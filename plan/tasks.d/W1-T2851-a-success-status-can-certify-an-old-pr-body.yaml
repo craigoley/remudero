@@ -1,0 +1,80 @@
+- id: W1-T2851
+  title: "A SUCCESS STATUS CAN CERTIFY AN OLD PR BODY — editing a capped or otherwise stale successful review input resets the exact-input retry counter but the sweep still treats the old success as current and routes straight to mergeable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/review-input-changed-success.test.ts
+  origin: "incident#3979-success-status-survives-body-repair-2026-09-04"
+  plan_refs: ["W1-T225", "W1-T1018", "W1-T2299", "W1-T2793"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #3979 AT HEAD 0ca3941 ON 2026-09-04. The daemon first posted a failure for
+    body digest v1:93de..., then a successful but CAPPED verdict for digest v1:5911... because
+    both grep proofs were malformed. The body was repaired again at 22:09:08Z; the current
+    head+body digest became v1:637d..., and both author-time proofs passed. At 22:25:08Z the sweep
+    nevertheless classified the PR `mergeable` from the still-visible SUCCESS status. It did not
+    re-run the reviewer, and the old capped ledger verdict continued to refuse the arm. The PR
+    remained green and open with no path that could certify the corrected body.
+
+    The exact-input machinery is already correct but incomplete at the disposition boundary.
+    `reviewAttemptsForInput` keys completed judgments by task/synthetic id, PR URL, head sha and
+    versioned head+body digest, so the repaired body correctly reads zero attempts. W1-T2299's
+    activity-after-verdict row consumes that reset only when `reviewState === failure`. The
+    later mergeable row accepts every `reviewState === success` without asking whether that
+    success judged the current digest. `decideSweepArm` then reads a same-head capped verdict
+    without an input digest and refuses it, producing the observed green-but-motionless loop.
+
+    A SUCCESS status is not proof of which mutable PR body it judged. Do not erase or weaken the
+    capped gate. Re-offer the changed input to the same reviewer, then let the fresh verdict make
+    the ordinary merge decision.
+  design: |
+    Derive one positive `reviewInputChangedSinceVerdict` fact while building each open-PR view:
+    the ledger contains a completed `review.posted` row for this PR URL and current head with a
+    concrete review-input digest different from the current digest, while the current exact input
+    has zero completed judgments. Key the historical scan on PR URL and head rather than task id,
+    because repairing a missing or wrong trailer may legitimately change review identity too.
+    Legacy rows without a digest are not evidence of an edit. This reads the ledger already in
+    memory and adds no GitHub call.
+
+    Add a disposition ahead of `mergeable` that routes checks-green, review-success PRs with that
+    positive changed-input fact and zero current-input attempts to `post-review`. Preserve every
+    unchanged-input success as mergeable. Once the fresh judgment is recorded, its exact-input
+    attempt count is nonzero and the existing mergeable path resumes. Preserve the guarded
+    head+body lifecycle check at status-post time; it remains the authority that prevents a review
+    started on one body from overwriting another edit.
+  acceptance:
+    - claim: "a green PR whose visible successful review judged a different body digest on the same head is routed to post-review before mergeable"
+      proof: "unit test: test/review-input-changed-success.test.ts"
+    - claim: "the changed-input fact requires a concrete different digest for the same PR URL and head; legacy, foreign-PR and foreign-head rows do not manufacture it"
+      proof: "unit test: test/review-input-changed-success.test.ts"
+    - claim: "a successful review for the exact current input remains mergeable with no extra review"
+      proof: "unit test: test/review-input-changed-success.test.ts"
+    - claim: "after a fresh current-input judgment is recorded, the PR leaves the re-review row and follows the ordinary successful-review path"
+      proof: "unit test: test/review-input-changed-success.test.ts"
+    - claim: "a trailer or review-identity repair still triggers re-review because the superseded-input scan is bound to PR URL and head rather than the old task id"
+      proof: "unit test: test/review-input-changed-success.test.ts"
+    - claim: "the producer uses the ledger already loaded by buildOpenPrViews and makes no additional GitHub request"
+      proof: "unit test: test/review-input-changed-success.test.ts"
+    - claim: "removing the success-input-change disposition makes the #3979-shaped fixture route to mergeable again"
+      proof: "mutation test: test/review-input-changed-success.test.ts"
+  falsifier: |
+    Close without implementation if the current sweep routes a SUCCESS status with a prior
+    same-head, different body digest and zero current-input attempts to `post-review`, or if the
+    fleet ledger contains a completed judgment for #3979's current v1:637d... digest. Source and
+    the live ledger refute both: only the failure row admits changed input, and the newest #3979
+    judgment is the older v1:5911... capped result.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved W1-T2851 at
+    `refs/rmd-id/W1-T2851` after observing W1-T2850 as the maximum across the plan, open PRs and
+    history.
+
+    This task is not a request for a larger retry cap. The current input has zero attempts. It
+    closes the missing transition that lets an old successful status hide a repaired input.
