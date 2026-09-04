@@ -233,10 +233,14 @@ forensic detail, so the narrative does not need to live here.
   minted `refs/rmd-id/W1-T967` 5.76s apart; the first read back its own nonce, then after the PR
   opened re-read the other's commit — it carried `+`. Only the message's pid+host+time named the
   winner; the ref has no identity field.)*
-- **A `verify: auto` task can NEVER declare its own plan record in `files:`, so a ratified scope
-  widening is recorded in the source comment and PR body, not the shard** — `rule15-filing` refuses
-  it, and the reviewer's `scope_violation` is ADVISORY, naming "review-ratified widenings"
-  legitimate. *(#2255)*
+- **`rule15-filing` refuses a plan record in `files:` only when an OUT-OF-PLAN path rides along —
+  the record ALONE passes at `verify: auto`.** MEASURED through `rule15FilingViolation`
+  (`src/lib/task-linter.ts`) with a blocking control: own shard alone, and own shard +
+  `MASTER-PLAN.md`, pass; own shard + `src/lib/x.ts` BLOCKS; `verify: human` and
+  `blocked`/`merged`/`done` are carve-outs. The MIXTURE is the mechanism (the gate's own message
+  says why), so a ratified scope widening still goes in the source comment and PR body, not the
+  shard; `scope_violation` is ADVISORY and names "review-ratified widenings" legitimate.
+  *(#2255; the "NEVER" corrected 2026-09-04 — the gate was right, the prose was not)*
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
   shipped.** THREE THIS SESSION: W1-T1127 read `queued` on main while its build had merged as
   #2476 (both credit paths — trailer AND a `run-W1-T1127-<digits>` head); W1-T1065's

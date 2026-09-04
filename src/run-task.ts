@@ -23110,6 +23110,11 @@ async function drainCommand(
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
+  // W1-T2675: the credit-read-failed probe, off the SAME `lastProj` snapshot `isOpenPr` reads and
+  // `refreshMerged` just built — never a second GitHub read path. `merged: false` alone cannot tell
+  // "no credit exists" from "the credit read failed"; `indeterminate` is the field that can, and
+  // `StatusProjection`'s own doc requires a dispatch gate to treat it as DO NOT ACT.
+  const isCreditIndeterminate = (id: string): boolean => lastProj?.get(id)?.indeterminate === true;
   // W1-T2397: the observation, built ONCE for both lanes — see {@link openSiblingObservation}.
   const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("drain", () => lastProj, log);
   // W1-T172: the queue governor's other input (alongside DrainOpts.wipLimit) —
@@ -23220,6 +23225,7 @@ async function drainCommand(
       {
         refreshMerged,
         isOpenPr,
+        isCreditIndeterminate,
         // W1-T2397: the two halves of the observation. #3120 shipped the predicate live and said so
         // — `openSiblingBuild` is computed on every projection pass while
         // `NextRunnableOpts.openSiblingBuildFor`/`onOpenSiblingBuild` had no production caller,
@@ -23948,6 +23954,11 @@ export async function daemonCommand(
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
+  // W1-T2675: the credit-read-failed probe, off the SAME `lastProj` snapshot `isOpenPr` reads and
+  // `refreshMerged` just built — never a second GitHub read path. `merged: false` alone cannot tell
+  // "no credit exists" from "the credit read failed"; `indeterminate` is the field that can, and
+  // `StatusProjection`'s own doc requires a dispatch gate to treat it as DO NOT ACT.
+  const isCreditIndeterminate = (id: string): boolean => lastProj?.get(id)?.indeterminate === true;
   // W1-T2397: the SAME observation drainCommand builds, on the lane that carries the dispatches —
   // `daemon.boot` 347 and `run.start` 558 against `drain.start` 16, and the motivating instance
   // (W1-T2387 dispatched while #3102 was open, producing #3109) came through HERE. Reads
@@ -24312,6 +24323,7 @@ export async function daemonCommand(
       {
         refreshMerged,
         isOpenPr,
+        isCreditIndeterminate,
         // W1-T2397: the second half of the wiring #3125 could only take for `drainCommand`. Same
         // pair, same factory, same contract — and this is the lane that actually dispatches.
         openSiblingBuildFor,
