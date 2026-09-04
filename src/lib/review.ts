@@ -7144,6 +7144,9 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "deploy/recycle-container.sh":
     "container-recycle ops runbook script with no CI-gate role — derived only because the task-id-existence " +
     "job's comment cites it as the defect's worked example, which is prose, not a reference",
+  "deploy/entrypoint.sh":
+    "container image asset copied by deploy/Dockerfile; its workflow reference is a push.paths build trigger, " +
+    "not CI gate-rule logic",
   "scripts/fleet-heartbeat.sh": "monitoring script for fleet-heartbeat-watch.yml, not a quality gate",
   "scripts/needs-human-issue.mjs": "issue-filing ops tool, not a quality gate",
   "scripts/recovery-drill.mjs": "ops drill script for recovery-drill.yml, not a quality/measurement gate",
