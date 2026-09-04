@@ -138,6 +138,25 @@ test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly �
   assert.equal(bash?.file, "test/recycle-container.test.ts");
 });
 
+// W1-T2785 round 2: the table row above is DATA an unrelated bug could still leave unread — this
+// test exercises the row through the real `appliesTo` predicate so a wrong cause, a wrong count,
+// or a predicate that fires on the wrong platform each fail this assertion by name, not just the
+// static row-comparison above.
+test("hostCausedSuiteRedsForFacts: the fleet-heartbeat-supervisor-tick entry applies on darwin, with its registered cause and count, and NOT on a linux host", () => {
+  const darwinApplicable = hostCausedSuiteRedsForFacts(DARWIN_BASH_3_2);
+  const entry = darwinApplicable.find((e) => e.file === "test/fleet-heartbeat-supervisor-tick.test.ts");
+  assert.ok(entry, "expected the entry to apply on a darwin host's facts");
+  assert.equal(entry?.cause, "bsd-date-control-arm");
+  assert.equal(entry?.count, 1);
+
+  const linuxApplicable = hostCausedSuiteRedsForFacts(LINUX_CI);
+  assert.equal(
+    linuxApplicable.some((e) => e.file === "test/fleet-heartbeat-supervisor-tick.test.ts"),
+    false,
+    "must not apply on a linux host — this file's red is a darwin-only date fact, not a general one",
+  );
+});
+
 test("hostCausedSuiteRedsForFacts: a host that satisfies EVERY axis matches every registered cluster (all `appliesTo` predicates read true)", () => {
   // The full-house case: darwin + bash 3.2 + no procfs (the original axes) AND a
   // running-Node/pin mismatch (W1-T2770's axis). Each cluster keys off one of these; the
