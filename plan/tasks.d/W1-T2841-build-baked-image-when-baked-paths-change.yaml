@@ -1,0 +1,63 @@
+- id: W1-T2841
+  title: "Build the ACR image automatically when an image-baked path lands on main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files:
+    - .github/workflows/acr-build.yml
+    - test/acr-build-trigger.test.ts
+  origin: "operator-session#automatic-baked-path-build-2026-09-04"
+  plan_refs: ["W1-T496", "W1-T1021", "W1-T2770"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main on 2026-09-04: `.github/workflows/acr-build.yml` accepts only
+    `workflow_dispatch`, so a merge cannot build the image. The repository already has one
+    authoritative baked-path set in `src/lib/image-drift.ts`: `deploy/Dockerfile` and
+    `deploy/entrypoint.sh`. Everything else used by the daemon is loaded from the mounted checkout
+    at boot, so triggering on every merge would be wasteful and triggering on only these two paths
+    is the exact change detector already used by production freshness diagnostics.
+
+    The old W1-T496 ruling deliberately kept image builds manual. The operator superseded that
+    cadence ruling on 2026-09-04: image-required changes must be detected and built automatically,
+    while manual dispatch remains available. The measured frequency makes the narrower trigger
+    cheap: 31 of 3,127 main commits touched either baked path (0.99%). The last 36 successful ACR
+    workflow runs had a 213-second median and 264-second p90; one 1,877-second outlier is retained
+    as evidence that a later deployment watcher must poll with backoff rather than assume five
+    minutes is a hard completion bound.
+  design: |
+    Add a `push` trigger limited to `main` and exactly the two authoritative baked paths while
+    retaining `workflow_dispatch`. Both triggers must build and publish an immutable
+    `${GITHUB_SHA}` tag plus `latest`, pass that same sha as `RMD_BUILD_SHA`, and use the current
+    serialized/cancel-superseded build group. Manual inputs remain effective; push-triggered runs
+    use the committed registry, image and latest-tag defaults rather than empty `inputs.*` values.
+
+    Keep this task build-only. It must not recycle either container, add Azure-host credentials,
+    expose the Docker socket, or change daemon/Serve lifecycle. A later task consumes the published
+    build receipt and adds pause/drain/verify deployment with operator controls. Failed builds stay
+    failed and visible in Actions; do not publish a success receipt or attempt deployment.
+  acceptance:
+    - claim: "a push to main that changes either authoritative baked path starts the ACR build workflow"
+      proof: "unit test: test/acr-build-trigger.test.ts"
+    - claim: "a push to main that changes only mounted source paths does not start the ACR build workflow"
+      proof: "unit test: test/acr-build-trigger.test.ts"
+    - claim: "manual dispatch remains available with its current registry image and latest-tag controls"
+      proof: "unit test: test/acr-build-trigger.test.ts"
+    - claim: "both trigger modes publish an immutable commit tag and latest with the built sha stamped as RMD_BUILD_SHA"
+      proof: "unit test: test/acr-build-trigger.test.ts"
+    - claim: "the workflow builds only and contains no container replacement or recycle action"
+      proof: "unit test: test/acr-build-trigger.test.ts"
+  falsifier: |
+    Do not add the push trigger if the production baked-path detector names a wider set, if baked
+    changes are common enough to make path-triggered builds routine, or if recent ACR runs are not
+    reliably successful. None holds at filing: `BAKED_PATHS` has exactly two entries, 0.99% of main
+    commits touched them, and the last 36 completed successful runs form the measured duration set.
+  note: |
+    `rmd next-task-id --reserve` reported `RESERVED W1-T2841 on origin` before this shard was
+    written. This task intentionally does not automate deployment: build and replace are separate
+    failure domains, and the operator retains the daemon/Serve lifecycle decision until the
+    digest-aware deployment task lands with an explicit policy and console override.
