@@ -150,14 +150,18 @@ export function hasRepoRootConstant(content) {
 
 /**
  * Whether `content` names a plan-or-docs repo path — `plan/`, `docs/`, or `MASTER-PLAN.md`,
- * quoted as a string literal (never a bare substring match, which would also catch a comment
- * merely discussing "plan/tasks.yaml" in prose without the suite ever reading it — this still
- * over-includes relative to "reads it", by design: OVER-including here only means the fast lane
- * runs one extra harmless suite, while under-including would silently drop a suite that CAN
- * fail, which is the failure mode this whole classifier exists to avoid).
+ * quoted as a string literal. Also recognizes the common path-join spelling
+ * `join(REPO_ROOT, "docs", ...)` / `join(REPO_ROOT, "plan", ...)`: the old literal-prefix
+ * predicate missed that form because `"docs"` is its own quoted segment, not a string beginning
+ * `docs/`. This is still deliberately over-inclusive relative to "reads it": running one extra
+ * harmless suite is cheaper than silently dropping a suite that CAN fail.
  */
 export function namesPlanOrDocsPath(content) {
-  return /["'`](?:\.\.\/)*(?:plan\/|docs\/)/.test(content) || /MASTER-PLAN\.md/.test(content);
+  return (
+    /["'`](?:\.\.\/)*(?:plan\/|docs\/)/.test(content) ||
+    /\bjoin\(\s*REPO_ROOT\s*,\s*["'`](?:plan|docs)["'`]\s*(?:,|\))/.test(content) ||
+    /MASTER-PLAN\.md/.test(content)
+  );
 }
 
 /**
