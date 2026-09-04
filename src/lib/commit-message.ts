@@ -1,9 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
-  checkOperatorMessage,
-  type OperatorMessage,
-  type OperatorMessageCheckResult,
   type OperatorMessageSlot,
 } from "./operator-message.js";
 
@@ -417,39 +414,6 @@ export interface GeneratedCommitNarrative {
   whatToDo?: OperatorMessageSlot;
   /** Why it matters to that reader — the standard's part (ii). */
   consequence?: OperatorMessageSlot;
-}
-
-/**
- * Project a generated commit's narrative onto the four presence slots, reading only what the
- * record already carries — the same discipline `toOperatorMessage` (`escalate.ts`) follows.
- */
-export function projectCommitNarrative(narrative: GeneratedCommitNarrative): OperatorMessage {
-  return {
-    speaker: narrative.prefix,
-    whatHappened: narrative.subject,
-    whatIsAsked: narrative.whatToDo,
-    consequenceOfInaction: narrative.consequence,
-  };
-}
-
-/**
- * {@link checkOperatorMessage} over that projection, best-effort — mirrors `escalate.ts`'s own safe
- * wrapper. Returns `undefined` rather than a fabricated verdict when the check itself cannot run,
- * so an unreadable record is never reported as an incomplete one.
- *
- * THIS NEVER BLOCKS. Its result is advisory: no caller may withhold a commit on it.
- */
-export function checkGeneratedCommitNarrative(
-  narrative: GeneratedCommitNarrative,
-): OperatorMessageCheckResult | undefined {
-  try {
-    return checkOperatorMessage(projectCommitNarrative(narrative));
-  } catch {
-    // Deliberately swallowed: the commit is the deliverable and its own conformance check must not
-    // be able to fail it. Returning undefined rather than a synthesised result keeps "could not be
-    // read" distinct from "was read and found thin".
-    return undefined;
-  }
 }
 
 /**
