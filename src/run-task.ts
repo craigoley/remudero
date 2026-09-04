@@ -23,7 +23,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { homedir, hostname, tmpdir } from "node:os";
+import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -272,9 +272,11 @@ import {
 } from "./lib/feedback.js";
 import { findPendingLandingPr, recordDecision, sweepFeedbackLanding } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
-import { runPreflight, type PreflightDeps } from "./lib/commit-message.js";
+import { defaultPreflightSpawn, runPreflight, type PreflightDeps } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
+  detectRunContext,
+  runContextLine,
   FAST_GATE_STEPS,
   preflightFailureNotice,
   preflightSummaryPath,
@@ -18831,13 +18833,36 @@ export function renderFastGateScriptList(steps: readonly { readonly script: stri
   return steps.map((step) => step.script).join(", ");
 }
 
-export async function preflightCommand(rest: string[], deps: PreflightDeps = {}): Promise<number> {
+/**
+ * W1-T2810 — `preflightCommand`'s OWN seams, declared here rather than widened onto
+ * {@link PreflightDeps}, which `runPreflight`, `runPreflightFast`, `runCiParity` and
+ * `runPreflightCoverage` all consume and none of which reads a clock or a load average. The run
+ * context is a property of THIS COMMAND's whole invocation — one stamp per run — so its seams
+ * belong to this signature alone. Both are optional and appended by intersection, so every
+ * existing `preflightCommand(rest, { spawn })` call site is byte-identical.
+ *
+ * Injectable for the same reason `computeHostFacts` splits from `detectHostFacts`: a test must
+ * drive the LOADED branch and the load-unavailable branch without an actually busy machine, and
+ * `os.loadavg()` is the one input here that cannot be arranged.
+ */
+export type PreflightCommandDeps = PreflightDeps & {
+  loadavg?: () => readonly number[] | undefined;
+  cpuCount?: number;
+};
+
+export async function preflightCommand(rest: string[], deps: PreflightCommandDeps = {}): Promise<number> {
   const badArg = unknownArgError("preflight", rest, [...PREFLIGHT_VALUE_FLAGS], [...PREFLIGHT_BOOL_FLAGS]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
   const startedAtMs = Date.now();
+  // W1-T2810: the START sample, taken here rather than at the end with everything else, because
+  // one sample cannot answer both questions the stamp exists for. `os.loadavg()[0]` is a
+  // ONE-MINUTE average, so a reading taken after an eight-minute `--ci-parity` run describes that
+  // run and says nothing about what the machine was doing when it began — and a run that started
+  // on a saturated machine is exactly the one whose wall-clock reds need explaining.
+  const loadavgStart = deps.loadavg ? deps.loadavg() : osLoadavg();
   const from = flagValue(rest, "--from");
   const to = flagValue(rest, "--to");
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
@@ -18866,10 +18891,31 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
     }
   }
   const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true);
+  // W1-T2810 — THE STAMP, ON BOTH BRANCHES AND ON THE LINE ITSELF.
+  //
+  // ON BOTH: a stale RED gets investigated anyway, because the reader is already suspicious. The
+  // stale GREEN is the dangerous one and is precisely hazard (h)'s measured shape — exit 0, a
+  // confident sentence, and both the measured file and the threshold it was measured against
+  // already moved. So the PASS branch is the one this exists for, not the FAIL branch.
+  //
+  // ON THE LINE, never behind a flag or a `preflight --context` subcommand: a gate that will tell
+  // you its conditions IF YOU ASK has the same defect, because nobody asks. `headSha` is the
+  // proof that adding a surface is not enough on its own — it has been computed on this path all
+  // along and written to the JSON summary, and never reached the sentence a human reads.
+  const headSha = readHeadShaForSummary();
+  const runContext = detectRunContext({
+    repoRoot,
+    headSha,
+    spawn: deps.spawn ?? defaultPreflightSpawn,
+    loadavgStart,
+    loadavgEnd: deps.loadavg ? deps.loadavg() : osLoadavg(),
+    cpuCount: deps.cpuCount ?? osCpus().length,
+  });
   console.log(
-    ok
+    (ok
       ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
-      : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes",
+      : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes") +
+      `\n### ${runContextLine(runContext)}`,
   );
 
   // ── THE RESULT MUST SURVIVE THE CONTAINER THAT PRODUCED IT (see preflightSummaryPath's doc).
@@ -18897,8 +18943,9 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
     steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])],
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
-    headSha: readHeadShaForSummary(),
+    headSha,
     args: rest,
+    runContext,
   });
   if (summaryPath === undefined) {
     console.log(
