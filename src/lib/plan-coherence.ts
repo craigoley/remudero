@@ -18,10 +18,12 @@ import { shardSlugFromPath } from "./task-linter.js";
  *     explicitly silent in whole-plan mode. A shard holding two records passes every gate and
  *     silently re-creates the shared-EOF collision surface W1-T122 deleted.
  *
- * A PURE, OFFLINE MODULE. No fs, no network — the caller (the retro rung, {@link
- * "./retro.js".planCoherenceRung}) reads `plan/tasks.yaml` and `plan/tasks.d/*.yaml` and hands
- * in the raw text, the same "the linter is pure, the caller reads disk" seam
- * `task-linter.ts`'s `opts.moduleExists` and `planShardSlugCorpus` already use.
+ * A PURE, OFFLINE MODULE. No fs, no network, here OR in this module's one consumer, {@link
+ * "./retro.js".planCoherenceRung} — both take the monolith blob and every shard's `(path,
+ * text)` as plain arguments, never touching disk themselves. Reading `plan/tasks.yaml` and
+ * listing `plan/tasks.d/*.yaml` is a DIFFERENT caller's job, the same "the linter is pure, the
+ * caller reads disk" seam `task-linter.ts`'s `opts.moduleExists` and `planShardSlugCorpus`
+ * already use.
  *
  * REUSE, NEVER A SECOND OPINION. The filename id comes from {@link shardSlugFromPath}, imported
  * and never re-parsed — a second filename parser IS the drift class this module exists to
