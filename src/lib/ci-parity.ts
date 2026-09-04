@@ -1419,19 +1419,9 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "this file — meta-tests CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS themselves; its one real git call is " +
       "`git grep`, never `git ls-files`, so it is not itself a src-population walk",
   ),
-  // W1-T2647's OWN proof file (this task's falsifier, consuming this population per design v's
-  // "ONE CENSUS PREDICATE, NEVER TWO" — it derives nothing of its own). Same self-reference shape
-  // as its W1-T2643/W1-T2523 siblings immediately above: its mock fixtures and prose quote
-  // `git ls-files` and `src/` literals, which trips the text-substring recognizer, but the file
-  // itself never shells `git ls-files` — its only real git call is `git grep`, via the imported
-  // `censusPopulationDrift`, so it fails clause (a) exactly like its two siblings.
-  refusedForPredicate(
-    "test/census-population-is-derived-not-counted.test.ts",
-    "a",
-    "this file — W1-T2647's falsifier, pinning CENSUS_POPULATION/CENSUS_ADMITTED_MEMBERS/FAST_GATE_STEPS/censusPopulationDrift " +
-      "against this task's own nine acceptance claims; its one real git call is `git grep`, never `git ls-files`, so it is not " +
-      "itself a src-population walk",
-  ),
+  // W1-T2647's OWN proof file — self-reference shape as its siblings above; only real git call
+  // is `git grep`, never `git ls-files`, so it fails clause (a).
+  refusedForPredicate("test/census-population-is-derived-not-counted.test.ts", "a", "this file — W1-T2647's falsifier; its one real git call is `git grep`, never `git ls-files`"),
 ];
 
 export const CENSUS_ADMITTED_MEMBERS: readonly (CensusPopulationMember & {

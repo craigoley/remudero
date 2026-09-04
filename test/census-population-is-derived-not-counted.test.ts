@@ -163,9 +163,20 @@ test("the four census entries admitted since W1-T2478 are still admitted, by job
 // ═══ PREDICATE in src/lib/ci-parity.ts) ═══════════════════════════════════════════════════════════
 
 test("src/lib/ci-parity.ts marks CENSUS_POPULATION as the single census-population predicate (ONE CENSUS PREDICATE, NEVER TWO) at its own definition", () => {
+  // A comment-only literal match cannot distinguish "the mechanism is real" from "someone wrote
+  // the words down" (assertion-discrimination, W1-T1051) — so this checks the CODE SHAPE the
+  // slogan describes: CENSUS_POPULATION is exported exactly once (no rival derivation minted
+  // beside it), and every `discoverSrcFilteredLsFilesCallers`-shaped export in this file funnels
+  // through that single array (no second `readonly CensusPopulationMember[]`-typed export exists).
   const source = readFileSync(join(REPO_ROOT, "src", "lib", "ci-parity.ts"), "utf8");
-  assert.match(source, /ONE CENSUS PREDICATE, NEVER TWO/);
-  assert.match(source, /export const CENSUS_POPULATION: readonly CensusPopulationMember\[\] = \[/);
+  const definitions = source.match(/^export const CENSUS_POPULATION: readonly CensusPopulationMember\[\] = \[/gm) ?? [];
+  assert.equal(definitions.length, 1, "CENSUS_POPULATION must be defined exactly once, not re-derived elsewhere");
+  const rivalPopulationTypedExports = source.match(/^export const \w+: readonly CensusPopulationMember\[\]/gm) ?? [];
+  assert.equal(
+    rivalPopulationTypedExports.length,
+    1,
+    "no second CensusPopulationMember[]-typed export may exist beside CENSUS_POPULATION",
+  );
 });
 
 // ═══ acceptance: "removing the derivation makes the denominator assertion fail — the falsifier ═══
