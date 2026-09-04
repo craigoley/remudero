@@ -1419,6 +1419,9 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "this file — meta-tests CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS themselves; its one real git call is " +
       "`git grep`, never `git ls-files`, so it is not itself a src-population walk",
   ),
+  // W1-T2647's OWN proof file — self-reference shape as its siblings above; only real git call
+  // is `git grep`, never `git ls-files`, so it fails clause (a).
+  refusedForPredicate("test/census-population-is-derived-not-counted.test.ts", "a", "this file — W1-T2647's falsifier; its one real git call is `git grep`, never `git ls-files`"),
 ];
 
 export const CENSUS_ADMITTED_MEMBERS: readonly (CensusPopulationMember & {
