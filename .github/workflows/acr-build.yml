@@ -34,11 +34,17 @@ name: Build image (ACR)
 #   already exists — the Azure CLI is not available to the session that wrote this file, so no
 #   read-only query was possible and neither could be confirmed.
 #
-# TRIGGER: `workflow_dispatch` ONLY. Not `push`, not `schedule`. This repo merges on the order of
-# tens of PRs a day and an image build on every merge would be pure waste; the operator triggers
-# this from the Actions tab, including from a phone.
+# TRIGGER: either an explicit operator dispatch OR a main push that changes one of the two paths
+# production's image-drift detector proves is baked into the running image. Tens of mounted-source
+# merges a day still trigger nothing; the rare Dockerfile/entrypoint merge cannot silently wait for
+# a human to notice image drift. Manual dispatch remains the recovery/commissioning path.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/Dockerfile
+      - deploy/entrypoint.sh
   workflow_dispatch:
     inputs:
       registry:
@@ -72,6 +78,13 @@ jobs:
   build:
     name: az acr build
     runs-on: ubuntu-latest
+    # The `inputs` context is populated only for workflow_dispatch. GitHub evaluates a missing
+    # property to an empty string, so `||` supplies the committed production defaults on push;
+    # the manual path still receives the operator's typed values. A push always advances latest.
+    env:
+      REGISTRY: ${{ inputs.registry || 'synthwatcholey0620' }}
+      IMAGE: ${{ inputs.image || 'remudero' }}
+      TAG_LATEST: ${{ github.event_name == 'push' || inputs.tag_latest }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -102,10 +115,6 @@ jobs:
             az acr build -r "${REGISTRY}" "${TAGS[@]}" \
               --build-arg "RMD_BUILD_SHA=${GITHUB_SHA}" \
               -f deploy/Dockerfile .
-        env:
-          REGISTRY: ${{ inputs.registry }}
-          IMAGE: ${{ inputs.image }}
-          TAG_LATEST: ${{ inputs.tag_latest }}
 
       # Report what landed, including the size — a build that "succeeded" but produced something
       # implausibly small is worth seeing without opening the portal.
@@ -118,9 +127,6 @@ jobs:
             az acr repository show-manifests -n "${REGISTRY}" --repository "${IMAGE}" \
               --orderby time_desc --top 1 -o table || \
             az acr manifest list-metadata -r "${REGISTRY}" -n "${IMAGE}" --orderby time_desc --top 1 -o table
-        env:
-          REGISTRY: ${{ inputs.registry }}
-          IMAGE: ${{ inputs.image }}
 
       - name: Write build summary
         run: |
@@ -132,6 +138,3 @@ jobs:
             echo "- **Built by:** \`az acr build\` (ACR Task, on Azure's build fleet — no local daemon)"
             echo "- **Deployed:** nothing. This workflow builds only."
           } >> "$GITHUB_STEP_SUMMARY"
-        env:
-          REGISTRY: ${{ inputs.registry }}
-          IMAGE: ${{ inputs.image }}
