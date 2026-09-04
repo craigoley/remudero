@@ -47,9 +47,9 @@
     Add a disposition ahead of `mergeable` that routes checks-green, review-success PRs with that
     positive changed-input fact and zero current-input attempts to `post-review`. Preserve every
     unchanged-input success as mergeable. Once the fresh judgment is recorded, its exact-input
-    attempt count is nonzero and the existing mergeable path resumes. Preserve the guarded
-    head+body lifecycle check at status-post time; it remains the authority that prevents a review
-    started on one body from overwriting another edit.
+    attempt count is nonzero and the existing mergeable path resumes.
+    Preserve the guarded head+body lifecycle check at status-post time; it remains the authority
+    that prevents a review started on one body from overwriting another edit.
   acceptance:
     - claim: "a green PR whose visible successful review judged a different body digest on the same head is routed to post-review before mergeable"
       proof: "unit test: test/review-input-changed-success.test.ts"
