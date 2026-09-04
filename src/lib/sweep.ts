@@ -5310,12 +5310,20 @@ interface PriorActions {
    * the post-review lane WITHOUT deciding anything — `decideReviewStatusPost`
    * (`src/lib/review.ts`) still runs on the next attempt and re-tests the same lifecycle
    * gate fresh, and can refuse again (writing a fresh row, re-dedupping). Every OTHER
-   * refusal reason — including the sibling "PR is already merged" half of that same
-   * branch (a merged PR can never return to `state=open`, so it has no falsifier) and
-   * the "attempt threw" refusal this module writes further below — keeps suppressing
-   * forever, no clock consulted.
+   * semantic or lifecycle refusal — including the sibling "PR is already merged" half
+   * of that same branch (a merged PR can never return to `state=open`, so it has no
+   * falsifier) — keeps suppressing forever, no clock consulted. W1-T2753 splits the
+   * sweep-owned "attempt threw" transport/process outcome into `reviewRetryableThrows`
+   * below because a thrown attempt is not a durable refusal.
    */
   reviewRefused: Set<string>;
+  /**
+   * Exact-input keys whose sweep-owned review attempt THREW before it delivered a verdict.
+   * The value is the latest parseable ledger timestamp in milliseconds, or `undefined` when
+   * every matching row is undated. Unlike {@link reviewRefused}, this is a bounded retry clock,
+   * not a semantic or lifecycle decision about the PR (W1-T2753).
+   */
+  reviewRetryableThrows: Map<string, number | undefined>;
   /**
    * W1-T970 — `${prNumber}@${headSha}` keys, built off the risk judge's OWN step
    * (`risk_judge.escalated`), the SAME shape `reviewDelivered`/`reviewRefused` above take off
@@ -5444,6 +5452,32 @@ function isReopenedClosedLifecycleRefusal(reason: unknown): boolean {
   return typeof reason === "string" && reason.startsWith("PR is already closed — refusing to post remudero-review");
 }
 
+const RETRYABLE_REVIEW_THROW_PREFIX = "post-review attempt threw — standing down rather than retrying this head unbounded:";
+
+function isRetryableReviewThrow(reason: unknown): boolean {
+  return typeof reason === "string" && reason.startsWith(RETRYABLE_REVIEW_THROW_PREFIX);
+}
+
+function retryableReviewThrowBackoffReason(
+  retryableThrows: ReadonlyMap<string, number | undefined>,
+  reviewKey: string,
+  policy: SweepPolicy,
+  now: number,
+): string | undefined {
+  if (!retryableThrows.has(reviewKey)) return undefined;
+  const attemptedAt = retryableThrows.get(reviewKey);
+  // An undated throw cannot prove that the bound is still live. Admit once; if the condition
+  // persists, the existing catch writes a fresh dated row and restores the bounded stand-down.
+  if (attemptedAt === undefined) return undefined;
+  const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
+  if (ageMinutes >= policy.pendingCeilingMinutes) return undefined;
+  return (
+    `the last post-review attempt for ${reviewKey} threw ${Math.floor(ageMinutes)}m ago — ` +
+    `retry backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
+    `this is a retryable transport/process outcome, not a durable review refusal`
+  );
+}
+
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
   const armed = new Set<string>();
   const fixed = new Set<string>();
@@ -5452,6 +5486,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const depReviewed = new Set<string>();
   const reviewDelivered = new Set<string>();
   const reviewRefused = new Set<string>();
+  const reviewRetryableThrows = new Map<string, number | undefined>();
   const riskRefused = new Map<string, string | undefined>();
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   for (const line of lines) {
@@ -5467,6 +5502,13 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
         );
         if (line.step === "review.posted") {
           reviewDelivered.add(key);
+        } else if (isRetryableReviewThrow(line.reason)) {
+          const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+          const existing = reviewRetryableThrows.get(key);
+          if (!reviewRetryableThrows.has(key)) reviewRetryableThrows.set(key, undefined);
+          if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
+            reviewRetryableThrows.set(key, parsed);
+          }
         } else if (!isReopenedClosedLifecycleRefusal(line.reason)) {
           // W1-T1213: the "PR is already closed" refusal is excluded here, never added to
           // `reviewRefused` — see that field's own doc for why reaching this fold at all
@@ -5538,7 +5580,18 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       // `review.posted`/`review.post_refused` branch above.
     }
   }
-  return { armed, fixed, closed, escalated, depReviewed, reviewDelivered, reviewRefused, riskRefused, absentRepushes };
+  return {
+    armed,
+    fixed,
+    closed,
+    escalated,
+    depReviewed,
+    reviewDelivered,
+    reviewRefused,
+    reviewRetryableThrows,
+    riskRefused,
+    absentRepushes,
+  };
 }
 
 /**
@@ -6256,14 +6309,18 @@ export async function runSweep(
     try {
       const fresh = priorActionsFromLedger(readLedger(deps.ledgerPath));
       const delivered = fresh.reviewDelivered.has(reviewKey);
-      if (delivered || fresh.reviewRefused.has(reviewKey)) {
+      const durableRefusal = fresh.reviewRefused.has(reviewKey);
+      const retryBackoff = retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now);
+      if (delivered || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return {
           ok: false,
           deduped: true,
           reason: delivered
             ? `a verdict was already DELIVERED for ${reviewKey} — the action-time re-read deduped the re-post`
-            : `a review post was already REFUSED for ${reviewKey} — the action-time re-read deduped the re-post`,
+            : durableRefusal
+              ? `a review post was already REFUSED for ${reviewKey} — the action-time re-read deduped the re-post`
+              : retryBackoff!,
         };
       }
     } catch (e) {
@@ -6719,7 +6776,9 @@ export async function runSweep(
         // set's own doc; this clears the dedup, it does not post a verdict or arm anything).
         const reviewKey = reviewOutcomeKeyForPr(pr);
         const reviewDelivered = prior.reviewDelivered.has(reviewKey);
-        alreadyDone = reviewDelivered || prior.reviewRefused.has(reviewKey);
+        const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
+        const retryBackoff = retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now);
+        alreadyDone = reviewDelivered || reviewDurablyRefused || retryBackoff !== undefined;
         // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT LOOK IDENTICAL TODAY (W1-T1110's
         // criterion: not "did it decline" but "could a reader otherwise tell it from a broken
         // action path"). An `acted:false` post-review row with no reason reads the same whether
@@ -6733,8 +6792,10 @@ export async function runSweep(
           dedupStandDownReason = reviewDelivered
             ? `a verdict was already DELIVERED for ${reviewKey} — the re-post is deduped by this ` +
               `arm, not lost to an admission and not unwired`
-            : `a review post was already REFUSED for ${reviewKey} — the re-post is deduped by this ` +
-              `arm, not lost to an admission and not unwired`;
+            : reviewDurablyRefused
+              ? `a review post was already REFUSED for ${reviewKey} — the re-post is deduped by this ` +
+                `arm, not lost to an admission and not unwired`
+              : retryBackoff;
         }
         break;
       }
@@ -7539,20 +7600,13 @@ export async function runSweep(
                 disposition: "post-review",
                 error: actionError,
               });
-              // W1-T529 design (v) — THE MISSING DEDUP KEY. `sweep.action_failed` alone leaves
-              // NO key `PriorActions.reviewDelivered`/`reviewRefused` can see: those sets are built
-              // ONLY from `review.posted`/`review.post_refused` lines (see their own docs above), never from
-              // `sweep.disposed`/`sweep.action_failed`. Without this, a thrown attempt —
-              // including a guarded call standing down at the floor once one is wired ahead of
-              // this call (lib/open-prs-rest.ts's `GhCallPacer`) — re-attempts THIS EXACT HEAD
-              // every following pass, without bound: a floor bounds the RATE of calls but, on
-              // its own, not the REPEAT of the attempt, and each retry against an exhausted
-              // budget only deepens it. This records the SAME outcome shape
-              // `postReviewStatusGuarded` (lib/review.ts) already writes for a graceful
-              // refusal — recording the throw as an OUTCOME the existing dedup already reads,
-              // never a second mechanism (design v's own "the honest shape"). `acted` stays
-              // `false` above regardless, so this never touches the fix-strike lane's own
-              // `acted:true`-gated dedup (design iv) — a different lane, a different set.
+              // W1-T529 design (v)/W1-T2753 — THE BOUNDED RETRY KEY. `sweep.action_failed`
+              // alone leaves no exact-input outcome key and would retry this throw every pass.
+              // The `review.post_refused` row below preserves the established material input
+              // shape, but W1-T2753 classifies this one prefix into `reviewRetryableThrows`, not
+              // the durable `reviewRefused` set: the latest dated throw suppresses only through
+              // the existing pending ceiling, then re-admits the unchanged input. `acted` stays
+              // `false`, so this never touches the fix-strike lane's `acted:true` dedup.
               appendLine(deps.ledgerPath, {
                 run_id: deps.runId,
                 // This row is an outcome key, not only a diagnostic. Fully attributed views use
@@ -7579,11 +7633,11 @@ export async function runSweep(
         // only ledgers/logs and never gates a future pass. On success
         // `postReview` has already durably written the "reviewed" state a
         // later pass's own fresh ledger read will see (so it never even
-        // reaches this claim again); on failure (W1-T529) the `review.post_refused`
-        // line just above plays the same role — either way this pr@head will not
-        // re-claim the SAME key next pass, so releasing it here costs nothing and
-        // holding it any longer than the attempt itself would only block work,
-        // never protect any.
+        // reaches this claim again); on failure (W1-T529/W1-T2753) the
+        // `review.post_refused` line just above establishes a bounded retry clock.
+        // Releasing the in-process claim here is safe because the ledger guard blocks
+        // another attempt until that clock expires; holding it longer would only hide
+        // the durable timing evidence from subsequent passes.
         claim.release();
       }
       finalizeDisposition(
@@ -7814,6 +7868,7 @@ export async function runSweepLightPass(
   const outcomes: ReviewAdmissionOutcomes = {
     delivered: selectionPrior.reviewDelivered,
     refused: selectionPrior.reviewRefused,
+    retryableThrows: selectionPrior.reviewRetryableThrows,
   };
   const { spawning, planFilings } = selectReviewAdmissions(openPrs, policy, now, outcomes);
   const selectedNumbers = new Set<number>([
@@ -7827,7 +7882,8 @@ export async function runSweepLightPass(
   const outcomeDedupedNumbers = new Set(
     openPrs
       .filter((pr) =>
-        deriveDisposition(pr, policy, now).disposition === "post-review" && reviewAdmissionOutcomeKnown(pr, outcomes))
+        deriveDisposition(pr, policy, now).disposition === "post-review" &&
+        reviewAdmissionOutcomeKnown(pr, outcomes, policy, now))
       .map((pr) => pr.prNumber),
   );
   const admittedNumbers = spawning.map((p) => `#${p.prNumber}`).join(", ");
@@ -7868,16 +7924,31 @@ export async function runSweepLightPass(
 export interface ReviewAdmissionOutcomes {
   delivered: ReadonlySet<string>;
   refused: ReadonlySet<string>;
+  /** W1-T2753: optional for compatibility with callers predating timed throw backoff. */
+  retryableThrows?: ReadonlyMap<string, number | undefined>;
 }
+
+const EMPTY_RETRYABLE_REVIEW_THROWS = new Map<string, number | undefined>();
 
 const EMPTY_REVIEW_ADMISSION_OUTCOMES: ReviewAdmissionOutcomes = {
   delivered: new Set<string>(),
   refused: new Set<string>(),
+  retryableThrows: EMPTY_RETRYABLE_REVIEW_THROWS,
 };
 
-function reviewAdmissionOutcomeKnown(pr: OpenPrView, outcomes: ReviewAdmissionOutcomes): boolean {
+function reviewAdmissionOutcomeKnown(
+  pr: OpenPrView,
+  outcomes: ReviewAdmissionOutcomes,
+  policy: SweepPolicy,
+  now: number,
+): boolean {
   const key = reviewOutcomeKeyForPr(pr);
-  return outcomes.delivered.has(key) || outcomes.refused.has(key);
+  return (
+    outcomes.delivered.has(key) ||
+    outcomes.refused.has(key) ||
+    retryableReviewThrowBackoffReason(outcomes.retryableThrows ?? EMPTY_RETRYABLE_REVIEW_THROWS, key, policy, now) !==
+      undefined
+  );
 }
 
 /**
@@ -7961,7 +8032,8 @@ export function selectReviewAdmissions(
   // before either lane ranks or truncates. The action-time lookup remains in `runSweep` as the
   // safety boundary for a verdict/refusal that races this snapshot.
   const eligible = openPrs.filter((pr) =>
-    deriveDisposition(pr, policy, now).disposition === "post-review" && !reviewAdmissionOutcomeKnown(pr, outcomes));
+    deriveDisposition(pr, policy, now).disposition === "post-review" &&
+    !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now));
   const filings = eligible.filter((pr) => pr.isPlanFiling === true);
   const rest = eligible.filter((pr) => pr.isPlanFiling !== true);
 
