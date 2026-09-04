@@ -36,13 +36,14 @@
     may also retry its own fresh exchange but must never join the ordinary in-flight operation.
 
     Kill each timed-out child exactly once before starting its retry. If the retry succeeds, use
-    only that fresh raw reading. If it times out or ends with any other failure, return unreadable,
+    only that fresh raw reading and carry bounded recovery detail into the existing provider
+    decision telemetry so the retry rate can be measured. If it times out or ends with any other failure, return unreadable,
     cache the ordinary failure under the existing bounded backoff, and preserve diagnostics for
     both attempts. Do not retry malformed data, RPC errors, process errors, exits, pagination, or
     toolchain failures. Do not revive stale successful headroom, increase the timeout, add a config
     field, alter model choice, alter Claude reads, or weaken any fail-closed routing posture.
   acceptance:
-    - claim: "one timed-out exchange followed by a successful exchange returns fresh readable Codex capacity, kills both children once, and reports no stale first-attempt data"
+    - claim: "one timed-out exchange followed by a successful exchange returns fresh readable Codex capacity with recovery telemetry, kills both children once, and reports no stale first-attempt data"
       proof: "unit test: test/codex-capacity-singleflight.test.ts"
     - claim: "three concurrent ordinary cold callers share the same bounded timeout retry and spawn exactly two app-server children rather than one retry per caller"
       proof: "unit test: test/codex-capacity-singleflight.test.ts"
