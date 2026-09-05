@@ -174,12 +174,18 @@ export function defaultGit(args) {
  * rule genuinely earns its bytes, the author folds first or files a compression task first — that
  * IS the discipline §8A names.
  */
-export function evaluateNetBytes(headBytes, baseBytes) {
+export function evaluateNetBytes(headBytes, baseBytes, operands = {}) {
   if (baseBytes === null || baseBytes === undefined) return [];
   const delta = headBytes - baseBytes;
   if (delta <= 0) return [];
+  const baseOperand =
+    operands.baseRef === undefined
+      ? `base ${baseBytes}`
+      : `base ${baseBytes} at ${operands.baseRef}${operands.baseSource ? ` via ${operands.baseSource}` : ""}`;
+  const headOperand =
+    operands.headLabel === undefined ? `head ${headBytes}` : `head ${headBytes} at ${operands.headLabel}`;
   return [
-    `CLAUDE.md grew by ${delta} bytes (base ${baseBytes} -> head ${headBytes}) — MASTER-PLAN §8A: ` +
+    `CLAUDE.md grew by ${delta} bytes (${baseOperand} -> ${headOperand}) — MASTER-PLAN §8A: ` +
       `compression is a deliverable, not just accretion. Fold, sharpen or migrate something out in ` +
       `the SAME change so the diff is byte-neutral or smaller. Content that names a concrete repo ` +
       `path belongs in learnings/*.yaml, whose files: glob delivers it to the task that governs it.`,
@@ -243,7 +249,11 @@ function main(argv) {
         `claude-md-budget-ratchet: net bytes ${actualBytes - baseBytes} (base ${baseBytes} at ${base.ref} ` +
           `via ${base.source} -> head ${actualBytes})`,
       );
-      netViolations = evaluateNetBytes(actualBytes, baseBytes);
+      netViolations = evaluateNetBytes(actualBytes, baseBytes, {
+        baseRef: base.ref,
+        baseSource: base.source,
+        headLabel: "working tree",
+      });
     }
   }
 

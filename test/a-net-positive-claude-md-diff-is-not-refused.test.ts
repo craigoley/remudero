@@ -20,7 +20,11 @@ const { defaultGit, evaluateNetBytes, evaluateRatchet, measureBytesAtRef, resolv
   pathToFileURL(SCRIPT).href
 )) as {
   defaultGit: (args: string[]) => string;
-  evaluateNetBytes: (headBytes: number, baseBytes: number | null) => string[];
+  evaluateNetBytes: (
+    headBytes: number,
+    baseBytes: number | null,
+    operands?: { baseRef?: string; baseSource?: string; headLabel?: string },
+  ) => string[];
   evaluateRatchet: (actualBytes: number, baseline: { capBytes?: unknown }) => string[];
   measureBytesAtRef: (file: string, ref: string, deps?: object) => number | null;
   resolveBaseRef: (deps?: { env?: Record<string, string | undefined>; remoteRef?: string }) => { ref: string; source: string } | null;
@@ -94,7 +98,7 @@ function runCliAllowingFailure(dir: string, env: Record<string, string | undefin
 
 // ── the refusal, naming both operands ──────────────────────────────────────────────────────────
 
-test("W1-T2831: a net-positive CLAUDE.md diff is REFUSED, naming the base size, the head size and the delta", () => {
+test("W1-T2831: a net-positive CLAUDE.md diff is REFUSED, naming the base operand, head operand and delta", () => {
   const dir = fixtureRepo();
   try {
     writeFileSync(join(dir, "CLAUDE.md"), "base content rewritten\nplus four hundred more bytes worth of unearned rule\n");
@@ -117,8 +121,11 @@ test("W1-T2831: a net-positive CLAUDE.md diff is REFUSED, naming the base size, 
     assert.doesNotMatch(r.stderr, /bytes > cap/, "so the refusal is the net-byte arm, not the cap arm");
     assert.match(
       r.stderr,
-      new RegExp(`CLAUDE\\.md grew by ${headBytes - baseBytes} bytes \\(base ${baseBytes} -> head ${headBytes}\\)`),
-      "the failure names the delta and BOTH operands, not just the verdict",
+      new RegExp(
+        `CLAUDE\\.md grew by ${headBytes - baseBytes} bytes ` +
+          `\\(base ${baseBytes} at ${baseRef} via git merge-base HEAD origin/main -> head ${headBytes} at working tree\\)`,
+      ),
+      "the failure names the delta and BOTH operands, including the base ref and head source",
     );
     assert.match(r.stderr, /§8A/, "and the rule it is enforcing");
     // A gate that reports a delta without naming what it was taken against is the stale-operand
@@ -329,6 +336,11 @@ test("W1-T2831: evaluateNetBytes is the predicate, in all four directions", () =
   assert.deepEqual(evaluateNetBytes(100, null), [], "no comparand");
   assert.equal(evaluateNetBytes(101, 100).length, 1, "one byte of growth is growth");
   assert.match(evaluateNetBytes(101, 100)[0]!, /grew by 1 bytes \(base 100 -> head 101\)/);
+  assert.match(
+    evaluateNetBytes(101, 100, { baseRef: "abc123", baseSource: "git merge-base HEAD origin/main", headLabel: "working tree" })[0]!,
+    /grew by 1 bytes \(base 100 at abc123 via git merge-base HEAD origin\/main -> head 101 at working tree\)/,
+    "the CLI can make the refusal self-contained by naming both compared operands",
+  );
 });
 
 test("W1-T2831: CI actually gives the arm a comparand — an unwired gate skips on every run and fires never", () => {
