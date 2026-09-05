@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { breMetacharsIn, proofGrepSafetyViolations } from "../src/lib/task-linter.js";
 import { parseWhitelistedProof } from "../src/lib/review.js";
@@ -77,18 +77,21 @@ test("THE #1071 REPRODUCTION: the bracket pattern passes grep -F but finds nothi
   assert.equal(fixed.trim(), "1", "grep -F finds the literal text — this is the false green");
 
   // The executor's own matcher is a BRE. The bracket is a character class, so it cannot match.
-  const w = parseWhitelistedProof(`grep: For a [call-site] violation in ${file}`);
+  // R-18: the TARGET is relative and the run is FROM the fixture dir — an absolute target is
+  // refused at parse now, and the reviewer never runs a proof from anywhere but the checkout.
+  const proof = `grep: For a [call-site] violation in ${basename(file)}`;
+  const w = parseWhitelistedProof(proof);
   assert.ok(w, "the proof PARSES — nothing today rejects it");
   let exit = 0;
   try {
-    execFileSync(w!.command, w!.args as string[], { encoding: "utf8", stdio: "pipe" });
+    execFileSync(w!.command, w!.args as string[], { cwd: dir, encoding: "utf8", stdio: "pipe" });
   } catch (e) {
     exit = (e as { status?: number }).status ?? -1;
   }
   assert.equal(exit, 1, "the REAL executor finds nothing — the two matchers disagree");
 
   // And the new check catches it before it can be authored.
-  const v = proofGrepSafetyViolations(taskWithProof(`grep: For a [call-site] violation in ${file}`));
+  const v = proofGrepSafetyViolations(taskWithProof(proof));
   assert.equal(v.filter((x) => x.severity === "block").length, 1, "lint now refuses it");
 });
 
@@ -105,11 +108,12 @@ test("a NUL-carrying target returns the SAME result as a NUL-free copy under the
   // (BSD exits 0 with "Binary file … matches"; ugrep exits 1 with nothing), so an exit-code-only
   // assertion silently cannot fail under whichever binary happens to be lenient. The line of
   // EVIDENCE is what `-a` guarantees on every implementation, so that is what this asserts.
+  // R-18: relative target + `cwd: dir`, for the same reason as the sibling test above.
   const run = (file: string) => {
-    const w = parseWhitelistedProof(`grep: export function callSiteViolations in ${file}`);
+    const w = parseWhitelistedProof(`grep: export function callSiteViolations in ${basename(file)}`);
     assert.ok(w);
     try {
-      return { exit: 0, out: execFileSync(w!.command, w!.args as string[], { encoding: "utf8", stdio: "pipe" }) };
+      return { exit: 0, out: execFileSync(w!.command, w!.args as string[], { cwd: dir, encoding: "utf8", stdio: "pipe" }) };
     } catch (e) {
       const err = e as { status?: number; stdout?: string };
       return { exit: err.status ?? -1, out: err.stdout ?? "" };
@@ -139,7 +143,20 @@ test("rmd check-proof reports the EXECUTOR'S OWN argv, exit code and hits — an
   const lines: string[] = [];
   t.mock.method(console, "log", (...a: unknown[]) => void lines.push(a.map(String).join(" ")));
 
-  assert.equal(checkProofCommand([`grep: export function breMetacharsIn in ${file}`]), 0);
+  // R-18: the proof names its target RELATIVE to the checkout and this runs FROM that checkout —
+  // an absolute target is now refused at parse (parseDialectGrep), and a target resolving outside
+  // the cwd is refused before the spawn (assertGrepTargetsInsideCheckout). The fixture keeps
+  // `rmd check-proof` in parity with the reviewer, which runs every proof with cwd pinned to the
+  // PR-head checkout — the property test/check-proof-executor-parity.test.ts exists to hold.
+  const realCwd = process.cwd();
+  let code: number;
+  try {
+    process.chdir(dir);
+    code = checkProofCommand([`grep: export function breMetacharsIn in ${basename(file)}`]);
+  } finally {
+    process.chdir(realCwd);
+  }
+  assert.equal(code, 0);
   const out = lines.join("\n");
   assert.match(out, /parse:\s+OK — kind=grep/);
   assert.match(out, /argv:\s+grep -arn --/, "it prints the EXACT argv the reviewer runs, -a included");
@@ -161,7 +178,16 @@ test("rmd check-proof FAILS a metacharacter pattern and names the regex trap", a
   t.mock.method(console, "log", (...a: unknown[]) => void lines.push(a.map(String).join(" ")));
 
   // The #1071 pattern: grep -F finds it, the executor does not. The verb reports the executor's answer.
-  assert.equal(checkProofCommand([`grep: For a [call-site] violation in ${file}`]), 1);
+  // R-18: relative target, run from the checkout — see the sibling test above for why.
+  const realCwd = process.cwd();
+  let code: number;
+  try {
+    process.chdir(dir);
+    code = checkProofCommand([`grep: For a [call-site] violation in ${basename(file)}`]);
+  } finally {
+    process.chdir(realCwd);
+  }
+  assert.equal(code, 1);
   const out = lines.join("\n");
   assert.match(out, /hits:\s+0/);
   assert.match(out, /BASIC REGULAR EXPRESSION/, "it tells the author WHY, at the moment they are wrong");
@@ -231,8 +257,11 @@ test("main(): `rmd check-proof` actually ROUTES to checkProofCommand and exits w
   writeFileSync(file, "export function breMetacharsIn() {}\n");
   const originalArgv = process.argv;
   const originalGuard = process.env[SELF_SYNC_GUARD_ENV];
-  process.argv = ["node", "run-task.js", "check-proof", `grep: export function breMetacharsIn in ${file}`];
+  const realCwd = process.cwd();
+  // R-18: relative target, run from the checkout — see the argv/exit/hits test above for why.
+  process.argv = ["node", "run-task.js", "check-proof", `grep: export function breMetacharsIn in ${basename(file)}`];
   process.env[SELF_SYNC_GUARD_ENV] = "1";
+  process.chdir(dir);
   try {
     let caught: unknown;
     await main().catch((e) => {
@@ -241,6 +270,7 @@ test("main(): `rmd check-proof` actually ROUTES to checkProofCommand and exits w
     assert.ok(caught instanceof ExitCalled, "main() must reach process.exit via checkProofCommand's return value");
     assert.equal((caught as ExitCalled).code, 0);
   } finally {
+    process.chdir(realCwd);
     process.argv = originalArgv;
     if (originalGuard === undefined) delete process.env[SELF_SYNC_GUARD_ENV];
     else process.env[SELF_SYNC_GUARD_ENV] = originalGuard;
