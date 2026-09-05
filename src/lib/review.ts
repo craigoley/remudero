@@ -3735,6 +3735,34 @@ export const DENIED_ATTRIBUTIVE_RE = /\b(?:not|never|isn't|aren't|wasn't)\s+(?:a
  * noun shape below turns a quotation into an assertion. This is the ONE call, not a second copy —
  * a second implementation is exactly how the count arm and this one drifted apart the first time.
  */
+/**
+ * Is the shorthand a member of a parenthesised enumeration rather than a label?
+ *
+ * TRAP (W1-T2679, measured on #3569): `(capped+override, capped+plan-only):` reaches the label arm
+ * because a closing bracket then a colon is exactly the shape W1-T395 ruled a label. But there the
+ * shorthand names a VERDICT STATE being discussed, not the diff. Every PR touching the arm gate,
+ * the calibration bands or the acceptance parser has cause to write these names in prose.
+ *
+ * The signal is available without guessing: an enumeration opens a bracket and separates siblings
+ * with a comma. `(Plan-only): no source touched.` opens a bracket and has no comma, so it stays a
+ * label. Only a comma INSIDE the still-open bracket, on this line, makes it a list.
+ *
+ * FALSIFIER: test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts.
+ */
+function shorthandIsInsideEnumeration(report: string, index: number): boolean {
+  const lineStart = report.lastIndexOf("\n", index - 1) + 1;
+  let depth = 0;
+  for (let i = index - 1; i >= lineStart; i -= 1) {
+    const c = report[i];
+    if (c === ")" || c === "]") depth += 1;
+    else if (c === "(" || c === "[") {
+      if (depth === 0) return report.slice(i + 1, index).includes(",");
+      depth -= 1;
+    }
+  }
+  return false;
+}
+
 function shorthandIsAboutChangeset(report: string, index: number, length: number): boolean {
   if (isInsideInlineQuote(report, index)) return false;
   const rest = report.slice(index + length);
@@ -3762,6 +3790,9 @@ function shorthandIsAboutChangeset(report: string, index: number, length: number
   // opened a quote span before the shorthand is reporting, not asserting. This class therefore
   // never needs to special-case a quote character; the guard above already removed it from view.
   if (/^[*_`'")\]\s]*:/.test(rest)) {
+    // W1-T2679: ...and unless the shorthand is a sibling in a parenthesised enumeration of state
+    // names, where the closing bracket belongs to the list rather than to a label span.
+    if (shorthandIsInsideEnumeration(report, index)) return false;
     // W1-T2533: ...unless the body ANSWERED the question negatively. See DENIED_LABEL_ANSWER_RE
     // for why `no <noun>` is still an assertion while `no.` and `not …` are denials.
     return !DENIED_LABEL_ANSWER_RE.test(rest);
