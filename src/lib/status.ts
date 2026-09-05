@@ -732,6 +732,38 @@ export interface GitHub {
    */
   readTruncated?(): boolean;
   /**
+   * R-24 (docs/audits/recon-2026-09-05.md): DROP THE FAILURE VERDICTS LEFT BY EARLIER ATTEMPTS, AND NOTHING ELSE — the one
+   * seam that lets a gateway be held for a whole daemon/drain lifetime instead of rebuilt per
+   * tick.
+   *
+   * WHY IT HAS TO EXIST. `buildBatchedGithub` closes over BOTH a delta cache (`knownBoardPrs`,
+   * the row set `fetchBoardPrsRest`'s early stop compares against) and a set of failure
+   * verdicts. Those two want opposite lifetimes: the cache is worth more the longer it lives —
+   * a warm closed half stops at the delta boundary in ~2 requests where a cold one walks the
+   * repo (MEASURED at 25 requests / 21.8 s at 2,400 PRs; this repo has passed 4,080) — while a
+   * verdict must never outlive the tick that earned it, or one transient outage marks every
+   * later tick indeterminate. `drainCommand`/`daemonCommand` used to buy the second property by
+   * throwing the whole instance away every tick, which paid for it with the first. This method
+   * separates them: the caller holds ONE instance and clears the verdicts at the top of each
+   * tick.
+   *
+   * WHAT IT CLEARS, AND WHY THE EMPTY HALF GOES WITH THE FLAG. A FAILED fetch replaces its half
+   * with an EMPTY one and stamps it (the W1-T181 pairing) — the empty rows are only ever safe
+   * because they are read alongside `readFailed()`. Clearing the flag while leaving that stamped
+   * empty half in place would hand a caller "GitHub says zero PRs" under a healthy label, which
+   * is precisely the conflation W1-T181 exists to prevent. So a half is dropped exactly when its
+   * failed verdict is, and the next read re-fetches it. `knownBoardPrs`/`knownIssues` are NOT
+   * touched: they are already untouched on a throw, so the re-fetch is a cheap delta, not a cold
+   * walk.
+   *
+   * A SUCCESSFUL verdict and its half are left exactly as they are — this is a reset of
+   * failures, never of the cache, and it performs no I/O.
+   *
+   * OPTIONAL, like every other method added after the first {@link GitHub} fixture: omitted ⇒ the
+   * caller's `?.()` is a no-op and the gateway keeps whatever verdict lifetime it already had.
+   */
+  resetFailureFlags?(): void;
+  /**
    * Resolve an escalation issue's LIVE state (+ title, for NEEDS ME's one-line ask) by its
    * `issue_url` (W1-T182) — the join that replaces trusting escalate.ts's
    * `escalation.issue_opened` ledger line as a permanent proxy for "still open" ({@link
@@ -5870,6 +5902,51 @@ export function buildBatchedGithub(
     return cache;
   };
 
+  /**
+   * R-24 — THE PER-TICK VERDICT RESET. See {@link GitHub.resetFailureFlags} for the contract and
+   * why this exists at all; what follows is only what the three assignments below actually do.
+   *
+   * PER HALF, mirroring `openOutcome`/`mergedOutcome`'s own split (W1-T2323): a half whose last
+   * attempt SUCCEEDED keeps both its verdict and its rows, so a reset never costs a re-fetch it
+   * did not have to pay. A half whose last attempt FAILED loses both together — the verdict AND
+   * the stamped EMPTY half that verdict is the only safe pairing for. Dropping one without the
+   * other is the W1-T181 hazard in reverse: `readFailed() === false` over rows that are empty
+   * because `gh` fell over, which is the "GitHub says zero PRs" reading that file's whole design
+   * refuses to produce.
+   *
+   * `cache`/`composedFrom` need no clearing: a re-fetched half bumps its epoch, and `index()`
+   * keys its memo on the epochs precisely so a rebuild cannot be missed.
+   *
+   * `knownBoardPrs`/`knownIssues` — the delta caches — are DELIBERATELY UNTOUCHED. They are the
+   * reason a caller holds one gateway across ticks, they are already untouched on a throw, and
+   * clearing them here would convert the recovery from a 2-request delta into the cold walk this
+   * whole change exists to stop paying.
+   *
+   * THE ONE INTERACTION WITH `warm()`, STATED RATHER THAN LEFT TO BE FOUND. Dropping a half while
+   * a background walk owns that channel leaves `openRows`/`mergedRows`'s `warmInFlight` guard
+   * answering `[]` until the worker's message lands — which is exactly the cold-gateway-mid-warm
+   * state those guards already document as legitimate, and `readState()` still reports
+   * `"in_flight"` for the whole of it. It self-heals either way: `applyOpenOutcome`/
+   * `applyMergedOutcome` write the half and the verdict unconditionally when the walk returns.
+   * No caller reaches both today — `warm()` has exactly one caller (`lib/serve.ts`) and the
+   * per-tick reset has two (`daemonCommand`/`drainCommand`), and they are different gateways.
+   */
+  const resetFailureFlags = (): void => {
+    if (openOutcome?.failed) {
+      openOutcome = undefined;
+      openHalf = undefined;
+    }
+    if (mergedOutcome?.failed) {
+      mergedOutcome = undefined;
+      mergedHalf = undefined;
+    }
+    if (lastIssueFetchFailed) {
+      lastIssueFetchFailed = false;
+      lastIssueFetchFailureReason = undefined;
+      issueCache = undefined;
+    }
+  };
+
   // W1-T2392: `body` rides along for the prose index — already on the row, no extra fetch.
   const asRef = (p: BatchedPr): PrRef => ({
     number: p.number,
@@ -6291,6 +6368,11 @@ export function buildBatchedGithub(
       // instead of trivially returning the initial `false`.
       index();
       return lastFetchTruncated();
+    },
+    // R-24: NEVER forces a fetch and performs no I/O — the whole point is that a caller can call
+    // it at the top of every tick for free. See `resetFailureFlags`'s own doc above.
+    resetFailureFlags() {
+      resetFailureFlags();
     },
     issueReadFailed() {
       issueIndex();

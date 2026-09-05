@@ -23796,13 +23796,16 @@ async function drainCommand(
   // merged PR in one fetch. So the change can only ADD merged credits, never remove one, and the
   // dispatch consequence is strictly "fewer tasks offered", never "more".
   //
-  // DEFAULTED PER CALL, NOT ONCE — the factory is invoked INSIDE `refreshMerged` (below), so each
-  // pass gets a FRESH instance. That is not incidental: `buildBatchedGithub` closes over mutable
-  // `lastFetchFailed`/`lastIssueFetchFailed` exactly as `ghGateway` closes over `failed`/
-  // `failureReason`, so hoisting one instance out of the closure would let a single pass's outage
-  // mark every later pass of the same drain indeterminate. The drain needs N instances for N
-  // passes, and already has them; unlike `retroCommand` (#1531) it has only ONE projection site,
-  // so it never needed two instances for two passes of differing scope.
+  // DEFAULTED ONCE PER INVOCATION, NOT PER PASS — R-24 (docs/audits/recon-2026-09-05.md). This
+  // factory is now invoked exactly once, at `projectionGithub` below, and every pass reads that
+  // one instance. It used to be invoked INSIDE `refreshMerged` so each pass got a FRESH instance,
+  // for one stated reason: `buildBatchedGithub` closes over mutable failure verdicts exactly as
+  // `ghGateway` closes over `failed`/`failureReason`, so a hoisted instance would let a single
+  // pass's outage mark every later pass of the same drain indeterminate. That reason was sound
+  // and is unchanged; what changed is that it no longer needs a whole instance to satisfy it.
+  // `GitHub.resetFailureFlags()` drops those verdicts (and only those) at the top of each pass,
+  // which is the same guarantee at none of the cost — a fresh instance ALSO starts with an empty
+  // `knownBoardPrs`, so every pass re-walked the closed half cold.
   const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log }));
 
   // W1-T2513 — ONE COALESCER FOR THIS WHOLE `rmd drain` INVOCATION (never per tick, never per
@@ -23841,10 +23844,19 @@ async function drainCommand(
   // GitHub read path. `refreshMerged` is always called at the top of each
   // drain tick before `isOpenPr` is consulted, so it is never stale.
   let lastProj: Map<string, StatusProjection> | undefined;
+  // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THIS WHOLE `rmd drain`
+  // INVOCATION, built HERE rather than inside `refreshMerged` below. See the identical
+  // construction in `daemonCommand` (its own doc carries the full argument, and the two must not
+  // drift apart again — #1532).
+  const projectionGithub = githubFactory(owner, repo);
   const refreshMerged: () => MergedSet = () => {
+    // R-24: the ONE thing a per-tick instance used to buy, bought without the cold walk that came
+    // with it — see `GitHub.resetFailureFlags`. A gateway that omits the method (`ghGateway`, every
+    // pre-existing fixture) no-ops here and keeps exactly the verdict lifetime it already had.
+    projectionGithub.resetFailureFlags?.();
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: githubFactory(owner, repo) },
+      { ledgerPath, github: projectionGithub },
       statusPath,
     );
     lastProj = proj;
@@ -23910,7 +23922,10 @@ async function drainCommand(
   let openHeadBranchesRead = false;
   const openHeadBranchesForBreaker = (): ReadonlyArray<PrRef> | null | undefined => {
     if (!openHeadBranchesRead) {
-      openHeadBranchesMemo = githubFactory(owner, repo).listOpenHeadBranches?.();
+      // R-24: the SAME instance `refreshMerged` reads, never a second gateway — this read is
+      // latched (`openHeadBranchesRead`) and so paid a whole cold walk of its own, once, for an
+      // answer the projection's own open half already holds.
+      openHeadBranchesMemo = projectionGithub.listOpenHeadBranches?.();
       openHeadBranchesRead = true;
     }
     return openHeadBranchesMemo;
@@ -24449,13 +24464,17 @@ export function planReloader(
  * drain's must not be answered by the target's gateway, so the key is the pair the caller actually
  * asks about.
  *
- * NEVER RESET, AND THAT IS SAFE HERE FOR A REASON WORTH STATING. `drainCommand`'s `githubFactory`
- * deliberately builds a FRESH instance per `refreshMerged` pass, because that gateway closes over
- * mutable `lastFetchFailed`/`lastIssueFetchFailed` and hoisting it would let one pass's outage mark
- * every later pass indeterminate. The LANE gateway has the opposite requirement — the lanes of one
- * tick are admitted together and should answer from ONE snapshot — and staleness is bounded by
- * `buildBatchedGithub`'s own `ttlMs` (15 s, far under `pollIntervalMs`), so a warm gateway still
- * refetches every poll. Warming changes a fetch's SHAPE, never whether one happens.
+ * NEVER RESET, AND STILL SAFE — but no longer for a reason that sets it apart. This doc used to
+ * contrast the lane gateway against `drainCommand`'s projection gateway, which was rebuilt per
+ * `refreshMerged` pass to keep one pass's outage from marking every later pass indeterminate.
+ * R-24 (docs/audits/recon-2026-09-05.md) hoisted that one too: the projection gateway is now built
+ * once per invocation and calls `GitHub.resetFailureFlags()` per pass, which drops the failure
+ * verdicts WITHOUT dropping the delta cache. So both gateways now live for the whole lifetime, and
+ * the only difference left is the narrow one: the lane gateway carries no per-tick reset, because
+ * the lanes of one tick are admitted together and should answer from ONE snapshot. Staleness is
+ * bounded either way by `buildBatchedGithub`'s own `ttlMs` (15 s, far under `pollIntervalMs`), so a
+ * warm gateway still refetches every poll. Warming changes a fetch's SHAPE, never whether one
+ * happens.
  *
  * PURE: it performs no I/O of its own and calls `build` at most once per distinct key.
  */
@@ -24665,12 +24684,12 @@ export async function daemonCommand(
   const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log }));
 
   // W1-T2509 — ONE GATEWAY PER owner/repo FOR THE WHOLE DAEMON, handed to every dispatch lane.
-  // DELIBERATELY SEPARATE FROM `githubFactory` ABOVE, which must keep building a FRESH instance per
-  // `refreshMerged` pass: that gateway closes over mutable `lastFetchFailed`/`lastIssueFetchFailed`,
-  // so hoisting IT would let one pass's outage mark every later pass of the same drain
-  // indeterminate (the rationale recorded at `drainCommand`'s own `githubFactory`). The LANE
-  // gateway has the opposite requirement — the lanes of ONE tick are admitted together and should
-  // answer from ONE snapshot — so it is memoised here and never reset.
+  // STILL SEPARATE FROM `githubFactory` ABOVE, but no longer because the projection gateway is
+  // short-lived: R-24 hoisted that one too (`projectionGithub`, below), so both now live for the
+  // whole lifetime. What remains separate is the RESET — the projection gateway drops its failure
+  // verdicts at the top of every tick, the LANE gateway never does, because the lanes of ONE tick
+  // are admitted together and should answer from ONE snapshot. Keyed per owner/repo, so a task
+  // carrying a different `repo:` is never answered by the target's gateway.
   //
   // KEYED ON owner/repo, NOT ON THE DRAIN TARGET: a task carrying a different `repo:` than the
   // drain's must never be answered by the target's gateway. Staleness is bounded by
@@ -24685,10 +24704,35 @@ export async function daemonCommand(
   // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
   // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
   const planSyncCoalescer = createPlanSyncCoalescer(target.planPath);
+  // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THE WHOLE DAEMON
+  // LIFETIME, built HERE rather than inside `refreshMerged` below. `target.owner`/`target.repo`
+  // are resolved ONCE, before this line (`resolveDaemonTarget`, `const target`), and no path
+  // reassigns either for the life of the process — so there is no repo change for a rebuilt
+  // instance to track, and `drainCommand`'s `owner`/`repo` are `const` for the same reason.
+  //
+  // THE DEFECT. `buildBatchedGithub` holds `knownBoardPrs` — the row cache `fetchBoardPrsRest`'s
+  // early stop compares against — at GATEWAY scope. Invoking the factory INSIDE `refreshMerged`
+  // therefore handed every tick a gateway with an empty cache, so `projectPlan` →
+  // `listMergedHeadBranches` → `index` → `mergedRows` → the closed half walked the repo COLD every
+  // tick: the code's own 2026-08-26 measurement is 25 requests / 21.8 s at 2,400 PRs, and this
+  // repo has passed 4,080. The REST `sort=updated&direction=desc` early stop can only pay off on
+  // an instance that outlives one tick. It is the same fix `memoiseGatewayByRepo` (above) already
+  // applied to the LANE gateway, applied to the one consumer that reads on every tick.
+  //
+  // AND WHY THE OLD PER-TICK INSTANCE IS NOT SIMPLY LOST. It bought exactly one property: a
+  // gateway closes over mutable failure verdicts, and a hoisted instance would let one tick's
+  // outage mark every later tick indeterminate. `resetFailureFlags()` (called at the top of
+  // `refreshMerged`, below) buys that property directly and per tick, without discarding the
+  // delta cache alongside it — see that method's own doc for why a failed half's EMPTY rows are
+  // dropped WITH its verdict rather than left behind under a healthy label.
+  const projectionGithub = githubFactory(target.owner, target.repo);
   const refreshMerged: () => MergedSet = () => {
+    // R-24: called once per tick, because `refreshMerged` is called once per tick — `runDaemon`'s
+    // loop body opens with `deps.refreshMerged()` (lib/daemon.ts) exactly as `runDrain`'s two do.
+    projectionGithub.resetFailureFlags?.();
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: githubFactory(target.owner, target.repo) },
+      { ledgerPath, github: projectionGithub },
       statusPath,
     );
     lastProj = proj;
@@ -24745,7 +24789,9 @@ export async function daemonCommand(
   let openHeadBranchesRead = false;
   const openHeadBranchesForBreaker = (): ReadonlyArray<PrRef> | null | undefined => {
     if (!openHeadBranchesRead) {
-      openHeadBranchesMemo = githubFactory(target.owner, target.repo).listOpenHeadBranches?.();
+      // R-24: the SAME instance `refreshMerged` reads, never a second gateway — see the identical
+      // line in `drainCommand`.
+      openHeadBranchesMemo = projectionGithub.listOpenHeadBranches?.();
       openHeadBranchesRead = true;
     }
     return openHeadBranchesMemo;
