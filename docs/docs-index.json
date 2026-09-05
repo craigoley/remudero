@@ -152,6 +152,12 @@
       "grepHint": "Forensics — `src/lib/inbox.ts`"
     },
     {
+      "path": "docs/forensics/ledger.md",
+      "title": "ledger.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "ledger.ts forensics"
+    },
+    {
       "path": "docs/forensics/sweep-map.md",
       "title": "Removed block map — `src/lib/sweep.ts`",
       "summary": "Every comment block compacted out of `src/lib/sweep.ts`, mapped to the heading in",
