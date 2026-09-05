@@ -1,0 +1,83 @@
+- id: W1-T2931
+  title: "THE HOST WORKER BUDGET BINDS REVIEWS AND NOTHING ELSE — hostWorkerBudget is read only by review-capacity, so the sweep fans out one worker per PR with no ceiling, and the ONE lane that respects the budget is the one that yields: dispatch starves the reviews that would have drained the board"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "W1-T2853", "W1-T341", "W1-T326"]
+  files: [src/lib/sweep.ts, test/the-sweep-fan-out-respects-the-host-budget.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    `plan/policy.yaml` sets `hostWorkerBudget: { value: 4, min: 1, max: 16 }`. `git grep hostWorkerBudget
+    -- src/` returns FIVE lines and every one is the review lane or its plumbing:
+    `review-capacity.ts` declares the field and gates on it twice
+    (`observation.activeWorkers + effectiveWidth > policy.hostWorkerBudget`), and `sweep.ts` names it
+    only as a policy field to validate. NOTHING ON THE DISPATCH SIDE CONSULTS IT. (Control: a symbol
+    that must be widespread, `loadConfig`, appears in 12 files, so the sweep reads.)
+
+    THE CONSEQUENCE IS BACKWARDS FROM WHAT THE BUDGET IS FOR. The lane that obeys the ceiling is the
+    only lane that yields; every other lane keeps taking host it never counted. So the host fills
+    with sweep workers and the review lane — the one that would DRAIN the board — is the single thing
+    throttled.
+
+    MEASURED 2026-09-05, the two `review.capacity` rows that exist (the signal is new, W1-T2853):
+      19:34:47  healthy-window       queue=3  width=2  active=1
+      19:37:11  host-worker-budget   queue=6  width=1  active=7
+    Two and a half minutes. Active workers 1 -> 7 against a budget of 4, review width cut 2 -> 1,
+    and the queue it had to drain GREW 3 -> 6. Host: 4 vCPU, load average 9.81, daemon container at
+    338% CPU.
+
+    THE FAN-OUT IS THE PRODUCER, AND IT IS UNBOUNDED BY CONSTRUCTION. The worktree list at that
+    moment: `sweep-PR-4130`, `-4131`, `-4132`, `-4133`, `-4134`, `-4135` — six sweep worktrees whose
+    epochs span FOURTEEN SECONDS (1788636914..1788636928) — plus `sweep-PR-3981`, a stale
+    `sweep-W1-T2653`, `run-DAEMON`, and exactly one `review-PR4125`. The sweep starts a worker PER
+    OPEN PR in one pass; nothing asks how many the host can hold. On a board of 12 that is 12 workers
+    on 4 cores, and the review lane's ceiling then reads the wreckage and drops itself to the floor.
+
+    THIS IS NOT AN ARGUMENT FOR A SMALLER DISPATCH WIDTH. `plan/policy.yaml` keeps drain width at 3
+    on measured evidence — "`rejected: 0` on every settled set, and no lane has ever failed for a
+    concurrency reason. THE ROW STAYS AT 3 ON THAT EVIDENCE, not on optimism" — and W1-T341 already
+    records that parallelism spends deploy slack. Nothing here contradicts that. The defect is that
+    a budget exists, is configured, and governs ONE of its several claimants; the fix is to make the
+    sweep's fan-out count against the same ceiling the review lane already honours, so the two
+    negotiate instead of one conceding.
+
+    A CEILING THAT ONLY EVER YIELDS IS THE SHAPE THIS REPO KEEPS FILING. It is the sibling of the
+    bound-that-fires-on-a-healthy-condition family (W1-T312, W1-T380, W1-T382): there the bound was
+    sized against a population never observed; here the bound is sized correctly and simply is not
+    consulted by the party that fills the host. Prefer counting the sweep's own in-flight workers
+    against `hostWorkerBudget` before starting another, over inventing a second number.
+    OPERATOR RULING 2026-09-05, AND IT IS THE PRINCIPLE THIS TASK SHOULD ENCODE RATHER THAN A BARE
+    CEILING: "when there is this much open, the process should be smart enough to decrease the build
+    throughput and focus cpu on clearing the queue." Today the priority is exactly INVERTED. Build
+    work (the sweep's per-PR fan-out, the drain's dispatch) takes host it never counts, and the
+    review lane — the only claimant that reads `hostWorkerBudget` — is the one that concedes, so a
+    DEEPER board makes the queue drain SLOWER at the exact moment it needs to drain faster. Measured
+    above: queue 3 -> 6 while width fell 2 -> 1.
+
+    SO THE FIX IS A PRIORITY, NOT ONLY A CAP. A shared ceiling alone would still let whichever lane
+    asks first win the host. What the ruling asks for is that review/merge work is served BEFORE new
+    build work when the board is deep, so build throughput yields as depth rises. Depth is already
+    measurable without inventing a signal: `queue_depth` is on the `review.capacity` row, and
+    board-review (W1-T2304) already derives depth thresholds it declines to take from open count
+    alone — reuse its reading rather than adding a second definition. Note the direction carefully:
+    build lanes give way to the queue, never the reverse, because an unreviewed green PR is finished
+    work that only needs draining, while a new dispatch is work not yet started.
+
+    DO NOT IMPLEMENT THIS AS A GLOBAL PAUSE. `rmd pause` already exists for the emergency and stops
+    everything including the reviews that would clear the board; an operator reached for it on
+    2026-09-05 at load 34 precisely because no proportional lever existed. The deliverable is the
+    proportional one.
+
+  acceptance:
+    - claim: "the sweep counts its in-flight workers against the host budget before starting another"
+      proof: "unit test: W1-T2931: the sweep stops fanning out at the host budget"
+    - claim: "a board larger than the budget is processed across passes rather than all at once"
+      proof: "unit test: W1-T2931: a board larger than the budget spans passes"
+    - claim: "the review lane keeps its width when the sweep respects the ceiling"
+      proof: "unit test: W1-T2931: review width survives a bounded fan-out"
