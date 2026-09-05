@@ -743,6 +743,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // reproduce that exact bug one module later: the next red-band CI run reads "not yet filed"
   // and re-files the same debt profile, the unbounded-refile loop this dedupe exists to prevent.
   "coverage.improvement.filed",
+  // W1-T2862: the source-size follow-up consumer reads this exact signature from the archive +
+  // live ledger union before deciding whether the same maintainability obligation may file again.
+  "source_size.followup.filed",
   // W1-T949: the reservation-REFUSAL record for each id-filing lane (triage/plan/approve).
   // Before this, `reserveTaskIdRemote`'s `TaskIdReservationError` landed only as a stringified
   // message inside the lane's generic `*.error` line — no id, no ref, no outcome discriminator,
