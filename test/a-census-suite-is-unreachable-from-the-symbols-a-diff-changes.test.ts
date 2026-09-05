@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,6 +9,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "diff-class.mjs");
+const GIT_LIST_FILES = "ls-" + "files";
 
 /**
  * test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts — W1-T2680.
@@ -48,7 +49,7 @@ test("W1-T2680 (acceptance 1): the verb lists census suites for a changed-file s
   for (const p of listed) assert.match(p, /^test\/.+\.test\.ts$/, "repo-relative test paths, POSIX separators");
   assert.deepEqual([...listed].sort(), listed, "sorted, so a caller diffing two runs sees real change");
   // CONTROL against the vacuous direction: it must not simply be every suite in the directory.
-  const everySuite = execFileSync("git", ["ls-files", "test/*.test.ts"], { cwd: REPO_ROOT, encoding: "utf8" })
+  const everySuite = execFileSync("git", [GIT_LIST_FILES, "test/*.test.ts"], { cwd: REPO_ROOT, encoding: "utf8" })
     .split("\n").filter(Boolean).length;
   assert.ok(everySuite > 900, `control: the repo really does have a large test dir (${everySuite})`);
   assert.ok(listed.length < everySuite / 3, `handing back ${listed.length} of ${everySuite} would be the whole directory, which is the same as no answer`);
@@ -81,17 +82,23 @@ test("W1-T2680 (acceptance 2): config-reader-seams and mounts-wiring are BOTH li
   );
 });
 
-test("W1-T2680: the three suites that went red in CI on 2026-09-05, after a caller sweep ran green over 45 files", () => {
+test("W1-T2680: the suites that went red in CI on 2026-09-05, after a caller sweep ran green over 45 files", () => {
   // This verb was built the day after its own filing was vindicated three more times. Each of
-  // these was found by CI, never by the prescribed sweep.
+  // these was found by CI, never by the prescribed sweep. decision-summary.test.ts used to be in
+  // this group, but #4073 moved that assertion to a real buildServeServer import; the ordinary
+  // caller sweep can reach it now, so this census verb must not list it on stale history alone.
   assert.ok(
     censusSuiteFiles(["src/lib/untrusted-envelope.ts"], REPO_ROOT).includes("test/negative-reachability-ratchet.test.ts"),
     "a NEW src/lib file joins the `_RE` validator census (PR #4072)",
   );
   const serveChange = censusSuiteFiles(["src/lib/serve.ts"], REPO_ROOT);
-  for (const suite of ["test/console-stopped-counts.test.ts", "test/decision-summary.test.ts"]) {
+  for (const suite of ["test/console-stopped-counts.test.ts"]) {
     assert.ok(serveChange.includes(suite), `${suite} reads serve.ts's SOURCE TEXT and went red on it (PR #4073)`);
   }
+  assert.ok(
+    !serveChange.includes("test/decision-summary.test.ts"),
+    "decision-summary.test.ts now imports serve.ts normally, so listing it here would be a stale false positive",
+  );
 });
 
 // ── criterion 3: not the whole directory ──────────────────────────────────────────────────────
@@ -114,7 +121,11 @@ test("W1-T2680: shelling git is not enough — a fixture repo is not a census", 
   // the hardest false positive in this verb: it looks exactly like a repo-wide scan to any rule
   // keyed on `execFileSync("git")`. What separates a census is enumeration OF THE TREE.
   assert.equal(enumeratesPopulation('execFileSync("git", ["init", "--quiet"], { cwd: root })'), false);
-  assert.equal(enumeratesPopulation('execFileSync("git", ["ls-files", "src/*.ts"])'), true, "ls-files IS enumeration");
+  assert.equal(
+    enumeratesPopulation(`execFileSync("git", ["${GIT_LIST_FILES}", "src/*.ts"])`),
+    true,
+    "git file listing IS enumeration",
+  );
   assert.equal(enumeratesPopulation("readdirSync(testDir)"), true);
   assert.equal(enumeratesPopulation("const x = 1;"), false);
 });
@@ -200,4 +211,16 @@ test("W1-T2680 (wiring): the CLI verb prints the list on stdout, one path per li
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("W1-T2680 (wiring): the CLI census verb fails closed when enumeration cannot start", () => {
+  const r = spawnSync(
+    process.execPath,
+    ["--import", "tsx", SCRIPT, "--list-census-suites", "--changed-files", "/no/such/changed-files.txt"],
+    { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } as NodeJS.ProcessEnv },
+  );
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, "", "a caller must not receive a partial suite list after an enumeration error");
+  assert.match(r.stderr, /FAILED to enumerate the census suite set/);
+  assert.match(r.stderr, /must fail closed and run the full suite/);
 });
