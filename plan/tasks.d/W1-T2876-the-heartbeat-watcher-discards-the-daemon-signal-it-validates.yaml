@@ -1,0 +1,60 @@
+- id: W1-T2876
+  title: "THE HEARTBEAT WATCHER DISCARDS THE DAEMON SIGNAL IT VALIDATES — fleet-heartbeat-watch.yml asserts daemon_verdict in its SELF-CHECK, prints it in the report, and then escalates on beat age and supervisor_verdict ONLY, so a cron that keeps beating over a dead daemon reads as fresh: the green light on a dead fleet the beat script's own header exists to prevent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§8", "W1-T2349", "W1-T2875"]
+  files: [.github/workflows/fleet-heartbeat-watch.yml]
+  status: queued
+  attempts: 0
+  rationale: |
+    `scripts/fleet-heartbeat.sh` carries the daemon's own last-poll timestamp precisely so that a
+    beat cannot be a liveness claim about the cron alone. Its header states the requirement in as
+    many words: "A beat that only proves the cron fired is a GREEN LIGHT ON A DEAD FLEET, which is
+    worse than no light at all." The beat holds up its end. THE WATCHER DOES NOT READ IT.
+
+    In `.github/workflows/fleet-heartbeat-watch.yml`, `daemon_verdict` appears ONLY inside the
+    self-check block, where four assertions prove the beat computes it correctly. The judging step
+    extracts `supervisor_verdict` from the payload and escalates on two arms — `age_s > threshold_s`
+    (BEAT STALE) and `is_supervisor_stale` (DEPLOY-SUPERVISOR STALE). There is no daemon arm. The
+    value is printed into the report and then dropped.
+
+    MEASURED — run 33961825846, 2026-09-05T10:52:55Z, taken WHILE the Azure daemon had been dead for
+    roughly three hours:
+      Last beat subject: heartbeat 2026-09-05T10:50:01Z: daemon STALE | rmd ok
+      daemon_verdict=STALE — last poll 2h17m ago
+      daemon_last_ts=2026-09-05T08:32:47.052Z
+      daemon_last_step=daemon.inflight_sweep
+      Condition: fresh — beat 3m old, deploy-supervisor unknown
+      heartbeat-watch: 2 branch(es) watched, 0 not installed, 0 stale.
+    The job concluded SUCCESS. It printed `daemon STALE` twice and reported zero stale branches,
+    because the beat itself was three minutes old. The daemon had exhausted docker's
+    `--restart=on-failure:5` budget at ~08:00 and stayed down until an operator noticed at 11:09 —
+    PRs accumulating green and unreviewed throughout, `serve` still up and still accepting webhook
+    wakes that nothing consumed. THE DETECTOR RAN DURING THE OUTAGE AND SAID EVERYTHING WAS FINE.
+
+    A DAEMON ARM CANNOT BE UNCONDITIONAL, AND THAT IS WHY THIS IS NOT A ONE-LINE CHANGE.
+    `heartbeat-mini` reported `daemon_verdict=STALE — last poll 465h25m ago` in that same run and has
+    for weeks: the mini is not the fleet host and deliberately runs no daemon. An unconditional arm
+    would fail this job forever on a correct reading, which is the failure mode that trains an
+    operator to ignore it. The branches that MUST have a polling daemon have to be named, and a
+    branch not named must stay silent on this arm exactly as a never-installed beat already does.
+
+    Follow the file's own conventions rather than inventing new ones: mirror `is_supervisor_stale`
+    for the predicate, count into the SAME `stale` total so the combined verdict stays the single
+    `[ "$stale" -eq 0 ]` check, name the condition in the report so the reader is not left to infer
+    which arm fired, and extend the self-check with a discriminating pair the way
+    `STALE_AFTER_MINUTES` already has one — an expected branch reading STALE must fail, and an
+    unlisted branch reading the same STALE must not.
+  acceptance:
+    - claim: "a fresh beat whose payload says the daemon is stale escalates on a branch that must run one"
+      proof: "unit test: W1-T2876: a fresh beat over a dead daemon escalates"
+    - claim: "the same stale daemon reading on an unlisted branch stays silent"
+      proof: "unit test: W1-T2876: an unlisted branch does not escalate on daemon staleness"
+    - claim: "the watcher names which arm fired rather than reporting a bare age"
+      proof: "grep: DAEMON STALE in .github/workflows/fleet-heartbeat-watch.yml"
