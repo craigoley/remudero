@@ -291,14 +291,14 @@ export function resolveLedgerUnion(
     for (const raw of text.split("\n")) {
       const line = raw.trim();
       if (!line || seen.has(line) || !re.test(line)) continue;
-      seen.add(line);
-      matches.push(line);
+      const ownedLine = Buffer.from(line, "utf8").toString("utf8"); // W1-T2833: explicit owned-string boundary
+      seen.add(ownedLine);
+      matches.push(ownedLine);
     }
   };
 
-  // W1-T2484: the window start, pre-parsed ONCE outside the loop. An unparseable `since` (bad
-  // input, not a corpus defect) is treated the same as "no window" — falling through to read
-  // everything — rather than throwing partway through an otherwise-valid call.
+  // W1-T2484: the window start, pre-parsed ONCE outside the loop. An unparseable `since` is
+  // "no window" — read everything rather than throw partway through an otherwise-valid call.
   const sinceMs = opts.since === undefined ? undefined : Date.parse(opts.since);
   const hasWindow = sinceMs !== undefined && !Number.isNaN(sinceMs);
 
