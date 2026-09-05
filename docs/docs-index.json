@@ -164,6 +164,12 @@
       "grepHint": "retro.ts forensics"
     },
     {
+      "path": "docs/forensics/status.md",
+      "title": "status.ts comment forensics",
+      "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/status.ts` when its comments were compacted to the plain-language standa…",
+      "grepHint": "status.ts comment forensics"
+    },
+    {
       "path": "docs/forensics/sweep-map.md",
       "title": "Removed block map — `src/lib/sweep.ts`",
       "summary": "Every comment block compacted out of `src/lib/sweep.ts`, mapped to the heading in",
