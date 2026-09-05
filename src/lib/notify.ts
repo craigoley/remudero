@@ -1,3 +1,4 @@
+import { mintOptionLink, type EscalationOptionKind } from "./escalate.js";
 import { execFileSync } from "node:child_process";
 import { appendLedger } from "./ledger.js";
 
@@ -142,4 +143,53 @@ export function notify(message: string, deps: NotifyDeps): void {
     channel: deps.channelName ?? "imessage",
     ...(unavailable !== undefined ? { delivered: false, reason: unavailable } : {}),
   });
+}
+
+// ── W1-T2696: the ping carries its own answer links ──────────────────────────
+//
+// The operator reads a MANUAL or HARD_STOP ping on a phone. Today answering means opening the
+// console; the option kinds and routes already exist, so what was missing is a link carrying the
+// operator's authority for exactly one option, once.
+//
+// INVARIANT: one link per EXECUTABLE option and none for an operator-only or untyped one, whose
+// prose is unchanged. A link is never minted without a secret.
+// FALSIFIER: test/escalation-answer-links.test.ts.
+
+/** What the renderer needs about one option: its prose, and its kind if it has one. */
+export interface PingOption {
+  readonly label: string;
+  readonly detail: string;
+  readonly kind?: EscalationOptionKind;
+}
+
+export interface EscalationPingInput {
+  readonly cls: string;
+  readonly taskId: string;
+  readonly summary: string;
+  readonly issueUrl: string;
+  readonly cardUrl: string;
+  readonly options: readonly PingOption[];
+}
+
+/**
+ * Render the real-time ping, appending one answer link per executable option.
+ *
+ * `secret` is optional and its absence is the degrade path, not an error: a deploy that has
+ * never minted a link secret still pages the operator with exactly today's text. That mirrors
+ * notify()'s own rule directly above — a notification is a report about work, never the work —
+ * so a missing secret must never cost the operator the page itself.
+ */
+export function renderEscalationPing(
+  input: EscalationPingInput,
+  opts: { readonly secret?: string; readonly baseUrl: string; readonly nowMs: number },
+): string {
+  const head = `[${input.cls}] ${input.taskId}: ${input.summary}\n${input.issueUrl}\n${input.cardUrl}`;
+  if (opts.secret === undefined) return head;
+  const lines: string[] = [];
+  for (const option of input.options) {
+    if (option.kind === undefined) continue;
+    const link = mintOptionLink(input.taskId, input.cls, option.kind, opts.secret, opts.nowMs, opts.baseUrl);
+    if (link !== undefined) lines.push(`${option.label}: ${link}`);
+  }
+  return lines.length === 0 ? head : `${head}\n${lines.join("\n")}`;
 }
