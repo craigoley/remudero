@@ -34,5 +34,7 @@
   acceptance:
     - claim: "the container recycle script creates its scratch log with mktemp"
       proof: "grep: mktemp in deploy/recycle-container.sh"
-    - claim: "no operator-run deploy script writes to a literal /tmp path and every mktemp has a cleanup trap"
-      proof: "unit test: test/deploy-scripts-use-mktemp.test.ts"
+    - claim: "no operator-run deploy script writes to or reads a literal /tmp path"
+      proof: "unit test: no operator-run deploy script writes to or reads a literal /tmp path"
+    - claim: "every host-scoped mktemp carries the reapable prefix and its script cleans up after itself"
+      proof: "unit test: every host-scoped temp-dir mktemp carries the reapable prefix"
