@@ -28328,12 +28328,30 @@ export interface CheckoutFixHeadRefDeps {
 
 const ZERO_GIT_OID = "0000000000000000000000000000000000000000";
 
-function fixHeadHeldByWorktree(repoDir: string, branchRef: string): boolean {
+/**
+ * Return the registered worktree path that owns one exact full branch ref. Git's porcelain
+ * format keeps the path and branch on separate lines within one blank-line-delimited record;
+ * parsing records avoids both substring branch matches and detached-worktree false positives.
+ */
+export function registeredFixWorktreeOwner(repoDir: string, branchRef: string): string | undefined {
   const rows = execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-  return rows.split("\n").some((line) => line === `branch ${branchRef}`);
+  for (const record of rows.split(/\n\n+/)) {
+    const lines = record.split("\n");
+    const worktree = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
+    if (worktree && lines.some((line) => line === `branch ${branchRef}`)) return worktree;
+  }
+  return undefined;
+}
+
+function fixHeadHeldByWorktree(repoDir: string, branchRef: string): boolean {
+  return registeredFixWorktreeOwner(repoDir, branchRef) != null;
+}
+
+function boundedWorktreeOwnerPath(value: string): string {
+  return value.replace(/[\r\n\0]/g, "?").slice(0, 512);
 }
 
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {
@@ -29059,6 +29077,11 @@ export function buildSweepEffects(
   // reader those two poll loops already drive `restRollupFor` through, so production wiring is
   // unchanged.
   readJsonImpl: (args: string[]) => Promise<unknown> = ghJsonAsync,
+  // W1-T2863 — appended LAST so every existing positional caller remains byte-for-byte intact.
+  // The registered worktree is Git's durable branch owner across an in-container daemon refresh;
+  // tests inject the read so they can prove admission stands down before the stale pid claim is
+  // reclaimed, without touching a real shared clone.
+  registeredWorktreeOwnerImpl: (repoDir: string, branchRef: string) => string | undefined = registeredFixWorktreeOwner,
 ): Pick<
   SweepDeps,
   | "arm"
@@ -29663,6 +29686,18 @@ export function buildSweepEffects(
           return;
         }
 
+        const registeredOwner = registeredWorktreeOwnerImpl(repoDir, `refs/heads/${realBranch}`);
+        if (registeredOwner) {
+          log("sweep.fix.checkout_claim_declined", {
+            reason: "registered_worktree_owner",
+            pr_number: pr.prNumber,
+            task_id: task.id,
+            branch: realBranch,
+            worktree_path: boundedWorktreeOwnerPath(registeredOwner),
+          });
+          return;
+        }
+
         // W1-T2609 (design ii): an EXCLUSIVE claim on this (repo, branch) pair, taken BEFORE any
         // worktree/git side effect — the same "declines before touching git" discipline the
         // preflight/ceiling checks above already keep. Reuses `acquireInflightLock`'s O_EXCL
@@ -29676,6 +29711,7 @@ export function buildSweepEffects(
         } catch (e) {
           if (e instanceof InflightLockError) {
             log("sweep.fix.checkout_claim_declined", {
+              reason: "inflight_lock_owner",
               pr_number: pr.prNumber,
               task_id: task.id,
               branch: realBranch,

@@ -30,7 +30,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -41,6 +41,7 @@ import {
   checkoutFixHeadRef,
   createFixRungWorktree,
   fixBranchClaimKey,
+  registeredFixWorktreeOwner,
 } from "../src/run-task.js";
 import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
@@ -337,7 +338,7 @@ type Drive = { logs: Array<{ step: string; extra?: Record<string, unknown> }>; t
  *  test/uncreditable-head-reason.test.ts's `driveDispatchFix`. `root` is caller-owned (not
  *  cleaned up here) so a test can inspect/pre-seed `state/inflight` and `repos/<repo>` around
  *  the call. */
-async function driveDispatchFix(root: string, headRefName: string): Promise<Drive> {
+async function driveDispatchFix(root: string, headRefName: string, registeredWorktreeOwnerPath?: string): Promise<Drive> {
   const bin = mkdtempSync(join(tmpdir(), "fbcs-gh-"));
   writeFileSync(
     join(bin, "gh"),
@@ -366,6 +367,24 @@ async function driveDispatchFix(root: string, headRefName: string): Promise<Driv
       PLAN,
       (step, extra) => void logs.push({ step, extra }),
       DEFAULT_SWEEP_POLICY,
+      undefined, // reviewRunner
+      undefined, // spawnImpl
+      undefined, // pushEmptyCommit
+      undefined, // issuesImpl
+      undefined, // stallNotice
+      undefined, // armImpl
+      undefined, // armSessionPrsOverride
+      undefined, // updateBranchImpl
+      undefined, // captureRepairFeedbackImpl
+      undefined, // ghRunImpl
+      undefined, // spawnWallClockBoundMsOverride
+      undefined, // reclaimWorkerImpl
+      undefined, // disarmImpl
+      undefined, // readJsonImpl
+      (_repoDir: string, branchRef: string) => {
+        assert.equal(branchRef, `refs/heads/${headRefName}`);
+        return registeredWorktreeOwnerPath;
+      },
     );
     await effects.dispatchFix(prFor(9001, headRefName) as never, { unmetCriteria: [], ciFailures: [] } as never);
   } catch (e) {
@@ -389,6 +408,7 @@ test("a branch claim already held by another run declines the poll — no worktr
       const { logs, threw } = await driveDispatchFix(root, branch);
       const row = logs.find((l) => l.step === "sweep.fix.checkout_claim_declined");
       assert.ok(row, `expected a decline row; steps were ${JSON.stringify(logs.map((l) => l.step))}`);
+      assert.equal(row!.extra?.reason, "inflight_lock_owner");
       assert.equal(row!.extra?.branch, branch);
       assert.equal(row!.extra?.holder_run_id, "OTHER-CONCURRENT-RUN");
       assert.ok(!logs.some((l) => l.step === "fix.dispatch"), "no strike spent on a declined round");
@@ -396,6 +416,60 @@ test("a branch claim already held by another run declines the poll — no worktr
     } finally {
       holder.release();
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("registered worktree lookup uses the exact branch ref and ignores a detached holder", () => {
+  const root = tmp("rmd-fbcs-owner-lookup-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const requested = "run-W1-T500-1785600000004";
+    const similar = `${requested}-suffix`;
+    execFileSync("git", ["-C", repoDir, "branch", similar]);
+    const holder = join(root, "holder");
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", holder, similar]);
+
+    assert.equal(registeredFixWorktreeOwner(repoDir, `refs/heads/${requested}`), undefined);
+    assert.equal(registeredFixWorktreeOwner(repoDir, `refs/heads/${similar}`), realpathSync(holder));
+
+    execFileSync("git", ["-C", holder, "checkout", "--quiet", "--detach"]);
+    assert.equal(registeredFixWorktreeOwner(repoDir, `refs/heads/${similar}`), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a surviving registered worktree declines before a dead-parent branch claim can be reclaimed", async () => {
+  const root = tmp("rmd-fbcs-worktree-owner-");
+  const branch = "run-W1-T500-1785600000003";
+  const ownerPath = join(root, "worktrees", "surviving-worker");
+  try {
+    mkdirSync(join(root, "repos"), { recursive: true }); // no repo: reaching checkout would throw
+    const inflightDir = join(root, "state", "inflight");
+    mkdirSync(inflightDir, { recursive: true });
+    const claimPath = join(inflightDir, `${fixBranchClaimKey("acme", "scratch-fbcs-repo", branch)}.lock`);
+    const deadParentClaim = JSON.stringify({
+      pid: 2_147_483_647,
+      run_id: "DEAD-DAEMON-PARENT",
+      startedAt: "2026-09-05T02:00:00.000Z",
+    });
+    writeFileSync(claimPath, deadParentClaim);
+
+    const { logs, threw } = await driveDispatchFix(root, branch, ownerPath);
+    const row = logs.find((entry) => entry.step === "sweep.fix.checkout_claim_declined");
+    assert.ok(row, `expected a decline row; steps were ${JSON.stringify(logs.map((entry) => entry.step))}`);
+    assert.equal(row.extra?.reason, "registered_worktree_owner");
+    assert.equal(row.extra?.pr_number, 9001);
+    assert.equal(row.extra?.task_id, "W1-T500");
+    assert.equal(row.extra?.branch, branch);
+    assert.equal(row.extra?.worktree_path, ownerPath);
+    assert.equal(readFileSync(claimPath, "utf8"), deadParentClaim, "the dead-parent claim was not reclaimed");
+    assert.ok(!logs.some((entry) => entry.step === "fix.dispatch"), "no strike was spent");
+    assert.equal(threw, undefined, "a registered owner stands down cleanly");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
