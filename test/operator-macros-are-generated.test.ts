@@ -137,6 +137,43 @@ test("W1-T2763 (acceptance 2): a hand-edited skill file fails --check and the fa
   }
 });
 
+test("W1-T2763: main() with no flag WRITES the skill files and logs what it wrote, returning 0 when nothing is orphaned", () => {
+  // AGAINST A TEMP ROOT, NEVER THE TRACKED TREE — same reasoning as acceptance 2 above.
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}macro-write-`));
+  try {
+    const skillsDir = join(root, ".claude", "skills");
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const code = main([], { repoRoot: root, skillsDir, log: (m: string) => logs.push(m), error: (m: string) => errors.push(m) });
+    assert.equal(code, 0, errors.join("\n"));
+    assert.match(logs.join("\n"), /macro-skills: wrote 2 skill\(s\) — tddr, grfp\./);
+    assert.equal(errors.length, 0, "nothing orphaned in a freshly written tree");
+
+    // The write actually landed on disk, at the path Claude Code reads.
+    const rendered = renderAllMacroSkills();
+    for (const r of rendered) {
+      assert.equal(readFileSync(join(skillsDir, r.name, "SKILL.md"), "utf8"), r.text);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2763: main() with no flag still WRITES the current rows but returns 1 and reports an orphaned skill dir left behind", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}macro-write-orphan-`));
+  try {
+    const skillsDir = join(root, ".claude", "skills");
+    mkdirSync(join(skillsDir, "leftover"), { recursive: true });
+    writeFileSync(join(skillsDir, "leftover", "SKILL.md"), "stale, no row for this one\n");
+    const errors: string[] = [];
+    const code = main([], { repoRoot: root, skillsDir, log: () => {}, error: (m: string) => errors.push(m) });
+    assert.equal(code, 1, "an orphaned skill dir must fail even though the write itself succeeded");
+    assert.match(errors.join("\n"), /ORPHANED skill dir\(s\) left in place: leftover/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T2763 (acceptance 2b): the COMMITTED skills are current — the same gate, run through the real repo, read-only", () => {
   const r = spawnSync("node", ["--import", "tsx", SCRIPT, "--check"], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
@@ -175,6 +212,25 @@ test("W1-T2763: the headline set is READ from CLAUDE.md, so a renamed rule redde
   assert.ok(real.length >= 5, "the document's own `##` sections, not a copy of them");
   // The committed table's headlines must all be in that set — the live guard, not a fixture.
   for (const r of renderAllMacroSkills()) assert.ok(r.text.length > 0);
+});
+
+test("W1-T2763: a row missing `summary` is refused, naming the macro and the missing field", () => {
+  assert.throws(
+    () => validateMacro({ name: "x", expansion: "b" }, HEADLINES, VERBS),
+    /macro `x` has no `summary` — the skill's description line/,
+  );
+  assert.throws(
+    () => validateMacro({ name: "x", summary: "   ", expansion: "b" }, HEADLINES, VERBS),
+    /macro `x` has no `summary`/,
+    "a blank summary is refused the same as a missing one",
+  );
+});
+
+test("W1-T2763: an empty `macros:` table is refused rather than silently rendering zero skills", () => {
+  assert.throws(
+    () => renderAllMacroSkills({ readFile: () => "macros: []\n" }),
+    /settings\/macros\.yaml declares no `macros:` rows/,
+  );
 });
 
 test("W1-T2763: an empty expansion and an rmd-verb collision are both refused, each naming what is wrong", () => {
