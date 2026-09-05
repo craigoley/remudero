@@ -139,10 +139,20 @@ test("a plan that loads fine but simply does not declare the id is NOT a diverge
   assert.equal(resolved.divergence, undefined, "declaredPlanTaskIds would equally fail to find this id — both resolvers already agree, nothing to reconcile");
 });
 
-test("the body fallback (`criteria.length === 0` => parseAcceptanceBlock(body)) is untouched source, reached unconditionally after the taskId branch", () => {
+test("the body fallback (`criteria.length === 0` => parseAcceptanceBlock) is reached unconditionally after the taskId branch, and reads the REAL body", () => {
   const runTaskSrc = readSrc("run-task.ts");
-  const fallback = /if \(criteria\.length === 0\) {\s*const fromBody = parseAcceptanceBlock\(body\);\s*if \(fromBody\.length\) {\s*criteria = fromBody;\s*source = `PR body Acceptance: block \(\$\{fromBody\.length\} criteria\)`;/;
-  assert.match(runTaskSrc, fallback, "the manual plan-or-doc shape must survive byte-for-byte");
+  // W1-T2846 MOVED WHAT THIS READS, AND THAT IS THE POINT OF THE CHANGE, NOT A DRIFT.
+  // `reviewCommand` now recovers a run-branch task identity and feeds the exact-trailer resolver a
+  // SYNTHETIC one-line body (`Remudero-Task: <id>`) by reassigning `body`. The fallback must
+  // therefore read `reportBody` — captured from `view.body` BEFORE that reassignment — or it would
+  // parse the synthetic trailer, find no Acceptance block, and silently resolve zero criteria on
+  // exactly the manual plan-or-doc PRs this fallback exists for. Pinning `parseAcceptanceBlock(body)`
+  // here would now pin that bug, so the pin follows the corrected shape rather than the old bytes.
+  const fallback = /if \(criteria\.length === 0\) {\s*const fromBody = parseAcceptanceBlock\(reportBody\);\s*if \(fromBody\.length\) {\s*criteria = fromBody;\s*source = `PR body Acceptance: block \(\$\{fromBody\.length\} criteria\)`;/;
+  assert.match(runTaskSrc, fallback, "the manual plan-or-doc shape must survive, and must read the real PR body");
+  // AND THE PROPERTY BEHIND THE PIN, ASSERTED DIRECTLY: whatever the fallback reads must be the
+  // body captured before any reassignment, never the reassigned `body` itself.
+  assert.match(runTaskSrc, /const reportBody = body;/, "the real PR body must still be captured before `body` can be reassigned");
 });
 
 // ── ACCEPTANCE 5: THE SYNTHETIC FIX-RUNG TASK KEEPS ITS OWN INDEPENDENT PATH ────────────────────
