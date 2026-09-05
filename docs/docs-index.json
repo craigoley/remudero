@@ -170,6 +170,12 @@
       "grepHint": "Forensics — `src/lib/sweep.ts`"
     },
     {
+      "path": "docs/forensics/worker.md",
+      "title": "`src/lib/worker.ts` — comment forensics",
+      "summary": "Verbatim archive of the measured facts, incidents and design arguments that used to live in",
+      "grepHint": "`src/lib/worker.ts` — comment forensics"
+    },
+    {
       "path": "docs/open-decisions.md",
       "title": "Open decisions — the rulings only the operator makes",
       "summary": "Three things are currently undecided, and each one blocks work that is otherwise ready. They are",
