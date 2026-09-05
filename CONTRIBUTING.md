@@ -87,8 +87,9 @@ landed in the same PR. Reversible, PR-shaped changes stay in
 
 Every commit message must follow [Conventional Commits](https://www.conventionalcommits.org/)
 (`type(scope): subject`, e.g. `fix(cli): correct the flag parsing`). The `commitlint` CI job
-lints this PR's own commit range and fails red on a malformed message — see
-`commitlint.config.mjs`. `type` drives `CHANGELOG.md`'s generated version bump: `feat:` → minor,
+lints the **PR title** — the squash-merge subject, read live from GitHub — and fails red on a
+malformed one; individual commits on the branch are not linted (retitle, then push or re-run the
+job). See `commitlint.config.mjs`. `type` drives `CHANGELOG.md`'s generated version bump: `feat:` → minor,
 `fix:` → patch, a `BREAKING CHANGE:` footer (or `!` after the type/scope) → major. Regenerate the
 changelog with `npm run changelog` (wraps `commit-and-tag-version`, configured to only edit
 `CHANGELOG.md`/`package.json` — never to commit, tag, or push on its own); the resulting diff
@@ -97,8 +98,14 @@ lands through the normal PR gate like any other change.
 ## Local checks before pushing
 
 ```sh
-npm ci            # a fresh worktree has no node_modules
-npm run build     # typecheck (tsc)
-npm run depcruise # architecture fitness rules
-npm test          # full suite
+npm ci                       # a fresh worktree has no node_modules
+./bin/rmd preflight --ci-parity   # the shipped local gate: shells CI's own commands, one per ci.yml job
 ```
+
+`rmd preflight --ci-parity` (`src/lib/ci-parity.ts`) is the one command to run before a first
+push: its `ci` entry runs `npm run test:ci`, the same full-suite command CI runs, so a green run is
+the real signal. The pieces are also available on their own — `npm run typecheck` (`tsc --noEmit`;
+`npm run build` emits `dist/`), `npm run depcruise`, and `npm run check -- test/<file>.test.ts`
+for one file plus a typecheck. The full suite needs a host with the pinned Chromium build and a
+non-root uid; inside an agent container it cannot pass honestly — see
+[docs/troubleshooting.md](docs/troubleshooting.md#the-full-test-suite-cannot-pass-inside-the-agent-container).

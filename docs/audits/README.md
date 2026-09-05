@@ -43,3 +43,21 @@ discipline the intake rung inherits.
 - **R-35** — the audit implies a stale lock blocks work. `acquireInflightLock` already steals a
   dead holder's lock, so it never blocked dispatch. The harm is operator legibility only: a
   circuit-broken task is never re-dispatched, so nothing ever clears its lock. Fixed in #477.
+
+## `recon-2026-09-05.md` — fixture #2
+
+A second fresh-eyes pass, this time with the codebase at ~170k source lines and ~1,080 task
+shards: 59 findings across nine pillars (the ninth, "Generality & console-first", grades the tree
+against the harness's own stated goal — any repository, every operator interaction through the
+console). Eight parallel sweeps; every top finding re-verified at `file:line` or by re-running the
+sweep's reproduction script. Backlog read only after the findings were frozen: 14 of 59 at least
+partially tracked, 45 novel, clustering in the assurance plane's own executor, per-tick cost,
+structure and test-suite economics.
+
+Unlike fixture #1 it landed with its own doc-class corrections in the same PR (its §9 lists them),
+so the doc drift it reports (R-46, R-47, R-52, R-53, R-56) was already repaired at the fixture's
+own commit. Everything else it reports was still open at that commit.
+
+### Known corrections to this fixture
+
+None yet. Record them here, never in the file.

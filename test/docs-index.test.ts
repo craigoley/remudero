@@ -263,13 +263,13 @@ test("generate-docs-index --check-paths: a fixture corpus where every mermaid ci
   }
 });
 
-test("the REAL docs/system-diagrams.md's mermaid citation 'lib/status.ts' does not resolve -- the check's first, tracked, unrepaired finding", () => {
-  // Locks in the one live defect this task found (rationale point 2): every OTHER path-like
-  // citation in docs/system-diagrams.md's mermaid blocks resolves; this is the sole exception.
-  // Repair happens under its own, later change -- this task reports it, and never rewrites the
-  // doc (see the "no existing document is rewritten" test below).
+test("the REAL docs/ corpus has no unresolved mermaid citations -- docs/system-diagrams.md's former 'lib/status.ts' finding is repaired", () => {
+  // This used to lock in a single tracked defect (rationale point 2): docs/system-diagrams.md
+  // cited `lib/status.ts` where the real file lives at `src/lib/status.ts`. That citation is
+  // now corrected in place (see the "no existing document is rewritten" test below, which
+  // pins the corrected text), so every path-like citation across docs/ resolves cleanly.
   const findings = findUnresolvedMermaidCitations("docs", REPO_ROOT);
-  assert.deepEqual(findings, [{ doc: "docs/system-diagrams.md", path: "lib/status.ts" }]);
+  assert.deepEqual(findings, []);
 });
 
 // ── Acceptance: none of docs-claims.test.ts's five claims are duplicated by this check ──────────
@@ -305,7 +305,7 @@ test("no existing document is rewritten: reading docs/system-diagrams.md through
   findUnresolvedMermaidCitations("docs", REPO_ROOT); // the check itself: read-only by construction
   const after = readFileSync(path, "utf8");
   assert.equal(after, before, "the checker must never write to a doc it inspects");
-  assert.ok(before.includes("(lib/status.ts)"), "the unresolved citation is still present, unrepaired -- reported, not silently corrected");
+  assert.ok(before.includes("(src/lib/status.ts)"), "the once-unresolved citation now resolves, corrected in place");
 });
 
 // ── serializeDocsIndex: content-only, byte-stable across runs when the corpus hasn't changed ────

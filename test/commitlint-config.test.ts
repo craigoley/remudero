@@ -11,8 +11,8 @@ import { dirname, join } from "node:path";
 // the project's own config, piping candidate commit messages over stdin -- proving the gate is
 // ACTIVE, the same falsifier-fixture shape used by claims-check.test.ts / jscpd-gate.test.ts.
 // The CI job (.github/workflows/ci.yml `commitlint`) runs the same binary against the PR's
-// actual commit range (`--from <base-sha> --to HEAD`); this test proves the config itself
-// rejects/accepts the right messages independent of any particular PR's history.
+// TITLE (the squash-merge subject, read live via `gh pr view`); this test proves the config
+// itself rejects/accepts the right messages independent of any particular PR's history.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
