@@ -1,0 +1,76 @@
+# settings/macros.yaml — THE OPERATOR'S MACRO TABLE (W1-T2763).
+#
+# THE DEFECT THIS CLOSES. The operator types standing shorthand into sessions — `tddr`, `grfp` —
+# and the model EXPANDS IT BY GUESSING. A guess is right until it is not, and nothing records
+# which expansion a session used. The token saving is nil: a rare four-letter token splits into
+# two or three sub-tokens against about five for the phrase. What the operator is actually after
+# is a LONG expansion behind a SHORT name, and that is a substitution, not a guess.
+#
+# WHY A TABLE AND A GENERATOR RATHER THAN HAND-WRITTEN SKILLS. A macro's expansion is a standing
+# instruction and will be edited; two hand-kept copies drift. `docs/cli-reference.md` is generated
+# from `COMMANDS` and byte-compared by `cli-reference:check`; this is the same shape, and it lets a
+# macro NAME the CLAUDE.md headlines its expansion invokes so a renamed rule fails the check rather
+# than silently orphaning the macro.
+#
+# EDIT THIS FILE, NEVER `.claude/skills/*/SKILL.md`. Those are generated. Run
+# `npm run macro-skills` after any change here; `npm run macro-skills:check` (driven by
+# test/operator-macros-are-generated.test.ts, so it runs inside `npm test` and therefore inside
+# CI's required `ci` job) byte-compares them and names the macro that drifted.
+#
+# WHAT THIS IS NOT. Dispatched workers never load these: `spawnWorker` passes `settingSources: []`,
+# and a worker-facing procedure is the skill-workshop lane's job, mined from evidence rather than
+# typed by the operator. And the console's reply route stays "A REPLY IS AN INPUT, NEVER A COMMAND"
+# (`buildEscalationReplyRoute`, W1-T2496) — a macro typed into a reply is text the Architect reads,
+# never a verb the daemon runs.
+#
+# FIELDS
+#   name       the invocation — `/name` in a session. Must not collide with an `rmd` verb.
+#   summary    the skill's `description` line: what it does, in one sentence.
+#   expansion  the body, verbatim. This is the substitution the operator wanted.
+#   headlines  CLAUDE.md `##` headlines the expansion invokes. Each MUST exist or the generator
+#              refuses, quoting the missing one — so a renamed rule is a red check, not a silent
+#              orphan.
+#   args       true appends `$ARGUMENTS`, which Claude Code inserts as literal text.
+macros:
+  - name: tddr
+    summary: "Think deeply and do research before answering — investigate the codebase and the evidence rather than reasoning from memory."
+    expansion: |
+      Think deeply and do the research before you answer. Do not reason from memory about this
+      repository — read the code, run the query, and quote what it actually said.
+
+      Ground every claim in something you ran:
+
+      - Prefer the repo's own instruments over a hand-rolled re-derivation. If a function already
+        answers the question, call it rather than reimplementing its rule.
+      - A zero is not a measurement until a positive control proves the query could see its
+        corpus. Run the control in the same corpus, with the same tool and the same flags.
+      - When a result surprises you, re-run it somewhere else before believing it. An
+        environmental defect reproduces exactly, so two readings taken the same way are one
+        measurement performed twice.
+      - Name the query, never only its answer. A count that is not reproducible is a claim about
+        the past.
+
+      Say plainly what you measured, what you could not measure, and which parts of the answer
+      rest on inference rather than evidence.
+    headlines:
+      - "Investigation discipline"
+      - "Ledger and evidence discipline"
+    args: true
+  - name: grfp
+    summary: "Give recommendations and follow-up prompts — end with a ranked recommendation and the prompts that would carry it forward."
+    expansion: |
+      Finish with recommendations and follow-up prompts.
+
+      Recommendations: rank them, most valuable first. For each, say what it costs, what it buys,
+      and what would have to be true for it to be wrong. Give a recommendation rather than an
+      exhaustive survey of options — if you are weighing a choice, pick one and say why.
+
+      Follow-up prompts: write them as prompts I can paste back verbatim to start the next piece
+      of work. Each should stand on its own, naming the file, the task id or the query it starts
+      from, so it does not depend on this conversation's context surviving.
+
+      Separate what you would do next from what you need me to decide. Anything blocked on my
+      ruling goes in its own short list, with the options and your recommendation.
+    headlines:
+      - "Plan and task hygiene"
+    args: true

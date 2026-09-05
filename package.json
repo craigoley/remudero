@@ -54,6 +54,8 @@
     "learnings-assert:check": "node scripts/learnings-assert-check.mjs --check",
     "cli-reference": "tsx scripts/generate-cli-reference.mjs",
     "cli-reference:check": "tsx scripts/generate-cli-reference.mjs --check",
+    "macro-skills": "node --import tsx scripts/generate-macro-skills.mjs",
+    "macro-skills:check": "node --import tsx scripts/generate-macro-skills.mjs --check",
     "capability-snapshot": "tsx scripts/generate-capability-snapshot.mjs",
     "capability-snapshot:check": "tsx scripts/generate-capability-snapshot.mjs --check",
     "spike": "tsx src/spike.ts",

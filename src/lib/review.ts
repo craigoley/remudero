@@ -7339,6 +7339,17 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "registration — the same circularity scripts/unwired-gate-check.mjs and " +
     "scripts/worker-branch-shape.mjs above record for themselves.",
   "scripts/generate-cli-reference.mjs": "its :check mode is not wired into any CI workflow",
+  // W1-T2763 — THE SAME CLASSIFICATION AS ITS SIBLING DIRECTLY ABOVE, which this generator was
+  // built to mirror. `macro-skills:check` is not a `.github/workflows/` `run:` step: it reaches CI
+  // only through test/operator-macros-are-generated.test.ts inside `npm test`, exactly as
+  // `cli-reference:check` does. So a diff cannot change what a workflow-level gate MEASURES by
+  // touching this file. What it does gate is drift between settings/macros.yaml and the generated
+  // `.claude/skills/` tree — operator-facing macro text, loaded by no daemon path (`spawnWorker`
+  // passes `settingSources: []`) and carrying no gate rule of its own.
+  "scripts/generate-macro-skills.mjs":
+    "its --check mode is not wired into any CI workflow — it reaches CI through `npm test` only, " +
+    "the same route scripts/generate-cli-reference.mjs above takes, and the drift it gates is over " +
+    "generated operator macro text rather than over any gate's own rule",
   "scripts/generate-docs-index.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-learnings-index.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-plan-index.mjs": "its :check mode is not wired into any CI workflow",
