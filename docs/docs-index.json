@@ -146,6 +146,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/ledger.md",
+      "title": "ledger.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "ledger.ts forensics"
+    },
+    {
       "path": "docs/forensics/retro.md",
       "title": "retro.ts forensics",
       "summary": "The measured facts, incidents and design arguments that used to live as comment prose inside",
