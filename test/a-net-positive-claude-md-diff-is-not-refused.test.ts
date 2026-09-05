@@ -26,6 +26,14 @@ const { defaultGit, evaluateNetBytes, evaluateRatchet, measureBytesAtRef, resolv
   resolveBaseRef: (deps?: { env?: Record<string, string | undefined>; remoteRef?: string }) => { ref: string; source: string } | null;
 };
 
+function gitIn(dir: string, ...args: string[]): string {
+  return execFileSync("git", args, {
+    cwd: dir,
+    encoding: "utf8",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+  });
+}
+
 /**
  * test/a-net-positive-claude-md-diff-is-not-refused.test.ts — W1-T2831.
  *
@@ -51,12 +59,7 @@ function fixtureRepo(): string {
   // before its finally block — scripts/mkdtemp-callsite-check.mjs refuses a bare prefix, and it
   // refused this one.
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t2831-`));
-  const git = (...args: string[]): string =>
-    execFileSync("git", args, {
-      cwd: dir,
-      encoding: "utf8",
-      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
-    });
+  const git = (...args: string[]): string => gitIn(dir, ...args);
   git("init", "-q", "-b", "main", ".");
   git("config", "user.email", "fixture@example.invalid");
   git("config", "user.name", "fixture");
@@ -94,16 +97,29 @@ function runCliAllowingFailure(dir: string, env: Record<string, string | undefin
 test("W1-T2831: a net-positive CLAUDE.md diff is REFUSED, naming the base size, the head size and the delta", () => {
   const dir = fixtureRepo();
   try {
-    writeFileSync(join(dir, "CLAUDE.md"), "base content\nplus four hundred more bytes worth of unearned rule\n");
-    // The operands are DERIVED, never hand-computed: a literal here would assert my arithmetic
-    // rather than the gate's, and it is the gate's that has to be right.
-    const baseBytes = 13; // "base content\n"
+    writeFileSync(join(dir, "CLAUDE.md"), "base content rewritten\nplus four hundred more bytes worth of unearned rule\n");
+    const [added, deleted] = gitIn(dir, "diff", "--numstat", "origin/main", "--", "CLAUDE.md")
+      .trim()
+      .split(/\s+/, 2)
+      .map(Number);
+    assert.ok(added > 0, "the fixture is a real CLAUDE.md diff with added content");
+    assert.ok(deleted > 0, "the fixture is not the weaker add-with-no-deletion predicate");
+
+    // The operands are DERIVED from the same compared blobs the CLI uses, never hand-computed:
+    // a literal here would assert my arithmetic rather than the failure text's own operands.
+    const baseRef = gitIn(dir, "merge-base", "HEAD", "origin/main").trim();
+    const baseBytes = Buffer.byteLength(gitIn(dir, "show", `${baseRef}:CLAUDE.md`), "utf8");
     const headBytes = readFileSync(join(dir, "CLAUDE.md")).length;
     assert.ok(headBytes > baseBytes);
     const r = runCliAllowingFailure(dir);
     assert.equal(r.status, 1, "a net-positive diff must RED");
-    assert.match(r.stderr, new RegExp(`grew by ${headBytes - baseBytes} bytes`), "the delta");
-    assert.match(r.stderr, new RegExp(`base ${baseBytes} -> head ${headBytes}`), "BOTH operands, not just the verdict");
+    assert.match(r.stdout, /cap 100000 bytes/, "the fixture remains under the total-size cap");
+    assert.doesNotMatch(r.stderr, /bytes > cap/, "so the refusal is the net-byte arm, not the cap arm");
+    assert.match(
+      r.stderr,
+      new RegExp(`CLAUDE\\.md grew by ${headBytes - baseBytes} bytes \\(base ${baseBytes} -> head ${headBytes}\\)`),
+      "the failure names the delta and BOTH operands, not just the verdict",
+    );
     assert.match(r.stderr, /§8A/, "and the rule it is enforcing");
     // A gate that reports a delta without naming what it was taken against is the stale-operand
     // shape (CLAUDE.md hazard (h)), so the base REF and where it came from are printed too.
