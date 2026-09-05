@@ -17,12 +17,12 @@ of these bullets exist at all. When a rule below turns out to matter, the fix is
 refuse it — file the task; do not sharpen the wording and call it closed. Rules that name their own
 enforcing gate say so inline.
 
-**Maintaining this file:** it is injected in full into every session, so it is a context tax paid
-per session — keep it compressed. Per MASTER-PLAN §8A, *compression is a deliverable, not just
-accretion*: a retro that adds a rule must also fold, sharpen, or delete the ones it supersedes.
-Cite **symbol names, not line numbers** — line numbers drift and every one this file used to carry
-had gone stale. Each rule cites the PR that earned it; that citation is the pointer to the full
-forensic detail, so the narrative does not need to live here.
+**Maintaining this file:** INTERACTIVE sessions here load it in full and pay that tax per
+session; a DISPATCHED WORKER never sees it — `spawnWorker` passes `settingSources: []`, the SDK's
+isolation mode, which needs `'project'` to load CLAUDE.md (only Codex reads it). Keep it
+compressed for the lane that pays. Per §8A, *compression is a deliverable*: a retro adding a rule
+folds or deletes what it supersedes. Cite **symbol names, not line numbers** — every one this file
+carried had gone stale. Each rule cites the PR that earned it.
 
 ## Before you push
 
