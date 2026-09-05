@@ -1709,6 +1709,90 @@ function isSpawnInfraBlocked(err: unknown): err is { reasonClass: "blocked_toolc
 }
 
 /**
+ * BACKSTOP (W1-T2852) — maximum time the inter-phase review clock's stop may wait for an idle
+ * clock sleep to
+ * notice that its phase ended. `DaemonDeps.sleepUntilSweepWake` is intentionally a promise-only
+ * seam (no cancellation handle), so waiting on the whole poll interval would add up to 60 seconds
+ * to every transition into dispatch or idle. The clock therefore subdivides only its IN-PROCESS
+ * wait into one-second quanta while retaining `pollIntervalMs` as the cadence that may start a
+ * timer-driven light pass. No GitHub read or sweep runs on the quantum itself.
+ */
+export const INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS = 1_000;
+
+interface InterphaseReviewClock {
+  /** Stops new admission, lets an already-started pass settle, and reports whether this clock
+   * consumed an event edge that the ordinary full-sweep gate still needs to reconcile. */
+  stop(): Promise<{ eventWakeSeen: boolean }>;
+}
+
+/**
+ * W1-T2852 — the review-only clock for the part of a daemon iteration that previously had none:
+ * after the full-sweep await returns and before the iteration reaches an existing retro/dispatch
+ * ticker or an idle wait. It owns only `deps.sweepLight`, whose production hook is already
+ * restricted to sha-pinned post-review work; no fix, merge, close, escalation or dispatch action
+ * is introduced here.
+ *
+ * Event edges and timer recovery share the existing injected clock. A wake observed while a pass
+ * is active remains pending inside the wake signal and makes the next wait resolve immediately,
+ * which serializes one coalesced follow-up instead of overlapping passes. STOP/PAUSE are read at
+ * the last possible point, immediately before admission. A held wake stays pending locally until
+ * one later quantum observes the hold clear. `stop()` flips `active` before awaiting the runner,
+ * so it starts nothing new and still lets an already-started pass settle.
+ */
+function startInterphaseReviewClock(
+  deps: DaemonDeps,
+  pollIntervalMs: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): InterphaseReviewClock {
+  let active = true;
+  let eventWakeSeen = false;
+  let eventWakePending = false;
+  let elapsedMs = 0;
+  const wait = deps.sleepUntilSweepWake;
+  const quantumMs = Math.max(1, Math.min(pollIntervalMs, INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS));
+  // The inter-phase clock exists to consume the durable GitHub-event signal. Do not synthesize
+  // it over the legacy plain `sleep` seam: that seam cannot be interrupted or cancelled at a
+  // phase boundary, and the pre-existing retro/dispatch ticker remains its sole owner. Production
+  // always wires `sleepUntilSweepWake`; omission retains the exact pre-W1-T2852 call cadence.
+  const runner = deps.sweepLight && wait
+    ? (async () => {
+        while (active) {
+          const result = await wait(quantumMs);
+          if (result === "wake") {
+            eventWakeSeen = true;
+            eventWakePending = true;
+          } else {
+            elapsedMs += quantumMs;
+          }
+          if (!active) break;
+          if (!eventWakePending && elapsedMs < pollIntervalMs) continue;
+
+          const halt = deps.checkStop?.() ?? deps.checkPause?.();
+          if (halt) continue;
+
+          const trigger = eventWakePending ? "github-event" : "interval";
+          eventWakePending = false;
+          elapsedMs = 0;
+          try {
+            await deps.sweepLight!();
+            if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger });
+          } catch (e) {
+            log("daemon.sweep_light.failed", { phase: "interphase", error: String((e as Error)?.message ?? e) });
+          }
+        }
+      })()
+    : undefined;
+
+  return {
+    stop: async () => {
+      active = false;
+      if (runner) await runner;
+      return { eventWakeSeen };
+    },
+  };
+}
+
+/**
  * W1-T276: wraps a fired retro's `runRetroTrigger` call with the SAME
  * restricted light-sweep ticker `runOne` already uses (W1-T254, lines
  * ~1441-1462 below) — a fired retro is a bare, unbounded await too, and
@@ -3213,6 +3297,32 @@ export async function runDaemon(
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
 
+    // W1-T2852: THE CLOCK THAT SPANS THE FORMER GAP. The full sweep above already owns its
+    // `startInFlightTicker`; start only AFTER that await returns, so the two restricted passes
+    // never overlap by construction. This clock remains live across orphan/feedback/posture,
+    // measurement, digest, board review and the later admission work. It is stopped immediately
+    // before an existing retro/dispatch ticker or an idle wait takes ownership of the clock.
+    let interphaseReviewClock: InterphaseReviewClock | undefined = startInterphaseReviewClock(
+      deps,
+      pollIntervalMs,
+      log,
+    );
+    let interphaseEventWakeSeen = false;
+    const stopInterphaseReviewClock = async (): Promise<boolean> => {
+      const clock = interphaseReviewClock;
+      interphaseReviewClock = undefined;
+      if (clock) {
+        const stoppedClock = await clock.stop();
+        interphaseEventWakeSeen ||= stoppedClock.eventWakeSeen;
+      }
+      return interphaseEventWakeSeen;
+    };
+    const restartInterphaseReviewClock = (): void => {
+      if (!interphaseReviewClock) {
+        interphaseReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log);
+      }
+    };
+
     // ORPHAN SWEEP (W1-T117 design part ii): runs alongside the PR-pipeline
     // reconciler above, on the SAME "once per iteration" cadence — daemon
     // BOOT already runs it once (see `daemonBoot`'s own `sweepOrphanWorkers`
@@ -3502,6 +3612,7 @@ export async function runDaemon(
               log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
             }
           }
+          if (await stopInterphaseReviewClock()) continue;
           await sleepUntilSweepWake(pollIntervalMs);
           continue;
         }
@@ -3542,6 +3653,7 @@ export async function runDaemon(
             park_ceiling_ms: parkCeilingMs,
             note: "usage unreadable beyond the bounded allowance — idling, not dispatching",
           });
+          if (await stopInterphaseReviewClock()) continue;
           await sleepUntilSweepWake(pollIntervalMs);
           continue;
         }
@@ -3656,6 +3768,7 @@ export async function runDaemon(
     if (tickGovernor) {
       ticks++;
       logDispatchGovernorDefer(tickGovernor, ticks);
+      if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
@@ -3695,6 +3808,10 @@ export async function runDaemon(
           days_since_marker: Number.isFinite(decision.daysSinceMarker) ? decision.daysSinceMarker : "unbounded",
         });
         if (deps.runRetroTrigger) {
+          // The retro already owns the established liveness/retrigger ticker. Hand clock
+          // ownership over without overlap; an event consumed by the inter-phase clock returns
+          // to the ordinary top-of-iteration full sweep before admitting this optional spend.
+          if (await stopInterphaseReviewClock()) continue;
           try {
             // W1-T276: the retro's own await is unbounded, just like `runOne`
             // below — wrap it in the SAME light-sweep ticker so the loop's
@@ -3710,6 +3827,8 @@ export async function runDaemon(
             );
           } catch (e) {
             log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
+          } finally {
+            restartInterphaseReviewClock();
           }
         }
       }
@@ -3986,6 +4105,7 @@ export async function runDaemon(
           log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
           if (deps.runAutoTriage) {
             const fired = decision;
+            if (await stopInterphaseReviewClock()) continue;
             try {
               // W1-T276's wrapper, reused verbatim. Triage holds for MINUTES after opening its PR
               // (a CI-polling tail) and this loop is single-threaded, so an unwrapped await would
@@ -4004,6 +4124,8 @@ export async function runDaemon(
                 feedback: fired.feedbackId,
                 error: String((e as Error)?.message ?? e),
               });
+            } finally {
+              restartInterphaseReviewClock();
             }
           }
         }
@@ -4085,7 +4207,7 @@ export async function runDaemon(
         }
       }
 
-
+      if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
@@ -4121,11 +4243,13 @@ export async function runDaemon(
     // guarantee for anything already in flight is completely untouched.
     const restopped = deps.checkStop?.();
     if (restopped) {
+      await stopInterphaseReviewClock();
       log("daemon.stop", { detail: restopped });
       return summary("stopped", restopped);
     }
     const repaused = deps.checkPause?.();
     if (repaused) {
+      await stopInterphaseReviewClock();
       ticks++;
       log("daemon.pause", {
         tick: ticks,
@@ -4181,6 +4305,7 @@ export async function runDaemon(
     if (admitted.length === 0) {
       ticks++;
       logDispatchGovernorDefer(deferredVerdict!, ticks);
+      if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
     }
@@ -4206,6 +4331,7 @@ export async function runDaemon(
     // aborted mid-call (a sweepLight() already in flight is allowed to finish before
     // the ticker stops). It also emits this dispatch's `daemon.alive` liveness rows —
     // see {@link startInFlightTicker} for why that row exists and why it is prefixed.
+    if (await stopInterphaseReviewClock()) continue;
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
 
     // CONCURRENT DISPATCH (W1-T343, mirrors `runDrainLanes` exactly): `allSettled`, never
@@ -4222,6 +4348,7 @@ export async function runDaemon(
     // failure cases this row exists to report. `allSettled` never rejects. See `settledSetPayload`.
     log("dispatch.settled_set", settledSetPayload(admitted, settled, laneCount));
     await stopTicker();
+    restartInterphaseReviewClock();
 
     // CLASSIFY EVERY LANE'S SETTLEMENT before this tick decides anything — mirrors
     // `runDrainLanes`' own "every sibling's outcome is recorded before the pass decides"
@@ -4271,6 +4398,7 @@ export async function runDaemon(
     }
 
     if (fatalError) {
+      await stopInterphaseReviewClock();
       return summary("error", `${fatalError.taskId}: ${fatalError.message}`);
     }
 
@@ -4299,6 +4427,7 @@ export async function runDaemon(
       }
     }
     if (blockedDetail !== undefined) {
+      await stopInterphaseReviewClock();
       return summary("blocked", blockedDetail);
     }
 
@@ -4318,6 +4447,7 @@ export async function runDaemon(
         reason: "consecutive blocked_transient refusals across different tasks — the API usage window looks closed; holding dispatch instead of re-discovering it per task",
         resumes_at: new Date(resumesAtMs).toISOString(),
       });
+      if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(apiWindowHoldMs);
     }
 
@@ -4331,8 +4461,11 @@ export async function runDaemon(
       consecutiveSpawnInfraFailures++;
       const backoffMs = Math.min(pollIntervalMs * 2 ** (consecutiveSpawnInfraFailures - 1), maxSpawnInfraBackoffMs);
       log("daemon.spawn_infra_backoff", { tick: ticks, backoff_ms: backoffMs, consecutive: consecutiveSpawnInfraFailures });
+      if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(backoffMs);
     }
+
+    await stopInterphaseReviewClock();
   }
 }
 
