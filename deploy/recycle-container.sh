@@ -688,16 +688,46 @@ else
   exit 1
 fi
 
+# ── THE PULL LOG IS PER-INVOCATION, FOR THE SAME REASON deploy/host-update.sh's IS ──────────────
+# This script wrote a FIXED path, `/tmp/recycle-container-pull.log`, and then GREPPED THAT SAME
+# PATH for `authentication required|unauthorized|denied` to decide whether the pull failed on
+# credentials. `/tmp` on this host is sticky and world-writable with two real accounts, so the name
+# is attacker- and accident-reachable in three distinct ways: a pre-existing file owned by another
+# uid makes the `tee` fail outright (host-update.sh measured exactly that, `Permission denied`, on
+# 2026-09-04); a symlink at that name makes `tee` write THROUGH it; and a pre-seeded file merely
+# CONTAINING the word `denied` flips this script's verdict — the read side is the sharper half,
+# because it turns a scratch path into an input the script trusts.
+#
+# `mktemp`, NOT A PID SUFFIX — a pid is reusable and defends against nothing someone pre-created;
+# mktemp creates the file ATOMICALLY and fails if it cannot, which is the property the fixed name
+# lacked. THE `rmd-` PREFIX IS LOAD-BEARING: src/lib/tmp.ts's sweepStaleTempDirs reaps only names
+# starting with it (W1-T2773), so a per-invocation name without it would trade a collision for a
+# fresh permanent leak. The trap is the primary cleanup; the prefix catches the run that dies
+# before it fires, and it is INSTALLED BEFORE the mktemp so a failed allocation still cleans up.
+RECYCLE_TMPDIR="${TMPDIR:-/tmp}"
+PULL_LOG=""
+recycle_cleanup_tmp() {
+  [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
+  return 0
+}
+trap recycle_cleanup_tmp EXIT
+if ! PULL_LOG="$(mktemp "${RECYCLE_TMPDIR%/}/rmd-recycle-container-pull-log.XXXXXX" 2>/dev/null)"; then
+  echo "recycle-container: REFUSING — could not create a scratch pull log under ${RECYCLE_TMPDIR}." >&2
+  echo "  Without it the credential-failure check below cannot run, and a pull that failed on auth" >&2
+  echo "  would read as a success. ${CONTAINER_NAME} is untouched." >&2
+  exit 1
+fi
+
 echo "recycle-container: docker pull ${REF}"
 # ${PIPESTATUS[0]}, NOT the pipeline's own status — the same trap deploy/host-update.sh guards
 # against: `docker pull | tee | sed` would report tee/sed's status, which is always 0, and a failed
 # pull would read as a success. `set +e` around the pipeline is required because `set -o pipefail`
 # would otherwise abort the script here, before PULL_RC is ever assigned.
 set +e
-docker pull "${REF}" 2>&1 | tee /tmp/recycle-container-pull.log | sed 's/^/  /'
+docker pull "${REF}" 2>&1 | tee "${PULL_LOG}" | sed 's/^/  /'
 PULL_RC="${PIPESTATUS[0]}"
 set -e
-if [ "${PULL_RC}" -ne 0 ] || grep -qiE 'authentication required|unauthorized|denied' /tmp/recycle-container-pull.log 2>/dev/null; then
+if [ "${PULL_RC}" -ne 0 ] || grep -qiE 'authentication required|unauthorized|denied' "${PULL_LOG}" 2>/dev/null; then
   echo "recycle-container: REFUSING — the pull FAILED (exit ${PULL_RC})." >&2
   echo "  ${CONTAINER_NAME} is untouched and STILL RUNNING on its current image." >&2
   echo "  NOT starting anything — a fresh image was requested and not obtained, and the last known" >&2
