@@ -39,6 +39,10 @@
 //   node --import tsx scripts/diff-class.mjs --list-plan-reading-suites   (prints, one per line,
 //     every test/**/*.test.ts file the PLAN-ONLY/DOCS-ONLY fast lane must still run — see
 //     `planReadingSuiteFiles` below)
+//   node --import tsx scripts/diff-class.mjs --list-census-suites --changed-files <path>
+//     (W1-T2680: prints every suite that WALKS a population the changed files belong to, or READS
+//     one of them as text — the suites a `git grep -l <symbol>` caller sweep cannot reach BY
+//     CONSTRUCTION, because a census names none of the symbols any particular diff touches)
 //
 // OUTPUT (classify mode): stdout carries EXACTLY one line — the class token (`PLAN_ONLY`,
 // `DOCS_ONLY`, or `SOURCE`). The human-readable reason goes to stderr, so a bash guard can do
@@ -212,6 +216,142 @@ export function planReadingSuiteFiles(root = REPO_ROOT) {
   return out;
 }
 
+// ── W1-T2680: THE SUITES A `git grep <symbol>` SWEEP CANNOT REACH ─────────────────────────────
+
+/**
+ * The directory prefixes a changed file can belong to, as a suite would NAME them. A suite is
+ * relevant to a diff only if it reaches the AREA the diff touched — without this, every census in
+ * the repo answers every question, which is the same as no answer (this task's own falsifier).
+ */
+export function changedAreas(files) {
+  const areas = new Set();
+  for (const f of files ?? []) {
+    const parts = f.split("/");
+    if (parts.length < 2) continue;
+    areas.add(parts[0] + "/"); // e.g. "src/", "test/", "scripts/"
+    if (parts.length > 2) areas.add(parts[0] + "/" + parts[1] + "/"); // e.g. "src/lib/"
+  }
+  return areas;
+}
+
+/**
+ * Whether `content` ENUMERATES A POPULATION of repo files — the shape that makes a suite
+ * unreachable from any symbol a diff changes, because it names none of them.
+ *
+ * `execFileSync("git", ...)` ALONE IS NOT THIS, and that distinction is the whole difficulty.
+ * test/serve.test.ts shells git six times — `init`, `config`, `add`, `commit` — against a
+ * per-test tmpdir fixture, and it is an ordinary suite this verb must NOT list. What separates a
+ * census is enumeration OF THE TREE: `ls-files`, a directory read, or a real glob call.
+ *
+ * A BARE `src/**`-SHAPED STRING IS NOT ENUMERATION EITHER, and a clause matching one was tried and
+ * REMOVED: MEASURED, it fired on `a-printed-remedy-is-never-applied.test.ts` for the string
+ * a `node --test` command string carrying a recursive test glob — a COMMAND that suite asserts
+ * about, not a population it walks. (Written as prose deliberately: a star-star-slash inside a
+ * block comment CLOSES it, which is how this very comment first broke the file.) Every
+ * genuine walker in this repo reaches the tree through one of the three calls above, so the glob
+ * clause bought nothing and cost a false positive on every `src/` change.
+ */
+/**
+ * `content` reduced to the text where NAMING AN AREA MEANS SOMETHING: relative path literals
+ * (`"../src/lib/x.js"`) and comments both removed.
+ *
+ * THIS IS WHAT KEEPS ARM (a) FROM ANSWERING "THE WHOLE TEST DIRECTORY", and both halves were
+ * MEASURED necessary against the real tree of 1,084 suites, for a `src/lib/` change:
+ *
+ *   raw `content.includes("src/")`            128 of 1,084 — every file imports from `../src/...`
+ *   minus relative path literals               82
+ *   minus comments as well                     54
+ *
+ * A census names its population as a BARE path in CODE — `join(REPO_ROOT, "src")`, `"src/*.ts"`
+ * passed to `git ls-files`. The `../` spelling is an import, and a `src/lib/x.ts` inside a doc
+ * comment is prose: `a-printed-remedy-is-never-applied.test.ts` and
+ * `a-count-assertion-names-its-members.test.ts` were both listed for every `src/` change on the
+ * strength of a comment alone, which is the "hands you the whole directory" failure this task's
+ * own falsifier names.
+ */
+export function withoutRelativePathLiterals(content) {
+  return content
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, "$1")
+    .replace(/["'`](?:\.\.\/)+[^"'`]*["'`]/g, '""');
+}
+
+export function enumeratesPopulation(content) {
+  return (
+    /\bls-files\b/.test(content) ||
+    /\breaddirSync\b|\breaddir\b/.test(content) ||
+    /\bglobSync\b|\bglob\(/.test(content)
+  );
+}
+
+/**
+ * Every repo-relative source path this test file READS AS TEXT — `readFileSync` over a path
+ * spelled inside the file. This is the SECOND census shape and it is not optional: acceptance
+ * criterion 2 names test/mounts-wiring.test.ts, which enumerates NOTHING. It reads
+ * `../src/run-task.ts` as a string and asserts on its SHAPE, so a diff that changes that file's
+ * shape breaks it while naming no symbol the suite mentions. Measured on this repo the same day
+ * this verb was built: two suites of exactly this shape (console-stopped-counts, decision-summary)
+ * went red in CI on a diff whose prescribed caller sweep had run green over 45 files.
+ */
+export function sourceTextPathsRead(content) {
+  const paths = new Set();
+  // ONLY paths spelled INSIDE a readFileSync call. Collecting every path-shaped literal in the
+  // file and merely REQUIRING a readFileSync somewhere was tried and MEASURED wrong: it listed
+  // test/sweep.test.ts — the negative control this task's criterion 3 names — because that suite
+  // carries `"src/config.ts"` and `"src/lib/widget.ts"` as FIXTURE DATA, fake paths fed to a
+  // conflict-resolution helper, and never reads either. A path in a fixture is an argument to the
+  // code under test; a path in `readFileSync` is a dependency on the tree. Only the second is this.
+  const CALL = /\breadFileSync\s*\(/g;
+  for (let m = CALL.exec(content); m; m = CALL.exec(content)) {
+    // The call's own argument text — bounded, so a later unrelated literal cannot be attributed to
+    // it. 240 chars covers `readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8")`.
+    const arg = content.slice(m.index, m.index + 240);
+    for (const q of arg.matchAll(/["'`](?:\.\.\/)+((?:src|scripts|test|plan)\/[^"'`]*)["'`]/g)) paths.add(q[1]);
+    for (const q of arg.matchAll(/["'`]((?:src|scripts|test|plan)\/[^"'`*]*\.[a-z]+)["'`]/g)) paths.add(q[1]);
+  }
+  return paths;
+}
+
+/**
+ * THE ANSWER TO "WHICH SUITES DOES MY DIFF JOIN, THAT NAME NONE OF ITS SYMBOLS" — enumerated from
+ * the tree at run time, never from a registry. A census added tomorrow is found tomorrow; a
+ * hardcoded list rots the moment someone adds one, which is the failure mode W1-T2521 already
+ * names for census gates.
+ *
+ * A suite is listed when it is relevant to the CHANGED AREAS by either arm:
+ *   (a) it ENUMERATES a population and names an area the diff touched, or
+ *   (b) it READS AS TEXT a specific file the diff changed.
+ *
+ * Arm (b) is exact (a path match), so it cannot over-include. Arm (a) is deliberately the looser
+ * one, and it is bounded by the area check rather than by cleverness: over-listing runs one extra
+ * suite, under-listing is the silent miss this verb exists to end — the same asymmetry
+ * `planReadingSuiteFiles` above already resolved in the same direction, for the same reason.
+ *
+ * An EMPTY changed-file set yields an EMPTY list (criterion 5): with no areas, nothing is relevant.
+ * That is NOT a fail-closed case like `classify()`'s — this verb ADDS suites to a run, so an empty
+ * answer costs nothing, while "every suite" would be the whole directory and no answer at all.
+ */
+export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
+  const files = (changedFiles ?? []).filter((f) => typeof f === "string" && f.length > 0);
+  if (files.length === 0) return [];
+  const areas = changedAreas(files);
+  const changed = new Set(files);
+  const testDir = join(root, "test");
+  const out = [];
+  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
+    const rel = relative(root, join(testDir, entry.name)).split(sep).join("/");
+    if (changed.has(rel)) continue; // a suite the diff itself edits is already in hand
+    const content = readFileSync(join(testDir, entry.name), "utf8");
+    const bare = withoutRelativePathLiterals(content);
+    const walksAnArea = enumeratesPopulation(content) && [...areas].some((a) => bare.includes(a));
+    const readsAChangedFile = [...sourceTextPathsRead(content)].some((p) => changed.has(p));
+    if (walksAnArea || readsAChangedFile) out.push(rel);
+  }
+  out.sort();
+  return out;
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────────────────────
 
 function readChangedFilesArg(value) {
@@ -225,6 +365,9 @@ export function main(argv) {
     options: {
       "changed-files": { type: "string" },
       "list-plan-reading-suites": { type: "boolean", default: false },
+      // W1-T2680: given a changed-file list, print every suite that WALKS a population those files
+      // belong to, or READS one of them as text — the suites `git grep -l <symbol>` cannot reach.
+      "list-census-suites": { type: "boolean", default: false },
       // TEST-ONLY: overrides the enumeration root passed to planReadingSuiteFiles(). ci.yml never
       // passes this flag (it always enumerates the real repo tree); it exists so
       // test/fast-lane-classifier.test.ts can drive main()'s own --list-plan-reading-suites catch
@@ -235,6 +378,20 @@ export function main(argv) {
       "plan-reading-root": { type: "string" },
     },
   });
+
+  if (values["list-census-suites"]) {
+    try {
+      const files = readChangedFilesArg(values["changed-files"]);
+      const root = values["plan-reading-root"] ?? REPO_ROOT;
+      for (const path of censusSuiteFiles(files, root)) console.log(path);
+      process.exitCode = 0;
+    } catch (err) {
+      console.error(`diff-class: FAILED to enumerate the census suite set — ${err && err.message ? err.message : String(err)}`);
+      console.error("diff-class: printing NOTHING — a caller reading zero lines here must fail closed and run the full suite.");
+      process.exitCode = 1;
+    }
+    return;
+  }
 
   if (values["list-plan-reading-suites"]) {
     try {
