@@ -1662,6 +1662,16 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "a",
     "`execFileSync('git', ['ls-files', 'test'])` is scoped to test/ only, never src/",
   ),
+  // W1-T2809's own suite. Same self-reference shape as its siblings: it is ABOUT the recognizer,
+  // so it necessarily carries both idiom tokens and `src/` in its own text.
+  refusedForPredicate(
+    "test/census-discovery-is-blind-to-a-second-idiom.test.ts",
+    "a",
+    "W1-T2809's own control. Its `git ls-files test/*.test.ts` walks the TEST population as the corpus it re-derives the " +
+      "two idiom sets from — never src/ — and it asserts about DISCOVERY, not a property of every src/ file. The `src/` " +
+      "strings the recognizer sees are its own fixture bodies and the paths of the PR (#2639) the positive control is " +
+      "anchored to",
+  ),
   // W1-T2905's own suite. SCOPE NOTE: the shard's `files:` names only the census test and its
   // baseline; this entry is here because `censusPopulationDrift` REFUSES an undisclosed
   // census-shaped file, and that gate cannot be satisfied from inside the two declared paths. The
@@ -1758,27 +1768,112 @@ const CENSUS_FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
   (m) => ({ job: m.job, script: m.script, reason: m.reason, boundMs: FAST_GATE_CENSUS_BOUND_MS }),
 );
 
-/** THE RECOGNIZER (W1-T2523's own `censusSuiteMembershipFor`, extracted so this task's drift
- *  guard reuses it rather than re-deriving a second copy of the same heuristic — "ONE CENSUS
- *  PREDICATE, NEVER TWO"). Every `test/*.test.ts` file mentioning `ls-files` whose own text also
+/** W1-T2809 — WHICH ENUMERATION IDIOM a census-shaped candidate was recognised BY. The
+ *  recognizer used to implement ONE (`git ls-files`) and was STRUCTURALLY BLIND to the other, and
+ *  the two populations were MEASURED disjoint: 28 suites reachable by the `ls-files` probe, 84
+ *  walking `src/` with `readdirSync`/`globSync`, sharing exactly ONE member — and that one is
+ *  test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts, whose fixtures
+ *  NAME both idioms as test data rather than using either to walk anything (a REFUSED population
+ *  member, so no admitted census suite is in both). The canonical instance CLAUDE.md's hazard (j)
+ *  cites, test/config-reader-seams.test.ts, is in the second set and NOT the first, which is why
+ *  a correctly-run caller sweep could not reach it. */
+export type CensusEnumerationIdiom = "ls-files" | "dir-walk";
+
+/** One census-shaped candidate the recognizer found, carrying the idiom it was recognised by.
+ *  `ls-files` takes PRECEDENCE for a file whose text carries both tokens, so the `ls-files`
+ *  projection below — and therefore {@link censusPopulationDrift}'s gated population — is
+ *  BYTE-FOR-BYTE what it was before this task widened discovery. */
+export interface CensusCandidate {
+  readonly testFile: string;
+  readonly idiom: CensusEnumerationIdiom;
+}
+
+/**
+ * THE LABEL, EXPORTED RATHER THAN LEFT IN A COMMENT — a comment can be deleted silently; a
+ * referenced constant cannot (the test that asserts it would not compile). W1-T2809's own design
+ * mandates that the second matcher ship EXPLICITLY LABELLED, "never silently, because A STOPGAP
+ * THAT SHIPS UNLABELLED BECOMES PERMANENT".
+ *
+ * WHY A SECOND MATCHER IS NOT THE FIX: matcher #2 is blind to idiom #3 (`fs.opendir`,
+ * `fast-glob`, a helper wrapping any of them) in exactly the way matcher #1 was blind to #2, and
+ * idiom #3 will be found the way this one was — by accident, after it costs someone a red PR.
+ * THE SUCCESSOR IS THE SEAM, per W1-T2790's ratified ordering (self-declaring at one seam >
+ * derived-and-committed > hand-written prediction): census suites all enumerate the tracked file
+ * list, so a shared helper they call to do that enumeration IS the declaration, and it makes the
+ * recognizer an EXACT IMPORT QUERY that RETIRES both matchers rather than adding #3 beside them.
+ * Adopting it means editing the ~84 suites measured above, which is its own filing and its own
+ * review, not a rider on this one.
+ */
+export const CENSUS_DIR_WALK_STOPGAP =
+  "STOPGAP (W1-T2809): the dir-walk matcher is a second text heuristic, blind to the next idiom " +
+  "exactly as the ls-files probe was blind to this one. Its successor is the SEAM (W1-T2790's " +
+  "ratified ordering): one shared tracked-file enumeration helper every census suite calls, " +
+  "making discovery an exact import query that retires both matchers. Adopting the seam across " +
+  "the measured ~84 dir-walk suites is its own filing, not a rider on this task.";
+
+/** THE ONE PROBE, exported so a test asserts the real argv rather than restating it. Widened from
+ *  W1-T2523's `ls-files`-only pattern to an ALTERNATION, deliberately kept to a SINGLE `git grep`
+ *  spawn: the idiom is then decided from each hit's own text, which the `src/` filter below
+ *  already had to read anyway — so this is one recognizer with two idioms, never two recognizers
+ *  ("ONE CENSUS PREDICATE, NEVER TWO"). */
+export const CENSUS_DISCOVERY_PROBE_ARGV: readonly string[] = [
+  "grep",
+  "-lE",
+  "ls-files|readdirSync|globSync",
+  "--",
+  "test/*.test.ts",
+];
+
+/** THE RECOGNIZER (W1-T2523's own `censusSuiteMembershipFor`, extracted so the drift guard reuses
+ *  it rather than re-deriving a second copy of the same heuristic — "ONE CENSUS PREDICATE, NEVER
+ *  TWO"; widened to a second idiom by W1-T2809, see {@link CENSUS_DIR_WALK_STOPGAP}). Every
+ *  `test/*.test.ts` file mentioning `ls-files`, `readdirSync` or `globSync` whose own text also
  *  filters on `src/` is a census-shaped candidate; a hit this process cannot read back off disk
- *  is KEPT rather than ruled out, the same "unknown stays visible" posture the caller above this
- *  drives takes. */
+ *  is KEPT rather than ruled out — tagged `ls-files`, the pre-W1-T2809 behaviour exactly — the
+ *  same "unknown stays visible" posture every caller of this takes. */
+export function discoverCensusCandidates(
+  repoRoot: string,
+  spawn: PreflightSpawn,
+  readFile: (path: string) => string,
+): CensusCandidate[] {
+  const res = spawn("git", [...CENSUS_DISCOVERY_PROBE_ARGV], { cwd: repoRoot });
+  const hits = (res.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const out: CensusCandidate[] = [];
+  for (const testFile of hits) {
+    let text: string;
+    try {
+      text = readFile(testFile);
+    } catch {
+      // unreadable: kept in, not ruled out, and tagged with the idiom whose projection is gated —
+      // so an unreadable hit still reaches censusPopulationDrift exactly as it did before.
+      out.push({ testFile, idiom: "ls-files" });
+      continue;
+    }
+    if (!/src\//.test(text)) continue;
+    out.push({ testFile, idiom: /ls-files/.test(text) ? "ls-files" : "dir-walk" });
+  }
+  return out;
+}
+
+/** The `ls-files` PROJECTION of {@link discoverCensusCandidates} — the population
+ *  {@link censusPopulationDrift} gates on, unchanged by W1-T2809's widening.
+ *
+ *  WHY THE GATE IS NOT WIDENED WITH THE REPORT, MEASURED RATHER THAN ASSUMED: the drift guard's
+ *  contract is that EVERY file it discovers carries a {@link CENSUS_POPULATION} entry. Feeding it
+ *  the dir-walk idiom adds 83 files with no entry (measured at this head: 28 ls-files candidates,
+ *  all 28 already entries; 84 dir-walk candidates, 83 of them new), so widening the GATE means
+ *  hand-writing 83 verdict rows — its own filing, and one that must argue each row on its merits.
+ *  The REPORT below has no such contract: `unknownCoverage` exists precisely to name a caller it
+ *  cannot place, so it takes the widened set today and that is what makes the positive control in
+ *  test/census-discovery-is-blind-to-a-second-idiom.test.ts pass. */
 function discoverSrcFilteredLsFilesCallers(
   repoRoot: string,
   spawn: PreflightSpawn,
   readFile: (path: string) => string,
 ): string[] {
-  const res = spawn("git", ["grep", "-l", "ls-files", "--", "test/*.test.ts"], { cwd: repoRoot });
-  const callers = (res.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
-  return callers.filter((f) => {
-    try {
-      return /src\//.test(readFile(f));
-    } catch {
-      // unreadable: kept in, not ruled out — see censusSuiteMembershipFor's own doc comment
-      return true;
-    }
-  });
+  return discoverCensusCandidates(repoRoot, spawn, readFile)
+    .filter((c) => c.idiom === "ls-files")
+    .map((c) => c.testFile);
 }
 
 export interface CensusPopulationDriftReport {
@@ -1978,7 +2073,13 @@ export function censusSuiteMembershipFor(
   spawn: PreflightSpawn,
   readFile: (path: string) => string = (path) => readFileSync(join(repoRoot, path), "utf8"),
 ): CensusMembershipReport {
-  const srcFilteredCallers = discoverSrcFilteredLsFilesCallers(repoRoot, spawn, readFile);
+  // W1-T2809 — THE WIDENED SET, not the `ls-files` projection. This report's whole contract is
+  // that a suite it cannot place is NAMED (`unknownCoverage`) rather than omitted, so the honest
+  // input is every candidate the recognizer finds by either idiom. The canonical instance —
+  // test/config-reader-seams.test.ts, which CLAUDE.md's hazard (j) cites and which #2639 reddened
+  // with a correctly-run caller sweep finding nothing — is a `dir-walk` candidate, so before this
+  // change it appeared in `suites` and in `unknownCoverage` EQUALLY NOT AT ALL.
+  const srcFilteredCallers = discoverCensusCandidates(repoRoot, spawn, readFile).map((c) => c.testFile);
   return censusSuiteMembership(changedPaths, srcFilteredCallers);
 }
 

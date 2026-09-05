@@ -45,6 +45,7 @@ test("W1-T273 #1: a grep proof matching on the merge-base as well as the head is
     report: "REPORT — unrelated cleanup, no mention of the criterion above.",
     headCheckoutDir: HEAD_DIR,
     baseCheckoutDir: BASE_DIR,
+    baseIsCheckout: true, // (R-11) a faked base run of a `unit test:` proof counts only for a real checkout
     execProof: matchesBoth,
   });
   assert.equal(v.criteria[0].proof_exec, "executed_stale");
@@ -66,6 +67,7 @@ test("W1-T273 #2: the non-discriminating outcome removes the proof's positive ov
     report: "REPORT — did unrelated work, said nothing about the keychain probe at all.",
     headCheckoutDir: HEAD_DIR,
     baseCheckoutDir: BASE_DIR,
+    baseIsCheckout: true, // (R-11) a faked base run of a `unit test:` proof counts only for a real checkout
     execProof: matchesBoth,
   });
   assert.equal(v.criteria[0].proof_exec, "executed_stale");
@@ -86,6 +88,7 @@ test("W1-T273 #3: a grep proof matching only on the head still counts as execute
     report: "REPORT — unrelated cleanup, no mention of the criterion above.",
     headCheckoutDir: HEAD_DIR,
     baseCheckoutDir: BASE_DIR,
+    baseIsCheckout: true, // (R-11) a faked base run of a `unit test:` proof counts only for a real checkout
     execProof: headOnly,
   });
   assert.equal(v.criteria[0].proof_exec, "executed_pass");
@@ -124,6 +127,7 @@ test("W1-T362: a `unit test:` proof that ALSO passes on the merge-base is now fl
     report: "REPORT — unrelated cleanup, no mention of the criterion above.",
     headCheckoutDir: HEAD_DIR,
     baseCheckoutDir: BASE_DIR,
+    baseIsCheckout: true, // (R-11) a faked base run of a `unit test:` proof counts only for a real checkout
     execProof: alwaysPass,
   });
   assert.equal(v.criteria[0].proof_exec, "executed_stale");
@@ -141,6 +145,7 @@ test("W1-T362: a `unit test:` proof absent/failing at the base still discriminat
     report: "REPORT — unrelated cleanup, no mention of the criterion above.",
     headCheckoutDir: HEAD_DIR,
     baseCheckoutDir: BASE_DIR,
+    baseIsCheckout: true, // (R-11) a faked base run of a `unit test:` proof counts only for a real checkout
     execProof: headOnly,
   });
   assert.equal(v.criteria[0].proof_exec, "executed_pass");
@@ -169,6 +174,7 @@ test("W1-T273: a base-checkout re-run that THROWS degrades to not-stale (execute
     report: "REPORT — unrelated cleanup, no mention of the criterion above.",
     headCheckoutDir: HEAD_DIR,
     baseCheckoutDir: BASE_DIR,
+    baseIsCheckout: true, // (R-11) a faked base run of a `unit test:` proof counts only for a real checkout
     execProof: throwsOnBase,
   });
   assert.equal(v.criteria[0].proof_exec, "executed_pass");

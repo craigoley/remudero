@@ -5,6 +5,7 @@ import { RETIREMENT_REASONS } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
+  grepProofTargetNamesNoFile,
   isDialectPrefixed,
   parseWhitelistedProof,
   type NameFilterResolution,
@@ -1101,8 +1102,25 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
     if (!split) continue;
     const pattern = split[1].trim();
     if (!pattern) continue;
-    const { blocking, warning } = breMetacharsIn(pattern);
     const where = `criterion ${i + 1} ("${(c.claim ?? "").slice(0, 56)}")`;
+    // (R-12) A DIRECTORY-SHAPED target is refused at filing time with the SAME rule and sentence
+    // `parseDialectGrep` (review.ts) applies at parse — so an author sees it here, when the shard is
+    // filed, instead of at review time as a proof that silently never executes (a `null` parse is
+    // graded prose/dialect-parse-error and contributes nothing). Pure, like every check in this
+    // module: the rule is textual (no extension on the final segment), and the executor's own
+    // filesystem check (`assertGrepTargetIsFile`) catches the dotted-directory remainder at run time.
+    const noFile = grepProofTargetNamesNoFile(split[2]);
+    if (noFile !== undefined) {
+      violations.push({
+        check: "proof-grep-safety",
+        severity: "block",
+        message:
+          `${where} \`grep:\` ${noFile}. The reviewer's parser refuses this proof, so it would never ` +
+          `execute and could certify nothing; name a file beneath that path instead (R-12).`,
+      });
+      continue;
+    }
+    const { blocking, warning } = breMetacharsIn(pattern);
     if (blocking.length) {
       violations.push({
         check: "proof-grep-safety",
@@ -2515,10 +2533,15 @@ export function declaredScopeViolation(task: Task): LintViolation | undefined {
  *  TASKS_SHARD_PATH_RE}. Mirrors {@link DECISIONS_LOG_PATH}'s root-relative convention. */
 const TASKS_MONOLITH_PATH = "plan/tasks.yaml";
 
-/** A `plan/tasks.d/<id>-<slug>.yaml` shard — the ONLY other place a task record lives
- *  (W1-T399). Matched structurally (a `plan/tasks.d/` prefix, one path segment, a `.yaml`
- *  suffix) rather than a loose glob, mirroring `src/lib/review.ts`'s `isTaskRecordPath`. */
-const TASKS_SHARD_PATH_RE = /^plan\/tasks\.d\/[^/]+\.yaml$/;
+/** A `plan/tasks.d/<id>-<slug>.yaml` (or `.yml`) shard — the ONLY other place a task record
+ *  lives (W1-T399). Matched structurally (a `plan/tasks.d/` prefix, one path segment, a
+ *  `.yaml`/`.yml` suffix) rather than a loose glob, mirroring `src/lib/review.ts`'s
+ *  `isTaskRecordPath`. Widened to `.ya?ml` (R-14, docs/audits/recon-2026-09-05.md): the loader
+ *  (`listShardFiles` in plan.ts, `materializeOriginShards` in run-task.ts) accepts both
+ *  extensions, so a `.yaml`-only match here let a task declare an out-of-plan-scope file
+ *  alongside its own `.yml` shard and pass this filing-time check the identical `.yaml` shape
+ *  would have blocked. */
+const TASKS_SHARD_PATH_RE = /^plan\/tasks\.d\/[^/]+\.ya?ml$/;
 
 /** True for the monolith or a shard — the two places {@link rule15FilingViolation} treats
  *  as "declares a task record". */

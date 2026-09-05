@@ -23,7 +23,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { buildBaseProofDir } from "../src/run-task.js";
+import { buildBaseProofDir, type BaseProofDir } from "../src/run-task.js";
 import { execWhitelistedProof, parseWhitelistedProof, preexistingProofHits } from "../src/lib/review.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -58,18 +58,34 @@ function realRepoWithBranch(baseFiles: Record<string, string>, headFiles: Record
   return dir;
 }
 
+/** (R-11) The base is now a real WORKTREE of the fixture repo: deregister it before the repo goes. */
+function dropBase(head: string, built: BaseProofDir | undefined): void {
+  if (built?.baseIsCheckout && built.baseCheckoutDir) {
+    try {
+      git(head, "worktree", "remove", "--force", built.baseCheckoutDir);
+    } catch {
+      /* best-effort; rmSync below still clears the dir */
+    }
+  }
+  if (built?.baseCheckoutDir) rmSync(built.baseCheckoutDir, { recursive: true, force: true });
+}
+
 /** The production judgement, end to end: build the base dir for real, then ask the real guard. */
-function staleViaRealPath(head: string, proof: string): boolean {
+function staleViaRealPath(head: string, proof: string): { stale: boolean; built: BaseProofDir } {
   const criteria = [{ proof }];
   // REAL default deps — no injection. W1-T460 split the return into
-  // (baseCheckoutDir, baseUnreadablePaths); this suite is about the DIR half, and every case below
-  // reads at the base perfectly well.
-  const baseDir = buildBaseProofDir(criteria, head).baseCheckoutDir;
+  // (baseCheckoutDir, baseUnreadablePaths); R-11 added `baseIsCheckout`. Every case below reads
+  // at the base perfectly well, and the base is a real detached worktree at the merge-base.
+  const built = buildBaseProofDir(criteria, head);
+  assert.equal(built.baseIsCheckout, true, "the real default path adds a worktree — no fallback here");
   const whitelisted = parseWhitelistedProof(proof);
   assert.ok(whitelisted, `the proof must compile: ${proof}`);
   // Sanity: the proof really does pass on the HEAD, or "stale" would be meaningless.
   assert.equal(execWhitelistedProof(whitelisted, head), "pass", "precondition: the proof passes on the head");
-  return preexistingProofHits(whitelisted, execWhitelistedProof, baseDir);
+  return {
+    stale: preexistingProofHits(whitelisted, execWhitelistedProof, built.baseCheckoutDir, built.baseUnreadablePaths, built.baseIsCheckout),
+    built,
+  };
 }
 
 // ── (6) A PROOF THAT ALREADY MATCHED ON THE BASE IS FLAGGED ──────────────────
@@ -81,9 +97,13 @@ test("a grep proof whose pattern ALREADY matched the merge-base is flagged stale
     { "src/app.ts": "import { workerKeychainPaths } from './x.js';\n" },
     { "src/app.ts": "import { workerKeychainPaths } from './x.js';\nexport function workerKeychainPaths() {}\n" },
   );
+  let built: BaseProofDir | undefined;
   try {
-    assert.equal(staleViaRealPath(head, "grep: workerKeychainPaths in src/app.ts"), true);
+    const r = staleViaRealPath(head, "grep: workerKeychainPaths in src/app.ts");
+    built = r.built;
+    assert.equal(r.stale, true);
   } finally {
+    dropBase(head, built);
     rmSync(head, { recursive: true, force: true });
   }
 });
@@ -95,9 +115,13 @@ test("a grep proof absent from the merge-base is NOT flagged — it discriminate
     { "src/app.ts": "export const unrelated = 1;\n" },
     { "src/app.ts": "export const unrelated = 1;\nexport function brandNewSymbol() {}\n" },
   );
+  let built: BaseProofDir | undefined;
   try {
-    assert.equal(staleViaRealPath(head, "grep: brandNewSymbol in src/app.ts"), false);
+    const r = staleViaRealPath(head, "grep: brandNewSymbol in src/app.ts");
+    built = r.built;
+    assert.equal(r.stale, false);
   } finally {
+    dropBase(head, built);
     rmSync(head, { recursive: true, force: true });
   }
 });
@@ -112,41 +136,56 @@ test("a proof naming a file the BRANCH CREATES is not flagged — absent is the 
     { "src/app.ts": "export const unrelated = 1;\n" },
     { "src/app.ts": "export const unrelated = 1;\n", "src/brand-new.ts": "export function freshThing() {}\n" },
   );
+  let built: BaseProofDir | undefined;
   try {
-    assert.equal(staleViaRealPath(head, "grep: freshThing in src/brand-new.ts"), false, "a created file is never stale");
+    const r = staleViaRealPath(head, "grep: freshThing in src/brand-new.ts");
+    built = r.built;
+    assert.equal(r.stale, false, "a created file is never stale");
+    assert.equal(existsSync(join(built.baseCheckoutDir!, "src/brand-new.ts")), false, "the worktree at the base simply lacks the file");
   } finally {
+    dropBase(head, built);
     rmSync(head, { recursive: true, force: true });
   }
 });
 
 // ── the builder's own contract, still on the REAL default path ───────────────
 
-test("buildBaseProofDir writes only the paths grep proofs name, and nothing for a test proof", () => {
+test("buildBaseProofDir yields a REAL CHECKOUT of the merge-base — every base path is there, a `unit test:` proof's file included (R-11)", () => {
   const head = realRepoWithBranch(
-    { "src/a.ts": "alpha\n", "src/b.ts": "beta\n" },
-    { "src/a.ts": "alpha\n", "src/b.ts": "beta\n" },
+    { "src/a.ts": "alpha\n", "src/b.ts": "beta\n", "test/x.test.ts": "// present at the base\n" },
+    { "src/a.ts": "alpha\n", "src/b.ts": "beta\n", "test/x.test.ts": "// present at the base\n" },
   );
+  let built: BaseProofDir | undefined;
   try {
-    const { baseCheckoutDir: dir, baseUnreadablePaths: unreadable } = buildBaseProofDir(
+    built = buildBaseProofDir(
       [{ proof: "grep: alpha in src/a.ts" }, { proof: "unit test: test/x.test.ts" }, { proof: "some prose claim" }],
       head,
     );
-    assert.ok(dir, "a grep proof means a base dir");
-    assert.deepEqual([...unreadable], [], "W1-T460: every read here succeeds — nothing is unreadable");
-    assert.equal(readFileSync(join(dir, "src/a.ts"), "utf8"), "alpha\n", "the named path is materialised from the base");
-    assert.equal(existsSync(join(dir, "src/b.ts")), false, "an unnamed path is not");
-    assert.equal(existsSync(join(dir, "test/x.test.ts")), false, "a `unit test:` proof needs no base blob");
+    const { baseCheckoutDir: dir, baseUnreadablePaths: unreadable } = built;
+    assert.ok(dir, "a dialect proof means a base dir");
+    assert.equal(built.baseIsCheckout, true, "…and it is a worktree, not a blob directory");
+    assert.deepEqual([...unreadable], [], "W1-T460: a checkout has no per-blob read to fail");
+    assert.equal(readFileSync(join(dir, "src/a.ts"), "utf8"), "alpha\n", "the named path is at the base");
+    assert.equal(existsSync(join(dir, "src/b.ts")), true, "so is a path no proof names — it is a checkout, not a materialisation");
+    assert.equal(existsSync(join(dir, "test/x.test.ts")), true, "a `unit test:` proof's file is there to be re-run (the R-11 defect was that it never was)");
+    assert.equal(existsSync(join(dir, ".git")), true, "a linked worktree carries its .git pointer");
   } finally {
+    dropBase(head, built);
     rmSync(head, { recursive: true, force: true });
   }
 });
 
-test("no grep proof ⇒ no base dir at all ⇒ the check stays inert, as it was for 1,180 verdicts", () => {
+test("no DIALECT proof ⇒ no base dir at all ⇒ the check stays inert; a `unit test:` proof alone now earns one (R-11)", () => {
   const head = realRepoWithBranch({ "src/a.ts": "alpha\n" }, { "src/a.ts": "alpha\n" });
+  let built: BaseProofDir | undefined;
   try {
-    assert.equal(buildBaseProofDir([{ proof: "unit test: test/x.test.ts" }], head).baseCheckoutDir, undefined);
+    assert.equal(buildBaseProofDir([{ proof: "just prose" }], head).baseCheckoutDir, undefined);
     assert.equal(buildBaseProofDir([], head).baseCheckoutDir, undefined);
+    built = buildBaseProofDir([{ proof: "unit test: test/x.test.ts" }], head);
+    assert.ok(built.baseCheckoutDir, "the pre-R-11 shape returned undefined here, so no unit test was ever checked against a base");
+    assert.equal(built.baseIsCheckout, true);
   } finally {
+    dropBase(head, built);
     rmSync(head, { recursive: true, force: true });
   }
 });
@@ -192,17 +231,24 @@ test("the production call site actually supplies baseCheckoutDir — the gap tha
   // returns two facts (the dir AND the paths whose blob could not be read) named as the evidence
   // fields they become. The QUESTION this pin asks is unchanged: is it actually called with the
   // materialised head worktree, and does its result actually reach the evidence?
+  // R-11 turned the spread back into three NAMED fields (the dir, W1-T460's unreadable set, and
+  // whether the dir is a checkout), because the builder's result now also drives TEARDOWN of the
+  // base worktree, which a spread onto the evidence could not express.
   assert.match(
     src,
-    /\.\.\.\(worktreePath \? buildBaseProofDir\(criteria, worktreePath\) : \{\}\)/,
-    "reviewCommand must build the base facts from its own materialised head worktree and spread them onto the evidence",
+    /const baseProof = worktreePath \? buildBaseProofDir\(criteria, worktreePath\) : undefined/,
+    "reviewCommand must build the base facts from its own materialised head worktree",
   );
+  assert.match(src, /baseCheckoutDir:\s*baseProof\?\.baseCheckoutDir/, "…and hand the dir to runReview");
+  assert.match(src, /baseIsCheckout:\s*baseProof\?\.baseIsCheckout/, "…with the checkout fact beside it (R-11)");
   assert.match(
     src,
     /baseCheckoutDir:\s*args\.baseCheckoutDir/,
     "and runReview must forward it into the evidence judgeReview reads",
   );
+  assert.match(src, /baseIsCheckout:\s*args\.baseIsCheckout/, "the checkout fact too");
   // The forwarding is worthless if judgeReview does not consume it — pin that end too.
   const review = readFileSync(join(REPO_ROOT, "src", "lib", "review.ts"), "utf8");
   assert.match(review, /baseCwd:\s*evidence\.baseCheckoutDir/, "judgeReview must put it on the exec context");
+  assert.match(review, /baseIsCheckout:\s*evidence\.baseIsCheckout/, "and the checkout fact with it — the classifier fails closed without it");
 });
