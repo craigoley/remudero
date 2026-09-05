@@ -391,8 +391,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "automerge.rate_limit_refused",
   // W1-T2558: cost-anomaly.ts's idempotence marker — `alreadyLedgeredCostAnomalyRunIds` reads every
   // `cost.anomaly` row back to decide whether a run was already flagged; before this entry the
-  // dedup worked only until the next rotation. Why: 471 raw rows collapsing to 45 run ids, one
-  // re-flagged 26 times (W1-T2558; docs/forensics/ledger.md).
+  // dedup worked only until the next rotation.
+  // Why: 471 raw rows collapsed to 45 run ids, one re-flagged 26 times (W1-T2558;
+  // docs/forensics/ledger.md#decision_relevant_ledger_steps).
   "cost.anomaly",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs
