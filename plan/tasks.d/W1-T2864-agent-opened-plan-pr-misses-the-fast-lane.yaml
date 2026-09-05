@@ -1,0 +1,92 @@
+- id: W1-T2864
+  title: "AN AGENT-OPENED PLAN PR MISSES THE FAST REVIEW LANE — admission trusts only the local pr.opened plan_only ledger event, so an otherwise identical one-file task filing opened through GitHub is classified as semantic work and waits behind a judge it will never spawn"
+  repo: remudero
+  depends_on: [W1-T2439, W1-T2472]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files:
+    - src/lib/open-prs-rest.ts
+    - src/run-task.ts
+    - test/plan-filing-admission-bound.test.ts
+  origin: "operator-session#agent-opened-plan-pr-misses-fast-review-lane-2026-09-05"
+  plan_refs: ["W1-T2439", "W1-T2472"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET AT 2026-09-05T03:18:42Z. PR #4030 changed exactly one path,
+    `plan/tasks.d/W1-T2861-a-source-file-cannot-outgrow-its-baseline.yaml`, and every GitHub check
+    was green. The sweep nevertheless reported `semantic post-review admission bound 1; admitted
+    #4028 ahead`. The PR was opened through GitHub by an agent, not by one of RMD's plan-emitter
+    flows. A search of the live ledger found no matching `pr.opened` line with `plan_only:true`.
+
+    THE CLASSIFIER EXPLAINS THE RESULT EXACTLY. `buildOpenPrViews` sets `isPlanFiling` only from
+    `isPlanOnlyFilingPr(ledger, pr.url)`. That predicate accepts one positive signal: a matching
+    local `pr.opened{plan_only:true}` event written by an RMD emitter. The GitHub PR is material
+    state, but the local event is provenance available only to the process that opened it. An
+    agent, operator or recovered workflow can create the same safe plan-only changeset without
+    that event, and the gateway then assigns `false`. W1-T2439's fast lane is implemented but
+    unreachable for this valid population.
+
+    DO NOT TRUST A TITLE, BRANCH NAME, TRAILER OR ABSENT IMPLEMENTATION FILE AS THE POSITIVE
+    ANSWER. All are claims. Extend the REST gateway with one bounded, memoised structural read of
+    the PR's actual changed-file paths, keyed by repository, PR number and head SHA. A non-empty
+    file list entirely inside the existing plan scope, excluding the same enforcement-data paths
+    that make review semantic, may corroborate a plan filing when the local emitter record is
+    absent. A failed, malformed, empty, truncated or over-cap read must leave the PR in the
+    semantic lane. The existing ledger event remains the zero-request fast path.
+
+    BUDGET IS PART OF CORRECTNESS. The daemon rebuilds the board every minute, so a per-PR files
+    request on every pass would convert queue speed into a GitHub-budget leak. Cache both positive
+    and negative complete reads by head SHA; invalidate naturally on a new head; place a hard cap
+    on uncached reads per pass; and retain bounded cache state for the process lifetime. Candidate
+    metadata such as conventional plan titles may reduce which PRs are structurally checked, but
+    it must never be sufficient to grant the fast lane. Emit a bounded classification-source
+    field so the console and ledger distinguish `emitter-ledger`, `github-files`, `unreadable` and
+    `not-plan-only` without exposing response bodies.
+  design: |
+    Add a REST-native changed-file scope hydrator beside the existing merge-state and
+    supersession hydrators in `src/lib/open-prs-rest.ts`. Its return value must distinguish a
+    complete non-empty path list from an unavailable or incomplete read. Memoise by
+    `<owner>/<repo>#<pr>@<headSha>`, bound both per-pass misses and retained entries, and never use
+    GraphQL. Thread the classified result into `buildOpenPrViews`; set `isPlanFiling` true when
+    either the existing emitter-ledger predicate is true or the structurally observed changeset
+    is a plan-only, non-enforcement-data filing. Unknown remains false and therefore semantic.
+
+    Keep `selectReviewAdmissions`, its two bounds, ordering and auto-merge rules unchanged. This
+    task only improves the input fact. Add an integration-shaped test through `buildOpenPrViews`
+    with a REST fake proving an externally opened filing reaches the existing plan-filing lane,
+    while a source-bearing lookalike, an enforcement-data edit and an unreadable file list stay in
+    the semantic lane. Drive repeated sweeps and a head change to prove cache reuse and
+    invalidation from observed call counts.
+  acceptance:
+    - claim: "a GitHub-opened PR whose complete non-empty changed-file list is plan scope and excludes enforcement data is classified as a plan filing even without a local pr.opened plan_only ledger event"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "the existing emitter-ledger signal remains a zero-file-request fast path and produces the same plan-filing classification"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "a source-bearing lookalike, an enforcement-data edit, an empty response, an unreadable response and a candidate beyond the per-pass cap all remain in the bounded semantic lane"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "repeated board builds at one head perform at most one successful structural read for that PR, while a changed head performs one new read and cannot inherit the prior classification"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "classification telemetry identifies emitter-ledger, github-files, unreadable and not-plan-only without recording PR bodies, file contents or credentials"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "review admission bounds, ordering, event wake behavior and auto-merge authority are unchanged"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+    - claim: "deleting the structural corroboration makes the externally opened filing consume semantic capacity again and fails the focused suite"
+      proof: "unit test: test/plan-filing-admission-bound.test.ts"
+  falsifier: |
+    Close without implementation if PR #4030 has a matching live
+    `pr.opened{pr_url:https://github.com/craigoley/remudero/pull/4030,plan_only:true}` ledger line, or
+    if its material changed-file list contains a non-plan or enforcement-data path. Both checks
+    were run before filing: the matching ledger search returned zero rows and GitHub returned the
+    one task-shard path named above. Also close if `buildOpenPrViews` already has a complete
+    GitHub-file-list fallback for `isPlanFiling`; at base 7e884c7b it calls only the ledger
+    predicate.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2864`; the held id
+    is authoritative. This does not make every plan-only document edit a task filing: the
+    implementation must use the shared plan-scope and enforcement-data definitions, require a
+    complete material file list, and fail toward the semantic lane.
