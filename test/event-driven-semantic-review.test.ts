@@ -143,7 +143,7 @@ test("a semantic provider failure still posts the binding deterministic verdict"
       join(bin, "gh"),
       `#!/bin/sh
 case "$1 $2" in
-  "api repos/"*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"cafebabe0002"},"state":"open"}' ;;
+  "api repos/"*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"},"state":"open"}' ;;
   "pr diff") cat ${JSON.stringify(diffPath)} ;;
   "pr view") echo '{"state":"OPEN"}' ;;
   *) echo '{}' ;;
@@ -156,6 +156,7 @@ esac
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-token-never-sent";
 
     const steps: string[] = [];
+    let providerInvoked = false;
     const verdict = await runReview({
       owner: "o",
       repo: "r",
@@ -175,14 +176,17 @@ esac
       spawnReviewer: true,
       reviewerMount: { model: "sonnet", effort: "high", maxTurns: 400, contextBudget: 120000 },
       reviewerQueryFn: (() => {
+        providerInvoked = true;
         throw new Error("provider unavailable fixture");
       }) as never,
+      headCheckoutDir: REPO_ROOT,
       ledgerPath: join(root, "ledger.ndjson"),
       runId: "REVIEW-PROVIDER-UNAVAILABLE",
       arm: () => "armed",
       disarm: () => "not-armed",
     });
 
+    assert.equal(providerInvoked, true, "the fixture must reach the semantic provider before proving its failure path");
     assert.ok(steps.includes("review.reviewer.error"), "the semantic failure must be explicit");
     assert.ok(steps.includes("review.posted"), "the authoritative deterministic status must still post");
     assert.equal(verdict.reviewerOutcome, "spawn_error");

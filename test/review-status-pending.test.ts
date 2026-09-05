@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -45,6 +46,8 @@ const NOT_MERGED: PrLifecycleState = { merged: false, closed: false };
 // source-text lock on its call site had already red-lined a PR that only moved it) ────────────
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const REPO_ROOT = process.cwd();
+const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 
 test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending via postReviewPending BEFORE the diff fetch and judgeReview", () => {
   const start = runTaskSrc.indexOf("async function runReview(");
@@ -126,12 +129,12 @@ printf '%s\\n' "$*" >> ${JSON.stringify(ghLog)}
 case "$1 $2" in
   "api "*)
     case "$*" in
-      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"cafebabe0002"}}' ;;
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
       *) echo '{}' ;;
     esac ;;
   "pr view")
     case "$*" in
-      *headRefOid*) echo '{"headRefOid":"cafebabe0002"}' ;;
+      *headRefOid*) echo '{"headRefOid":"${HEAD}"}' ;;
       *state*) echo '{"state":"OPEN"}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -188,6 +191,7 @@ esac
       // nothing live happens either way, but the boundary is not this test's business at all.
       disarm: () => {},
       reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
+      headCheckoutDir: REPO_ROOT,
       ledgerPath,
       runId: "REVIEW-PENDING-ORDER-1",
     } as never);
@@ -200,7 +204,7 @@ esac
     assert.ok(ghCallsAtReviewerSpawn !== undefined, "the reviewer spawn was reached but nothing snapshotted the gh log at that point");
     assert.match(
       ghCallsAtReviewerSpawn!,
-      /statuses\/cafebabe0002 -f context=remudero-review -f state=pending/,
+      new RegExp(`statuses/${HEAD} -f context=remudero-review -f state=pending`),
       "the remudero-review=pending POST for THIS head must already have been made by the time the advisory reviewer is spawned",
     );
 
@@ -208,17 +212,17 @@ esac
     // through the one guarded site rather than merely reaching `gh` by some other route.
     const pending = readLedgerLines(ledgerPath).filter((l) => l.step === "review.pending_posted");
     assert.equal(pending.length, 1, "exactly one review.pending_posted line for this head");
-    assert.equal(pending[0]?.head_sha, "cafebabe0002");
+    assert.equal(pending[0]?.head_sha, HEAD);
     assert.equal(pending[0]?.pr_url, "https://github.com/acme/remudero/pull/1");
     assert.equal(
       pending[0]?.review_input_digest,
-      reviewInputDigest("cafebabe0002", "The actual PR body snapshot used only for retry identity."),
+      reviewInputDigest(HEAD, "The actual PR body snapshot used only for retry identity."),
     );
     const terminal = reviewEvents.find((event) => event.step === "review.posted");
     assert.equal(terminal?.extra?.pr_url, "https://github.com/acme/remudero/pull/1");
     assert.equal(
       terminal?.extra?.review_input_digest,
-      reviewInputDigest("cafebabe0002", "The actual PR body snapshot used only for retry identity."),
+      reviewInputDigest(HEAD, "The actual PR body snapshot used only for retry identity."),
     );
   } finally {
     process.env.PATH = oldPath;

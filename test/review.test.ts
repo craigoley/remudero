@@ -920,12 +920,13 @@ test("buildReviewPrompt: fresh, read-only, gh-only, does NOT post the status (or
   assert.match(prompt, /orchestrator/i);
   // The reviewer must be told never to edit code.
   assert.match(prompt, /never (edit|modify)/i);
-  // The reviewer verifies against REPO STATE: check out the PR head and RUN the
-  // proof's test/grep, not verdict on diff+report alone.
+  // The reviewer verifies against REPO STATE in the already-materialized exact-head checkout and
+  // RUNS the proof's test/grep, rather than trying to fetch into a read-only empty cwd.
   assert.match(prompt, /repo state/i);
-  assert.match(prompt, /checkout|check out/i);
-  // The checkout target is the head sha, and running tests/greps is allowed.
-  assert.match(prompt, /gh pr checkout|git fetch origin abc123/);
+  assert.match(prompt, /already a THROWAWAY Git checkout/i);
+  assert.match(prompt, /git rev-parse HEAD/);
+  assert.match(prompt, /abc123/);
+  assert.doesNotMatch(prompt, /gh pr checkout|git fetch origin/);
 });
 
 // ── The reviewer RUBRIC (§5 layer 2): four judgment items + the satisfied_by guard ──

@@ -6111,9 +6111,10 @@ export interface ReviewPromptInput {
  *
  * The reviewer verifies against REPO STATE, not diff+report alone: when a proof
  * names an EXECUTABLE check (a test to run, a grep/command over the source), the
- * reviewer CHECKS OUT the PR head and RUNS that check, verdicting on the OBSERVED
- * result — the report's word that a test passes or a grep matches is not proof it
- * does. Running tests/greps against the checked-out head is read-only in spirit:
+ * reviewer receives an already-materialized disposable PR-head checkout and RUNS
+ * that check, verdicting on the OBSERVED result — the report's word that a test
+ * passes or a grep matches is not proof it does. Running tests/greps against the
+ * checked-out head is read-only in spirit:
  * it never edits the PR's code and never changes the head sha it judges.
  */
 export function buildReviewPrompt(input: ReviewPromptInput): string {
@@ -6135,10 +6136,11 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     `Do this:`,
     `1. Read the PR diff:            gh pr diff ${input.prUrl}`,
     `2. Read the implement REPORT (the PR body / last worker message).`,
-    `3. CHECK OUT the PR head so you can verify against REPO STATE, not just take`,
-    `   the report's word. In a THROWAWAY directory (never the runner's cwd), and`,
-    `   without changing the PR head sha (${input.headSha}):`,
-    `     gh pr checkout ${input.prUrl}   # or: git fetch origin ${input.headSha} && git checkout ${input.headSha}`,
+    `3. Your cwd is already a THROWAWAY Git checkout pinned to the PR head`,
+    `   (${input.headSha}). Verify that exact value with: git rev-parse HEAD.`,
+    `   Do not materialize another copy, contact a remote, switch revisions, or`,
+    `   otherwise change the checkout. If the observed HEAD differs, verdict every criterion FAILURE`,
+    `   and report the mismatch; never inspect a different revision.`,
     `4. For EACH acceptance criterion below, verdict its stated PROOF. When the`,
     `   proof names an EXECUTABLE check — a test (RUN it), a grep/command over the`,
     `   source — RUN that check against the checked-out PR head and verdict on the`,

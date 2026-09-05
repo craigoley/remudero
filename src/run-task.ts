@@ -893,6 +893,8 @@ import {
   workerLedgerFields,
   workerTranscript,
   uniqueRunBranch,
+  excludeNodeModulesFromGit,
+  linkWorktreeNodeModules,
   worktreeAdd,
   worktreeLockIsPidAlive,
   worktreeRemove,
@@ -4954,6 +4956,124 @@ function reviewerSemanticVerdicts(
   return parseReviewerVerdicts(workerTranscript(reviewer), criteriaCount);
 }
 
+type ReviewerSnapshotPhase = "materialization" | "integrity";
+
+class ReviewerSnapshotError extends Error {
+  constructor(
+    readonly phase: ReviewerSnapshotPhase,
+    readonly reason: "source-unavailable" | "head-mismatch" | "clone-failed" | "unreadable" | "dirty",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ReviewerSnapshotError";
+  }
+}
+
+/**
+ * Materialize the semantic reviewer's repository locally from the exact checkout the
+ * deterministic proof floor already owns. The clone has its own Git metadata and worktree, but
+ * borrows immutable objects from the source for speed; no GitHub read and no source checkout
+ * mutation is needed. The caller's withTempDir boundary owns removal on every exit path.
+ */
+function materializeReviewerSnapshot(
+  reviewRoot: string,
+  sourceDir: string | undefined,
+  expectedHeadSha: string,
+): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules> } {
+  if (!sourceDir || !existsSync(sourceDir)) {
+    throw new ReviewerSnapshotError(
+      "materialization",
+      "source-unavailable",
+      "semantic reviewer source checkout is unavailable",
+    );
+  }
+
+  let sourceHead: string;
+  try {
+    sourceHead = execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    throw new ReviewerSnapshotError(
+      "materialization",
+      "source-unavailable",
+      "semantic reviewer source checkout is not a readable Git repository",
+    );
+  }
+  if (sourceHead !== expectedHeadSha) {
+    throw new ReviewerSnapshotError(
+      "materialization",
+      "head-mismatch",
+      "semantic reviewer source checkout does not match the PR head",
+    );
+  }
+
+  const cwd = join(reviewRoot, "checkout");
+  try {
+    execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceDir, cwd], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    execFileSync("git", ["-C", cwd, "checkout", "--quiet", "--detach", "--force", expectedHeadSha], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    throw new ReviewerSnapshotError(
+      "materialization",
+      "clone-failed",
+      "semantic reviewer disposable checkout could not be created",
+    );
+  }
+
+  let materializedHead: string;
+  try {
+    materializedHead = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    throw new ReviewerSnapshotError("materialization", "unreadable", "semantic reviewer checkout HEAD is unreadable");
+  }
+  if (materializedHead !== expectedHeadSha) {
+    throw new ReviewerSnapshotError(
+      "materialization",
+      "head-mismatch",
+      "semantic reviewer disposable checkout does not match the PR head",
+    );
+  }
+
+  // The clone's own exclude file may be changed before the reviewer starts; the source checkout
+  // and common Git metadata remain untouched. This makes a linked dependency tree invisible to
+  // the post-review cleanliness proof even for repositories whose committed .gitignore omits it.
+  excludeNodeModulesFromGit(cwd);
+  const nodeModules = linkWorktreeNodeModules(sourceDir, cwd);
+  return { cwd, nodeModules };
+}
+
+/** A semantic result is usable only while the disposable checkout remains exact and clean. */
+function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): void {
+  let actualHead: string;
+  let status: string;
+  try {
+    actualHead = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    status = execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", "--untracked-files=all"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    throw new ReviewerSnapshotError("integrity", "unreadable", "semantic reviewer checkout integrity is unreadable");
+  }
+  if (actualHead !== expectedHeadSha) {
+    throw new ReviewerSnapshotError("integrity", "head-mismatch", "semantic reviewer changed the checkout HEAD");
+  }
+  if (status.length > 0) {
+    throw new ReviewerSnapshotError("integrity", "dirty", "semantic reviewer changed the disposable checkout");
+  }
+}
+
 /**
  * THE REVIEW GATE CALL SITE (W1-T1D — the piece W1-T1C built the reviewer for but
  * nothing ever called; the split left the call site unowned). After the PR is open
@@ -5208,14 +5328,19 @@ async function runReview(args: {
       // mkdtempSync this used to be, which never cleaned up on any path and
       // leaked one `rmd-review-*` dir per PR review (a major contributor to
       // the 26,711-dir ENOSPC incident: this runs on every gate check).
-      await withTempDir("review", async (reviewCwd) => {
+      await withTempDir("review", async (reviewRoot) => {
+        const snapshot = materializeReviewerSnapshot(reviewRoot, args.headCheckoutDir, headSha);
+        log("review.reviewer.materialized", {
+          head_sha: headSha,
+          node_modules: snapshot.nodeModules,
+        });
         const prompt =
           buildReviewPrompt({ task: { id: task.id, acceptance: criteria }, prUrl, owner, repo, headSha }) +
           "\n" +
           reviewerVerdictContract(criteria.length);
         const reviewer = args.account(
           await (args.reviewerSpawnWorker ?? spawnWorker)({
-            cwd: reviewCwd,
+            cwd: snapshot.cwd,
             permissionMode: "bypassPermissions",
             settingsFile: args.settingsFile,
             // MOUNT-GOVERNED (§9, W1-T63/P10): model/effort/max_turns come from the
@@ -5237,7 +5362,9 @@ async function runReview(args: {
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );
-        semantic = reviewerSemanticVerdicts(reviewer, criteria.length);
+        const candidateSemantic = reviewerSemanticVerdicts(reviewer, criteria.length);
+        assertReviewerSnapshotIntegrity(snapshot.cwd, headSha);
+        semantic = candidateSemantic;
         reviewerSubtype = reviewer.subtype;
         const reviewerFields = workerLedgerFields(reviewer);
         evaluatorProvenance = {
@@ -5257,11 +5384,14 @@ async function runReview(args: {
         });
         // The reviewer is fresh (no resume) — reap its SDK scratchpad now, before
         // withTempDir removes reviewCwd. Best-effort, guarded (lib/worker-scratch).
-        reapWorkerScratch(reviewCwd);
+        reapWorkerScratch(snapshot.cwd);
       });
     } catch (e) {
       // Advisory only — the deterministic floor still binds and posts below.
       reviewerSpawnFailed = true;
+      if (e instanceof ReviewerSnapshotError) {
+        log(`review.reviewer.${e.phase}_error`, { reason: e.reason, error: e.message });
+      }
       log("review.reviewer.error", { error: String((e as Error)?.message ?? e) });
     }
   }
