@@ -57,6 +57,13 @@ ee-open.json
 # ignored, so no operator-local state (transcripts, session caches) becomes committable by
 # accident.
 !.claude/settings.json
+# W1-T2763: the SECOND exception, and the same mechanism. `.claude/skills/<name>/SKILL.md` is
+# GENERATED from settings/macros.yaml and byte-compared by `macro-skills:check`, so it has to be
+# tracked or the gate compares against nothing and passes vacuously. Un-ignoring the DIRECTORY is
+# what makes the files inside re-includable at all — git never re-descends into an excluded
+# directory, which is why the `.claude/*` form above exists. Operator-local state (transcripts,
+# session caches) stays ignored exactly as before: this un-ignores one generated tree, not `.claude/`.
+!.claude/skills/
 *.log
 
 # W1-T421: mutated module copies written by test/helpers/mutant-module.ts. They live under test/
