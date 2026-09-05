@@ -146,6 +146,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/daemon.md",
+      "title": "daemon.ts forensics",
+      "summary": "Measured forensics, incidents and design arguments removed from `src/lib/daemon.ts` when its comments were compacted to the plain-language standard. The code k…",
+      "grepHint": "daemon.ts forensics"
+    },
+    {
       "path": "docs/forensics/drain.md",
       "title": "Forensics — `src/lib/drain.ts`",
       "summary": "A verbatim archive of comment blocks compacted out of `src/lib/drain.ts`. Each heading names",

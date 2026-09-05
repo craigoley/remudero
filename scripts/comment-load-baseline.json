@@ -123,7 +123,7 @@
   "src/lib/cost-anomaly.ts": 97,
   "src/lib/coverage-improvement.ts": 143,
   "src/lib/daemon-health.ts": 177,
-  "src/lib/daemon.ts": 2839,
+  "src/lib/daemon.ts": 1000,
   "src/lib/dep-review.ts": 149,
   "src/lib/deployer.ts": 548,
   "src/lib/digest.ts": 608,
