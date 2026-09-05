@@ -2160,6 +2160,12 @@ export interface ArmDeps {
    *  pre-existing behavior — treat the 405 as final — is exactly what omitting this dep still
    *  produces, so no caller built before W1-T1280 is affected. */
   readMergeFacts?: (prUrl: string) => FixRebaseMergeFacts;
+  /** W1-T2855 — OPTIONAL companion to {@link readMergeFacts}. When both are present,
+   *  {@link attemptArm} requires fresh merge facts before every direct-merge fallback and uses
+   *  this existing REST update-branch write once when the PR is behind. Fixtures predating this
+   *  seam may omit it; {@link realArmDeps} always supplies both, so production cannot bypass the
+   *  preflight. */
+  updateBranch?: (prUrl: string) => { ok: boolean; error?: string };
   /** W1-T1280 — OPTIONAL. Blocks the calling thread for `ms` between the bounded re-reads
    *  {@link readMergeFacts} above drives — mirrors {@link GhCallPacer.sleepSync}'s own
    *  `Atomics.wait`-backed real default (lib/open-prs-rest.ts). A test omits it (or injects a
@@ -2353,6 +2359,15 @@ export function realArmDeps(
       const target = mergeTargetFromPrUrl(prUrl);
       return target ? fixRebaseMergeFactsFromRest(target.owner, target.repo, target.prNumber) : {};
     },
+    // W1-T2855: paired with `readMergeFacts` above. `directMergePreflight` is the sole caller and
+    // reaches this only for a definitely MERGEABLE head whose fresh compare says it is behind.
+    // `ghUpdateBranch` owns the live-write guard and the REST PUT; a URL that cannot be addressed
+    // is a named failure, never a skipped write reported as success.
+    updateBranch: (prUrl) => {
+      const target = mergeTargetFromPrUrl(prUrl);
+      if (!target) return { ok: false, error: `cannot resolve update-branch target from ${prUrl}` };
+      return ghUpdateBranch(target.owner, target.repo, target.prNumber);
+    },
     // W1-T1280: a genuinely blocking wait — `attemptArm` has no async caller (every dep on this
     // object shells out via synchronous `execFileSync`/`ghJson`), so `Atomics.wait` on a private
     // `SharedArrayBuffer` parks the one thread already parked by those calls, mirroring
@@ -2374,6 +2389,9 @@ export type ArmOutcome =
   | "armed"
   | "direct-merged"
   | "direct-merge-failed"
+  | "direct-merge-updated"
+  | "direct-merge-preflight-refused"
+  | "direct-merge-update-failed"
   | "arm-error-ignored"
   // W1-T947: {@link armAutoMergeAtOpen} refused because the diff is classified IRREVERSIBLE
   // (W1-T919) — the ONE outcome this file's arm sites can return that never went through
@@ -2405,6 +2423,17 @@ export interface ArmAttemptResult {
    *  carries no header to read (see worker.ts's {@link ghRateLimitRefusalUnknown} for why this
    *  is the deliberately honest shape, never a guess). Absent on every other outcome. */
   rateLimit?: GhRateLimitRefusal;
+  /** W1-T2855 — the fresh facts and remedy behind a direct-merge preflight outcome. Field names
+   *  stay TypeScript-shaped here; {@link logArmAttribution} maps them to stable ledger names. */
+  directMergePreflight?: DirectMergePreflightEvidence;
+}
+
+export interface DirectMergePreflightEvidence {
+  priorHeadSha?: string;
+  behindBy?: number;
+  mergeable?: string;
+  remedy: "direct-merge" | "update-branch" | "retry-later";
+  error?: string;
 }
 
 export function armAutoMerge(
@@ -2462,7 +2491,7 @@ export function armAutoMergeDetailed(
     deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
     return { outcome: "ledger-refused" };
   }
-  return attemptArm(prUrl, deps);
+  return attemptArm(prUrl, deps, headSha);
 }
 
 /**
@@ -2486,9 +2515,121 @@ export function armAutoMergeDetailed(
  * unconditionally and only a caller that deliberately narrows the deps object (as those tests do,
  * to prove the narrower shape still arms) sees the pre-W1-T1000002 behaviour.
  */
+type DirectMergePreflightDeps = Pick<ArmDeps, "say"> &
+  Partial<Pick<ArmDeps, "headSha" | "readMergeFacts" | "updateBranch">>;
+
+type DirectMergePreflightDecision =
+  | { proceed: true; evidence?: DirectMergePreflightEvidence }
+  | { proceed: false; result: ArmAttemptResult };
+
+/**
+ * W1-T2855 — the one gate every direct REST merge in {@link attemptArm} crosses immediately
+ * before its write. The pair of optional seams is the backward-compatibility boundary: old unit
+ * fixtures omit `updateBranch` and retain their narrow pre-task behavior; production's
+ * {@link realArmDeps} supplies both, so a production merge must prove MERGEABLE + behindBy=0.
+ */
+function directMergePreflight(
+  prUrl: string,
+  deps: DirectMergePreflightDeps,
+  priorHeadSha?: string,
+  context: Pick<ArmAttemptResult, "error" | "rateLimit"> = {},
+): DirectMergePreflightDecision {
+  if (!deps.readMergeFacts || !deps.updateBranch) return { proceed: true };
+
+  let observedHead = priorHeadSha;
+  if (observedHead === undefined && deps.headSha) {
+    try {
+      observedHead = deps.headSha(prUrl);
+    } catch (e) {
+      const headRead = { error: String((e as Error)?.message ?? e) };
+      deps.say(
+        `automerge.direct_merge_preflight_head_unavailable (W1-T2855): ` +
+          `${headRead.error} — refusing an unattributable direct merge: ${prUrl}`,
+      );
+      return {
+        proceed: false,
+        result: {
+          outcome: "direct-merge-preflight-refused",
+          ...context,
+          directMergePreflight: { remedy: "retry-later", error: headRead.error },
+        },
+      };
+    }
+  }
+  let facts: FixRebaseMergeFacts;
+  let readError: string | undefined;
+  try {
+    facts = deps.readMergeFacts(prUrl);
+  } catch (e) {
+    const failedRead = { error: String((e as Error)?.message ?? e) };
+    facts = {};
+    readError = failedRead.error;
+  }
+  const baseEvidence = {
+    ...(observedHead !== undefined ? { priorHeadSha: observedHead } : {}),
+    ...(facts.behindBy !== undefined ? { behindBy: facts.behindBy } : {}),
+    ...(facts.mergeable !== undefined ? { mergeable: facts.mergeable } : {}),
+  };
+  const behindIsConsistent = Number.isInteger(facts.behindBy) && Number(facts.behindBy) >= 0;
+
+  if (facts.mergeable !== "MERGEABLE" || !behindIsConsistent) {
+    const directMergePreflight: DirectMergePreflightEvidence = {
+      ...baseEvidence,
+      remedy: "retry-later",
+      ...(readError !== undefined ? { error: readError } : {}),
+    };
+    deps.say(
+      `automerge.direct_merge_preflight_refused (W1-T2855): mergeability=${String(facts.mergeable)} ` +
+        `behind_by=${String(facts.behindBy)} — fresh facts are unreadable, unknown, conflicting, or inconsistent; ` +
+        `left unmerged for a later pass: ${prUrl}`,
+    );
+    return {
+      proceed: false,
+      result: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight },
+    };
+  }
+
+  if (facts.behindBy === 0) {
+    return { proceed: true, evidence: { ...baseEvidence, remedy: "direct-merge" } };
+  }
+
+  let update: { ok: boolean; error?: string };
+  try {
+    update = deps.updateBranch(prUrl);
+  } catch (e) {
+    update = { ok: false, error: String((e as Error)?.message ?? e) };
+  }
+  const directMergePreflight: DirectMergePreflightEvidence = {
+    ...baseEvidence,
+    remedy: "update-branch",
+    ...(update.error !== undefined ? { error: update.error } : {}),
+  };
+  if (!update.ok) {
+    deps.say(
+      `automerge.direct_merge_update_failed (W1-T2855): behind_by=${facts.behindBy}; ` +
+        `${update.error ?? "update-branch returned ok=false"} — left unmerged: ${prUrl}`,
+    );
+    return {
+      proceed: false,
+      result: { outcome: "direct-merge-update-failed", ...context, directMergePreflight },
+    };
+  }
+
+  deps.say(
+    `automerge.direct_merge_updated (W1-T2855): prior_head=${observedHead ?? "unknown"} ` +
+      `behind_by=${facts.behindBy} — updated once; awaiting fresh checks and review: ${prUrl}`,
+  );
+  return {
+    proceed: false,
+    result: { outcome: "direct-merge-updated", ...context, directMergePreflight },
+  };
+}
+
 export function attemptArm(
   prUrl: string,
-  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines" | "readMergeFacts" | "sleepSync">>,
+  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "sleepSync">>,
+  priorHeadSha?: string,
 ): ArmAttemptResult {
   // MERGE (W1-T1000002 x W1-T1079): main widened this function's return to ArmAttemptResult so an
   // `arm-error-ignored` can carry the raw failure text; the hold refusal predates that shape and
@@ -2521,10 +2662,12 @@ export function attemptArm(
     // The run flow's later poll only papers over this for ITS OWN PRs — the
     // sweep's arm is fire-and-forget and needs the state resolved HERE.
     if (armFailureAction(msg) === "direct-merge") {
+      const preflight = directMergePreflight(prUrl, deps, priorHeadSha);
+      if (!preflight.proceed) return preflight.result;
       try {
         deps.mergeDirect(prUrl);
         deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
-        return { outcome: "direct-merged" };
+        return { outcome: "direct-merged", directMergePreflight: preflight.evidence };
       } catch (e2) {
         const msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
         // W1-T1050: `deps.mergeDirect`'s own `execFileSync` wraps the WHOLE merge attempt, so a
@@ -2536,25 +2679,25 @@ export function attemptArm(
           deps.say(
             `automerge.clean_status_direct_merge (merge landed; a post-merge step failed: ${msg2}): ${prUrl}`,
           );
-          return { outcome: "direct-merged" };
+          return { outcome: "direct-merged", directMergePreflight: preflight.evidence };
         }
         deps.say(`automerge.direct_merge_failed: ${msg2} — ${prUrl}`);
-        return { outcome: "direct-merge-failed" };
+        return { outcome: "direct-merge-failed", directMergePreflight: preflight.evidence };
       }
     }
-    // W1-T1255: THE QUOTA FALLBACK. The `/clean status/i` branch above is untouched — it is
-    // GitHub's own "this PR is already mergeable, just merge it" refusal, and it stays the
-    // certification this fleet relies on. What that branch cannot reach is the case this task
+    // W1-T1255: THE QUOTA FALLBACK. The `/clean status/i` branch above is still GitHub's
+    // "this PR is already mergeable" refusal, but W1-T2855 no longer treats that earlier answer
+    // as current-base certification: both paths cross `directMergePreflight` before writing. What
+    // that branch cannot reach is the case this task
     // exists for: when the GraphQL budget is spent, `armAuto` fails with a QUOTA message, so
     // `armFailureAction` returns `"transient"`, the branch above never fires, and the fallback is
     // never attempted at all. `armFailureIsRateLimited` (W1-T1235, already live and already
     // consulted below) is the ONLY trigger for this second attempt — never `armFailureAction`'s
     // wider `"transient"`, which also matches an ordinary network blip.
     //
-    // THE PRECONDITION IS NOT WIDENED, IT IS RELOCATED TO THE SAME AUTHORITY. `mergeDirect` is now
-    // the REST endpoint, and GitHub refuses it (405) on a pull request it does not consider
-    // mergeable — so a PR that is not already green is REFUSED BY GITHUB here exactly as it would
-    // have been refused by the arm. The fleet still evaluates no required context of its own.
+    // `mergeDirect` is the REST endpoint and GitHub still owns the final mergeability decision.
+    // W1-T2855 adds only a fresher precondition: its REST facts must also say MERGEABLE and current
+    // with main. The fleet still evaluates no required-check context of its own.
     //
     // AND IT IS A FALLBACK, NEVER AN ARM REPLACEMENT: a REST merge cannot hold intent for checks
     // that have not finished, so it can only ever land a PR that is ALREADY green. Arming is still
@@ -2572,17 +2715,19 @@ export function attemptArm(
         `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
           `${quota.bucket}, resets: ${quota.resetsAt}) — ${msg} — ${prUrl}`,
       );
+      const preflight = directMergePreflight(prUrl, deps, priorHeadSha, { error: msg, rateLimit: quota });
+      if (!preflight.proceed) return preflight.result;
       try {
         deps.mergeDirect(prUrl);
         deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
-        return { outcome: "direct-merged", error: msg, rateLimit: quota };
+        return { outcome: "direct-merged", error: msg, rateLimit: quota, directMergePreflight: preflight.evidence };
       } catch (e3) {
         let msg3 = String((e3 as { stderr?: unknown })?.stderr ?? (e3 as Error)?.message ?? e3);
         // W1-T1050's discipline, applied to this path too: a merge that LANDED must never be
         // reported as a failure just because something after it threw.
         if (deps.isMerged?.(prUrl)) {
           deps.say(`automerge.rate_limited_rest_merge (merge landed; a post-merge step failed: ${msg3}): ${prUrl}`);
-          return { outcome: "direct-merged", error: msg, rateLimit: quota };
+          return { outcome: "direct-merged", error: msg, rateLimit: quota, directMergePreflight: preflight.evidence };
         }
         // W1-T1280: THE RETRY. `deps.readMergeFacts` is OPTIONAL (see its doc on `ArmDeps`) —
         // absent, this block is skipped byte-for-byte and the refusal below is unchanged from
@@ -2609,19 +2754,34 @@ export function attemptArm(
                 `automerge.rate_limited_rest_merge_retry (W1-T1280): mergeFactsFromRest settled ` +
                   `MERGEABLE on read ${read}/${REST_MERGE_UNSETTLED_MAX_READS} — retrying: ${prUrl}`,
               );
+              const retryPreflight = directMergePreflight(prUrl, deps, priorHeadSha, {
+                error: msg,
+                rateLimit: quota,
+              });
+              if (!retryPreflight.proceed) return retryPreflight.result;
               try {
                 deps.mergeDirect(prUrl);
                 deps.say(
                   `automerge.rate_limited_rest_merge (W1-T1255; settled mergeable on retry ${read}): ${prUrl}`,
                 );
-                return { outcome: "direct-merged", error: msg, rateLimit: quota };
+                return {
+                  outcome: "direct-merged",
+                  error: msg,
+                  rateLimit: quota,
+                  directMergePreflight: retryPreflight.evidence,
+                };
               } catch (e4) {
                 msg3 = String((e4 as { stderr?: unknown })?.stderr ?? (e4 as Error)?.message ?? e4);
                 if (deps.isMerged?.(prUrl)) {
                   deps.say(
                     `automerge.rate_limited_rest_merge (merge landed; a post-merge step failed: ${msg3}): ${prUrl}`,
                   );
-                  return { outcome: "direct-merged", error: msg, rateLimit: quota };
+                  return {
+                    outcome: "direct-merged",
+                    error: msg,
+                    rateLimit: quota,
+                    directMergePreflight: retryPreflight.evidence,
+                  };
                 }
               }
               break; // ONE retry attempt once settled MERGEABLE (design note ii) — never a second.
@@ -2781,7 +2941,8 @@ function irreversibleSignalForWorktree(worktreePath: string): boolean {
  */
 export function armAutoMergeAtOpen(
   prUrl: string,
-  deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines" | "readMergeFacts" | "sleepSync">>) = realArmDeps(),
+  deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "sleepSync">>) = realArmDeps(),
   irreversible = false,
 ): ArmOutcome {
   // W1-T2347: this is one of the four `deps: ArmDeps = realArmDeps()`-shaped LEVEL-1 sites the
@@ -3184,7 +3345,7 @@ export type ArmLane = "review" | "operator" | "sweep";
  * reuses that classification rather than re-deriving a fourth one.
  */
 function armOutcomeAttemptedAndFailed(outcome: ArmOutcome | "skipped"): boolean {
-  return outcome === "direct-merge-failed" || outcome === "arm-error-ignored";
+  return outcome === "direct-merge-failed" || outcome === "direct-merge-update-failed" || outcome === "arm-error-ignored";
 }
 
 /**
@@ -3212,21 +3373,49 @@ function logArmAttribution(
   // fixture shifts. The bucket/reset `attemptArm`'s catch captured when the failure was
   // rate-limit-shaped (see `ArmAttemptResult.rateLimit`'s own doc).
   rateLimit?: GhRateLimitRefusal,
+  directMergePreflight?: DirectMergePreflightEvidence,
 ): void {
   const prNumber = prNumberFromRef(prUrl);
   const ghFields = rateLimit
     ? { gh_bucket: rateLimit.bucket, gh_bucket_resets_at: rateLimit.resetsAt, gh_bucket_operation: rateLimit.operation }
     : {};
+  const preflightFields = directMergePreflight
+    ? {
+        ...(directMergePreflight.priorHeadSha !== undefined ? { prior_head_sha: directMergePreflight.priorHeadSha } : {}),
+        ...(directMergePreflight.behindBy !== undefined ? { behind_by: directMergePreflight.behindBy } : {}),
+        ...(directMergePreflight.mergeable !== undefined ? { mergeability: directMergePreflight.mergeable } : {}),
+        remedy: directMergePreflight.remedy,
+        ...(directMergePreflight.error !== undefined ? { remedy_error: directMergePreflight.error } : {}),
+      }
+    : {};
   log(armOutcomeArmed(outcome) ? "automerge.armed" : armSkipStepName(outcome), {
     ...extra,
     ...ghFields,
+    ...preflightFields,
     task_id: taskId,
     pr_number: prNumber,
     pr_url: prUrl,
     lane,
   });
   if (outcome === "direct-merged") {
-    log("automerge.clean_status_direct_merge", { task_id: taskId, pr_number: prNumber, pr_url: prUrl, lane });
+    log("automerge.clean_status_direct_merge", {
+      task_id: taskId,
+      pr_number: prNumber,
+      pr_url: prUrl,
+      lane,
+      ...preflightFields,
+    });
+  }
+  const preflightStep =
+    outcome === "direct-merge-updated"
+      ? "automerge.direct_merge_updated"
+      : outcome === "direct-merge-preflight-refused"
+        ? "automerge.direct_merge_preflight_refused"
+        : outcome === "direct-merge-update-failed"
+          ? "automerge.direct_merge_update_failed"
+          : undefined;
+  if (preflightStep) {
+    log(preflightStep, { task_id: taskId, pr_number: prNumber, pr_url: prUrl, lane, ...preflightFields });
   }
   // W1-T1235: a rate-limit-shaped refusal gets its OWN named step, beside the generic
   // `automerge.arm_failed` row above — so a rate-limited arm is discoverable by grepping ONE
@@ -3284,6 +3473,7 @@ export function armIfVerdictPermits(
   const error = typeof result === "string" ? undefined : result.error;
   // W1-T1235: same rider as `armAndLogOutcome` — see that function's own comment.
   const rateLimit = typeof result === "string" ? undefined : result.rateLimit;
+  const directMergePreflight = typeof result === "string" ? undefined : result.directMergePreflight;
   // impl-BI: the STEP NAME must match the outcome. This used to log `automerge.armed`
   // unconditionally with the outcome merely carried in a field — so a `ledger-refused` here
   // still read as an arm to anyone counting steps.
@@ -3311,6 +3501,7 @@ export function armIfVerdictPermits(
       ...(error !== undefined ? { error } : {}),
     },
     rateLimit,
+    directMergePreflight,
   );
   return outcome;
 }
@@ -3339,6 +3530,12 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
       return "the PR's current head could not be read, so the arm was withheld rather than applied to an unknown head";
     case "direct-merge-failed":
       return "GitHub refused --auto as already-clean and the direct-merge fallback then failed";
+    case "direct-merge-updated":
+      return "the direct-merge preflight found the PR behind current main, updated its branch once, and left it for fresh checks and review";
+    case "direct-merge-preflight-refused":
+      return "fresh REST mergeability/base-distance facts were unreadable, unknown, conflicting, or inconsistent, so the direct merge failed closed";
+    case "direct-merge-update-failed":
+      return "the direct-merge preflight found the PR behind current main, but GitHub refused or failed the update-branch remedy; it remains unmerged";
     case "arm-error-ignored":
       // W1-T1079: no longer claims "treated as transient" unconditionally — armFailureAction
       // now only calls a narrow set of signatures transient and defaults to permanent for
@@ -3411,6 +3608,7 @@ export function armAndLogOutcome(
   // function already writes — see `logArmAttribution`'s own doc for the second, named step it
   // additionally emits.
   const rateLimit = typeof result === "string" ? undefined : result.rateLimit;
+  const directMergePreflight = typeof result === "string" ? undefined : result.directMergePreflight;
   logArmAttribution(
     log,
     outcome,
@@ -3419,6 +3617,7 @@ export function armAndLogOutcome(
     lane,
     { ...(error !== undefined ? { outcome, error } : { outcome }), ...(headSha !== undefined ? { head_sha: headSha } : {}) },
     rateLimit,
+    directMergePreflight,
   );
   return outcome;
 }
@@ -7399,10 +7598,10 @@ export function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number
  * the wire it travels on. No `--delete-branch` equivalent is sent, matching `mergeDirect`'s own
  * W1-T1050 note for why the branch is left alone.
  *
- * THE ENDPOINT IS ITS OWN MERGEABILITY GATE. GitHub refuses this call (405) on a pull request it
- * does not consider mergeable, so the fleet still never evaluates required contexts itself — the
- * certification stays exactly where {@link attemptArm}'s `/clean status/i` branch already put it,
- * with GitHub.
+ * THE ENDPOINT REMAINS THE FINAL MERGEABILITY GATE. GitHub refuses this call (405) on a pull
+ * request it does not consider mergeable, so the fleet never evaluates required contexts itself.
+ * W1-T2855 additionally requires fresh REST merge facts and a zero base distance immediately
+ * before this write; GitHub still owns the final decision.
  */
 export function ghMergePrArgv(owner: string, repo: string, prNumber: number): string[] {
   return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/merge`, "-f", "merge_method=squash"];
