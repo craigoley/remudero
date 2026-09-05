@@ -78,6 +78,10 @@ jobs:
   build:
     name: az acr build
     runs-on: ubuntu-latest
+    # R-50: measured over the last 10 runs (2026-08-31 to 2026-09-04), every `az acr build`
+    # completes in 3-5 minutes — the build runs on Azure's fleet, not this runner, so the job's
+    # own wall-clock is mostly polling. 20m gives ~4x headroom over the observed max.
+    timeout-minutes: 20
     # The `inputs` context is populated only for workflow_dispatch. GitHub evaluates a missing
     # property to an empty string, so `||` supplies the committed production defaults on push;
     # the manual path still receives the operator's typed values. A push always advances latest.

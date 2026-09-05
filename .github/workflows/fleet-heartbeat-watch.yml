@@ -135,6 +135,9 @@ jobs:
   heartbeat-watch:
     name: heartbeat-watch (reads every host's beat branch off-machine; silent per host until installed)
     runs-on: ubuntu-latest
+    # R-50: observed runs complete in 15-30 seconds; 20m bounds a genuine hang with generous
+    # headroom.
+    timeout-minutes: 20
     permissions:
       contents: read
       # DELIVERY. Without this the job's only output is a red badge on a page nobody opens — the
@@ -145,6 +148,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
 
       # No `npm ci`, unlike the three sibling workflows — a deliberate subtraction, not an
       # oversight. scripts/needs-human-issue.mjs imports only node builtins (node:fs,

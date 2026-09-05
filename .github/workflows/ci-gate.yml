@@ -45,6 +45,13 @@ jobs:
   ci-gate:
     name: ci-gate
     runs-on: ubuntu-latest
+    # R-50: this job's OWN script can legitimately run past GitHub's 360-minute default under
+    # nothing but its own two knobs below -- WAIT_CAP_SECONDS (2400s = 40m) plus, if a required
+    # check is failing when that wait concludes, GRACE_WINDOW_SECONDS (600s = 10m) -- 2400+600 =
+    # 3000s = 50m worst case. 60m keeps this job's own external bound strictly above that derived
+    # worst case (the same "the bound must exceed what it bounds" property ci.yml's heavy band
+    # already owes ci-gate) while still being a FINITE, loud ceiling rather than the 360m default.
+    timeout-minutes: 60
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
