@@ -62,12 +62,22 @@ test("daemonCommand: a SELF-TARGET non-dry-run boot wires checkRetroTrigger + ru
     "a self-target daemon wires the automated-retro runner",
   );
   const source = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  // `buildRetroDaemonHooks()` itself stays a bare, zero-arg construction call (byte-identical
+  // to before W1-T2870) so test/owner-self-host-gating.test.ts's isSelf source-grep still
+  // matches; the daemon's per-boot ledger sink is instead handed to `runRetroTrigger` at
+  // INVOCATION time, in the wiring line below.
   assert.ok(
-    /buildRetroDaemonHooks\(\{\s*log\s*\}\)/.test(source),
-    "the production daemon construction hands its ledger sink to the subprocess-backed hook",
+    /const retroHooks = target\.isSelf \? buildRetroDaemonHooks\(\) : undefined;/.test(source),
+    "buildRetroDaemonHooks's construction call stays gated on target.isSelf and takes no deps",
   );
   assert.ok(
-    /else\s+await\s+runAutomatedRetroSubprocess\(decision,\s*\{\s*log:\s*deps\.log\s*\}\)/.test(source),
+    /runRetroTrigger: retroHooks \? \(decision\) => retroHooks\.runRetroTrigger\(decision, log\) : undefined,/.test(
+      source,
+    ),
+    "the production wiring hands its ledger sink to runRetroTrigger at call time",
+  );
+  assert.ok(
+    /else\s+await\s+runAutomatedRetroSubprocess\(decision,\s*\{\s*log\s*\}\)/.test(source),
     "the default automated-retro hook reaches the subprocess adapter rather than retroCommand in the daemon pid",
   );
 });
