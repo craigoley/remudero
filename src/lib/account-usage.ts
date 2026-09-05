@@ -114,9 +114,8 @@ export interface AccountUsageInput {
   /** `cachedUsageUtilization.accountUuid` — whose usage the cached block describes. */
   cacheUuid?: string;
   /** W1-T2688 — the RAW value of whichever {@link CREDIT_STATE_FIELDS} name the block carried, if
-   *  any. Projected out as an opaque `unknown` and INTERPRETED separately, so a surface that
-   *  starts exposing the state under a value this module does not recognise is reported as
-   *  unrecognised rather than silently read as "subscription". */
+   *  any. Projected as an opaque `unknown` and interpreted separately, so an unrecognised value
+   *  is reported as such rather than read as "subscription". */
   creditStateRaw?: unknown;
   /** Which field name it came from — evidence, so a later reader can tell WHAT was read. */
   creditStateField?: string;
@@ -130,32 +129,22 @@ export interface AccountUsageInput {
 
 /** Why the usage half of the panel is UNKNOWN, when it is. Absent ⇒ the reading is good. */
 /**
- * W1-T2688 — THE ECONOMICS CHANGE UNDER THE FLEET AND NOTHING OBSERVES IT.
+ * W1-T2688 — the credit state, read or refused, never inferred.
  *
  * A subscription drawing on usage credits drops the prompt-cache lifetime from an hour to five
- * minutes. Every rung here is built on long conversations with reused prefixes, so the same
- * worker, on the same task, at the same mount, costs materially more after that transition than
- * before it — and cost per completed task moves for a reason no row explains.
+ * minutes. Every rung here reuses long prefixes, so cost per task moves for a reason no row
+ * explains.
  *
- * WHAT THE SURFACE ACTUALLY EXPOSES, ESTABLISHED BEFORE ANYTHING WAS BUILT (the shard makes this
- * the first obligation). The repo's own captured real block —
- * test/fixtures/account-usage/claude-json.json — carries `accountUuid`, `fetchedAtMs` and
- * `utilization.{five_hour,seven_day}.{utilization,resets_at,used_dollars,limit_dollars,
- * remaining_dollars}`, and NO credit, billing, plan or subscription field anywhere in it. The
- * LIVE `~/.claude.json` could not be inspected from this container — reading it was refused, and
- * correctly so: it holds OAuth material — so the conclusion rests on that captured block and on
- * this module's own header, not on a live read.
+ * TRAP: the surface may not expose the state at all. The captured block
+ * (test/fixtures/account-usage/claude-json.json) carries the utilization windows and no credit,
+ * billing, plan or subscription field. So an absent field reads `not-exposed` — loud, in the shape
+ * {@link UsageUnknownReason} already uses — and an unknown value reads `unrecognised-value`. A
+ * credit state guessed from window utilisation would move policy on an inference.
  *
- * SO THE DELIVERABLE IS DETECT-OR-REFUSE, WHICH IS RIGHT EITHER WAY. If the field is absent the
- * state reads `not-exposed` — loud and recorded, in the same shape {@link UsageUnknownReason}
- * already uses — and NEVER an inferred flag, because a credit state guessed from window
- * utilisation would move policy on an inference. If the surface starts exposing it under any of
- * {@link CREDIT_STATE_FIELDS}, this reads it with no further change; and a value it does not
- * recognise is `unrecognised-value`, not a default.
+ * Policy is out of scope: what to do when credits engage is an operator ruling. Nothing here
+ * changes a mount, holds a dispatch, or reads a policy.
  *
- * POLICY IS NOT IN SCOPE. What to do when credits engage — hold dispatch, lower a mount, warn —
- * is an operator ruling, and the mount table's own rule is that a routing decision is a data
- * edit. Nothing here changes a mount, holds a dispatch, or reads a policy.
+ * FALSIFIER: test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts.
  */
 export const CREDIT_STATE_FIELDS = ["creditState", "credit_state", "billingMode", "billing_mode", "usingCredits", "using_credits"] as const;
 
@@ -173,8 +162,8 @@ export interface CreditReading {
 }
 
 /** Interpret a raw credit-state value. `true`/`"credits"`/`"credit"`/`"usage_credits"` read as
- *  credits; `false`/`"subscription"`/`"plan"` as subscription; ANYTHING ELSE is unrecognised
- *  rather than defaulted, which is the whole point of separating this from the projection. */
+ *  credits; `false`/`"subscription"`/`"plan"` as subscription; anything else is unrecognised
+ *  rather than defaulted — the reason this is separate from the projection. */
 export function interpretCreditState(raw: unknown): CreditState | undefined {
   if (raw === true) return "credits";
   if (raw === false) return "subscription";
@@ -212,10 +201,9 @@ export function lastRecordedCreditState(lines: ReadonlyArray<Record<string, unkn
 }
 
 /**
- * THE EDGE, NOT THE LEVEL. A level sampled every tick is noise; the edge is one row a later
- * census can join against spend. Returns the row to write when the state CHANGED (including the
- * first time it becomes known), and `undefined` when it is unchanged — or when it is not known at
- * all, because an unknown is not a transition and must never be recorded as one.
+ * The edge, not the level: a level sampled every tick is noise. Returns a row when the state
+ * changed (including the first time it becomes known), `undefined` when unchanged or unknown —
+ * an unknown is not a transition.
  */
 export function creditTransitionRow(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -329,8 +317,8 @@ export interface AccountUsageSnapshot {
   /** Present iff the usage half is UNKNOWN; the windows are then absent. */
   usageUnknownReason?: UsageUnknownReason;
   /** W1-T2688 — subscription vs usage credits. A SEPARATE axis from `usageUnknownReason`: the
-   *  windows can be perfectly readable while the credit state is not exposed at all, and
-   *  collapsing the two would make a readable panel claim the credit state was unreadable too. */
+   *  windows can be readable while the credit state is not exposed; collapsing the two would
+   *  make a readable panel claim the credit state was unreadable too. */
   creditState?: CreditState;
   /** Present iff {@link creditState} is absent — never both, never neither. */
   creditUnknownReason?: CreditUnknownReason;
@@ -432,8 +420,8 @@ export function deriveAccountUsage(
   const costGovernor = deriveCostGovernorDeferral(lines);
   const queueGovernor = deriveQueueGovernorDeferral(lines);
   const ceilingAudit = deriveCeilingOverrideAudit(lines);
-  // W1-T2688: computed from the INPUT alone, never from the windows — an inferred credit state
-  // would move policy on a guess, which the shard refuses by name.
+  // Computed from the input alone, never from the windows: an inferred state moves policy on a
+  // guess.
   const credit = readCreditState(input);
   const base: AccountUsageSnapshot = {
     governor: governor.state,
@@ -766,7 +754,7 @@ interface ClaudeJsonShape {
     accountUuid?: unknown;
     fetchedAtMs?: unknown;
     /** W1-T2688: whichever of CREDIT_STATE_FIELDS the surface may carry. Indexed rather than
-     *  named one-by-one so a rename on Anthropic's side is picked up by editing ONE list. */
+     *  named one-by-one so an upstream rename is picked up by editing one list. */
     [k: string]: unknown;
     utilization?: {
       five_hour?: { utilization?: unknown; resets_at?: unknown } | null;
@@ -823,8 +811,7 @@ export function readAccountUsageFile(path: string = join(homedir(), ".claude.jso
   if (typeof cache?.fetchedAtMs === "number" && Number.isFinite(cache.fetchedAtMs)) {
     out.cacheFetchedAtMs = cache.fetchedAtMs;
   }
-  // W1-T2688: ONE more field copied out, by the same rule as every other — named, not spread.
-  // The parsed object is still discarded in this expression; nothing else is carried.
+  // One more field copied out by the same rule as every other: named, not spread.
   for (const field of CREDIT_STATE_FIELDS) {
     if (cache !== undefined && Object.prototype.hasOwnProperty.call(cache, field)) {
       out.creditStateField = field;

@@ -59,8 +59,23 @@ function materializeOutsideRepo(workerHome: string, realHome: string): void {
   materializeWorkerHome({ workerHome, realHome, exists: (path) => !path.endsWith("/.git") });
 }
 
+/**
+ * W1-T2850 — RESOLVED THROUGH THE ENV'S OWN PATH, NOT A HARDCODED LOCATION.
+ *
+ * This helper spawned `/usr/bin/bash`, which DOES NOT EXIST ON DARWIN (bash ships at `/bin/bash`),
+ * so three tests in this file died `spawnSync ENOENT` on the operator's mini — reds no cluster
+ * declared, which forced a ~28-minute baseline run to prove them pre-existing.
+ *
+ * IT IS A TEST DEFECT, NOT A HOST FACT, AND THAT DISTINCTION IS THE POINT. Bash is not the code
+ * under test — it is a PROBE, used only to read back what the spawn env exports. The production
+ * path resolves its own bash BY NAME through the injectable spawn seam (`detectHostFacts`,
+ * src/lib/ci-parity.ts, spawns `"bash"`), and `codexSpawnEnvForTest`'s env carries PATH (measured:
+ * the allowlist passes PATH, HOME, TMPDIR, LANG, USER and the token). So the probe can resolve the
+ * interpreter exactly as production does, and a cluster declared over this would have buried a real
+ * defect permanently — which is the trap W1-T2850's own design (iii) names.
+ */
 function interactiveBashAnthropicKey(env: Record<string, string | undefined>): string {
-  return execFileSync("/usr/bin/bash", ["-ic", "printf %s \"${ANTHROPIC_API_KEY-}\""], {
+  return execFileSync("bash", ["-ic", "printf %s \"${ANTHROPIC_API_KEY-}\""], {
     encoding: "utf8",
     env,
     stdio: ["ignore", "pipe", "ignore"],
