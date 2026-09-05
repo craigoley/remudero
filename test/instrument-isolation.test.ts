@@ -257,18 +257,23 @@ diff --git a/test/knowledge-budget-derivation.test.ts b/test/knowledge-budget-de
   assert.equal(v.state, "success", v.summary);
 });
 
-// W1-T2526 added the SECOND entry, and this guard is why that could not happen quietly: it names
-// every exempt path verbatim, so widening the set is a diff a reviewer must approve by hand. Kept
-// in exactly that shape — the assertion is the enumeration, never a size or a predicate, because a
-// looser form would let a third path in without anyone reading its reason. Each entry carries its
-// OWN justification at the declaration (W1-T941: nothing in CI ratchets against it; W1-T2526: it
-// IS read in CI, but it is a size LEDGER and not a score FLOOR, so raising an entry cannot make a
-// failing falsifier pass), and test/a-size-ledger-is-not-a-score-floor.test.ts pins that the two
-// reasons stay distinct.
-test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the two named, reviewed paths — no blanket widening", () => {
+// W1-T2526 added the SECOND entry (and the comment-load ledger a THIRD, same reason), and this
+// guard is why that could not happen quietly: it names every exempt path verbatim, so widening the
+// set is a diff a reviewer must approve by hand. Kept in exactly that shape — the assertion is the
+// enumeration, never a size or a predicate, because a looser form would let another path in without
+// anyone reading its reason. Each entry carries its OWN justification at the declaration (W1-T941:
+// nothing in CI ratchets against it; W1-T2526 and the comment-load entry beside it: they ARE read
+// in CI, but each is a size LEDGER and not a score FLOOR, so raising an entry cannot make a failing
+// falsifier pass), and test/a-size-ledger-is-not-a-score-floor.test.ts /
+// test/comment-load-baseline-is-exempt.test.ts pin that the reasons stay distinct.
+test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the three named, reviewed paths — no blanket widening", () => {
   assert.deepEqual(
     [...ENTANGLEMENT_EXEMPT_INSTRUMENTS],
-    ["scripts/knowledge-budget-baseline.json", "scripts/source-size-baseline.json"],
+    [
+      "scripts/knowledge-budget-baseline.json",
+      "scripts/source-size-baseline.json",
+      "scripts/comment-load-baseline.json",
+    ],
   );
 });
 

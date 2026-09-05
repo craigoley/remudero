@@ -11,6 +11,7 @@ import { configPath, loadConfig, type Config } from "./config.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { capStderrExcerpt, spawnWorker } from "./worker.js";
 import { reapWorkerScratch } from "./worker-scratch.js";
+import { WORKER_HOME_SYMLINKS } from "./worker-home.js";
 
 /**
  * POST-SPAWN CONTAINMENT PROBE (WS-0 verdict 7; W1-T2 acceptance #2).
@@ -1762,4 +1763,189 @@ export async function probeContainment(opts: {
     );
   }
   return { contained: true, reason: verdict.reason, evidence, costUsd };
+}
+
+// Credential reach: what a worker-shaped subprocess can read.
+//
+// Four seams describe this boundary and none measured it. See W1-T2698's shard for the four.
+//
+// SCOPE: the live sandbox is applied by the CLI, so it is not exercisable in-process;
+// probeContainment above is the arm that spawns a real worker. Measurable here are the two
+// controls that decide the reach — the env allowlist and settings/worker.json's deny rules.
+//
+// INVARIANT: a target no deny rule covers is never reported `refused`, so this cannot launder
+// an unenforced path into a clean result. FALSIFIER: test/credential-reach-probe.test.ts.
+export type CredentialReachKind = "env" | "file";
+
+/** `unproven` separates "the deciding control could not run" from "it ran and held". */
+export type CredentialReachOutcome = "reachable" | "refused" | "absent" | "unproven";
+
+export interface CredentialReachTarget {
+  /** Stable id — this is what the baseline keys on and what a failure names. */
+  readonly id: string;
+  readonly kind: CredentialReachKind;
+  /** An env var NAME, or an already-anchored absolute path. */
+  readonly subject: string;
+  readonly why: string;
+}
+
+export interface CredentialReachResult {
+  readonly id: string;
+  readonly kind: CredentialReachKind;
+  readonly outcome: CredentialReachOutcome;
+  readonly reason: string;
+}
+
+/** Line prefix the probe script emits and {@link parseCredentialReach} consumes. */
+export const CREDENTIAL_REACH_PREFIX = "REACH";
+
+/** Where the settings file's `~` rules resolve to. Its `$comment` states these: a worker's HOME
+ *  is the redirected per-run home, `~/..` reaches config.root, `~/../..` the operator's home. */
+export interface CredentialReachAnchors {
+  readonly workerHome: string;
+  readonly configRoot: string;
+  readonly realHome: string;
+}
+
+/**
+ * The targets to probe, built from the containment's own tables rather than a list kept here.
+ *
+ * Grants come from WORKER_HOME_SYMLINKS, so a new grant becomes a probed target with no edit to
+ * this file. The operator-side paths are the ones settings/worker.json's deny rules exist to
+ * cover, plus the two credential files in NEITHER table — the reach W1-T2698 was filed to find.
+ */
+export function credentialReachTargets(a: CredentialReachAnchors): CredentialReachTarget[] {
+  const granted = WORKER_HOME_SYMLINKS.map((g) => ({
+    id: `grant:${g.relPath}`,
+    kind: "file" as const,
+    subject: join(a.workerHome, g.relPath),
+    why: `granted into every worker HOME: ${g.reason.slice(0, 80)}`,
+  }));
+  return [
+    ...granted,
+    { id: "deny:ssh-key", kind: "file", subject: join(a.realHome, ".ssh", "id_ed25519"), why: "an ssh private key" },
+    { id: "deny:aws-credentials", kind: "file", subject: join(a.realHome, ".aws", "credentials"), why: "cloud credentials" },
+    { id: "deny:instance-config", kind: "file", subject: join(a.realHome, ".config", "remudero", "config.json"), why: "the mode-600 instance config loadConfig reads (W1-T2213)" },
+    { id: "deny:console-write-token", kind: "file", subject: join(a.configRoot, "state", "service-tokens.json"), why: "the console's write token (W1-T2211)" },
+    { id: "ungoverned:operator-claude-json", kind: "file", subject: join(a.realHome, ".claude.json"), why: "the operator's CLI config, carrying oauthAccount — in no deny rule and no grant" },
+    { id: "ungoverned:operator-credentials", kind: "file", subject: join(a.realHome, ".claude", ".credentials.json"), why: "the operator's real credentials file — in no deny rule and no grant" },
+  ];
+}
+
+/**
+ * Render the file half of the probe as a POSIX `sh` script, one line per target.
+ *
+ * `test -r` only: the script never opens a credential, so a transcript is safe to paste into
+ * an issue. A filesystem can only report `absent` or `reachable`; {@link resolveCredentialReach}
+ * decides `refused`, because a deny rule the CLI enforces is invisible to a plain `sh`.
+ */
+export function containmentProbeScript(targets: readonly CredentialReachTarget[]): string {
+  const lines = ["#!/bin/sh", "# W1-T2698 credential-reach probe — reports reachability, never contents."];
+  for (const t of targets) {
+    if (t.kind !== "file") continue;
+    const q = shellSingleQuote(t.subject);
+    lines.push(
+      `if [ -r ${q} ]; then echo "${CREDENTIAL_REACH_PREFIX} ${t.id} reachable readable-by-the-worker-uid";`,
+      `elif [ -e ${q} ]; then echo "${CREDENTIAL_REACH_PREFIX} ${t.id} refused present-but-unreadable-by-the-worker-uid";`,
+      `else echo "${CREDENTIAL_REACH_PREFIX} ${t.id} absent no-such-path"; fi`,
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+/** POSIX single-quote escaping: end the quote, emit an escaped quote, reopen. */
+function shellSingleQuote(s: string): string {
+  return `'${s.split("'").join(`'\\''`)}'`;
+}
+
+/** Parse the probe script's stdout back into results. Lines that are not REACH lines are
+ *  ignored, so a shell that prints a warning does not corrupt the reading. */
+export function parseCredentialReach(stdout: string): CredentialReachResult[] {
+  const out: CredentialReachResult[] = [];
+  for (const line of stdout.split("\n")) {
+    const m = /^REACH\s+(\S+)\s+(reachable|refused|absent|unproven)\s+(.*)$/.exec(line.trim());
+    if (m) out.push({ id: m[1], kind: "file", outcome: m[2] as CredentialReachOutcome, reason: m[3] });
+  }
+  return out;
+}
+
+/**
+ * Does a settings-file deny path, with or without its `Read(...)` wrapper, cover `path`?
+ *
+ * The `~`-anchoring is the settings file's own, stated in its `$comment`: a worker's HOME is
+ * the redirected per-run home, so `~/..` reaches config.root and `~/../..` the operator's home.
+ */
+export function denyRuleCovers(
+  rule: string,
+  path: string,
+  anchors: { workerHome: string; configRoot: string; realHome: string },
+): boolean {
+  const bare = /^Read\((.*)\)$/.exec(rule.trim())?.[1] ?? rule.trim();
+  let expanded = bare;
+  if (bare.startsWith("~/../../")) expanded = join(anchors.realHome, bare.slice("~/../../".length));
+  else if (bare.startsWith("~/../")) expanded = join(anchors.configRoot, bare.slice("~/../".length));
+  else if (bare.startsWith("~/")) expanded = join(anchors.workerHome, bare.slice("~/".length));
+  else if (!bare.startsWith("/")) return false;
+  if (expanded.endsWith("/**")) {
+    const dir = expanded.slice(0, -3);
+    return path === dir || path.startsWith(dir + "/");
+  }
+  return path === expanded;
+}
+
+/**
+ * Decide one target's reach. A covering deny rule wins over whatever the filesystem says.
+ *
+ * TRAP: without that precedence the ratchet is a no-op on CI, where the operator's files are
+ * absent and the filesystem alone reads `absent` whether or not a rule still exists.
+ */
+export function resolveCredentialReach(
+  target: CredentialReachTarget,
+  observed: CredentialReachResult | undefined,
+  denyRules: readonly string[],
+  anchors: { workerHome: string; configRoot: string; realHome: string },
+): CredentialReachResult {
+  if (target.kind === "file") {
+    const rule = denyRules.find((r) => denyRuleCovers(r, target.subject, anchors));
+    if (rule) return { id: target.id, kind: "file", outcome: "refused", reason: `denied by settings rule ${rule}` };
+  }
+  if (observed) return observed;
+  return { id: target.id, kind: target.kind, outcome: "unproven", reason: "the probe reported no line for this target" };
+}
+
+/**
+ * Split observed results against one host class's baseline reachable set.
+ *
+ * A widening is reachable now and unlisted — refused by name. A closable is a listed entry no
+ * longer reachable — reported, never failed, so the PR that closed it drops the line.
+ */
+export function credentialReachDrift(
+  observed: readonly CredentialReachResult[],
+  baselineReachable: readonly string[],
+): { widenings: CredentialReachResult[]; closable: string[] } {
+  const allowed = new Set(baselineReachable);
+  const reachableNow = new Set(observed.filter((r) => r.outcome === "reachable").map((r) => r.id));
+  return {
+    widenings: observed.filter((r) => r.outcome === "reachable" && !allowed.has(r.id)),
+    closable: baselineReachable.filter((id) => !reachableNow.has(id)),
+  };
+}
+
+/**
+ * The host class, derived from the environment rather than asserted. The container marker is
+ * the file scripts/fleet-heartbeat.sh already publishes as `image_build_sha`.
+ */
+export function hostClassOf(
+  env: NodeJS.ProcessEnv,
+  platform: string,
+  exists: (p: string) => boolean = existsSync,
+): string {
+  // CI is tested first and carries the platform: a macOS runner is a CI host, not the fleet's
+  // `mini`, whose baseline was measured on a machine holding the operator's real home.
+  if (env.CI === "true" || env.GITHUB_ACTIONS === "true") {
+    return platform === "linux" ? "ci-ubuntu" : `ci-${platform}`;
+  }
+  if (exists("/etc/rmd-build-sha")) return "azure-container";
+  if (platform === "darwin") return "mini";
+  return `unknown-${platform}`;
 }
