@@ -1,0 +1,82 @@
+- id: W1-T2863
+  title: "A FRESHNESS RESTART FORGETS A SURVIVING FIX WORKER — the branch claim records the daemon parent pid, so the next in-container process reclaims it while the detached child still owns the registered worktree and dispatches a duplicate repair that can only fail at git checkout"
+  repo: remudero
+  depends_on: [W1-T2609, W1-T2845]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files:
+    - src/run-task.ts
+    - test/fix-branch-checkout-serialization.test.ts
+  origin: "operator-session#daemon-self-refresh-duplicate-fix-worker-2026-09-05"
+  plan_refs: ["W1-T2609", "W1-T2845"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET AT 2026-09-05T02:51Z-03:02Z. A full sweep dispatched a fix for
+    PR #4023 on branch `run-W1-T2847-1788575098000` and created registered worktree
+    `/home/node/Remudero/worktrees/sweep-W1-T2847-1788576666167`. Origin/main then advanced, the
+    daemon exited 75, and the entrypoint refreshed and started a new Node process. The child worker
+    survived and eventually pushed commit 38f955f7. Before that completion, the new process
+    reclaimed `fix-branch--craigoley--remudero--run-W1-T2847-1788575098000.lock` because its holder
+    pid named the dead prior daemon, then launched a duplicate repair. Git refused it because that
+    branch was still checked out in the surviving worker's registered worktree.
+
+    THE EXISTING LOCK IS CORRECT WITHIN ONE PROCESS LIFETIME AND INCOMPLETE ACROSS THIS RESTART.
+    `dispatchFix` acquires the branch claim before creating the worktree and releases it after the
+    worktree is removed. The lock holder identity is the parent process, not the worker process or
+    registered worktree. Reclaiming a dead parent is therefore valid according to the lock's stated
+    contract while wrong according to material branch ownership. `createFixRungWorktree` fails
+    closed and protected the branch, but only after the sweep attempted duplicate work and emitted
+    a generic error. The queue recovered by accident of the git refusal, not by recognizing the
+    surviving owner.
+
+    USE GIT'S EXISTING DURABLE OWNERSHIP FACT. A registered worktree carrying the PR head branch is
+    already the condition `checkoutFixHeadRef` refuses to move, and it survives a parent refresh.
+    Before acquiring or reclaiming the process-pid branch claim, consult the canonical clone's
+    porcelain worktree registry for that exact branch. If another worktree owns it, stand down this
+    poll with the branch and owning path in telemetry. This is not a new lease, timer or kill path;
+    it makes admission respect the durable fact the eventual checkout already enforces.
+
+    STALE WORKTREES REMAIN SOMEONE ELSE'S JOB. Existing boot/poll orphan reapers classify and
+    remove genuinely stale registered worktrees. This task must not force-remove, reset, prune or
+    age out a holder. Once the registry no longer names the branch, the ordinary O_EXCL claim and
+    checkout path proceed unchanged. A live worker gets room to finish; an abandoned worktree is
+    recovered by the existing owner before a later level-triggered poll retries.
+  design: |
+    Extract or expose a pure-enough lookup over `git worktree list --porcelain` that returns the
+    registered path holding an exact `refs/heads/<branch>`, never a substring match. Inject that
+    reader at `buildSweepEffects` so an offline test can reproduce a new daemon process seeing a
+    stale pid claim plus an extant worktree without spawning a worker or mutating a real clone.
+
+    Run the holder check after live-state, ceiling and head-creditability checks but before
+    `acquireInflightLock`. When held, emit `sweep.fix.checkout_claim_declined` with reason
+    `registered_worktree_owner`, PR, task, branch and bounded repo-relative or configured worktree
+    path; then return with no lock reclaim, worktree creation, worker spawn or strike. Preserve the
+    existing `InflightLockError` branch under a distinct reason so dashboards can separate a live
+    pid owner from a cross-refresh worktree owner.
+  acceptance:
+    - claim: "a fix head registered to a surviving worktree causes the new sweep process to stand down before it reclaims a dead-parent branch claim or creates another worktree"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "the stand-down telemetry names registered_worktree_owner, PR, task, exact branch and owning worktree path without credentials or an unbounded command transcript"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "a live O_EXCL branch-claim holder still declines under its existing path and an unregistered branch still proceeds through one checkout and worker dispatch"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "substring-related branch names and detached registered worktrees do not falsely claim the PR head"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "the repair never kills a process, removes a worktree, resets a branch or weakens createFixRungWorktree's fail-closed checkout guard"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "deleting the pre-claim registered-worktree check reproduces a second checkout attempt and fails the focused suite"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+  falsifier: |
+    Close without implementation if the post-refresh process already treats a registered
+    worktree owning the exact fix head as an admission-time owner before branch-claim reclaim, or
+    if the original worker did not survive the refresh. The fleet evidence falsifies both: the new
+    process reclaimed the claim and attempted checkout; the old worker later pushed 38f955f7 from
+    the still-registered path.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2863`; the held id
+    is authoritative. This task changes no freshness, container lifecycle or orphan-reap policy.
