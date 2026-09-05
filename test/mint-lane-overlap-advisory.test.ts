@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { declaredFilesForFiledIds, printLaneOverlapAdvisory } from "../src/run-task.js";
@@ -206,7 +205,4 @@ test("W1-T985: all three minting lanes reach the advisory, not just the CLI verb
   const src = readFileSync(join(import.meta.dirname, "..", "src", "run-task.ts"), "utf8");
   const callSites = [...src.matchAll(/printLaneOverlapAdvisory\(/g)].length;
   assert.ok(callSites >= 4, `expected the definition plus three lane call sites, found ${callSites}`);
-  const base = execFileSync("git", ["show", "origin/main:src/run-task.ts"], { cwd: join(import.meta.dirname, ".."), encoding: "utf8", maxBuffer: 1 << 26 });
-  assert.ok(/overlapAdvisoryLines\(/.test(base), "control: the base really does carry the CLI verb's own reader, so this query can see its corpus");
-  assert.equal([...base.matchAll(/printLaneOverlapAdvisory\(/g)].length, 0, "and on the base the lanes had no reader at all — the premise of this task");
 });
