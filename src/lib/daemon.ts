@@ -75,7 +75,7 @@ import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
 // W1-T2744: a VALUE import, unlike the type-only line above. Safe: `sweep.ts` imports nothing
 // from this module, so this edge closes no cycle (contrast the daemon-health note above, where a
 // value import WOULD). Observation only: phase transitions never drain the process-wide registry.
-import { detachedSweepActionCount } from "./sweep.js";
+import { detachedSweepActionCount, drainDetachedSweepActions } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch-governor.js";
@@ -2991,6 +2991,24 @@ export async function runDaemon(
       sweepRetriggerState.lastRunAtMs = now().getTime();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
+    // W1-T2865: a freshness restart is the process-lifetime boundary W1-T2379's detached-action
+    // registry was built for. The final sweep above may have synchronously admitted a fix and
+    // detached only its long CI wait; returning before that wait settles lets entrypoint replace
+    // this process and kill the useful worker. Read the bounded count once, emit nothing for the
+    // common zero-action path, and let the existing registry own every admitted action to its
+    // normal outcome before the restart is announced. The pre-admission caller stops its
+    // interphase clock before entering this function, so nothing can race in behind the drain.
+    const detachedAtFreshness = detachedSweepActionCount();
+    if (detachedAtFreshness > 0) {
+      const drainStartedAtMs = now().getTime();
+      log("daemon.freshness_drain.started", { detached_sweep_actions: detachedAtFreshness });
+      await drainDetachedSweepActions();
+      log("daemon.freshness_drain.completed", {
+        detached_sweep_actions: detachedAtFreshness,
+        remaining_detached_sweep_actions: detachedSweepActionCount(),
+        duration_ms: Math.max(0, now().getTime() - drainStartedAtMs),
+      });
+    }
     const detail =
       `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
       `past this process's boot sha`;
@@ -4268,6 +4286,10 @@ export async function runDaemon(
     // new lane and cannot interrupt one: every prior batch settled before this tick began.
     const refetchedFreshness = deps.checkFreshness?.();
     if (refetchedFreshness?.stale) {
+      // W1-T2865: this is the only freshness boundary reached while the interphase review clock
+      // exists. Close admission before the shared final-sweep/drain path; do not move the drain
+      // into the clock itself, where W1-T2744 proved it can freeze ordinary phase transitions.
+      await stopInterphaseReviewClock();
       return stopForFreshness(refetchedFreshness);
     }
 

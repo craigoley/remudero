@@ -14,6 +14,13 @@ import {
 } from "../src/lib/daemon.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet } from "../src/lib/drain.js";
+import {
+  drainDetachedSweepActions,
+  detachedSweepActionCount,
+  runSweepLightPass,
+  type OpenPrView,
+  type SweepDeps,
+} from "../src/lib/sweep.js";
 
 // W1-T126 — DAEMON SELF-FRESHNESS. The same small linear plan test/daemon.test.ts uses
 // (A -> B -> C chain, D independent), trimmed to just A/B since these tests only need
@@ -50,6 +57,49 @@ function fakeClock(): { sleep: (ms: number) => Promise<void>; calls: number[] } 
 
 const OLD_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await settle();
+  }
+  assert.fail(message);
+}
+
+function blockedPr(): OpenPrView {
+  return {
+    prNumber: 2865,
+    prUrl: "https://github.com/o/r/pull/2865",
+    taskId: "W1-T2865-FIX",
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [
+      { claim: "finish the repair", proof: "unit test: x", met: false, reason: "not done", proof_exec: "executed_fail" },
+    ],
+    priorStrikes: 0,
+    lastActivityAt: "2026-09-05T04:00:00Z",
+    headSha: "detached-fix-head",
+    autoMergeArmed: false,
+  };
+}
+
+function detachedFixSweepDeps(
+  ledgerPath: string,
+  dispatchFix: NonNullable<SweepDeps["dispatchFix"]>,
+): SweepDeps {
+  return {
+    arm: () => {},
+    close: () => {},
+    dispatchFix,
+    escalate: () => {},
+    actionable: (disposition) => disposition === "blocked-fixable",
+    ledgerPath,
+    runId: "SWEEP-T2865",
+    now: () => Date.parse("2026-09-05T04:40:00Z"),
+  };
+}
 
 // ── claim 1: stale fixture ─────────────────────────────────────────────────────
 // "in-flight work completes, the restart is ledgered as
@@ -517,3 +567,147 @@ for (const lateFreshness of ["fresh", "unavailable"] as const) {
     assert.equal(freshnessReads, lateFreshness === "fresh" ? 2 : 0);
   });
 }
+
+// ── W1-T2865: freshness is a daemon-lifetime boundary ───────────────────────
+
+test("W1-T2865: the final freshness sweep's detached fix settles before the restart is ledgered", async () => {
+  assert.equal(detachedSweepActionCount(), 0, "precondition: no detached action leaked from another test");
+  const root = mkdtempSync(join(tmpdir(), "daemon-freshness-drain-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let releaseFix!: () => void;
+  let fixSettled = false;
+  const fixGate = new Promise<void>((resolve) => {
+    releaseFix = () => {
+      fixSettled = true;
+      resolve();
+    };
+  });
+
+  const daemon = runDaemon(fixturePlan(), {
+    refreshMerged: () => () => false,
+    runOne: async (id) => okResult(id),
+    sleep: fakeClock().sleep,
+    log: (step, extra = {}) => lines.push({ step, extra }),
+    checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: OLD_SHA, newSha: NEW_SHA }),
+    sweep: async () => {
+      await runSweepLightPass(
+        [blockedPr()],
+        detachedFixSweepDeps(ledgerPath, () => fixGate as never),
+      );
+    },
+  });
+
+  await waitFor(() => detachedSweepActionCount() === 1, "the final sweep never registered its detached fix");
+  const returnedBeforeSettlement = await Promise.race([
+    daemon.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 25)),
+  ]);
+  const fixWasSettledBeforeRelease = fixSettled;
+  const restartWasLoggedBeforeRelease = lines.some((line) => line.step === "daemon_selfrestart_for_freshness");
+
+  releaseFix();
+  const summary = await daemon;
+  await drainDetachedSweepActions();
+
+  assert.equal(returnedBeforeSettlement, false, "the stale summary must remain owned while the fix is settling");
+  assert.equal(fixWasSettledBeforeRelease, false);
+  assert.equal(restartWasLoggedBeforeRelease, false);
+  assert.equal(summary.stopReason, "stale");
+  assert.equal(fixSettled, true);
+  assert.equal(detachedSweepActionCount(), 0);
+  const steps = lines.map((line) => line.step);
+  assert.equal(steps.filter((step) => step === "daemon.freshness_drain.started").length, 1);
+  assert.equal(steps.filter((step) => step === "daemon.freshness_drain.completed").length, 1);
+  assert.ok(steps.indexOf("daemon.freshness_drain.started") < steps.indexOf("daemon.freshness_drain.completed"));
+  assert.ok(steps.indexOf("daemon.freshness_drain.completed") < steps.indexOf("daemon_selfrestart_for_freshness"));
+  const started = lines.find((line) => line.step === "daemon.freshness_drain.started");
+  const completed = lines.find((line) => line.step === "daemon.freshness_drain.completed");
+  assert.equal(started?.extra.detached_sweep_actions, 1);
+  assert.equal(completed?.extra.detached_sweep_actions, 1);
+  assert.equal(completed?.extra.remaining_detached_sweep_actions, 0);
+  assert.equal(typeof completed?.extra.duration_ms, "number");
+});
+
+test("W1-T2865: a zero-action freshness exit emits no drain telemetry", async () => {
+  const lines: Array<{ step: string }> = [];
+  const summary = await runDaemon(fixturePlan(), {
+    refreshMerged: () => () => false,
+    runOne: async (id) => okResult(id),
+    sleep: fakeClock().sleep,
+    log: (step) => lines.push({ step }),
+    checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: OLD_SHA, newSha: NEW_SHA }),
+    sweep: async () => {},
+  });
+
+  assert.equal(summary.stopReason, "stale");
+  assert.equal(lines.some((line) => line.step.startsWith("daemon.freshness_drain.")), false);
+});
+
+test("W1-T2865: late freshness closes the interphase review clock before its final sweep", async () => {
+  const waiters: Array<(result: "wake" | "timeout") => void> = [];
+  const sweepTickerWaiters: Array<() => void> = [];
+  let releaseOrphan!: () => void;
+  let releaseFinalSweep!: () => void;
+  const orphanGate = new Promise<void>((resolve) => { releaseOrphan = resolve; });
+  const finalSweepGate = new Promise<void>((resolve) => { releaseFinalSweep = resolve; });
+  let freshnessReads = 0;
+  let sweepCalls = 0;
+  let finalSweepStarted = false;
+  let lightPasses = 0;
+  let lateLightPasses = 0;
+
+  const daemon = runDaemon(fixturePlan(), {
+    refreshMerged: () => () => false,
+    runOne: async (id) => okResult(id),
+    sleep: () => new Promise<void>((resolve) => sweepTickerWaiters.push(resolve)),
+    checkFreshness: (): DaemonFreshness =>
+      ++freshnessReads === 1
+        ? { stale: false }
+        : { stale: true, oldSha: OLD_SHA, newSha: NEW_SHA },
+    sweep: async () => {
+      sweepCalls++;
+      if (sweepCalls === 2) {
+        finalSweepStarted = true;
+        await finalSweepGate;
+      }
+    },
+    sweepOrphans: async () => {
+      await orphanGate;
+      return { killed: [], leftAlone: [] };
+    },
+    sleepUntilSweepWake: () => new Promise((resolve) => waiters.push(resolve)),
+    sweepLight: async () => {
+      lightPasses++;
+      if (finalSweepStarted) lateLightPasses++;
+    },
+  });
+
+  await waitFor(() => sweepTickerWaiters.length === 1, "the ordinary full-sweep ticker never began waiting");
+  await settle();
+  sweepTickerWaiters.shift()!();
+  await waitFor(() => waiters.length === 1, "the interphase clock never began waiting");
+  waiters.shift()!("wake");
+  await waitFor(() => lightPasses === 1, "the interphase clock did not consume its first wake");
+  await waitFor(() => waiters.length >= 1, "the interphase clock did not resume waiting after its first wake");
+  releaseOrphan();
+  for (let i = 0; i < 10; i++) await settle();
+  const finalSweepStartedBeforeClockSettled = finalSweepStarted;
+  while (waiters.length > 0) waiters.shift()!("timeout");
+  await waitFor(() => finalSweepStarted, "the final freshness sweep never started after the clock settled");
+  await waitFor(() => sweepTickerWaiters.length === 1, "the final full-sweep ticker never began waiting");
+  releaseFinalSweep();
+  await settle();
+  sweepTickerWaiters.shift()!();
+
+  const summary = await daemon;
+  assert.equal(summary.stopReason, "stale");
+  assert.equal(sweepCalls, 2, "the ordinary and final freshness sweeps each ran once");
+  assert.equal(
+    finalSweepStartedBeforeClockSettled,
+    false,
+    "the late freshness boundary closes the interphase clock before starting its final sweep",
+  );
+  assert.equal(lightPasses, 1, "the clock admitted no pass after the late freshness boundary");
+  assert.equal(lateLightPasses, 0, "no review or fix admission raced behind the final sweep");
+});
