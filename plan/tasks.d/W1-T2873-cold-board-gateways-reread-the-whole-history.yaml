@@ -1,0 +1,111 @@
+- id: W1-T2873
+  title: "COLD BOARD GATEWAYS REREAD THE WHOLE HISTORY — closed-PR and issue delta indexes die with each gateway instance and daemon restart, so a warm one-call read repeatedly becomes a 34-call 69 MB fetch"
+  repo: remudero
+  depends_on: [W1-T2222, W1-T2323, W1-T2440]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 38.00
+  files:
+    - scripts/source-size-baseline.json
+    - src/lib/board-snapshot-cache.ts
+    - src/lib/status.ts
+    - src/run-task.ts
+    - test/board-snapshot-cache.test.ts
+  origin: "operator-session#crash-durable-board-index-2026-09-05"
+  plan_refs: ["W1-T181", "W1-T2222", "W1-T2323", "W1-T2440", "W1-T2870"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET AT 2026-09-05T08:22:52Z. After the daemon's fifth V8-heap
+    restart, `board_gateway.fetch_bytes` read 69,037,447 bytes over 34 REST calls for the closed
+    half and retained 3,325 rows. The next warm delta at 08:23:14Z read 545,244 bytes in one call.
+    The issue half showed the same shape: 4,358,882 bytes over eight calls cold, then 174,930 bytes
+    in one call warm. These are daemon ledger measurements, not estimates. They do not prove that
+    board parsing caused the OOMs; W1-T2870 separately owns the observed automated-retro heap
+    failure. They prove that every lost index imposes a large, avoidable network and parse burst
+    during recovery, exactly when queue supervision is least able to afford it.
+
+    OBSERVED AT CURRENT SOURCE. W1-T2222 already made closed PRs and labelled issues delta walks:
+    `fetchBoardPrsRest` and `fetchLabelledIssuesRest` stop at the first row whose `updated_at`
+    matches the supplied known map. W1-T2323 split the hot open half from the cold closed half,
+    and W1-T2440 moved prewarming off the request thread. The remaining state is two closure-local
+    variables in `buildBatchedGithub`: `knownBoardPrs` and `knownIssues`, both initialized
+    `undefined`. A new gateway therefore has no delta base. The daemon keeps one gateway for its
+    light sweep, but deliberately builds fresh gateways for other projections so failure flags do
+    not leak across passes; a process restart loses all of them. A source census found no file
+    read, file write, persistent store or snapshot option on this board-index path.
+
+    THE FALSIFIER WAS CHECKED. Current main has no process-shared or restart-durable seed for those
+    maps. A warm `mode: delta` ledger row is not such a seed: it proves only that one living
+    gateway retained its closure. The cache must not become a second board truth. GitHub remains
+    authoritative on every TTL refresh; persistence supplies only the complete prior row set that
+    the existing sorted-`updated_at` delta algorithm already requires.
+  design: |
+    Add one bounded `BoardSnapshotCache` constructed once per long-lived daemon or Serve process
+    from `<config.root>/state/cache/board/` and passed to every production `buildBatchedGithub`
+    instance for that repository. The in-process object supplies cloned closed-PR and labelled-
+    issue maps to newly constructed gateways. Its on-disk snapshot lets a replacement process
+    start with the same complete seed. Keep open PRs, mergeability, checks, review status and every
+    other mutable per-row follow-up out of the snapshot: the hot open half still refetches in full
+    on every due read exactly as today.
+
+    Store schema version, exact owner/repo, completed channel markers and one JSON record per row
+    in an atomically replaced 0600 NDJSON file. Stream reads and writes in bounded chunks rather
+    than constructing a second 69 MB JSON string in the daemon heap. Enforce explicit file, row,
+    line and string bounds before accepting data. A missing, malformed, partial, oversized,
+    wrong-repository or future-version file yields no seed and one bounded reason-code telemetry
+    row; it never yields an empty authoritative board. Never log row bodies, titles, paths, raw
+    bytes, credentials or the snapshot contents.
+
+    Commit a new snapshot only after a successful, untruncated closed or issue fetch. Preserve the
+    last complete channel when the other channel refreshes, and preserve the whole last-good file
+    when a fetch fails, truncates, serialization fails or atomic replacement fails. Apply a worker
+    prewarm result through the same cache commit path as a synchronous result. Multiple gateways
+    may race benignly: atomic replacement prevents partial files, repository/version validation
+    prevents cross-talk, and the next GitHub delta repairs an older complete winner. The snapshot
+    is disposable cache state, not ledger history, merge authorization or a deployment input.
+
+    Wire the same process-scoped cache into the daemon's projection gateways, lane gateways and
+    light-sweep gateway, and into Serve's one board gateway. Do not share mutable read-failure
+    flags between gateways; this task supplies only row seeds. Do not lengthen a TTL, suppress a
+    GitHub refresh, persist open values, add a database/dependency, or change any lifecycle action.
+  acceptance:
+    - claim: "a complete live-shaped snapshot survives a new gateway and a new process cache instance, turning the first closed and issue reads into existing one-call deltas while preserving the same projected rows"
+      proof: "unit test: test/board-snapshot-cache.test.ts"
+    - claim: "open PRs and every mutable check, review and mergeability value are never persisted and are still fetched from GitHub on the first due read"
+      proof: "unit test: test/board-snapshot-cache.test.ts"
+    - claim: "missing, malformed, partial, oversized, wrong-repository and future-version snapshots are refused as absent seeds, never as an authoritative empty board"
+      proof: "unit test: test/board-snapshot-cache.test.ts"
+    - claim: "failed or truncated GitHub reads and failed snapshot writes preserve the last complete seed for the next recovery"
+      proof: "unit test: test/board-snapshot-cache.test.ts"
+    - claim: "snapshot reads and writes are bounded and streaming, replacement is atomic with mode 0600, and telemetry contains only schema, repository, channel, row count, byte count and bounded reason codes"
+      proof: "unit test: test/board-snapshot-cache.test.ts"
+    - claim: "the daemon shares one cache across projection, lane and light-sweep gateway instances, and Serve seeds its board gateway from the same state namespace without an extra GitHub call"
+      proof: "unit test: test/board-snapshot-cache.test.ts"
+    - claim: "the new snapshot-cache module is constructed by the production daemon and Serve composition root rather than imported only by its own test"
+      proof: "grep: createBoardSnapshotCache( in src/run-task.ts"
+    - claim: "existing TTLs, delta stop rules, read-failure isolation, board rendering, GitHub pacing, merge authorization and daemon or Serve lifecycle behavior remain unchanged"
+      proof: "regression test: test/board-snapshot-cache.test.ts"
+    - claim: "removing either the disk load or the fresh-gateway seed makes the cold-recovery request-count regression fail"
+      proof: "mutation test: test/board-snapshot-cache.test.ts"
+  falsifier: |
+    Close without implementation only if current main can construct a fresh `buildBatchedGithub`
+    or restart the process and still give `fetchBoardPrsRest` plus `fetchLabelledIssuesRest` their
+    prior complete maps before the first fetch. Closure-local maps do not satisfy that condition,
+    and the live full-mode rows prove they are repeatedly absent.
+
+    Re-design instead of shipping if correctness requires persisting any open or per-head status,
+    if a partial/truncated read can replace a complete seed, if loading needs one unbounded whole-
+    file allocation, or if the cache needs GitHub, Docker, Azure, worker credentials or lifecycle
+    authority of its own. The optimization must be removable without changing a board verdict.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2873` after
+    reporting 2872 as the maximum across the merged plan, shards, open PRs, remote plan and
+    history. The held id is authoritative.
+
+    This task does not claim the cold walk caused the V8 OOM. W1-T2870 isolates the proven retro
+    crash. W1-T2873 removes a separately observed recovery and multi-gateway amplification cost so
+    a crash does not immediately buy another 73 MB of API payload and parse pressure.
