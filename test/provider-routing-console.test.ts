@@ -46,6 +46,8 @@ const selectedInput = () => ({
     provider: "codex" as const,
     capacity: capacity("codex", 25),
     tightestRemainingPercent: 75,
+    allocationWeight: 70 ** 2,
+    allocationSharePercent: 94.2,
   },
 });
 
@@ -67,6 +69,8 @@ test("the provider snapshot writes through a temp file + rename and the reader p
   assert.equal(read.selected?.provider, "codex");
   assert.equal(read.selected?.model, "gpt-5.6-terra");
   assert.equal(read.selected?.effort, "high");
+  assert.equal(read.selected?.allocationWeight, 70 ** 2);
+  assert.equal(read.selected?.allocationSharePercent, 94.2);
   assert.equal(read.providers?.find((p) => p.provider === "codex")?.windows[0]?.usedPercent, 25);
   assert.equal(read.providers?.find((p) => p.provider === "claude")?.windows[0]?.usedPercent, 72);
   const source = readFileSync(fileURLToPath(new URL("../src/lib/provider-routing-status.ts", import.meta.url)), "utf8");
@@ -381,9 +385,12 @@ test("the console panel renders reserve, both windows/resets, selected model/eff
   render(snapshot);
   assert.equal(elements["pr-state"]!.textContent, "stale last decision");
   assert.equal(elements["pr-reserve"]!.textContent, "5%");
-  assert.match(elements["pr-selected"]!.textContent, /codex.*gpt-5\.6-terra.*high.*75% remaining/);
+  assert.match(elements["pr-selected"]!.textContent, /codex.*gpt-5\.6-terra.*high.*75% remaining.*94\.2% automatic target share/);
   assert.match(elements["pr-providers"]!.textContent, /claude.*72%.*reset.*codex.*25%.*reset/);
   assert.match(elements["pr-as-of"]!.textContent, /^at /);
+
+  render({ ...snapshot, policy: { preference: "codex" } });
+  assert.match(elements["pr-selected"]!.textContent, /94\.2% explicit target share/);
 
   render({ version: 1, state: "blocked", freshness: "fresh", enabledProviders: ["claude", "codex"], reservePercent: 5, observedAt: "2026-09-02T12:00:00.000Z", freshUntil: "2026-09-02T12:01:00.000Z", providers: [], blockedReason: "no-provider-headroom" });
   assert.match(elements["pr-state"]!.textContent, /blocked.*no-provider-headroom/);

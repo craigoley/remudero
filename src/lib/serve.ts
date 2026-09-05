@@ -2697,10 +2697,14 @@ export function renderShellHtml(
     setGlanceValue("pr-reserve", typeof p.reservePercent === "number" ? p.reservePercent + "%" : "unknown");
 
     const selected = p.selected;
+    const allocationKind = p.policy && p.policy.preference && p.policy.preference !== "automatic" ? "explicit" : "automatic";
+    const allocationShare = selected && typeof selected.allocationSharePercent === "number"
+      ? selected.allocationSharePercent.toFixed(1).replace(/\.0$/, "") + "% " + allocationKind + " target share"
+      : "";
     setGlanceValue(
       "pr-selected",
       selected
-        ? [selected.provider, selected.accountLabel, selected.model, selected.effort, selected.tightestRemainingPercent + "% remaining"]
+        ? [selected.provider, selected.accountLabel, selected.model, selected.effort, selected.tightestRemainingPercent + "% remaining", allocationShare]
             .filter(Boolean)
             .join(" · ")
         : p.state === "blocked"
