@@ -89,8 +89,21 @@ test("W1-T2680: the three suites that went red in CI on 2026-09-05, after a call
     "a NEW src/lib file joins the `_RE` validator census (PR #4072)",
   );
   const serveChange = censusSuiteFiles(["src/lib/serve.ts"], REPO_ROOT);
-  for (const suite of ["test/console-stopped-counts.test.ts", "test/decision-summary.test.ts"]) {
-    assert.ok(serveChange.includes(suite), `${suite} reads serve.ts's SOURCE TEXT and went red on it (PR #4073)`);
+  assert.ok(
+    serveChange.includes("test/console-stopped-counts.test.ts"),
+    "console-stopped-counts reads serve.ts's SOURCE TEXT and went red on it (PR #4073)",
+  );
+  // decision-summary.test.ts went red for the SAME reason in the same PR, and is deliberately NOT
+  // asserted here: its repair replaced the `readFileSync(serve.ts)` with an assertion on the real
+  // function object, so it no longer carries the shape at all. Pinning it would be pinning history
+  // rather than the tree — and this suite found that itself, by failing when the repair landed.
+  //
+  // The CLASS is what matters and it is very much alive: every suite that still reads serve.ts as
+  // text is reachable only this way. Asserted as a population so the claim cannot quietly decay to
+  // one lucky file.
+  const stillReadServe = ["test/codex-model-console.test.ts", "test/console-token-refresh.test.ts", "test/provider-routing-console.test.ts"];
+  for (const suite of stillReadServe) {
+    assert.ok(serveChange.includes(suite), `${suite} reads serve.ts as text and no symbol sweep can reach it`);
   }
 });
 
@@ -182,6 +195,39 @@ test("W1-T2680: sourceTextPathsRead reads paths from the CALL, not from fixture 
 });
 
 // ── the CLI, end to end ───────────────────────────────────────────────────────────────────────
+
+test("W1-T2680: the CLI FAILS CLOSED — an unreadable tree prints NOTHING and exits 1, never an empty list a caller could read as 'no suites matter'", () => {
+  // Driven through the CLI's TEST-ONLY `--plan-reading-root` flag, the same seam
+  // test/fast-lane-classifier.test.ts uses to drive the sibling verb's catch block — pointed at a
+  // directory that does not exist, so the enumeration genuinely throws. Without this the catch arm
+  // is dead code, which is exactly what `diff-coverage` blocked this PR on.
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}census-cli-fail-`));
+  try {
+    const list = join(dir, "changed.txt");
+    writeFileSync(list, "src/lib/policy.ts\n");
+    let status = 0;
+    let stdout = "";
+    let stderr = "";
+    try {
+      stdout = execFileSync(
+        process.execPath,
+        ["--import", "tsx", SCRIPT, "--list-census-suites", "--changed-files", list, "--plan-reading-root", join(REPO_ROOT, "no-such-directory-at-all")],
+        { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } as NodeJS.ProcessEnv },
+      );
+    } catch (err) {
+      const e = err as { status?: number; stdout?: string; stderr?: string };
+      status = e.status ?? 0;
+      stdout = e.stdout ?? "";
+      stderr = e.stderr ?? "";
+    }
+    assert.equal(status, 1, "a nonzero exit is the whole signal — a caller must fail closed on it");
+    assert.equal(stdout.trim(), "", "and NOTHING on stdout: an empty list beside exit 0 would read as 'no suites matter'");
+    assert.match(stderr, /FAILED to enumerate the census suite set/);
+    assert.match(stderr, /fail closed and run the full suite/, "the message says what the caller must do");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("W1-T2680 (wiring): the CLI verb prints the list on stdout, one path per line", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}census-cli-`));
