@@ -1,0 +1,68 @@
+# DOCS-INDEX check guard (R-46, docs/audits/recon-2026-09-05.md).
+#
+# `npm run docs-index:check` (the committed docs-index.json, under docs/, must match a fresh
+# regeneration from docs/**/*.md) and `npm run docs-index:check-paths` (every repo-relative path cited inside a
+# fenced ```mermaid block in docs/ must resolve to a real file) both exist, are both exercised at
+# the unit level by test/docs-index.test.ts, and until this workflow neither was invoked by any
+# CI job -- `git grep -n docs-index -- .github/` returned zero hits (OBSERVED, 2026-09-05). A
+# generator's own `--check`/`--check-paths` flags are exactly the shape scripts/unwired-gate-
+# check.mjs already polices for `scripts/*-check.mjs` FILE basenames, but its GATE_SHAPED_RE
+# matches only that basename shape -- an npm SCRIPT NAME ending `:check`/`:check-paths` (the
+# generator's own file, `scripts/generate-docs-index.mjs`, is not itself gate-shaped) was
+# invisible to it. This PR extends that classifier (see scripts/unwired-gate-check.mjs's
+# NPM_SCRIPT_ALLOWANCE) to cover the npm-script-name shape too; this workflow is what makes
+# `docs-index:check`/`docs-index:check-paths` specifically stop being an offender under the
+# widened classifier, rather than an allowance-listed one.
+#
+# WHY ITS OWN FILE RATHER THAN A ci.yml JOB, MEASURED -- same reasoning
+# .github/workflows/unwired-gate.yml already documents for the identical shape of problem: a new
+# ci.yml JOB needs a `CI_PARITY_TABLE` entry in `src/lib/ci-parity.ts` (refused in every
+# ordering -- before the job by test/preflight-ci-parity.test.ts's own-table-ahead-of-workflow
+# check, after it by that file's forward "every real job has an entry" check, and alongside it by
+# Rule 25's `detectInstrumentEntanglement`, which reads `entangled: true` for a ci.yml job change
+# shipped beside a src/ registration edit). That src/ edit is out of scope for this instrument-only
+# PR. A separate workflow file needs no `CI_PARITY_TABLE` entry (that table is scoped to ci.yml by
+# design) and is the direction ci-gate.yml's own header already states: "remudero's required
+# checks will live in SEPARATE workflow files".
+#
+# NOT ADDED TO ci-gate.yml's REQUIRED LIST. `docs-index:check-paths` FAILS at HEAD today
+# (docs/system-diagrams.md:213 cites `lib/status.ts`, which does not resolve -- the exact R-46
+# citation; corrected on branch claude/codebase-analysis-debt-33bpfy, PR #4075, not yet merged as
+# of this PR) -- wiring a currently-red check into a REQUIRED job would deadlock every PR in the
+# repo, this one included, until that PR lands. `ci.yml`'s own `task-id-existence` and
+# `assertion-discrimination` jobs (and `unwired-gate.yml`'s own job) are this repo's precedent for
+# a gate that runs and reddens on every PR without yet being a merge blocker; promoting one is an
+# operator decision, not this PR's to make. Once #4075 merges this job goes green on its own, with
+# no further edit needed here.
+#
+# Runs UNCONDITIONALLY on every PR (no path filter, no `if:` beyond the PR-only gate below) -- same
+# fail-closed shape as ci.yml's claims/no-hand-rolled-fetch/task-id-existence gates and
+# unwired-gate.yml's own job: a path-filtered check that can go silently absent is the synthwatch
+# #102 deadlock class ci-gate.yml exists to avoid, and both scripts are cheap (pure JS reading
+# docs/**/*.md, no network).
+name: docs-index-check
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docs-index-check:
+    name: docs-index-check
+    runs-on: ubuntu-latest
+    # W1-T1009-shaped LIGHT band: two pure-JS reads of docs/**/*.md, no network, measured well
+    # under a minute alongside the sibling unwired-gate job's ~0.2s check.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Docs index freshness (the committed docs-index.json, under docs/, must match a fresh regeneration)
+        run: npm run --silent docs-index:check
+      - name: Docs mermaid path citations (every cited repo-relative path must resolve)
+        run: npm run --silent docs-index:check-paths

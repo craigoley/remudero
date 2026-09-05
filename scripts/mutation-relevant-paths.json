@@ -1,6 +1,10 @@
 [
   "src/lib/classify.ts",
   "test/classify.test.ts",
+  "test/block-reason.test.ts",
+  "test/three-retries-in-three-seconds-against-a-lockout.test.ts",
+  "test/session-limit-is-a-refusal-not-a-success.test.ts",
+  "test/codex-quota-window-refusal.test.ts",
   "stryker.conf.json",
   "scripts/mutation-ratchet.mjs",
   "scripts/mutation-baseline.json"

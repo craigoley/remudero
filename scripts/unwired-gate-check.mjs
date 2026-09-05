@@ -106,6 +106,166 @@ export const ALLOWANCE = [
   },
 ];
 
+// ── R-46: the SAME hazard, one level up -- an npm SCRIPT NAME can claim to be a gate too ───────
+//
+// {@link GATE_SHAPED_RE} judges a tracked `scripts/` FILE's basename. That predicate is blind to
+// `docs-index:check-paths`: its underlying file, `scripts/generate-docs-index.mjs`, does not end
+// in `-check.mjs`/`-gate.mjs` -- the CLAIM to be a gate lives in the npm alias name
+// (`package.json`'s `"docs-index:check-paths": "node scripts/generate-docs-index.mjs
+// --check-paths"`), not the file it runs. R-46 (docs/audits/recon-2026-09-05.md) measured exactly
+// this: `docs-index:check-paths` failed at HEAD and was invoked by no workflow, and this guard's
+// own file-basename predicate could not see it (`git grep -n docs-index -- .github/` = 0, yet
+// `isGateShaped("scripts/generate-docs-index.mjs")` is false).
+//
+// THE PREDICATE IS THE NAME, SAME AS ABOVE, ONLY NOW IT IS THE PACKAGE.JSON KEY. A hyphen or colon
+// is required before the `check` suffix, so bare `"check"` (the repo's own aggregate runner,
+// `node scripts/check.mjs`) is not swept in -- the identical hyphen-guard reasoning
+// {@link GATE_SHAPED_RE} already applies to `scripts/check.mjs`/`scripts/gate.mjs`. A trailing
+// `-<word>` (`:check-paths`) is also check-shaped: the generator's OWN two flags are
+// `--check`/`--check-paths`, and both are exactly the shape this predicate exists to catch.
+export const NPM_CHECK_SHAPED_RE = /[-:]check(?:-[a-z0-9-]+)?$/i;
+
+/** Characters that can appear inside an npm script name -- wider than a file basename's
+ *  {@link isWired} boundary class because npm script names use `:` as a namespace separator
+ *  (`docs-index:check`) as well as `-`. Used to stop a shorter script name being credited by a
+ *  longer sibling's mention, e.g. `docs-index:check` must never be "wired" merely because
+ *  `docs-index:check-paths` appears in a `run:` step -- the identical hazard the file-basename
+ *  {@link isWired} guards against for `foo-check.mjs` vs. `bar-foo-check.mjs`. */
+const NPM_SCRIPT_IDENT_RE = /[A-Za-z0-9_.:-]/;
+
+/**
+ * THE RECORDED ALLOWANCE for check-shaped npm SCRIPT NAMES -- the sibling of {@link ALLOWANCE},
+ * same shrink-only contract, same written-reason requirement, keyed by `npmScript` (a
+ * `package.json` scripts key) rather than a tracked file path. Measured against the real tree
+ * 2026-09-05: of 14 check-shaped npm script names, 6 are wired (`api-client:check`,
+ * `no-hand-rolled-fetch:check`, `unwired-gate:check`, `mkdtemp-callsite-check`,
+ * `task-id-existence:check`, and `docs-index:check`/`docs-index:check-paths` as of THIS PR's own
+ * `.github/workflows/docs-index-check.yml`), and the 7 below are not -- each is a DIFFERENT
+ * generator's own staleness/consistency check, tested at the unit level but invoked by no CI job,
+ * and wiring any one of them is a separate, single-concern PR (widening this allowance list is
+ * the visible edit a reviewer sees when that happens; there is no verb that appends to it).
+ */
+export const NPM_SCRIPT_ALLOWANCE = [
+  {
+    npmScript: "learnings-index:check",
+    reason:
+      "generate-learnings-index.mjs's own staleness check on learnings/index.json; tested at the " +
+      "unit level (test/learnings-index.test.ts) but invoked by no CI job -- wiring it is a " +
+      "separate, single-concern PR, same shape as the docs-index pair this PR does wire.",
+  },
+  {
+    npmScript: "plan-index:check",
+    reason:
+      "generate-plan-index.mjs's own staleness check on plan/plan-index.json; tested at the unit " +
+      "level (test/plan-index.test.ts) but invoked by no CI job -- wiring it is a separate, " +
+      "single-concern PR, same shape as the docs-index pair this PR does wire.",
+  },
+  {
+    npmScript: "learnings-assert:check",
+    reason:
+      "learnings-assert-check.mjs's own `--check` mode; invoked by no CI job today -- wiring it " +
+      "is a separate, single-concern PR outside R-46's docs-index scope.",
+  },
+  {
+    npmScript: "cli-reference:check",
+    reason:
+      "generate-cli-reference.mjs's staleness check; exercised only indirectly, by " +
+      "test/cli-reference.test.ts spawning the generator script directly (never `npm run " +
+      "cli-reference:check`) as part of `npm run test:ci` -- a unit test of the generator, not a " +
+      "CI gate enforcing it against the committed docs/cli-reference.md. Wiring the npm alias " +
+      "itself is a separate, single-concern PR.",
+  },
+  {
+    npmScript: "macro-skills:check",
+    reason:
+      "generate-macro-skills.mjs's own `--check` mode; invoked by no CI job today -- wiring it is " +
+      "a separate, single-concern PR outside R-46's docs-index scope.",
+  },
+  {
+    npmScript: "capability-snapshot:check",
+    reason:
+      "generate-capability-snapshot.mjs's own `--check` mode; invoked by no CI job today -- " +
+      "wiring it is a separate, single-concern PR outside R-46's docs-index scope.",
+  },
+  {
+    npmScript: "worker-branch-shape:check",
+    reason:
+      "worker-branch-shape.mjs's own check mode; invoked by no CI job today -- wiring it is a " +
+      "separate, single-concern PR outside R-46's docs-index scope.",
+  },
+];
+
+/** True when a `package.json` scripts KEY has, by its own name, claimed to be a gate. */
+export function isNpmScriptCheckShaped(name) {
+  return NPM_CHECK_SHAPED_RE.test(name);
+}
+
+/** The `package.json` scripts map's keys, tolerating a missing/unparseable file the same way
+ *  {@link collectWiringText} already does for its own read of the same file (an absent or broken
+ *  package.json has no scripts to judge, not a throw). */
+export function listNpmScriptNames(repoRoot) {
+  let pkg = {};
+  try {
+    pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+  } catch {
+    pkg = {};
+  }
+  return Object.keys(pkg.scripts ?? {});
+}
+
+/**
+ * Npm-script-name occurrence at a position not preceded OR FOLLOWED by an npm-script-name
+ * character -- the two-sided version of {@link isWired}'s one-sided guard, needed because a
+ * check-shaped name can be a PREFIX of a longer sibling's name (`docs-index:check` is a prefix of
+ * `docs-index:check-paths`), not merely a suffix of one (`foo-check.mjs` inside
+ * `bar-foo-check.mjs`, the case {@link isWired} was built for). Reuses the SAME wiring text
+ * {@link collectWiringText} already builds (every workflow's executable strings plus every
+ * `package.json` script's VALUE) -- an npm-run invocation and a compound script that chains
+ * `npm run <name>` both live there; a script's own KEY is never part of that text, so a script
+ * cannot self-credit.
+ */
+export function isNpmScriptWired(name, wiringText) {
+  let i = wiringText.indexOf(name);
+  while (i !== -1) {
+    const prev = i === 0 ? "" : wiringText[i - 1];
+    const next = wiringText[i + name.length] ?? "";
+    if (!NPM_SCRIPT_IDENT_RE.test(prev) && !NPM_SCRIPT_IDENT_RE.test(next)) return true;
+    i = wiringText.indexOf(name, i + 1);
+  }
+  return false;
+}
+
+/**
+ * The npm-script-name judgement, over an injectable tree -- the sibling of {@link scanRepo},
+ * same `unwired`/`stale` shape and the same shrink-only contract for its allowance.
+ */
+export function scanNpmScripts(repoRoot, { allowance = NPM_SCRIPT_ALLOWANCE, scripts, wiringText } = {}) {
+  const names = scripts ?? listNpmScriptNames(repoRoot);
+  const wiring = wiringText ?? collectWiringText(repoRoot);
+  const checkShaped = names.filter(isNpmScriptCheckShaped);
+  const allowed = new Map(allowance.map((e) => [e.npmScript, e]));
+
+  const unwired = [];
+  for (const name of checkShaped) {
+    if (isNpmScriptWired(name, wiring)) continue;
+    if (allowed.has(name)) continue;
+    unwired.push(name);
+  }
+
+  const stale = [];
+  for (const entry of allowance) {
+    if (!names.includes(entry.npmScript)) {
+      stale.push({ npmScript: entry.npmScript, why: "no longer a package.json script" });
+      continue;
+    }
+    if (isNpmScriptWired(entry.npmScript, wiring)) {
+      stale.push({ npmScript: entry.npmScript, why: "is now wired -- delete this row" });
+    }
+  }
+
+  return { unwired, stale, checkShaped, scanned: names.length };
+}
+
 /** A small bounded synchronous sleep (`Atomics.wait` on a throwaway buffer) -- used only to
  *  space out {@link listTrackedScripts}'s retries, never to change the eventual verdict. */
 function sleepMs(ms) {
@@ -273,12 +433,14 @@ export function scanRepo(repoRoot, { allowance = ALLOWANCE, scripts, wiringText 
 export function main({
   repoRoot = join(dirname(fileURLToPath(import.meta.url)), ".."),
   scan = scanRepo,
+  scanNpm = scanNpmScripts,
   log = console.log,
   error = console.error,
 } = {}) {
   const { unwired, stale, gateShaped, scanned } = scan(repoRoot);
+  const { unwired: npmUnwired, stale: npmStale, checkShaped, scanned: npmScanned } = scanNpm(repoRoot);
 
-  if (unwired.length > 0 || stale.length > 0) {
+  if (unwired.length > 0 || stale.length > 0 || npmUnwired.length > 0 || npmStale.length > 0) {
     error("unwired-gate-check: FAILED -- a gate-shaped instrument that nothing invokes is not a gate:");
     for (const rel of unwired) {
       error(`  ${rel}: named like a gate, but no .github/workflows/ file and no package.json script invokes it`);
@@ -286,18 +448,27 @@ export function main({
     for (const s of stale) {
       error(`  ${s.script}: recorded in ALLOWANCE, but it ${s.why}`);
     }
+    for (const name of npmUnwired) {
+      error(`  ${name}: an npm script named like a gate, but no .github/workflows/ file and no OTHER package.json script invokes it`);
+    }
+    for (const s of npmStale) {
+      error(`  ${s.npmScript}: recorded in NPM_SCRIPT_ALLOWANCE, but it ${s.why}`);
+    }
     error("");
     error(
       "Wire it: add the script to a job step in .github/workflows/ and to package.json's scripts " +
-        "map, exactly as this check itself is wired. The ALLOWANCE in this file records the gates " +
-        "whose wiring is owned elsewhere and may only SHRINK -- there is no verb that appends to it.",
+        "map, exactly as this check itself is wired. The ALLOWANCE/NPM_SCRIPT_ALLOWANCE in this " +
+        "file record the gates whose wiring is owned elsewhere and may only SHRINK -- there is no " +
+        "verb that appends to either.",
     );
     return 1;
   }
 
   log(
     `unwired-gate-check: clean -- ${gateShaped.length} gate-shaped of ${scanned} tracked scripts/ ` +
-      `executables, ${ALLOWANCE.length} recorded as owned elsewhere, 0 unwired and unrecorded.`,
+      `executables, ${ALLOWANCE.length} recorded as owned elsewhere, 0 unwired and unrecorded; ` +
+      `${checkShaped.length} check-shaped of ${npmScanned} package.json scripts, ` +
+      `${NPM_SCRIPT_ALLOWANCE.length} recorded as owned elsewhere, 0 unwired and unrecorded.`,
   );
   return 0;
 }
