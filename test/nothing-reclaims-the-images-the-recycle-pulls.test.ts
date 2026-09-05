@@ -86,6 +86,12 @@ function dockerStub(scenario: string): string {
     '    fmt=""',
     '    if [ "$1" = "--format" ]; then fmt="$2"; shift 2; fi',
     '    case "$fmt" in',
+    '      *Mounts*)',
+    '        printf "%s\\t/home/node/Remudero\\ttrue\\n" "${RMD_STATE_DIR:-$HOME/rmd-state2}"',
+    '        printf "%s\\t/home/node/.claude\\ttrue\\n" "${RMD_CLAUDE_DIR:-$HOME/.claude}"',
+    '        codex="${RMD_CODEX_DIR:-$HOME/.codex}"; [ ! -d "$codex" ] || printf "%s\\t/home/node/.codex\\ttrue\\n" "$codex"',
+    '        config="${RMD_CONTAINER_CONFIG_DIR:-$HOME/.config/remudero-container}"; [ ! -d "$config" ] || printf "%s\\t/home/node/.config/remudero\\ttrue\\n" "$config"',
+    "        exit 0 ;;",
     // `{{.Image}}` against a container id is the protected-set read; against the container NAME
     // it is section 7's proof that the started container is on the digest just pulled.
     '      *.Image*)',

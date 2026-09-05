@@ -10,7 +10,10 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CONTRACT = join(REPO_ROOT, "deploy", "container-runtime-contract.sh");
 const RECYCLE = join(REPO_ROOT, "deploy", "recycle-container.sh");
-const BASH_SUPPORTS_ASSOCIATIVE_ARRAYS = spawnSync("bash", ["-c", "declare -A probe"], {
+const BASH_BIN = ["/opt/homebrew/opt/bash/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"]
+  .find((candidate) => existsSync(candidate) && spawnSync(candidate, ["-c", "declare -A probe"]).status === 0)
+  ?? "bash";
+const BASH_SUPPORTS_ASSOCIATIVE_ARRAYS = spawnSync(BASH_BIN, ["-c", "declare -A probe"], {
   encoding: "utf8",
 }).status === 0;
 
@@ -62,7 +65,7 @@ function runContract(expectations: ContractExpectation[], extraEnv: Record<strin
   for (const expectation of expectations) {
     args.push("--expect", expectation.source, expectation.destination, expectation.mode ?? "rw");
   }
-  const run = spawnSync("bash", [CONTRACT, ...args], {
+  const run = spawnSync(BASH_BIN, [CONTRACT, ...args], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: {
@@ -192,7 +195,7 @@ function runRecycle(opts: { codex: boolean; omitCodexMount?: boolean; scriptPath
     { mode: 0o755 },
   );
   chmodSync(join(binDir, "az"), 0o755);
-  const run = spawnSync("bash", [opts.scriptPath ?? RECYCLE], {
+  const run = spawnSync(BASH_BIN, [opts.scriptPath ?? RECYCLE], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: {
