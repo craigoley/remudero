@@ -1,0 +1,79 @@
+- id: W1-T2930
+  title: "THE SEMANTIC DOWNGRADE READS A CLAUSE ITS OWN CONTRACT FORBIDS WRITING — parseReviewerVerdictClauses captures a trailing reason off the reviewer's FAIL line, and reviewerVerdictContract instructs that reviewer to emit a FIXED parenthetical and NOTHING ELSE ON THE LINE, so every downgrade lands with no reason and can only be overridden, never answered"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§12", "W1-T2263", "W1-T2304", "W1-T2284"]
+  files: [src/lib/review.ts, test/the-downgrade-clause-has-a-writer.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS SHARD REPLACES ITS OWN ORIGINAL PREMISE, WHICH WAS MEASURED AND FOUND FALSE. It first
+    claimed the axis was the PROOF FORM — that a shard must cite `unit test: test/foo.test.ts` for
+    `not_yet_built` to resolve, and that the semantic reviewer then refuses that same form as
+    non-responsive. Two PRs were repointed from a file path to a specific test title on that theory
+    (#4116, #4119). #4110 then carried a TITLE proof that executed, passed, and discriminated
+    against its merge-base — and was downgraded anyway. The proof form is not the axis. A second
+    guess, that the production path was unwired, was also wrong: that PR's CI step passes `BASE_SHA`
+    with a comment recording that without it the arm "would have skipped on every run and shipped a
+    gate that never fires".
+
+    THE ACTUAL DEFECT IS A READER WITH NO WRITER, AND BOTH HALVES ARE IN ONE FILE.
+      * `parseReviewerVerdictClauses` (src/lib/review.ts) matches `REVIEW_VERDICT <n>: FAIL` and
+        captures group 3 — "whatever the reviewer wrote after the token" — then feeds it through
+        `extractBoundedClause` into `semanticClause`.
+      * `judgeCriterion` threads it: `reason = semanticClause ? \`${reason} — NOTE: ${downgradeNote}:
+        ${semanticClause}\` : \`${reason} — NOTE: ${downgradeNote}\``, and W1-T2263's own comment
+        says the clause exists "so the row can name what would answer the claim, not just that it
+        didn't."
+      * `reviewerVerdictContract` — the instruction the reviewer actually receives — says: emit
+        "EXACTLY one line per criterion, in this form and nothing else on the line:
+        `REVIEW_VERDICT <n>: FAIL   (proof missing, unpasted, or non-responsive)`". The parenthetical
+        is a FIXED TEMPLATE LITERAL naming a three-way category, not a slot for this criterion's
+        reason, and "nothing else on the line" FORBIDS the reviewer from adding one.
+    So the capture group is dead by construction. W1-T2263 built the reader and the threading; the
+    contract was never widened to ask anyone to write.
+
+    WHAT IT COSTS, MEASURED ON THE LIVE LEDGER 2026-09-05:
+      semantic non-responsive downgrades .............. 42
+      distinct tasks affected ......................... 11
+      rows carrying a clause .......................... 0
+    Re-counted twice, two hours apart: 38 then 42, so this accrues at roughly two an hour on a
+    normal board and the operator cost is per-instance, not one-off.
+    Every one reads `— NOTE: reviewer judged the proof non-responsive (semantic downgrade)` and
+    stops. There is no rationale anywhere else either: no diff-level review comments, and the PR
+    comment restates the criterion. The fix rung then classifies it as a REVIEW FALSE-BLOCK
+    ("deterministic floor passes while the spawned reviewer blocks"), stands down, and opens a
+    needs-human issue whose own recommendation is "re-judge … if the block is unjustified" — an
+    operator adjudicating on evidence that was never written down. Two such issues (#4123, #4128)
+    were cleared by hand this session; both PRs then passed on re-judge.
+
+    WHY THIS IS THE PREREQUISITE FOR ANY ADJUDICATOR. The obvious remedy — add an LLM that sweeps
+    blocks and decides which truly need a human — cannot work while the first judge is silent: a
+    second judge would form an opinion from the same absence. W1-T2284 already records the trap in
+    this class: "OUTCOME AGREEMENT CANNOT VALIDATE A REMEDY … indistinguishable from a rubber stamp
+    by construction, because the null hypothesis scores perfectly", and pre-registers what a valid
+    instrument needs — a citation a human can check, a polarity-inverted negative control it must
+    refuse to clear, a clear rate split by reason class, and a non-clearing arm required to fire.
+    A written clause is the citation. It is also what makes the clear rate splittable BY REASON CLASS
+    at all, which is otherwise unmeasurable.
+
+    SCOPE AND SAFETY. Widen the contract's trailing position from a fixed category to this
+    criterion's own reason, bounded to one line — `extractBoundedClause` and the same-line-only
+    regex already fence it, so a runaway reviewer cannot flood the row. The semantic lane stays
+    DOWNGRADE-ONLY and ADVISORY: "a reviewer that emits nothing parseable simply leaves the floor
+    untouched — never a stall, never a deadlock", and that property must survive, so an empty or
+    unparseable clause must still downgrade exactly as it does today. Do NOT make the clause
+    mandatory for the downgrade to apply; that would convert a silent block into a silent PASS.
+  acceptance:
+    - claim: "the contract asks the reviewer for this criterion's own reason in the trailing position"
+      proof: "unit test: W1-T2930: the contract asks for a reason rather than a fixed category"
+    - claim: "a FAIL line carrying a written reason lands that reason in the criterion's recorded row"
+      proof: "unit test: W1-T2930: a written reason reaches the recorded row"
+    - claim: "a FAIL line with no clause still downgrades, so the lane stays advisory and cannot deadlock"
+      proof: "unit test: W1-T2930: a clauseless FAIL still downgrades"

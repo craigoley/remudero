@@ -1,0 +1,59 @@
+id: fb-repair-conflicted-2957
+ts: 2026-09-05T19:37:11.694Z
+raw: >-
+  SWEEP REPAIR RECURRENCE: the "conflicted" surface was repaired for 5 distinct
+  PRs between 2026-09-03T00:00:00.000Z and 2026-09-10T00:00:00.000Z (threshold
+  3, window 7d).
+
+
+  Root cause is UNOBSERVED — this is a recurrence report, not a diagnosis: the
+  sweep classifies and repairs the INSTANCE (each PR below), it does not
+  investigate why the CLASS keeps recurring.
+
+
+  EVIDENCE (read verbatim off each PR's own sweep.disposed ledger row, never
+  invented):
+
+  - PR #4130 (https://github.com/craigoley/remudero/pull/4130) at 71fa824,
+  2026-09-05T19:35:14.169Z: merge conflict (mergeState dirty) — every
+  conflicting path has a declared generator: docs/docs-index.json (generator:
+  docs-index) — dispatching the merge-conflict fix mode to RE-RUN the
+  generator(s) on the merged tree — the resolution is that output, never either
+  side's recorded value
+
+  - PR #4131 (https://github.com/craigoley/remudero/pull/4131) at e20d104,
+  2026-09-05T19:35:18.153Z: merge conflict (mergeState dirty) — every
+  conflicting path has a declared generator: docs/docs-index.json (generator:
+  docs-index) — dispatching the merge-conflict fix mode to RE-RUN the
+  generator(s) on the merged tree — the resolution is that output, never either
+  side's recorded value
+
+  - PR #4132 (https://github.com/craigoley/remudero/pull/4132) at aabc5c0,
+  2026-09-05T19:35:21.285Z: merge conflict (mergeState dirty) — every
+  conflicting path has a declared generator: docs/docs-index.json (generator:
+  docs-index) — dispatching the merge-conflict fix mode to RE-RUN the
+  generator(s) on the merged tree — the resolution is that output, never either
+  side's recorded value
+
+  - PR #4133 (https://github.com/craigoley/remudero/pull/4133) at d4c96c8,
+  2026-09-05T19:35:24.499Z: merge conflict (mergeState dirty) — every
+  conflicting path has a declared generator: docs/docs-index.json (generator:
+  docs-index) — dispatching the merge-conflict fix mode to RE-RUN the
+  generator(s) on the merged tree — the resolution is that output, never either
+  side's recorded value
+
+  - PR #4134 (https://github.com/craigoley/remudero/pull/4134) at 4447a4d,
+  2026-09-05T19:35:28.005Z: merge conflict (mergeState dirty) — every
+  conflicting path has a declared generator: docs/docs-index.json (generator:
+  docs-index) — dispatching the merge-conflict fix mode to RE-RUN the
+  generator(s) on the merged tree — the resolution is that output, never either
+  side's recorded value
+attachments: []
+origin: repair#conflicted
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
