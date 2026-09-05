@@ -70,6 +70,8 @@
 #   RMD_STATE_DIR=/path ./deploy/serve-container.sh    # if the bind mount is not the daemon's
 #   RMD_CLAUDE_JSON_PATH=/path ./deploy/serve-container.sh   # if ~/.claude.json is not the host's
 #   RMD_GITHUB_WEBHOOK_SECRET_PATH=/path ./deploy/serve-container.sh   # arm POST /v1/hooks/github
+#   RMD_GH_APP_PRIVATE_KEY_HOST_PATH=/path ./deploy/serve-container.sh # the pem's HOST path, resolved
+#                                                                      # without inspecting remudero-daemon
 #
 # W1-T2434: THE ACCOUNT FILE, MOUNTED READ-ONLY AND WIRED THROUGH THE SEAM W1-T997 ALREADY BUILT.
 # `readAccountUsageFile` (src/lib/account-usage.ts) reads `~/.claude.json` for the console's
@@ -288,25 +290,91 @@ daemon_host_path_for() {
   printf '%s%s\n' "${BEST_SOURCE}" "${CONTAINER_PATH:${#BEST_DEST}}"
 }
 
+# ── W1-T2834: THE KEY'S HOST PATH IS CONFIGURATION, NOT AN INFERENCE ABOUT A SIBLING ────────────
+#
+# `daemon_host_path_for` inspects `remudero-daemon` ONCE, at docker-run time, and is never
+# re-evaluated. MEASURED 2026-09-04: nine consecutive `github_app.token_refresh_failed` rows from
+# 17:20:03Z, reason `private key unreadable`, one every five minutes for over an hour, with NO RED
+# CHECK ANYWHERE. The daemon's process started 16:54:23Z and serve launched 16:54:54Z — thirty-one
+# seconds apart, on a day the daemon was crash-looping — so serve almost certainly inspected a
+# container mid-creation and saw an absent or incomplete mount table. That cannot be proven now
+# (the container is gone), but it explains why every precondition holds today while the launch
+# failed, and restarting serve only re-runs the same one-shot resolution against whatever the
+# daemon happens to be doing at that second.
+#
+# THREE SHAPES WERE WEIGHED. Re-evaluating at USE time removes the race but puts container-topology
+# knowledge — a `docker inspect` — on a live path inside a container that has no docker socket.
+# FAILING LOUDLY is the smallest change and the wrong one: the degrade is deliberate, GH_TOKEN is a
+# real fallback, and refusing to start the console over a credential it can live without is a worse
+# failure than the one it replaces. DECOUPLING is what ships: take the host path from configuration
+# directly, and keep the sibling inspection as a FALLBACK HINT. The race is removed rather than
+# narrowed, no socket is needed, and the graceful degrade survives for hosts with no key at all.
+APP_KEY_DEGRADED=0
+APP_KEY_HOST_DECLARED="${RMD_GH_APP_PRIVATE_KEY_HOST_PATH:-}"
 APP_PRIVATE_KEY_ARGS=()
 APP_KEY_DECLARED="${GH_APP_PRIVATE_KEY_PATH:-}"
 APP_KEY_HOST=""
-if [ -n "${APP_KEY_DECLARED}" ]; then
+APP_KEY_SOURCE=""
+if [ -n "${APP_KEY_HOST_DECLARED}" ]; then
+  # FIRST, AND WITHOUT ASKING ANOTHER CONTAINER ANYTHING. An operator who states the host path is
+  # not overridden by a mount table, and is not made to depend on the daemon being up.
+  APP_KEY_HOST="${APP_KEY_HOST_DECLARED}"
+  APP_KEY_SOURCE="RMD_GH_APP_PRIVATE_KEY_HOST_PATH"
+fi
+if [ -z "${APP_KEY_HOST}" ] && [ -n "${APP_KEY_DECLARED}" ]; then
   if [ -f "${APP_KEY_DECLARED}" ] && [ -s "${APP_KEY_DECLARED}" ] && [ -r "${APP_KEY_DECLARED}" ]; then
     APP_KEY_HOST="${APP_KEY_DECLARED}"
+    APP_KEY_SOURCE="GH_APP_PRIVATE_KEY_PATH (already a host path)"
   elif [ -n "${DAEMON_STATE_DIR}" ]; then
     APP_KEY_HOST="$(daemon_host_path_for "${APP_KEY_DECLARED}" || true)"
+    [ -n "${APP_KEY_HOST}" ] && APP_KEY_SOURCE="${DAEMON_CONTAINER} mount table (fallback hint)"
   fi
+fi
+if [ -n "${APP_KEY_DECLARED}" ] || [ -n "${APP_KEY_HOST_DECLARED}" ]; then
   if [ -n "${APP_KEY_HOST}" ] && [ -f "${APP_KEY_HOST}" ] && [ -s "${APP_KEY_HOST}" ] && [ -r "${APP_KEY_HOST}" ]; then
     APP_PRIVATE_KEY_ARGS=(-v "${APP_KEY_HOST}:${APP_PRIVATE_KEY_MOUNT_DEST}:ro")
     GH_APP_PRIVATE_KEY_PATH="${APP_PRIVATE_KEY_MOUNT_DEST}"
     export GH_APP_PRIVATE_KEY_PATH
-    echo "serve-container: GitHub App private key mounted as one read-only file (content never read or printed)"
+    echo "serve-container: GitHub App private key mounted as one read-only file, resolved from ${APP_KEY_SOURCE} (content never read or printed)"
   else
     APP_KEY_HOST=""
+    # W1-T2834 — THE PATH IS DELIBERATELY RETAINED, AND THAT IS W1-T2778'S RULING, NOT AN
+    # OVERSIGHT. Blanking it here was tried and REVERTED: W1-T2778's own tests assert "the
+    # refresher retains the unreadable path so its existing telemetry names the failure", so
+    # emptying it would delete the signal `refreshInstallationToken` reports the failure WITH, and
+    # overturn a ratified decision from inside a task that never argued for it. This task's own
+    # design weighed exactly three shapes and recommended DECOUPLING — the explicit host path
+    # above — not a change to what the degrade exports.
+    #
+    # WHAT WAS ACTUALLY WRONG WAS THE SILENCE. Nine `github_app.token_refresh_failed` rows an hour
+    # produced no line any human or check would see; the WARNING below is that line.
+    APP_KEY_DEGRADED=1
     echo "serve-container: NOTE — configured GitHub App private key is unreadable or cannot be resolved through ${DAEMON_CONTAINER}'s mounts." >&2
-    echo "  Not a refusal: GH_TOKEN remains the fallback and the console reports the refresh failure." >&2
+    echo "  Not a refusal: GH_TOKEN remains the fallback, and the declared path is passed through so" >&2
+    echo "  the refresher's own telemetry names the failure (W1-T2778)." >&2
   fi
+fi
+
+# W1-T2834 — WHAT THE CONTAINER WILL ACTUALLY RECEIVE, STATED. `-e GH_APP_PRIVATE_KEY_PATH` passes
+# the NAME only, so the value is invisible in the printed `docker run` and a reader (or a test)
+# cannot tell a mounted key from an unmountable path carried through. This line is the effective
+# value, which is the thing that decides whether token refresh can work. It is a PATH, never key
+# material — the same class of metadata this script already prints for every other mount.
+echo "serve-container: GH_APP_PRIVATE_KEY_PATH -> ${GH_APP_PRIVATE_KEY_PATH:-(empty — App auth unconfigured)}"
+
+# W1-T2834 — THE SILENT HALF, REMOVED. What made this cost an hour was not the degrade; it was that
+# the degrade produced no line anywhere a human or a check could read. This is a WARNING and not a
+# FAIL — the same shape the tunnel check below uses — because GH_TOKEN is a working fallback and
+# the console is up. It is emitted HERE rather than in the post-launch section because `--dry-run`
+# exits before that section: a preview must show this, and a test must be able to reach it without
+# launching a container.
+if [ "${APP_KEY_DEGRADED}" -ne 0 ]; then
+  echo "serve-container: WARNING — GitHub App private key NOT mounted; App auth is unconfigured in this container." >&2
+  echo "  GH_TOKEN is carrying authentication. Serve will report token refresh failing against the" >&2
+  echo "  declared path (W1-T2778's telemetry) until this is resolved — that reporting is the" >&2
+  echo "  symptom, and THIS line is the cause it never had." >&2
+  echo "  To restore App auth WITHOUT depending on ${DAEMON_CONTAINER} being up and settled:" >&2
+  echo "    RMD_GH_APP_PRIVATE_KEY_HOST_PATH=<host path to the pem> ./deploy/serve-container.sh" >&2
 fi
 
 # W1-T2836: decide whether the launch has A CREDENTIAL only after both credential forms have been
@@ -328,7 +396,7 @@ else
   echo "  GH_APP_PRIVATE_KEY_PATH. Nothing has been changed." >&2
   exit 1
 fi
-unset APP_KEY_DECLARED APP_KEY_HOST
+unset APP_KEY_DECLARED APP_KEY_HOST APP_KEY_HOST_DECLARED APP_KEY_SOURCE APP_KEY_DEGRADED
 
 # ── 4c. THE ACCOUNT FILE — MOUNTED READ-ONLY WHEN PRESENT, NEVER REFUSED WHEN ABSENT (W1-T2434) ──
 # See the header note for the defect this closes. `-f` (a regular file, not a directory) is the

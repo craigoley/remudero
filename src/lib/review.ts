@@ -2949,13 +2949,34 @@ export function judgeCriterion(
    *  verdict. See {@link ReviewEvidence.reportSubstituteCause}. */
   reportSubstituteCause?: ReportSubstituteCause,
   /**
-   * W1-T2713: which authoritative text the mechanical responsiveness floor is checking. A
-   * plan-only criterion already resolved from its task shard is present by construction, so
-   * comparing its proof with independently-written PR prose makes filename vocabulary decide the
-   * verdict. All existing/direct callers default to `report`; only {@link judgeReview}'s narrow
-   * resolved-shard + plan-only arm selects `criterion`.
+   * WHICH TEXT OF THE CRITERION SUPPLIES THE FLOOR'S KEYWORDS. The floor's *source* is always the
+   * REPORT (`reportTokens`, the PR body) — that is the only text the author writes independently
+   * of the criterion, so it is the only text whose agreement is evidence of anything.
+   *
+   * W1-T2713 established the real defect and this parameter carries its fix: on a plan-only PR
+   * whose criteria were resolved from the task SHARD, scoring `proofKeywords(criterion.proof)`
+   * makes a test FILENAME's accidental vocabulary decide the only binding lane (MEASURED on
+   * #3665: 4/6 = 0.667, clearing MIN_COVERAGE only because the path was named after four words
+   * the body happened to use; rename the file and the same PR fails). `unit` and `test` are dead
+   * weight in every such denominator.
+   *
+   * W1-T2713 SHIPPED THAT FIX AS `floorTokens = tokenize(claim + proof)` — drawing the floor from
+   * the CRITERION ITSELF. A criterion trivially contains its own proof, so coverage was 1.0 BY
+   * CONSTRUCTION and every resolved-shard criterion read `met` against ANY body, an EMPTY one
+   * included (recon-2026-09-05 R-15). That defeats the shard's own third acceptance claim — "a
+   * filing that genuinely fails to substantiate its criteria still fails" — and its falsifier,
+   * which refuses any change that "exempts plan-only PRs from the floor entirely without a
+   * control proving an unsubstantiated filing still fails". The floor may never read the text it
+   * is judging.
+   *
+   * SO THE ARM KEEPS SCORING AGAINST THE BODY AND CHANGES ONLY WHICH KEYWORDS IT SCORES: the
+   * CLAIM's. A claim is prose the author wrote about the change and a body is prose the author
+   * wrote about the change — a fair pair — while the proof's filename is the accident W1-T2713
+   * measured. An empty or unresponsive body now scores 0/N and FAILS, which is the property R-15
+   * says was missing. All existing/direct callers default to `proof`; only {@link judgeReview}'s
+   * narrow resolved-shard + plan-only arm selects `claim`.
    */
-  floorSource: "report" | "criterion" = "report",
+  floorKeywords: "proof" | "claim" = "proof",
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
 
@@ -2973,11 +2994,11 @@ export function judgeCriterion(
     };
   }
 
-  const kws = proofKeywords(criterion.proof);
-  const floorTokens =
-    floorSource === "criterion"
-      ? new Set(tokenize(`${criterion.claim}\n${criterion.proof}`))
-      : reportTokens;
+  // R-15: `floorTokens` is ALWAYS `reportTokens`. There is no arm that lets the floor read the
+  // criterion it is judging — that is what made coverage 1.0 by construction. Only the KEYWORD
+  // side varies, and both alternatives are text the criterion supplies, scored against the body.
+  const kws = floorKeywords === "claim" ? proofKeywords(criterion.claim) : proofKeywords(criterion.proof);
+  const floorTokens = reportTokens;
 
   // Mechanical floor: is the proof responsively present in the authoritative source?
   let met: boolean;
@@ -2997,15 +3018,15 @@ export function judgeCriterion(
     // OBSERVED repo-state evidence, never vibes.
     met = false;
     reason =
-      floorSource === "criterion"
-        ? "proof unmet: INDETERMINATE — no mechanical anchors in proof text to check the authoritative criterion source against " +
-          "(a claim with nothing distinctive to verify is not evidence; requires an executable proof)"
-        : "proof unmet: INDETERMINATE — no mechanical anchors in proof text to check the report " +
-          "against (a claim with nothing distinctive to verify is not evidence; requires an executable proof)";
+      `proof unmet: INDETERMINATE — no mechanical anchors in ${floorKeywords} text to check the report ` +
+      "against (a claim with nothing distinctive to verify is not evidence; requires an executable proof)";
   } else {
     const covered = kws.filter((k) => floorTokens.has(k));
     const coverage = covered.length / kws.length;
-    if (floorSource === "report" && reportSubstituted) {
+    // R-15: this rule is no longer gated on the arm. Both arms now score against the report, so a
+    // report that is NOT the body cannot substantiate either of them — the W1-T1100 refusal below
+    // applies to a claim-keyword floor for exactly the reason it applies to a proof-keyword one.
+    if (reportSubstituted) {
       // W1-T1100 (design (iii)): the floor may not report substantiation off a substitute, in
       // EITHER direction of coverage — a high-coverage substitute is the #2395 fail-OPEN case
       // (the worker describes its own change in the proof's own words), not evidence the body
@@ -3017,7 +3038,7 @@ export function judgeCriterion(
       // 6/6-coverage row on 2026-08-25 is the proof it is working). Only the WORDING branches, and
       // it must not imply a fetch failed: on the measured population the fetch has never failed
       // once, while "this mode never reads the body" is the common case.
-      const withheld = `so keyword coverage (${covered.length}/${kws.length} proof keywords) is withheld as substantiation`;
+      const withheld = `so keyword coverage (${covered.length}/${kws.length} ${floorKeywords} keywords) is withheld as substantiation`;
       if (reportSubstituteCause?.kind === "never-fetched") {
         const who = reportSubstituteCause.fixMode
           ? `the "${reportSubstituteCause.fixMode}" fix mode does not fetch it`
@@ -3030,16 +3051,10 @@ export function judgeCriterion(
       }
     } else if (coverage < MIN_COVERAGE) {
       met = false;
-      reason =
-        floorSource === "criterion"
-          ? `proof unmet: authoritative criterion source does not contain it (matched ${covered.length}/${kws.length} proof keywords)`
-          : `proof unmet: report does not substantiate it (matched ${covered.length}/${kws.length} proof keywords)`;
+      reason = `proof unmet: report does not substantiate it (matched ${covered.length}/${kws.length} ${floorKeywords} keywords)`;
     } else {
       met = true;
-      reason =
-        floorSource === "criterion"
-          ? `proof present in authoritative criterion source (matched ${covered.length}/${kws.length} proof keywords)`
-          : `proof substantiated in report (matched ${covered.length}/${kws.length} proof keywords)`;
+      reason = `proof substantiated in report (matched ${covered.length}/${kws.length} ${floorKeywords} keywords)`;
     }
   }
 
@@ -4549,17 +4564,19 @@ export function judgeReview(
   evidence: ReviewEvidence,
 ): ReviewVerdict {
   const reportTokens = new Set(tokenize(evidence.report));
-  // W1-T205/W1-T427/W1-T2472: compute plan-only before grading so W1-T2713 can choose the
-  // floor's authoritative source. The predicate and inputs are unchanged; this is only a move
-  // ahead of the consumer that now needs them.
+  // W1-T205/W1-T427/W1-T2472: compute plan-only before grading so W1-T2713 can choose which of
+  // the criterion's texts supplies the floor's keywords. The predicate and inputs are unchanged;
+  // this is only a move ahead of the consumer that now needs them.
   const diffFiles = changedFiles(walkDiff(evidence.diff));
   const enforcementData = enforcementDataInDiff(diffFiles);
   const planOnly = planOnlyFromFiles(diffFiles, enforcementData);
   // `taskDeclaredFiles` is the existing resolved-task signal throughout this module. On the only
   // arm changed here — a plan-only diff — it means the criteria were loaded from the task shard,
-  // not parsed from the PR body. Implementing PRs and unresolved/body-derived filings retain the
-  // report floor byte-for-byte.
-  const floorSource = planOnly && (evidence.taskDeclaredFiles?.length ?? 0) > 0 ? "criterion" : "report";
+  // not parsed from the PR body, so the proof arrived with the criteria and its filename cannot
+  // be evidence about the body (W1-T2713). Implementing PRs and unresolved/body-derived filings
+  // keep the proof-keyword floor byte-for-byte. BOTH arms score against the report — see
+  // judgeCriterion's `floorKeywords` doc for why no arm may read the criterion itself (R-15).
+  const floorKeywords = planOnly && (evidence.taskDeclaredFiles?.length ?? 0) > 0 ? "claim" : "proof";
   // W1-T456 (DEFECT A): read straight off THIS diff, never off a resolved task id — see
   // shardDeclaredFilesInDiff's doc for why a filing PR (no Remudero-Task: trailer, #1527) has
   // no task id to look `files:` up against otherwise. Union'd with a resolved task's own
@@ -4595,7 +4612,7 @@ export function judgeReview(
       evidence.reportIsSubstitute,
       evidence.semanticClauses?.[i],
       evidence.reportSubstituteCause,
-      floorSource,
+      floorKeywords,
     ),
   );
   const testTheater = detectTestTheater(evidence.diff);
