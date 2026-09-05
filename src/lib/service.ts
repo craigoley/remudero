@@ -948,6 +948,65 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/**
+ * Error `code`s that mean THE CLIENT'S REQUEST WAS MALFORMED, not that this process is broken —
+ * the discriminator {@link respondToRequestFailure} uses to answer 400 rather than 500.
+ *
+ * A SET rather than an `===` so the next shape code is admitted in one place, and deliberately
+ * NARROW: membership is "Node raised this while parsing what the client sent", never "the message
+ * looked client-ish". Anything unrecognised is a 500 with a `service.error` row, because grading an
+ * unknown failure as the client's fault is exactly how a real defect hides behind a 4xx.
+ *
+ * `ERR_INVALID_URL` is the reproduced member: `new URL(req.url, "http://localhost")` in the
+ * dispatch below throws it for a request line as short as `GET http://[ HTTP/1.1`, which Node's
+ * HTTP parser accepts and hands through verbatim as `req.url`.
+ */
+const REQUEST_SHAPE_ERROR_CODES: ReadonlySet<string> = new Set(["ERR_INVALID_URL"]);
+
+/**
+ * The LAST RESORT for anything thrown out of `createService`'s dispatch — the backstop that makes
+ * the unawaited `void (async () => { ... })()` below survivable.
+ *
+ * Before this, a throw anywhere outside the two inner `try` blocks (see
+ * {@link cloudflareAccessIdentityProvider}'s design (ii), which defends itself precisely because
+ * of this hazard) became an unhandled rejection and KILLED THE PROCESS: no `unhandledRejection`
+ * handler existed anywhere in `src/` or `bin/`, so one malformed request line took down `rmd serve`
+ * — console and webhook receiver both — and under launchd's 60 s restart throttle that is a
+ * repeatable outage per packet, reachable from loopback, the tailnet or the relay.
+ *
+ * It logs `method`/`url` and NOT `path`, unlike every other row in this file: `path` is
+ * `new URL(...).pathname`, and the commonest way to arrive here is that exact expression throwing,
+ * so there is no parsed path to name. The raw request target is what the operator needs anyway.
+ *
+ * NEVER THROWS ITSELF, by construction — `log` is the caller's seam and could be anything, and a
+ * throw here would land back in the unhandled rejection this function exists to prevent.
+ */
+function respondToRequestFailure(
+  res: ServerResponse,
+  log: NonNullable<ServiceOptions["log"]>,
+  req: IncomingMessage,
+  e: unknown,
+): void {
+  try {
+    const method = (req.method ?? "GET").toUpperCase();
+    const url = req.url ?? "/";
+    const code = (e as { code?: unknown } | null | undefined)?.code;
+    const clientFault = typeof code === "string" && REQUEST_SHAPE_ERROR_CODES.has(code);
+    const error = String((e as Error)?.message ?? e);
+    log(clientFault ? "service.bad_request" : "service.error", { method, url, error });
+    if (!res.headersSent) {
+      sendJson(res, clientFault ? 400 : 500, { error: clientFault ? "bad_request" : "internal_error" });
+    }
+    // Headers already out (an SSE stream that threw after `writeHead`, a handler that threw
+    // mid-write): the status is no longer ours to choose, but leaving the client hanging on a
+    // request this process has given up on is not an option either.
+    if (!res.writableEnded) res.end();
+  } catch {
+    // See this function's own doc: it is the last resort, so it absorbs its own failures rather
+    // than re-raising them into the rejection it was installed to catch.
+  }
+}
+
 function openSse(req: IncomingMessage, res: ServerResponse, route: SseRoute, path: string, log: NonNullable<ServiceOptions["log"]>): void {
   res.writeHead(200, {
     "content-type": "text/event-stream",
@@ -1091,6 +1150,14 @@ export function createService(opts: ServiceOptions): Server {
         log("service.error", { method, path, error: String((e as Error)?.message ?? e) });
         if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
       }
-    })();
+      // `.catch` and not a `try` wrapping the body: the body is an ASYNC function, so a
+      // synchronous throw in it (`new URL` on the very first line) rejects this promise exactly
+      // as an awaited failure would. Same coverage as the try, without reindenting the dispatch.
+    })().catch((e: unknown) => {
+      // NOT an erasure: every failure that lands here is logged and answered — see
+      // {@link respondToRequestFailure}, which names the `error` it records and the status it
+      // sends, and which absorbs nothing silently.
+      respondToRequestFailure(res, log, req, e);
+    });
   });
 }

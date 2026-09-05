@@ -301,17 +301,25 @@ test("resolveServiceTokens: a well-formed file missing its keys parses fine (the
 
 // design (iii): comparing a presented credential against an `undefined` stored token
 // (`bearerTokenProvider`'s `safeEqual`, service.ts) throws inside `Buffer.from` rather than
-// returning a clean false, and `createService`'s listener is `void (async () => {...})()` with NO
-// `.catch()` -- so this becomes an UNHANDLED REJECTION, which Node terminates the process for.
-// That crash is the whole point (REFUSE rather than GRANT, the safe direction — but fatal, not a
-// clean 500) and this suite must prove it fires, but node:test's own harness treats ANY unhandled
-// rejection occurring during a test as THAT test's failure regardless of listeners the test itself
-// registers (verified empirically while writing this suite) — there is no way to "catch and assert
-// on" it in-process without corrupting this file's own pass/fail. So the crash is reproduced in an
-// ISOLATED CHILD `node --test` process (same technique test/reapable-prefix.test.ts uses for its
-// own end-to-end fixture) and this test asserts on the CHILD's exit code and captured output —
-// nonzero exit, and never a 200, is the proof; this process's own test run is unaffected either way.
-test("createService: a malformed token store crashes an authenticated request rather than granting it", () => {
+// returning a clean false. THE PROPERTY THIS TEST OWNS — the request is REFUSED, never GRANTED —
+// is unchanged and asserted below in both directions.
+//
+// WHAT CHANGED (R-2, recon-2026-09-05): the MECHANISM of that refusal. `createService`'s listener
+// used to be `void (async () => {...})()` with NO `.catch()`, so the throw became an UNHANDLED
+// REJECTION and Node terminated the process — which this test pinned, while its own words called
+// it out as "the safe direction — but fatal, not a clean 500". It is now the clean 500: the
+// dispatch's `.catch` hands the failure to `respondToRequestFailure`, which logs `service.error`
+// and answers 500. That is strictly stronger, because the fatal version was reachable from any
+// caller who could open a socket — one malformed request line (`GET http://[`) took the whole
+// console and webhook receiver down, per-packet, under launchd's 60 s restart throttle.
+//
+// The ISOLATED CHILD `node --test` (the technique test/reapable-prefix.test.ts uses for its own
+// end-to-end fixture) is KEPT rather than folded back in-process, and deliberately: it is what
+// makes the "never fatal" half falsifiable. node:test's harness attributes ANY unhandled rejection
+// during a test to THAT test regardless of listeners the test itself registers (verified
+// empirically when this suite was written), so a regression to the crash would corrupt this file's
+// own pass/fail instead of being reported. In a child, the exit code IS the assertion.
+test("createService: a malformed token store refuses an authenticated request with a 500, never a grant and never a crash", () => {
   const scratch = mkdtempSync(join(tmpdir(), "rmd-route-scope-matrix-crash-"));
   try {
     const fixture = join(scratch, "malformed-store-crash.test.ts");
@@ -366,23 +374,28 @@ test("createService: a malformed token store crashes an authenticated request ra
     let threw = false;
     let output = "";
     try {
-      execFileSync("node", ["--test", "--import", "tsx", fixture], { encoding: "utf8", cwd: REPO_ROOT, env: childEnv });
+      output = execFileSync("node", ["--test", "--import", "tsx", fixture], { encoding: "utf8", cwd: REPO_ROOT, env: childEnv });
     } catch (e) {
       threw = true;
       const err = e as { stdout?: string; stderr?: string };
       output = `${err.stdout ?? ""}\n${err.stderr ?? ""}`;
     }
 
-    assert.ok(
-      threw,
-      "a malformed token store must crash the request rather than complete it — the subprocess " +
-        "exiting cleanly would mean something now catches it and either grants or gracefully refuses instead",
-    );
+    // HALF ONE — never grants. The unchanged property, and the reason this test exists: an
+    // `undefined` stored token must not be comparable-equal to anything a caller presents.
     assert.ok(!/FETCH_STATUS:200/.test(output), `must never have answered the probe with a 200:\n${output}`);
-    assert.match(
-      output,
-      /Buffer\.from|ERR_INVALID_ARG_TYPE|unhandledRejection/,
-      `expected the documented Buffer.from-on-undefined-token crash, not an unrelated failure:\n${output}`,
+    assert.match(output, /FETCH_STATUS:500/, `expected a clean 500 refusal from the dispatch guard:\n${output}`);
+
+    // HALF TWO — never fatal. A child that exits nonzero here means the throw escaped the
+    // dispatch's `.catch` again and Node terminated the process, which is the R-2 regression.
+    assert.ok(
+      !threw,
+      `a malformed token store must be refused, not fatal — the child exited nonzero, so the ` +
+        `throw escaped createService's dispatch guard and became an unhandled rejection again:\n${output}`,
+    );
+    assert.ok(
+      !/unhandledRejection|ERR_UNHANDLED_REJECTION/.test(output),
+      `no rejection may escape the dispatch, however the child exited:\n${output}`,
     );
   } finally {
     rmSync(scratch, { recursive: true, force: true });
