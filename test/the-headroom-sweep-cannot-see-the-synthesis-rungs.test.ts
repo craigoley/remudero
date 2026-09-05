@@ -128,9 +128,26 @@ test("W1-T2668: invocations are deduped by run_id, and a row with no run_id is D
   assert.equal(retro.rowsWithoutRunId, 1, "the undedupable row is COUNTED, so a corpus full of them is visible");
 });
 
-test("W1-T2668: cost falls back to total_cost_usd, the same precedence every other row in this report uses", () => {
+test("W1-T2668: cost falls back to total_cost_usd, and a row carrying NEITHER still counts as an invocation", () => {
   const retro = computeSynthesisSweep([row("retro.synthesized", "RETRO-1", { cost_usd: undefined, total_cost_usd: 7 })]).find((r) => r.rung === "retro")!;
-  assert.equal(retro.totalCostUsd, 7);
+  assert.equal(retro.totalCostUsd, 7, "the same precedence every other row in this report uses");
+
+  // THE THIRD ARM, which `diff-coverage` caught as dead: a terminal row with NEITHER cost field.
+  // It must contribute 0 to the sum and still COUNT — dropping it would quietly shrink the divisor
+  // and make the remaining invocations look more expensive than they were, which is the opposite
+  // of what an unpriced row means.
+  const unpriced = computeSynthesisSweep([
+    row("triage.synthesized", "TRIAGE-1", { cost_usd: undefined, total_cost_usd: undefined, num_turns: 5 }),
+    row("triage.synthesized", "TRIAGE-2", { cost_usd: 4, num_turns: 5 }),
+  ]).find((r) => r.rung === "triage")!;
+  assert.equal(unpriced.invocations, 2, "the unpriced invocation still happened and still counts");
+  assert.equal(unpriced.totalCostUsd, 4, "and contributes nothing to the sum rather than a guess");
+  assert.equal(unpriced.costPerInvocationUsd, 2, "so the per-invocation figure is 4/2, not 4/1");
+  // IN the distribution as a zero, not excluded from it: with costs [0, 4] the p50 is 0 (the
+  // percentile picks a real observed value, never an interpolated mean — which is the whole point
+  // of using percentiles here), and the priced invocation is still visible as max.
+  assert.equal(unpriced.costP50, 0);
+  assert.equal(unpriced.costMax, 4);
 });
 
 // ── criterion 4: the existing rows and controls are unchanged ─────────────────────────────────
