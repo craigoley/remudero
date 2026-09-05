@@ -870,6 +870,7 @@ import {
   renderWorkerSettings,
   resolveClaudeExecutable,
   claudeExecutableCache,
+  runAdhocLaneReapRung,
   runWorktreeReapRung,
   spawnWorker,
   activeWorkerCount,
@@ -12517,6 +12518,22 @@ async function runTask(
   // dispatch never reaches the daemon poll or `rmd sweep` call site that would otherwise run
   // it. Best-effort and ships dry (`worktreeReapBoot.enabled`) — see logWorktreeReapBootSurvey.
   logWorktreeReapBootSurvey(config, log);
+  // W1-T2847: the SAME start-of-run rung, pointed at the ad-hoc lane root. MEASURED 2026-09-04:
+  // `worktreesDir` (the only root the line above ever scans) held 11 entries totalling 44K while
+  // 180 linked worktrees totalling 4.7G sat as its SIBLINGS under config.root, reached by nothing
+  // on any cadence. Ships SURVEY-ONLY — `runAdhocLaneReapRung`'s `enabled` seam defaults false, so
+  // this ledgers what it would reclaim and removes nothing; arming it is an operator decision that
+  // earns its own policy key once several passes' dispositions have been read, exactly the posture
+  // `worktreeReapBoot` shipped in.
+  //
+  // SCOPE: `src/run-task.ts` is NOT in W1-T2847's declared `files:`. The shard's own note invites
+  // this — "the rung wiring already exists via runWorktreeReapRung, and an implementer who needs
+  // it should widen the shard deliberately rather than inherit it" — and it is needed: a rung with
+  // no call site is a dead parameter (the #339/W1-T281 shape, where deleting the call fails no
+  // test). Recorded here and in the PR body because the linter refuses the shard edit that would
+  // record it in `files:`; the reviewer's `scope_violation` is advisory and names review-ratified
+  // widenings legitimate.
+  runAdhocLaneReapRung(config, log, { repoDir });
   // W1-T411: three MORE sweeps with call sites only inside daemonCommand — stale rmd temp
   // dirs, abandoned review clones, and per-spawn worker homes — get the SAME start-of-run
   // reclaim rung pruneStaleRuns and logWorktreeReapBootSurvey already occupy. Unlike the
