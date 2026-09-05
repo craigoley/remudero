@@ -79,8 +79,10 @@ function writeDaemonStandin(dir: string): string {
     [
       "#!/usr/bin/env bash",
       'started="$1"; cleaned="$2"',
-      'touch "$started"',
       "trap 'touch \"$cleaned\"; trap - TERM; kill -TERM $$' TERM",
+      // `bootAndSignal` treats this marker as readiness and may send TERM immediately. Publish it
+      // only after the cleanup trap exists; the old order made `cleaned: false` a scheduler race.
+      'touch "$started"',
       "while :; do sleep 0.1; done",
       "",
     ].join("\n"),
