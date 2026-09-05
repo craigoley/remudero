@@ -220,8 +220,8 @@ export interface DraftAttemptCache {
   [proposalId: string]: string;
 }
 
-/** Parse a {@link DraftAttemptCache}; `{}` on missing or malformed input, since a daemon that has never attempted a
- *  draft is the normal pre-population state, not an error. */
+/** Parse a {@link DraftAttemptCache}; `{}` on missing or malformed input — a daemon that has never drafted is the
+ *  normal pre-population state, not an error. */
 export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCache {
   if (!text) return {};
   try {
@@ -244,7 +244,8 @@ export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCa
  * (test/bound-kind-declared.test.ts) reads this block. Why: docs/forensics/inbox.md.
  */
 // W1-T2569 correction: a per-batch SIZE, never a concurrency limit; the "300s poll cadence" this file used to cite
-// was wrong. Why: the measured batch duration and rung cadence — docs/forensics/inbox.md.
+// was wrong.
+// Why: the measured batch duration and rung cadence — docs/forensics/inbox.md.
 export const DAEMON_DRAFT_BATCH_CAP = 3;
 
 /** Proposals the DAEMON-SIDE rung should attempt this poll — {@link proposalsNeedingDraft} throttled so the same
@@ -959,7 +960,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
   };
 
   // W1-T2664: the volume cap was also an accidental wall-clock multiplier. A tiny indexed pool makes elapsed time
-  // approach the slowest proposal, not their sum. Why: docs/forensics/inbox.md.
+  // approach the slowest proposal, not their sum.
+  // Why: the measured sequential drafts that crossed the sweep's await bound — docs/forensics/inbox.md.
   const outcomes = new Array<DraftRungOutcome>(toDraft.length);
   let nextIndex = 0;
   const runLane = async (): Promise<void> => {
@@ -1079,8 +1081,7 @@ export function renderInboxPollSummary(s: InboxPollSummary): string {
   return `${s.ready} ready`;
 }
 
-// ── State-side registry shapes. W1-T240 also put the one write-side helper every writer must share
-// here — see {@link updateProposalRegistry} below ────────────────────────────────────────────────
+// ── State-side registry shapes; W1-T240's one write-side helper for them is below ─────────────────
 
 /** `<config.root>/state/inbox-proposals.json` — the ACTIVE-proposal registry. */
 export interface ProposalRegistry {
@@ -1465,8 +1466,8 @@ export function pruneRatifiedProposals(
 // already shipped. W1-T2486 corrected a false third reason this comment used to give — `lint-plan` IS required, but a
 // `warn` never enters the `blocking` array. IT KEYS ON THE DRAFTED SHARD SLUG, NEVER ON THE PROPOSAL, because eleven
 // board-review summaries read near-identically yet are legitimately distinct. HONEST RECALL: a LEXICAL check misses
-// drafts in other words, and no cutoff is invented to reach them. Why: the measured 2026-08-29 scores — see
-// docs/forensics/inbox.md.
+// drafts in other words, and no cutoff is invented to reach them.
+// Why: the measured 2026-08-29 scores and the named residue — docs/forensics/inbox.md.
 
 /** The slug stem of each shard a drafted fragment would be filed as — the SAME stems {@link ratificationShardFiles}
  *  emits, so the check scores what would land on disk. PLACEHOLDER-TOLERANT BY NECESSITY: at approve time the
