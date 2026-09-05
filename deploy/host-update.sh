@@ -422,15 +422,60 @@ fi
 echo "host-update: target ${REF}"
 [ "${DRY_RUN}" -eq 1 ] && echo "host-update: DRY RUN — nothing will be reclaimed and nothing pulled"
 
+# ── 0a. TEMPORARY FILES ARE PER-INVOCATION, BECAUSE THIS HOST HAS TWO REAL ACCOUNTS ──────────
+# MEASURED 2026-09-04: this script wrote two FIXED paths, `/tmp/host-update-docker.err` and
+# `/tmp/host-update-pull.log`. `/tmp` is sticky, so whichever account ran first owned both names
+# permanently and the second account's redirect failed outright:
+#
+#   deploy/host-update.sh: line 427: /tmp/host-update-docker.err: Permission denied
+#
+# CI never saw it — a runner has a clean /tmp and one uid — and the collision is specific to a
+# shared host, which is what this machine is.
+#
+# `mktemp`, NOT A PID SUFFIX. A pid is reusable and does not defend against a name someone
+# pre-created; mktemp creates the file ATOMICALLY and fails if it cannot, which is exactly the
+# property the fixed names lacked.
+#
+# THE `rmd-` PREFIX IS LOAD-BEARING. `src/lib/tmp.ts`'s sweepStaleTempDirs reaps only names
+# starting with it (W1-T2773), so a per-invocation name WITHOUT it would trade a collision for a
+# fresh permanent leak — the exact thing that campaign exists to stop. The trap is the primary
+# cleanup; the prefix is what catches the run that dies before it fires.
+HOST_UPDATE_TMPDIR="${TMPDIR:-/tmp}"
+DOCKER_ERR=""
+PULL_LOG=""
+# Installed BEFORE the first mktemp on purpose: if the SECOND allocation fails, the first is
+# already registered and still gets removed.
+host_update_cleanup_tmp() {
+  [ -n "${DOCKER_ERR}" ] && rm -f "${DOCKER_ERR}"
+  [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
+  return 0
+}
+trap host_update_cleanup_tmp EXIT
+if ! DOCKER_ERR="$(mktemp "${HOST_UPDATE_TMPDIR%/}/rmd-host-update-docker-err.XXXXXX" 2>/dev/null)"; then
+  # NAME WHAT ACTUALLY FAILED. Under the old fixed path this branch did not exist: the redirect
+  # failed, the conditional fell through, and the script announced "docker is not answering" —
+  # sending an operator to diagnose a healthy daemon. A wrong diagnosis costs more than the
+  # original failure, so a temp-file problem is reported as one, with the directory named.
+  echo "host-update: cannot create a temporary file in ${HOST_UPDATE_TMPDIR%/}." >&2
+  echo "  This is a TEMP-FILE problem, not a docker problem — docker has not been contacted yet." >&2
+  echo "  Check the directory is writable by this account, or set TMPDIR to one that is." >&2
+  exit 1
+fi
+
 # ── 0. DOCKER MUST ANSWER, AND A PERMISSION FAILURE IS ITS OWN MESSAGE ───────────────────────
 # `docker info` failing means one of two very different things, and the raw error buries which.
-if ! DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/tmp/host-update-docker.err)"; then
+if ! DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>"${DOCKER_ERR}")"; then
   echo "host-update: docker is not answering." >&2
-  sed 's/^/  /' /tmp/host-update-docker.err >&2 || true
-  if grep -qi 'permission denied' /tmp/host-update-docker.err 2>/dev/null; then
+  sed 's/^/  /' "${DOCKER_ERR}" >&2 || true
+  if grep -qi 'permission denied' "${DOCKER_ERR}" 2>/dev/null; then
     echo "  This is a PERMISSIONS failure, not a broken daemon. The operator user must be in the" >&2
     echo "  docker group: 'sudo usermod -aG docker \$USER', then log out and back in." >&2
     echo "  This script deliberately does not re-run itself under sudo." >&2
+  # THE REMEDIATION LINE IS PLATFORM-SPECIFIC AND USED NOT TO BE. `systemctl` does not exist on
+  # macOS, which is the platform this host runs, so an operator following the old line verbatim
+  # got `command not found` while chasing a problem that was never docker's.
+  elif [ "$(uname -s 2>/dev/null || echo unknown)" = "Darwin" ]; then
+    echo "  Check Docker Desktop is running (open -a Docker), then re-run." >&2
   else
     echo "  Check the daemon is up: 'systemctl status docker'." >&2
   fi
@@ -665,10 +710,18 @@ if [ "${DRY_RUN}" -eq 0 ]; then
   #    exit 1 with a raw docker error above it. That is precisely the confusing failure this script
   #    exists to replace, so the guard is the point rather than a style choice.
   set +e
-  docker pull "${REF}" 2>&1 | tee /tmp/host-update-pull.log | sed 's/^/  /'
+  # W1-T2848: the second of the two fixed names, allocated the same way and for the same reason —
+  # see section 0a. Allocated HERE rather than beside the first so a run that never reaches the
+  # pull does not create a file it will not write to.
+  if ! PULL_LOG="$(mktemp "${HOST_UPDATE_TMPDIR%/}/rmd-host-update-pull-log.XXXXXX" 2>/dev/null)"; then
+    echo "host-update: cannot create a temporary file in ${HOST_UPDATE_TMPDIR%/} for the pull log." >&2
+    echo "  This is a TEMP-FILE problem, not a pull failure — nothing has been pulled." >&2
+    exit 1
+  fi
+  docker pull "${REF}" 2>&1 | tee "${PULL_LOG}" | sed 's/^/  /'
   PULL_RC="${PIPESTATUS[0]}"
   set -e
-  if grep -qiE 'authentication required|unauthorized|denied' /tmp/host-update-pull.log 2>/dev/null; then
+  if grep -qiE 'authentication required|unauthorized|denied' "${PULL_LOG}" 2>/dev/null; then
     PULL_RC=1
     echo "host-update: the pull was REJECTED for authentication." >&2
     echo "  The ACR token expired between the login above and the pull, or the login did not take." >&2
