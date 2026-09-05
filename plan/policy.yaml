@@ -211,6 +211,47 @@ fixSpawnWallClockBoundMs:
   min: 1200000
   max: 7200000
 
+# THE KEYCHAIN PROVISIONING LOCK'S WAIT DEADLINE (ms). `acquireKeychainProvisionLock`
+# (src/lib/worker-home.ts) is the ONE lock in this repo a waiter WAITS on instead of failing
+# fast — a live peer provisioning THIS store is something to converge on, never to abort over
+# (W1-T339's design point (iv)). That wait ran with NO deadline at all until this row existed,
+# inside a fully SYNCHRONOUS call (`Atomics.wait`, never `await`) reached from the daemon's own
+# boot and from every worker spawn: a lock whose holder is judged live but never releases froze
+# the daemon's event loop outright — no poll ticks, no STOP/PAUSE, and a relaunch queued behind
+# the same lock. This row is what turns that freeze into a named, thrown
+# `WorkerKeychainError` (`keychain-provision-lock-timeout`) that the caller can act on.
+#
+# NO CONTENDED-WAIT POPULATION HAS EVER BEEN RECORDED, and the reason is the defect itself: an
+# unbounded wait produces no timing rows to derive a bound from, and no `daemon.worker_keychain`
+# ledger line carries a lock-wait duration. So this value is derived from the population the
+# wait actually covers rather than from observed waits: ONE keychain (re-)provision under the
+# lock — a fixed, small sequence of local `security(1)` invocations (find-generic-password,
+# create-keychain, set-keychain-settings, unlock-keychain, add-generic-password) with no network
+# I/O and no operator interaction on the paths that reach here. The only measured stand-in this
+# repo holds for that sequence is test/worker-keychain-account.test.ts's own real two-process
+# concurrency fixture, whose child provision delay is 300ms.
+#
+# value: 120000 (2 minutes) is ~400x that stand-in, and still ~100x it even if a waiter queued
+# behind every lane `sweep.dispatchLanes` permits (max: 4). A bound that fires on a HEALTHY
+# provision is this repo's recurring defect (CLAUDE.md, "Investigation discipline"), so the
+# margin is deliberately extravagant: the thing being separated is not "slow" from "fast", it is
+# "provisioning" from "never releasing".
+#
+# min: 5000 (5 seconds) keeps even the tightest operator retune an order of magnitude above the
+# measured stand-in. max: 900000 (15 minutes) mirrors `sweepWallClockBoundMs`'s own max above —
+# the already-accepted outer ceiling for a bound whose expiry stalls the daemon's poll loop — so
+# the widest retune still cannot restore the unbounded freeze this row exists to end.
+#
+# OPTIONAL IN THE SCHEMA (src/lib/policy.ts): read like `sweepWallClockBoundMs`/`autoTriage`'s
+# own optional blocks — ABSENT means "use the committed default" (mirrored in policy.ts as
+# `DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS`), never a load failure, so a `policy.yaml` fixture
+# that predates this row keeps loading clean.
+keychainProvisionLockWaitMs:
+  value: 120000
+  origin: "net-new"
+  min: 5000
+  max: 900000
+
 sweep:
   staleDays:
     value: 14

@@ -274,7 +274,23 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // test 2 before this number moved, so it is not allowlisted; adding it to ALLOWED would fail
   // test 3's STALE-ENTRY LOCK and test 5. The task's file declaration names this calibration
   // lock because adding a policy consumer without updating its measured corpus is incomplete.
-  assert.equal(readers.length, 23, `expected 23 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // TWENTY-FOUR since `resolveKeychainProvisionLockWaitMs` (worker-home.ts, R-3) landed — a
+  // TWENTY-FIRST consumer, also SEAMED (`opts.waitDeadlineMs ?? loadDefaultPolicy()`), resolving
+  // the deadline that bounds `acquireKeychainProvisionLock`'s wait on a live holder. It is the
+  // FIRST reader in `src/lib/worker-home.ts`, so unlike the last four this DID move the `files`
+  // assertion below — that file is a genuinely new unredirectable surface, not a sibling landing
+  // where its family already lives, and the list is edited deliberately rather than by reflex.
+  // ⚠ AND IT IS THE SECOND READER ON A PATH THAT MAY NOT REFUSE TO START, for `serveCommand`'s own
+  // reason above: `loadDefaultPolicy` THROWS on an absent or malformed install policy, and this
+  // lock is taken on the daemon's BOOT path (daemon.ts) as well as on every worker spawn. So the
+  // read is wrapped and falls back to `DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS` — the committed
+  // row's own figure — because a checkout with no readable policy.yaml must still WAIT WITH A
+  // DEADLINE rather than inherit the unbounded freeze that row exists to end. The seam alone
+  // would have satisfied test 2 while turning a missing policy.yaml into a boot failure.
+  // IT PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this comment requires: the
+  // calibration failed at 24-vs-23 while test 2 stayed green, so the reader arrived already seamed
+  // and is NOT allowlisted — adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
+  assert.equal(readers.length, 24, `expected 24 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
@@ -296,6 +312,7 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
     "src/lib/policy.ts",
     "src/lib/review.ts",
     "src/lib/sweep.ts",
+    "src/lib/worker-home.ts",
     "src/lib/worker.ts",
     "src/run-task.ts",
   ]);

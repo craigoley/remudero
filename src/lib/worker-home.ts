@@ -18,12 +18,14 @@ import {
   writeSync,
   renameSync,
 } from "node:fs";
+import { hostname } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import { playwrightCacheRoot } from "./review.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { reclaimStaleLock } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
+import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS, loadDefaultPolicy } from "./policy.js";
 
 /**
  * GENERAL SHELL-ISOLATION MECHANISM (W1-T18 / OSS blocker).
@@ -981,7 +983,13 @@ export type WorkerKeychainReasonClass =
   | "provision-failed"
   | "credential-file-unreadable"
   | "credential-file-malformed"
-  | "credential-too-short-for-run";
+  | "credential-too-short-for-run"
+  /** R-3: the keychain PROVISIONING LOCK was still held by a holder judged live after this call
+   *  waited out `keychainProvisionLockWaitMs`. Named separately from `provision-failed` on
+   *  purpose: nothing was attempted and nothing is wrong with the credential — the spawn is
+   *  refused because a peer (or an unreclaimable ghost of one) owns the store's lock, which is a
+   *  different operator action from any other member of this union. */
+  | "keychain-provision-lock-timeout";
 
 /**
  * A credential-NAMED failure out of the worker-keychain rung. Thrown BEFORE
@@ -1395,6 +1403,13 @@ export function keychainProvisionLockPath(keychainPath: string): string {
 
 interface KeychainProvisionLockInfo {
   pid: number;
+  /** `os.hostname()` of the process that wrote the lock. RECORDED SINCE R-3, and the reason is
+   *  {@link isHolderStale}'s rung 1: a pid is only ever meaningful on the host that assigned it,
+   *  so without this field every liveness probe below answers a question about OUR process table
+   *  that says nothing about the recorded holder. OPTIONAL on the READ side — a lock written
+   *  before this field existed carries none, and `isHolderStale` skips its host rung for exactly
+   *  that shape rather than inventing an identity for it. */
+  host?: string;
   startedAt: string;
 }
 
@@ -1424,24 +1439,121 @@ export interface KeychainProvisionLockHandle {
   release(): void;
 }
 
+export interface AcquireKeychainProvisionLockOpts {
+  /** Injectable liveness probe, forwarded to {@link isHolderStale} (tests). Defaults to
+   *  {@link defaultIsPidAlive}. */
+  isPidAlive?: (pid: number) => boolean;
+  /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests). Defaults to
+   *  fs-race-safe.ts's own `defaultGetProcessStartTime`. */
+  getProcessStartTime?: (pid: number) => number | null;
+  /** This host's own identity, forwarded to {@link isHolderStale}'s rung 1 (tests). Defaults to
+   *  `os.hostname()` — the SAME writer this function records, so the two agree by construction. */
+  hostname?: () => string;
+  /** Whether THIS process is containerised, forwarded to {@link isHolderStale}'s rung 1 (tests).
+   *  Defaults to fs-race-safe.ts's own `defaultInContainer`. */
+  inContainer?: () => boolean;
+  /** Injectable blocking sleep between polls (tests). Defaults to {@link defaultSleepSyncMs}. */
+  sleepSyncMs?: (ms: number) => void;
+  /** Injectable clock for the wait deadline below (tests). Defaults to `Date.now`. */
+  now?: () => number;
+  /** How long (ms) this call may wait on a LIVE holder before throwing. Omitted ⇒
+   *  plan/policy.yaml's `keychainProvisionLockWaitMs` row, falling back to
+   *  {@link DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS} when that file cannot be read at all. */
+  waitDeadlineMs?: number;
+  /** TEST-ONLY seam standing in for the committed-policy READ itself, so a test can drive the
+   *  branch where that read FAILS. `loadDefaultPolicy` resolves from `import.meta.url` and
+   *  memoizes for the process lifetime, so its failure path is unreachable from a test by any
+   *  other means — and an unreachable catch arm is this repo's own recorded coverage trap
+   *  (#978). Same `__`-prefixed convention `acquireInflightLock`'s `__beforeReclaimDelete` uses;
+   *  never set outside tests. */
+  __readCommittedWaitMs?: () => number;
+}
+
 /**
- * Acquire the exclusive provisioning lock for `keychainPath`, WAITING (never
- * throwing, never letting the caller proceed uncoordinated) while a live peer holds
- * it. A stale lock — its holder's pid no longer alive, or its file unreadable/garbage
- * — is reclaimed via the same identity-safe {@link reclaimStaleLock} every other lock
- * in this repo uses, so a crashed provisioner's abandoned lock cannot wedge every
- * later dispatch (this task's design point (v)): the very next call to reach EEXIST
- * on it takes it over.
+ * THE WAIT DEADLINE, resolved from policy through the `??` seam this repo's other policy
+ * consumers use (`test/config-reader-seams.test.ts` enforces that shape).
+ *
+ * WRAPPED, AND THE WRAPPING IS LOAD-BEARING. `loadDefaultPolicy` THROWS on an absent or malformed
+ * install policy, and this lock is held on the daemon's own boot path — turning "no readable
+ * policy.yaml" into a thrown boot failure would be a worse defect than the one this deadline
+ * fixes, and turning it into an unbounded wait would be the SAME one. So an unreadable policy
+ * falls back to the committed default, which is the same figure the row itself carries. Same
+ * shape, and the same reason, as `serveCommand`'s own `githubEventWakePolicy` read (W1-T2568).
  */
-function acquireKeychainProvisionLock(
+export function resolveKeychainProvisionLockWaitMs(opts: AcquireKeychainProvisionLockOpts): number {
+  try {
+    return opts.waitDeadlineMs ?? opts.__readCommittedWaitMs?.() ?? loadDefaultPolicy().values.keychainProvisionLockWaitMs;
+  } catch (e) {
+    // RECORDED, never swallowed: falling back is correct here, but "the committed policy could not
+    // be read at all" is a fact about the install, not a routine outcome, and the only place it
+    // could otherwise surface is a bound that silently stopped being the operator's. Same
+    // visible-trace precedent `reclaimStaleLock`'s own onReclaim/onLostReclaim defaults set.
+    console.error(
+      `[keychain-provision-lock] could not read the committed keychainProvisionLockWaitMs ` +
+        `(${e instanceof Error ? e.message : String(e)}); waiting with the built-in default ` +
+        `${DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS}ms instead`,
+    );
+    // No `opts.waitDeadlineMs ??` here: `??` short-circuits, so a caller-supplied deadline never
+    // reaches `loadDefaultPolicy` at all and this branch is only ever entered with none.
+    return DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS;
+  }
+}
+
+/**
+ * Acquire the exclusive provisioning lock for `keychainPath`, WAITING (never letting the caller
+ * proceed uncoordinated) while a live peer holds it — but only up to a DEADLINE, past which it
+ * throws {@link WorkerKeychainError} naming the holder it waited on.
+ *
+ * A stale lock — its holder judged dead by the shared {@link isHolderStale} predicate, or its file
+ * unreadable/garbage — is reclaimed via the same identity-safe {@link reclaimStaleLock} every
+ * other lock in this repo uses, so a crashed provisioner's abandoned lock cannot wedge every later
+ * dispatch (W1-T339's design point (v)): the very next call to reach EEXIST on it takes it over.
+ *
+ * R-3 — TWO DEFECTS, ONE SHAPE: A WAIT WITH NOTHING TO END IT.
+ *
+ *   (i) STALENESS WAS JUDGED BY `!isPidAlive(held.pid)` ALONE — the pre-W1-T368 predicate every
+ *       other lock in this repo has already stopped using. That answers "is SOME process using
+ *       this number", never "is it the process that wrote the lock". A provisioner that died
+ *       holding the lock, plus a REUSED pid, reads as LIVE forever: the recorded holder can never
+ *       become dead again, so nothing here ever reclaims. The lock now runs the SAME
+ *       {@link isHolderStale} — host first (rung 1), then pid liveness (rung 2), then the recorded
+ *       start time against the live pid's ACTUAL one (rung 3) — as `acquireInflightLock`,
+ *       `acquireDrainLock` and `acquireReviewStatusLock`. That is what needed `host` in the lock
+ *       payload above, and what makes a reused pid decidable without waiting for a real wrap.
+ *
+ *  (ii) THE WAIT ITSELF HAD NO BOUND. `ensureWorkerKeychain` is synchronous end to end and is
+ *       reached from `daemon.ts`'s boot and from `worker.ts` on every spawn, so this loop's
+ *       `Atomics.wait` blocks the daemon's EVENT LOOP, not a task: a lock nothing can reclaim
+ *       froze the whole process — no poll ticks, no STOP/PAUSE, and a relaunch queued behind the
+ *       same lock on the same path. Rung 1 alone makes the unreclaimable case ORDINARY rather than
+ *       exotic (a foreign-host lock is deliberately never reclaimed, and never should be), so the
+ *       deadline is not a belt-and-braces addition to (i) — it is what keeps (i)'s correct refusal
+ *       to steal a live holder's lock from being a new way to hang. A named throw hands the caller
+ *       something it can act on; an unbounded wait hands it nothing at all.
+ *
+ * THE UNCONTENDED PATH IS UNCHANGED, deliberately: no policy is read, no clock is sampled, and no
+ * deadline is computed unless and until this call actually meets a holder judged live. The
+ * steady-state majority of calls never even reach this function (see `ensureWorkerKeychain`'s
+ * pre-lock gate), and those that do overwhelmingly take the lock on the first `wx`.
+ */
+export function acquireKeychainProvisionLock(
   keychainPath: string,
-  opts: { isPidAlive?: (pid: number) => boolean; sleepSyncMs?: (ms: number) => void } = {},
+  opts: AcquireKeychainProvisionLockOpts = {},
 ): KeychainProvisionLockHandle {
   const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const sleep = opts.sleepSyncMs ?? defaultSleepSyncMs;
+  const now = opts.now ?? Date.now;
   const lockPath = keychainProvisionLockPath(keychainPath);
-  const info: KeychainProvisionLockInfo = { pid: process.pid, startedAt: new Date().toISOString() };
+  const info: KeychainProvisionLockInfo = {
+    pid: process.pid,
+    host: (opts.hostname ?? hostname)(),
+    startedAt: new Date(now()).toISOString(),
+  };
   mkdirSync(dirname(lockPath), { recursive: true });
+
+  // Set on the FIRST live holder this call meets, never before — see the doc above on keeping the
+  // uncontended path free of both the policy read and the clock sample.
+  let waitDeadlineAt: number | undefined;
 
   for (;;) {
     try {
@@ -1453,12 +1565,31 @@ function acquireKeychainProvisionLock(
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseKeychainProvisionLockInfo,
-        isStale: (held) => !isAlive(held.pid),
+        isStale: (held) =>
+          isHolderStale(held, {
+            isPidAlive: isAlive,
+            getProcessStartTime: opts.getProcessStartTime,
+            hostname: opts.hostname,
+            inContainer: opts.inContainer,
+          }),
       });
       if (result.outcome === "live") {
-        // A live peer is provisioning THIS store right now — WAIT and re-check,
-        // never throw and never proceed alongside it. Its own release (or, if it
-        // crashes, the next pass reclaiming its now-stale lock) is what ends this.
+        // A live peer is provisioning THIS store right now — WAIT and re-check rather than
+        // proceeding alongside it. Its own release (or, if it crashes, the next pass reclaiming
+        // its now-stale lock) is what ordinarily ends this; the deadline is what ends it when
+        // neither ever happens.
+        if (waitDeadlineAt === undefined) waitDeadlineAt = now() + resolveKeychainProvisionLockWaitMs(opts);
+        if (now() >= waitDeadlineAt) {
+          const held = result.holder;
+          throw new WorkerKeychainError(
+            "keychain-provision-lock-timeout",
+            `worker-keychain provisioning lock ${lockPath} is still held after waiting for it: holder pid ` +
+              `${held.pid}${held.host ? ` on host ${held.host}` : " (no host recorded)"}, started ${held.startedAt}. ` +
+              `Refusing to wait longer — this wait is synchronous and blocks the daemon's event loop, so an ` +
+              `unbounded one freezes the process outright. If that holder is genuinely gone, removing ${lockPath} ` +
+              `releases it; if it is on another host, this process is correct never to reclaim it.`,
+          );
+        }
         sleep(KEYCHAIN_PROVISION_LOCK_POLL_MS);
         continue;
       }

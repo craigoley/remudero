@@ -103,6 +103,16 @@ export interface PolicyValues {
    *  row (same absent-means-default shape as {@link PolicyValues.autoTriage}): an existing
    *  policy.yaml missing this row resolves to {@link DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS}. */
   fixSpawnWallClockBoundMs: number;
+  /** R-3: the WAIT DEADLINE (ms) on `acquireKeychainProvisionLock` (src/lib/worker-home.ts) —
+   *  how long a call may wait on a provisioning lock whose holder is judged LIVE before it gives
+   *  up and throws `WorkerKeychainError` (`keychain-provision-lock-timeout`) naming that holder.
+   *  That wait is fully SYNCHRONOUS (`Atomics.wait`, never `await`) and is reached from the
+   *  daemon's own boot and from every worker spawn, so an unbounded one froze the daemon's event
+   *  loop outright. See plan/policy.yaml's own row for why no contended-wait population exists to
+   *  derive this from and what the value is anchored on instead. OPTIONAL in the committed row
+   *  (same absent-means-default shape as {@link PolicyValues.sweepWallClockBoundMs}): an existing
+   *  policy.yaml missing this row resolves to {@link DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS}. */
+  keychainProvisionLockWaitMs: number;
   sweep: {
     staleDays: number;
     strikeCap: number;
@@ -328,6 +338,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   workerAbandon: "net-new",
   sweepWallClockBoundMs: "net-new",
   fixSpawnWallClockBoundMs: "net-new",
+  keychainProvisionLockWaitMs: "net-new",
   "sweep.staleDays": "lifted",
   "sweep.strikeCap": "lifted",
   "sweep.wipLimit": "lifted",
@@ -562,6 +573,19 @@ const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
 export const DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS = 3_600_000;
 
 /**
+ * R-3: DEFAULT `keychainProvisionLockWaitMs` — mirrors plan/policy.yaml's own row (net-new;
+ * derivation, and why no contended-wait population exists to derive it from, in that file's
+ * comment). Used ONLY when the row is ABSENT from the loaded YAML — the SAME absent-means-default
+ * shape {@link DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS} above already uses, so a policy.yaml fixture
+ * that predates this row keeps loading clean rather than failing on a missing mapping. EXPORTED
+ * because `src/lib/worker-home.ts`'s `acquireKeychainProvisionLock` needs it as its own fallback
+ * on the one path where the committed policy cannot be read at all: that lock is held on the
+ * daemon's boot path, and a checkout with no readable plan/policy.yaml must still be able to WAIT
+ * with a deadline rather than inherit the unbounded freeze this row exists to end.
+ */
+export const DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS = 120_000;
+
+/**
  * W1-T2568: DEFAULT `githubEventWake.dedupCapacity` — mirrors plan/policy.yaml's own row
  * (net-new; derivation in that file's comment). Used ONLY when the row is ABSENT from the
  * loaded YAML, the SAME absent-means-default shape {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS}
@@ -615,6 +639,12 @@ export function validatePolicy(raw: unknown): Policy {
   const fixSpawnWallClockBoundMs = fixSpawnWallClockBoundMsRaw
     ? numberField("fixSpawnWallClockBoundMs", fixSpawnWallClockBoundMsRaw, origin)
     : DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS;
+  // R-3: OPTIONAL, same absent-means-default shape as the two rows immediately above — a
+  // fixture that predates the keychain provisioning lock's wait deadline still loads clean.
+  const keychainProvisionLockWaitMsRaw = raw.keychainProvisionLockWaitMs as Record<string, unknown> | undefined;
+  const keychainProvisionLockWaitMs = keychainProvisionLockWaitMsRaw
+    ? numberField("keychainProvisionLockWaitMs", keychainProvisionLockWaitMsRaw, origin)
+    : DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS;
 
   const sweepRaw = raw.sweep;
   if (!isPlainObject(sweepRaw)) throw new PolicyError("policy.yaml: 'sweep' must be a mapping.");
@@ -738,6 +768,7 @@ export function validatePolicy(raw: unknown): Policy {
       workerAbandon,
       sweepWallClockBoundMs,
       fixSpawnWallClockBoundMs,
+      keychainProvisionLockWaitMs,
       sweep: {
         staleDays,
         strikeCap: sweepStrikeCap,
