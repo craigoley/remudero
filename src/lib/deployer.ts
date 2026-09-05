@@ -29,7 +29,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
+import { writeAtomic } from "./fs-race-safe.js";
 import { join } from "node:path";
 import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
@@ -897,8 +898,7 @@ export function deployIdleDeferredSincePath(stateRoot: string): string {
 /** `rmd deploy` — request a deploy at the next idle gap. */
 export function requestDeploy(stateRoot: string, reason: string | undefined): void {
   const p = deployMarkerPath(stateRoot);
-  mkdirSync(join(stateRoot, "state"), { recursive: true });
-  writeFileSync(p, JSON.stringify({ reason, requestedAt: new Date().toISOString() }, null, 2));
+  writeAtomic(p, JSON.stringify({ reason, requestedAt: new Date().toISOString() }, null, 2));
 }
 
 // ── Real, injected side effects ─────────────────────────────────────────────────
@@ -1139,8 +1139,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     alertConsoleOnly: (message) => {
       // The operator-visible alert WITHOUT deployLastFailedPath — see the dep's doc for why
       // poisoning the failed-HEAD marker on a console fault would freeze the pipeline.
-      mkdirSync(join(o.stateRoot, "state"), { recursive: true });
-      writeFileSync(
+      writeAtomic(
         deployFailedAlertPath(o.stateRoot),
         JSON.stringify({ message, scope: "console", at: new Date().toISOString() }, null, 2),
       );
@@ -1161,15 +1160,14 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       return { bootObserved: boots >= 1, crashCount: Math.max(0, boots - 1) };
     },
     alert: (message, failedHead, kind) => {
-      mkdirSync(join(o.stateRoot, "state"), { recursive: true });
       // `kind` is persisted so the NEXT poll's skip line can state the real cause. Without it the
       // record and the message that cites it can disagree, which is how a dirty-tree stall spent
       // an investigation being read as a health-check failure.
-      writeFileSync(
+      writeAtomic(
         deployFailedAlertPath(o.stateRoot),
         JSON.stringify({ message, failedHead, kind, at: new Date().toISOString() }, null, 2),
       );
-      writeFileSync(deployLastFailedPath(o.stateRoot), failedHead);
+      writeAtomic(deployLastFailedPath(o.stateRoot), failedHead);
     },
     clearMarker: () => {
       try {
@@ -1192,8 +1190,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       }
     },
     setDeferredSince: (ms) => {
-      mkdirSync(join(o.stateRoot, "state"), { recursive: true });
-      writeFileSync(deployIdleDeferredSincePath(o.stateRoot), String(ms));
+      writeAtomic(deployIdleDeferredSincePath(o.stateRoot), String(ms));
     },
     clearDeferredSince: () => {
       try {
