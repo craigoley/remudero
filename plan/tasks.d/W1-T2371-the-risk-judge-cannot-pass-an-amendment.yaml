@@ -136,6 +136,41 @@
     real risk judge escalates THIS PR on that basis, the rate becomes two of two and (vi)'s trigger
     is satisfied for whoever picks this shard up next; if it does not, nothing about the disposition
     above changes. Recorded so the outcome is legible either way, not predicted.
+    ── Q5. RE-VERIFIED AGAIN (2026-09-05) -- TRIGGER STILL NOT FIRED, AND (xiii) RESOLVED ────────
+
+    (xiv) THE INTERSECTION WAS RE-RUN, PER (vi), BEFORE A LINE WAS TOUCHED. The escalation corpus
+    has GROWN since Q4: `"risk judge ESCALATED"` in title now returns total_count 41, against the
+    37 measured at filing AND at the 2026-08-28 re-verification. Four new escalations opened, all
+    after #3060:
+
+        #3201  2026-08-28  W1-T2383  PR #3199   test/spend-observability-fields.test.ts
+        #3332  2026-08-30  W1-T2482  PR #3330   src/lib/ledger.ts + 3 tests
+        #3442  2026-08-31  W1-T2521  PR #3440   src/lib/review.ts + 1 test
+        #3464  2026-09-01  W1-T2531  PR #3463   3 test files
+
+    NOT ONE IS AMENDMENT-SHAPED. Every one carries a `src/` or `test/` diff, so none satisfies the
+    plan-only half of (ii)'s conjunction. The growth is real and is the reason this had to be
+    re-measured rather than assumed unchanged — a count that moved 37 -> 41 could easily have
+    carried the trigger, and did not.
+
+    (xv) THE RATE IS STILL ONE OF ONE. The founding instance (#3060 / PR #3059 / W1-T2318) remains
+    the only risk-judge escalation whose PR is a plan-only amendment. Per (vi): "if it still
+    returns one id, record the new instance and stop." This dispatch records and stops. acceptance,
+    files:, risk:, type: and status: below are byte-identical to the filed shard.
+
+    (xvi) AND (xiii)'S OPEN QUESTION IS NOW ANSWERED, WHICH IS THE ONE NEW FACT HERE. Q4 recorded
+    that its own amendment was itself the exact shape -- a plan-only diff under a chore(plan)
+    subject on a `run-W1-T2371-<digits>` head, amending a shard declaring source -- and said the
+    outcome would be "legible either way, not predicted". It merged as #3195 and NO escalation
+    names it: the four above are the only ones opened since, and none is W1-T2371's. So the judge
+    did NOT escalate a second fleet-dispatched amendment when handed one. That is evidence about
+    EXPOSURE rather than about the inference in (2), which is structural and unchanged -- but it is
+    the specific outcome (xiii) asked to be recorded, and it points the same way as (vi): wait.
+
+    (xvii) THIS AMENDMENT IS THE SAME SHAPE AGAIN, recorded for the same reason (xiii) recorded it:
+    one file under plan/, a chore(plan) subject, amending a shard that declares source. A third
+    data point either way is worth having, and predicting it would be worth nothing.
+
   acceptance:
     - claim: "a plan-only diff under a plan-declaring subject is no longer read as evidence of incomplete work or misdeclared scope"
       proof: "unit test: test/risk-judge-plan-only-amendment.test.ts"
