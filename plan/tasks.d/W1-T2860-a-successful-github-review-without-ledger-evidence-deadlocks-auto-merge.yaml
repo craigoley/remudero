@@ -1,0 +1,67 @@
+- id: W1-T2860
+  title: "A SUCCESSFUL GITHUB REVIEW WITHOUT LEDGER EVIDENCE DEADLOCKS AUTO-MERGE — the sweep calls the PR mergeable forever while the safety gate refuses every arm, and only unowned failures have a recovery row"
+  repo: remudero
+  depends_on: [W1-T230]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files:
+    - src/lib/sweep.ts
+    - test/sweep.test.ts
+  origin: "operator-session#pr-4016-unowned-review-success-deadlock-2026-09-04"
+  plan_refs: ["W1-T230"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET AT 2026-09-05T02:37:19Z. PR #4016 head
+    `987e30ed08a25445fc17796667a927fd5e499ff4` was CI-green and GitHub carried a successful
+    `remudero-review` commit status posted at 2026-09-05T02:27:41Z. The live ledger contained no
+    matching `review.posted` row for task W1-T2710 at that head. `deriveDisposition` therefore
+    returned `mergeable` with reason `review success, required checks green`, but
+    `armAutoMergeDetailed` returned `ledger-refused` because W1-T230 correctly requires the
+    review's structured local evidence. The same head repeated this incompatible pair on later
+    light and full sweeps. The PR eventually merged through another path before a manual review
+    could restore the evidence; that lifecycle change does not remove the reproducible policy gap.
+
+    MAIN ALREADY RECOVERS THE FAILURE-SHAPED SIBLING. The row introduced in PR #3604 re-runs the
+    reviewer when GitHub says failure but the exact input has zero completed ledger judgments.
+    There is no equivalent row before the positive `checks green + review success => mergeable`
+    rule. A process interruption between posting GitHub status and appending the ledger, a state
+    restore, or an externally posted status can therefore strand a success permanently. Do not
+    weaken the arm gate or manufacture a `review.posted` row from the less-detailed GitHub status;
+    only the authoritative reviewer can recreate the proof evidence the gate requires.
+  design: |
+    Add the success-shaped symmetric recovery row immediately before the ordinary mergeable row.
+    It matches only when checks are green, required contexts are readable, GitHub review state is
+    success, the versioned review-input digest is present, the exact-input completed-attempt count
+    is strictly zero, and no exact-input post refusal exists. Route that shape to the existing
+    `post-review` action with a reason naming the GitHub/ledger contradiction. A delivered rerun
+    increments the exact-input count, so the next pass reaches the existing mergeable row and the
+    unchanged W1-T230 arm gate can verify the ledger. A refusal remains a one-input retry bound.
+
+    Preserve the current failure recovery, absent/pending handling, explicit review invalidation,
+    arm policy and every legacy fixture whose gateway does not populate digest/count. This task
+    changes no GitHub status parsing and gives no commit status authority to certify its own proof.
+  acceptance:
+    - claim: "a CI-green PR with GitHub remudero-review success, a versioned input digest and explicitly zero completed ledger judgments routes to post-review instead of mergeable"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "after the authoritative rerun creates a matching completed judgment, the same PR reaches the existing mergeable row and W1-T230 remains the arm authority"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "an exact-input post refusal prevents the success recovery from looping, while a changed head or body digest earns a fresh attempt through the existing key"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "callers that omit the digest or exact-input count, unowned failures, ordinary reviewed successes and every unreadable/red/pending state keep their current disposition"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "runSweep invokes the existing post-review lane once for this contradiction and neither arms nor escalates on that pass"
+      proof: "unit test: test/sweep.test.ts"
+  falsifier: |
+    Close without implementation if current main already routes a green exact-head
+    `remudero-review` SUCCESS with `priorReviewAttemptsForInput: 0` and a versioned digest through
+    the authoritative review lane before attempting auto-merge. A fail-closed `ledger-refused`
+    result after the sweep has already classified the PR as mergeable confirms, rather than
+    falsifies, the task.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2860` and printed
+    `RESERVED W1-T2860`; the held id is authoritative.
