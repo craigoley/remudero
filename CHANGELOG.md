@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+> **Frozen at 0.1.0 (2026-07-19).** The project is pre-alpha: no releases are
+> cut and no tags are pushed while it stays in that state (see README's
+> "Pre-alpha" section). The deployable unit is the image build stamped into
+> `/etc/rmd-build-sha`, not a semver bump. `npm run changelog` will regenerate
+> this file once a tagged release exists.
+
 ## 0.1.0 (2026-07-19)
 
 ### Features

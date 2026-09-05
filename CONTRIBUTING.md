@@ -89,11 +89,11 @@ Every commit message must follow [Conventional Commits](https://www.conventional
 (`type(scope): subject`, e.g. `fix(cli): correct the flag parsing`). The `commitlint` CI job
 lints the **PR title** — the squash-merge subject, read live from GitHub — and fails red on a
 malformed one; individual commits on the branch are not linted (retitle, then push or re-run the
-job). See `commitlint.config.mjs`. `type` drives `CHANGELOG.md`'s generated version bump: `feat:` → minor,
-`fix:` → patch, a `BREAKING CHANGE:` footer (or `!` after the type/scope) → major. Regenerate the
-changelog with `npm run changelog` (wraps `commit-and-tag-version`, configured to only edit
-`CHANGELOG.md`/`package.json` — never to commit, tag, or push on its own); the resulting diff
-lands through the normal PR gate like any other change.
+job). See `commitlint.config.mjs`. `type` still selects `feat:`/`fix:`/`BREAKING CHANGE:` (or `!`
+after the type/scope) for a minor/patch/major bump, but the bump itself is deferred until releases
+are cut: the project is pre-alpha, carries no semver tags, and `CHANGELOG.md` is frozen (see
+README's "Pre-alpha" section). Do not run `npm run changelog` (wraps `commit-and-tag-version`) until
+that changes.
 
 ## Local checks before pushing
 

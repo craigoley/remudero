@@ -26,6 +26,15 @@ stack — OS sandbox + a deterministic deny-floor hook + worktree scoping — bu
 deny-floor is a *tripwire, not a sandbox*. Read the plan before pointing this at
 anything you care about.
 
+**No releases while pre-alpha.** There are no semver tags (`git tag` returns
+none) and `CHANGELOG.md` is frozen — main is the only moving line, and every
+merged commit is current by definition. The deployable unit is an image build
+(`.github/workflows/acr-build.yml`), not a version bump: the operator builds the
+daemon image and its commit is stamped into `/etc/rmd-build-sha` inside the
+container, which `scripts/fleet-heartbeat.sh` publishes as `image_build_sha` so a
+fleet host's running code is checkable against `origin/main`. Semver, tags, and a
+regenerated changelog return once the project leaves pre-alpha.
+
 ## Where this is going
 
 **The harness is the product; GitHub is plumbing.** The loop already runs
