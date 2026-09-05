@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildOpenPrViews } from "../src/run-task.js";
+import {
+  PLAN_FILING_FILE_RESPONSE_CAP,
+  createPlanFilingFileCache,
+  hydratePlanFilingFiles,
+  type GhApiFetcher,
+} from "../src/lib/open-prs-rest.js";
 import {
   DEFAULT_SWEEP_POLICY,
   oldestActivityFirst,
@@ -42,8 +51,10 @@ const build = (n: number, created: string) => pr({ prNumber: n, createdAt: creat
 
 test("W1-T2439 (acceptance 1): buildOpenPrViews assigns isPlanFiling from the ledger predicate", () => {
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.match(src, /isPlanFiling: isPlanOnlyFilingPr\(ledger, pr\.url\),/,
-    "the producer must assign the key with a plain call, never a conditional spread");
+  assert.match(src, /new Map\(raw\.map\(\(pr\) => \[pr\.number, isPlanOnlyFilingPr\(ledger, pr\.url\)\]\)\)/,
+    "the producer must still derive the emitter fast path from the shared ledger predicate");
+  assert.match(src, /isPlanFiling: planFiling\.isPlanFiling,/,
+    "the producer must assign the classified key plainly, never through a conditional spread");
   // The census walks TOP-LEVEL KEYS and pushes any spread onto `unresolvableSpreads` — the shape
   // that made #3127 read as unwired. Assert the key is not inside one.
   assert.ok(!/\.\.\.\([^)]*isPlanFiling/.test(src), "isPlanFiling must not be assigned via a spread");
@@ -173,4 +184,238 @@ test("W1-T2439 (acceptance 8): nothing added paces, sleeps, or arms auto-merge e
   for (const banned of ["setTimeout", "await", "sleep", "delay", "arm("]) {
     assert.ok(!body.includes(banned), `selectReviewAdmissions must not contain ${banned}`);
   }
+});
+
+// ── W1-T2864 — external plan filings earn the same lane from material GitHub paths ──────────
+
+interface RestFixturePr {
+  number: number;
+  html_url: string;
+  head: { ref: string; sha: string };
+  updated_at: string;
+  created_at: string;
+  body: string;
+  auto_merge: null;
+  state: "open";
+}
+
+function restPr(number: number, sha: string): RestFixturePr {
+  return {
+    number,
+    html_url: `https://github.com/o/r/pull/${number}`,
+    head: { ref: `agent/plan-${number}`, sha },
+    updated_at: "2026-09-05T04:00:00.000Z",
+    created_at: "2026-09-05T03:00:00.000Z",
+    body: "opened outside the rmd emitter",
+    auto_merge: null,
+    state: "open",
+  };
+}
+
+function viewHarness(
+  initial: RestFixturePr[],
+  initialFiles: Map<number, unknown>,
+  ledgerRows: Array<Record<string, unknown>> = [],
+) {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-plan-filing-admission-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  writeFileSync(ledgerPath, ledgerRows.map((row) => JSON.stringify(row)).join("\n") + (ledgerRows.length ? "\n" : ""));
+  let rows = initial;
+  const files = initialFiles;
+  const fileCalls = new Map<number, number>();
+  const fetch: GhApiFetcher = (args) => {
+    const path = args[args.length - 1] ?? "";
+    if (/pulls\?state=open/.test(path)) return rows;
+    const fileMatch = path.match(/pulls\/(\d+)\/files/);
+    if (fileMatch) {
+      const number = Number(fileMatch[1]);
+      fileCalls.set(number, (fileCalls.get(number) ?? 0) + 1);
+      const reply = files.get(number);
+      if (reply instanceof Error) throw reply;
+      return reply;
+    }
+    if (/\/pulls\/\d+$/.test(path)) return { mergeable: true, mergeable_state: "clean" };
+    if (/check-runs/.test(path)) {
+      return {
+        check_runs: [
+          {
+            name: "ci-gate",
+            status: "completed",
+            conclusion: "success",
+            started_at: "2026-09-05T03:30:00.000Z",
+          },
+        ],
+      };
+    }
+    if (/\/status$/.test(path)) return { statuses: [] };
+    return [];
+  };
+  return {
+    ledgerPath,
+    fetch,
+    files,
+    fileCalls,
+    setRows(next: RestFixturePr[]) {
+      rows = next;
+    },
+    cleanup() {
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+type ClassifiedView = OpenPrView & { planFilingSource?: string };
+type ClassificationEvent = { prNumber: number; headSha: string; source: string };
+
+function buildClassifiedViews(
+  harness: ReturnType<typeof viewHarness>,
+  opts: { cache?: ReturnType<typeof createPlanFilingFileCache>; missCap?: number } = {},
+): { views: ClassifiedView[]; events: ClassificationEvent[] } {
+  const events: ClassificationEvent[] = [];
+  const views = buildOpenPrViews("o", "r", harness.ledgerPath, {
+    fetch: harness.fetch,
+    requiredContexts: () => ["ci-gate"],
+    readCiGateRequired: () => ["ci-gate"],
+    planFilingFileCache: opts.cache ?? createPlanFilingFileCache(),
+    planFilingFileMissCap: opts.missCap ?? 3,
+    onPlanFilingClassification: (event: ClassificationEvent) => events.push(event),
+  }) as ClassifiedView[];
+  return { views, events };
+}
+
+test("W1-T2864: a complete external plan changeset reaches the existing non-spawning lane", () => {
+  const harness = viewHarness([restPr(101, "a".repeat(40))], new Map([[101, [{ filename: "plan/tasks.d/W1-T3000.yaml" }]]]));
+  try {
+    const { views, events } = buildClassifiedViews(harness);
+    assert.equal(views[0].isPlanFiling, true);
+    assert.equal(views[0].planFilingSource, "github-files");
+    assert.deepEqual(events, [{ prNumber: 101, headSha: "a".repeat(40), source: "github-files" }]);
+    const admitted = selectReviewAdmissions(views, DEFAULT_SWEEP_POLICY, NOW);
+    assert.deepEqual(admitted.planFilings.map((candidate) => candidate.prNumber), [101]);
+    assert.deepEqual(admitted.spawning, []);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("W1-T2864: the emitter ledger signal remains a zero-file-request fast path", () => {
+  const row = restPr(102, "b".repeat(40));
+  const harness = viewHarness([row], new Map([[102, [{ filename: "src/not-consulted.ts" }]]]), [
+    { step: "pr.opened", pr_url: row.html_url, plan_only: true },
+  ]);
+  try {
+    const { views, events } = buildClassifiedViews(harness);
+    assert.equal(views[0].isPlanFiling, true);
+    assert.equal(views[0].planFilingSource, "emitter-ledger");
+    assert.equal(harness.fileCalls.get(102) ?? 0, 0);
+    assert.equal(events[0].source, "emitter-ledger");
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("W1-T2864: lookalikes, enforcement data, unavailable reads and misses beyond the cap stay semantic", () => {
+  const prs = [1, 2, 3, 4, 5].map((number) => restPr(number, String(number).repeat(40)));
+  const harness = viewHarness(
+    prs,
+    new Map<number, unknown>([
+      [1, [{ filename: "src/lib/lookalike.ts" }]],
+      [2, [{ filename: "plan/policy.yaml" }]],
+      [3, []],
+      [4, new Error("rate limited")],
+      [5, [{ filename: "plan/tasks.d/W1-T3005.yaml" }]],
+    ]),
+  );
+  try {
+    const { views, events } = buildClassifiedViews(harness, { missCap: 4 });
+    assert.deepEqual(views.map((view) => view.isPlanFiling), [false, false, false, false, false]);
+    assert.deepEqual(views.map((view) => view.planFilingSource), [
+      "not-plan-only",
+      "not-plan-only",
+      "unreadable",
+      "unreadable",
+      "unreadable",
+    ]);
+    assert.equal(harness.fileCalls.get(5) ?? 0, 0, "the candidate beyond the primary per-pass bound is not fetched");
+    assert.deepEqual(Object.keys(events[0]).sort(), ["headSha", "prNumber", "source"], "telemetry is bounded metadata only");
+    assert.doesNotMatch(JSON.stringify(events), /lookalike|policy\.yaml|rate limited|credential|token/i);
+    assert.equal(selectReviewAdmissions(views, DEFAULT_SWEEP_POLICY, NOW).planFilings.length, 0);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("W1-T2864: one head reads once, while a new head reads again and cannot inherit classification", () => {
+  const cache = createPlanFilingFileCache();
+  const first = restPr(103, "c".repeat(40));
+  const harness = viewHarness([first], new Map([[103, [{ filename: "plan/tasks.d/W1-T3006.yaml" }]]]));
+  try {
+    assert.equal(buildClassifiedViews(harness, { cache }).views[0].isPlanFiling, true);
+    assert.equal(buildClassifiedViews(harness, { cache }).views[0].isPlanFiling, true);
+    assert.equal(harness.fileCalls.get(103), 1, "the complete positive observation is cached at this head");
+
+    harness.setRows([restPr(103, "d".repeat(40))]);
+    harness.files.set(103, [{ filename: "src/lib/now-semantic.ts" }]);
+    const changed = buildClassifiedViews(harness, { cache }).views[0];
+    assert.equal(changed.isPlanFiling, false);
+    assert.equal(changed.planFilingSource, "not-plan-only");
+    assert.equal(harness.fileCalls.get(103), 2, "the new head earns one new material read");
+    assert.equal(buildClassifiedViews(harness, { cache }).views[0].isPlanFiling, false);
+    assert.equal(harness.fileCalls.get(103), 2, "the complete negative observation is cached too");
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("W1-T2864: malformed and page-capped reads remain unknown, and retained cache state is bounded", () => {
+  const cache = createPlanFilingFileCache();
+  const candidates = [201, 202, 203, 204, 205].map((number) => ({ number, headRefOid: String(number).repeat(40).slice(0, 40) }));
+  const fetch: GhApiFetcher = (args) => {
+    const number = Number((args[args.length - 1] ?? "").match(/pulls\/(\d+)\/files/)?.[1]);
+    if (number === 201) return [{ filename: null }];
+    if (number === 202) return Array.from({ length: PLAN_FILING_FILE_RESPONSE_CAP }, (_, i) => ({ filename: `plan/tasks.d/${i}.yaml` }));
+    return [{ filename: `plan/tasks.d/W1-T${number}.yaml` }];
+  };
+  const observations = hydratePlanFilingFiles("o", "r", candidates, fetch, cache, { missCap: 5, maxEntries: 2 });
+  assert.deepEqual(observations.get(201), { state: "unreadable", reason: "malformed" });
+  assert.deepEqual(observations.get(202), { state: "unreadable", reason: "response-cap" });
+  assert.equal(cache.entries.size, 2, "the retained LRU never exceeds its configured backstop");
+});
+
+test("W1-T2864: capped misses rotate so an unreadable early PR cannot starve later candidates", () => {
+  const cache = createPlanFilingFileCache();
+  const candidates = [301, 302].map((number) => ({
+    number,
+    headRefOid: String(number).repeat(40).slice(0, 40),
+  }));
+  const calls: number[] = [];
+  const fetch: GhApiFetcher = (args) => {
+    const number = Number((args[args.length - 1] ?? "").match(/pulls\/(\d+)\/files/)?.[1]);
+    calls.push(number);
+    if (number === 301) throw new Error("still unavailable");
+    return [{ filename: "plan/tasks.d/W1-T3302.yaml" }];
+  };
+
+  const first = hydratePlanFilingFiles("o", "r", candidates, fetch, cache, { missCap: 1 });
+  assert.deepEqual(first.get(301), { state: "unreadable", reason: "fetch-failed" });
+  assert.deepEqual(first.get(302), { state: "unreadable", reason: "per-pass-cap" });
+
+  const second = hydratePlanFilingFiles("o", "r", candidates, fetch, cache, { missCap: 1 });
+  assert.deepEqual(second.get(301), { state: "unreadable", reason: "per-pass-cap" });
+  assert.deepEqual(second.get(302), {
+    state: "complete",
+    paths: ["plan/tasks.d/W1-T3302.yaml"],
+    cache: "miss",
+  });
+  assert.deepEqual(calls, [301, 302], "each pass advances one bounded miss instead of retrying PR 301 forever");
+});
+
+test("W1-T2864: the daemon owns one structural cache outside its recurring sweep callback", () => {
+  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const hook = source.indexOf("export function buildSweepHook");
+  const cache = source.indexOf("const planFilingFileCache = createPlanFilingFileCache()", hook);
+  const callback = source.indexOf("return async (continueReviewAdmissions", hook);
+  const consumer = source.indexOf("planFilingFileCache,", callback);
+  assert.ok(hook >= 0 && cache > hook && callback > cache, "the cache must be built once per daemon lifetime, before the poll callback");
+  assert.ok(consumer > callback, "every recurring build uses that same cache instance");
 });

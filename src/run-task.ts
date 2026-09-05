@@ -220,6 +220,7 @@ import {
   type OpenPrRest,
   fetchSinglePrRest,
   hydrateMergeConflictEvidence,
+  hydratePlanFilingFiles,
   hydrateSupersessionVerdicts,
   hydrateWorkflowRuns,
   hydrateMergeStates,
@@ -232,6 +233,10 @@ import {
   singlePrRestArgs,
   type GhApiFetcher,
   type GhCallPacer,
+  createPlanFilingFileCache,
+  PLAN_FILING_FILE_CACHE_MAX_ENTRIES,
+  type PlanFilingFileCache,
+  type PlanFilingFileObservation,
   type RestPullRow,
   type RestRollupEntry,
 } from "./lib/open-prs-rest.js";
@@ -668,6 +673,7 @@ import {
   priorReviewVerdictFromLedger,
   resolveAutoMergeArm,
   planOnlyDiff,
+  enforcementDataInDiff,
   reviewerOutcome,
   reviewerVerdictContract,
   reviewEvidenceStrength,
@@ -27389,6 +27395,58 @@ function isPlanOnlyFilingPr(ledger: Array<Record<string, unknown>>, prUrl: strin
   return ledger.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
 }
 
+export type PlanFilingClassificationSource = "emitter-ledger" | "github-files" | "unreadable" | "not-plan-only";
+
+export interface PlanFilingClassification {
+  isPlanFiling: boolean;
+  source: PlanFilingClassificationSource;
+}
+
+export interface PlanFilingClassificationEvent {
+  prNumber: number;
+  headSha: string;
+  source: PlanFilingClassificationSource;
+}
+
+export type ClassifiedOpenPrView = OpenPrView & { planFilingSource: PlanFilingClassificationSource };
+
+/** Titles and branch names may nominate a read, but only the emitter record or material paths grant it. */
+export function classifyPlanFiling(
+  emitterLedger: boolean,
+  files: PlanFilingFileObservation | undefined,
+): PlanFilingClassification {
+  if (emitterLedger) return { isPlanFiling: true, source: "emitter-ledger" };
+  if (!files || files.state === "unreadable") return { isPlanFiling: false, source: "unreadable" };
+  const isPlanOnly = files.paths.length > 0 && files.paths.every(isInPlanScope);
+  const touchesEnforcementData = enforcementDataInDiff([...files.paths]).length > 0;
+  return isPlanOnly && !touchesEnforcementData
+    ? { isPlanFiling: true, source: "github-files" }
+    : { isPlanFiling: false, source: "not-plan-only" };
+}
+
+/** One bounded ledger row per classification transition, never one row per unchanged poll. */
+export function createPlanFilingClassificationTelemetry(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): (event: PlanFilingClassificationEvent) => void {
+  const observed = new Map<string, PlanFilingClassificationSource>();
+  return (event) => {
+    const key = `${event.prNumber}@${event.headSha}`;
+    if (observed.get(key) === event.source) return;
+    observed.delete(key);
+    observed.set(key, event.source);
+    while (observed.size > PLAN_FILING_FILE_CACHE_MAX_ENTRIES) {
+      const oldest = observed.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      observed.delete(oldest);
+    }
+    log("sweep.plan_filing_classified", {
+      pr_number: event.prNumber,
+      head_sha: event.headSha,
+      classification_source: event.source,
+    });
+  };
+}
+
 /**
  * Resolve the task identity shared by the direct review path and the open-PR board path.
  * An exact trailer wins; a positively identified plan-only filing is intentionally
@@ -27715,8 +27773,14 @@ export function buildOpenPrViews(
     fetchCiFailureEvidence?: typeof fetchCiFailures;
     /** Local-only owner probe; never performs a GitHub read. */
     assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
+    /** Process-lifetime complete-read cache; the daemon owns one for all of its poll passes. */
+    planFilingFileCache?: PlanFilingFileCache;
+    /** Primary per-pass miss bound. Production reuses the existing cheap-lane admission bound. */
+    planFilingFileMissCap?: number;
+    /** Bounded classification telemetry; production de-duplicates unchanged head/source pairs. */
+    onPlanFilingClassification?: (event: PlanFilingClassificationEvent) => void;
   } = {},
-): OpenPrView[] {
+): ClassifiedOpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
   const assessPendingOwner =
     deps.assessPendingOwner ??
@@ -27752,6 +27816,26 @@ export function buildOpenPrViews(
   const ciGateRequired = deps.readCiGateRequired
     ? deps.readCiGateRequired(repoRoot)
     : readCiGateRequiredChecks(repoRoot);
+
+  // W1-T2864: the local emitter receipt is still the zero-request positive answer. Only PRs
+  // without it enter the bounded REST hydrator; complete reads are cached by exact head.
+  const emitterPlanFilings = new Map(raw.map((pr) => [pr.number, isPlanOnlyFilingPr(ledger, pr.url)]));
+  const planFilingFiles = hydratePlanFilingFiles(
+    owner,
+    repo,
+    raw
+      .filter((pr) => emitterPlanFilings.get(pr.number) !== true)
+      .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid })),
+    fetch,
+    deps.planFilingFileCache ?? createPlanFilingFileCache(),
+    { missCap: deps.planFilingFileMissCap ?? DEFAULT_SWEEP_POLICY.planFilingAdmissionBound },
+  );
+  const planFilingClassifications = new Map<number, PlanFilingClassification>();
+  for (const pr of raw) {
+    const classification = classifyPlanFiling(emitterPlanFilings.get(pr.number) === true, planFilingFiles.get(pr.number));
+    planFilingClassifications.set(pr.number, classification);
+    deps.onPlanFilingClassification?.({ prNumber: pr.number, headSha: pr.headRefOid, source: classification.source });
+  }
 
   // MERGE STATE: one bounded follow-up fetch per PR, because the LIST endpoint omits
   // `mergeable_state` (see hydrateMergeStates' doc for the live verification and the incident).
@@ -27813,6 +27897,7 @@ export function buildOpenPrViews(
   const supersessionVerdicts = hydrateSupersessionVerdicts(owner, repo, supersededPrs, fetch, isInPlanScope);
 
   return raw.map((pr) => {
+    const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
     const taskId = resolveOpenPrTaskId(pr, ledger);
     const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
     const inputDigest = reviewInputDigest(pr.headRefOid, pr.body ?? "");
@@ -27892,7 +27977,8 @@ export function buildOpenPrViews(
       // and pushes any SPREAD onto `unresolvableSpreads`; that is deliberate and has its own
       // passing test, which is exactly what made #3127 read as unwired after a conditional spread.
       // A plain key whose value is a call is what the census recognises.
-      isPlanFiling: isPlanOnlyFilingPr(ledger, pr.url),
+      isPlanFiling: planFiling.isPlanFiling,
+      planFilingSource: planFiling.source,
       // W1-T923: a SIBLING read, off the SAME `review.posted` ledger line `unmetCriteria` above
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
@@ -30011,7 +30097,10 @@ export async function sweepCommand(rest: string[]): Promise<number> {
 
   let openPrs: OpenPrView[];
   try {
-    openPrs = buildOpenPrViews(owner, repo, ledgerPath);
+    openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+      planFilingFileCache: createPlanFilingFileCache(),
+      onPlanFilingClassification: createPlanFilingClassificationTelemetry(log),
+    });
   } catch (e) {
     console.error(`### rmd sweep — could not list open PRs for ${owner}/${repo}: ${String((e as Error)?.message ?? e)}`);
     return 1;
@@ -30890,6 +30979,8 @@ export function buildSweepHook(
   // no seam to receive it) and into `buildOpenPrViews` below, so both burst call sites share the
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
+  const planFilingFileCache = createPlanFilingFileCache();
+  const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   return async (continueReviewAdmissions = () => true) => {
     try {
       await mainHealthRung?.();
@@ -30897,7 +30988,11 @@ export function buildSweepHook(
       log("main.health.error", { error: String((e as Error)?.message ?? e) });
     }
     try {
-      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, { pacer });
+      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+        pacer,
+        planFilingFileCache,
+        onPlanFilingClassification: reportPlanFilingClassification,
+      });
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
@@ -31178,9 +31273,14 @@ export function buildSweepLightHook(
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): () => Promise<void> {
+  const planFilingFileCache = createPlanFilingFileCache();
+  const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   return async () => {
     try {
-      const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
+      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+        planFilingFileCache,
+        onPlanFilingClassification: reportPlanFilingClassification,
+      });
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
