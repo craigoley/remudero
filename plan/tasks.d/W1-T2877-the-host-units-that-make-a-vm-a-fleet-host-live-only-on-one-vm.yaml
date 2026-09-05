@@ -1,0 +1,70 @@
+- id: W1-T2877
+  title: "THE HOST UNITS THAT MAKE A VM A FLEET HOST EXIST ONLY ON ONE VM — the daemon launcher, its boot unit, the crash-recovery watchdog, the stray-container reaper and the heartbeat cron were all installed by hand and are in NO tracked file, so a second instance provisioned from this repo comes up without reboot survival, without crash recovery, without a heap ceiling and without a beat"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§8", "W1-T2856", "W1-T2875", "W1-T2876"]
+  files: [deploy/install-host-units.sh, docs/operator-guide.md, test/host-units-install.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2856 established the pattern and closed exactly one instance of this problem: emergency
+    systemd drop-ins applied by hand during an incident became `deploy/install-container-runtime-mount-order.sh`,
+    a tracked installer with a check mode, a test, and an operator-guide entry. Running that tracked
+    installer on the live host then found TWO required paths the hand fix had missed — Docker's real
+    data root, resolved from `docker info --format '{{.DockerRootDir}}'` rather than assumed, and the
+    device backing the containerd root. THE TRACKED, TESTED INSTALLER WAS STRICTLY BETTER THAN THE
+    HAND FIX IT REPLACED, which is the argument for this task rather than merely the analogy.
+
+    EVERYTHING ELSE ADDED DURING THE 2026-09-05 INCIDENTS IS STILL HAND-INSTALLED. Measured on the
+    Azure host, then grepped across `deploy/`, `scripts/` and `docs/` on origin/main — seven
+    artifacts, none of them tracked anywhere (control: `host-update` matches, so the sweep reads):
+      /home/craigoleyagent/rmd-relaunch.sh ......................... 5877 B   NOT IN REPO
+      /etc/systemd/system/rmd-fleet.service ........................ 1143 B   NOT IN REPO
+      /etc/systemd/system/rmd-fleet-watchdog.service ............... 1059 B   NOT IN REPO
+      /etc/systemd/system/rmd-fleet-watchdog.timer .................  202 B   NOT IN REPO
+      /etc/systemd/system/rmd-reap-stray.service ...................  204 B   NOT IN REPO
+      /etc/systemd/system/rmd-reap-stray.timer .....................  153 B   NOT IN REPO
+      /usr/local/bin/rmd-reap-stray-containers ..................... 1450 B   NOT IN REPO
+    plus a crontab line installing the five-minute beat.
+
+    WHAT A SECOND VM PROVISIONED FROM THIS REPO GETS TODAY, AND WHAT IT SILENTLY DOES NOT:
+      * no reboot survival — the daemon runs `--restart=on-failure:5` deliberately, so that a clean
+        STOP is not undone; docker therefore does NOT bring it back after a reboot, and
+        rmd-fleet.service is what covers that case.
+      * no crash recovery — `on-failure:5` is a COUNT, not a rate. On 2026-09-05 six heap aborts
+        exhausted it, docker stopped trying, and the fleet sat dead for three hours.
+        rmd-fleet-watchdog.timer revives a crash-capped daemon every five minutes.
+      * no heap ceiling — `NODE_OPTIONS=--max-old-space-size=4096` lives only in the hand-written
+        launcher. Without it V8 caps at ~2 GB and the retro rung aborts at ~2046 MB on a 7.9 GB host.
+      * no beat — with no cron the host never reports, and W1-T2876's watcher cannot escalate for a
+        branch that does not exist; that silence is SILENT BY DESIGN, so a second instance would be
+        unmonitored and look exactly like a monitored one that is fine.
+      * no stray-container reaper — a leaked worker container held 90% CPU and starved reviews until
+        it was found by hand.
+
+    THE LAUNCHER IS THE HARD PART AND MUST NOT BE COPIED BLIND. It carries four properties that were
+    each learned from a failure: it refuses when `state/STOP` is present, so no watchdog or boot unit
+    can resurrect a deliberate stop; it refuses when the state root is unmounted, which is the
+    2026-09-05 fleet-wipe failure mode; it is idempotent, so a five-minute timer cannot disturb a
+    healthy daemon or its in-flight workers; and it appends a revival record, because recreating the
+    container RESETS docker's RestartCount and auto-recovery would otherwise hide the crash loop it
+    is recovering from. A port that drops any of those is worse than no port.
+
+    HOST-SPECIFIC VALUES MUST BE INPUTS, NOT CONSTANTS. The live host hardcodes a state root of
+    `/home/craigoleyagent/rmd-state2`, a registry image, a service user, and GH_APP_* ids. A second
+    instance differs in all of them, so the installer takes them as environment with the current
+    host's values as defaults, and REFUSES rather than guessing when one cannot be resolved — the
+    same failure posture `--print-daemon-run` already takes when it cannot find a ledger.
+  acceptance:
+    - claim: "the installer renders every host unit and a check mode reports which are missing without changing anything"
+      proof: "unit test: W1-T2877: check mode reports missing units and changes nothing"
+    - claim: "the rendered launcher keeps the STOP refusal, the unmounted-state refusal and idempotence"
+      proof: "unit test: W1-T2877: the rendered launcher refuses on STOP and on an unmounted state root"
+    - claim: "host-specific values are inputs, and the installer refuses rather than guessing when one is unresolvable"
+      proof: "unit test: W1-T2877: an unresolvable host value is refused rather than guessed"
