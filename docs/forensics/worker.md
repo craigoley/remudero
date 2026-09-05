@@ -1139,7 +1139,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
     // carry the account its spend is attributed to (W1-T268's ledger dimension).
 ```
 
-## spawnWorker — spawnWorker — the non-darwin credential rung
+## spawnWorker — the non-darwin credential rung
 
 `src/lib/worker.ts:1828-1842` at `ea02cc83`.
 
@@ -1188,7 +1188,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
     // compinit contamination).
 ```
 
-## spawnWorker — spawnWorker — worker process-tree containment
+## spawnWorker — worker process-tree containment
 
 `src/lib/worker.ts:1880-1890` at `ea02cc83`.
 
@@ -1220,7 +1220,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
       // a custom spawn (see the file-header note in worker-containment.ts).
 ```
 
-## spawnWorker — spawnWorker — the live-spawn guard
+## spawnWorker — the live-spawn guard
 
 `src/lib/worker.ts:1933-1946` at `ea02cc83`.
 
@@ -1241,7 +1241,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
     // model spawn, and catches its own failure without weakening this guard.
 ```
 
-## spawnWorker — spawnWorker — replacing a thrown error with WorkerAbandonedError
+## spawnWorker — replacing a thrown error with WorkerAbandonedError
 
 `src/lib/worker.ts:2029-2034` at `ea02cc83`.
 
@@ -1254,7 +1254,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
       // documented contract.
 ```
 
-## spawnWorker — spawnWorker — the teardown `finally`
+## spawnWorker — the teardown `finally`
 
 `src/lib/worker.ts:2041-2059` at `ea02cc83`.
 
