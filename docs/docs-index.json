@@ -134,6 +134,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/sweep-map.md",
+      "title": "Removed block map — `src/lib/sweep.ts`",
+      "summary": "Every comment block compacted out of `src/lib/sweep.ts`, mapped to the heading in",
+      "grepHint": "Removed block map — `src/lib/sweep.ts`"
+    },
+    {
       "path": "docs/forensics/sweep.md",
       "title": "Forensics — `src/lib/sweep.ts`",
       "summary": "A verbatim archive of comment blocks compacted out of `src/lib/sweep.ts`. Each heading names",
