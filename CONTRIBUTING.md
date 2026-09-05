@@ -83,6 +83,26 @@ landed in the same PR. Reversible, PR-shaped changes stay in
 [`DECISIONS.md`](DECISIONS.md)/auto-choose — see
 [`docs/adr/README.md`](docs/adr/README.md) for which is which.
 
+## Comments — plain language, and a ceiling on volume
+
+Code comments follow [ISO 24495-1](https://www.iso.org/standard/78907.html) plain language, written
+up in [`docs/comment-standard.md`](docs/comment-standard.md). Read it before writing a long block.
+The short version: lead with a purpose sentence, one idea per sentence, and earn the space by
+stating an invariant, a trap, or the falsifier test — then cite the record (PR number, task id,
+`DECISIONS.md` date) instead of retelling it. Measured forensics go in `learnings/*.yaml` or a dated
+page under `docs/`, with a one-line pointer left in the code.
+
+Two limits refuse a PR, both via the `comment-load-ratchet` CI job
+(`scripts/comment-load-ratchet.mjs`): no measured file may carry more comment lines than
+`scripts/comment-load-baseline.json` records for it, and no diff may add a comment block longer than
+40 lines. If growth is right, record it in the baseline in the same PR so a reviewer reads the
+decision.
+
+**A compaction PR migrates or keeps every phrase a test pins.** 206 assertions across 138 test files
+read `src/` files as raw text and match on a literal substring (R-44,
+`docs/audits/recon-2026-09-05.md`). Before shortening a block, run
+`git grep -lF -- '<phrase>' test/` on the sentences in it.
+
 ## Commit messages — Conventional Commits (W1-T31, §6A)
 
 Every commit message must follow [Conventional Commits](https://www.conventionalcommits.org/)

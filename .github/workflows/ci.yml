@@ -1248,3 +1248,42 @@ jobs:
         run: npm ci
       - name: Task-id existence check (every cited id resolves; no declared id collides with main)
         run: npm run --silent task-id-existence:check
+
+  comment-load-ratchet:
+    # COMMENT-LOAD ratchet — a CEILING on comment volume, the same shape as the
+    # `learnings-budget-ratchet` and `jscpd-gate` jobs above and for the same reason: something grew
+    # unnoticed. Measured on main at ea02cc83: 87,888 comment lines against 101,007 code lines
+    # across src/, scripts/, deploy/, .github/workflows/, bin/ and hooks/ — 46.5%. Every agent
+    # session that opens a file pays those lines in context on every run.
+    #
+    # The gate refuses two things and judges nothing else: a file whose comment-line count grew past
+    # scripts/comment-load-baseline.json, and a newly ADDED comment block over 40 lines. The written
+    # standard is docs/comment-standard.md. See test/comment-load-ratchet.test.ts for the falsifier
+    # proof this is ACTIVE (a planted grown file is REJECTED, a shrunk one ratchets down, a 41-line
+    # added block is REJECTED and a 40-line one passes), driving the real CLI as a subprocess.
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:` beyond the PR-only trigger) —
+    # same fail-closed shape as `claims`/`jscpd-gate`/`task-id-existence` above: a path-filtered
+    # REQUIRED check that can go silently absent is the synthwatch #102 deadlock class ci-gate.yml
+    # exists to avoid.
+    name: comment-load-ratchet
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The added-block half diffs against the merge base with `origin/main`, so that ref must
+          # exist. Without this the base read fails and the gate REFUSES (by design — an unreadable
+          # base read as an empty diff is a false zero), reddening every PR rather than none.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Comment-load ratchet (no file grows past its ceiling; no added block over 40 lines)
+        run: npm run --silent comment-load-ratchet
