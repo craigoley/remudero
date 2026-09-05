@@ -31,7 +31,9 @@ the kind decides how a change lands:
 | [alert-lane.md](alert-lane.md) | hand-written | The alert-fix lane: act-vs-escalate policy per open security alert. |
 | [base-ref-contract.md](base-ref-contract.md) | hand-written | What reads `origin/main` versus local `main`, and why. |
 | [control-surface.md](control-surface.md) | hand-written | Fleet commands (STOP, PAUSE, resume, away) and safe dispatch. |
+| [comment-standard.md](comment-standard.md) | hand-written | How to write a code comment here, and the volume ceiling `comment-load-ratchet` enforces. |
 | [dep-review.md](dep-review.md) | hand-written | The Dependabot-PR review lane. |
+| [forensics/](forensics/README.md) | hand-written | Verbatim archives of comment blocks compacted out of a source file, cited by that file's `// Why:` pointers. |
 | [deploy-supervisor.md](deploy-supervisor.md) | hand-written | How the daemon updates itself, and what needs an image rebuild. |
 | [operator-message-standard.md](operator-message-standard.md) | hand-written | The shape every operator-facing message must take. |
 | [probe.md](probe.md) | hand-written | Mount routing: deterministic task-class → model routing, proven by probe. |
