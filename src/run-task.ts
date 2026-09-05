@@ -49,6 +49,7 @@ import {
 } from "./lib/config.js";
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
+import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
@@ -864,6 +865,7 @@ import {
   claudeExecutableCache,
   runWorktreeReapRung,
   spawnWorker,
+  activeWorkerCount,
   cacheTokenLedgerFields,
   capStderrExcerpt,
   STDERR_EXCERPT_CAP,
@@ -28958,6 +28960,7 @@ export function buildSweepEffects(
   | "reaggregateCiGate"
   | "readMainTip"
   | "releaseBaseCausedStandDown"
+  | "selectAdaptiveReviewWidth"
 > {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
@@ -29032,6 +29035,23 @@ export function buildSweepEffects(
   };
 
   return {
+    // W1-T2853: one controller instance is retained per config root by review-capacity.ts, while
+    // each pass supplies its already-read ledger snapshot. Host observation is local, provider
+    // capacity comes only from the existing age-bounded status file, and all worker kinds count
+    // against the same spawnWorker boundary counter.
+    selectAdaptiveReviewWidth: ({ queueDepth, nowMs, ledgerLines }) =>
+      selectRuntimeReviewWidth({
+        root: config.root,
+        queueDepth,
+        activeWorkers: activeWorkerCount(),
+        nowMs,
+        ledgerLines,
+        policy: policy.reviewCapacity,
+        baseWidth: policy.reviewLanes,
+        minWidth: policy.reviewLaneMin,
+        maxWidth: policy.reviewLaneMax,
+        log,
+      }),
     // impl-BI — RETURN THE OUTCOME. PR #968 taught `runSweep` to read this effect's return
     // value (`armOutcomeArmed(armOutcome)` → `acted:false` + a stand-down reason), but THIS
     // adapter — the only implementation the daemon ever runs — still discarded it, so the

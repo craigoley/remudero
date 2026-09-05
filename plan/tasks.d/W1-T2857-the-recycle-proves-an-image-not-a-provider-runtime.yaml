@@ -1,0 +1,86 @@
+- id: W1-T2857
+  title: "THE RECYCLE REPORTS OK AFTER PROVING ONLY THE IMAGE DIGEST — a replacement can omit the existing Codex and provider-config mounts, silently downgrade the fleet to Claude-only, and still receive the same successful recycle verdict"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [deploy/container-runtime-contract.sh, deploy/recycle-container.sh, test/container-runtime-contract.test.ts]
+  origin: "operator-session#azure-restart-runtime-contract-2026-09-04"
+  plan_refs: ["W1-T1010", "W1-T1069", "W1-T2592", "W1-T2774"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE HOST 2026-09-05T01:44Z. The host has non-empty
+    `${HOME}/.codex/auth.json` and `${HOME}/.config/remudero-container/config.json`, and current
+    main's `deploy/recycle-container.sh` conditionally mounts those directories at
+    `/home/node/.codex` and `/home/node/.config/remudero`. The running `remudero-daemon` instead
+    has only the state and Claude mounts. Both container paths therefore lack the auth/config files,
+    and Codex cannot be eligible even though the subscription was commissioned on the host.
+
+    The current postcondition cannot detect this class. After `docker run`, section 7 reads only
+    the started container's image id and compares it with the pulled digest. A container with the
+    wrong runtime mounts passes that check exactly. This incident's replacement did not use the
+    repository script, but the same missing-mount state has no standalone checker and a future
+    caller cannot distinguish it from the intended Claude-only fallback without reimplementing
+    Docker inspection by hand.
+
+    Image identity and runtime eligibility are separate contracts. Preserve the digest proof, then
+    add a reusable host-side verifier for the provider mount subset so both the recycle and later
+    monitoring can ask the same question. Do not parse or print auth/config contents, infer provider
+    health from a directory name, or grant Serve the Docker socket.
+  design: |
+    Add one plain-Bash `deploy/container-runtime-contract.sh` that inspects a named container and
+    compares Docker's actual mount tuples with explicit expectations supplied by the caller. Its
+    reusable output is a bounded JSON verdict plus exit status: healthy only when every expected
+    source resolves to the exact destination read-write; drift names only the destination and
+    reason (`missing`, `wrong_source`, `read_only`, or `unreadable`). Never emit credential values,
+    config content, a full `docker inspect`, or arbitrary container command/environment fields.
+
+    In `recycle-container.sh`, derive expectations from the launch decision already made: state and
+    Claude are always expected; Codex and container config are expected only when their host source
+    directories existed and their mount args were added. Run the verifier after the image-digest
+    proof and before the OK verdict. A drift or unreadable inspection exits non-zero and says that
+    the newly started container remains running for investigation; it must not stop, remove, retry,
+    or roll back a process after the operator-approved lifecycle action has completed. An optional
+    source that was absent before launch stays an intentional Claude-only omission, not a false
+    failure and not permission for Docker to create it.
+
+    Keep the verifier independent of Node, jq, GitHub, the provider status endpoints, and the
+    container's writable layer. Preserve the existing image proof, pause/drain order, App auth,
+    Claude mount, Codex opt-in boundary, runtime environment, restart policy, reclaim behavior and
+    operator lifecycle ownership.
+  acceptance:
+    - claim: "a replacement with the pulled image but a missing expected Codex or provider-config mount fails the postcondition instead of printing the recycle OK verdict"
+      proof: "unit test: test/container-runtime-contract.test.ts"
+    - claim: "the actual state and Claude mounts plus each optional mount selected before launch must match the exact host source, container destination and read-write mode"
+      proof: "unit test: test/container-runtime-contract.test.ts"
+    - claim: "an optional Codex/config source absent before launch is omitted intentionally, is not created, and does not make the unchanged Claude-only launch fail"
+      proof: "regression test: test/container-runtime-contract.test.ts"
+    - claim: "the standalone verifier returns bounded machine-readable healthy, drift and unreadable verdicts without exposing config contents, credentials, environment values or a full inspect payload"
+      proof: "unit test: test/container-runtime-contract.test.ts"
+    - claim: "a failed runtime postcondition leaves the new container running and performs no stop, remove, retry or rollback action"
+      proof: "unit test: test/container-runtime-contract.test.ts"
+    - claim: "image-digest verification, pause/drain sequencing, App authentication, reclaim and the existing Claude-only fallback remain unchanged"
+      proof: "regression test: test/container-runtime-contract.test.ts"
+    - claim: "deleting the runtime-contract call lets a pulled-image container with missing expected provider mounts report success again"
+      proof: "mutation test: test/container-runtime-contract.test.ts"
+  falsifier: |
+    Close without implementation if current main already verifies the running container's actual
+    provider mount tuples after launch, or if the captured container proves the Codex auth and
+    provider config are present through another durable mechanism. Current source checks only
+    `.Image`; the live files are absent and Docker lists no corresponding mounts.
+
+    Re-design rather than build if a reusable verifier requires the Docker socket inside Serve or
+    requires reading secret contents. This task is a host-side observation boundary only.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved W1-T2857 at
+    `refs/rmd-id/W1-T2857`; the remote reservation resolves to
+    07e7f7678a6ced51f3f65535b0d35ba604acca1d.
+
+    This task does not claim the repository script caused the 2026-09-05 replacement; mount evidence
+    proves only that the supported launch contract was not present. W1-T2858 separately makes this
+    runtime drift visible off the shell. Neither task authorizes a recycle.

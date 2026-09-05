@@ -525,6 +525,27 @@ sweep:
     origin: "net-new"
     min: 1
     max: 3
+  # W1-T2853: lane three is temporary capacity earned by a sustained healthy window, not a new
+  # default. These rows govern review admission only; they never cancel a live worker and never
+  # widen dispatchLanes. The 1.5 GiB reserve follows W1-T1049's measured ~1.33 GiB Claude-worker
+  # peak with margin. PSI uses cgroup-v2 avg10 low/high watermarks, with the observed Azure
+  # memory sample (31.40%) deliberately above the 15% shed threshold. Provider headroom is read
+  # from the existing age-bounded routing snapshot, never a new per-PR subscription call.
+  reviewCapacity:
+    hostWorkerBudget: { value: 4, origin: "net-new", min: 1, max: 16 }
+    workerMemoryReserveMib: { value: 1536, origin: "net-new", min: 256, max: 4096 }
+    healthyWindowSamples: { value: 3, origin: "net-new", min: 2, max: 12 }
+    sampleCadenceMs: { value: 60000, origin: "net-new", min: 10000, max: 600000 }
+    telemetryCadenceMs: { value: 300000, origin: "net-new", min: 60000, max: 3600000 }
+    cpuPsiLowPct: { value: 5, origin: "net-new", min: 0, max: 50 }
+    cpuPsiHighPct: { value: 20, origin: "net-new", min: 1, max: 100 }
+    memoryPsiLowPct: { value: 5, origin: "net-new", min: 0, max: 50 }
+    memoryPsiHighPct: { value: 15, origin: "net-new", min: 1, max: 100 }
+    providerAllowancePct: { value: 2, origin: "net-new", min: 0, max: 25 }
+    settlementWindowMs: { value: 1800000, origin: "net-new", min: 60000, max: 86400000 }
+    unhealthySettlementThreshold: { value: 2, origin: "net-new", min: 1, max: 10 }
+    minHealthySettlements: { value: 1, origin: "net-new", min: 1, max: 10 }
+    latencyExpansionRatio: { value: 2, origin: "net-new", min: 1.1, max: 10 }
   # W1-T330: the daily spend ceiling (W1-T148 COST GOVERNOR) — at or over this many ledgered
   # dollars spent today, NEW dispatch is deferred (drainage is never gated). This is a
   # RELOCATION, not a retune: the value stays exactly what src/lib/sweep.ts's
