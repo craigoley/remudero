@@ -1695,6 +1695,18 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // W1-T2647's OWN proof file — self-reference shape as its siblings above; only real git call
   // is `git grep`, never `git ls-files`, so it fails clause (a).
   refusedForPredicate("test/census-population-is-derived-not-counted.test.ts", "a", "this file — W1-T2647's falsifier; its one real git call is `git grep`, never `git ls-files`"),
+  // Recon 2026-09-05 R-18's proof file. It shells a REAL `git ls-files` — unlike the four
+  // self-referential entries directly above, whose only real git call is `git grep` — but against
+  // a THROWAWAY fixture repo it builds in a temp dir, naming ONE path, purely to prove that
+  // fixture's `escape` entry is a genuinely COMMITTED symlink (mode 120000) rather than a local
+  // filesystem accident. The tracked `src/` population it never reads; the `src/` text the
+  // recognizer matches on is its import of src/lib/review.js and its prose. Clause (a).
+  refusedForPredicate(
+    "test/proof-grep-target-stays-inside-checkout.test.ts",
+    "a",
+    "`git ls-files -s escape` runs inside a throwaway fixture repo and reads ONE fixture path (asserting mode 120000, i.e. a " +
+      "committed symlink) — it is not a walk of the tracked src/ population and asserts nothing over any tree-wide set",
+  ),
 ];
 
 // W1-T2644: THE ROSTER IS THE POPULATION, RE-EXPORTED UNDER THE NAME THIS TASK'S OWN ACCEPTANCE
