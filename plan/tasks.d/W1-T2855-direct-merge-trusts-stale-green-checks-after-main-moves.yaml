@@ -1,0 +1,88 @@
+- id: W1-T2855
+  title: "THE DIRECT-MERGE FALLBACK TRUSTS GREEN CHECKS FROM AN OLD BASE — with non-strict branch protection a reviewed PR can be clean on its last merge ref, main can move afterward, and the daemon then squash-merges it without first refreshing the head onto current main or rerunning CI"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 25.00
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/stale-green-direct-merge.test.ts
+  origin: "operator-session#main-poisoned-by-stale-green-2026-09-04"
+  plan_refs: ["W1-T230", "W1-T528", "W1-T1050", "W1-T1095", "W1-T1255", "W1-T2671"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #3997. Its required CI completed against base 02c75c1c. PR #3985 then moved
+    main. At 23:33:25Z the daemon posted a successful review and immediately took
+    `automerge.clean_status_direct_merge`; GitHub created squash commit 9bf4b569 whose parent was
+    the newer main tip 5c549317. The merged tree therefore combined changes that had never shared
+    a required-check run. The newly combined main failed two tests that each PR had passed alone.
+
+    THE REPOSITORY ALLOWS THIS. The live branch-protection response requires `remudero-review` and
+    `ci-gate` but reports `strict: false`. GitHub may therefore consider an old-base head clean.
+    `attemptArm` treats the clean-status refusal from `gh pr merge --auto` as authority to call
+    `mergeDirect` immediately. Its rate-limit fallback also calls `mergeDirect` before reading
+    `readMergeFacts`; the existing merge-facts retry runs only after a 405. GitHub accepting either
+    direct write is not evidence that the checks were computed with current main.
+
+    `fixRebaseMergeFactsFromRest` already supplies the two facts needed without GraphQL:
+    mergeability and `behindBy`. `ghUpdateBranchArgv` / `ghUpdateBranch` already provide GitHub's
+    update-branch REST write. The missing control is a shared, fresh precondition at the direct
+    merge sites, not another cached board field and not a stronger interpretation of `clean`.
+  design: |
+    Put one shared direct-merge preflight in `attemptArm` and route every direct-merge write through
+    it: the clean-status fallback, the rate-limit fallback, and the settled-mergeable retry. The
+    production dependency must read REST merge facts immediately before the write. A fixture may
+    omit the optional seam for backward compatibility, but a source/behavioral proof must show the
+    real dependency always wires it; no production direct merge may bypass the preflight.
+
+    When `behindBy` is exactly zero and mergeability is definitely MERGEABLE, preserve the current
+    squash merge. When `behindBy` is positive, do not merge. Call the existing update-branch REST
+    mechanism once, return a distinct non-merge outcome, and let GitHub's new head invalidate the
+    old review/checks and wake the normal event-driven review flow. An update conflict or refusal
+    remains unmerged and is reported for the existing conflict/fix machinery; do not resolve it in
+    this arm path. When either fact is unreadable, UNKNOWN, or inconsistent, fail closed and retry
+    on a later fresh pass. Never sleep-and-guess and never treat a write failure as an update.
+
+    Give updated, refused, and failed preflights distinct outcome/ledger vocabulary carrying PR,
+    prior head, `behind_by`, mergeability, and the attempted remedy. Preserve the verdict/head-sha
+    gate, operator merge hold, draft and irreversible guards, ordinary auto-arm behavior, squash
+    shape, rate-limit attribution, bounded 405 retry, and the user's external/manual squash escape
+    hatch. This task changes only the daemon's direct fallback after auto-arm was refused.
+  acceptance:
+    - claim: "a clean-status fallback whose fresh REST facts say behindBy > 0 updates the branch once and never calls the direct-merge write"
+      proof: "unit test: test/stale-green-direct-merge.test.ts"
+    - claim: "the rate-limit fallback and its settled-MERGEABLE retry use the same preflight, so neither can merge a head behind current main"
+      proof: "unit test: test/stale-green-direct-merge.test.ts"
+    - claim: "an update success returns a distinct non-merge outcome and records the old head, behind_by, mergeability and update remedy so a later pass can verify the new head"
+      proof: "unit test: test/stale-green-direct-merge.test.ts"
+    - claim: "unreadable, UNKNOWN or inconsistent merge facts fail closed without direct merge or update; update conflict/error also remains unmerged and is named"
+      proof: "unit test: test/stale-green-direct-merge.test.ts"
+    - claim: "a definitely MERGEABLE head with behindBy === 0 retains the current direct squash merge, including post-merge confirmation and quota attribution"
+      proof: "unit test: test/stale-green-direct-merge.test.ts"
+    - claim: "production realArmDeps wires the fresh REST read and guarded update-branch write, while omitted test seams cannot make that production wiring disappear"
+      proof: "unit test: test/stale-green-direct-merge.test.ts"
+    - claim: "operator holds, stale verdict/head refusal, irreversible changes, drafts and ordinary successful auto-arm paths behave exactly as before"
+      proof: "regression test: test/stale-green-direct-merge.test.ts"
+    - claim: "removing the fresh direct-merge preflight reproduces #3997's stale-green direct merge against a behind head"
+      proof: "mutation test: test/stale-green-direct-merge.test.ts"
+  falsifier: |
+    Close without implementation if a captured #3997 required-check run proves it evaluated the
+    same tree GitHub merged, or if branch protection reports strict up-to-date checks at the merge.
+    The live API reports `strict: false`; #3997's PR base was 02c75c1c while squash commit 9bf4b569
+    has parent 5c549317. Also close if every production direct-merge path already reads behindBy
+    before its write. Source shows the clean-status and initial quota fallbacks call `mergeDirect`
+    first; only a post-405 quota retry consults `readMergeFacts`.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved W1-T2855 at
+    `refs/rmd-id/W1-T2855` before this filing; the remote reservation resolves to
+    370e074f5f89768c9cbed518e4aeeb3a33692bfb.
+
+    This is separate from W1-T2854, which removes two impossible post-merge negative controls that
+    exposed the incident by poisoning main. W1-T2854 restores CI; this task prevents the merge
+    decision that combined separately-green trees without a current-base run.

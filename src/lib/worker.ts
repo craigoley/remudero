@@ -1089,6 +1089,17 @@ export interface SpawnWorkerArgs {
   permissionMode: PermissionMode;
   /** Path to the worker settings file (permissions + hooks + sandbox). */
   settingsFile: string;
+  /**
+   * W1-T2591: tool names this spawn is never offered, threaded to the SDK's own
+   * `Options.disallowedTools`. NOT the settings `deny` list, deliberately: that floor is enforced
+   * by a hook, and this repo's own {@link DenyFloorVerdict} exists because the block can LEAK
+   * under `bypassPermissions` (claude-code#20946) and needs a `dontAsk` re-probe to catch it. A
+   * disallowed tool is never presented to the model at all, so there is no check to race.
+   *
+   * The default is UNRESTRICTED — every existing caller spawns exactly as before. Only a lane
+   * that has shown it needs no mutation passes this.
+   */
+  disallowedTools?: readonly string[];
   prompt: string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
   resumeSessionId?: string;
@@ -1861,6 +1872,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         args.onSpawnError,
       ),
     };
+    // W1-T2591: omitted entirely when unset, so an unrestricted spawn's option object is
+    // byte-identical to what it was — never `disallowedTools: undefined`, which would be a
+    // different object for the SDK to interpret.
+    if (args.disallowedTools && args.disallowedTools.length > 0) options.disallowedTools = [...args.disallowedTools];
     if (args.resumeSessionId) options.resume = args.resumeSessionId;
     const routedClaudeModel = claudeHealthRoute?.routedModel ?? args.model;
     if (args.model) options.model = args.model;

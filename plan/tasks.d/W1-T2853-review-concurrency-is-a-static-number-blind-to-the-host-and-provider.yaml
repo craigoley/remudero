@@ -1,0 +1,139 @@
+- id: W1-T2853
+  title: "REVIEW CONCURRENCY IS A STATIC NUMBER BLIND TO THE HOST AND PROVIDER — `reviewLanes: 2` cannot use a quiet four-core host to drain a backlog faster and cannot shed admissions when memory PSI, total worker occupancy or subscription headroom says the same two lanes are already too many"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 35.00
+  files:
+    - src/lib/review-capacity.ts
+    - src/lib/sweep.ts
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - plan/policy.yaml
+    - test/adaptive-review-capacity.test.ts
+  origin: "operator-session#adaptive-review-concurrency-2026-09-04"
+  plan_refs: ["W1-T1038", "W1-T1049", "W1-T2584", "W1-T2792", "W1-T2852"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED IN SOURCE. `runSweep` converts `policy.reviewLanes` directly into a fixed-size pull
+    pool. The full sweep drains its already-derived review set through that pool and the light pass
+    admits at most the same fixed semantic width. Neither path reads queue depth, active build
+    workers, host memory, pressure stall information, recent reviewer latency/failures, or provider
+    headroom before choosing its width. `reviewLanes` is therefore a static ceiling and the fleet
+    cannot safely do what the operator requested: add reviewers when green work is waiting and
+    resources are idle, then remove them when the host or subscriptions are pressured.
+
+    OBSERVED ON THE AZURE FLEET HOST, 2026-09-04. The container sees 4 processors,
+    `memory.max=max` and `cpu.max=max 100000`, so cgroup limits provide no finite capacity budget.
+    At the sampled instant `/proc/meminfo` reported 4,370,720 kB available while cgroup-v2
+    `memory.current` reported 2,840,629,248 bytes. Pressure was not idle: cgroup memory
+    `some avg10=31.40`, `full avg10=29.54`; CPU `some avg10=10.99`, `full avg10=5.93`; system
+    memory `some avg10=29.31`. That sample falsifies "raise the value to three now": an adaptive
+    controller should have shed, not expanded, at that instant.
+
+    OBSERVED IN THE EXISTING PLAN AND LEDGER EVIDENCE. W1-T1049 measured roughly 1.33 GiB peak
+    per Claude worker and about four workers of any kind fitting on this 7.75 GiB host after system
+    overhead. Reviews and builds use the same worker spawn boundary, and a light review can overlap
+    dispatch. Independent `dispatchLanes` and `reviewLanes` therefore cannot be treated as separate
+    host budgets. W1-T1038 supplies a real `/proc/meminfo` reader for dispatch but ships its memory
+    floor disabled and does not govern drainage. The missing mechanism is review admission that
+    observes one shared in-process worker occupancy and current host pressure without killing work
+    already in flight.
+
+    PRIMARY DESIGN BASIS. Linux PSI reports the fraction of time tasks are stalled on CPU, memory
+    or I/O and explicitly supports dynamic load shedding; cgroup v2 exposes per-cgroup
+    `cpu.pressure`, `memory.pressure`, `memory.current` and limits. Netflix's concurrency-limits
+    design applies backpressure to concurrent work rather than rate and uses latency/rejection
+    feedback with fast decrease and cautious recovery. Sources:
+    https://cdn.kernel.org/doc/html/latest/accounting/psi.html
+    https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html
+    https://github.com/Netflix/concurrency-limits/blob/main/README.md
+
+    DO NOT COPY A GENERAL-PURPOSE GRADIENT CONTROLLER BLINDLY. Review jobs are heterogeneous, the
+    sample count is sparse, and a two-to-three-lane fleet has too little range for a noisy latency
+    ratio to be authoritative. Host pressure and provider refusals are direct safety signals;
+    latency is a corroborating trend. The committed `reviewLanes.value: 2` remains the initial and
+    telemetry-unavailable behavior, while its existing min/max of 1/3 are hard bounds. Three is an
+    earned temporary width, not a new default.
+  design: |
+    Add a small pure review-capacity controller and feed its effective width into both the full and
+    light review paths. Start each daemon process at the committed `reviewLanes.value`, clamp every
+    decision to that row's existing `[min,max]`, and keep zero eligible reviews at zero spawns.
+
+    SCALE UP ADDITIVELY, WITH HYSTERESIS. Move from two to three only after a backlog deeper than
+    the current width persists across a policy-sized healthy window, the shared active worker count
+    leaves room under the measured host-worker budget, MemAvailable has at least one measured
+    worker reserve beyond current occupancy, recent CPU and memory PSI remain below low-water
+    policy thresholds, recent review settlements are healthy, and at least one enabled provider has
+    a current readable window above its configured reserve plus the recorded review-consumption
+    allowance. One cheap or fast completion alone must not widen the pool.
+
+    SHED QUICKLY. A high-water PSI crossing, a memory-reserve breach, a provider-capacity refusal,
+    repeated reviewer failure/timeout, or a material short-versus-long latency expansion reduces
+    subsequent admission immediately, with a lower bound of one. Never cancel an in-flight build or
+    review. Require the healthy window again before recovering so readings around a threshold do
+    not flap the lane count.
+
+    COUNT THE WHOLE PROCESS. Instrument the existing `spawnWorker` boundary with an in-process,
+    finally-released occupancy counter so builds and reviews consume one shared worker budget.
+    Tests use an injected observation; production reads `/proc/meminfo` and cgroup-v2 PSI when
+    available. When the container is unbounded, use host MemAvailable as W1-T1038 already does.
+    A missing or malformed PSI/provider observation is explicit telemetry and cannot authorise a
+    width above the committed value; it must not reduce the established two-lane behavior merely
+    because optional telemetry is absent.
+
+    Provider capacity is a SCALE-UP prerequisite, not a replacement for the existing per-worker
+    routing guard. The controller consumes only the already-cached, age-bounded provider-routing
+    status and makes no new live rate-limit call per PR. The worker boundary still re-derives
+    provider/model availability before spend. Concurrent workers selecting against one stale
+    subscription snapshot may require provider-capacity leases; that is a separate concern and
+    must be filed separately rather than hidden in this host-width task.
+
+    Ledger every decision only when the effective width or limiting reason changes, plus a bounded
+    periodic sample. Include queue depth, effective/min/base/max widths, active total workers,
+    MemAvailable, PSI values, provider-status age/headroom, latency signal and reason. Keep the
+    record numeric and bounded so Serve can render it without probing GitHub or providers and the
+    ledger cannot grow once per PR or once per inner-loop pull.
+
+    Keep W1-T2584's pull-pool semantics, W1-T2792's light-pass admission ordering, all exact-input
+    review mutexes, STOP/PAUSE, and W1-T2852's iteration-spanning clock unchanged. This task sizes
+    concurrent review admission only; it does not decide review eligibility, alter verdicts, widen
+    dispatch lanes, merge, deploy, or restart either container.
+  acceptance:
+    - claim: "the production sweep path calls the adaptive controller rather than leaving the new module reachable only from tests"
+      proof: "grep: selectAdaptiveReviewWidth( in src/lib/sweep.ts"
+    - claim: "a sustained eligible backlog on a low-pressure host with spare total-worker and readable provider headroom raises the effective review width from the committed two to at most three"
+      proof: "unit test: test/adaptive-review-capacity.test.ts"
+    - claim: "the captured Azure pressure sample reduces subsequent review admission instead of expanding it"
+      proof: "unit test fixture: test/adaptive-review-capacity.test.ts"
+    - claim: "active build and review workers consume one shared host-worker budget, and every worker occupancy claim is released on success, throw and cancellation"
+      proof: "unit test: test/adaptive-review-capacity.test.ts"
+    - claim: "high memory or CPU PSI, low MemAvailable, provider-capacity refusal, or repeated unhealthy settlements decreases later admissions without killing work already in flight"
+      proof: "unit test: test/adaptive-review-capacity.test.ts"
+    - claim: "unreadable or stale optional telemetry cannot authorise more than the committed review width, and preserves the established two-lane behavior when no direct pressure signal is available"
+      proof: "unit test: test/adaptive-review-capacity.test.ts"
+    - claim: "low/high watermarks, worker reserve, healthy-window length and sample cadence are bounded policy data rather than literals at the call site"
+      proof: "unit test: test/adaptive-review-capacity.test.ts"
+    - claim: "decision telemetry is change-based and periodically bounded, and contains enough numeric evidence for Serve to explain why the lane width changed"
+      proof: "unit test: test/adaptive-review-capacity.test.ts"
+    - claim: "removing the adaptive width selection restores a fixed two-worker pool and fails the sustained-low-pressure scale-up fixture"
+      proof: "mutation test: test/adaptive-review-capacity.test.ts"
+  falsifier: |
+    Close without implementation if current source already derives both full- and light-pass review
+    width from queue depth, shared build-plus-review occupancy, host memory/PSI and current provider
+    headroom, or if a production trace shows `reviewLanes` changing automatically with those inputs.
+    Current source computes `Math.max(1, policy.reviewLanes)` at both paths and creates the worker
+    pool from that fixed number; the Azure ledger contains no adaptive review-width decision row.
+  note: |
+    ID PROVENANCE: the first reservation attempt raced W1-T2852 and its advisory line remained
+    stale. The second `rmd next-task-id --reserve` invocation explicitly reported W1-T2853 as the
+    RESERVED id and created `refs/rmd-id/W1-T2853`; the held id, not the stale advisory, governs.
+
+    W1-T2852 owns review-clock liveness and may land in either order. This shard owns only dynamic
+    width once a pass exists. A separate provider-lease task is expected after code-level proof of
+    the same-snapshot stampede; it is deliberately not bundled here.

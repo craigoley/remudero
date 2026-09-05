@@ -374,7 +374,7 @@ export function scanForHostCapability(file: string, text: string): Site[] {
   // NOT a `cwd:\s*<token>` anchor: the one true positive spells its cwd
   // `fileURLToPath(new URL("..", import.meta.url))`, and an anchored match stops at that inner
   // comma. Matching the token anywhere in the call body is what actually reads both idioms.
-  const liveRootToken = /REPO_ROOT|repoRoot|process\.cwd\(\)|import\.meta\.url/;
+  const liveRootToken = /REPO_ROOT|repoRoot|process\.cwd\(\)|import\.meta\.(?:url|dirname)/;
   for (const body of gitBodies) {
     if (!/origin\/main/.test(body)) continue;
     if (/["']-C["']/.test(body)) continue;
@@ -549,6 +549,16 @@ test("each of the other three properties fails when newly introduced", () => {
     const audit = auditHostCapability([{ file: "n.test.ts", text: c.text }], []);
     assert.deepEqual(audit.undeclared, [{ kind: c.kind, file: "n.test.ts", key: c.key }], c.kind);
   }
+});
+
+test("a live-tree git call rooted through import.meta.dirname is detected, not mistaken for a fixture repo", () => {
+  const corpus = [{
+    file: "new.test.ts",
+    text: 'execFileSync("git", ["show", "origin/main:src/x.ts"], { cwd: join(import.meta.dirname, "..") });',
+  }];
+  assert.deepEqual(auditHostCapability(corpus, []).undeclared, [
+    { kind: "live-tree-git", file: "new.test.ts", key: "origin/main" },
+  ]);
 });
 
 // ── DIRECTION 2: THE LEGITIMATE SHAPES STAY SILENT ────────────────────────────────────────────

@@ -111,7 +111,7 @@
     - claim: "a filed shard declaring no files produces no advisory line rather than a bare heading"
       proof: "unit test: W1-T985: a lane whose filed shard declares no files prints no advisory line"
     - claim: "this shard does not close the duplicate-work case and must not be read as doing so"
-      proof: "grep: this shard does not close the duplicate-work case and must not be read as doing so in plan/tasks.d/W1-T985-mint-lanes-never-type-the-advisory.yaml"
+      proof: "grep: This does not close the duplicate-work case in test/mint-lane-overlap-advisory.test.ts"
   risk: high
   origin: "oper#mint-lanes-never-type-the-advisory-2026-08-18"
   plan_refs: ["W1-T917", "W1-T533", "W1-T984"]
@@ -180,3 +180,13 @@
     (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
     Craigs-Mac-mini-51495-1787053484146610000, the exit status captured into a variable, and the ref
     re-read and matched: PUSH_EXIT_CODE=0, `* [new reference]  109c7ebe… -> refs/rmd-id/W1-T985`.
+
+    THE PROOF FOR CRITERION 6 WAS REPOINTED 2026-09-04: THE OLD ONE COULD NEVER DISCRIMINATE.
+    It grepped THIS SHARD for the criterion's own claim text, and a shard merges BEFORE the build
+    that cites it, so the pattern matched the merge base exactly as it matched the head.
+    `classifyBaseProofOutcome` re-runs every proof against the base and reads a pass there as
+    `stale`, so the criterion degraded to the keyword floor, and a scope DISCLAIMER has no
+    vocabulary in the diff to satisfy that floor. PR #3985 was refused `unmet` on this criterion
+    alone with all 36 checks green. Criterion 6 now greps the sentence the suite carries at its
+    own head, and that file is absent at the base by construction, so the proof discriminates.
+    The claim is unchanged: only the evidence it points at moved.

@@ -35,6 +35,36 @@
     code `unwired_export` and the rendered section header share no string: over the same 862
     comments the reason code reads 0 while the header reads 11. Anyone re-deriving this by grepping
     the reason code where the prose appears gets a clean, silent zero.
+
+    **OPERATOR RULING, 2026-09-04 — THE FLIP IS DECLINED FOR NOW, AND THE CONDITION IS RE-ARMED.**
+    Zero adoption is not read as "the escape is unneeded, so blocking is safe". It is read as "the
+    channel has never been shown to work", and the ordering matters: the suppression branch has no
+    test, so flipping would make a never-exercised code path load-bearing on every PR. W1-T322's
+    contract, the window and the threshold are untouched; W1-T323 remains the flip's own record and
+    is not edited here.
+
+    **THE CONDITION THIS RULING SETS, SO IT IS FALSIFIABLE RATHER THAN AN OPEN WAIT.** The flip is
+    re-asked once BOTH hold: a test exercises the WIRED-AT suppression branch and shows a correctly
+    written marker suppressing the advisory, and marker usage is re-measured over a window that
+    begins after that test lands. Until the first holds, a re-measurement answers a question about
+    a channel nobody has shown to open.
+
+    **AND A SECOND DATA POINT ARRIVED FROM THIS SESSION'S OWN WORK, AGAINST THE DECLINATION.** The
+    advisory fired on PR 3926 naming plan-pr-emitter.ts::buildPlanPrCommitMessageChecked. No marker
+    was written, no caller landed, and the export merged unwired; it was removed later the same day
+    once measured. That is an author reading the rendered advisory and merging past it, which is
+    evidence FOR the flip and is recorded here because it weakens the ruling above rather than
+    supporting it. It does not change the ordering objection.
+
+    **A DEFECT IN THIS SHARD'S OWN PROOFS, MEASURED AND RECORDED RATHER THAN SILENTLY REPAIRED.**
+    All five acceptance patterns are literal substrings of their own proof: lines in this same file,
+    so each matches the proof that names it. Measured by stripping every prose block and re-running
+    them: all five still read 1 against the acceptance section alone. They therefore cannot detect
+    the content they claim to pin, and neither can the same idiom in W1-T2817, W1-T2826 or the
+    W1-T1120 precedent they were copied from. The acceptance field is a REPORTED_MERGED_FIELD, so
+    repairing it here would itself be the drift Rule 21 reports; the defect is named for a separate
+    filing instead. A record-shard proof must anchor on a phrase that appears ONLY in the prose.
+
   design: |
     **THE SUPPRESSION BRANCH HAS NEVER RUN UNDER TEST.** WIRED_AT_RE has exactly one application in
     the repo, `wiredAtPairs`, reached only from `unwiredAdvisoriesFor` and given `evidence.report` —
