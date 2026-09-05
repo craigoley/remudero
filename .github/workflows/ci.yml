@@ -896,8 +896,19 @@ jobs:
       # rule they came to write — see that baseline's bumpRationale. The gate is unchanged and
       # still fails closed; only the number moved. It only ever ratchets UP, by a reviewed bump
       # that says why growth is right — never down to make a red PR pass.
-      - name: CLAUDE.md size ratchet (blocks a PR that grows CLAUDE.md past the recorded cap)
+      # W1-T2831 — THE NET-BYTE ARM NEEDS A COMPARAND, AND WITHOUT THIS ENV IT WOULD NEVER HAVE ONE.
+      # This job checks out at actions/checkout's DEFAULT fetch-depth of 1: a shallow clone with no
+      # `origin/main` ref, so the script's preferred `git merge-base HEAD origin/main` cannot
+      # resolve. Its documented fallback is BASE_SHA, which no step here was passing — so the §8A
+      # arm would have skipped on every run and shipped a gate that never fires. Passing the event
+      # payload's base sha is what the sibling jobs already do. Run-time resolution still WINS where
+      # it is available (the script prefers merge-base and says which base it used), so deepening
+      # this checkout later automatically upgrades the comparand without touching the script; and on
+      # a push to main there is no pull_request payload, this is empty, and the arm correctly skips.
+      - name: CLAUDE.md size ratchet (blocks a PR that grows CLAUDE.md past the recorded cap, and refuses a net-positive diff per §8A)
         run: npm run --silent claude-md-budget-ratchet
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
 
   jscpd-gate:
     # §5 TIER 2, quality gate 3/4 (W1-T97) — a duplication CEILING: copy-pasted code rots
