@@ -78,6 +78,15 @@ jobs:
   build:
     name: az acr build
     runs-on: ubuntu-latest
+    # JOB-LEVEL OVERRIDE, THIS JOB ONLY. A `permissions:` block on a job REPLACES the workflow's
+    # top-level block for that job rather than merging with it — the top-level `contents: read`
+    # above stays the file's committed default (and would still govern any job added later that
+    # declares no block of its own); only `build` needs `contents: write`, to push the annotated
+    # `image/<date>-<sha>` tag the "Tag the build" step below creates. `id-token: write` is
+    # repeated because it is still needed for `azure/login`.
+    permissions:
+      id-token: write
+      contents: write
     # The `inputs` context is populated only for workflow_dispatch. GitHub evaluates a missing
     # property to an empty string, so `||` supplies the committed production defaults on push;
     # the manual path still receives the operator's typed values. A push always advances latest.
@@ -105,6 +114,7 @@ jobs:
       # and any local `state/` would be uploaded AND baked in by `COPY . .`, and on a real host
       # `state/` holds the ledger and the console's bearer tokens.
       - name: Build and push (ACR)
+        id: build_push
         uses: azure/cli@9eb25b8360668fb0ecbafa808d40e2197b2f5f52 # v3.0.0
         with:
           azcliversion: latest
@@ -115,6 +125,36 @@ jobs:
             az acr build -r "${REGISTRY}" "${TAGS[@]}" \
               --build-arg "RMD_BUILD_SHA=${GITHUB_SHA}" \
               -f deploy/Dockerfile .
+
+      # A RELEASE, HERE, IS A GIT-VISIBLE SNAPSHOT OF WHAT GOT BUILT — see README's "Pre-alpha"
+      # section (there are no semver tags while pre-alpha; this is a build marker, not one) and
+      # docs/audits/recon-2026-09-05.md R-48. The name reuses `${GITHUB_SHA}` VERBATIM, the exact
+      # expression the build step above stamps into the image as `RMD_BUILD_SHA` (see
+      # `deploy/Dockerfile`'s `ARG RMD_BUILD_SHA` and `/etc/rmd-build-sha`, published as
+      # `image_build_sha` by `scripts/fleet-heartbeat.sh`) — never recomputed, so the tag always
+      # names the commit a running container can prove it is built from.
+      #
+      # GUARDED ON THE BUILD/PUSH STEP'S OUTCOME, explicitly, so this never tags a commit whose
+      # image never reached the registry — `steps.build_push.outcome` reads `failure` (not just
+      # "the job stopped") whenever that step's `az acr build` did not exit 0.
+      #
+      # IDEMPOTENT: a re-run on the same sha, same day, resolves to the same tag name. Rather than
+      # let `git push` fail on the existing ref (or force it, which could silently repoint an
+      # existing tag), check for the ref on `origin` first and no-op when it is already there.
+      - name: Tag the build
+        if: steps.build_push.outcome == 'success'
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          TAG_NAME="image/$(date -u +%Y%m%d)-${SHORT_SHA}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            echo "refs/tags/${TAG_NAME} already exists on origin — same sha, same day, nothing to do."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG_NAME}" -m "Deployable image: ${REGISTRY}/${IMAGE}:${GITHUB_SHA}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${TAG_NAME}"
 
       # Report what landed, including the size — a build that "succeeded" but produced something
       # implausibly small is worth seeing without opening the portal.

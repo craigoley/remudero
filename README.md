@@ -32,8 +32,12 @@ merged commit is current by definition. The deployable unit is an image build
 (`.github/workflows/acr-build.yml`), not a version bump: the operator builds the
 daemon image and its commit is stamped into `/etc/rmd-build-sha` inside the
 container, which `scripts/fleet-heartbeat.sh` publishes as `image_build_sha` so a
-fleet host's running code is checkable against `origin/main`. Semver, tags, and a
-regenerated changelog return once the project leaves pre-alpha.
+fleet host's running code is checkable against `origin/main`. Once
+`.github/workflows/acr-build.yml` has run, each image build is additionally
+tagged `image/<date>-<sha>` on the built commit, so `git tag --list 'image/*'`
+lists deployable snapshots without touching the registry — these are build
+markers, not semver releases. Semver, tags, and a regenerated changelog return
+once the project leaves pre-alpha.
 
 ## Where this is going
 
