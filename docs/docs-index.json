@@ -170,6 +170,12 @@
       "grepHint": "ledger.ts forensics"
     },
     {
+      "path": "docs/forensics/open-prs-rest.md",
+      "title": "Forensics — `src/lib/open-prs-rest.ts`",
+      "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/open-prs-rest.ts`. Each",
+      "grepHint": "Forensics — `src/lib/open-prs-rest.ts`"
+    },
+    {
       "path": "docs/forensics/retro.md",
       "title": "retro.ts forensics",
       "summary": "The measured facts, incidents and design arguments that used to live as comment prose inside",

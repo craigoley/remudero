@@ -183,7 +183,7 @@
   "src/lib/onboard/recon.ts": 167,
   "src/lib/onboard/session.ts": 121,
   "src/lib/onboard/synthesize.ts": 145,
-  "src/lib/open-prs-rest.ts": 1022,
+  "src/lib/open-prs-rest.ts": 460,
   "src/lib/operator-merge-hold.ts": 7,
   "src/lib/operator-message.ts": 90,
   "src/lib/operator-notes.ts": 77,
