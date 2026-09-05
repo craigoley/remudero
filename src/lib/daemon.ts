@@ -2887,6 +2887,33 @@ export async function runDaemon(
     return s;
   };
 
+  // W1-T2845: ONE stale-exit path for BOTH freshness boundaries. The top-of-tick read and the
+  // pre-admission re-read must preserve the same install -> bounded full sweep -> named ledger ->
+  // stale summary contract; duplicating that sequence at the second site would let the two paths
+  // drift the next time W1-T1272 or install freshness changes.
+  const stopForFreshness = async (
+    freshness: Extract<DaemonFreshness, { stale: true }>,
+  ): Promise<DaemonSummary> => {
+    // W1-T151: install BEFORE the loop stops for restart — never after — so the
+    // freshly-relaunched process (booting at newSha) inherits deps that already
+    // match it, not the stale node_modules this tick's own process is still running.
+    if (freshness.installNeeded) {
+      deps.runInstall?.();
+    }
+    // W1-T1272: every stale exit reaches the SAME bounded full-sweep gate before returning.
+    // This remains unconditional with respect to where staleness was observed; the restart is
+    // never suppressed by the sweep and no second sweep implementation is introduced.
+    if (deps.sweep) {
+      sweepRetriggerState.lastRunAtMs = now().getTime();
+      await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
+    }
+    const detail =
+      `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
+      `past this process's boot sha`;
+    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha });
+    return summary("stale", detail);
+  };
+
   // W1-T343: ONE per-task block-reasoning processor, shared by the single-task tick
   // (`laneCount <= 1`) and the multi-lane batch (`laneCount >= 2`) below — the SAME "never a
   // second implementation" discipline this task applies to lane partitioning also applies to
@@ -3130,31 +3157,7 @@ export async function runDaemon(
     // between iterations. See `DaemonDeps.checkFreshness`'s doc for the full contract.
     const freshness = deps.checkFreshness?.();
     if (freshness?.stale) {
-      // W1-T151: install BEFORE the loop stops for restart — never after — so the
-      // freshly-relaunched process (booting at newSha) inherits deps that already
-      // match it, not the stale node_modules this tick's own process is still running.
-      if (freshness.installNeeded) {
-        deps.runInstall?.();
-      }
-      // W1-T1272 (THE FULL SWEEP IS UNREACHABLE AFTER A BOOT'S FIRST ITERATION, design part
-      // (ii), "the ordering"): REACH THE GATE BEFORE RETURNING. Before this, a stale verdict
-      // returned from `runDaemon` sixty-four lines above the loop's only `deps.sweep!()` call
-      // (below), so origin/main advancing past this process's boot sha — which the fleet's own
-      // throughput causes routinely — closed the ONE thing that starts a full sweep before it
-      // could ever fire again this boot. Never widens what the sweep may decide (design (v)):
-      // this is the SAME `deps.sweep` call, under the SAME wall-clock bound and light-sweep
-      // ticker, that the non-stale path below already runs — just also reached from here. The
-      // stale verdict is never suppressed by running it: `return summary("stale", ...)` below
-      // still fires unconditionally afterward (design (iii): the restart stays).
-      if (deps.sweep) {
-        sweepRetriggerState.lastRunAtMs = now().getTime();
-        await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
-      }
-      const detail =
-        `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
-        `past this process's boot sha`;
-      log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha });
-      return summary("stale", detail);
+      return stopForFreshness(freshness);
     }
 
     // CONSOLE "DRAIN NOW" (fb-1784988460437-9daa9b): consumed-once at the top of a
@@ -4132,6 +4135,16 @@ export async function runDaemon(
       });
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
+    }
+
+    // W1-T2845: awaited sweep/retro/usage and reconciliation rungs can make the top-of-tick
+    // freshness result obsolete before admission. Re-read at the same safe boundary W1-T1065
+    // established for STOP/PAUSE, after both operator controls so their priority remains exact,
+    // and before `admitted` or `daemon.iteration` exists. A stale observation therefore starts no
+    // new lane and cannot interrupt one: every prior batch settled before this tick began.
+    const refetchedFreshness = deps.checkFreshness?.();
+    if (refetchedFreshness?.stale) {
+      return stopForFreshness(refetchedFreshness);
     }
 
     // W1-T342/W1-T343 — THE PER-LANE GOVERNOR GATE, adopted verbatim from `runDrainLanes`
