@@ -1033,6 +1033,48 @@ container lifecycle was exercised by running it — proof 3 is a separate, delib
 operator-timed action, because taking an unscheduled reboot of a live fleet host is exactly the
 kind of decision this script does not make on its own.
 
+### Host units: the launcher, boot unit, watchdog and reaper (W1-T2877)
+
+`deploy/install-host-units.sh` provisions everything that makes a VM a **fleet host**, as opposed to
+a machine that merely has the image. Before W1-T2877 all of it was installed by hand and lived in no
+tracked file, so a second instance came up without reboot survival, without crash recovery, without
+a heap ceiling and without a heartbeat — and a host with no beat branch is *silent by design* in
+`fleet-heartbeat-watch.yml`, so an unmonitored instance looked exactly like a monitored healthy one.
+
+```
+deploy/install-host-units.sh                 # CHECK (default): reports drift, changes nothing, exit 1 if any
+sudo deploy/install-host-units.sh --install  # renders the units, reloads systemd, enables the timers
+```
+
+Check mode is read-only, so it is safe to run at any time — an installer whose reporting mode mutates
+the host cannot be run to find out whether it needs running. It reports both **missing** units and
+**drifted** ones (a unit hand-edited on the host no longer matching what this repo renders).
+
+| unit | the failure it answers |
+|---|---|
+| `rmd-relaunch.sh` | the canonical launcher; the invocation itself comes from `deploy/host-update.sh --print-daemon-run` |
+| `rmd-fleet.service` | reboot survival — the daemon runs `--restart=on-failure:5` so a clean STOP is not undone, which also means docker will not restart it after a reboot |
+| `rmd-fleet-watchdog.{service,timer}` | crash recovery — that budget is a **count, not a rate**; on 2026-09-05 six heap aborts exhausted it and the fleet sat dead for three hours |
+| `rmd-reap-stray.{service,timer}` + `rmd-reap-stray-containers` | a leaked ad-hoc container spawned 158 nested daemons and held ~90% of a core |
+
+**Host-specific values are inputs, and an unresolvable one is refused rather than guessed** (exit 2).
+`RMD_STATE_DIR`, `RMD_IMAGE`, `RMD_SERVICE_USER`, `RMD_NODE_MAX_OLD_SPACE_MB`, the `RMD_GH_APP_*`
+trio. Note the defaults use `${VAR-default}`, *not* `${VAR:-default}`: the colon form would
+substitute this host's path for an explicitly empty override, silently provisioning a second machine
+against a volume it does not have. Guessing a state root is how `PAUSE` and `STOP` end up written
+where nothing reads them.
+
+**The launcher's four guards are load-bearing** and each was learned from a failure — it refuses on
+`state/STOP`, refuses on an unmounted state root, is idempotent so the five-minute timer never
+disturbs in-flight workers, and appends a revival record because recreating the container **resets
+docker's `RestartCount`**, so without it auto-recovery hides the crash loop it is recovering from.
+Check `~/rmd-revivals.log` when the fleet looks healthy but throughput is wrong: repeated revivals
+there mean a daemon crash-looping under a watchdog that keeps papering over it.
+
+This installer does **not** start or stop the daemon. Bring it up with `~/rmd-relaunch.sh`, or let
+`rmd-fleet.service` do it at boot.
+
+
 ### Rotating the service tokens
 
 Covered in full just above (["The console: what it binds, and rotating its
