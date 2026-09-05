@@ -1,0 +1,116 @@
+- id: W1-T2867
+  title: "A BUILT IMAGE HAS NO OPERATOR-APPROVED PATH TO A VERIFIED RECYCLE — ACR now publishes an immutable SHA tag automatically, but no host process turns that receipt into readiness state, no console action can request the exact artifact, and deployment still depends on a human reproducing the pause/drain/recycle/verify sequence at a shell"
+  repo: remudero
+  depends_on: [W1-T2841, W1-T2857, W1-T2858]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 45.00
+  files:
+    - deploy/deployment-supervisor.sh
+    - deploy/install-deployment-supervisor.sh
+    - deploy/serve-container.sh
+    - src/lib/deployment-control.ts
+    - src/lib/serve.ts
+    - scripts/source-size-baseline.json
+    - test/deployment-control.test.ts
+    - test/deployment-supervisor.test.ts
+  origin: "operator-session#automatic-build-to-approved-verified-deploy-2026-09-05"
+  plan_refs: ["W1-T1010", "W1-T496", "W1-T1021", "W1-T2841", "W1-T2857", "W1-T2858"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT ORIGIN/MAIN 2026-09-05. W1-T2841 now starts `.github/workflows/acr-build.yml`
+    automatically only when `deploy/Dockerfile` or `deploy/entrypoint.sh` lands on `main`. Both
+    trigger modes publish `${GITHUB_SHA}` as an immutable ACR tag and stamp that SHA into the
+    image. `deploy/recycle-container.sh` already accepts `--tag <sha>`, authenticates to ACR,
+    pulls before pausing, waits for the existing drain, verifies the started image digest and,
+    after W1-T2857, verifies the selected provider mounts. Those are the two durable halves of a
+    deployment, but nothing joins them: `deploy.request`, `deployment.request` and
+    `recycle.request` have zero source/test hits, and Serve has zero recycle/deploy routes.
+
+    This is why an automatic build can finish while the fleet remains on the prior image until an
+    operator notices drift, opens a shell and repeats a long procedure. The inverse is also unsafe:
+    letting an always-on web process run Docker directly would give Serve the Docker socket and
+    turn a browser request into an unbounded lifecycle action. W1-T2858 establishes the required
+    observation boundary first: a host producer writes sanitized runtime health and Serve reads
+    shared state only.
+
+    Build detection should not spend GitHub budget. The immutable ACR SHA tag is the build receipt;
+    the host already has Azure/Docker access, while Serve intentionally has neither. The steady
+    state therefore needs no workflow polling, no GitHub token in Serve and no image pull merely to
+    discover readiness. A failed or unfinished build is a visible pending/refused state, never
+    permission to recycle onto `latest` or a cached image.
+  design: |
+    Add a small host-side deployment supervisor with an explicit check/install script for its
+    systemd timer. On its bounded tick, derive the desired baked-path SHA from the mounted checkout,
+    query ACR metadata for that exact immutable tag without pulling it, and atomically publish a
+    sanitized deployment-readiness snapshot under shared state. Model `current`, `build_pending`,
+    `ready`, `deploying`, `succeeded`, `failed` and `unknown` separately. For a missing tag, check at
+    five minutes, again at five minutes, then use bounded backed-off intervals; persist
+    `next_check_at` so restarts cannot reset the cadence into a hot poll. Unchanged ticks write no
+    ledger or snapshot churn. Never query GitHub from this path.
+
+    Extend Serve with a prominent deployment card fed only by W1-T2858's runtime-health snapshot
+    and the supervisor snapshot. A high-tier authenticated operator must complete a two-step
+    confirmation that names the exact SHA/digest. Confirmation atomically writes one bounded,
+    replay-resistant request signed by a host-owned capability key mounted read-only into Serve but
+    not the daemon. The request endpoint does not invoke a child process and does not itself start,
+    stop, pause, recycle, build or deploy anything. Missing/stale/unknown readiness disables the
+    action and explains why.
+
+    The host supervisor is the sole consumer. Re-read the ACR tag, verify the signature, nonce,
+    freshness, expected SHA and digest, and claim the request atomically. Then invoke the repository
+    `deploy/recycle-container.sh --tag <sha>` exactly once and only from the host. Preserve every
+    existing refusal: pull failure occurs before pause, active work drains within the existing
+    bound, and a refused run clears its pause. After success, run `deploy/verify-image.sh` against
+    the exact digest and consume W1-T2857's runtime-contract verdict. Publish a bounded terminal
+    receipt that the console can render; redact command arguments, host paths, environment and
+    credentials. A retry is a new confirmed nonce, never an automatic loop over lifecycle.
+
+    Keep manual `recycle-container.sh` and `verify-image.sh` use available. The installed timer may
+    observe readiness automatically, but it must never synthesize a deployment request: the
+    operator remains the lifecycle authority. Default install mode is read-only check; only an
+    explicit `--install` changes systemd state, and commissioning remains a separately approved
+    operational step after this PR is reviewed and merged.
+  acceptance:
+    - claim: "the host supervisor derives the desired baked-path SHA and publishes current, build-pending, ready and unknown states from the exact immutable ACR tag without pulling an image"
+      proof: "unit test: test/deployment-supervisor.test.ts"
+    - claim: "unfinished builds are checked after five minutes, again after five minutes and then with bounded persisted backoff rather than a hot poll or an assumed five-minute completion"
+      proof: "unit test: test/deployment-supervisor.test.ts"
+    - claim: "Serve renders deployment readiness from shared state without a GitHub request, Docker socket, Azure credential or child Docker/Azure command"
+      proof: "unit test: test/deployment-control.test.ts"
+    - claim: "the deployment-control module is wired into Serve's production projection rather than imported only by its own test"
+      proof: "grep: readDeploymentReadiness( in src/lib/serve.ts"
+    - claim: "only a high-tier authenticated two-step confirmation can write a signed request pinned to the currently ready SHA and digest, and the HTTP request performs no lifecycle action"
+      proof: "unit test: test/deployment-control.test.ts"
+    - claim: "the supervisor refuses stale, replayed, unsigned, mismatched or already-claimed requests before pause, pull, stop, remove or run"
+      proof: "unit test: test/deployment-supervisor.test.ts"
+    - claim: "one valid request invokes the repository recycle with the immutable SHA tag exactly once, preserving its existing pull-before-pause, drain and refusal behavior"
+      proof: "unit test: test/deployment-supervisor.test.ts"
+    - claim: "success requires both exact-image verification and W1-T2857 provider-runtime verification, while any failure remains a bounded visible terminal receipt"
+      proof: "unit test: test/deployment-supervisor.test.ts"
+    - claim: "the console can request but cannot autonomously build or deploy, the timer never invents a request, and manual recycle and verification remain available"
+      proof: "regression test: test/deployment-control.test.ts"
+    - claim: "removing the signed-request claim or exact-SHA argument makes the focused supervisor suite fail"
+      proof: "mutation test: test/deployment-supervisor.test.ts"
+  falsifier: |
+    Close without implementation if current main already exposes a confirmation-gated Serve route
+    whose host-side consumer pins and verifies the immutable ACR artifact. The source census found
+    no deployment request vocabulary or Serve route, while the existing workflow/recycle scripts
+    prove the producer and executor remain disconnected.
+
+    Re-design rather than build if the action requires a Docker socket, Azure credential or GitHub
+    token inside Serve; if the capability key is visible to daemon workers; if readiness can only
+    be inferred by pulling `latest`; or if any timer can deploy without a fresh operator-signed
+    request. Those erase the privilege, quota and lifecycle boundaries this task exists to keep.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` first printed advisory W1-T2866 because the open-plan
+    census lagged the reservation namespace, then atomically held W1-T2867 at
+    `refs/rmd-id/W1-T2867`. The held id is authoritative.
+
+    This task is daemon-container deployment only. Serve's own source-refresh/replacement contract,
+    automatic retry of a failed GitHub ACR workflow and multi-host rollout policy are separate
+    concerns. This record performs no operational install, build, pause, recycle or deployment.

@@ -1,0 +1,84 @@
+- id: W1-T2871
+  title: "MODEL-BUCKET HEADROOM MASKS PROVIDER PRESSURE — an independently full Codex-Spark bucket makes automatic routing favor Codex even when the standard Codex allowance is constrained and Claude has materially more subscription room"
+  repo: remudero
+  depends_on: [W1-T2842, W1-T2859]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 24.00
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - src/lib/provider-routing-status.ts
+    - src/lib/serve.ts
+    - test/worker-provider.test.ts
+    - test/provider-routing-console.test.ts
+  origin: "operator-session#provider-subscription-pressure-over-model-bucket-headroom-2026-09-05"
+  plan_refs: ["W1-T2577", "W1-T2842", "W1-T2859"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT 10ea419. W1-T2859 correctly replaced winner-take-all routing with a
+    deterministic squared-headroom allocation, but it weights the `ProviderCapacity.windows`
+    returned for the concrete selected Codex model. W1-T2842 correctly made Codex-Spark eligible
+    from its independent model-specific bucket. Together, those two correct local decisions create
+    a hierarchy defect: a low-effort request selected Spark at 88-90% remaining and therefore gave
+    Codex about 81% of automatic allocation even though the standard Codex bucket had only 24%
+    remaining and Claude's tightest live window had 44-45% remaining. The operator explicitly
+    requires Claude to carry materially more work while its subscription has materially more room.
+
+    Official OpenAI documentation current on 2026-09-05 says Spark has its own usage limits and
+    does not count against standard Codex limits. Therefore the standard bucket must not make an
+    otherwise eligible Spark dispatch unavailable. It is still valid as a conservative provider-
+    pressure signal for the cross-subscription allocation policy: model-specific limits answer
+    whether this concrete Codex model can run; provider pressure answers how much of the automatic
+    fleet stream Codex should receive relative to Claude. Mixing those two questions into one
+    `windows` array either hides provider pressure, as today, or incorrectly hard-vetoes Spark.
+  design: |
+    Extend a provider capacity reading with an optional bounded allocation-window projection that
+    is distinct from the concrete model's eligibility and attribution windows. For Codex, retain
+    the selected model's own bucket in `windows`; when the app-server response also exposes the
+    standard Codex bucket, construct allocation windows from the conservative union of that bucket
+    and the selected model bucket. If no distinct standard bucket is readable, fall back to the
+    selected model windows. Claude has no independent per-model bucket in its current reader, so
+    its allocation projection remains its existing session and weekly windows.
+
+    The provider selector must apply readability, percentage validity and reserve hard gates only
+    to the concrete model's existing `windows`. It then computes W1-T2859's squared weight from the
+    tightest valid allocation window. Thus a constrained standard Codex allowance reduces Codex's
+    share without making spare independent Spark capacity unreachable; if Claude is unavailable or
+    below reserve, eligible Spark remains selectable. Attribution before/after reads continue to
+    compare only the selected model's own windows and must not mislabel standard-bucket movement as
+    Spark consumption.
+
+    Publish the bounded allocation-window names and percentages beside the existing model windows
+    in `worker.provider.selected`, the durable provider-routing snapshot and the console. Label the
+    two roles plainly so an operator can reconcile why an eligible 88% Spark bucket received a 19%
+    provider share. No credential, raw RPC payload or additional capacity probe is emitted.
+  acceptance:
+    - claim: "with Claude at 45% tight-window remaining, standard Codex at 24% remaining and the selected Spark bucket at 88% remaining, a deterministic 200-dispatch sequence allocates at least 75% to Claude while still allocating at least one dispatch to Codex"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "the standard Codex allocation window changes automatic share but does not make an independently eligible Spark model unreadable, reserve-bound or unselectable when Claude is unavailable"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "when no distinct readable standard Codex bucket exists, automatic routing falls back to the selected model's windows without inventing zero headroom"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "Codex before/after window-consumption attribution remains scoped to the selected concrete model bucket and does not attribute standard-bucket movement to Spark"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "worker telemetry and the durable routing snapshot expose bounded model eligibility windows separately from provider allocation windows without a new capacity read or raw account payload"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "the console labels model headroom and provider allocation headroom separately and renders the allocation share derived from the latter"
+      proof: "unit test: test/provider-routing-console.test.ts"
+  falsifier: |
+    Close without implementation if current main already preserves a selected Codex model's
+    independent eligibility while weighting Claude-versus-Codex allocation with a distinct
+    subscription-pressure projection, and the live 45% Claude / 24% standard Codex / 88% Spark
+    shape favors Claude in a reproducible sequence. A selector that sees only Spark's 88% window,
+    or one that appends the standard bucket to the hard eligibility windows, does not falsify this
+    task.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2871`; the held id
+    is authoritative. DOCUMENTATION PROVENANCE: OpenAI Docs `agent-configuration/speed` and the
+    2026-02-12 Codex changelog both state that Codex-Spark has separate model-specific usage limits
+    and does not count against standard Codex limits.

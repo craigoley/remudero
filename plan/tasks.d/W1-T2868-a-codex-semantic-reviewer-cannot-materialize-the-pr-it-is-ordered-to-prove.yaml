@@ -1,0 +1,146 @@
+- id: W1-T2868
+  title: "a Codex semantic reviewer cannot materialize the PR it is ordered to prove from its empty read-only cwd, so passing executable proofs can be downgraded as non-responsive"
+  repo: remudero
+  depends_on: [W1-T2748]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  files:
+    - src/run-task.ts
+    - src/lib/review.ts
+    - test/codex-reviewer-production-wiring.test.ts
+    - test/codex-reviewer-materialized-checkout.test.ts
+    - test/event-driven-semantic-review.test.ts
+    - test/review-skips-spawn-on-plan-only.test.ts
+    - test/review-status-pending.test.ts
+    - test/review.test.ts
+    - test/worker.test.ts
+  origin: "operator-session#codex-reviewer-empty-readonly-checkout-2026-09-05"
+  plan_refs: ["W1-T65", "W1-T115", "W1-T185", "W1-T2748"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #4042 AT HEAD eb44a4cab4e78a85c2fbb8e893b4225ab589cd4b: every one of
+    W1-T2857's seven executable proofs passed, but the semantic reviewer downgraded all seven as
+    non-responsive. The `review.reviewer` ledger row identifies provider `codex`, routed model
+    `gpt-5.5`, subtype `success`, seven downgrades and 514,204 input tokens. The posted verdict
+    records `executed_pass` for all seven proofs. This is not a failing implementation proof.
+
+    THE REVIEWER'S CONTRACT IS IMPOSSIBLE UNDER THE CODEX SANDBOX. `runReview` creates a fresh,
+    empty `withTempDir("review", ...)` directory and passes it as the semantic worker cwd. Its
+    prompt then requires the worker to check out the PR there using `gh pr checkout <url>` or `git
+    fetch origin <sha>`. The Codex adapter correctly classifies the specialist tool set as
+    read-only and launches `codex exec --sandbox read-only` from that empty directory. There is no
+    repository in which either suggested Git command can operate, and the sandbox refuses creating
+    one.
+
+    THE FALSIFIER WAS CHECKED AGAINST THE DEPLOYED PIN, NOT INFERRED FROM DOCUMENTATION. A bounded
+    diagnostic under Azure `codex-cli 0.152.0`, using the same empty cwd, non-repository trust
+    bypass and read-only sandbox, observed: `gh pr checkout` exit 4 with no checkout, `git fetch`
+    exit 128 with no repository, and `touch` exit 1 with no write. The temp directory was removed
+    after the probe. If any of those operations had materialized a usable clean checkout, this
+    task's diagnosis would have been false.
+
+    W1-T2748 FIXED STARTUP, NOT EVIDENCE MATERIALIZATION. Its narrow bypass correctly lets an
+    intentionally non-repository read-only Codex call start while keeping write-capable missing
+    worktrees fail-closed. It explicitly preserved the disposable reviewer boundary. This task
+    keeps that boundary and supplies the missing provider-neutral repository snapshot before the
+    worker starts; it must not widen Codex's sandbox or give a reviewer the implementation
+    worker's live checkout.
+
+    The deterministic proof floor remains authoritative and fail-closed. This task does not
+    suppress semantic FAIL verdicts, weaken test-theater judgment, change provider/model routing,
+    spend policy, GitHub status finality, daemon lifecycle or deployment.
+  design: |
+    Reuse the already-materialized `headCheckoutDir` that the deterministic proof floor receives.
+    Before spawning any non-plan semantic reviewer, create a private repository snapshot below the
+    existing disposable review directory, locally and without another GitHub API read. Pin that
+    snapshot to the supplied `headSha`, prove the resulting `git rev-parse HEAD` is exact, and make
+    the snapshot the reviewer cwd. Reuse the existing dependency installation read-only (for
+    example through the same node_modules linkage discipline as task worktrees) rather than
+    running package installation inside the review.
+
+    Revise the reviewer prompt to state that its cwd is already a disposable checkout pinned to
+    the named head. It must verify that SHA and inspect/run proofs there; it must not call `gh pr
+    checkout`, fetch into the empty parent, or change the checkout. Existing PR diff/body reads may
+    remain, but materialization itself must be local and must add no GitHub calls.
+
+    After the worker returns, verify the snapshot still has the named HEAD and no tracked or
+    untracked changes. A changed or unprovable snapshot makes the semantic result unusable: log a
+    named reviewer-materialization/integrity failure and leave the deterministic floor to decide,
+    exactly as an ordinary advisory reviewer spawn failure does. Never convert that environment
+    failure into per-criterion semantic FAILs. The existing `withTempDir` cleanup remains the sole
+    lifetime boundary and removes the private snapshot on success, reviewer error and integrity
+    refusal.
+
+    Unit-drive the production `runReview` call site with real temporary Git repositories and the
+    existing injected reviewer spawn. Assert the captured cwd is a Git worktree at the exact PR
+    SHA before the fake reviewer runs, that both Claude- and Codex-shaped results consume that same
+    snapshot contract, and that no live source checkout is mutated. Drive missing checkout,
+    wrong-SHA and reviewer-mutation cases through the named advisory-failure path. Assert through
+    the contained Codex spawn recorder that the materialized cwd no longer receives the
+    non-repository bypass and remains `--sandbox read-only`.
+  acceptance:
+    - claim: "before a semantic reviewer starts, its disposable cwd is a real Git worktree whose HEAD exactly equals the PR head SHA already supplied to the review"
+      proof: "unit test: test/codex-reviewer-materialized-checkout.test.ts"
+    - claim: "a Codex reviewer receives the materialized repository cwd under its existing read-only sandbox and no longer depends on `--skip-git-repo-check` to review a PR"
+      proof: "unit test: test/codex-reviewer-materialized-checkout.test.ts"
+    - claim: "the Claude reviewer consumes the same disposable snapshot contract, while the live proof checkout and source repository remain unchanged"
+      proof: "unit test: test/codex-reviewer-materialized-checkout.test.ts"
+    - claim: "the reviewer prompt verifies the already-pinned local HEAD and no longer instructs an empty read-only cwd to run `gh pr checkout` or `git fetch origin`"
+      proof: "unit test: test/codex-reviewer-materialized-checkout.test.ts"
+    - claim: "a missing source checkout, wrong snapshot SHA, dirty snapshot or reviewer mutation is a named advisory reviewer failure and cannot manufacture semantic FAIL verdicts"
+      proof: "unit test: test/codex-reviewer-materialized-checkout.test.ts"
+    - claim: "the disposable snapshot is removed on success, spawn error and integrity refusal without adding a GitHub materialization call"
+      proof: "unit test: test/codex-reviewer-materialized-checkout.test.ts"
+    - claim: "deleting the materialization step restores the empty-cwd Codex argv and makes the end-to-end regression fail"
+      proof: "mutation test: test/codex-reviewer-materialized-checkout.test.ts"
+    - claim: "the deterministic proof floor, semantic downgrade authority, provider/model selection and daemon lifecycle remain unchanged"
+      proof: "regression test: test/codex-reviewer-materialized-checkout.test.ts"
+  falsifier: |
+    Close this task without implementation if the deployed pinned CLI can check out PR #4042 and
+    run its named proof from RMD's current empty read-only reviewer cwd, or if the #4042 reviewer
+    transcript proves that a clean exact-head checkout was already materialized before its seven
+    FAIL lines. Otherwise, deleting the snapshot preparation from the final implementation must
+    restore a captured empty non-repository cwd and fail the integration test.
+  note: |
+    REVIEW-PROMPT FIXTURE DECLARED-FILES CORRECTION: implementation PR #4052 changed
+    `buildReviewPrompt` from the impossible empty-cwd `gh pr checkout` / `git fetch` instruction
+    to the W1-T2868-designed already-pinned checkout contract. CI shard 1 ran the whole suite and
+    failed twice because `test/review.test.ts` still asserts the removed instruction literally.
+    The new prompt text in the same failure output states the intended exact-head verification.
+    This legacy unit fixture does not call `runReview` or `spawnReviewer`, so the earlier exhaustive
+    search for provider-spawning fixtures correctly did not find it; prompt construction is a
+    separate consumer. W1-T2868 must update that assertion to prove the new instruction and refuse
+    the old remote-materialization text. This is a plan-only, human-authored `files:` correction;
+    acceptance criteria are unchanged.
+
+    REVIEW-FIXTURE DECLARED-FILES CORRECTION: an exhaustive static search found exactly four
+    pre-existing tests, in addition to the two W1-T2868-owned reviewer tests above, that invoke
+    `runReview` with `spawnReviewer: true`. Their fixtures predate the exact-head checkout contract
+    and either omit `headCheckoutDir` or supply a non-repository context. The broader focused run
+    proved this is load-bearing: `test/review-skips-spawn-on-plan-only.test.ts` failed because its
+    non-plan control expected the semantic provider to spawn without a source checkout. The other
+    three tests must receive exact local repository fixtures so their pending-ordering,
+    provider-failure, and joined-transcript assertions continue to exercise the provider boundary
+    instead of passing or failing earlier at materialization. All tests with `spawnReviewer: false`
+    remain outside this task. This is a plan-only, human-authored `files:` correction; acceptance
+    criteria are unchanged.
+
+    DECLARED-FILES CORRECTION: `test/codex-reviewer-production-wiring.test.ts` is the existing
+    load-bearing W1-T2829 regression that asserts the behavior this task intentionally replaces:
+    it requires the reviewer cwd to be a non-repository scratch directory and requires Codex argv
+    to contain `--skip-git-repo-check`. W1-T2868 cannot implement its opposite contract while that
+    test remains unchanged. Omitting this path would under-declare the implementation's required
+    diff and leave the existing suite red. This is a plan-only, human-authored `files:` correction;
+    acceptance criteria are unchanged.
+
+    ID PROVENANCE: `rmd next-task-id --reserve` reported W1-T2868 and atomically held
+    `refs/rmd-id/W1-T2868` on origin after one attempt. The shard uses the held id.
+
+    LIVE DIAGNOSTIC HYGIENE: the one paid diagnostic was bounded to five commands, printed no
+    environment or credential values, posted nothing to GitHub, changed no repository, and removed
+    its exact temporary directory. It used the already-commissioned subscription only to prove the
+    sandbox behavior that ordinary host commands cannot establish.

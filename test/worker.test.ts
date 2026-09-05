@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +32,9 @@ import {
   workerTranscript,
 } from "../src/lib/worker.js";
 import { runReview } from "../src/run-task.js";
+
+const REPO_ROOT = process.cwd();
+const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 
 // ── Synthetic SDK message streams ──────────────────────────────────────────
 // The real SDK yields a `type:"result"` envelope (even for an error subtype)
@@ -347,12 +351,12 @@ test("runReview (W1-T2205, end-to-end): the advisory reviewer's overlapping text
 case "$1 $2" in
   "api "*)
     case "$*" in
-      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"cafebabe0002"}}' ;;
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
       *) echo '{}' ;;
     esac ;;
   "pr view")
     case "$*" in
-      *headRefOid*) echo '{"headRefOid":"cafebabe0002"}' ;;
+      *headRefOid*) echo '{"headRefOid":"${HEAD}"}' ;;
       *state*) echo '{"state":"OPEN"}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -402,6 +406,7 @@ esac
       spawnReviewer: true,
       reviewerQueryFn,
       reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
+      headCheckoutDir: REPO_ROOT,
       ledgerPath,
       runId: "RUNREVIEW-E2E-1",
       // W1-T2347: the unsubstantiated report fails the review, so withdrawArmIfVerdictRefuses

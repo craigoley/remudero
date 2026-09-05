@@ -1,0 +1,82 @@
+- id: W1-T2865
+  title: "A FRESHNESS EXIT ABORTS THE FIX ITS FINAL SWEEP JUST STARTED — runGatedSweep correctly detaches the long CI wait, but stopForFreshness returns without the existing process-lifetime drain, so the entrypoint relaunch kills useful repair work and strands its registered worktree"
+  repo: remudero
+  depends_on: [W1-T2379, W1-T2744, W1-T2845, W1-T2863]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files: [src/lib/daemon.ts, test/daemon-freshness.test.ts, test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts]
+  origin: "operator-session#freshness-exit-aborted-W1-T2862-fix-2026-09-05"
+  plan_refs: ["W1-T2379", "W1-T2744", "W1-T2845", "W1-T2863"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET 2026-09-05T04:30Z-04:40Z. The final sweep for stale daemon run
+    `DAEMON-1788582094463` claimed PR #4040 / W1-T2862 and started a Claude fix worker in
+    registered worktree `sweep-W1-T2862-1788582621513`. At 04:39 the worker was still alive and
+    running the coverage proof. At 04:40:21 the daemon wrote `daemon_selfrestart_for_freshness`.
+    The relaunched process reclaimed the prior fix-branch lock, the worker process was gone, the
+    PR head remained `95f7887`, and the ledger contained no terminal result from that attempt.
+
+    THE SOURCE PRODUCES THAT ORDER. `stopForFreshness` runs W1-T1272's mandatory final
+    `runGatedSweep`, then immediately logs the restart and returns the stale summary. W1-T2379 and
+    W1-T2744 intentionally let a sweep return while a long fix/CI action remains in the module's
+    `detachedSweepActions` registry so the review clock stays responsive. The existing
+    `drainDetachedSweepActions` is explicitly documented as the daemon-lifetime seam, but
+    production imports only `detachedSweepActionCount`; no production call drains that registry
+    before process exit.
+
+    W1-T2863 solves the sibling race, not this loss. Its durable worktree-owner check prevents the
+    new process from launching a duplicate checkout while the old worktree is registered. It does
+    not keep a worker alive through the restart. In this incident that safety check converts the
+    aborted attempt into a stranded-worktree stand-down until orphan recovery, rather than into a
+    completed repair.
+  design: |
+    Make the freshness path a real daemon-lifetime boundary. Before returning the stale summary,
+    stop any interphase light-review clock that can still admit new detached actions, run the
+    existing final full sweep unchanged, then await the existing process-global
+    `drainDetachedSweepActions`. Read the bounded count once before the drain and emit change-only
+    start/completion telemetry when it is nonzero. Log `daemon_selfrestart_for_freshness` only
+    after every action admitted by this process has settled. Do not poll promises or invent a
+    second action registry.
+
+    This drain belongs only at the actual freshness exit. Do not put it back into a phase-local
+    ticker stop or the abandoned-sweep path: W1-T2744 proved that placement can freeze reviews for
+    tens of minutes. A zero-action freshness exit remains immediate. Existing fix-worker, CI and
+    provider bounds remain the settlement bounds; do not kill, retry, duplicate, reset or remove
+    a worker/worktree to make refresh faster.
+
+    Preserve W1-T1272's final sweep, W1-T2845's two freshness boundaries, STOP/PAUSE precedence,
+    W1-T2863's worktree-owner refusal, entrypoint exit code 75, and operator lifecycle authority.
+    This task changes only the ownership ordering of work already admitted by the exiting process.
+  acceptance:
+    - claim: "when the final freshness sweep detaches a fix action, the daemon does not return its stale summary until that action settles"
+      proof: "unit test: test/daemon-freshness.test.ts"
+    - claim: "the detached action can complete its existing outcome path before daemon_selfrestart_for_freshness is written and the process exits"
+      proof: "unit test: test/daemon-freshness.test.ts"
+    - claim: "a pre-admission freshness transition closes the interphase review clock before draining, so no new review or fix action is admitted behind the drain"
+      proof: "unit test: test/daemon-freshness.test.ts"
+    - claim: "freshness-drain telemetry is bounded to one start and one completion row with counts and duration, and a zero-action exit adds no wait or hot-loop row"
+      proof: "unit test: test/daemon-freshness.test.ts"
+    - claim: "an abandoned full sweep still returns promptly while its detached action continues, because the process-lifetime drain is not restored to a phase-local ticker"
+      proof: "regression test: test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts"
+    - claim: "STOP/PAUSE ordering, the required final sweep and the exit-75 freshness contract remain unchanged"
+      proof: "regression test: test/daemon-freshness.test.ts"
+    - claim: "deleting the process-final drain makes the stale summary resolve while the detached fix is still pending and fails the focused suite"
+      proof: "mutation test: test/daemon-freshness.test.ts"
+  falsifier: |
+    Close without implementation if PR #4040's original fix attempt wrote a terminal outcome or
+    moved the head before the freshness event, or if production already drains detached sweep
+    actions at the daemon-lifetime boundary. Both checks were run: the head stayed at `95f7887`,
+    no terminal attempt row followed the dispatch, the worker vanished at the restart, and the
+    only production reference is the heartbeat's count reader.
+
+    Re-design rather than build if preserving the action requires returning the drain to a
+    phase-local sweep/ticker stop. That recreates W1-T2744's review outage and is not an acceptable
+    repair.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2865`; the held id
+    is authoritative. This task authorizes no manual restart, recycle or deployment.

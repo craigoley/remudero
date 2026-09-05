@@ -1,0 +1,88 @@
+- id: W1-T2858
+  title: "RUNTIME LAUNCH DRIFT IS INVISIBLE TO THE CONSOLE — the host can see that a live daemon lost its commissioned provider mounts, but Serve has neither the Docker socket nor a durable host-health snapshot, so the dashboard reports a running fleet while Codex is silently unavailable"
+  repo: remudero
+  depends_on: [W1-T2857]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 32.00
+  files: [scripts/fleet-heartbeat.sh, scripts/source-size-baseline.json, src/lib/fleet-runtime-health.ts, src/lib/serve.ts, test/fleet-runtime-health-console.test.ts]
+  origin: "operator-session#azure-restart-runtime-drift-console-2026-09-04"
+  plan_refs: ["W1-T483", "W1-T496", "W1-T999", "W1-T2592", "W1-T2857"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE HOST 2026-09-05T01:44Z. `remudero-daemon` was running with restart count
+    zero and a current bind-mounted checkout, so liveness and source-freshness signals were green.
+    The same container had no Codex auth file and no container provider config because both expected
+    mounts were absent, making the commissioned Codex subscription ineligible. Serve could not show
+    that distinction. It is deliberately not given `/var/run/docker.sock`, and preserving that
+    privilege boundary is more important than making the dashboard inspect a sibling directly.
+
+    `scripts/fleet-heartbeat.sh` already runs on the host, already inspects the daemon for restart
+    count and baked image sha, and already has the shared state root. It is therefore the cheapest
+    trusted producer for W1-T2857's runtime-contract verdict. Today it publishes only to a force-
+    updated Git branch and a timestamp file; Serve has no local, bounded snapshot to read. Making
+    Serve poll GitHub for this would spend the exact API budget the webhook/cache work is protecting.
+
+    A healthy process is not the same as a capable fleet. Runtime-contract drift must be a first-
+    class health dimension, visible beside liveness, source freshness and provider routing, while
+    preserving operator ownership of lifecycle actions.
+  design: |
+    Extend the host heartbeat to invoke W1-T2857's repository-owned verifier and atomically write a
+    sanitized `${RMD_ROOT}/state/fleet-runtime-health.json` snapshot on every beat. Carry schema
+    version, observed timestamp, host/container identity, `healthy|drift|unknown`, and bounded reason
+    codes/destinations only. Do not carry host source paths, credential/config content, Docker env,
+    command args, tokens or full inspect output. A verifier failure still lets the heartbeat publish;
+    drift is payload, not a reason for monitoring itself to go silent.
+
+    Add one strict reader that treats a missing, malformed, future-version or stale snapshot as
+    unknown, never healthy. `rmd serve` reads only this shared-state file and renders a prominent
+    operational alert when drift is observed, including the supported `rmd-recycle.sh` remedy name
+    but no executable lifecycle action. Healthy, drift and unknown must remain distinct. Reading or
+    rendering the snapshot performs no GitHub request and needs no Docker socket.
+
+    Keep the console endpoint and client projection sparse and backward-compatible so an older host
+    with no producer shows `runtime contract unknown` rather than failing the whole board. Bound the
+    stale threshold from the heartbeat schedule with explicit margin, emit change-only/bounded
+    telemetry, and preserve liveness, provider-routing, access grants, webhook handling and board
+    cache behavior.
+  acceptance:
+    - claim: "the real host heartbeat writes one atomic sanitized runtime-health snapshot from W1-T2857's verifier while continuing to publish its normal beat"
+      proof: "unit test: test/fleet-runtime-health-console.test.ts"
+    - claim: "a missing expected provider mount renders a prominent console drift alert even while daemon liveness, restart count and source freshness are green"
+      proof: "unit test: test/fleet-runtime-health-console.test.ts"
+    - claim: "healthy, drift, missing, malformed, future-version and stale snapshots remain distinct; no unreadable input is rendered healthy"
+      proof: "unit test: test/fleet-runtime-health-console.test.ts"
+    - claim: "the snapshot and console response contain no host paths, credential/config contents, Docker environment values, command args, tokens or full inspect output"
+      proof: "unit test: test/fleet-runtime-health-console.test.ts"
+    - claim: "Serve obtains runtime health only from shared state, with no Docker socket, child Docker command or GitHub request"
+      proof: "unit test: test/fleet-runtime-health-console.test.ts"
+    - claim: "the new runtime-health reader is wired into Serve's production projection rather than imported only by its own test"
+      proof: "grep: readFleetRuntimeHealth( in src/lib/serve.ts"
+    - claim: "the alert names the supported recycle remedy but cannot start, stop, restart, recycle, build or deploy either container"
+      proof: "regression test: test/fleet-runtime-health-console.test.ts"
+    - claim: "normal console liveness, provider-routing, webhook and board-cache behavior remains unchanged when the new snapshot is absent"
+      proof: "regression test: test/fleet-runtime-health-console.test.ts"
+    - claim: "removing the snapshot projection makes a live daemon with missing provider mounts look fully healthy again"
+      proof: "mutation test: test/fleet-runtime-health-console.test.ts"
+  falsifier: |
+    Close without implementation if current Serve already receives a fresh host-measured runtime
+    mount verdict without GitHub or Docker access. Current source has no reader for heartbeat branch
+    payloads or a local runtime-contract snapshot, and the live console had no signal for the missing
+    mounts.
+
+    Re-design rather than build if the only viable transport requires a Docker socket in Serve,
+    GitHub polling per console client, or secret-bearing state. Those erase the security and quota
+    boundaries this task exists to preserve.
+  note: |
+    ID PROVENANCE: the first advisory mint repeated W1-T2857 because the open-plan census had not
+    moved, but `rmd next-task-id --reserve` atomically held W1-T2858 at
+    `refs/rmd-id/W1-T2858`; the remote reservation resolves to
+    bb3619caf91fbd1837d2a01a157fb50d5185b1a8.
+
+    This task reports only. A one-click, confirmation-gated ACR-build/pause/recycle workflow is a
+    separate irreversible-action concern and must consume this health signal without being bundled
+    into the reporter. The operator remains the lifecycle authority.

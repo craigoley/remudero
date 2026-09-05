@@ -220,6 +220,7 @@ import {
   type OpenPrRest,
   fetchSinglePrRest,
   hydrateMergeConflictEvidence,
+  hydratePlanFilingFiles,
   hydrateSupersessionVerdicts,
   hydrateWorkflowRuns,
   hydrateMergeStates,
@@ -232,6 +233,10 @@ import {
   singlePrRestArgs,
   type GhApiFetcher,
   type GhCallPacer,
+  createPlanFilingFileCache,
+  PLAN_FILING_FILE_CACHE_MAX_ENTRIES,
+  type PlanFilingFileCache,
+  type PlanFilingFileObservation,
   type RestPullRow,
   type RestRollupEntry,
 } from "./lib/open-prs-rest.js";
@@ -285,6 +290,11 @@ import {
   runPreflightCoverage,
   runPreflightFast,
 } from "./lib/ci-parity.js";
+import {
+  consumeSourceSizeFollowup,
+  type ConsumeSourceSizeFollowupArgs,
+  type ConsumeSourceSizeFollowupResult,
+} from "./lib/source-size-followup.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
   buildReadyServeServer,
@@ -668,6 +678,7 @@ import {
   priorReviewVerdictFromLedger,
   resolveAutoMergeArm,
   planOnlyDiff,
+  enforcementDataInDiff,
   reviewerOutcome,
   reviewerVerdictContract,
   reviewEvidenceStrength,
@@ -882,6 +893,8 @@ import {
   workerLedgerFields,
   workerTranscript,
   uniqueRunBranch,
+  excludeNodeModulesFromGit,
+  linkWorktreeNodeModules,
   worktreeAdd,
   worktreeLockIsPidAlive,
   worktreeRemove,
@@ -4943,6 +4956,124 @@ function reviewerSemanticVerdicts(
   return parseReviewerVerdicts(workerTranscript(reviewer), criteriaCount);
 }
 
+type ReviewerSnapshotPhase = "materialization" | "integrity";
+
+class ReviewerSnapshotError extends Error {
+  constructor(
+    readonly phase: ReviewerSnapshotPhase,
+    readonly reason: "source-unavailable" | "head-mismatch" | "clone-failed" | "unreadable" | "dirty",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ReviewerSnapshotError";
+  }
+}
+
+/**
+ * Materialize the semantic reviewer's repository locally from the exact checkout the
+ * deterministic proof floor already owns. The clone has its own Git metadata and worktree, but
+ * borrows immutable objects from the source for speed; no GitHub read and no source checkout
+ * mutation is needed. The caller's withTempDir boundary owns removal on every exit path.
+ */
+function materializeReviewerSnapshot(
+  reviewRoot: string,
+  sourceDir: string | undefined,
+  expectedHeadSha: string,
+): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules> } {
+  if (!sourceDir || !existsSync(sourceDir)) {
+    throw new ReviewerSnapshotError(
+      "materialization",
+      "source-unavailable",
+      "semantic reviewer source checkout is unavailable",
+    );
+  }
+
+  let sourceHead: string;
+  try {
+    sourceHead = execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    throw new ReviewerSnapshotError(
+      "materialization",
+      "source-unavailable",
+      "semantic reviewer source checkout is not a readable Git repository",
+    );
+  }
+  if (sourceHead !== expectedHeadSha) {
+    throw new ReviewerSnapshotError(
+      "materialization",
+      "head-mismatch",
+      "semantic reviewer source checkout does not match the PR head",
+    );
+  }
+
+  const cwd = join(reviewRoot, "checkout");
+  try {
+    execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceDir, cwd], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    execFileSync("git", ["-C", cwd, "checkout", "--quiet", "--detach", "--force", expectedHeadSha], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    throw new ReviewerSnapshotError(
+      "materialization",
+      "clone-failed",
+      "semantic reviewer disposable checkout could not be created",
+    );
+  }
+
+  let materializedHead: string;
+  try {
+    materializedHead = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    throw new ReviewerSnapshotError("materialization", "unreadable", "semantic reviewer checkout HEAD is unreadable");
+  }
+  if (materializedHead !== expectedHeadSha) {
+    throw new ReviewerSnapshotError(
+      "materialization",
+      "head-mismatch",
+      "semantic reviewer disposable checkout does not match the PR head",
+    );
+  }
+
+  // The clone's own exclude file may be changed before the reviewer starts; the source checkout
+  // and common Git metadata remain untouched. This makes a linked dependency tree invisible to
+  // the post-review cleanliness proof even for repositories whose committed .gitignore omits it.
+  excludeNodeModulesFromGit(cwd);
+  const nodeModules = linkWorktreeNodeModules(sourceDir, cwd);
+  return { cwd, nodeModules };
+}
+
+/** A semantic result is usable only while the disposable checkout remains exact and clean. */
+function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): void {
+  let actualHead: string;
+  let status: string;
+  try {
+    actualHead = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    status = execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", "--untracked-files=all"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    throw new ReviewerSnapshotError("integrity", "unreadable", "semantic reviewer checkout integrity is unreadable");
+  }
+  if (actualHead !== expectedHeadSha) {
+    throw new ReviewerSnapshotError("integrity", "head-mismatch", "semantic reviewer changed the checkout HEAD");
+  }
+  if (status.length > 0) {
+    throw new ReviewerSnapshotError("integrity", "dirty", "semantic reviewer changed the disposable checkout");
+  }
+}
+
 /**
  * THE REVIEW GATE CALL SITE (W1-T1D — the piece W1-T1C built the reviewer for but
  * nothing ever called; the split left the call site unowned). After the PR is open
@@ -5197,14 +5328,19 @@ async function runReview(args: {
       // mkdtempSync this used to be, which never cleaned up on any path and
       // leaked one `rmd-review-*` dir per PR review (a major contributor to
       // the 26,711-dir ENOSPC incident: this runs on every gate check).
-      await withTempDir("review", async (reviewCwd) => {
+      await withTempDir("review", async (reviewRoot) => {
+        const snapshot = materializeReviewerSnapshot(reviewRoot, args.headCheckoutDir, headSha);
+        log("review.reviewer.materialized", {
+          head_sha: headSha,
+          node_modules: snapshot.nodeModules,
+        });
         const prompt =
           buildReviewPrompt({ task: { id: task.id, acceptance: criteria }, prUrl, owner, repo, headSha }) +
           "\n" +
           reviewerVerdictContract(criteria.length);
         const reviewer = args.account(
           await (args.reviewerSpawnWorker ?? spawnWorker)({
-            cwd: reviewCwd,
+            cwd: snapshot.cwd,
             permissionMode: "bypassPermissions",
             settingsFile: args.settingsFile,
             // MOUNT-GOVERNED (§9, W1-T63/P10): model/effort/max_turns come from the
@@ -5226,7 +5362,9 @@ async function runReview(args: {
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );
-        semantic = reviewerSemanticVerdicts(reviewer, criteria.length);
+        const candidateSemantic = reviewerSemanticVerdicts(reviewer, criteria.length);
+        assertReviewerSnapshotIntegrity(snapshot.cwd, headSha);
+        semantic = candidateSemantic;
         reviewerSubtype = reviewer.subtype;
         const reviewerFields = workerLedgerFields(reviewer);
         evaluatorProvenance = {
@@ -5246,11 +5384,14 @@ async function runReview(args: {
         });
         // The reviewer is fresh (no resume) — reap its SDK scratchpad now, before
         // withTempDir removes reviewCwd. Best-effort, guarded (lib/worker-scratch).
-        reapWorkerScratch(reviewCwd);
+        reapWorkerScratch(snapshot.cwd);
       });
     } catch (e) {
       // Advisory only — the deterministic floor still binds and posts below.
       reviewerSpawnFailed = true;
+      if (e instanceof ReviewerSnapshotError) {
+        log(`review.reviewer.${e.phase}_error`, { reason: e.reason, error: e.message });
+      }
       log("review.reviewer.error", { error: String((e as Error)?.message ?? e) });
     }
   }
@@ -11763,6 +11904,41 @@ export function nextLaneEpochMs(): number {
   return (lastLaneEpochMs = now);
 }
 
+/**
+ * W1-T2862: report the maintainability obligation without ever changing the implementation
+ * verdict. The consumer owns durable filing and its decision-relevant receipt; this wrapper owns
+ * only worker-path narration for named no-op/error outcomes and catches an unexpected seam throw.
+ */
+export function reportWorkerSourceSizeFollowup(
+  args: ConsumeSourceSizeFollowupArgs,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+  consume?: (input: ConsumeSourceSizeFollowupArgs) => ConsumeSourceSizeFollowupResult,
+): ConsumeSourceSizeFollowupResult | undefined {
+  try {
+    const result = consume ? consume(args) : consumeSourceSizeFollowup(args);
+    if (result.action === "filed") {
+      say(`source-size follow-up filed as ${result.feedbackId} for ${result.files.length} material hotspot(s)`);
+      return result;
+    }
+    if (result.action === "noop") {
+      log("source_size.followup.noop", {
+        reason: result.reason,
+        ...(result.signature ? { signature: result.signature } : {}),
+      });
+      return result;
+    }
+    log("source_size.followup.error", { reason: result.reason, detail: result.detail });
+    say(`source-size follow-up could not be filed (${result.reason}) — implementation verdict is unchanged`);
+    return result;
+  } catch (error) {
+    const detail = String((error as Error)?.message ?? error).replace(/[\r\n\t]+/g, " ").slice(0, 512);
+    log("source_size.followup.error", { reason: "unexpected_throw", detail });
+    say("source-size follow-up could not be evaluated — implementation verdict is unchanged");
+    return undefined;
+  }
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -13065,6 +13241,35 @@ async function runTask(
     if (preflightNotice) {
       log("preflight.failed", { detail: preflightNotice, worktree: worktreePath });
       say(preflightNotice);
+    }
+
+    // W1-T2862: consume the worker's successful source-size signal while this exact worktree and
+    // its durable preflight summary still exist. This runs before every implementation verdict
+    // branch that may remove the worktree. An unreadable HEAD or any filing failure is telemetry
+    // only: maintainability debt creates separate work and never rewrites the feature verdict.
+    try {
+      const expectedHead = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+      reportWorkerSourceSizeFollowup(
+        {
+          root: repoDir,
+          worktreeRoot: worktreePath,
+          expectedHead,
+          stateDir: dirname(ledgerPath),
+          ledgerPath,
+          runId,
+          sourceTask: taskId,
+          sourcePr: parseReport(workerTranscript(impl))?.prUrl,
+          sourceBranch: branch,
+        },
+        log,
+        say,
+      );
+    } catch (error) {
+      const detail = String((error as Error)?.message ?? error).replace(/[\r\n\t]+/g, " ").slice(0, 512);
+      log("source_size.followup.noop", { reason: "head_unreadable", detail });
     }
 
     const implFail = failOnWorkerError(impl, "implement");
@@ -27389,6 +27594,58 @@ function isPlanOnlyFilingPr(ledger: Array<Record<string, unknown>>, prUrl: strin
   return ledger.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
 }
 
+export type PlanFilingClassificationSource = "emitter-ledger" | "github-files" | "unreadable" | "not-plan-only";
+
+export interface PlanFilingClassification {
+  isPlanFiling: boolean;
+  source: PlanFilingClassificationSource;
+}
+
+export interface PlanFilingClassificationEvent {
+  prNumber: number;
+  headSha: string;
+  source: PlanFilingClassificationSource;
+}
+
+export type ClassifiedOpenPrView = OpenPrView & { planFilingSource: PlanFilingClassificationSource };
+
+/** Titles and branch names may nominate a read, but only the emitter record or material paths grant it. */
+export function classifyPlanFiling(
+  emitterLedger: boolean,
+  files: PlanFilingFileObservation | undefined,
+): PlanFilingClassification {
+  if (emitterLedger) return { isPlanFiling: true, source: "emitter-ledger" };
+  if (!files || files.state === "unreadable") return { isPlanFiling: false, source: "unreadable" };
+  const isPlanOnly = files.paths.length > 0 && files.paths.every(isInPlanScope);
+  const touchesEnforcementData = enforcementDataInDiff([...files.paths]).length > 0;
+  return isPlanOnly && !touchesEnforcementData
+    ? { isPlanFiling: true, source: "github-files" }
+    : { isPlanFiling: false, source: "not-plan-only" };
+}
+
+/** One bounded ledger row per classification transition, never one row per unchanged poll. */
+export function createPlanFilingClassificationTelemetry(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): (event: PlanFilingClassificationEvent) => void {
+  const observed = new Map<string, PlanFilingClassificationSource>();
+  return (event) => {
+    const key = `${event.prNumber}@${event.headSha}`;
+    if (observed.get(key) === event.source) return;
+    observed.delete(key);
+    observed.set(key, event.source);
+    while (observed.size > PLAN_FILING_FILE_CACHE_MAX_ENTRIES) {
+      const oldest = observed.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      observed.delete(oldest);
+    }
+    log("sweep.plan_filing_classified", {
+      pr_number: event.prNumber,
+      head_sha: event.headSha,
+      classification_source: event.source,
+    });
+  };
+}
+
 /**
  * Resolve the task identity shared by the direct review path and the open-PR board path.
  * An exact trailer wins; a positively identified plan-only filing is intentionally
@@ -27715,8 +27972,14 @@ export function buildOpenPrViews(
     fetchCiFailureEvidence?: typeof fetchCiFailures;
     /** Local-only owner probe; never performs a GitHub read. */
     assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
+    /** Process-lifetime complete-read cache; the daemon owns one for all of its poll passes. */
+    planFilingFileCache?: PlanFilingFileCache;
+    /** Primary per-pass miss bound. Production reuses the existing cheap-lane admission bound. */
+    planFilingFileMissCap?: number;
+    /** Bounded classification telemetry; production de-duplicates unchanged head/source pairs. */
+    onPlanFilingClassification?: (event: PlanFilingClassificationEvent) => void;
   } = {},
-): OpenPrView[] {
+): ClassifiedOpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
   const assessPendingOwner =
     deps.assessPendingOwner ??
@@ -27752,6 +28015,26 @@ export function buildOpenPrViews(
   const ciGateRequired = deps.readCiGateRequired
     ? deps.readCiGateRequired(repoRoot)
     : readCiGateRequiredChecks(repoRoot);
+
+  // W1-T2864: the local emitter receipt is still the zero-request positive answer. Only PRs
+  // without it enter the bounded REST hydrator; complete reads are cached by exact head.
+  const emitterPlanFilings = new Map(raw.map((pr) => [pr.number, isPlanOnlyFilingPr(ledger, pr.url)]));
+  const planFilingFiles = hydratePlanFilingFiles(
+    owner,
+    repo,
+    raw
+      .filter((pr) => emitterPlanFilings.get(pr.number) !== true)
+      .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid })),
+    fetch,
+    deps.planFilingFileCache ?? createPlanFilingFileCache(),
+    { missCap: deps.planFilingFileMissCap ?? DEFAULT_SWEEP_POLICY.planFilingAdmissionBound },
+  );
+  const planFilingClassifications = new Map<number, PlanFilingClassification>();
+  for (const pr of raw) {
+    const classification = classifyPlanFiling(emitterPlanFilings.get(pr.number) === true, planFilingFiles.get(pr.number));
+    planFilingClassifications.set(pr.number, classification);
+    deps.onPlanFilingClassification?.({ prNumber: pr.number, headSha: pr.headRefOid, source: classification.source });
+  }
 
   // MERGE STATE: one bounded follow-up fetch per PR, because the LIST endpoint omits
   // `mergeable_state` (see hydrateMergeStates' doc for the live verification and the incident).
@@ -27813,6 +28096,7 @@ export function buildOpenPrViews(
   const supersessionVerdicts = hydrateSupersessionVerdicts(owner, repo, supersededPrs, fetch, isInPlanScope);
 
   return raw.map((pr) => {
+    const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
     const taskId = resolveOpenPrTaskId(pr, ledger);
     const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
     const inputDigest = reviewInputDigest(pr.headRefOid, pr.body ?? "");
@@ -27892,7 +28176,8 @@ export function buildOpenPrViews(
       // and pushes any SPREAD onto `unresolvableSpreads`; that is deliberate and has its own
       // passing test, which is exactly what made #3127 read as unwired after a conditional spread.
       // A plain key whose value is a call is what the census recognises.
-      isPlanFiling: isPlanOnlyFilingPr(ledger, pr.url),
+      isPlanFiling: planFiling.isPlanFiling,
+      planFilingSource: planFiling.source,
       // W1-T923: a SIBLING read, off the SAME `review.posted` ledger line `unmetCriteria` above
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
@@ -30011,7 +30296,10 @@ export async function sweepCommand(rest: string[]): Promise<number> {
 
   let openPrs: OpenPrView[];
   try {
-    openPrs = buildOpenPrViews(owner, repo, ledgerPath);
+    openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+      planFilingFileCache: createPlanFilingFileCache(),
+      onPlanFilingClassification: createPlanFilingClassificationTelemetry(log),
+    });
   } catch (e) {
     console.error(`### rmd sweep — could not list open PRs for ${owner}/${repo}: ${String((e as Error)?.message ?? e)}`);
     return 1;
@@ -30890,6 +31178,8 @@ export function buildSweepHook(
   // no seam to receive it) and into `buildOpenPrViews` below, so both burst call sites share the
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
+  const planFilingFileCache = createPlanFilingFileCache();
+  const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   return async (continueReviewAdmissions = () => true) => {
     try {
       await mainHealthRung?.();
@@ -30897,7 +31187,11 @@ export function buildSweepHook(
       log("main.health.error", { error: String((e as Error)?.message ?? e) });
     }
     try {
-      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, { pacer });
+      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+        pacer,
+        planFilingFileCache,
+        onPlanFilingClassification: reportPlanFilingClassification,
+      });
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
@@ -31178,9 +31472,14 @@ export function buildSweepLightHook(
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): () => Promise<void> {
+  const planFilingFileCache = createPlanFilingFileCache();
+  const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   return async () => {
     try {
-      const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
+      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+        planFilingFileCache,
+        onPlanFilingClassification: reportPlanFilingClassification,
+      });
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
