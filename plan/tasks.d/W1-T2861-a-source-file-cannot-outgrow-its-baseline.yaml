@@ -1,0 +1,74 @@
+- id: W1-T2861
+  title: "THE LEGACY SOURCE-SIZE SELF-TEST REINTRODUCES THE BLOCKING POLICY — CI no longer runs the shared baseline as a gate, but the full test suite still runs that same baseline against the shipped source tree and fails every PR that honestly grows a recorded file"
+  repo: remudero
+  depends_on: [W1-T2734]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files:
+    - test/a-source-file-cannot-outgrow-its-baseline.test.ts
+    - test/source-size-suite-contract.test.ts
+  origin: "operator-session#source-size-must-create-follow-up-not-block-current-pr-2026-09-05"
+  plan_refs: ["W1-T2734"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT 255bb84f. W1-T2734 replaced the habitual source-size gate with a
+    PR-relative signal whose positive growth exits zero. `rmd preflight --fast` exercises that
+    contract and is green. The full test suite nevertheless executes
+    `the shipped tree passes its own recorded baseline...`; that test copies the historical
+    baseline and invokes the legacy `--baseline` mode with `--root REPO_ROOT`. When an ordinary PR
+    grows a recorded source file past that historical value, the test fails even though the
+    production PR gate deliberately no longer treats growth as a correctness defect.
+
+    THIS IS A MATERIAL GATE, NOT DOCUMENTATION DRIFT. PR #4023 changed `src/lib/worker.ts` to 5,139
+    lines while its historical baseline remained 5,000. Its full-suite `ci-shard 3/4` failed at
+    this shipped-tree test with `5139 lines > baseline 5000 (+139)`. Raising the baseline made the
+    PR green without changing runtime behavior. That is the exact queue serialization W1-T2734
+    was intended to remove.
+
+    KEEP COMPATIBILITY COVERAGE WITHOUT APPLYING LEGACY POLICY TO THE LIVE TREE. The explicit
+    `--baseline` mode remains useful for historical callers and already has fixture-repository
+    tests for overages, shrinkage, new files, malformed baselines and deterministic output. Remove
+    only the assertion that the current shipped source tree conforms to the historical baseline.
+    Add a separate contract test which refuses any future source-size suite that combines the
+    legacy baseline mode with the real repository root. This makes the policy boundary
+    load-bearing without weakening measurement-integrity failures or deleting compatibility mode.
+
+    THIS TASK DOES NOT BUILD THE SIGNAL CONSUMER. Turning a hotspot signal into a deduplicated,
+    high-priority decomposition task is a separate runtime concern with separate files and failure
+    modes. This repair only prevents the obsolete policy from blocking the PR that produced the
+    signal.
+  design: |
+    Delete the shipped-tree historical-baseline test and any import or constant used only by that
+    test. Preserve all fixture-root tests of `--baseline` compatibility and every test of the
+    PR-relative default signal.
+
+    Add `test/source-size-suite-contract.test.ts`. It reads the source-size suite as text and fails
+    if a test invocation supplies both the real repository root and legacy baseline mode, while a
+    control assertion proves the contract can still see fixture-only `--baseline` coverage. Keep
+    the contract narrow: reading the inert baseline for metadata or testing another ratchet against
+    the shipped tree is outside this task; executing the source-size legacy policy against shipped
+    source is the forbidden combination.
+  acceptance:
+    - claim: "the full test suite no longer executes source-size legacy baseline enforcement against the shipped repository tree, so honest source growth cannot make CI red through a self-test"
+      proof: "unit test: test/source-size-suite-contract.test.ts"
+    - claim: "fixture repositories still prove that explicit legacy baseline mode rejects an overage and reports the file plus exact line delta"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "the PR-relative default source-size signal still reports positive growth and exits zero while unreadable measurement inputs remain failures"
+      proof: "unit test: test/a-source-file-cannot-outgrow-its-baseline.test.ts"
+    - claim: "the new contract test fails when the removed shipped-tree baseline invocation is restored and passes when that invocation is absent"
+      proof: "unit test: test/source-size-suite-contract.test.ts"
+  falsifier: |
+    Close without implementation if the full CI command does not execute the shipped-tree
+    historical-baseline test, or if a source file above its recorded baseline still passes that
+    test without updating baseline metadata. Both falsifiers were checked on PR #4023: GitHub's
+    full-suite shard named this test and failed at 5,139 versus 5,000, then passed only after the
+    metadata ceiling changed.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2861`; the held id
+    is authoritative. This is one concern: eliminate the residual correctness block. Automatic
+    decomposition-task creation and daemon cross-refresh child ownership require separate tasks.
