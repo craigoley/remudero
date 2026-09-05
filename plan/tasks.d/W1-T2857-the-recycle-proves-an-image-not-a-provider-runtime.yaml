@@ -8,7 +8,18 @@
   risk: high
   band_meaning: span
   budget_usd: 20.00
-  files: [deploy/container-runtime-contract.sh, deploy/recycle-container.sh, test/container-runtime-contract.test.ts, test/recycle-container.test.ts]
+  files:
+    - deploy/container-runtime-contract.sh
+    - deploy/recycle-container.sh
+    - test/container-runtime-contract.test.ts
+    - test/recycle-container.test.ts
+    - test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts
+    - test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts
+    - test/container-config-mount.test.ts
+    - test/daemon-default-credential.test.ts
+    - test/nothing-reclaims-the-images-the-recycle-pulls.test.ts
+    - test/the-recovery-path-merges-into-a-shared-checkout.test.ts
+    - test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts
   origin: "operator-session#azure-restart-runtime-contract-2026-09-04"
   plan_refs: ["W1-T1010", "W1-T1069", "W1-T2592", "W1-T2774"]
   status: queued
@@ -97,3 +108,17 @@
     files no code, adds no production subsystem, and grants no operator permission to run the
     recycle lifecycle. It only widens `files:` to include the existing regression harness
     already required by the unchanged-lifecycle acceptance criterion above.
+
+    SCOPE AMENDMENT 2026-09-05 (W1-T2866): GitHub's four Linux shards falsified the first
+    amendment. Seven older focused suites each carry an independent Docker fixture for the real
+    recycle script. Their successful-path fixtures model image, credential, drain, reclaim,
+    worktree and wait contracts, but none modeled the newly mandatory Mounts inspection. The new
+    postcondition therefore failed closed before those unchanged assertions could run. Add only
+    the seven deterministically failing fixture files named above so each successful replacement
+    reports the state and Claude mount tuples selected by that same test invocation. Keep drift
+    fail-closed; do not add a test-only bypass or treat empty/unreadable mounts as healthy.
+
+    The new verifier suite also resolves a Bash-4-capable test binary once and uses it for every
+    deploy-script spawn. That preserves the existing macOS host-parity completeness gate without
+    registering avoidable Bash-3 failures as permanent host debt. No production behavior or
+    lifecycle authority is added by this amendment.
