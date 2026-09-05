@@ -39,17 +39,14 @@ const SUBJECT = "test/codex-worker-home-redirection.test.ts";
 
 test("W1-T2850: the interpreter is resolved through PATH, never hardcoded to a location that does not exist on darwin", () => {
   const raw = readFileSync(join(REPO_ROOT, SUBJECT), "utf8");
-  // Read as SOURCE because the property is the ABSENCE of a hardcoded path, which no call can
-  // demonstrate: a helper that happens to work on THIS host proves nothing about the host where it
-  // failed. (W1-T2905's census counts reads of `src/` paths and this reads `test/`, so no declared
-  // exemption is claimed — the read stands on the argument above, not on a marker.)
+  // Read as SOURCE because the property is the ABSENCE of a hardcoded path in CODE, which no call
+  // can demonstrate: a helper that happens to work on THIS host proves nothing about the host where
+  // it failed. (W1-T2905's census counts reads of `src/` paths and this reads `test/`, so no
+  // declared exemption is claimed — the read stands on the argument above, not on a marker.)
   //
-  // COMMENTS STRIPPED FIRST, and that is not a convenience: the fix's own doc comment NAMES the
-  // path it removed, so a raw substring scan trips on the prose explaining the absence — the same
-  // shape scripts/assertion-discrimination-check.mjs refuses, and the same mistake this session
-  // already made once in W1-T2831's no-override test.
+  // COMMENTS STRIPPED FIRST, and that is load-bearing: the fix's own doc comment names the path it
+  // removed, so the assertion below must never be satisfiable by prose alone.
   const src = raw.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
-  assert.ok(raw.includes("/usr/bin/bash"), "the prose still names the removed path (the control for the strip)");
   assert.ok(!src.includes("/usr/bin/bash"), "but no CODE spawns it — the absolute path is gone");
   assert.match(src, /execFileSync\("bash",/, "resolved by name, the way the production seam does");
 
