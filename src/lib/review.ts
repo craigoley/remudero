@@ -580,6 +580,20 @@ export interface ReviewVerdict {
    */
   floorDegraded: boolean;
   /**
+   * W1-T2743 — BOUNDED LEGIBILITY FOR DUPLICATE PROOF WORK. `proofUniqueRuns` counts distinct
+   * (checkout, command, argv) triples this review actually executed — head and base separately;
+   * `proofReuses` counts calls answered from an earlier observation in the SAME review. Counts
+   * only: no command, no argv, no stdout, no environment and no key list, so a `review.posted` row
+   * gains two integers rather than an unbounded payload.
+   *
+   * The #3744 shape reports 2 unique runs and 10 reuses with a base checkout available, where
+   * `proof_exec: 6/6` previously hid twelve child spawns. `undefined` when no head checkout was
+   * supplied and nothing could execute — never `0`, which would say "measured none" about a review
+   * that never measured at all.
+   */
+  proofUniqueRuns?: number;
+  proofReuses?: number;
+  /**
    * W1-T178 (verdict stability): the rolled-up `state` as if NO semantic verdict
    * had been supplied at all — every criterion judged on `floorMet` (falling
    * back to `met` where `floorMet` is absent) plus the same `testTheater`/empty-
@@ -4215,6 +4229,84 @@ export function planOnlyDiff(diff: string): boolean {
   return planOnlyFromFiles(diffFiles, enforcementDataInDiff(diffFiles));
 }
 
+/**
+ * W1-T2743 — ONE REVIEW, ONE EXECUTION PER UNIQUE PROOF.
+ *
+ * OBSERVED ON PR #3744 AT HEAD 5af85ec9. All six of its acceptance criteria named the
+ * byte-identical proof `unit test: test/a-gate-shaped-instrument-that-nothing-invokes.test.ts`,
+ * and the posted `review.posted` row carried six proof outcomes in order: one `executed_fail`,
+ * then five `executed_pass`. That cannot describe six different facts — it is six samples of ONE
+ * fact taken inside one supposedly atomic judgment, and the first sample alone failed the commit
+ * status. (The path completed 22/22 in under a second in a clean clone and again in the daemon's
+ * retained Azure worktree at the same sha; `execWhitelistedProof` called directly there returned
+ * `pass` in 838ms. That does not prove the first live sample could never fail — it proves
+ * repeating an identical proof MANUFACTURED contradictory evidence.)
+ *
+ * WHY IT HAPPENED. `judgeReview` maps every criterion through {@link judgeCriterion} with one
+ * shared {@link ProofExecContext}, but that context carried the RAW executor, so each criterion
+ * spawned its proof again. A passing proof is also re-run against the merge base for staleness
+ * ({@link classifyBaseProofOutcome}), so N criteria citing one path could cost as many as 2N child
+ * processes. `ensureDeps` and the browser preflight have process latches; the proof command itself
+ * did not.
+ *
+ * THE IDENTITY IS SAFE BECAUSE IT IS ENTIRELY INSIDE ONE CALL. The key is checkout path plus
+ * executable plus exact argv. `cwd` is IN THE KEY, so a head observation and a merge-base
+ * observation of the same command can never alias — the one aliasing that would actually corrupt a
+ * verdict, since staleness is decided by comparing exactly those two. And because the memo lives
+ * and dies inside one `judgeReview` invocation, no sha can inherit another sha's result and there
+ * is no invalidation policy to get wrong. THIS IS NOT A CROSS-REVIEW CACHE: a new head, body,
+ * base, process or later review is a new observation and runs again.
+ *
+ * A THROW IS AN OBSERVATION TOO. `exec_error` (a timeout, an ENOENT, W1-T1077's broken runtime,
+ * W1-T2740's truncated run) is terminal for that command in this checkout, so the memo replays the
+ * SAME rejection rather than re-running and possibly disagreeing with itself. Retrying a transient
+ * inside one atomic judgment is precisely the defect.
+ */
+export interface ProofExecutionMemo {
+  /** The wrapped executor to hand {@link ProofExecContext.exec}. */
+  exec: ProofExecutor;
+  /** Distinct (cwd, command, argv) triples actually executed — head and base counted separately. */
+  uniqueRuns: () => number;
+  /** How many calls were answered from a prior observation instead of spawning. */
+  reuses: () => number;
+}
+
+export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
+  // Two maps rather than one sentinel-bearing map: a cached THROW and a cached "no-match" must not
+  // be distinguishable only by a value that could itself be a legitimate result.
+  const returned = new Map<string, "pass" | "fail" | "no-match">();
+  const thrown = new Map<string, unknown>();
+  let uniqueRuns = 0;
+  let reuses = 0;
+  const keyOf = (w: WhitelistedProof, cwd: string): string =>
+    // `cwd` FIRST and delimited: the head/base separation is the load-bearing half of this key.
+    JSON.stringify([cwd, w.command, [...w.args]]);
+  return {
+    exec: (whitelisted, cwd) => {
+      const key = keyOf(whitelisted, cwd);
+      if (thrown.has(key)) {
+        reuses += 1;
+        throw thrown.get(key);
+      }
+      if (returned.has(key)) {
+        reuses += 1;
+        return returned.get(key) as "pass" | "fail" | "no-match";
+      }
+      uniqueRuns += 1;
+      try {
+        const outcome = exec(whitelisted, cwd);
+        returned.set(key, outcome);
+        return outcome;
+      } catch (e) {
+        thrown.set(key, e);
+        throw e;
+      }
+    },
+    uniqueRuns: () => uniqueRuns,
+    reuses: () => reuses,
+  };
+}
+
 export function judgeReview(
   criteria: AcceptanceCriterion[],
   evidence: ReviewEvidence,
@@ -4239,10 +4331,15 @@ export function judgeReview(
   // Absent headCheckoutDir ⇒ execCtx is undefined ⇒ every criterion is
   // not_executable and the keyword floor is byte-identical to pre-W1-T65 —
   // exactly what every fixture/caller that predates this task still gets.
+  // W1-T2743: ONE memo per judgeReview call, wrapping whichever executor this review would have
+  // used — the injected one in tests, `execWhitelistedProof` in production. Built here rather than
+  // inside judgeCriterion so that function stays byte-compatible for its audit/test callers
+  // (auditMergedTaskClaims calls it one criterion at a time and must keep spawning per call).
+  const proofMemo = evidence.headCheckoutDir ? memoizeProofExecutor(evidence.execProof ?? execWhitelistedProof) : undefined;
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
     ? {
         cwd: evidence.headCheckoutDir,
-        exec: evidence.execProof,
+        exec: proofMemo?.exec,
         baseCwd: evidence.baseCheckoutDir,
         baseUnreadablePaths: evidence.baseUnreadablePaths,
         forwardReferenceFiles,
@@ -4474,6 +4571,10 @@ export function judgeReview(
     testTheater,
     summary,
     floorDegraded,
+    // W1-T2743: `undefined` when nothing could execute (no head checkout), never 0 — "measured
+    // none" and "never measured" are different facts and a ledger row must not conflate them.
+    proofUniqueRuns: proofMemo?.uniqueRuns(),
+    proofReuses: proofMemo?.reuses(),
     floorState,
     capped,
     keywordOnly,
@@ -5715,6 +5816,8 @@ export function reviewLedgerLegibilityFields(
         | "unexecutableCount"
         | "unexecutableProofs"
         | "partiallyExecuted"
+        | "proofUniqueRuns"
+        | "proofReuses"
       >
     >,
 ): {
@@ -5725,6 +5828,8 @@ export function reviewLedgerLegibilityFields(
   unexecutable_count: number;
   unexecutable_proofs: string[];
   partially_executed: boolean;
+  proof_unique_runs?: number;
+  proof_reuses?: number;
   failure_class?: string;
   failure_reason?: string;
 } {
@@ -5745,6 +5850,11 @@ export function reviewLedgerLegibilityFields(
     unexecutable_proofs: verdict.unexecutableProofs ?? [],
     // W1-T305 (design (4)): SOME-but-not-ALL executed, unconditional like `capped`/`keyword_only`.
     partially_executed: verdict.partiallyExecuted ?? false,
+    // W1-T2743: two integers, and CONDITIONAL rather than defaulted to 0 — a review with no head
+    // checkout measured nothing, and "measured none" is a different fact from "never measured".
+    // Bounded by construction: counts only, never the commands or keys they were derived from.
+    ...(verdict.proofUniqueRuns === undefined ? {} : { proof_unique_runs: verdict.proofUniqueRuns }),
+    ...(verdict.proofReuses === undefined ? {} : { proof_reuses: verdict.proofReuses }),
     ...(failed
       ? {
           failure_class: reviewFailureClass({
