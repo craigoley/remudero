@@ -3714,6 +3714,28 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
+    // W1-T2860 — GitHub can carry an exact-head remudero-review SUCCESS without the matching
+    // completed `review.posted` ledger row W1-T230 requires before it will arm auto-merge. The
+    // success status alone cannot recreate the review's structured proof evidence, so route the
+    // contradiction through the same authoritative reviewer used by every other post-review row.
+    // This is deliberately symmetric with the unowned FAILURE recovery above: both exact-input
+    // identity signals must be present, and the count must be STRICTLY zero so legacy/unwired
+    // callers keep the ordinary mergeable disposition. A refusal bounds retries for the unchanged
+    // input; a changed head/body digest receives its own zero count and can be judged afresh.
+    disposition: "post-review",
+    when: (pr) =>
+      pr.checksState === "green" &&
+      pr.requiredContextsUnreadable !== true &&
+      pr.reviewState === "success" &&
+      pr.reviewInputDigest !== undefined &&
+      pr.priorReviewAttemptsForInput === 0 &&
+      pr.reviewPostRefused !== true,
+    reason: (pr) =>
+      `checks green and GitHub reports remudero-review success, but the ledger has no matching completed ` +
+      `review.posted evidence for this exact input — re-running the authoritative reviewer on ` +
+      `#${pr.prNumber} before auto-merge; one exact-input post refusal stops retries`,
+  },
+  {
     // POSITIVE MATCH ONLY (the #161 fix, W1-T93): mergeable is NEVER inferred
     // from the mere absence of a failure — it requires required-checks green AND
     // review success, named explicitly (P22's own words: "required contexts

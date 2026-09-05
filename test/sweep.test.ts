@@ -704,6 +704,92 @@ test("runSweep: unowned failure recovery invokes the review lane and does not es
   assert.equal(deps.escalated.length, 0);
 });
 
+test("W1-T2860: a successful GitHub review with no completed exact-input judgment is re-reviewed before merge", () => {
+  const p = pr({
+    reviewState: "success",
+    checksState: "green",
+    priorReviewAttemptsForInput: 0,
+    reviewInputDigest: "v1:unowned-success",
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "post-review");
+  assert.match(r.reason, /success/);
+  assert.match(r.reason, /no matching completed review\.posted evidence/);
+  assert.match(r.reason, /authoritative reviewer/);
+});
+
+test("W1-T2860: a completed exact-input judgment restores the ordinary mergeable disposition", () => {
+  const recovered = pr({
+    reviewState: "success",
+    checksState: "green",
+    priorReviewAttemptsForInput: 1,
+    reviewInputDigest: "v1:owned-success",
+  });
+  assert.deepEqual(
+    deriveDisposition(recovered, DEFAULT_SWEEP_POLICY, NOW),
+    deriveDisposition(mergeablePr(), DEFAULT_SWEEP_POLICY, NOW),
+    "the rerun only restores the evidence required by the existing mergeable path",
+  );
+
+  const legacy = pr({ reviewState: "success", checksState: "green" });
+  assert.equal(deriveDisposition(legacy, DEFAULT_SWEEP_POLICY, NOW).disposition, "mergeable");
+  assert.equal(
+    deriveDisposition({ ...legacy, reviewInputDigest: "v1:unwired-count" }, DEFAULT_SWEEP_POLICY, NOW).disposition,
+    "mergeable",
+    "a digest without an explicit zero is not evidence of a missing judgment",
+  );
+});
+
+test("W1-T2860: an exact-input refusal bounds recovery while a changed input earns a fresh attempt", () => {
+  const refused = pr({
+    reviewState: "success",
+    checksState: "green",
+    priorReviewAttemptsForInput: 0,
+    reviewInputDigest: "v1:refused-success",
+    reviewPostRefused: true,
+  });
+  assert.notEqual(deriveDisposition(refused, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
+
+  const changed = {
+    ...refused,
+    headSha: "bbbb222",
+    reviewInputDigest: "v1:changed-success",
+    reviewPostRefused: undefined,
+  };
+  assert.equal(deriveDisposition(changed, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
+});
+
+test("W1-T2860: the success recovery fails closed around required-context and CI state", () => {
+  const candidate = {
+    reviewState: "success" as const,
+    checksState: "green" as const,
+    priorReviewAttemptsForInput: 0,
+    reviewInputDigest: "v1:unowned-success",
+  };
+  assert.notEqual(
+    deriveDisposition(pr({ ...candidate, requiredContextsUnreadable: true }), DEFAULT_SWEEP_POLICY, NOW).disposition,
+    "post-review",
+  );
+  assert.notEqual(deriveDisposition(pr({ ...candidate, checksState: "red" }), DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
+  assert.notEqual(deriveDisposition(pr({ ...candidate, checksState: "pending" }), DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
+});
+
+test("W1-T2860: runSweep invokes only the existing review lane for an unowned success", async () => {
+  const p = pr({
+    reviewState: "success",
+    checksState: "green",
+    priorReviewAttemptsForInput: 0,
+    reviewInputDigest: "v1:unowned-success",
+  });
+  const posted: number[] = [];
+  const deps = fakeDeps({ postReview: (candidate) => { posted.push(candidate.prNumber); } });
+  const summary = await runSweep([p], deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(posted, [p.prNumber]);
+  assert.deepEqual(deps.armed, []);
+  assert.equal(deps.escalated.length, 0);
+  assert.equal(summary.byDisposition["post-review"], 1);
+});
+
 // W1-T440: the SAME empty (unmetCriteria === []) has two causes — a trailer resolved a task id
 // and the ledger genuinely came back with nothing unmet (contradictory, above), versus no
 // trailer at all so unmetFromLedger was never consulted (unrecoverable, here). Same
