@@ -26,7 +26,7 @@ const BASELINE = join(REPO_ROOT, "scripts", "comment-load-baseline.json");
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import would be a TS7016. A dynamic
 // specifier is not statically resolved, so this loads the REAL module with no shadow copy.
-const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks, MAX_ADDED_BLOCK_LINES } =
+const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks, listMeasuredFiles, MAX_ADDED_BLOCK_LINES } =
   (await import(pathToFileURL(SCRIPT).href)) as {
     countCommentLines: (text: string, path: string) => { comments: number; code: number };
     evaluateCommentLoadRatchet: (
@@ -44,6 +44,7 @@ const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks,
       diff: string,
       isMeasured: (f: string) => boolean,
     ) => Array<{ file: string; startLine: number; lines: number }>;
+    listMeasuredFiles: (root: string) => string[];
     MAX_ADDED_BLOCK_LINES: number;
   };
 
@@ -218,19 +219,24 @@ test(`CLI: a real commit adding ${MAX_ADDED_BLOCK_LINES + 1} comment lines is RE
 
 // ── the shipped tree ─────────────────────────────────────────────────────────────────────────
 
-test("CENSUS: the shipped baseline covers every tracked file in the measured path set, and no other", () => {
-  const tracked = execFileSync(
-    "git",
-    ["ls-files", "--", "src", "scripts", "deploy", ".github/workflows", "bin", "hooks"],
-    { cwd: REPO_ROOT, encoding: "utf8" },
-  )
-    .split("\n")
-    .map((p) => p.trim())
-    .filter(Boolean)
-    .sort();
-  assert.ok(tracked.length > 100, `sanity: the path set must be non-empty; saw ${tracked.length}`);
+test("CENSUS: the shipped baseline covers every measured file, and no other", () => {
+  const measured = listMeasuredFiles(REPO_ROOT);
   const recorded = Object.keys(JSON.parse(readFileSync(BASELINE, "utf8"))).filter((k) => k !== "_comment");
-  assert.deepEqual(recorded.sort(), tracked, "every tracked file in the path set carries a recorded ceiling");
+  assert.deepEqual(recorded.sort(), measured, "every measured file carries a recorded ceiling, and nothing else does");
+  // POSITIVE CONTROL on the path set itself: the assertion above compares the baseline against the
+  // SAME function that built it, so a root silently dropped from MEASURED_ROOTS would agree with a
+  // baseline missing it. One representative tracked file per root, named here, is what refuses that.
+  for (const representative of [
+    "src/run-task.ts",
+    "scripts/check.mjs",
+    "deploy/Dockerfile",
+    ".github/workflows/ci.yml",
+    "bin/rmd",
+    "hooks/pre-commit",
+  ]) {
+    assert.ok(recorded.includes(representative), `${representative} must carry a recorded ceiling`);
+  }
+  assert.ok(measured.length > 100, `sanity: the measured set must be a real corpus; saw ${measured.length}`);
 });
 
 test("the shipped tree passes its own ratchet, over a corpus that is not empty", () => {

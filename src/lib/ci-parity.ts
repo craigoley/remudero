@@ -1591,6 +1591,14 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "`git ls-files -- ee-open.json` checks exactly one named path is untracked; not a population walk",
   ),
   refusedForPredicate(
+    "test/comment-load-ratchet.test.ts",
+    "a",
+    "the comment-load ratchet's own falsifier suite. The recognizer's text heuristic matches it on an `ls-files` mention in its " +
+      "header prose plus the `src/` fixture paths in its bodies, but the suite makes no such call over the tracked tree: its own " +
+      "git calls build a throwaway fixture repo under mkdtemp, and its baseline-coverage assertion reads the population from the " +
+      "script's exported listMeasuredFiles rather than walking src/ itself",
+  ),
+  refusedForPredicate(
     "test/config-fixture-path-parity.test.ts",
     "a",
     "`git ls-files test` is scoped to test/ only, never src/",
