@@ -1,0 +1,60 @@
+- id: W1-T2869
+  title: "the operator-stop regression fixture announces startup before its signal-cleanup trap exists, so main can fail red without a production regression"
+  repo: remudero
+  depends_on: [W1-T2586]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium
+  files:
+    - test/an-operator-stop-is-undone-by-the-restart-policy.test.ts
+  origin: "operator-session#main-signal-fixture-readiness-race-2026-09-05"
+  plan_refs: ["W1-T2586"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT b375b9afc33a03c30e1f2a092f0d62e0cd182dca: CI shard 3 failed
+    `an operator TERM, forwarded and handled, reports a CLEAN exit — not a crash` because the
+    cleanup marker was absent. The automatic retry failed at the same assertion. The focused test
+    passes on a local run, so that pass alone does not distinguish an intermittent fixture race
+    from a production signal-forwarding regression.
+
+    THE FIXTURE'S HANDSHAKE IS ORDERED INCORRECTLY. `writeDaemonStandin` touches its `started`
+    marker and only then installs the TERM trap that touches `cleaned`. `bootAndSignal` waits only
+    for `started` and immediately signals the supervising entrypoint. A signal forwarded during
+    that gap kills the stand-in with the default TERM disposition, exactly producing `cleaned:
+    false` while exercising no defect in `deploy/entrypoint.sh`.
+
+    THE RACE WAS FALSIFIED DIRECTLY. In a disposable latest-main checkout, inserting a 500 ms
+    delay between the existing `touch started` and trap installation made the unchanged focused
+    test fail at the same cleanup assertion in 104 ms. If that ordering were not causal, widening
+    only that interval would not deterministically reproduce the GitHub failure.
+
+    This task changes only the test fixture's readiness handshake. It does not change production
+    signal handling, restart policy, container lifecycle, deployment, daemon behavior or Serve.
+  design: |
+    Install the stand-in's TERM trap before publishing the marker that `bootAndSignal` treats as
+    readiness. Keep the real Bash process, real forwarded signal, self-re-raised TERM, exit-code
+    assertions and crash-throttle mutant intact.
+
+    Add a load-bearing regression that proves the marker cannot be observed before the cleanup
+    handler is ready. Its mutant must restore the old marker-before-trap ordering and reproduce
+    the missing-cleanup failure without relying on scheduler luck or repeated blind execution.
+  acceptance:
+    - claim: "the stand-in installs its TERM cleanup trap before publishing the readiness marker consumed by bootAndSignal"
+      proof: "unit test: test/an-operator-stop-is-undone-by-the-restart-policy.test.ts"
+    - claim: "a TERM sent as soon as readiness is observed runs cleanup and the entrypoint reports a normal zero exit without paying the crash throttle"
+      proof: "unit test: test/an-operator-stop-is-undone-by-the-restart-policy.test.ts"
+    - claim: "the genuine unsignalled crash and pre-fix entrypoint mutants retain their existing non-zero and throttle behavior"
+      proof: "regression test: test/an-operator-stop-is-undone-by-the-restart-policy.test.ts"
+    - claim: "restoring the old marker-before-trap interval reproduces the missing-cleanup failure and fails the focused suite"
+      proof: "mutation test: test/an-operator-stop-is-undone-by-the-restart-policy.test.ts"
+  falsifier: |
+    Close this task without implementation if a readiness marker observed only after trap
+    installation can still reproduce `cleaned: false`, or if widening only the current
+    marker-before-trap interval no longer reproduces the exact main failure. Otherwise, restoring
+    the old ordering from the final implementation must fail the focused regression.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` reported W1-T2869 and atomically held
+    `refs/rmd-id/W1-T2869` on origin after one attempt. The shard uses the held id.
