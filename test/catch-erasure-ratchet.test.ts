@@ -109,13 +109,47 @@ function extractCatchBlocks(source: string): string[] {
 }
 
 const RETHROW_RE = /\bthrow\b/;
+// W1-T2670 — `\blog\s*\(` IS THE HOUSE SEAM, AND IT WAS THE ONE FORM THIS PATTERN COULD NOT SEE.
+// `log\.\w+` matches a call on a PROPERTY named log (`log.info(...)`); every testable module here
+// records through an INJECTED binding instead — `deps.log(...)` or a destructured `log(...)` — a
+// call on `log` ITSELF. `\blog\s*\(` matches both spellings and, because `\b` needs a word
+// boundary before `log`, matches neither `catalog(` nor `blog(`. MEASURED at this head: 131
+// catches across 15 files record through a house form this pattern could not see. Only ONE was
+// counted bare today; the other 130 pass on an INCIDENTAL route — a comment, or a `reason:`/
+// `error:` key that happens to be in the logged object — and 112 of those hang on a single such
+// route that any later edit can remove. That is the cost the filing names: not one cycle, but a
+// detector that charges its price to the exact idiom the coverage guidance pushes authors toward,
+// so the cheapest way past it is to buy a baseline row.
 const RECORD_RE =
-  /\b(console\.(error|warn|log|info|debug)|logger\.\w+|log\.\w+|process\.stderr\.write|recordError|captureException|reportError)\s*\(/;
+  /\b(console\.(error|warn|log|info|debug)|logger\.\w+|log\.\w+|log|process\.stderr\.write|recordError|captureException|reportError)\s*\(/;
 // The house's own present/absent-with-reason vocabulary, carried in the RETURN SHAPE:
 // `ok: false`, `{kind: "corrupt"}`, `status: "measured" | "refused"`, `reason: ...`, etc.
 const DISTINCTION_KEY_RE =
   /\b(ok|kind|status|reason|error|corrupt|unreadable|refused|measured|failed|success)\s*:/i;
 const COMMENT_RE = /\/\/[^\n]*|\/\*[\s\S]*?\*\//;
+
+// W1-T2670 — THE SECOND HOUSE FORM. `DISTINCTION_KEY_RE` requires the vocabulary word followed by
+// a COLON; the house shape binds it with an EQUALS and then carries it into the recorded object
+// as ES shorthand:
+//     const reason = "produced-head-unreadable" as const;
+//     deps.log("pr.head_provider", { ..., reason, });
+//     return { state: "unavailable", reason };
+// so neither the binding nor the carry has a colon and the catch reads as bare. Recognising it
+// requires BOTH halves — the `const` binding AND at least one later use — which is what keeps
+// this from widening into "any const passes": a catch that returns a bare value binds nothing it
+// then carries anywhere.
+const CONST_REASON_RE =
+  /\bconst\s+(ok|kind|status|reason|error|corrupt|unreadable|refused|measured|failed|success)\b\s*=/i;
+
+/** True when the body BINDS one of the house vocabulary words with `const` AND uses it again —
+ *  the binding plus at least one carry. A binding alone is not a record: it must go somewhere. */
+function bindsAndCarriesReason(body: string): boolean {
+  const m = CONST_REASON_RE.exec(body);
+  if (!m) return false;
+  const name = m[1];
+  const uses = body.match(new RegExp(`\\b${name}\\b`, "g"))?.length ?? 0;
+  return uses >= 2;
+}
 
 /** A catch body passes by ANY of the four routes design (i) names: rethrow, record, carry the
  *  distinction in its return shape, or state the reason in a comment. Anything else erases a
@@ -124,6 +158,7 @@ function isBareErasingCatch(body: string): boolean {
   if (RETHROW_RE.test(body)) return false;
   if (RECORD_RE.test(body)) return false;
   if (DISTINCTION_KEY_RE.test(body)) return false;
+  if (bindsAndCarriesReason(body)) return false;
   if (COMMENT_RE.test(body)) return false;
   return true;
 }
@@ -212,6 +247,16 @@ function conflatorViolations(root: string, baseline: ConflatorSite[]): Conflator
 // ratchet only ever tightens. Growing one, or adding a row for a file not already here, is what
 // this gate exists to refuse.
 
+// W1-T2670 RE-CAPTURED DOWNWARD (the ratchet only ever tightens; three rows, 243 -> 239).
+// THE DROP IS ATTRIBUTED RATHER THAN POCKETED, because "no file's count moves except by this
+// recognition" is only checkable if the two causes are separated. Measured by running the
+// detector as it stood BEFORE this task against the same tree:
+//   src/lib/relay-client.ts  1 -> 0   THIS TASK: a `log(...)` catch the old RECORD_RE could not see
+//   src/lib/status.ts        8 -> 7   pre-existing slack — the old detector already read 7 here
+//   src/lib/worker.ts       13 -> 11  pre-existing slack — the old detector already read 11 here
+// So exactly ONE point of the four is this recognition; the other three are allowance the table
+// had carried since capture, surfaced by the recount and lowered because leaving a known-loose
+// row is the population growth W1-T2295 exists to stop.
 const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/analytics-route.ts": 1,
   "src/lib/autonomy.ts": 1,
@@ -260,7 +305,6 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/plan-pr-emitter.ts": 1,
   "src/lib/plan.ts": 3,
   "src/lib/reachability.ts": 1,
-  "src/lib/relay-client.ts": 1,
   "src/lib/relint.ts": 2,
   "src/lib/retro.ts": 2,
   "src/lib/review.ts": 4,
@@ -269,14 +313,14 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/serve.ts": 20,
   "src/lib/skill.ts": 4,
   "src/lib/status-board.ts": 5,
-  "src/lib/status.ts": 8,
+  "src/lib/status.ts": 7,
   "src/lib/task-id-reservation.ts": 1,
   "src/lib/task-linter.ts": 1,
   "src/lib/trace.ts": 1,
   "src/lib/verdict-calibration.ts": 1,
   "src/lib/worker-containment.ts": 5,
   "src/lib/worker-home.ts": 3,
-  "src/lib/worker.ts": 13,
+  "src/lib/worker.ts": 11,
   "src/run-task.ts": 64,
   "src/spike.ts": 1,
 };
@@ -527,4 +571,81 @@ test("catch-erasure-ratchet: every row in both baseline tables names a currently
   for (const site of BASELINE_CONFLATOR_SITES) {
     assert.equal(tracked.has(site.file), true, `${site.file} in the conflator baseline is no longer tracked`);
   }
+});
+
+// ── W1-T2670: the two HOUSE recording forms the detector used to read as erasure ───────────────
+
+test("W1-T2670: a catch recording through an INJECTED log binding is not counted as bare", () => {
+  // The seam every testable module here uses. `deps.log(` is a call on a property named log, and
+  // a destructured `log(` is a call on the binding itself — `log\.\w+` saw neither.
+  assert.equal(bareCatchCountForSource(`try { f(); } catch { deps.log("x.failed", { id }); return null; }`), 0, "deps.log(");
+  assert.equal(bareCatchCountForSource(`try { f(); } catch { log("x.failed", { id }); return null; }`), 0, "a destructured log(");
+  assert.equal(bareCatchCountForSource(`try { f(); } catch { this.log("x.failed", { id }); return null; }`), 0, "this.log(");
+  // ...without admitting a word that merely ENDS in "log" — the boundary is load-bearing.
+  assert.equal(bareCatchCountForSource(`try { f(); } catch { catalog("x"); return null; }`), 1, "catalog( is not a record");
+  assert.equal(bareCatchCountForSource(`try { f(); } catch { blog("x"); return null; }`), 1, "blog( is not a record");
+});
+
+test("W1-T2670: a catch binding its reason by const and CARRYING it into a recorded object is not counted as bare", () => {
+  // src/lib/review-provider-provenance.ts's own shape, reduced: an `=` binding and a shorthand
+  // carry, so DISTINCTION_KEY_RE's required colon appears nowhere.
+  const housed = `try { f(); } catch { const reason = "produced-head-unreadable" as const; return { state: "unavailable", reason }; }`;
+  assert.equal(bareCatchCountForSource(housed), 0);
+  assert.equal(bindsAndCarriesReason(' const reason = "x" as const; return { reason }; '), true);
+});
+
+test("W1-T2670: a const binding that goes NOWHERE is still erasure — the recognition needs both halves", () => {
+  // The widening this deliberately does not do: "any const passes" would empty the gate.
+  assert.equal(bindsAndCarriesReason(' const reason = "x"; return null; '), false, "bound, never carried");
+  assert.equal(bareCatchCountForSource(`try { f(); } catch { const reason = "x"; return null; }`), 1);
+  assert.equal(bindsAndCarriesReason(' const value = "x"; return { value }; '), false, "carried, but not a house vocabulary word");
+  assert.equal(bindsAndCarriesReason(" return null; "), false, "no binding at all");
+});
+
+test("W1-T2670: a catch returning a bare value with no record, reason or marker is STILL counted — the direction is unchanged", () => {
+  // THE CONTROL THAT IS PART OF THE DELIVERABLE: the fix must not have traded a false positive
+  // for a false negative. These are the shapes the ratchet exists for.
+  for (const bare of [
+    `try { f(); } catch { return null; }`,
+    `try { f(); } catch { return undefined; }`,
+    `try { f(); } catch { return []; }`,
+    `try { f(); } catch { return 0; }`,
+    `try { f(); } catch { return ""; }`,
+    `try { f(); } catch { return false; }`,
+    `f().catch(() => null)`,
+    `f().catch(() => ({ entries: [] }))`,
+  ]) {
+    assert.equal(bareCatchCountForSource(bare), 1, `still erasing: ${bare}`);
+  }
+});
+
+test("W1-T2670: the recognition moves exactly the catches that record by a house form — every other count is untouched", () => {
+  // The whole tracked population, re-derived here rather than quoted: a file's count may only
+  // FALL, and only where the body actually carries one of the two house forms. Nothing rises, and
+  // nothing falls for another reason.
+  const withoutHouseForms = (body: string): boolean => {
+    if (RETHROW_RE.test(body)) return false;
+    if (/\b(console\.(error|warn|log|info|debug)|logger\.\w+|log\.\w+|process\.stderr\.write|recordError|captureException|reportError)\s*\(/.test(body)) return false;
+    if (DISTINCTION_KEY_RE.test(body)) return false;
+    if (COMMENT_RE.test(body)) return false;
+    return true;
+  };
+  let moved = 0;
+  for (const file of trackedSrcFiles(REPO_ROOT)) {
+    const bodies = extractCatchBlocks(readFileSync(join(REPO_ROOT, file), "utf8"));
+    const before = bodies.filter(withoutHouseForms).length;
+    const after = bodies.filter(isBareErasingCatch).length;
+    assert.ok(after <= before, `${file}: the recognition may only LOWER a count (${before} -> ${after})`);
+    for (const b of bodies) {
+      if (withoutHouseForms(b) && !isBareErasingCatch(b)) {
+        moved += 1;
+        assert.ok(
+          /\blog\s*\(/.test(b) || bindsAndCarriesReason(b),
+          `a catch stopped being counted for a reason other than the two house forms:\n${b}`,
+        );
+      }
+    }
+  }
+  // Non-vacuity: the sweep must actually have found the population it is asserting over.
+  assert.ok(moved > 0, "no catch moved at all — this test would be vacuously true");
 });
