@@ -152,6 +152,12 @@
       "grepHint": "ledger.ts forensics"
     },
     {
+      "path": "docs/forensics/retro.md",
+      "title": "retro.ts forensics",
+      "summary": "The measured facts, incidents and design arguments that used to live as comment prose inside",
+      "grepHint": "retro.ts forensics"
+    },
+    {
       "path": "docs/forensics/sweep-map.md",
       "title": "Removed block map — `src/lib/sweep.ts`",
       "summary": "Every comment block compacted out of `src/lib/sweep.ts`, mapped to the heading in",
@@ -168,6 +174,12 @@
       "title": "Forensics: src/lib/task-linter.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/task-linter.ts` used to",
       "grepHint": "Forensics: src/lib/task-linter.ts"
+    },
+    {
+      "path": "docs/forensics/worker.md",
+      "title": "`src/lib/worker.ts` — comment forensics",
+      "summary": "Verbatim archive of the measured facts, incidents and design arguments that used to live in",
+      "grepHint": "`src/lib/worker.ts` — comment forensics"
     },
     {
       "path": "docs/open-decisions.md",
