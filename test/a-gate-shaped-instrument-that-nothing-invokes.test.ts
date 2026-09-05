@@ -472,6 +472,17 @@ test("W1-T2735: collectWiringText tolerates a missing workflows dir and an unrea
   }
 });
 
+test("R-46: listNpmScriptNames tolerates a missing package.json (no throw) AND an unparseable one (its own catch arm)", () => {
+  const bare = mkdtempSync(join(tmpdir(), "rmd-unwired-gate-npm-bare-"));
+  try {
+    assert.deepEqual(mod.listNpmScriptNames(bare), [], "no package.json at all yields no scripts, not a throw");
+    writeFileSync(join(bare, "package.json"), "{ not json");
+    assert.deepEqual(mod.listNpmScriptNames(bare), [], "an unparseable package.json is tolerated the same way, via its own catch arm");
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
 test("W1-T2735: an unparseable workflow THROWS naming the file", () => {
   withFixture({ scripts: {}, workflows: { "broken.yml": "a:\n  - b\n c: [unclosed\n" }, pkgScripts: {} }, (root) => {
     assert.throws(() => mod.collectWiringText(root), /broken\.yml/, "a parse failure must name the file, not silently contribute nothing");
