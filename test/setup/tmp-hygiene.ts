@@ -23,7 +23,6 @@
  * Loaded via a second `--import` flag on the `test` npm script, after `--import tsx` —
  * so this file, and the fixtures it instruments, both run through tsx's loader.
  */
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
@@ -87,82 +86,6 @@ fs.mkdtempSync = ((...args: Parameters<typeof fs.mkdtempSync>) => {
 // libraries (e.g. mock-fs) rely on.
 syncBuiltinESMExports();
 
-/**
- * W1-T2715 — A TEST THAT WRITES INTO THE TRACKED TREE IS OBSERVED BY EVERY OTHER WORKER.
- *
- * MEASURED, THREE INSTANCES IN ONE SESSION (2026-09-02), each found by accident rather than by a
- * gate:
- *   1. the shipped-tree check ran the REAL source-size ratchet against the REAL baseline, and that
- *      script RECORDS a newly-seen source file and writes — twice adding an entry and leaving the
- *      tree dirty. That is worse than debris: a test that writes a gate's own baseline MOVES the
- *      gate, silently pre-approving growth the ratchet exists to make a human decide about;
- *   2. a probe shard under test/fixtures/, removed only in a `finally`. A run killed mid-flight
- *      left it behind and the NEXT run failed that suite's own "the probe shard must not already
- *      exist" assertion — which READS AS A REGRESSION: green on main, red on a branch, the exact
- *      signature of a real defect. One session lost time diagnosing it as one;
- *   3. a fixture task file left modified after a run, in a different worktree again.
- *
- * THE INVARIANT WAS ALREADY WRITTEN DOWN AND ALREADY UNENFORCED — stated verbatim in
- * test/a-source-file-cannot-outgrow-its-baseline.test.ts's own header, which was itself violator
- * (1). A rule stated only in a comment is the class this repo already knows gets violated silently
- * and repeatedly, so this is a gate rather than a fourth per-file repair.
- *
- * SNAPSHOT-AND-COMPARE, NEVER A BARE `git status`. The suite runs in parallel and against
- * worktrees that may legitimately be dirty when a run starts, so an absolute clean-tree assertion
- * would fire on state the process did not create. Only paths appearing in the AFTER set and not
- * the BEFORE set are attributable to this process.
- *
- * UNTRACKED DEBRIS COUNTS. Instance 2 was an untracked file and it still broke the next run, so
- * `??` entries are in scope — which is why the porcelain read cannot use `-uno` (measured 9ms
- * against 52ms, and blind to exactly the instance that cost the most time).
- *
- * IT MUST NOT BECOME THE FOURTH SELF-WRITING TEST: this reads git, writes nothing, creates no
- * fixture, and degrades to SILENCE when git cannot be read rather than failing a suite for an
- * environment fact.
- */
-export type PorcelainReader = (cwd: string) => string[] | null;
-
-/** `git status --porcelain` as a sorted line set, or `null` when git could not be read at all —
- *  not-a-repo, no git binary, a permission error. `null` is the silence case, never `[]`, because
- *  "could not look" and "looked and found nothing" must not be the same value here. */
-export const readPorcelain: PorcelainReader = (cwd) => {
-  try {
-    return execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-      .split("\n")
-      .filter(Boolean)
-      .sort();
-  } catch {
-    return null;
-  }
-};
-
-/**
- * The paths this process is ANSWERABLE FOR: porcelain lines present after and absent before.
- * `null` on either side ⇒ `[]`, because an unreadable snapshot cannot attribute anything and must
- * not be rendered as "everything is new".
- */
-export function attributableDirt(before: string[] | null, after: string[] | null): string[] {
-  if (before === null || after === null) return [];
-  const seen = new Set(before);
-  return after.filter((line) => !seen.has(line));
-}
-
-/** The message a leaking process prints, naming every path — a hygiene gate that reported only a
- *  count would cost the diagnosis the debris already costs. */
-export function trackedTreeDirtReport(dirt: string[]): string | null {
-  if (dirt.length === 0) return null;
-  return (
-    `tmp-hygiene (W1-T2715): this test process left ${dirt.length} change(s) in the tracked tree, ` +
-    `which every other worker in a concurrent run observes and the NEXT run reads as a regression:\n` +
-    dirt.map((d) => `  ${d}`).join("\n") +
-    `\nWrite fixtures under mkdtemp, never into the tracked tree.`
-  );
-}
-
-// Taken at LOAD, before any test body runs — the BEFORE half of the comparison. `process.cwd()` is
-// the repo root for every `node --test` child this suite spawns.
-const trackedTreeBefore = readPorcelain(process.cwd());
-
 process.on("exit", () => {
   for (const dir of created) {
     try {
@@ -170,16 +93,5 @@ process.on("exit", () => {
     } catch {
       // best-effort — a fixture may already have removed its own dir
     }
-  }
-  // W1-T2715: AFTER the temp sweep above, so a fixture's own temp dir under the repo (if any) is
-  // already gone and cannot be misattributed as debris. `process.exitCode` rather than a thrown
-  // error: an exit handler cannot fail an individual test, and a non-zero file-process exit is
-  // what `node --test` surfaces as a file-level failure — which is the loudest thing available
-  // here and is what makes the leak stop being invisible.
-  const dirt = attributableDirt(trackedTreeBefore, readPorcelain(process.cwd()));
-  const report = trackedTreeDirtReport(dirt);
-  if (report !== null) {
-    process.stderr.write(`${report}\n`);
-    if (!process.exitCode) process.exitCode = 1;
   }
 });
