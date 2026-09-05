@@ -95,7 +95,7 @@ test("mintNextTaskIdWithHistory: still unions the current-tree sources and open-
       openPrTexts: () => ["chore(plan): file the thing\n\nadds W1-T300"],
     });
     assert.equal(mint.id, "W1-T301", "the open-PR source is still the one that wins here");
-    assert.deepEqual(mint.sources, { monolith: 259, shards: 260, openPrs: 300 });
+    assert.deepEqual(mint.sources, { monolith: 259, shards: 260, openPrs: 300, remotePlan: null });
     assert.equal(mint.historyMax, 260, "history saw the shard's commit too, but 260 < 300 so it never surfaces as the max");
     assert.deepEqual(mint.degraded, []);
   } finally {

@@ -245,7 +245,12 @@ test("nextTaskIdCommand --offline: prints the id + its provenance and exits 0, r
   // W1-T278: the plan fixture lives outside this checkout's repoRoot, so the git-history
   // source has nothing to scan — "history -", never a degradation (see
   // test/next-task-id-history.test.ts for the in-tree-history cases).
-  assert.match(logs.join("\n"), /W1-T10 \(max 9 across tasks\.yaml 5, shards 9, open PRs not enumerated, history -\)/);
+  // W1-T2710 added the `remote plan` term; this fixture plan lives outside any git repo, so the
+  // reader answers nothing and the line reads `-` — an UNMEASURED gap, not a measured zero.
+  assert.match(
+    logs.join("\n"),
+    /W1-T10 \(max 9 across tasks\.yaml 5, shards 9, open PRs not enumerated, remote plan -, history -\)/,
+  );
   assert.match(logs.join("\n"), /--offline: open plan PRs were NOT read/, "the reduced scope is stated, never implied");
 });
 

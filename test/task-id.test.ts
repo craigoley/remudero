@@ -71,7 +71,7 @@ test("mintNextTaskId: every source is folded with max — the highest wins where
   const planPath = planFixture([300, 12], { "a.yaml": "- id: W1-T7\n", "b.yaml": "- id: W1-T290\n" });
   const mint = mintNextTaskId({ planPath, openPrTexts: () => ["nothing minted here"] });
   assert.equal(mint.id, "W1-T301");
-  assert.deepEqual(mint.sources, { monolith: 300, shards: 290, openPrs: null });
+  assert.deepEqual(mint.sources, { monolith: 300, shards: 290, openPrs: null, remotePlan: null });
 });
 
 test("mintNextTaskId: an unsharded plan is EMPTY shards, not a degradation (back-compat)", () => {
@@ -106,7 +106,9 @@ test("mintNextTaskId: a THROWING open-PR enumerator DEGRADES loudly — the id s
 test("describeMint names the id, the max, and every source it derived from", () => {
   const planPath = planFixture([9], { "s.yaml": "- id: W1-T11\n" });
   const line = describeMint(mintNextTaskId({ planPath, openPrTexts: () => ["W1-T10"] }));
-  assert.match(line, /^W1-T12 \(max 11 across tasks\.yaml 9, shards 11, open PRs 10\)$/);
+  // W1-T2710 added the `remote plan` term. `-` is the UNMEASURED reading: no reader was injected
+  // here, so the line must say the comparison never happened rather than imply a current ceiling.
+  assert.match(line, /^W1-T12 \(max 11 across tasks\.yaml 9, shards 11, open PRs 10, remote plan -\)$/);
 });
 
 test("describeMint says 'not enumerated' when the open-PR source was never consulted (offline mint)", () => {
