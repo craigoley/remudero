@@ -1460,6 +1460,13 @@ export interface AcquireKeychainProvisionLockOpts {
    *  plan/policy.yaml's `keychainProvisionLockWaitMs` row, falling back to
    *  {@link DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS} when that file cannot be read at all. */
   waitDeadlineMs?: number;
+  /** TEST-ONLY seam standing in for the committed-policy READ itself, so a test can drive the
+   *  branch where that read FAILS. `loadDefaultPolicy` resolves from `import.meta.url` and
+   *  memoizes for the process lifetime, so its failure path is unreachable from a test by any
+   *  other means — and an unreachable catch arm is this repo's own recorded coverage trap
+   *  (#978). Same `__`-prefixed convention `acquireInflightLock`'s `__beforeReclaimDelete` uses;
+   *  never set outside tests. */
+  __readCommittedWaitMs?: () => number;
 }
 
 /**
@@ -1473,9 +1480,9 @@ export interface AcquireKeychainProvisionLockOpts {
  * falls back to the committed default, which is the same figure the row itself carries. Same
  * shape, and the same reason, as `serveCommand`'s own `githubEventWakePolicy` read (W1-T2568).
  */
-function resolveKeychainProvisionLockWaitMs(opts: AcquireKeychainProvisionLockOpts): number {
+export function resolveKeychainProvisionLockWaitMs(opts: AcquireKeychainProvisionLockOpts): number {
   try {
-    return opts.waitDeadlineMs ?? loadDefaultPolicy().values.keychainProvisionLockWaitMs;
+    return opts.waitDeadlineMs ?? opts.__readCommittedWaitMs?.() ?? loadDefaultPolicy().values.keychainProvisionLockWaitMs;
   } catch (e) {
     // RECORDED, never swallowed: falling back is correct here, but "the committed policy could not
     // be read at all" is a fact about the install, not a routine outcome, and the only place it

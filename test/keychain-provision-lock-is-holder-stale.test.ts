@@ -24,6 +24,13 @@
 //   (b) a genuinely live holder is waited on and then REFUSED BY NAME at the deadline —
 //       `WorkerKeychainError`, naming the holder's pid/host/startedAt, never a silent forever-wait.
 //
+//   (d) an UNREADABLE committed policy falls back to the built-in default and records why, rather
+//       than throwing. That branch exists because this lock is taken on the daemon's BOOT path:
+//       turning "no readable policy.yaml" into a boot failure would be worse than the defect, and
+//       turning it into an unbounded wait would be the SAME one. `loadDefaultPolicy` resolves from
+//       `import.meta.url` and memoizes for the process lifetime, so nothing else could reach that
+//       arm — which is exactly how an untested catch arm survives (#978).
+//
 //   (c) a lock recorded on ANOTHER HOST is treated as live until the deadline and never reclaimed.
 //       Rung 1 is deliberately the first rung: a pid is meaningful only on the host that assigned
 //       it, so reclaiming here would mean stealing a lock from a peer this process cannot see.
@@ -35,7 +42,13 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { WorkerKeychainError, acquireKeychainProvisionLock, keychainProvisionLockPath } from "../src/lib/worker-home.js";
+import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS } from "../src/lib/policy.js";
+import {
+  WorkerKeychainError,
+  acquireKeychainProvisionLock,
+  keychainProvisionLockPath,
+  resolveKeychainProvisionLockWaitMs,
+} from "../src/lib/worker-home.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "rmd-keychain-lock-"));
@@ -207,4 +220,50 @@ test("R-3 (c): a lock recorded on ANOTHER host is treated as live until the dead
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("R-3 (d): an unreadable committed policy falls back to the built-in default and RECORDS why, never throwing on the daemon's boot path", { timeout: HUNG_TEST_TIMEOUT_MS }, () => {
+  const recorded: string[] = [];
+  const realConsoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    recorded.push(args.map(String).join(" "));
+  };
+
+  let resolved: number;
+  try {
+    resolved = resolveKeychainProvisionLockWaitMs({
+      __readCommittedWaitMs: () => {
+        throw new Error("policy.yaml is not valid YAML (simulated unreadable install policy)");
+      },
+    });
+  } finally {
+    console.error = realConsoleError;
+  }
+
+  assert.equal(
+    resolved,
+    DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS,
+    "an unreadable policy still yields a DEADLINE — falling through to an unbounded wait would be the defect itself",
+  );
+  assert.equal(recorded.length, 1, "the failure is recorded exactly once, not swallowed and not repeated");
+  assert.match(recorded[0], /could not read the committed keychainProvisionLockWaitMs/);
+  assert.match(recorded[0], /simulated unreadable install policy/, "the underlying cause is carried, not just the fact of failure");
+});
+
+test("R-3 (d, the other direction): a caller-supplied deadline short-circuits the policy read entirely", { timeout: HUNG_TEST_TIMEOUT_MS }, () => {
+  // This is the "uncontended path is unchanged" claim made falsifiable: `??` short-circuits, so a
+  // supplied deadline must never reach the committed-policy read at all. A regression that made
+  // the read unconditional would be invisible in every other test here, because they all supply
+  // one and would still get the right number back.
+  let reads = 0;
+  const resolved = resolveKeychainProvisionLockWaitMs({
+    waitDeadlineMs: 7,
+    __readCommittedWaitMs: () => {
+      reads += 1;
+      return 99_999;
+    },
+  });
+
+  assert.equal(resolved, 7, "the caller's own deadline wins");
+  assert.equal(reads, 0, "and the committed policy is never read when the caller supplied one");
 });
