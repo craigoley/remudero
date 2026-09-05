@@ -91,6 +91,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
 import { DAEMON_DRAFT_BATCH_CAP } from "../src/lib/inbox.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import { LaunchdPlistError } from "../src/lib/launchd.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
 import type { AlertGateway } from "../src/lib/ops.js";
 import { realOnboardFsDeps, type Inventory, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
@@ -6208,7 +6209,14 @@ test("materializeOriginShards: a failing ls-tree (no tasks.d/ at origin/main) is
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test("materializeOriginShards: a shard that LISTS but fails to `git show` throws GitFetchError loudly — a torn read never silently drops a task", () => {
+// The SHARD READ is one `git cat-file --batch` for every shard, never one `git show` each — the
+// spawn count is O(1) in the number of tasks ever filed (test/plan-sync-spawn-count.test.ts pins
+// the count itself). These fakes therefore answer `cat-file` in git's own `--batch` framing:
+// `<oid> blob <byteLength>\n<contents>\n` per requested object, in request order.
+const SHARD_BODY = "- id: W1-T9\n  title: shard task\n";
+const batchOne = (body: string): string => `${"0".repeat(40)} blob ${Buffer.byteLength(body, "utf8")}\n${body}\n`;
+
+test("materializeOriginShards: a shard that LISTS but cannot be read throws GitFetchError loudly — a torn read never silently drops a task", () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "shard-torn-"));
   const runGit: GitRunner = (args) => {
     if (args[0] === "ls-tree") return "plan/tasks.d/W1-T9.yaml\n";
@@ -6216,7 +6224,23 @@ test("materializeOriginShards: a shard that LISTS but fails to `git show` throws
   };
   assert.throws(
     () => materializeOriginShards("/repo", "plan", tmpDir, runGit),
-    /git show origin\/main:plan\/tasks\.d\/W1-T9\.yaml failed/,
+    /git cat-file --batch over origin\/main:plan\/tasks\.d\/ failed/,
+  );
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("materializeOriginShards: a shard git reports `missing` in the batch stream throws GitFetchError naming that shard", () => {
+  // `RMD_TMP_PREFIX` is not decoration: hooks/mkdtemp-callsite-check refuses a new fixture whose
+  // dir src/lib/tmp.ts's boot sweep could not reap. The neighbouring prefixes predate that gate.
+  const tmpDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}shard-missing-`));
+  const runGit: GitRunner = (args) =>
+    args[0] === "ls-tree"
+      ? "plan/tasks.d/W1-T9.yaml\n"
+      : "origin/main:plan/tasks.d/W1-T9.yaml missing\n";
+  assert.throws(
+    () => materializeOriginShards("/repo", "plan", tmpDir, runGit),
+    /plan\/tasks\.d\/W1-T9\.yaml/,
+    "a `missing` line is a torn read too — it must name the shard, never yield a short plan",
   );
   rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -6224,30 +6248,32 @@ test("materializeOriginShards: a shard that LISTS but fails to `git show` throws
 test("materializeOriginShards: a listed shard is copied into <tmpDir>/tasks.d verbatim from the origin blob", () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "shard-ok-"));
   const runGit: GitRunner = (args) =>
-    args[0] === "ls-tree" ? "plan/tasks.d/W1-T9.yaml\n" : "- id: W1-T9\n  title: shard task\n";
+    args[0] === "ls-tree" ? "plan/tasks.d/W1-T9.yaml\n" : batchOne(SHARD_BODY);
   const got = materializeOriginShards("/repo", "plan", tmpDir, runGit);
   assert.deepEqual(got, ["plan/tasks.d/W1-T9.yaml"]);
-  assert.equal(readFileSync(join(tmpDir, "tasks.d", "W1-T9.yaml"), "utf8"), "- id: W1-T9\n  title: shard task\n");
+  assert.equal(readFileSync(join(tmpDir, "tasks.d", "W1-T9.yaml"), "utf8"), SHARD_BODY);
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test("materializeOriginShards: an explicit `ref` is used INSTEAD of origin/main in both the ls-tree and git-show invocations (W1-T246)", () => {
+test("materializeOriginShards: an explicit `ref` is used INSTEAD of origin/main in both the ls-tree and the batch read (W1-T246)", () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "shard-ref-"));
   const seenArgs: string[][] = [];
-  const runGit: GitRunner = (args) => {
+  const seenStdin: string[] = [];
+  const runGit: GitRunner = (args, stdin) => {
     seenArgs.push(args);
-    return args[0] === "ls-tree" ? "plan/tasks.d/W1-T9.yaml\n" : "- id: W1-T9\n  title: shard task\n";
+    if (stdin !== undefined) seenStdin.push(stdin);
+    return args[0] === "ls-tree" ? "plan/tasks.d/W1-T9.yaml\n" : batchOne(SHARD_BODY);
   };
   const got = materializeOriginShards("/repo", "plan", tmpDir, runGit, "abc123def");
   assert.deepEqual(got, ["plan/tasks.d/W1-T9.yaml"]);
   assert.ok(seenArgs.some((a) => a[0] === "ls-tree" && a.includes("abc123def")), "ls-tree must target the given ref, not origin/main");
   assert.ok(
-    seenArgs.some((a) => a[0] === "show" && a[1] === "abc123def:plan/tasks.d/W1-T9.yaml"),
-    "git show must target <ref>:<shard>, not origin/main:<shard>",
+    seenStdin.some((input) => input.includes("abc123def:plan/tasks.d/W1-T9.yaml")),
+    "the batch request must name <ref>:<shard>, not origin/main:<shard>",
   );
   assert.ok(
-    seenArgs.every((a) => !a.some((tok) => tok.includes("origin/main"))),
-    "origin/main must never appear when an explicit ref is given",
+    [...seenArgs.flat(), ...seenStdin].every((tok) => !tok.includes("origin/main")),
+    "origin/main must never appear when an explicit ref is given, in the args OR on stdin",
   );
   rmSync(tmpDir, { recursive: true, force: true });
 });

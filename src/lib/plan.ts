@@ -506,28 +506,16 @@ export function loadPlanAtRef(
   repoRoot: string,
   planRelPath: string,
   ref = "HEAD",
-  runGit: (args: string[]) => string = (args) =>
-    execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }),
+  runGit: GitBlobRunner = (args, stdin) =>
+    execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26, input: stdin }),
 ): Plan {
-  const tasks: Task[] = [];
-  const byId = new Map<string, Task>();
-  const ingest = (blob: string, label: string) => {
-    for (const t of parseTasksFromYaml(blob, label)) {
-      if (byId.has(t.id)) {
-        throw new PlanError(`duplicate task id '${t.id}' (${label} collides with an earlier plan entry)`);
-      }
-      byId.set(t.id, t);
-      tasks.push(t);
-    }
-  };
-
   let monolithBlob: string;
   try {
     monolithBlob = runGit(["show", `${ref}:${planRelPath}`]);
   } catch (err) {
     throw new PlanError(`cannot read plan file at ${ref}:${planRelPath} in ${repoRoot}: ${String(err)}`);
   }
-  ingest(monolithBlob, `${ref}:${planRelPath}`);
+  const blobs: Array<{ label: string; text: string }> = [{ label: `${ref}:${planRelPath}`, text: monolithBlob }];
 
   // List `tasks.d/` AT THE REF via `git ls-tree`, never `readdirSync` on the working tree — the
   // working tree is exactly what this function exists to not trust. No `tasks.d/` at `ref` (the
@@ -545,20 +533,105 @@ export function loadPlanAtRef(
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")))
     .sort();
-  for (const shardRelPath of shardRelPaths) {
-    let shardBlob: string;
-    try {
-      shardBlob = runGit(["show", `${ref}:${shardRelPath}`]);
-    } catch (err) {
-      // Unlike loadPlan's ENOENT-skip for a shard that vanished mid-read off the working tree,
-      // there is no analogous benign race here: `shardRelPath` just came off `git ls-tree` AT
-      // THE SAME `ref` this `git show` reads, and objects at a fixed ref never vanish. A failure
-      // here is a real problem (git corruption, a gc mid-read) and must throw, never skip.
-      throw new PlanError(`cannot read plan shard at ${ref}:${shardRelPath} in ${repoRoot}: ${String(err)}`);
-    }
-    ingest(shardBlob, `${ref}:${shardRelPath}`);
+  // ONE `git cat-file --batch` for every shard, never one `git show` per shard: the spawn count
+  // is what made this O(tasks ever filed) on a path the write-scoped approve gate runs
+  // synchronously (see {@link readBlobsAtRef} for the measurement).
+  //
+  // Unlike loadPlan's ENOENT-skip for a shard that vanished mid-read off the working tree, there
+  // is no analogous benign race here: every `shardRelPath` just came off `git ls-tree` AT THE
+  // SAME `ref` this read resolves, and objects at a fixed ref never vanish. A failure here is a
+  // real problem (git corruption, a gc mid-read) and must throw, never skip.
+  let shardBlobs: string[];
+  try {
+    shardBlobs = readBlobsAtRef(runGit, ref, shardRelPaths);
+  } catch (err) {
+    throw new PlanError(`cannot read plan shard at ${ref} in ${repoRoot}: ${String(err)}`);
   }
+  shardRelPaths.forEach((shardRelPath, i) => {
+    blobs.push({ label: `${ref}:${shardRelPath}`, text: shardBlobs[i] });
+  });
 
+  return mergePlanBlobs(blobs);
+}
+
+/**
+ * Injectable git invoker that can feed STDIN. `git cat-file --batch` takes its object list on
+ * stdin, which the older `(args: string[]) => string` shape had no way to supply; the parameter
+ * is OPTIONAL so every existing `(args) => string` fake stays assignable and keeps working.
+ */
+export type GitBlobRunner = (args: string[], stdin?: string) => string;
+
+/**
+ * Read every blob at `<ref>:<relPath>` in ONE `git cat-file --batch`, returned in the order
+ * `relPaths` was given.
+ *
+ * WHY A BATCH AND NOT A LOOP. The obvious `git show <ref>:<path>` per path is one PROCESS SPAWN
+ * per path, and this repo's plan is one file per task: measured 2026-09-05 at 1,079 shards,
+ * 1,079 spawns cost 4,258 ms (3.95 ms each) and one `cat-file --batch` over the same paths
+ * returns the same bytes in 208 ms. That loop ran on every dispatching daemon tick and every
+ * inbox approval, so it was per-tick cost growing linearly with the number of tasks ever filed.
+ *
+ * FRAMING. `--batch` answers each stdin line with `<oid> SP <type> SP <size> LF <contents> LF`,
+ * or `<input> SP missing LF` for anything it cannot resolve. Sizes are BYTES, so the output is
+ * sliced as a Buffer and each blob decoded afterwards — slicing the decoded string would
+ * mis-position every blob after the first non-ASCII character (this corpus is full of em
+ * dashes). Round-tripping through `Buffer.from(text, "utf8")` is exact for the UTF-8 the old
+ * `git show` path already assumed.
+ *
+ * FAILS LOUD, NEVER PARTIAL: `missing`, a non-blob type, or a truncated stream throws naming the
+ * path — the same contract the per-path loop had, where a torn read must never silently drop a
+ * task. Callers wrap it in their own error type (`PlanError` here, `GitFetchError` on the
+ * dispatch path) exactly as they wrapped the per-path failure before.
+ */
+export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: string[]): string[] {
+  if (relPaths.length === 0) return [];
+  const request = relPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
+  const raw = runGit(["cat-file", "--batch"], request);
+  const buf = Buffer.from(raw, "utf8");
+  const texts: string[] = [];
+  let off = 0;
+  for (const relPath of relPaths) {
+    const nl = buf.indexOf(0x0a, off);
+    if (nl < 0) {
+      throw new Error(`git cat-file --batch output ended before ${ref}:${relPath}`);
+    }
+    const header = buf.toString("utf8", off, nl);
+    off = nl + 1;
+    const fields = header.split(" ");
+    // `<input> missing` and `<input> ambiguous` both land here, as does a tree or a commit.
+    if (fields.length < 3 || fields[1] !== "blob") {
+      throw new Error(`git cat-file --batch could not read ${ref}:${relPath} (${header})`);
+    }
+    const size = Number(fields[2]);
+    if (!Number.isInteger(size) || size < 0 || off + size > buf.length) {
+      throw new Error(`git cat-file --batch gave an unusable size for ${ref}:${relPath} (${header})`);
+    }
+    texts.push(buf.toString("utf8", off, off + size));
+    off = off + size + 1; // the LF git appends after the contents
+  }
+  return texts;
+}
+
+/**
+ * Merge already-read plan blobs into one {@link Plan} under {@link loadPlan}'s OWN contract —
+ * duplicate ids across blobs fail loud, every `depends_on` must resolve within the merged view.
+ * Split out so a caller holding the bytes (from git objects, never the working tree) gets a Plan
+ * that is deep-equal to what `loadPlan` builds over the same content on disk, without writing
+ * those bytes to a temp directory first just to have a directory to point `loadPlan` at.
+ * `label` names each blob in error text and is the ONLY thing that differs from the disk path.
+ */
+export function mergePlanBlobs(blobs: Array<{ label: string; text: string }>): Plan {
+  const tasks: Task[] = [];
+  const byId = new Map<string, Task>();
+  for (const { label, text } of blobs) {
+    for (const t of parseTasksFromYaml(text, label)) {
+      if (byId.has(t.id)) {
+        throw new PlanError(`duplicate task id '${t.id}' (${label} collides with an earlier plan entry)`);
+      }
+      byId.set(t.id, t);
+      tasks.push(t);
+    }
+  }
   for (const t of tasks) {
     for (const dep of t.depends_on) {
       if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
