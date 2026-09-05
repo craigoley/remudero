@@ -1,0 +1,88 @@
+- id: W1-T2854
+  title: "TWO FALSIFIERS BECOME GUARANTEED FAILURES THE MOMENT THEIR FIX MERGES — W1-T985 and W1-T2585 assert that moving `origin/main` still has their pre-fix behavior, so each implementation can pass on its PR base and then poison every later PR once main advances"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 5.00
+  files:
+    - plan/tasks.d/W1-T2854-two-post-merge-impossible-falsifiers-poison-main.yaml
+    - test/mint-lane-overlap-advisory.test.ts
+    - test/nothing-reclaims-the-images-the-recycle-pulls.test.ts
+    - test/host-capability-fixtures.test.ts
+  origin: "operator-session#main-poisoned-by-moving-base-falsifiers-2026-09-04"
+  plan_refs: ["W1-T985", "W1-T2585", "W1-T2204", "W1-T2671"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT origin/main 6eb5432b AND REPRODUCED LOCALLY. The focused pair runs 19 tests,
+    passes 17 and fails exactly two. W1-T985 reads `origin/main:src/run-task.ts` and requires zero
+    `printLaneOverlapAdvisory(` call sites; its implementation is now on main and has four.
+    W1-T2585 reads `origin/main:deploy/recycle-container.sh` and requires no image-prune command;
+    its implementation is now on main and deliberately has one. Neither assertion describes an
+    invariant of the finished system. Both describe the pre-fix base through a ref whose meaning
+    changes at merge.
+
+    The positive behavioral legs remain load-bearing without those moving controls. Removing the
+    W1-T985 production wiring makes its same test's current-tree call-site count fall below four.
+    Removing the recycle reclaim makes the first W1-T2585 test fail because the docker recorder sees
+    no prune call. The two impossible base assertions add no post-merge discrimination; they only
+    ensure main is red after the implementation succeeds.
+
+    The existing host-capability ratchet knew one of these reads reached the live checkout but
+    allowed it as a declared host dependency. It missed the W1-T985 instance because its repo-root
+    recognizer accepts `import.meta.url` but not Node's sibling `import.meta.dirname`, the spelling
+    that test uses. Host dependence was therefore recorded for one and invisible for the other,
+    while temporal dependence on a moving ref was rejected for neither.
+
+    PR #3997 supplies the incident discriminator. Its checks ran against base 02c75c1c before
+    W1-T985's implementation merged. GitHub later created #3997's squash commit on top of the newer
+    main that already contained the implementation, without rerunning those earlier green checks;
+    the resulting main now fails W1-T985. That stale-green merge-admission defect is real but is a
+    separate control-plane concern. This task restores a truthful suite and closes the missed
+    live-tree spelling; it does not redesign merge admission.
+  design: |
+    Delete only the two assertions whose required outcome becomes false when their subject reaches
+    main. Keep the current-tree behavioral assertions that fail when either implementation is
+    removed. Do not weaken the image safety, ordering, advisory coverage or lane behavior tests.
+
+    Remove W1-T2585's now-absent live-tree declaration from the structural host-capability audit,
+    and teach that audit that `import.meta.dirname` names the live checkout just like
+    `import.meta.url`. Add a pure synthetic case proving the spelling is detected. Do not add either
+    removed moving-ref read to an allowlist under a new explanation.
+
+    This is an emergency bootstrap repair filed and implemented together because main's own suite
+    is red and any plan-only filing inherits the same failures. The task declares its own shard so
+    scope remains explicit. It changes no production source, deployment, container, provider,
+    verdict, merge or review behavior.
+  acceptance:
+    - claim: "the two focused suites pass on current main without asserting that origin/main still has pre-fix behavior"
+      proof: "unit test: test/mint-lane-overlap-advisory.test.ts"
+    - claim: "the recycle suite still fails when its image-reclaim call is removed"
+      proof: "unit test: test/nothing-reclaims-the-images-the-recycle-pulls.test.ts"
+    - claim: "the advisory suite still fails when one of the three production lane call sites is removed"
+      proof: "unit test: test/mint-lane-overlap-advisory.test.ts"
+    - claim: "the host-capability walk detects an origin/main read rooted with import.meta.dirname"
+      proof: "unit test: test/host-capability-fixtures.test.ts"
+    - claim: "the repair changes tests and its declared task record only, with no production or deployment behavior change"
+      proof: "grep: This is an emergency bootstrap repair filed and implemented together in plan/tasks.d/W1-T2854-two-post-merge-impossible-falsifiers-poison-main.yaml"
+  falsifier: |
+    Close without change if both focused tests pass at origin/main 6eb5432b, or if removing each
+    shipped implementation still leaves its positive behavioral test green. The first condition is
+    false with the exact 17/19 reproduction above; the existing positive tests are the mutation
+    controls and fail when their subject disappears.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` reported W1-T2854 as RESERVED on the first attempt
+    and created `refs/rmd-id/W1-T2854` after reading W1-T2853 as the maximum.
+
+    `verify: human` is deliberate: the plan linter's Rule 15 correctly refuses an auto task whose
+    own filing record and implementation files share a PR. The operator remains the merge gate for
+    this explicit bootstrap exception; no worker may infer it as a reusable bypass.
+
+    The normal filing-before-implementation sequence is impossible while main's suite contains the
+    two failures this task removes: the filing PR would inherit and reproduce them. Keeping the
+    task record in this same narrowly scoped bootstrap repair is the smallest reviewed exception;
+    the PR body must name the exception and the unchanged production surface.
