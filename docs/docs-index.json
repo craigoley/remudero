@@ -8,6 +8,12 @@
       "grepHint": "ORIENTATION"
     },
     {
+      "path": "docs/README.md",
+      "title": "Documentation map",
+      "summary": "Where to start, and which files a human may edit by hand. Three kinds of document live here, and",
+      "grepHint": "Documentation map"
+    },
+    {
       "path": "docs/account-selection.md",
       "title": "Account selection: which account a run uses",
       "summary": "Decision record, W1-T266. Depends on W1-T265 (shipped, PR #1022 / commit 843ecce), which made",
@@ -48,6 +54,12 @@
       "title": "Remudero — Production Readiness Review (fresh-eyes recon)",
       "summary": "Date: 2026-07-21 · Reviewer: external recon pass, no project history · Method: 7 parallel source audits + direct measurement of the live clone, state dir, laun…",
       "grepHint": "Remudero — Production Readiness Review (fresh-eyes recon)"
+    },
+    {
+      "path": "docs/audits/recon-2026-09-05.md",
+      "title": "Remudero — Codebase Audit (fresh-eyes recon, bugs and technical debt)",
+      "summary": "Date: 2026-09-05 · Head: `f7ceb86` (origin/main at PR #4067; the PR carrying this fixture is based on `6d5b3e2`, four plan/heartbeat commits later, none touchi…",
+      "grepHint": "Remudero — Codebase Audit (fresh-eyes recon, bugs and technical debt)"
     },
     {
       "path": "docs/audits/worktree-base-provisioning-2026-09.md",

@@ -17,8 +17,12 @@
 // impl-GC report). Locally there is no reason to withhold either result.
 //
 // A TARGET IS REQUIRED. With no argument `node --test` walks the whole tree, and the full suite is
-// forbidden in this repo's working rules (it reaches the real worker-spawn primitive with no stub).
-// Refusing is safer than defaulting.
+// not something this scoped verb should ever start by accident: it is CI's and
+// `rmd preflight --ci-parity`'s job (both run `npm run test:ci`, the same full glob), and inside an
+// agent container it cannot even pass honestly — uid 0 turns permission-branch fixtures into vacuous
+// greens, Playwright suites die at browser launch, and `git commit` fixtures wedge on an unreachable
+// MCP endpoint (docs/troubleshooting.md, "The full test suite cannot pass inside the agent
+// container"). Refusing is safer than defaulting.
 import { spawnSync } from "node:child_process";
 
 const targets = process.argv.slice(2);
@@ -31,7 +35,8 @@ if (targets.length === 0) {
       "  usage:  npm run check -- test/<file>.test.ts [more.test.ts ...]",
       "",
       "A target is REQUIRED on purpose: `node --test` with no argument walks the whole tree, and",
-      "the full suite is not safe to run here (it reaches the real worker-spawn primitive).",
+      "the full suite belongs to CI and `rmd preflight --ci-parity`, not to this scoped verb",
+      "(inside an agent container it cannot pass honestly — see docs/troubleshooting.md).",
     ].join("\n"),
   );
   process.exit(2);

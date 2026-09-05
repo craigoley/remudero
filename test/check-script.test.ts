@@ -7,8 +7,9 @@
  * WHAT THIS SUITE COVERS, AND WHAT IT DELIBERATELY DOES NOT.
  *
  * It covers the SAFETY property: the script refuses to run with no target. That matters because
- * `node --test` with no argument walks the whole tree, and the full suite is not safe to run in
- * this repo (it reaches the real worker-spawn primitive with no stub). A regression that made the
+ * `node --test` with no argument walks the whole tree, and the full suite is CI's and
+ * `rmd preflight --ci-parity`'s to run, never this scoped verb's (inside an agent container it
+ * cannot pass honestly — docs/troubleshooting.md). A regression that made the
  * script default to "everything" would be actively dangerous, so it is pinned here.
  *
  * It does NOT drive the full happy path, because that path runs `tsc` over the whole project — a
