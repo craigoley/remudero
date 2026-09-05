@@ -146,6 +146,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/drain.md",
+      "title": "Forensics — `src/lib/drain.ts`",
+      "summary": "A verbatim archive of comment blocks compacted out of `src/lib/drain.ts`. Each heading names",
+      "grepHint": "Forensics — `src/lib/drain.ts`"
+    },
+    {
       "path": "docs/forensics/inbox.md",
       "title": "Forensics — `src/lib/inbox.ts`",
       "summary": "`src/lib/inbox.ts` is the ratification inbox (MASTER-PLAN §7B): it tiers open proposals, drafts a",
