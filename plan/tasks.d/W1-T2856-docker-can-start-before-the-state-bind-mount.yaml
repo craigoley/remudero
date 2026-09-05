@@ -1,0 +1,116 @@
+- id: W1-T2856
+  title: "CONTAINER RUNTIME STARTUP STILL DOES NOT REQUIRE THE REMUDERO STATE MOUNT — emergency Docker and containerd drop-ins now wait for their data roots, but an auto-restarted container can still open the underlying OS-disk state directory before its nofail bind mount becomes active"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [deploy/install-container-runtime-mount-order.sh, docs/operator-guide.md, test/container-runtime-mount-order-install.test.ts]
+  origin: "operator-session#azure-reboot-lost-fleet-2026-09-05"
+  plan_refs: ["W1-T2204", "W1-T2555", "W1-T2585", "W1-T2671", "W1-T2833"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE HOST AFTER THE 2026-09-05 REBOOT. The prior boot was unclean. Docker
+    started at 00:56:05Z while `/mnt/rmd` and its bind mounts became available afterward, so Docker
+    initially loaded an empty root and no Remudero containers existed to restart. The data remained
+    intact on the data disk; the service ordering was wrong. At the first measurement
+    `docker.service` had no drop-in, no `RequiresMountsFor`, and no ordering edge to `mnt-rmd.mount`.
+
+    AN EMERGENCY HOST EDIT NOW CLOSES THE TWO RUNTIME-ROOT RACES BUT NOT THE STATE RACE. At
+    01:13:31Z another operator session installed matching Docker and containerd drop-ins with
+    `RequiresMountsFor=/mnt/rmd /var/lib/containerd`. Fresh `systemctl show` output now names
+    `mnt-rmd.mount` and `var-lib-containerd.mount` in both services' effective `Requires` and
+    `After` sets. The 01:27 reboot then mounted `/mnt/rmd` and `/var/lib/containerd` at 01:27:29Z,
+    started containerd at 01:27:30Z, and started Docker at 01:27:31Z: the new runtime-root ordering
+    was active. Docker still found stale missing RW layers and containerd parents left by the prior
+    wrong-root start; pulling the image and recreating the three containers recovered the fleet.
+
+    THE THIRD PATH REMAINS UNORDERED. The live state bind mount is
+    `/home/craigoleyagent/rmd-state2`. It happened to finish at 01:27:29Z on this reboot, but its
+    generated mount unit has no dependency edge to Docker and Docker's `RequiresMountsFor` still
+    omits that path. The emergency files are also untracked machine state: a rebuilt VM or another
+    fleet host will not inherit them or prove both runtime services carry the same protection.
+
+    THE REMAINING RACE IS MATERIAL. Docker's restart policy may launch the daemon as soon as Docker
+    is ready. If the state bind mount is still pending, `-v /home/craigoleyagent/rmd-state2:...`
+    resolves against the underlying OS-disk directory rather than the data-disk state tree. That is
+    the same wrong-root class W1-T2555 refuses during an interactive recycle, but it occurs before
+    the recycle script can check anything. Waiting only for Docker's image and containerd roots does
+    not prove the state volume is mounted.
+
+    VERIFIED AGAINST THE HOST'S PINNED SYSTEMD FAMILY, VERSION 255. systemd.unit(5) v255 defines
+    `RequiresMountsFor=` as adding both `Requires=` and `After=` for every mount needed to access
+    each absolute path. systemd.mount(5) v255 says a `nofail` mount is only wanted, is not ordered
+    before the local-filesystem target, and boot continues without waiting for it. Those two rules
+    explain both the incident and the narrow remedy; no fstab rewrite is required.
+
+    Primary sources:
+    https://raw.githubusercontent.com/systemd/systemd/v255/man/systemd.unit.xml
+    https://raw.githubusercontent.com/systemd/systemd/v255/man/systemd.mount.xml
+  design: |
+    Ship one explicit host installer/checker for the container runtime dependency set. It renders
+    repository-owned systemd drop-ins for both `containerd.service` and `docker.service`.
+    Containerd must require the backing data mount and `/var/lib/containerd`; Docker must require
+    the resolved Docker data root (currently `/mnt/rmd/docker`), `/var/lib/containerd`, and the
+    explicitly supplied Remudero state directory. The state directory must come from
+    `RMD_STATE_DIR`; do not revive the unsafe `~/rmd-state` default. Every path must be absolute,
+    exist, and resolve to the expected active mount before installation.
+
+    Make checking the default and installation an explicit mutation. With no install flag, compare
+    the effective `systemctl show` dependency sets for both services with their required paths and
+    exit nonzero naming the service and each missing path. Check mode must write nothing and must be
+    usable by future host health/console code without root. Installation requires root, stages and
+    atomically replaces one repository-owned drop-in under each service's `.d` directory, runs one
+    `systemctl daemon-reload`, and then re-runs the same effective-dependency checks. It must not
+    start, stop, restart or reload Docker or containerd and must not touch any container; lifecycle
+    timing remains the operator's decision.
+
+    Preserve stronger pre-existing rows rather than replacing the emergency files blindly. The
+    repository-owned filenames and content are authoritative for paths Remudero requires, while
+    unrelated administrator drop-ins remain untouched. Running install twice must be idempotent. A
+    stale, one-service-only, or partial emergency installation is diagnosed by effective
+    dependencies, not accepted merely because either filename exists.
+
+    Document the one-time host commissioning and the three post-install proofs: the effective
+    `RequiresMountsFor` lists, `After`/`Requires` containing all generated mount units for both
+    services, and a deliberate later reboot showing all three mounts active before containerd and
+    Docker and the three containers restored.
+    The implementation does not perform that reboot. It also does not alter fstab, Docker's restart
+    policy, the recycle path, ACR automation, daemon code, Serve code, or the separate W1-T2833 heap
+    retention defect.
+  acceptance:
+    - claim: "the rendered containerd and Docker drop-ins require their runtime roots, and Docker also requires the explicit Remudero state directory"
+      proof: "unit test: test/container-runtime-mount-order-install.test.ts"
+    - claim: "check mode refuses a one-service-only or partial emergency installation and names the service and missing state mount without writing or reloading anything"
+      proof: "unit test: test/container-runtime-mount-order-install.test.ts"
+    - claim: "install mode writes both service drop-ins atomically, reloads systemd once and proves both effective dependency sets after the write"
+      proof: "unit test: test/container-runtime-mount-order-install.test.ts"
+    - claim: "installation never starts, stops, restarts or reloads Docker or containerd and never invokes a container lifecycle command"
+      proof: "unit test: test/container-runtime-mount-order-install.test.ts"
+    - claim: "an unset, relative, absent or unmounted RMD_STATE_DIR is refused before the host is changed"
+      proof: "unit test: test/container-runtime-mount-order-install.test.ts"
+    - claim: "the operator guide records commissioning and post-install evidence without claiming the host lifecycle was exercised"
+      proof: "unit test: test/container-runtime-mount-order-install.test.ts"
+    - claim: "removing the state-directory dependency reproduces the partial-drop-in failure that remains on the Azure host"
+      proof: "mutation test: test/container-runtime-mount-order-install.test.ts"
+  falsifier: |
+    Close without implementation if the effective Azure `docker.service` dependencies already
+    require and order `/mnt/rmd`, `/var/lib/containerd`, and `/home/craigoleyagent/rmd-state2`, or if
+    Docker is prevented from restoring containers until the state bind mount is active by another
+    unit. The current effective `RequiresMountsFor` contains only the first two paths; the generated
+    state mount unit has no `Before=docker.service` edge.
+  note: |
+    ID PROVENANCE: `RMD_SELF_SYNC_DONE=1 ./bin/rmd next-task-id --reserve` reported W1-T2856 as
+    RESERVED on the first attempt and created `refs/rmd-id/W1-T2856` after reading W1-T2855 as the
+    maximum. The emergency live-host drop-in was discovered after reservation and is carried as
+    evidence, not treated as the durable implementation.
+
+    This task owns boot ordering only. The reboot's exact initiating cause remains unproven; the
+    journal proves an unclean reboot and earlier pressure but contains no kernel OOM record. W1-T2833
+    owns the daemon's measured unbounded retro ledger read and is still only filed. The currently
+    recreated daemon also lacks the temporary `NODE_OPTIONS=--max-old-space-size=4096` protection;
+    adding that setting requires a separately approved lifecycle action and is not hidden here.
