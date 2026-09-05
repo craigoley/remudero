@@ -1297,4 +1297,4 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Comment-load ratchet (no file grows past its ceiling; no added block over 40 lines)
-        run: npm run --silent comment-load-ratchet
+        run: npm run --silent comment-load-signal
