@@ -11,6 +11,7 @@ import {
   type DraftAttemptCache,
   type DraftCache,
 } from "../src/lib/inbox.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── W1-T2566: THE MIGRATION IS BOUNDED WITHIN A BOOT AND UNBOUNDED ACROSS BOOTS ──────────────
 //
@@ -98,7 +99,7 @@ test("W1-T2566: a host with a marker file it cannot read still recovers, rather 
 // ── criterion 3 ──────────────────────────────────────────────────────────────────────────────
 
 test("W1-T2566: the marker survives a process restart, which the closure flag it replaces could not", () => {
-  const dir = mkdtempSync(join(tmpdir(), "reopened-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reopened-`));
   const path = join(dir, "inbox-reopened-keys.json");
 
   // "Process 1" re-opens a stuck proposal and commits the marker.
@@ -113,7 +114,7 @@ test("W1-T2566: the marker survives a process restart, which the closure flag it
 });
 
 test("W1-T2566: the marker is committed by rename, so a torn write cannot read as fully-migrated", () => {
-  const dir = mkdtempSync(join(tmpdir(), "reopened-atomic-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reopened-atomic-`));
   const path = join(dir, "inbox-reopened-keys.json");
   writeReopenedKeys(path, { "P-a": "2026-09-04T00:00:00.000Z" });
   assert.deepEqual(parseReopenedKeysCache(readFileSync(path, "utf8")), { "P-a": "2026-09-04T00:00:00.000Z" });
