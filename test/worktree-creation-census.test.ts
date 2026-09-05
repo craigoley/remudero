@@ -212,11 +212,11 @@ test("every exempt row in the real registry carries a non-blank reason (no row s
   assert.deepEqual(blanks, []);
 });
 
-test("the real registry declares EXACTLY the two raw sites this task's own recon found — no more, no fewer", () => {
+test("the real registry declares EXACTLY the three exempt raw sites — the two this task's own recon found plus R-11's merge-base checkout — no more, no fewer", () => {
   const exempt = WORKTREE_SITE_REGISTRY.filter((r) => r.disposition.kind === "exempt")
     .map((r) => `${r.file}::${r.site}`)
     .sort();
-  assert.deepEqual(exempt, ["src/run-task.ts::addWorktree", "src/run-task.ts::createFixRungWorktree"]);
+  assert.deepEqual(exempt, ["src/run-task.ts::addWorktree", "src/run-task.ts::buildBaseProofDir", "src/run-task.ts::createFixRungWorktree"]);
 });
 
 // ── (4) NO PROVISIONING BEHAVIOUR CHANGES — the census only ever reads text ──────────────────
