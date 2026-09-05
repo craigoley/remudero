@@ -176,6 +176,12 @@
       "grepHint": "retro.ts forensics"
     },
     {
+      "path": "docs/forensics/self-sync.md",
+      "title": "self-sync.ts forensics",
+      "summary": "Measured forensics, incidents and design arguments removed from `src/lib/self-sync.ts` when its",
+      "grepHint": "self-sync.ts forensics"
+    },
+    {
       "path": "docs/forensics/status.md",
       "title": "status.ts comment forensics",
       "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/status.ts` when its comments were compacted to the plain-language standa…",
