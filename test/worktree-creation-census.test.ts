@@ -280,11 +280,16 @@ test("enclosingSiteName finds a named function, an object-literal method, and ne
   assert.equal(enclosingSiteName(["  execFileSync(...)"], 0), "", "no enclosing declaration above ⇒ empty");
 });
 
-test("findRawWorktreeAddSites finds the exact three real sites at their real lines (regression pin)", () => {
+test("findRawWorktreeAddSites finds the exact four real sites at their real lines (regression pin)", () => {
   const sites = findRawWorktreeAddSites(REAL_SRC, REPO_ROOT).map((s) => `${s.file}::${s.site}`);
   assert.deepEqual(
     sites.sort(),
-    ["src/lib/worker.ts::worktreeAdd", "src/run-task.ts::addWorktree", "src/run-task.ts::createFixRungWorktree"].sort(),
+    [
+      "src/lib/worker.ts::worktreeAdd",
+      "src/run-task.ts::addWorktree",
+      "src/run-task.ts::buildBaseProofDir", // R-11: the merge-base worktree the staleness check re-runs proofs in
+      "src/run-task.ts::createFixRungWorktree",
+    ].sort(),
   );
 });
 
