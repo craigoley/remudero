@@ -192,3 +192,29 @@ test("ACCEPTANCE 3 (negative control): a clean diff touching neither a monolith 
   const v = judgeReview(CRITERIA, { diff: clean, report: REPORT });
   assert.equal(v.criteriaTampered, false);
 });
+
+// ── ACCEPTANCE 4 (R-16 fail-closed fallback): the owning field's header is OUTSIDE the hunk ────
+
+test("ACCEPTANCE 4: a block-scalar continuation edit is still flagged when the diff's own hunk context never shows the owning `proof:`/`claim:` header — fails closed under a known `acceptance:` line", () => {
+  // A tight hunk (minimal diff context) that shows `acceptance:` but jumps straight to a
+  // continuation line with NO `- claim:`/`proof: >-` header visible in between — the exact
+  // shape the header-outside-hunk fallback exists for (planTasksCriterionFieldLines' own doc).
+  const noVisibleHeader = [
+    "diff --git a/plan/tasks.d/W1-T999-some-shard.yaml b/plan/tasks.d/W1-T999-some-shard.yaml",
+    "+++ b/plan/tasks.d/W1-T999-some-shard.yaml",
+    "@@",
+    "   acceptance:",
+    "-        unit test: test/widget.test.ts",
+    "+        unit test: test/widget-renamed.test.ts",
+    "diff --git a/src/lib/widget.ts b/src/lib/widget.ts",
+    "+++ b/src/lib/widget.ts",
+    "@@",
+    "+export function frobnicate() {}",
+  ].join("\n");
+  const v = judgeReview(CRITERIA, { diff: noVisibleHeader, report: REPORT });
+  assert.equal(
+    v.criteriaTampered,
+    true,
+    "with no visible owner, an edit indented under a known acceptance: line must fail closed, not silently pass",
+  );
+});
