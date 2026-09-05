@@ -1595,6 +1595,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "`git ls-files test` is scoped to test/ only, never src/",
   ),
   refusedForPredicate(
+    "test/deploy-scripts-use-mktemp.test.ts",
+    "a",
+    "W1-T2915's deploy-script census. Its `git ls-files deploy/*.sh` walks the DEPLOY population — shell scripts, never src/*.ts — " +
+      "and the `src/` string the recognizer sees is one comment citing src/lib/tmp.ts's sweepStaleTempDirs as the reason the " +
+      "`rmd-` prefix is load-bearing",
+  ),
+  refusedForPredicate(
     "test/coverage-session-blanking.test.ts",
     "a",
     "listTrackedTestFiles shells `git ls-files -- test` — test/ only, never src/",
