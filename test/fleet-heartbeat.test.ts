@@ -753,7 +753,13 @@ interface Watch {
   report: string;
 }
 
-function runWatch(opts: { branches: string; stub: string; staleAfterMinutes?: string; mutate?: [string, string] }): Watch {
+function runWatch(opts: {
+  branches: string;
+  stub: string;
+  staleAfterMinutes?: string;
+  daemonExpectedBranches?: string;
+  mutate?: [string, string];
+}): Watch {
   const dir = mkdtempSync(join(tmpdir(), "heartbeat-watch-"));
   const binDir = join(dir, "bin");
   mkdirSync(binDir, { recursive: true });
@@ -778,6 +784,12 @@ function runWatch(opts: { branches: string; stub: string; staleAfterMinutes?: st
       PATH: `${binDir}:${process.env.PATH ?? ""}`,
       HEARTBEAT_BRANCHES: opts.branches,
       STALE_AFTER_MINUTES: opts.staleAfterMinutes ?? "30",
+      // W1-T2876: the committed workflow declares this at the top-level `env:`, so GitHub Actions
+      // always hands it to the step; the extracted script alone does not carry that context, and
+      // `set -u` turns its absence into an unbound-variable crash rather than a quiet empty string.
+      // Default to "" (no branch expects a daemon) so these pre-existing tests, which stub no
+      // `daemon_verdict` at all, keep exercising only the beat-age axis they were written for.
+      DAEMON_EXPECTED_BRANCHES: opts.daemonExpectedBranches ?? "",
       STUB_BRANCHES: opts.stub,
     },
   });

@@ -123,6 +123,13 @@ env:
   # same alarm; its own doc calls that "the alarm working as intended".
   HEARTBEAT_BRANCHES: "heartbeat-mini heartbeat-azure"
   STALE_AFTER_MINUTES: "30"
+  # W1-T2876: THE BRANCHES THAT MUST HAVE A POLLING DAEMON. The beat already carries
+  # `daemon_verdict`; the judging step below now escalates on it, but ONLY for a branch named here.
+  # `heartbeat-mini` reports `daemon_verdict=STALE` correctly and permanently -- the mini is not the
+  # fleet host and runs no daemon -- so an unconditional arm would fail this job forever on a TRUE
+  # reading, which is exactly what trains an operator to ignore an alarm. A branch not listed stays
+  # silent on this arm, the same way a never-installed beat already does.
+  DAEMON_EXPECTED_BRANCHES: "heartbeat-azure"
 
 jobs:
   heartbeat-watch:
@@ -163,6 +170,19 @@ jobs:
           is_stale $(( threshold_s + 60 )) || fail "an age one minute PAST the threshold was judged fresh"
           ! is_stale $(( threshold_s - 60 )) || fail "an age one minute INSIDE the threshold was judged stale"
           echo "self-check: staleness predicate discriminates at ${STALE_AFTER_MINUTES}m"
+
+          # (i-b) W1-T2876: the daemon arm must discriminate on BOTH axes -- the verdict itself AND
+          # whether the branch is expected to run a daemon at all. A pair that only proved "STALE
+          # escalates" would also pass for an UNCONDITIONAL arm, and an unconditional arm fails this
+          # job forever on `heartbeat-mini`, whose STALE reading is correct and permanent. Both
+          # directions of both axes are therefore asserted here.
+          is_daemon_stale() { case "$1" in STALE*) return 0 ;; *) return 1 ;; esac; }
+          daemon_expected() { case " ${DAEMON_EXPECTED_BRANCHES} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+          is_daemon_stale "STALE — last poll 2h17m ago" || fail "a STALE daemon verdict did not read as stale"
+          ! is_daemon_stale "live"                      || fail "a live daemon verdict read as stale"
+          daemon_expected heartbeat-azure               || fail "the fleet host is absent from DAEMON_EXPECTED_BRANCHES"
+          ! daemon_expected heartbeat-mini              || fail "a host that runs no daemon is armed on the daemon arm"
+          echo "self-check: daemon arm discriminates on verdict AND on branch membership"
 
           # (ii) the beat script parses, and reports the three states it exists to separate.
           bash -n scripts/fleet-heartbeat.sh || fail "scripts/fleet-heartbeat.sh does not parse"
@@ -268,6 +288,18 @@ jobs:
           # reason this job must fail, exactly as a stale beat itself is.
           is_supervisor_stale() { case "$1" in STALE*) return 0 ;; *) return 1 ;; esac; }
 
+          # W1-T2876: THE SIGNAL THIS JOB USED TO PRINT AND THEN DISCARD. `fleet-heartbeat.sh`
+          # publishes `daemon_verdict` so that a beat cannot be a liveness claim about the cron
+          # alone -- its own header: "A beat that only proves the cron fired is a GREEN LIGHT ON A
+          # DEAD FLEET, which is worse than no light at all." Until now that value appeared ONLY in
+          # the self-check above: the judging loop extracted `supervisor_verdict` and nothing else,
+          # so on 2026-09-05 (run 33961825846) this job printed `daemon STALE` twice while the Azure
+          # daemon had been dead three hours, and reported `0 stale`. Same shape as the supervisor
+          # arm, counting into the SAME `stale` total, so the combined verdict below stays the single
+          # `[ "$stale" -eq 0 ]` check it has always been.
+          is_daemon_stale() { case "$1" in STALE*) return 0 ;; *) return 1 ;; esac; }
+          daemon_expected() { case " ${DAEMON_EXPECTED_BRANCHES} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
           # THE LOOP NEVER EXITS EARLY, IN EITHER DIRECTION, AND THAT IS THE FIX. A `break` or an
           # `exit 1` on the first stale branch would hide every host after it; an early success on
           # the first fresh branch would hide every host after THAT — which is precisely the outage
@@ -291,6 +323,7 @@ jobs:
             subject=$(git log -1 --format=%s "origin/${branch}")
             payload=$(git show "origin/${branch}:heartbeat.txt" 2>/dev/null || echo "(no heartbeat.txt on the branch)")
             sup_verdict=$(printf '%s\n' "$payload" | sed -n 's/^supervisor_verdict=//p' | tail -n 1)
+            dmn_verdict=$(printf '%s\n' "$payload" | sed -n 's/^daemon_verdict=//p' | tail -n 1)
 
             # THE CONDITION LEADS THE REPORT, NAMED EXPLICITLY (design note vi) — this workflow's
             # issue title reads "the machine has stopped reporting", which is WRONG for a fresh
@@ -298,6 +331,8 @@ jobs:
             # fired rather than leave the reader to infer it from the age line and payload alone.
             if [ "$age_s" -gt "$threshold_s" ]; then
               condition="BEAT STALE — the machine itself has stopped reporting (${age_m}m, threshold ${STALE_AFTER_MINUTES}m)"
+            elif daemon_expected "$branch" && is_daemon_stale "$dmn_verdict"; then
+              condition="DAEMON STALE — the beat is fresh but the daemon has stopped polling: ${dmn_verdict}"
             elif is_supervisor_stale "$sup_verdict"; then
               condition="DEPLOY-SUPERVISOR STALE — the beat is fresh but the deploy cycle has stopped: ${sup_verdict}"
             else
@@ -324,6 +359,9 @@ jobs:
             if [ "$age_s" -gt "$threshold_s" ]; then
               stale=$(( stale + 1 ))
               echo "heartbeat-watch: STALE — '${branch}' has not beaten for ${age_m} minute(s)." >&2
+            elif daemon_expected "$branch" && is_daemon_stale "$dmn_verdict"; then
+              stale=$(( stale + 1 ))
+              echo "heartbeat-watch: DAEMON STALE — '${branch}': ${dmn_verdict}" >&2
             elif is_supervisor_stale "$sup_verdict"; then
               stale=$(( stale + 1 ))
               echo "heartbeat-watch: DEPLOY-SUPERVISOR STALE — '${branch}': ${sup_verdict}" >&2
