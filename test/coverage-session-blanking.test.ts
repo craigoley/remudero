@@ -127,7 +127,7 @@ test("the REAL repo, scanned end to end via git ls-files, still names test/base-
     "test/base-blob-read-failure.test.ts's own `delete childEnv.NODE_V8_COVERAGE;` (rationale §2(a)'s named " +
       "exemplar) must still be flagged -- this task deliberately does not fix callers, only names them",
   );
-  assert.equal(hit!.line, 414);
+  assert.equal(hit!.line, 436); // R-11 added lines above the delete in that file; the pin follows it
   assert.equal(hit!.expr, "childEnv");
 });
 
@@ -264,7 +264,7 @@ test("the CLI, run directly (no injected collaborators), exits 1 against the rea
   const result = spawnSync(process.execPath, [SCRIPT], { encoding: "utf8" });
   assert.equal(result.status, 1, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
   assert.match(result.stderr, /coverage-session-blanking-check: FAILED/);
-  assert.match(result.stderr, /test\/base-blob-read-failure\.test\.ts:414: delete childEnv\.NODE_V8_COVERAGE/);
+  assert.match(result.stderr, /test\/base-blob-read-failure\.test\.ts:436: delete childEnv\.NODE_V8_COVERAGE/);
   assert.match(result.stderr, /Unreachable by this scan/);
 });
 

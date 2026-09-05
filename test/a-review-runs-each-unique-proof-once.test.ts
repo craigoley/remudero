@@ -63,6 +63,7 @@ function evidenceWith(rec: Recorder, over: Partial<ReviewEvidence> = {}): Review
     report: "claim number 1 claim number 2 gate shaped instrument nothing invokes",
     headCheckoutDir: "/head",
     baseCheckoutDir: "/base",
+    baseIsCheckout: true, // (R-11) a faked base run of a `unit test:` proof counts only for a real checkout
     execProof: rec.exec,
     ...over,
   } as ReviewEvidence;
