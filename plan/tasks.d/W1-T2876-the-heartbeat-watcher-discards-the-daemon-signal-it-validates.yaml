@@ -52,9 +52,9 @@
     `STALE_AFTER_MINUTES` already has one — an expected branch reading STALE must fail, and an
     unlisted branch reading the same STALE must not.
   acceptance:
-    - claim: "a fresh beat whose payload says the daemon is stale escalates on a branch that must run one"
-      proof: "unit test: W1-T2876: a fresh beat over a dead daemon escalates"
-    - claim: "the same stale daemon reading on an unlisted branch stays silent"
-      proof: "unit test: W1-T2876: an unlisted branch does not escalate on daemon staleness"
-    - claim: "the watcher names which arm fired rather than reporting a bare age"
+    - claim: "a fresh beat whose payload says the daemon is stale escalates, and the report names that arm"
       proof: "grep: DAEMON STALE in .github/workflows/fleet-heartbeat-watch.yml"
+    - claim: "the arm is gated so a host that runs no daemon stays silent on the same STALE reading"
+      proof: "grep: DAEMON_EXPECTED_BRANCHES in .github/workflows/fleet-heartbeat-watch.yml"
+    - claim: "the daemon predicate exists beside the supervisor predicate it mirrors"
+      proof: "grep: is_daemon_stale in .github/workflows/fleet-heartbeat-watch.yml"
