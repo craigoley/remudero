@@ -194,6 +194,12 @@
       "grepHint": "Forensics — `src/lib/sweep.ts`"
     },
     {
+      "path": "docs/forensics/task-linter.md",
+      "title": "Forensics: src/lib/task-linter.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/task-linter.ts` used to",
+      "grepHint": "Forensics: src/lib/task-linter.ts"
+    },
+    {
       "path": "docs/forensics/worker.md",
       "title": "`src/lib/worker.ts` — comment forensics",
       "summary": "Verbatim archive of the measured facts, incidents and design arguments that used to live in",
