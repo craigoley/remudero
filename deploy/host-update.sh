@@ -65,7 +65,7 @@ set -euo pipefail
 # own fallback, deploy/runtime-env-vars.sh's real array, and the `-e` names actually printed below
 # never disagree, so neither the fallback nor the static passthrough block below can go stale
 # unnoticed.
-RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH)
+RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH NODE_OPTIONS)
 RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
 if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
   # shellcheck source=./runtime-env-vars.sh
@@ -353,6 +353,7 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
     -e GH_APP_ID="\${GH_APP_ID:-}" \\
     -e GH_APP_INSTALLATION_ID="\${GH_APP_INSTALLATION_ID:-}" \\
     -e GH_APP_PRIVATE_KEY_PATH="\${GH_APP_PRIVATE_KEY_PATH:-}" \\
+    -e NODE_OPTIONS="\${NODE_OPTIONS:-}" \\
 ${CODEX_MOUNT_LINE}${CONTAINER_CONFIG_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\
     ${REF} \\

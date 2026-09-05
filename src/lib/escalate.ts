@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { closeSync, existsSync, mkdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import { createOrReadExclusive } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
 import {
@@ -1551,4 +1553,179 @@ export function ghIssueGateway(
       run(["issue", "comment", url, "--repo", repoArg, "--body", body]);
     },
   };
+}
+
+// ── W1-T2696: signed, single-use answer links ────────────────────────────────
+//
+// The loop is half built. `rmd escalate` opens a needs-human issue with typed options
+// (W1-T2273); the console executes them through a closed route map; notify() pages the operator
+// with prose. The operator reads the ping on a phone and must open the console to act.
+//
+// A link, not a bot: a Telegram or Slack bot is a new channel with its own identity problem
+// (channel spoofing). A signed link inherits the console's token model and W1-T2211's boundary —
+// the secret is minted by the daemon under the state root, which a worker tree cannot read.
+//
+// INVARIANT: a link authorises exactly one option on exactly one escalation, once, before its
+// expiry. Signature, expiry and single-use are checked independently, and a refusal names which.
+// FALSIFIER: test/escalation-answer-links.test.ts.
+
+/** `<root>/state/escalation-link-secret` — the same state-root boundary
+ *  `serviceTokensPath` sits behind, which settings/worker.json already denies a worker. */
+export function escalationLinkSecretPath(root: string): string {
+  return join(root, "state", "escalation-link-secret");
+}
+
+/** Where a consumed link's marker lands. Named by the signature, so the marker never
+ *  reveals which option it answered to anyone listing the directory. */
+export function escalationLinkUsedPath(root: string, signature: string): string {
+  return join(root, "state", "escalation-links", `${signature}.used`);
+}
+
+/** Create-once, read-thereafter, mode 600 — the discipline `loadServiceTokens` already uses.
+ *  A rotation is: stop the daemon, delete the file, start it again. */
+export function loadEscalationLinkSecret(
+  root: string,
+  io: { create: typeof createOrReadExclusive; write: typeof writeSync; close: typeof closeSync; mkdir: typeof mkdirSync } = {
+    create: createOrReadExclusive,
+    write: writeSync,
+    close: closeSync,
+    mkdir: mkdirSync,
+  },
+): string {
+  const path = escalationLinkSecretPath(root);
+  io.mkdir(dirname(path), { recursive: true });
+  const result = io.create(path, 0o600);
+  if (result.created) {
+    const secret = randomBytes(32).toString("hex");
+    io.write(result.fd, `${secret}\n`);
+    io.close(result.fd);
+    return secret;
+  }
+  return result.raw.trim();
+}
+
+/** The fields a link signs over. Order is fixed: a signature is over this exact string. */
+export interface OptionLinkClaims {
+  readonly escalationId: string;
+  /** The escalation's class. Carried and SIGNED because the answer must derive the same
+   *  {@link ThreadIdentity} the escalation was raised under, and a class taken from an
+   *  unsigned query could redirect an answer onto a different thread. */
+  readonly cls: string;
+  readonly route: EscalationOptionRoute;
+  readonly expiresAtMs: number;
+}
+
+/** The signed payload, canonical and delimiter-separated. A field may not contain the
+ *  delimiter, which `mintOptionLink` enforces rather than assuming. */
+function optionLinkPayload(c: OptionLinkClaims): string {
+  for (const [name, value] of [["escalation id", c.escalationId], ["class", c.cls]] as const) {
+    if (value.includes("|")) {
+      throw new Error(`${name} ${JSON.stringify(value)} contains the signing delimiter "|"`);
+    }
+  }
+  return `${c.escalationId}|${c.cls}|${c.route}|${c.expiresAtMs}`;
+}
+
+export function signOptionLink(claims: OptionLinkClaims, secret: string): string {
+  return createHmac("sha256", secret).update(optionLinkPayload(claims), "utf8").digest("hex");
+}
+
+/** How long a minted link stays answerable. Picked, not measured — an escalation the operator
+ *  has not answered in a day wants a fresh look at the issue, not a stale one-tap. */
+export const OPTION_LINK_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * One answer URL for one executable option.
+ *
+ * Only an `executable` option gets a link: an `operator-only` option names an act the console
+ * cannot perform, so a link for it would be a button that does nothing. Returns `undefined`
+ * there rather than a dead URL, and the caller keeps rendering the prose.
+ */
+export function mintOptionLink(
+  escalationId: string,
+  cls: string,
+  kind: EscalationOptionKind,
+  secret: string,
+  nowMs: number,
+  baseUrl: string,
+): string | undefined {
+  if (kind.type !== "executable") return undefined;
+  const claims: OptionLinkClaims = { escalationId, cls, route: kind.route, expiresAtMs: nowMs + OPTION_LINK_TTL_MS };
+  const sig = signOptionLink(claims, secret);
+  const q = new URLSearchParams({
+    e: claims.escalationId,
+    c: claims.cls,
+    r: claims.route,
+    x: String(claims.expiresAtMs),
+    s: sig,
+  });
+  return `${baseUrl.replace(/\/$/, "")}/v1/escalation/confirm?${q.toString()}`;
+}
+
+export type OptionLinkRefusal = "bad-request" | "forged" | "expired" | "already-used";
+export type OptionLinkCheck =
+  | { readonly ok: true; readonly claims: OptionLinkClaims; readonly signature: string }
+  | { readonly ok: false; readonly reason: OptionLinkRefusal; readonly detail: string };
+
+/**
+ * Check a link's query before anything acts on it.
+ *
+ * The three failures are checked independently and reported apart, because they mean different
+ * things to the operator: `forged` is an attack or a corrupted URL, `expired` is a stale ping
+ * worth re-raising, `already-used` is a double-tap and is benign. Collapsing them into one
+ * refusal would make the ledger unable to tell an attack from a second tap.
+ */
+export function verifyOptionLink(
+  query: URLSearchParams,
+  secret: string,
+  nowMs: number,
+  isUsed: (signature: string) => boolean,
+): OptionLinkCheck {
+  const e = query.get("e");
+  const c = query.get("c");
+  const r = query.get("r");
+  const x = query.get("x");
+  const s = query.get("s");
+  if (!e || !c || !r || !x || !s || !/^[0-9a-f]{64}$/.test(s) || !/^\d+$/.test(x)) {
+    return { ok: false, reason: "bad-request", detail: "a link must carry e, c, r, x and a 64-hex s" };
+  }
+  if (!(r in ESCALATION_OPTION_ROUTES)) {
+    return { ok: false, reason: "bad-request", detail: `route ${JSON.stringify(r)} is outside the closed set` };
+  }
+  const claims: OptionLinkClaims = { escalationId: e, cls: c, route: r as EscalationOptionRoute, expiresAtMs: Number(x) };
+  // Signature FIRST: an expired or used link whose signature does not verify is forged, and
+  // reporting it as merely expired would hide that.
+  const expected = Buffer.from(signOptionLink(claims, secret), "utf8");
+  const given = Buffer.from(s, "utf8");
+  if (expected.length !== given.length || !timingSafeEqual(expected, given)) {
+    return { ok: false, reason: "forged", detail: "signature does not verify" };
+  }
+  if (claims.expiresAtMs <= nowMs) {
+    return { ok: false, reason: "expired", detail: `expired at ${new Date(claims.expiresAtMs).toISOString()}` };
+  }
+  if (isUsed(s)) {
+    return { ok: false, reason: "already-used", detail: "this link has already answered its escalation" };
+  }
+  return { ok: true, claims, signature: s };
+}
+
+/** Mark a verified link consumed. Exclusive-create, so two taps racing cannot both win: the
+ *  loser sees the marker already there and is refused `already-used` on its own check. */
+export function consumeOptionLink(
+  root: string,
+  signature: string,
+  io: { create: typeof createOrReadExclusive; close: typeof closeSync; mkdir: typeof mkdirSync } = {
+    create: createOrReadExclusive,
+    close: closeSync,
+    mkdir: mkdirSync,
+  },
+): boolean {
+  const path = escalationLinkUsedPath(root, signature);
+  io.mkdir(dirname(path), { recursive: true });
+  const result = io.create(path, 0o600);
+  if (result.created) {
+    io.close(result.fd);
+    return true;
+  }
+  return false;
 }

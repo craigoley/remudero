@@ -71,6 +71,7 @@ import { join } from "node:path";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { readLedgerLines, type LedgerReader } from "./status.js";
+import { appendLedger, type LedgerLine } from "./ledger.js";
 import {
   loadDefaultPolicy,
   resolveDailyCostCeiling,
@@ -112,6 +113,12 @@ export interface AccountUsageInput {
   org?: string;
   /** `cachedUsageUtilization.accountUuid` — whose usage the cached block describes. */
   cacheUuid?: string;
+  /** W1-T2688 — the RAW value of whichever {@link CREDIT_STATE_FIELDS} name the block carried, if
+   *  any. Projected as an opaque `unknown` and interpreted separately, so an unrecognised value
+   *  is reported as such rather than read as "subscription". */
+  creditStateRaw?: unknown;
+  /** Which field name it came from — evidence, so a later reader can tell WHAT was read. */
+  creditStateField?: string;
   /** `cachedUsageUtilization.fetchedAtMs` — when Claude Code last wrote the block. */
   cacheFetchedAtMs?: number;
   fiveHour?: UsageWindowReading;
@@ -121,6 +128,131 @@ export interface AccountUsageInput {
 }
 
 /** Why the usage half of the panel is UNKNOWN, when it is. Absent ⇒ the reading is good. */
+/**
+ * W1-T2688 — the credit state, read or refused, never inferred.
+ *
+ * A subscription drawing on usage credits drops the prompt-cache lifetime from an hour to five
+ * minutes. Every rung here reuses long prefixes, so cost per task moves for a reason no row
+ * explains.
+ *
+ * TRAP: the surface may not expose the state at all. The captured block
+ * (test/fixtures/account-usage/claude-json.json) carries the utilization windows and no credit,
+ * billing, plan or subscription field. So an absent field reads `not-exposed` — loud, in the shape
+ * {@link UsageUnknownReason} already uses — and an unknown value reads `unrecognised-value`. A
+ * credit state guessed from window utilisation would move policy on an inference.
+ *
+ * Policy is out of scope: what to do when credits engage is an operator ruling. Nothing here
+ * changes a mount, holds a dispatch, or reads a policy.
+ *
+ * FALSIFIER: test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts.
+ */
+export const CREDIT_STATE_FIELDS = ["creditState", "credit_state", "billingMode", "billing_mode", "usingCredits", "using_credits"] as const;
+
+export type CreditState = "subscription" | "credits";
+
+/** Why the credit state is not known — never absent when {@link CreditReading.state} is. */
+export type CreditUnknownReason = "not-exposed" | "unrecognised-value";
+
+export interface CreditReading {
+  state?: CreditState;
+  unknownReason?: CreditUnknownReason;
+  /** The field the value came from, present only when one was found — so "unrecognised-value"
+   *  can be traced to what was actually read. */
+  field?: string;
+}
+
+/** Interpret a raw credit-state value. `true`/`"credits"`/`"credit"`/`"usage_credits"` read as
+ *  credits; `false`/`"subscription"`/`"plan"` as subscription; anything else is unrecognised
+ *  rather than defaulted — the reason this is separate from the projection. */
+export function interpretCreditState(raw: unknown): CreditState | undefined {
+  if (raw === true) return "credits";
+  if (raw === false) return "subscription";
+  if (typeof raw !== "string") return undefined;
+  const v = raw.trim().toLowerCase();
+  if (v === "credits" || v === "credit" || v === "usage_credits" || v === "usage-credits") return "credits";
+  if (v === "subscription" || v === "plan" || v === "subscription_plan") return "subscription";
+  return undefined;
+}
+
+/** The credit half of a reading — absent field ⇒ `not-exposed`, present-but-unreadable ⇒
+ *  `unrecognised-value`. Never infers from window utilisation. */
+export function readCreditState(input: AccountUsageInput): CreditReading {
+  if (input.creditStateField === undefined) return { unknownReason: "not-exposed" };
+  const state = interpretCreditState(input.creditStateRaw);
+  if (state === undefined) return { unknownReason: "unrecognised-value", field: input.creditStateField };
+  return { state, field: input.creditStateField };
+}
+
+/** The ledger step one transition writes. */
+export const CREDIT_STATE_STEP = "account.credit_state";
+export const CREDIT_STATE_RUN_ID = "ACCOUNT-USAGE";
+export const CREDIT_STATE_TASK_ID = "ACCOUNT";
+
+/** The newest credit state this ledger already recorded, or `undefined` when it has never
+ *  recorded one. Reads the SAME `lines` every other derivation in this module consumes. */
+export function lastRecordedCreditState(lines: ReadonlyArray<Record<string, unknown>>): CreditState | undefined {
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const row = lines[i]!;
+    if (row.step !== CREDIT_STATE_STEP) continue;
+    const s = row.state;
+    if (s === "credits" || s === "subscription") return s;
+  }
+  return undefined;
+}
+
+/**
+ * The edge, not the level: a level sampled every tick is noise. Returns a row when the state
+ * changed (including the first time it becomes known), `undefined` when unchanged or unknown —
+ * an unknown is not a transition.
+ */
+export function creditTransitionRow(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reading: CreditReading,
+  nowIso: string,
+): { step: string; state: CreditState; previous?: CreditState; field?: string; ts: string } | undefined {
+  if (reading.state === undefined) return undefined;
+  const previous = lastRecordedCreditState(lines);
+  if (previous === reading.state) return undefined;
+  const row: { step: string; state: CreditState; previous?: CreditState; field?: string; ts: string } = {
+    step: CREDIT_STATE_STEP,
+    state: reading.state,
+    ts: nowIso,
+  };
+  if (previous !== undefined) row.previous = previous;
+  if (reading.field !== undefined) row.field = reading.field;
+  return row;
+}
+
+/** The appendable ledger line for the same edge {@link creditTransitionRow} describes. */
+export function creditTransitionLedgerLine(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reading: CreditReading,
+): LedgerLine | undefined {
+  if (reading.state === undefined) return undefined;
+  const previous = lastRecordedCreditState(lines);
+  if (previous === reading.state) return undefined;
+  const line: LedgerLine = {
+    run_id: CREDIT_STATE_RUN_ID,
+    task_id: CREDIT_STATE_TASK_ID,
+    step: CREDIT_STATE_STEP,
+    state: reading.state,
+  };
+  if (previous !== undefined) line.previous = previous;
+  if (reading.field !== undefined) line.field = reading.field;
+  return line;
+}
+
+/** Append one credit-state transition row, and none for unknown or unchanged readings. */
+export function appendCreditStateTransition(
+  ledgerPath: string,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reading: CreditReading,
+  writeLedger: typeof appendLedger = appendLedger,
+): void {
+  const line = creditTransitionLedgerLine(lines, reading);
+  if (line) writeLedger(ledgerPath, line);
+}
+
 export type UsageUnknownReason = "unreadable" | "no-cache" | "account-mismatch" | "too-old";
 
 /** Whether the headroom governor is enforcing, per the fleet's own newest heartbeat. */
@@ -184,6 +316,14 @@ export interface AccountUsageSnapshot {
   usageAgeMs?: number;
   /** Present iff the usage half is UNKNOWN; the windows are then absent. */
   usageUnknownReason?: UsageUnknownReason;
+  /** W1-T2688 — subscription vs usage credits. A SEPARATE axis from `usageUnknownReason`: the
+   *  windows can be readable while the credit state is not exposed; collapsing the two would
+   *  make a readable panel claim the credit state was unreadable too. */
+  creditState?: CreditState;
+  /** Present iff {@link creditState} is absent — never both, never neither. */
+  creditUnknownReason?: CreditUnknownReason;
+  /** Which field the state was read from, when one was found. */
+  creditStateField?: string;
   governor: GovernorState;
   /** `ts` of the `daemon.headroom` line the posture came from. */
   governorAsOf?: string;
@@ -280,12 +420,19 @@ export function deriveAccountUsage(
   const costGovernor = deriveCostGovernorDeferral(lines);
   const queueGovernor = deriveQueueGovernorDeferral(lines);
   const ceilingAudit = deriveCeilingOverrideAudit(lines);
+  // Computed from the input alone, never from the windows: an inferred state moves policy on a
+  // guess.
+  const credit = readCreditState(input);
   const base: AccountUsageSnapshot = {
     governor: governor.state,
     costGovernor: costGovernor.state,
     queueGovernor: queueGovernor.state,
     measures: USAGE_SCOPE_NOTE,
   };
+  // Exactly one of the two, always — never both, never neither.
+  if (credit.state !== undefined) base.creditState = credit.state;
+  else base.creditUnknownReason = credit.unknownReason;
+  if (credit.field !== undefined) base.creditStateField = credit.field;
   if (ceiling) {
     base.dailyCostCeilingUsd = ceiling.usd;
     base.dailyCostCeilingProvenance = ceiling.provenance;
@@ -606,6 +753,9 @@ interface ClaudeJsonShape {
   cachedUsageUtilization?: {
     accountUuid?: unknown;
     fetchedAtMs?: unknown;
+    /** W1-T2688: whichever of CREDIT_STATE_FIELDS the surface may carry. Indexed rather than
+     *  named one-by-one so an upstream rename is picked up by editing one list. */
+    [k: string]: unknown;
     utilization?: {
       five_hour?: { utilization?: unknown; resets_at?: unknown } | null;
       seven_day?: { utilization?: unknown; resets_at?: unknown } | null;
@@ -661,6 +811,14 @@ export function readAccountUsageFile(path: string = join(homedir(), ".claude.jso
   if (typeof cache?.fetchedAtMs === "number" && Number.isFinite(cache.fetchedAtMs)) {
     out.cacheFetchedAtMs = cache.fetchedAtMs;
   }
+  // One more field copied out by the same rule as every other: named, not spread.
+  for (const field of CREDIT_STATE_FIELDS) {
+    if (cache !== undefined && Object.prototype.hasOwnProperty.call(cache, field)) {
+      out.creditStateField = field;
+      out.creditStateRaw = (cache as Record<string, unknown>)[field];
+      break;
+    }
+  }
   const fiveHour = windowOf(cache?.utilization?.five_hour);
   if (fiveHour) out.fiveHour = fiveHour;
   const sevenDay = windowOf(cache?.utilization?.seven_day);
@@ -708,6 +866,8 @@ export interface AccountUsageDeps {
    * `root` (every pre-W1-T333 caller of this type) renders BYTE-IDENTICAL to before this task.
    */
   readUsageProjection?: () => AccountUsageProjection | undefined;
+  /** W1-T2688: ledger appender for the observed credit-state edge; tests inject a spy. */
+  writeLedger?: typeof appendLedger;
 }
 
 /**
@@ -734,7 +894,9 @@ export function buildAccountUsageRoute(deps: AccountUsageDeps): Route {
       const policy = deps.policy ?? loadDefaultPolicy();
       const resolveCeiling = deps.resolveCeiling ?? (() => resolveDailyCostCeiling(deps.root ?? process.cwd(), policy));
       const account = mergeAccountUsageProjection(readAccount(), readProjection());
-      sendJson(res, 200, deriveAccountUsage(account, readLedger(deps.ledgerPath), now(), resolveCeiling()));
+      const lines = readLedger(deps.ledgerPath);
+      appendCreditStateTransition(deps.ledgerPath, lines, readCreditState(account), deps.writeLedger ?? appendLedger);
+      sendJson(res, 200, deriveAccountUsage(account, lines, now(), resolveCeiling()));
     },
   };
 }

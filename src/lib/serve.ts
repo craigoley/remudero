@@ -57,7 +57,7 @@ import {
   type SseRoute,
   type WriteTier,
 } from "./service.js";
-import type { EscalationOption, EscalationOptionRoute } from "./escalate.js";
+import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import type { GitHub } from "./status.js";
 import {
@@ -66,6 +66,8 @@ import {
   buildControlStatusRoute,
   buildDrainFeedbackRoute,
   buildDrainNowRoute,
+  buildEscalationLinkAnswerRoute,
+  buildEscalationLinkConfirmRoute,
   buildEscalationMarkHandledRoute,
   buildEscalationReplyRoute,
   buildKickRoute,
@@ -6244,6 +6246,12 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
     // — so this route currently refuses every real call with "no thread store configured", the SAME
     // safe refusal it gives any thread it cannot confirm, never a silent unattached filing.
     buildEscalationReplyRoute(fleetControlDeps),
+    // W1-T2696: the ping's own answer links. MOUNTED for the reason the note above states — a
+    // declared-but-unreachable route is this module's recurring defect. Both are
+    // selfAuthenticated: the operator's phone carries no bearer token, so the link's signature is
+    // the authority and each handler verifies it before anything acts. The GET is side-effect-free
+    // because iMessage previews a URL it sends, which would otherwise burn every link unclicked.
+    ...escalationLinkRoutes(fleetControlDeps, deps.fleetControlRoot),
     // W1-T164: operator guidance notes — console-editable, provenance-stamped, task-scoped.
     // Rooted at `questionsRoot` (repoRoot) — the SAME durable, gitignored `plan/` store
     // worker.ts's question channel already reads/writes (see operator-notes.ts's module doc).
@@ -6368,6 +6376,22 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
 }
 
 /** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
+/**
+ * W1-T2696's two answer routes.
+ *
+ * The signing secret is resolved LAZILY — assembling routes must touch no disk, and
+ * `loadEscalationLinkSecret` creates the secret on first read.
+ * TRAP: resolving it here instead makes standing up a server write a file, which
+ * test/console-write-entry.test.ts refuses ("obtaining the grant touches no disk at all").
+ *
+ * Both routes are always mounted, so a link can only be refused by a route that could have
+ * verified it, never 404 by one silently left out.
+ */
+function escalationLinkRoutes(panelDeps: PanelActionDeps, configRoot: string): Route[] {
+  const linkDeps = { root: configRoot, secret: () => loadEscalationLinkSecret(configRoot), now: () => Date.now() };
+  return [buildEscalationLinkConfirmRoute(panelDeps, linkDeps), buildEscalationLinkAnswerRoute(panelDeps, linkDeps)];
+}
+
 export function buildServeRoutes(deps: ServeDeps): Route[] {
   return assembleServeRoutes(deps).routes;
 }

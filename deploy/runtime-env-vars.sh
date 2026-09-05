@@ -38,6 +38,7 @@ RMD_DAEMON_RUNTIME_ENV_VARS=(
   GH_APP_ID
   GH_APP_INSTALLATION_ID
   GH_APP_PRIVATE_KEY_PATH
+  NODE_OPTIONS
 )
 
 # W1-T1222: the console's own runtime names, read by `resolveServeHosts` in src/lib/serve.ts, NOT

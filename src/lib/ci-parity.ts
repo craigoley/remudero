@@ -1170,7 +1170,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
   npmScriptEntry("learnings-budget-ratchet", "learnings-budget-ratchet"),
   npmScriptEntry("jscpd-gate", "jscpd"),
-  npmScriptEntry("comment-load-ratchet", "comment-load-ratchet"),
+  npmScriptEntry("comment-load-ratchet", "comment-load-signal"),
   npmScriptEntry("claims", "claims"),
   {
     job: "lint-plan",
@@ -1948,7 +1948,7 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
   },
   {
     job: "comment-load-ratchet",
-    script: "comment-load-ratchet",
+    script: "comment-load-signal",
     reason:
       "same-class — a deterministic, offline npm-script gate ci.yml's comment-load-ratchet job runs unconditionally. It " +
       "reads the tracked tree plus a local merge-base diff (git ls-files / merge-base / diff; never the network, never " +

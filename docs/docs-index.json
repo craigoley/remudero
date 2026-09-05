@@ -146,10 +146,40 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/daemon.md",
+      "title": "daemon.ts forensics",
+      "summary": "Measured forensics, incidents and design arguments removed from `src/lib/daemon.ts` when its comments were compacted to the plain-language standard. The code k…",
+      "grepHint": "daemon.ts forensics"
+    },
+    {
+      "path": "docs/forensics/drain.md",
+      "title": "Forensics — `src/lib/drain.ts`",
+      "summary": "A verbatim archive of comment blocks compacted out of `src/lib/drain.ts`. Each heading names",
+      "grepHint": "Forensics — `src/lib/drain.ts`"
+    },
+    {
+      "path": "docs/forensics/inbox.md",
+      "title": "Forensics — `src/lib/inbox.ts`",
+      "summary": "`src/lib/inbox.ts` is the ratification inbox (MASTER-PLAN §7B): it tiers open proposals, drafts a",
+      "grepHint": "Forensics — `src/lib/inbox.ts`"
+    },
+    {
       "path": "docs/forensics/ledger.md",
       "title": "ledger.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
       "grepHint": "ledger.ts forensics"
+    },
+    {
+      "path": "docs/forensics/retro.md",
+      "title": "retro.ts forensics",
+      "summary": "The measured facts, incidents and design arguments that used to live as comment prose inside",
+      "grepHint": "retro.ts forensics"
+    },
+    {
+      "path": "docs/forensics/status.md",
+      "title": "status.ts comment forensics",
+      "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/status.ts` when its comments were compacted to the plain-language standa…",
+      "grepHint": "status.ts comment forensics"
     },
     {
       "path": "docs/forensics/sweep-map.md",
@@ -162,6 +192,18 @@
       "title": "Forensics — `src/lib/sweep.ts`",
       "summary": "A verbatim archive of comment blocks compacted out of `src/lib/sweep.ts`. Each heading names",
       "grepHint": "Forensics — `src/lib/sweep.ts`"
+    },
+    {
+      "path": "docs/forensics/task-linter.md",
+      "title": "Forensics: src/lib/task-linter.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/task-linter.ts` used to",
+      "grepHint": "Forensics: src/lib/task-linter.ts"
+    },
+    {
+      "path": "docs/forensics/worker.md",
+      "title": "`src/lib/worker.ts` — comment forensics",
+      "summary": "Verbatim archive of the measured facts, incidents and design arguments that used to live in",
+      "grepHint": "`src/lib/worker.ts` — comment forensics"
     },
     {
       "path": "docs/open-decisions.md",

@@ -107,5 +107,5 @@ test("removing the exemption entry makes the ordinary-growth case refuse again",
     true,
     "a non-exempt *-baseline.json in the same shape still refuses, so membership in the set is what decided the exempt case",
   );
-  assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.size, 2, "exactly two paths are exempt — a third would need its own reviewed reason");
+  assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.size, 3, "exactly three paths are exempt — a fourth would need its own reviewed reason");
 });

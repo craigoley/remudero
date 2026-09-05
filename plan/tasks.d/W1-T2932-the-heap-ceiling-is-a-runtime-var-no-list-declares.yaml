@@ -1,0 +1,63 @@
+- id: W1-T2932
+  title: "THE DAEMON'S HEAP CEILING IS A RUNTIME VAR NO LIST DECLARES — NODE_OPTIONS is what keeps the retro from aborting at V8's 2 GB default, and runtime-env-vars.sh does not name it, so the graceful recycle REFUSES rather than carrying it and an operator's only way past is the hand-rolled relaunch that skips all four of the script's refusals"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "W1-T1069", "W1-T2875"]
+  files: [deploy/runtime-env-vars.sh, deploy/recycle-container.sh, deploy/host-update.sh, test/recycle-container.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    `deploy/runtime-env-vars.sh` is "the ONE declared list of environment variable NAMES the
+    remudero-daemon container carries at runtime", and its own header records why it exists: before
+    it, the two consuming scripts retyped the list and drove apart, silently dropping four of six
+    names — including the `GH_APP_*` trio, whose absence is byte-identical to a host that never had
+    App auth. It names six. It does not name `NODE_OPTIONS`.
+
+    NODE_OPTIONS IS NOT COSMETIC HERE. `--max-old-space-size` is the only thing standing between the
+    retro rung and V8's ~2 GB default, which it hit six times in eight hours on 2026-09-05
+    (`FATAL ERROR: Ineffective mark-compacts near heap limit` at ~2046 MB, exit 134). Five of those
+    exits spent docker's `on-failure:5` budget and the fleet then sat dead for three hours. The
+    ceiling was raised by hand to 4096, then to 8192 after the host went 4 vCPU/7.9 GB ->
+    8 vCPU/32 GB. None of that is in a declared list, so it survives only in one host's local copy of
+    the launcher.
+
+    THE CONSEQUENCE IS A DIRECT INCENTIVE TO BYPASS THE SAFE TOOL, WHICH IS WORSE THAN THE MISSING
+    NAME. `deploy/recycle-container.sh` refuses when the live container carries a runtime variable
+    this list does not name — correct behaviour, and it fails LOUD rather than dropping the value.
+    But the only way past that refusal today is to hand-roll `docker rm -f` + `docker run`, which
+    skips all four of the refusals the script exists to enforce: the credential check, the bounded
+    wait for in-flight workers, the pull-failed-never-fall-through-to-start rule, and the
+    started-image-matches-pulled-digest check. MEASURED 2026-09-05: an operator did exactly that, and
+    the very pull it replaced would have failed — ACR auth had expired, which is refusal #3's own
+    2026-08-18 incident. The hand-rolled path happened to re-check it; it need not have.
+
+    THE FIX IS ONE NAME IN FOUR FILES BUT SIX SITES, AND THE BUILD FOUND THE LAST TWO.
+    Predicted here: the declared list, each consuming script's inline fallback, and the test fixture.
+    The existing W1-T1069 checks then caught two more that this filing missed -- `host-update.sh`
+    prints its `-e` passthroughs from a HARDCODED BLOCK separate from the array, so patching the
+    array alone leaves the printed invocation short a variable; and the W1-T1069 MUTANT hardcodes the
+    old array text as its mutation anchor, so appending a name makes the mutation unfindable and the
+    mutant correctly refuses to pass on a mutation it never performed. Both are the three-copies
+    checks doing their job. AND NO COMMENTS INSIDE THE ARRAY: its readers take the parenthesised body
+    as bare whitespace-separated tokens, so a `#` line parses as two additional NAMES and the
+    consistency check fails naming them.
+
+    THE REST OF THE ORIGINAL SCOPE IS UNCHANGED, AND THE LAST CLAUSE IS ALREADY ENFORCED. Add `NODE_OPTIONS` to
+    `deploy/runtime-env-vars.sh` and to the inline fallback copy each consuming script carries
+    (`recycle-container.sh`, `host-update.sh`), and extend `DECLARED_RUNTIME_FIXTURE` in
+    `test/recycle-container.test.ts`, whose existing assertion that all three copies agree is what
+    stops them drifting again. Nothing about the VALUE is declared — the file's own header is
+    explicit that this is "A NAME LIST, NEVER A VALUE" — so no host sizing is baked into the repo.
+  acceptance:
+    - claim: "the declared runtime list names the heap ceiling variable"
+      proof: "grep: NODE_OPTIONS in deploy/runtime-env-vars.sh"
+    - claim: "a recycle carries the heap ceiling across a container replacement instead of refusing"
+      proof: "unit test: W1-T2932: a recycle carries the heap ceiling across"
+    - claim: "all three copies of the declared list still agree, so they cannot drift apart again"
+      proof: "unit test: W1-T2932: the three declared lists still agree"

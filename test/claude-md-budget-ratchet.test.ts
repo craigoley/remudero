@@ -8,7 +8,9 @@ import { tmpdir } from "node:os";
 
 // ── W1-T503: CLAUDE.md SIZE AS A CI RATCHET (MASTER-PLAN §8A) ────────────────────────────────────
 //
-// CLAUDE.md is injected in full into every session on every lane -- until this ratchet it was the
+// CLAUDE.md is injected in full into every INTERACTIVE session in this checkout -- never into a
+// dispatched worker, which spawnWorker isolates with settingSources: [] (W1-T2759). Until this
+// ratchet it was the
 // fleet's largest per-session injectable with no budget at all, while the learnings corpus at a
 // fifth its weight already had one (scripts/learnings-budget-ratchet.mjs). Same ratchet shape --
 // a byte-size CEILING against scripts/claude-md-budget-baseline.json -- except CLAUDE.md's cap

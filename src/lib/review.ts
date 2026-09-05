@@ -2247,6 +2247,34 @@ export const DENIED_ATTRIBUTIVE_RE = /\b(?:not|never|isn't|aren't|wasn't)\s+(?:a
  * how the arms drifted apart the first time.
  * // Why: #3422's second body quoted the LABEL form and was refused; #3421's measurement table only passed once
  * // moved into a FENCED block, the literals byte-identical (2026-08-31). */
+/**
+ * Is the shorthand a member of a parenthesised enumeration rather than a label?
+ *
+ * TRAP (W1-T2679, measured on #3569): `(capped+override, capped+plan-only):` reaches the label arm
+ * because a closing bracket then a colon is exactly the shape W1-T395 ruled a label. But there the
+ * shorthand names a VERDICT STATE being discussed, not the diff. Every PR touching the arm gate,
+ * the calibration bands or the acceptance parser has cause to write these names in prose.
+ *
+ * The signal is available without guessing: an enumeration opens a bracket and separates siblings
+ * with a comma. `(Plan-only): no source touched.` opens a bracket and has no comma, so it stays a
+ * label. Only a comma INSIDE the still-open bracket, on this line, makes it a list.
+ *
+ * FALSIFIER: test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts.
+ */
+function shorthandIsInsideEnumeration(report: string, index: number): boolean {
+  const lineStart = report.lastIndexOf("\n", index - 1) + 1;
+  let depth = 0;
+  for (let i = index - 1; i >= lineStart; i -= 1) {
+    const c = report[i];
+    if (c === ")" || c === "]") depth += 1;
+    else if (c === "(" || c === "[") {
+      if (depth === 0) return report.slice(i + 1, index).includes(",");
+      depth -= 1;
+    }
+  }
+  return false;
+}
+
 function shorthandIsAboutChangeset(report: string, index: number, length: number): boolean {
   if (isInsideInlineQuote(report, index)) return false;
   const rest = report.slice(index + length);
@@ -2258,6 +2286,9 @@ function shorthandIsAboutChangeset(report: string, index: number, length: number
   // character leaving the span open is caught by `isInsideInlineQuote` first. See
   // test/changeset-shorthand-anchor.test.ts.
   if (/^[*_`'")\]\s]*:/.test(rest)) {
+    // W1-T2679: ...and unless the shorthand is a sibling in a parenthesised enumeration of state
+    // names, where the closing bracket belongs to the list rather than to a label span.
+    if (shorthandIsInsideEnumeration(report, index)) return false;
     // W1-T2533: ...unless the body ANSWERED the question negatively. See DENIED_LABEL_ANSWER_RE
     // for why `no <noun>` is still an assertion while `no.` and `not …` are denials.
     return !DENIED_LABEL_ANSWER_RE.test(rest);
@@ -5200,13 +5231,20 @@ export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
   // W1-T2526: the per-file source-size LEDGER. THIS ENTRY DOES NOT FIT THE REASON ABOVE AND SAYS SO RATHER THAN
   // PRETENDING IT DOES — `scripts/source-size-ratchet.mjs` IS read in CI, through
   // test/a-source-file-cannot-outgrow-its-baseline.test.ts inside the unconditional `ci` job. THE REASON THAT DOES
-  // APPLY IS THE LEDGER/FLOOR DISTINCTION: a SCORE FLOOR (scripts/mutation-baseline.json, the coverage floors) grades
+  // APPLY IS THE LEDGER/FLOOR DISTINCTION. A SCORE FLOOR (scripts/mutation-baseline.json, the coverage floors) grades
   // falsifiers, so lowering it lets a weakened suite pass, while this file grades nothing — raising an entry cannot
   // make a failing falsifier pass. AND WITHOUT THIS THE GATE IS UNSATISFIABLE, MEASURED: every PR that grows a src/
   // file must carry both halves and was refused, and pre-raising separately is no escape because
   // `evaluateSourceSizeRatchet` writes a too-high value back DOWN on the next clean run.
   // // Why: on 2026-08-31 the ledger went stale on five consecutive merges and left `main` itself red (#3352).
   "scripts/source-size-baseline.json",
+  // W1-T2526's sibling: the per-file COMMENT-LINE ledger (scripts/comment-load-ratchet.mjs, run
+  // unconditionally in ci.yml). Same reason as the entry directly above, not the knowledge-budget
+  // one: this file IS read in CI, but it is a size LEDGER, not a score FLOOR -- it records how many
+  // comment lines a file has and grades no falsifier, so raising an entry cannot make a failing
+  // falsifier pass. The ratchet script itself stays on the surface; only its recorded counts are
+  // exempt.
+  "scripts/comment-load-baseline.json",
 ]);
 
 /** INSTRUMENT ISOLATION (W1-T297, Standing rule 25): true when `diffFiles` holds at least one {@link
