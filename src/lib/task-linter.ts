@@ -27,60 +27,21 @@ import {
 } from "./knowledge-dedup.js";
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 
-/**
- * Deterministic task linter (MASTER-PLAN §5C Layer A). NO LLM — a PURE function
- * over a loaded {@link Task}/{@link Plan}, no I/O, no side effects. Catches the
- * class of malformed task that reached a worker four times (W1-T6, W1-T9, and
- * W1-T12 twice-over) and burned budget before a human noticed: over-scoping
- * (Rule 19), headless-unfitness (Rule 18), vibe proofs, a proof that CANNOT
- * EXECUTE at all (the dead proof floor, moratorium finding 9, W1-T246), a
- * dialect-prefixed proof that promises executability but names no resolvable
- * artifact (the W1-T100 0/3, W1-T101), a proof that names a path OUTSIDE the
- * task's own declared `files:` (W1-T310 — the scope guard then refuses the
- * branch AFTER the work is done), an ALREADY-MERGED task's criteria being
- * amended with no follow-up filed in the same PR (W1-T180 — MERGED is terminal,
- * so the drain and the retro sweep both skip it and the amendment would
- * otherwise orphan silently), missing provenance (Rules 16/17), and a
- * ruling-shaped task (its `files:` includes DECISIONS.md) filed verify:auto —
- * a worker's proof that a ruling was WRITTEN is not an operator RATIFYING it
- * (W1-T326, #1302/#1303).
- *
- * Wired at TWO points, both FAIL-CLOSED — EXCEPT post-merge-amendment, which is
- * CI-only (see below):
- *   (i)  a CI check on any PR that edits plan/tasks.yaml (`rmd lint-plan`, see
- *        run-task.ts's `lintPlanCommand` + .github/workflows/ci.yml's `lint-plan`
- *        job, aggregated into the required `ci-gate` context). Only THIS call
- *        site supplies `opts.postMergeAmendment` (it alone has a `--base` diff
- *        and derived merge state to inject) — the check is a no-op wherever
- *        that context is absent.
- *   (ii) a PRE-DISPATCH guard in `rmd run-task` (and therefore `rmd drain`, which
- *        dispatches every task through the same `runTask` path) — a task that
- *        fails a BLOCKING check is NEVER dispatched: `verdict=blocked_illformed`,
- *        no worker spawned, no inflight lock even taken (see run-task.ts,
- *        `assertLintClean` called immediately after `assertRunnable`). Post-
- *        merge-amendment needs no wiring here: a MERGED task is never dispatched
- *        in the first place (the drain's own `if (isMerged(t.id)) continue`).
- *
- * A BLOCKING violation refuses dispatch. A WARN violation is visibility-only and
- * never blocks — budget-sanity always warns; proof-dialect and proof-resolvability
- * warn instead of blocking ONLY at the pre-dispatch call site (`opts.proofDialect:
- * "warn"` / `opts.proofResolvability: "warn"`, so the legacy backlog authored
- * before either check existed does not brick overnight), proof-dialect always
- * warns (regardless of that option) for a `unit test:` proof whose body reads as a
- * runtime narrative rather than a literal test-title substring, and proof-scope
- * (W1-T310) warns by default (`opts.proofScope`, default "warn") EXCEPT one
- * conjunction it auto-escalates to "block" (W1-T2287: mis-declared, absent at head,
- * `verify: auto` — see that check's own module comment for why), and
- * dispatch-priority (W1-T422) always warns, unconditionally, like budget-sanity.
- * advisory-routing (W1-T519) is WARN-only BY CONSTRUCTION — it carries no `opts` severity
- * knob at all, anywhere, the only violation family with that property: a task whose title,
- * rationale or note names a security-shaped weakness (auth, token/credential, secret,
- * sandbox/containment, route-scope enforcement, prompt-injection) draws a warn pointing at
- * SECURITY.md's private advisory path, because filing a task shard IS publishing the finding
- * on this public repo before any fix lands — but the fleet cannot itself act on a finding held
- * in a private advisory (loadPlan only reads plan/tasks.d/ on origin/main), so the routing
- * decision stays the operator's alone and this check can never withhold a task from dispatch.
- */
+/** Deterministic task linter (MASTER-PLAN §5C Layer A).
+ *  A PURE function over a loaded {@link Task}/{@link Plan}: no LLM, no I/O, no side effects. Every
+ *  fact a check needs from disk, git or GitHub arrives through {@link LintOpts}. No predicate ⇒ no
+ *  opinion: the check that needs it stays silent.
+ *  It refuses the malformed shapes that reached a worker and burned budget — over-scoping (Rule 19),
+ *  headless-unfitness (Rule 18), vibe proofs, a proof that cannot execute or resolve, a proof naming
+ *  a path outside the task's own `files:`, criteria amended on a merged task (Rule 21), missing
+ *  provenance (Rules 16/17), a ruling-shaped task filed `verify: auto`.
+ *  Wired at two fail-closed points. (i) CI — `rmd lint-plan` on any PR that edits the plan; only
+ *  this site holds a `--base` diff, so it alone supplies the diff-scoped contexts. (ii) PRE-DISPATCH
+ *  — `assertLintClean` in `rmd run-task`, so a task failing a BLOCKING check is never dispatched.
+ *  A BLOCK refuses dispatch; a WARN is visibility-only, and each check states its own severity and
+ *  any knob that demotes it. Two are warn-only BY CONSTRUCTION, with no knob anywhere.
+ *  Why: docs/forensics/task-linter.md#module-header holds the incidents each check was earned by
+ *  (W1-T6/T9/T12, W1-T100/T101, W1-T180, W1-T246, W1-T310, W1-T326, W1-T519). */
 
 export type LintCheck =
   | "sizing"
@@ -126,49 +87,35 @@ export interface LintResult {
 }
 
 // ── SIZING (Rule 19) ─────────────────────────────────────────────────────────
-//
-// "≥2 DISTINCT SUBSYSTEMS/CONCERNS — inferred from the files: globs PLUS
-// criteria naming modules OUTSIDE files:, NOT the raw criterion COUNT." A task
-// with many criteria over ONE module (W1-T4's 3-criteria parser shape, W1-T3E's
-// 4-criteria reviewer-rubric shape) must NOT flag; a task whose files:/criteria
-// span multiple modules, at risk<high, must.
+// Rule 19 counts DISTINCT SUBSYSTEMS/CONCERNS, never the raw criterion count: concerns are inferred
+// from the `files:` list plus criteria naming modules outside it. Many criteria over one module
+// must not flag; a span across modules at risk<high must. Why: the count-based reading mis-flagged
+// W1-T4 and W1-T3E.
 
-/** Basename-minus-extension of a repo-relative path (`.test` suffix folded away
- *  so `test/review.test.ts` and `src/lib/review.ts` name the SAME module). */
+/** Basename minus extension of a repo-relative path, with `.test` folded away so
+ *  `test/review.test.ts` and `src/lib/review.ts` name the SAME module. */
 export function moduleIdFromPath(path: string): string | undefined {
   const m = path.match(/([^/\\]+)\.[A-Za-z0-9]+$/);
   if (!m) return undefined;
   return m[1].replace(/\.test$/, "").toLowerCase();
 }
 
-/**
- * Known cross-cutting subsystem nouns, checked against acceptance criteria text
- * for a task that names a module OUTSIDE its `files:` list (or carries none at
- * all — W1-T12's original definition had no `files:` field). DATA, like the
- * headless-fitness lexicon below — it grows as the retro/Architect find a new
- * pattern, never by editing the check logic. Deliberately narrow: each entry is
- * a DISTINCTIVE noun for a real remudero subsystem, not a generic English word
- * (a naive "every src/lib basename as a keyword" scan false-positives on
- * ordinary prose — e.g. "plan/tasks.yaml" appears in nearly every task and
- * would spuriously tag the `plan` module; "reviewer"/"review-gate" would tag
- * `review` on W1-T3E's single-concern reviewer-rubric task).
- */
+/** Cross-cutting subsystem nouns, matched against acceptance-criteria text when a task names a
+ *  module outside its `files:` list, or carries none. DATA, not logic: a new pattern is a row here.
+ *  THE TRAP IS OVER-BREADTH — each entry must be a DISTINCTIVE noun for a real subsystem, never a
+ *  generic word, since a "every src/lib basename is a keyword" scan tags `plan` on every task.
+ *  Why: docs/forensics/task-linter.md#subsystem_lexicon. */
 export const SUBSYSTEM_LEXICON: ReadonlyArray<{ tag: string; pattern: RegExp }> = [
   { tag: "daemon", pattern: /\bdaemon\b/i },
   { tag: "launchd", pattern: /\blaunchd\b|\blaunchctl\b/i },
   { tag: "crash-recovery", pattern: /\bchaos-drill\b|\bcrash-recover(?:y|ed)?\b/i },
 ];
 
-/**
- * Non-code data/config file classes DISCOUNTED from the subsystem COUNT (#153,
- * W1-T92): a code file paired with its OWN data artifact — e.g. `src/lib/retro.ts`
- * + `plan/mast-mapping.yaml`, the policy-as-data house pattern MASTER-PLAN rule 2
- * prescribes — must not count as a SECOND subsystem just because the artifact has
- * a different basename. Each row is a path prefix PLUS an extension, not a branch,
- * so a new discounted class is a table row with ZERO changes to {@link subsystemsOf}.
- * The file still appears in `task.files` and in a violation's file list either way —
- * this table only removes it from the CONCERN tally.
- */
+/** Non-code data/config file classes discounted from the subsystem COUNT: a code file paired with
+ *  its own data artifact, the policy-as-data pattern of MASTER-PLAN rule 2, must not count as a
+ *  second subsystem merely because the artifact has a different basename. Each row is a path prefix
+ *  plus an extension, never a branch, so a new class costs one row and no engine change; it removes
+ *  the file from the concern tally only. Why: #153, W1-T92. */
 export interface DataArtifactClass {
   tag: string;
   pathPattern: RegExp;
@@ -181,8 +128,8 @@ export const DATA_ARTIFACT_CLASSES: ReadonlyArray<DataArtifactClass> = [
   { tag: "settings-data", pathPattern: /^settings\//, extPattern: /\.(?:ya?ml|json|md)$/i },
 ];
 
-/** True iff `path` matches BOTH the path prefix and the extension of some row in
- *  `classes` — i.e. it's a discounted data/config artifact, not a code subsystem. */
+/** True iff `path` matches BOTH the path prefix and the extension of some row in `classes` — a
+ *  discounted data/config artifact rather than a code subsystem. */
 export function isDataArtifact(
   path: string,
   classes: ReadonlyArray<DataArtifactClass> = DATA_ARTIFACT_CLASSES,
@@ -190,30 +137,12 @@ export function isDataArtifact(
   return classes.some((c) => c.pathPattern.test(path) && c.extPattern.test(path));
 }
 
-/**
- * W1-T2525 — `ownFalsifierSlug`: THIS task's own shard filename slug (the same fact {@link
- * LintOpts.duplicateSlug} already carries for {@link duplicateTitleViolations}), so THIS task's
- * own falsifier can be told apart from an unrelated one: a `test/` path whose {@link
- * moduleIdFromPath} EQUALS the slug is
- * the task's own falsifier (the suite written to prove ITS acceptance criteria, named after the
- * task the house convention already uses); any other `test/` path is SOMEONE ELSE's test, or an
- * unrelated one, and now counts like an ordinary concern instead of being swept into the discount.
- *
- * WHY THIS EXISTS. {@link COMPANION_PATH_CLASSES}'s W1-T2543 discount is UNCONDITIONAL on path
- * class alone: ANY `test/` path is a candidate companion the moment some non-companion file
- * survives, with no check that the specific test belongs to THIS task's own change. That is exactly
- * right for the dominant shape (one source stem plus the suite written to prove it) but says nothing
- * about a task that lists a second, unrelated test file alongside — which still spans two concerns
- * and must still be refused (W1-T2525's rationale: "a task listing SOMEONE ELSE'S test file, or
- * several unrelated test files, is still spanning concerns").
- *
- * UNKNOWN SLUG (`undefined` — every caller before this task, and every caller that has no shard
- * filename to read, e.g. the pre-dispatch call site which never threads {@link
- * duplicateCorpusOpts}) ⇒ the W1-T2543 behaviour is kept BYTE FOR BYTE: any `test/` path is a
- * companion candidate, discounted subject to the vacuity guard below. Passing the slug only ever
- * NARROWS which companions are discounted — it can turn a discount into a count, never the reverse
- * — so a caller that supplies it can only make sizing STRICTER, never looser.
- */
+/** The distinct subsystems/concerns a task spans. `ownFalsifierSlug` is this task's own shard
+ *  filename slug, the fact {@link LintOpts.duplicateSlug} carries: a `test/` path whose {@link
+ *  moduleIdFromPath} equals it is the task's own falsifier and is discounted, and any other is
+ *  someone else's test and counts as an ordinary concern. INVARIANT: an unknown slug keeps
+ *  W1-T2543's behaviour byte for byte, and supplying one can only NARROW the discount.
+ *  Why: docs/forensics/task-linter.md#subsystemsof (W1-T2525, W1-T2543). */
 export function subsystemsOf(
   task: Task,
   dataArtifactClasses: ReadonlyArray<DataArtifactClass> = DATA_ARTIFACT_CLASSES,
@@ -221,18 +150,17 @@ export function subsystemsOf(
   ownFalsifierSlug?: string,
 ): Set<string> {
   const ids = new Set<string>();
-  // W1-T2543: companions are collected SEPARATELY and folded in only if nothing else survives, so
-  // the discount cannot empty the tally. Two passes rather than one because whether a companion
-  // counts depends on the WHOLE file list, not on the companion itself.
+  // Companions are collected separately and folded in only if nothing else survives, so the
+  // discount cannot empty the tally. Two passes, because whether a companion counts depends on the
+  // WHOLE file list, not the companion (W1-T2543).
   const companions = new Set<string>();
   for (const f of task.files ?? []) {
     if (isDataArtifact(f, dataArtifactClasses)) continue; // a data/config artifact, not a concern
     const id = moduleIdFromPath(f);
     if (!id) continue;
     if (isCompanionPath(f, companionClasses)) {
-      // W1-T2525: a known slug that this companion does NOT match means it is not the task's
-      // own falsifier — count it directly, exactly like an ordinary (non-companion) file, so it
-      // can never be swept away by the vacuity guard below either.
+      // A known slug this companion does not match means it is not the task's own falsifier, so
+      // count it like an ordinary file and keep the vacuity guard below from sweeping it (W1-T2525).
       if (ownFalsifierSlug !== undefined && id !== ownFalsifierSlug) ids.add(id);
       else companions.add(id);
     } else ids.add(id);
@@ -247,37 +175,12 @@ export function subsystemsOf(
   return ids;
 }
 
-/**
- * W1-T2814 — WHICH DECLARED COMPANION, IF IT WERE THIS TASK'S OWN FALSIFIER, WOULD REMOVE THE SPAN.
- *
- * PURELY DIAGNOSTIC. This decides what a violation's MESSAGE may offer; it is never consulted by
- * {@link sizingViolation}'s block/warn decision, and {@link subsystemsOf}'s carve-out is unchanged.
- * W1-T2525 narrowed that discount DELIBERATELY — a task listing someone else's test file is still
- * spanning concerns — and widening it here (fuzzy matching, prefix matching, "any single test
- * file") would be weakening a gate rather than explaining one.
- *
- * THE DEFECT THIS SERVES. `subsystemsOf`'s own-falsifier discount keys on STRING EQUALITY between
- * two names a filer chooses independently — the shard's filename slug and the test's
- * {@link moduleIdFromPath} — so a few words' difference defeats it and a one-source-one-test task
- * reads as spanning two concerns. MEASURED: W1-T2809's filing tripped
- * `[sizing] spans 2 distinct subsystems/concerns (census-discovery-is-blind-to-a-second-idiom,
- * ci-parity) at risk:medium` over exactly that shape, and renaming the shard so its slug matched
- * the test made it pass at `risk: medium` with no other change.
- *
- * AND WHY THE MESSAGE, NOT THE PREDICATE, IS THE FIX. The violation text names two exits — "raise
- * to risk:high or decompose". REGRADING SILENCES IT IDENTICALLY, and looks like the intended
- * remedy, so a lane that does not open `subsystemsOf` inflates the band and gets no signal it did
- * anything wrong: no second message, no warning, no ledger row. `risk` drives sizing exemptions,
- * dispatch ordering and effort routing, so anything reading that field downstream may be reading a
- * FILENAME MISMATCH encoded as real span.
- *
- * Returns the companion path(s) — in declaration order — for which
- * `subsystemsOf(task, …, moduleIdFromPath(path))` scores below 2, i.e. renaming the shard to that
- * module id would legitimately engage W1-T2525's discount. Empty when the slug is unknown (there
- * is nothing to rename toward), when no companion is declared, or when the span survives the
- * rename anyway — a task spanning two real source stems gets no such suggestion, which is what
- * keeps the third exit from becoming a dodge.
- */
+/** The declared companions that, renamed to, would remove the span — in declaration order; a
+ *  companion qualifies when `subsystemsOf(task, …, moduleIdFromPath(path))` scores below 2. PURELY
+ *  DIAGNOSTIC: it decides what a violation MESSAGE may offer, never {@link sizingViolation}'s
+ *  decision, and is empty unless the rename would really resolve the span. TRAP: that discount keys
+ *  on string equality between two names a filer picks independently, so a few words' difference
+ *  reads as a real span. Why: docs/forensics/task-linter.md#ownfalsifierrenamecandidates. */
 export function ownFalsifierRenameCandidates(
   task: Task,
   ownFalsifierSlug: string | undefined,
@@ -295,19 +198,10 @@ export function ownFalsifierRenameCandidates(
   return out;
 }
 
-/**
- * W1-T2814 — THE THIRD EXIT, WITH ITS CONDITION ATTACHED. Appended to the sizing block message
- * only when {@link ownFalsifierRenameCandidates} finds the rename would actually resolve the span,
- * so it is never a bare suggestion on a task spanning two real concerns.
- *
- * THE CONDITION IS NOT OPTIONAL, AND IT IS WHY THIS IS NOT ONE MORE SENTENCE. Advertising a rename
- * INVITES GAMING IT: read as "rename your shard to match your test", any task spanning two genuine
- * concerns could silence Rule 19 by renaming a file, and this text would have built the next silent
- * distortion while fixing the current one. So the exit states the property that makes the discount
- * legitimate — the named suite is the one written to prove THESE acceptance criteria — and names
- * the misuse outright, so a reader can tell "the carve-out applies to me" apart from "rename to
- * make this go away" without opening `subsystemsOf`.
- */
+/** The third exit for a sizing block, appended only when {@link ownFalsifierRenameCandidates} finds
+ *  the rename would resolve the span. The sentence states the condition that makes the discount
+ *  legitimate and names the misuse outright, because advertised bare a rename exit invites gaming:
+ *  any task spanning two genuine concerns could silence Rule 19 by renaming a file. */
 export function ownFalsifierRenameExit(candidates: readonly string[]): string {
   if (candidates.length === 0) return "";
   const named = candidates.map((c) => `\`${c}\``).join(", ");
@@ -322,46 +216,22 @@ export function ownFalsifierRenameExit(candidates: readonly string[]): string {
   );
 }
 
-/** ≥2 subsystems while risk<high ⇒ a sizing violation (raise to high or decompose).
- *
- *  W1-T2503: `if (task.risk === "high") return undefined` used to be the WHOLE
- *  risk:high predicate — but the band conflates two meanings: Rule 19's SPAN
- *  measure (≥2 subsystems/concerns) or genuine BLAST RADIUS unrelated to span
- *  (a boot script, an auth path, a merge arm), and nothing recorded which.
- *  DECLARE, DO NOT REMOVE (the task's own rationale): a task the diff newly
- *  files or promotes to high (per `opts.riskTransition`, see that field's own
- *  doc for the exact contract) must now say which meaning its band carries via
- *  `task.band_meaning`; undeclared there ⇒ BLOCKED, naming both legal values
- *  rather than a bare rejection. `band_meaning: "blast-radius"` keeps today's
- *  exemption byte for byte (span left uncomputed, regardless of transition).
- *  `band_meaning: "span"` computes the subsystem count and REPORTS it
- *  (`severity: "warn"`) instead of skipping it — never a refusal, because a
- *  wide span is exactly what declaring "span" already admits.
- *
- *  `opts.riskTransition` ABSENT (no diff context at all — every call site of
- *  this function before this task, and every one of them still today:
- *  pre-dispatch's `assertLintClean`, whole-plan `lintPlan`, the retro
- *  plan-health sweep, inbox, panel-skill-run) ⇒ an undeclared band stays
- *  SILENT, exactly as before this task existed — none of those callers
- *  regress or newly block on the standing backlog. Present ⇒ an undeclared
- *  band on a task the diff FILED or MOVED to high (`baseTask` absent, or
- *  `baseTask.risk !== "high"`) blocks; on a task ALREADY high before the diff
- *  (`baseTask.risk === "high"` — the standing 824-task baseline) it only
- *  warns: reported, never refused, so no existing task blocks a PR on this
- *  alone and the count reduces at whatever pace an operator chooses. */
+/** ≥2 subsystems while risk<high ⇒ a sizing violation (raise to high or decompose). A risk:high
+ *  band conflates two meanings and nothing used to record which: Rule 19's SPAN measure, or genuine
+ *  BLAST RADIUS unrelated to span. So a task the diff files or promotes to high must declare
+ *  `band_meaning`: `blast-radius` keeps the old exemption byte for byte, and `span` computes the
+ *  count and reports it as a warn, never a refusal. INVARIANT — no `opts.riskTransition` ⇒ an
+ *  undeclared band stays SILENT, so no caller regresses on the standing backlog; with it, a
+ *  newly-high task blocks and an already-high one warns. Why: docs/forensics/task-linter.md#sizingviolation. */
 export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation | undefined {
-  // W1-T2525: the SAME shard-filename slug `duplicateTitleViolations` already reads (never
-  // re-derived here — this module is pure and reads no disk) narrows {@link subsystemsOf}'s
-  // companion discount to the task's OWN test, not `test/` at large. Blank/absent ⇒ `undefined`,
-  // which keeps the W1-T2543 discount exactly as it was for every caller that has no slug to give.
+  // The same slug `duplicateTitleViolations` reads, never re-derived — this module reads no disk.
+  // Blank or absent ⇒ undefined, keeping the W1-T2543 discount for callers with no slug (W1-T2525).
   const ownFalsifierSlug = opts.duplicateSlug?.trim().toLowerCase() || undefined;
   if (task.risk !== "high") {
     const subsystems = subsystemsOf(task, undefined, undefined, ownFalsifierSlug);
     if (subsystems.size < 2) return undefined;
-    // W1-T2814: the third exit rides on THIS message alone. The band-inflation harm the task
-    // measures is caused by this text's two exits, one of which (regrade to high) silences the
-    // violation identically; the `band_meaning: span` warn below has already admitted a wide span
-    // and offers no exit to take wrongly.
+    // The third exit rides on THIS message alone (W1-T2814). The `band_meaning: span` warn below
+    // has already admitted a wide span, so it offers no exit a reader can take wrongly.
     return {
       check: "sizing",
       severity: "block",
@@ -414,76 +284,28 @@ export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation 
 }
 
 // ── HEADLESS-FITNESS (Rule 18) ───────────────────────────────────────────────
-//
-// A forbidden live-context lexicon, held as DATA so it grows. Applied to every
-// acceptance criterion of an auto-verify task — a headless worker has no TTY and
-// no operator, so a criterion needing one can never pass (W1-T9's readline-
-// reproduction death spiral; W1-T12's overnight-drain / launchctl-load / live-
-// kill criteria).
-//
-// PRECISION vs RECALL (the #146 sweep, W1-T81): a naive whole-word-anywhere scan
-// is wrong in BOTH directions on the SAME rule.
-//   - FALSE POSITIVE #1 — negation: 'NO real overnight run' (W1-T12a) and 'NOT a
-//     real launchctl load' (W1-T12b) contain a forbidden word but explicitly deny
-//     the live action. A hit whose CLAUSE (bounded by . , ; : ( ) or an em-dash)
-//     opens with a negation cue (no/not/never/without/non/isn't/doesn't/won't/
-//     cannot/can't/nor) BEFORE the match does not flag.
-//   - FALSE POSITIVE #2 — self-reference: W1-T20c's own criterion literally names
-//     the lexicon ('a criterion containing overnight/launchctl/killed...') to
-//     describe the CHECK, not to instruct a live action. Exempted by CONTENT
-//     SHAPE, never a task-id allowlist (an id allowlist rots): (a) forbidden
-//     terms directly enumerated back-to-back with a bare '/' between them (no
-//     surrounding spaces) are a quoted/listed lexicon excerpt, not an
-//     instruction; (b) a hit fully inside a quoted span ('...' or "...", the
-//     quote not itself a contraction/possessive apostrophe) is a quoted excerpt
-//     under discussion, not an instruction.
-//   - FALSE POSITIVE #3 — missing ACTOR (the #268 sweep, W1-T118): a lexicon
-//     word can name either a genuinely live action (W1-T12d's operator kill -9
-//     on a real daemon) or a headless one (a test spawning its own child and
-//     reaping it in-process, W1-T117) — SAME WORD, opposite fitness, because the
-//     check matched vocabulary, not who/what the action is done TO. The
-//     discriminator is SPAWN-OWNERSHIP: a lexicon row may carry an optional
-//     `qualifier` pattern (see {@link LexiconEntry}); when the criterion's own
-//     text (claim + proof together, unscoped by clause — ownership is usually
-//     established earlier in the SAME criterion, often in a different clause,
-//     e.g. 'fixture spawns...; ...killed') matches that pattern, the row does
-//     NOT fire — the process/resource acted upon is CREATED BY THE TEST OR
-//     FIXTURE, not pre-existing on the operator's machine, so the action is
-//     headlessly performable. No qualifier, or no match ⇒ the row fires exactly
-//     as before (DEFAULT ON FIRING: a false positive costs a reword, a false
-//     negative costs a dispatched task that can never pass, the W1-T9 death
-//     spiral) — W1-T12d's live-kill criterion names no ownership signal and
-//     must keep flagging.
-//   - FALSE NEGATIVE — the genuinely headless-unfit proofs the check was BUILT to
-//     catch ('paste the red check, then revert' — the W1-T25 no_pr incident,
-//     122 turns before verdict=no_pr) are PHRASES, not lexicon words, so the
-//     original word-only lexicon never matched them. Phrase-level signals below
-//     close this gap.
+// A forbidden live-context lexicon, held as DATA so it grows. A headless worker has no TTY and no
+// operator, so an auto-verify criterion needing one can never pass. A naive whole-word scan is wrong
+// in BOTH directions, so three exemptions and one widening carry the precision: NEGATION,
+// SELF-REFERENCE (by CONTENT SHAPE, never a task-id allowlist, which rots), SPAWN-OWNERSHIP, and
+// PHRASE rows. DEFAULT ON FIRING: an ambiguous criterion still flags, because a false positive costs
+// a reword and a false negative a task that can never pass. Why:
+// docs/forensics/task-linter.md#headless_forbidden_lexicon.
 
 export interface LexiconEntry {
   tag: string;
   pattern: RegExp;
-  /** SPAWN-OWNERSHIP qualifier (W1-T118, the #268 false positive) — OPTIONAL,
-   *  scope-as-data, never a reason to delete the row. When present, a hit for
-   *  THIS row is exempted (does not flag) if `qualifier` matches anywhere in the
-   *  criterion's combined claim+proof text: the criterion's own words establish
-   *  that the process/resource acted upon is CREATED BY THE TEST OR FIXTURE
-   *  (spawns/seeds/fixture/in-process/test-spawned), not pre-existing on the
-   *  operator's machine. Absent, or no match ⇒ the row fires unconditionally,
-   *  exactly as before — DEFAULT ON FIRING: an ambiguous criterion (the term
-   *  appears with no ownership signal either way) still flags, because a false
-   *  positive costs a reword while a false negative costs a dispatched task
-   *  that can never pass (the W1-T9 death spiral). See {@link
-   *  SPAWN_OWNERSHIP_CUE} for the shared cue pattern most rows will reuse. */
+  /** Optional SPAWN-OWNERSHIP qualifier — scope-as-data, never a reason to delete the row. A hit is
+   *  exempted when `qualifier` matches anywhere in the criterion's claim+proof text, i.e. its own
+   *  words say the test or fixture created the process acted upon; absent or no match, the row
+   *  fires. Why: W1-T118, the #268 false positive. */
   qualifier?: RegExp;
 }
 
-/** Shared SPAWN-OWNERSHIP cue (W1-T118): the criterion's own text names the
- *  test/fixture as the thing that CREATED the process/resource being acted
- *  upon — 'a worker fixture spawns a detached child... the child's process
- *  group killed' (W1-T117) vs 'the LIVE daemon killed mid-task' (W1-T12d,
- *  names no such actor). Any lexicon row may reuse this as its `qualifier`,
- *  or supply its own — the field is per-row DATA, not tied to this constant. */
+/** Shared SPAWN-OWNERSHIP cue: the criterion's own text names the test or fixture as what CREATED
+ *  the process being acted upon. 'a worker fixture spawns a detached child … the child's process
+ *  group killed' qualifies; 'the LIVE daemon killed mid-task' names no such actor. A row may reuse
+ *  this or supply its own — the field is per-row DATA. Why: W1-T118. */
 export const SPAWN_OWNERSHIP_CUE = /\b(?:spawns?|spawned|spawning|seeds?|seeded|seeding|fixture|in-process|test-spawned)\b/i;
 
 export const HEADLESS_FORBIDDEN_LEXICON: ReadonlyArray<LexiconEntry> = [
@@ -495,19 +317,10 @@ export const HEADLESS_FORBIDDEN_LEXICON: ReadonlyArray<LexiconEntry> = [
   { tag: "operator-confirms", pattern: /\boperator\s+confirms?\b/i },
   { tag: "user-selects", pattern: /\buser\s+selects?\b/i },
   { tag: "manual-eyeball", pattern: /\bmanual[- ]eyeball(?:ed|ing)?\b/i },
-  // Phrase-level live-demonstration signals (RECALL, the #146 sweep) — an
-  // imperative demonstration no headless worker can perform, regardless of
-  // whether any single WORD above appears: 'paste the <red|green|score|check>
-  // [...], then revert' (W1-T25/26/28 pre-sweep), 'run against <a live/sandbox
-  // repo>' (W1-T27 pre-sweep: 'run against remudero-sandbox'), and 'operator
-  // observes'. NOT included: a bare 'screenshot' — checked against the LIVE
-  // plan (255 tasks) before landing, it false-positived on W1-T153's Lighthouse
-  // artifact (an AUTOMATED headless-browser capture attached to the PR, not a
-  // live action) and on W1-T184's '(operator screenshot, 2026-07-20)' — a
-  // FALSIFIER citing PAST evidence, not an instruction to the worker. The word
-  // alone doesn't distinguish "a headless worker can produce this" from "a
-  // human must be there" — exactly the false-positive failure mode this task
-  // exists to fix, so it stays out until a precise phrase shape is found.
+  // Phrase-level live-demonstration signals: an imperative no headless worker can perform,
+  // regardless of whether any single word above appears. A bare 'screenshot' is DELIBERATELY not a
+  // row — measured against the live plan, it false-positived on an automated capture and on a
+  // falsifier citing past evidence. Why: the #146 sweep, W1-T25/26/27/28, W1-T153/T184.
   {
     tag: "paste-then-revert",
     pattern: /\bpaste\s+the\s+(?:\w+\s+){0,2}(?:red|green|score|check)\b[\s\S]{0,40}?\bthen\s+revert\b/i,
@@ -551,9 +364,8 @@ function findLexiconHits(text: string, lexicon: ReadonlyArray<LexiconEntry>): Le
   return hits;
 }
 
-/** Indices of `hits` that are part of a bare-'/'-joined enumeration (>=2 terms,
- *  e.g. 'overnight/launchctl/killed') — a quoted/listed lexicon excerpt, not an
- *  instruction (W1-T20c's self-description). */
+/** Indices of `hits` that are part of a bare-'/'-joined enumeration of >=2 terms — a listed
+ *  lexicon excerpt, not an instruction. Why: W1-T20c's self-description. */
 function enumerationExemptIndices(hits: LexiconHit[], text: string): Set<number> {
   const exempt = new Set<number>();
   for (let i = 1; i < hits.length; i++) {
@@ -587,14 +399,10 @@ function isNegationScoped(text: string, start: number): boolean {
   return NEGATION_CUE.test(text.slice(clauseStart, start));
 }
 
-/** True iff `tag`'s row in `lexicon` carries a `qualifier` that matches
- *  somewhere in `text` — the criterion's own words establish spawn-ownership
- *  (W1-T118, the #268 false positive). Unscoped by clause (unlike {@link
- *  isNegationScoped}): ownership is typically established earlier in the SAME
- *  criterion, often in a different clause ('fixture spawns...; ...killed'), so
- *  restricting to the local clause would miss it. No qualifier on the row, or
- *  no match ⇒ false — DEFAULT ON FIRING (W1-T118(ii)): an ambiguous criterion
- *  still flags. */
+/** True iff `tag`'s row carries a `qualifier` matching somewhere in `text` — the criterion's own
+ *  words establish spawn-ownership. Unscoped by clause, unlike {@link isNegationScoped}, since
+ *  ownership is usually established earlier in the criterion, in a different clause. No qualifier
+ *  or no match ⇒ false, so an ambiguous criterion still flags. Why: W1-T118, the #268 positive. */
 function isSpawnOwnershipQualified(text: string, tag: string, lexicon: ReadonlyArray<LexiconEntry>): boolean {
   const entry = lexicon.find((e) => e.tag === tag);
   if (!entry?.qualifier) return false;
@@ -602,10 +410,9 @@ function isSpawnOwnershipQualified(text: string, tag: string, lexicon: ReadonlyA
   return re.test(text);
 }
 
-/** Every criterion of an auto-verify task that hits `lexicon` outside a negation
- *  scope, a quoted span, or a bare-'/' lexicon enumeration. Defaults to
- *  {@link HEADLESS_FORBIDDEN_LEXICON}; the `lexicon` param exists so the DATA
- *  table can grow (a new phrase row) with ZERO changes to this function. */
+/** Every criterion of an auto-verify task that hits `lexicon` outside a negation scope, a quoted
+ *  span, or a bare-'/' enumeration. The `lexicon` parameter exists so the DATA table can grow with
+ *  no change to this function. */
 export function headlessFitnessViolations(
   task: Task,
   lexicon: ReadonlyArray<LexiconEntry> = HEADLESS_FORBIDDEN_LEXICON,
@@ -613,9 +420,8 @@ export function headlessFitnessViolations(
   if (task.verify !== "auto") return []; // only an auto-verify task is dispatched headless
   const violations: LintViolation[] = [];
   (task.acceptance ?? []).forEach((c, i) => {
-    // Joined with an em-dash — a CLAUSE_BOUNDARY char — so a negation cue or a
-    // quoted span in one field can never leak into the OTHER field (claim vs
-    // proof are logically separate clauses; W1-T81).
+    // Joined with an em-dash, a CLAUSE_BOUNDARY char, so a negation cue or a quoted span in one
+    // field can never leak into the other: claim and proof are separate clauses (W1-T81).
     const text = `${c.claim ?? ""} — ${c.proof ?? ""}`;
     const hits = findLexiconHits(text, lexicon);
     if (hits.length === 0) return;
@@ -641,9 +447,8 @@ export function headlessFitnessViolations(
 }
 
 // ── PROOF-SHAPE ──────────────────────────────────────────────────────────────
-//
-// Every criterion needs an OBSERVABLE proof, not a vibe ("works" / "correct" /
-// empty). DATA-driven, same pattern as the two lexicons above.
+// Every criterion needs an OBSERVABLE proof, not a vibe ("works" / "correct" / empty). DATA-driven,
+// like the two lexicons above.
 
 const VIBE_PROOFS = new Set([
   "",
@@ -682,61 +487,34 @@ export function proofShapeViolations(task: Task): LintViolation[] {
 }
 
 // ── PROOF-DIALECT (moratorium finding 9 — the dead proof floor) ─────────────
-//
-// remudero-review resolves a task's acceptance from tasks.yaml and EXECUTES
-// each `proof:` — but only review.ts's own house dialect actually runs
-// (`parseWhitelistedProof`: `unit test: <path-or-name>` / `grep: <pattern> in
-// <path>`, plus two legacy strict shapes). Anything else is free prose: it
-// never executes, degrades straight to the 0.6 keyword floor, and a task with
-// ZERO executable proofs CAPS on review exactly like W1-T79 (PR #662) did — a
-// two-step manual operator rescue (a worker cannot amend its own criteria,
-// Standing rule 15). CENSUS at filing time: 45% of all plan proofs (390/861)
-// cannot execute; 96 not-done tasks have zero executable proofs. The fix
-// belongs at AUTHORING, not a third rescue lever on the review side — this
-// check REUSES review.ts's own predicate (never a reimplementation that could
-// drift from what the executor actually runs).
-//
-// W1-T277: a THIRD dialect, `demonstration: <what the operator must do>`,
-// is also never executed — but unlike the free prose above, that is not a
-// defect: it is an honest, on-the-record declaration that the proof is an
-// operator action with no executable form and never will be (a chaos drill,
-// a device recording, a live deploy). Legal ONLY on a `verify: human` task
-// (where it lints clean); refused outright on `verify: auto` (where the
-// identical prefix would be an escape hatch from the rule this check exists
-// to enforce). See the dedicated block below, checked BEFORE the general
-// dead-proof-floor logic.
+// The reviewer EXECUTES each `proof:`, but only review.ts's house dialect actually runs. Anything
+// else is free prose: it never executes, degrades to the keyword floor, and a task with ZERO
+// executable proofs caps on review and needs a manual operator rescue. This check REUSES review.ts's
+// own predicate, never a reimplementation that could drift from what the executor runs.
+// `demonstration:` is a third, never-executed dialect — an honest declaration, not a defect. It is
+// legal ONLY on `verify: human` and refused on `verify: auto`, where the identical prefix would be
+// an escape hatch, and is checked BEFORE the dead-proof-floor logic.
+// Why: docs/forensics/task-linter.md#proofdialectviolations.
 
-/** A near-miss dialect prefix — close enough to the real `unit test:`/`grep:`
- *  labels that it reads as an authoring TYPO rather than deliberate prose
- *  (`unit tests:` plural, `unit test over ...:`, `integration test:`), but
- *  none of these match {@link parseWhitelistedProof}'s exact prefixes, so the
- *  proof still falls through to free prose. Checked at the START of the
- *  trimmed proof only — the dialect label is how a proof STARTS (mirrors
- *  review.ts's own `isDialectPrefixed` doc). */
+/** A near-miss dialect prefix — close enough to the real `unit test:`/`grep:` labels to read as an
+ *  authoring typo rather than deliberate prose. None of these match {@link parseWhitelistedProof},
+ *  so the proof still falls through to free prose. Checked at the START of the trimmed proof only,
+ *  because a dialect label is how a proof begins (mirrors review.ts's `isDialectPrefixed`). */
 const NEAR_MISS_PREFIX_RE = /^(?:unit tests\s*:|unit test over\b|integration test\s*:)/i;
 
-/** True iff a `unit test:` dialect BODY reads as a runtime narrative rather
- *  than a literal test-title substring — the W1-T79-criteria-3/4 shape
- *  ("same-sha fixture -> no pull, no re-exec, ..."). `--test-name-pattern`
- *  is a substring match against the actual test's title, so a compound,
- *  multi-clause body predictably matches ZERO tests at review time (degrading
- *  to the keyword floor, W1-T72's `floorDegraded` signal) even though the
- *  proof parses as executable. WARN-only, regardless of `opts.proofDialect`:
- *  some real test titles genuinely are long or contain `;`, so this is a
- *  hint, never a block. */
+/** True iff a `unit test:` body reads as a runtime narrative rather than a literal test-title
+ *  substring. `--test-name-pattern` is a substring match against a real title, so a compound,
+ *  multi-clause body matches ZERO tests at review time and degrades to the keyword floor even
+ *  though the proof parses. WARN-only regardless of `opts.proofDialect`, since some real titles are
+ *  genuinely long. Why: the W1-T79 criteria-3/4 shape, W1-T72. */
 function looksLikeNonTitleBody(body: string): boolean {
   return body.includes(" -> ") || body.includes("; ") || body.length > 100;
 }
 
-/** Every non-`satisfied_by` criterion whose proof does not parse as a
- *  {@link parseWhitelistedProof} shape — a proof that CANNOT execute never
- *  lands (the dead proof floor, moratorium finding 9). BLOCK by default, and
- *  since impl-AK every call site including run-task.ts's pre-dispatch gate
- *  takes that default: `opts.proofDialect: "warn"` remains available (it
- *  demotes every violation here to visibility-only) but no caller passes it.
- *  A criterion whose proof DOES parse but
- *  reads as a non-title `unit test:` body (see {@link looksLikeNonTitleBody})
- *  gets a separate WARN, always, independent of `opts.proofDialect`. */
+/** Every non-`satisfied_by` criterion whose proof does not parse as a {@link parseWhitelistedProof}
+ *  shape — the dead proof floor. BLOCK by default, and since impl-AK every call site takes that
+ *  default. A proof that DOES parse but reads as a non-title `unit test:` body (see {@link
+ *  looksLikeNonTitleBody}) draws a separate WARN, always, independent of `opts.proofDialect`. */
 export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const severity: LintSeverity = opts.proofDialect ?? "block";
   const violations: LintViolation[] = [];
@@ -746,18 +524,9 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
     const trimmed = proof.trim();
     const claimHead = (c.claim ?? "").slice(0, 60);
 
-    // W1-T277: `demonstration: <what the operator must do>` names an operator
-    // action with no executable form and never will (a chaos drill, a device
-    // recording, a live deploy) — it is a proof the harness DECLINES to check,
-    // on the record, not one that failed to parse. Legal ONLY on a
-    // verify:human task, where declining to execute it is the entire point
-    // (lints clean, no violation at all — never even a warn). On a
-    // verify:auto task the identical prefix is an escape hatch from the
-    // executable-proof rule this check exists to enforce, so it is BLOCKED
-    // unconditionally here — that asymmetry is the dialect's whole safety
-    // property (W1-T277 design), so it holds regardless of `opts.proofDialect`
-    // (the legacy-backlog warn-only rollout knob applies to proofs that FAIL
-    // to parse, never to one that is illegal by construction).
+    // The asymmetry is the dialect's whole safety property, so `opts.proofDialect` cannot demote
+    // it: the warn-only rollout knob covers proofs that FAIL to parse, never one illegal by
+    // construction (W1-T277; see the section comment above).
     if (isDemonstrationProof(trimmed)) {
       if (task.verify === "human") return;
       const head = trimmed.slice(0, 80) + (trimmed.length > 80 ? "…" : "");
@@ -810,38 +579,14 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
 }
 
 // ── PROOF-RESOLVABILITY (W1-T101 — a dialect prefix is a promise) ───────────
-//
-// proofDialectViolations (above, W1-T246) already refuses a dialect body that
-// does not PARSE at all (a `grep:` proof with no `in <path>` clause, etc.) and
-// WARNS when a `unit test:` body reads as a runtime narrative — but never
-// BLOCKS the narrative case, because parseTestTarget (review.ts) deliberately
-// treats ANY non-path `unit test:` body as a valid name-filtered proof, on the
-// theory that the author's own prose might still match a real test's title.
-// The W1-T100 ledger is the gap that permissiveness leaves open: proof_exec
-// [not_executable x3] on two `unit test:`-prefixed proofs, each PARSING as
-// "whitelisted", each resolving to ZERO real tests at review time — a prefix
-// that PROMISED executability with a payload that could never resolve.
-//
-// This rule polices that PROMISE, independent of whether the payload happens
-// to parse: a `unit test:`/`grep:` prefix commits the author to naming a
-// RESOLVABLE artifact — a path-like token or an explicit `::test-name` token
-// for `unit test:`, a pattern plus an `in <path>` clause for `grep:` (DATA,
-// {@link PROOF_PAYLOAD_SHAPES} — companion rows to W1-T81's phrase signals and
-// W1-T92's path classes; a new resolvable shape is a table row, zero engine
-// changes). A proof with NO dialect prefix makes no such promise and is NEVER
-// touched by this rule — prose is legitimate and keyword-bound by design; drop
-// the prefix is always the other valid remedy.
-//
-// A `unit test:` body that carries neither anchor is refused ONLY when it also
-// reads as a multi-clause SCENARIO NARRATIVE, never on a bare single-arrow
-// phrase alone — this repo's OWN test titles idiomatically read `X -> Y` (187
-// real `test("... -> ...")` titles in this suite, e.g. `test("decideAlert
-// Disposition: critical severity -> escalate")`), so a lone arrow is not a red
-// flag. What the W1-T100 corpus actually looks like is SEVERAL independent
-// observations chained together (multiple comma-separated clauses, or a
-// semicolon stacked on top of an enumerated clause) — a shape no single test
-// title plausibly reads as. `grep:` carries no such exception: the dialect's
-// own promise ("a pattern AND an `in <path>` clause") is unconditional.
+// A dialect prefix is a PROMISE, and this rule polices it independently of whether the payload
+// parses: it commits the author to naming a RESOLVABLE artifact, held as DATA in {@link
+// PROOF_PAYLOAD_SHAPES}. A proof with NO dialect prefix makes no such promise and is never touched.
+// TRAP proofDialectViolations cannot close: parseTestTarget treats ANY non-path `unit test:` body
+// as a valid name-filtered proof, so a prefix can promise executability with a payload resolving to
+// zero real tests. Such a body is refused ONLY when it also reads as a multi-clause SCENARIO
+// NARRATIVE, never on a lone arrow — this repo's own titles read `X -> Y`. Why:
+// docs/forensics/task-linter.md#proofresolvabilityviolations (W1-T100, W1-T101, W1-T246).
 
 export interface ProofPayloadShape {
   tag: string;
@@ -851,45 +596,35 @@ export interface ProofPayloadShape {
   pattern: RegExp;
 }
 
-/** DATA table — a new resolvable payload SHAPE is a row here, zero engine
- *  changes (mirrors {@link SUBSYSTEM_LEXICON} / {@link DATA_ARTIFACT_CLASSES} /
- *  {@link HEADLESS_FORBIDDEN_LEXICON} above). */
+/** DATA table — a new resolvable payload SHAPE is a row here, with no engine change (mirrors
+ *  {@link SUBSYSTEM_LEXICON} / {@link DATA_ARTIFACT_CLASSES} / {@link HEADLESS_FORBIDDEN_LEXICON}). */
 export const PROOF_PAYLOAD_SHAPES: ReadonlyArray<ProofPayloadShape> = [
   // unit test: a path-like token (test/*.test.ts) anywhere in the body.
   { tag: "test-path", dialect: "unit test", pattern: /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/ },
   // unit test: an explicit ::test-name token — a literal '::' followed by a
   // non-empty name, unambiguous even when the token before it isn't a path.
   { tag: "test-name-token", dialect: "unit test", pattern: /::\s*\S/ },
-  // grep: a pattern AND a trailing `in <path>` clause — the same shape
-  // parseDialectGrep (review.ts) requires to parse at all, re-declared here as
-  // DATA so the remedy text below stays uniform across both dialects.
+  // grep: a pattern AND a trailing `in <path>` clause — the same shape parseDialectGrep requires
+  // to parse at all, re-declared as DATA so the remedy text stays uniform across both dialects.
   { tag: "grep-in-path", dialect: "grep", pattern: /\bin\s+\S*[./]\S*\s*$/i },
 ];
 
-/** How a proof's TEXT starts when it is written in the executable dialect —
- *  matched EXACTLY (unlike {@link NEAR_MISS_PREFIX_RE} above, a near-miss
- *  prefix makes no promise this rule polices; that's its own, separate hint). */
+/** How a proof's text starts when written in the executable dialect, matched EXACTLY. A near-miss
+ *  prefix ({@link NEAR_MISS_PREFIX_RE}) makes no promise this rule polices and is a separate hint. */
 const RESOLVABILITY_DIALECT_RE = /^(unit test|grep):\s*([\s\S]*)$/i;
 
-/** True iff `body` reads as a multi-clause scenario narrative rather than a
- *  single test's title — see the module comment above for why a lone arrow
- *  does not, by itself, qualify. */
+/** True iff `body` reads as a multi-clause scenario narrative rather than a single test's title.
+ *  See the module comment above for why a lone arrow does not, by itself, qualify. */
 function looksLikeScenarioNarrative(body: string): boolean {
   const commas = (body.match(/,/g) ?? []).length;
   return commas >= 2 || (body.includes("; ") && commas >= 1) || body.length > 100;
 }
 
-/** Every criterion whose proof STARTS with the executable dialect (`unit
- *  test:` | `grep:`) but whose payload matches NONE of {@link
- *  PROOF_PAYLOAD_SHAPES} for that dialect — a prefix that promises
- *  executability without naming a resolvable artifact (the W1-T100 0/3). A
- *  proof with no dialect prefix is never touched (prose is legitimate by
- *  design). BLOCK by default; `opts.proofResolvability: "warn"` (the
- *  pre-dispatch call site — the legacy backlog authored before this check
- *  existed must not brick overnight) demotes every violation here to
- *  visibility-only, the SAME rollout convention {@link proofDialectViolations}
- *  already uses.
- */
+/** Every criterion whose proof STARTS with the executable dialect but whose payload matches NONE of
+ *  {@link PROOF_PAYLOAD_SHAPES} for it — a prefix promising executability without naming a
+ *  resolvable artifact. A proof with no dialect prefix is never touched. BLOCK by default;
+ *  `opts.proofResolvability: "warn"` demotes them at the pre-dispatch site, so the legacy backlog
+ *  does not brick overnight. */
 export function proofResolvabilityViolations(
   task: Task,
   opts: LintOpts = {},
@@ -925,136 +660,52 @@ export function proofResolvabilityViolations(
 }
 
 // ── PROOF-GREP-SAFETY (W1-T287) ──────────────────────────────────────────────
-//
-// A `grep:` proof's pattern is compiled by `execWhitelistedProof` as
-// `grep -arn -- <pattern> <path>` — a BASIC REGULAR EXPRESSION (BRE), not a fixed
-// string. Nothing in the dialect docs, the authoring prompts, or CLAUDE.md says
-// so, and guidance circulating in this project ("`grep -F` is case-sensitive")
-// actively teaches the wrong model. The result is measurable: 1,952 verdicts in
-// the unioned ledger carry a FAILED grep proof, including `grep: loadPolicy in
-// src/lib/review.ts` failing four separate times on W1-T253.
-//
-// THE LIVE FIXTURE (PR #1071): a proof reading `grep: For a [call-site]
-// violation in <path>` had `[call-site]` read as a CHARACTER CLASS matching one
-// character from {c,a,l,-,s,i,t,e}. The pattern meant "For a X violation" and
-// could never match the literal text. Its author verified locally with
-// `grep -F` — a DIFFERENT MATCHER — and got a false green.
-//
-// THE SET IS MEASURED, NOT REMEMBERED. Determined by running both grep
-// implementations on this host against two discriminators: (1) does `aXb` match
-// the text `aQb`, which contains no `X`? (2) does `aXb` FAIL to match the
-// literal text `aXb`? Either ⇒ `X` is a metacharacter. Results:
-//
-//   * . ^ $ [   metacharacters      ] ( ) { } + ? | \   literal-safe
-//
-// `(` is NOT a BRE metacharacter (it is an ERE one), which matters because
-// PR #1071's own call-site proofs use `foo(` — rejecting it would break a rule
-// that merged the same day. `]` alone is literal-safe on both implementations,
-// so only `[` — which is what OPENS a bracket expression — is refused.
-//
-// IMPLEMENTATIONS DISAGREE, so the set is the UNION (⇒ the safe intersection of
-// accepted patterns). BSD grep 2.6.0-FreeBSD reads a mid-pattern `^` as a
-// literal; ugrep 7.5.0 (what `grep` actually resolves to on this host) reads it
-// as an anchor everywhere. A pattern whose meaning depends on which binary the
-// review host happens to run is not a proof, so anything special to EITHER is
-// refused.
-//
-// SEVERITY IS SPLIT ON THE FAILURE MODE, and the split is what the retrofit
-// measurement earned. Across all 313 tasks / 31 parseable `grep:` proofs:
-//   - `[ * ^ $` can make a proof NEVER match its intended text — a silent
-//     false FAIL, the #1071 class. Retrofit: 0 tasks. ⇒ BLOCK.
-//   - `.` merely matches MORE than intended (`a.b` also matches `aQb`) — the
-//     proof still finds its literal text, so the failure mode is over-breadth,
-//     not a false fail. Retrofit: 4 tasks (W1-T254, W1-T266, W1-T275, W1-T284),
-//     every one a dot inside an identifier (`panel-skills.js`,
-//     `sweep.post_review.attempt`). ⇒ WARN, so working proofs are not stranded.
-// Blocking `.` would have forced four rewrites of proofs that function; warning
-// on `[` would have let the #1071 defect through again.
-//
-// AN ESCAPED METACHARACTER IS LEGITIMATE and is accepted: `\.` matches a literal
-// dot and NOT any character (verified on both implementations). But a backslash
-// that OPENS a BRE construct — `\(`, `\)`, `\{`, `\}` (grouping and intervals,
-// both confirmed working) — is itself a metacharacter and is refused.
+// `execWhitelistedProof` runs `grep -arn -- <pattern> <path>`, so a `grep:` proof's pattern is a
+// BASIC REGULAR EXPRESSION, not a fixed string. THE TRAP: an author verifies with `grep -F` — a
+// DIFFERENT MATCHER — and gets a false green on a pattern that can never match.
+// THE METACHARACTER SET IS MEASURED, NOT REMEMBERED, and is the UNION over both grep
+// implementations: a pattern whose meaning depends on which binary the review host runs is not a
+// proof. SEVERITY SPLITS ON THE FAILURE MODE: a character that can make a proof NEVER match blocks,
+// one that only widens a match that still succeeds warns, so working proofs stand.
+// Why: docs/forensics/task-linter.md#proofgrepsafetyviolations (W1-T287, PR #1071, W1-T253).
 
 /** BRE metacharacters whose presence can make a pattern NEVER match its literal
  *  text — the silent-false-FAIL class. Blocking; measured retrofit 0. */
 const BRE_BLOCKING_METACHARS: ReadonlyArray<string> = ["[", "*", "^", "$"];
 
-/** BRE metacharacters that do NOT silently strand a proof under the executor's own
- *  matcher, so they warn rather than block.
- *
- *  `.` only WIDENS a match: the proof still finds its own text (blocking it would
- *  strand the 4 tasks that use it).
- *
- *  `?` is the OPPOSITE shape and is here for a different reason. It is LITERAL in a
- *  BRE and a QUANTIFIER in an ERE, and the executor's argv is `grep -arn --` with no
- *  `-E`, so a bare `?` genuinely works TODAY — blocking it would refuse patterns that
- *  match. What it is not is portable: read by any ERE-defaulting grep the same pattern
- *  finds nothing and reports a clean zero. Measured on `logUnavailable?: Cause`, BRE
- *  matched and ERE missed. See {@link SINGLE_LITERAL_CLASS_CHARS} for why the remedy
- *  is `[?]` and never `\?`. */
+/** BRE metacharacters that do NOT silently strand a proof under the executor's own matcher, so they
+ *  warn rather than block — for opposite reasons. `.` only WIDENS a match, so the proof still finds
+ *  its own text. `?` is LITERAL in a BRE and a QUANTIFIER in an ERE: the executor passes no `-E`, so
+ *  a bare `?` works today but any ERE-defaulting grep reports a clean zero. See {@link
+ *  SINGLE_LITERAL_CLASS_CHARS} for why the remedy is `[?]`. */
 const BRE_WARNING_METACHARS: ReadonlyArray<string> = [".", "?"];
 
-/** Characters for which `[X]` — a bracket holding exactly this one character and
- *  nothing else — is the SANCTIONED literal escape, exempt from `[`'s blocking rule.
- *
- *  WHY THE EXEMPTION EXISTS. Without it this linter forbids the only portable remedy
- *  for the very fragility it warns about: `[?]` tripped `[`'s block while the bare `?`
- *  it replaces passed clean, so the rule pushed authors toward the fragile form. The
- *  #1071 precedent (`[call-site]` read as a character class) is a DIFFERENT shape —
- *  several characters forming a real class — and stays blocked, because nothing about
- *  it is unambiguously a literal.
- *
- *  AND `\X` IS NOT AN ALTERNATIVE for the character that motivated this. `\?` is a
- *  quantifier in GNU BRE and a literal in an ERE — exactly inverted from bare `?` — so
- *  the obvious escape moves the failure rather than removing it. Only the bracket form
- *  is literal under both.
- *
- *  MEASURED, not assumed: every member below matched its literal text under BOTH
- *  `grep` and `grep -E` and matched nothing when the character was absent. `^` is
- *  DELIBERATELY EXCLUDED — `[^]` opens a NEGATED class rather than closing a literal
- *  one, and both engines error on it. */
+/** Characters for which `[X]` — a bracket holding exactly this one character — is the SANCTIONED
+ *  literal escape, exempt from `[`'s blocking rule; without it the linter would forbid the only
+ *  portable remedy for the fragility it warns about. `\X` IS NOT AN ALTERNATIVE, since `\?` is a
+ *  quantifier in GNU BRE and a literal in an ERE. MEASURED under both `grep` and `grep -E`. `^` is
+ *  DELIBERATELY EXCLUDED, since `[^]` opens a NEGATED class; a multi-character class stays
+ *  blocked. Why: PR #1071. */
 const SINGLE_LITERAL_CLASS_CHARS: ReadonlyArray<string> = ["?", ".", "*", "+", "$", "(", ")", "{", "}", "|", "[", "]"];
 
-/** The remedy sentence for each warning-tier metacharacter — the character's OWN fix,
- *  never a generic one, because `.` and `?` fail in opposite directions and a shared
- *  sentence would have to be vague enough to help with neither. */
+/** The remedy sentence for each warning-tier metacharacter — the character's OWN fix, never a
+ *  generic one: `.` and `?` fail in opposite directions, so a shared sentence would help neither. */
 const BRE_WARNING_REMEDY: Readonly<Record<string, string>> = {
   ".": "matches ANY character in a BRE — the proof still finds its own text but would also match text you did not intend. Escape it (\\.) to mean a literal dot.",
   "?": "is LITERAL under the executor's own `grep -arn` (a BRE) but a QUANTIFIER under an ERE, so this pattern matches today and silently finds NOTHING under any grep that defaults to ERE — a clean zero, not an error. Write `[?]`, which is literal under both. Do NOT write `\\?`: that INVERTS the failure (a quantifier in GNU BRE, a literal in an ERE) and breaks the engine that works today.",
 };
 
-/** Characters that become a BRE construct when a backslash precedes them —
- *  grouping, intervals, and GNU's optional-quantifier. `\.`-style escapes are NOT
- *  here: those are literals.
- *
- *  MEASURED on GNU grep 3.11 against a file holding `ab` and `a?b`, the same
- *  discipline {@link SINGLE_LITERAL_CLASS_CHARS} states for its own membership:
- *  BRE `a\?b` hits BOTH lines (2) — it is a QUANTIFIER, not an escaped literal —
- *  while BRE `a?b`, BRE `a[?]b` and ERE `a[?]b` each hit one. So the escape an
- *  author reaches for to make `?` literal is precisely the form that stops being
- *  literal, and it scored CLEAN here until this entry existed.
- *
- *  `?` IS ENGINE-DEPENDENT IN A WAY THE OTHER FOUR ARE NOT, and that is recorded
- *  rather than smoothed over: `\(`, `\)`, `\{` and `\}` are POSIX BRE constructs
- *  everywhere, whereas `\?` is a GNU extension. Only GNU grep was available to
- *  measure from — ugrep and BSD grep are both absent in the container this was
- *  derived in — so an implementation without the extension would read `\?` as a
- *  literal `?`. Blocking is still the right call in that case: an author who wants
- *  a literal `?` has `[?]`, which measured as literal under BOTH engines above, so
- *  the blocked form is one nobody needs on either.
- *
- *  RETROFIT, measured before this became blocking: ZERO `grep:` proofs across the
- *  whole plan carried `\?`, against a control of seven that carry some other
- *  backslash — so no existing proof newly fails. This entry is preventive. */
+/** Characters that become a BRE construct when a backslash precedes them — grouping, intervals, and
+ *  GNU's optional-quantifier; `\.`-style escapes are NOT here, being literals. THE TRAP `?` NAMES:
+ *  the escape an author reaches for to make `?` literal is precisely the form that stops being
+ *  literal, since `\?` is a quantifier in a GNU BRE. Blocking is still right, because `[?]` is
+ *  literal under both engines, and retrofit measured ZERO affected proofs.
+ *  Why: docs/forensics/task-linter.md#bre_construct_after_backslash. */
 const BRE_CONSTRUCT_AFTER_BACKSLASH: ReadonlyArray<string> = ["(", ")", "{", "}", "?"];
 
-/**
- * The unescaped BRE metacharacters in `pattern`, split by severity. Walks the
- * string rather than regex-matching it, because the one thing that must be
- * exactly right here is which characters an escape consumes — and expressing
- * that as a regex over a regex is how this class of bug is born.
- */
+/** The unescaped BRE metacharacters in `pattern`, split by severity. It walks the string rather
+ *  than regex-matching it: the one thing that must be exactly right is which characters an escape
+ *  consumes, and expressing that as a regex over a regex is how this class of bug is born. */
 export function breMetacharsIn(pattern: string): { blocking: string[]; warning: string[] } {
   const blocking: string[] = [];
   const warning: string[] = [];
@@ -1070,11 +721,10 @@ export function breMetacharsIn(pattern: string): { blocking: string[]; warning: 
       i++; // the escape consumes its next char — `\.` is a LITERAL dot, legitimate
       continue;
     }
-    // `[X]` — one metacharacter, immediately closed — is the SANCTIONED literal form
-    // (see SINGLE_LITERAL_CLASS_CHARS). Consume all three characters so the bracket does
-    // not block AND the character inside is not separately scored: `[?]` must be silent,
-    // not a warning about the very `?` it exists to escape. Anything else starting with
-    // `[` falls through to the blocking arm exactly as before — `[call-site]` included.
+    // `[X]` — one metacharacter, immediately closed — is the sanctioned literal form. Consume all
+    // three characters so the bracket does not block AND the character inside is not separately
+    // scored: `[?]` must be silent, not a warning about the very `?` it escapes. Anything else
+    // starting with `[` falls through to the blocking arm.
     if (ch === "[" && pattern[i + 2] === "]" && SINGLE_LITERAL_CLASS_CHARS.includes(pattern[i + 1] ?? "")) {
       i += 2;
       continue;
@@ -1092,23 +742,19 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
     const proof = typeof c.proof === "string" ? c.proof : "";
     const m = proof.trim().match(/^grep:\s*([\s\S]*)$/i);
     if (!m) continue;
-    // Same split parseDialectGrep uses: an " in " followed by a PATH-LIKE trailing token.
-    // NO FALLBACK TO THE WHOLE BODY. A path-less `grep:` is REFUSED outright by parseDialectGrep
-    // (review.ts), so it never executes and has no pattern to be unsafe — treating its prose as a
-    // pattern warned about a dot in text nobody will ever grep. Measured: that fallback produced
-    // 2 spurious warnings (W1-T66, W1-T90) on proofs the real parser rejects, both of which
-    // proof-dialect already flags for the actual defect. This check polices only proofs that RUN.
+    // The same split parseDialectGrep uses: an " in " followed by a PATH-LIKE trailing token.
+    // NO FALLBACK TO THE WHOLE BODY: a path-less `grep:` is refused outright by parseDialectGrep,
+    // so it never executes and has no pattern to be unsafe; this check polices only proofs that
+    // RUN. Why: the fallback warned spuriously on W1-T66 and W1-T90.
     const split = m[1].match(/^([\s\S]*?)\s+in\s+(\S*[./]\S*)\s*$/i);
     if (!split) continue;
     const pattern = split[1].trim();
     if (!pattern) continue;
     const where = `criterion ${i + 1} ("${(c.claim ?? "").slice(0, 56)}")`;
-    // (R-12) A DIRECTORY-SHAPED target is refused at filing time with the SAME rule and sentence
-    // `parseDialectGrep` (review.ts) applies at parse — so an author sees it here, when the shard is
-    // filed, instead of at review time as a proof that silently never executes (a `null` parse is
-    // graded prose/dialect-parse-error and contributes nothing). Pure, like every check in this
-    // module: the rule is textual (no extension on the final segment), and the executor's own
-    // filesystem check (`assertGrepTargetIsFile`) catches the dotted-directory remainder at run time.
+    // (R-12) A DIRECTORY-SHAPED target is refused at filing time with the same rule and sentence
+    // `parseDialectGrep` applies at parse, so an author sees it when the shard is filed rather than
+    // at review time as a proof that silently never executes. The rule stays textual; the
+    // executor's `assertGrepTargetIsFile` catches the rest at run time.
     const noFile = grepProofTargetNamesNoFile(split[2]);
     if (noFile !== undefined) {
       violations.push({
@@ -1134,11 +780,8 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
           `different matcher and reports a false green.`,
       });
     }
-    // ONE VIOLATION PER DISTINCT CHARACTER, never one aggregate line: `.` and `?` fail in
-    // OPPOSITE directions (one widens a match that still succeeds, the other succeeds here
-    // and misses entirely under another engine), so a shared sentence could only be vague
-    // enough to help with neither. A pattern carrying just one of them still yields exactly
-    // one violation, which is the shape this check has always had.
+    // ONE VIOLATION PER DISTINCT CHARACTER, never one aggregate line: `.` and `?` fail in opposite
+    // directions, so a shared sentence could only be vague enough to help with neither.
     for (const ch of warning) {
       violations.push({
         check: "proof-grep-safety",
@@ -1153,63 +796,29 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
 }
 
 // ── PROOF-GREP-UNMATCHABLE (W1-T1225 — a grep: pattern that can NEVER match) ─
-//
-// Nothing at filing time ever opens the file a `grep:` proof names, so a pattern that cannot match
-// ANY single line of a file already on disk reads identically to a correct forward reference (the
-// "not written yet" case CLAUDE.md protects). That indistinguishability is real for a HIT-COUNT
-// check (zero is legitimately a forward reference — proof-name-resolution's own rule, below), but
-// two subclasses are POSITIVE detections, not zeros: the phrase is present in the file but a line
-// break falls inside it (grep is line-based and can never match, no matter how long the filer
-// waits), or the phrase is present only under different capitalisation (grep has no case-fold by
-// default). A genuine forward reference matches neither probe and stays silent.
-//
-// CONSUMES {@link classifyGrepZeroHit} (W1-T1224) instead of re-deriving line-seam / case-only
-// detection here; that module is the SAME matcher `checkProofCommand` (run-task.ts) uses to
-// explain a real zero-hit `grep:` run, so this filing-time check and that runtime diagnostic can
-// never disagree about why a pattern misses.
-//
-// THE LINTER STAYS PURE. Like {@link proofNameResolutionViolations}'s `opts.resolveNameFilteredCandidates`
-// and {@link callSiteViolations}'s `opts.moduleExists`, the file's own text arrives via an INJECTED
-// reader on {@link LintOpts.readGrepProofFile} — no fs, no exec, in this module. Absent reader ⇒
-// silent, exactly like every other injected-predicate check here.
-//
-// WARN, NEVER BLOCK, WITH NO SEVERITY OVERRIDE — the same posture {@link proofNameResolutionViolations}
-// takes for the same reason (zero/mismatch is a heuristic about intent an author may deliberately
-// want), plus one more: a warn that names the offending line is actionable; a block would refuse
-// authoring a pattern this check cannot fully adjudicate (a pattern carrying a BRE metacharacter the
-// display-only line locator below cannot always re-find, for instance).
-//
-// NOT folded into {@link lintTask}'s own aggregate, unlike every sibling injected-predicate check
-// nearby — DELIBERATELY. Design (vi) (W1-T1225) scopes this check to ONE call site, the
-// changed-tasks lint pass (`lintPlanCommand`'s `--base` branch, run-task.ts), and never a
-// pre-dispatch guard, a whole-plan sweep, or the retro's plan-health pass — reading a `grep:`
-// proof's named file is bounded by the diff there (a handful of files) and is NOT bounded anywhere
-// `lintTask` is called generically. Gating solely on "reader absent ⇒ silent" would still be
-// correct today (no other caller supplies one), but folding the push into `lintTask` would let any
-// FUTURE caller light this check up by accident just by wiring the option — the exact "shipped
-// dormant, wired later, by someone else" failure this task's own rationale (point 5) names.
-// `lintPlanCommand` calls {@link proofGrepUnmatchableViolations} directly instead.
+// Nothing at filing time opens the file a `grep:` proof names, so a pattern that cannot match any
+// line of a file already on disk reads identically to a correct forward reference. Two subclasses
+// are POSITIVE detections rather than zeros: the phrase is in the file with a line break inside it,
+// or only under different capitalisation. A genuine forward reference matches neither probe.
+// It CONSUMES {@link classifyGrepZeroHit} rather than re-deriving that detection, and stays PURE
+// via the injected {@link LintOpts.readGrepProofFile}. WARN, NEVER BLOCK, with no override.
+// DELIBERATELY NOT folded into {@link lintTask}'s aggregate — it is scoped to ONE call site where
+// the read is bounded by the diff. Why: docs/forensics/task-linter.md#proofgrepunmatchableviolations.
 
-/** The (pattern, path) a {@link WhitelistedProof} of kind "grep" names, restricted to the DIALECT
- *  shape (`grep: pattern in path` — parseDialectGrep, review.ts) that always inserts the `--` argv
- *  separator ahead of `pattern`/`path` (`args: ["-arn", "--", pattern, path]`). Mirrors {@link
- *  proofScopePath}'s own discriminator exactly, for the same reason: the legacy fenced ``
- *  `grep -rn x y` `` shape carries no such separator and its pattern/path split is not reliably
- *  recoverable from `args` alone — silently out of scope here too, rather than guessed at. */
+/** The (pattern, path) a "grep"-kind {@link WhitelistedProof} names, restricted to the DIALECT
+ *  shape, which always inserts the `--` argv separator (`args: ["-arn", "--", pattern, path]`).
+ *  Mirrors {@link proofScopePath}'s discriminator: the legacy fenced shape carries no separator and
+ *  its pattern/path split is not recoverable from `args`, so it is out of scope, never guessed. */
 function proofGrepPatternAndPath(w: WhitelistedProof): { pattern: string; path: string } | undefined {
   if (w.kind !== "grep" || w.args[1] !== "--") return undefined;
   return { pattern: w.args[2], path: w.args[3] };
 }
 
-/** The 0-based RAW line index of the first line whose text contains `pattern` case-insensitively —
- *  what a "case-only" cause's own message quotes as "the file's own casing". A plain (non-regex)
- *  substring search: the WARN/SILENT decision already came from {@link classifyGrepZeroHit} (which
- *  matches through the same BRE-emulating regex `checkProofCommand` runs); this only locates, for a
- *  human, which physical line to show — and every pattern this repo's `grep:` proofs actually write
- *  is plain prose with no regex metacharacter (measured — see {@link proofGrepSafetyViolations}'s
- *  module comment above), so a literal search finds the identical line a regex search would. Returns
- *  `undefined` on the rare pattern a literal search cannot re-locate; the caller degrades to a
- *  message with no quoted line rather than guessing wrong. */
+/** The 0-based raw line index of the first line containing `pattern` case-insensitively — the line
+ *  a "case-only" cause's message quotes. A plain substring search, never a regex: the WARN/SILENT
+ *  decision already came from {@link classifyGrepZeroHit}, and this only locates which line to show
+ *  a human. Returns `undefined` when a literal search cannot re-locate it, so the caller degrades
+ *  to a message with no quoted line rather than guessing wrong. */
 function firstLineIndexCaseInsensitive(lines: readonly string[], pattern: string): number | undefined {
   const needle = pattern.toLowerCase();
   for (let i = 0; i < lines.length; i++) {
@@ -1218,14 +827,12 @@ function firstLineIndexCaseInsensitive(lines: readonly string[], pattern: string
   return undefined;
 }
 
-/** The 0-based RAW line span a "line-seam" cause's phrase straddles — located by walking `fileText`
- *  once and replicating the EXACT collapse `classifyGrepZeroHit`'s own `whitespaceNormalised` helper
- *  performs (a newline plus any run of the following indentation collapses to one space), so a
- *  literal (never regex) search over the resulting text lands on the same seam the classifier's BRE
- *  match already confirmed exists. Not a second implementation of the CAUSE decision — only of
- *  where to point a human at it. Returns `undefined` when a literal search cannot re-find the span
- *  (a pattern carrying a BRE metacharacter) or the match turns out to sit on one physical line
- *  (nothing to report as a seam) — the caller degrades to a message with no quoted lines. */
+/** The 0-based raw line span a "line-seam" phrase straddles. It walks `fileText` once, replicating
+ *  the exact collapse `classifyGrepZeroHit`'s `whitespaceNormalised` performs (a newline plus the
+ *  following indentation becomes one space), so a literal search lands on the seam the classifier's
+ *  BRE match already confirmed. Not a second implementation of the CAUSE decision — only of where
+ *  to point a human. Returns `undefined` when the search cannot re-find the span or the match sits
+ *  on one physical line; the caller then quotes no lines. */
 function wrappedLineSpan(fileText: string, pattern: string): { startLine: number; endLine: number } | undefined {
   let normalized = "";
   const lineOfChar: number[] = [];
@@ -1253,15 +860,10 @@ function wrappedLineSpan(fileText: string, pattern: string): { startLine: number
   return { startLine, endLine };
 }
 
-/** Every `grep:` proof whose named file ALREADY EXISTS on disk and whose pattern is a POSITIVE
- *  detection of unmatchability (design iii): {@link classifyGrepZeroHit} returns "line-seam" (the
- *  phrase IS in the file but a line break falls inside it) or "case-only" (the phrase is in the
- *  file only under different capitalisation) for it. Silent on every other case: the path is not
- *  on disk yet (`opts.readGrepProofFile` returns undefined — a legitimate forward reference), the
- *  phrase is absent from the file in every probed form ("absent" — also a legitimate forward
- *  reference), or the pattern already matches a real line today ("matched" — a proof that already
- *  matches main is `executed_stale`'s business, W1-T273, not re-judged by this check). WARN-only;
- *  see the module comment above for why there is no severity override. */
+/** Every `grep:` proof whose named file exists and whose pattern is a POSITIVE detection of
+ *  unmatchability: {@link classifyGrepZeroHit} returns "line-seam" or "case-only". Silent otherwise
+ *  — not on disk yet, absent in every probed form (both legitimate forward references), or already
+ *  matching today (`executed_stale`'s business, W1-T273). WARN-only, with no override. */
 export function proofGrepUnmatchableViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const readGrepProofFile = opts.readGrepProofFile;
   if (!readGrepProofFile) return [];
@@ -1315,51 +917,24 @@ export function proofGrepUnmatchableViolations(task: Task, opts: LintOpts = {}):
 
 // ── PROOF-ENGINE-DIVERGENCE (W1-T2294 — a `grep:` pattern whose meaning depends on the
 //    regex engine, nothing declares which one ran) ───────────────────────────────────
-//
-// The house `grep:` DIALECT (parseDialectGrep, review.ts) always compiles to `["-arn", "--",
-// pattern, path]` — no `-E` anywhere reachable, so BRE and only BRE, author-unselectable. That
-// arm can never diverge and is not this check's business (flagging it would fail patterns —
-// `mergeConflict?:` among them — that are CORRECT under the engine that always actually runs).
-//
-// The LEGACY fenced `` `grep ...` `` shape (parseWhitelistedProof's `GREP_FENCE_RE` branch,
-// review.ts) tokenises everything after `grep` as the author's own argv verbatim — `-E` is
-// reachable there, and nothing inspects it: `proofGrepSafetyViolations` above matches `^grep:`
-// before it does anything, so a backticked proof never reaches `breMetacharsIn` at all. That
-// arm is flagged here via {@link WhitelistedProof.authorSelectedArgv} (review.ts), which is set
-// ONLY by that branch — never re-derived from `args` shape, which is not reliably recoverable
-// (a single-flag legacy invocation like `` `grep -arn -- pat path` `` has the identical `args`
-// shape as the dialect form's own compiled argv).
-//
-// BEHAVIOURAL, NOT LEXICAL (design Q2): a pattern that is syntactically valid under BOTH engines
-// and MEANS DIFFERENT THINGS — `mergeConflict?: MergeConflictEvidence` is the measured case, 2
-// hits under BRE and 0 under ERE against src/lib/sweep.ts — carries nothing in its own text that
-// distinguishes it from an ordinary pattern; only running it both ways does. So this check
-// compiles the pattern as BOTH a BRE and an ERE and counts matching lines each way; the two
-// engines agreeing is the common case and draws no report, and disagreeing is the exact
-// condition the task's own title names.
-//
-// `?` MUST NOT move from `BRE_WARNING_METACHARS` above — see that constant's own comment. Under
-// the dialect form's fixed BRE, `?` is literal and the pattern is correct; this check never
-// touches the dialect arm at all, so the two checks cannot contradict each other about the same
-// proof.
-//
-// PURE, same discipline as {@link proofGrepUnmatchableViolations} just above: no fs, no exec —
-// the target file's text arrives via the SAME injected `opts.readGrepProofFile` reader (one
-// contract, two consumers of the same fact "what does this path's text look like today").
+// The house `grep:` DIALECT always compiles to `["-arn", "--", pattern, path]`, so it is BRE and
+// only BRE, author-unselectable: that arm cannot diverge and is not this check's business. The
+// LEGACY fenced shape passes the author's own argv through, so `-E` is reachable there and nothing
+// inspects it — `proofGrepSafetyViolations` matches `^grep:` first, so a backticked proof never
+// reaches `breMetacharsIn`. This check finds that arm through {@link
+// WhitelistedProof.authorSelectedArgv}, set only by that branch, never re-derived from `args`.
+// BEHAVIOURAL, NOT LEXICAL: a pattern valid under both engines that MEANS DIFFERENT THINGS carries
+// nothing in its text to distinguish it, so it is compiled both ways and lines counted. `?` MUST
+// NOT move from `BRE_WARNING_METACHARS`. Why: W1-T2294 (measured on `mergeConflict?:`).
 
-/** The 7 characters that are ordinary METACHARACTERS in a POSIX EXTENDED regular expression
- *  (quantifier/grouping/alternation) but LITERAL in a BASIC one unless escaped — the exact set
- *  `grep-zero-cause.ts`'s own `JS_METACHAR_LITERAL_IN_BRE` already tracks for the same reason,
- *  kept in sync only by both being the measured BRE/ERE difference, not by importing one from
- *  the other (this task's declared `files:` does not include grep-zero-cause.ts). `.`, `*`,
- *  `^`, `$`, `[`, `]` are NOT here because they mean the same thing in both engines and cannot
- *  be the source of a BRE/ERE divergence. */
+/** The 7 characters that are METACHARACTERS in a POSIX EXTENDED regular expression but LITERAL in a
+ *  BASIC one unless escaped — the set `grep-zero-cause.ts`'s `JS_METACHAR_LITERAL_IN_BRE` tracks,
+ *  kept in sync by both being the measured BRE/ERE difference rather than by an import. `.`, `*`,
+ *  `^`, `$`, `[`, `]` are absent: they mean the same in both engines and cannot diverge. */
 const ERE_ONLY_METACHARS = new Set(["?", "+", "|", "(", ")", "{", "}"]);
 
-/** Characters that OPEN a BRE construct (grouping/interval) when a backslash precedes them —
- *  the same {@link BRE_CONSTRUCT_AFTER_BACKSLASH} set above that `breMetacharsIn`'s
- *  classification already walks. (It read "two-character set" while that set held four;
- *  naming the set rather than counting it keeps the two from drifting again.) */
+/** `pattern` rewritten so a JS `RegExp` reads it the way a BRE does. It reuses {@link
+ *  BRE_CONSTRUCT_AFTER_BACKSLASH}, named rather than counted so the two cannot drift again. */
 function breEmulatingSource(pattern: string): string {
   let out = "";
   for (let i = 0; i < pattern.length; i++) {
@@ -1379,15 +954,13 @@ function breEmulatingSource(pattern: string): string {
   return out;
 }
 
-/** Longest translated regex source this check ever compiles — same bound `grep-zero-cause.ts`'s
- *  own `sanitizeRegExp` and `ledger-grep.ts`'s `sanitizeRegExp` use, for the identical reason: a
- *  pattern arrives as free-form proof text, not vetted input, and this module compiles it into
- *  an in-process backtracking `RegExp` with no timeout of its own. */
+/** Longest translated regex source this check compiles — the bound `grep-zero-cause.ts` and
+ *  `ledger-grep.ts` use, for the same reason: a pattern arrives as free-form proof text, and this
+ *  module compiles it into a backtracking `RegExp` with no timeout. */
 const MAX_ENGINE_PROBE_SOURCE_LENGTH = 200;
 
-/** Compile `source` as a `RegExp`, declining (returning `undefined`) rather than guessing when
- *  it is too long, is ReDoS-shaped (the canonical nested-quantifier `(a+)+`/`(a*)*` trigger), or
- *  is not syntactically valid JS regex at all. */
+/** Compile `source` as a `RegExp`, declining rather than guessing when it is too long, is
+ *  ReDoS-shaped (the nested-quantifier `(a+)+`/`(a*)*` trigger), or is not valid JS regex. */
 function boundedRegExp(source: string, flags: string): RegExp | undefined {
   if (source.length > MAX_ENGINE_PROBE_SOURCE_LENGTH) return undefined;
   if (/\([^()]*[+*][^()]*\)[+*]/.test(source)) return undefined;
@@ -1398,18 +971,16 @@ function boundedRegExp(source: string, flags: string): RegExp | undefined {
   }
 }
 
-/** Count of lines in `fileText` the compiled pattern matches — the same unit `grep -n`'s hit
- *  count is (this task's rationale measures BRE/ERE divergence in exactly these terms). */
+/** Count of lines in `fileText` the compiled pattern matches — the same unit `grep -n` reports. */
 function lineHitCount(re: RegExp, fileText: string): number {
   let hits = 0;
   for (const line of fileText.split("\n")) if (re.test(line)) hits++;
   return hits;
 }
 
-/** The (pattern, path) a LEGACY fenced `grep:` proof's raw argv names — the flag(s) before the
- *  `--` separator (if any) are the author's own and irrelevant to WHAT is being searched; the
- *  first non-flag token is the pattern, the last is the target path. `undefined` when the argv
- *  does not carry at least a pattern and a path (e.g. `` `grep -c foo` `` with no target). */
+/** The (pattern, path) a LEGACY fenced `grep:` proof's raw argv names. Flags before the `--`
+ *  separator are the author's own and irrelevant to WHAT is searched: the first non-flag token is
+ *  the pattern, the last the path, and `undefined` when the argv carries no path. */
 function legacyGrepPatternAndPath(args: readonly string[]): { pattern: string; path: string } | undefined {
   const sepIdx = args.indexOf("--");
   const rest = sepIdx === -1 ? args.filter((a) => !a.startsWith("-")) : args.slice(sepIdx + 1);
@@ -1418,16 +989,11 @@ function legacyGrepPatternAndPath(args: readonly string[]): { pattern: string; p
 }
 
 /** Every LEGACY (author-argv) `grep:` proof whose pattern reads a DIFFERENT hit count under BRE
- *  than under ERE against its own named file — the condition the task title names: "a `grep:`
- *  proof pattern's meaning depends on a regex engine nothing declares". Silent whenever: no
- *  `opts.readGrepProofFile` reader (same "no predicate ⇒ no opinion" contract every injected
- *  check here uses), the proof is the house DIALECT form (never diverges, see the module
- *  comment), the named file is not on disk yet (a legitimate forward reference), either engine
- *  declines to compile the pattern, or both engines agree on the hit count (design: "a pattern
- *  that means the same thing under either engine draws no report"). WARN-only, matching {@link
- *  proofGrepUnmatchableViolations}'s own posture for the same reason: this is a heuristic about
- *  an author's intent (a proof pinned to one engine on purpose is not necessarily wrong) that
- *  names the disagreement for a human to judge, never a block. */
+ *  than under ERE against its named file. Silent whenever: no `opts.readGrepProofFile` reader, the
+ *  proof is the house dialect form (which never diverges), the file is not on disk yet, either
+ *  engine declines to compile the pattern, or both engines agree. WARN-only, like {@link
+ *  proofGrepUnmatchableViolations}: a proof pinned to one engine on purpose is not necessarily
+ *  wrong, so this names the disagreement for a human to judge. */
 export function proofEngineDivergenceViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const readGrepProofFile = opts.readGrepProofFile;
   if (!readGrepProofFile) return [];
@@ -1466,106 +1032,30 @@ export function proofEngineDivergenceViolations(task: Task, opts: LintOpts = {})
 }
 
 // ── PROOF-SCOPE (W1-T310 — a proof naming a path the task never declared) ───
-//
-// scopeGuardOutOfScopeFiles (run-task.ts) compares a branch's diff against the
-// task's declared `files:` — EXACT Set membership, `declared.has(f)`, never a
-// prefix or glob (read directly off that guard so this check can never
-// disagree with it about what "in scope" means, design point 2). A proof
-// naming a path outside that same declared set is therefore GUARANTEED to
-// trip the guard once the work satisfying it is done — W1-T309's own
-// postmortem: `files: [src/lib/status-board.ts]`, two of its three proofs
-// named `test/status-blockers-live.test.ts`. ALL TWELVE tasks filed that day
-// (W1-T298..W1-T309) carried the flaw and `lint-plan` passed every one of
-// them — it validates proof SHAPE (proof-dialect) and RESOLVABILITY
-// (proof-resolvability), never whether the artifact a proof names is inside
-// the scope the SAME task declares.
-//
-// (W1-T2287) THE GUARD NO LONGER REFUSES, and the message below used to claim
-// it does. W1-T309's own 106-turn / $4.36 postmortem WAS a refusal, at the
-// time; the implement path's disposition since changed to push-and-flag:
-// `scope_guard.overrun` is logged and the branch pushes anyway — "pushed and
-// flagged rather than refused: the branch is the only evidence that separates
-// a phantom revert from an under-declared files:, and a refusal reaped it"
-// (run-task.ts's own ledger line at the `scopeGuardOutOfScopeFiles` call
-// site). The consequence that IS real and IS a verdict, and that the old
-// message never named: `judgeCriterion` (review.ts) grades a pure-path
-// `unit test:` proof `not_yet_built` only when its path is a member of
-// `ProofExecContext.forwardReferenceFiles`, built from (among other sources)
-// this task's own declared `files:`. A path OUTSIDE `files:` can never take
-// that carve-out, so if it is still absent when the PR is reviewed, the
-// criterion grades `executed_fail` instead — overriding keyword coverage and
-// failing the PR outright, not a refusal but a wrong verdict.
-//
-// REUSES parseWhitelistedProof (review.ts) — the SAME parse the reviewer's
-// executor runs (design point 1) — so this check can never disagree with
-// `rmd check-proof` about what a proof names. A proof that does not parse
-// (free prose, a malformed dialect body — proof-dialect's concern) or that
-// parses but names no path (a bare, name-filtered `unit test: <title>` —
-// design point 4) is SILENT here: there is nothing to compare against
-// `files:`.
-//
-// SEVERITY defaults to WARN, not block, and that is a measured call, not an
-// oversight (design point 3: "recommend, with the count of existing tasks
-// that would trip it, and let the operator rule"). Against the live plan at
-// filing (338 tasks, 2026-08-03): 102 already carry this flaw. `lint-plan`
-// runs CHANGED-TASKS-ONLY in CI, so a BLOCKING default would refuse merging
-// any UNRELATED future edit to one of those 102 tasks until its `files:` is
-// separately repaired. Worse, at the PRE-DISPATCH call site
-// (`assertLintClean`) there is no severity override available to THIS task:
-// this task's own declared `files:` is `[src/lib/task-linter.ts,
-// test/lint-proof-scope.test.ts]` — adding one to run-task.ts's
-// `preDispatchLint` object would itself be an out-of-declared-scope edit, the
-// exact defect this check exists to catch. A BLOCKING default here would
-// therefore immediately brick pre-dispatch (`blocked_illformed`) for those
-// same 102 already-queued tasks the moment this merges, with no way for this
-// PR to carve out the "legacy backlog must not brick overnight" exemption
-// {@link proofResolvabilityViolations} and {@link proofDialectViolations}
-// both used during their own rollout. `opts.proofScope` is the override knob
-// — an operator can flip any call site (whole-plan, or just pre-dispatch, via
-// a follow-up run-task.ts edit) to "block" with zero further engine changes,
-// once the backlog is repaired or the risk is judged acceptable.
-//
-// (W1-T2287) ONE CONJUNCTION AUTO-ESCALATES TO "block" ANYWAY, measured at
-// ZERO in the live plan today (see this task's own filing rationale): a
-// mis-declared path that is ALSO absent at head AND whose task is
-// `verify: auto` — the exact conjunction under which the grade above actually
-// goes wrong, rather than merely looking untidy. `opts.moduleExists` (the SAME
-// injected disk-existence predicate {@link callSiteViolations} already uses —
-// this module stays pure, no fs of its own) answers "absent at head"; absent
-// that predicate this check makes no attempt to escalate, exactly like every
-// other injected-predicate check here — the plain "warn" default holds. A
-// `verify: human` task never escalates regardless: `isDispatchEligible`
-// (drain.ts) refuses it before the linter is ever consulted, so it can never
-// reach the review that would grade it wrong. A path that EXISTS at head also
-// never escalates: `judgeCriterion` never takes the forward-reference branch
-// for an existing path, so the proof executes for real and is graded on its
-// own merits — mis-declared but harmless, the 325-task `verify: auto`
-// population an outright `block` default would otherwise have failed. An
-// explicit `opts.proofScope` still wins outright over this computed value, in
-// either direction — the operator override this module has always honoured.
+// `scopeGuardOutOfScopeFiles` compares a branch's diff against the declared `files:` by EXACT Set
+// membership, never a prefix or glob, so a proof naming a path outside that set is guaranteed to
+// trip it once the work is done. `lint-plan` used to pass such a task: it validates proof SHAPE and
+// RESOLVABILITY, never whether the artifact a proof names is inside the task's own scope.
+// THE REAL CONSEQUENCE IS A VERDICT, NOT A REFUSAL: `judgeCriterion` grades a pure-path
+// `unit test:` proof `not_yet_built` only when its path is in `forwardReferenceFiles`, built from
+// this task's `files:`, so a path outside it grades `executed_fail` when absent at review,
+// overriding keyword coverage and failing the PR. It REUSES parseWhitelistedProof, so it cannot
+// disagree with `rmd check-proof`. SEVERITY DEFAULTS TO WARN, measured; ONE CONJUNCTION
+// AUTO-ESCALATES to block — a mis-declared path ALSO absent at head AND `verify: auto`.
+// Why: docs/forensics/task-linter.md#proofscopeviolations (W1-T310, W1-T309, W1-T2287).
 
-/** The repo-relative path a {@link WhitelistedProof} names, or `undefined` when
- *  it names none. Mirrors exactly how {@link parseWhitelistedProof}'s own
- *  parseTestTarget/parseDialectGrep (review.ts) build `label`/`args`: a
- *  test-kind proof's `label` IS the literal path UNLESS `nameFiltered` (a bare
- *  test title, design point 4's silent case); a grep-kind proof's path is the
- *  token after the `--` separator every whitelisted grep shape inserts before
- *  its pattern (`args: ["-arn", "--", pattern, path]`) — a legacy fenced
- *  `` `grep -rn x y` `` proof (no dialect label, no `--` separator) names no
- *  path here either, silent rather than guessed at. */
+/** The repo-relative path a {@link WhitelistedProof} names, or `undefined` when it names none. It
+ *  mirrors how parseTestTarget/parseDialectGrep build `label`/`args`: a test-kind proof's `label`
+ *  IS the literal path unless `nameFiltered`, and a grep-kind proof's path is the token after the
+ *  `--` separator. A legacy fenced proof carries none, so it names no path here. */
 function proofScopePath(w: WhitelistedProof): string | undefined {
   if (w.kind === "test") return w.nameFiltered ? undefined : w.label;
   return w.args[1] === "--" ? w.args[3] : undefined;
 }
 
-/** Every criterion whose proof names a path OUTSIDE the task's declared
- *  `files:` — a mismatch {@link scopeGuardOutOfScopeFiles} (run-task.ts) now
- *  PUSHES AND FLAGS rather than refuses, and that {@link judgeCriterion}
- *  (review.ts) can grade `executed_fail` instead of `not_yet_built` because
- *  the path is not in `files:` (W1-T2287 — see the module comment above).
- *  WARN by default, auto-escalated to "block" only when the path is also
- *  absent at head (per `opts.moduleExists`) and the task is `verify: auto`;
- *  see the module comment above for the measured count driving both. */
+/** Every criterion whose proof names a path OUTSIDE the task's declared `files:`. WARN by default,
+ *  auto-escalated to "block" only when the path is also absent at head (per `opts.moduleExists`)
+ *  and the task is `verify: auto`. See the section comment above. */
 export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const declared = new Set(task.files ?? []);
   const dispatchable = task.verify === "auto";
@@ -1577,9 +1067,8 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
     const path = proofScopePath(whitelisted);
     if (!path) return; // names no path (design point 4) — nothing to compare
     if (declared.has(path)) return; // inside the declared scope — silent
-    // NO PREDICATE ⇒ NO ESCALATION (W1-T2287) — the same "no fs of its own" contract
-    // {@link callSiteViolations}'s `opts.moduleExists` already keeps: absent the predicate this
-    // stays the plain "warn" default rather than guessing at disk state.
+    // NO PREDICATE ⇒ NO ESCALATION: absent `opts.moduleExists` this stays the plain warn default
+    // rather than guessing at disk state (W1-T2287).
     const absentAtHead = opts.moduleExists ? !opts.moduleExists(path) : false;
     const severity: LintSeverity = opts.proofScope ?? (absentAtHead && dispatchable ? "block" : "warn");
     const claimHead = (c.claim ?? "").slice(0, 60);
@@ -1602,64 +1091,31 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
 }
 
 // ── PROOF-NAME-RESOLUTION (W1-T488 — the literal-substring trap) ────────────
-//
-// A name-filtered `unit test: <title>` proof (parseTestTarget, review.ts) is NOT a regex against
-// real test titles: `escapeRegExp` runs on the body FIRST, so `.` `(` `)` `[` `]` and every other
-// regex metacharacter match only THEMSELVES. A title an author wrote with `.` standing in for a
-// symbol resolves to ZERO real tests and reads `not_executable` — silently, with no error, and
-// the criterion falls back to the keyword floor looking healthy. OBSERVED live (W1-T245/#651): 4
-// of 5 proofs executed and the 5th used `.` for the parentheses in the test's own title.
-//
-// REUSES resolveNameFilteredCandidates (review.ts) — the SAME resolver `execWhitelistedProof`
-// itself calls before ever spawning `node --test` — so this check can never disagree with the
-// reviewer about what a proof's raw name resolves to (the same rule {@link proofScopeViolations}
-// above already applies to proof-scope). NOT a reimplementation of that decision: `resolved` /
-// `absent` / `unresolvable` are read verbatim off its return value.
-//
-// INJECTED, LIKE `opts.moduleExists` — resolveNameFilteredCandidates shells out to `grep` against
-// a real checkout, and this module reads no disk (the same "no predicate ⇒ no opinion" contract
-// {@link callSiteViolations} already uses). Absent `opts.resolveNameFilteredCandidates` this check
-// is silent. NOT wired to any real call site by this task (`run-task.ts`'s pre-dispatch guard and
-// `lintPlanCommand` are both outside this task's declared `files:`) — shipped here as a tested,
-// directly callable function ready for that follow-up wiring, the same posture W1-T420's
-// `learningDuplicateViolation` documents for its own out-of-scope gate.
-//
-// THE ZERO-MATCH WARN IS NARROWED, and that narrowing is a MEASURED call, not a guess (design
-// point 3 required the measurement before shipping). A naive "WARN on every zero-resolution
-// name-filtered proof" was run once against the live open queue (338 tasks, 2026-08-14): 251 of
-// 319 open name-filtered proofs (78.7%) resolve to zero — almost all of them multi-clause SCENARIO
-// NARRATIVES (`looksLikeScenarioNarrative`, defined above) that `proofDialectViolations` already
-// warns about via a different signal, not the wildcard-confusion defect this check exists to
-// name. Restricting to proofs that ALSO carry a regex metacharacter still left 145/319 (45.5%) —
-// most of those narratives again, just ones that happen to contain a `.` or `(`. Restricting
-// FURTHER to "contains a metacharacter AND does not read as a scenario narrative" — the same
-// narrative guard {@link proofResolvabilityViolations} already exempts a single plausible test
-// title from — cut it to 15/319 (4.7%), a high-precision set where the metacharacter is plausibly
-// load-bearing punctuation inside an otherwise title-shaped body rather than narrative prose. That
-// is the shape this check warns on. The MANY-match warn needed no such narrowing: it fired on
-// 4/319 (1.25%) of the same corpus, so it is reported unconditionally.
+// A name-filtered `unit test: <title>` proof is NOT a regex against real test titles.
+// parseTestTarget runs `escapeRegExp` on the body FIRST, so every metacharacter matches only ITSELF.
+// A title written with `.` standing in for a symbol resolves to ZERO real tests and reads
+// `not_executable` — silently, while the criterion falls back to the keyword floor looking healthy.
+// It REUSES resolveNameFilteredCandidates, the resolver `execWhitelistedProof` itself calls, so lint
+// and review cannot disagree; that resolver greps a real checkout, so it is INJECTED. THE ZERO-MATCH
+// WARN IS NARROWED, measured, to "carries a metacharacter AND does not read as a narrative".
+// Why: docs/forensics/task-linter.md#proofnameresolutionviolations (W1-T488, W1-T245/#651).
 
-/** Mirrors the exact character class `escapeRegExp` (review.ts, not exported) makes inert on a
- *  name-filtered proof's raw title — used only to NAME which of them a title contains, for the
- *  warning message. Detection only; the resolution decision itself never touches this and comes
- *  from {@link LintOpts.resolveNameFilteredCandidates} alone. */
+/** Mirrors the character class `escapeRegExp` (review.ts, not exported) makes inert on a
+ *  name-filtered proof's raw title. Detection only, used to NAME which characters a title carries
+ *  for the warning message; the resolution decision comes from the injected resolver alone. */
 const LITERAL_ONLY_METACHARS_RE = /[.*+?^${}()|[\]\\]/g;
 
-/** The distinct regex metacharacters `rawName` contains, in first-seen order — what a
- *  name-filtered `unit test:` title would have meant as a wildcard/anchor/group/class had
- *  escaping not made it literal. Empty for the common case, a title with none of them. */
+/** The distinct regex metacharacters `rawName` contains, in first-seen order — what the title would
+ *  have meant as a wildcard, anchor, group or class had escaping not made it literal. */
 export function literalOnlyMetacharsIn(rawName: string): string[] {
   return [...new Set(rawName.match(LITERAL_ONLY_METACHARS_RE) ?? [])];
 }
 
-/** Every name-filtered `unit test:` proof whose raw title resolves to ZERO tests (narrowed to the
- *  high-precision case above) or into MANY different test files. WARN-only, unconditionally — no
- *  severity override, ever: zero is legitimately a forward reference to an unwritten test
- *  (CLAUDE.md), so this can never BLOCK without refusing correct authoring at scale (design point
- *  3). Silent absent `opts.resolveNameFilteredCandidates` (see the module comment above). */
+/** Every name-filtered `unit test:` proof whose raw title resolves to ZERO tests (narrowed as
+ *  above) or into MANY test files. WARN-only with no override ever: zero is legitimately a forward
+ *  reference, so blocking would refuse correct authoring at scale. Silent absent the resolver. */
 export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
-  // The reviewer's OWN resolver, called directly — never a reimplementation, so lint and review can
-  // never disagree about what a proof's raw name resolves to.
+  // The reviewer's own resolver, called directly, so lint and review cannot disagree.
   const resolveNameFilteredCandidates = opts.resolveNameFilteredCandidates;
   if (!resolveNameFilteredCandidates) return [];
   const violations: LintViolation[] = [];
@@ -1704,72 +1160,31 @@ export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): 
 }
 
 // ── POST-MERGE-AMENDMENT (§5C, W1-T180) ──────────────────────────────────────
-//
-// An amendment to an ALREADY-MERGED task's acceptance criteria is unreachable by
-// every rung today: MERGED is terminal in the status layer (status.ts:696), the
-// drain skips a merged id outright (drain.ts:88's `if (isMerged(t.id)) continue`),
-// and the retro's plan-health sweep explicitly scopes itself away from a closed
-// task (retro.ts:578). So a claim added to a merged task's criteria after the
-// fact sits in the plan looking authoritative and is never dispatched, reviewed,
-// or proven — the LIVE FIXTURE: PR #374 added two criteria to W1-T155 an hour
-// forty-five minutes after PR #365 credited it merged, and every existing gate
-// passed it clean. Standing rule 21 (MASTER-PLAN §12) names the house answer in
-// prose — amending a merged task does not re-queue it; the amender owns filing
-// the follow-up in the SAME PR — this check is what makes that answer CHECKED
-// rather than merely conventional.
-//
-// THE INJECTION PROBLEM: merge state and the base-ref criteria set are I/O, and
-// this module is documented as a PURE function over an already-loaded Task/Plan
-// (module comment above) — so neither is fetched here. Both arrive through
-// {@link LintOpts.postMergeAmendment}, populated by the CALLER (run-task.ts's
-// `lintPlanCommand`, which already does the `--base` git-show read) from
-// deriveStatus + the base plan snapshot. This check performs no I/O and imports
-// neither status.ts nor any gh/exec surface.
+// An amendment to an ALREADY-MERGED task's criteria is unreachable by every rung: MERGED is
+// terminal in the status layer, the drain skips a merged id outright, and the retro's plan-health
+// sweep scopes itself away from a closed task. So a claim added after the fact sits in the plan
+// looking authoritative and is never dispatched, reviewed, or proven. Standing rule 21 names the
+// house answer in prose; this check makes that answer CHECKED rather than conventional.
+// THE INJECTION PROBLEM: merge state and the base-ref criteria set are I/O and this module is pure,
+// so both arrive through {@link LintOpts.postMergeAmendment}, and nothing here imports status.ts or
+// an exec surface. Why: docs/forensics/task-linter.md#postmergeamendmentviolations.
 
-/** Trim + collapse-whitespace normalized key for a criterion — keyed on the
- *  CLAIM ALONE (W1-T1098; was claim+proof, see W1-T1098's rationale). SET
- *  membership, not raw-list/positional equality, so reordering the
- *  `acceptance:` list or a pure formatting reflow never trips this check; a
- *  criterion whose claim text differs from every base-ref entry's claim
- *  counts as added-or-changed, regardless of what its proof says.
- *
- *  WHY CLAIM-ONLY: rule 21's own violation message names the harm it exists
- *  to prevent — a criterion that "would orphan silently" because MERGED is
- *  terminal and nothing re-queues the task. Rewording a proof orphans
- *  nothing: the CONTRACT the task promised (the claim) is unchanged, only
- *  how it is checked. Keying on claim+proof made a reworded proof on an
- *  already-merged task indistinguishable from a genuinely new criterion —
- *  `lint-plan` refused a proof rewrite with the same message it uses for an
- *  actual amendment, on a task nobody added a promise to.
- *
- *  WHAT THIS ALONE STOPS CATCHING (named, not hidden): a claim KEPT with its
- *  proof swapped for a WEAKER one — the discriminating `grep:` this task's own
- *  criterion once had, replaced by a whole-file `unit test:` that always
- *  passes — is invisible to THIS comparison, which is claim-only by design
- *  (see WHY CLAIM-ONLY above). `proof-dialect` and `proof-resolvability` (this
- *  file) and `executed_stale` (review.ts) each see PART of that gap — an
- *  unexecutable or non-discriminating proof — but none of them compares a NEW
- *  proof against the one it replaced. W1-T2254's {@link criteriaProofChanged},
- *  wired into {@link postMergeAmendmentViolations} as a REPORT (`severity:
- *  "warn"`, never a block — this function's own claim-added comparison stays
- *  exactly as documented above), is that comparison: a same-claim proof
- *  downgrade on an already-merged task is now named in the lint output, even
- *  though it still is not, and is not meant to be, blocked. */
+/** Trim-and-collapse-whitespace key for a criterion, keyed on the CLAIM ALONE. Set membership, not
+ *  positional equality, so reordering the `acceptance:` list or a reflow never trips this check.
+ *  WHY CLAIM-ONLY: rule 21 exists to stop a criterion orphaning silently, and rewording a proof
+ *  orphans nothing — the contract is unchanged, only how it is checked. Keying on claim+proof made
+ *  a proof reword indistinguishable from a new criterion.
+ *  WHAT THIS ALONE STOPS CATCHING, named rather than hidden: a claim kept with its proof swapped
+ *  for a WEAKER one. {@link criteriaProofChanged} is that comparison. Why: W1-T1098, W1-T2254. */
 function criterionKey(c: AcceptanceCriterion): string {
   const norm = (s: string) => s.trim().replace(/\s+/g, " ");
   return norm(c.claim ?? "");
 }
 
-/**
- * Criteria in `currentCriteria` whose claim does not appear anywhere in
- * `baseCriteria` — covers BOTH an outright ADDITION and a semantic CHANGE to
- * an existing criterion's claim (a changed claim is, by set membership, a
- * new one). A claim held constant while only its proof is reworded is NOT
- * an addition (see {@link criterionKey}). `baseCriteria` undefined (the task
- * did not exist at the base ref, or the caller could not resolve a base
- * version) yields no additions — nothing to diff against, so the check is a
- * no-op for that task.
- */
+/** Criteria in `currentCriteria` whose claim appears nowhere in `baseCriteria` — covering both an
+ *  outright ADDITION and a semantic CHANGE, since by set membership a changed claim is a new one. A
+ *  claim held constant while only its proof is reworded is NOT an addition (see {@link
+ *  criterionKey}). `baseCriteria` undefined ⇒ no additions: nothing to diff against. */
 export function criteriaAdded(
   baseCriteria: AcceptanceCriterion[] | undefined,
   currentCriteria: AcceptanceCriterion[],
@@ -1779,148 +1194,71 @@ export function criteriaAdded(
   return currentCriteria.filter((c) => !baseKeys.has(criterionKey(c)));
 }
 
-/**
- * True iff every criterion in `added` is carried by at least one task in
- * `candidateTasks` — the follow-up escape hatch (W1-T180's design): the same PR
- * that amends a merged task's criteria also introduces a NEW task whose own
- * acceptance criteria include the amended ones, so the criteria have a home
- * that will actually be dispatched. Matched by {@link criterionKey} — claim
- * only, same as `criteriaAdded` — so the follow-up task's own proof wording
- * need not match verbatim. Vacuously true when `added` is empty (there
- * is nothing to carry). The caller supplies `candidateTasks` as the OTHER tasks
- * newly introduced by the same changed set — this function does no scoping of
- * its own.
- */
-/**
- * W1-T2375 (extracted from #3091, which rebuilt the merged #3086 and carried this one increment):
- * WHICH of the follow-ups filed in this PR actually carry an added criterion — keyed on
- * {@link criterionKey}, the SAME normalisation {@link followUpCarriesCriteria} decides
- * `followUpFiled` with, so the message can never name a task the decision did not consider.
- *
- * MESSAGE PRECISION ONLY, AND THAT IS THE WHOLE CLAIM. No verdict moves: the refusal below fires
- * on `added.length > 0 && !escapeAvailable`, and neither term reads this. What it fixes is that
- * `ctx.followUpTaskIds` is EVERY new task in the PR (run-task.ts passes
- * `followUpTasks.map((t) => t.id)`), while `followUpFiled` is decided by which of them CARRY the
- * criteria — so a PR filing one carrying follow-up beside one unrelated new task names both, and
- * points the reader at a task that carries nothing.
- */
+/** Which of the follow-ups filed in this PR actually carry an added criterion — keyed on {@link
+ *  criterionKey}, the same normalisation {@link followUpCarriesCriteria} decides `followUpFiled`
+ *  with, so a message can never name a task the decision did not consider.
+ *  MESSAGE PRECISION ONLY, no verdict moves: the refusal fires on `added.length > 0 &&
+ *  !escapeAvailable` and neither term reads this. It exists because `ctx.followUpTaskIds` is EVERY
+ *  new task in the PR, while `followUpFiled` turns on which of them carry the criteria (W1-T2375). */
 function followUpTaskIdsCarrying(added: AcceptanceCriterion[], candidateTasks: Task[]): string[] {
   const addedKeys = new Set(added.map(criterionKey));
   return candidateTasks.filter((t) => (t.acceptance ?? []).some((c) => addedKeys.has(criterionKey(c)))).map((t) => t.id);
 }
 
+/** True iff EVERY criterion in `added` is carried by at least one task in `candidateTasks` — Rule
+ *  21's follow-up escape hatch, so the amended criteria have a home that will be dispatched.
+ *  Matched by {@link criterionKey}, claim only, and vacuously true when `added` is empty. The
+ *  caller scopes `candidateTasks`; this function does no scoping of its own. */
 export function followUpCarriesCriteria(added: AcceptanceCriterion[], candidateTasks: Task[]): boolean {
   if (added.length === 0) return true;
-  // EVERY added criterion, not just one. The code here read `candidateTasks.some(t => t.acceptance
-  // .some(...))` until 2026-08-26 -- at least ONE added criterion carried by at least one task --
-  // while the doc above has always said "every criterion in `added`". The doc is what W1-T180 was
-  // for: its own shard says the follow-up carries "the amended criteria", plural, and the whole
-  // purpose is that the criteria have a home that will actually be dispatched. One carried
-  // criterion gives the other four no home, so a PR could add five criteria to a MERGED task, carry
-  // one, and pass -- the exact orphaning Rule 21 exists to stop, reached through its own escape.
-  //
-  // NOTHING WRITTEN ANYWHERE CHOSE `some`: the introducing commit (bd59a51d, W1-T180, #928) says
-  // nothing about the quantifier, and the shard argues the other way.
-  //
-  // RETROFIT, MEASURED BEFORE THE CHANGE over all 823 plan commits: 93 criteria amendments, 4 with
-  // a new task in the same PR, 34 adding more than one criterion, and exactly 1 that is both --
-  // `1dd397fc` (#396) adding two to W1-T136 beside a new W1-T176, which carried NEITHER, so it
-  // fails `some` AND `every` and was never permitted by the looseness. The only amendment where
-  // this escape has ever actually fired is `13a73d57` (W1-T2327/W1-T2340), which carries its one
-  // added criterion and passes under both readings. TIGHTENING REFUSES NOTHING THAT HAS EVER
-  // HAPPENED.
+  // EVERY added criterion, not just one. This read `some`/`some` until 2026-08-26, so a PR could
+  // add five criteria to a MERGED task, carry one, and pass -- the exact orphaning Rule 21 exists
+  // to stop, reached through its own escape. Retrofit over 823 plan commits: tightening refuses
+  // nothing that has ever happened. Why: docs/forensics/task-linter.md#followupcarriescriteria.
   const carried = new Set(candidateTasks.flatMap((t) => (t.acceptance ?? []).map(criterionKey)));
   return added.every((c) => carried.has(criterionKey(c)));
 }
 
-/** The phrase a PR uses to state that an amended parent is only PARTLY superseded — the
- *  follow-up carries the amended criteria, but the parent's OTHER, unamended criteria still
- *  stand, so it must remain dispatchable. Deliberately a MARKER rather than free prose: the
- *  check must be unable to guess, and an author who has thought about the question can say so
- *  in one line while an author who has not cannot do it by accident. Named in the refusal
- *  message so it is discoverable from the failure rather than only from this file. */
+/** The phrase a PR uses to state that an amended parent is only PARTLY superseded: the follow-up
+ *  carries the amended criteria, but the parent's own criteria still stand, so it stays
+ *  dispatchable. Deliberately a MARKER rather than free prose — the check must be unable to guess,
+ *  and nobody can satisfy it by accident. Named in the refusal so it is discoverable. */
 export const PARENT_SURVIVES_MARKER = "PARENT SURVIVES:";
 
-/**
- * Whether this PR has STATED the amended parent's disposition (W1-T2375). Two ways, and the
- * check accepts either without preferring one:
- *
- *   - FULLY SUPERSEDED — the parent is out of dispatch, `status: "blocked"`. This is the
- *     property {@link "./drain.js".isDispatchEligible} itself reads (`t.status === "blocked"`),
- *     and `drain.ts` references `retirement` ZERO times, so a `retirement:` field alone leaves
- *     the parent selectable. KEYED ON DISPATCHABILITY, NOT ON THE FIELD, deliberately: the
- *     2026-08-25 instance set `retirement: retired`, left `status: queued`, and was dispatched
- *     anyway — a field-keyed rule would have passed it and prevented nothing.
- *   - PARTLY SUPERSEDED — the parent stays dispatchable and its own prose carries
- *     {@link PARENT_SURVIVES_MARKER}, naming what remains.
- *
- * READS THE HEAD STATE, NOT THE DELTA. The question is "after this PR, is the disposition
- * answered", not "did this PR answer it" — a parent already blocked at the base ref cannot
- * orphan anything, and a second amendment to a parent that already states its survival should
- * not have to restate it. Both arms are therefore evaluated on `task`, with `baseTask` unused
- * here; it stays in the signature because a future arm that genuinely needs the delta should
- * not have to re-thread it.
- *
- * NEVER WRITES OR INFERS A DISPOSITION. A retirement is an operator act. This predicate only
- * reports whether the question has been answered; picking the answer is not its job.
- */
+/** Whether this PR has STATED the amended parent's disposition. Two ways, accepted equally: FULLY
+ *  SUPERSEDED, the parent out of dispatch at `status: "blocked"`; or PARTLY SUPERSEDED, the parent
+ *  still dispatchable with {@link PARENT_SURVIVES_MARKER} in its prose naming what remains.
+ *  KEYED ON DISPATCHABILITY, NOT ON THE FIELD: `isDispatchEligible` reads `t.status === "blocked"`
+ *  and drain.ts references `retirement` zero times, so a `retirement:` field alone leaves the parent
+ *  selectable — and one instance did exactly that and was dispatched anyway. READS THE HEAD STATE,
+ *  NOT THE DELTA, so `baseTask` is unused, kept only so a future arm need not re-thread it.
+ *  NEVER WRITES OR INFERS A DISPOSITION — a retirement is an operator act. Why: W1-T2375. */
 export function parentDispositionStated(task: Task, _baseTask?: Task): boolean {
   if (task.status === "blocked") return true;
   const prose = `${task.note ?? ""}\n${task.rationale ?? ""}`;
   return prose.includes(PARENT_SURVIVES_MARKER);
 }
 
-/**
- * Context for {@link blockedDispositionViolations} (W1-T2487) — the task's whole shard as it
- * existed at the PR's base ref, the SAME resolved value {@link PostMergeAmendmentContext.baseTask}
- * already carries (run-task.ts's `lintPlanCommand` resolves `oldTask` once per task and can hand
- * it to both). A dedicated context rather than folding into `PostMergeAmendmentContext`: this
- * check has nothing to do with MERGE status (its concern fires on `status: "blocked"` regardless
- * of whether the task was ever merged), so sharing that interface would make an unrelated
- * concern's presence/absence gate this one by accident. Undefined ⇒ the check is silent — see
- * {@link LintOpts.blockedDisposition}'s own doc for why that must be the whole-plan pass's
- * behaviour, not an oversight.
- */
+/** Context for {@link blockedDispositionViolations} — the task's shard at the PR's base ref, the
+ *  same value {@link PostMergeAmendmentContext.baseTask} carries, resolved once per task by the
+ *  caller. It is a DEDICATED context rather than a field on that interface because this check has
+ *  nothing to do with merge status: sharing would let an unrelated concern's presence gate it by
+ *  accident. Undefined ⇒ silent. Why: W1-T2487. */
 export interface BlockedDispositionContext {
-  /** Undefined when the task is new in this PR (the caller could not resolve a base version
-   *  either way — same "nothing to diff against" contract every other base-ref-shaped context
-   *  in this file already uses). */
+  /** Undefined when the task is new in this PR, or the caller could not resolve a base version —
+   *  the "nothing to diff against" contract every base-ref context in this file uses. */
   baseTask?: Task;
 }
 
-/**
- * W1-T2487: A `status: "blocked"` task must NAME its disposition — one of {@link
- * RETIREMENT_REASONS} — the moment THIS DIFF is what puts it there. Fifty tasks on main carry
- * `status: blocked`; twenty-six name no `retirement:` at all, and nothing before this check ever
- * asked one to. W1-T2474 made the field LOAD-BEARING (drain now splits a retired task out of the
- * recoverable-blocker class by reading it), so an absent field is no longer untidiness — a
- * consumer that reads a field missing on more than half its population is not classifying, it is
- * defaulting.
- *
- * TRANSITION-SCOPED, NOT A THIRD SWEEP. `opts.blockedDisposition` is populated ONLY in
- * `lintPlanCommand`'s changed-tasks (`--base`) pass, exactly like {@link
- * PostMergeAmendmentContext} — the whole-plan pass (no `--base`) supplies no context at all, so
- * this function returns `[]` for EVERY task there, including the standing twenty-six. Refusing
- * them all at once would redden every PR that merely touches the plan until an operator
- * dispositions twenty-six pre-existing tasks — a demand this check has no standing to make (this
- * task's own rationale). Within the changed-tasks pass, two shapes:
- *
- *   - `ctx.baseTask` was ALSO `status: "blocked"` (the standing population, touched but not
- *     newly blocked by this diff) ⇒ reported, `severity: "warn"` — visible, never refused.
- *   - `ctx.baseTask` was anything else, or absent (a brand-new task filed straight into
- *     `blocked`) ⇒ THIS diff is what moves it into blocked ⇒ `severity: "block"`.
- *
- * NEVER WRITES OR INFERS A DISPOSITION — same discipline {@link parentDispositionStated}'s own
- * doc states in terms ("a retirement is an operator act. This predicate only ..."). This function
- * only ever READS `task.retirement`; nothing here sets it, guesses it, or defaults it, and a
- * blocked task that already names a legal value passes silently, untouched, at either severity.
- *
- * A VALUE OUTSIDE {@link RETIREMENT_REASONS} IS TREATED AS ABSENT, NOT PRESENT. `plan.ts`'s own
- * parser already throws `PlanError` on such a value at load time, so this arm is reached only by
- * a `Task` object built directly (by a future loader, or a test) — but "present" here means
- * "present AND legal", never merely "non-empty", so a bogus string cannot slip past as a
- * disposition either check ever intended to accept.
- */
+/** A `status: "blocked"` task must NAME its disposition — one of {@link RETIREMENT_REASONS} — the
+ *  moment THIS DIFF is what puts it there. W1-T2474 made the field load-bearing, so an absent field
+ *  is no longer untidiness: a consumer reading a field missing on half its population is defaulting.
+ *  TRANSITION-SCOPED, NOT A THIRD SWEEP. `opts.blockedDisposition` is populated only in the
+ *  changed-tasks (`--base`) pass, so the whole-plan pass returns `[]` for every task; refusing the
+ *  standing population at once would redden every PR that touches the plan. Within that pass a
+ *  `ctx.baseTask` that was also blocked warns, and anything else blocks. A VALUE OUTSIDE {@link
+ *  RETIREMENT_REASONS} IS TREATED AS ABSENT — "present" means present AND legal, so a bogus string
+ *  cannot slip past, and nothing here writes or infers one. Why: W1-T2487, W1-T2474. */
 export function blockedDispositionViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   if (task.status !== "blocked") return [];
   const ctx = opts.blockedDisposition;
@@ -1954,50 +1292,18 @@ export function blockedDispositionViolations(task: Task, opts: LintOpts = {}): L
 }
 
 // ── BLOCKED-RECORD DISPOSITION CENSUS (W1-T2634) ────────────────────────────────────────────────
-//
-// {@link blockedDispositionViolations} (W1-T2487, above) fires ONLY inside the changed-tasks
-// (`--base`) pass, and even there only for a task THIS diff actually touches (its own module
-// comment: "the whole-plan pass ... supplies no context at all, so this function returns [] for
-// EVERY task there, including the standing twenty-six"). By design — refusing the whole standing
-// population at once is the exact wedge W1-T2481 measured (13 permanently uneditable tombstones
-// after PR #3305). But the result is that the STANDING population — every blocked record nobody's
-// PR happens to touch this week — is invisible to every lint pass, and W1-T391, W1-T2474 and
-// W1-T2481 each re-derived it BY HAND at three different shas and got three different numbers
-// (31/32, 46/50, 13 wedged). A population that must be re-measured by a human to be discussed is a
-// population nothing is tracking, and it silently regrows after every backfill.
-//
-// This check closes that gap without reopening the one the check above exists to avoid: it runs
-// UNCONDITIONALLY, in EVERY lint pass — no `LintOpts` field, no base-ref context, so it fires just
-// as well over `lintPlan`'s whole-plan sweep (the retro's periodic plan-health pass, W1-T20d, or
-// `rmd lint-plan --all`) as it does inside a diff. It reads the LOADED `Task` object's own
-// `status`/`retirement` fields — never raw plan text — so it measures the population the way a
-// consumer (drain.ts's dispatch filter, daemon.ts's starvation census) actually sees it, not the
-// way a grep over plan/tasks.yaml plus every tasks.d/*.yaml shard approximates it.
-//
-// WARN-ONLY BY CONSTRUCTION, exactly like {@link advisoryRoutingViolations}: there is no `LintOpts`
-// knob anywhere to escalate this to `block`, and none should ever be added — this task's own
-// rationale is explicit that a blocking arm over this exact population reproduces the W1-T2481
-// wedge one field over, this time catching the legitimate `status: blocked` records too (W1-T391
-// and W1-T10 are both correct as they stand, with no retirement).
-//
-// IT NAMES; IT DOES NOT RULE — it reads ONLY `task.status` and `task.retirement`, the two
-// structured fields, and infers nothing from `note:`/`rationale:`/title prose. That lexicon-over-
-// prose shortcut is the exact move W1-T391's withdrawn first implementation made (inferring a
-// disposition from a 31-of-32 regularity), and it misfiled a legitimate operator-block that was
-// already a fixture in that suite. The ruling belongs to an operator (W1-T2635); this check only
-// names the record and stops.
+// {@link blockedDispositionViolations} above fires only inside the changed-tasks pass, and only for
+// a task the diff touches — deliberately, since refusing the whole standing population at once is
+// the wedge W1-T2481 measured, but that leaves the STANDING population invisible to every pass.
+// This closes the gap without reopening that one: it runs UNCONDITIONALLY, with no `LintOpts`
+// field, and reads the LOADED `Task`'s own `status`/`retirement` rather than raw plan text.
+// WARN-ONLY BY CONSTRUCTION, since a blocking arm would reproduce that wedge one field over.
+// IT NAMES; IT DOES NOT RULE, inferring nothing from prose.
+// Why: docs/forensics/task-linter.md#blockedrecordunruledviolations (W1-T2634, W1-T391).
 
-/** A `status: "blocked"` task carrying no LEGAL `retirement:` value (absent, or a value outside
- *  {@link RETIREMENT_REASONS} — "present" here means "present AND legal", the same reading {@link
- *  blockedDispositionViolations} uses) is NAMED, unconditionally, in every lint pass — see the
- *  module comment above for why this exists ALONGSIDE that diff-scoped check rather than replacing
- *  it. Length is always 0 or 1: a task whose `status` is not `"blocked"` emits nothing regardless
- *  of `retirement`, and a `"blocked"` task that already names a legal disposition emits nothing
- *  either. WARN-ONLY BY CONSTRUCTION — no `opts` parameter, so no caller can ever run this
- *  blocking (mirrors {@link advisoryRoutingViolations}'s own "no knob, ever" shape). The message
- *  names the two legitimate remedies (record a `retirement:` ruling, or state in prose why the
- *  record is waiting rather than retired) so the fix is discoverable from the failure itself,
- *  never only from this task's own shard. */
+/** A `status: "blocked"` task carrying no LEGAL `retirement:` value is NAMED, unconditionally, in
+ *  every lint pass; length is always 0 or 1. WARN-ONLY BY CONSTRUCTION: no `opts` parameter, so no
+ *  caller can run it blocking. The message names both remedies, so the fix is discoverable. */
 export function blockedRecordUnruledViolations(task: Task): LintViolation[] {
   if (task.status !== "blocked") return [];
   const hasLegalDisposition = task.retirement !== undefined && (RETIREMENT_REASONS as readonly string[]).includes(task.retirement);
@@ -2015,92 +1321,58 @@ export function blockedRecordUnruledViolations(task: Task): LintViolation[] {
   ];
 }
 
-/**
- * Context the CALLER resolves via I/O and injects through {@link LintOpts} —
- * see the module comment above this section for why it cannot be fetched here.
- */
+/** Context the CALLER resolves via I/O and injects through {@link LintOpts} — see the section
+ *  comment above for why it cannot be fetched here. */
 export interface PostMergeAmendmentContext {
-  /** False iff the derived merge status could not be resolved at all (`gh`
-   *  unavailable, no token, `loadConfig`'s CI trap — see run-task.ts's
-   *  `lintPlanCommand`). FAIL OPEN: an unreadable status never produces a
-   *  violation, deliberately, so a GitHub outage never reds the one lane
-   *  (plan-only PRs) that still works during one. */
+  /** False iff the derived merge status could not be resolved at all (`gh` unavailable, no token,
+   *  `loadConfig`'s CI trap). FAIL OPEN, deliberately: an unreadable status never produces a
+   *  violation, so a GitHub outage never reds the one lane — plan-only PRs — that still works. */
   statusResolvable: boolean;
-  /** This task's derived status is MERGED. Only a merged task can be "amended
-   *  post-merge" — an open/queued task's criteria changing is ordinary authoring. */
+  /** This task's derived status is MERGED. Only a merged task can be amended post-merge; an
+   *  open task's criteria changing is ordinary authoring. */
   merged: boolean;
-  /** This task's acceptance criteria as they existed at the PR's base ref.
-   *  Undefined when the task is new in this PR or the caller could not resolve
-   *  a base version — either way {@link criteriaAdded} is a no-op. */
+  /** This task's acceptance criteria at the PR's base ref. Undefined when the task is new here or
+   *  the caller could not resolve a base version — either way {@link criteriaAdded} is a no-op. */
   baseAcceptance?: AcceptanceCriterion[];
-  /** Whether some OTHER task in the SAME changed set already carries the added
-   *  criteria (the follow-up escape hatch) — necessarily computed across the
-   *  whole changed set by the caller, since a single task's lint has no
-   *  visibility into its siblings. */
+  /** Whether some OTHER task in the same changed set already carries the added criteria — the
+   *  follow-up escape hatch. The caller computes it across the whole changed set, since a single
+   *  task's lint cannot see its siblings. */
   followUpFiled: boolean;
-  /** The ids of the tasks that satisfied {@link followUpFiled} — resolved by the same call site
-   *  that already builds `followUpTasks` to compute it (run-task.ts's `lintPlanCommand`), so
-   *  carrying them needs no new resolution, exactly as W1-T2254's `baseTask` widening did.
-   *  Used only to NAME the follow-up in the refusal below; the decision never depends on it. */
+  /** The ids of the tasks that satisfied {@link followUpFiled}, resolved by the same call site
+   *  that already builds `followUpTasks`. Used only to NAME the follow-up in the refusal; the
+   *  decision never reads it. */
   followUpTaskIds?: string[];
-  /** W1-T2375: the follow-up TASKS behind {@link followUpFiled} — the same array the call site
-   *  already builds to compute it, so carrying it needs no new resolution (the widening
-   *  {@link baseTask} and {@link followUpTaskIds} both already made). Supplied ⇒ the refusal names
-   *  only those that actually carry an added criterion ({@link followUpTaskIdsCarrying}); omitted
-   *  ⇒ the message falls back to {@link followUpTaskIds} verbatim, so a caller that wires nothing
-   *  new is byte-identical to before this field existed. The DECISION never reads either. */
+  /** The follow-up TASKS behind {@link followUpFiled} — the array the call site already builds, so
+   *  carrying it needs no new resolution. Supplied ⇒ the refusal names only those that actually
+   *  carry an added criterion ({@link followUpTaskIdsCarrying}); omitted ⇒ it falls back to {@link
+   *  followUpTaskIds} verbatim. The decision never reads either. Why: W1-T2375. */
   followUpTasks?: Task[];
-  /** This task's WHOLE shard as it existed at the PR's base ref — not just its
-   *  `acceptance:` (see {@link baseAcceptance}). W1-T2254: the call site
-   *  (run-task.ts's `lintPlanCommand`) already resolves this base-ref task to
-   *  read `baseAcceptance` off it, so widening the context to carry the whole
-   *  object needs no new resolution, git read, or base-ref lookup — see that
-   *  check's own module comment for why only `acceptance` was wired at first.
-   *  Undefined under the same conditions as {@link baseAcceptance}. */
+  /** This task's WHOLE shard at the PR's base ref, not just its `acceptance:`. The call site
+   *  already resolves this task to read {@link baseAcceptance} off it, so carrying the whole object
+   *  costs no new git read. Undefined under the same conditions as {@link baseAcceptance}.
+   *  Why: W1-T2254. */
   baseTask?: Task;
 }
 
-/**
- * W1-T2503: diff-scoped base-ref state for {@link sizingViolation}'s risk:high
- * `band_meaning` obligation — presence of THIS OBJECT (not merely a non-undefined
- * `baseTask` field within it) is the "we know this is a diff" signal, so a genuinely
- * NEW task (absent from the base ref entirely) is distinguishable from "the caller has
- * no diff context at all" even though both read `baseTask === undefined`. A caller that
- * already resolves the base-ref task for {@link PostMergeAmendmentContext.baseTask} (the
- * merged-amendment check) can reuse that SAME lookup here — one `oldTask` read, two
- * independent consumers, exactly the reuse W1-T2254's `baseTask` widening already
- * established for this file.
- */
+/** Diff-scoped base-ref state for {@link sizingViolation}'s risk:high `band_meaning` obligation.
+ *  INVARIANT: presence of THIS OBJECT, not a non-undefined `baseTask` inside it, is the "this is a
+ *  diff" signal — so a genuinely NEW task is distinguishable from a caller with no diff context,
+ *  even though both read `baseTask === undefined`. A caller already resolving {@link
+ *  PostMergeAmendmentContext.baseTask} reuses that same lookup here. Why: W1-T2503, W1-T2254. */
 export interface RiskTransitionContext {
-  /** This task's own record in the base-ref plan snapshot. `undefined` ⇒ the task is
-   *  NEW in this diff (Rule 19's "a task the diff FILES ... at high" case, not just
-   *  "moves to high") — the caller resolves this exactly as {@link
-   *  PostMergeAmendmentContext.baseTask} already does, so `undefined` here means "looked
-   *  it up, found nothing" and never "didn't look". */
+  /** This task's record in the base-ref plan snapshot. `undefined` ⇒ the task is NEW in this diff,
+   *  and always means "looked it up, found nothing", never "didn't look". */
   baseTask: Task | undefined;
 }
 
-/** Fields on a merged task's shard that something ELSE in the system still reads
- *  AFTER the task merges (W1-T2254 rationale §Q1 (ii)) — a post-merge edit here
- *  silently changes live behaviour nobody signed off on: `status` feeds dispatch
- *  eligibility (drain.ts's `t.status === "blocked"` branch), `files` feeds
- *  W1-T171's overlap serialization (`partitionByFileOverlap`), `depends_on` feeds
- *  the DAG, `priority` feeds the dispatch comparator, `risk`/`verify`/`type`/
- *  `principles`/`budget_usd` each steer a lane/gate/spend cap, and `retirement`
- *  feeds the board's bucketing.
- *
- *  DELIBERATELY EXCLUDED, NAMED RATHER THAN LEFT IMPLICIT (§Q1 (iii)): `title`,
- *  `note` and `rationale` are prose an amendment is EXPECTED to touch — reporting
- *  them would fire on every legitimate rationale edit and get muted within a
- *  week. `hand_built` has exactly two mentions in `src/` (both in plan.ts, the
- *  interface declaration and the loader's own copy) and zero consumers — a field
- *  nothing reads cannot be poisoned, and reporting it would be pure noise. `id`,
- *  `repo`, `attempts`, `pr`, `prompt` and `context` are likewise left unreported:
- *  none of them has a documented post-merge consumer the way the ten below do.
- *
- *  The question a field must answer to be listed here is "does anything read
- *  this after the task merges", never "is this field conceptually final" — see
- *  §Q1 (iv). */
+/** Fields on a merged task's shard that something ELSE still reads AFTER the task merges, so a
+ *  post-merge edit silently changes live behaviour nobody signed off on: `status` feeds dispatch
+ *  eligibility, `files` overlap serialization, `depends_on` the DAG, `priority` the comparator,
+ *  `risk`/`verify`/`type`/`principles`/`budget_usd` a lane, gate or spend cap, and `retirement`
+ *  the board's bucketing. DELIBERATELY EXCLUDED, named rather than left implicit: `title`, `note`
+ *  and `rationale` are prose an amendment is expected to touch, `hand_built` has zero consumers,
+ *  and the rest have no documented post-merge consumer. THE TEST FOR MEMBERSHIP is "does anything
+ *  read this after the task merges", never "is this field conceptually final". Why: W1-T2254 §Q1. */
 const REPORTED_MERGED_FIELDS: readonly (keyof Task)[] = [
   "status",
   "files",
@@ -2114,24 +1386,18 @@ const REPORTED_MERGED_FIELDS: readonly (keyof Task)[] = [
   "retirement",
 ];
 
-/** Human-readable rendering of a reported field's value for a violation message
- *  — never used to compare, only to display both sides once a change is already
- *  detected via `JSON.stringify` equality (below). */
+/** Human-readable rendering of a reported field's value for a violation message. Never used to
+ *  compare — only to display both sides once `JSON.stringify` equality has detected a change. */
 function reportedFieldDisplay(v: unknown): string {
   if (v === undefined) return "(absent)";
   if (typeof v === "string") return JSON.stringify(v);
   return JSON.stringify(v);
 }
 
-/** Every {@link REPORTED_MERGED_FIELDS} entry whose value differs between
- *  `baseTask` and `task` — REPORT ONLY, `severity: "warn"`, never `"block"`:
- *  W1-T2248 already ruled that a merged `files:` can be provably wrong and must
- *  stay correctable, and this task's own design (§Q2) reconciles with that
- *  ruling by building a DETECTOR, not a lock — a field changing is made a
- *  declared, visible act, never forbidden. `baseTask` undefined (the task is new
- *  in this PR, or the caller could not resolve a base version) ⇒ no violations,
- *  same "nothing to diff against" contract {@link criteriaAdded} uses for
- *  `baseAcceptance`. */
+/** Every {@link REPORTED_MERGED_FIELDS} entry whose value differs between `baseTask` and `task`.
+ *  REPORT ONLY, never a block: W1-T2248 ruled that a merged `files:` can be provably wrong and must
+ *  stay correctable, so this is a DETECTOR, not a lock — the change becomes a declared, visible act
+ *  rather than a forbidden one. `baseTask` undefined ⇒ no violations. */
 export function mergedFieldChangeViolations(task: Task, baseTask: Task | undefined): LintViolation[] {
   if (!baseTask) return [];
   const violations: LintViolation[] = [];
@@ -2152,14 +1418,10 @@ export function mergedFieldChangeViolations(task: Task, baseTask: Task | undefin
   return violations;
 }
 
-/** Criteria in `baseCriteria` whose claim does not appear anywhere in
- *  `currentCriteria` — the mirror image of {@link criteriaAdded}: a merged
- *  criterion REMOVED outright rather than reworded or added-to. `criteriaAdded`
- *  alone cannot see this (W1-T2254 rationale §(4)): removing an entry shrinks
- *  the current set, so nothing in it fails to match a base key, and the check
- *  reads as "no delta". Keyed on {@link criterionKey} — claim only, same as
- *  every other comparison in this section. `baseCriteria` undefined ⇒ no
- *  removals (nothing to diff against). */
+/** Criteria in `baseCriteria` whose claim appears nowhere in `currentCriteria` — the mirror of
+ *  {@link criteriaAdded}: a merged criterion REMOVED outright. `criteriaAdded` cannot see this,
+ *  because removing an entry shrinks the current set, so nothing in it fails to match a base key
+ *  and the check reads as "no delta". Keyed on {@link criterionKey}. Why: W1-T2254 §(4). */
 export function criteriaRemoved(
   baseCriteria: AcceptanceCriterion[] | undefined,
   currentCriteria: AcceptanceCriterion[],
@@ -2169,12 +1431,9 @@ export function criteriaRemoved(
   return baseCriteria.filter((c) => !currentKeys.has(criterionKey(c)));
 }
 
-/** Criteria present in BOTH `baseCriteria` and `currentCriteria` under the same
- *  {@link criterionKey} (claim unchanged) whose `proof` text differs — the exact
- *  gap `criterionKey`'s own doc comment names as unstopped: a claim kept with
- *  its proof swapped for a WEAKER one is invisible to `criteriaAdded`, which
- *  compares claims and never proofs. `baseCriteria` undefined ⇒ nothing to
- *  compare. */
+/** Criteria present in BOTH sets under the same {@link criterionKey} whose `proof` text differs —
+ *  the gap `criterionKey`'s own doc names as unstopped: a claim kept with its proof swapped for a
+ *  WEAKER one is invisible to `criteriaAdded`, which compares claims and never proofs. */
 export function criteriaProofChanged(
   baseCriteria: AcceptanceCriterion[] | undefined,
   currentCriteria: AcceptanceCriterion[],
@@ -2192,36 +1451,25 @@ export function criteriaProofChanged(
 }
 
 /** The phrase a rationale uses to record that a title-level claim was later falsified and
- *  corrected (W1-T2438). `renderImplementPrompt` (run-task.ts) renders `task.prompt ??
- *  task.title` — the frozen title, unconditionally, for every dispatched build (MEASURED: 0 of
- *  681 shards on main declare `prompt:`) — so a correction recorded only in `rationale:` never
- *  reaches a worker: `rationale` has no post-merge consumer on the dispatch path at all (see the
- *  {@link REPORTED_MERGED_FIELDS} doc comment's own list of exclusions). Rule 21 permits the
- *  correction to land in `rationale:` post-merge; it does NOT permit the title to change, so the
- *  remedy is a place to put the correction the worker actually reads (`prompt:`), never a
- *  relaxed freeze. A MARKER, not a free-text heuristic, for the same reason {@link
- *  PARENT_SURVIVES_MARKER} is one: whether a rationale "records a correction" cannot be guessed
- *  from prose, and an author who has actually recorded one can say so in one line. */
+ *  corrected. `renderImplementPrompt` renders `task.prompt ?? task.title` — the frozen title, for
+ *  every dispatched build — so a correction recorded only in `rationale:` never reaches a worker.
+ *  Rule 21 permits the correction to land in `rationale:` post-merge but does not permit the title
+ *  to change, so the remedy is a field the worker actually reads, never a relaxed freeze. A MARKER,
+ *  not a heuristic, for the same reason {@link PARENT_SURVIVES_MARKER} is one. Why: W1-T2438. */
 export const RATIONALE_CORRECTION_MARKER = "CORRECTS TITLE:";
 
 /** Whether `task.rationale` states, via {@link RATIONALE_CORRECTION_MARKER}, that a title-level
- *  claim was later falsified — the predicate {@link correctionWithoutPromptViolation} gates on.
- *  Exported so a test can drive the marker directly, mirroring {@link parentDispositionStated}. */
+ *  claim was later falsified. Exported so a test can drive the marker directly. */
 export function rationaleRecordsCorrection(task: Task): boolean {
   return (task.rationale ?? "").includes(RATIONALE_CORRECTION_MARKER);
 }
 
-/** A task whose rationale records a correction ({@link rationaleRecordsCorrection}) but carries
- *  no `prompt:` — the composition W1-T2438 exists to catch: the only field Rule 21 lets an
- *  amendment change (`rationale:`) is not the field `renderImplementPrompt` reads, so the
- *  correction is invisible to every dispatched build. REPORT ONLY, `severity: "warn"`, same
- *  register as {@link mergedFieldChangeViolations}: this never blocks a merge and never writes a
- *  `prompt:` for anyone — filling it in is the author's act, same as {@link
- *  PARENT_SURVIVES_MARKER}'s disposition is never inferred. `task.prompt` present and non-blank
- *  ⇒ no violation regardless of the marker, since the correction already reaches the worker.
- *  Gates on NOTHING about the title's own text — a title carrying a count is not itself a
- *  violation (195 of 950 legitimately do, per this task's own rationale); only a RECORDED,
- *  marker-stated correction with no `prompt:` trips this. */
+/** A task whose rationale records a correction but carries no `prompt:` — the composition W1-T2438
+ *  catches: the only field Rule 21 lets an amendment change is not the field
+ *  `renderImplementPrompt` reads, so the correction is invisible to every dispatched build. REPORT
+ *  ONLY, like {@link mergedFieldChangeViolations}: it never blocks and never writes a `prompt:` for
+ *  anyone. `task.prompt` present and non-blank ⇒ no violation. It gates on NOTHING about the
+ *  title's own text: only a recorded, marker-stated correction with no `prompt:` trips it. */
 export function correctionWithoutPromptViolation(task: Task): LintViolation | undefined {
   if (!rationaleRecordsCorrection(task)) return undefined;
   if (task.prompt && task.prompt.trim()) return undefined;
@@ -2237,24 +1485,13 @@ export function correctionWithoutPromptViolation(task: Task): LintViolation | un
   };
 }
 
-/** Every acceptance criterion this PR adds or changes on an ALREADY-MERGED
- *  task, absent a follow-up task in the same PR to carry it. No {@link
- *  LintOpts.postMergeAmendment} at all ⇒ this check is skipped entirely (the
- *  pre-dispatch call site never dispatches a merged task in the first place,
- *  so it never supplies this context).
- *
- *  W1-T2254 widens this past the one BLOCKING case (a genuinely new/changed
- *  claim with no follow-up): three REPORT-ONLY, `severity: "warn"` checks run
- *  under the same three early exits (no context / unresolvable status / not
- *  merged) but are NOT gated by `followUpFiled` — that escape hatch is specific
- *  to the criteria-orphaning harm the BLOCK exists to prevent, and a warning
- *  never blocks a merge regardless, so there is nothing for it to escape. See
- *  {@link mergedFieldChangeViolations}, {@link criteriaRemoved} and {@link
- *  criteriaProofChanged} for what each reports and why it stays a report.
- *  W1-T2438 adds a FOURTH report under the same three early exits, gated on
- *  `ctx.merged`/`ctx.statusResolvable` exactly like the other three but reading
- *  no diff at all (unlike the three above, it is not comparing against
- *  `baseTask`/`baseAcceptance` — see {@link correctionWithoutPromptViolation}). */
+/** Every acceptance criterion this PR adds or changes on an ALREADY-MERGED task, absent a follow-up
+ *  in the same PR to carry it. No {@link LintOpts.postMergeAmendment} ⇒ skipped entirely, since the
+ *  pre-dispatch site never dispatches a merged task and so never supplies it. Four REPORT-ONLY
+ *  checks run under the same three early exits (no context, unresolvable status, not merged) but
+ *  are NOT gated by `followUpFiled`: that escape is specific to the criteria-orphaning harm the
+ *  BLOCK prevents, and a warn never blocks anyway. See {@link mergedFieldChangeViolations}, {@link
+ *  criteriaRemoved}, {@link criteriaProofChanged} and {@link correctionWithoutPromptViolation}. */
 export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const ctx = opts.postMergeAmendment;
   if (!ctx) return [];
@@ -2263,21 +1500,16 @@ export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): L
   const currentCriteria = task.acceptance ?? [];
   const violations: LintViolation[] = [];
   const added = criteriaAdded(ctx.baseAcceptance, currentCriteria);
-  // W1-T2375: the follow-up escape now has TWO conditions, not one. Filing a follow-up gives the
-  // amended criteria a second home; it does not take the first away, and nothing here used to ask
-  // about the parent. MEASURED ONCE: a follow-up filed 2026-08-26T22:30:50Z left its parent
-  // dispatchable for 12h37m34s, inside which the fleet dispatched BOTH in parallel.
-  //
-  // A CONDITION ON THE ESCAPE, NOT A FOURTH VIOLATION (shard design iv). The escape is simply not
-  // available until the disposition is stated, so the BLOCKING surface stays exactly one predicate
-  // wide — the property W1-T2248's ruling protects, and the reason this is not a new gate.
+  // The escape has TWO conditions, not one: filing a follow-up gives the amended criteria a second
+  // home, it does not take the first away. Measured once, a follow-up left its parent dispatchable
+  // for 12h37m and the fleet built both in parallel. This is A CONDITION ON THE ESCAPE, not a
+  // fourth violation, so the blocking surface stays one predicate wide (W1-T2375, W1-T2248).
   const dispositionStated = parentDispositionStated(task, ctx.baseTask);
   const escapeAvailable = ctx.followUpFiled && dispositionStated;
   if (added.length > 0 && !escapeAvailable) {
-    // W1-T2375: prefer the CARRYING subset when the caller supplies the tasks; fall back to the
-    // caller-supplied id list otherwise. A carrying subset that comes back EMPTY (every filed
-    // follow-up is unrelated) falls back too rather than naming nothing — this narrows a message,
-    // it never blanks one.
+    // Prefer the CARRYING subset when the caller supplies the tasks, else the id list. An empty
+    // carrying subset falls back too rather than naming nothing: this narrows a message, it never
+    // blanks one (W1-T2375).
     const carrying = ctx.followUpTasks ? followUpTaskIdsCarrying(added, ctx.followUpTasks) : [];
     const followUps = carrying.length > 0 ? carrying : ctx.followUpTaskIds ?? [];
     const namedFollowUps = followUps.length > 0 ? followUps.join(", ") : "the follow-up filed here";
@@ -2301,9 +1533,8 @@ export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): L
       })),
     );
   }
-  // W1-T2254: report-only widening past the single guarded field (`acceptance`'s claims).
-  // Never blocks — see this function's own doc comment for why `followUpFiled` does not gate
-  // these. Nothing here rewrites a field back to its base value; it only names the drift.
+  // Report-only widening past the single guarded field. Nothing here rewrites a field back to its
+  // base value; it only names the drift (W1-T2254).
   violations.push(...mergedFieldChangeViolations(task, ctx.baseTask));
   violations.push(
     ...criteriaRemoved(ctx.baseAcceptance, currentCriteria).map((c) => ({
@@ -2327,20 +1558,17 @@ export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): L
         "reported here.",
     })),
   );
-  // W1-T2438: the frozen title is the only field renderImplementPrompt reads, so a correction
-  // Rule 21 permits in `rationale:` reaches no dispatched build until it also lands in `prompt:`.
+  // The frozen title is the only field renderImplementPrompt reads, so a correction Rule 21 permits
+  // in `rationale:` reaches no dispatched build until it also lands in `prompt:` (W1-T2438).
   const correction = correctionWithoutPromptViolation(task);
   if (correction) violations.push(correction);
   return violations;
 }
 
 // ── PROVENANCE (Rules 16/17) ─────────────────────────────────────────────────
-//
-// `risk:` is already guaranteed present by plan.ts's loader (it validates
-// against TASK_RISKS and defaults an omitted one to DEFAULT_RISK — a load-time
-// contract, not a linter concern). The remaining provenance gap the linter
-// checks is `origin:`, which the loader does NOT default: every task must name
-// where it came from (architect / feedback#… / alert#… / issue#…).
+// plan.ts's loader already guarantees `risk:` — it validates against TASK_RISKS and defaults an
+// omitted one, a load-time contract rather than a linter concern. The remaining gap is `origin:`,
+// which the loader does NOT default: every task must name where it came from.
 
 /** Missing `origin:` ⇒ a provenance violation. */
 export function provenanceViolation(task: Task): LintViolation | undefined {
@@ -2355,51 +1583,20 @@ export function provenanceViolation(task: Task): LintViolation | undefined {
 }
 
 // ── RULING-VERIFY (W1-T326 — a ruling needs an operator, not a grep) ────────
-//
-// W1-T326's own shard set verify:auto with the note "the whole deliverable is
-// text at known paths, so grep proofs execute against it directly and no
-// operator need be present to judge them" — on a task whose SAME note says
-// risk:high because "this writes a BINDING RULING on dispatch architecture."
-// The proofs verified the ruling was WRITTEN, not that anyone RATIFIED it:
-// #1302 merged in ten minutes and the operator overrode it in twenty-three
-// more (#1303). isDispatchEligible (drain.ts) already refuses to dispatch any
-// task whose `verify !== "auto"` — that enforcement lever is free and
-// pre-existing; a ruling-shaped task at verify:human simply PARKS until the
-// operator looks, which is the entire point. What was missing is only the
-// rule that puts it there.
-//
-// TRIGGER A ONLY — `files:` contains "DECISIONS.md" (an exact entry, the
-// literal repo-relative path this repo's single decision log lives at, per
-// {@link isDataArtifact}'s own root-relative convention). A task whose
-// declared write surface includes the decision log is ruling-shaped by
-// construction, and A ALONE would have caught W1-T326 (its shard's `files:`
-// named exactly this path). A mixed diff — other files alongside
-// DECISIONS.md — still triggers: that is how the entry rides in unnoticed.
-//
-// TRIGGER B (a ruling-shaped TITLE, e.g. a bare `\bruling\b` word match) is
-// the design's proposed belt for a ruling landing in some OTHER file (a
-// MASTER-PLAN "ruling" section, a docs/ decision record) — DELIBERATELY NOT
-// SHIPPED. Measured against the very task that files this check: W1-T353's
-// own title reads "...deliverable is a RULING... a ruling-shaped task..." —
-// describing the INCIDENT and the CHECK, not claiming its own diff (files:
-// [src/lib/task-linter.ts, test/task-linter.test.ts], no DECISIONS.md) is a
-// ruling — so a bare word match would misfire on the task introducing it, the
-// same self-reference failure mode the headless-fitness lexicon special-cases
-// for W1-T20c (see {@link HEADLESS_FORBIDDEN_LEXICON}'s FALSE POSITIVE #2
-// above). No enumeration/quote-span exemption of that kind applies here (the
-// title is one unquoted YAML string), so B cannot be stated precisely without
-// either false-positiving on this task or growing bespoke self-reference
-// carve-outs the design never asked for. The design's own fallback governs
-// exactly this case: "if B proves too fuzzy to state without false positives,
-// ship A alone and say so in the report" — done here.
+// A worker's proof that a ruling was WRITTEN is not an operator RATIFYING it. `isDispatchEligible`
+// already refuses any task whose `verify !== "auto"`, so a ruling-shaped task at verify:human
+// simply PARKS until the operator looks; only the rule that puts it there was missing.
+// TRIGGER A ONLY — `files:` contains the exact literal "DECISIONS.md", and a mixed diff still
+// triggers, since that is how the entry rides in unnoticed. TRIGGER B, a ruling-shaped TITLE, is
+// DELIBERATELY NOT SHIPPED: a bare word match misfires on the very task introducing this check.
+// Why: docs/forensics/task-linter.md#rulingverifyviolation (W1-T326, #1302/#1303, W1-T353).
 
-/** The exact repo-relative path this repo's single decision log lives at —
- *  the literal `files:` entry {@link rulingVerifyViolation} looks for. */
+/** The exact repo-relative path this repo's decision log lives at — the literal `files:` entry
+ *  {@link rulingVerifyViolation} looks for. */
 const DECISIONS_LOG_PATH = "DECISIONS.md";
 
-/** A task whose `files:` includes the decision log but is not verify:human —
- *  W1-T326's exact shape. TRIGGER A only; see the module comment above for
- *  why the title-word trigger B is deliberately not shipped. */
+/** A task whose `files:` includes the decision log but is not verify:human — W1-T326's exact shape.
+ *  TRIGGER A only; see the section comment for why the title-word trigger B is not shipped. */
 export function rulingVerifyViolation(task: Task): LintViolation | undefined {
   if (task.verify === "human") return undefined;
   if (!(task.files ?? []).includes(DECISIONS_LOG_PATH)) return undefined;
@@ -2414,57 +1611,28 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
 }
 
 // ── DECLARED SCOPE (W1-T504 — an undeclared files: lints clean and then serializes the fleet) ─
-//
-// 80 of 530 tasks carry an absent or empty `files:`, 13 of them minted unattended by triage.
-// The linter never checked this: `overlappingPaths` (dispatch-overlap.ts) is fail-closed on an
-// undeclared scope — it reports such a task as overlapping EVERY co-dispatched candidate — and
-// `undeclaredScopeLast` (drain.ts, W1-T476) only demotes it to the end of its priority tier.
-// Demotion is not containment: a demoted total-blocker that becomes the only eligible candidate
-// still serializes everything behind it. This check closes that gap at the choke point that
-// already exists — `assertLintClean` inside `runTask` refuses a task before any probe or spawn —
-// by making a missing or empty `files:` a BLOCKING violation, the same severity shape
-// {@link rulingVerifyViolation} established (a structural trigger, enforced by the linter,
-// parked by the dispatcher). No dispatcher-side change is needed or made: a default-block check
-// already reaches dispatch through `assertLintClean`, so teaching `isDispatchEligible` the same
-// refusal would only duplicate it.
-//
-// THE PREDICATE IS `undeclaredScopeLast`'s OWN (`t.files === undefined || t.files.length === 0`),
-// restated here rather than imported — drain.ts keeps no new dependency on this module, and the
-// two can be pinned against each other by test rather than by coupling.
-//
-// W1-T1030 — DISPATCHER-UNREACHABLE EXEMPTION. The rule above is sound but its rationale is
-// entirely about `overlappingPaths` at DISPATCH: `isDispatchEligible` (drain.ts) refuses at
-// `t.verify !== "auto"` BEFORE any path is read, so a task that is not `verify: auto` never
-// reaches `overlappingPaths` and cannot serialise the lane by an undeclared scope. Gating on
-// `verify: human` rather than `type: manual` because `verify` is the exact field
-// `isDispatchEligible` checks — `type: manual` is today a strict subset of it (see W1-T1030's
-// rationale) but is a proxy that a future `type: manual, verify: auto` record would break. The
-// 71 `implement/auto` records with no `files:` are untouched: this exemption checks `verify`,
-// not `type`, so they still hit the `block` below exactly as before. The exemption is also
-// SELF-LAPSING: it re-reads `task.verify` on every call, so the moment a task's record is
-// re-banded to `verify: auto` (the sanctioned `deriveStatus` channel), the very next lint run
-// — the changed-tasks CI pass that re-lints any touched record — sees `verify !== "human"` and
-// the block re-applies with no separate bookkeeping.
+// An undeclared `files:` lints clean and then serialises the lane: `overlappingPaths` is
+// fail-closed on it, and `undeclaredScopeLast` only demotes such a task to the end of its priority
+// tier. Demotion is not containment — a demoted total-blocker that becomes the only eligible
+// candidate still serialises everything behind it. THE PREDICATE IS `undeclaredScopeLast`'s OWN,
+// restated rather than imported, and the two are pinned by test rather than by coupling.
+// DISPATCHER-UNREACHABLE EXEMPTION: `isDispatchEligible` refuses at `t.verify !== "auto"` BEFORE
+// any path is read. It gates on `verify`, not `type: manual`, and is SELF-LAPSING, so a re-banded
+// record blocks again on the next run.
+// Why: docs/forensics/task-linter.md#declaredscopeviolation (W1-T504, W1-T476, W1-T1030).
 
-/** A task whose `files:` is absent, or present and empty — W1-T504's exact shape. The predicate
- *  is `undeclaredScopeLast`'s own (drain.ts, W1-T476), restated rather than imported so this
- *  module gains no new dependency. See the module comment above for why this is `block`, not
- *  `warn`, and why no dispatcher-side change accompanies it.
- *
- *  EXEMPT when `verify: human` (W1-T1030): such a task never reaches `isDispatchEligible`'s
- *  path-reading step, so the overlap hazard this check exists to prevent cannot occur for it.
- *  The exemption lapses the instant `verify` reads `auto` again — see the module comment. */
+/** A task whose `files:` is absent, or present and empty. EXEMPT when `verify: human`: such a task
+ *  never reaches `isDispatchEligible`'s path-reading step, and the exemption lapses the instant
+ *  `verify` reads `auto` again. See the section comment for why this blocks. */
 export function declaredScopeViolation(task: Task): LintViolation | undefined {
   if (!(task.files === undefined || task.files.length === 0)) return undefined;
   if (task.verify === "human") return undefined;
-  // W1-T2481: `isDispatchEligible` (drain.ts) refuses `t.status === "blocked"` before it ever
-  // reaches `overlappingPaths` — the ONLY place an undeclared scope can serialise the dispatch
-  // lane (this rule's own message). A blocked record cannot produce that harm by construction,
-  // so it is exempt on the SAME `status` field the dispatcher gates on, not on `retirement:`
-  // (which a blocked-and-unscoped record cannot acquire without first tripping this rule — the
-  // exact deadlock this exemption breaks). Un-blocking IS a plan edit, so a `--base` pass
-  // re-lints the record the moment it becomes dispatchable — the check moves to when the harm
-  // becomes possible, it is not removed.
+  // `isDispatchEligible` refuses `t.status === "blocked"` before it reaches `overlappingPaths`, the
+  // only place an undeclared scope can serialise the lane, so a blocked record cannot produce that
+  // harm. The exemption keys on the SAME `status` field the dispatcher gates on, not on
+  // `retirement:` — which a blocked-and-unscoped record cannot acquire without first tripping this
+  // rule, the deadlock this breaks. Un-blocking is a plan edit, so a `--base` pass re-lints the
+  // record the moment it becomes dispatchable: the check moves, it is not removed (W1-T2481).
   if (task.status === "blocked") return undefined;
   return {
     check: "declared-scope",
@@ -2478,59 +1646,17 @@ export function declaredScopeViolation(task: Task): LintViolation | undefined {
 }
 
 // ── RULE-15 FILING (W1-T384 — a filing shape the review guard can only refuse) ─
-//
-// THE INCIDENT, TWICE IN THREE DAYS. #1295 (W1-T324's dispatched run) went green on
-// 23 checks and was refused by `remudero-review` on Standing rule 15; #1416
-// (W1-T369's) was refused the same way with 18 deleted `proof:` lines. Both closed
-// unmerged; both were recovered by SPLITTING into a plan-only PR plus a code/test PR
-// (#1298+#1299 and #1418+#1420), each recovery merging in about a quarter of an hour.
-// The work was correct both times — only the PACKAGING was impossible.
-//
-// THE MECHANISM. `judgeReview` computes `planOnly = diffFiles.length > 0 &&
-// diffFiles.every(isInPlanScope)`, then `criteriaTampered = !planOnly &&
-// criterionFieldTampered(evidence.diff)`. Withdrawing or repairing a record
-// NECESSARILY removes a `claim:`/`proof:` line, which is exactly what
-// `criterionFieldTampered` fires on. So the moment ONE declared path falls outside
-// `isInPlanScope`, the carve-out is gone and the PR is refused however good the work
-// is. A dispatched worker gets one PR per run and cannot produce the split.
-//
-// WHY A LITERAL PATH AND NOT "ANY PLAN-SCOPE PATH" — MEASURED, per CLAUDE.md's rule
-// that a bound must have observed the population it separates. Re-derived over all
-// 425 task records at 1e952fc: FOUR declare `plan/tasks.yaml`. Two are plan-scope-only
-// and clean (W1-T202, W1-T370 — W1-T370 also verify:human); two are MIXED at
-// verify:auto (W1-T324, W1-T369) — exactly the two that lost dispatches. ZERO false
-// positives. Broadening the first clause to "any `isInPlanScope` path" instead fires
-// on 18 open records, 17 of them verify:auto, every one legitimate: `plan/policy.yaml`
-// beside `src/lib/policy.ts` is an ordinary config-plus-reader pairing (W1-T252,
-// W1-T264, W1-T318, W1-T320, W1-T325, W1-T330, W1-T344, W1-T378 among them) and none
-// touches an acceptance criterion. `plan/policy.yaml` is in plan scope only because it
-// starts with `plan/`. The narrow trigger is the one the evidence supports.
-//
-// IT GATES STRICTLY EARLIER THAN THE REVIEW GUARD, which is why it needs no reasoning
-// about gaming. `criteriaTampered` keeps working byte-identically on everything that
-// reaches review; this adds a refusal BEFORE dispatch and changes nothing about what
-// the reviewer does. It is purely additive to rule 15's strength — there is no path by
-// which it lets through something rule 15 previously caught.
-//
-// ONE TRIGGER ONLY, following {@link rulingVerifyViolation}'s own lesson: that check
-// shipped trigger A alone and dropped a title-word trigger B because B false-positived
-// on the very task introducing it. No second trigger is invented here either.
-//
-// W1-T399 — THE MONOLITH-ONLY TRIGGER WENT BLIND AS THE MONOLITH FROZE. PR #1060 stopped
-// routing new filings into `plan/tasks.yaml`; a task now stores its record in its own
-// `plan/tasks.d/<id>-<slug>.yaml` shard (of the last twenty merged implementation PRs,
-// nineteen worked a shard task). The literal-path trigger above never saw any of them —
-// a task declaring its OWN shard alongside an out-of-scope path has the identical
-// `criteriaTampered` exposure as W1-T324/W1-T369 did declaring the monolith, but passed
-// this check silently. Widened to also match a shard path — NOT to "any plan-scope path"
-// (the measured rejection above still holds; `plan/policy.yaml` beside `src/lib/policy.ts`
-// remains legitimate and untouched). Re-measured over all 442 task records at 9b6687b with
-// the widened trigger: the monolith clause alone still fires once (unchanged); the shard
-// clause adds ZERO newly-failing open records — no staging is needed.
+// THE MECHANISM. `judgeReview` computes `planOnly = diffFiles.every(isInPlanScope)`, then
+// `criteriaTampered = !planOnly && criterionFieldTampered(evidence.diff)`. Withdrawing or repairing
+// a record NECESSARILY removes a `claim:`/`proof:` line, which is what `criterionFieldTampered`
+// fires on, so the moment ONE declared path falls outside plan scope the carve-out is gone and the
+// PR is refused however good the work is — and a dispatched worker gets one PR per run.
+// A LITERAL PATH, NOT "ANY PLAN-SCOPE PATH": broadening the clause fires on ~18 legitimate
+// config-plus-reader pairings. ONE TRIGGER ONLY, the monolith path and a `plan/tasks.d/` shard.
+// Why: docs/forensics/task-linter.md#rule15filingviolation (W1-T384, #1295/#1416, W1-T399/#1060).
 
-/** The exact repo-relative path this repo's task monolith lives at — the literal
- *  `files:` entry {@link rule15FilingViolation} keys on, alongside {@link
- *  TASKS_SHARD_PATH_RE}. Mirrors {@link DECISIONS_LOG_PATH}'s root-relative convention. */
+/** The exact repo-relative path this repo's task monolith lives at — the literal `files:` entry
+ *  {@link rule15FilingViolation} keys on, alongside {@link TASKS_SHARD_PATH_RE}. */
 const TASKS_MONOLITH_PATH = "plan/tasks.yaml";
 
 /** A `plan/tasks.d/<id>-<slug>.yaml` shard — the ONLY other place a task record lives
@@ -2544,22 +1670,15 @@ function isTaskRecordFile(f: string): boolean {
   return f === TASKS_MONOLITH_PATH || TASKS_SHARD_PATH_RE.test(f);
 }
 
-/** Retired or landed records, excluded from {@link rule15FilingViolation}.
- *
- *  A withdrawal under the W1-T229 convention PRESERVES the record, `files:` included,
- *  so W1-T324's and W1-T369's mixed `files:` survive retirement forever. Without this
- *  exclusion the operator plan-only PR that withdraws W1-T324 would be blocked by the
- *  very check W1-T324 earned. `isOpenLintTask` is unexported and local to run-task.ts;
- *  W1-T369's own lock (test/plan-proof-debt.test.ts) re-declared the three-value set
- *  locally with a written reason rather than exporting it, and that precedent governs
- *  — a 3-literal Set carries none of the drift risk a re-implemented algorithm would. */
+/** Retired or landed records, excluded from {@link rule15FilingViolation}. A withdrawal preserves
+ *  the record, `files:` included, so without this exclusion the operator's plan-only PR withdrawing
+ *  such a task would be blocked by the very check that task earned. Declared locally rather than
+ *  imported, following W1-T369: a 3-literal Set carries none of an algorithm's drift risk. */
 const NON_OPEN_FILING_STATUSES = new Set<TaskStatus>(["blocked", "merged", "done"]);
 
-/** A task that declares a task record (the monolith OR its own shard, W1-T399) alongside a
- *  path outside plan scope, at a `verify` the operator will not be asked to judge —
- *  W1-T324's and W1-T369's exact shape, which `remudero-review` can only ever refuse. See
- *  the module comment above for the measured population and why the trigger keys on a
- *  structural path match rather than "any plan-scope path". */
+/** A task that declares a task record — the monolith or its own shard — alongside a path outside
+ *  plan scope, at a `verify` the operator will not be asked to judge: the shape `remudero-review`
+ *  can only ever refuse. See the section comment for the measured population behind the trigger. */
 export function rule15FilingViolation(task: Task): LintViolation | undefined {
   if (NON_OPEN_FILING_STATUSES.has(task.status)) return undefined;
   if (task.verify === "human") return undefined;
@@ -2582,11 +1701,9 @@ export function rule15FilingViolation(task: Task): LintViolation | undefined {
 }
 
 // ── BUDGET-SANITY (soft) ─────────────────────────────────────────────────────
-//
-// A WARNING (never blocks) when a task's resolved mount turn-budget sits below
-// the observed class mean. The mean is ALWAYS an injected argument, read by the
-// caller from MASTER-PLAN's current-cycle Calibration row (retro.ts's
-// calibrationTable) or the retro's own aggregate — NEVER a hardcoded literal.
+// A WARNING, never a block, when a task's resolved mount turn-budget sits below the observed class
+// mean. The mean is ALWAYS an injected argument, read by the caller from MASTER-PLAN's
+// current-cycle Calibration row or the retro's aggregate — never a hardcoded literal.
 
 export interface ClassCalibration {
   avgTurns: number;
@@ -2608,21 +1725,16 @@ export function budgetSanityWarning(
 }
 
 // ── DISPATCH-PRIORITY (W1-T422, soft) ────────────────────────────────────────
-//
-// A WARNING (never blocks) on the optional `priority:` field (lib/plan.ts) that
-// `compareDispatch` (lib/drain.ts) reads as its FIRST sort key. Two ways the field
-// rots silently without this: a value far outside the sanctioned band (a typo — a
-// risk number or a turn budget pasted into the wrong column), and a value left on a
-// task that can no longer dispatch at all (blocked/merged/done — see
-// {@link NON_OPEN_FILING_STATUSES}, reused here unchanged: "non-open" means the exact
-// same thing for a priority as it does for rule15-filing). Neither case can produce a
-// WRONG verdict — a bad priority only degrades ORDERING (design (iii), W1-T422's own
-// task record) — so blocking would overreach the failure mode.
+// A WARNING, never a block, on the optional `priority:` field that `compareDispatch` reads as its
+// FIRST sort key. Two ways it rots silently: a value far outside the sanctioned band (a typo — a
+// risk number or turn budget pasted into the wrong column), and a value left on a task that can no
+// longer dispatch ({@link NON_OPEN_FILING_STATUSES}, reused unchanged). Neither can produce a
+// WRONG verdict — a bad priority only degrades ORDERING — so blocking would overreach the failure
+// mode. Why: W1-T422 design (iii).
 
-/** Sanctioned `priority` band (design (iii), W1-T422) — wide enough to rank the whole
- *  open queue without doubling as an unbounded knob. A value outside it still sorts
- *  exactly where the comparator says it does (dispatchOrder never refuses to read it);
- *  the warning exists because a value this far out is very likely a typo. */
+/** Sanctioned `priority` band — wide enough to rank the whole open queue without doubling as an
+ *  unbounded knob. A value outside it still sorts exactly where the comparator says; the warning
+ *  exists because a value that far out is very likely a typo. */
 export const DISPATCH_PRIORITY_MIN = 0;
 export const DISPATCH_PRIORITY_MAX = 99;
 
@@ -2655,45 +1767,14 @@ export function dispatchPriorityViolations(task: Task): LintViolation[] {
 }
 
 // ── ADVISORY-ROUTING (W1-T519 — a security-shaped filing is PUBLISHED before it's fixed) ────
-//
-// SECURITY.md (W1-T23, #320) already routes OUTSIDE reporters to a private GitHub security
-// advisory and says plainly "do not open a public issue" — but nothing tells the fleet's OWN
-// filers (triage, a recon session, a retro) that the same rule applies to a task shard: filing a
-// task IS publishing on this repo, world-readable the moment it merges, and it can name a
-// precondition-measured weakness that is not yet fixed. loadPlan reads plan/tasks.d/ on
-// origin/main, so the fleet cannot itself act on a finding held in a private advisory — any fix
-// there is necessarily HUMAN-BUILT — which is why this check is a WARN, never a gate: it informs
-// the operator's routing choice for THIS filing, it never makes that choice (see "WARN-ONLY BY
-// CONSTRUCTION" below).
-//
-// PRECISION OVER RECALL, MEASURED. A naive single-word scan (auth/token/secret/sandbox/scope/
-// route/grant) over the live corpus (546 task blocks — every plan/tasks.d/ shard plus the
-// monolith, 2026-08-15) hits 345/546 (63%) — wallpaper, not a signal, because this repo
-// legitimately uses "scope", "route", "session", "grant" and "tier" in ordinary, non-security
-// senses dozens of times a week (a task's declared files: scope, an HTTP route, a review
-// session, a duplicate-title grant match, a risk tier). Every entry below instead matches a
-// PHRASE naming an actual weakness shape (a bypass, a leak, an unscoped reachable route) and
-// never fires on a bare noun. Re-run over the SAME corpus with the phrase table below: 5/546
-// (0.9%), every hit inspected and genuine — W1-T10's scoped-PAT injection, W1-T371/W1-T169's
-// "token leak"/"leaked" write-token discussions, W1-T493's route-scope-enforcement audit, and
-// this task's own rationale (which quotes "auth gap" describing W1-T493/495/500 — a legitimate
-// hit, not a false one: this shard's own text genuinely discusses a security-shaped topic).
-//
-// FIELDS: title + rationale + note — the free-text prose fields a filer actually writes into.
-// The task record that requested this check also names `design:`, but that field is DROPPED by
-// the plan parser before a {@link Task} object exists (see {@link rawChangedTaskIds}'s own
-// comment on the six fields the parser never carries into a parsed Task) — this module is a PURE
-// function over an already-loaded Task (module comment, top of file), so there is no `design:`
-// text here to match against. Matching only the fields the linter actually receives is the
-// honest version of the rule; a follow-up teaching the parser to retain `design:` on Task would
-// let this check see it too, with zero changes to the matcher table itself.
-//
-// WARN-ONLY BY CONSTRUCTION: severity is the literal "warn" below, with NO {@link LintOpts} knob
-// anywhere — unlike proofDialect/proofResolvability there is deliberately no way to run this rule
-// blocking, in any caller, so it can never stall dispatch, the changed-tasks gate, or a filing.
-// The routing decision this warn informs is the operator's; starving the queue over an advisory
-// judgment call would be the opposite failure this repo has already paid for once (a ruling
-// dispatched instead of parked for a human, W1-T326/#1302 — see {@link rulingVerifyViolation}).
+// SECURITY.md routes OUTSIDE reporters to a private advisory, but nothing told the fleet's OWN
+// filers that the same rule applies to a task shard: filing a task IS publishing on this repo,
+// world-readable the moment it merges, and it can name a weakness that is not yet fixed.
+// PRECISION OVER RECALL, MEASURED: a naive single-word scan hits 63% of the live corpus, wallpaper
+// rather than signal, so every row below matches a PHRASE naming a weakness shape, never a noun.
+// FIELDS: title + rationale + note; `design:` is DROPPED by the plan parser before a {@link Task}
+// exists. WARN-ONLY BY CONSTRUCTION: no knob exists to run this blocking, and the routing decision
+// is the operator's. Why: docs/forensics/task-linter.md#advisoryroutingviolations (W1-T519).
 
 export interface AdvisoryRoutingMatcher {
   /** Surfaced in the warn message — the category text acceptance criterion 1 checks for. */
@@ -2701,19 +1782,16 @@ export interface AdvisoryRoutingMatcher {
   /** PRECISION-FIRST: must fire only on phrasing that names an actual weakness shape, never on
    *  a bare noun this repo also uses benignly (scope/route/session/grant/tier). */
   pattern: RegExp;
-  /** WHY this phrase is security-shaped — read by a reviewer auditing the table, not consumed by
-   *  the matcher itself (T427's per-entry-reason discipline: a reviewer reads reasons, not a
-   *  bare list — see {@link ENFORCEMENT_DATA} in review.ts for the same discipline applied
-   *  elsewhere). */
+  /** WHY this phrase is security-shaped — read by a reviewer auditing the table, never consumed by
+   *  the matcher. A reviewer reads reasons, not a bare list (T427; the same discipline
+   *  {@link ENFORCEMENT_DATA} in review.ts follows). */
   reason: string;
 }
 
-/** DATA table — a new phrase is a row here, zero engine changes (mirrors {@link
- *  SUBSYSTEM_LEXICON} / {@link HEADLESS_FORBIDDEN_LEXICON} above). Categories match the design's
- *  own six: authentication/authorization weakness, token or credential leakage, secret handling,
- *  sandbox/containment escape or bypass, scope enforcement on a reachable route,
- *  prompt-injection escalation. See the module comment above for the measured 5/546 vs 345/546
- *  precision comparison this table earns. */
+/** DATA table — a new phrase is a row here, with no engine change. The six categories are
+ *  authentication/authorization weakness, token or credential leakage, secret handling,
+ *  sandbox/containment escape or bypass, scope enforcement on a reachable route, and
+ *  prompt-injection escalation. See the section comment for the precision measurement. */
 export const ADVISORY_ROUTING_LEXICON: ReadonlyArray<AdvisoryRoutingMatcher> = [
   {
     category: "authentication/authorization weakness",
@@ -2758,17 +1836,10 @@ export const ADVISORY_ROUTING_LEXICON: ReadonlyArray<AdvisoryRoutingMatcher> = [
   },
 ];
 
-/** `task`'s narrative text (title + rationale + note — see the module comment above for why
- *  `design:` is not among them) matched against {@link ADVISORY_ROUTING_LEXICON}'s phrase
- *  entries. Named and shaped PLURAL, an ARRAY, matching this file's majority violation-family
- *  idiom (`proofShapeViolations`, `headlessFitnessViolations`, `dispatchPriorityViolations`,
- *  `duplicateTitleViolations` — every one returns `LintViolation[]`, spread straight into
- *  `lintTask`'s aggregator) — this is criterion 3's own point, "lands beside the other violation
- *  families ... as one idiom". Length is 0 or 1, NEVER more: only the FIRST matching category,
- *  in table order, is returned — never one per hit or one per field, so a task whose text
- *  matches several entries still draws exactly one warn (the falsifier's "exactly one"
- *  requirement). WARN-only, unconditionally: no `opts` parameter exists to override it (see the
- *  module comment above, "WARN-ONLY BY CONSTRUCTION"). */
+/** `task`'s narrative text (title + rationale + note) matched against {@link
+ *  ADVISORY_ROUTING_LEXICON}, shaped as an ARRAY to match this file's violation-family idiom.
+ *  Length is 0 or 1, never more: only the FIRST matching category in table order is returned, so a
+ *  task matching several entries still draws exactly one warn. WARN-only, with no override. */
 export function advisoryRoutingViolations(task: Task): LintViolation[] {
   const text = [task.title, task.rationale, task.note].filter(Boolean).join("\n");
   for (const entry of ADVISORY_ROUTING_LEXICON) {
@@ -2792,76 +1863,23 @@ export function advisoryRoutingViolations(task: Task): LintViolation[] {
 }
 
 // ── DUPLICATE-CLOSURE AT KNOWLEDGE INTAKE (W1-T420, narrowed W1-T2486) ───────
-//
-// ONE PURE MODULE (src/lib/knowledge-dedup.ts's `bestNearDuplicate`), THREE CONSUMERS HERE,
-// TWO SEVERITIES — matched to population size and false-positive cost (the W1-T352-vs-W1-T322
-// calibration argument applied at filing time). Every consumer below passes its own corpus in
-// (this module reads no disk, same purity contract `moduleExists` already keeps for
-// `callSiteViolations`); the CALLER resolves `learnings/*.yaml` and `plan/tasks.yaml` + shards
-// and injects the result.
-//
-// (i) `duplicateTitleViolations` — TASK-TITLE INTAKE, ADVISORY. Wired into `lintTask` via
-//     `opts.openTaskTitles`, so it runs on every real lint pass once a caller supplies the
-//     corpus. WARN-only, unconditionally (no severity override — the whole point of the
-//     advisory posture is that it never blocks): title similarity is legitimately high for
-//     sibling tasks in an arc (a W1-T369/T370-shaped pair would rightly score high), and a
-//     false BLOCK at filing costs a whole re-file cycle. The warn is the pointer; the author
-//     decides.
-//
-// (i-b) `unansweredDuplicateTitleViolations` (W1-T2486) — THE NARROW BLOCKING ARM, not a
-//     promotion of (i). Promoting the whole check to `block` would refuse legitimate sibling
-//     shards in the same arc (the W1-T369/T370 shape (i) exists to spare) — this arm fires only
-//     on an UNANSWERED NEAR-CERTAIN match: score >= {@link NEAR_IDENTITY_DUPLICATE_CUTOFF} (well
-//     above {@link DEFAULT_DUPLICATE_CUTOFF}'s "possibly related" line — see that constant's
-//     measured sibling ceiling of 0.091) AND neither shard citing the other by either of (i)'s
-//     own two additive answers: CITE the sibling in plan_refs, or SAY WHY IT DIFFERS in the
-//     rationale. Either shard's exit clears it (`opts.openTaskRecords` carries what the OTHER
-//     shard already said, since a plain id/text {@link OpenTaskTitleCorpus} entry cannot answer
-//     that). W1-T403/W1-T1062 — byte-identical titles AND files:, both queued, neither citing
-//     the other — is the fixture this arm exists to catch; it is exactly the escape the old
-//     inbox.ts ratification comment named and could not close, because that check was, and (i)
-//     still is, advisory-only.
-//
-// (ii) `learningDuplicateViolation` — LEARNINGS INTAKE, BLOCKING. NOT wired into `lintTask`
-//      (a `Task` does not carry a learning's `fact`/`id` — there is nothing on `Task` to hang
-//      this check off), and this task's own declared `files:` is
-//      [src/lib/knowledge-dedup.ts, src/lib/task-linter.ts, test/knowledge-dedup.test.ts] —
-//      wiring a live gate over `learnings/*.yaml` diffs would mean editing run-task.ts or a CI
-//      workflow file, outside that declared scope. Shipped here as a tested, directly callable
-//      function (test/knowledge-dedup.test.ts exercises it directly) ready for that follow-up
-//      wiring, exactly as `postMergeAmendmentViolations` above documents its own CI-only call
-//      site rather than pretending to own it. Population: single-digit additions per week
-//      against ~35 active entries — tiny, and every catch saves permanent double context-tax.
-//      ANSWERABLE (the W1-T365 exemption shape): a stated distinction naming the matched id
-//      clears it — a refusal that cannot be answered would just relocate the judgment it
-//      replaces.
-//
-// THE CUTOFF (both consumers default to `DEFAULT_DUPLICATE_CUTOFF`) is MEASURED, not asserted
-// — see that constant's own doc comment in knowledge-dedup.ts and this PR's body for the full
-// pairwise score distribution over the live learnings corpus and open task titles that the
-// cutoff sits above.
+// ONE PURE MODULE (knowledge-dedup.ts's `bestNearDuplicate`), THREE CONSUMERS, TWO SEVERITIES,
+// matched to population size and false-positive cost. Every consumer takes its corpus by parameter,
+// so this module still reads no disk, and THE CUTOFF is MEASURED, not asserted.
+// `duplicateTitleViolations` is ADVISORY, warn-only with no override, because title similarity is
+// legitimately high for siblings in one arc. `unansweredDuplicateTitleViolations` is the NARROW
+// BLOCKING ARM, not a promotion of it, and fires only on an unanswered near-certain match.
+// `learningDuplicateViolation` is BLOCKING but unwired, since a `Task` carries no learning
+// `fact`/`id` to hang it off, and ANSWERABLE, the W1-T365 shape.
+// Why: docs/forensics/task-linter.md#duplicate-closure (W1-T420, W1-T2486, W1-T403/W1-T1062).
 
-/**
- * W1-T1076: the shingle width the OPEN-PR SLUG corpus is scored at — 2, deliberately NOT
- * {@link DEFAULT_SHINGLE_K}'s 3, and chosen per call exactly as `bestNearDuplicate`'s own
- * `opts.k` was built to allow.
- *
- * WHY A SEPARATE CONSTANT AND NOT THE MODULE DEFAULT. Re-derived on the real predicate against
- * origin/main over every shard in `plan/tasks.d/`, on the two pairs that were filed minutes apart
- * on 2026-08-20 and that nothing caught:
- *
- *   pair A (W1-T1070/W1-T1071)  slug k=3 = 0.111  MISSED   slug k=2 = 0.200  caught
- *   pair B (W1-T1074/W1-T1075)  slug k=3 = 1.000  caught   slug k=2 = 1.000  caught
- *
- * k=3 misses pair A outright. k=1 catches both and is unusable — the whole-plan false-positive
- * load at cutoff {@link DEFAULT_DUPLICATE_CUTOFF} reads 196 pairs at k=1 against 34 at k=2 and 5
- * at k=3 (re-derived, and every one of those counts moves as shards land — re-run it, never quote
- * it). k=2 is the honest middle and pair A sits EXACTLY on the cutoff there, which is stated
- * rather than smoothed over: this width catches that pair by the smallest possible margin.
- *
- * {@link DEFAULT_SHINGLE_K} itself is NOT changed — it is the measured default for the learnings
- * corpus and the title consumer, and moving it is explicitly not this task's to do.
- */
+/** The shingle width the OPEN-PR SLUG corpus is scored at — 2, deliberately NOT {@link
+ *  DEFAULT_SHINGLE_K}'s 3, chosen per call as `bestNearDuplicate`'s `opts.k` was built to allow.
+ *  MEASURED on the two pairs filed minutes apart that nothing caught: k=3 misses one outright, and
+ *  k=1 catches both but is unusable, its whole-plan false-positive load an order of magnitude
+ *  higher. k=2 is the honest middle, and the missed pair sits EXACTLY on the cutoff there — stated
+ *  rather than smoothed over. {@link DEFAULT_SHINGLE_K} is NOT changed: it is the measured default
+ *  for the learnings corpus. Why: docs/forensics/task-linter.md#duplicate_slug_shingle_k. */
 export const DUPLICATE_SLUG_SHINGLE_K = 2;
 
 /** A plan shard path's `<id>` and filename `<slug>`, as a corpus entry whose `text` is the SLUG.
@@ -2872,18 +1890,12 @@ export function shardSlugFromPath(path: string): DuplicateCorpusEntry | undefine
   return m ? { id: m[1], text: m[2] } : undefined;
 }
 
-/**
- * The SLUG corpus for {@link duplicateTitleViolations}, built from a set of changed-file paths.
- * Deduped by id, first path per id wins. PURE — the caller does the GitHub read and hands the
- * paths in, the same seam `opts.moduleExists` and `opts.resolveNameFilteredCandidates` already
- * use, so this module still never reaches disk or network.
- *
- * THE TEXT IS THE SLUG ALONE, NEVER SLUG-PLUS-TITLE. Joining the two is measurably WORSE, which
- * is counter-intuitive enough to be worth stating where an implementer will read it: at k=2 the
- * joined text scores 0.049 and 0.121 on the two pairs above, against the slug's own 0.200 and
- * 1.000. The house title style is long and deliberately distinctive prose, so it floods the
- * shingle set and dilutes the signal the short topical slug carries.
- */
+/** The SLUG corpus for {@link duplicateTitleViolations}, built from changed-file paths. Deduped by
+ *  id, first path per id wins. PURE: the caller does the GitHub read and hands the paths in.
+ *  THE TEXT IS THE SLUG ALONE, NEVER SLUG-PLUS-TITLE. Joining the two is measurably WORSE, which is
+ *  counter-intuitive enough to state where an implementer will read it: the house title style is
+ *  long, distinctive prose, so it floods the shingle set and dilutes the short topical slug's
+ *  signal. Measured on the two pairs above, the join scores roughly a quarter of the slug alone. */
 export function planShardSlugCorpus(paths: readonly string[]): DuplicateCorpusEntry[] {
   const byId = new Map<string, DuplicateCorpusEntry>();
   for (const path of paths) {
@@ -2894,30 +1906,23 @@ export function planShardSlugCorpus(paths: readonly string[]): DuplicateCorpusEn
 }
 
 /** The corpus the caller supplies for {@link duplicateTitleViolations} to compare THIS task
- *  against. `undefined`/empty ⇒ the check is silent — same "no predicate, no opinion" contract
- *  {@link callSiteViolations} uses for `opts.moduleExists`.
- *
- *  W1-T1076 CHANGED WHAT `text` HOLDS, and the field name is kept for continuity with W1-T420
- *  rather than because it is still perfectly descriptive: the live caller now supplies each OPEN
- *  PR's added shard FILENAME SLUG (see {@link planShardSlugCorpus}), because the title scores
- *  0.000 and 0.054 at k=3 on the two pairs this check exists to catch — wiring the corpus without
- *  changing what is scored would have caught neither. A caller that still passes titles gets
- *  W1-T420's original behaviour unchanged. */
+ *  against. `undefined` or empty ⇒ the check is silent.
+ *  W1-T1076 CHANGED WHAT `text` HOLDS; the field name is kept for continuity, not because it is
+ *  still descriptive. The live caller supplies each open PR's added shard FILENAME SLUG (see
+ *  {@link planShardSlugCorpus}), because titles score near zero on the pairs this check exists to
+ *  catch. A caller that still passes titles gets W1-T420's original behaviour. */
 export type OpenTaskTitleCorpus = readonly DuplicateCorpusEntry[];
 
-/** ADVISORY (never blocks): this task scores >= cutoff against some OTHER entry in the supplied
- *  corpus. Absent `opts.openTaskTitles` ⇒ silent (the caller hasn't supplied a corpus).
- *
- *  W1-T1076: scores `opts.duplicateSlug` — this shard's own filename slug — when the caller
- *  supplies one, at `opts.duplicateShingleK`. Absent either, it falls back BYTE-FOR-BYTE to
- *  W1-T420's title-at-{@link DEFAULT_SHINGLE_K} behaviour, so every caller and fixture that
- *  predates the slug corpus is unaffected. */
+/** ADVISORY, never blocking: this task scores >= cutoff against some OTHER entry in the supplied
+ *  corpus. Absent `opts.openTaskTitles` ⇒ silent. It scores `opts.duplicateSlug` at
+ *  `opts.duplicateShingleK` when the caller supplies them, and otherwise falls back byte for byte
+ *  to W1-T420's title-at-{@link DEFAULT_SHINGLE_K} behaviour. */
 export function duplicateTitleViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const corpus = opts.openTaskTitles;
   if (!corpus || corpus.length === 0) return [];
   const cutoff = opts.duplicateTitleCutoff ?? DEFAULT_DUPLICATE_CUTOFF;
-  // THE SLUG WHEN THERE IS ONE, THE TITLE OTHERWISE — never the two joined; see
-  // {@link planShardSlugCorpus} for the measurement that rules the join out.
+  // THE SLUG WHEN THERE IS ONE, THE TITLE OTHERWISE — never the two joined; {@link
+  // planShardSlugCorpus} carries the measurement that rules the join out.
   const scored = opts.duplicateSlug?.trim();
   const candidateText = scored && scored.length > 0 ? scored : task.title;
   const k = opts.duplicateShingleK ?? DEFAULT_SHINGLE_K;
@@ -2938,41 +1943,33 @@ export function duplicateTitleViolations(task: Task, opts: LintOpts = {}): LintV
   ];
 }
 
-/**
- * The near-identity cutoff for {@link unansweredDuplicateTitleViolations}'s BLOCKING arm — well
- * above {@link DEFAULT_DUPLICATE_CUTOFF} (0.2, tuned to flag a merely POSSIBLE duplicate for the
- * warn-only check above) and well above the measured reworded-near-duplicate band that constant's
- * own doc comment reports (0.28-0.36). A genuine sibling pair's measured ceiling is 0.091 (same
- * doc comment); a "same lesson reworded" pair still tops out at 0.36. 0.9 sits far above both —
- * this arm is deliberately built to catch only a near-VERBATIM restatement (the W1-T403/W1-T1062
- * fixture scores a perfect 1.00, byte-identical titles), never a paraphrase or a legitimate
- * sibling, so raising the stakes to `block` never costs a false refusal against either measured
- * population. NOT a change to {@link DEFAULT_DUPLICATE_CUTOFF} itself, or to the scorer/shingle
- * width knowledge-dedup.ts owns — this is a SEPARATE, higher bar for a separate, narrower arm.
- */
+/** The near-identity cutoff for {@link unansweredDuplicateTitleViolations}'s BLOCKING arm. It sits
+ *  far above {@link DEFAULT_DUPLICATE_CUTOFF}, above that constant's measured sibling ceiling, and
+ *  above its reworded-near-duplicate band, so this arm catches only a near-VERBATIM restatement —
+ *  never a paraphrase or a legitimate sibling. Raising the stakes to `block` therefore costs no
+ *  false refusal against either measured population. NOT a change to {@link
+ *  DEFAULT_DUPLICATE_CUTOFF} or to the scorer knowledge-dedup.ts owns: a separate, higher bar for a
+ *  separate, narrower arm. */
 export const NEAR_IDENTITY_DUPLICATE_CUTOFF = 0.9;
 
-/** A near-duplicate corpus entry carrying what {@link unansweredDuplicateTitleViolations} needs
- *  that a plain {@link OpenTaskTitleCorpus} entry (id/text only) cannot answer: did the OTHER
- *  shard already clear this pair from ITS side? `Task` itself carries no `plan_refs` field
- *  (plan.ts keeps it declarative-only — see panel-graph.ts's own note on why), so a caller
- *  assembles this the same way `opts.duplicateSlug` already threads slug data `Task` lacks. Both
- *  fields are optional and independently checked: a shard with either one but not the other still
- *  clears via the one it has. */
+/** A near-duplicate corpus entry carrying what a plain {@link OpenTaskTitleCorpus} entry cannot
+ *  answer: did the OTHER shard already clear this pair from its side? `Task` carries no
+ *  `plan_refs` field, so a caller assembles this the way `opts.duplicateSlug` already threads slug
+ *  data `Task` lacks. Both fields are optional and independently checked. */
 export interface DuplicateAnswerCorpusEntry extends DuplicateCorpusEntry {
   /** This candidate's own `plan_refs` list, verbatim. Cleared when it contains the OTHER task's
    *  id exactly (an exact-string check — plan_refs is a flat list of citations, not prose). */
   planRefs?: readonly string[];
   /** This candidate's own `rationale` prose. Cleared when it NAMES the other task's id — the
-   *  mechanical, deterministic proxy for "says why it differs": whether prose correctly explains
-   *  a difference cannot be graded by a linter, but whether the id is named at all can be. */
+   *  deterministic proxy for "says why it differs". A linter cannot grade whether prose correctly
+   *  explains a difference; it can tell whether the id is named at all. */
   rationale?: string;
 }
 
-/** `true` iff `id` is named in `refs` (exact-string membership) or mentioned in `text` (a
- *  delimiter-bounded, case-insensitive substring match — `W1-T25` must never match a mention of
- *  `W1-T250`, the same hazard `classifyFailingMergeEvidence` guards against). Either surface
- *  clearing is enough; this is the shared predicate both directions of the citation check use. */
+/** True iff `id` is named in `refs` by exact-string membership, or mentioned in `text` by a
+ *  delimiter-bounded, case-insensitive match. The delimiter matters: `W1-T25` must never match a
+ *  mention of `W1-T250`. Either surface clearing is enough; both directions of the citation check
+ *  share this predicate. */
 export function citesTaskId(refs: readonly string[] | undefined, text: string | undefined, id: string): boolean {
   if (refs?.includes(id)) return true;
   if (!text) return false;
@@ -2980,19 +1977,12 @@ export function citesTaskId(refs: readonly string[] | undefined, text: string | 
   return new RegExp(`(?:^|[^A-Za-z0-9-])${escaped}(?:$|[^A-Za-z0-9-])`, "i").test(text);
 }
 
-/**
- * BLOCKING (the narrow arm, W1-T2486): this task scores >= {@link NEAR_IDENTITY_DUPLICATE_CUTOFF}
- * against some OTHER entry in `opts.openTaskRecords`, AND neither shard has answered — this task
- * does not cite the match (in `opts.taskPlanRefs` or its own `task.rationale`), and the matched
- * entry does not cite this task back (in ITS `planRefs`/`rationale`). Either citation, from either
- * side, clears it: a legitimate sibling pair that names its twin in plan_refs or explains the
- * difference in its rationale is UNTOUCHED by this arm, exactly as (i)'s own message already
- * promises. Absent `opts.openTaskRecords` ⇒ silent — same "no corpus, no opinion" contract
- * {@link duplicateTitleViolations} already uses for `opts.openTaskTitles`.
- *
- * NEVER answered by narrowing `files:` or deleting a proof: this predicate reads only the
- * citation surfaces above, so nothing else about either shard can clear it.
- */
+/** BLOCKING, the narrow arm: this task scores >= {@link NEAR_IDENTITY_DUPLICATE_CUTOFF} against
+ *  some OTHER entry in `opts.openTaskRecords`, AND neither shard has answered — this task does not
+ *  cite the match (in `opts.taskPlanRefs` or its own `task.rationale`) and the matched entry does
+ *  not cite this task back. Either citation, from either side, clears it, so a legitimate sibling
+ *  pair is untouched; absent `opts.openTaskRecords` it is silent. NEVER answered by narrowing
+ *  `files:` or deleting a proof, since it reads only the citation surfaces. Why: W1-T2486. */
 export function unansweredDuplicateTitleViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const corpus = opts.openTaskRecords;
   if (!corpus || corpus.length === 0) return [];
@@ -3022,8 +2012,7 @@ export function unansweredDuplicateTitleViolations(task: Task, opts: LintOpts = 
 }
 
 /** A stated distinction naming the SAME id `bestNearDuplicate` matched — the W1-T365 exemption
- *  shape: an answerable refusal, cleared by the author explaining the difference rather than
- *  relocating the judgment to a human every time. */
+ *  shape: an answerable refusal, cleared by the author explaining the difference. */
 export interface DuplicateLearningDistinction {
   /** Must equal the matched entry's id for the exemption to apply. */
   existingId: string;
@@ -3031,11 +2020,10 @@ export interface DuplicateLearningDistinction {
   statement: string;
 }
 
-/** BLOCKING: a NEW active learning entry's `fact` scores >= cutoff against some entry already
- *  in the ACTIVE corpus. Returns `undefined` (clears) when no match reaches cutoff OR when
- *  `distinction` names the matched id with a non-empty statement. Takes its corpus and
- *  candidate by parameter — no disk read, so a caller can supply ANY corpus (a real
- *  `learnings/*.yaml` read, or a test fixture) with identical behavior. */
+/** BLOCKING: a NEW active learning entry's `fact` scores >= cutoff against an entry already in the
+ *  ACTIVE corpus. Clears when no match reaches cutoff, or when `distinction` names the matched id
+ *  with a non-empty statement. Corpus and candidate arrive by parameter, so a real
+ *  `learnings/*.yaml` read and a test fixture behave identically. */
 export function learningDuplicateViolation(
   candidate: DuplicateCorpusEntry,
   activeCorpus: readonly DuplicateCorpusEntry[],
@@ -3059,41 +2047,18 @@ export function learningDuplicateViolation(
 
 // ── Aggregator ────────────────────────────────────────────────────────────────
 
-/**
- * CALL-SITE (impl-DO) — "the code is REACHED, not merely that it exists".
- *
- * ELEVEN MEASURED INSTANCES IN THREE DAYS of code that merged green and nothing ever calls:
- * `console-freshness.ts` (111 lines, 83 of tests, `serve.ts` never imported it — the defect it
- * fixed is still on screen eight days later), `panel-skills.ts`, `panel-skill-run.ts`,
- * `runbook-coverage.ts`, `log-rotation.ts`, and PR #1066's auto-triage rung, whose producer
- * `daemonCommand` never supplied. Eighteen passing tests, three genuine diff-coverage blocks and a
- * green review, dead on arrival.
- *
- * WHY NO EXISTING GATE CATCHES IT (recon-DL): `lint-plan` never opens src/; `tsc` is satisfied
- * because a TEST is an importer; `coverage-ratchet` is satisfied because a unit test calling the
- * function directly covers 100% of it; `remudero-review` executes those same tests. Every gate asks
- * whether the code WORKS. None asks whether anything CALLS it.
- *
- * THE RULE. A task that will CREATE a src/ module must carry at least one acceptance criterion
- * whose proof demonstrates a CALL SITE in a DIFFERENT file: `grep: <symbol>( in <consumer path>`.
- *
- * ★ CALL vs MENTION, AND THE EXACT LIMIT OF WHAT THIS CHECKS. `grep: resolveFreshness in
- * src/lib/serve.ts` passes on a COMMENT — that is precisely how W1-T267's proof exited 0 against
- * entirely unbuilt work. `grep: resolveFreshness( in src/lib/serve.ts` demands the open paren, so
- * the pattern can only be satisfied by something shaped like an invocation. This check enforces
- * THE SHAPE OF THE PROOF, which is mechanically decidable. It does NOT and cannot verify that the
- * eventual grep hit is executable code rather than a comment containing `foo(` — that would need to
- * run the proof against a tree that does not exist yet. Saying so plainly is the point: this is the
- * honest weaker version, and what it cannot catch is a comment written to look like a call.
- *
- * MULTI-LINE CALLS ARE NOT A PRACTICAL RISK HERE, and that was measured rather than assumed: across
- * all of src/ at b5fd9cc there are 12,639 same-line `identifier(` occurrences and ONE split across a
- * newline (0.008%). A line-oriented grep for `foo(` therefore finds real call sites.
- */
+/** CALL-SITE — the code is REACHED, not merely that it exists. NO EXISTING GATE CATCHES IT:
+ *  `lint-plan` never opens src/, `tsc` is satisfied because a TEST is an importer,
+ *  `coverage-ratchet` because a unit test covers 100% of it, and the reviewer runs those same tests.
+ *  Every gate asks whether the code WORKS; none asks whether anything CALLS it. THE RULE: a task
+ *  that will CREATE a src/ module must carry a criterion proving a CALL SITE in a DIFFERENT file.
+ *  CALL vs MENTION, AND THE EXACT LIMIT: a pattern without the open paren passes on a COMMENT,
+ *  which is how one proof exited 0 against entirely unbuilt work. This enforces THE SHAPE OF THE
+ *  PROOF, which is mechanically decidable, and cannot verify the eventual hit is code.
+ *  Why: docs/forensics/task-linter.md#callsiteviolations (impl-DO, recon-DL, W1-T267, PR #1066). */
 export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
-  // NO PREDICATE ⇒ NO OPINION. The linter is pure (no fs), so whether a module already exists is
-  // the caller's to answer. Absent it this check is silent rather than guessing — a wrong guess
-  // here would flag every task that merely EDITS a module.
+  // NO PREDICATE ⇒ NO OPINION. Whether a module already exists is the caller's to answer, and a
+  // wrong guess here would flag every task that merely EDITS a module.
   if (!opts.moduleExists) return [];
   const severity: LintSeverity = opts.callSite ?? "warn";
   const created = (task.files ?? []).filter(
@@ -3109,8 +2074,8 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
     const [, pattern, path] = m;
     // A CALL, not a mention: the pattern must demand an invocation…
     if (!pattern.includes("(")) return false;
-    // …in a file OTHER than the module being created. A module calling itself proves nothing about
-    // whether the rest of the program reaches it.
+    // …in a file OTHER than the module being created, since a module calling itself proves nothing
+    // about whether the rest of the program reaches it.
     return !created.includes(path);
   };
 
@@ -3133,34 +2098,14 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
   ];
 }
 
-/**
- * MONOLITH-FILING (impl-DS) — one storage convention for new tasks.
- *
- * PR #1060 redirected `rmd triage` to propose a new task as its own `plan/tasks.d/<id>-<slug>.yaml`
- * shard rather than appending to the 992 KB `plan/tasks.yaml` monolith. But that is ONLY A PROMPT
- * INSTRUCTION TO AN LLM: `decideTriage` (lib/triage.ts) filters `!f.startsWith("plan/")`, so a shard
- * passes AND so does a monolith append. #1060's own author flagged the gap — the prompt DIRECTS a
- * shard, the validator does not REQUIRE one, and a disobedient worker (or any hand-filing, or the
- * plan/architect lanes) still passes.
- *
- * THIS IS NOT A SIZE EMERGENCY, and the old framing should not be repeated. The 1 MiB buffer cliff
- * is gone (run-task.ts:589/:5298/:5500) and the monolith has essentially stopped growing: +303,798
- * bytes on 07-20, +3,666 on 07-30, ZERO on 07-31. The reason to enforce this is CONSISTENCY — one
- * storage convention the whole toolchain, the id minter and the conflict story can rely on.
- *
- * ID SETS, NEVER DIFF LINES. A reformat, a rename, a moved block or a whitespace change inside the
- * monolith leaves the id set untouched and cannot trip this. Only an id PRESENT in the monolith on
- * this branch and ABSENT from the monolith at the base ref is a violation.
- *
- * IT ALSO CATCHES THE REVERSE MIGRATION, which is more than the minimum asked for and costs nothing
- * extra: the base side is the base's MONOLITH blob specifically (not the merged base plan), so a
- * task moving from a shard INTO the monolith trips too — its id is absent from the base monolith.
- * A task moving the RIGHT way, monolith → shard, never trips: its id simply leaves the monolith.
- *
- * REQUIRES `--base`. "New" has no meaning without one, so {@link LintOpts.newMonolithIds} is
- * undefined in whole-plan mode and this check is silent there — the caller says so out loud rather
- * than letting a check that cannot run look like a check that passed.
- */
+/** MONOLITH-FILING — one storage convention for new tasks. PR #1060 redirected `rmd triage` to
+ *  propose a new task as its own shard, but that is ONLY A PROMPT INSTRUCTION TO AN LLM:
+ *  `decideTriage` filters `!f.startsWith("plan/")`, so a shard passes and so does a monolith append.
+ *  THIS IS NOT A SIZE EMERGENCY, and the old framing should not be repeated: the reason to enforce
+ *  it is CONSISTENCY. ID SETS, NEVER DIFF LINES: a reformat, rename or whitespace change leaves the
+ *  id set untouched, and keying on the base's MONOLITH blob catches the REVERSE migration too.
+ *  REQUIRES `--base`: "new" has no meaning without one, so this check is silent in whole-plan mode
+ *  — said out loud, rather than letting a check that cannot run look like one that passed. */
 export function monolithFilingViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   if (!opts.newMonolithIds?.has(task.id)) return [];
   const severity: LintSeverity = opts.monolithFiling ?? "block";
@@ -3183,117 +2128,74 @@ export interface LintOpts {
   mountMaxTurns?: number;
   /** The observed class mean, from a real Calibration row — never hardcoded. */
   calibration?: ClassCalibration;
-  /** Severity for {@link proofDialectViolations}. Default "block", and since impl-AK EVERY
-   *  call site takes it — CI's `lint-plan`, the inbox draft rung, the retro's plan-health
-   *  sweep, AND run-task.ts's pre-dispatch `assertLintClean`. The "warn" demotion the
-   *  pre-dispatch site used to pass is still honoured here, but nothing passes it: a proof
-   *  that cannot execute is refused before a worker spawns. */
+  /** Severity for {@link proofDialectViolations}. Default "block", and since impl-AK every call
+   *  site takes it: a proof that cannot execute is refused before a worker spawns. */
   proofDialect?: LintSeverity;
   /** Does this repo-relative path already exist? Supplied by the caller because the linter is pure.
    *  Absent ⇒ {@link callSiteViolations} is silent. */
   moduleExists?: (repoRelPath: string) => boolean;
   /** Severity for {@link callSiteViolations}. Default "warn" — see the report's retrofit count. */
   callSite?: LintSeverity;
-  /** Severity for {@link proofResolvabilityViolations}. Default "block" — but `rmd
-   *  run-task`'s pre-dispatch call site DELIBERATELY still passes "warn", and that is not an
-   *  oversight: a queued task's proof legitimately FORWARD-REFERENCES the test its own PR
-   *  will create, and this check cannot tell that apart from a dead reference pre-dispatch.
-   *  CI's `lint-plan`, the inbox draft rung, and the retro's plan-health sweep — the birth
-   *  gates, where the artifact really ought to exist — all want the default and BLOCK. */
+  /** Severity for {@link proofResolvabilityViolations}. Default "block", but the pre-dispatch site
+   *  DELIBERATELY passes "warn": a queued task's proof legitimately forward-references the test its
+   *  own PR will create, and pre-dispatch cannot tell that from a dead reference. */
   proofResolvability?: LintSeverity;
-  /** Injected merge-state context for {@link postMergeAmendmentViolations} —
-   *  see {@link PostMergeAmendmentContext} for why this arrives by injection
-   *  rather than a fetch. Absent ⇒ the check is skipped (no merge state to
-   *  judge against, e.g. the pre-dispatch call site, which never dispatches an
-   *  already-merged task in the first place). */
+  /** Injected merge-state context for {@link postMergeAmendmentViolations}; see {@link
+   *  PostMergeAmendmentContext} for why it arrives by injection. Absent ⇒ the check is skipped. */
   postMergeAmendment?: PostMergeAmendmentContext;
-  /** Injected base-ref context for {@link blockedDispositionViolations} (W1-T2487) — see that
-   *  check's own module comment for why the refusal fires ONLY in the changed-tasks (`--base`)
-   *  pass. Absent ⇒ the check is silent — the whole-plan pass (no base to compare against) must
-   *  never refuse, or even report, the standing population of already-blocked tasks. */
+  /** Injected base-ref context for {@link blockedDispositionViolations}. Absent ⇒ silent: the
+   *  whole-plan pass must never refuse the standing population of already-blocked tasks. */
   blockedDisposition?: BlockedDispositionContext;
-  /** W1-T2503: diff-scoped base-ref state for {@link sizingViolation}'s risk:high
-   *  `band_meaning` obligation — see {@link RiskTransitionContext} for the full contract.
-   *  Absent (not diff-scoped at all — pre-dispatch, whole-plan `lintPlan`, retro, inbox,
-   *  panel-skill-run) ⇒ the same "no predicate ⇒ no opinion" contract `opts.moduleExists`
-   *  already uses: an undeclared `band_meaning` on a risk:high task stays silent, exactly
-   *  as before this task existed. */
+  /** Diff-scoped base-ref state for {@link sizingViolation}'s risk:high `band_meaning` obligation;
+   *  see {@link RiskTransitionContext}. Absent ⇒ an undeclared `band_meaning` stays silent. */
   riskTransition?: RiskTransitionContext;
   /** Ids present in THIS branch's `plan/tasks.yaml` and absent from the base ref's monolith.
    *  Supplied only in `--base` mode; undefined ⇒ {@link monolithFilingViolations} is silent. */
   newMonolithIds?: ReadonlySet<string>;
   /** Severity for {@link monolithFilingViolations}. Default "block" — retrofit cost is zero. */
   monolithFiling?: LintSeverity;
-  /** Severity for {@link proofScopeViolations}. Default "warn" — see that check's module
-   *  comment for the measured 102/338 retrofit count driving the default, and why THIS
-   *  task cannot itself wire a pre-dispatch "block" override (it would be an out-of-scope
-   *  edit to run-task.ts, the exact defect this check exists to catch). */
+  /** Severity for {@link proofScopeViolations}. Default "warn" — see that check's section comment
+   *  for the measured retrofit count driving the default. */
   proofScope?: LintSeverity;
-  /** The reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to a real checkout,
-   *  for {@link proofNameResolutionViolations} (W1-T488) to resolve a name-filtered `unit test:`
-   *  proof's raw title against — never a reimplementation, so lint and review can never disagree
-   *  about what a proof names. The linter itself is pure (no fs), so this is the caller's to
-   *  supply — same "no predicate ⇒ no opinion" contract {@link callSiteViolations}'s
-   *  `opts.moduleExists` already uses. Absent ⇒ the check is silent. */
+  /** The reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to a real checkout, so
+   *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations} is silent. */
   resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
-  /** Other OPEN tasks' (id, title) pairs for {@link duplicateTitleViolations} (W1-T420) to
-   *  compare THIS task's title against. Supplied by the caller — never fetched, this module
-   *  stays pure. Absent/empty ⇒ the check is silent. */
+  /** Other OPEN tasks' corpus entries for {@link duplicateTitleViolations} to compare this task
+   *  against. Supplied by the caller, never fetched. Absent or empty ⇒ silent. */
   openTaskTitles?: OpenTaskTitleCorpus;
-  /** Jaccard cutoff for {@link duplicateTitleViolations}. Default {@link
-   *  DEFAULT_DUPLICATE_CUTOFF} (measured — see that constant's doc comment in
-   *  knowledge-dedup.ts). The check is WARN-only regardless of this value; there is no
-   *  severity override, unlike every other opt above — see the module comment ahead of
-   *  {@link duplicateTitleViolations} for why. */
+  /** Jaccard cutoff for {@link duplicateTitleViolations}. Default {@link DEFAULT_DUPLICATE_CUTOFF}.
+   *  The check is WARN-only regardless of it, and has no severity override. */
   duplicateTitleCutoff?: number;
-  /** W1-T1076: THIS task's own shard filename slug, for {@link duplicateTitleViolations} to
-   *  score instead of the title. Supplied by the caller (the linter reads no disk and cannot
-   *  derive it — `Task` carries no path). Absent/blank ⇒ the title is scored, exactly as before.
-   *  ALSO consumed by {@link sizingViolation} (W1-T2525) to tell the task's OWN test companion
-   *  apart from an unrelated one — same fact, second reader, one value threaded once. */
+  /** THIS task's own shard filename slug, for {@link duplicateTitleViolations} to score instead of
+   *  the title; the linter reads no disk and `Task` carries no path, so the caller supplies it.
+   *  Absent or blank ⇒ the title is scored. ALSO consumed by {@link sizingViolation}. */
   duplicateSlug?: string;
-  /** W1-T1076: shingle width for {@link duplicateTitleViolations}. The live caller passes
-   *  {@link DUPLICATE_SLUG_SHINGLE_K}; absent ⇒ {@link DEFAULT_SHINGLE_K}, W1-T420's original. */
+  /** Shingle width for {@link duplicateTitleViolations}. The live caller passes {@link
+   *  DUPLICATE_SLUG_SHINGLE_K}; absent ⇒ {@link DEFAULT_SHINGLE_K}. */
   duplicateShingleK?: number;
-  /** W1-T2486: the richer corpus {@link unansweredDuplicateTitleViolations}'s BLOCKING arm scores
-   *  against — each entry carries its own `planRefs`/`rationale` so the check can tell whether
-   *  the OTHER shard already answered. Supplied by the caller — never fetched. Absent/empty ⇒
-   *  the arm is silent, same "no corpus, no opinion" contract `opts.openTaskTitles` uses. */
+  /** The richer corpus {@link unansweredDuplicateTitleViolations}'s BLOCKING arm scores against:
+   *  each entry carries its own `planRefs`/`rationale`, so the check can tell whether the OTHER
+   *  shard already answered. Absent or empty ⇒ silent. */
   openTaskRecords?: readonly DuplicateAnswerCorpusEntry[];
   /** Jaccard cutoff for {@link unansweredDuplicateTitleViolations}. Default {@link
-   *  NEAR_IDENTITY_DUPLICATE_CUTOFF} — see that constant's own doc comment for why it sits far
-   *  above {@link DEFAULT_DUPLICATE_CUTOFF}. */
+   *  NEAR_IDENTITY_DUPLICATE_CUTOFF}. */
   nearIdentityCutoff?: number;
-  /** W1-T2486: THIS task's own `plan_refs` list, for {@link unansweredDuplicateTitleViolations}
-   *  to check whether THIS shard already cites the matched sibling. Supplied by the caller —
-   *  `Task` itself carries no `plan_refs` field (see {@link DuplicateAnswerCorpusEntry}'s own
-   *  note on why). Absent ⇒ only `task.rationale` is checked on this task's side. */
+  /** THIS task's own `plan_refs` list, which `Task` carries no field for, so {@link
+   *  unansweredDuplicateTitleViolations} can see whether this shard already cites its match.
+   *  Absent ⇒ only `task.rationale` is checked on this side. */
   taskPlanRefs?: readonly string[];
-  /** W1-T1225: a `grep:` proof's named path -> that file's own text, or `undefined` when the path
-   *  is not on disk (the linter reads no disk itself) — for {@link proofGrepUnmatchableViolations}
-   *  to feed {@link classifyGrepZeroHit}. Same "no predicate ⇒ no opinion" contract {@link
-   *  callSiteViolations}'s `opts.moduleExists` already uses. Absent ⇒ the check is silent.
-   *  ALSO consumed by {@link proofEngineDivergenceViolations} (W1-T2294) — same fact, same
-   *  reader, one contract for two checks that both need "what does this path's text look like
-   *  today". */
+  /** A `grep:` proof's named path -> that file's text, or `undefined` when the path is not on
+   *  disk, for {@link proofGrepUnmatchableViolations} and {@link proofEngineDivergenceViolations}:
+   *  one contract for two checks that both need today's text. Absent ⇒ both are silent. */
   readGrepProofFile?: (repoRelPath: string) => string | undefined;
 }
 
-/** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
- *  proof-resolvability/post-merge-amendment/blocked-disposition/provenance/ruling-verify) always
- *  run — post-merge-amendment is a no-op absent `opts.postMergeAmendment`, and blocked-disposition
- *  (W1-T2487) is likewise a no-op absent `opts.blockedDisposition` — budget-sanity
- *  runs only when `opts.mountMaxTurns` is supplied, duplicate-title (W1-T420) is a
- *  no-op absent `opts.openTaskTitles`, its narrow blocking arm (W1-T2486) is a no-op absent
- *  `opts.openTaskRecords`, proof-name-resolution (W1-T488) is a no-op
- *  absent `opts.resolveNameFilteredCandidates`, and dispatch-priority (W1-T422) and
- *  advisory-routing (W1-T519) always run — advisory-routing is a no-op (empty array) only
- *  when the task's title/rationale/note match none of {@link ADVISORY_ROUTING_LEXICON}, and
- *  can never block (see {@link advisoryRoutingViolations}'s module comment). blocked-record-
- *  unruled (W1-T2634) also always runs, unconditionally, with no `opts` field at all — it names
- *  every `status: "blocked"` task lacking a legal `retirement:`, in every pass including a
- *  whole-plan `lintPlan` sweep, and — like advisory-routing — can never block (see {@link
- *  blockedRecordUnruledViolations}'s module comment). */
+/** Lint one task, aggregating every check below. The hard checks — sizing, headless-fitness,
+ *  proof-shape, proof-dialect, proof-resolvability, provenance, ruling-verify — always run. Each
+ *  injected-predicate check is a no-op absent its own `opts` field: post-merge-amendment,
+ *  blocked-disposition, budget-sanity, duplicate-title and its narrow arm, proof-name-resolution.
+ *  Dispatch-priority, advisory-routing and blocked-record-unruled always run with no `opts` field
+ *  at all, and the last two can never block. */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);
@@ -3336,21 +2238,9 @@ export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => (
   return out;
 }
 
-/**
- * The task ids that are NEW or CHANGED between two plan snapshots (by deep
- * value, not reference) — a pure diff, no git I/O. This is what scopes the CI
- * check (`rmd lint-plan --base <ref>`) to the PR's OWN edit rather than the
- * whole historical queue: Layer A's CI half is "a CI check on any PR that
- * EDITS plan/tasks.yaml" (MASTER-PLAN §5C), so it lints the edit, not decades
- * of pre-existing debt — re-grading the WHOLE open queue is the retro's
- * separate, periodic plan-health sweep (W1-T20d), not every PR's gate.
- */
-/**
- * W1-T428: split a raw plan yaml corpus into per-task RECORD blocks, keyed by id. A block runs
- * from its `- id:` line to the next one (or EOF), trimmed of trailing whitespace so a record
- * moved to a file's tail never differs by its final newline alone. Pure over the supplied text —
- * no disk, no git, the same contract as every other function in this file.
- */
+/** Split a raw plan yaml corpus into per-task RECORD blocks, keyed by id. A block runs from its
+ *  `- id:` line to the next one or EOF, trimmed of trailing whitespace so a record moved to a
+ *  file's tail never differs by its final newline alone. Pure over the supplied text. Why: W1-T428. */
 export function splitTaskRecordBlocks(text: string): Map<string, string> {
   const blocks = new Map<string, string>();
   const starts = [...text.matchAll(/^- id:[ \t]*(\S+)/gm)];
@@ -3362,17 +2252,14 @@ export function splitTaskRecordBlocks(text: string): Map<string, string> {
   return blocks;
 }
 
-/**
- * W1-T428: ids whose RAW record text differs between two corpora — the companion the parsed
- * {@link changedTaskIds} below cannot replace and must not be replaced by. The parser DROPS six
- * fields the corpus uses (design, plan_refs, queue_note, amendment_note, cycle_residual,
- * fixture_forensics — measured at the filing sha), so a design-only edit is INVISIBLE to the
- * parsed comparison: #1544 measured `0 task(s) checked` on exactly that diff, and the next
- * dispatched worker acted on instructions no gate re-checked. Comparing record BYTES catches
- * every dropped field, present and future, by construction; the parsed side still owns semantic
- * equivalence. The gate consumes the UNION. Ids present on exactly one side are reported too —
- * the same new/changed semantics the parsed comparison uses, and the union dedups.
- */
+/** Ids whose RAW record text differs between two corpora — the companion {@link changedTaskIds}
+ *  cannot replace and must not be replaced by. THE TRAP: the parser DROPS six fields the corpus
+ *  uses (design, plan_refs, queue_note, amendment_note, cycle_residual, fixture_forensics), so a
+ *  design-only edit is INVISIBLE to the parsed comparison — one PR measured `0 task(s) checked` on
+ *  exactly that diff, and the next dispatched worker acted on instructions no gate re-checked.
+ *  Comparing record BYTES catches every dropped field, present and future, by construction, while
+ *  the parsed side still owns semantic equivalence. The gate consumes the UNION, which dedups.
+ *  Why: W1-T428, #1544. */
 export function rawChangedTaskIds(oldTexts: readonly string[], newTexts: readonly string[]): Set<string> {
   const merge = (texts: readonly string[]): Map<string, string> => {
     const all = new Map<string, string>();
@@ -3387,6 +2274,10 @@ export function rawChangedTaskIds(oldTexts: readonly string[], newTexts: readonl
   return changed;
 }
 
+/** The task ids NEW or CHANGED between two plan snapshots, by deep value rather than reference — a
+ *  pure diff, no git I/O. This is what scopes the CI check to the PR's OWN edit rather than the
+ *  whole historical queue; re-grading the whole open queue is the retro's separate plan-health
+ *  sweep (W1-T20d), not every PR's gate. */
 export function changedTaskIds(oldTasks: Task[], newTasks: Task[]): Set<string> {
   const oldById = new Map(oldTasks.map((t) => [t.id, t]));
   const changed = new Set<string>();
@@ -3419,29 +2310,22 @@ export function assertLintClean(task: Task, opts: LintOpts = {}): void {
 }
 
 // ── READ-IDENTITY & ROOT-CONTAINMENT (gate integrity, W1-T120) ──────────────
-//
-// A gate that reads a task/plan must be provably reading the RIGHT ONE — a silent
-// wrong-file read is still green and still wrong (the #271 false-green: one
-// checkout's `bin/rmd`, invoked with cwd inside a DIFFERENT work tree, linted the
-// INSTALL tree's plan and never opened the file under test at all). These two pure
-// helpers give `run-task.ts`'s `lint-plan`/`review` commands the vocabulary to (a)
-// refuse an out-of-root `--plan` BY NAME instead of letting it fail downstream as a
-// confusing base-resolution error, and (b) print the absolute path + content hash
-// of the file actually opened, so a wrong-file run is visible in its own output
-// instead of merely inferred from cwd. Both are pure string/hash logic over
-// ALREADY-READ input — no filesystem I/O, consistent with this module's contract.
+// A gate that reads a task or plan must be provably reading the RIGHT ONE: a silent wrong-file read
+// is still green and still wrong. In the #271 false-green, one checkout's `bin/rmd`, invoked with
+// cwd inside a DIFFERENT work tree, linted the install tree's plan and never opened the file under
+// test. These two pure helpers let a gate refuse an out-of-root `--plan` BY NAME rather than
+// failing downstream as a confusing base-resolution error, and print the absolute path and content
+// hash of the file actually opened, so a wrong-file run is visible in its own output.
 
-/** True iff `candidate` resolves to a path OUTSIDE `root` (`root` itself, and anything
- *  under it, is IN). Both arguments must already be absolute — this does no resolving
- *  or symlink-following of its own. */
+/** True iff `candidate` resolves OUTSIDE `root`; `root` itself and anything under it is IN. Both
+ *  arguments must already be absolute — this does no resolving or symlink-following of its own. */
 export function isPathOutsideRoot(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
   return rel === ".." || rel.startsWith(`..${sep}`);
 }
 
-/** `<abs path> (sha256:<first 12 hex chars>)` — the read-identity assertion a gate's
- *  summary line carries so the file it actually opened is legible in its OWN output,
- *  rather than merely inferable from cwd/argv. */
+/** `<abs path> (sha256:<first 12 hex chars>)` — the read-identity assertion a gate's summary line
+ *  carries, so the file it opened is legible in its own output rather than inferred from cwd. */
 export function formatReadIdentity(absPath: string, raw: string): string {
   const hash = createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 12);
   return `${absPath} (sha256:${hash})`;
