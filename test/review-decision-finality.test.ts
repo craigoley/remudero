@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { appendLedger } from "../src/lib/ledger.js";
 import {
+  REVIEW_ENGINE_REVISION,
   claimReviewDecision,
   lastReviewDecisionTerminal,
   postReviewStatusGuarded,
@@ -60,6 +61,7 @@ test("W1-T2722: the decision digest covers every material input and excludes ope
     { ...digestInput, acceptance: [{ claim: "changed criterion", proof: "unit test: test/a.test.ts" }] },
     { ...digestInput, declaredFiles: [...digestInput.declaredFiles, "src/b.ts"] },
     { ...digestInput, policyRevision: "review-policy-v2" },
+    { ...digestInput, engineRevision: `${REVIEW_ENGINE_REVISION}-next` },
   ];
   for (const changed of changes) assert.notEqual(reviewDecisionDigest(changed), base);
   assert.equal(

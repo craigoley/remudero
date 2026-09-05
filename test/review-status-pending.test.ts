@@ -10,6 +10,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { CLAUDE_BIN_ENV_OVERRIDE } from "../src/lib/worker.js";
 import { buildOpenPrViews, runReview } from "../src/run-task.js";
 import {
+  REVIEW_ENGINE_REVISION,
   assessPendingReviewOwner,
   decideAutoMergeArmAtSha,
   lastPendingReviewStatusFromLedger,
@@ -218,12 +219,14 @@ esac
       pending[0]?.review_input_digest,
       reviewInputDigest(HEAD, "The actual PR body snapshot used only for retry identity."),
     );
+    assert.equal(pending[0]?.review_engine_revision, REVIEW_ENGINE_REVISION);
     const terminal = reviewEvents.find((event) => event.step === "review.posted");
     assert.equal(terminal?.extra?.pr_url, "https://github.com/acme/remudero/pull/1");
     assert.equal(
       terminal?.extra?.review_input_digest,
       reviewInputDigest(HEAD, "The actual PR body snapshot used only for retry identity."),
     );
+    assert.equal(terminal?.extra?.review_engine_revision, REVIEW_ENGINE_REVISION);
   } finally {
     process.env.PATH = oldPath;
     if (oldClaudeBinOverride === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE];
@@ -279,6 +282,7 @@ test("W1-T913 criterion 3: postReviewPending posts state=pending through postRev
       ledgerPath,
       prUrl,
       reviewInputDigest: inputDigest,
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
       ownerIdentity: { pid: 4242, startedAt: ownerStartedAt },
       fetchLifecycle: () => NOT_MERGED,
       post: (o) => {
@@ -302,6 +306,7 @@ test("W1-T913 criterion 3: postReviewPending posts state=pending through postRev
     assert.equal(pendingLine?.owner_started_at, ownerStartedAt);
     assert.equal(pendingLine?.pr_url, prUrl);
     assert.equal(pendingLine?.review_input_digest, inputDigest);
+    assert.equal(pendingLine?.review_engine_revision, REVIEW_ENGINE_REVISION);
 
     const record = lastPendingReviewStatusFromLedger(lines, "W1-T913");
     assert.deepEqual(record, {
@@ -312,6 +317,37 @@ test("W1-T913 criterion 3: postReviewPending posts state=pending through postRev
       ownerHost: hostname(),
       ownerStartedAt,
     });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2872: a refused shared-review post carries the bounded current engine revision", async () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const result = await postReviewStatusGuarded({
+      owner: "o",
+      repo: "r",
+      sha: "abc1234",
+      state: "failure",
+      taskId: "W1-T2872",
+      evidence: "executed",
+      ledgerPath,
+      runId: "run-2872-refused",
+      prUrl: "https://github.com/o/r/pull/2872",
+      reviewInputDigest: reviewInputDigest("abc1234", "body"),
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
+      fetchLifecycle: () => ({ merged: false, closed: true }),
+      post: () => assert.fail("a closed PR must never reach the poster"),
+    });
+    assert.equal(result.posted, false);
+    const refused = readLedgerLines(ledgerPath).find((line) => line.step === "review.post_refused");
+    assert.equal(refused?.review_engine_revision, REVIEW_ENGINE_REVISION);
+    const serialized = JSON.stringify(refused);
+    for (const forbidden of ["prompt", "transcript", "credential", "auth.json"]) {
+      assert.doesNotMatch(serialized, new RegExp(forbidden, "i"));
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

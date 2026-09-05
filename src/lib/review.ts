@@ -66,12 +66,20 @@ export type PostableReviewState = ReviewState | "pending";
  * Stable identity for the material a review actually judges. The PR head binds the code/diff and
  * the exact body binds the authored acceptance claims and evidence. A new commit OR body edit
  * therefore earns a fresh retry budget, while comments, labels and other `updated_at` churn do
- * not. The version prefix makes a future input expansion an explicit reset instead of silently
- * colliding with rows written under this contract.
+ * not. The bounded engine revision rearms the same evidence only after a material reviewer-contract
+ * change; it is deliberately independent of boot commits, provider choice and model sampling. The
+ * version prefix makes a future input expansion an explicit reset instead of silently colliding
+ * with rows written under this contract.
  */
-export function reviewInputDigest(headSha: string, body: string): string {
-  const encoded = JSON.stringify({ version: 1, headSha, body });
-  return `v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
+export const REVIEW_ENGINE_REVISION = "w1-t2868-exact-head-materialization-v1";
+
+export function reviewInputDigest(
+  headSha: string,
+  body: string,
+  engineRevision: string = REVIEW_ENGINE_REVISION,
+): string {
+  const encoded = JSON.stringify({ version: 2, engineRevision, headSha, body });
+  return `v2:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }
 
 export const REVIEW_DECISION_POLICY_REVISION = "review-policy-v1";
@@ -84,6 +92,7 @@ export interface ReviewDecisionDigestInput {
   acceptance: readonly AcceptanceCriterion[];
   declaredFiles?: readonly string[];
   policyRevision?: string;
+  engineRevision?: string;
 }
 
 /** Content address of every material input to one review decision; model output is excluded. */
@@ -95,7 +104,8 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     holdout: c.holdout === true,
   }));
   const encoded = JSON.stringify({
-    version: 1,
+    version: 2,
+    engineRevision: input.engineRevision ?? REVIEW_ENGINE_REVISION,
     policyRevision: input.policyRevision ?? REVIEW_DECISION_POLICY_REVISION,
     headSha: input.headSha,
     diff: input.diff,
@@ -104,7 +114,7 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     acceptance,
     declaredFiles: input.declaredFiles ?? [],
   });
-  return `v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
+  return `v2:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }
 
 export interface ReviewEvaluatorProvenance {
@@ -9279,6 +9289,7 @@ export interface PostReviewStatusGuardedOpts {
   prUrl?: string;
   reviewInputDigest?: string;
   reviewDecisionDigest?: string;
+  reviewEngineRevision?: string;
   evaluatorProvenance?: ReviewEvaluatorProvenance;
   /**
    * Fresh lifecycle read for THIS attempt — real callers pass
@@ -9355,6 +9366,7 @@ export async function postReviewStatusGuarded(
       appendLedger(opts.ledgerPath, {
         run_id: opts.runId, task_id: opts.taskId, step: "review.verdict_conflict",
         pr_url: opts.prUrl, head_sha: opts.sha, review_decision_digest: opts.reviewDecisionDigest,
+        ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
         prior_state: priorDecision.state, attempted_state: opts.state,
         prior_evaluator: priorDecision.evaluatorProvenance,
         attempted_evaluator: opts.evaluatorProvenance ?? null,
@@ -9363,7 +9375,11 @@ export async function postReviewStatusGuarded(
         await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: "failure", description: "remudero-review: conflicting verdicts for identical decision input — operator adjudication required" });
         return { posted: true, conflict: true, effectiveState: "failure", reason };
       } catch (error) {
-        appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.post_failed", head_sha: opts.sha, attempted_state: "failure", review_decision_digest: opts.reviewDecisionDigest, error: String(error) });
+        appendLedger(opts.ledgerPath, {
+          run_id: opts.runId, task_id: opts.taskId, step: "review.post_failed", head_sha: opts.sha,
+          attempted_state: "failure", review_decision_digest: opts.reviewDecisionDigest, error: String(error),
+          ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
+        });
       }
       return { posted: false, conflict: true, effectiveState: "failure", reason };
     }
@@ -9388,6 +9404,7 @@ export async function postReviewStatusGuarded(
         reason: decision.reason,
         ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
         ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+        ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
       });
       return { posted: false, reason: decision.reason };
     }
@@ -9407,6 +9424,7 @@ export async function postReviewStatusGuarded(
         error: message,
         ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
         ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+        ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
       });
       return {
         posted: false,
@@ -9431,6 +9449,7 @@ export interface PostReviewPendingOpts {
   ledgerPath: string;
   prUrl?: string;
   reviewInputDigest?: string;
+  reviewEngineRevision?: string;
   fetchLifecycle: () => PrLifecycleState;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
   post?: PostReviewStatusGuardedOpts["post"];
@@ -9528,6 +9547,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     runId: opts.runId,
     prUrl: opts.prUrl,
     reviewInputDigest: opts.reviewInputDigest,
+    reviewEngineRevision: opts.reviewEngineRevision,
     fetchLifecycle: opts.fetchLifecycle,
     post: opts.post,
     lockOpts: opts.lockOpts,
@@ -9542,6 +9562,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       owner_started_at: ownerIdentity.startedAt,
       ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
       ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+      ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
     });
   }
   return result;
