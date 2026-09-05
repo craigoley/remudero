@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { mergeHoldConfirmationText } from "../src/lib/console-shell-script.js";
 import { computeBoardSnapshot, type BoardDeps } from "../src/lib/board.js";
 import { buildMergeHoldRoute } from "../src/lib/panel-actions.js";
 import { automergeHoldFromLedger } from "../src/lib/review.js";
@@ -245,11 +246,11 @@ test("the console renders fleet and PR controls, exact confirmations and no merg
     "function mergeHoldActionHtml",
     'postJson("/v1/merge-hold"',
   ]) assert.match(html, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  const confirmationSource = html.match(/function mergeHoldConfirmationText\(action, scope, reason\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(confirmationSource);
-  const confirmation = new Function(
-    `${confirmationSource}\nreturn mergeHoldConfirmationText(arguments[0], arguments[1], arguments[2]);`,
-  ) as (action: string, scope: string, reason: string) => string;
+  // W1-T2731: a real import. The shell still SHIPS this function — the marker loop above already
+  // asserts `function mergeHoldConfirmationText` is in the rendered HTML — but its emitted form is
+  // minified and ASCII-escaped by tsx/esbuild, so no source regex can carve it back out. Calling
+  // the real export tests the behaviour instead, over the same single definition the shell emits.
+  const confirmation = mergeHoldConfirmationText;
   assert.equal(
     confirmation("engage", "the whole fleet", "incident freeze"),
     "Confirm ENGAGE automatic-merge hold for the whole fleet — reason: incident freeze?",

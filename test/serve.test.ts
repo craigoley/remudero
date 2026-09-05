@@ -14,6 +14,10 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { askTypeFromEscalationTitle, draftedTasksHtml } from "../src/lib/console-shell-script.js";
+// W1-T2731: the shell's pure helpers are a real module now; these sandboxes take them from it
+// (via the SAME emitter the shell uses) instead of regexing them out of the rendered HTML.
+import { renderConsoleShellScript } from "../src/lib/console-shell-script.js";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import {
@@ -1254,10 +1258,14 @@ test("W1-T193: a READY card renders each drafted task's id AND title (never just
   assert.ok(inboxRowFn, "needsMeInboxHtml must exist");
   assert.match(inboxRowFn, /draftedTasksHtml/, "must render the drafted-tasks summary");
 
-  const draftedTasksFn = html.match(/function draftedTasksHtml\(draftedTasks\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(draftedTasksFn, "draftedTasksHtml must exist");
-  assert.match(draftedTasksFn, /\.id/);
-  assert.match(draftedTasksFn, /\.title/);
+  // W1-T2731: `draftedTasksHtml` is a real export now, so this asserts its OUTPUT rather than its
+  // source text. The claim ("id AND title, never just the opaque proposal id") is a claim about
+  // what an operator SEES, and the rendered row states it directly — the old `.id`/`.title`
+  // source match could have passed on a function that read both fields and printed neither.
+  const drafted = draftedTasksHtml([{ id: "W1-T4242", title: "rotate the deploy key" }]);
+  assert.match(drafted, /W1-T4242/, "the id");
+  assert.match(drafted, /rotate the deploy key/, "AND the title — the whole point of W1-T193");
+  assert.equal(draftedTasksHtml([]), "", "no drafted tasks renders nothing, not an empty list shell");
 });
 
 test("W1-T193: the APPROVE click handler ARMS on the first click (data-confirming) and only POSTs /v1/inbox/approve on a second click, mirroring STOP's arm-then-confirm exactly", () => {
@@ -1491,23 +1499,24 @@ test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's rea
   const html = renderShellHtml();
   const parts: Record<string, string | undefined> = {
     STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
-    escapeHtml: html.match(/function escapeHtml\(text\) \{[\s\S]*?\n  \}/)?.[0],
     statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
     prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
-    rowChevronHtml: html.match(/function rowChevronHtml\(\) \{[\s\S]*?\n  \}/)?.[0],
     // W1-T202: needsMeTaskRowHtml's markHandledBtn now calls writeGateAttrs() (the disabled/
     // reason attributes a read-only session's write affordances carry) -- pulled in here too so
     // this isolated eval has the same closure the real served script does.
     writeGateAttrs: html.match(/function writeGateAttrs\(\) \{[\s\S]*?\n  \}/)?.[0],
     // W1-T346: needsMeTaskRowHtml now calls askTypeFromEscalationTitle() -- pulled in here too
     // so this isolated eval has the same closure the real served script does.
-    askTypeFromEscalationTitle: html.match(/function askTypeFromEscalationTitle\(title\) \{[\s\S]*?\n  \}/)?.[0],
     needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
   };
   for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
 
   const renderRow = new Function(
-    `let hasWriteScope = false;\n${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.rowChevronHtml}\n${parts.writeGateAttrs}\n${parts.askTypeFromEscalationTitle}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
+    // W1-T2731: the pure collaborators (escapeHtml, rowChevronHtml, askTypeFromEscalationTitle …)
+    // come from lib/console-shell-script.ts via the SAME emitter the shell splices in; the
+    // state-reading ones (STATUS_LABELS, statusBadge, prLink, writeGateAttrs, needsMeTaskRowHtml)
+    // are still inline in the template and still extracted from the shipped script verbatim.
+    `let hasWriteScope = false;\n${renderConsoleShellScript()}\n${parts.STATUS_LABELS}\n${parts.statusBadge}\n${parts.prLink}\n${parts.writeGateAttrs}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
   ) as (t: Record<string, unknown>) => string;
 
   // A CONFIRMED-open escalation, live issue title flowing through escalationTitle.
@@ -1539,11 +1548,10 @@ test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's rea
 // the W1-T182 test directly above.
 test("W1-T346: askTypeFromEscalationTitle is deterministic over the title's own [CLASS] prefix — GRILL is a question, every other named class defaults to action, no prefix classifies nothing", () => {
   const html = renderShellHtml();
-  const src = html.match(/function askTypeFromEscalationTitle\(title\) \{[\s\S]*?\n  \}/)?.[0];
-  assert.ok(src, "askTypeFromEscalationTitle must exist in the shell's inline script");
-  const askType = new Function(`${src}\nreturn askTypeFromEscalationTitle(arguments[0]);`) as (
-    title: string | undefined,
-  ) => string | undefined;
+  // W1-T2731: the real export. The shell still ships it — asserted directly below — but its
+  // emitted form is minified and ASCII-escaped by tsx/esbuild, so no source regex can carve it out.
+  assert.match(html, /function askTypeFromEscalationTitle\(title\)/, "the shell really emits it");
+  const askType = askTypeFromEscalationTitle;
 
   assert.equal(askType("[MANUAL] W1-T1: rotate the deploy key"), "action");
   assert.equal(askType("[GRILL] TRIAGE-fb-1: cli flag or config default?"), "question");
@@ -1557,18 +1565,19 @@ test("W1-T346: needsMeTaskRowHtml renders an ACTION row and a QUESTION row with 
   const html = renderShellHtml();
   const parts: Record<string, string | undefined> = {
     STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
-    escapeHtml: html.match(/function escapeHtml\(text\) \{[\s\S]*?\n  \}/)?.[0],
     statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
     prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
-    rowChevronHtml: html.match(/function rowChevronHtml\(\) \{[\s\S]*?\n  \}/)?.[0],
     writeGateAttrs: html.match(/function writeGateAttrs\(\) \{[\s\S]*?\n  \}/)?.[0],
-    askTypeFromEscalationTitle: html.match(/function askTypeFromEscalationTitle\(title\) \{[\s\S]*?\n  \}/)?.[0],
     needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
   };
   for (const [name, part] of Object.entries(parts)) assert.ok(part, `${name} must exist in the shell's inline script`);
 
   const renderRow = new Function(
-    `let hasWriteScope = false;\n${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.rowChevronHtml}\n${parts.writeGateAttrs}\n${parts.askTypeFromEscalationTitle}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
+    // W1-T2731: the pure collaborators (escapeHtml, rowChevronHtml, askTypeFromEscalationTitle …)
+    // come from lib/console-shell-script.ts via the SAME emitter the shell splices in; the
+    // state-reading ones (STATUS_LABELS, statusBadge, prLink, writeGateAttrs, needsMeTaskRowHtml)
+    // are still inline in the template and still extracted from the shipped script verbatim.
+    `let hasWriteScope = false;\n${renderConsoleShellScript()}\n${parts.STATUS_LABELS}\n${parts.statusBadge}\n${parts.prLink}\n${parts.writeGateAttrs}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
   ) as (t: Record<string, unknown>) => string;
 
   // ACTION row (MANUAL — action by definition): leads with a "Do" affordance.

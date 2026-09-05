@@ -16,6 +16,7 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { workerStateHtml } from "../src/lib/console-shell-script.js";
 import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
 import { computeBoardSnapshot, isRunningRow, type BoardDeps } from "../src/lib/board.js";
 import { renderShellHtml } from "../src/lib/serve.js";
@@ -204,10 +205,20 @@ test("W1-T944: the NOW row renders a worker-state span beside the spend span, in
   assert.match(html, /workerStateHtml\(t\)\}\$\{liveSpendHtml\(t\)\}/, "worker state sits directly beside spend in nowRowHtml's own template");
 });
 
+// W1-T2731: `workerStateHtml` is a real export now, so the two tests below assert its OUTPUT
+// rather than its source text inside the rendered HTML. That is not a workaround — it is stronger.
+// The emitted script is produced by tsx/esbuild, which MINIFIES and ASCII-ESCAPES it: the shipped
+// bytes read `quiet \u2026`, not `quiet …`, and `function workerStateHtml(t){` with no space or
+// two-space-indented brace. Runtime output is byte-identical (the browser decodes the escapes),
+// which is exactly why asserting on behaviour survives a transpiler change and asserting on
+// source text does not. The remaining source-text assertions in this file target functions that
+// are STILL inline in the template and so are unaffected.
 test("W1-T944: quiet renders as a DURATION span carrying its transition timestamp as a data attribute, never a frozen number", () => {
-  const html = renderShellHtml();
-  assert.match(html, /class="worker-state worker-quiet" data-worker-since="/);
+  const html = workerStateHtml({ taskId: "W1-T1", workerState: "quiet", workerStateSince: "2026-01-01T00:00:00Z" });
+  assert.match(html, /class="worker-state worker-quiet" data-worker-since="2026-01-01T00:00:00Z"/);
   assert.match(html, />quiet …</, "the initial paint text — a real word, not blank");
+  // AND THE WIRING, so this can never pass over a module the shell does not actually ship:
+  assert.match(renderShellHtml(), /function workerStateHtml\(t\)/, "the shell really emits it");
 });
 
 test("W1-T944: quiet ages on the SAME 1s tick elapsed already uses (tickElapsed), never a second setInterval", () => {
@@ -227,13 +238,12 @@ test("W1-T944: no worker.state row renders 'state unknown' as a real word — ne
 });
 
 test("W1-T944: every worker-state branch renders TEXT (never colour alone) — working/tool-executing/quiet/unknown are each a literal word in the same span shape", () => {
-  const html = renderShellHtml();
-  const fn = /function workerStateHtml\(t\) \{([\s\S]*?)\n  \}/.exec(html);
-  assert.ok(fn);
-  const body = fn![1];
-  assert.match(body, /class="worker-state">\$\{escapeHtml\(t\.workerState\)\}</, "working/tool-executing render their own name as text");
-  assert.match(body, /quiet …/);
-  assert.match(body, /state unknown/);
+  // Every branch, by its OUTPUT — see the note above. A branch that rendered colour alone would
+  // produce a span with no text between its tags, which each assertion below refuses directly.
+  assert.match(workerStateHtml({ taskId: "x", workerState: "working" }), /class="worker-state">working</, "working renders its own name as text");
+  assert.match(workerStateHtml({ taskId: "x", workerState: "tool-executing" }), /class="worker-state">tool-executing</);
+  assert.match(workerStateHtml({ taskId: "x", workerState: "quiet", workerStateSince: "T" }), /quiet …/);
+  assert.match(workerStateHtml({ taskId: "x" }), /state unknown/);
   // No branch returns bare markup with only a class and no text content — every return above is
   // itself the proof (each carries a word between its span tags).
 });
