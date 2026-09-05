@@ -973,6 +973,66 @@ UUID=<data-disk-uuid> /mnt/rmd ext4 defaults,nofail 0 2
 /mnt/rmd/state2 /home/<user>/rmd-state2 none bind,nofail 0 0
 ```
 
+### Container runtime mount ordering (the state bind mount, W1-T2856)
+
+The 2026-09-05 reboot showed `docker.service` starting before `/mnt/rmd` and its bind mounts were
+available: Docker loaded an empty root and no Remudero container was there to restart. A same-day
+emergency edit installed matching `containerd.service.d`/`docker.service.d` drop-ins with
+`RequiresMountsFor=/mnt/rmd /var/lib/containerd`, and a later reboot proved that runtime-root
+ordering works: both mounts and containerd came up before Docker. The live Remudero state bind
+mount was never added to either service's dependency set — so an auto-restarted container could
+still resolve its `-v` mount against the un-mounted OS-disk directory before the real bind mount
+landed. Those emergency files are also untracked machine state: a rebuilt VM or another fleet host
+does not inherit them.
+
+`deploy/install-container-runtime-mount-order.sh` closes the third path with two repository-owned
+drop-ins, one per service. `containerd.service` requires only the resolved data-disk mount backing
+`/var/lib/containerd` (read from the live mount table, matching the fstab layout documented above)
+and `/var/lib/containerd` itself — it never opens the Remudero state mount. `docker.service`
+requires the resolved Docker data root, `/var/lib/containerd`, and the explicit Remudero state
+directory. The script never starts, stops, restarts or reloads either service and never runs a
+container lifecycle command — the only Docker command it runs is the read-only `docker info` used
+to resolve the data root, it runs no containerd client command at all, and the only systemd
+command it runs is `systemctl show` (to read) and, in `--install` mode, a single
+`systemctl daemon-reload` covering both drop-ins (never `systemctl restart/reload docker.service`
+or `containerd.service` themselves). It writes its own files under its own names, so systemd
+unions its `RequiresMountsFor=` rows with the emergency files' — neither this script nor its
+output edits, merges into, or removes those other drop-ins.
+
+**One-time host commissioning:**
+
+```sh
+RMD_STATE_DIR=/mnt/rmd/state2 sudo -E deploy/install-container-runtime-mount-order.sh --install
+```
+
+`RMD_STATE_DIR` has no default here — unlike `deploy/host-update.sh` and
+`deploy/recycle-container.sh`, which fall back to `${HOME:-/root}/rmd-state` for a mount whose
+absence only warns, a wrong value here would silently "protect" the wrong directory for the rest
+of the host's life. An unset, relative, absent, or not-yet-mounted `RMD_STATE_DIR` is refused
+before anything is written or reloaded, naming exactly what is wrong.
+
+Before installing, running the script with no flag is the check: it compares each service's
+EFFECTIVE `RequiresMountsFor` (via `systemctl show`, never the drop-in file on disk, so a stale,
+one-service-only, or partial installation is caught by what systemd actually resolved) against
+that service's own required paths, and names the SERVICE and every missing path without writing
+or reloading anything.
+
+**The three post-install proofs this installer records, and does not itself perform:**
+
+1. The effective `RequiresMountsFor` lists for both `containerd.service` and `docker.service`
+   (`systemctl show <service> --property=RequiresMountsFor`, or the bare
+   `deploy/install-container-runtime-mount-order.sh` check run) name all required paths.
+2. `systemctl show <service> --property=Requires` and `--property=After` both contain the
+   generated mount units for every required path of that service (e.g. `mnt-rmd.mount`,
+   `var-lib-containerd.mount`, and the state directory's own generated unit for docker.service).
+3. A DELIBERATE, LATER reboot shows all three mounts active before containerd and Docker start,
+   and the fleet's containers come back on the data-disk state tree rather than an empty root.
+
+This installer does not take that reboot, and does not claim the host's Docker, containerd, or
+container lifecycle was exercised by running it — proof 3 is a separate, deliberately
+operator-timed action, because taking an unscheduled reboot of a live fleet host is exactly the
+kind of decision this script does not make on its own.
+
 ### Rotating the service tokens
 
 Covered in full just above (["The console: what it binds, and rotating its
