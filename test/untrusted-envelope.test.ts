@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  ENVELOPE_OPEN_RE,
   EXTERNAL_SOURCE_CLASSES,
   countEnvelopes,
   defaultBoundary,
@@ -241,6 +242,18 @@ test("W1-T2700 (design iv): every source class is enumerated ONCE and every enum
   for (const c of EXTERNAL_SOURCE_CLASSES) {
     assert.ok(untrustedNotice(c).includes(`"${c}"`), `${c}'s notice must name it`);
   }
+});
+
+test("W1-T2700: ENVELOPE_OPEN_RE ACCEPTS a real marker and REFUSES a forged one — both arms, driven by name", () => {
+  // W1-T2317: an instrument must be able to fail for a reason it can name, and a fixture that only
+  // drives the healthy arm proves the refusal is even reachable. Both arms, on the regex itself.
+  assert.equal(ENVELOPE_OPEN_RE.test(envelopeOpenMarker("ci-log", "BOUNDARY123")), true, "the healthy arm: a real marker is accepted");
+  assert.equal(ENVELOPE_OPEN_RE.test("<untrusted_external_data>"), false, "the unhealthy arm: no attributes at all is REFUSED");
+  assert.equal(ENVELOPE_OPEN_RE.test('<untrusted_external_data source="ci-log">'), false, "a marker with no boundary is refused too — the boundary is what makes it unforgeable");
+  assert.equal(ENVELOPE_OPEN_RE.test('<untrusted_external_data boundary="B">'), false, "and one with no source class");
+  assert.equal(ENVELOPE_OPEN_RE.global, false, "NOT global — a /g/ regex's .test advances lastIndex and answers differently per call");
+  assert.equal(ENVELOPE_OPEN_RE.test(envelopeOpenMarker("ci-log", "B")), ENVELOPE_OPEN_RE.test(envelopeOpenMarker("ci-log", "B")),
+    "so two identical questions get the identical answer — the falsifier for making it global again");
 });
 
 test("W1-T2700: countEnvelopes counts what it should and nothing it should not", () => {

@@ -100,12 +100,24 @@ export function envelope(
   ].join("\n");
 }
 
+/**
+ * What COUNTS as an envelope's open marker. Both attributes are required, so a bare
+ * `<untrusted_external_data>` written by an attacker inside a payload inflates no count and
+ * closes nothing — the refusal is the point, and test/untrusted-envelope.test.ts drives BOTH arms
+ * of this regex by name (W1-T2317's negative-reachability ratchet: an instrument must be able to
+ * fail for a reason it can name).
+ *
+ * DELIBERATELY NOT GLOBAL. `RegExp.prototype.test` on a `/g/` regex advances `lastIndex`, so the
+ * same regex object answers differently on successive calls — a validator that is stateful across
+ * callers is exactly the seam this repo keeps finding defects in. {@link countEnvelopes} builds
+ * its own global copy per call instead.
+ */
+export const ENVELOPE_OPEN_RE = /<untrusted_external_data source="[^"]*" boundary="[^"]*">/;
+
 /** Every open marker in an assembled prompt, whatever its class or boundary. This is what the
  *  W1-T2297 prompt manifest records per part: a part declared external whose count is 0 carried
  *  its outside text BARE, and that is detectable after the fact from the ledger alone. */
-const OPEN_MARKER_RE = /<untrusted_external_data source="[^"]*" boundary="[^"]*">/g;
-
 export function countEnvelopes(text: string | null | undefined): number {
   if (!text) return 0;
-  return text.match(OPEN_MARKER_RE)?.length ?? 0;
+  return text.match(new RegExp(ENVELOPE_OPEN_RE.source, "g"))?.length ?? 0;
 }
