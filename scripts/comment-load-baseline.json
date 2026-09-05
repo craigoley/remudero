@@ -26,7 +26,7 @@
   "deploy/host-update.sh": 463,
   "deploy/install-container-runtime-mount-order.sh": 101,
   "deploy/install-host-units.sh": 92,
-  "deploy/recycle-container.sh": 489,
+  "deploy/recycle-container.sh": 505,
   "deploy/runtime-env-vars.sh": 39,
   "deploy/serve-container.sh": 254,
   "deploy/verify-image.sh": 322,
