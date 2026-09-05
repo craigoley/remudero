@@ -247,11 +247,15 @@ test("drain.ts: tallyDispatchFilters's DispatchFilterReason-keyed record still h
   const snapshot = tally.snapshot();
   // W1-T2474 adds one more arm, 'retired' (the 'blocked' bucket's own split) — the breaker's
   // own exclusion still lands in NONE of these, 'retired' included.
+  // W1-T988: `foreign-repo` joins the enumeration. This list exists so a NEW arm cannot slip
+  // in unnoticed — noticing it is the point, and the guard this assertion actually protects (no
+  // `circuit-broken` arm) is untouched: the breaker is still not a DispatchFilterReason.
   assert.deepEqual(Object.keys(snapshot).sort(), [
     "already-merged",
     "blocked",
     "continued-this-pass",
     "credit-indeterminate",
+    "foreign-repo",
     "retired",
     "run-branch-already-pushed",
     "unmet-deps",

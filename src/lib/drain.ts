@@ -254,6 +254,12 @@ export interface NextRunnableOpts {
    */
   onFiltered?: (task: Task, reason: DispatchFilterReason) => void;
   /**
+   * W1-T988 — the repo this daemon targets (`DaemonTarget.repo`). OPTIONAL BY DESIGN: omitted, the
+   * repo guard does not fire at all and every existing caller is byte-identical. Accepts either
+   * spelling; {@link normalizeRepoName} reduces a slug to its bare name before comparing.
+   */
+  targetRepo?: string;
+  /**
    * W1-T951 DELIVERABLE B: true when this ALREADY-MERGED task's durable credit
    * (status.ts's `isSinglePathCredited`, over its `CreditStore`) rests on
    * EXACTLY ONE of the two credit paths — a `Remudero-Task:` trailer XOR a
@@ -572,6 +578,9 @@ export type DispatchFilterReason =
   | "retired"
   | "unmet-deps"
   | "continued-this-pass"
+  // W1-T988: the task names a repo this daemon does not target. NOT multi-repo support and not
+  // routing — see `taskTargetsRepo`'s doc and the shard's own first clause.
+  | "foreign-repo"
   // W1-T2675 — DISTINCT FROM "already-merged", AND THE DISTINCTION IS THE POINT. That reason means
   // the credit projection SAW a merge. This one means it could not look, a failed GitHub read
   // carrying indeterminate true, which is not evidence of absence. Folding the two would tell an
@@ -615,6 +624,12 @@ export function tallyDispatchFilters(): {
     blocked: [],
     retired: [],
     "unmet-deps": [],
+    // W1-T988: in the SNAPSHOT (which is what `daemon.idle_reasons` carries), never in
+    // idle-reasons-panel.ts's `IDLE_REASON_ORDER`. That asymmetry is load-bearing and already
+    // exists — `continued-this-pass` is in the union and not in the panel's order — because the
+    // panel returns `kind: "unknown"` the moment any LISTED key is missing from a row, so adding
+    // a key there would make EVERY HISTORICAL ROW unreadable.
+    "foreign-repo": [],
     "continued-this-pass": [],
     "credit-indeterminate": [],
     "run-branch-already-pushed": [],
@@ -641,6 +656,50 @@ export function tallyDispatchFilters(): {
  * either. Order matters (see the inline comments on each guard) and is preserved
  * verbatim from nextRunnable's original single-task walk.
  */
+/**
+ * W1-T988 — the BARE repo name, which is canonical here. MEASURED across the plan: every `repo:`
+ * value is bare (1321 `remudero`, 1 `remudero-site`, 1 `none`), and zero carry an owner slug —
+ * while `resolveDaemonTarget`'s own doc documents `--repo owner/name` as an ACCEPTED input. So
+ * normalisation reduces a slug to its last path segment before comparing, and never the reverse:
+ * a task never carries an owner to compare against, so expanding the bare side would have to
+ * invent one.
+ *
+ * A guard that compared raw strings would strand EVERY task the moment an operator passed the
+ * slug form — the shape that stops the fleet rather than protecting it.
+ */
+export function normalizeRepoName(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  return lastSegment.toLowerCase();
+}
+
+/**
+ * W1-T988 — does this task belong to the repo this daemon targets?
+ *
+ * ⚠ THIS IS A SAFETY GUARD ON A SINGLE-TARGET DAEMON. It is NOT multi-repo support, NOT routing,
+ * and NOT the second checkout the architecture would need — that is a second daemon with its own
+ * `config.root`, and an operator's decision rather than this predicate's. All this does is refuse
+ * work that is not this daemon's own.
+ *
+ * THE FAILURE IT CLOSES IS A PLAUSIBLE-LOOKING PULL REQUEST, NOT AN ERROR. `repo` is required and
+ * validated on every task (`plan.ts`'s `req(e.repo, "repo", id)`), the plan already carries a
+ * `remudero-site` task, and MEASURED at origin/main `drain.ts` and `daemon.ts` read a task's
+ * `repo` ZERO times — against controls of 75 and 38 id reads in the same modules. A foreign task
+ * handed to a worker whose worktree is a `remudero` checkout edits the wrong tree and opens a PR
+ * against the wrong repository, with nothing on the path flagging it. The only reason it has not
+ * happened is that the one such task carries `verify: human`, which parks it earlier — a property
+ * of that task, not a fence.
+ *
+ * ⚠ ABSENT TARGET MEANS NO GUARD, NEVER REFUSE-ALL. `targetRepo` is optional, so every existing
+ * caller — `runnableCandidates`, the panel, every test that builds opts by hand — keeps
+ * byte-identical behaviour. A guard that defaults to refusing is the shape that stops the fleet.
+ */
+export function taskTargetsRepo(taskRepo: string | undefined, targetRepo: string | undefined): boolean {
+  if (targetRepo === undefined || targetRepo.trim() === "") return true; // no target ⇒ no guard
+  if (taskRepo === undefined || taskRepo.trim() === "") return true; // nothing to compare ⇒ no guard
+  return normalizeRepoName(taskRepo) === normalizeRepoName(targetRepo);
+}
+
 function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: NextRunnableOpts): boolean {
   const merged: import("./plan.js").MergedResolver = (task) => isMerged(task.id);
   // THE FOUR FORMERLY-SILENT DECLINES. `opts.onFiltered` is observation ONLY — every `return
@@ -694,6 +753,14 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     // only the NAME reported to `onFiltered` differs, so a caller reading the tally can tell
     // the two populations apart instead of conflating them under one "blocked" bucket.
     opts.onFiltered?.(t, t.retirement !== undefined ? "retired" : "blocked");
+    return false;
+  }
+  // W1-T988: BEFORE the dependency walk — a task that is not this daemon's is refused without
+  // resolving deps for it. Refused through the SAME `onFiltered` channel every other decline uses,
+  // and exactly as inert: nothing is marked done, no strike is spent, no status changes, so the
+  // task stays eligible for a differently-targeted daemon.
+  if (!taskTargetsRepo(t.repo, opts.targetRepo)) {
+    opts.onFiltered?.(t, "foreign-repo");
     return false;
   }
   if (unmetDependencies(plan, t, merged).length > 0) {
