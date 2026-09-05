@@ -653,6 +653,7 @@ import {
 } from "./lib/wipe-test.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
+  explainGrepProofRefusal,
   materialiseBaseProofBlobs,
   REVIEW_CONTEXT,
   REVIEW_ENGINE_REVISION,
@@ -5220,6 +5221,8 @@ async function runReview(args: {
   baseCheckoutDir?: string;
   /** W1-T460: the paths whose base blob could not be READ — see buildBaseProofDir. */
   baseUnreadablePaths?: ReadonlySet<string>;
+  /** R-11: true when `baseCheckoutDir` is a real merge-base worktree — see buildBaseProofDir. */
+  baseIsCheckout?: boolean;
   /**
    * W1-T233: the NAMED reason `headCheckoutDir` is absent because a worktree
    * materialization attempt failed (rather than simply never having been
@@ -5478,6 +5481,7 @@ async function runReview(args: {
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
     baseUnreadablePaths: args.baseUnreadablePaths,
+    baseIsCheckout: args.baseIsCheckout,
     // W1-T322: advisory-only inputs — see ReviewEvidence's own doc for both fields.
     taskDeclaredFiles: task.files,
     openTaskIds: args.openTaskIds,
@@ -14426,22 +14430,56 @@ export function resolveReviewTarget(
 
 
 /**
- * Build the BASE-revision directory {@link preexistingProofHits} needs, containing only the blobs
- * this review's `grep:` proofs name. Returns `dir: undefined` when there is nothing to put in it
- * (no grep proof, or no resolvable merge-base) — in which case the staleness check stays inert
- * exactly as it was, which is the pre-impl-GE behaviour.
+ * (R-11) What {@link buildBaseProofDir} hands back — the evidence fields it becomes, plus the one
+ * fact the caller needs for teardown. `baseCheckoutDir` is a REAL CHECKOUT (a detached worktree at
+ * the merge-base) exactly when `baseIsCheckout` is true; otherwise it is the blob-only fallback
+ * (or absent), and `baseWorktreeFailure` names why the worktree could not be created.
+ */
+export interface BaseProofDir {
+  baseCheckoutDir: string | undefined;
+  baseUnreadablePaths: ReadonlySet<string>;
+  baseIsCheckout: boolean;
+  baseWorktreeFailure?: string;
+}
+
+/**
+ * Build the BASE-revision tree {@link preexistingProofHits} needs. Returns `baseCheckoutDir:
+ * undefined` when there is nothing to compare (no dialect proof at all, or no resolvable
+ * merge-base) — in which case the staleness check stays inert exactly as it was.
+ *
+ * (R-11) A REAL CHECKOUT, NOT A BLOB DIRECTORY. This used to materialise only the blobs `grep:`
+ * proofs name (via {@link materialiseBaseProofBlobs}) and returned a dir only when one was
+ * written. W1-T362 had already extended the staleness check to `unit test:` proofs, so every one
+ * of those was re-run in a directory holding no `package.json` and no `test/` — or in NO base at
+ * all, when the review carried no grep proof. `node --test` there exits 1 with empty stdout, the
+ * executor reports "fail", and `classifyBaseProofOutcome` (review.ts) graded that "discriminates":
+ * a test passing identically at both commits was certified `executed_pass` with a reason asserting
+ * it told done from not-done. Every W1-T362 test injected a fake executor, so the shape was never
+ * exercised. The base is now `git worktree add --detach <dir> <merge-base>`, run from the head
+ * checkout through the same injectable seam the head materialisation uses, so a `unit test:` proof
+ * re-runs in the tree it was written for; its `node_modules` is primed by the executor's existing
+ * `ensureDeps` (review.ts) only when a `unit test:` proof actually runs there — a `grep:`-only
+ * review pays for the checkout and never for an install. Teardown is the CALLER's (the same
+ * `withMaterializedWorktree` that removes the head; `rmd check-proof` removes its own).
+ *
+ * THE BLOB PATH IS THE FALLBACK, ONLY when the worktree cannot be created (a checkout that is not a
+ * git repo, a base object the repo does not hold, disk): `grep:` proofs are still checked against
+ * their blobs exactly as before, and `baseIsCheckout: false` tells the classifier that a
+ * `unit test:` proof is `base_unknown` there — never "discriminates". `git show <rev>:<dir>` for a
+ * DIRECTORY target (R-12) can no longer reach this path either: `parseDialectGrep` refuses the
+ * directory shape, so no such proof compiles to a blob to materialise.
  *
  * THE MERGE-BASE, not `origin/main`: "already matched before this work existed" is a question about
  * the commit the branch forked from, and a proof legitimately added by a PR merged in between must
  * not count against this one.
  *
- * (W1-T460) RETURNS TWO FACTS, NOT ONE, NAMED AS THE EVIDENCE FIELDS THEY BECOME so the call site
- * can spread them in one line. `baseUnreadablePaths` names the paths whose base blob GENUINELY
- * failed to read (never the ordinary absent-at-base forward reference, which stays carved out).
- * That set is a PER-PROOF fact and cannot be folded into `baseCheckoutDir === undefined`, which is
- * the GLOBAL "no base at all" fact: a mixed review where one blob reads and another fails still
- * produces a perfectly good dir, and collapsing the two would either exempt every proof in the
- * review or silently credit the one that was never checked — the defect W1-T460 fixes.
+ * (W1-T460) `baseUnreadablePaths` names the paths whose base blob GENUINELY failed to read on the
+ * fallback path (never the ordinary absent-at-base forward reference, which stays carved out). It
+ * is a PER-PROOF fact and cannot be folded into `baseCheckoutDir === undefined`, the GLOBAL "no
+ * base at all" fact: a mixed review where one blob reads and another fails still produces a
+ * perfectly good dir, and collapsing the two would either exempt every proof in the review or
+ * silently credit the one that was never checked. On the worktree path it is always empty — a
+ * checkout has no per-blob read step.
  */
 export function buildBaseProofDir(
   criteria: ReadonlyArray<{ proof?: string }>,
@@ -14450,8 +14488,12 @@ export function buildBaseProofDir(
     mergeBase?: (cwd: string) => string;
     showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
     makeDir?: () => string;
+    /** (R-11) `git worktree add --detach <worktreePath> <revision>` run from `repoDir` — the same
+     *  shape {@link ReviewWorktreeDeps.addWorktree} has for the head. Injected by tests to force the
+     *  fallback (throw) or to observe the call; real callers omit it. */
+    addWorktree?: (repoDir: string, worktreePath: string, revision: string) => void;
   } = {},
-): { baseCheckoutDir: string | undefined; baseUnreadablePaths: ReadonlySet<string> } {
+): BaseProofDir {
   const mergeBase =
     deps.mergeBase ??
     ((cwd: string) =>
@@ -14474,9 +14516,21 @@ export function buildBaseProofDir(
         maxBuffer: 1 << 26,
         stdio: ["ignore", "pipe", "pipe"],
       }));
+  const addWorktree =
+    deps.addWorktree ??
+    ((repoDir: string, worktreePath: string, revision: string) =>
+      // stderr PIPED for the same reason `showBlob` pipes it: a base the repo cannot check out is
+      // a degrade this function REPORTS (`baseWorktreeFailure`), never a `fatal:` line through a
+      // passing review. `--detach`: no branch name is ever wanted here (W1-T232's lesson at the head).
+      execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], {
+        stdio: ["ignore", "pipe", "pipe"],
+      }));
   const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
 
-  const noBase = { baseCheckoutDir: undefined, baseUnreadablePaths: new Set<string>() };
+  const noBase: BaseProofDir = { baseCheckoutDir: undefined, baseUnreadablePaths: new Set<string>(), baseIsCheckout: false };
+  // No DIALECT proof at all (prose only, or no criteria) ⇒ nothing will ever be re-run against a
+  // base, so no checkout is paid for. A single `grep:` OR `unit test:` proof is enough to want one.
+  if (!criteria.some((c) => typeof c.proof === "string" && parseWhitelistedProof(c.proof) !== null)) return noBase;
   let base: string;
   try {
     base = mergeBase(headCheckoutDir);
@@ -14486,6 +14540,16 @@ export function buildBaseProofDir(
   if (!base) return noBase;
 
   const dir = makeDir();
+  let worktreeFailure: string;
+  try {
+    addWorktree(headCheckoutDir, dir, base);
+    return { baseCheckoutDir: dir, baseUnreadablePaths: new Set<string>(), baseIsCheckout: true };
+  } catch (e) {
+    // Not erased: the reason rides out on `baseWorktreeFailure` below, where `rmd check-proof`
+    // prints it and the classifier reads the fallback's `baseIsCheckout: false` (R-11).
+    worktreeFailure = String((e as Error)?.message ?? e);
+  }
+  // FALLBACK: the pre-R-11 blob materialisation, byte-for-byte, into the same dir.
   const { written, unreadable } = materialiseBaseProofBlobs(
     criteria,
     base,
@@ -14496,7 +14560,12 @@ export function buildBaseProofDir(
       writeFileSync(dest, contents);
     },
   );
-  return { baseCheckoutDir: written > 0 ? dir : undefined, baseUnreadablePaths: new Set(unreadable) };
+  return {
+    baseCheckoutDir: written > 0 ? dir : undefined,
+    baseUnreadablePaths: new Set(unreadable),
+    baseIsCheckout: false,
+    baseWorktreeFailure: worktreeFailure,
+  };
 }
 
 // ── W1-T185 (Gap 2): materialize a PR-head worktree for `rmd review` ────────
@@ -15349,51 +15418,64 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   }
   const worktreePath = materialized.worktreePath;
 
+  // impl-GE / R-11: the merge-base side this PR's proofs are re-run against, so a proof that ALREADY
+  // matched/passed before the work existed is marked `executed_stale` instead of counting as
+  // evidence. Built from the materialised head worktree (the merge-base is resolved there);
+  // `baseCheckoutDir` is a real detached worktree when `baseIsCheckout` is true, else the blob-only
+  // fallback (or undefined when the PR has no dialect proof / no resolvable base — the check then
+  // stays inert, exactly as it was for its first 1,180 verdicts). W1-T460's `baseUnreadablePaths`
+  // rides along: a per-proof fact the dir alone cannot carry.
+  const baseProof = worktreePath ? buildBaseProofDir(criteria, worktreePath) : undefined;
+
   // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
   // on EVERY exit path, including a throw from runReview itself — never just
-  // the success path, which would reproduce the W1-T175 leak class.
-  const verdict = await withMaterializedWorktree(worktreePath, repoRoot, () =>
-    runReviewDep({
-      owner,
-      repo,
-      prUrl: view.url,
-      // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
-      headRefName: view.headRefName,
-      task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria, files: taskDeclaredFiles },
-      report: reportBody, // the PR body is the manual author's REPORT (proofs are pasted here)
-      settingsFile,
-      config,
-      budgetUsd: spawnReviewer ? taskBudgetUsd : undefined,
-      log,
-      say: (m) => console.log(m),
-      account: (r) => r,
-      spawnReviewer,
-      reviewerMount,
-      // W1-T185 (Gap 2): the materialized worktree above when available — the
-      // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
-      // proofs execute here too. `undefined` (materialization unavailable)
-      // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
-      // the documented fallback (criterion 5) — never silent.
-      headCheckoutDir: worktreePath,
-      // impl-GE: the merge-base blobs this PR's `grep:` proofs name, so a proof that ALREADY
-      // matched before the work existed is marked `executed_stale` instead of counting as evidence.
-      // `undefined` when the PR has no grep proof or no resolvable base — the check then stays inert,
-      // exactly as it was for its first 1,180 verdicts.
-      // W1-T460 makes this ONE spread rather than two named fields: the builder now yields
-      // `baseCheckoutDir` AND `baseUnreadablePaths` (the paths whose blob could not be READ — a
-      // per-proof fact the dir alone cannot carry; without it a proof never checked against the
-      // base is graded `executed_pass` as if proven to discriminate). Spreading keeps the whole
-      // wiring on a single executable line, which matters because this function is reachable only
-      // through a full `rmd review` drive.
-      ...(worktreePath ? buildBaseProofDir(criteria, worktreePath) : {}),
-      // W1-T233: the named reason materialization failed (absent ⇒ it was
-      // never attempted at all) — carried onto the posted CAPPED description
-      // and the review.posted ledger line's degraded_reason fields.
-      materializationFailure: materialized.failure,
-      ledgerPath,
-      runId,
-      openTaskIds,
-    }),
+  // the success path, which would reproduce the W1-T175 leak class. (R-11) The
+  // base worktree is torn down by the SAME helper, as the outer scope, so the
+  // head goes first and the base follows on every exit path too; a blob-only
+  // fallback dir is not a worktree and is left to the boot sweep (src/lib/tmp.ts)
+  // exactly as before.
+  const verdict = await withMaterializedWorktree(
+    baseProof?.baseIsCheckout ? baseProof.baseCheckoutDir : undefined,
+    repoRoot,
+    () =>
+      withMaterializedWorktree(worktreePath, repoRoot, () =>
+        runReviewDep({
+          owner,
+          repo,
+          prUrl: view.url,
+          // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
+          headRefName: view.headRefName,
+          task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria, files: taskDeclaredFiles },
+          report: reportBody, // the PR body is the manual author's REPORT (proofs are pasted here)
+          settingsFile,
+          config,
+          budgetUsd: spawnReviewer ? taskBudgetUsd : undefined,
+          log,
+          say: (m) => console.log(m),
+          account: (r) => r,
+          spawnReviewer,
+          reviewerMount,
+          // W1-T185 (Gap 2): the materialized worktree above when available — the
+          // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
+          // proofs execute here too. `undefined` (materialization unavailable)
+          // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
+          // the documented fallback (criterion 5) — never silent.
+          headCheckoutDir: worktreePath,
+          // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
+          // can see each one reach the evidence: the dir, the per-proof unreadable set (W1-T460), and
+          // whether the dir is a checkout a `unit test:` proof may honestly be re-run in (R-11).
+          baseCheckoutDir: baseProof?.baseCheckoutDir,
+          baseUnreadablePaths: baseProof?.baseUnreadablePaths,
+          baseIsCheckout: baseProof?.baseIsCheckout,
+          // W1-T233: the named reason materialization failed (absent ⇒ it was
+          // never attempted at all) — carried onto the posted CAPPED description
+          // and the review.posted ledger line's degraded_reason fields.
+          materializationFailure: materialized.failure,
+          ledgerPath,
+          runId,
+          openTaskIds,
+        }),
+      ),
   );
 
   console.log(
@@ -16114,9 +16196,11 @@ export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
  * reviewer's own `executed_stale` when both trees agree. Absent `--base`, none of this runs — every
  * line above and the function's return value are byte-identical to before this task, so no existing
  * caller shifts. It REPORTS, it does not RE-RANK: no change to the reviewer, to `executed_stale`
- * itself, or to any exit code other than the new stale case (see {@link CHECK_PROOF_EXIT}). Like
- * {@link materialiseBaseProofBlobs} itself, only `grep:` proofs get a base blob materialized — a
- * `unit test:` proof reports `NOT COMPARABLE` rather than silently skipping the check.
+ * itself, or to any exit code other than the new stale case (see {@link CHECK_PROOF_EXIT}). (R-11)
+ * The base is a real detached worktree at `<ref>` — the same builder the reviewer uses — so a
+ * `unit test:` proof is compared too; when that worktree cannot be created, a `grep:` proof falls
+ * back to its materialized base blob and a `unit test:` proof reports `UNKNOWN` (the reviewer's own
+ * `base_unknown`) rather than silently skipping the check. The worktree is removed before returning.
  */
 /** Opt-in for the one `check-proof` path that would otherwise run the ENTIRE suite — see the
  *  `unresolvable` branch in {@link checkProofCommand}. */
@@ -17609,7 +17693,15 @@ export function checkProofCommand(
      *  from two literal fixture trees with NO spawn beyond the executor this verb already
      *  drives (execWhitelistedProof's own grep/`node --test`) — the "base" tree never needs a
      *  real git rev to exist for a test. */
-    baseBlobDeps?: { showBlob?: (cwd: string, rev: string, repoRelPath: string) => string; makeDir?: () => string };
+    baseBlobDeps?: {
+      showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
+      makeDir?: () => string;
+      /** (R-11) the merge-base worktree seam — thrown from, in a test, to reach the blob fallback. */
+      addWorktree?: (repoDir: string, worktreePath: string, revision: string) => void;
+      /** (R-11) teardown of that worktree — thrown from, in a test, to prove a failed teardown never
+       *  masks the verdict already computed. */
+      removeWorktree?: (repoDir: string, worktreePath: string) => void;
+    };
   } = {},
 ): number {
   // Matched as STANDALONE tokens, never a substring: a proof body is free text that could
@@ -17640,6 +17732,10 @@ export function checkProofCommand(
   if (!w) {
     console.log(`proof:      ${proof}`);
     console.log("parse:      REFUSED — parseWhitelistedProof returned null.");
+    // R-12: name the cause when the parser can — a directory-shaped target, a missing `in <path>`
+    // clause, a traversal — instead of only the generic hint below.
+    const why = explainGrepProofRefusal(proof);
+    if (why !== undefined) console.log(`            reason: ${why}`);
     console.log(
       "            A `grep:` proof needs an explicit `in <path>` clause; a `unit test:` proof needs a\n" +
         "            test path or title. A proof wrapped in markdown backticks parses since #1063, but a\n" +
@@ -17842,88 +17938,125 @@ export function checkProofCommand(
   if (baseRef === undefined) return headExit;
 
   console.log(`base ref:   ${baseRef}`);
-  // Reuses the SAME builder `rmd review` wires (buildBaseProofDir -> materialiseBaseProofBlobs),
-  // injected with `<ref>` in place of the real `git merge-base origin/main HEAD` — everything
-  // downstream (blob materialization, the absent/unreadable distinction) is the reviewer's own
-  // mechanism, not a second implementation kept in sync by hand.
-  const { baseCheckoutDir, baseUnreadablePaths } = buildBaseProofDir([{ proof }], process.cwd(), {
+  // Reuses the SAME builder `rmd review` wires (buildBaseProofDir: a detached worktree at <ref>,
+  // falling back to materialiseBaseProofBlobs), injected with `<ref>` in place of the real
+  // `git merge-base origin/main HEAD` — everything downstream (the worktree, the blob fallback, the
+  // absent/unreadable distinction) is the reviewer's own mechanism, not a second implementation
+  // kept in sync by hand.
+  const { removeWorktree, ...builderDeps } = deps.baseBlobDeps ?? {};
+  const built = buildBaseProofDir([{ proof }], process.cwd(), {
     mergeBase: () => baseRef,
-    ...deps.baseBlobDeps,
+    ...builderDeps,
   });
-  // grepTargetPath (mirrors grepProofTargetPath, review.ts, unexported) was already resolved
-  // above, before the W1-T387 collapse — reused here rather than re-derived a second time.
-
-  if (baseCheckoutDir === undefined) {
-    if (grepTargetPath !== undefined && baseUnreadablePaths.has(grepTargetPath)) {
-      console.log(
-        `base:       UNREADABLE — \`git show ${baseRef}:${grepTargetPath}\` failed to read; the base\n` +
-          "            comparison is inconclusive and never counted as a false discrimination — the same\n" +
-          "            base_unreadable degrade the reviewer itself uses (W1-T460).",
-      );
-    } else if (grepTargetPath !== undefined) {
-      console.log(
-        `base:       ABSENT at ${baseRef} — ${grepTargetPath} did not exist there, so this proof could not\n` +
-          "            have matched before the work existed (a forward reference) — the strongest possible\n" +
-          "            form of discriminating.",
-      );
-    } else {
-      console.log(
-        `base:       NOT COMPARABLE — only \`grep:\` proofs get a base blob materialized today (kind=${w.kind}),\n` +
-          "            the same scope materialiseBaseProofBlobs has for the reviewer itself; base comparison\n" +
-          "            skipped, the verdict above stands unchanged.",
-      );
-    }
-    console.log("discrimination: unknown — reported verdict above stands unchanged");
-    return headExit;
-  }
-
-  let baseDiag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
-  const baseCapturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
-    try {
-      const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
-      baseDiag = { stdout: out, status: 0, signal: null };
-      return out;
-    } catch (e) {
-      const err = e as NodeJS.ErrnoException & {
-        status?: number | null;
-        signal?: NodeJS.Signals | null;
-        stdout?: string | Buffer | null;
-      };
-      baseDiag = {
-        stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
-        status: typeof err.status === "number" ? err.status : null,
-        signal: err.signal ?? null,
-      };
-      throw e;
-    }
-  };
-  let baseOutcome: "pass" | "fail" | "no-match";
   try {
-    baseOutcome = execWhitelistedProof(w, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
-  } catch (e) {
-    console.log(
-      `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
-        "            evidence either way, same as the reviewer's own base_unknown degrade.",
-    );
-    console.log("discrimination: unknown — reported verdict above stands unchanged");
+    return compareAgainstBase(built);
+  } finally {
+    // (R-11) A worktree this verb added is this verb's to remove — the reviewer's `withMaterializedWorktree`
+    // does the same for its own. A blob-fallback dir is not a worktree; the boot sweep reaps it.
+    if (built.baseIsCheckout && built.baseCheckoutDir !== undefined) {
+      removeBaseProofWorktree(process.cwd(), built.baseCheckoutDir, removeWorktree);
+    }
+  }
+
+  function compareAgainstBase(base: BaseProofDir): number {
+    const { baseCheckoutDir, baseUnreadablePaths } = base;
+    // grepTargetPath (mirrors grepProofTargetPath, review.ts, unexported) was already resolved
+    // above, before the W1-T387 collapse — reused here rather than re-derived a second time.
+
+    if (baseCheckoutDir === undefined) {
+      if (grepTargetPath !== undefined && baseUnreadablePaths.has(grepTargetPath)) {
+        console.log(
+          `base:       UNREADABLE — \`git show ${baseRef}:${grepTargetPath}\` failed to read; the base\n` +
+            "            comparison is inconclusive and never counted as a false discrimination — the same\n" +
+            "            base_unreadable degrade the reviewer itself uses (W1-T460).",
+        );
+      } else if (grepTargetPath !== undefined) {
+        console.log(
+          `base:       ABSENT at ${baseRef} — ${grepTargetPath} did not exist there, so this proof could not\n` +
+            "            have matched before the work existed (a forward reference) — the strongest possible\n" +
+            "            form of discriminating.",
+        );
+      } else {
+        // (R-11) A `unit test:` proof with no checkout to run in. The worktree is the only base a
+        // test can be re-run against; without one the reviewer grades base_unknown, and so does this.
+        console.log(
+          `base:       UNKNOWN — a merge-base worktree at ${baseRef} could not be created` +
+            (base.baseWorktreeFailure ? ` (${base.baseWorktreeFailure.split("\n")[0]})` : "") +
+            `, and a \`unit test:\` proof (kind=${w!.kind}) cannot be re-run against materialised\n` +
+            "            blobs — the reviewer grades exactly this base_unknown (R-11): no downgrade, and NO\n" +
+            "            claim that the proof discriminates; the verdict above stands unchanged.",
+        );
+      }
+      console.log("discrimination: unknown — reported verdict above stands unchanged");
+      return headExit;
+    }
+
+    let baseDiag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
+    const baseCapturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
+      try {
+        const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
+        baseDiag = { stdout: out, status: 0, signal: null };
+        return out;
+      } catch (e) {
+        const err = e as NodeJS.ErrnoException & {
+          status?: number | null;
+          signal?: NodeJS.Signals | null;
+          stdout?: string | Buffer | null;
+        };
+        baseDiag = {
+          stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
+          status: typeof err.status === "number" ? err.status : null,
+          signal: err.signal ?? null,
+        };
+        throw e;
+      }
+    };
+    let baseOutcome: "pass" | "fail" | "no-match";
+    try {
+      baseOutcome = execWhitelistedProof(w!, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
+    } catch (e) {
+      console.log(
+        `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
+          "            evidence either way, same as the reviewer's own base_unknown degrade.",
+      );
+      console.log("discrimination: unknown — reported verdict above stands unchanged");
+      return headExit;
+    }
+    if (baseDiag && w!.kind === "grep") {
+      const baseHits = baseDiag.stdout.split("\n").filter((l) => l.trim() !== "").length;
+      console.log(`base hits:  ${baseHits}`);
+    }
+    console.log(`base:       ${baseOutcome}`);
+
+    if (outcome === "pass" && baseOutcome === "pass") {
+      console.log(
+        "discrimination: executed_stale — this proof matches BOTH head and base, so it discriminates NOTHING;\n" +
+          "                the reviewer downgrades exactly this shape (W1-T273/W1-T362) and this verdict would\n" +
+          "                count for nothing in review despite reading pass above.",
+      );
+      return CHECK_PROOF_EXIT.executedStale;
+    }
+    console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
     return headExit;
   }
-  if (baseDiag) {
-    const baseHits = baseDiag.stdout.split("\n").filter((l) => l.trim() !== "").length;
-    console.log(`base hits:  ${baseHits}`);
-  }
-  console.log(`base:       ${baseOutcome}`);
+}
 
-  if (outcome === "pass" && baseOutcome === "pass") {
-    console.log(
-      "discrimination: executed_stale — this proof matches BOTH head and base, so it discriminates NOTHING;\n" +
-        "                the reviewer downgrades exactly this shape (W1-T273/W1-T362) and this verdict would\n" +
-        "                count for nothing in review despite reading pass above.",
-    );
-    return CHECK_PROOF_EXIT.executedStale;
+/**
+ * (R-11) `rmd check-proof --base`'s own teardown of the merge-base worktree {@link buildBaseProofDir}
+ * added for it — best-effort, never masking the verdict already computed, mirroring
+ * {@link withMaterializedWorktree}'s teardown handling for the reviewer's head worktree.
+ */
+function removeBaseProofWorktree(
+  repoDir: string,
+  worktreePath: string,
+  remove: (repoDir: string, worktreePath: string) => void = (dir, wt) =>
+    execFileSync("git", ["-C", dir, "worktree", "remove", "--force", wt], { stdio: ["ignore", "pipe", "pipe"] }),
+): void {
+  try {
+    remove(repoDir, worktreePath);
+  } catch (e) {
+    console.error(`(base worktree teardown failed for ${worktreePath}: ${String((e as Error)?.message ?? e)})`);
   }
-  console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
-  return headExit;
 }
 
 /**
@@ -36592,7 +36725,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "check-proof",
     syntax: "rmd check-proof <proof> [--allow-full-suite] [--base <ref>]",
     summary: "Run one acceptance proof through the reviewer's own executor and print its verdict.",
-    detail: "run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). --base <ref> (W1-T912, OPTIONAL — omitting it leaves every line and exit code above byte-identical) re-runs the SAME proof against <ref> and prints a `base:`/`discrimination:` line: a proof that ALSO matches at <ref> discriminates nothing and reports `executed_stale`, the reviewer's OWN name for the exact downgrade it applies at review time (W1-T273/W1-T362) — so a local `verdict: pass` that would count for nothing in review is visible before a PR ever opens. Only `grep:` proofs get a base blob materialized (same scope the reviewer itself has); a `unit test:` proof reports NOT COMPARABLE. EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades), 5 executed_stale (--base only — passed on both trees, never read as fail). READ-ONLY: writes no cache, no ledger line, no state file",
+    detail: "run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). --base <ref> (W1-T912, OPTIONAL — omitting it leaves every line and exit code above byte-identical) re-runs the SAME proof against <ref> and prints a `base:`/`discrimination:` line: a proof that ALSO matches at <ref> discriminates nothing and reports `executed_stale`, the reviewer's OWN name for the exact downgrade it applies at review time (W1-T273/W1-T362) — so a local `verdict: pass` that would count for nothing in review is visible before a PR ever opens. The base is a real detached worktree at <ref> (R-11, the reviewer's own builder), so `unit test:` proofs are compared too; when that worktree cannot be created, a `grep:` proof falls back to a materialized base blob and a `unit test:` proof reports UNKNOWN (the reviewer's base_unknown). The worktree is removed before the verb returns. EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades), 5 executed_stale (--base only — passed on both trees, never read as fail). READ-ONLY: writes no cache, no ledger line, no state file",
   },
   {
     name: "reap-branches",

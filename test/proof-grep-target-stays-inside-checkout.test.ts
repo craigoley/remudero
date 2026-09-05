@@ -103,14 +103,17 @@ function escapingCheckout(): { checkout: string; outside: string } {
 // ── (i) THE ESCAPES THE PROOF TEXT SHOWS: refused at PARSE, before anything runs ────────────────
 
 test("R-18 (i): an ABSOLUTE `grep:` target is refused at parse — it never reaches the executor", () => {
-  assert.equal(parseWhitelistedProof("grep: x in /etc/hostname"), null, "an absolute target must not compile");
+  assert.equal(parseWhitelistedProof("grep: x in /etc/hosts.txt"), null, "an absolute target must not compile");
 
   // THE CONTROL THAT MAKES THAT NULL A MEASUREMENT. The same body with the SAME trailing token
   // made RELATIVE parses, so the refusal above is the leading `/`, not a failure of the ` in `
-  // split to find a path clause at all (which is its own, older refusal).
-  const relative = parseWhitelistedProof("grep: x in etc/hostname");
+  // split to find a path clause at all (which is its own, older refusal). The token carries an
+  // extension because R-12 separately refuses a directory-SHAPED target (no extension on the
+  // final segment) — `etc/hostname` would now be refused for that reason, and a control that is
+  // refused for two reasons measures neither.
+  const relative = parseWhitelistedProof("grep: x in etc/hosts.txt");
   assert.ok(relative, "control: the identical body with a relative target still compiles");
-  assert.deepEqual(relative!.args, ["-arn", "--", "x", "etc/hostname"]);
+  assert.deepEqual(relative!.args, ["-arn", "--", "x", "etc/hosts.txt"]);
 
   // The two escapes that were already refused stay refused, unchanged.
   assert.equal(parseWhitelistedProof("grep: x in ../outside.txt"), null, "`..` — unchanged");

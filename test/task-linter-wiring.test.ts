@@ -524,7 +524,11 @@ test("W1-T1225 ACCEPTANCE: the --base changed-tasks pass WARNS proof-grep-unmatc
   );
   const tmpDir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t1225-wiring-"));
   const caseFileAbs = join(tmpDir, "case-fixture.md");
-  const dirAsFileAbs = join(tmpDir, "dir-as-file");
+  // Named WITH an extension on purpose (R-12): parseDialectGrep and proof-grep-safety now refuse a
+  // directory-SHAPED target (no extension on the final segment) before anything opens it, so an
+  // extensionless name would BLOCK here and never reach the unmatchable check's own EISDIR branch —
+  // the branch this test exists to drive. A dotted directory passes the shape rule.
+  const dirAsFileAbs = join(tmpDir, "dir-as-file.md");
   const caseFileRel = relative(REPO_ROOT, caseFileAbs);
   const dirAsFileRel = relative(REPO_ROOT, dirAsFileAbs);
   assert.equal(existsSync(shardPath), false, "the probe shard must not already exist on disk");

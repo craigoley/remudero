@@ -155,6 +155,25 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
   },
   {
     file: "src/run-task.ts",
+    site: "buildBaseProofDir",
+    creates:
+      "a throwaway worktree materialized AT A REVIEW'S MERGE-BASE, detached — the base side every proof " +
+      "is re-run against for the staleness check (R-11)",
+    disposition: {
+      kind: "exempt",
+      because:
+        "it materializes at `git merge-base origin/main HEAD` of the PR under review, DETACHED — a commit " +
+        "that is BEHIND origin/main by construction whenever main has moved since the branch forked, which " +
+        "is exactly the tree the staleness question is about ('did this proof already pass before the work " +
+        "existed'). worktreeAdd's origin/main currency assert would refuse the one checkout this site " +
+        "exists to make. The guard that DOES apply — the base is a real checkout a `unit test:` proof may be " +
+        "re-run in — is carried as `baseIsCheckout` to classifyBaseProofOutcome, which fails closed to " +
+        "base_unknown without it; a worktree that cannot be created degrades to the blob fallback, never " +
+        "to a wrong tree.",
+    },
+  },
+  {
+    file: "src/run-task.ts",
     site: "createFixRungWorktree",
     creates: "a throwaway worktree materialized at a PR's OWN fix branch, for the fix rung to commit/push from",
     disposition: {

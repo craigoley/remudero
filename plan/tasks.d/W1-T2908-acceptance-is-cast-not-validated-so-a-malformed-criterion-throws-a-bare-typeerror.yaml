@@ -37,5 +37,9 @@
   acceptance:
     - claim: "the acceptance array is shape-validated at load rather than cast"
       proof: "grep: validateAcceptanceShape( in src/lib/plan.ts"
-    - claim: "a numeric claim, a boolean claim or a null proof throws a PlanError naming the shard, index and field"
-      proof: "unit test: test/plan-acceptance-shape.test.ts"
+    - claim: "a numeric claim throws a PlanError naming the shard, the index and the field"
+      proof: "unit test: a numeric claim is refused with the shard, index and field"
+    - claim: "a boolean claim is refused, and a string that merely looks boolean is not"
+      proof: "unit test: a genuinely BOOLEAN claim is refused"
+    - claim: "an empty proof is refused at load rather than surviving the linter and detonating in review"
+      proof: "unit test: an EMPTY proof is refused at LOAD"

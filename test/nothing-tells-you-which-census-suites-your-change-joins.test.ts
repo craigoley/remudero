@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  CENSUS_DISCOVERY_PROBE_ARGV,
   KNOWN_CENSUS_SUITES,
   censusSuiteMembership,
   censusSuiteMembershipFor,
@@ -30,13 +31,17 @@ import {
 } from "../src/lib/ci-parity.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 
-/** A `PreflightSpawn` that answers the ONE `git grep -l 'ls-files' -- 'test/*.test.ts'` call
+/** A `PreflightSpawn` that answers the ONE `git grep -lE 'ls-files|readdirSync|globSync'` call
  *  `censusSuiteMembershipFor` makes with `stdout`, and fails any other invocation loudly rather
  *  than silently returning a clean result — so a test proves it drove the real call shape. */
 function grepSpawn(stdout: string, status = 0): PreflightSpawn {
   return (file, args) => {
     assert.equal(file, "git");
-    assert.deepEqual(args, ["grep", "-l", "ls-files", "--", "test/*.test.ts"]);
+    // W1-T2809 widened this probe from `-l ls-files` to an ALTERNATION over both enumeration
+    // idioms, in ONE spawn — the argv is asserted against the exported constant so this fixture
+    // can never drift from the real probe again (it was this VERBATIM pin that made the old
+    // single-idiom probe structurally permanent).
+    assert.deepEqual(args, [...CENSUS_DISCOVERY_PROBE_ARGV]);
     return { status, stdout, stderr: "" };
   };
 }

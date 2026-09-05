@@ -147,7 +147,8 @@ test("acceptance 4 — a unit test: proof gone stale is also untouched (this tas
     { claim: "the widget is frobnicated", proof: "unit test: test/widget.test.ts" },
     new Set(),
     undefined,
-    { cwd: HEAD_DIR, exec: alwaysPass, baseCwd: BASE_DIR, forwardReferenceFiles: CODE_DELIVERABLE },
+    // (R-11) a faked base run of a `unit test:` proof counts only for a declared real checkout
+    { cwd: HEAD_DIR, exec: alwaysPass, baseCwd: BASE_DIR, baseIsCheckout: true, forwardReferenceFiles: CODE_DELIVERABLE },
   );
   assert.equal(v.proof_exec, "executed_stale");
 });

@@ -2974,6 +2974,11 @@ esac
 // (design: plan/tasks.d/W1-T362-unit-proof-base-run-stale-downgrade.yaml)
 
 const BASE_DIR = "/fake/merge-base/checkout";
+// (R-11) These contexts fake the EXECUTOR, so they must also state what the base IS: a fake base
+// run only means anything for a `unit test:` proof if the base is a real checkout, and the
+// classifier fails closed (base_unknown) when nothing says so. See
+// test/base-proof-dir-is-a-checkout.test.ts for the real-executor drive of every outcome below.
+const BASE_IS_CHECKOUT = { baseIsCheckout: true } as const;
 
 test("W1-T362 (i): a `unit test:` proof passing at HEAD and IDENTICALLY at the merge-base is downgraded to executed_stale, with the base outcome recorded", () => {
   const criterion = { claim: "the widget is frobnicated", proof: "unit test: test/widget.test.ts" };
@@ -2982,6 +2987,7 @@ test("W1-T362 (i): a `unit test:` proof passing at HEAD and IDENTICALLY at the m
   const v = judgeCriterion(criterion, new Set(["unrelated", "tokens"]), undefined, {
     cwd: "/tmp/head",
     baseCwd: BASE_DIR,
+    ...BASE_IS_CHECKOUT,
     exec: () => "pass", // passes identically on head AND base
   });
   assert.equal(v.proof_exec, "executed_stale");
@@ -2995,6 +3001,7 @@ test("W1-T362 (ii-a): a `unit test:` proof ABSENT at the base (forward-referenci
   const v = judgeCriterion(criterion, new Set(), undefined, {
     cwd: "/tmp/head",
     baseCwd: BASE_DIR,
+    ...BASE_IS_CHECKOUT,
     exec: (_wp, cwd) => (cwd === BASE_DIR ? "no-match" : "pass"), // the test does not exist yet at the base
   });
   assert.equal(v.proof_exec, "executed_pass", "absent-at-base is the OPPOSITE of stale — it discriminates maximally");
@@ -3007,6 +3014,7 @@ test("W1-T362 (ii-b): a `unit test:` proof that FAILS at the base keeps executed
   const v = judgeCriterion(criterion, new Set(), undefined, {
     cwd: "/tmp/head",
     baseCwd: BASE_DIR,
+    ...BASE_IS_CHECKOUT,
     exec: (_wp, cwd) => (cwd === BASE_DIR ? "fail" : "pass"), // present but genuinely failing pre-work
   });
   assert.equal(v.proof_exec, "executed_pass");
@@ -3019,6 +3027,7 @@ test("W1-T362 (iii): a base-tree execution error (unresolvable/unrunnable base c
   const v = judgeCriterion(criterion, new Set(), undefined, {
     cwd: "/tmp/head",
     baseCwd: BASE_DIR,
+    ...BASE_IS_CHECKOUT,
     exec: (_wp, cwd) => {
       if (cwd === BASE_DIR) throw new Error("base checkout cannot run node --test (no node_modules)");
       return "pass";
@@ -3043,9 +3052,9 @@ test("W1-T362: absent baseCwd never runs the base check for a `unit test:` proof
 
 test("preexistingProofHits: now answers for kind=test too (W1-T362 lifts the grep-only restriction), true only when the base run itself passes", () => {
   const wp = parseWhitelistedProof("unit test: test/widget.test.ts")!;
-  assert.equal(preexistingProofHits(wp, () => "pass", BASE_DIR), true, "pass at base ⇒ stale");
-  assert.equal(preexistingProofHits(wp, () => "no-match", BASE_DIR), false, "absent at base ⇒ not stale");
-  assert.equal(preexistingProofHits(wp, () => "fail", BASE_DIR), false, "failing at base ⇒ not stale");
+  assert.equal(preexistingProofHits(wp, () => "pass", BASE_DIR, undefined, true), true, "pass at base ⇒ stale");
+  assert.equal(preexistingProofHits(wp, () => "no-match", BASE_DIR, undefined, true), false, "absent at base ⇒ not stale");
+  assert.equal(preexistingProofHits(wp, () => "fail", BASE_DIR, undefined, true), false, "failing at base ⇒ not stale");
   assert.equal(
     preexistingProofHits(
       wp,
@@ -3053,11 +3062,16 @@ test("preexistingProofHits: now answers for kind=test too (W1-T362 lifts the gre
         throw new Error("unreadable base checkout");
       },
       BASE_DIR,
+      undefined,
+      true,
     ),
     false,
     "a thrown base run ⇒ not stale (degrades exactly like exec_error elsewhere)",
   );
   assert.equal(preexistingProofHits(wp, () => "pass", undefined), false, "no baseCwd at all ⇒ never stale");
+  // (R-11) FAIL CLOSED: a base that is not declared a checkout never grades a test proof stale,
+  // however the fake answers — the run is not even attempted.
+  assert.equal(preexistingProofHits(wp, () => "pass", BASE_DIR), false, "a base of unknown kind ⇒ base_unknown, never stale");
 });
 
 test("W1-T362: grep proofs are UNCHANGED — the executed_pass reason carries no base-outcome note (only `unit test:` proofs get the new discriminates/base_unknown annotations)", () => {

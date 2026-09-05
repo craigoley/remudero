@@ -216,7 +216,7 @@ flowchart TD
     REC["recon worker — its own mount row: task_type 'recon' × risk × class (resolveMountForClass, src/run-task.ts)"]
     IMP["implement worker — commits on the run branch, pushes"]
     PR["PR opened — armAutoMergeAtOpen roughly 16s later, with NO verdict gate at open; the triage lane's arm is verdict- and CI-gated instead (both call attemptArm, src/run-task.ts — the lane asymmetry operator ruling W1-T489 documents rather than changes)"]
-    CHK["the 14 REQUIRED check runs + ci-gate, the always-reporting aggregator (REQUIRED list and WAIT_CAP_SECONDS 2400 in .github/workflows/ci-gate.yml)"]
+    CHK["the REQUIRED check runs + ci-gate, the always-reporting aggregator (REQUIRED list and WAIT_CAP_SECONDS 2400 in .github/workflows/ci-gate.yml — the count drifts as gates are promoted, so it is not pinned here)"]
     REV["remudero-review — a COMMIT STATUS, not a check-run (postReviewStatus, src/lib/review.ts), posted by the sweep's post-review lane at checks green + review none; /check-runs alone cannot see it"]
     MERGE{"MERGE [operator gate] — armed auto-merge fires once green + PASS; every unarmed or capped PR waits for a human"}
     DEP["mini: com.remudero.supervisor runs rmd deploy-run on a 2-minute tick (SUPERVISOR_LABEL, src/lib/launchd.ts) — decideDeployTrigger (src/lib/deployer.ts) deploys when the install is behind origin/main OR runningStale, then kickstarts the daemon unit"]

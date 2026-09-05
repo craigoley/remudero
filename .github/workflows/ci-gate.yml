@@ -115,6 +115,19 @@ jobs:
       # / `Review` job (kept warn-only, `continue-on-error: true`, NOT in this list), `License
       # Review` carries no continue-on-error and fails on a disallowed, unresolved, or (via its own
       # follow-up step) undeterminable-licence dependency introduced by the PR.
+      # `leak-grep` / `assertion-discrimination` / `task-id-existence` (all three ci.yml jobs) and
+      # `acceptance-author-gate` (its own file) / `unwired-gate` (its own file) added (R-51,
+      # docs/audits/recon-2026-09-05.md): all five already ran UNCONDITIONALLY on every PR — no
+      # path filter, no job `if:` beyond `github.event_name == 'pull_request'` (or, for
+      # acceptance-author-gate, no `if:` at all) — but none was in this list, so a red run on any
+      # of them could never hold a merge; a hand-opened PR could carry a leaked secret, a
+      # comment-stripped assertion that never executes, an unreserved/colliding task id, an
+      # acceptance block that fails author-time parsing, or a newly added gate-shaped script no
+      # workflow invokes, and merge anyway. Measured wall-clock on PR #4075 (sha 761365c,
+      # 2026-09-05, via the check-runs API — one read per job, not re-timed here): leak-grep 6s,
+      # unwired-gate 19s, acceptance-author-gate 20s, task-id-existence 25s,
+      # assertion-discrimination 26s — all five comfortably inside WAIT_CAP_SECONDS (2400s), no cap
+      # change needed. Same UNCONDITIONAL shape as every entry above.
       # One entry per line (JSON array, folded-scalar YAML) so concurrent PRs each adding a new
       # required check append a line instead of both editing the same line — avoiding the merge
       # conflict that a single-line array forces on every simultaneous gate addition.
@@ -133,12 +146,49 @@ jobs:
         "api-client-drift",
         "no-hand-rolled-fetch",
         "scan-pr / osv-scan",
-        "License Review"
+        "License Review",
+        "leak-grep",
+        "assertion-discrimination",
+        "task-id-existence",
+        "acceptance-author-gate",
+        "unwired-gate"
         ]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-
         ["ci-gate"]
+      # ADVISORY (R-51) — every OTHER check-run this repo's workflows register on a `pull_request`
+      # event, named here ONLY so test/every-pr-check-is-required-or-advisory.test.ts can prove
+      # completeness: a job that is neither REQUIRED nor ADVISORY is a silent gap, exactly the
+      # shape this repo's own history keeps producing (a gate that runs and reddens without ever
+      # blocking a merge — the defect R-51 fixes for the five names above). ci-gate's aggregator
+      # script never reads this key; it exists for that test alone. Membership here is a claim
+      # that the check-run is EITHER (a) a path-filtered / conditionally-skippable job, which can
+      # never be REQUIRED without reproducing the synthwatch #102 deadlock class this file's own
+      # header describes, or (b) a documented advisory-only scanner/aggregation-internal shard, or
+      # (c) explicitly deferred pending a currently-red state (docs-index-check, see its own file's
+      # header) — promoting any of these is a future, separate, one-concern PR, not a side effect
+      # of adding a name here.
+      ADVISORY: >-
+        [
+        "ci-shard (1/4)",
+        "ci-shard (2/4)",
+        "ci-shard (3/4)",
+        "ci-shard (4/4)",
+        "coverage-shard (1/4)",
+        "coverage-shard (2/4)",
+        "coverage-shard (3/4)",
+        "coverage-shard (4/4)",
+        "Analyze (javascript-typescript)",
+        "Analyze (actions)",
+        "Scan",
+        "Review",
+        "docs-index-check",
+        "clock-sweep (+400d, artifacts excluded by name)",
+        "heartbeat-watch (reads every host's beat branch off-machine; silent per host until installed)",
+        "probe-path-filter",
+        "recovery-drill (throwaway fixtures, real recovery code, no live fleet touched)"
+        ]
       # W1-T261 RE-AGGREGATE grace window — see the step below for the mechanism. Kept as env
       # (not a literal) so tests can shrink both to seconds instead of minutes.
       GRACE_WINDOW_SECONDS: "600"
