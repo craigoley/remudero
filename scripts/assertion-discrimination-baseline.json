@@ -48,6 +48,24 @@
       "target": ".github/workflows/ci.yml",
       "literal": "WAIT_CAP_SECONDS",
       "reason": "The test's own title says 'ci.yml's heavy-band comment names WAIT_CAP_SECONDS, coupling the two files' -- it deliberately pins that ci.yml's comment mentions the constant, not that ci.yml enforces it (ci.yml doesn't own that value; ci-gate.yml does)."
+    },
+    {
+      "testFile": "test/what-a-worker-loads.test.ts",
+      "target": "node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts",
+      "literal": "Pass `[]` to disable filesystem settings",
+      "reason": "W1-T2759 design (i)(b): the SDK's CONTRACT for settingSources exists only as a doc comment in its typings, so pinning it is necessarily a text assertion \u2014 that is the point, not an accident. Standing rule 7: the premise re-verifies against the INSTALLED version on every run, and this fails and names the sentence if a future SDK rewrites it. The live-mechanism half of the same claim is asserted separately, against COMMENT-STRIPPED src/lib/worker.ts."
+    },
+    {
+      "testFile": "test/what-a-worker-loads.test.ts",
+      "target": "node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts",
+      "literal": "Must include `'project'` to load CLAUDE.md files",
+      "reason": "W1-T2759 design (i)(b), same reason as the sibling entry above: this sentence is the SDK's documented requirement for loading CLAUDE.md and lives only as a doc comment. It is the premise the whole task rests on, so it is pinned to the installed file rather than repeated in prose \u2014 the shard cited SDK 0.3.226 while 0.3.241 is installed, which is exactly the staleness this pins against."
+    },
+    {
+      "testFile": "test/what-a-worker-loads.test.ts",
+      "target": "test/claude-md-budget-ratchet.test.ts",
+      "literal": "INTERACTIVE session",
+      "reason": "W1-T2759 design (iii): the deliverable IS a prose correction. One of the three artifacts that carried the false 'every session on every lane' claim is that suite's own header comment, so asserting the corrected wording is asserting the artifact itself, not standing in for a mechanism. The mechanism behind the claim is registered separately as plan/claims.yaml's worker-loads-no-claude-md."
     }
   ]
 }

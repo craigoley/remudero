@@ -229,3 +229,12 @@
   plan_section: "MASTER-PLAN.md §SHIPPED log"
   assertion: 'node --import tsx scripts/plan-state-claims.mjs'
   precondition_paths: ["MASTER-PLAN.md", "plan/tasks.yaml"]
+
+- id: worker-loads-no-claude-md
+  claim: "A dispatched worker never loads CLAUDE.md. spawnWorker passes the SDK's isolation option
+    `settingSources: []`, which the installed SDK documents as the option that must include
+    'project' to load CLAUDE.md files — so the file is a context tax on INTERACTIVE sessions in
+    this checkout, never on the fleet's own workers (W1-T2759)."
+  plan_section: "CLAUDE.md — the 'Maintaining this file' paragraph"
+  assertion: 'grep -q "settingSources: \[\]," src/lib/worker.ts && grep -q "Must include .*project.* to load CLAUDE.md files" node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts'
+  precondition_paths: ["src/lib/worker.ts", "node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts"]
