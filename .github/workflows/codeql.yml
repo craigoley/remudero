@@ -35,6 +35,9 @@ jobs:
     concurrency:
       group: codeql-${{ github.workflow }}-${{ github.ref }}-${{ matrix.language }}
       cancel-in-progress: true
+    # R-50: this repo's PR-firing CodeQL runs complete in 1-2 minutes; 20m bounds a genuine hang
+    # (e.g. a CodeQL database build stalling) with generous headroom.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

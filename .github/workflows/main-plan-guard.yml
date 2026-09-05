@@ -58,11 +58,15 @@ jobs:
   plan-load:
     name: plan-load
     runs-on: ubuntu-latest
+    # R-50: observed push runs complete in ~25-30 seconds; 20m bounds a genuine hang with
+    # generous headroom.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Load the plan on this tip

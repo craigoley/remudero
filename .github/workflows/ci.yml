@@ -29,6 +29,20 @@ on:
 permissions:
   contents: read
 
+# R-50: a force-push mid-run left the superseded PR run competing for the same shared CI-minute
+# budget as its replacement — every job above pays for a cold `npm ci` and (on `ci`/
+# `coverage-ratchet`) a Playwright install, so an abandoned run is not free just because nothing
+# reads its result. Group by PR number so a PR's own runs cancel their predecessor
+# (`cancel-in-progress` true only on `pull_request`); group by `github.ref` on a push to `main`
+# (always `refs/heads/main` here — see `on.push.branches` above) so those runs share ONE FIFO
+# queue rather than a free-for-all, but `cancel-in-progress` stays false there: this is the ONLY
+# lane that runs the full suite against `main` and the coverage-ratchet aggregate the fleet
+# merges frequently against, and a fast merge cancelling a slower in-flight one would drop
+# coverage data for a commit that is already on `main`.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     name: ci-shard (${{ matrix.shard }}/4)
@@ -61,8 +75,27 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
+      - name: Determine Playwright's pinned browser version (cache key input)
+        id: playwright-version
+        run: |
+          VERSION="$(node -e "console.log(require('./package-lock.json').packages['node_modules/playwright'].version)")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      # R-50: caches the DOWNLOADED BROWSER BINARY only -- keyed on runner OS plus the exact
+      # playwright version pinned in package-lock.json (never a hash of the whole lockfile, which
+      # would invalidate on any unrelated dependency bump). This has no apt/lock interaction
+      # whatsoever (see the install step's own W1-T1027/W1-T1034 comment below: apt is off the
+      # critical path entirely since --with-deps was dropped), so it carries none of that step's
+      # hazards. `npx playwright install chromium` below is unchanged and stays a no-op on a warm
+      # cache hit, a real download on a cold one -- ci.yml pays for this download 8 times/PR today
+      # (4 shards each in `ci` and `coverage-ratchet`) with no reuse between them.
+      - name: Cache Playwright's Chromium download
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
       - name: Install Playwright's Chromium (W1-T153 shell a11y/responsive tests need a real headless browser — Lighthouse-equivalent axe-core scan, 390px/1440px no-hscroll, fleet-control read-back/STOP-confirm interaction)
         # NO `--with-deps`, AND THAT IS THE WHOLE FIX: it is what invoked apt, and apt is what
         # failed. MEASURED ON A GREEN RUN: `--with-deps` reported `0 upgraded, 9 newly installed`
@@ -300,6 +333,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: commitlint (the PR title — read LIVE via `gh pr view`, not the opened-event payload snapshot)
@@ -398,6 +432,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Determine this diff's fast-lane class (W1-T2428 — a PLAN_ONLY/DOCS_ONLY diff cannot move source coverage)
@@ -434,6 +469,18 @@ jobs:
           cat diff-class.log || true
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           echo "W1-T2428 fast-lane: this diff classifies as ${CLASS}."
+      - name: Determine Playwright's pinned browser version (cache key input)
+        id: playwright-version
+        run: |
+          VERSION="$(node -e "console.log(require('./package-lock.json').packages['node_modules/playwright'].version)")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      # R-50: same cache as the `ci` job's identical step above — see that step's comment for why
+      # this is safe (no apt/lock interaction) and what it's keyed on.
+      - name: Cache Playwright's Chromium download
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
       - name: Install Playwright's Chromium (same requirement as the ci job — W1-T153's shell a11y/responsive tests launch a real headless browser; this job runs the same test/**/*.test.ts glob under coverage, so it needs it too)
         # Same step as the `ci` job's above, and the same reason: see that step's comment for the
         # measurement behind dropping `--with-deps`. Fixing one copy and not the other leaves the
@@ -584,6 +631,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Determine this diff's fast-lane class for the coverage aggregator
@@ -758,6 +806,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Determine whether this diff can move src/lib/classify.ts's mutation score
@@ -814,6 +863,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Knowledge budget ratchet (blocks a PR that pushes the active learnings corpus over the recorded cap)
@@ -875,6 +925,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: jscpd duplication gate (blocks a duplicate above the recorded threshold)
@@ -906,6 +957,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Plan claims (every plan/claims.yaml assertion must exit 0)
@@ -947,6 +999,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Assertion discrimination (comment-stripped re-evaluation of raw-text assertions)
@@ -984,6 +1037,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: rmd lint-plan (PR-changed tasks only)
@@ -1016,6 +1070,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: dependency-cruiser fitness rules
@@ -1066,6 +1121,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Determine whether this diff touches sandbox/hooks/env/deny-floor
@@ -1113,6 +1169,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: api-client drift check (committed client must match a fresh regeneration from openapi/daemon.yaml)
@@ -1143,6 +1200,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: No-hand-rolled-fetch grep gate (apps/**, packages/** except packages/api-client)
@@ -1185,6 +1243,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Task-id existence check (every cited id resolves; no declared id collides with main)

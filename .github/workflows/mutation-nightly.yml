@@ -98,6 +98,18 @@ jobs:
   mutation-nightly:
     name: mutation-nightly (full src/** scope, sampled + rotated)
     runs-on: ubuntu-latest
+    # R-50: MEASURED, not the audit's flat "20m elsewhere" default -- that would have killed
+    # healthy runs. Over the 8 most recent scheduled runs (2026-08-27 to 2026-09-05), completed
+    # durations ranged ~17.5 to ~49 minutes, and one real (non-timeout) `failure` conclusion on
+    # 2026-08-31 (run 33380226631) legitimately ran 124 minutes -- confirmed via its own job
+    # steps: "Stryker mutation runs" started 09:59:17Z and completed 12:02:00Z, then the ratchet
+    # step correctly read that report and failed on its own merits, not on a hang. A 20m (or even
+    # 60m) cap would have truncated that run before it ever reached its real verdict -- exactly
+    # the "a bound that fires on a healthy condition" defect CLAUDE.md's Investigation-discipline
+    # section names. 240m (4h) ties the cap to this file's own header, which already measures
+    # full-tree Stryker at "~4 hours" -- comfortable headroom over the observed 124m worst case
+    # while still bounding a genuine hang.
+    timeout-minutes: 240
     # Job-level permissions REPLACE the top-level block, so `contents: read` is restated rather
     # than inherited. `issues: write` is the minimum the delivery step needs and is scoped to this
     # job alone (Scorecard TokenPermissions -- W1-T66).
@@ -111,6 +123,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         id: install
         run: npm ci

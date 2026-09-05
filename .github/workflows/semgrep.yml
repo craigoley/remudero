@@ -25,6 +25,9 @@ jobs:
   semgrep:
     name: Scan
     runs-on: ubuntu-latest
+    # R-50: observed PR runs complete in ~1-2 minutes; 20m bounds a genuine hang with
+    # generous headroom.
+    timeout-minutes: 20
     permissions:
       security-events: write
       contents: read
