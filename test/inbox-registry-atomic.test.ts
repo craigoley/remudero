@@ -133,7 +133,13 @@ test("W1-T240 claim 2: two 'concurrent' updateProposalRegistry calls -- B's read
     // and releasing. B's eventual acquire is therefore guaranteed to happen strictly AFTER
     // A's write landed. Without the lock, A's write would instead silently stomp whatever B
     // already read at call time.
-    fsDefault.writeFileSync(`${registryPath}.lock`, JSON.stringify({ pid: 111, startedAt: new Date(0).toISOString() }));
+    //
+    // R-4: `startedAt` must be RECENT, not an arbitrary old placeholder — isHolderStale's
+    // boot/start-time rungs treat an ancient `startedAt` as stale on its own, regardless of
+    // what `isPidAlive` says, which would let B reclaim this "live" lock on its very first
+    // attempt instead of waiting behind it. A recent timestamp keeps liveness controlled
+    // purely by the injected `isPidAlive` below, as this test's choreography requires.
+    fsDefault.writeFileSync(`${registryPath}.lock`, JSON.stringify({ pid: 111, startedAt: new Date().toISOString() }));
     let aDone = false;
 
     const bResult = updateProposalRegistry(
@@ -242,7 +248,7 @@ test("W1-T240 claim 2: a GARBAGE (unparseable) lock file -- not merely a dead pi
   try {
     updateProposalRegistry(registryPath, () => [proposal("seed")]);
     // Not valid JSON at all (a torn write of the lock file itself, or disk corruption) --
-    // readRegistryLockInfo's own catch branch must treat this the same as "no valid holder",
+    // parseRegistryLockInfo's own catch branch must treat this the same as "no valid holder",
     // never throw and never wedge the next caller behind it forever.
     fsDefault.writeFileSync(`${registryPath}.lock`, "{not json");
 
@@ -262,7 +268,11 @@ test("W1-T240 claim 2: the DEFAULT sleep (no injected `opts.sleep`) is a real, b
     // This test's OWN pid is unimpeachably alive for the whole test run, so the default
     // isPidAlive probe never reclaims it -- every poll must fall through to the REAL,
     // un-injected defaultRegistryLockSleep (execFileSync("sleep", ...)), not a test double.
-    fsDefault.writeFileSync(`${registryPath}.lock`, JSON.stringify({ pid: process.pid, startedAt: new Date(0).toISOString() }));
+    // R-4: `startedAt` must be RECENT (this process's real start necessarily precedes
+    // it) -- an ancient placeholder would trip isHolderStale's boot/start-time rungs and
+    // get this "live" lock reclaimed immediately instead of waited out, per those rungs'
+    // own coverage in test/lock-holder-identity.test.ts.
+    fsDefault.writeFileSync(`${registryPath}.lock`, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
 
     assert.throws(
       () => updateProposalRegistry(registryPath, (current) => [...current, proposal("unreachable")], { maxWaitMs: 60, pollIntervalMs: 20 }),
@@ -278,7 +288,10 @@ test("W1-T240 claim 2: a LIVE holder that outlasts maxWaitMs makes the caller th
   const { dir, registryPath } = tmpRegistry();
   try {
     updateProposalRegistry(registryPath, () => [proposal("seed")]);
-    fsDefault.writeFileSync(`${registryPath}.lock`, JSON.stringify({ pid: 777, startedAt: new Date(0).toISOString() }));
+    // R-4: recent `startedAt`, same reason as the sibling test above -- an ancient one
+    // would read as stale via isHolderStale's boot/start-time rungs regardless of the
+    // injected `isPidAlive: () => true` below, defeating this test's own point.
+    fsDefault.writeFileSync(`${registryPath}.lock`, JSON.stringify({ pid: 777, startedAt: new Date().toISOString() }));
 
     assert.throws(
       () =>
