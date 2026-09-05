@@ -49,6 +49,9 @@ import {
   type Method,
   type Route,
   type Scope,
+  cloudflareAccessIdentityProvider,
+  createCloudflareAccessKeyCache,
+  type IdentityProvider,
   type ServiceOptions,
   type ServiceTokens,
   type SseRoute,
@@ -115,7 +118,7 @@ import {
   sweepWakeMarkerPath,
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
-import type { WorkerProviderId } from "./config.js";
+import { loadConfig, type WorkerProviderId } from "./config.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -167,6 +170,17 @@ export interface ServeDeps {
   /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
    *  {@link resolveConsoleSha}, resolved once at server start. */
   consoleSha?: string;
+  /**
+   * W1-T996 — the Cloudflare Access team domain and AUD tag. Defaulted from `loadConfig()` inside
+   * {@link buildServeServer} rather than threaded from `serveCommand`, so the ONE production call
+   * site stays this module's own and no caller changes. Injectable so a test states them without
+   * a config file on disk.
+   *
+   * ⚠ BOTH OR NEITHER — see {@link accessIdentityProviders}. Absent either, no provider is
+   * composed at all, and `createService`'s built-in order is byte-identical to before.
+   */
+  accessTeamDomain?: string;
+  accessAudience?: string;
   /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
    *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
   resolveCurrentSha?: () => string;
@@ -5968,6 +5982,65 @@ function renderGithubCredentialHtml(state: GithubCredentialState): string {
  * closes the W1-T139 bootstrap paradox: the auth spec was satisfied against header-sending fetch
  * clients and unreachable by the one client that matters, the browser opening the URL.
  */
+/**
+ * W1-T996 — COMPOSE THE ACCESS PROVIDER, OR DELIBERATELY COMPOSE NOTHING.
+ *
+ * `cloudflareAccessIdentityProvider` and `createCloudflareAccessKeyCache` shipped in W1-T531,
+ * fully unit-tested, and MEASURED 2026-09-04 they scored **0 src invocations each** against
+ * controls of 2 and 2 for `tailscaleIdentityProvider` and `bearerTokenProvider` — the two
+ * providers that ARE wired. So every console request already carried a verified identity the
+ * server discarded. This is the wiring, not a second implementation: `src/lib/service.ts` is
+ * deliberately NOT in this task's scope, and a builder editing it is rebuilding W1-T531.
+ *
+ * ⚠ ABSENT CONFIG MEANS NO PROVIDER, NEVER A PERMISSIVE ONE. Composing with an empty audience
+ * would verify nothing and grant on ANY assertion — strictly worse than leaving it unwired. Both
+ * values are per-install operator config, so their absence is the normal case for every install
+ * that does not front the console with Access, and it must cost those installs nothing.
+ *
+ * ⚠ THE REFRESH IS STARTED HERE AND NEVER AWAITED ON THE REQUEST PATH. `scheduleRefresh()` is
+ * fire-and-forget and reentrancy-guarded by the cache itself; `grant` reads whatever `keys()`
+ * currently holds. A cache miss therefore DENIES THIS REQUEST and lets the next refresh fix the
+ * next one — the design's own falsifier, and the reason this returns providers rather than a
+ * promise.
+ *
+ * Returns `[]` rather than `undefined` so the call site spreads it unconditionally: with no
+ * Access config the `providers` array is empty and `createService`'s built-in order — tailnet
+ * identity, then bearer token — is byte-identical to before this task.
+ */
+/** W1-T996 — the two Access values off `loadConfig()`, tolerantly. A console that cannot read its
+ *  config still serves; it simply composes no Access provider, which is the same outcome as an
+ *  install that never configured one. Never a throw on the boot path for an optional credential. */
+function accessConfig(): { accessTeamDomain?: string; accessAudience?: string } {
+  try {
+    const config = loadConfig();
+    return { accessTeamDomain: config.accessTeamDomain, accessAudience: config.accessAudience };
+  } catch {
+    // Deliberate: an unreadable config is indistinguishable here from an unconfigured one, and
+    // both must mean "no Access provider" rather than a failed boot.
+    return {};
+  }
+}
+
+export function accessIdentityProviders(opts: {
+  teamDomain?: string;
+  audience?: string;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+  makeKeyCache?: typeof createCloudflareAccessKeyCache;
+}): IdentityProvider[] {
+  const teamDomain = opts.teamDomain?.trim();
+  const audience = opts.audience?.trim();
+  if (!teamDomain || !audience) return [];
+  const keys = (opts.makeKeyCache ?? createCloudflareAccessKeyCache)(teamDomain, opts.fetchImpl ?? fetch, opts.log);
+  // Off the request path, by construction: started once here, re-armed by the cache's own
+  // `scheduleRefresh` on a miss. Never awaited, so a slow certs endpoint cannot hold a request.
+  // Optional on the interface (a timer-refreshed cache may leave it a no-op), so it is called only
+  // when present rather than asserted — the default `createCloudflareAccessKeyCache` supplies it.
+  keys.scheduleRefresh?.();
+  return [cloudflareAccessIdentityProvider({ teamDomain, audience, keys, now: opts.now, log: opts.log })];
+}
+
 export function buildShellRoute(
   phaseElapsedThresholdsMs: Record<string, number>,
   consoleSha: string,
@@ -6776,6 +6849,14 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const server = createService({
     tokens: deps.tokens,
     identity: deps.identity,
+    // W1-T996: APPENDED through the seam, never by reordering `createService`'s built-in array —
+    // the token-first order is the pre-seam W1-T371 contract, and preserving it is what keeps
+    // every CLI caller unaffected. Empty unless BOTH Access config values are present.
+    providers: accessIdentityProviders({
+      teamDomain: deps.accessTeamDomain ?? accessConfig().accessTeamDomain,
+      audience: deps.accessAudience ?? accessConfig().accessAudience,
+      log: deps.log,
+    }),
     routes,
     sse: [staleExit.wrapSse(prewarm.route)],
     log: deps.log,

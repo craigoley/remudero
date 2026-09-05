@@ -63,6 +63,21 @@ export interface Config {
   /** Model the retro Architect rides — MUST outrank workerModel (G-17). Default `opus`. */
   architectModel?: string;
   /**
+   * W1-T996 — the operator's Cloudflare Access team domain, e.g.
+   * `https://example.cloudflareaccess.com` (no trailing slash). PER-INSTALL, never a plan
+   * constant: the same class `.remudero/mounts.yaml`'s own header sends to `rmd init` config
+   * rather than the plan.
+   *
+   * ⚠ BOTH THIS AND {@link Config.accessAudience} MUST BE PRESENT OR THE ACCESS PROVIDER IS NOT
+   * COMPOSED AT ALL. Composing it with an empty audience would verify nothing and grant on any
+   * assertion — a worse outcome than not wiring it, which is why absence is a hard skip rather
+   * than a default.
+   */
+  accessTeamDomain?: string;
+  /** W1-T996 — the Access application's AUD tag, checked against the JWT's `aud` claim. See
+   *  {@link Config.accessTeamDomain}: absent EITHER value and the provider is not composed. */
+  accessAudience?: string;
+  /**
    * iMessage buddy identifier (phone number or Apple ID email) real-time escalation
    * pings are sent to (W1-T8, notify.ts). Optional; defaults to the operator's Apple
    * ID email so the notifier works out of the box on a single-operator instance.
