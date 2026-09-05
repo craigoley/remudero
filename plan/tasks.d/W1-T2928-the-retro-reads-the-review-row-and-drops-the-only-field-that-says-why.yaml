@@ -1,0 +1,59 @@
+- id: W1-T2928
+  title: "THE RETRO READS THE REVIEW ROW AND DROPS THE ONLY FIELD THAT SAYS WHY — review.posted carries unmet_criteria/reasons, the most specific feedback this system produces, and retro.ts references review.posted 11 times and those two fields ZERO times, so the same review failure recurs across independent tasks and never becomes a learning"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§8", "W1-T19", "W1-T33"]
+  files: [src/lib/retro.ts, test/review-feedback-reaches-the-learning-loop.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LEARNING LOOP ALREADY EXISTS AND ALREADY READS THIS ROW. `buildGather` reads `review.posted`
+    (11 references in src/lib/retro.ts) and `proof_exec` (9), an Architect ratifies a candidate into
+    a `learnings/*.yaml` shard, `learnings/index.json` indexes it, and W1-T19 injects the corpus into
+    later workers. Nothing here needs building. What is missing is two field reads.
+
+    `review.posted` also carries `unmet_criteria` and `reasons` — the reviewer's own sentence naming
+    what failed and why. `git grep -c` in src/lib/retro.ts: `review.posted` 11, `proof_exec` 9,
+    `unmet_criteria` 0, `reasons` 0. The row is opened, the coarse signal is taken, and the
+    diagnostic text is dropped on the floor. This is the shape CLAUDE.md's MIRROR rule names: before
+    filing a NEW signal, grep the producer's type for consumers, because the fact is usually ALREADY
+    COMPUTED AND DISCARDED. It is.
+
+    MEASURED ON THE LIVE LEDGER 2026-09-05 (union not required — these are live-file rows):
+      review.posted rows ............................... 201
+      rows carrying unmet_criteria/reasons ............. 32
+      distinct unmet reasons ........................... 49
+      total occurrences ................................ 67
+      "test theater: added tests assert nothing" ....... 9 occurrences ACROSS 3 DIFFERENT TASKS
+    That last line is the argument. A failure mode repeating across three INDEPENDENT tasks is the
+    definition of something a corpus entry would have prevented: the second task's worker had no way
+    to know the first had already been refused for it, because the refusal never left the ledger.
+
+    WHAT THIS IS NOT. It is not a new signal, a new ledger step, a new lane, or an LLM judgment call.
+    The candidate must stay a CANDIDATE — Rule 2 and the existing pipeline both require that an
+    Architect ratifies a learning into `learnings/*.yaml` inside a reviewed PR; nothing here may
+    hand-write the corpus, and `learnings/` stays out of this task's `files:` for that reason. The
+    deliverable is that the retro's gather CARRIES these reasons into the evidence it already renders,
+    so ratification has something to act on.
+
+    TWO TRAPS THE BUILD MUST NOT FALL INTO. First, `unmet_criteria` is a criterion CLAIM, which is
+    architect prose that will differ in wording between two tasks describing the same defect —
+    grouping on exact text under-counts, and the 49-distinct/67-total split above is mostly that.
+    Prefer the reviewer's own classifier prefix (`test theater: …`) where one exists, and treat the
+    free text as evidence rather than as a key. Second, the corpus is CI-budgeted:
+    `scripts/learnings-budget-ratchet.mjs` caps its injectable weight, so a change that reliably
+    produced one candidate per failed review would blow that budget. Recurrence ACROSS TASKS, not
+    occurrence, is what earns a candidate.
+  acceptance:
+    - claim: "the gather carries a failed review's unmet reasons instead of dropping them"
+      proof: "unit test: W1-T2928: the gather carries a failed review's unmet reasons"
+    - claim: "a reason recurring across independent tasks is surfaced as a candidate and a one-off is not"
+      proof: "unit test: W1-T2928: recurrence across tasks earns a candidate and a one-off does not"
+    - claim: "the retro never writes the learnings corpus itself, leaving ratification to the architect"
+      proof: "unit test: W1-T2928: the retro proposes a candidate and never writes the corpus"
