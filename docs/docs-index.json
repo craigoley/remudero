@@ -146,6 +146,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/drain.md",
+      "title": "Forensics — `src/lib/drain.ts`",
+      "summary": "A verbatim archive of comment blocks compacted out of `src/lib/drain.ts`. Each heading names",
+      "grepHint": "Forensics — `src/lib/drain.ts`"
+    },
+    {
       "path": "docs/forensics/ledger.md",
       "title": "ledger.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
