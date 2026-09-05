@@ -12,6 +12,10 @@
     - src/lib/review.ts
     - test/codex-reviewer-production-wiring.test.ts
     - test/codex-reviewer-materialized-checkout.test.ts
+    - test/event-driven-semantic-review.test.ts
+    - test/review-skips-spawn-on-plan-only.test.ts
+    - test/review-status-pending.test.ts
+    - test/worker.test.ts
   origin: "operator-session#codex-reviewer-empty-readonly-checkout-2026-09-05"
   plan_refs: ["W1-T65", "W1-T115", "W1-T185", "W1-T2748"]
   status: queued
@@ -101,6 +105,18 @@
     FAIL lines. Otherwise, deleting the snapshot preparation from the final implementation must
     restore a captured empty non-repository cwd and fail the integration test.
   note: |
+    REVIEW-FIXTURE DECLARED-FILES CORRECTION: an exhaustive static search found exactly four
+    pre-existing tests, in addition to the two W1-T2868-owned reviewer tests above, that invoke
+    `runReview` with `spawnReviewer: true`. Their fixtures predate the exact-head checkout contract
+    and either omit `headCheckoutDir` or supply a non-repository context. The broader focused run
+    proved this is load-bearing: `test/review-skips-spawn-on-plan-only.test.ts` failed because its
+    non-plan control expected the semantic provider to spawn without a source checkout. The other
+    three tests must receive exact local repository fixtures so their pending-ordering,
+    provider-failure, and joined-transcript assertions continue to exercise the provider boundary
+    instead of passing or failing earlier at materialization. All tests with `spawnReviewer: false`
+    remain outside this task. This is a plan-only, human-authored `files:` correction; acceptance
+    criteria are unchanged.
+
     DECLARED-FILES CORRECTION: `test/codex-reviewer-production-wiring.test.ts` is the existing
     load-bearing W1-T2829 regression that asserts the behavior this task intentionally replaces:
     it requires the reviewer cwd to be a non-repository scratch directory and requires Codex argv
