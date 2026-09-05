@@ -477,6 +477,11 @@ import {
   type RunRetroPrepublishPreflightOptions,
   type RetroPrepublishProvenance,
 } from "./lib/retro-preflight.js";
+import {
+  AUTOMATED_RETRO_DECISION_ENV,
+  decodeAutomatedRetroDecision,
+  runAutomatedRetroSubprocess,
+} from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
 import {
   buildPlanPrBody,
@@ -19919,14 +19924,22 @@ export function buildRetroDaemonHooks(deps: {
   runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
 } = {}): {
   checkRetroTrigger: () => RetroTriggerDecision | undefined;
-  runRetroTrigger: (decision: Extract<RetroTriggerDecision, { fire: true }>) => Promise<void>;
+  // The optional `log` is supplied by the CALLER at invocation time (daemonCommand's own
+  // per-boot ledger sink), never threaded through `deps` above — that keeps the
+  // `buildRetroDaemonHooks()` construction call byte-identical to before W1-T2870 (see
+  // test/owner-self-host-gating.test.ts's source-grep for the isSelf gate) while still
+  // letting the subprocess adapter below ledger its start/exit rows under the real run id.
+  runRetroTrigger: (
+    decision: Extract<RetroTriggerDecision, { fire: true }>,
+    log?: (step: string, extra?: Record<string, unknown>) => void,
+  ) => Promise<void>;
 } {
   const check = deps.check ?? (() => retroTriggerCheck());
-  const runRetro = deps.runRetro ?? retroCommand;
   return {
     checkRetroTrigger: () => check(),
-    runRetroTrigger: async (decision) => {
-      await runRetro([], { automated: decision });
+    runRetroTrigger: async (decision, log) => {
+      if (deps.runRetro) await deps.runRetro([], { automated: decision });
+      else await runAutomatedRetroSubprocess(decision, { log });
     },
   };
 }
@@ -25221,7 +25234,10 @@ export async function daemonCommand(
         // already ledgers everything the daemon loop needs (retro_triggered above,
         // retro_aborted_integrity, pr.opened, retro.marker.advanced).
         checkRetroTrigger: retroHooks?.checkRetroTrigger,
-        runRetroTrigger: retroHooks?.runRetroTrigger,
+        // Wrapped (not `retroHooks?.runRetroTrigger` directly) so the daemon's own per-boot
+        // ledger sink (`log`, closed over here) reaches the subprocess adapter without
+        // widening `buildRetroDaemonHooks`'s construction-time deps — see its own doc.
+        runRetroTrigger: retroHooks ? (decision) => retroHooks.runRetroTrigger(decision, log) : undefined,
         // AUTO-TRIAGE RUNG (impl-DJ's design, wired here by impl-DM). Same shape as the retro
         // hooks above and gated the same way. The rung is DEFAULT OFF in policy data — this line
         // makes the switch REACHABLE, it does not turn anything on.
@@ -37282,7 +37298,11 @@ export async function main(
     process.exit(await nextTaskIdCommand(rest));
   }
   if (cmd === "retro") {
-    process.exit(await retroCommand(rest));
+    const encodedAutomatedDecision = process.env[AUTOMATED_RETRO_DECISION_ENV];
+    const automated = encodedAutomatedDecision === undefined
+      ? undefined
+      : decodeAutomatedRetroDecision(encodedAutomatedDecision);
+    process.exit(await retroCommand(rest, automated ? { automated } : {}));
   }
   if (cmd === "drain") {
     process.exit(await drainCommand(rest));
