@@ -14676,13 +14676,17 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     url: string;
     number: number;
   };
-  const body = view.body ?? "";
+  let body = view.body ?? "";
+  const reportBody = body;
   const inputDigest = reviewInputDigest(view.headRefOid, body);
+  const config = loadConfigDep();
+  const ledgerPath = ledgerPathFor(config);
+  const reviewLedger = readLedgerLines(ledgerPath);
 
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
-  const taskId = reviewTaskIdFromBody(body);
+  const taskId = resolveReviewTaskId(body, view.headRefName, isPlanOnlyFilingPr(reviewLedger, view.url));
   // W1-T322: the same plan lookup this block already does for `criteria` also carries the
   // task's declared scope — an advisory-only input judgeReview needs. Stays `undefined` on ANY
   // read/parse failure (see the catch below), exactly like `criteria` degrading to the body's
@@ -14729,6 +14733,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
+  // W1-T2846: a fleet PR can lose its trailer while retaining the task-bearing run branch.
+  // Give the existing exact-trailer criteria resolver only the recovered identity it needs;
+  // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
+  if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
   if (taskId) {
     const resolved = resolvePlanCriteriaAtHead(body, repoRoot, "plan/tasks.yaml", view.headRefOid);
     criteria = resolved.criteria;
@@ -14739,21 +14747,19 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     resolverDivergence = resolved.divergence;
   }
   if (criteria.length === 0) {
-    const fromBody = parseAcceptanceBlock(body);
+    const fromBody = parseAcceptanceBlock(reportBody);
     if (fromBody.length) {
       criteria = fromBody;
       source = `PR body Acceptance: block (${fromBody.length} criteria)`;
     }
   }
 
-  const config = loadConfigDep();
-  const ledgerPath = ledgerPathFor(config);
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
 
   const provenanceKey = { taskId: taskId ?? `PR-${view.number}`, prUrl: view.url, headSha: view.headRefOid };
-  const provenance = resolveReviewProviderProvenance(readLedgerLines(ledgerPath), provenanceKey);
+  const provenance = resolveReviewProviderProvenance(reviewLedger, provenanceKey);
   log("review.provider_provenance", reviewProviderProvenanceLedgerFields(provenance, provenanceKey));
 
   let spawnReviewer = false, reviewerMount: Mount | undefined;
@@ -14853,7 +14859,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
       headRefName: view.headRefName,
       task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria, files: taskDeclaredFiles },
-      report: body, // the PR body is the manual author's REPORT (proofs are pasted here)
+      report: reportBody, // the PR body is the manual author's REPORT (proofs are pasted here)
       settingsFile,
       config,
       budgetUsd: spawnReviewer ? taskBudgetUsd : undefined,
@@ -27042,12 +27048,6 @@ export function cancelledRequiredChecks(
     .map((c) => ({ name: c.name ?? c.context ?? "unknown", jobId: c.detailsUrl?.match(/\/job\/(\d+)/)?.[1] }));
 }
 
-/** The `Remudero-Task: <id>` trailer in a PR body, if present (anchored line). */
-function taskIdFromBody(body: string): string | undefined {
-  const m = body.match(/^Remudero-Task:\s*(\S+)\s*$/m);
-  return m ? m[1] : undefined;
-}
-
 /**
  * Is `prUrl` a plan-only filing PR, per the ONE positive signal `OpenPrView.isPlanFiling`'s
  * own doc (lib/sweep.ts) requires: a `pr.opened{plan_only:true}` ledger line the emitter
@@ -27061,6 +27061,22 @@ function taskIdFromBody(body: string): string | undefined {
  */
 function isPlanOnlyFilingPr(ledger: Array<Record<string, unknown>>, prUrl: string): boolean {
   return ledger.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
+}
+
+/**
+ * Resolve the task identity shared by the direct review path and the open-PR board path.
+ * An exact trailer wins; a positively identified plan-only filing is intentionally
+ * unattributed; otherwise the fleet's task-bearing run branch is the safe fallback.
+ */
+export function resolveReviewTaskId(
+  body: string,
+  headRefName: string,
+  planOnlyFiling: boolean,
+): string | undefined {
+  const fromTrailer = reviewTaskIdFromBody(body);
+  if (fromTrailer) return fromTrailer;
+  if (planOnlyFiling) return undefined;
+  return taskIdFromRunBranch(headRefName);
 }
 
 /**
@@ -27083,10 +27099,7 @@ function isPlanOnlyFilingPr(ledger: Array<Record<string, unknown>>, prUrl: strin
  * plan-only diff, the trap design (iii) of this task names explicitly.
  */
 function resolveOpenPrTaskId(pr: RawOpenPr, ledger: Array<Record<string, unknown>>): string | undefined {
-  const fromTrailer = taskIdFromBody(pr.body ?? "");
-  if (fromTrailer) return fromTrailer;
-  if (isPlanOnlyFilingPr(ledger, pr.url)) return undefined;
-  return taskIdFromRunBranch(pr.headRefName);
+  return resolveReviewTaskId(pr.body ?? "", pr.headRefName, isPlanOnlyFilingPr(ledger, pr.url));
 }
 
 /**
@@ -31014,7 +31027,7 @@ export async function fixCommand(
   }
 
   const ledger = readLedgerLines(ledgerPath);
-  const taskId = taskIdFromBody(raw.body ?? "");
+  const taskId = reviewTaskIdFromBody(raw.body ?? "");
   const reviewState = reviewStateFromRollup(raw.statusCheckRollup);
   // W1-T2299: same producer as buildOpenPrViews above — see OpenPrView.reviewVerdictPostedAt's doc.
   const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(raw.statusCheckRollup);
