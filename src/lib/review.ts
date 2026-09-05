@@ -306,6 +306,19 @@ export async function claimReviewDecision(opts: {
  *                          {@link execWhitelistedProof}'s doc for the measured TAP shapes that tell
  *                          this apart from a genuine named-test failure (which stays `executed_fail`,
  *                          untouched, carrying no `proof_skip` at all).
+ *   incomplete-run       — (W1-T2740) a PURE-PATH `unit test:` proof's run emitted at least one
+ *                          REAL subtest result and then stopped WITHOUT node's trailing
+ *                          `# duration_ms` summary ({@link hasFinalSummary}) — the one completion
+ *                          signal this file already trusts for the name-filtered branch. The run
+ *                          was cut off (a proof-timeout kill node reaped with numeric status 1,
+ *                          an external SIGTERM, an OOM); its passing subtests are real but its
+ *                          verdict about the CRITERION was never reached, so it degrades to the
+ *                          keyword floor instead of minting an `executed_fail` that would override
+ *                          it. Distinct from `runtime-broken` (a run that COMPLETED and printed a
+ *                          summary, whose only `not ok` names the file wrapper) and from
+ *                          `exec-error` (nothing to diagnose from the stream). A stream carrying a
+ *                          REAL failing subtest is NOT this — an observed failure is evidence
+ *                          whether or not the run later finished, and stays `executed_fail`.
  *   no-exec-context      — no PR-head checkout was supplied at all; execution was never attempted
  *                          for ANY criterion.
  *   forward-reference    — (W1-T456) an exact-path `unit test:` proof names a file ABSENT on the
@@ -326,6 +339,7 @@ export type ProofSkipReason =
   | "prose-no-match"
   | "exec-error"
   | "runtime-broken"
+  | "incomplete-run"
   | "no-exec-context"
   | "forward-reference";
 
@@ -2188,6 +2202,20 @@ export function execWhitelistedProof(
     // stays exactly as hard-refused as before.
     if (whitelisted.kind === "test" && !whitelisted.nameFiltered) {
       const stdout = typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? "");
+      // W1-T2740: AN INCOMPLETE RUN IS NOT A FAILING ONE, and it is read BEFORE the wrapper-name
+      // classifier below on purpose — the two discriminators are orthogonal and this one is the
+      // stronger. `runtime-broken` describes a run that COMPLETED (its fixture carries the
+      // trailing summary) and whose only `not ok` names the file itself; a stream with NO summary
+      // did not finish at all, whatever its `not ok` lines say, so classifying it by them would
+      // name a cause the stream cannot support. MEASURED on PR #3719 (head 51d4958b): the proof
+      // `unit test: test/retro-marker-atomic.test.ts` was posted `executed_fail` while the same
+      // checkout passed all 33 tests in 127s unrestricted — killed at 60s, node reaped it with
+      // `status: 1`, `signal: null`, no `not ok` line and no `# duration_ms`, so both guards above
+      // (ETIMEDOUT, non-numeric status) missed it and the wrapper classifier found no wrapper.
+      // NOT a request to raise `proofTimeoutMs`: a larger bound only moves the same false verdict
+      // onto a slower file. The bound stays; its expiry now yields no conclusion instead of a lie.
+      const completedResults = pureTestIncompleteRunResultCount(stdout);
+      if (completedResults !== undefined) throw new PureProofIncompleteRunError(completedResults);
       const wrapperName = pureTestNeverExecutedWrapperName(stdout);
       if (wrapperName !== undefined) throw new PureProofNeverExecutedError(wrapperName);
     }
@@ -2213,6 +2241,54 @@ class PureProofNeverExecutedError extends Error {
         "test it names actually failed",
     );
   }
+}
+
+/**
+ * (W1-T2740) Thrown by {@link execWhitelistedProof} for a pure-path `unit test:` proof whose run
+ * emitted real subtest results and then stopped before node's trailing summary — an INCOMPLETE
+ * execution, not a verdict. {@link judgeCriterion} recognises this via `instanceof` and records
+ * `proof_skip: "incomplete-run"` plus the bounded discriminator already parsed here (how many real
+ * results the stream did carry) — the same "record the discriminator, not the stream" rule
+ * {@link PureProofNeverExecutedError} follows, for the same reason: a raw TAP capture is unbounded
+ * and would carry the proof's runtime environment into a durable ledger row.
+ */
+class PureProofIncompleteRunError extends Error {
+  constructor(readonly completedResults: number) {
+    super(
+      `pure-path proof's run reported ${completedResults} passing subtest(s) and then stopped ` +
+        "before node's trailing `# duration_ms` summary — the run was cut off (a proof-timeout " +
+        "kill reaped with a numeric status, an external signal, an OOM), so it never reached a " +
+        "verdict about the criterion; inconclusive, not a failing test",
+    );
+  }
+}
+
+/**
+ * (W1-T2740) A pure-path `unit test:` proof's TAP stdout: the number of REAL (non-file-wrapper)
+ * subtest results the stream carried when the run is INCOMPLETE — at least one real result
+ * reported, NONE of them `not ok`, and no trailing summary ({@link hasFinalSummary}); `undefined`
+ * otherwise. The three `undefined` cases are exactly the three shapes that must keep today's
+ * behaviour, and each is a deliberate boundary of this task:
+ *   - the stream HAS a final summary ⇒ the run completed; whatever it reports is a real answer,
+ *     so {@link pureTestNeverExecutedWrapperName} and the caller's `"fail"` decide it, unchanged;
+ *   - a REAL subtest reported `not ok` ⇒ an observed failure is evidence whether or not the run
+ *     later finished — the same rule {@link nameFilteredOutcome} already applies to its own
+ *     branch, so a genuine failure keeps overriding the keyword floor;
+ *   - NO real result at all ⇒ nothing was observed to be incomplete. An ABSENT test path reports
+ *     empty stdout (W1-T1077's own measurement), and empty stdout also has no final summary, so
+ *     without this clause absence would be silently reclassified as a timeout — the one
+ *     regression this task must not introduce.
+ */
+function pureTestIncompleteRunResultCount(stdout: string): number | undefined {
+  if (hasFinalSummary(stdout)) return undefined; // the run reached its own completion signal
+  let completed = 0;
+  for (const line of stdout.split("\n")) {
+    const m = TAP_RESULT_LINE_RE.exec(line);
+    if (!m || isFileWrapperResultName(m[2])) continue; // a file's own trivial wrapper is not a real result
+    if (m[1] === "not ok") return undefined; // a real subtest genuinely failed — evidence, not truncation
+    completed += 1;
+  }
+  return completed > 0 ? completed : undefined;
 }
 
 /**
@@ -2906,6 +2982,17 @@ export function judgeCriterion(
               `own TAP wrapper reported the failure (a broken runtime: an unresolvable --import ` +
               `loader, an uncaught module-load error, …), not the named test; not executed, keyword ` +
               `floor applied`;
+          } else if (e instanceof PureProofIncompleteRunError) {
+            // W1-T2740, the same design rule as the sibling arm above: record the DISCRIMINATOR,
+            // never the stream. The bounded fact is that node's own completion signal is absent
+            // after N real results — enough for a `review.posted` row to say WHY a pure-path proof
+            // reached no conclusion, without carrying the TAP capture into a durable row.
+            proofSkip = "incomplete-run";
+            reason =
+              `${reason} — NOTE: proof's run reported ${e.completedResults} passing subtest(s) and ` +
+              `then stopped before node's trailing summary — an incomplete run (cut off by a ` +
+              `timeout kill, an external signal, or an OOM), so it never reached a verdict about ` +
+              `this criterion; not executed, keyword floor applied`;
           } else {
             proofSkip = "exec-error";
           }
