@@ -443,9 +443,9 @@ export function resolveHeadroomLimitPct(hoursToReset: number | null, policy: Hea
   // wrong and that is how the wrong number persisted: THIS IS HARDENING, NOT A LIVE BUG FIX. The
   // sole production caller (below, ~line 348) derives `hoursToReset` from
   // `parseResetInstant(w.resetsAt, now)` with the SAME `now`, and that function's contract is "the
-  // nearest instant AT OR AFTER now" — every branch rolls forward (+24h / +1 year). Probed across
-  // 20 shapes spanning both sides of `now`, it never returned a past instant, so today this branch
-  // is unreachable and the change is behaviour-neutral.
+  // nearest instant AT OR AFTER now" — every branch rolls forward (next-day wall-clock / +1 year).
+  // Probed across 20 shapes spanning both sides of `now`, it never returned a past instant, so
+  // today this branch is unreachable and the change is behaviour-neutral.
   //
   // recon-FH reported 36 of 2368 `daemon.headroom` lines carrying a `resets_at` behind their own
   // `ts` and inferred the ceiling had been relaxed. That inference was WRONG: those lines are a
@@ -544,7 +544,15 @@ export function parseResetInstant(raw: string, now: Date): Date | null {
     const hour = to24Hour(Number(timeOnly[1]), timeOnly[3]);
     const minute = timeOnly[2] ? Number(timeOnly[2]) : 0;
     let candidate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
-    if (candidate.getTime() < now.getTime()) candidate = new Date(candidate.getTime() + 24 * 3_600_000);
+    // Roll to "tomorrow, same wall-clock time" via the LOCAL CALENDAR (day + 1
+    // in the Date constructor, which normalizes month/year overflow itself),
+    // never by adding 24h in milliseconds: a fixed-ms roll crosses a DST
+    // transition an hour off (e.g. spring-forward turns "3pm" into 4pm local
+    // the next day). The calendar constructor re-resolves the wall-clock
+    // fields against whatever UTC offset the target date actually has.
+    if (candidate.getTime() < now.getTime()) {
+      candidate = new Date(candidate.getFullYear(), candidate.getMonth(), candidate.getDate() + 1, hour, minute, 0, 0);
+    }
     return candidate;
   }
 

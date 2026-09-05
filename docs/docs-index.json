@@ -20,6 +20,36 @@
       "grepHint": "Account selection: which account a run uses"
     },
     {
+      "path": "docs/adr/0001-typescript-7-native-compiler.md",
+      "title": "0001. Use TypeScript 7's native compiler as the project compiler",
+      "summary": "Status: Accepted",
+      "grepHint": "0001. Use TypeScript 7's native compiler as the project compiler"
+    },
+    {
+      "path": "docs/adr/0002-node-version-pin.md",
+      "title": "0002. Pin Node to an exact version, everywhere, no floating tags",
+      "summary": "Status: Accepted",
+      "grepHint": "0002. Pin Node to an exact version, everywhere, no floating tags"
+    },
+    {
+      "path": "docs/adr/0003-acr-container-deployment.md",
+      "title": "0003. Build and run the daemon as an ACR-built container image",
+      "summary": "Status: Accepted",
+      "grepHint": "0003. Build and run the daemon as an ACR-built container image"
+    },
+    {
+      "path": "docs/adr/0004-ci-gate-and-remudero-review-merge-gate.md",
+      "title": "0004. `ci-gate` + `remudero-review` are the only required merge gate",
+      "summary": "Status: Accepted",
+      "grepHint": "0004. `ci-gate` + `remudero-review` are the only required merge gate"
+    },
+    {
+      "path": "docs/adr/0005-apache-2.0-never-relicense.md",
+      "title": "0005. Apache-2.0, and the core is never relicensed",
+      "summary": "Status: Accepted",
+      "grepHint": "0005. Apache-2.0, and the core is never relicensed"
+    },
+    {
       "path": "docs/adr/README.md",
       "title": "Architecture Decision Records",
       "summary": "MASTER-PLAN §5 TIER 3: ADR discipline for IRREVERSIBLE calls. A short",

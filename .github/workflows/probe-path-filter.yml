@@ -8,7 +8,7 @@ name: Probe path-filter sub-job
 # REQUIRED list, so its absence must never block ci-gate or the merge. The PR
 # that introduced this file (itself scoped outside fixtures/probe-path-filter/**)
 # is the live proof: ci-gate went green and the PR merged with this job entirely
-# absent from the check-runs list. Proof pasted in docs/ci-gate.md.
+# absent from the check-runs list. Proof pasted in docs/review-gate.md.
 #
 # Kept live afterward as a cheap permanent regression fixture for the same
 # mechanism the future W1-T25/T26 tiered path-filtered sub-jobs will rely on.

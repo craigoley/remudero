@@ -8,6 +8,7 @@ import { slug as kebabSlug } from "./feedback-docket.js";
 // module's own registry writer mirrors.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import { hostname } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
@@ -27,6 +28,7 @@ export type DraftLintViolation = RelintViolation;
 import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
@@ -1837,9 +1839,16 @@ export function loadProposalRegistry(registryPath: string): Proposal[] {
 // a live holder of THIS lock is polled/retried up to `maxWaitMs` rather than refused —
 // every real critical section here is a synchronous JSON read-transform-write done in
 // microseconds, so a live holder means "wait a beat, it is about to release," not "a
-// second command must not run." A holder whose pid is already dead (a crash mid-update)
-// is reclaimed immediately via the same {@link defaultIsPidAlive} probe those two
-// modules use, so a crash never wedges the lock for the next caller.
+// second command must not run." A holder judged stale (a crash mid-update, or a dead
+// pid whose number a later process has since reused) is reclaimed via the SAME
+// {@link isHolderStale} predicate and {@link reclaimStaleLock} primitive
+// lib/drain-lock.ts and lib/inflight-lock.ts use (W1-T289/W1-T368): staleness is never
+// pid-liveness alone (a live PID reused by an unrelated process must not read as "the
+// same holder still running"), and the reclaim's delete is conditioned on the lock's
+// own on-disk identity (dev+ino+bytes) so two reclaimers racing over one dead lock
+// cannot both come away believing they hold it — the SAME lost-update hazard this
+// module's own header above describes for the registry file itself, previously left
+// open on the LOCK file that guards it.
 //
 // `update` receives a FRESH parse of whatever is on disk RIGHT NOW (read under the
 // lock), never a value some earlier, unlocked read produced — so a caller whose
@@ -1861,18 +1870,36 @@ export interface UpdateProposalRegistryOpts {
   /** Injectable blocking sleep (tests fake it to skip real delay). Default = a real,
    *  busy-wait-free sleep (mirrors lib/deployer.ts's own injected-sleep discipline). */
   sleep?: (ms: number) => void;
+  /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests).
+   *  Defaults to {@link import("./fs-race-safe.js").defaultGetProcessStartTime}. */
+  getProcessStartTime?: (pid: number) => number | null;
+  /** Called whenever a reclaim attempt loses the race to another reclaimer (see
+   *  {@link reclaimStaleLock}). Defaults to a `console.error` trace; tests override it
+   *  to observe the event directly instead of scraping stderr. */
+  onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
+  /** TEST-ONLY seam forwarded to {@link reclaimStaleLock}'s `beforeDelete` — lets a test
+   *  run a second reclaimer's whole acquire to completion inside this call's reclaim
+   *  window, to prove the delete-time identity check refuses to clear a lock that is no
+   *  longer the one it judged stale. Never set outside tests. */
+  __beforeReclaimDelete?: () => void;
 }
 
 interface RegistryLockInfo {
   pid: number;
-  startedAt: string;
+  host?: string;
+  startedAt?: string;
 }
 
-function readRegistryLockInfo(lockPath: string): RegistryLockInfo | null {
+/** Parse raw lock file contents into a holder record, or `null` for missing/garbage —
+ *  the {@link reclaimStaleLock} `parseHolder` contract, mirroring
+ *  {@link import("./drain-lock.js").parseDrainLockInfo}. Takes the raw bytes rather than
+ *  a path: {@link reclaimStaleLock} reads the lock through ONE descriptor (for its own
+ *  dev+ino identity check) and hands this the exact bytes that read produced, never a
+ *  second path re-resolution. */
+function parseRegistryLockInfo(raw: string): RegistryLockInfo | null {
   try {
-    const o = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-    if (typeof o?.pid === "number") return o as RegistryLockInfo;
-    return null;
+    const o = JSON.parse(raw);
+    return typeof o?.pid === "number" ? (o as RegistryLockInfo) : null;
   } catch {
     return null; // missing, unreadable, or garbage → no valid holder
   }
@@ -1907,24 +1934,31 @@ export function updateProposalRegistry(
       // O_EXCL: create-or-fail, no TOCTOU gap — same discipline as acquireDrainLock /
       // acquireInflightLock (lib/drain-lock.ts, lib/inflight-lock.ts).
       const fd = fs.openSync(lockPath, "wx");
-      fs.writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() }));
       fs.closeSync(fd);
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const held = readRegistryLockInfo(lockPath);
-      if (held && isAlive(held.pid)) {
+      // R-4: staleness is judged by isHolderStale — host + pid-liveness + start-time
+      // reuse — NEVER by pid liveness alone (a live pid the recorded holder no longer
+      // owns must not read as "the same holder still running"). The reclaim itself goes
+      // through reclaimStaleLock, which conditions its delete on the lock's own on-disk
+      // identity (dev+ino+bytes), so two reclaimers racing over the SAME dead lock
+      // cannot both come away believing they hold it (see this section's header doc).
+      const result = reclaimStaleLock(lockPath, {
+        parseHolder: parseRegistryLockInfo,
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
+        onLostReclaim: opts.onLostReclaim,
+        beforeDelete: opts.__beforeReclaimDelete,
+      });
+      if (result.outcome === "live") {
         if (Date.now() >= deadline) {
-          throw new Error(`updateProposalRegistry: timed out after ${maxWaitMs}ms waiting for ${lockPath} (held by pid ${held.pid})`);
+          throw new Error(`updateProposalRegistry: timed out after ${maxWaitMs}ms waiting for ${lockPath} (held by pid ${result.holder.pid})`);
         }
         sleep(pollIntervalMs);
         continue;
       }
-      try {
-        fs.unlinkSync(lockPath); // stale (dead pid / unreadable) — reclaim and retry
-      } catch {
-        // raced with another reclaimer between the read and the unlink; retry the create
-      }
+      // "missing" | "reclaimed" | "lost" → loop back and retry the atomic create.
     }
   }
 
