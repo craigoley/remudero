@@ -1,0 +1,101 @@
+- id: W1-T2870
+  title: "an automated retro executes inside the daemon's V8 heap, so its optional self-improvement workload can OOM and kill queue supervision"
+  repo: remudero
+  depends_on: [W1-T2833]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  files:
+    - src/run-task.ts
+    - src/lib/retro-subprocess.ts
+    - test/retro-subprocess.test.ts
+    - test/retro-trigger-check.test.ts
+    - test/daemon-retro-trigger.test.ts
+    - test/daemon-command-retro-wiring.test.ts
+    - test/retro-sweep-ticker.test.ts
+  origin: "operator-session#retro-oom-crash-domain-2026-09-05"
+  plan_refs: ["W1-T160", "W1-T276", "W1-T2833"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED TWICE ON THE AZURE FLEET ON 2026-09-05: the daemon died with V8
+    `Ineffective mark-compacts near heap limit` at roughly 2,045-2,047 MB while its ledger
+    heartbeat named phase `retro`. The first crash occurred during RETRO-1788586105550. The
+    second process reached 940,087 ms, ran RETRO-1788590438368, and died while a detached queue
+    fix was also active. Docker recorded restart counts 1 then 2 and the 120-second crash throttle
+    delayed each recovery. No kernel OOM occurred and Docker reported `OOMKilled=false`; the
+    failure was the daemon process's own V8 heap limit.
+
+    W1-T2833 IS MERGED AND PRESENT IN BOTH FAILING BOOTS. It bounds the follow-up archive union
+    to the relevant time window and copies matched strings, but its own task explicitly does not
+    claim to bound every retro allocation or reduce today's peak enough. The repeated crash after
+    that merge is the falsifier: archive-window retention was a real defect, but it was not a
+    sufficient crash boundary.
+
+    THE BLAST RADIUS IS ARCHITECTURAL. `buildRetroDaemonHooks` defaults `runRetro` directly to
+    `retroCommand`; `runDaemon` awaits that Promise through `sweepLightDuringRetro`. The light
+    sweep preserves PR liveness while the Promise runs, but all deterministic gather, full live
+    ledger parsing, plan projection and Architect orchestration allocate in the same Node process
+    that owns queue supervision. A fatal V8 OOM cannot be caught by the surrounding try/catch.
+
+    Automated retro is optional self-improvement work. It may fail, but it must not kill the
+    daemon, abandon active fix/review ownership, spend the crash throttle, or delay the whole PR
+    queue. Operator-invoked `rmd retro` remains an explicit foreground command and is out of this
+    task's behavior change.
+  design: |
+    Split automated retro execution into a dedicated child Node process behind a small
+    `retro-subprocess` adapter. `buildRetroDaemonHooks` must launch the current RMD CLI's `retro`
+    command without a shell, await that exact child, and reject with a named bounded error on
+    non-zero exit or signal. Keep the existing daemon-side `sweepLightDuringRetro` wrapper around
+    the child Promise so GitHub-event queue work continues while retro runs.
+
+    Give the child an explicit V8 old-space ceiling no larger than the currently observed
+    approximately-2-GiB default. The ceiling is a containment boundary, not a claim that the
+    retro now fits. Inherit the daemon's already-minted runtime credentials and necessary paths,
+    but never log environment values. Capture only a bounded stdout/stderr tail for failure
+    diagnosis.
+
+    Emit exactly one bounded start row and one terminal row per automated fire, carrying child
+    pid, duration, configured heap ceiling, exit code or signal and success/failure class. A child
+    OOM/non-zero exit must flow through the existing `daemon.retro_trigger.run_failed` path, leave
+    the retro marker unadvanced, release child ownership, and return control to the same daemon
+    process. No Docker/container restart, daemon lifecycle mutation or queue pause belongs here.
+
+    Unit-drive the adapter through an injected contained spawn and a real short-lived child
+    fixture. Compose the production hook with `runDaemon` and a child result shaped like exit 134
+    to prove the daemon reaches a later tick/clean stop. Preserve the existing success, throw and
+    light-sweep ticker tests. Deleting the subprocess boundary must make the production-wiring or
+    distinct-pid proof fail.
+  acceptance:
+    - claim: "the new retro subprocess adapter is reached by the production automated-retro hook rather than only by its tests"
+      proof: "grep: runAutomatedRetroSubprocess( in src/run-task.ts"
+    - claim: "the production self-target daemon launches an automated retro in a distinct child process with an explicit bounded V8 old-space ceiling instead of calling retroCommand in-process"
+      proof: "unit test: test/retro-subprocess.test.ts"
+    - claim: "a retro child that exits 134 or by signal produces a bounded named failure and the original daemon process continues to a later tick and clean stop without a container restart"
+      proof: "unit test: test/daemon-retro-trigger.test.ts"
+    - claim: "the existing light-sweep ticker continues handling queue work while the retro child is running and is stopped exactly once on every child terminal path"
+      proof: "regression test: test/retro-sweep-ticker.test.ts"
+    - claim: "automated retro emits one start and one terminal telemetry row with duration, heap ceiling and exit provenance, without logging credentials or unbounded child output"
+      proof: "unit test: test/retro-subprocess.test.ts"
+    - claim: "a successful child preserves the firing decision, retro marker semantics and existing daemon hook contract"
+      proof: "regression test: test/retro-trigger-check.test.ts"
+    - claim: "operator-invoked foreground rmd retro behavior and the daemon's Docker restart policy remain unchanged"
+      proof: "regression test: test/daemon-command-retro-wiring.test.ts"
+    - claim: "removing the child-process boundary makes the production distinct-pid/spawn-recorder proof fail"
+      proof: "mutation test: test/retro-subprocess.test.ts"
+  falsifier: |
+    Close this task without implementation if both observed fatal processes were not executing an
+    automated retro in the daemon PID, or if `buildRetroDaemonHooks` already launches retro in a
+    distinct process whose fatal heap exit cannot terminate the daemon. Otherwise, replacing the
+    child launch with the current direct `retroCommand` call must fail the production-wiring proof.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` reported W1-T2870 and atomically held
+    `refs/rmd-id/W1-T2870` on origin after one attempt. The shard uses the held id.
+
+    FOLLOW-UP, NOT SMUGGLED INTO THIS TASK: after the crash boundary lands, add stage-level
+    heap/RSS telemetry and use it to reduce retro's actual peak (the unbounded live-ledger string,
+    gather structures, plan projection and full/delta board reads are current candidates, not yet
+    proven as the single peak stage). Crash containment and peak-memory optimization are separate
+    concerns and must ship separately.
