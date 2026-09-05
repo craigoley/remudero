@@ -31,10 +31,10 @@ import { classifyGrepZeroHit } from "./grep-zero-cause.js";
  *  A PURE function over a loaded {@link Task}/{@link Plan}: no LLM, no I/O, no side effects. Every
  *  fact a check needs from disk, git or GitHub arrives through {@link LintOpts}. No predicate ⇒ no
  *  opinion: the check that needs it stays silent.
- *  It refuses the malformed shapes that reached a worker and burned budget — over-scoping (Rule 19),
- *  headless-unfitness (Rule 18), vibe proofs, a proof that cannot execute or resolve, a proof naming
- *  a path outside the task's own `files:`, criteria amended on a merged task (Rule 21), missing
- *  provenance (Rules 16/17), a ruling-shaped task filed `verify: auto`.
+ *  It refuses the malformed shapes that reached a worker and burned budget: over-scoping, headless
+ *  unfitness, vibe proofs, a proof that cannot execute or resolve, a proof naming a path outside the
+ *  task's own `files:`, criteria amended on a merged task, missing provenance, a ruling-shaped task
+ *  filed `verify: auto`. Each check below names its own rule.
  *  Wired at two fail-closed points. (i) CI — `rmd lint-plan` on any PR that edits the plan; only
  *  this site holds a `--base` diff, so it alone supplies the diff-scoped contexts. (ii) PRE-DISPATCH
  *  — `assertLintClean` in `rmd run-task`, so a task failing a BLOCKING check is never dispatched.
@@ -289,8 +289,8 @@ export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation 
 // in BOTH directions, so three exemptions and one widening carry the precision: NEGATION,
 // SELF-REFERENCE (by CONTENT SHAPE, never a task-id allowlist, which rots), SPAWN-OWNERSHIP, and
 // PHRASE rows. DEFAULT ON FIRING: an ambiguous criterion still flags, because a false positive costs
-// a reword and a false negative a task that can never pass. Why:
-// docs/forensics/task-linter.md#headless_forbidden_lexicon.
+// a reword and a false negative a task that can never pass.
+// Why: docs/forensics/task-linter.md#headless_forbidden_lexicon.
 
 export interface LexiconEntry {
   tag: string;
@@ -491,9 +491,9 @@ export function proofShapeViolations(task: Task): LintViolation[] {
 // else is free prose: it never executes, degrades to the keyword floor, and a task with ZERO
 // executable proofs caps on review and needs a manual operator rescue. This check REUSES review.ts's
 // own predicate, never a reimplementation that could drift from what the executor runs.
-// `demonstration:` is a third, never-executed dialect — an honest declaration, not a defect. It is
-// legal ONLY on `verify: human` and refused on `verify: auto`, where the identical prefix would be
-// an escape hatch, and is checked BEFORE the dead-proof-floor logic.
+// `demonstration:` is a third, never-executed dialect — an honest declaration, not a defect. Legal
+// ONLY on `verify: human` and refused on `verify: auto`, where the identical prefix would be an
+// escape hatch, it is checked BEFORE the dead-proof-floor logic.
 // Why: docs/forensics/task-linter.md#proofdialectviolations.
 
 /** A near-miss dialect prefix — close enough to the real `unit test:`/`grep:` labels to read as an
@@ -579,14 +579,14 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
 }
 
 // ── PROOF-RESOLVABILITY (W1-T101 — a dialect prefix is a promise) ───────────
-// A dialect prefix is a PROMISE, and this rule polices it independently of whether the payload
-// parses: it commits the author to naming a RESOLVABLE artifact, held as DATA in {@link
-// PROOF_PAYLOAD_SHAPES}. A proof with NO dialect prefix makes no such promise and is never touched.
+// A dialect prefix is a PROMISE, policed here whether or not the payload parses: it commits the
+// author to naming a RESOLVABLE artifact, held as DATA in {@link PROOF_PAYLOAD_SHAPES}. A proof
+// with NO dialect prefix makes no such promise and is never touched.
 // TRAP proofDialectViolations cannot close: parseTestTarget treats ANY non-path `unit test:` body
 // as a valid name-filtered proof, so a prefix can promise executability with a payload resolving to
 // zero real tests. Such a body is refused ONLY when it also reads as a multi-clause SCENARIO
-// NARRATIVE, never on a lone arrow — this repo's own titles read `X -> Y`. Why:
-// docs/forensics/task-linter.md#proofresolvabilityviolations (W1-T100, W1-T101, W1-T246).
+// NARRATIVE, never on a lone arrow — this repo's own titles read `X -> Y`.
+// Why: docs/forensics/task-linter.md#proofresolvabilityviolations (W1-T100, W1-T101, W1-T246).
 
 export interface ProofPayloadShape {
   tag: string;
@@ -661,12 +661,12 @@ export function proofResolvabilityViolations(
 
 // ── PROOF-GREP-SAFETY (W1-T287) ──────────────────────────────────────────────
 // `execWhitelistedProof` runs `grep -arn -- <pattern> <path>`, so a `grep:` proof's pattern is a
-// BASIC REGULAR EXPRESSION, not a fixed string. THE TRAP: an author verifies with `grep -F` — a
-// DIFFERENT MATCHER — and gets a false green on a pattern that can never match.
-// THE METACHARACTER SET IS MEASURED, NOT REMEMBERED, and is the UNION over both grep
-// implementations: a pattern whose meaning depends on which binary the review host runs is not a
-// proof. SEVERITY SPLITS ON THE FAILURE MODE: a character that can make a proof NEVER match blocks,
-// one that only widens a match that still succeeds warns, so working proofs stand.
+// BASIC REGULAR EXPRESSION, not a fixed string. THE TRAP: an author verifies with `grep -F`, a
+// DIFFERENT MATCHER, and gets a false green on a pattern that can never match. THE METACHARACTER
+// SET IS MEASURED, NOT REMEMBERED, and is the UNION over both grep implementations: a pattern whose
+// meaning depends on which binary the review host runs is not a proof. SEVERITY SPLITS ON THE
+// FAILURE MODE: a character that can make a proof NEVER match blocks, one that only widens a match
+// that still succeeds warns, so working proofs stand.
 // Why: docs/forensics/task-linter.md#proofgrepsafetyviolations (W1-T287, PR #1071, W1-T253).
 
 /** BRE metacharacters whose presence can make a pattern NEVER match its literal
@@ -799,9 +799,9 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
 // Nothing at filing time opens the file a `grep:` proof names, so a pattern that cannot match any
 // line of a file already on disk reads identically to a correct forward reference. Two subclasses
 // are POSITIVE detections rather than zeros: the phrase is in the file with a line break inside it,
-// or only under different capitalisation. A genuine forward reference matches neither probe.
+// or only under different capitalisation, and a genuine forward reference matches neither probe.
 // It CONSUMES {@link classifyGrepZeroHit} rather than re-deriving that detection, and stays PURE
-// via the injected {@link LintOpts.readGrepProofFile}. WARN, NEVER BLOCK, with no override.
+// via the injected {@link LintOpts.readGrepProofFile}. WARN, NEVER BLOCK, with no override, and
 // DELIBERATELY NOT folded into {@link lintTask}'s aggregate — it is scoped to ONE call site where
 // the read is bounded by the diff. Why: docs/forensics/task-linter.md#proofgrepunmatchableviolations.
 
@@ -915,8 +915,7 @@ export function proofGrepUnmatchableViolations(task: Task, opts: LintOpts = {}):
   return violations;
 }
 
-// ── PROOF-ENGINE-DIVERGENCE (W1-T2294 — a `grep:` pattern whose meaning depends on the
-//    regex engine, nothing declares which one ran) ───────────────────────────────────
+// ── PROOF-ENGINE-DIVERGENCE (W1-T2294 — a pattern whose meaning depends on the engine) ──────
 // The house `grep:` DIALECT always compiles to `["-arn", "--", pattern, path]`, so it is BRE and
 // only BRE, author-unselectable: that arm cannot diverge and is not this check's business. The
 // LEGACY fenced shape passes the author's own argv through, so `-E` is reachable there and nothing
