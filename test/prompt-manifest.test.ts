@@ -90,9 +90,22 @@ test("no manifest row ever carries prompt text", () => {
 
   assert.equal(serialized.includes("OBSERVED"), false);
   assert.equal(serialized.includes("secret-looking"), false);
-  // Only identity + size fields ever appear on a row.
+  // Only identity + size fields ever appear on a row. W1-T2700 added `envelopes` (a count) and
+  // `external` (the caller's provenance declaration) — both SCALARS that carry no prompt bytes,
+  // which is the invariant this test exists for. The whitelist stays EXACT so a future field still
+  // has to come through here and be justified.
   for (const row of manifest) {
-    assert.deepEqual(Object.keys(row).sort(), ["bytes", "name", "present", "sha256"]);
+    assert.deepEqual(Object.keys(row).sort(), ["bytes", "envelopes", "external", "name", "present", "sha256"]);
+  }
+  // AND THE SHARPER HALF, so widening the list above can never be enough on its own: `name` and
+  // `sha256` are the ONLY string-valued fields a row may carry. A future field that smuggled prompt
+  // text in would have to be a string, and would fail here even if someone added its key above.
+  for (const row of manifest) {
+    for (const [k, v] of Object.entries(row)) {
+      if (typeof v === "string") {
+        assert.ok(["name", "sha256"].includes(k), `row field \`${k}\` is string-valued — only name/sha256 may be`);
+      }
+    }
   }
 });
 

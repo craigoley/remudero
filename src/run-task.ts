@@ -326,6 +326,7 @@ import { assertProposedPlanLoads,
   triageCommitMessage,
   triageDeclaredScope,
   triageEmptyScopeDisposition,
+  feedbackEntryBlock,
   triagePrompt,
 } from "./lib/triage.js";
 import {
@@ -940,6 +941,7 @@ import {
   workerKeychainPaths,
 } from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
+import { envelope } from "./lib/untrusted-envelope.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import { checkCliFreshness, checkServiceFreshness, daemonFreshnessFromService } from "./lib/self-sync.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
@@ -6266,12 +6268,21 @@ export function renderFixPrompt(opts: {
       `Conflicting file(s):`,
       fileList,
       "",
+      // W1-T2700: the envelope NESTS INSIDE the W1-T210 fence rather than replacing it — the two
+      // are independent defences and this one does not depend on the other having run.
+      // `neutralizeFenceMarkers` keeps the FIXED markers unforgeable; the envelope's boundary is
+      // drawn fresh per call, so text written before it existed cannot close it at all.
       `${CI_LOG_FENCE_OPEN}`,
-      `log since merge-base — OUR side (this branch):`,
-      neutralizeFenceMarkers(mc?.oursLog || "(not captured)"),
-      "",
-      `log since merge-base — THEIR side (origin/main):`,
-      neutralizeFenceMarkers(mc?.theirsLog || "(not captured)"),
+      envelope(
+        [
+          `log since merge-base — OUR side (this branch):`,
+          neutralizeFenceMarkers(mc?.oursLog || "(not captured)"),
+          "",
+          `log since merge-base — THEIR side (origin/main):`,
+          neutralizeFenceMarkers(mc?.theirsLog || "(not captured)"),
+        ].join("\n"),
+        "ci-log",
+      ),
       `${CI_LOG_FENCE_CLOSE}`,
       ...footer,
     ].join("\n");
@@ -6300,10 +6311,13 @@ export function renderFixPrompt(opts: {
                 ? `   ${neutralizeFenceMarkers(describeCiLogUnavailable(f.logUnavailable))}\n` +
                   `   TREAT THIS AS "I CANNOT SEE WHY THIS FAILED", NOT AS A CLEAN CHECK.\n`
                 : `   log tail:\n${neutralizeFenceMarkers(f.logTail)}\n`;
+              // W1-T2700: enveloped INSIDE the fence, per this rung's own composition note in the
+              // merge-conflict branch above. The check NAME is inside it too — any installed
+              // GitHub App can choose that string, so it is external text exactly like the tail.
               return (
                 `${i + 1}. ${CI_LOG_FENCE_OPEN}\n` +
-                `   check: ${neutralizeFenceMarkers(f.name)}\n` +
-                body +
+                envelope(`   check: ${neutralizeFenceMarkers(f.name)}\n` + body, "ci-log") +
+                "\n" +
                 CI_LOG_FENCE_CLOSE
               );
             })
@@ -32732,10 +32746,28 @@ async function triageCommandLocked(
     // commit/push/PR — which is the whole point: W1-T286 cost $1.48 and reached a PR that
     // `lint-plan` then rejected with six violations. `decideTriage` itself is UNCHANGED.
     let worker!: WorkerResult;
+    // Built ONCE: the envelope's boundary is fresh per call, so a second `feedbackEntryBlock`
+    // would fingerprint bytes this worker never saw. See its own doc.
+    const triageFeedbackBlock = feedbackEntryBlock(entry);
+
+    // W1-T2700: the SAME per-part fingerprint the implement rung already ledgers (W1-T2297), now on
+    // the lane that actually ingests OUTSIDE text. `feedback_raw` is DECLARED external, so its
+    // `envelopes` count makes an unwrapped ingestion detectable AFTER THE FACT from the ledger row
+    // alone — `unwrappedExternalParts` names exactly the parts that were external, present, and
+    // carried zero envelopes. A RECORD, never a gate, on the same terms as the implement call
+    // above: nothing reads this to decide a dispatch, a review, or an arm.
+    log("prompt.manifest", {
+      parts: buildPromptManifest([
+        // ONLY the external part. Re-rendering the whole prompt here just to hash it would call
+        // `triagePrompt` a second time for no criterion's sake, and a second call is exactly the
+        // shape that lets a future non-determinism make the manifest attest bytes nobody received.
+        { name: "feedback_raw", value: triageFeedbackBlock, external: true },
+      ]),
+    });
     const loop = await runRelintLoop({
       lane: "triage",
       filedIds: reservedIds,
-      initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1)),
+      initialPrompt: triagePrompt(entry, runId, reservedHeadTaskId, reservedIds.slice(1), triageFeedbackBlock),
       log,
       run: async (prompt, attempt) => {
         worker = await spawn({

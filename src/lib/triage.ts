@@ -5,6 +5,7 @@ import { loadPlan } from "./plan.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { diffEmptyAgainstScope } from "./review.js";
 import { feedbackEntryRepoPath } from "./feedback.js";
+import { envelope } from "./untrusted-envelope.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
 
 /**
@@ -157,11 +158,24 @@ export function missingFeedbackMessage(
  * only `mintedId` (a single reservation, or none at all) is BYTE-IDENTICAL to before this
  * parameter existed; only a caller that actually reserved more states the fuller instruction.
  */
+/**
+ * W1-T2700: the enveloped feedback block, built ONCE per dispatch. The envelope's boundary is
+ * drawn fresh PER CALL, so calling this twice yields two different strings — a caller that wants
+ * to both render the prompt AND fingerprint what the worker saw must build the block once and pass
+ * it to {@link triagePrompt}, or the manifest would attest bytes the worker never received.
+ */
+export function feedbackEntryBlock(entry: FeedbackEntry): string {
+  return envelope(entry.raw, "feedback-entry");
+}
+
 export function triagePrompt(
   entry: FeedbackEntry,
   runId: string,
   mintedId?: string,
   additionalReservedIds: string[] = [],
+  // APPENDED LAST and defaulted, so every existing positional caller is byte-identical to before
+  // this parameter existed; only a caller that must fingerprint the block passes its own.
+  feedbackBlock: string = feedbackEntryBlock(entry),
 ): string {
   return [
     "You are the REMUDERO ARCHITECT running an INTAKE TRIAGE (MASTER-PLAN §7B) over one captured",
@@ -173,7 +187,13 @@ export function triagePrompt(
     `id: ${entry.id}`,
     `ts: ${entry.ts}`,
     `origin: ${entry.origin}`,
-    `raw: ${entry.raw}`,
+    // W1-T2700: `raw` is the WIDEST FIRST INGESTION POINT in this harness. On the `rmd issues`
+    // path it is a GitHub issue body -- anyone who can open an issue on a managed repo wrote it --
+    // and on the `rmd feedback` path it is operator prose that may itself quote outside text. It
+    // used to be spliced bare between narrative instruction lines, one `raw:` label away from the
+    // STEP 1 heading a worker obeys. `id`/`ts`/`origin` above are harness-derived and stay bare.
+    "raw:",
+    feedbackBlock,
     entry.attachments.length ? `attachments: ${entry.attachments.join(", ")}` : "attachments: (none)",
     "",
     "=== STEP 1 — GROUND ===",
@@ -857,7 +877,10 @@ export function buildGrillEscalation(opts: {
     taskId,
     runId,
     summary: `feedback#${entry.id} needs a human call: ${decision.detail}`,
-    detail: [`Feedback: ${entry.raw}`, "", `Open question: ${decision.detail}`].join("\n"),
+    // W1-T2700: this detail becomes a needs-human ISSUE BODY, which later rungs read back into
+    // prompts -- so the same outside text makes a round trip and is enveloped on the way out too,
+    // not only where it first enters. `decision.detail` is the triage worker's own words.
+    detail: [`Feedback:`, envelope(entry.raw, "feedback-entry"), "", `Open question: ${decision.detail}`].join("\n"),
     options: decision.options,
     recommendation: decision.recommendation,
   };
