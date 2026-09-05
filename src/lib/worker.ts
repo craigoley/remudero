@@ -852,10 +852,73 @@ export interface ClaudeCapacityDeps {
   openSession?: () => UsageProbeSession;
   /** Bypass the routing cache at an attribution boundary. */
   forceRefresh?: boolean;
+  /** W1-T2828: which account this reading is taken under. Injectable — appended LAST so no
+   *  existing caller shifts — and defaulting to {@link readClaudeAccountLabel}. */
+  accountLabel?: () => string | undefined;
 }
 
 export function clearClaudeCapacityCache(): void {
   claudeCapacityCache = undefined;
+}
+
+
+/**
+ * The account a Claude capacity reading was taken under — `oauthAccount.accountUuid`.
+ *
+ * The operator switches subscriptions by hand, and every instrument follows whatever Claude Code
+ * is logged into, so two readings from two accounts are indistinguishable in the ledger. The uuid
+ * is stable per account and answers "which account", which is the entire question.
+ *
+ * NEVER emailAddress OR organizationName. They sit beside the uuid in the same object and are
+ * unnecessary exposure; only `accountUuid` is ever bound here, so the others cannot reach a caller
+ * even by accident. This mirrors account-usage.ts's own discipline.
+ *
+ * FAILS OPEN, ALWAYS. An absent, unreadable, unparseable or shape-changed file yields `undefined`,
+ * never a throw: the label annotates a reading and is never a precondition for taking one. A host
+ * with one account has run fine without it for months and must keep running.
+ *
+ * FALSIFIER: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts.
+ */
+/** Why a reading carries no label. Four distinct causes, kept apart for the same reason
+ *  account-usage.ts keeps its own: "absent" and "unreadable" are different facts. */
+export type ClaudeAccountLabelReason = "unreadable" | "unparseable" | "not-an-object" | "no-account" | "no-uuid";
+
+export type ClaudeAccountLabelRead =
+  | { readonly label: string }
+  | { readonly label: undefined; readonly reason: ClaudeAccountLabelReason };
+
+/** {@link readClaudeAccountLabel}'s answer WITH its reason. Every failure path names which one it
+ *  took, so a host with no label can be told apart from one whose file changed shape. */
+export function readClaudeAccountLabelDetailed(
+  path: string = join(homedir(), CLAUDE_CONFIG_REL),
+  readFile: (p: string, enc: "utf8") => string = readFileSync,
+): ClaudeAccountLabelRead {
+  let raw: string;
+  try {
+    raw = readFile(path, "utf8");
+  } catch {
+    return { label: undefined, reason: "unreadable" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { label: undefined, reason: "unparseable" };
+  }
+  if (typeof parsed !== "object" || parsed === null) return { label: undefined, reason: "not-an-object" };
+  const account: unknown = (parsed as { oauthAccount?: unknown }).oauthAccount;
+  if (typeof account !== "object" || account === null) return { label: undefined, reason: "no-account" };
+  const uuid: unknown = (account as { accountUuid?: unknown }).accountUuid;
+  if (typeof uuid !== "string" || uuid.trim() === "") return { label: undefined, reason: "no-uuid" };
+  return { label: uuid };
+}
+
+/** The label alone — what the capacity read needs. Fails open to `undefined` on every cause. */
+export function readClaudeAccountLabel(
+  path: string = join(homedir(), CLAUDE_CONFIG_REL),
+  readFile: (p: string, enc: "utf8") => string = readFileSync,
+): string | undefined {
+  return readClaudeAccountLabelDetailed(path, readFile).label;
 }
 
 export async function readClaudeProviderCapacity(
@@ -874,7 +937,10 @@ export async function readClaudeProviderCapacity(
       return value;
     }
     try {
-      const value = claudeCapacityFromUsage(usageSnapshotFromSdk(await method.call(session) as never));
+      const value = claudeCapacityFromUsage(
+        usageSnapshotFromSdk(await method.call(session) as never),
+        (deps.accountLabel ?? readClaudeAccountLabel)(),
+      );
       claudeCapacityCache = { at: now(), value };
       return value;
     } catch (error) {
@@ -1199,6 +1265,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           provider: capacity.provider,
           readable: capacity.readable,
           ...(capacity.model ? { model: capacity.model, effort: capacity.effort } : {}),
+          // W1-T2828: projected for BOTH providers, in the same field and the same shape. Codex
+          // already populated `accountLabel` and it never reached a row; Claude never set it at
+          // all. A reader comparing two rows must not have to know which provider produced which.
+          ...(capacity.accountLabel ? { account_label: capacity.accountLabel } : {}),
           windows: capacity.windows.map((window) => ({ name: window.name, used_percent: window.usedPercent })),
           ...(capacity.allocationWindows
             ? {
