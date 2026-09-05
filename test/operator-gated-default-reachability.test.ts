@@ -724,13 +724,16 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // :5891/:5952. W1-T2540 then added 54 lines at :3210 (merge-conflict prompt fixtures, again
   // ahead of both) and they shifted the same way, to :5945/:6006 — the SECOND time this exact
   // re-derivation has been needed. W1-T2561 then added fourteen lines ahead of both, moving the
-  // witnesses to :5959/:6020. This THIRD re-derivation is that note's own point: a line number is
-  // a QUERY over the current tree, and any diff inserting above these witnesses moves them. The THIRD
-  // witness (arm-ordering.test.ts) is untouched by either edit and unmoved.
+  // witnesses to :5959/:6020. The plan-sync batch-read PR then added ONE line ahead of both (an
+  // `RMD_TMP_PREFIX` import at :92, so a fixture's temp dir is boot-sweep reapable) and they moved
+  // by exactly one, to :5960/:6021 — the FOURTH re-derivation. That is this note's own point: a
+  // line number is a QUERY over the current tree, and any diff inserting above these witnesses
+  // moves them. The THIRD witness (arm-ordering.test.ts) is untouched by every one of these edits
+  // and unmoved.
   const expectedKeys = [
     "armIfVerdictPermits:test/arm-ordering.test.ts:63:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:5959:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6020:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:5960:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6021:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(
