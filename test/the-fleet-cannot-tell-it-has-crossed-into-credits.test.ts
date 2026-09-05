@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  buildAccountUsageRoute,
   CREDIT_STATE_FIELDS,
   CREDIT_STATE_STEP,
   creditTransitionRow,
@@ -14,12 +16,29 @@ import {
   lastRecordedCreditState,
   readAccountUsageFile,
   readCreditState,
+  type AccountUsageSnapshot,
   type AccountUsageInput,
 } from "../src/lib/account-usage.js";
+import type { LedgerLine } from "../src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CAPTURED = join(REPO_ROOT, "test", "fixtures", "account-usage", "claude-json.json");
+
+async function invokeRoute(route: ReturnType<typeof buildAccountUsageRoute>): Promise<{ status: number; parsed: AccountUsageSnapshot }> {
+  let status = 0;
+  let body = "";
+  const res = {
+    writeHead(code: number) {
+      status = code;
+    },
+    end(chunk: string) {
+      body = chunk;
+    },
+  } as unknown as ServerResponse;
+  await route.handler({} as never, res, { params: {} });
+  return { status, parsed: JSON.parse(body) as AccountUsageSnapshot };
+}
 
 /**
  * test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts — W1-T2688.
@@ -69,7 +88,7 @@ test("W1-T2688: the captured real block exposes NO credit state — the finding,
 
 // ── read it when the surface exposes it ────────────────────────────────────────────────────────
 
-test("W1-T2688: the credit state is read from the existing usage surface when that surface exposes it", () => {
+test("W1-T2688: the credit state is read from the existing usage surface when that surface exposes it", async () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}credit-state-`));
   try {
     for (const field of CREDIT_STATE_FIELDS) {
@@ -82,6 +101,28 @@ test("W1-T2688: the credit state is read from the existing usage surface when th
       assert.equal(snapshot.creditState, "credits", `read from '${field}'`);
       assert.equal(snapshot.creditUnknownReason, undefined, "and no reason, because it is known");
       assert.equal(snapshot.creditStateField, field, "with the field it came from, as evidence");
+
+      const rows: Array<Record<string, unknown>> = [];
+      const written: LedgerLine[] = [];
+      const route = buildAccountUsageRoute({
+        ledgerPath: join(dir, `${field}.ledger.ndjson`),
+        accountFilePath: path,
+        readLedger: () => rows,
+        writeLedger: (_ledgerPath, line) => {
+          written.push(line);
+          rows.push(line);
+        },
+        now: () => Date.parse("2026-09-05T12:00:00Z"),
+        resolveCeiling: () => ({ usd: 150, provenance: "default", committedDefaultUsd: 150 }),
+      });
+      const { status, parsed } = await invokeRoute(route);
+      assert.equal(status, 200);
+      assert.equal(parsed.creditState, "credits", `route read '${field}' from cachedUsageUtilization`);
+      assert.equal(parsed.creditStateField, field);
+      assert.equal(written.length, 1, "the route recorded the first known state once");
+      assert.equal(written[0]?.step, CREDIT_STATE_STEP);
+      assert.equal(written[0]?.state, "credits");
+      assert.equal(written[0]?.field, field);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -107,7 +148,7 @@ test("W1-T2688: both states and both spellings read, and anything else is unreco
   });
 });
 
-test("W1-T2688: a surface that does not expose it yields a recorded cannot-determine reason, never an inferred flag", () => {
+test("W1-T2688: a surface that does not expose it yields a recorded cannot-determine reason, never an inferred flag", async () => {
   assert.deepEqual(readCreditState({}), { unknownReason: "not-exposed" });
 
   // NEVER INFERRED FROM UTILISATION. A fully-spent window is the state most tempting to read as
@@ -120,11 +161,26 @@ test("W1-T2688: a surface that does not expose it yields a recorded cannot-deter
   assert.equal(snapshot.creditUnknownReason, "not-exposed");
   assert.equal(snapshot.creditState, undefined);
   assert.equal(snapshot.fiveHour?.percentUsed, 100, "and the windows are read exactly as before");
+
+  const written: LedgerLine[] = [];
+  const route = buildAccountUsageRoute({
+    ledgerPath: "/tmp/w1-t2688-no-credit-state-ledger.ndjson",
+    readLedger: () => [],
+    readAccount: () => spent,
+    writeLedger: (_ledgerPath, line) => written.push(line),
+    now: () => Date.parse("2026-09-05T12:00:00Z"),
+    resolveCeiling: () => ({ usd: 150, provenance: "default", committedDefaultUsd: 150 }),
+  });
+  const { status, parsed } = await invokeRoute(route);
+  assert.equal(status, 200);
+  assert.equal(parsed.creditUnknownReason, "not-exposed", "the route records the cannot-determine reason in its payload");
+  assert.equal(parsed.creditState, undefined, "and never invents a state from spent windows");
+  assert.equal(written.length, 0, "unknown credit state is not written as a transition");
 });
 
 // ── the edge, not the level ────────────────────────────────────────────────────────────────────
 
-test("W1-T2688: the transition edge writes one row; an unchanged state writes none", () => {
+test("W1-T2688: the transition edge writes one row; an unchanged state writes none", async () => {
   const at = "2026-09-05T12:00:00Z";
   const prior = [{ step: CREDIT_STATE_STEP, state: "subscription", ts: "2026-09-01T00:00:00Z" }];
 
@@ -147,6 +203,44 @@ test("W1-T2688: the transition edge writes one row; an unchanged state writes no
   assert.equal(lastRecordedCreditState([]), undefined, "a ledger that never recorded one says so");
   assert.equal(lastRecordedCreditState([{ step: CREDIT_STATE_STEP, state: "nonsense" }]), undefined, "and a torn row is not a state");
   assert.equal(lastRecordedCreditState([...prior, { step: "daemon.alive" }]), "subscription", "unrelated rows do not displace it");
+
+  const lines: Array<Record<string, unknown>> = [];
+  const written: LedgerLine[] = [];
+  let raw: unknown = "subscription";
+  const route = buildAccountUsageRoute({
+    ledgerPath: "/tmp/w1-t2688-credit-transition-ledger.ndjson",
+    readLedger: () => lines,
+    readAccount: () => ({
+      uuid: "u",
+      cacheUuid: "u",
+      cacheFetchedAtMs: Date.parse("2026-09-05T11:59:00Z"),
+      creditStateField: "creditState",
+      creditStateRaw: raw,
+      fiveHour: { percentUsed: 10 },
+      sevenDay: { percentUsed: 20 },
+    }),
+    writeLedger: (_ledgerPath, line) => {
+      written.push(line);
+      lines.push(line);
+    },
+    now: () => Date.parse(at),
+    resolveCeiling: () => ({ usd: 150, provenance: "default", committedDefaultUsd: 150 }),
+  });
+
+  await invokeRoute(route);
+  await invokeRoute(route);
+  assert.equal(written.length, 1, "first known subscription is recorded once, not every poll");
+  assert.equal(written[0]?.state, "subscription");
+  assert.equal(written[0]?.previous, undefined);
+
+  raw = "credits";
+  await invokeRoute(route);
+  await invokeRoute(route);
+  assert.equal(written.length, 2, "the subscription -> credits edge adds exactly one row");
+  assert.deepEqual(
+    { step: written[1]?.step, state: written[1]?.state, previous: written[1]?.previous, field: written[1]?.field },
+    { step: CREDIT_STATE_STEP, state: "credits", previous: "subscription", field: "creditState" },
+  );
 });
 
 // ── nothing else moved ─────────────────────────────────────────────────────────────────────────

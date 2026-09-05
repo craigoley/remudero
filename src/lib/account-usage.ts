@@ -71,6 +71,7 @@ import { join } from "node:path";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { readLedgerLines, type LedgerReader } from "./status.js";
+import { appendLedger, type LedgerLine } from "./ledger.js";
 import {
   loadDefaultPolicy,
   resolveDailyCostCeiling,
@@ -195,6 +196,8 @@ export function readCreditState(input: AccountUsageInput): CreditReading {
 
 /** The ledger step one transition writes. */
 export const CREDIT_STATE_STEP = "account.credit_state";
+export const CREDIT_STATE_RUN_ID = "ACCOUNT-USAGE";
+export const CREDIT_STATE_TASK_ID = "ACCOUNT";
 
 /** The newest credit state this ledger already recorded, or `undefined` when it has never
  *  recorded one. Reads the SAME `lines` every other derivation in this module consumes. */
@@ -230,6 +233,36 @@ export function creditTransitionRow(
   if (previous !== undefined) row.previous = previous;
   if (reading.field !== undefined) row.field = reading.field;
   return row;
+}
+
+/** The appendable ledger line for the same edge {@link creditTransitionRow} describes. */
+export function creditTransitionLedgerLine(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reading: CreditReading,
+): LedgerLine | undefined {
+  if (reading.state === undefined) return undefined;
+  const previous = lastRecordedCreditState(lines);
+  if (previous === reading.state) return undefined;
+  const line: LedgerLine = {
+    run_id: CREDIT_STATE_RUN_ID,
+    task_id: CREDIT_STATE_TASK_ID,
+    step: CREDIT_STATE_STEP,
+    state: reading.state,
+  };
+  if (previous !== undefined) line.previous = previous;
+  if (reading.field !== undefined) line.field = reading.field;
+  return line;
+}
+
+/** Append one credit-state transition row, and none for unknown or unchanged readings. */
+export function appendCreditStateTransition(
+  ledgerPath: string,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reading: CreditReading,
+  writeLedger: typeof appendLedger = appendLedger,
+): void {
+  const line = creditTransitionLedgerLine(lines, reading);
+  if (line) writeLedger(ledgerPath, line);
 }
 
 export type UsageUnknownReason = "unreadable" | "no-cache" | "account-mismatch" | "too-old";
@@ -846,6 +879,8 @@ export interface AccountUsageDeps {
    * `root` (every pre-W1-T333 caller of this type) renders BYTE-IDENTICAL to before this task.
    */
   readUsageProjection?: () => AccountUsageProjection | undefined;
+  /** W1-T2688: ledger appender for the observed credit-state edge; tests inject a spy. */
+  writeLedger?: typeof appendLedger;
 }
 
 /**
@@ -872,7 +907,9 @@ export function buildAccountUsageRoute(deps: AccountUsageDeps): Route {
       const policy = deps.policy ?? loadDefaultPolicy();
       const resolveCeiling = deps.resolveCeiling ?? (() => resolveDailyCostCeiling(deps.root ?? process.cwd(), policy));
       const account = mergeAccountUsageProjection(readAccount(), readProjection());
-      sendJson(res, 200, deriveAccountUsage(account, readLedger(deps.ledgerPath), now(), resolveCeiling()));
+      const lines = readLedger(deps.ledgerPath);
+      appendCreditStateTransition(deps.ledgerPath, lines, readCreditState(account), deps.writeLedger ?? appendLedger);
+      sendJson(res, 200, deriveAccountUsage(account, lines, now(), resolveCeiling()));
     },
   };
 }
