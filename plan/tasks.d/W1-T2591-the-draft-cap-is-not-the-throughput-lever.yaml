@@ -78,6 +78,43 @@
     re-entrancy guard (W1-T2569), the exclusion (W1-T2582) and the refusal deferral (W1-T2590), all
     of which are correct and none of which this changes.
 
+    ── CRITERIA 1 AND 3 SHIPPED ELSEWHERE ON 2026-09-02; CRITERION 2 IS OPEN AND NOW LOAD-BEARING
+       (measured 2026-09-04) ─────────────────────────────────────────────────────────────────
+
+    `perf(inbox): parallelize capped draft batches` (#3588, W1-T2664) landed the day after this
+    was filed and replaced the sequential for-await this rationale measures. `runDraftRung`
+    (lib/inbox.ts) now runs an indexed worker pool — `Promise.all` over `concurrency =
+    Math.min(DAEMON_DRAFT_BATCH_CAP, toDraft.length)` lanes — whose own comment states the goal in
+    this task's words: "makes elapsed time approach the slowest proposal instead of their sum".
+    That is criterion 1, and criterion 3 with it (the sweep-bound crossing was #3588's own
+    motivating evidence). This task carries no `Remudero-Task:` credit for either.
+
+    ⚠ CRITERION 2 IS NOT SATISFIED, AND PARALLELISING WITHOUT IT IS WHAT MAKES IT MATTER.
+    `draftProposalBatch` (run-task.ts) still materialises ONE worktree per batch —
+    `createDaemonLaneWorktree(...)` — and the `spawn` closure it hands to `runDraftRung` passes
+    that single `worktreePath` as `cwd` for every lane. So up to `DAEMON_DRAFT_BATCH_CAP`
+    concurrent workers now share one checkout where before exactly one ran at a time.
+
+    THE SHARING IS ASSERTED SAFE, NOT SHOWN SAFE — THE DISTINCTION THIS CRITERION EXISTS FOR.
+    `inboxDraftPrompt` tells the worker: "You have NO Write/Edit/Bash tools — you cannot touch a
+    file or run git." That is PROSE IN A PROMPT. Measured against what the harness enforces:
+    `settings/worker.json` carries `allow: []` and a `deny` list of exactly four READ paths
+    (ssh, aws, remudero config, service-tokens) — nothing about Write, Edit or Bash — and the
+    spawn passes `permissionMode: "bypassPermissions"`. Worker HOMES are already isolated
+    (`perRunWorkerHomeDir(..., { perSpawn: true })`); the `cwd` is not.
+    A model that ignores one sentence can write into a checkout N-1 siblings are reading.
+
+    TWO ROUTES CLOSE IT AND THE CHOICE IS NOT THIS RECORD'S TO MAKE:
+      (a) ENFORCE the claim the prompt already makes, so the sharing becomes provably read-only.
+          The plan text is passed IN the prompt (`inboxDraftPrompt(proposal, currentPlanText,
+          runId)`) and the outcome is parsed from the TRANSCRIPT, so a draft worker has no
+          established need to touch the tree at all.
+      (b) GIVE EACH LANE ITS OWN WORKTREE. Correct, and it multiplies checkout disk by the cap on
+          a host that hit 100% full on 2026-09-01 (W1-T2585) — a cost worth naming before paying.
+
+    (a) is cheaper and matches what the prompt already promises; (b) is stronger. RECOMMEND (a)
+    unless an operator wants the stronger isolation.
+
   acceptance:
     - claim: "a batch of N drafts finishes in about the time of one draft rather than N of them"
       proof: "unit test: test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts"

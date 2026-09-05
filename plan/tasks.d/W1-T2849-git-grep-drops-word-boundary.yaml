@@ -1,0 +1,104 @@
+- id: W1-T2849
+  title: "git grep -E SILENTLY DROPS \\b ON THIS HOST, SO THE RULE-CITATION GATE REPORTS 'A CITATION THAT POINTS AT NOTHING' FOR A SYMBOL DEFINED AT src/lib/review.ts — the gate is broken OPEN, and CLAUDE.md's investigation-discipline rule (a) asserts the opposite in writing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    (1) MEASURED, WITH BOTH CONTROLS, AT origin/main ON git 2.54.0:
+        git grep -lE 'date'                     -> 105 files   (positive control: corpus readable)
+        git grep -lE '\bdate'                   ->   0 files
+        git grep -lE 'criterionFieldTampered'   ->   3 files
+        git grep -lE 'criterionFieldTampered\b' ->   0 files
+        git grep -lE 'xyzzy_no_such_symbol'     ->   0 files   (negative control)
+        /usr/bin/grep -rlE 'date' src/          -> 105 files
+        /usr/bin/grep -rlE '\bdate' src/        ->  30 files
+    So `\b` is honoured by the system grep and matches NOTHING through `git grep -E` here. The
+    corpus is identical; only the engine differs.
+
+    (2) A SHIPPED GATE IS BROKEN OPEN BY IT. `test/rule-15-16-filing-misattribution.test.ts` builds
+    `(export )?(function|const) ${symbol}\\b` and runs it through `execFileSync("git", ["grep", …])`
+    for every symbol in its decoding table. For `criterionFieldTampered` that returns no match and
+    the test reports "a citation that points at nothing is not checkable" — but the symbol IS there,
+    declared at `src/lib/review.ts` and called at the same file. The gate cannot currently
+    distinguish a genuinely stale citation from any citation at all, which is the one thing it exists
+    to do.
+
+    (3) CLAUDE.md SAYS THE OPPOSITE, IN BOLD, WITH A MEASUREMENT. Its investigation-discipline
+    clause (a) reads: "**`\b` IS A SEPARATE TRAP AND IT IS NOT AN ENGINE DIFFERENCE — `git grep -E`
+    DOES honour it.** MEASURED at 6e7d131: `git grep -lE '\bdate' -- src/` returns **21**". That
+    reading does not reproduce: the same command returns 0 here today. A rule that tells the next
+    investigator their zero is trustworthy, when it is not, is worse than no rule — and this file's
+    own header says a rule stated only in prose "can be violated silently and repeatedly".
+
+    (4) WHY IT HID. The failure is host- and build-dependent, so CI is green; it surfaces only in a
+    local full-suite run, where it sits among genuine host-caused reds and reads as more of the same.
+    It was separated from them only by reading the assertion's own error text.
+  design: |
+    (i) FIX THE GATE FIRST — DROP THE `\b`, DO NOT PORT IT. The boundary buys nothing here: the
+    pattern already anchors on `(function|const) ` to the left, and a declaration is followed by `(`
+    or ` ` regardless. Removing it makes the check work on every engine rather than trading one
+    portability assumption for another. A word-bounded variant that happens to work on the author's
+    git would re-arm the same trap.
+
+    (ii) THE GATE MUST FAIL LOUDLY WHEN ITS OWN QUERY CANNOT SEE THE CORPUS. This is the repo's own
+    positive-control doctrine turned on the gate itself: before concluding "citation points at
+    nothing", assert the query can match something it is known to match. A zero with no control is
+    not a measurement, and this test currently produces exactly that.
+
+    (iii) CORRECT CLAUDE.md's CLAUSE (a) TO WHAT REPRODUCES, AND KEEP THE HISTORY. The 6e7d131
+    reading is not deleted — it is dated and superseded by rationale (1), because a future reader on
+    a different git build may see the old behaviour and needs to know both were observed. State the
+    portable instruction: do not use `\b` in a `git grep` pattern; anchor on the non-word character,
+    use `-w`, or use the system grep.
+
+    (iv) SIZE THE BLAST RADIUS BEFORE EDITING ANYTHING ELSE. Rationale (2) is one known consumer;
+    other `git grep` callers in `src/`, `scripts/` and `test/` may carry the same pattern and would
+    be silently answering zero. Enumerate them and report the count — a fix that repairs one caller
+    while leaving siblings blind has measured nothing.
+
+    (v) OUT OF SCOPE. Changing git's configuration, requiring a PCRE-enabled build, or adding
+    `--perl-regexp` anywhere: all of them make the repo depend on a build flag the fleet does not
+    control, which is the portability trap in a new costume. And NOT a rewrite of the rule-15/16
+    decoding table itself, whose contents are correct.
+  acceptance:
+    - claim: "the citation gate resolves a symbol that is defined, on an engine that does not honour a word boundary"
+      proof: "unit test: test/rule-citation-gate-engine-portable.test.ts"
+    - claim: "the gate refuses to report a zero without first proving its own query can match"
+      proof: "unit test: test/rule-citation-gate-engine-portable.test.ts"
+    - claim: "no git grep pattern in the tree relies on a word boundary"
+      proof: "unit test: test/rule-citation-gate-engine-portable.test.ts"
+    - claim: "the investigation-discipline clause no longer asserts that git grep honours a word boundary"
+      proof: "unit test: test/rule-citation-gate-engine-portable.test.ts"
+  risk: high
+  origin: "oper#git-grep-word-boundary-2026-09-04"
+  plan_refs: ["W1-T2622"]
+  files: [CLAUDE.md, test/rule-15-16-filing-misattribution.test.ts, test/rule-citation-gate-engine-portable.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE FOURTH CRITERION IS ASSERTED BY TEST, NOT BY A NEGATIVE GREP. Its first draft greped for
+    `DOES honour it` and required it to STOP matching, which `check-proof` grades `no-match` — test
+    theatre — because a `grep:` proof must MATCH at head and MISS the base. A test that reads
+    CLAUDE.md and refuses the stale claim is also the shape this repo already uses
+    (`test/claude-md-rules-reach-their-scope.test.ts`), and it satisfies CLAUDE.md's own instruction
+    that a rule which turns out to matter needs something that REFUSES it, not a reworded paragraph.
+
+    THIS SHARD DECLARES CLAUDE.md AND THAT IS DELIBERATE. Rule 15's filing check refuses a plan
+    record in `files:` only when an out-of-plan path rides along; CLAUDE.md is out-of-plan and no
+    plan record is declared here, so the combination is clean. The doc edit is design (iii) and is
+    NOT the deliverable on its own — design (i) and (ii) are, per CLAUDE.md's own instruction that
+    the fix for a rule that turns out to matter is to make something refuse it.
+
+    THE OBSERVED FAILURE IS PRE-EXISTING, VERIFIED BOTH SIDES. This test is red at merge-base
+    67e6a451 and on a working branch, one failure each, in a full-suite run carrying a `# tests`
+    summary on both sides — so it is not any diff's, and `ci:host-caused-suite-reds` correctly does
+    not declare it, since it is a defect rather than a host fact.
+
+    risk: high IS RULE 19'S SPAN, NOT BLAST RADIUS, AND IS SET DELIBERATELY. `sizingViolation`
+    (`src/lib/task-linter.ts`) derives subsystems from `files:` AND from the acceptance text, and
+    exempts only `risk: high`; this shard touches one source file plus its new suite, which the
+    linter counts as 3 concerns. The change itself is small and its blast radius is narrow — the
+    field records span, exactly as W1-T999's own note records it.

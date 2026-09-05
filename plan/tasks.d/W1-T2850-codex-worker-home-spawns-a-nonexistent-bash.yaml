@@ -1,0 +1,74 @@
+- id: W1-T2850
+  title: "test/codex-worker-home-redirection.test.ts SPAWNS /usr/bin/bash, WHICH DOES NOT EXIST ON DARWIN — three reds that ci:host-caused-suite-reds does not declare, so W1-T2234 forces every local full-suite run to re-derive them from scratch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  rationale: |
+    (1) THE FAILURE, MEASURED. Three tests in `test/codex-worker-home-redirection.test.ts` fail with
+    `spawnSync /usr/bin/bash ENOENT`. On this host `/usr/bin/bash` does not exist; bash ships at
+    `/bin/bash` (verified: `ls -l /usr/bin/bash` -> No such file or directory, `/bin/bash` present).
+    Red at merge-base 67e6a451 and on a working branch alike, so pre-existing and environmental.
+
+    (2) THE SIBLING FACT IS ALREADY DECLARED AND THIS ONE IS NOT. `src/lib/ci-parity.ts` carries a
+    `bsd-date-control-arm` entry for `test/fleet-heartbeat-supervisor-tick.test.ts` whose note says
+    the stub "execs `/usr/bin/date`, and on macOS that path DOES NOT EXIST (date ships at /bin/date),
+    so the exec dies before `-d` is ever parsed". That is the SAME fact about a different binary, and
+    it is recorded. The bash one is not.
+
+    (3) THE COST OF THE OMISSION IS A FULL SUITE RUN, EVERY TIME. `ci:host-caused-suite-reds`
+    attributes ~63 of this host's ~79 reds to 15 declared clusters, and W1-T2234's rule is that any
+    failure NOT matching a cluster is the diff's own and blocking. These three are undeclared, so a
+    contributor must prove them pre-existing — which costs a ~28-minute baseline run on a clean
+    worktree. MEASURED: that is exactly what one contributor did on 2026-09-04, comparing 13692/79
+    against a baseline 13679/79 with identical failure sets in both directions, to clear three tests
+    that a one-line table entry would have explained.
+  design: |
+    (i) DECLARE THE CLUSTER, MATCHING THE EXISTING RECORD SHAPE. A row in `src/lib/ci-parity.ts`
+    alongside its siblings: `file`, `cause`, `count`, `note`, `appliesTo`. Name the cause after the
+    PATH that is absent, not after bash generally — the neighbouring `bsd-date-control-arm` note is
+    explicit that naming the wrong half "would send the next reader to flag compatibility instead of
+    to the path", and the same trap applies here.
+
+    (ii) `appliesTo` MUST TEST THE PATH, NOT THE PLATFORM, IF IT CAN. `f.platform === "darwin"` is
+    what the sibling uses and is acceptable, but the honest predicate is whether `/usr/bin/bash`
+    exists — a Linux host without it would fail identically, and a darwin host with a homebrew shim
+    at that path would not fail at all. Choose deliberately and say which, because a cluster that
+    claims a red the host would not actually produce is a false attribution in the other direction.
+
+    (iii) DECIDE, AND RECORD, WHETHER THE TEST ITSELF SHOULD BE FIXED. Declaring a cluster says "the
+    machine did this"; it does not say the test is right to hardcode an absolute interpreter path.
+    If the production code under test resolves bash from PATH, the test hardcoding `/usr/bin/bash` is
+    a test defect and the cluster is a workaround. Read the fixture before choosing, and state the
+    finding either way — a declared cluster over a real test defect buries it permanently.
+
+    (iv) OUT OF SCOPE. The other 76 reds on this host, declared or otherwise; the two genuine defects
+    filed separately alongside this shard; and any change to worker-home redirection behaviour, which
+    is not implicated — only the fixture's interpreter path is.
+  acceptance:
+    - claim: "the absent-interpreter cluster is declared with a cause naming the path rather than the shell"
+      proof: "unit test: test/codex-worker-home-cluster-declared.test.ts"
+    - claim: "the cluster's applicability predicate is decided against the path rather than assumed from the platform"
+      proof: "unit test: test/codex-worker-home-cluster-declared.test.ts"
+    - claim: "the declared count matches the number of reds the file actually produces"
+      proof: "unit test: test/codex-worker-home-cluster-declared.test.ts"
+  risk: high
+  origin: "oper#undeclared-bash-path-cluster-2026-09-04"
+  plan_refs: ["W1-T2234"]
+  files: [src/lib/ci-parity.ts, test/codex-worker-home-cluster-declared.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THIS IS THE ONLY ONE OF THE FOUR 2026-09-04 FINDINGS THAT IS GENUINELY A HOST FACT. The other
+    three — the ad-hoc lane leak, the host-update tmp collision and the git-grep word boundary — are
+    defects, and each is filed as such. Grouping all four as "machine noise" was the reading this
+    filing set out to correct, and design (iii) exists so this shard does not commit the same error
+    one level down by declaring a cluster over a test defect.
+
+    risk: high IS RULE 19'S SPAN, NOT BLAST RADIUS, AND IS SET DELIBERATELY. `sizingViolation`
+    (`src/lib/task-linter.ts`) derives subsystems from `files:` AND from the acceptance text, and
+    exempts only `risk: high`; this shard touches one source file plus its new suite, which the
+    linter counts as 2 concerns. The change itself is small and its blast radius is narrow — the
+    field records span, exactly as W1-T999's own note records it.
