@@ -91,6 +91,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
 import { DAEMON_DRAFT_BATCH_CAP } from "../src/lib/inbox.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import { LaunchdPlistError } from "../src/lib/launchd.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
 import type { AlertGateway } from "../src/lib/ops.js";
 import { realOnboardFsDeps, type Inventory, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
@@ -6229,7 +6230,9 @@ test("materializeOriginShards: a shard that LISTS but cannot be read throws GitF
 });
 
 test("materializeOriginShards: a shard git reports `missing` in the batch stream throws GitFetchError naming that shard", () => {
-  const tmpDir = mkdtempSync(join(tmpdir(), "shard-missing-"));
+  // `RMD_TMP_PREFIX` is not decoration: hooks/mkdtemp-callsite-check refuses a new fixture whose
+  // dir src/lib/tmp.ts's boot sweep could not reap. The neighbouring prefixes predate that gate.
+  const tmpDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}shard-missing-`));
   const runGit: GitRunner = (args) =>
     args[0] === "ls-tree"
       ? "plan/tasks.d/W1-T9.yaml\n"
