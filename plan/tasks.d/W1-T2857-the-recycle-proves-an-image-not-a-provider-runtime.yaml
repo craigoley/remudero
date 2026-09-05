@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 20.00
-  files: [deploy/container-runtime-contract.sh, deploy/recycle-container.sh, test/container-runtime-contract.test.ts]
+  files: [deploy/container-runtime-contract.sh, deploy/recycle-container.sh, test/container-runtime-contract.test.ts, test/recycle-container.test.ts]
   origin: "operator-session#azure-restart-runtime-contract-2026-09-04"
   plan_refs: ["W1-T1010", "W1-T1069", "W1-T2592", "W1-T2774"]
   status: queued
@@ -84,3 +84,11 @@
     This task does not claim the repository script caused the 2026-09-05 replacement; mount evidence
     proves only that the supported launch contract was not present. W1-T2858 separately makes this
     runtime drift visible off the shell. Neither task authorizes a recycle.
+
+    SCOPE AMENDMENT 2026-09-05: the runtime verifier becomes a postcondition of the existing
+    recycle script, so that script's established stub must emit the mount inspection the new
+    postcondition consumes. Without `test/recycle-container.test.ts` in scope, every existing
+    successful recycle regression would stop at an unmodelled empty mount list and the task could
+    not prove that image verification, pause/drain sequencing, authentication, reclaim and the
+    Claude-only fallback remain unchanged. This adds the existing regression harness only; it does
+    not broaden the production surface or authorize a recycle.
