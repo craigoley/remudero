@@ -21,6 +21,7 @@ import {
   type OpenPrView,
   type SweepDeps,
 } from "../src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // W1-T126 — DAEMON SELF-FRESHNESS. The same small linear plan test/daemon.test.ts uses
 // (A -> B -> C chain, D independent), trimmed to just A/B since these tests only need
@@ -572,7 +573,7 @@ for (const lateFreshness of ["fresh", "unavailable"] as const) {
 
 test("W1-T2865: the final freshness sweep's detached fix settles before the restart is ledgered", async () => {
   assert.equal(detachedSweepActionCount(), 0, "precondition: no detached action leaked from another test");
-  const root = mkdtempSync(join(tmpdir(), "daemon-freshness-drain-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-freshness-drain-`));
   const ledgerPath = join(root, "ledger.ndjson");
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let releaseFix!: () => void;
