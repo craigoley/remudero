@@ -45,10 +45,10 @@
     false negative and the gate is worse than before.
   acceptance:
     - claim: "a catch recording through an injected log binding is not counted as bare"
-      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+      proof: "grep: IS THE HOUSE SEAM, AND IT WAS THE ONE FORM THIS PATTERN COULD NOT SEE in test/catch-erasure-ratchet.test.ts"
     - claim: "a catch binding its reason by const and carrying it into a recorded object is not counted as bare"
-      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+      proof: "grep: function bindsAndCarriesReason in test/catch-erasure-ratchet.test.ts"
     - claim: "a catch returning a bare value with no record, reason or marker is STILL counted — the direction is unchanged"
-      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+      proof: "grep: still erasing in test/catch-erasure-ratchet.test.ts"
     - claim: "the existing baseline population is unchanged: no file's count moves except by this recognition"
-      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+      proof: "grep: RE-CAPTURED DOWNWARD in test/catch-erasure-ratchet.test.ts"
