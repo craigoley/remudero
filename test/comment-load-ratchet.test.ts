@@ -26,7 +26,7 @@ const BASELINE = join(REPO_ROOT, "scripts", "comment-load-baseline.json");
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import would be a TS7016. A dynamic
 // specifier is not statically resolved, so this loads the REAL module with no shadow copy.
-const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks, listMeasuredFiles, MAX_ADDED_BLOCK_LINES } =
+const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks, listMeasuredFiles, main, readBaseline, MAX_ADDED_BLOCK_LINES } =
   (await import(pathToFileURL(SCRIPT).href)) as {
     countCommentLines: (text: string, path: string) => { comments: number; code: number };
     evaluateCommentLoadRatchet: (
@@ -45,6 +45,8 @@ const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks,
       isMeasured: (f: string) => boolean,
     ) => Array<{ file: string; startLine: number; lines: number }>;
     listMeasuredFiles: (root: string) => string[];
+    readBaseline: (text: string, path: string) => Record<string, number>;
+    main: (argv: string[]) => number;
     MAX_ADDED_BLOCK_LINES: number;
   };
 
@@ -212,6 +214,141 @@ test(`CLI: a real commit adding ${MAX_ADDED_BLOCK_LINES + 1} comment lines is RE
     assert.match(res.stderr, new RegExp(`src/a\\.ts:1: ${MAX_ADDED_BLOCK_LINES + 1} lines`));
     // The ceiling of 999 is deliberately slack, so this refusal can only be the block half.
     assert.doesNotMatch(res.stderr, /comment lines > ceiling/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── the CLI body, driven IN PROCESS ──────────────────────────────────────────────────────────
+//
+// The subprocess cases above prove the real exit codes CI consumes, but a spawned run reports no
+// coverage, so every arm of `main` below would otherwise be untested code shipped behind a green
+// gate (#978's shape: when every test drives the seam from outside, the seam's own branches are
+// unreachable). These call `main` directly and capture what it writes.
+
+/** Run `main(argv)` with console output captured, restoring both writers whatever happens. */
+function runInProcess(argv: string[]): { code: number; out: string; err: string } {
+  const out: string[] = [];
+  const err: string[] = [];
+  const realLog = console.log;
+  const realError = console.error;
+  console.log = (...a: unknown[]) => void out.push(a.join(" "));
+  console.error = (...a: unknown[]) => void err.push(a.join(" "));
+  try {
+    return { code: main(argv), out: out.join("\n"), err: err.join("\n") };
+  } finally {
+    console.log = realLog;
+    console.error = realError;
+  }
+}
+
+test("readBaseline REFUSES malformed JSON and a non-object shape, rather than reading as an empty ceiling set", () => {
+  assert.throws(() => readBaseline("{not json", "b.json"), /is not valid JSON/);
+  assert.throws(() => readBaseline("[]", "b.json"), /must be a JSON object keyed by path/);
+  assert.throws(() => readBaseline('{"a": -1}', "b.json"), /non-negative integer/);
+});
+
+test("listMeasuredFiles REFUSES a directory that is not a git repository — it never reads as an empty tree", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}comment-load-nogit-`));
+  try {
+    assert.throws(() => listMeasuredFiles(dir), /list measured files/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("main: an unparseable flag exits 2 and says so — never a silent 0", () => {
+  const { code, err } = runInProcess(["--no-such-flag"]);
+  assert.equal(code, 2);
+  assert.match(err, /MEASUREMENT FAILED -- invalid arguments/);
+});
+
+test("main: a root that is not a git repository exits 2, and an unreadable baseline exits 2", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}comment-load-main-`));
+  try {
+    const notARepo = runInProcess(["--root", dir]);
+    assert.equal(notARepo.code, 2);
+    assert.match(notARepo.err, /MEASUREMENT FAILED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  const root = fixtureRepo({ "src/a.ts": 1 }, CLEAN);
+  try {
+    writeFileSync(join(root, "scripts", "comment-load-baseline.json"), "{oops");
+    const bad = runInProcess(["--root", root, "--base", "main"]);
+    assert.equal(bad.code, 2);
+    assert.match(bad.err, /is not valid JSON/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main: an unresolvable base ref exits 2 — an unreadable base is never read as an empty diff", () => {
+  const root = fixtureRepo({ "src/a.ts": 1, "scripts/comment-load-baseline.json": 0 }, CLEAN);
+  try {
+    const { code, err } = runInProcess(["--root", root, "--base", "no/such/ref"]);
+    assert.equal(code, 2);
+    assert.match(err, /resolve merge base against no\/such\/ref/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main --print: reports the largest files and exits 0 without consulting the baseline", () => {
+  const root = fixtureRepo({}, `// one\n// two\n${CLEAN}`);
+  try {
+    // A baseline that would REFUSE if it were read. --print exiting 0 over it is the proof that
+    // the report returns before readBaseline, not merely that a valid baseline happened to pass.
+    writeFileSync(join(root, "scripts", "comment-load-baseline.json"), "{oops");
+    const { code, out } = runInProcess(["--root", root, "--print"]);
+    assert.equal(code, 0, "the report must not consult the baseline at all");
+    // 2 comments from src/a.ts; 2 code lines — its one statement plus the malformed baseline
+    // line, which is a tracked scripts/ file and so measured like any other.
+    assert.match(out, /comment-load: 2 comment lines against 2 code lines \(50\.0%\)/);
+    assert.match(out, /src\/a\.ts/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main --json: emits a schema-versioned report and carries the same verdict as the human output", () => {
+  const root = fixtureRepo({ "src/a.ts": 1, "scripts/comment-load-baseline.json": 0 }, `// one\n${CLEAN}`);
+  try {
+    commitOnBranch(root, `// one\n// two\n${CLEAN}`);
+    const { code, out } = runInProcess(["--root", root, "--base", "main", "--json"]);
+    assert.equal(code, 1, "a grown file must fail in --json mode too");
+    const report = JSON.parse(out) as {
+      schema_version: number;
+      files: number;
+      totals: { comments: number; code: number };
+      violations: { path: string; overage: number }[];
+      oversized_added_blocks: unknown[];
+    };
+    assert.equal(report.schema_version, 1);
+    assert.ok(report.files >= 2);
+    assert.equal(report.totals.comments, 2);
+    assert.deepEqual(report.violations.map((v) => [v.path, v.overage]), [["src/a.ts", 1]]);
+    assert.deepEqual(report.oversized_added_blocks, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main --check: refuses to leave a required baseline change unwritten, and names each one", () => {
+  const root = fixtureRepo({ "src/a.ts": 5, "src/gone.ts": 3, "scripts/comment-load-baseline.json": 0 }, `// one\n${CLEAN}`);
+  try {
+    const before = readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8");
+    const { code, err } = runInProcess(["--root", root, "--base", "main", "--check"]);
+    assert.equal(code, 1);
+    assert.match(err, /CHECK FAILED/);
+    assert.match(err, /lower {2}"src\/a\.ts": 5 -> 1/);
+    assert.match(err, /remove "src\/gone\.ts"/);
+    assert.equal(
+      readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8"),
+      before,
+      "--check must leave the baseline byte-identical",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
