@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── R-51 (docs/audits/recon-2026-09-05.md): "every deterministic PR check can block a merge" ──
 //
@@ -330,7 +331,7 @@ test("instrument census: every job this repo's own workflow files register on a 
 // disk round-trip is exercised here once, directly, as its own regression pin: parsing a
 // temp-file copy must produce byte-identical candidates to parsing the same text in memory.
 test("deriveCandidates: parsing a real temp-file copy of a workflow matches parsing the same YAML text in memory", () => {
-  const dir = mkdtempSync(join(tmpdir(), "every-pr-check-census-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}every-pr-check-census-`));
   try {
     const yaml = `
 on:
