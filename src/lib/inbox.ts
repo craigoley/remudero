@@ -489,11 +489,26 @@ export function evictRefusalPoisonedKeys(
   attempts: DraftAttemptCache,
   drafts: DraftCache,
   liveProposalIds: ReadonlySet<string>,
+  /**
+   * W1-T2566 — ids this host has ALREADY re-opened once, read from {@link ReopenedKeysCache}.
+   * An EXCLUSION, not a change to the predicate above: "keyed, live, no cached draft" still
+   * decides what is poisoned, and the predicate itself is explicitly out of this task's scope.
+   * What this adds is that a given id is re-opened AT MOST ONCE EVER rather than once per boot.
+   *
+   * Defaults to empty, so every existing caller is byte-identical.
+   */
+  alreadyReopened: ReadonlySet<string> = new Set(),
 ): string[] {
   const freed: string[] = [];
   for (const id of Object.keys(attempts)) {
     if (!liveProposalIds.has(id)) continue;
     if (drafts[id]) continue;
+    // W1-T2566: a proposal that fails GENUINELY and repeatedly never acquires a cached draft, so
+    // it satisfies the predicate on EVERY boot. The closure flag that bounds this within a
+    // process cannot see across the restart that resets it, and at a MEASURED median daemon
+    // lifetime of 50.5 minutes (479 processes, 32% under 30 min) that is ~29 re-opens a day per
+    // stuck proposal at an $8.52 draft mean. This is the bound that survives a restart.
+    if (alreadyReopened.has(id)) continue;
     delete attempts[id];
     freed.push(id);
   }
@@ -2021,6 +2036,58 @@ export function writeDraftAttemptPair(draftsPath: string, attemptsPath: string, 
   fs.writeFileSync(attemptsTmpPath, JSON.stringify(nextAttempts, null, 2), "utf8");
   fs.renameSync(draftsTmpPath, draftsPath);
   fs.renameSync(attemptsTmpPath, attemptsPath);
+}
+
+/**
+ * `<config.root>/state/inbox-reopened-keys.json` (W1-T2566) — one entry per proposal id this host
+ * has re-opened, with the ISO stamp it happened at. The third cache beside `inbox-drafts.json` and
+ * `inbox-draft-attempts.json`.
+ *
+ * ⚠ KEYED ON PROPOSAL ID, NEVER A GLOBAL "MIGRATION DONE" FLAG, AND THAT DISTINCTION IS THE
+ * DELIVERABLE. W1-T2564 chose a closure flag precisely because every boot runs it, so a
+ * freshly-provisioned host recovers with no operator step. A per-id marker preserves that — an id
+ * never seen before is still re-opened on first sight — whereas one global flag would not, and
+ * would reintroduce exactly the gap the closure flag was chosen to avoid.
+ */
+export interface ReopenedKeysCache {
+  [proposalId: string]: string;
+}
+
+/** Parse a {@link ReopenedKeysCache} JSON blob; `{}` on missing/malformed input — the same
+ *  posture {@link parseDraftCache} takes, and for the same reason: an unreadable marker file must
+ *  mean "nothing re-opened yet" (so the host still recovers), never a crash on the boot path. */
+export function parseReopenedKeysCache(text: string | undefined): ReopenedKeysCache {
+  if (!text) return {};
+  try {
+    const raw = JSON.parse(text) as unknown;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+    const out: ReopenedKeysCache = {};
+    for (const [id, at] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof at === "string") out[id] = at;
+    }
+    return out;
+  } catch {
+    // Deliberate: a malformed marker file re-opens each id once more rather than failing the
+    // boot. Losing the marker costs one extra attempt per id; failing the boot costs the fleet.
+    return {};
+  }
+}
+
+/** W1-T2566 — record the ids just re-opened, preserving any stamp already present so a re-read
+ *  never moves an existing entry's time. Pure: returns the next cache, mutating nothing. */
+export function markReopened(current: ReopenedKeysCache, ids: readonly string[], at: string): ReopenedKeysCache {
+  const next: ReopenedKeysCache = { ...current };
+  for (const id of ids) if (next[id] === undefined) next[id] = at;
+  return next;
+}
+
+/** W1-T2566 — commit the marker file with the same stage-then-rename discipline
+ *  {@link writeDraftAttemptPair} uses, so a torn write can never leave a half-written marker that
+ *  parses as "everything already re-opened". Live `fs.` lookups so a test can intercept them. */
+export function writeReopenedKeys(path: string, next: ReopenedKeysCache): void {
+  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpPath, JSON.stringify(next, null, 2), "utf8");
+  fs.renameSync(tmpPath, path);
 }
 
 /** Parse a {@link DraftCache} JSON blob; `{}` on missing/malformed input. */

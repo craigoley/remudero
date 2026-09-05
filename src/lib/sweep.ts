@@ -4777,6 +4777,9 @@ export type ArmOutcomeName =
   | "armed"
   | "direct-merged"
   | "direct-merge-failed"
+  | "direct-merge-updated"
+  | "direct-merge-preflight-refused"
+  | "direct-merge-update-failed"
   | "arm-error-ignored"
   // W1-T947: `armAutoMergeAtOpen` refused because the diff is classified IRREVERSIBLE
   // (W1-T919) — mirrored here for the same reason every other member is, so `armOutcomeArmed`
