@@ -25,9 +25,11 @@ test("W1-T2862: the worker-path wrapper reports filing failure and lets verdict 
 
 test("W1-T2862: production consumes the summary before the first implementation verdict branch removes its worktree", () => {
   const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const directConsumer = source.indexOf("consumeSourceSizeFollowup(args)");
   const workerReturn = source.indexOf("driverResult = await runDiagnoseThenRetry");
   const consumer = source.indexOf("reportWorkerSourceSizeFollowup(", workerReturn);
   const firstVerdict = source.indexOf('failOnWorkerError(impl, "implement")', workerReturn);
+  assert.ok(directConsumer >= 0, "the production wrapper must invoke the source-size consumer directly");
   assert.ok(workerReturn >= 0 && consumer > workerReturn, "the production worker path must call the consumer after the worker returns");
   assert.match(source.slice(consumer, firstVerdict), /root:\s*repoDir/, "feedback belongs to the task repository, not the rmd install checkout");
   assert.ok(firstVerdict > consumer, "the consumer must run while the worktree still exists and before verdict cleanup");

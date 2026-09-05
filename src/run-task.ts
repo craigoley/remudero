@@ -11783,10 +11783,10 @@ export function reportWorkerSourceSizeFollowup(
   args: ConsumeSourceSizeFollowupArgs,
   log: (step: string, extra?: Record<string, unknown>) => void,
   say: (message: string) => void,
-  consume: (input: ConsumeSourceSizeFollowupArgs) => ConsumeSourceSizeFollowupResult = consumeSourceSizeFollowup,
+  consume?: (input: ConsumeSourceSizeFollowupArgs) => ConsumeSourceSizeFollowupResult,
 ): ConsumeSourceSizeFollowupResult | undefined {
   try {
-    const result = consume(args);
+    const result = consume ? consume(args) : consumeSourceSizeFollowup(args);
     if (result.action === "filed") {
       say(`source-size follow-up filed as ${result.feedbackId} for ${result.files.length} material hotspot(s)`);
       return result;
