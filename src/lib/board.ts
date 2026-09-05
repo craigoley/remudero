@@ -770,9 +770,115 @@ export function deriveReviewState(
   }
 }
 
+/**
+ * W1-T2919 — THE CACHE KEY WAS A LINE COUNT, SO EVERY HEARTBEAT INVALIDATED IT.
+ *
+ * `createBoardSnapshotCache` keyed on `(ledger line count, gateway health, open-index
+ * fingerprint)`. The daemon appends `daemon.alive` on EVERY poll and the board gateway appends
+ * `board_gateway.fetch_bytes` on every fetch, so each of those changed the count, invalidated the
+ * snapshot, and made the next console read recompute `projectPlan` synchronously on the
+ * single-threaded HTTP server. In steady state the console froze for about a second at least once
+ * a minute with nothing on the board having changed — the operator experiences a "live" console as
+ * periodically stalled.
+ *
+ * DECISION-RELEVANT IS DEFINED BY EXCLUSION, AND THAT DIRECTION IS THE WHOLE SAFETY ARGUMENT.
+ * An INCLUSION list — "these steps may change a board row" — defaults a step nobody has added to
+ * it yet to IRRELEVANT, so the day a new board-affecting step lands the console silently serves a
+ * STALE board and nothing reddens. The exclusion below defaults a new step to relevant: the cache
+ * invalidates, the projection recomputes, and the only thing lost is an optimisation. A drifting
+ * enumeration is this repo's own recurring defect; this is the one arrangement of it where drift
+ * costs performance instead of correctness.
+ *
+ * BOTH ENTRIES ARE MEASURED, NOT ASSUMED. Neither step is READ anywhere in the projection path:
+ * `daemon.alive` has zero occurrences in board.ts/status.ts's projection, and every
+ * `board_gateway.fetch_bytes` occurrence is a `log(...)` write or a comment about one — checked
+ * against a control (`run.start`, a step that IS read, returns 43 hits across the same two files).
+ * A step may only join this set on that same evidence.
+ */
+export const BOARD_IRRELEVANT_STEPS: ReadonlySet<string> = new Set(["daemon.alive", "board_gateway.fetch_bytes"]);
+
+/** The `step` of one already-parsed ledger row, or `undefined` when it carries none (a torn
+ *  write). A row whose step cannot be read is treated as decision-relevant — unknown stays
+ *  visible, the same fail-open posture the rest of this module takes. */
+export function ledgerStepOf(row: Record<string, unknown>): string | undefined {
+  return typeof row.step === "string" ? row.step : undefined;
+}
+
+/** Can this row change a board row? Everything except {@link BOARD_IRRELEVANT_STEPS}. */
+export function isDecisionRelevantRow(row: Record<string, unknown>): boolean {
+  const step = ledgerStepOf(row);
+  return step === undefined || !BOARD_IRRELEVANT_STEPS.has(step);
+}
+
+/** The running fingerprint's state — folded incrementally so a cache HIT never re-walks the whole
+ *  ledger, which is the cost the tail cursor above already exists to avoid. */
+export interface DecisionFingerprint {
+  /** How many rows have been folded in — the read cursor, not the count below. */
+  readonly foldedUpTo: number;
+  /** The first row's identity as folded, so a ROTATION (rotateLedger keeps only the 200 newest
+   *  rows per step and archives the rest, so the live file SHRINKS or has its head replaced) is
+   *  detected and the fold restarted rather than continued against a different file. */
+  readonly head: string | undefined;
+  readonly hash: number;
+  /** How many DECISION-RELEVANT rows have been folded in. On an append-only log this alone is
+   *  sufficient to detect an append — which is exactly what the old raw line count did, and its
+   *  only defect was counting the irrelevant rows too. */
+  readonly count: number;
+}
+
+export const EMPTY_DECISION_FINGERPRINT: DecisionFingerprint = { foldedUpTo: 0, head: undefined, hash: 0x811c9dc5, count: 0 };
+
+/** A row's cheap identity for folding: its step and timestamp. NOT the whole row — re-serialising
+ *  every row on every request would reintroduce the per-request cost this cache exists to avoid,
+ *  and on an APPEND-ONLY log the count already carries the append signal; this pair is what
+ *  additionally distinguishes a rotation that happens to leave the count unchanged. */
+function rowIdentity(row: Record<string, unknown>): string {
+  return String(row.step ?? "") + " " + String(row.ts ?? "");
+}
+
+/**
+ * Fold `rows` into `prior`, walking only what is NEW.
+ *
+ * Restarts from zero when the log shrank or its head row changed — both mean rotation, and
+ * continuing the fold across it would key the cache on a file that no longer exists. (The old
+ * line-count key had the same exposure and no such check; this is strictly more careful, not a
+ * regression it inherits.)
+ */
+export function foldDecisionFingerprint(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  prior: DecisionFingerprint,
+): DecisionFingerprint {
+  const head = rows.length > 0 ? rowIdentity(rows[0]!) : undefined;
+  const rotated = rows.length < prior.foldedUpTo || (prior.foldedUpTo > 0 && head !== prior.head);
+  const from = rotated ? 0 : prior.foldedUpTo;
+  let hash = rotated ? EMPTY_DECISION_FINGERPRINT.hash : prior.hash;
+  let count = rotated ? 0 : prior.count;
+  for (let i = from; i < rows.length; i += 1) {
+    const row = rows[i]!;
+    if (!isDecisionRelevantRow(row)) continue;
+    count += 1;
+    const id = rowIdentity(row);
+    // FNV-1a, folded into the running value — order-sensitive, so a reordering is a different key.
+    for (let c = 0; c < id.length; c += 1) {
+      hash ^= id.charCodeAt(c);
+      hash = Math.imul(hash, 0x01000193);
+    }
+  }
+  return { foldedUpTo: rows.length, head, hash: hash >>> 0, count };
+}
+
+/** The cache key this fingerprint contributes — count and hash together, so a change either side
+ *  of a collision still invalidates. */
+export function decisionKey(fp: DecisionFingerprint): string {
+  return `${fp.count}:${(fp.hash >>> 0).toString(16)}`;
+}
+
 export function createBoardSnapshotCache(): BoardSnapshotCache {
-  let cached: { ledgerLen: number; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
+  let cached: { decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
   let lastGoodPrQueueAt: string | undefined;
+  // W1-T2919: folded across requests, so a cache HIT costs one pass over the lines appended since
+  // the last one — never a re-walk of the whole ledger.
+  let fingerprint: DecisionFingerprint = EMPTY_DECISION_FINGERPRINT;
   // ONE persistent tail cursor for this route's whole lifetime (never reconstructed per request,
   // mirroring RecentActivityCache/the SSE stream's own `lastLineCount`) — see readLedgerTail's
   // own doc for why this is the fix for a cache HIT still paying a full ledger re-read+re-parse
@@ -782,7 +888,11 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
   return {
     get(deps: BoardDeps): BoardSnapshot {
       const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
-      const ledgerLen = readLedger(deps.ledgerPath).length;
+      // W1-T2919: the key is a fingerprint over the lines that CAN change a board row, not the
+      // raw count — `daemon.alive` and `board_gateway.fetch_bytes` move the count every minute
+      // and change nothing this snapshot renders.
+      fingerprint = foldDecisionFingerprint(readLedger(deps.ledgerPath), fingerprint);
+      const key = decisionKey(fingerprint);
       // The queue's live identity can change before the sweep appends anything. Read the existing
       // batched open half for the cache key, then hand this SAME capture into the recompute below.
       const prQueueIndex = readPrQueueIndex(deps.github);
@@ -794,7 +904,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
       const ghTruncated = safeQueueTruncated(deps.github);
       if (
         cached &&
-        cached.ledgerLen === ledgerLen &&
+        cached.decisionKey === key &&
         cached.ghFailed === ghFailed &&
         cached.ghTruncated === ghTruncated &&
         cached.prQueueIndexKey === prQueueIndexKey
@@ -804,7 +914,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
       // re-resolve `deps.readLedger ?? readLedgerLines` on its own — one read, not two.
       const snapshot = computeBoardSnapshot({ ...deps, readLedger }, { lastGoodPrQueueAt, prQueueIndex });
       if (snapshot.prQueue.complete) lastGoodPrQueueAt = snapshot.generated_at;
-      cached = { ledgerLen, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
+      cached = { decisionKey: key, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
       return snapshot;
     },
   };
