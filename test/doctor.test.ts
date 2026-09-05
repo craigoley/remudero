@@ -84,6 +84,11 @@ function baseInputs(over: Partial<Parameters<typeof buildDoctorReport>[0]> = {})
     // what it always tested rather than incidentally tripping the new arm's unreadable-by-default
     // WARN (judgeCheckoutDepth never reads an absent measurement as healthy).
     checkoutDepth: { shallow: false, commitCount: 980 },
+    // R-49 — a matching node-version pin by default, same discipline as checkoutDepth above: every
+    // PRE-EXISTING test below (none of which is about the node pin) keeps testing what it always
+    // tested rather than incidentally tripping the new arm's WARN.
+    runningNodeVersion: "22.22.3",
+    nvmrcVersion: "22.22.3",
     ...over,
   };
 }
@@ -195,11 +200,16 @@ test("W1-T1209: the existing doctor arms are unchanged", () => {
   }
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
-  // +4, not +3: W1-T1236 lands a SECOND new arm (sweep-liveness) after this test's own baseline,
-  // W1-T2332 a THIRD (checkout-depth), and W1-T2627 a FOURTH (worktree-base) later still — this
-  // file's own baseInputs() carries a healthy sweep.pass/sweep.summary pair, a full checkoutDepth
-  // and no live worktrees, so all four read OK.
-  assert.equal(report.checks.length, preExisting.length + 4, "repair-stall, sweep-liveness, checkout-depth and worktree-base all joined the report");
+  // +5, not +3: W1-T1236 lands a SECOND new arm (sweep-liveness) after this test's own baseline,
+  // W1-T2332 a THIRD (checkout-depth), W1-T2627 a FOURTH (worktree-base), and R-49 a FIFTH
+  // (node-version-pin) later still — this file's own baseInputs() carries a healthy
+  // sweep.pass/sweep.summary pair, a full checkoutDepth, no live worktrees and a matching node
+  // pin, so all five read OK.
+  assert.equal(
+    report.checks.length,
+    preExisting.length + 5,
+    "repair-stall, sweep-liveness, checkout-depth, worktree-base and node-version-pin all joined the report",
+  );
 });
 
 // ── W1-T1236 — sweep liveness: a reader for `sweep.pass`, the per-pass heartbeat nothing read ──
@@ -344,10 +354,15 @@ test("W1-T1236: the existing doctor arms are unchanged", () => {
   }
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
-  // +3, not +1: W1-T2332 lands a further new arm (checkout-depth) after this test's own baseline,
-  // and W1-T2627 a further one still (worktree-base) — this file's own baseInputs() carries a
-  // healthy, full checkoutDepth and no live worktrees, so both read OK.
-  assert.equal(report.checks.length, preExisting.length + 3, "sweep-liveness, checkout-depth and worktree-base all joined the report");
+  // +4, not +1: W1-T2332 lands a further new arm (checkout-depth) after this test's own baseline,
+  // W1-T2627 a further one still (worktree-base), and R-49 one more (node-version-pin) — this
+  // file's own baseInputs() carries a healthy, full checkoutDepth, no live worktrees and a
+  // matching node pin, so all three read OK.
+  assert.equal(
+    report.checks.length,
+    preExisting.length + 4,
+    "sweep-liveness, checkout-depth, worktree-base and node-version-pin all joined the report",
+  );
 });
 
 // ── criterion 2 — dispatch starvation, a reader for a field nothing read ───────────────────────
@@ -571,6 +586,9 @@ test("doctor: the verb registration dispatches into the doctor module", async ()
     // suite happens to run in is shallow (e.g. a CI runner's shallow clone) — the same reason
     // every other reader above is injected rather than left to hit the real filesystem/git.
     readCheckoutDepth: () => ({ shallow: false, commitCount: 980 }),
+    // R-49: same reasoning — echo the running version back so this test's exit code never depends
+    // on whether THIS host's node happens to match the repo's .nvmrc pin.
+    readNvmrcVersion: () => process.versions.node,
   });
   assert.equal(code, 0, "a healthy local read exits 0");
   assert.match(lines.join("\n"), /^rmd doctor: OK/m, "the command printed the module's own report");
@@ -602,6 +620,11 @@ function doctorDoctorDeps(over: Record<string, unknown> = {}) {
     // W1-T2332: same reasoning as the standalone verb-registration test above — a real, unstubbed
     // git read would make these tests' exit codes depend on the ambient checkout's actual depth.
     readCheckoutDepth: () => ({ shallow: false, commitCount: 980 }),
+    // R-49: same reasoning again — a real, unstubbed .nvmrc read would make these tests' exit
+    // codes depend on whether THIS host's node happens to match the repo's pin (this container
+    // itself runs 22.22.2 against a 22.22.3 pin, a live mismatch — see doctor-node-pin.test.ts).
+    // Echo the running version back so the arm always reads a match, on any host.
+    readNvmrcVersion: () => process.versions.node,
     ...over,
   };
 }
