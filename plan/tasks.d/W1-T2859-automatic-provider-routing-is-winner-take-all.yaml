@@ -1,0 +1,81 @@
+- id: W1-T2859
+  title: "AUTOMATIC PROVIDER ROUTING IS WINNER-TAKE-ALL — the subscription with one point more tight-window headroom receives every dispatch, so routing does not proportionally favor a freshly reset allowance, preserve a small learning sample on the other healthy provider, or expose the share it intended to allocate"
+  repo: remudero
+  depends_on: [W1-T2709, W1-T2774]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 32.00
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - src/lib/provider-routing-status.ts
+    - src/lib/serve.ts
+    - test/worker-provider.test.ts
+    - test/provider-routing-console.test.ts
+  origin: "operator-session#relative-subscription-headroom-weighting-2026-09-04"
+  plan_refs: ["W1-T2577", "W1-T2709", "W1-T2774"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT 33f4418e. `selectWorkerProvider` excludes unreadable and reserve-boundary
+    subscriptions, computes the minimum remaining percentage across each provider's windows, then
+    selects only the maximum. Its tie breaker is consulted solely when the maxima are exactly equal.
+    A provider at 100% tight-window remaining therefore receives every automatic dispatch against
+    a healthy provider at 30%, rather than receiving a strong but bounded share. The operator's
+    current posture is a newly reset Claude weekly allowance and roughly 30% Codex remaining; the
+    live capacity readers, not that report, remain authoritative for each dispatch.
+
+    WINNER-TAKE-ALL WASTES BOTH FEEDBACK AND CAPACITY. A tiny headroom lead can flip every new task
+    to one subscription until the readings cross, then flip the whole stream back. That creates
+    avoidable oscillation and stops collecting comparison evidence from the other eligible route.
+    Equal probability is also wrong: the fuller subscription should carry materially more work.
+    Automatic routing needs a deterministic weighted-fair sequence whose weight rises faster than
+    usable headroom, so a large lead becomes a large dispatch-share lead without making the smaller
+    healthy subscription unreachable.
+
+    PRESERVE HARD GATES AND OPERATOR CONTROL. Readability, valid percentages, model health,
+    assignment, active parks and the reserve boundary remain eligibility gates. An explicit
+    `preference: claude|codex` remains an operator override and is not diluted by automatic
+    weighting. Codex is not enabled or commissioned by this task. Provider/model suitability and
+    the existing model selectors run in their current order; relative subscription capacity
+    changes only the automatic choice among providers that already passed those checks.
+  design: |
+    For each eligible provider, derive usable headroom as its tightest remaining percentage minus
+    the effective reserve. Square that value to form its automatic allocation weight, then divide
+    by the total eligible weight to obtain the intended share. The square is deliberate: with a 5%
+    reserve, 100% versus 30% remaining produces weights 9025:625, about 94% versus 6%; a small lead
+    stays close to even, while a substantial lead is strongly preferred. The hard reserve gate
+    still removes a provider before weighting, so no probability can spend reserved capacity.
+
+    Map the existing monotonic tie-break input onto a deterministic low-discrepancy sequence and
+    select the provider whose cumulative weight contains that point. Do not use ambient randomness:
+    identical capacities and sequence positions must reproduce the same route in tests and incident
+    reconstruction. Preserve exact-tie alternation. Return the selected weight and intended share
+    with the decision, publish them in the existing bounded routing snapshot and
+    `worker.provider.selected` event, and render the intended automatic share in the console. These
+    fields make observed allocation auditable without exposing credentials or adding a probe.
+  acceptance:
+    - claim: "with a 5% reserve and readable Claude/Codex tight-window remaining values of 100% and 30%, a deterministic 200-dispatch sequence routes at least 90% to Claude while still routing at least one task to Codex"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "equal headroom remains evenly alternating, a small lead stays near even, and reversing the headroom lead reverses the favored provider"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "unreadable, invalid and reserve-boundary providers remain hard-excluded, and an all-ineligible set still throws ProviderCapacityBlockedError"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "explicit Claude or Codex preference remains authoritative while eligible and retains the existing fallback when the preferred route becomes unreadable or reserve-bound"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "the selected provider's allocation weight and intended share are emitted in bounded worker telemetry and the provider-routing snapshot without credentials or a new capacity read"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "the console shows the intended allocation share beside the selected provider so the operator can distinguish headroom-weighted routing from an explicit preference"
+      proof: "unit test: test/provider-routing-console.test.ts"
+  falsifier: |
+    Close without implementation if current main already makes automatic provider choices across a
+    reproducible weighted sequence based on relative usable subscription headroom, keeps every
+    existing eligibility/reserve and explicit-preference rule, and publishes the intended share in
+    worker telemetry plus the console snapshot. A selector that always chooses the maximum, or a
+    model recommender that optimizes only settled outcomes, does not falsify this task.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` printed advisory W1-T2858 but atomically held
+    `refs/rmd-id/W1-T2859`; the held id is authoritative and used here.
