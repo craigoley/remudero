@@ -16,6 +16,9 @@ jobs:
   analysis:
     name: Scorecard analysis
     runs-on: ubuntu-latest
+    # R-50: observed runs complete in under a minute; 20m bounds a genuine hang with
+    # generous headroom.
+    timeout-minutes: 20
     permissions:
       # Upload the SARIF results to the code-scanning dashboard.
       security-events: write

@@ -41,6 +41,9 @@ jobs:
   recovery-drill:
     name: recovery-drill (throwaway fixtures, real recovery code, no live fleet touched)
     runs-on: ubuntu-latest
+    # R-50: observed runs complete in well under a minute; 20m bounds a genuine hang with
+    # generous headroom.
+    timeout-minutes: 20
     permissions:
       contents: read
       # DELIVERY. Without this the job's only output is a red badge on a page nobody opens — the
@@ -51,6 +54,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
 

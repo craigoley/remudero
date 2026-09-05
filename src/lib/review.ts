@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
@@ -1376,9 +1376,22 @@ function parseDialectGrep(body: string): WhitelistedProof | null {
   // explicit target: no path ⇒ refuse (null), leaving the proof on the
   // keyword floor instead of mechanically executing an unscoped match.
   if (path === undefined) return null;
-  // The grep TARGET is the one place a real hazard survives execFile: path
-  // traversal out of the checkout, still refused.
+  // The grep TARGET is the one place a real hazard survives execFile: the executor runs
+  // `grep -arn -- <pattern> <path>` with cwd pinned to the PR-head CHECKOUT, so a target naming a
+  // file the review host can read but the checkout does not contain turns a proof into a
+  // match/no-match ORACLE over that host's filesystem — and a body edit re-earns review on the
+  // same head (see this repo's CLAUDE.md), so the oracle is repeatable a bit at a time.
+  //
+  // WHAT THIS LINE ACTUALLY REFUSES, STATED HONESTLY (R-18): the two escapes VISIBLE IN THE
+  // PROOF TEXT — a `..` segment, and an ABSOLUTE path, which `resolve()` would honour verbatim
+  // and which this check used to let straight through while its own comment claimed traversal out
+  // of the checkout was refused. It CANNOT see the third escape: a target that resolves out
+  // through a SYMLINK committed to the head. Nothing in the text distinguishes `escape/secret.txt`
+  // from any ordinary in-tree path, so that one is refused where it is observable — against the
+  // real filesystem, in {@link assertGrepTargetsInsideCheckout}, which
+  // {@link execWhitelistedProof} calls before spawning grep.
   if (path.includes("..")) return null;
+  if (isAbsolute(path)) return null;
   // No shell here (execFile) ⇒ no glob expansion — a literal '*' target can
   // never resolve to a real file and would always exit non-zero, silently
   // manufacturing a spurious executed_fail. Refuse rather than run it.
@@ -2151,6 +2164,71 @@ export function narrowNameFilteredArgs(baseArgs: readonly string[], candidateFil
  * result line, never from the process exit code — on both the success path and
  * a thrown nonzero-exit's attached stdout.
  */
+/**
+ * (R-18) Thrown by {@link execWhitelistedProof} for a `grep:` proof whose argv names a target that
+ * RESOLVES outside the checkout the proof is being run against. {@link judgeCriterion}'s catch maps
+ * every throw to `exec_error` — the keyword floor, verbatim — so the refusal is CONTENT-INDEPENDENT:
+ * the verdict reads the same whether the out-of-checkout file contains the pattern or not, which is
+ * exactly what closes the one-bit oracle described in {@link assertGrepTargetsInsideCheckout}.
+ * A `fail` here would leak the same bit in the other direction, so this is a throw, never a verdict.
+ */
+export class ProofTargetOutsideCheckoutError extends Error {
+  constructor(
+    readonly token: string,
+    readonly resolvedPath: string,
+    readonly checkoutDir: string,
+  ) {
+    super(
+      `grep proof target \`${token}\` resolves to ${resolvedPath}, which is outside the checkout ` +
+        `(${checkoutDir}) — a proof may only read files the PR head itself contains, so this run ` +
+        "concluded nothing about the criterion (a symlink committed to the head, or an absolute " +
+        "path in a legacy fenced invocation, is the usual cause)",
+    );
+  }
+}
+
+/**
+ * (R-18) REFUSE a `grep:` proof whose argv would read OUTSIDE the checkout, before the spawn.
+ *
+ * THE DEFECT THIS CLOSES. {@link execWhitelistedProof} runs `grep` with cwd pinned to the PR-head
+ * checkout, and grep FOLLOWS a symlink named on its own command line — so a symlink committed to
+ * the head (`escape -> /`) makes any file the reviewer's uid can read a legal proof target, and the
+ * proof's match/no-match verdict reports one bit about that file's CONTENT. Because a PR-body edit
+ * re-earns review on the same head sha (CLAUDE.md, "A BODY REPAIR IS A NEW REVIEW INPUT"), that bit
+ * is repeatable at will. {@link parseDialectGrep} refuses the two escapes it can SEE in the proof
+ * text (`..`, an absolute path); a symlink is invisible there and the LEGACY fenced `` `grep …` ``
+ * shape passes the author's own argv through untouched (`-f <file>` reads its PATTERNS from a file,
+ * a second read of the same kind), so both are caught here instead, against the real filesystem.
+ *
+ * WHY EVERY NON-FLAG TOKEN, NOT JUST THE LAST ONE. The house dialect always compiles to
+ * `["-arn", "--", pattern, path]`, but the legacy shape's argv is whatever the author typed, and
+ * grep reads files from more than one position (`-f patternfile`, several trailing operands). A
+ * token that does not exist on disk is SKIPPED rather than refused — a pattern is an ordinary
+ * non-path string, and a genuinely missing target is already grep's own exit 2 ⇒ `exec_error`
+ * (W1-T219), so nothing here needs to pre-empt it. `realpathSync` (not `resolve`) is what makes
+ * this see through the symlink at all; `cwd` is realpath'd too so a checkout reached through a
+ * symlinked parent (a `/tmp` fixture, a worktree under one) is not mistaken for an escape.
+ */
+function assertGrepTargetsInsideCheckout(args: readonly string[], cwd: string): void {
+  let root: string;
+  try {
+    root = realpathSync(cwd);
+  } catch {
+    root = resolve(cwd); // an unreadable cwd is the spawn's problem to report, not this check's
+  }
+  for (const token of args) {
+    if (token.startsWith("-")) continue; // a flag, never a path operand (`--` included)
+    let resolved: string;
+    try {
+      resolved = realpathSync(resolve(root, token));
+    } catch {
+      continue; // not a file on disk ⇒ a pattern, or an absent target grep itself reports (exit 2)
+    }
+    if (resolved === root || resolved.startsWith(root + pathSep)) continue;
+    throw new ProofTargetOutsideCheckoutError(token, resolved, root);
+  }
+}
+
 export function execWhitelistedProof(
   whitelisted: WhitelistedProof,
   cwd: string,
@@ -2186,6 +2264,9 @@ export function execWhitelistedProof(
     // requiredChromiumDirs for the false-FAIL incident this closes (PR #892).
     ensureBrowsersOnce(cwd);
   }
+  // R-18: BEFORE the spawn, and outside the try on purpose — a target outside the checkout is not
+  // an execution outcome to be classified below, it is a refusal to run the proof at all.
+  if (whitelisted.kind === "grep") assertGrepTargetsInsideCheckout(args, cwd);
   try {
     const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
     if (whitelisted.nameFiltered) return nameFilteredOutcome(stdout);

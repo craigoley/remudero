@@ -841,6 +841,24 @@ export interface DeriveDeps {
   /** Ledger reader; defaults to reading + parsing NDJSON from disk. */
   readLedger?: LedgerReader;
   /**
+   * R-23: the per-projection {@link LedgerIndex} over the rows {@link DeriveDeps.readLedger}
+   * returns, built ONCE by {@link projectPlan} and shared by every task in that call — same
+   * batch-once-amortize-over-N-tasks shape as the ledger read itself (W1-T187) and the batched
+   * GitHub fetch ({@link buildBatchedGithub}). Omitted by every per-task caller, in which case
+   * each helper scans the whole array exactly as it always has; supplied but built over a
+   * DIFFERENT array, the identity check in `indexedTaskRows` falls back to that same scan. So
+   * this can only ever change how long a derivation takes, never what it derives.
+   */
+  ledgerIndex?: LedgerIndex;
+  /**
+   * TEST-ONLY EQUIVALENCE SEAM (R-23), set by `test/project-plan-is-indexed.test.ts` and by
+   * nothing in `src/`. Makes {@link projectPlan} skip building its {@link LedgerIndex}, so every
+   * helper takes the pre-index whole-ledger scan — which is how that test asserts the indexed and
+   * unindexed projections are deep-equal over generated ledgers through the PRODUCTION function
+   * rather than a second copy of it that could drift away from what ships.
+   */
+  unindexedForEquivalenceTest?: true;
+  /**
    * Clock for {@link StatusProjection.elapsedMs} (W1-T155); defaults to `Date.now`.
    * Injectable so a test can assert an exact elapsed value without a real sleep.
    */
@@ -1717,13 +1735,111 @@ function fromPrState(state: string): { status: TaskStatus; merged: boolean } {
   }
 }
 
+/**
+ * ONE PASS OVER THE LEDGER, SHARED BY EVERY PER-TASK HELPER (R-23).
+ *
+ * THE COST THIS REMOVES. {@link projectPlan} already reads and parses the ledger exactly once
+ * (W1-T187) and hands every task the SAME array — but each of the ten per-task helpers below
+ * ({@link lastPrOpened}, {@link latestManualCompletion}, {@link seedCountFromCircuitBreak},
+ * {@link dispatchesWithoutNewOwnedPr} (twice), {@link dispatchesEver}, `debunkedTrailerUrls`,
+ * `latestActualPrUrl`, `deriveRunState`, {@link latestEscalationLine}, `isPlanOnlyFilingPr`)
+ * then walks that whole array from end to end, once per task, discarding every row whose
+ * `task_id` is not the one it was asked about. Reading the ledger once and scanning it 1,393
+ * times is still O(tasks x rows): MEASURED 776 ms per projection at 1,393 tasks x 29,567 rows
+ * (a 4 MiB live ledger, the rotation ceiling), on the daemon's and drain's every tick and on
+ * every console snapshot recompute (`createBoardSnapshotCache`, board.ts).
+ *
+ * BUCKETED ON THE TWO ID FIELDS, NOT ONE. Nine of the ten helpers filter on `task_id`, but
+ * {@link seedCountFromCircuitBreak}'s `dispatch.circuit_broken` arm filters on `task` — a
+ * DIFFERENT field on the same rows — and it interleaves both kinds in ledger order, so a
+ * `task_id`-only bucket would silently drop its seed rows. {@link byTask} therefore holds
+ * every row naming an id in EITHER field, deduped so a row naming the same id twice is not
+ * double-counted (that would inflate {@link dispatchesEver}). Every helper keeps its OWN
+ * predicate unchanged and re-filters the bucket, so the bucket only ever has to be a SUPERSET
+ * of the rows that helper could match, in ledger order — which is what makes the substitution
+ * an identity rather than a re-derivation.
+ *
+ * IDENTITY-CHECKED BEFORE USE. {@link rows} is the exact array this index was built over, and
+ * {@link indexedTaskRows}/{@link indexedStepRows} fall back to a full scan of the caller's own
+ * `lines` whenever it does not match. An index that has drifted from the rows a helper was
+ * handed can therefore only cost time, never change an answer.
+ */
+export interface LedgerIndex {
+  /** The exact array this index was built over — identity-compared, never re-read. */
+  readonly rows: ReadonlyArray<Record<string, unknown>>;
+  /** Rows naming an id in `task_id` OR `task`, in ledger order, each row at most once per id. */
+  readonly byTask: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
+  /** Rows by `step`, in ledger order — backs the whole-ledger step scans, not the per-task ones. */
+  readonly byStep: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
+  /** Every `pr_url` carried by a `plan_only: true` `pr.opened` row — `isPlanOnlyFilingPr`'s set. */
+  readonly planOnlyFilingPrUrls: ReadonlySet<string>;
+}
+
+/** Append `row` to `id`'s bucket, creating it on first use. */
+function pushIndexed(
+  buckets: Map<string, Array<Record<string, unknown>>>,
+  key: string,
+  row: Record<string, unknown>,
+): void {
+  const bucket = buckets.get(key);
+  if (bucket) bucket.push(row);
+  else buckets.set(key, [row]);
+}
+
+/** Build the {@link LedgerIndex} for `rows` in a single pass. */
+export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): LedgerIndex {
+  const byTask = new Map<string, Array<Record<string, unknown>>>();
+  const byStep = new Map<string, Array<Record<string, unknown>>>();
+  const planOnlyFilingPrUrls = new Set<string>();
+  for (const row of rows) {
+    const step = row.step;
+    if (typeof step === "string") {
+      pushIndexed(byStep, step, row);
+      if (step === "pr.opened" && row.plan_only === true && typeof row.pr_url === "string") {
+        planOnlyFilingPrUrls.add(row.pr_url);
+      }
+    }
+    const taskId = row.task_id;
+    const task = row.task;
+    if (typeof taskId === "string") pushIndexed(byTask, taskId, row);
+    // DEDUPED against `task_id` above: a row carrying the same id in both fields must land in the
+    // bucket ONCE, or `dispatchesEver` would count one `run.start` twice.
+    if (typeof task === "string" && task !== taskId) pushIndexed(byTask, task, row);
+  }
+  return { rows, byTask, byStep, planOnlyFilingPrUrls };
+}
+
+/** The empty bucket handed back for an id the index saw no rows for — never `lines`. */
+const NO_INDEXED_ROWS: ReadonlyArray<Record<string, unknown>> = Object.freeze([]);
+
+/** `taskId`'s rows from `index`, or `lines` itself when there is no usable index for them. */
+function indexedTaskRows(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index: LedgerIndex | undefined,
+): ReadonlyArray<Record<string, unknown>> {
+  if (index === undefined || index.rows !== lines) return lines;
+  return index.byTask.get(taskId) ?? NO_INDEXED_ROWS;
+}
+
+/** `step`'s rows from `index`, or `lines` itself when there is no usable index for them. */
+function indexedStepRows(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  step: string,
+  index: LedgerIndex | undefined,
+): ReadonlyArray<Record<string, unknown>> {
+  if (index === undefined || index.rows !== lines) return lines;
+  return index.byStep.get(step) ?? NO_INDEXED_ROWS;
+}
+
 /** The most recent `pr.opened` ledger line for a task id, if any. */
 function lastPrOpened(
-  lines: Array<Record<string, unknown>>,
+  lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
+  index?: LedgerIndex,
 ): string | undefined {
   let url: string | undefined;
-  for (const line of lines) {
+  for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.step === "pr.opened" && line.task_id === taskId && typeof line.pr_url === "string") {
       url = line.pr_url; // keep scanning: last one wins
     }
@@ -1765,11 +1881,12 @@ export interface ManualCompletion {
  * wrong assertion never means deleting this line, only outranking it.
  */
 export function latestManualCompletion(
-  lines: Array<Record<string, unknown>>,
+  lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
+  index?: LedgerIndex,
 ): ManualCompletion | undefined {
   let found: ManualCompletion | undefined;
-  for (const line of lines) {
+  for (const line of indexedTaskRows(lines, taskId, index)) {
     if (
       line.step === "manual.completed" &&
       line.task_id === taskId &&
@@ -1875,9 +1992,12 @@ export function isMergeCreditLine(line: Record<string, unknown>): boolean {
 export function seedCountFromCircuitBreak(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
+  index?: LedgerIndex,
 ): number | undefined {
   let seed: number | undefined;
-  for (const line of lines) {
+  // The ONE helper reading `task` as well as `task_id` — see {@link LedgerIndex}'s own note on
+  // why the bucket is keyed on both fields, which is what keeps this scan's row set unchanged.
+  for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id === taskId && (line.step === "pr.opened" || isMergeCreditLine(line))) {
       seed = undefined; // forward progress — the same reset the counter itself applies
       continue;
@@ -1968,7 +2088,9 @@ const PRE_WORKER_REFUSAL_VERDICTS: ReadonlySet<string> = new Set(["blocked_conta
 export function dispatchesWithoutNewOwnedPr(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
+  index?: LedgerIndex,
 ): number {
+  const rows = indexedTaskRows(lines, taskId, index);
   // PRE-SCAN (W1-T2249's shape, kept; W1-T2423 widens only what it matches) — two passes over
   // the (small, per-task) line set rather than one: a run's own `verdict` line always lands AFTER
   // its `run.start` in ledger order, so the set of run_ids to EXCLUDE must be known before the
@@ -1977,7 +2099,7 @@ export function dispatchesWithoutNewOwnedPr(
   // dispatch that produces no PR still counts exactly as it does today — see
   // {@link PRE_WORKER_REFUSAL_VERDICTS} for which verdicts qualify and why these two only.
   const preWorkerRefusalRunIds = new Set<string>();
-  for (const line of lines) {
+  for (const line of rows) {
     if (
       line.task_id === taskId &&
       line.step === "verdict" &&
@@ -1989,7 +2111,7 @@ export function dispatchesWithoutNewOwnedPr(
     }
   }
   let count = 0;
-  for (const line of lines) {
+  for (const line of rows) {
     if (line.task_id !== taskId) continue;
     if (line.step === "pr.opened" || isMergeCreditLine(line)) {
       count = 0; // forward progress — a new PR, or a credited merge, resets the streak
@@ -2020,8 +2142,9 @@ export function isDispatchBreakerTripped(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   maxDispatches: number = DEFAULT_MAX_TASK_DISPATCHES,
+  index?: LedgerIndex,
 ): boolean {
-  return dispatchesWithoutNewOwnedPr(lines, taskId) >= maxDispatches;
+  return dispatchesWithoutNewOwnedPr(lines, taskId, index) >= maxDispatches;
 }
 
 /**
@@ -2041,9 +2164,10 @@ export function isDispatchBreakerTripped(
 export function dispatchesEver(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
+  index?: LedgerIndex,
 ): number {
   let count = 0;
-  for (const line of lines) {
+  for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id === taskId && line.step === "run.start") count++;
   }
   return count;
@@ -2084,8 +2208,9 @@ export function isLifetimeDispatchCapExceeded(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   maxLifetimeDispatches: number = DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
+  index?: LedgerIndex,
 ): boolean {
-  return dispatchesEver(lines, taskId) >= maxLifetimeDispatches;
+  return dispatchesEver(lines, taskId, index) >= maxLifetimeDispatches;
 }
 
 /**
@@ -2206,7 +2331,10 @@ export function evaluateDispatchBreakerDetailed(
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   // ledger-read-intent: live — the dispatch breaker wants the newest rows only.
   const lines = readLedgerLines(ledgerPath, ledgerFs);
-  const freshCount = dispatchesWithoutNewOwnedPr(lines, taskId);
+  // R-23: ONE pass to bucket, then three per-task lookups — the three helpers below (four scans,
+  // `dispatchesWithoutNewOwnedPr` making two) otherwise walk this whole array end to end each.
+  const index = buildLedgerIndex(lines);
+  const freshCount = dispatchesWithoutNewOwnedPr(lines, taskId, index);
   let priorCount = cache.lastCounts.get(taskId);
   // W1-T2425: FIRST OBSERVATION OF THIS TASK IN THIS PROCESS — seed the baseline from the
   // breaker's own on-disk record rather than starting blind, so the regression arm below is
@@ -2214,13 +2342,13 @@ export function evaluateDispatchBreakerDetailed(
   // outranks the ledger's), and only from the lines already read here — see
   // {@link seedCountFromCircuitBreak} for why this is neither a wider read nor a reset.
   if (priorCount === undefined) {
-    const seeded = seedCountFromCircuitBreak(lines, taskId);
+    const seeded = seedCountFromCircuitBreak(lines, taskId, index);
     if (seeded !== undefined) {
       priorCount = seeded;
       cache.lastCounts.set(taskId, seeded);
     }
   }
-  const hasNewOwnedPr = lastPrOpened(lines, taskId) !== undefined;
+  const hasNewOwnedPr = lastPrOpened(lines, taskId, index) !== undefined;
   const base = { freshCount, maxDispatches, priorCount, hasNewOwnedPr };
 
   if (priorCount !== undefined && freshCount < priorCount && !hasNewOwnedPr) {
@@ -2359,9 +2487,13 @@ function escapeRegExp(s: string): string {
  * the credit is wrong and deriveStatus must never re-surface it, even if GitHub's
  * search keeps turning it up. Every `claimed_pr_url` named for `taskId` is debunked.
  */
-function debunkedTrailerUrls(lines: Array<Record<string, unknown>>, taskId: string): Set<string> {
+function debunkedTrailerUrls(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+): Set<string> {
   const out = new Set<string>();
-  for (const line of lines) {
+  for (const line of indexedTaskRows(lines, taskId, index)) {
     if (
       line.step === "correction.provenance" &&
       line.task_id === taskId &&
@@ -2385,9 +2517,13 @@ function debunkedTrailerUrls(lines: Array<Record<string, unknown>>, taskId: stri
  * branch — #91 was a docs PR, #134 a `fix/*` PR). Last correction wins. Returns
  * undefined when the task has no correction.
  */
-function latestActualPrUrl(lines: Array<Record<string, unknown>>, taskId: string): string | undefined {
+function latestActualPrUrl(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+): string | undefined {
   let url: string | undefined;
-  for (const line of lines) {
+  for (const line of indexedTaskRows(lines, taskId, index)) {
     if (
       line.step === "correction.provenance" &&
       line.task_id === taskId &&
@@ -3134,7 +3270,12 @@ export function runBranchClaimGap(pr: PrRef, taskId: string): RunBranchClaimGap 
  * by its OWN dispatched run, not a filing flow) and credits exactly as before — the diff is never
  * read to tell the two apart.
  */
-function isPlanOnlyFilingPr(ledgerLines: Array<Record<string, unknown>>, prUrl: string): boolean {
+function isPlanOnlyFilingPr(
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  prUrl: string,
+  index?: LedgerIndex,
+): boolean {
+  if (index !== undefined && index.rows === ledgerLines) return index.planOnlyFilingPrUrls.has(prUrl);
   return ledgerLines.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
 }
 
@@ -3171,7 +3312,8 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // `prNumber` is decoration parsed from the URL's own text (never a gate); a
   // corrected task is reported `merged` unconditionally, never re-subjected to
   // whatever GitHub currently says (or fails to say) about `correctedUrl`.
-  const correctedUrl = latestActualPrUrl(ledgerLines, task.id);
+  const ledgerIndex = deps.ledgerIndex;
+  const correctedUrl = latestActualPrUrl(ledgerLines, task.id, ledgerIndex);
   if (correctedUrl) {
     return {
       taskId: task.id,
@@ -3254,7 +3396,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // REVERSIBLE without deleting it (see {@link latestManualCompletion}'s doc): a later
   // `correction.provenance` row is checked above THIS rung too, so retracting a wrong
   // assertion is already covered by code that already ran.
-  const manualCompletion = latestManualCompletion(ledgerLines, task.id);
+  const manualCompletion = latestManualCompletion(ledgerLines, task.id, ledgerIndex);
   if (manualCompletion) {
     return {
       taskId: task.id,
@@ -3278,7 +3420,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // returning unconditionally, so rung (c)'s trailer search — which WOULD have
   // found #255 — was never even reached again.
   let ownResult: StatusProjection | undefined;
-  const openedUrl = lastPrOpened(ledgerLines, task.id);
+  const openedUrl = lastPrOpened(ledgerLines, task.id, ledgerIndex);
   if (openedUrl) {
     const pr = deps.github.prByRef(openedUrl);
     if (pr) {
@@ -3346,7 +3488,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     // path for direct deriveStatus callers.
     const cands = deps.mergedHeadBranches?.(task.id) ?? deps.github.findMergedByHeadBranch?.(task.id);
     if (!cands) return undefined; // null (read failed → W1-T119) or method absent (fixture) — skip
-    const debunked = debunkedTrailerUrls(ledgerLines, task.id);
+    const debunked = debunkedTrailerUrls(ledgerLines, task.id, ledgerIndex);
     const hit = cands.find(
       (pr) =>
         pr.state.toUpperCase() === "MERGED" &&
@@ -3355,7 +3497,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
         // W1-T1004: this rung had NO plan-only guard at all before — a filing PR dispatched
         // from this task's OWN run-<taskId>-* worktree (the retro/triage/plan flows reuse the
         // dispatched task's worktree) would otherwise credit the task it just filed unconditionally.
-        !isPlanOnlyFilingPr(ledgerLines, pr.url),
+        !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex),
     );
     if (!hit) return undefined;
     // W1-T951 DELIVERABLE A: a merged branch hit is a NEW live credit this task's durable store
@@ -3398,7 +3540,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   };
 
   const trailerPr = deps.github.findMergedByTrailer(task.id);
-  if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
+  if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id, ledgerIndex).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
     const body = deps.github.prBody(trailerPr.url);
     // W1-T2387: the union's own second surface, read back from the SAME memoised commit index the
@@ -3412,7 +3554,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     // construction" without ever consulting the ledger — exactly the hole rationale (5) names ("the
     // branch shape has no guard at all"). The ledger read is free (already in hand, no gh call), so
     // paying it unconditionally costs nothing.
-    const planOnlyFilingRefusal = wouldCredit && isPlanOnlyFilingPr(ledgerLines, trailerPr.url);
+    const planOnlyFilingRefusal = wouldCredit && isPlanOnlyFilingPr(ledgerLines, trailerPr.url, ledgerIndex);
     // W1-T413: the DIFF-BASED plan-only refusal, checked only for a hit that would otherwise credit
     // AND that the ledger check above did not already refuse.
     // ORDER IS THE COST CONTROL, not a style choice. `ownsOwnRunBranch` is free — the head ref is
@@ -3644,14 +3786,18 @@ const LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
  * `recon.done`, `implement.done`/`implement.resumed`, `pr.opened`, `fix.dispatch`/`fix.review`,
  * `fix.resolved`.
  */
-function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: string): RunState {
+function deriveRunState(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+): RunState {
   let inFlight = false;
   let phase: Phase | undefined;
   let startedAt: string | undefined;
   let lastActivityTs: string | undefined;
   let workerState: WorkerState | undefined;
   let workerStateSince: string | undefined;
-  for (const line of lines) {
+  for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId) continue;
     if (typeof line.ts === "string") lastActivityTs = line.ts;
     // Read into a bare local (`rawStep`) BEFORE the typeof guard, never inline off the `line`
@@ -3735,12 +3881,13 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
 export function latestEscalationLine(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
+  index?: LedgerIndex,
 ): { issueUrl?: string; escalationClass?: string; openedAt?: string } | undefined {
   let last: "run" | "escalation" | undefined;
   let issueUrl: string | undefined;
   let escalationClass: string | undefined;
   let openedAt: string | undefined;
-  for (const line of lines) {
+  for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId) continue;
     if (line.step === "run.start") {
       last = "run";
@@ -3786,8 +3933,9 @@ export function resolveEscalation(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   github: GitHub,
+  index?: LedgerIndex,
 ): EscalationState | undefined {
-  const latest = latestEscalationLine(lines, taskId);
+  const latest = latestEscalationLine(lines, taskId, index);
   if (!latest) return undefined;
   // No issue_url at all (malformed/pre-W1-T8 ledger line) ⇒ there is nothing to join against —
   // same fail-closed treatment as an unresolved/unreadable url, never a dropped row.
@@ -3843,7 +3991,7 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   // IN-FLIGHT + PHASE: never overrides an already-definitive `blocked` (a closed PR is
   // stronger GitHub evidence than an unresolved ledger scan reaching a stale run.start).
   if (base.status !== "blocked") {
-    const runState = deriveRunState(ledgerLines, task.id);
+    const runState = deriveRunState(ledgerLines, task.id, deps.ledgerIndex);
     if (runState.inFlight && runState.phase) {
       // LIVENESS BOUND (W1-T179 design (ii), W1-T155's amended criterion): a ledger-only
       // in-flight trace is only "running" while it is BACKED by an open PR (base.status is
@@ -3913,7 +4061,7 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   const uncredited = uncreditedBuildWarning(task.id, deps.proseNamedTaskIds, deps.github.changedFiles?.bind(deps.github));
   if (uncredited) projection.uncreditedBuild = uncredited;
 
-  const escalation = resolveEscalation(ledgerLines, task.id, deps.github);
+  const escalation = resolveEscalation(ledgerLines, task.id, deps.github, deps.ledgerIndex);
   if (escalation) {
     projection.needsHuman = true;
     if (escalation.issueUrl) projection.escalationIssueUrl = escalation.issueUrl;
@@ -3967,10 +4115,13 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
  * ONE scan {@link projectPlan} needs to find escalations that may not belong to any plan task,
  * done once over the already-read ledger, never per candidate id.
  */
-function taskIdsWithEscalationLines(lines: ReadonlyArray<Record<string, unknown>>): string[] {
+function taskIdsWithEscalationLines(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  index?: LedgerIndex,
+): string[] {
   const seen = new Set<string>();
   const ids: string[] = [];
-  for (const line of lines) {
+  for (const line of indexedStepRows(lines, "escalation.issue_opened", index)) {
     if (line.step !== "escalation.issue_opened") continue;
     if (typeof line.task_id !== "string") continue;
     if (seen.has(line.task_id)) continue;
@@ -4345,7 +4496,13 @@ export function projectPlan(
   // analogous O(N) `gh` subprocess cost below.
   const readLedgerOnce = effectiveDeps.readLedger ?? readLedgerLines;
   const ledgerLinesOnce = readLedgerOnce(effectiveDeps.ledgerPath);
-  effectiveDeps = { ...effectiveDeps, readLedger: () => ledgerLinesOnce };
+  // R-23: AND INDEX IT ONCE, in the same breath and for the same reason. Reading once was only
+  // half the fix — `deriveStatus`'s ten per-task helpers each still walked the whole array end to
+  // end, so an N-task plan scanned it ~10N times (776 ms at 1,393 tasks x 29,567 rows, MEASURED).
+  // One bucketing pass here makes each of those a Map lookup plus a walk of that task's OWN rows.
+  // See {@link LedgerIndex} for why the substitution is an identity and not a re-derivation.
+  const ledgerIndex = effectiveDeps.unindexedForEquivalenceTest ? undefined : buildLedgerIndex(ledgerLinesOnce);
+  effectiveDeps = { ...effectiveDeps, readLedger: () => ledgerLinesOnce, ledgerIndex };
   // W1-T951 DELIVERABLE A, READ+WRITE THE DURABLE CREDIT STORE ONCE PER PLAN — same
   // batch-once-amortize-over-N-tasks shape as the ledger read directly above: without this, an
   // N-task plan would open+JSON.parse the store file once per task (deriveStatus's own default),
@@ -4466,9 +4623,9 @@ export function projectPlan(
   // plan Task to hand deriveStatus): scan the ledger once for every escalated task_id and, for
   // any id the plan does NOT own, resolve it live and add its OWN row. An id the plan DOES own
   // is skipped here — it already got its row above — so nothing is ever double-counted.
-  for (const taskId of taskIdsWithEscalationLines(ledgerLinesOnce)) {
+  for (const taskId of taskIdsWithEscalationLines(ledgerLinesOnce, ledgerIndex)) {
     if (plan.byId.has(taskId)) continue;
-    const escalation = resolveEscalation(ledgerLinesOnce, taskId, effectiveDeps.github);
+    const escalation = resolveEscalation(ledgerLinesOnce, taskId, effectiveDeps.github, ledgerIndex);
     if (!escalation) continue; // confirmed closed (or otherwise resolved) — no row, same as above.
     byId.set(taskId, {
       taskId,

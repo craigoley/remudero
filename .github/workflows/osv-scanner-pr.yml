@@ -17,6 +17,13 @@ permissions:
 
 jobs:
   scan-pr:
+    # R-50: NOT bounded with a job-level `timeout-minutes` here, deliberately -- this job's body
+    # is `uses:` (a reusable-workflow call), and GitHub Actions accepts only
+    # name/uses/with/secrets/needs/if/permissions/strategy on such a job; `timeout-minutes` is
+    # not part of that allowed set and would be a schema violation, not a stricter bound. The
+    # reusable workflow's own job (google/osv-scanner-action) carries whatever timeout its
+    # author set; that is out of this repo's control.
+    #
     # No actor exemption: a Dependabot PR is exactly the shape of PR that changes dependencies,
     # so it is exactly the PR this scanner must run on, not skip (W1-T211). Skipping it here was
     # doubly wrong: it exempted the highest-risk PRs from the dependency scanner, AND (once this
