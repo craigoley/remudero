@@ -1,0 +1,44 @@
+- id: W1-T2907
+  title: "FIFTY-SIX SCRIPTS, NO SHARED LIBRARY, AND jscpd NEVER READS THEM — repoRoot is re-derived in 12 scripts, argv is hand-parsed in 32, git is spawned 10 ways, lcov is parsed twice, .jscpd.json's format is typescript-only so scripts/ is outside the duplication gate, and two .mjs files carry a tsx shebang: one scripts/lib, the duplication gate over scripts, and the shebangs fixed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§5", "§8A", "W1-T2259"]
+  files: [scripts/lib/repo-root.mjs, scripts/lib/argv.mjs, scripts/lib/git.mjs, scripts/lib/lcov.mjs, scripts/*.mjs, scripts/plan-state-claims.mjs, scripts/generate-capability-snapshot.mjs, .jscpd.json, test/scripts-shared-lib.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-59 (OBSERVED; the dead-script half is ALREADY W1-T2259 and is not
+    repeated). At f7ceb86 `scripts/` holds 56 files and 14,765 lines with no shared module:
+    `repoRoot` is re-derived in 12 scripts, argv hand-parsed in 32, git spawned 10 different
+    ways, and lcov parsed by two independent parsers (the coverage ratchet and diff-coverage).
+    `.jscpd.json` declares `"format": ["typescript"]`, so the duplication gate that reports
+    108 clones over src/ has never read a `.mjs` file. `scripts/generate-capability-snapshot.mjs`
+    and `scripts/plan-state-claims.mjs` carry a `#!/usr/bin/env tsx` shebang on plain
+    JavaScript, which works only where `tsx` is on PATH and misleads a reader about what runs
+    them. The scripts ARE the gates — every ratchet CLAUDE.md names lives here — so their
+    duplication is gate duplication: a fix to one lcov parser does not reach the other.
+
+    THE FIX: `scripts/lib/` with four modules — `repo-root.mjs` (one derivation, symlink-safe,
+    the shape `bin/rmd` already uses), `argv.mjs` (flags/values/`--help`, no dependency),
+    `git.mjs` (one `git(args, opts)` spawn with the identity-env and cwd conventions), and
+    `lcov.mjs` (one parser returning per-file `DA`/`SF` records, used by both consumers).
+    Migrate the callers the audit counted onto them; report the before/after counts of each
+    duplication class in the PR. Add `"javascript"` to `.jscpd.json`'s `format` so scripts/
+    joins the duplication census (raising `threshold` is not the fix — if scripts/ pushes the
+    percentage over, the clones it finds are the work). Replace the two tsx shebangs with
+    `#!/usr/bin/env node`. The test imports each lib module and asserts `repoRoot()` resolves
+    the package root from a nested cwd, `parseArgv` handles the three flag shapes the scripts
+    use, and the lcov parser round-trips a fixture with two `SF:` blocks.
+  acceptance:
+    - claim: "one shared library under scripts/lib is imported by the migrated scripts"
+      proof: "unit test: test/scripts-shared-lib.test.ts"
+    - claim: "the duplication gate reads scripts as well as src"
+      proof: "grep: \"javascript\" in .jscpd.json"
+    - claim: "plain JavaScript scripts run under node, not a tsx shebang"
+      proof: "grep: #!/usr/bin/env node in scripts/plan-state-claims.mjs"

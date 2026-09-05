@@ -1,0 +1,39 @@
+- id: W1-T2893
+  title: "THE COMMAND REGISTRY DESCRIBES THE CLI BUT DOES NOT DISPATCH IT — COMMANDS (run-task.ts:36425) generates --help while main() dispatches through its own switch over 75 handlers in the same file, so the entrypoint must contain every verb: make the registry the dispatcher under src/cli/ so a verb is one file that registers itself and run-task.ts becomes the thin entry it was named for (decomposition step 10)"
+  repo: remudero
+  depends_on: [W1-T2892]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§8A", "W1-T2883", "W1-T47"]
+  files: [src/run-task.ts, src/cli/registry.ts, test/cli-registry-dispatches.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Step 10 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29). OBSERVED
+    at f7ceb86: `const COMMANDS: readonly CommandSpec[]` at `src/run-task.ts:36425` is the
+    single source of truth for `rmd --help` (W1-T47; `bin/rmd`'s header says so and refuses a
+    duplicate list). Dispatch is NOT driven by it: `main()` selects handlers by name in the same
+    file, which is why all 75 handlers (13,602 lines) have to be in scope there and why
+    `rmd --help` loads 140 modules to print text (R-28). W1-T2883 pre-declared the `src/cli/`
+    layering rule for this step.
+
+    THE FIX: create `src/cli/registry.ts` exporting the `CommandSpec` type, the registry, and a
+    `dispatchCommand(argv, deps)` that resolves a spec and invokes its handler; each spec carries
+    its handler (a direct import, or a lazy `() => import(...)` for heavy verbs — the choice per
+    verb is the worker's, and R-28's task measures the result). `main()` in run-task.ts calls
+    `dispatchCommand` and keeps only process-boundary concerns (exit codes, the freshness gate,
+    the re-exec guard). Handlers that steps 1-9 already moved to lib import from lib; handlers
+    still in run-task.ts stay there for now and are registered by reference — this step changes
+    WHO dispatches, not where every handler lives. `bin/rmd` is unchanged. Lower the run-task.ts
+    ceiling by the lines removed. The new test drives `dispatchCommand` with a fake handler
+    registered under a test name and asserts it is invoked with the parsed args, that an unknown
+    verb returns the same usage error text as today, and that `--help` output is unchanged.
+  acceptance:
+    - claim: "main dispatches every verb through the registry instead of its own switch"
+      proof: "grep: dispatchCommand( in src/run-task.ts"
+    - claim: "the registry resolves a verb to its handler and preserves the unknown-verb and help text"
+      proof: "unit test: test/cli-registry-dispatches.test.ts"

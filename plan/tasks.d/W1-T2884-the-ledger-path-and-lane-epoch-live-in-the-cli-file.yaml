@@ -1,0 +1,41 @@
+- id: W1-T2884
+  title: "THE LEDGER PATH AND THE LANE EPOCH LIVE IN THE CLI FILE — ledgerPathFor and nextLaneEpochMs are defined in src/run-task.ts, so every lib module that needs the canonical ledger path either re-derives it from a literal or imports the 37,508-line entrypoint: move both to src/lib/ledger-path.ts and re-export from run-task.ts so the 397 test importers keep resolving (decomposition step 1)"
+  repo: remudero
+  depends_on: [W1-T2883]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§8A", "W1-T2883", "W1-T2257"]
+  files: [src/run-task.ts, src/lib/ledger-path.ts, test/ledger-path.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Step 1 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29, R-38). The
+    chain moves the SMALLEST, most-depended-on leaves first so every later extraction has a
+    lib-side home to import from without reaching back into the entrypoint.
+
+    OBSERVED at f7ceb86: `export function ledgerPathFor(config)` is defined at
+    `src/run-task.ts:1065` and `export function nextLaneEpochMs()` at `:11923`. The literal
+    `"ledger.ndjson"` appears at 11 sites across src/ (MEASURED, `grep -rn`), which is the
+    direct consequence of the canonical resolver living where lib modules cannot import it —
+    `.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` rule (severity error) forbids
+    `src/lib -> src/run-task.ts`, so each lib reader re-derives the path instead. W1-T2257 and
+    W1-T1013 each repaired one such reader; this removes the reason they existed.
+
+    THE FIX: create `src/lib/ledger-path.ts` exporting `ledgerPathFor` and `nextLaneEpochMs`
+    with their doc comments intact; `src/run-task.ts` imports them from there and RE-EXPORTS both
+    names so the test files that import them by path from `../src/run-task.ts` (466 symbols
+    across 397 files at f7ceb86) keep resolving unchanged. Lower the run-task.ts ceiling in
+    `scripts/source-size-baseline.json` by the lines removed, per W1-T2883's convention. No
+    behaviour changes; the test proves the lib module answers the same path for the same config
+    and that the epoch is strictly increasing across two calls.
+  acceptance:
+    - claim: "run-task.ts imports the ledger path from a lib module instead of defining it"
+      proof: "grep: lib/ledger-path\" in src/run-task.ts"
+    - claim: "the lib module resolves the same path as before and the epoch is monotonic"
+      proof: "unit test: test/ledger-path.test.ts"
+    - claim: "the moved resolver is called from the lib module's own consumers, not only re-exported"
+      proof: "grep: ledgerPathFor( in test/ledger-path.test.ts"

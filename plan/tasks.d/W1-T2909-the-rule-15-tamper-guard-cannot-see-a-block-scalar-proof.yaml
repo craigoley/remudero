@@ -1,0 +1,43 @@
+- id: W1-T2909
+  title: "THE RULE 15 TAMPER GUARD CANNOT SEE A BLOCK-SCALAR PROOF — planTasksCriterionFieldLines matches only diff lines that START with claim:, proof: or satisfied_by:, so editing the indented continuation of a proof: >- block scalar passes criterionFieldTampered (reproduced); the loader accepts the form, so the first worker to use it can rewrite its own proof unseen: make the guard follow the scalar"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§12", "§5C"]
+  files: [src/lib/review.ts, test/rule15-block-scalar-proof.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-16 (OBSERVED, reproduced by the audit against
+    `criterionFieldTampered`). At f7ceb86, `planTasksCriterionFieldLines`
+    (`src/lib/review.ts:8229-8235`) selects the added/deleted diff lines the Rule 15 guard
+    judges by testing whether the line's TEXT STARTS with `claim:`, `proof:` or
+    `satisfied_by:` after indentation. A YAML block scalar — `proof: >-` followed by indented
+    continuation lines — puts the proof's whole content on lines that start with none of those
+    words, so a diff that rewrites the continuation and leaves the `proof: >-` line untouched
+    contains ZERO lines the guard inspects. Zero block-scalar proofs exist in the corpus today
+    (the audit's own count), and `loadPlan` accepts the form, so nothing prevents the first
+    one; CLAUDE.md's proof rule already warns that a block scalar defeats a `grep:` proof by
+    wrapping it, which is the second reason the form is hostile. The two together mean a
+    worker can convert a proof to a block scalar in one PR (visible) and rewrite it in the next
+    (invisible).
+
+    THE FIX, IN THE GUARD: when a selected `proof:`/`claim:` line opens a block scalar (`|`,
+    `>`, with optional chomping/indent indicators), the following lines indented deeper than
+    the key are part of the field and must be included in what `criterionFieldTampered`
+    compares; the comparison text is the folded scalar value, so a continuation-only edit reads
+    as a changed field. Alternatively — and the worker may choose this if simpler and says so —
+    refuse block-scalar `claim:`/`proof:` values outright in `planTasksCriterionFieldLines`'s
+    caller with a named violation, since the proof executor cannot run a wrapped pattern
+    anyway. Either way the falsifier is the audit's reproduction: a diff editing only the
+    continuation lines of a `proof: >-` must trip the guard. Add the same case for `claim:`.
+  acceptance:
+    - claim: "an edit to only the continuation lines of a block-scalar proof trips the tamper guard"
+      proof: "unit test: test/rule15-block-scalar-proof.test.ts"
+    - claim: "the guard's line selection documents that it follows a block scalar's continuation"
+      proof: "grep: block-scalar continuation in src/lib/review.ts"

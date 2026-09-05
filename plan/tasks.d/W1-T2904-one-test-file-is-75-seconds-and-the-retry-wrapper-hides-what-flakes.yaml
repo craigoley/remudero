@@ -1,0 +1,49 @@
+- id: W1-T2904
+  title: "ONE TEST FILE IS 75 SECONDS AND THE RETRY WRAPPER HIDES WHAT FLAKES — test/run-task.test.ts (8,570 lines, 316 cases) cannot be balanced by file-count sharding, test-with-retry re-runs a WHOLE shard on any red and nothing aggregates its FLAKE-RETRY lines, and 182 real setTimeout sleeps sit in 78 files: record per-file durations, shard by them into a fast and a slow tier, and aggregate flake retries per test"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§5", "§9", "W1-T255"]
+  files: [scripts/test-with-retry.mjs, scripts/test-tier-manifest.json, scripts/flake-retry-aggregate.mjs, .github/workflows/ci.yml, src/lib/ci-parity.ts, package.json, test/test-tier-manifest.test.ts, test/flake-retry-aggregate.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-40 and R-45 (OBSERVED mechanics; INFERRED masking). At f7ceb86,
+    `test/run-task.test.ts` is 8,570 lines / 316 cases / 75.4 s wall, and `.github/workflows/
+    ci.yml:225` shards the suite by FILE COUNT, which cannot balance one file that long. 396
+    test files import `src/run-task.ts` at ~1,022 ms of tsx compile each (vs 226 ms for
+    `classify.ts`) — the decomposition chain (W1-T2883…) attacks the cause; this task makes the
+    suite's economics visible and bounded meanwhile. `scripts/test-with-retry.mjs:200-230`
+    re-runs the WHOLE shard when any test reds, is wired only into the `ci` shards
+    (`ci.yml:224`), not coverage (`:492`), and prints `FLAKE-RETRY: first attempt failed —
+    <names>` (line 198) which nothing collects — so the fleet cannot say which test flakes most.
+    182 `setTimeout` in 78 test files with real sleeps up to 8,500 ms
+    (`test/serve.live-state.test.ts:472`) and 34 elapsed-time assertions are what the retry
+    wrapper is masking.
+
+    THE FIX: (1) `scripts/test-tier-manifest.json` records each test file's last measured
+    duration (captured by the retry wrapper from the TAP summary it already parses and
+    committed like a baseline); the CI matrix shards by cumulative duration rather than file
+    count, and files over a stated threshold form a `test:slow` tier (`package.json` script)
+    that runs as its own job so the fast tier's wall-clock is bounded. (2)
+    `scripts/flake-retry-aggregate.mjs` reads every `FLAKE-RETRY:` line a run emitted and
+    prints a per-test count, run as a step after the shards in `ci.yml` and registered in
+    `CI_PARITY_TABLE`. (3) The retry wrapper re-runs only the FAILED FILES, not the shard. The
+    manifest test asserts a file missing from the manifest fails the check (a new test file must
+    be tiered), and the aggregate test asserts three retry lines naming the same test produce
+    one row with count 3. Renaming test files to a module-prefixed convention is deliberately
+    NOT in scope: the manifest keys by path, and a 1,084-file rename is its own PR.
+  acceptance:
+    - claim: "test files are tiered by recorded duration and a slow tier runs as its own job"
+      proof: "grep: test:slow in package.json"
+    - claim: "a test file absent from the tier manifest is refused"
+      proof: "unit test: test/test-tier-manifest.test.ts"
+    - claim: "flake retries are aggregated per test after every CI run"
+      proof: "grep: flake-retry-aggregate in .github/workflows/ci.yml"
+    - claim: "three retry lines naming one test aggregate to one row with count three"
+      proof: "unit test: test/flake-retry-aggregate.test.ts"

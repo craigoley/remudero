@@ -1,0 +1,43 @@
+- id: W1-T2925
+  title: "THE MEASUREMENT CADENCE REPORTS LATEST VALUES AND NO DELTA, SO NOTHING CAN SAY WHETHER THE LOOP IS CONVERGING — zero-touch merge rate, blocked_ci share and repeat-incident rate are computed fresh each fire and the previous fire's values are not kept: persist them and emit delta_vs_previous per metric, rendered on /v1/self-measurement"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§5D", "§7", "§8A"]
+  files: [src/lib/measurement-cadence.ts, src/lib/serve.ts, test/measurement-cadence-delta.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 §6, move 4 (OBSERVED: `grep -c delta_vs_previous
+    src/lib/measurement-cadence.ts` reads 0). At f7ceb86 the measurement cadence
+    (`src/lib/measurement-cadence.ts`, scheduled by `plan/policy.yaml`'s `measurementCadence`
+    row) computes the harness's self-measurements — zero-touch merge rate, `blocked_ci`
+    share, repeat-incident rate — from the ledger on each fire and reports the LATEST value of
+    each. The previous fire's values are not persisted, so the console's
+    `/v1/self-measurement` route and the digest can show a number but never a direction;
+    "is the loop converging" — the question the self-improvement half of the mission exists
+    to answer — cannot be read off any surface. §5D's ongoing-response loop and the retro's
+    plan-health duties both assume a trend they cannot currently see.
+
+    THE FIX: persist each fire's metric values (the cadence already has a state file for its
+    last-fire timestamp; extend that record, or write beside it, with the values and the fire
+    time); on the next fire compute `delta_vs_previous` for every metric (null on the first
+    fire, and null again when the previous record is older than a stated horizon so a
+    months-old comparison is not presented as a trend), write the deltas into the ledger row
+    the cadence already emits, and render them as a column on `/v1/self-measurement` beside
+    the values. The test fires the cadence twice against a fixed ledger fixture whose second
+    window differs from the first by a known amount, and asserts the second fire's row carries
+    the exact delta and the first fire's carries null; a control fires twice on an identical
+    window and asserts delta 0.
+  acceptance:
+    - claim: "each metric carries its change since the previous cadence fire"
+      proof: "grep: delta_vs_previous in src/lib/measurement-cadence.ts"
+    - claim: "the second fire reports the exact delta and the first fire reports null"
+      proof: "unit test: test/measurement-cadence-delta.test.ts"
+    - claim: "the console self-measurement route renders the delta beside the value"
+      proof: "grep: delta_vs_previous in src/lib/serve.ts"

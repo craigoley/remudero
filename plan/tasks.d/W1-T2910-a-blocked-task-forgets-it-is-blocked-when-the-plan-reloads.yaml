@@ -1,0 +1,41 @@
+- id: W1-T2910
+  title: "A BLOCKED TASK FORGETS IT IS BLOCKED WHEN THE PLAN RELOADS — the daemon marks an independent failure by writing task.status = \"blocked\" on the in-memory Task, reloadPlan swaps in fresh objects on any origin/main plan change, and the breaker resets on every pr.opened, so a task that failed for its own reasons is re-dispatched at full cost after the next unrelated plan merge: derive the block from the ledger, not from a field on an object the next tick discards"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§2", "§4", "W1-T340", "W1-T2799"]
+  files: [src/lib/daemon.ts, src/run-task.ts, src/lib/status.ts, test/blocked-status-survives-plan-reload.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-5 (OBSERVED). At f7ceb86, `src/lib/daemon.ts:3103` sets
+    `task.status = "blocked"` on the in-memory `Task` when a run fails for a reason independent
+    of the plan; `deps.reloadPlan()` at `:3188` replaces the whole task array with fresh objects
+    whenever `origin/main:plan` changes, and nothing carries the field across. §2 is explicit
+    that status is DERIVED — "blocked iff an escalation issue is open" — and `deriveStatus`
+    (`src/lib/status.ts:1962`) is that derivation, but this one write bypasses it: the block
+    lives only in the object. The circuit breaker at `src/run-task.ts:24345-24350` compounds it
+    by resetting on each `pr.opened`, so a task that opens a PR and then fails independently is
+    fresh again next tick. W1-T340 already found the reload mutating a snapshot the lanes are
+    reading; W1-T2799 found the false-block breaker forgetting it fired — this is the third
+    shape of the same defect: state that should be in the ledger held in process memory.
+
+    THE FIX: on the independent-failure path, write a ledger row (a named step, e.g.
+    `dispatch.blocked_independent`, with the task id, the reason and the run id) INSTEAD of
+    mutating the task; extend `deriveStatus` so an open row of that step with no later
+    clearing row yields `blocked`, exactly as an open escalation does; and make the breaker's
+    reset key on a terminal outcome for the task, not on `pr.opened`. The reload then rebuilds
+    the same `blocked` from the same ledger. The test runs a daemon tick with a fake worker
+    that fails independently, triggers a plan reload with an unrelated shard change, and
+    asserts the task is NOT re-dispatched on the next tick and that `deriveStatus` reads
+    `blocked` from the ledger alone with no in-memory object involved.
+  acceptance:
+    - claim: "a task blocked for an independent failure is still blocked after the plan reloads"
+      proof: "unit test: test/blocked-status-survives-plan-reload.test.ts"
+    - claim: "the block is recorded as a ledger row rather than as a field on the in-memory task"
+      proof: "grep: dispatch\\.blocked_independent in src/lib/daemon.ts"

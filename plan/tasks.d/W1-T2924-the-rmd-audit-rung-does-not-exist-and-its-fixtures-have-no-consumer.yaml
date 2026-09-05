@@ -1,0 +1,49 @@
+- id: W1-T2924
+  title: "THE rmd audit RUNG DOES NOT EXIST AND ITS FIXTURES HAVE NO CONSUMER — docs/audits/README.md defines the rung and its bar (reproduce at least 80% of the 36 findings in recon-2026-07-21.md from source), the COMMANDS registry has zero audit entries, and a second fixture now sits beside the first: ship the verb as a deterministic gather over src graded against a fixture's finding table"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§5D", "§8A", "§10", "P36"]
+  files: [src/run-task.ts, src/lib/audit.ts, docs/audits/README.md, test/audit-command.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 §6, move 3 (OBSERVED: `name: "audit"` appears zero times in
+    `COMMANDS`, `src/run-task.ts:36425`). `docs/audits/README.md` names the rung — "the audit
+    rung (T2 monthly) — first acceptance test: reproduces >= 80% of these 36 findings from
+    source" — and stores its fixtures byte-identical for exactly that purpose; the audit PR
+    (#4075) adds `recon-2026-09-05.md` as the second. The rung is MASTER-PLAN's P36 process
+    proposal. Two fixtures and no consumer means the self-improvement loop's outermost
+    measurement — does the harness still find what a fresh-eyes reviewer finds — is a document,
+    not a verb. Everything else in the loop (retro, auto-triage, the measurement cadence,
+    digests) runs inside the daemon; this is the rung that is missing.
+
+    THE FIX, KEPT DETERMINISTIC: `rmd audit --fixture <path> [--repo <target>]` in
+    `src/lib/audit.ts`, exported as `auditFixtureCommand` (the name is chosen so it is not a
+    case-variant of the existing `proofQueueAuditCommand`). It runs a fixed set of GATHERERS over the target's source — the
+    measurements the audits themselves used and this repo already has scripts for: file and
+    function sizes, the depcruise cycle count, jscpd clones, `execFileSync` sites without a
+    timeout, direct `gh` spawns, `Date.now()` sites, `process.env` reads, bare `catch {}`
+    counts, `readFileSync(…src/…)` in tests, baseline-vs-actual for every `scripts/*-baseline
+    .json`, unwired scripts, dangling doc citations — each producing candidate findings tagged
+    with the evidence path. It then parses the fixture's findings table (the `| R-n | … |`
+    rows with their Evidence column) and grades each fixture finding REPRODUCED when a
+    gatherer's finding cites the same file (and symbol where the fixture names one), printing
+    `reproduced: N/M` plus the unreproduced ids. No LLM call: the README's bar is a
+    reproduction rate, and a deterministic gather is what makes the rate a measurement rather
+    than a judgement. The test runs the verb against `recon-2026-07-21.md` with the repo at
+    head and asserts the printed N is at least 29 of 36 (the README's own bar), and against a
+    fixture whose evidence column names a nonexistent file asserts that row is reported
+    unreproduced — the control. The README gains the invocation and the grading rule.
+  acceptance:
+    - claim: "an audit verb exists in the command registry"
+      proof: "grep: name: \"audit\" in src/run-task.ts"
+    - claim: "the verb is dispatched from the registry to its handler"
+      proof: "grep: auditFixtureCommand( in src/run-task.ts"
+    - claim: "the verb reproduces at least 29 of the first fixture's 36 findings and reports an unreproducible row as such"
+      proof: "unit test: test/audit-command.test.ts"

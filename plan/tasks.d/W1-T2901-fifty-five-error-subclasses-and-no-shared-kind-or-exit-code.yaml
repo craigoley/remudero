@@ -1,0 +1,46 @@
+- id: W1-T2901
+  title: "FIFTY-FIVE ERROR SUBCLASSES AND NO SHARED KIND OR EXIT-CODE DISCRIMINANT — 54 extend Error directly, 124 bare throw new Error( sites, ~1,000 catch sites of which 142 are empty, and the process boundary maps them to exit codes by instanceof chains in main(): one typed error envelope with a kind and an exit code, adopted by the plan and CLI errors first and held by a census"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§8A"]
+  files: [src/lib/errors.ts, src/lib/plan.ts, src/run-task.ts, test/error-envelope.test.ts, test/error-subclass-census.test.ts, scripts/error-subclass-baseline.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-37 (OBSERVED). At f7ceb86, `git grep -nE 'class \w+ extends
+    (Error|\w*Error)\b' -- src` reads 55 subclasses (54 extending `Error` directly — MEASURED
+    54 by `grep -rhoE 'class \w+ extends Error\b'`), 124 bare `throw new Error(`, and roughly
+    1,000 catch sites of which 142 are empty; `test/catch-erasure-ratchet.test.ts` already
+    holds 227 of 755 catches that erase failure into absence UNDER A RATCHET rather than a type.
+    The process boundary is sound — 91 of 92 `process.exit` calls live in `main()` — but it
+    decides the exit code by walking `instanceof` chains over unrelated classes, so a new error
+    class gets exit 1 by default and the ledger row that records it carries `message` and
+    nothing structured. `PlanError` (`src/lib/plan.ts:208`) is the best-behaved of the 55 and
+    still carries no kind.
+
+    THE FIX: `src/lib/errors.ts` declares `abstract class RmdError extends Error { readonly
+    kind: RmdErrorKind; readonly exitCode: number; readonly details?: Record<string, unknown> }`
+    plus `exitCodeFor(err: unknown): number` (an `RmdError` answers its own code; anything else
+    is the generic failure code) and `isRmdError`. Adopt it in this task for `PlanError` (and
+    its plan.ts siblings) and for the CLI's usage/refusal errors in run-task.ts, and make
+    `main()` map through `exitCodeFor`. The remaining 50-odd classes are NOT migrated here: the
+    census test (`test/error-subclass-census.test.ts`, baseline in
+    `scripts/error-subclass-baseline.json`) records today's count of classes that extend `Error`
+    directly and refuses growth, so each later PR that touches one lowers its row. The envelope
+    test proves a thrown `PlanError` yields its declared code through `exitCodeFor` and that a
+    foreign `Error` yields the generic code.
+  acceptance:
+    - claim: "the process boundary derives the exit code from the error's own declared kind"
+      proof: "grep: exitCodeFor( in src/run-task.ts"
+    - claim: "plan errors carry a kind and an exit code through the shared envelope"
+      proof: "grep: RmdError in src/lib/plan.ts"
+    - claim: "a PlanError maps to its declared code and a foreign Error to the generic one"
+      proof: "unit test: test/error-envelope.test.ts"
+    - claim: "the count of classes extending Error directly is recorded and cannot grow"
+      proof: "unit test: test/error-subclass-census.test.ts"

@@ -1,0 +1,48 @@
+- id: W1-T2926
+  title: "48 OF 65 VERBS ARE CLI-ONLY AND NOTHING MEASURES THE GAP — 49 console routes against 65 COMMANDS entries, deploy, sync, retro, triage, plan, review, fix, sweep and onboard reachable only from a shell, and docs/control-surface.md never mentions the console: a console-parity ratchet that maps every verb to a route or a stated cli-only reason, with a baseline of uncovered verbs that may only shrink"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§7", "§7A", "§5C", "W1-T47"]
+  files: [scripts/console-parity-ratchet.mjs, scripts/console-parity-baseline.json, .github/workflows/ci.yml, src/lib/ci-parity.ts, test/console-parity-ratchet.test.ts, docs/control-surface.md]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 §6, move 5 (route and verb counts OBSERVED; the 19-of-95 reachable
+    mapping INFERRED). At f7ceb86 the console serves 49 routes (22 read / 27 write, tiered)
+    against 65 `COMMANDS` entries, and 48 verbs are CLI-only — including `deploy`, `sync`,
+    `retro`, `triage`, `plan`, `review`, `fix`, `sweep` and `onboard`. The mission statement
+    says every human interaction and all operator control goes through the console; the
+    architecture has the HIGH-tier POST shape for exactly these verbs, and nothing measures
+    how far the surface is from the goal, so each new verb lands CLI-first by default and the
+    gap grows silently. `docs/control-surface.md` describes the CLI and never mentions the
+    console. This repo's answer to a gap that must only shrink is a ratchet with a baseline —
+    the cycle, source-size and CLAUDE.md ratchets are the pattern.
+
+    THE FIX: `scripts/console-parity-ratchet.mjs` reads the `COMMANDS` registry (by importing
+    run-task.ts's export, or by the same generated-help path W1-T47 uses) and the declared
+    routes (the `test/helpers/declared-routes.ts` helper already enumerates them), and requires
+    every verb to map to a route OR to an entry in a `cliOnly` table carrying a reason
+    (`"operator-shell-only: needs a TTY for …"`, `"superseded by route …"`); an unmapped verb
+    fails. `scripts/console-parity-baseline.json` records the set of verbs currently uncovered
+    (captured in this PR) and the script refuses any verb ADDED to that set — so a new verb
+    must ship with a route or a reason, and the set can only shrink. Wire it as a step of an
+    existing PR job in `ci.yml` and register it in `CI_PARITY_TABLE`. Routing `retro`,
+    `triage`, `sweep` and `deploy` through the POST shape — the audit's "fund the first shrink"
+    — is deliberately NOT in this task: each is its own concern, and the ratchet is what makes
+    them fileable as measured shrinks. Update `docs/control-surface.md` to name the console as
+    the primary surface and link the baseline. The test runs the script against a fixture
+    registry with one unmapped verb and asserts failure, and against a fully mapped one asserts
+    success and an unchanged baseline.
+  acceptance:
+    - claim: "a verb with neither a route nor a stated cli-only reason reddens a PR check"
+      proof: "grep: console-parity in .github/workflows/ci.yml"
+    - claim: "the ratchet refuses an unmapped verb and accepts a fully mapped registry"
+      proof: "unit test: test/console-parity-ratchet.test.ts"
+    - claim: "the control-surface doc names the console as primary and links the shrinking baseline"
+      proof: "grep: console-parity-baseline in docs/control-surface.md"

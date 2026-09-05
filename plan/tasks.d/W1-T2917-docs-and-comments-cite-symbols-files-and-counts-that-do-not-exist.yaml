@@ -1,0 +1,46 @@
+- id: W1-T2917
+  title: "DOCS AND COMMENTS CITE SYMBOLS, FILES AND COUNTS THAT DO NOT EXIST — base-ref-contract.md names eight functions defined nowhere, probe-path-filter.yml points at a docs/ci-gate.md that does not exist, ci-parity.ts says thirteen jobs where ci.yml has seventeen, and learnings.ts:11 says LEARNINGS.md is never read back while retroCommand reads it: repoint each and add the test that keeps a cited symbol real"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§12A", "§8A", "W1-T2630"]
+  files: [docs/base-ref-contract.md, .github/workflows/probe-path-filter.yml, src/lib/ci-parity.ts, src/lib/learnings.ts, test/docs-cite-real-symbols.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-57 (OBSERVED). At f7ceb86: `docs/base-ref-contract.md:63-65`
+    lists, per file, the functions that resolve a base ref — eight of the names in that table
+    (`refreshOriginMainOnce`, `worktreeChangedFiles`, `bareMainDiffFiles`, `readShardBlobAtRef`,
+    `worktreeAheadCount`, `patchAgainstOrigin`, `diffFilesAgainstOrigin`, `mergeBaseWithOrigin`
+    among them) resolve to no definition under `git grep -nE 'function <name>'`; W1-T2630
+    wrote the contract and the names have since moved or been renamed.
+    `.github/workflows/probe-path-filter.yml:11` says "Proof pasted in docs/ci-gate.md" and no
+    such file exists (the ci-gate material lives in `docs/review-gate.md`).
+    `src/lib/ci-parity.ts:13` says "thirteen jobs .github/workflows/ci.yml actually gates a
+    merge on" and ci.yml declares 17. `src/lib/learnings.ts:11` says "LEARNINGS.md is written
+    by diagnosing workers and never read back" while `retroCommand` reads it. §12A makes
+    documentation a gated artifact; these four are the gate's blind spots — each is a claim
+    about the code that the code no longer supports, and CLAUDE.md's evidence rule ("a
+    declarative record tells you what someone intended") applies to the repo's own docs.
+
+    THE FIX: repoint each of the four (name the CURRENT symbol per row in base-ref-contract.md,
+    verified by `git grep`; point probe-path-filter.yml at the file that holds the proof;
+    replace the literal job count in ci-parity.ts with a sentence that does not carry a number,
+    or one derived from `CI_PARITY_TABLE.length`; correct learnings.ts to name its reader). Then
+    the test: for `docs/base-ref-contract.md` and any doc that carries a symbol table, every
+    backticked identifier that looks like a function name (`\w+\(` or a camelCase token in a
+    "functions" column) must resolve to a definition in src/ — the existing `docs-claims` test
+    family is the shape to extend, and the worker may extend it rather than add a file if the
+    existing test can carry the check; say which.
+  acceptance:
+    - claim: "every function the base-ref contract names is defined in src"
+      proof: "unit test: test/docs-cite-real-symbols.test.ts"
+    - claim: "the learnings module names the verb that reads LEARNINGS.md back"
+      proof: "grep: retroCommand in src/lib/learnings.ts"
+    - claim: "the probe-path-filter workflow points at a document that exists"
+      proof: "grep: docs/review-gate\\.md in .github/workflows/probe-path-filter.yml"

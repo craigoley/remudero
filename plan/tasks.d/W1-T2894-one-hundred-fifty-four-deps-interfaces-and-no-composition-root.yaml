@@ -1,0 +1,42 @@
+- id: W1-T2894
+  title: "154 *Deps INTERFACES AND NO COMPOSITION ROOT — nine real*Deps factories and 325 deps: parameters are assembled ad hoc at each call site, so the real graph is built differently by every verb and a seam's default can go dead or fire unexpectedly without any file naming the wiring: build the real dependency graph once in src/lib/composition-root.ts and hold the interface count with a census (decomposition step 11)"
+  repo: remudero
+  depends_on: [W1-T2893]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§8A", "W1-T2883", "W1-T2889"]
+  files: [src/run-task.ts, src/lib/composition-root.ts, test/composition-root.test.ts, test/deps-interface-census.test.ts, scripts/deps-interface-baseline.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    Step 11, the last of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-33).
+    OBSERVED at f7ceb86: `git grep -ohE '(interface|type) \w+Deps\b' -- src | sort -u | wc -l`
+    reads 154; there are 325 `deps:` parameters and 9 `real*Deps` factories, and at least six
+    incompatible injectable `exec` shapes. CLAUDE.md's coverage section records both failure
+    modes this produces: "when every test injects a fake, the seam's DEFAULT implementation is
+    unreachable" (#978) and its mirror, "a deps object supplying SOME fakes leaves every other
+    seam on its REAL default — so relaxing a guard can make a previously-dead default FIRE"
+    (#2237/#2248, six runners killed at exit 143). Both are symptoms of the same absence: no
+    single place says what the real graph is.
+
+    THE FIX: `src/lib/composition-root.ts` exports `composeRealDeps(config)` that builds the
+    real object graph once — the paced GitHub transport, the clock, the ledger union, the
+    filesystem seams, the worker spawn — and the verbs dispatched by the registry (step 10)
+    receive their deps from it rather than assembling `real*Deps` inline. The nine factories
+    become thin views over the root or are deleted. DO NOT attempt to collapse all 154
+    interfaces in this task; the census test (`test/deps-interface-census.test.ts`, baseline in
+    `scripts/deps-interface-baseline.json`) records today's count and refuses growth, so the
+    number can only fall, one PR at a time, the way the cycle and source-size ratchets work.
+    The new root test composes the graph with a fake config and asserts every top-level field
+    is populated and that no field is a test double.
+  acceptance:
+    - claim: "the real dependency graph is built once by a composition root the entrypoint calls"
+      proof: "grep: composeRealDeps( in src/run-task.ts"
+    - claim: "the root populates every seam with a real implementation and is testable with a fake config"
+      proof: "unit test: test/composition-root.test.ts"
+    - claim: "the count of Deps interfaces is recorded and cannot grow"
+      proof: "unit test: test/deps-interface-census.test.ts"

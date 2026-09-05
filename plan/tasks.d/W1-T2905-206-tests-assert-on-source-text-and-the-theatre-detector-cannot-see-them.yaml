@@ -1,0 +1,39 @@
+- id: W1-T2905
+  title: "206 TESTS ASSERT ON SOURCE TEXT AND THE THEATRE DETECTOR CANNOT SEE THEM — readFileSync of a src/ path appears at 206 sites in 138 test files (120 read run-task.ts as text), each a snapshot of source that passes when the prose is right and the behaviour is wrong, and detectTestTheater scans only added diff lines when a new test( is declared: record the count and refuse growth"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§5", "§12"]
+  files: [test/source-text-assertion-census.test.ts, scripts/source-text-assertion-baseline.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-44 (OBSERVED). At f7ceb86, `git grep -nE
+    'readFileSync\([^)]*src/' -- 'test/*.test.ts' | wc -l` reads 206 across 138 files, and 120
+    of those read `src/run-task.ts` as TEXT. A test that asserts a comment phrase or a signature
+    string exists in a source file is the snapshot-of-source shape: it passes when the prose is
+    present and the behaviour is broken, and it fails when a refactor moves the prose and the
+    behaviour is intact — the second is exactly what the decomposition chain (W1-T2883…) will do
+    to 120 files. `detectTestTheater` (`src/lib/review.ts:1080`) cannot catch the shape because
+    it scans only ADDED diff lines and only when a new `test(` is declared; a source-text read
+    added to an existing test body is invisible to it. Standing rule 4 ("green checks are not
+    evidence") is the doctrine; this is one of the mechanisms that defeats it quietly.
+
+    THE FIX, IN THE HOUSE SHAPE: a census test that walks `test/**/*.test.ts` for
+    `readFileSync(` calls whose argument resolves under `src/` (the audit's regex, plus the
+    `join(… "src" …)` form), counts per test file, and compares against
+    `scripts/source-text-assertion-baseline.json`; growth in any file fails, a decrease is
+    accepted and the PR re-captures. The baseline is captured in this PR at today's count and
+    carries a `_comment` naming the allowed exception (the census test asserts the comment is present): a test whose SUBJECT is the source file's
+    text (the CLAUDE.md budget ratchet, the docs-claims tests) declares itself with a marker
+    comment the census honours, so the count measures theatre and not the ratchets. Converting
+    the existing 206 sites is follow-up work the ratchet drives; changing `detectTestTheater` is
+    a separate review-engine concern and is not in this task.
+  acceptance:
+    - claim: "the per-file count of source-text reads in tests is recorded and cannot grow"
+      proof: "unit test: test/source-text-assertion-census.test.ts"

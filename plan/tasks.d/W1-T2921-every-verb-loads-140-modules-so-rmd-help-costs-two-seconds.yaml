@@ -1,0 +1,43 @@
+- id: W1-T2921
+  title: "EVERY VERB STATICALLY LOADS 140 MODULES SO rmd --help COSTS TWO SECONDS — status.ts imports escalate.ts for one constant, escalate.ts imports worker.ts, worker.ts imports the Claude SDK, and run-task.ts imports all of it at the top, so printing usage takes 1.5-2.1 s against a 30-70 ms bare-node floor: cut the one-constant edge and lazy-load the heavy verbs, proven by a test that --help never loads the SDK"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§9", "§8A", "W1-T47"]
+  files: [src/run-task.ts, src/lib/status.ts, src/lib/escalate.ts, src/lib/poll-interval.ts, test/help-does-not-load-the-sdk.test.ts, test/helpers/module-load-recorder.cjs]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-28 (OBSERVED). At f7ceb86, `src/run-task.ts` carries 138 static
+    `import` statements (MEASURED, `grep -cE '^import'`) and 3 dynamic ones; the module graph
+    from it loads 140 modules / 155k lines / 8.5 MB before `main()` runs. One chain is
+    illustrative: `src/lib/status.ts:28` imports `escalate.ts` for a single constant,
+    `escalate.ts` imports `worker.ts`, and `worker.ts` imports the Claude Agent SDK — so
+    `rmd status`, `rmd --help` and every plan-only verb pay for the SDK's load. `rmd --help`
+    measures 1.5-2.1 s against a 30-70 ms floor for bare node. The daemon pays this once; the
+    worker-side hooks, `rmd check-proof`, `rmd lint-plan` and the preflight gate — verbs run
+    dozens of times per session — pay it every invocation, and `ci-parity` shells several of
+    them in sequence.
+
+    THE FIX, WITHOUT WAITING FOR THE REGISTRY STEP (W1-T2893) but compatible with it: (1) move
+    the constant status.ts needs out of escalate.ts into a leaf (`src/lib/poll-interval.ts`,
+    the same leaf W1-T2895's cycle cut wants for `DEFAULT_POLL_INTERVAL_MS`; whichever task
+    lands first creates it and the other imports it); (2) in run-task.ts, convert the imports
+    that reach the SDK, playwright and the daemon into `await import()` inside the handlers
+    that use them, through one `loadHeavyVerb(name)` helper so the lazy set is listed in one
+    place. The test runs `bin/rmd --help` as a child process with
+    `NODE_OPTIONS=--require ./test/helpers/module-load-recorder.cjs`, a hook that records every
+    loaded module path to a file, and asserts the SDK, playwright and `daemon.ts` are absent
+    from the list; the control runs `rmd doctor` and asserts the daemon module IS loaded, so
+    the recorder is proven to see loads. No elapsed-time assertion — the module list is the
+    falsifier.
+  acceptance:
+    - claim: "printing usage does not load the Claude SDK, playwright or the daemon module"
+      proof: "unit test: test/help-does-not-load-the-sdk.test.ts"
+    - claim: "the heavy verbs are loaded lazily through one named helper"
+      proof: "grep: loadHeavyVerb( in src/run-task.ts"

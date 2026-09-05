@@ -1,0 +1,46 @@
+- id: W1-T2898
+  title: "LEDGER ACCESS IS OWNED BY NOBODY AND READ WHOLE BY EVERYBODY — the \"ledger.ndjson\" literal sits at 11 sites, eight reader entry points across six modules each re-derive the three-form rotation union that CLAUDE.md has to carry as prose, and every one is readFileSync plus per-line JSON.parse (662 ms and 540 MB of heap for today's 24 rotations, ~5 GB at 10x): one ledger-union module owns the paths, the glob and a streaming reader"
+  repo: remudero
+  depends_on: [W1-T2884]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§9", "W1-T2257", "W1-T1013", "W1-T2388", "W1-T2884"]
+  files: [src/lib/ledger-union.ts, src/lib/ledger-path.ts, src/lib/status.ts, src/lib/ledger-grep.ts, src/lib/ledger-replay.ts, src/lib/receipt.ts, src/lib/analytics-route.ts, src/lib/autonomy.ts, src/lib/retro.ts, src/lib/ledger.ts, test/ledger-union.test.ts, test/ledger-literal-census.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-38 and R-27 (both OBSERVED). At f7ceb86 the literal
+    `"ledger.ndjson"` appears at 11 sites in src/ (MEASURED, `grep -rn`), the canonical
+    `ledgerPathFor` lives in the CLI file (moved to `src/lib/ledger-path.ts` by W1-T2884, which
+    this task depends on), and eight reader entry points exist across `status.ts`
+    (`readLedgerUnionBounded` :1366, `readLedgerLines` :1446), `ledger-grep.ts`,
+    `ledger-replay.ts`, `receipt.ts`, `analytics-route.ts`, `autonomy.ts` and `retro.ts`. That
+    scatter is why CLAUDE.md's ledger section must say in prose that "the rotations come in TWO
+    FORMS and every glob that names only one answers SILENTLY WRONG", and why W1-T2257 and
+    W1-T1013 each fixed one reader that read the live file alone. R-27: every reader is
+    whole-file — `readFileSync` plus per-line `JSON.parse`, `gunzipSync` per rotation
+    (`status.ts:1270-1340`, `ledger.ts:1350+`); the 24-rotation union costs 662 ms, 251k
+    objects and 540 MB of heap today and scales linearly with history.
+
+    THE FIX: `src/lib/ledger-union.ts` owns (a) the three-pattern glob as ONE exported function
+    that every reader calls (so the two-forms rule becomes code, and the census below makes it
+    the only code), (b) `openLedgerUnion(stateDir, opts)` — a streaming line reader over the
+    union (gzip streams for rotations, readline over the live file) yielding parsed rows oldest
+    first with an optional `sinceTs`/`step` filter so callers stop materialising the whole
+    history, and (c) a bounded whole-array convenience for callers that genuinely need it,
+    implemented on top of the stream. Migrate the eight entry points onto it; delete the
+    per-module copies. The census test refuses any `"ledger.ndjson"` literal outside
+    `ledger-path.ts`/`ledger-union.ts`. The union test builds a state dir with a live file, a
+    `.ndjson` rotation and a `.ndjson.gz` rotation, and asserts every row of all three is
+    yielded exactly once — the control CLAUDE.md demands (each form proven read).
+  acceptance:
+    - claim: "one streaming reader over the three-form union yields every row of every form exactly once"
+      proof: "unit test: test/ledger-union.test.ts"
+    - claim: "the retro reads the ledger through the owner module rather than its own union"
+      proof: "grep: openLedgerUnion( in src/lib/retro.ts"
+    - claim: "the ledger filename literal cannot reappear outside the owner modules"
+      proof: "unit test: test/ledger-literal-census.test.ts"

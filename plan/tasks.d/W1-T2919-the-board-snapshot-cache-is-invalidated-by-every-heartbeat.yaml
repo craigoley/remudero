@@ -1,0 +1,41 @@
+- id: W1-T2919
+  title: "THE BOARD SNAPSHOT CACHE IS INVALIDATED BY EVERY HEARTBEAT — createBoardSnapshotCache keys on the live ledger's total line count, and daemon.alive (every poll) plus board_gateway.fetch_bytes rows change it, so the 1.1 s projection runs on the HTTP server's event loop at least once a minute whether or not anything decision-relevant changed: key the cache on the steps that can change a board row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§7", "§9", "W1-T2873"]
+  files: [src/lib/board.ts, test/board-snapshot-cache-ignores-heartbeats.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-26 (OBSERVED). At f7ceb86, `createBoardSnapshotCache`
+    (`src/lib/board.ts:773-812`) keys its snapshot on `(ledger line count, gateway health,
+    material open-index fingerprint)` — the module comment at `:711` says so. The daemon
+    appends `daemon.alive` on EVERY poll (`src/lib/daemon.ts:1985`) and the board gateway
+    appends `board_gateway.fetch_bytes` on every fetch (`src/lib/status.ts:5500`); each
+    changes the line count, so each invalidates the snapshot, and the next console read
+    recomputes `projectPlan` — 1.1 s at 1,347 tasks × 10k lines (R-23, in flight as its own
+    task) — synchronously on the single-threaded HTTP server. The console therefore stalls for
+    about a second at least once a minute in steady state with nothing on the board having
+    changed, and the operator experiences the "live" console as periodically frozen. W1-T2873
+    covers the cold-gateway half; this is the invalidation half.
+
+    THE FIX: key the cache on a fingerprint of the ledger rows whose steps can change a board
+    row — a `decision-relevant` step set held in one exported constant (run lifecycle, review
+    verdicts, arm/merge, escalation, blocked/unblocked, plan sync), computed as a running hash
+    over the union reader's filtered stream rather than a count — so heartbeats and gateway
+    telemetry leave the snapshot valid. The test appends `daemon.alive` and
+    `board_gateway.fetch_bytes` rows and asserts the cached snapshot is returned without
+    recompute (a recorder on the projection seam reads zero calls); then appends a
+    `review.posted` row and asserts exactly one recompute. A control asserts the pre-change
+    behaviour recomputed on the heartbeat, so the test is load-bearing.
+  acceptance:
+    - claim: "heartbeat and gateway-telemetry rows do not invalidate the board snapshot"
+      proof: "unit test: test/board-snapshot-cache-ignores-heartbeats.test.ts"
+    - claim: "the steps that may invalidate the snapshot are named in one place"
+      proof: "grep: decision-relevant in src/lib/board.ts"

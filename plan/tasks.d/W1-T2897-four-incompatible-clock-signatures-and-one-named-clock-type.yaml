@@ -1,0 +1,46 @@
+- id: W1-T2897
+  title: "FOUR INCOMPATIBLE INJECTED-CLOCK SIGNATURES AND ONE NAMED CLOCK TYPE — now: () => number at 64 sites, () => Date at 16, () => string at 3, beside 153 bare Date.now() and 145 new Date( calls, so a test cannot freeze time across two modules and the weekly clock-sweep exists to count the drift: declare one Clock port, migrate the daemon onto it, and hold the signature count with a census"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§8A", "W1-T1128"]
+  files: [src/lib/clock.ts, src/lib/daemon.ts, test/clock-port.test.ts, test/clock-signature-census.test.ts, scripts/clock-signature-baseline.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-34 (OBSERVED). At f7ceb86, `git grep -ohE '\bnow\??: \(\) =>
+    (number|string|Date)' -- src | sort | uniq -c` reads `now?: () => number` 53, `now: () =>
+    number` 11, `now?: () => Date` 15, `now: () => Date` 1, `now?: () => string` 3 — four
+    incompatible shapes — while `Date.now()` appears at 153 sites in 43 files and `new Date(`
+    at 145 in 48. `src/lib/daemon.ts:1722` declares the one named clock type. W1-T1128's
+    `clock-sweep.yml` with `driftCeiling: 11` (`scripts/clock-sweep-baseline.json`) counts
+    wall-clock DRIFT in tests, which is the symptom: two modules that each take a different
+    clock shape cannot be frozen together, so tests reach for real sleeps and elapsed-time
+    assertions (R-45: 182 `setTimeout` in 78 test files). CLAUDE.md's code-trap "a fixed date
+    constant compared against rows stamped at REAL time is a time bomb … stamp through the
+    injected clock at the write seam" (#2250) presumes a clock seam that exists everywhere; it
+    does not.
+
+    THE FIX, SCOPED SO IT SHIPS: `src/lib/clock.ts` declares `interface Clock { now(): number;
+    date(): Date; iso(): string }`, `systemClock`, and `fixedClock(ms)` for tests — one type
+    that satisfies every existing shape by adapter. Migrate `src/lib/daemon.ts` (the module with
+    the named type and the most call sites) onto it in this task. DO NOT migrate the other 42
+    files here: the census test (`test/clock-signature-census.test.ts`, baseline in
+    `scripts/clock-signature-baseline.json`) records today's per-file counts of the four legacy
+    shapes and of bare `Date.now()`/`new Date(` and refuses growth, so each later PR that
+    touches a file can migrate it and lower its row. Rule 19: one port, one migrated module,
+    one ratchet — the remaining migration is follow-up work the ratchet drives.
+  acceptance:
+    - claim: "one Clock port exists with system and fixed implementations"
+      proof: "unit test: test/clock-port.test.ts"
+    - claim: "the fixed clock is constructed and read through the port in the test"
+      proof: "grep: fixedClock( in test/clock-port.test.ts"
+    - claim: "the daemon reads time through the port rather than through its own clock type"
+      proof: "grep: lib/clock\" in src/lib/daemon.ts"
+    - claim: "the count of legacy clock shapes and bare Date calls per file is recorded and cannot grow"
+      proof: "unit test: test/clock-signature-census.test.ts"

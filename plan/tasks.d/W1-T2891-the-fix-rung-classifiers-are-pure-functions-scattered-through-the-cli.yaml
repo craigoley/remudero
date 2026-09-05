@@ -1,0 +1,37 @@
+- id: W1-T2891
+  title: "THE FIX-RUNG CLASSIFIERS ARE PURE FUNCTIONS SCATTERED THROUGH THE CLI FILE — detectReviewFalseBlock, detectCiLogVerdictUnchanged, classifyUpdateBranchFailure and classifyNoPrShape take text and return a verdict, and runFixRung (2,011 lines) is unreadable partly because they sit between its halves: move them to src/lib/fix-rung-classify.ts (decomposition step 8)"
+  repo: remudero
+  depends_on: [W1-T2890]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§4B", "§8A", "W1-T2883", "W1-T2799"]
+  files: [src/run-task.ts, src/lib/fix-rung-classify.ts, test/fix-rung-classify.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Step 8 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29). OBSERVED at
+    f7ceb86: `runFixRung` (`src/run-task.ts:8441`) is 2,011 lines. The classifiers it consults
+    are pure text-to-verdict functions defined elsewhere in the same file —
+    `classifyUpdateBranchFailure` (:3780), `detectReviewFalseBlock` (:7367),
+    `detectCiLogVerdictUnchanged` (:7444), `classifyNoPrShape` (:10630) — each with its own
+    table-driven test population that currently compiles the whole entrypoint to run
+    (~1,022 ms per process, R-40). W1-T2799 (the false-block circuit breaker that forgets it
+    fired) is the most recent defect that needed the classifier and the rung read together.
+
+    THE FIX: move the four classifiers, their verdict types and the private helpers only they
+    use into `src/lib/fix-rung-classify.ts`; run-task.ts imports and RE-EXPORTS the names so
+    existing tests resolve. Pure means pure: a classifier that turns out to read process state
+    stays behind and is named in the PR as a step-9 concern. Lower the run-task.ts ceiling in
+    `scripts/source-size-baseline.json` by the lines removed. The new test feeds each classifier
+    the fixture texts its existing tests use and asserts identical verdicts.
+  acceptance:
+    - claim: "run-task.ts imports the fix-rung classifiers from lib instead of defining them"
+      proof: "grep: lib/fix-rung-classify\" in src/run-task.ts"
+    - claim: "each classifier returns the same verdict for the same fixture text after the move"
+      proof: "unit test: test/fix-rung-classify.test.ts"
+    - claim: "the false-block detector is exercised through the lib module in the test"
+      proof: "grep: detectReviewFalseBlock( in test/fix-rung-classify.test.ts"
