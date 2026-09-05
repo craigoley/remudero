@@ -443,3 +443,44 @@ test("the shipped tree passes its own ratchet, over a corpus that is not empty",
   const total = Number(/comment-load: (\d+) comment lines/.exec(printed.stdout)?.[1]);
   assert.ok(total > 1000, `sanity: the measurement must see a real corpus; saw ${total}`);
 });
+
+// ── --no-record: the form a GATE runs — enforces exactly, records nothing ─────────────────────
+
+test("main --no-record: a drifted ledger is left byte-identical and the run still passes", () => {
+  // The gate form's whole job. Left recording, this write is what dirtied the tracked tree on
+  // every suite run that spawned `preflight --fast` (W1-T2791's split, applied here).
+  const root = fixtureRepo({ "src/a.ts": 5, "src/gone.ts": 3, "scripts/comment-load-baseline.json": 0 }, `// one\n${CLEAN}`);
+  try {
+    const before = readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8");
+    const { code, out } = runInProcess(["--root", root, "--base", "main", "--no-record"]);
+    assert.equal(code, 0, "drift alone is not a failure — only growth is");
+    assert.match(out, /baseline change\(s\) are pending and --no-record left/);
+    assert.equal(
+      readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8"),
+      before,
+      "--no-record must leave the ledger byte-identical",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main --no-record: growth this diff added is STILL refused — not writing is not not enforcing", () => {
+  // The discriminator. A flag that suppressed the write by suppressing the verdict would pass the
+  // test above and gate nothing.
+  const root = fixtureRepo({ "src/a.ts": 1, "scripts/comment-load-baseline.json": 0 }, `// one\n${CLEAN}`);
+  try {
+    commitOnBranch(root, `// one\n// two\n${CLEAN}`);
+    const before = readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8");
+    const { code, err } = runInProcess(["--root", root, "--base", "main", "--no-record"]);
+    assert.equal(code, 1, "a file over its ceiling is refused with or without --no-record");
+    assert.match(err, /BLOCKED/);
+    assert.equal(
+      readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8"),
+      before,
+      "and the refusal still writes nothing",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
