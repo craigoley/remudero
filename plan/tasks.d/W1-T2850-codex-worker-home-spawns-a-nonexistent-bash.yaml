@@ -48,20 +48,35 @@
     filed separately alongside this shard; and any change to worker-home redirection behaviour, which
     is not implicated — only the fixture's interpreter path is.
   acceptance:
-    - claim: "the absent-interpreter cluster is declared with a cause naming the path rather than the shell"
+    - claim: "design (iii) is answered against the fixture: the probe's interpreter is resolved through PATH the way the production seam resolves it, never a hardcoded absolute path"
+      proof: "grep: execFileSync(\"bash\", in test/codex-worker-home-redirection.test.ts"
+    - claim: "the guard refuses the CLASS and not the one instance — any absolute interpreter path spawned from that file fails it"
       proof: "unit test: test/codex-worker-home-cluster-declared.test.ts"
-    - claim: "the cluster's applicability predicate is decided against the path rather than assumed from the platform"
-      proof: "unit test: test/codex-worker-home-cluster-declared.test.ts"
-    - claim: "the declared count matches the number of reds the file actually produces"
+    - claim: "NO host cluster is declared for the file, because a cluster attributing reds that no longer happen is a false attribution and buries the defect"
       proof: "unit test: test/codex-worker-home-cluster-declared.test.ts"
   risk: high
   origin: "oper#undeclared-bash-path-cluster-2026-09-04"
   plan_refs: ["W1-T2234"]
-  files: [src/lib/ci-parity.ts, test/codex-worker-home-cluster-declared.test.ts]
+  # CORRECTED 2026-09-05: the fix edits the SUBJECT suite (design (iii)'s answer was a test
+  # defect, not a cluster), and src/lib/ci-parity.ts is NOT touched — no cluster is declared.
+  # lint-plan's proof-scope check named this: a criterion may not cite a path outside files:.
+  files: [test/codex-worker-home-redirection.test.ts, test/codex-worker-home-cluster-declared.test.ts]
   status: queued
   attempts: 0
   note: |
-    THIS IS THE ONLY ONE OF THE FOUR 2026-09-04 FINDINGS THAT IS GENUINELY A HOST FACT. The other
+    CORRECTED 2026-09-05 BY DESIGN (iii)'s OWN CHECK — THIS IS NOT A HOST FACT. The note below
+    called it "the ONLY one of the four 2026-09-04 findings that is GENUINELY A HOST FACT". Read
+    against the fixture, it is a TEST DEFECT: bash is not the code under test but a PROBE, the
+    production path resolves bash BY NAME through the injectable spawn seam (detectHostFacts spawns
+    "bash", never an absolute path), and the env the probe is handed carries PATH (measured keys:
+    CODEX_HOME, GH_TOKEN, GITHUB_TOKEN, HOME, PATH, REMUDERO_WORKER_SCOPE). The probe could always
+    have resolved the interpreter as production does. Fixed at the source; no cluster declared, since
+    one over a fixed defect attributes to the machine reds that no longer happen. The criteria above
+    are repointed to what was actually delivered rather than left describing a cluster it would be
+    untrue to declare. The original text stands below, because design (iii) existed precisely to
+    catch this and the record is more useful than a silent edit.
+
+    ORIGINAL NOTE: THIS IS THE ONLY ONE OF THE FOUR 2026-09-04 FINDINGS THAT IS GENUINELY A HOST FACT. The other
     three — the ad-hoc lane leak, the host-update tmp collision and the git-grep word boundary — are
     defects, and each is filed as such. Grouping all four as "machine noise" was the reading this
     filing set out to correct, and design (iii) exists so this shard does not commit the same error
