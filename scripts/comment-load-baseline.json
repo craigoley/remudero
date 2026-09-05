@@ -218,7 +218,7 @@
   "src/lib/repo-location.ts": 50,
   "src/lib/retro-preflight.ts": 83,
   "src/lib/retro-subprocess.ts": 8,
-  "src/lib/retro.ts": 2156,
+  "src/lib/retro.ts": 890,
   "src/lib/review-capacity.ts": 12,
   "src/lib/review-provider-provenance.ts": 29,
   "src/lib/review.ts": 5526,

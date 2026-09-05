@@ -152,6 +152,12 @@
       "grepHint": "ledger.ts forensics"
     },
     {
+      "path": "docs/forensics/retro.md",
+      "title": "retro.ts forensics",
+      "summary": "The measured facts, incidents and design arguments that used to live as comment prose inside",
+      "grepHint": "retro.ts forensics"
+    },
+    {
       "path": "docs/forensics/sweep-map.md",
       "title": "Removed block map — `src/lib/sweep.ts`",
       "summary": "Every comment block compacted out of `src/lib/sweep.ts`, mapped to the heading in",
