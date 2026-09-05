@@ -128,6 +128,18 @@
       "grepHint": "Deploy supervisor — self-updating the daemon"
     },
     {
+      "path": "docs/forensics/README.md",
+      "title": "Forensics",
+      "summary": "This directory holds the measured forensic detail compacted out of source-file comments. Every",
+      "grepHint": "Forensics"
+    },
+    {
+      "path": "docs/forensics/sweep.md",
+      "title": "Forensics — `src/lib/sweep.ts`",
+      "summary": "A verbatim archive of comment blocks compacted out of `src/lib/sweep.ts`. Each heading names",
+      "grepHint": "Forensics — `src/lib/sweep.ts`"
+    },
+    {
       "path": "docs/open-decisions.md",
       "title": "Open decisions — the rulings only the operator makes",
       "summary": "Three things are currently undecided, and each one blocks work that is otherwise ready. They are",
