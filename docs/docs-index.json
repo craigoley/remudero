@@ -122,6 +122,12 @@
       "grepHint": "Dependency-PR review lane (W1-T54 + W1-T54b)"
     },
     {
+      "path": "docs/deploy-image-forensics.md",
+      "title": "Deploy image forensics: the measured record behind `deploy/Dockerfile`",
+      "summary": "Every incident, measurement and rejected alternative that `deploy/Dockerfile` used to carry inline,",
+      "grepHint": "Deploy image forensics: the measured record behind `deploy/Dockerfile`"
+    },
+    {
       "path": "docs/deploy-supervisor.md",
       "title": "Deploy supervisor — self-updating the daemon",
       "summary": "The daemon runs `tsx src/…` (loaded once at start) and dispatches in-process, so a",

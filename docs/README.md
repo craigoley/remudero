@@ -33,6 +33,7 @@ the kind decides how a change lands:
 | [control-surface.md](control-surface.md) | hand-written | Fleet commands (STOP, PAUSE, resume, away) and safe dispatch. |
 | [dep-review.md](dep-review.md) | hand-written | The Dependabot-PR review lane. |
 | [deploy-supervisor.md](deploy-supervisor.md) | hand-written | How the daemon updates itself, and what needs an image rebuild. |
+| [deploy-image-forensics.md](deploy-image-forensics.md) | hand-written | The measured record behind every `deploy/Dockerfile` layer: incidents, rejected alternatives, evidence. |
 | [operator-message-standard.md](operator-message-standard.md) | hand-written | The shape every operator-facing message must take. |
 | [probe.md](probe.md) | hand-written | Mount routing: deterministic task-class → model routing, proven by probe. |
 | [adr/](adr/README.md) | hand-written | Architecture Decision Records for one-way-door changes (and the test for which changes need one). |
