@@ -1170,6 +1170,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
   npmScriptEntry("learnings-budget-ratchet", "learnings-budget-ratchet"),
   npmScriptEntry("jscpd-gate", "jscpd"),
+  npmScriptEntry("comment-load-ratchet", "comment-load-ratchet"),
   npmScriptEntry("claims", "claims"),
   {
     job: "lint-plan",
@@ -1590,9 +1591,24 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "`git ls-files -- ee-open.json` checks exactly one named path is untracked; not a population walk",
   ),
   refusedForPredicate(
+    "test/comment-load-ratchet.test.ts",
+    "a",
+    "the comment-load ratchet's own falsifier suite. The recognizer's text heuristic matches it on an `ls-files` mention in its " +
+      "header prose plus the `src/` fixture paths in its bodies, but the suite makes no such call over the tracked tree: its own " +
+      "git calls build a throwaway fixture repo under mkdtemp, and its baseline-coverage assertion reads the population from the " +
+      "script's exported listMeasuredFiles rather than walking src/ itself",
+  ),
+  refusedForPredicate(
     "test/config-fixture-path-parity.test.ts",
     "a",
     "`git ls-files test` is scoped to test/ only, never src/",
+  ),
+  refusedForPredicate(
+    "test/deploy-scripts-use-mktemp.test.ts",
+    "a",
+    "W1-T2915's deploy-script census. Its `git ls-files deploy/*.sh` walks the DEPLOY population — shell scripts, never src/*.ts — " +
+      "and the `src/` string the recognizer sees is one comment citing src/lib/tmp.ts's sweepStaleTempDirs as the reason the " +
+      "`rmd-` prefix is load-bearing",
   ),
   refusedForPredicate(
     "test/coverage-session-blanking.test.ts",
@@ -1929,6 +1945,16 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
     job: "jscpd",
     script: "jscpd",
     reason: "same-class — deterministic npm-script gate ci.yml's jscpd-gate job runs unconditionally, measured 0.17s",
+  },
+  {
+    job: "comment-load-ratchet",
+    script: "comment-load-ratchet",
+    reason:
+      "same-class — a deterministic, offline npm-script gate ci.yml's comment-load-ratchet job runs unconditionally. It " +
+      "reads the tracked tree plus a local merge-base diff (git ls-files / merge-base / diff; never the network, never " +
+      "node --test) and refuses a file whose comment-line count grew past scripts/comment-load-baseline.json or an added " +
+      "comment block over 40 lines. Run locally it also records a shrink DOWN into that baseline, which is where an author " +
+      "wants that edit made — see docs/comment-standard.md",
   },
   {
     job: "depcruise",

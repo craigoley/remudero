@@ -110,6 +110,12 @@
       "grepHint": "rmd CLI reference"
     },
     {
+      "path": "docs/comment-standard.md",
+      "title": "The comment standard",
+      "summary": "How to write a code comment in this repo, and how much of one. It applies to every tracked file",
+      "grepHint": "The comment standard"
+    },
+    {
       "path": "docs/control-surface.md",
       "title": "Control surface — fleet commands & safe dispatch",
       "summary": "The `rmd` CLI is the control surface for an unattended daemon, so it must be safe and",
@@ -122,16 +128,46 @@
       "grepHint": "Dependency-PR review lane (W1-T54 + W1-T54b)"
     },
     {
+      "path": "docs/deploy-image-forensics.md",
+      "title": "Deploy image forensics: the measured record behind `deploy/Dockerfile`",
+      "summary": "Every incident, measurement and rejected alternative that `deploy/Dockerfile` used to carry inline,",
+      "grepHint": "Deploy image forensics: the measured record behind `deploy/Dockerfile`"
+    },
+    {
       "path": "docs/deploy-supervisor.md",
       "title": "Deploy supervisor — self-updating the daemon",
       "summary": "The daemon runs `tsx src/…` (loaded once at start) and dispatches in-process, so a",
       "grepHint": "Deploy supervisor — self-updating the daemon"
     },
     {
+      "path": "docs/forensics/README.md",
+      "title": "Forensics",
+      "summary": "This directory holds the measured forensic detail compacted out of source-file comments. Every",
+      "grepHint": "Forensics"
+    },
+    {
       "path": "docs/forensics/daemon.md",
       "title": "daemon.ts forensics",
       "summary": "Measured forensics, incidents and design arguments removed from `src/lib/daemon.ts` when its comments were compacted to the plain-language standard. The code k…",
       "grepHint": "daemon.ts forensics"
+    },
+    {
+      "path": "docs/forensics/ledger.md",
+      "title": "ledger.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "ledger.ts forensics"
+    },
+    {
+      "path": "docs/forensics/sweep-map.md",
+      "title": "Removed block map — `src/lib/sweep.ts`",
+      "summary": "Every comment block compacted out of `src/lib/sweep.ts`, mapped to the heading in",
+      "grepHint": "Removed block map — `src/lib/sweep.ts`"
+    },
+    {
+      "path": "docs/forensics/sweep.md",
+      "title": "Forensics — `src/lib/sweep.ts`",
+      "summary": "A verbatim archive of comment blocks compacted out of `src/lib/sweep.ts`. Each heading names",
+      "grepHint": "Forensics — `src/lib/sweep.ts`"
     },
     {
       "path": "docs/open-decisions.md",
