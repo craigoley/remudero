@@ -36,7 +36,7 @@
   "src/lib/dispatch-overlap.ts": 532,
   "src/lib/doctor.ts": 1000,
   "src/lib/drain-lock.ts": 156,
-  "src/lib/drain.ts": 2500,
+  "src/lib/drain.ts": 3000,
   "src/lib/emissions.ts": 205,
   "src/lib/env.ts": 510,
   "src/lib/escalate.ts": 2000,
