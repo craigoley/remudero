@@ -88,7 +88,12 @@
     SCOPE AMENDMENT 2026-09-05: the runtime verifier becomes a postcondition of the existing
     recycle script, so that script's established stub must emit the mount inspection the new
     postcondition consumes. Without `test/recycle-container.test.ts` in scope, every existing
-    successful recycle regression would stop at an unmodelled empty mount list and the task could
-    not prove that image verification, pause/drain sequencing, authentication, reclaim and the
-    Claude-only fallback remain unchanged. This adds the existing regression harness only; it does
-    not broaden the production surface or authorize a recycle.
+    successful recycle regression would stop at an unmodelled empty mount list and the task
+    could not prove that image verification, pause/drain sequencing, authentication, reclaim
+    and the Claude-only fallback remain unchanged. This adds the existing regression harness
+    only.
+
+    This scope amendment does not broaden the production surface or authorize a recycle: it
+    files no code, adds no production subsystem, and grants no operator permission to run the
+    recycle lifecycle. It only widens `files:` to include the existing regression harness
+    already required by the unchanged-lifecycle acceptance criterion above.
