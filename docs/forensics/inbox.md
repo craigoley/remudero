@@ -1,4 +1,4 @@
-# `src/lib/inbox.ts` — archived comment forensics
+# Forensics — `src/lib/inbox.ts`
 
 `src/lib/inbox.ts` is the ratification inbox (MASTER-PLAN §7B): it tiers open proposals, drafts a
 candidate through a bounded Architect worker, and ratifies an approved draft into a plan PR.
@@ -56,7 +56,7 @@ The code keeps a one-line `// Why:` pointer wherever the history mattered.
 
 Explained `the module header`. Base lines 36-84; first words: "`rmd inbox` — the ratification".
 
-```
+```text
 /**
  * `rmd inbox` — the ratification inbox's DETERMINISTIC CORE (MASTER-PLAN P25(i), W1-T110).
  *
@@ -112,7 +112,7 @@ Explained `the module header`. Base lines 36-84; first words: "`rmd inbox` — t
 
 Explained `DAEMON_DRAFT_BATCH_CAP`. Base lines 387-435; first words: "W1-T2561: the MOST proposals one".
 
-```
+```text
 /**
  * W1-T2561: the MOST proposals one daemon poll may spawn an Architect for.
  *
@@ -168,7 +168,7 @@ Explained `DAEMON_DRAFT_BATCH_CAP`. Base lines 387-435; first words: "W1-T2561: 
 
 Explained `evictRefusalPoisonedKeys`. Base lines 454-489; first words: "W1-T2564 MIGRATION: re-open every attempt".
 
-```
+```text
 /**
  * W1-T2564 MIGRATION: re-open every attempt key that never produced a draft.
  *
@@ -211,7 +211,7 @@ Explained `evictRefusalPoisonedKeys`. Base lines 454-489; first words: "W1-T2564
 
 Explained `evictRefusalPoisonedKeys`. Base lines 494-501; first words: "W1-T2566 — ids this host".
 
-```
+```text
   /**
    * W1-T2566 — ids this host has ALREADY re-opened once, read from {@link ReopenedKeysCache}.
    * An EXCLUSION, not a change to the predicate above: "keyed, live, no cached draft" still
@@ -226,7 +226,7 @@ Explained `evictRefusalPoisonedKeys`. Base lines 494-501; first words: "W1-T2566
 
 Explained `evictRefusalPoisonedKeys`. Base lines 508-512; first words: "W1-T2566: a proposal that fails".
 
-```
+```text
     // W1-T2566: a proposal that fails GENUINELY and repeatedly never acquires a cached draft, so
     // it satisfies the predicate on EVERY boot. The closure flag that bounds this within a
     // process cannot see across the restart that resets it, and at a MEASURED median daemon
@@ -238,7 +238,7 @@ Explained `evictRefusalPoisonedKeys`. Base lines 508-512; first words: "W1-T2566
 
 Explained `mergeDraftCaches`. Base lines 520-539; first words: "W1-T2569: MERGE this batch's own".
 
-```
+```text
 /**
  * W1-T2569: MERGE this batch's own results onto the caches AS THEY ARE ON DISK RIGHT NOW, rather
  * than onto the snapshot this batch read when it started.
@@ -265,7 +265,7 @@ Explained `mergeDraftCaches`. Base lines 520-539; first words: "W1-T2569: MERGE 
 
 Explained `DraftDeferralCache`. Base lines 550-574; first words: "W1-T2590: `<config.root>/state/inbox-draft-deferred-until.json` — the instant".
 
-```
+```text
 /**
  * W1-T2590: `<config.root>/state/inbox-draft-deferred-until.json` — the instant the account itself
  * said its window reopens, after a draft was refused for a usage/session limit.
@@ -297,7 +297,7 @@ Explained `DraftDeferralCache`. Base lines 550-574; first words: "W1-T2590: `<co
 
 Explained `decideDraftDeferral`. Base lines 599-610; first words: "Should this poll's draft batch".
 
-```
+```text
 /**
  * Should this poll's draft batch run, or is the account's own stated window still shut?
  *
@@ -316,7 +316,7 @@ Explained `decideDraftDeferral`. Base lines 599-610; first words: "Should this p
 
 Explained `deferralFromOutcomes`. Base lines 625-636; first words: "The deferral a batch's own".
 
-```
+```text
 /**
  * The deferral a batch's own outcomes justify, or `undefined` when they justify none.
  *
@@ -335,7 +335,7 @@ Explained `deferralFromOutcomes`. Base lines 625-636; first words: "The deferral
 
 Explained `ReadinessContext.depsUnobservable`. Base lines 775-795; first words: "W1-T510: the readiness predicate's THIRD".
 
-```
+```text
   /**
    * W1-T510: the readiness predicate's THIRD value for a dependency's landed-ness. `isMerged`
    * above is (necessarily — see {@link "./plan.js".MergedResolver}'s own two-valued signature,
@@ -363,7 +363,7 @@ Explained `ReadinessContext.depsUnobservable`. Base lines 775-795; first words: 
 
 Explained `approveRunBranch`. Base lines 835-874; first words: "THE ONE PLACE an approve".
 
-```
+```text
 /**
  * THE ONE PLACE an approve run's `run_id` becomes a GIT REF NAME (and, through
  * `join(worktreesDir(config), branch)`, a WORKTREE DIRECTORY NAME). Sanitising happens HERE, at
@@ -410,7 +410,7 @@ Explained `approveRunBranch`. Base lines 835-874; first words: "THE ONE PLACE an
 
 Explained `priorApproveRunBranch`. Base lines 889-904; first words: "W1-T903: the branch a PRIOR".
 
-```
+```text
 /**
  * W1-T903: the branch a PRIOR `rmd approve <proposalId>` run would have pushed, derived PURELY
  * from ledger evidence — `approveCommand` (run-task.ts) mints `run_id`s of the shape
@@ -433,7 +433,7 @@ Explained `priorApproveRunBranch`. Base lines 889-904; first words: "W1-T903: th
 
 Explained `classifyProposal`. Base lines 1032-1041; first words: "W1-T2451: a board-review proposal's referent".
 
-```
+```text
   // W1-T2451: a board-review proposal's referent is checked next, before drafting/trigger/the
   // four AND-clauses below. RESOLVED (the referent left the open board) is a terminal override,
   // exactly like the ratified check above — a proposal about a PR that already merged, died, or
@@ -450,7 +450,7 @@ Explained `classifyProposal`. Base lines 1032-1041; first words: "W1-T2451: a bo
 
 Explained `INBOX_DRAFT_DISALLOWED_TOOLS`. Base lines 1141-1167; first words: "W1-T2591 — THE TOOLS THE".
 
-```
+```text
 /**
  * W1-T2591 — THE TOOLS THE DRAFT PROMPT ALREADY CLAIMS THIS RUNG DOES NOT HAVE, now enforced.
  *
@@ -484,7 +484,7 @@ Explained `INBOX_DRAFT_DISALLOWED_TOOLS`. Base lines 1141-1167; first words: "W1
 
 Explained `stripMarkdownFence`. Base lines 1258-1272; first words: "Strip a markdown code fence".
 
-```
+```text
 /**
  * Strip a markdown code fence wrapping an Architect-drafted fragment — a ```yaml (or bare
  * ```) opening line and its matching ``` closing line — so a FENCED draft parses as plain
@@ -506,7 +506,7 @@ Explained `stripMarkdownFence`. Base lines 1258-1272; first words: "Strip a mark
 
 Explained `DraftRungOutcome`. Base lines 1347-1355; first words: "W1-T2564: `refused` marks a run".
 
-```
+```text
   /**
    * W1-T2564: `refused` marks a run the ACCOUNT turned away (a session/usage limit), as distinct
    * from a run that happened and failed. THE DIFFERENCE IS NOT COSMETIC — it decides whether a
@@ -522,7 +522,7 @@ Explained `DraftRungOutcome`. Base lines 1347-1355; first words: "W1-T2564: `ref
 
 Explained `runDraftRung`. Base lines 1358-1374; first words: "Draft EVERY proposal in `toDraft`".
 
-```
+```text
 /**
  * Draft EVERY proposal in `toDraft` against `currentPlanText`, via {@link inboxDraftPrompt} +
  * {@link parseDraftedCandidate}. Independent proposals run concurrently up to
@@ -546,7 +546,7 @@ Explained `runDraftRung`. Base lines 1358-1374; first words: "Draft EVERY propos
 
 Explained `runDraftRung`. Base lines 1486-1490; first words: "W1-T2664: the daemon's volume cap".
 
-```
+```text
   // W1-T2664: the daemon's volume cap was also an accidental wall-clock multiplier. Live
   // evidence on 2026-09-02 showed three independent drafts starting sequentially inside one full
   // sweep; one completed after 347s and the batch crossed the sweep's 559s await bound. A tiny
@@ -558,7 +558,7 @@ Explained `runDraftRung`. Base lines 1486-1490; first words: "W1-T2664: the daem
 
 Explained `ProposalRegistryParseResult`. Base lines 1644-1658; first words: "W1-T1270: the discriminated outcome {@link".
 
-```
+```text
 /** W1-T1270: the discriminated outcome {@link parseProposalRegistryResult} reports —
  *  the same four input classes {@link parseProposalRegistry} collapses to `[]` kept
  *  apart, so a caller that cares WHY a read came back with no proposals can tell "this
@@ -580,7 +580,7 @@ Explained `ProposalRegistryParseResult`. Base lines 1644-1658; first words: "W1-
 
 Explained `loadProposalRegistry`. Base lines 1694-1710; first words: "── W1-T2490: PROPOSAL SHARDING —".
 
-```
+```text
 // ── W1-T2490: PROPOSAL SHARDING — a proposal gets the same one-record-per-file home
 // `plan/tasks.d/` already gave tasks and `plan/decisions.d/` gave decisions ───────────────
 //
@@ -604,7 +604,7 @@ Explained `loadProposalRegistry`. Base lines 1694-1710; first words: "── W1-
 
 Explained `loadProposalRegistry`. Base lines 1785-1800; first words: "Load `registryPath` (the legacy `state/inbox-proposals.json`".
 
-```
+```text
 /**
  * Load `registryPath` (the legacy `state/inbox-proposals.json` blob) merged with any shards
  * under the sibling `inbox-proposals.d/` directory, as ONE population — exactly as plan.ts's
@@ -627,7 +627,7 @@ Explained `loadProposalRegistry`. Base lines 1785-1800; first words: "Load `regi
 
 Explained `updateProposalRegistry`. Base lines 1810-1858; first words: "── W1-T240: the ONE registry-write".
 
-```
+```text
 // ── W1-T240: the ONE registry-write helper every writer of state/inbox-proposals.json
 // goes through ─────────────────────────────────────────────────────────────────────────
 //
@@ -683,7 +683,7 @@ Explained `updateProposalRegistry`. Base lines 1810-1858; first words: "── W
 
 Explained `updateProposalRegistry`. Base lines 1998-2008; first words: "A `next` proposal that is".
 
-```
+```text
     // A `next` proposal that is NEW (its id was not in `current` at all) or already had a
     // shard mirror gets its OWN file, atomically (sibling temp file + rename — the SAME
     // idiom the blob write below uses) — MIRRORED alongside the blob write below, never
@@ -701,7 +701,7 @@ Explained `updateProposalRegistry`. Base lines 1998-2008; first words: "A `next`
 
 Explained `writeDraftAttemptPair`. Base lines 2040-2061; first words: "── W1-T241: the ONE atomic-write".
 
-```
+```text
 // ── W1-T241: the ONE atomic-write helper for the daemon draft rung's cache PAIR ───────────
 //
 // buildInboxDraftHook (run-task.ts) used to write `state/inbox-drafts.json` and
@@ -730,7 +730,7 @@ Explained `writeDraftAttemptPair`. Base lines 2040-2061; first words: "── W1
 
 Explained `ReopenedKeysCache`. Base lines 2075-2085; first words: "`<config.root>/state/inbox-reopened-keys.json` (W1-T2566) — one entry".
 
-```
+```text
 /**
  * `<config.root>/state/inbox-reopened-keys.json` (W1-T2566) — one entry per proposal id this host
  * has re-opened, with the ISO stamp it happened at. The third cache beside `inbox-drafts.json` and
@@ -748,7 +748,7 @@ Explained `ReopenedKeysCache`. Base lines 2075-2085; first words: "`<config.root
 
 Explained `pruneRatifiedProposals`. Base lines 2149-2164; first words: "W1-T190 (round 2): the read-side".
 
-```
+```text
 /**
  * W1-T190 (round 2): the read-side override in {@link classifyProposal} stops a drifted
  * registry entry from ever being MISCLASSIFIED again, but the drifted entry itself — the
@@ -771,7 +771,7 @@ Explained `pruneRatifiedProposals`. Base lines 2149-2164; first words: "W1-T190 
 
 Explained `draftedDuplicate`. Base lines 2177-2210; first words: "── W1-T2455: THE DUPLICATE CHECK".
 
-```
+```text
 // ── W1-T2455: THE DUPLICATE CHECK AT THE RATIFICATION SEAM ──────────────────────────────────
 //
 // `duplicateTitleViolations` (task-linter.ts) has been WIRED since W1-T1076 — `duplicateCorpusOpts`
@@ -812,7 +812,7 @@ Explained `draftedDuplicate`. Base lines 2177-2210; first words: "── W1-T245
 
 Explained `draftedShardSlugs`. Base lines 2212-2221; first words: "The slug stem of each".
 
-```
+```text
 /**
  * The slug stem of each shard a drafted fragment would be filed as — the SAME stems
  * {@link ratificationShardFiles} emits, so the check scores exactly what would land on disk.
@@ -829,7 +829,7 @@ Explained `draftedShardSlugs`. Base lines 2212-2221; first words: "The slug stem
 
 Explained `approveProposal`. Base lines 2439-2463; first words: "`rmd approve <P##>` — valid".
 
-```
+```text
 /**
  * `rmd approve <P##>` — valid ONLY for a READY classification. Approving anything else is
  * REFUSED, naming the state, with ZERO gateway calls (a bit on a non-ready item initiates
@@ -861,7 +861,7 @@ Explained `approveProposal`. Base lines 2439-2463; first words: "`rmd approve <P
 
 Explained `approveCommitMessage`. Base lines 2552-2562; first words: "The harness-authored commit message for".
 
-```
+```text
 /** The harness-authored commit message for a `rmd approve` ratification branch — never
  *  the LLM (mirrors lib/plan-architect.ts's `planCommitMessage` discipline in spirit: the
  *  fragment and stamp are the Architect's drafted TEXT, but the commit framing around
@@ -879,7 +879,7 @@ Explained `approveCommitMessage`. Base lines 2552-2562; first words: "The harnes
 
 Explained `ratificationShardFiles`. Base lines 2597-2618; first words: "Split a drafted fragment into".
 
-```
+```text
 /**
  * Split a drafted fragment into ONE `plan/tasks.d/` shard per task it carries.
  *
@@ -908,7 +908,7 @@ Explained `ratificationShardFiles`. Base lines 2597-2618; first words: "Split a 
 
 Explained `writeRatificationShards`. Base lines 2656-2666; first words: "Compose {@link ratificationShardFiles} and WRITE".
 
-```
+```text
 /**
  * Compose {@link ratificationShardFiles} and WRITE them under `worktreePath`, returning the
  * repo-relative paths written. THROWS on a refusal rather than returning a partial result: a
@@ -926,7 +926,7 @@ Explained `writeRatificationShards`. Base lines 2656-2666; first words: "Compose
 
 Explained `planRatificationBatch`. Base lines 2698-2711; first words: "── W1-T2471: RATIFY A BATCH".
 
-```
+```text
 // ── W1-T2471: RATIFY A BATCH — one branch, one commit, one MASTER-PLAN block, one PR ───────
 //
 // `approveProposal` above ships exactly ONE proposal per branch/commit/PR/review-spawn. With
@@ -947,7 +947,7 @@ Explained `planRatificationBatch`. Base lines 2698-2711; first words: "── W1
 
 Explained `planRatificationBatch`. Base lines 2763-2777; first words: "Reduce a batch of already-computed".
 
-```
+```text
 /**
  * Reduce a batch of already-computed {@link InboxClassification}s into a {@link RatifyBatchPlan}
  * — PURE, no fs/git/network, mirroring {@link approveProposal}'s own read-only decision/side-
@@ -969,7 +969,7 @@ Explained `planRatificationBatch`. Base lines 2763-2777; first words: "Reduce a 
 
 Explained `approveBatch`. Base lines 2874-2892; first words: "`rmd approve <P##> <P##> ...`".
 
-```
+```text
 /**
  * `rmd approve <P##> <P##> ...` — the N-proposal counterpart of {@link approveProposal}. Every
  * member is classified INDIVIDUALLY by the caller (this function never re-derives readiness)
@@ -995,7 +995,7 @@ Explained `approveBatch`. Base lines 2874-2892; first words: "`rmd approve <P##>
 
 Explained `materializeDraftTaskIds`. Base lines 2956-2964; first words: "── Draft placeholder ids ->".
 
-```
+```text
 // ── Draft placeholder ids -> concrete ids AT APPROVE TIME (feedback#fb-1784766965325-c7b673,
 //    the SEQUENCING half; lib/task-id.ts is the DERIVATION half) ─────────────────────────────
 //
@@ -1011,7 +1011,7 @@ Explained `materializeDraftTaskIds`. Base lines 2956-2964; first words: "── 
 
 Explained `reframeProposal`. Base lines 3110-3127; first words: "`rmd reframe <P##> --feedback "<text>"".
 
-```
+```text
 /**
  * `rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]` — the operator's objection
  * is captured VERBATIM (never summarized) and ledgered as `ratify.reframed`; the cached

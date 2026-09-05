@@ -147,9 +147,9 @@
     },
     {
       "path": "docs/forensics/inbox.md",
-      "title": "`src/lib/inbox.ts` — archived comment forensics",
+      "title": "Forensics — `src/lib/inbox.ts`",
       "summary": "`src/lib/inbox.ts` is the ratification inbox (MASTER-PLAN §7B): it tiers open proposals, drafts a",
-      "grepHint": "`src/lib/inbox.ts` — archived comment forensics"
+      "grepHint": "Forensics — `src/lib/inbox.ts`"
     },
     {
       "path": "docs/forensics/sweep-map.md",
