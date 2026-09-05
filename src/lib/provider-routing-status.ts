@@ -35,6 +35,7 @@ export interface ProviderRoutingProviderStatus {
   provider: WorkerProviderId;
   readable: boolean;
   windows: ProviderRoutingWindowStatus[];
+  allocationWindows?: ProviderRoutingWindowStatus[];
   reason?: "capacity-unreadable" | "authentication-unavailable" | "capacity-unavailable";
   accountLabel?: string;
   model?: string;
@@ -238,22 +239,29 @@ function projectModelDecision(capacity: ProviderCapacity): CodexModelDecisionSta
   };
 }
 
-function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderStatus | undefined {
-  const provider = providerId(capacity.provider);
-  if (!provider) return undefined;
+function projectWindows(candidates: ReadonlyArray<ProviderCapacity["windows"][number]>): ProviderRoutingWindowStatus[] {
   const windows: ProviderRoutingWindowStatus[] = [];
-  for (const candidate of capacity.windows.slice(0, MAX_WINDOWS_PER_PROVIDER)) {
+  for (const candidate of candidates.slice(0, MAX_WINDOWS_PER_PROVIDER)) {
     const name = safeLabel(candidate.name);
     const usedPercent = safePercent(candidate.usedPercent);
     if (!name || usedPercent === undefined) continue;
     const resetsAt = isoTime(candidate.resetsAt);
     windows.push({ name, usedPercent, ...(resetsAt ? { resetsAt } : {}) });
   }
+  return windows;
+}
+
+function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderStatus | undefined {
+  const provider = providerId(capacity.provider);
+  if (!provider) return undefined;
+  const windows = projectWindows(capacity.windows);
+  const allocationWindows = capacity.allocationWindows ? projectWindows(capacity.allocationWindows) : undefined;
   const modelDecision = projectModelDecision(capacity);
   return {
     provider,
     readable: capacity.readable === true,
     windows,
+    ...(allocationWindows ? { allocationWindows } : {}),
     ...(capacity.readable ? {} : { reason: closedUnreadableReason(capacity.detail) }),
     ...(safeLabel(capacity.accountLabel) ? { accountLabel: safeLabel(capacity.accountLabel) } : {}),
     ...(safeLabel(capacity.model) ? { model: safeLabel(capacity.model) } : {}),
@@ -407,6 +415,21 @@ function parseProviderList(value: unknown, allowEmpty = false): WorkerProviderId
   const providers = value.map(providerId).filter((provider): provider is WorkerProviderId => provider !== undefined);
   if (providers.length !== value.length || new Set(providers).size !== providers.length) return undefined;
   return providers;
+}
+
+function parseWindows(value: unknown): ProviderRoutingWindowStatus[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const windows: ProviderRoutingWindowStatus[] = [];
+  for (const candidate of value.slice(0, MAX_WINDOWS_PER_PROVIDER)) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+    const window = candidate as Record<string, unknown>;
+    const name = safeLabel(window.name);
+    const usedPercent = safePercent(window.usedPercent);
+    if (!name || usedPercent === undefined) return undefined;
+    const resetsAt = isoTime(window.resetsAt);
+    windows.push({ name, usedPercent, ...(resetsAt ? { resetsAt } : {}) });
+  }
+  return windows;
 }
 
 function parseCodexPreference(value: unknown): ProviderRoutingPolicyStatus["codexModelPreference"] | undefined {
@@ -612,22 +635,17 @@ function parseSnapshot(value: unknown, nowMs: number): ProviderRoutingStatus | u
     const row = item as Record<string, unknown>;
     const provider = providerId(row.provider);
     if (!provider || typeof row.readable !== "boolean" || !Array.isArray(row.windows)) return undefined;
-    const windows: ProviderRoutingWindowStatus[] = [];
-    for (const candidate of row.windows.slice(0, MAX_WINDOWS_PER_PROVIDER)) {
-      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
-      const window = candidate as Record<string, unknown>;
-      const name = safeLabel(window.name);
-      const usedPercent = safePercent(window.usedPercent);
-      if (!name || usedPercent === undefined) return undefined;
-      const resetsAt = isoTime(window.resetsAt);
-      windows.push({ name, usedPercent, ...(resetsAt ? { resetsAt } : {}) });
-    }
+    const windows = parseWindows(row.windows);
+    if (!windows) return undefined;
+    const allocationWindows = row.allocationWindows === undefined ? undefined : parseWindows(row.allocationWindows);
+    if (row.allocationWindows !== undefined && !allocationWindows) return undefined;
     const modelDecision = row.modelDecision === undefined ? undefined : parseModelDecision(row.modelDecision);
     if (row.modelDecision !== undefined && !modelDecision) return undefined;
     providers.push({
       provider,
       readable: row.readable,
       windows,
+      ...(allocationWindows ? { allocationWindows } : {}),
       ...(row.reason === "capacity-unreadable" || row.reason === "authentication-unavailable" || row.reason === "capacity-unavailable"
         ? { reason: row.reason }
         : {}),

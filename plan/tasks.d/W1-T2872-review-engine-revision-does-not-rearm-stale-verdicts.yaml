@@ -1,0 +1,97 @@
+- id: W1-T2872
+  title: "A MATERIAL REVIEW-ENGINE FIX CANNOT REARM AN UNCHANGED PR — the old admission digest suppresses another review and the old decision digest would replay the false verdict even if the sweep admitted it"
+  repo: remudero
+  depends_on: [W1-T2299, W1-T2722, W1-T2860, W1-T2868]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 28.00
+  files:
+    - src/lib/review.ts
+    - src/run-task.ts
+    - test/review-engine-revision-rearm.test.ts
+    - test/review-decision-finality.test.ts
+    - test/review-status-pending.test.ts
+    - test/sweep.test.ts
+  origin: "operator-session#review-engine-fix-cannot-rearm-exact-input-2026-09-05"
+  plan_refs: ["W1-T2299", "W1-T2722", "W1-T2860", "W1-T2868"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #4042 AT HEAD eb44a4cab4e78a85c2fbb8e893b4225ab589cd4b. All required CI
+    checks are green. The 2026-09-05T05:40:57Z `review.posted` row records seven
+    `executed_pass` proofs but a failure because the Codex semantic reviewer downgraded all seven
+    as non-responsive. W1-T2868 subsequently fixed the reviewer runtime by materializing an exact-
+    head repository before either provider starts; that implementation is merged on main as PR
+    #4052. The PR head and body did not change, so `reviewInputDigest` still produces
+    `v1:b22335c7...`. `reviewAttemptsForInput` counts the old posting, the sweep keeps routing the
+    PR to `blocked-fixable`, and the fix rung repeatedly declines its registered worktree owner.
+    The corrected reviewer is never offered the input it was built to judge.
+
+    REOPENING ONLY THE SWEEP IS INSUFFICIENT. W1-T2722 correctly makes one material decision final
+    under `review_decision_digest`, but that digest includes an explicit policy revision whose
+    current value remained unchanged across W1-T2868. If #4042 merely receives a new admission
+    key, `claimReviewDecision` can still find and replay the terminal false failure at
+    `v1:8dfa3c12...` without starting the corrected semantic reviewer. The admission identity and
+    the decision identity therefore disagree about whether a material review-engine change is a
+    new judgment.
+
+    Head plus exact body remains the correct identity for ordinary author changes. Comments,
+    labels, scheduling, unrelated main commits, daemon restarts, provider availability and a
+    different random sample must not reset review history. The missing input is a deliberately
+    versioned review-engine contract: prompt/tool-surface assumptions, checkout materialization,
+    deterministic evaluator policy and other changes that can alter whether the same evidence is
+    judged correctly.
+  design: |
+    Define one stable, bounded `REVIEW_ENGINE_REVISION` beside the two digest constructors. Include
+    that revision in both `reviewInputDigest` and `reviewDecisionDigest`, while retaining their
+    existing head/body and full decision-envelope inputs. The current revision must name the
+    exact-head materialization contract introduced by W1-T2868. A deliberate future change to a
+    material reviewer contract bumps this one revision; an unrelated source or image revision
+    does not. Keep optional revision parameters on the pure constructors so tests can represent
+    old and current engines without mutating global state.
+
+    Thread the current revision through every shared-review producer and add the bounded
+    `review_engine_revision` field to pending, refused and terminal review ledger rows. The field
+    is operational evidence; no prompt, transcript, credential, raw provider response or source
+    hash is added. Dependabot's separate deterministic decision policy may use the same current
+    input identity for status safety, but it must not gain a semantic reviewer or change its lane.
+
+    The existing W1-T2860 unowned-failure recovery row is the rearm mechanism. Once the current
+    engine produces a different input digest, the old exact-head posting no longer spends the
+    current engine's attempt count, so a green failed PR routes once to `post-review`. The new
+    decision digest prevents W1-T2722 from replaying the old engine's terminal. A current-engine
+    posting restores the ordinary completed-attempt count and finality; repeated ticks keep the
+    existing bounded retry/backoff behavior. Do not special-case PR #4042, erase ledger history,
+    clear a GitHub status, weaken semantic downgrades, or key the revision to the boot commit.
+  acceptance:
+    - claim: "an exact-head and exact-body failure written under the pre-W1-T2868 engine has zero attempts under the current engine and routes through the existing post-review recovery instead of blocked-fixable"
+      proof: "unit test: test/review-engine-revision-rearm.test.ts"
+    - claim: "the rearmed review receives a new decision digest and starts the corrected reviewer rather than replaying the old engine's terminal verdict"
+      proof: "unit test: test/review-engine-revision-rearm.test.ts"
+    - claim: "after the current engine posts a terminal verdict for that same head and body, later sweeps preserve the existing dedup, finality and elapsed-time backoff behavior"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "head changes and exact body changes still reset review identity, while comments, labels, scheduling, provider choice, model sample and unrelated main commits do not"
+      proof: "unit test: test/review-engine-revision-rearm.test.ts"
+    - claim: "one explicit bounded review-engine revision participates in both admission and decision identities, and changing only that revision changes both digests"
+      proof: "unit test: test/review-decision-finality.test.ts"
+    - claim: "pending, refused and terminal shared-review rows carry the current review-engine revision without prompts, transcripts, credentials or raw provider payloads"
+      proof: "unit test: test/review-status-pending.test.ts"
+    - claim: "the exact #4042 fixture with green checks, its old failed status and its old-engine ledger row becomes eligible for one authoritative re-review under the current engine"
+      proof: "unit test: test/review-engine-revision-rearm.test.ts"
+    - claim: "Dependabot routing, semantic downgrade authority, proof execution, merge authorization and daemon lifecycle remain unchanged"
+      proof: "regression test: test/review-engine-revision-rearm.test.ts"
+    - claim: "removing the engine revision from either digest makes the old #4042 admission suppression or terminal replay regression fail"
+      proof: "mutation test: test/review-engine-revision-rearm.test.ts"
+  falsifier: |
+    Close without implementation only if current main already makes a material review-engine
+    revision change both the exact-input attempt identity and the terminal-decision replay
+    identity. It must re-offer #4042's unchanged head/body to the corrected exact-head reviewer
+    exactly once. A manual status rewrite, a new PR commit/body edit, or bypassing terminal replay
+    does not falsify this task because none makes engine evolution part of the durable contract.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2872`; the held id
+    is authoritative. This task does not change review conclusions. It makes a material change to
+    how conclusions are produced an explicit, auditable input to the existing fail-closed system.
