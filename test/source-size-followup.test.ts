@@ -80,6 +80,26 @@ test("W1-T2862: small, malformed, stale, unknown-schema and non-source evidence 
   const malformed = summary([line("src/lib/x.ts", 900, 1200)]);
   malformed.steps[0].successOutput!.text = "source-size-signal-json: {not json";
   assert.equal(classifySourceSizeSummary(malformed, HEAD).reason, "payload_malformed");
+  const missingOutput = summary([line("src/lib/x.ts", 900, 1200)]);
+  delete missingOutput.steps[0].successOutput;
+  assert.equal(classifySourceSizeSummary(missingOutput, HEAD).reason, "source_output_missing");
+  const staleReport = summary([line("src/lib/x.ts", 900, 1200)]);
+  staleReport.steps[0].successOutput!.text = staleReport.steps[0].successOutput!.text.replace(
+    `"head":"${HEAD}"`,
+    `"head":"${"d".repeat(40)}"`,
+  );
+  assert.equal(classifySourceSizeSummary(staleReport, HEAD).reason, "stale_head");
+  const nonArrayHotspots = summary([line("src/lib/x.ts", 900, 1200)]);
+  nonArrayHotspots.steps[0].successOutput!.text = `source-size-signal-json: ${JSON.stringify({
+    schema_version: 1,
+    base: BASE,
+    head: HEAD,
+    hotspots: null,
+  })}`;
+  assert.equal(classifySourceSizeSummary(nonArrayHotspots, HEAD).reason, "payload_malformed");
+  const invalidNewFilePercent = line("src/lib/new.ts", 0, 1_000);
+  invalidNewFilePercent.delta_percent = 100;
+  assert.equal(classifySourceSizeSummary(summary([invalidNewFilePercent]), HEAD).reason, "invalid_hotspot");
   const oversized = summary([line("src/lib/x.ts", 900, 1200)]);
   oversized.steps[0].successOutput = { text: "x".repeat(65_536), truncated: true };
   assert.equal(classifySourceSizeSummary(oversized, HEAD).reason, "source_output_oversized");
