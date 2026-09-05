@@ -23,7 +23,7 @@ Every block below is reproduced verbatim from the source at the base commit. Onl
 - [priorUnrecognisedResetStrings](#priorunrecognisedresetstrings) — base lines 504-517
 - [canonicalizeResetInstant](#canonicalizeresetinstant) — base lines 587-594
 - [resolveHeadroomWindows](#resolveheadroomwindows) — base lines 621-631
-- [instant](#instant) — base lines 654-662
+- [resolveHeadroomWindows (the three reset states)](#resolveheadroomwindows-the-three-reset-states) — base lines 654-662
 - [DEFAULT_UNREADABLE_DEGRADED_LIMIT](#defaultunreadabledegradedlimit) — base lines 684-700
 - [evaluateHeadroomPark](#evaluateheadroompark) — base lines 722-736
 - [headroomEnabled](#headroomenabled) — base lines 757-769
@@ -81,8 +81,8 @@ Every block below is reproduced verbatim from the source at the base commit. Onl
 - [sweepLightDuringRetro](#sweeplightduringretro) — base lines 1803-1828
 - [startInFlightTicker](#startinflightticker) — base lines 1845-1906
 - [HEADROOM_SAMPLE_MAX_AGE_MS](#headroomsamplemaxagems) — base lines 1907-1945
-- [holdSeen](#holdseen) — base lines 1976-1986
-- [headroomSampler](#headroomsampler) — base lines 2004-2015
+- [the acknowledgement gap](#the-acknowledgement-gap) — base lines 1976-1986
+- [the in-flight headroom sample](#the-in-flight-headroom-sample) — base lines 2004-2015
 - [the full-sweep retrigger](#the-full-sweep-retrigger) — base lines 2059-2092
 - [SweepRetrigger](#sweepretrigger) — base lines 2138-2145
 - [runGatedSweep and SweepLiveness](#rungatedsweep-and-sweepliveness) — base lines 2161-2197
@@ -98,38 +98,38 @@ Every block below is reproduced verbatim from the source at the base commit. Onl
 - [daemonBoot checkoutDepth](#daemonboot-checkoutdepth) — base lines 2611-2625
 - [unlockWorkerKeychain](#unlockworkerkeychain) — base lines 2656-2663
 - [checkDispatchGovernors](#checkdispatchgovernors) — base lines 2748-2761
-- [function](#function) — base lines 2764-2778
-- [sweepLiveness](#sweepliveness) — base lines 2788-2796
+- [runDaemon](#rundaemon) — base lines 2764-2778
+- [the shared retrigger and liveness state](#the-shared-retrigger-and-liveness-state) — base lines 2788-2796
 - [circuitEscalated](#circuitescalated) — base lines 2870-2878
 - [headroomReserveEscalated](#headroomreserveescalated) — base lines 2893-2900
 - [diskHeadroomLatch](#diskheadroomlatch) — base lines 2902-2911
 - [processDispatchResult](#processdispatchresult) — base lines 3027-3044
-- [result](#result) — base lines 3051-3058
-- [blockRetryStates](#blockretrystates) — base lines 3083-3092
-- [log](#log) — base lines 3120-3128
+- [processDispatchResult (the merged projection)](#processdispatchresult-the-merged-projection) — base lines 3051-3058
+- [processDispatchResult (the fixable-blocker fix rung)](#processdispatchresult-the-fixable-blocker-fix-rung) — base lines 3083-3092
+- [processDispatchResult (the genuine-blocker halt)](#processdispatchresult-the-genuine-blocker-halt) — base lines 3120-3128
 - [the liveness tick](#the-liveness-tick) — base lines 3148-3159
 - [plan freshness](#plan-freshness) — base lines 3177-3193
 - [planForBatch](#planforbatch) — base lines 3205-3223
-- [deps](#deps) — base lines 3225-3232
+- [the daily cost ceiling reload](#the-daily-cost-ceiling-reload) — base lines 3225-3232
 - [PAUSE before self-freshness](#pause-before-self-freshness) — base lines 3240-3254
 - [the top-of-iteration full pass](#the-top-of-iteration-full-pass) — base lines 3285-3320
-- [deps (2)](#deps-2) — base lines 3388-3395
-- [deps (3)](#deps-3) — base lines 3407-3415
+- [the GitHub posture drift check](#the-github-posture-drift-check) — base lines 3388-3395
+- [the measurement cadence rung](#the-measurement-cadence-rung) — base lines 3407-3415
 - [the board-review block](#the-board-review-block) — base lines 3472-3488
 - [the headroom block](#the-headroom-block) — base lines 3520-3532
-- [reportedUnrecognisedResets](#reportedunrecognisedresets) — base lines 3550-3558
+- [the once-per-window unrecognised-reset bound](#the-once-per-window-unrecognised-reset-bound) — base lines 3550-3558
 - [the unconditional headroom heartbeat](#the-unconditional-headroom-heartbeat) — base lines 3584-3605
 - [the unreadable-usage branch](#the-unreadable-usage-branch) — base lines 3648-3661
-- [log (2)](#log-2) — base lines 3687-3694
+- [the park ceiling forcing a blind dispatch](#the-park-ceiling-forcing-a-blind-dispatch) — base lines 3687-3694
 - [the tick-wide governor gate](#the-tick-wide-governor-gate) — base lines 3772-3792
 - [the retro cadence trigger](#the-retro-cadence-trigger) — base lines 3802-3820
 - [the dispatch set](#the-dispatch-set) — base lines 4007-4025
 - [the auto-triage rung's placement](#the-auto-triage-rungs-placement) — base lines 4064-4087
 - [the starvation predicate](#the-starvation-predicate) — base lines 4180-4196
 - [the pre-admission STOP and PAUSE re-check](#the-pre-admission-stop-and-pause-re-check) — base lines 4254-4269
-- [admitted](#admitted) — base lines 4304-4312
-- [await](#await) — base lines 4353-4363
-- [spawnInfraSeenThisTick](#spawninfraseenthistick) — base lines 4404-4411
+- [the per-lane governor gate](#the-per-lane-governor-gate) — base lines 4304-4312
+- [the dispatch light-sweep ticker](#the-dispatch-light-sweep-ticker) — base lines 4353-4363
+- [the spawn-infra degrade](#the-spawn-infra-degrade) — base lines 4404-4411
 - [crash recovery](#crash-recovery) — base lines 4502-4523
 - [parseOrphanedBranch](#parseorphanedbranch) — base lines 4545-4552
 - [reconstructOrphan](#reconstructorphan) — base lines 4565-4580
@@ -615,7 +615,7 @@ different clocks — and returns every window MOST-BURNED FIRST. The caller read
 the enforcement decision (the governor ON path), so both share ONE resolution.
 ```
 
-## instant
+## resolveHeadroomWindows (the three reset states)
 
 Removed from `src/lib/daemon.ts` lines 654-662 at the base commit.
 
@@ -1753,7 +1753,7 @@ POLICY DATA (rule 2) — a literal here, the same disposition `UNREADABLE_DEGRAD
 (lib/headroom.ts) records for its own bound.
 ```
 
-## holdSeen
+## the acknowledgement gap
 
 Removed from `src/lib/daemon.ts` lines 1976-1986 at the base commit.
 
@@ -1771,7 +1771,7 @@ untouched — but the operator can now tell "seen, waiting for this batch to set
 from "not seen yet" without escalating.
 ```
 
-## headroomSampler
+## the in-flight headroom sample
 
 Removed from `src/lib/daemon.ts` lines 2004-2015 at the base commit.
 
@@ -2154,7 +2154,7 @@ has paid for twice. Re-exported rather than relocated-and-rewired so every exist
 (test/cost-governor.test.ts among them) keeps working byte-for-byte.
 ```
 
-## function
+## runDaemon
 
 Removed from `src/lib/daemon.ts` lines 2764-2778 at the base commit.
 
@@ -2174,7 +2174,7 @@ via the injected clock and poll again — the loop is PERSISTENT by default
 in-process state, never a process exit.
 ```
 
-## sweepLiveness
+## the shared retrigger and liveness state
 
 Removed from `src/lib/daemon.ts` lines 2788-2796 at the base commit.
 
@@ -2263,7 +2263,7 @@ provable no-op restructuring: same inputs, same log lines, same return value thr
 straight back into a `return summary("blocked", …)` exactly as before.
 ```
 
-## result
+## processDispatchResult (the merged projection)
 
 Removed from `src/lib/daemon.ts` lines 3051-3058 at the base commit.
 
@@ -2278,7 +2278,7 @@ the SAME `{ kind: "merged" }` path a merged `result` always took; a genuinely un
 reaches `reasonAboutBlock` exactly as before.
 ```
 
-## blockRetryStates
+## processDispatchResult (the fixable-blocker fix rung)
 
 Removed from `src/lib/daemon.ts` lines 3083-3092 at the base commit.
 
@@ -2295,7 +2295,7 @@ state threaded across ticks — dropped only once resolved
 (merged, flagged, or escalated) below.
 ```
 
-## log
+## processDispatchResult (the genuine-blocker halt)
 
 Removed from `src/lib/daemon.ts` lines 3120-3128 at the base commit.
 
@@ -2380,7 +2380,7 @@ is free to be reassigned again on the NEXT tick; `planForBatch` never is. This h
 it landable and provable before any lane exists rather than speculative scaffolding.
 ```
 
-## deps
+## the daily cost ceiling reload
 
 Removed from `src/lib/daemon.ts` lines 3225-3232 at the base commit.
 
@@ -2460,7 +2460,7 @@ above and with every ticker's retrigger (`SweepRetrigger`) — see that function
 check (below, in `startInFlightTicker`) measures from whichever call actually ran last.
 ```
 
-## deps (2)
+## the GitHub posture drift check
 
 Removed from `src/lib/daemon.ts` lines 3388-3395 at the base commit.
 
@@ -2475,7 +2475,7 @@ posture finding can never halt a dispatch or fail a check (task rationale (vii))
 omitted ⇒ the loop behaves exactly as before this check existed.
 ```
 
-## deps (3)
+## the measurement cadence rung
 
 Removed from `src/lib/daemon.ts` lines 3407-3415 at the base commit.
 
@@ -2535,7 +2535,7 @@ STOP/PAUSE is honoured above. The ceiling itself is TIME-AWARE
 relaxes toward 100%, since anything unspent is destroyed at reset.
 ```
 
-## reportedUnrecognisedResets
+## the once-per-window unrecognised-reset bound
 
 Removed from `src/lib/daemon.ts` lines 3550-3558 at the base commit.
 
@@ -2601,7 +2601,7 @@ in-process idle heartbeat a confirmed breach uses, until a read
 succeeds again.
 ```
 
-## log (2)
+## the park ceiling forcing a blind dispatch
 
 Removed from `src/lib/daemon.ts` lines 3687-3694 at the base commit.
 
@@ -2774,7 +2774,7 @@ this point, and `Promise.allSettled` (further down) is unreached — the drain-a
 guarantee for anything already in flight is completely untouched.
 ```
 
-## admitted
+## the per-lane governor gate
 
 Removed from `src/lib/daemon.ts` lines 4304-4312 at the base commit.
 
@@ -2790,7 +2790,7 @@ the tick — the SAME provable no-op change in observable behaviour W1-T342 alre
 documented here, now discharged rather than merely promised.
 ```
 
-## await
+## the dispatch light-sweep ticker
 
 Removed from `src/lib/daemon.ts` lines 4353-4363 at the base commit.
 
@@ -2808,7 +2808,7 @@ the ticker stops). It also emits this dispatch's `daemon.alive` liveness rows �
 see {@link startInFlightTicker} for why that row exists and why it is prefixed.
 ```
 
-## spawnInfraSeenThisTick
+## the spawn-infra degrade
 
 Removed from `src/lib/daemon.ts` lines 4404-4411 at the base commit.
 
