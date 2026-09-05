@@ -5,9 +5,16 @@ import { judgeCriterion, judgeReview } from "../src/lib/review.js";
 
 // W1-T2713 — the floor for a plan-only filing used to compare a proof loaded from the task
 // shard with independently-written PR-body prose. That made a filename's accidental vocabulary
-// overlap decide the only binding lane. These tests pin the source boundary: a criterion resolved
-// from a shard is self-authenticating as PRESENT, while body-derived and implementation criteria
-// keep the existing responsiveness check.
+// overlap decide the only binding lane. These tests pin the boundary: on a criterion resolved
+// from a shard the KEYWORDS come from the claim, while body-derived and implementation criteria
+// keep the proof-keyword responsiveness check.
+//
+// AMENDED for recon-2026-09-05 R-15. W1-T2713's first implementation drew the floor from
+// `tokenize(claim + proof)` — the criterion JUDGING ITSELF — so coverage was 1.0 by construction
+// and these tests were passing bodies that substantiated nothing. The assertions below no longer
+// pin "any body passes"; they pin the property W1-T2713 actually established, that an OPAQUE TEST
+// FILENAME cannot decide the verdict, by holding the proof path constant across a body that
+// engages the claim and one that does not. See test/plan-only-floor-reads-the-body.test.ts.
 
 const CRITERION = {
   claim: "the account-visible choices are constrained by the active routing policy",
@@ -29,6 +36,24 @@ function planShardDiff(): string {
 }
 
 test("criteria resolved from a shard do not depend on an opaque test filename echoing PR prose", () => {
+  // The body shares NOTHING with `test/xylophone-zebra.test.ts` and everything with the claim.
+  // Under the pre-W1-T2713 floor this failed on filename vocabulary alone (#3665's shape).
+  const verdict = judgeReview([CRITERION], {
+    diff: planShardDiff(),
+    report:
+      "The account-visible choices this filing describes are constrained by whichever routing " +
+      "policy is active, and by nothing else.",
+    taskDeclaredFiles: ["src/lib/example.ts", "test/xylophone-zebra.test.ts"],
+  });
+
+  assert.equal(verdict.planOnly, true);
+  assert.equal(verdict.state, "success", "an opaque test path cannot fail a body that engages the claim");
+  assert.equal(verdict.criteria[0].floorMet, true);
+  assert.match(verdict.criteria[0].reason, /claim keywords/, "the shard arm scores the claim, never the filename");
+  assert.doesNotMatch(verdict.criteria[0].reason, /proof keywords/);
+});
+
+test("R-15 — the SAME criterion and the SAME opaque path fail when the body engages neither", () => {
   const verdict = judgeReview([CRITERION], {
     diff: planShardDiff(),
     report: "File the account-model policy task separately from implementation.",
@@ -36,10 +61,13 @@ test("criteria resolved from a shard do not depend on an opaque test filename ec
   });
 
   assert.equal(verdict.planOnly, true);
-  assert.equal(verdict.state, "success", "zero body/proof overlap cannot fail an authoritative shard filing");
-  assert.equal(verdict.criteria[0].floorMet, true);
-  assert.match(verdict.criteria[0].reason, /authoritative criterion source/);
-  assert.doesNotMatch(verdict.criteria[0].reason, /report|PR body/i, "the reason must not blame correct body prose");
+  assert.equal(
+    verdict.state,
+    "failure",
+    "R-15: the shard arm once read 1.0 against ANY body — only the body may move this verdict",
+  );
+  assert.equal(verdict.criteria[0].floorMet, false);
+  assert.match(verdict.criteria[0].reason, /report does not substantiate it \(matched \d+\/7 claim keywords\)/);
 });
 
 test("the same text remains unsubstantiated when criteria came from the body or the diff implements code", () => {
@@ -72,9 +100,12 @@ test("the same text remains unsubstantiated when criteria came from the body or 
   assert.match(implementation.criteria[0].reason, /report does not substantiate/);
 });
 
-test("W1-T219 stays fail-closed when an authoritative proof has no distinctive anchor", () => {
+test("W1-T219 stays fail-closed when the scored text has no distinctive anchor", () => {
+  // On the shard arm the anchors come from the CLAIM, so the no-anchor case is a claim with
+  // nothing distinctive in it. A proof with no anchors is no longer a free pass either — the
+  // claim still has to be substantiated by the body.
   const verdict = judgeReview(
-    [{ claim: "a genuinely unsubstantiated filing", proof: "to be or not to be" }],
+    [{ claim: "it is not so", proof: "to be or not to be" }],
     {
       diff: planShardDiff(),
       report: "Everything requested was filed.",
