@@ -469,6 +469,30 @@ sweep:
   # per-run cost work lands: W1-T2557 (the runaway tail, ~15% of spend in 8.4% of runs) and the
   # opus-tier synthesis rungs ($827 across 219 invocations). Restore to 3 once burn per run is
   # down, and record the measurement that justifies it rather than restoring on optimism.
+  #
+  # W1-T2708 — THE CONDITION NOW HAS A COMPARABLE LEFT-HAND SIDE, AND IT IS READ OFF THE TOOL.
+  # As written above, "burn per run is down" had no baseline beside it. The only per-run figures in
+  # this table sat one block over, in `reviewLanes` prose ("$0.63/run measured, against implement
+  # at $5.28", 2026-09-01), naming no STATISTIC, no CORPUS WINDOW and no COMMAND. That is not
+  # pedantry: measured 2026-09-02 over 749 distinct runs, class `src` read cost p50 4.94 / p90
+  # 11.34 / max 38.46. If $5.28 was a MEDIAN the condition READS MET; if it was a MEAN, today's
+  # mean is necessarily above 4.94 and burn may be UP. The same two numbers support opposite
+  # rulings and nothing recorded decided between them — an operator session came within one step of
+  # comparing $5.28 against a p50 as though the statistics matched.
+  #
+  # THE BASELINE IS NOT RESTATED HERE, IT LIVES IN THE INSTRUMENT. `LANE_RESTORE_BASELINE` in
+  # scripts/mount-headroom-sweep.mjs carries the statistic (p50), the class (src), the figure
+  # ($4.94), the corpus window (newest row 2026-09-02T14:00:27.894Z, 749 distinct runs) and the
+  # exact command. `compareToLaneRestoreBaseline` prints the current reading against it in the SAME
+  # statistic and REFUSES rather than comparing a mean on either side. A prose figure re-copied
+  # into this row would be the same defect one row over, so this comment deliberately names the
+  # constant instead — and
+  # test/a-recorded-baseline-that-names-no-statistic-cannot-be-compared.test.ts pins the two
+  # together so they cannot drift.
+  #
+  # IT RULES ON NOTHING. The sweep reports whether the condition reads met; taking the third lane
+  # is an operator ruling with its own evidence (the 2026-09-02 memory ceiling bears on it too),
+  # and W1-T2708 deliberately did not reopen it.
   dispatchLanes:
     value: 2
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"

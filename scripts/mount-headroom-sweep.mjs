@@ -662,6 +662,126 @@ export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) 
   };
 }
 
+/**
+ * W1-T2708 — THE LANE-RESTORE BASELINE, RECORDED IN THIS INSTRUMENT'S OWN VOCABULARY.
+ *
+ * `dispatchLanes`' comment in plan/policy.yaml holds the fleet at 2 and states the release:
+ * "Restore to 3 once burn per run is down, and record the measurement that justifies it rather
+ * than restoring on optimism." That posture is right. What it lacked was a comparable left-hand
+ * side: the only per-run figures in the table sat one block over, in `reviewLanes` prose — "a
+ * review lane is cheap ($0.63/run measured, against implement at $5.28)", 2026-09-01 — naming no
+ * STATISTIC, no CORPUS WINDOW and no COMMAND.
+ *
+ * THAT AMBIGUITY FLIPS THE ANSWER, WHICH IS WHY IT IS NOT PEDANTRY. Measured 2026-09-02 over 67
+ * archives, all three rotation forms, 801,987 raw rows deduped to 749 distinct runs: class `src`
+ * read cost p50 4.94 / p90 11.34 / max 38.46. If `$5.28` was a MEDIAN, today's p50 is a 6.4%
+ * improvement and the condition is MET. If it was a MEAN, today's mean is necessarily ABOVE 4.94
+ * (a p90 of 11.34 and a max of 38.46 guarantee it) and burn may be UP. The same two numbers
+ * support opposite rulings, and nothing recorded decides between them — an operator session
+ * already came within a step of comparing 5.28 against a p50 as though the statistics matched.
+ *
+ * SO THE 2026-09-01 FIGURE IS NOT RESTATED, IT IS SUPERSEDED. Its statistic is unrecoverable, and
+ * a figure that can be read two ways is worse than none. The baseline below is the 2026-09-02
+ * reading, which names all four fields BECAUSE IT CAME FROM THIS SCRIPT — the one instrument that
+ * commits to "PERCENTILES, NEVER A MEAN" (see this file's header).
+ *
+ * A CONSTANT, NOT PROSE, BECAUSE THE DELIVERABLE IS A COMPUTED CONDITION. "A prose figure
+ * re-copied into the right row is the same defect one row over" — so the comparison is READ OFF
+ * THE TOOL rather than argued, and a test pins plan/policy.yaml's own comment to this object so
+ * the two cannot drift.
+ */
+export const LANE_RESTORE_BASELINE = Object.freeze({
+  /** The statistic, named. Both sides of the comparison must be this same percentile. */
+  statistic: "p50",
+  /** Which `task_class` row the figure is drawn from — a cross-class comparison is not one. */
+  taskClass: "src",
+  /** The figure itself, in USD per run. */
+  costUsd: 4.94,
+  /** The corpus window it was taken over — a sweep answering about a stale window must show it. */
+  corpusNewestTs: "2026-09-02T14:00:27.894Z",
+  corpusDistinctRuns: 749,
+  /** The exact command that produced it, so the reading is reproducible rather than asserted. */
+  command: "node --import tsx scripts/mount-headroom-sweep.mjs --state-dir <state-dir>",
+});
+
+/** The four fields a baseline MUST name before anything may be compared against it — the exact
+ *  list W1-T2708's rationale says the 2026-09-01 figure was missing. */
+export const REQUIRED_BASELINE_FIELDS = Object.freeze(["statistic", "taskClass", "costUsd", "command"]);
+
+/** Percentile names this comparison will accept on EITHER side. A mean is refused by name: this
+ *  script's own header states why ("the mean is dragged by exactly the outlier a headroom sweep
+ *  exists to find"), and the whole defect being fixed is a figure whose statistic was unknown and
+ *  might have been one. */
+export const ACCEPTED_STATISTICS = Object.freeze(["p50", "p90"]);
+
+/**
+ * W1-T2708 — compare the current sweep's reading against {@link LANE_RESTORE_BASELINE}, in the
+ * SAME statistic, and REFUSE loudly rather than compare anyway when that is not possible.
+ *
+ * REPORTS, RULES ON NOTHING. The returned object says whether the recorded condition reads met on
+ * this corpus; it changes no lane count, edits no policy row and recommends no restore. Whether to
+ * take the third lane is an operator ruling with its own evidence — the memory ceiling bears on it
+ * too — and this task deliberately does not reopen it.
+ *
+ * Returns `null` when the corpus carries no row for the baseline's class: an absent class is not a
+ * reading of zero, and reporting one would be the vacuous-pass shape this repo keeps paying for.
+ */
+export function compareToLaneRestoreBaseline(report, baseline = LANE_RESTORE_BASELINE) {
+  for (const field of REQUIRED_BASELINE_FIELDS) {
+    const value = baseline?.[field];
+    if (value === undefined || value === null || value === "") {
+      throw new MountHeadroomSweepError(
+        `lane-restore baseline is missing \`${field}\` — a baseline that does not name its ` +
+          `statistic, class, figure and command cannot be compared to this sweep's own output, ` +
+          `which is the exact defect W1-T2708 was filed against. Refusing rather than comparing anyway.`,
+      );
+    }
+  }
+  if (!ACCEPTED_STATISTICS.includes(baseline.statistic)) {
+    throw new MountHeadroomSweepError(
+      `lane-restore baseline names statistic \`${baseline.statistic}\`, which is not one of ` +
+        `${ACCEPTED_STATISTICS.join("/")}. This sweep reports PERCENTILES, NEVER A MEAN (see this ` +
+        `file's header), so a mean on either side is not comparable and is refused.`,
+    );
+  }
+  const row = (report.classes ?? []).find((r) => r.taskClass === baseline.taskClass);
+  if (!row) return null; // no row for that class — an absent reading, never a zero
+  const currentKey = baseline.statistic === "p50" ? "costP50" : "costP90";
+  const current = row[currentKey];
+  if (typeof current !== "number") return null; // the class settled no runs — again, absent, not zero
+  return {
+    statistic: baseline.statistic,
+    taskClass: baseline.taskClass,
+    baselineUsd: baseline.costUsd,
+    currentUsd: current,
+    /** Down means the recorded release condition READS met on this corpus. It is a reading, not a ruling. */
+    down: current < baseline.costUsd,
+    deltaUsd: Number((current - baseline.costUsd).toFixed(2)),
+    baselineCorpusNewestTs: baseline.corpusNewestTs ?? null,
+    currentCorpusNewestTs: report.corpus?.newestTs ?? null,
+    command: baseline.command,
+  };
+}
+
+/** One rendered block for {@link compareToLaneRestoreBaseline}'s result — named beside the table
+ *  it is drawn from, never on a separate page a reader could skip past (this file's own rule). */
+export function renderLaneRestoreComparison(comparison) {
+  if (comparison === null) {
+    return (
+      `lane-restore condition: NOT ANSWERABLE on this corpus — no settled ${LANE_RESTORE_BASELINE.taskClass} ` +
+      `row to read a ${LANE_RESTORE_BASELINE.statistic} from. An absent reading is not a reading of zero.`
+    );
+  }
+  return (
+    `lane-restore condition (reports only, rules on nothing): ${comparison.taskClass} cost ` +
+    `${comparison.statistic} ${comparison.currentUsd} vs baseline ${comparison.baselineUsd} ` +
+    `(${comparison.statistic}, taken over a corpus whose newest row was ${comparison.baselineCorpusNewestTs}; ` +
+    `this corpus's newest row: ${comparison.currentCorpusNewestTs}) — burn per run reads ` +
+    `${comparison.down ? "DOWN" : "NOT DOWN"} (${comparison.deltaUsd >= 0 ? "+" : ""}${comparison.deltaUsd}). ` +
+    `Reproduce with: ${comparison.command}`
+  );
+}
+
 /** Render {@link buildMountHeadroomSweep}'s report as plain text — every control this script
  *  carries (forms opened, row:run ratio, newest ts) printed BESIDE the per-class table, never on
  *  a separate page a reader could skip past. */
@@ -695,6 +815,12 @@ export function renderMountHeadroomReport(report) {
         `${row.costPerCompletedTaskUsd ?? "-"}`,
     );
   }
+
+  // W1-T2708: the lane-restore condition, READ OFF THE TOOL, immediately under the table whose
+  // row it is drawn from — so "is burn per run down" is a reading rather than an argument, and a
+  // reader cannot see the figure without also seeing which statistic and which window it is.
+  lines.push("");
+  lines.push(renderLaneRestoreComparison(compareToLaneRestoreBaseline(report)));
 
   // W1-T2574: cells (type x risk x class), each carrying its own provider x served_model x
   // effort arms and every WITHIN-cell comparison — NEVER a cross-cell one (see this script's own
