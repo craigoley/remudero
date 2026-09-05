@@ -273,7 +273,9 @@ function printLargest(comments, totals) {
   for (const [path, n] of top) console.log(`  ${String(n).padStart(6)}  ${path}`);
 }
 
-function main(argv) {
+/** The CLI body, exported so its branches are exercised IN PROCESS rather than only through a
+ *  subprocess — a spawned run reports no coverage, which left every arm below untested. */
+export function main(argv) {
   let values;
   try {
     ({ values } = parseArgs({
