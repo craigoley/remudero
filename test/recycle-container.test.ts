@@ -41,7 +41,7 @@ interface Run {
  */
 const IMAGE_ENV_LINES = ["PATH=/usr/local/bin:/usr/bin:/bin", "NODE_VERSION=22.11.0", "YARN_VERSION=1.22.22", "HOME=/home/node", "DISABLE_AUTOUPDATER=1"];
 
-/** The six declared runtime names (deploy/runtime-env-vars.sh), with fixture values for the stub. */
+/** The declared runtime names (deploy/runtime-env-vars.sh), with fixture values for the stub. */
 const DECLARED_RUNTIME_FIXTURE: Record<string, string> = {
   GH_TOKEN: "captured-token-value",
   RMD_RESTART_THROTTLE_S: "300",
@@ -49,6 +49,9 @@ const DECLARED_RUNTIME_FIXTURE: Record<string, string> = {
   GH_APP_ID: "app-id-fixture",
   GH_APP_INSTALLATION_ID: "install-id-fixture",
   GH_APP_PRIVATE_KEY_PATH: "/path/to/key.pem",
+  // W1-T2932: the heap ceiling. Its VALUE is a host sizing decision and deliberately not declared
+  // anywhere in this repo; only the NAME is, so a recycle carries whatever the live container holds.
+  NODE_OPTIONS: "--max-old-space-size=8192",
 };
 
 /** The image env plus every declared runtime var at its fixture value, one override or drop applied. */
@@ -701,7 +704,7 @@ test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-
   // Proves the consistency test above actually discriminates, rather than passing on any six names.
   const recycleSrc = readFileSync(SCRIPT, "utf8");
   const mutated = recycleSrc.replace(
-    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH)",
+    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH NODE_OPTIONS)",
     "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S)",
   );
   assert.notEqual(mutated, recycleSrc, "the mutation target must actually be present and unique");
