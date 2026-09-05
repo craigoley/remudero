@@ -243,21 +243,16 @@ export const RISK_OVERRIDE_DISPOSITIONS = ["merged_by_hand", "redispatched", "ab
 export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number];
 
 /**
- * The ledger steps a DECIDING reader — never a merely-displaying one — consults to answer "has this
- * already happened" or "how many times". Such a line survives rotation, bounded only by
- * {@link MAX_RETAINED_LINES_PER_STEP}.
+ * Ledger steps a DECIDING reader consults — never a merely-displaying one. Rotation must never
+ * archive one away; {@link MAX_RETAINED_LINES_PER_STEP} is their only bound.
  *
- * THE INVARIANT: for these steps THE LINE IS THE BOUND. Archiving one silently resets the breaker,
- * dedup or cap it backs, so the reader re-fires an escalation, re-arms a refused head, or re-files
- * work it already did. Each entry below names its reader and what losing it would do.
- *
- * THIS LIST IS NOT SELF-CERTIFYING, and it has fallen behind its consumers once already.
- * test/ledger-rotation.test.ts re-derives the set from every consumer's own source on every run;
- * treat that test, not this comment, as the source of truth. Telemetry and display-only reads are
- * archived, operator-visible history gets {@link RENDER_RELEVANT_LEDGER_STEPS}, and `daemon.boot`
- * and `deploy.*` are members but health HEARTBEATS, bounded by recency instead.
- *
- * Why: the per-consumer table, the W1-T244 incident and the exclusion arguments —
+ * Trap: for these steps the line IS the bound, so a step that "forgets" is a breaker or a dedup
+ * that silently resets. Each entry below names its reader and what losing it would do. Telemetry
+ * and display-only reads are archived; operator-visible history lives in
+ * {@link RENDER_RELEVANT_LEDGER_STEPS}; `daemon.boot` and `deploy.*` are members but heartbeats,
+ * bounded by {@link HEALTH_STEP_RETENTION_WINDOW_MS} instead. Falsifier:
+ * test/ledger-rotation.test.ts re-derives this set from every consumer's own source, so treat it,
+ * not this comment, as the source of truth. Why: the per-consumer table and the W1-T244 incident —
  * docs/forensics/ledger.md#decision_relevant_ledger_steps.
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
@@ -793,30 +788,26 @@ export interface LedgerRotationResult {
 }
 
 /**
- * ROLL, BUT KEEP A DECISION TAIL (W1-T209). Moves the ledger's content byte-for-byte into a dated
- * archive beside it — relocated, never deleted — then rewrites the live path to hold only the
- * decision-relevant lines, so status.ts's readers keep seeing what the breaker, sweep dedup, credit
- * backfill and escalation dedup consult. THE ACCEPTANCE TEST IS THE BREAKER, NOT THE FILE SIZE. A
- * no-op (`{ rotated: false }`) when the ledger is absent or under `ceilingBytes`. Only the snapshot
- * is gzipped (W1-T2482), so an append in progress on the live path is untouched.
+ * Roll, but keep a decision tail (W1-T209). Move the whole file byte-for-byte into a dated archive
+ * — relocated, never deleted — then rewrite the live path to hold only the decision-relevant lines.
+ * A rotation that shrinks the file but drops one of those is worthless, so the acceptance test is
+ * the breaker, not the file size. Only the snapshot is gzipped (W1-T2482), and this is a no-op when
+ * the ledger is absent or under `ceilingBytes`.
  *
- * CONCURRENCY — TWO ROTATORS (R-1, 2026-09-05). Four invariants, each with its own falsifier in
+ * Two rotators (R-1, 2026-09-05). Four invariants, all falsified by
  * test/ledger-rotation-is-locked.test.ts:
- *   1. Rotation is serialised across processes by {@link tryAcquireRotationLock}, taken AFTER the
- *      cheap ceiling check and BEFORE the snapshot.
- *   2. A second rotator finding a live holder returns `{ rotated: false }` at once — append is the
- *      priority, and the holder's catch-up read folds that append in.
- *   3. Once held, the ceiling is RE-CHECKED, or a rotator queued behind a completed rotation
- *      re-archives the freshly shrunk file.
- *   4. Immediately before the rename the live path is `stat`ed by name and compared on `dev`+`ino`
- *      against the snapshot's own `fstat`; a mismatch WITHDRAWS the rename rather than clobbering
- *      whatever replaced the file, and the archive already written stays on disk.
+ *   1. {@link tryAcquireRotationLock} serialises rotation across processes, taken after the cheap
+ *      ceiling check and before the snapshot.
+ *   2. A rotator meeting a live holder returns `{ rotated: false }` at once, because append is the
+ *      priority and the holder's catch-up read folds that append in.
+ *   3. The ceiling is re-checked once the lock is held, or a rotator queued behind a completed
+ *      rotation re-archives the freshly shrunk file.
+ *   4. The rename is withdrawn when a `dev`+`ino` compare shows the live path is no longer the
+ *      snapshotted inode, leaving the archive already written on disk.
  *
- * CONCURRENCY — ONE APPENDER: appendLedger holds no long-lived descriptor, so the only exposure is
- * the window between the snapshot and the rename. One statSync plus a delta read immediately before
- * the rename folds any line appended in that window into the live file unfiltered. A line landing
- * between that check and the rename syscall is the one residual hazard — the same one `logrotate`
- * has against a writer it cannot signal to reopen its handle.
+ * One appender: appendLedger holds no long-lived descriptor, so a delta read immediately before the
+ * rename folds any line appended since the snapshot into the live file. What lands between that
+ * read and the rename syscall is the one residual sliver, the same one `logrotate` has.
  * Why: without the lock the second rotator's catch-up saw the first's smaller live file, took an
  * empty tail and renamed over it (R-1; docs/forensics/ledger.md#rotateledger).
  */
