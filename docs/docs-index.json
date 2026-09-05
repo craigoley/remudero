@@ -146,6 +146,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/containment.md",
+      "title": "Forensics: src/lib/containment.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/containment.ts` used to",
+      "grepHint": "Forensics: src/lib/containment.ts"
+    },
+    {
       "path": "docs/forensics/daemon.md",
       "title": "daemon.ts forensics",
       "summary": "Measured forensics, incidents and design arguments removed from `src/lib/daemon.ts` when its comments were compacted to the plain-language standard. The code k…",
