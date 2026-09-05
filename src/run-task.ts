@@ -481,7 +481,13 @@ import {
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask, DECISION_RELEVANT_LEDGER_STEPS } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { gunzipSync } from "node:zlib";
-import { ledgerRotationEntries, resolveLedgerUnion, rotationStampIso, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
+import {
+  ledgerRotationEntries,
+  resolveLedgerUnion,
+  rotationStampIso,
+  type LedgerCorpusEntry,
+  type LedgerGrepFsDeps,
+} from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import { injectCoverageImprovementTask } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
@@ -15844,6 +15850,19 @@ export function ledgerCorpusFiles(stateDir: string): LedgerCorpusEntry[] {
 const FOLLOWUP_LEDGER_STEP_PATTERN = '"step":"report\\.followups"|"step":"followup\\.harvested"|"step":"followup\\.deduped"';
 
 /**
+ * W1-T2833 correctness floor. The production corpus's measured maximum report-to-harvest lag was
+ * 17.2 days; 30 days preserves that tail with ~1.7x margin while bounding rotation opens once
+ * archive history grows beyond the window. This bounds growth, not today's corpus by itself — the
+ * owned-string boundary in resolveLedgerUnion independently removes the measured amplification.
+ */
+const FOLLOWUP_LEDGER_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000;
+
+export interface FollowupLedgerUnionDeps {
+  now?: () => number;
+  fsDeps?: LedgerGrepFsDeps;
+}
+
+/**
  * W1-T1013: the follow-up harvest's OWN ndjson corpus — `resolveLedgerUnion`'s archive∪live
  * UNION, never the live ledger file alone.
  *
@@ -15866,8 +15885,10 @@ const FOLLOWUP_LEDGER_STEP_PATTERN = '"step":"report\\.followups"|"step":"follow
  * `rmd ledger-grep` already applies, instead of quietly falling back to the live-file-only
  * read this whole task exists to kill.
  */
-export function followupLedgerUnionNdjson(stateDir: string): string {
-  const result = resolveLedgerUnion(stateDir, FOLLOWUP_LEDGER_STEP_PATTERN);
+export function followupLedgerUnionNdjson(stateDir: string, deps: FollowupLedgerUnionDeps = {}): string {
+  const now = deps.now ?? Date.now;
+  const since = new Date(now() - FOLLOWUP_LEDGER_WINDOW_MS).toISOString();
+  const result = resolveLedgerUnion(stateDir, FOLLOWUP_LEDGER_STEP_PATTERN, deps.fsDeps, { since });
   if (!result.ok) {
     const reason =
       result.archiveCount === 0

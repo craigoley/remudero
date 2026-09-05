@@ -41,7 +41,7 @@ test("W1-T1013: the follow-up harvest reads the rotation archives not the live f
       })}\n`,
     );
 
-    const union = followupLedgerUnionNdjson(dir);
+    const union = followupLedgerUnionNdjson(dir, { now: () => Date.parse("2026-07-15T00:00:00.000Z") });
     const mined = mineFollowups(parseLedger(union));
 
     assert.equal(mined.candidates.length, 1, "the archived report.followups row must be mined");
@@ -154,7 +154,7 @@ test("W1-T1013: an entry marked in an archived row is not proposed again", () =>
       })}\n`,
     );
 
-    const union = followupLedgerUnionNdjson(dir);
+    const union = followupLedgerUnionNdjson(dir, { now: () => Date.parse("2026-07-15T00:00:00.000Z") });
     const mined = mineFollowups(parseLedger(union));
 
     assert.equal(mined.candidates.length, 0, "an entry whose mark survives only in an archive must not re-mint");
