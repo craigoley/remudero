@@ -26,8 +26,11 @@ import type { DrainDeps, DrainSummary } from "../src/lib/drain.js";
  *      show this: its owned PR sorts first, so `.slice(0, 1)` happens to pick the right one;
  *   2. that `drainCommand`'s DEFAULT is really the batched gateway, proved by a ledger line only
  *      the batched gateway can write;
- *   3. the per-pass instance contract the swap's comment claims — a fresh gateway per pass, so one
- *      pass's outage cannot mark every later pass of the same drain indeterminate.
+ *   3. the instance contract the swap's comment claims. It USED to be "a fresh gateway per pass";
+ *      R-24 (docs/audits/recon-2026-09-05.md) replaced that with "ONE gateway for the whole
+ *      invocation, its failure verdicts cleared per pass" — same guarantee (one pass's outage
+ *      cannot mark every later pass indeterminate), without throwing away `knownBoardPrs` and
+ *      re-walking the closed half of the repo every tick. Section 4 below asserts the new form.
  */
 
 function task(id: string): Task {
@@ -282,9 +285,9 @@ test("REACHABILITY: the real drainCommand builds its projection from the BATCHED
   }
 });
 
-// ── 4. the per-pass instance contract ───────────────────────────────────────────────────────
+// ── 4. the instance contract: ONE gateway, verdicts cleared per pass ────────────────────────
 
-test("the gateway is constructed PER PASS, so one pass's outage cannot poison the rest of the drain", async () => {
+test("the gateway is constructed ONCE per drain, and each pass clears its failure verdicts so one pass's outage cannot poison the rest", async () => {
   const root = mkdtempSync(join(tmpdir(), "drain-gateway-perpass-"));
   mkdirSync(join(root, "state"), { recursive: true });
   const config = { claudeBin: "/nonexistent/claude-not-installed", root } as Config;
@@ -315,12 +318,22 @@ test("the gateway is constructed PER PASS, so one pass's outage cannot poison th
     const before = built.length;
     captured.refreshMerged();
     captured.refreshMerged();
-    assert.equal(built.length - before, 2, "each pass constructs its OWN gateway — the factory is inside refreshMerged");
-    // DISTINCT INSTANCES, not merely two calls: `buildBatchedGithub` closes over mutable
-    // `lastFetchFailed` exactly as `ghGateway` closes over `failed`, so a shared instance would
-    // carry one pass's outage into every later pass of the same drain. That is the reason this
-    // swap kept the construction inside the closure rather than hoisting it.
-    assert.notEqual(built[built.length - 1], built[built.length - 2], "and they are different objects");
+    // R-24 — THE EXPECTATION MOVED FROM 2 TO 0 DELIBERATELY, AND THIS IS WHY. This assertion used
+    // to read `built.length - before === 2` ("each pass constructs its OWN gateway"). The factory
+    // is now invoked ONCE, above the closure, so no pass constructs anything: `drainCommand` built
+    // the single instance before `runDrain` was ever reached, which is why `before` already
+    // counts it. A fresh instance per pass ALSO started with an empty `knownBoardPrs` and so
+    // re-walked the closed half of the repo every tick — 25 requests / 21.8 s at 2,400 PRs by the
+    // code's own 2026-08-26 measurement, on a repo that has passed 4,080.
+    assert.equal(before, 1, "drainCommand built exactly ONE gateway, before runDrain was reached");
+    assert.equal(built.length - before, 0, "and a pass constructs none — the factory is no longer inside refreshMerged");
+
+    // THE PROPERTY THE PER-PASS INSTANCE BOUGHT, ASSERTED DIRECTLY INSTEAD. `buildBatchedGithub`
+    // closes over mutable failure verdicts exactly as `ghGateway` closes over `failed`, so a
+    // shared instance could carry one pass's outage into every later pass. `resetFailureFlags()`
+    // is what stops it, and it is reachable on the real gateway `drainCommand` holds — the
+    // guarantee is now a method with a name rather than a side effect of reallocation.
+    assert.equal(typeof built[0].resetFailureFlags, "function", "the one gateway exposes the per-pass reset");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
