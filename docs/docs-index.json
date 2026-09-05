@@ -110,6 +110,12 @@
       "grepHint": "rmd CLI reference"
     },
     {
+      "path": "docs/comment-standard.md",
+      "title": "The comment standard",
+      "summary": "This page says how to write a code comment in this repo, and how much of one. It applies to every",
+      "grepHint": "The comment standard"
+    },
+    {
       "path": "docs/control-surface.md",
       "title": "Control surface — fleet commands & safe dispatch",
       "summary": "The `rmd` CLI is the control surface for an unattended daemon, so it must be safe and",
