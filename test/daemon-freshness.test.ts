@@ -71,11 +71,12 @@ test("stale fixture: lets the in-flight task finish, THEN stops as stale and led
     },
     sleep: clock.sleep,
     log: (step, extra = {}) => lines.push({ step, extra }),
-    // Up to date for the FIRST tick (A gets dispatched normally); origin/main advances
-    // only AFTER A is already in flight — proving the check never abandons it.
+    // Up to date at BOTH boundaries of the FIRST tick (A gets dispatched normally);
+    // origin/main advances only AFTER A is already in flight — proving the check
+    // never abandons it. The third read is the next tick's top boundary.
     checkFreshness: (): DaemonFreshness => {
       tick += 1;
-      return tick === 1 ? { stale: false } : { stale: true, oldSha: OLD_SHA, newSha: NEW_SHA };
+      return tick <= 2 ? { stale: false } : { stale: true, oldSha: OLD_SHA, newSha: NEW_SHA };
     },
   });
 
@@ -379,3 +380,140 @@ test("W1-T936: clearing PAUSE lets the freshness exit fire", async () => {
     "the freshness restart fires on the very next tick after the hold clears",
   );
 });
+
+// ── W1-T2845: re-check freshness at the pre-admission boundary ───────────────
+
+test("W1-T2845: origin/main advancing during the awaited full sweep admits no stale-code task", async () => {
+  const plan = fixturePlan();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let sweeps = 0;
+  let runOneCalls = 0;
+  let installs = 0;
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    runOne: async (id) => {
+      runOneCalls++;
+      return okResult(id);
+    },
+    sleep: fakeClock().sleep,
+    log: (step, extra = {}) => lines.push({ step, extra }),
+    checkFreshness: (): DaemonFreshness =>
+      sweeps === 0
+        ? { stale: false }
+        : { stale: true, oldSha: OLD_SHA, newSha: NEW_SHA, installNeeded: true },
+    runInstall: () => {
+      installs++;
+    },
+    sweep: async () => {
+      // This awaited rung stands in for the production sweep during which origin/main advanced.
+      sweeps++;
+    },
+  });
+
+  assert.equal(s.stopReason, "stale");
+  assert.deepEqual(s.attempted, [], "nothing from the stale tick crossed the admission boundary");
+  assert.equal(runOneCalls, 0, "stale code never reached runOne");
+  assert.equal(installs, 1, "the shared stale-exit path performs the required install exactly once");
+  assert.equal(sweeps, 2, "the ordinary sweep ran, then the W1-T1272 stale-exit sweep ran once");
+  assert.equal(
+    lines.filter((l) => l.step === "daemon_selfrestart_for_freshness").length,
+    1,
+    "the late observation uses the same named restart ledger path",
+  );
+});
+
+test("W1-T2845: a pre-admission STOP wins before the simultaneous late freshness observation", async () => {
+  const plan = fixturePlan();
+  let stopReads = 0;
+  let freshnessReads = 0;
+  let runOneCalls = 0;
+  const lines: Array<{ step: string }> = [];
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    runOne: async (id) => {
+      runOneCalls++;
+      return okResult(id);
+    },
+    sleep: fakeClock().sleep,
+    log: (step) => lines.push({ step }),
+    checkStop: () => (++stopReads === 2 ? "STOP raised during the tick" : undefined),
+    checkFreshness: (): DaemonFreshness => {
+      freshnessReads++;
+      return freshnessReads === 1
+        ? { stale: false }
+        : { stale: true, oldSha: OLD_SHA, newSha: NEW_SHA };
+    },
+  });
+
+  assert.equal(s.stopReason, "stopped");
+  assert.equal(freshnessReads, 1, "the late freshness read is suppressed when STOP wins");
+  assert.equal(runOneCalls, 0);
+  assert.equal(lines.some((l) => l.step === "daemon_selfrestart_for_freshness"), false);
+});
+
+test("W1-T2845: a pre-admission PAUSE wins before late freshness and remains an in-process hold", async () => {
+  const plan = fixturePlan();
+  let pauseReads = 0;
+  let freshnessReads = 0;
+  let stopped = false;
+  let runOneCalls = 0;
+  const lines: Array<{ step: string }> = [];
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    runOne: async (id) => {
+      runOneCalls++;
+      return okResult(id);
+    },
+    sleep: async () => {
+      stopped = true;
+    },
+    log: (step) => lines.push({ step }),
+    checkStop: () => (stopped ? "test complete" : undefined),
+    checkPause: () => (++pauseReads === 2 ? "PAUSE raised during the tick" : undefined),
+    checkFreshness: (): DaemonFreshness => {
+      freshnessReads++;
+      return freshnessReads === 1
+        ? { stale: false }
+        : { stale: true, oldSha: OLD_SHA, newSha: NEW_SHA };
+    },
+  });
+
+  assert.equal(s.stopReason, "stopped", "PAUSE idles; the test's later STOP ends the process");
+  assert.equal(freshnessReads, 1, "the late freshness read is suppressed while PAUSE holds");
+  assert.equal(runOneCalls, 0);
+  assert.ok(lines.some((l) => l.step === "daemon.pause"));
+  assert.equal(lines.some((l) => l.step === "daemon_selfrestart_for_freshness"), false);
+});
+
+for (const lateFreshness of ["fresh", "unavailable"] as const) {
+  const article = lateFreshness === "unavailable" ? "an" : "a";
+  test(`W1-T2845: ${article} ${lateFreshness} late observation preserves the existing dispatch path`, async () => {
+    const plan = fixturePlan();
+    let freshnessReads = 0;
+    let runOneCalls = 0;
+    const deps: DaemonDeps = {
+      refreshMerged: () => () => false,
+      runOne: async (id) => {
+        runOneCalls++;
+        return okResult(id);
+      },
+      sleep: fakeClock().sleep,
+    };
+    if (lateFreshness === "fresh") {
+      deps.checkFreshness = () => {
+        freshnessReads++;
+        return { stale: false };
+      };
+    }
+
+    const s = await runDaemon(plan, deps, { max: 1 });
+
+    assert.equal(s.stopReason, "max_reached");
+    assert.deepEqual(s.attempted, ["A"]);
+    assert.equal(runOneCalls, 1);
+    assert.equal(freshnessReads, lateFreshness === "fresh" ? 2 : 0);
+  });
+}
