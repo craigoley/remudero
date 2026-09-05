@@ -197,7 +197,7 @@
   "src/lib/plan-coherence.ts": 70,
   "src/lib/plan-index.ts": 29,
   "src/lib/plan-pr-emitter.ts": 401,
-  "src/lib/plan.ts": 328,
+  "src/lib/plan.ts": 361,
   "src/lib/policy.ts": 488,
   "src/lib/producer-completeness.ts": 242,
   "src/lib/producer-identity.ts": 70,
