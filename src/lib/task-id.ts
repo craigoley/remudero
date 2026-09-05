@@ -150,6 +150,10 @@ export interface MintSources {
   shards: number | null;
   /** Open plan PRs' minted ids — ids that exist but have not merged (the #770 class). */
   openPrs: number | null;
+  /** (W1-T2710) The plan's ceiling on the REMOTE tracking ref — the same declarations
+   *  `monolith`/`shards` read, but from a source this checkout cannot silently lag behind.
+   *  `null` when no reader was injected (a legitimate offline mint) or it answered nothing. */
+  remotePlan: number | null;
 }
 
 /** The mint: the id to use, what it was derived from, and what could not be read. */
@@ -166,6 +170,12 @@ export interface MintedTaskId {
   /** How many ids the sources carried above {@link MAX_ALLOCATABLE_TASK_ID} and this mint
    *  therefore ignored — a COUNT, never the ids. Zero on a healthy plan. */
   ignoredAboveBound: number;
+  /** (W1-T2710) How many ids this checkout's OWN plan half (`monolith` ∪ `shards`) is behind
+   *  the remote's. `0` when the local half is current, and `0` when no remote reader was
+   *  injected — an unmeasured gap is never reported as a measured zero, which is why the
+   *  provenance line asks {@link MintSources.remotePlan} whether the comparison happened at
+   *  all rather than reading this field alone. */
+  planBehindBy: number;
 }
 
 /** Highest ALLOCATABLE id in a list, or `null` when none is — the per-source fold. Ids above
@@ -224,6 +234,14 @@ export function mintNextTaskId(opts: {
   planPath: string;
   /** Open plan PRs' text (title/body/branch), scanned for MENTIONED ids. */
   openPrTexts?: () => string[];
+  /**
+   * (W1-T2710) The plan's highest DECLARED id on the REMOTE tracking ref. Injected by the
+   * caller exactly like `openPrTexts` — a git read at the edge, fixtures in tests — and a
+   * THROWING reader degrades rather than blocking, for the same reason. Omitting it leaves
+   * every line below byte-identical to before this existed: `remotePlan` stays `null`,
+   * `planBehindBy` stays `0`, and the corroboration check reads the local ceiling alone.
+   */
+  remotePlanCeiling?: () => number | null;
 }): MintedTaskId {
   const degraded: MintDegradation[] = [];
 
@@ -242,10 +260,26 @@ export function mintNextTaskId(opts: {
     }
   }
 
+  // W1-T2710: THE ONE SOURCE THAT CANNOT SILENTLY LAG. Every source above reads THIS CHECKOUT,
+  // so all of them are stale together when it is behind — and staleness is invisible from inside,
+  // because each file it reads is internally consistent. A degradation is raised only when the
+  // reader THROWS; a reader that answers a number outside the allocatable range is treated as
+  // answering nothing, exactly like `highest` drops such ids from every other source.
+  let remotePlanCeiling: number | null = null;
+  if (opts.remotePlanCeiling) {
+    try {
+      const answered = opts.remotePlanCeiling();
+      remotePlanCeiling = answered !== null && isAllocatableTaskId(answered) ? answered : null;
+    } catch (err) {
+      degraded.push({ source: "remote-plan", reason: `cannot read the remote plan ceiling: ${String(err)}` });
+    }
+  }
+
   const sources: MintSources = {
     monolith: highest(monolithIds),
     shards: highest(shards.ids),
     openPrs: openPrsEnumerated ? highest(openPrIds) : null,
+    remotePlan: remotePlanCeiling,
   };
 
   // THE CORROBORATION CHECK (a source that is PRESENT AND ABSURD). `degraded` already covers a
@@ -273,8 +307,31 @@ export function mintNextTaskId(opts: {
   // tightened to the real ceiling without also refusing the two above-bound ids the plan already
   // carries. This one is RELATIVE, so it needs no calibration against the plan's size and does not
   // move as the plan grows.
+  //
+  // W1-T2710 — AND WHY THE CEILING IT COMPARES AGAINST MUST BE THE CURRENT ONE. Everything above
+  // is right while the plan half is current and INVERTS the moment it is not: a checkout behind
+  // the remote reports a low ceiling, the open-PR scan (which reads PRs on the REMOTE, and so
+  // cannot be stale in the same way) reports the truth, and the guard drops the only accurate
+  // source precisely BECAUSE the stale half disagrees with it.
+  //
+  // MEASURED 2026-09-02, one invocation: `shards` read 2598 from a checkout 107 ids behind while
+  // origin's own highest shard was 2705, so the lead computed as 109 (> 100) and the open-PR
+  // ceiling was discarded as uncorroborated. With every current source gone the mint fell back to
+  // the plan history's 2690 and the reserve path then walked 2691, 2692, … 2710 — TWENTY
+  // sequential pushes into `refs/rmd-id/`. CLAUDE.md records a ninety-minute lockout caused by
+  // request CADENCE rather than volume; a burst of twenty ref pushes several times a session is
+  // that shape. Had `shards` been current the lead would have been ~2, well inside the bound.
+  //
+  // THE FIX IS WHICH SOURCES ARE TRUSTED, NEVER A WIDER TOLERANCE. `MAX_MENTION_LEAD` is
+  // deliberately untouched: widening it re-opens W1-T1039 exactly as that constant's own doc
+  // warns. The discriminator is whether the plan half is CURRENT — which is checkable against the
+  // remote — not whether the numbers differ.
   if (sources.openPrs !== null) {
-    const planCeiling = Math.max(0, ...[sources.monolith, sources.shards].filter((n): n is number => n != null));
+    const localPlanCeiling = Math.max(0, ...[sources.monolith, sources.shards].filter((n): n is number => n != null));
+    // The CURRENT plan ceiling: the local half, raised by the remote's when this checkout is
+    // behind it. Absent a remote reader this is the local figure verbatim, so an offline mint
+    // keeps the pre-W1-T2710 behaviour exactly.
+    const planCeiling = Math.max(localPlanCeiling, sources.remotePlan ?? 0);
     const lead = sources.openPrs - planCeiling;
     if (planCeiling > 0 && lead > MAX_MENTION_LEAD) {
       degraded.push({
@@ -290,11 +347,32 @@ export function mintNextTaskId(opts: {
     }
   }
 
-  // Every term here has already been through `highest`, so each is allocatable or null — the
-  // bound is applied at the FOLD, not re-applied at the max.
-  const maxSeen = Math.max(0, ...[sources.monolith, sources.shards, sources.openPrs].filter((n): n is number => n != null));
+  // W1-T2710: SAY THAT THE LOCAL HALF IS BEHIND, rather than reporting a figure derived from it
+  // and letting the reader infer contention. Raised as a degradation because that is already this
+  // module's channel for "a source contributed less than it should have", and because the mint IS
+  // then a floor with respect to this checkout — the same thing `degraded` means everywhere else.
+  // Reported EVEN WHEN the corroboration check above did not fire: the staleness is a fact about
+  // the checkout, not about whether it happened to change this one answer.
+  const localPlanCeiling = Math.max(0, ...[sources.monolith, sources.shards].filter((n): n is number => n != null));
+  const planBehindBy = sources.remotePlan !== null ? Math.max(0, sources.remotePlan - localPlanCeiling) : 0;
+  if (planBehindBy > 0) {
+    degraded.push({
+      source: "local-plan",
+      reason:
+        `this checkout's plan half is ${planBehindBy} id(s) behind origin's — its own ceiling is ` +
+        "not current, so the remote's was used instead; pull before filing",
+    });
+  }
+
+  // Every term here has already been through `highest` (or, for `remotePlan`, `isAllocatableTaskId`
+  // at its read above), so each is allocatable or null — the bound is applied at the FOLD, not
+  // re-applied at the max.
+  const maxSeen = Math.max(
+    0,
+    ...[sources.monolith, sources.shards, sources.openPrs, sources.remotePlan].filter((n): n is number => n != null),
+  );
   const ignoredAboveBound = countAboveBound(monolithIds, shards.ids, openPrIds);
-  return { id: `W1-T${maxSeen + 1}`, n: maxSeen + 1, maxSeen, sources, degraded, ignoredAboveBound };
+  return { id: `W1-T${maxSeen + 1}`, n: maxSeen + 1, maxSeen, sources, degraded, ignoredAboveBound, planBehindBy };
 }
 
 /** One-line provenance for a mint — what it derived from, and any source it could not read. */
@@ -317,7 +395,12 @@ function renderAbsentSource(mint: MintedTaskId, source: string): string {
 
 export function describeMint(mint: MintedTaskId): string {
   const openPrs = mint.sources.openPrs ?? renderAbsentSource(mint, "open-prs");
-  const src = `tasks.yaml ${mint.sources.monolith ?? "-"}, shards ${mint.sources.shards ?? "-"}, open PRs ${openPrs}`;
+  // W1-T2710: NAME THE COMPARISON, NOT JUST ITS RESULT. `remote plan -` says the check never ran
+  // (no reader injected — an offline mint); a number says it did, and `planBehindBy` then reads as
+  // a measured zero rather than an unmeasured one.
+  const src =
+    `tasks.yaml ${mint.sources.monolith ?? "-"}, shards ${mint.sources.shards ?? "-"}, ` +
+    `open PRs ${openPrs}, remote plan ${mint.sources.remotePlan ?? "-"}`;
   const warn = mint.degraded.length
     ? ` — DEGRADED: ${mint.degraded.map((d) => `${d.source} (${d.reason})`).join("; ")}`
     : "";

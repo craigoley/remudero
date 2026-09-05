@@ -318,6 +318,7 @@ import { assertProposedPlanLoads,
   triagePrompt,
 } from "./lib/triage.js";
 import {
+  declaredTaskIds,
   isAllocatableTaskId,
   mintNextTaskId,
   UNTRUSTED_SOURCE_REASON_PREFIX,
@@ -15589,13 +15590,92 @@ export interface MintedTaskIdWithHistory {
   degraded: MintDegradation[];
 }
 
+/**
+ * (W1-T2710) THE REF THE PLAN'S CURRENT CEILING IS READ FROM. Named as a constant rather than
+ * inlined so the one place that decides "what is current" is greppable — every other source in
+ * the mint reads THIS CHECKOUT, and this is the only one that does not.
+ */
+const REMOTE_PLAN_REF = "origin/main";
+
+/**
+ * (W1-T2710) The highest ALLOCATABLE id DECLARED in the plan on {@link REMOTE_PLAN_REF} — the
+ * producer for {@link mintNextTaskId}'s `remotePlanCeiling` seam. `null` when the ref is not
+ * resolvable at all (a fixture checkout, a clone with no `origin`), which is EMPTY and not a
+ * degradation, exactly as an absent `tasks.d/` is; a genuine read failure THROWS, and the mint
+ * records it as a degradation on the `remote-plan` source.
+ *
+ * WHY `git grep` OVER THE REF AND NOT A FILENAME SCAN. Shard filenames encode the id too, and
+ * `git ls-tree` would be one cheaper call — but a filename is a naming convention while `id:` is
+ * the declaration, and this figure feeds `maxSeen`. The SAME anchored pattern
+ * {@link declaredTaskIds} uses is applied to the remote's blobs, so the remote half and the local
+ * half cannot disagree about what counts as ownership. The bound is applied HERE, before the max,
+ * for the reason `highest` states: the plan legitimately carries ids above
+ * {@link MAX_ALLOCATABLE_TASK_ID}, and taking the max first would answer one of those and be
+ * rejected wholesale by the caller's own allocatable check — losing the real ceiling entirely.
+ *
+ * NO NETWORK. `origin/main` is a local tracking ref; this reads what the last fetch left behind.
+ * A checkout that never fetches is still behind, and the point is that it now SAYS so.
+ */
+export function remotePlanCeilingOnRef(
+  repoRoot: string,
+  planRelPath: string,
+  gitRunner: (args: string[]) => string = (args) =>
+    execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 26 }),
+): number | null {
+  try {
+    gitRunner(["rev-parse", "--verify", "--quiet", `${REMOTE_PLAN_REF}^{commit}`]);
+  } catch {
+    return null; // no remote tracking ref to compare against — empty, not a failure
+  }
+  let out: string;
+  try {
+    // `git grep` exits 1 on NO MATCH, which the runner surfaces as a throw. A plan with no `id:`
+    // declaration anywhere on the remote is empty, not broken, so that case answers `null` too;
+    // any other failure is left to throw and be recorded as a degradation by the caller.
+    out = gitRunner(["grep", "-h", "-E", REMOTE_PLAN_ID_DECL_PATTERN, REMOTE_PLAN_REF, "--", planRelPath]);
+  } catch (err) {
+    if ((err as { status?: number | null }).status === 1) return null;
+    throw err;
+  }
+  const allocatable = declaredTaskIds(out).filter(isAllocatableTaskId);
+  return allocatable.length ? Math.max(...allocatable) : null;
+}
+
+/** The POSIX-ERE spelling of {@link declaredTaskIds}' own anchored `id:` pattern, for `git grep -E`.
+ *  Written with `[[:space:]]` rather than `\s`: CLAUDE.md records that a POSIX engine drops `\s`
+ *  silently instead of erroring, which would return a clean, wrong zero here. */
+const REMOTE_PLAN_ID_DECL_PATTERN = '^[[:space:]]*(-[[:space:]]*)?id:[[:space:]]*["\']?W1-T[0-9]+';
+
 export function mintNextTaskIdWithHistory(opts: {
   planPath: string;
   repoRoot: string;
   openPrTexts?: () => string[];
   gitRunner?: (args: string[]) => string;
 }): MintedTaskIdWithHistory {
-  const base = mintNextTaskId({ planPath: opts.planPath, openPrTexts: opts.openPrTexts });
+  const planRelPathForRemote = relative(opts.repoRoot, dirname(opts.planPath));
+  // W1-T2710 — THE WIRING END, and the reason it lives here rather than in `task-id.ts`. That
+  // module is deliberately free of child-process access (its three sources are file reads and an
+  // injected thunk), so the remote read belongs on this side of the seam, beside
+  // `taskIdsEverFiled`'s own git reader. Wired at THIS one function rather than at each of the
+  // five `mintNextTaskIdWithHistory` call sites, so every caller inherits the current ceiling and
+  // no call site can silently opt out of it.
+  //
+  // SCOPE: `src/run-task.ts` is NOT in W1-T2710's declared `files:`. The widening is the same one
+  // W1-T1039 made in this exact function and for the same structural reason — a seam in
+  // `task-id.ts` with no producer here is a dead parameter (the #339/W1-T281 shape: removing the
+  // assignment fails no test), and the shard's own rationale asks for a source "that cannot
+  // silently lag", which only this side can supply. Recorded here and in the PR body because the
+  // linter refuses the shard edit that would record it there: adding a path outside plan scope to
+  // a `verify: auto` task's `files:` trips `rule15FilingViolation`. The review's `scope_violation`
+  // is ADVISORY and its own doc names review-ratified widenings as legitimate.
+  const base = mintNextTaskId({
+    planPath: opts.planPath,
+    openPrTexts: opts.openPrTexts,
+    remotePlanCeiling:
+      !isAbsolute(planRelPathForRemote) && !planRelPathForRemote.startsWith("..")
+        ? () => remotePlanCeilingOnRef(opts.repoRoot, planRelPathForRemote === "" ? "." : planRelPathForRemote, opts.gitRunner)
+        : undefined,
+  });
 
   const planRelPath = relative(opts.repoRoot, dirname(opts.planPath));
   let historyMax: number | null = null;
@@ -15648,7 +15728,8 @@ export function mintNextTaskIdWithHistory(opts: {
 export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
   const src =
     `tasks.yaml ${mint.sources.monolith ?? "-"}, shards ${mint.sources.shards ?? "-"}, ` +
-    `open PRs ${mint.sources.openPrs ?? "not enumerated"}, history ${mint.historyMax ?? "-"}`;
+    `open PRs ${mint.sources.openPrs ?? "not enumerated"}, remote plan ${mint.sources.remotePlan ?? "-"}, ` +
+    `history ${mint.historyMax ?? "-"}`;
   const warn = mint.degraded.length
     ? ` — DEGRADED: ${mint.degraded.map((d) => `${d.source} (${d.reason})`).join("; ")}`
     : "";
