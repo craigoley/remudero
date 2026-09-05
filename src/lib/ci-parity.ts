@@ -56,7 +56,15 @@ export interface CiParityStepResult {
   name: string;
   ok: boolean;
   detail: string;
+  /**
+   * W1-T2862: bounded stdout retained only when a fast-step descriptor explicitly opts in.
+   * Ordinary successful steps remain terse; a truncated payload is never treated as complete.
+   */
+  successOutput?: { text: string; truncated: boolean };
 }
+
+/** BACKSTOP: the durable summary must not grow with an unbounded child stdout stream. */
+export const MAX_RETAINED_SUCCESS_OUTPUT_CHARS = 65_536;
 /**
  * Where a preflight run writes its verdict so the RESULT SURVIVES THE CONTAINER THAT PRODUCED IT.
  *
@@ -207,6 +215,7 @@ interface CiParityLeafResult {
   ok: boolean;
   detail: string;
   matched?: boolean;
+  successOutput?: CiParityStepResult["successOutput"];
 }
 
 /** One ci.yml job's parity entry. `mirrored: false` entries MUST carry a `reason` — that is
@@ -243,7 +252,13 @@ function toolchainFailure(name: string, e: unknown): CiParityStepResult {
 function runStep(name: string, fn: () => CiParityLeafResult): CiParityStepResult & { matched?: boolean } {
   try {
     const r = fn();
-    return { name, ok: r.ok, detail: `${name}: ${r.detail}`, matched: r.matched };
+    return {
+      name,
+      ok: r.ok,
+      detail: `${name}: ${r.detail}`,
+      matched: r.matched,
+      ...(r.successOutput ? { successOutput: r.successOutput } : {}),
+    };
   } catch (e) {
     return { ...toolchainFailure(name, e), matched: false };
   }
@@ -272,7 +287,7 @@ export function shellOut(
   label: string,
   file: string,
   args: string[],
-  opts?: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv },
+  opts?: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv; retainSuccessOutput?: boolean },
 ): CiParityLeafResult {
   const res = spawn(file, args, opts);
   // A child that produced NO exit status is not an ordinary failure, and rendering it as
@@ -290,7 +305,21 @@ export function shellOut(
   const spawnFailed = spawnFailureDetail(label, res);
   if (spawnFailed) return { ok: false, detail: spawnFailed };
   const ok = res.status === 0;
-  if (ok) return { ok, detail: `PASS — ${label}` };
+  if (ok) {
+    const output = res.stdout.trim();
+    return {
+      ok,
+      detail: `PASS — ${label}`,
+      ...(opts?.retainSuccessOutput
+        ? {
+            successOutput: {
+              text: output.slice(0, MAX_RETAINED_SUCCESS_OUTPUT_CHARS),
+              truncated: output.length > MAX_RETAINED_SUCCESS_OUTPUT_CHARS,
+            },
+          }
+        : {}),
+    };
+  }
   // A STREAMED step has no captured text to quote — its output already went to the terminal, in
   // order, as it happened. Say so rather than rendering `FAIL — <label>` followed by an empty
   // line, which is the shape that made an ENOBUFS read as a real red test with no visible cause.
@@ -1743,7 +1772,16 @@ export function censusPopulationDrift(
   return { unknown, stale };
 }
 
-export const FAST_GATE_STEPS: { job: string; script: string; reason: string; boundMs?: number }[] = [
+export interface FastGateStep {
+  job: string;
+  script: string;
+  reason: string;
+  boundMs?: number;
+  /** Retain bounded stdout on PASS. Only evidence-producing signals may opt in. */
+  retainSuccessOutput?: boolean;
+}
+
+export const FAST_GATE_STEPS: FastGateStep[] = [
   {
     job: "cli-reference",
     script: "cli-reference:check",
@@ -1782,6 +1820,7 @@ export const FAST_GATE_STEPS: { job: string; script: string; reason: string; bou
   {
     job: "source-size",
     script: "source-size-signal",
+    retainSuccessOutput: true,
     reason:
       "same-class (W1-T2488/W1-T2734) — a deterministic npm-script signal: refreshes origin/main, measures only changed " +
       "src/**/*.ts files from the merge base to HEAD, and publishes human plus schema-versioned JSON hotspot evidence. " +
@@ -1926,7 +1965,7 @@ export interface PreflightFastDeps {
   /** Test seam — production always uses {@link FAST_GATE_STEPS} itself; a falsifier can inject a
    *  narrowed or synthetic list (e.g. with the census entries removed) to prove what a fast run
    *  can and cannot see, without mutating the real exported table. */
-  steps?: readonly { job: string; script: string; reason: string; boundMs?: number }[];
+  steps?: readonly FastGateStep[];
 }
 
 export interface PreflightFastResult {
@@ -1992,14 +2031,14 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // its own result. Nothing is refused on cost here, because the threshold is derived from the
   // population and the population is not complete until the last entry has run.
   const censusCosts = new Map<number, number>();
-  const steps = gateSteps.map(({ job, script, boundMs }, i) =>
+  const steps = gateSteps.map(({ job, script, boundMs, retainSuccessOutput }, i) =>
     runStep(job, () => {
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
       }
       const label = `npm run --silent ${script}`;
       if (boundMs === undefined) {
-        return shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot });
+        return shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot, retainSuccessOutput });
       }
       const startedAt = now();
       const result = withoutNodeTestContext(() => shellOut(spawn, label, "npm", ["run", "--silent", script], { cwd: repoRoot }));

@@ -88,6 +88,44 @@ test("runPreflightFast: every step's detail names itself in both directions (PAS
   }
 });
 
+test("W1-T2862: only the source-size step retains bounded successful output for the durable summary", () => {
+  const report = {
+    schema_version: 1,
+    base: "a".repeat(40),
+    head: "b".repeat(40),
+    hotspots: [{ path: "src/lib/large.ts", before_lines: 900, after_lines: 1150, delta_lines: 250, delta_percent: 27.78 }],
+  };
+  const sourceOutput = `source-size-signal: OK\nsource-size-signal-json: ${JSON.stringify(report)}\n`;
+  const { spawn } = recordingSpawn({
+    "source-size-signal": { status: 0, stdout: sourceOutput },
+    claims: { status: 0, stdout: "ordinary successful output must stay terse" },
+  });
+  const steps = [
+    { job: "source-size", script: "source-size-signal", reason: "same-class", retainSuccessOutput: true },
+    { job: "claims", script: "claims", reason: "required-core" },
+  ];
+  const result = runPreflightFast(REPO_ROOT, {
+    spawn,
+    packageJsonText: JSON.stringify({ scripts: { "source-size-signal": "echo stub", claims: "echo stub" } }),
+    steps,
+  });
+
+  assert.deepEqual(result.steps[0].successOutput, { text: sourceOutput.trim(), truncated: false });
+  assert.equal(result.steps[1].successOutput, undefined, "no other successful gate may retain stdout");
+  assert.equal(result.steps[0].detail, "source-size: PASS — npm run --silent source-size-signal");
+});
+
+test("W1-T2862: retained successful output is capped and records truncation instead of growing the summary without bound", () => {
+  const { spawn } = recordingSpawn({ "source-size-signal": { status: 0, stdout: "x".repeat(80_000) } });
+  const result = runPreflightFast(REPO_ROOT, {
+    spawn,
+    packageJsonText: JSON.stringify({ scripts: { "source-size-signal": "echo stub" } }),
+    steps: [{ job: "source-size", script: "source-size-signal", reason: "same-class", retainSuccessOutput: true }],
+  });
+  assert.equal(result.steps[0].successOutput?.truncated, true);
+  assert.ok((result.steps[0].successOutput?.text.length ?? Infinity) <= 65_536);
+});
+
 test("runPreflightFast: one step's failure never blocks a later step from running and reporting — same independent-step discipline as --ci-parity", () => {
   const { spawn } = recordingSpawn({
     "cli-reference:check": { status: 1, stderr: "docs/cli-reference.md is stale" },

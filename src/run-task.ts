@@ -290,6 +290,11 @@ import {
   runPreflightCoverage,
   runPreflightFast,
 } from "./lib/ci-parity.js";
+import {
+  consumeSourceSizeFollowup,
+  type ConsumeSourceSizeFollowupArgs,
+  type ConsumeSourceSizeFollowupResult,
+} from "./lib/source-size-followup.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
   buildReadyServeServer,
@@ -11769,6 +11774,41 @@ export function nextLaneEpochMs(): number {
   return (lastLaneEpochMs = now);
 }
 
+/**
+ * W1-T2862: report the maintainability obligation without ever changing the implementation
+ * verdict. The consumer owns durable filing and its decision-relevant receipt; this wrapper owns
+ * only worker-path narration for named no-op/error outcomes and catches an unexpected seam throw.
+ */
+export function reportWorkerSourceSizeFollowup(
+  args: ConsumeSourceSizeFollowupArgs,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+  consume?: (input: ConsumeSourceSizeFollowupArgs) => ConsumeSourceSizeFollowupResult,
+): ConsumeSourceSizeFollowupResult | undefined {
+  try {
+    const result = consume ? consume(args) : consumeSourceSizeFollowup(args);
+    if (result.action === "filed") {
+      say(`source-size follow-up filed as ${result.feedbackId} for ${result.files.length} material hotspot(s)`);
+      return result;
+    }
+    if (result.action === "noop") {
+      log("source_size.followup.noop", {
+        reason: result.reason,
+        ...(result.signature ? { signature: result.signature } : {}),
+      });
+      return result;
+    }
+    log("source_size.followup.error", { reason: result.reason, detail: result.detail });
+    say(`source-size follow-up could not be filed (${result.reason}) — implementation verdict is unchanged`);
+    return result;
+  } catch (error) {
+    const detail = String((error as Error)?.message ?? error).replace(/[\r\n\t]+/g, " ").slice(0, 512);
+    log("source_size.followup.error", { reason: "unexpected_throw", detail });
+    say("source-size follow-up could not be evaluated — implementation verdict is unchanged");
+    return undefined;
+  }
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -13071,6 +13111,35 @@ async function runTask(
     if (preflightNotice) {
       log("preflight.failed", { detail: preflightNotice, worktree: worktreePath });
       say(preflightNotice);
+    }
+
+    // W1-T2862: consume the worker's successful source-size signal while this exact worktree and
+    // its durable preflight summary still exist. This runs before every implementation verdict
+    // branch that may remove the worktree. An unreadable HEAD or any filing failure is telemetry
+    // only: maintainability debt creates separate work and never rewrites the feature verdict.
+    try {
+      const expectedHead = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+      reportWorkerSourceSizeFollowup(
+        {
+          root: repoDir,
+          worktreeRoot: worktreePath,
+          expectedHead,
+          stateDir: dirname(ledgerPath),
+          ledgerPath,
+          runId,
+          sourceTask: taskId,
+          sourcePr: parseReport(workerTranscript(impl))?.prUrl,
+          sourceBranch: branch,
+        },
+        log,
+        say,
+      );
+    } catch (error) {
+      const detail = String((error as Error)?.message ?? error).replace(/[\r\n\t]+/g, " ").slice(0, 512);
+      log("source_size.followup.noop", { reason: "head_unreadable", detail });
     }
 
     const implFail = failOnWorkerError(impl, "implement");
