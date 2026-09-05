@@ -295,7 +295,7 @@ test("FAST_GATE_STEPS: unaffected by --coverage's existence — still exactly th
     "census:no-shallowing",
     "claims",
     "cli-reference:check",
-    "comment-load-ratchet",
+    "comment-load-signal",
     "depcruise",
     "jscpd",
     "learnings-budget-ratchet",

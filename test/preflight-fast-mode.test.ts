@@ -51,7 +51,7 @@ test("FAST_GATE_STEPS: the curated list is exactly the ten deterministic npm-scr
     "census:no-shallowing",
     "claims",
     "cli-reference:check",
-    "comment-load-ratchet",
+    "comment-load-signal",
     "depcruise",
     "jscpd",
     "learnings-budget-ratchet",
