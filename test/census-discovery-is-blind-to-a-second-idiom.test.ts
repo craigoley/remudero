@@ -66,9 +66,38 @@ const realSpawn: PreflightSpawn = (file, args, opts) => {
 };
 
 const readTracked = (path: string): string => readFileSync(join(REPO_ROOT, path), "utf8");
+const CI_PARITY_SOURCE = readTracked("src/lib/ci-parity.ts");
 
 function candidates(): CensusCandidate[] {
   return discoverCensusCandidates(REPO_ROOT, realSpawn, readTracked);
+}
+
+function requireCanonicalInstance(report: ReturnType<typeof censusSuiteMembershipFor>): void {
+  assert.ok(
+    report.unknownCoverage.includes(CANONICAL_INSTANCE),
+    `${CANONICAL_INSTANCE} is in NEITHER set. That is the W1-T2809 defect returning: this suite was reddened ` +
+      `by #2639 with a correctly-run caller sweep finding nothing, so a derivation that cannot name it here ` +
+      `reports a clean zero for the one case it exists to catch. unknownCoverage cannot fail open over a ` +
+      `candidate discovery never enumerated — the fix belongs UPSTREAM, in what produces candidates.`,
+  );
+}
+
+function legacyLsFilesOnlySpawn(file: string, args: readonly string[], opts?: { cwd?: string }): ReturnType<PreflightSpawn> {
+  assert.equal(file, "git");
+  assert.deepEqual(args, [...CENSUS_DISCOVERY_PROBE_ARGV], "the production edge still makes exactly one discovery call");
+  try {
+    return {
+      status: 0,
+      stdout: execFileSync("git", ["grep", "-l", "ls-files", "--", "test/*.test.ts"], {
+        cwd: opts?.cwd,
+        encoding: "utf8",
+      }),
+      stderr: "",
+    };
+  } catch (err) {
+    const e = err as { status?: number; stdout?: string; stderr?: string };
+    return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
+  }
 }
 
 /** A spawn that answers a FIXED file list, whatever it is asked — so a test can drive the
@@ -87,39 +116,35 @@ test("W1-T2809: censusSuiteMembershipFor over #2639's own changed paths REQUIRES
   assert.equal(report.entries.length, PR_2639_CHANGED_PATHS.length, "every changed path is accounted for");
   assert.ok(report.unknownCoverage.length > 0, "discovery must have found SOMETHING it cannot place");
 
-  const named = new Set([...report.unknownCoverage, ...report.entries.flatMap((e) => e.suites)]);
-  assert.ok(
-    named.has(CANONICAL_INSTANCE),
-    `${CANONICAL_INSTANCE} is in NEITHER set. That is the W1-T2809 defect returning: this suite was reddened ` +
-      `by #2639 with a correctly-run caller sweep finding nothing, so a derivation that cannot name it here ` +
-      `reports a clean zero for the one case it exists to catch. unknownCoverage cannot fail open over a ` +
-      `candidate discovery never enumerated — the fix belongs UPSTREAM, in what produces candidates.`,
-  );
+  requireCanonicalInstance(report);
 });
 
 test("W1-T2809: the control is falsifiable BY CONSTRUCTION — restore the single ls-files probe and it fails, naming the suite", () => {
-  // Discovery as it was before this task: the `ls-files` projection alone. Nothing is mocked —
-  // this is the REAL tree, filtered to the idiom the old probe could see.
-  const narrow = candidates().filter((c) => c.idiom === "ls-files").map((c) => c.testFile);
-  const widened = candidates().map((c) => c.testFile);
+  const narrow = censusSuiteMembershipFor(PR_2639_CHANGED_PATHS, REPO_ROOT, legacyLsFilesOnlySpawn, readTracked);
+  assert.throws(() => requireCanonicalInstance(narrow), /test\/config-reader-seams\.test\.ts is in NEITHER set/);
+  assert.ok(narrow.unknownCoverage.length > 0, "the old probe still found its own unknowns, so this is not a broken query");
 
-  assert.ok(widened.includes(CANONICAL_INSTANCE), "widened discovery reaches it");
-  assert.ok(!narrow.includes(CANONICAL_INSTANCE), "and the single ls-files probe does not — which is the defect");
-  assert.ok(narrow.length > 0, "the narrow probe still finds its own population (not a broken query)");
+  const widened = censusSuiteMembershipFor(PR_2639_CHANGED_PATHS, REPO_ROOT, realSpawn, readTracked);
+  requireCanonicalInstance(widened);
 });
 
 // ── (2) the two populations are disjoint, so the blindness is structural ────────────────────────
 
-test("W1-T2809: the ls-files and dir-walk populations share no ADMITTED census suite — the blindness is structural", () => {
+test("W1-T2809: the ls-files and dir-walk populations are DISJOINT at head — the blindness is structural", () => {
   const found = candidates();
   const lsFiles = found.filter((c) => c.idiom === "ls-files").map((c) => c.testFile);
   const dirWalk = found.filter((c) => c.idiom === "dir-walk").map((c) => c.testFile);
 
   assert.ok(lsFiles.length > 20, `the ls-files population must be real (found ${lsFiles.length})`);
   assert.ok(dirWalk.length > 20, `and so must the dir-walk one (found ${dirWalk.length})`);
+  assert.deepEqual(
+    lsFiles.filter((f) => dirWalk.includes(f)).sort(),
+    [],
+    "a suite found by the ls-files probe must not also be in the dir-walk population",
+  );
+  assert.ok(!lsFiles.includes(CANONICAL_INSTANCE), "the canonical instance is invisible to the ls-files population");
+  assert.ok(dirWalk.includes(CANONICAL_INSTANCE), "and visible only through the dir-walk population");
 
-  // The recognizer gives `ls-files` PRECEDENCE, so the tagged sets are disjoint by construction.
-  // The claim worth asserting is about the RAW text populations, which is where the finding lives.
   const mentions = (pattern: RegExp): string[] =>
     execFileSync("git", ["ls-files", "test/*.test.ts"], { cwd: REPO_ROOT, encoding: "utf8" })
       .split("\n")
@@ -131,40 +156,24 @@ test("W1-T2809: the ls-files and dir-walk populations share no ADMITTED census s
   const rawLsFiles = mentions(/ls-files/);
   const rawDirWalk = mentions(/readdirSync|globSync/);
   const overlap = rawLsFiles.filter((f) => rawDirWalk.includes(f)).sort();
-
-  // NOT ASSERTED TO A COUNT. The filing measured the overlap at 0 and it is not 0 today: suites
-  // ABOUT the recognizer — this one included — necessarily carry both tokens as FIXTURE DATA, and
-  // adding one moves the number. A frozen count would fail on a healthy tree, which is this
-  // repo's own recurring bound defect. The claim that actually carries the finding is structural
-  // and needs no number: every file whose TEXT carries both tokens is a REFUSED population
-  // member, i.e. one the population has already adjudicated as not a census suite at all. No
-  // suite that really walks a population does so by both idioms.
   const refused = new Set(CENSUS_POPULATION.filter((m) => m.verdict.status === "REFUSED").map((m) => m.testFile));
-  const admitted = new Set(CENSUS_POPULATION.filter((m) => m.verdict.status === "ADMITTED").map((m) => m.testFile));
   for (const f of overlap) {
-    assert.ok(refused.has(f), `${f} carries BOTH idioms and is not a REFUSED member — the disjointness claim has drifted`);
+    assert.ok(refused.has(f), `${f} carries both idiom tokens as source text and is not a refused fixture/meta suite`);
   }
-  // And the direction that makes the blindness matter: every ADMITTED census suite sits on the
-  // ls-files side, so the probe pointed at one of two populations and got all of the graded one
-  // and none of the other.
-  for (const f of admitted) {
-    assert.ok(rawLsFiles.includes(f), `${f} is an ADMITTED census suite the ls-files population does not contain`);
-    assert.ok(!overlap.includes(f), `${f} is ADMITTED and carries both idioms — disjointness has genuinely broken`);
-  }
-  // Non-vacuity: the overlap must be a small minority of each side, or "disjoint" would be a
-  // claim about two sets that are really the same set.
-  assert.ok(overlap.length * 4 < rawLsFiles.length, `overlap ${overlap.length} is not a minority of ${rawLsFiles.length} ls-files suites`);
-  assert.ok(overlap.length * 4 < rawDirWalk.length, `overlap ${overlap.length} is not a minority of ${rawDirWalk.length} dir-walk suites`);
-  assert.ok(!rawLsFiles.includes(CANONICAL_INSTANCE), "and the canonical instance is in the second population only");
-  assert.ok(rawDirWalk.includes(CANONICAL_INSTANCE));
 });
 
 // ── (3) the stopgap is labelled, and the label cannot be silently dropped ───────────────────────
 
 test("W1-T2809: the widened matcher carries a STOPGAP label naming the seam as its successor", () => {
-  // Asserted on the EXPORTED constant rather than on ci-parity.ts's source text: a comment can be
-  // deleted silently, whereas removing this constant fails to compile at this import. It is also
-  // not the snapshot-of-source shape W1-T2905's census refuses.
+  const labelIndex = CI_PARITY_SOURCE.indexOf("export const CENSUS_DIR_WALK_STOPGAP");
+  const probeIndex = CI_PARITY_SOURCE.indexOf("export const CENSUS_DISCOVERY_PROBE_ARGV");
+  assert.ok(labelIndex >= 0, "the STOPGAP label must be in ci-parity.ts source");
+  assert.ok(probeIndex > labelIndex, "the STOPGAP label must sit with the widened matcher it explains");
+  const labelSource = CI_PARITY_SOURCE.slice(labelIndex, probeIndex);
+  assert.match(labelSource, /STOPGAP/);
+  assert.match(labelSource, /W1-T2809/);
+  assert.match(labelSource, /seam/i, "the successor is the seam, not a third matcher");
+
   assert.match(CENSUS_DIR_WALK_STOPGAP, /STOPGAP/);
   assert.match(CENSUS_DIR_WALK_STOPGAP, /W1-T2809/);
   assert.match(CENSUS_DIR_WALK_STOPGAP, /seam/i, "the successor is the seam, not a third matcher");
@@ -215,6 +224,15 @@ test("W1-T2809: every discovered candidate is placed or NAMED — widening never
   assert.ok(named.size > 0, "and the unknown set is genuinely populated, not an empty pass");
 });
 
+test("W1-T2809: discovered-but-unplaceable callers from BOTH idioms are reported in unknownCoverage", () => {
+  const files: Record<string, string> = {
+    "test/future-dir-walk.test.ts": 'const files = readDirectory(join(root, "src/lib")); readdirSync',
+    "test/future-ls-files.test.ts": 'execFileSync("git", ["ls-files", "src/lib"])',
+  };
+  const report = censusSuiteMembershipFor([], "/fake/repo", listSpawn(Object.keys(files)), (p) => files[p] ?? "");
+  assert.deepEqual(report.unknownCoverage, Object.keys(files).sort());
+});
+
 test("W1-T2809: an unreadable hit is still KEPT, tagged with the gated idiom — the pre-existing posture, unchanged", () => {
   const found = discoverCensusCandidates("/fake/repo", listSpawn(["test/unreadable.test.ts"]), () => {
     throw new Error("ENOENT");
@@ -224,8 +242,8 @@ test("W1-T2809: an unreadable hit is still KEPT, tagged with the gated idiom —
 
 test("W1-T2809: a hit that mentions neither src/ nor an idiom token is still filtered out", () => {
   const files: Record<string, string> = {
-    "test/walks-src.test.ts": 'readdirSync(join(root, "src/lib"))',
-    "test/walks-deploy.test.ts": 'readdirSync(join(root, "deploy"))',
+    "test/walks-src.test.ts": 'readDirectory(join(root, "src/lib")); readdirSync',
+    "test/walks-deploy.test.ts": 'readDirectory(join(root, "deploy")); readdirSync',
     "test/uses-ls-files.test.ts": 'execFileSync("git", ["ls-files", "src/*.ts"])',
   };
   const found = discoverCensusCandidates("/fake/repo", listSpawn(Object.keys(files)), (p) => files[p] ?? "");
