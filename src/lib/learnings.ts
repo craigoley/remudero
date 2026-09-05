@@ -8,9 +8,10 @@ import { citation } from "./provenance.js";
  * Promptsmith — the READ side of the compounding thesis (WS-8, W1-T19; SPLIT +
  * INDEX + SUPERSESSION, W1-T33).
  *
- * LEARNINGS.md is written by diagnosing workers and never read back, so every
- * worker starts fresh and re-pays the re-learning tax two files away. This
- * module closes the loop: it injects, into every rendered implement prompt,
+ * LEARNINGS.md is written by diagnosing workers and read back only by
+ * `retroCommand` (src/run-task.ts), which folds it into the retro's own
+ * context — never by an ordinary implement worker. This module closes THAT
+ * gap: it injects, into every rendered implement prompt,
  *   (a) DISTRUST THE PROMPT OVER THE INSTALLED VERSION (Standing rule 7),
  *   (b) the autonomy clause (Standing rule 8), and
  *   (c) the LEARNINGS entries whose file-globs MATCH the task.
