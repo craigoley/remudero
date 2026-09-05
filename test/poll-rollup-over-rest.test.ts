@@ -14,6 +14,7 @@
  * error propagation.
  */
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { test } from "node:test";
 
 import { rollupFor, GhPaceFloorStandDownError, type GhApiFetcher } from "../src/lib/open-prs-rest.js";
@@ -253,5 +254,5 @@ test("W1-T2268: pollToGate and waitForCiGreen are drivable end to end without a 
   } finally {
     process.env.PATH = savedPath;
   }
-  assert.ok(Date.now() - started < 5000, "a fully-injected run must cost no real wall-clock time despite a 6s nominal cadence");
+  assertWallClockBound(Date.now() - started, 5000, "a fully-injected run must cost no real wall-clock time despite a 6s nominal cadence");
 });

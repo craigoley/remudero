@@ -29,6 +29,7 @@
  * Its own file per CLAUDE.md's coverage rule — never appended to test/run-task.test.ts.
  */
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import {
   chmodSync,
   existsSync,
@@ -109,7 +110,7 @@ test("a worktree whose ROOT mtime is ancient but whose NESTED file was just writ
     assert.ok(rootAgeMin > 60, `root dir mtime must be ancient, was ${rootAgeMin.toFixed(1)} min old`);
     const probe = newestActivityMs(f.entry);
     assert.equal(probe.complete, true);
-    assert.ok((Date.now() - probe.mtimeMs) / MIN < 1, "the real walk finds the fresh nested file");
+    assertWallClockBound((Date.now() - probe.mtimeMs) / MIN, 1, "the real walk finds the fresh nested file");
     assert.equal(statSync(deep).mtimeMs, probe.mtimeMs, "and it is that FILE the walk found");
 
     // The REAL probe — opts.newestActivity deliberately not injected.
@@ -322,7 +323,7 @@ test("the ROOT's own mtime is the FLOOR — an empty, freshly-created dir is not
   try {
     const probe = newestActivityMs(root);
     assert.equal(probe.complete, true);
-    assert.ok((Date.now() - probe.mtimeMs) / MIN < 1, "an empty new dir reports its OWN mtime, not 0");
+    assertWallClockBound((Date.now() - probe.mtimeMs) / MIN, 1, "an empty new dir reports its OWN mtime, not 0");
     assert.equal(probe.mtimeMs, statSync(root).mtimeMs);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -351,7 +352,7 @@ test("`.git` and `node_modules` are never descended into — their churn is not 
     // PAIRED POSITIVE CONTROL: the same tree with an EMPTY skip set does see them. Without this,
     // the assertion above passes on a walk that finds nothing at all.
     const unskipped = newestActivityMs(root, { skipDirs: new Set() });
-    assert.ok((Date.now() - unskipped.mtimeMs) / MIN < 1, "so the skip list is what excluded them");
+    assertWallClockBound((Date.now() - unskipped.mtimeMs) / MIN, 1, "so the skip list is what excluded them");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -407,7 +408,7 @@ test("a single unstatable ENTRY is skipped without failing the whole walk — th
     // The walk COMPLETED — one unstatable entry is not an unreadable tree — and still found the
     // activity in the statable half.
     assert.equal(probe.complete, true, "a single unstatable entry must not poison the whole probe");
-    assert.ok((Date.now() - probe.mtimeMs) / MIN < 1, "and the readable half's fresh file still counted");
+    assertWallClockBound((Date.now() - probe.mtimeMs) / MIN, 1, "and the readable half's fresh file still counted");
   } finally {
     try {
       chmodSync(blind, 0o755);

@@ -15,6 +15,7 @@
  * measured 173 ms / 0.32 GiB against the same 669-rotation corpus.
  */
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
@@ -161,7 +162,7 @@ test("the bounded read stays under a second on the REAL 669-rotation corpus", (t
   const ms = Date.now() - started;
   // MEASURED at 173 ms; 1000 is the ceiling this must never quietly cross. The full union through
   // `rmd emissions` costs 7.74s — the price the cap exists to refuse.
-  assert.ok(ms < 1000, `bounded read took ${ms} ms — a board nobody runs is a board that does not work`);
+  assertWallClockBound(ms, 1000, `bounded read took ${ms} ms — a board nobody runs is a board that does not work`);
   assert.ok(
     union.filter((l) => l.step === "daemon.summary").length > 0,
     "and it must actually find the row the one-path reader could not",

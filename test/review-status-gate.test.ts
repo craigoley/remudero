@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -198,7 +199,7 @@ test("acquireReviewStatusLock: a STALE (dead-pid) lock is reclaimed immediately,
     await acquireReviewStatusLock(lockPath, { info: { pid: 424242 }, isPidAlive: () => true });
     const started = Date.now();
     const handle = await acquireReviewStatusLock(lockPath, { isPidAlive: () => false, retryMs: 5000, timeoutMs: 5000 });
-    assert.ok(Date.now() - started < 1000, "a stale lock must be reclaimed without waiting a full retry cycle");
+    assertWallClockBound(Date.now() - started, 1000, "a stale lock must be reclaimed without waiting a full retry cycle");
     handle.release();
   } finally {
     rmSync(dir, { recursive: true, force: true });

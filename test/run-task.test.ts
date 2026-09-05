@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { execFileSync } from "node:child_process";
 import { chmodSync, cpSync, readdirSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8496,7 +8497,7 @@ test("W1-T2370: nothing added paces or throttles or sleeps between attempts", ()
   const out = resolveAlreadySatisfiedWithRetry(w2370Claim("#42"), W2370_GATEWAY, W2370_TASK, r.resolve);
   const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
   assert.equal(out.attempts, 3);
-  assert.ok(elapsedMs < 50, `three attempts must not pace; took ${elapsedMs.toFixed(3)}ms`);
+  assertWallClockBound(elapsedMs, 50, `three attempts must not pace; took ${elapsedMs.toFixed(3)}ms`);
   // A returned value, not a thenable: an async signature is where a sleep would live.
   assert.notEqual(typeof (out as unknown as { then?: unknown }).then, "function");
 });

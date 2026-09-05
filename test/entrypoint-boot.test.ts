@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -540,14 +541,14 @@ test("an exit 0 is NEVER throttled, so a STOP file stops the fleet immediately",
   const run = bootTimed(freshHome(), makeOrigin(), 0, { RMD_RESTART_THROTTLE_S: "5" });
   assert.equal(run.calls, 1);
   assert.equal(run.status, 0);
-  assert.ok(run.elapsedMs < 5000, `an exit 0 must not sleep, took ${run.elapsedMs}ms`);
+  assertWallClockBound(run.elapsedMs, 5000, `an exit 0 must not sleep, took ${run.elapsedMs}ms`);
   assert.match(run.stderr, /exited 0 — not throttled/);
 });
 
 test("with the throttle UNSET the script still execs, so one-shot verbs keep today's latency", () => {
   const run = bootTimed(freshHome(), makeOrigin(), 3, {});
   assert.equal(run.status, 3, "the exit code still propagates through exec");
-  assert.ok(run.elapsedMs < 2000, `the default path must not sleep, took ${run.elapsedMs}ms`);
+  assertWallClockBound(run.elapsedMs, 2000, `the default path must not sleep, took ${run.elapsedMs}ms`);
   assert.doesNotMatch(run.stderr, /restart throttle/, "and must not announce a throttle it is not applying");
 });
 
@@ -555,7 +556,7 @@ test("a non-numeric throttle is refused loudly and falls back to exec rather tha
   const run = bootTimed(freshHome(), makeOrigin(), 3, { RMD_RESTART_THROTTLE_S: "60s" });
   assert.equal(run.status, 3);
   assert.match(run.stderr, /not a whole number of seconds/);
-  assert.ok(run.elapsedMs < 2000, "a rejected value must not sleep");
+  assertWallClockBound(run.elapsedMs, 2000, "a rejected value must not sleep");
 });
 
 // ── W1-T490: A FRESHNESS RESTART MUST NOT SPEND THE CRASH-LOOP BUDGET, AND A CRASH STILL MUST ──
@@ -844,7 +845,7 @@ test("W1-T498: a freshness retry pauses its own short interval not the crash thr
   assert.equal(run.calls, 2, "the freshness restart must still re-run in-container, as W1-T490 pinned");
   assert.equal(run.status, 0, "and still hand back a clean exit");
   assert.ok(run.elapsedMs >= 1000, `must pay its own 1s pause, took ${run.elapsedMs}ms`);
-  assert.ok(run.elapsedMs < 4000, `must NOT pay the 5s crash throttle, took ${run.elapsedMs}ms`);
+  assertWallClockBound(run.elapsedMs, 4000, `must NOT pay the 5s crash throttle, took ${run.elapsedMs}ms`);
   assert.match(run.stderr, /sleeping 1s \(not the 5s crash throttle\)/);
 });
 

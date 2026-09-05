@@ -27,6 +27,7 @@
  * "judged silently" this shard forbids.
  */
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -295,7 +296,7 @@ test("drain lock: the shutdown signal reaches the supervised daemon", async () =
     const releasedElapsedMs = Date.now() - sentAt;
     // FAR under the 3s throttle sleep a stranded-and-never-released lock would fall through to —
     // the release happens on receipt of the FORWARDED signal, not on any timer.
-    assert.ok(releasedElapsedMs < 2_000, `the lock must release promptly on the forwarded signal, took ${releasedElapsedMs}ms`);
+    assertWallClockBound(releasedElapsedMs, 2_000, `the lock must release promptly on the forwarded signal, took ${releasedElapsedMs}ms`);
   } finally {
     // The stand-in re-raises and dies for real (like production), so the outer entrypoint still
     // has its own throttle sleep to run through before exiting; nothing further to assert once

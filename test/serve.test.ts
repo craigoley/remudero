@@ -8,6 +8,7 @@
 // runtime helper (test/setup/open-shell.ts's reachSection) for exactly that reason -- there is no
 // `page` here to reach a section on.
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -463,7 +464,7 @@ test("GET /v1/status over a full 183-task plan: first-paint-to-data under budget
     assert.equal(res.status, 200);
     const body = (await res.json()) as { tasks: Array<{ taskId: string }> };
     assert.equal(body.tasks.length, N); // the WHOLE plan reached the client, not a partial/hung snapshot
-    assert.ok(ms < 2000, `first-paint-to-data ${ms.toFixed(0)}ms exceeded the 2000ms budget`);
+    assertWallClockBound(ms, 2000, `first-paint-to-data ${ms.toFixed(0)}ms exceeded the 2000ms budget`);
     assert.equal(fetchCalls, 1, `expected O(1) GitHub fetch for the snapshot, got ${fetchCalls} for ${N} tasks`);
   });
 });
@@ -650,7 +651,7 @@ test("W1-T188 criterion 2: the first-paint-to-data budget is a REPLAYABLE golden
       await res.text();
       const ms = performance.now() - t0;
       assert.equal(res.status, 200);
-      assert.ok(ms < 2000, `replay ${replay}/2 of the golden corpus: GET /v1/status took ${ms.toFixed(1)}ms -- must be < 2000ms`);
+      assertWallClockBound(ms, 2000, `replay ${replay}/2 of the golden corpus: GET /v1/status took ${ms.toFixed(1)}ms -- must be < 2000ms`);
     });
   }
 });

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -291,7 +292,7 @@ test("claim: nothing added here paces, throttles, or sleeps a call — a refusal
     );
     const elapsedMs = Date.now() - startedAt;
     assert.equal(err.reasonClass, "credential-too-short-for-run");
-    assert.ok(elapsedMs < 200, `expected a synchronous refusal, took ${elapsedMs}ms — nothing here should sleep or poll`);
+    assertWallClockBound(elapsedMs, 200, `expected a synchronous refusal, took ${elapsedMs}ms — nothing here should sleep or poll`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

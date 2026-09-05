@@ -12,6 +12,7 @@
  * a sweep might hang on.
  */
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { test } from "node:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -370,7 +371,7 @@ test("W1-T1044: an unsensed worker is bounded by elapsed time", async () => {
   // either side of the requested bound rather than pinning exact timer precision, the same
   // tolerance the sibling "abandoning a sweep records the task and elapsed time" test uses.
   assert.ok(outcome.spawnAbandonedElapsedMs !== undefined && outcome.spawnAbandonedElapsedMs >= 25, "bounded by the configured elapsed time");
-  assert.ok(realElapsedMs < 5000, `abandonment must fire near the 30ms bound, not the module's own multi-minute default (saw ${realElapsedMs}ms)`);
+  assertWallClockBound(realElapsedMs, 5000, `abandonment must fire near the 30ms bound, not the module's own multi-minute default (saw ${realElapsedMs}ms)`);
 
   const records = readLedgerRecords(ledgerPath);
   assert.ok(records.length > 0, "the ledger genuinely received writes — this is not an unused path");
