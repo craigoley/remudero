@@ -24,6 +24,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { renderConsoleShellScript } from "../src/lib/console-shell-script.js";
 import { buildPanelGraphRoutes, type PanelGraphDeps, type RatifyCliGateway } from "../src/lib/panel-graph.js";
 import { renderShellHtml } from "../src/lib/serve.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -52,11 +53,12 @@ interface Journey {
 function journeyHarness(): Journey {
   const factory = new Function(
     [
-      clientFn("escapeHtml"),
-      clientFn("journeyGraphSvg"),
-      clientFn("journeyRunHtml"),
-      clientFn("journeyTaskHtml"),
-      clientFn("journeyHtml"),
+      // W1-T2731: every PURE helper this sandbox needs now comes from
+      // lib/console-shell-script.ts, through the SAME `renderConsoleShellScript()` the shell
+      // itself splices in — so this is still the real shipped code, not a stand-in. `clientFn`
+      // could not reach them any more in any case: tsx MINIFIES the transpiled module, so the
+      // emitted text is one line per function and no source regex can carve it up.
+      renderConsoleShellScript(),
       "return { journeyGraphSvg: journeyGraphSvg, journeyHtml: journeyHtml };",
     ].join("\n"),
   ) as () => Journey;
