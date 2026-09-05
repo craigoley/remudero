@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { classifyUpdateBranchFailure, updateBranchViaGh } from "../src/run-task.js";
+import { classifyUpdateBranchFailure, reviewAttemptsForInput, updateBranchViaGh } from "../src/run-task.js";
 import { test } from "node:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,6 +19,7 @@ import {
   isPureConcurrentAddition,
   listRetirableEscalationIssues,
   observedBlockerState,
+  reviewInputBackoffElapsed,
   renderClarificationQuestion,
   renderMootedCloseComment,
   renderReconcileCloseComment,
@@ -48,7 +49,7 @@ import {
   type SweepPolicy,
   type SupersessionVerdict,
 } from "../src/lib/sweep.js";
-import { reviewLedgerReasons, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
+import { REVIEW_ENGINE_REVISION, reviewInputDigest, reviewLedgerReasons, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
 // W1-T2381: the trip's surviving surface is the digest, so the end-to-end test renders one.
@@ -738,6 +739,52 @@ test("W1-T2860: a completed exact-input judgment restores the ordinary mergeable
     "mergeable",
     "a digest without an explicit zero is not evidence of a missing judgment",
   );
+});
+
+test("W1-T2872: current-engine terminal evidence restores ordinary dedup and backoff after one rearmed review", () => {
+  const taskId = "W1-T2857";
+  const prUrl = "https://github.com/craigoley/remudero/pull/4042";
+  const headSha = "eb44a4cab4e78a85c2fbb8e893b4225ab589cd4b";
+  const body = "exact body";
+  const currentDigest = reviewInputDigest(headSha, body, REVIEW_ENGINE_REVISION);
+  const oldDigest = reviewInputDigest(headSha, body, "review-engine-pre-exact-head-v1");
+  const oldLedger = [{
+    ts: "2026-09-05T05:40:57.234Z",
+    step: "review.posted",
+    task_id: taskId,
+    pr_url: prUrl,
+    head_sha: headSha,
+    review_input_digest: oldDigest,
+  }];
+  assert.deepEqual(reviewAttemptsForInput(oldLedger, taskId, prUrl, headSha, currentDigest), { attempts: 0 });
+
+  const currentAt = "2026-09-05T08:20:00.000Z";
+  const currentLedger = [...oldLedger, {
+    ts: currentAt,
+    step: "review.posted",
+    task_id: taskId,
+    pr_url: prUrl,
+    head_sha: headSha,
+    review_input_digest: currentDigest,
+    review_engine_revision: REVIEW_ENGINE_REVISION,
+  }];
+  const attempts = reviewAttemptsForInput(currentLedger, taskId, prUrl, headSha, currentDigest);
+  assert.deepEqual(attempts, { attempts: 1, lastAttemptAt: currentAt });
+  const reviewed = pr({
+    prNumber: 4042,
+    prUrl,
+    taskId,
+    headSha,
+    checksState: "green",
+    reviewState: "failure",
+    reviewInputDigest: currentDigest,
+    priorReviewAttemptsForInput: attempts.attempts,
+    reviewInputLastAttemptAt: attempts.lastAttemptAt,
+    unmetCriteria: [criterion()],
+    lastActivityAt: currentAt,
+  });
+  assert.equal(deriveDisposition(reviewed, DEFAULT_SWEEP_POLICY, Date.parse("2026-09-05T08:21:00.000Z")).disposition, "blocked-fixable");
+  assert.equal(reviewInputBackoffElapsed(reviewed, DEFAULT_SWEEP_POLICY, Date.parse("2026-09-05T08:21:00.000Z")), false);
 });
 
 test("W1-T2860: an exact-input refusal bounds recovery while a changed input earns a fresh attempt", () => {
