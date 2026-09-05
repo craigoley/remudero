@@ -269,7 +269,12 @@ test("criterion 3/4: no identifier is named as though it were reserved while bou
   // remote block. Asserted on the assignment rather than on each consumer, which is what makes it
   // a single source rather than three that happen to agree today.
   assert.match(src, /const reservedIds = remoteIdBlock\.taskIds;/, "reservedIds is the remote block");
-  assert.match(src, /initialPrompt: triagePrompt\(entry, runId, reservedHeadTaskId, reservedIds\.slice\(1\)\)/, "the prompt reads it");
+  // The trailing `)` is deliberately NOT anchored: this test guards WHICH LIST the prompt reads,
+  // not how many arguments `triagePrompt` happens to take. W1-T2700 appended a fifth parameter
+  // (the enveloped feedback block, defaulted so no positional caller shifted) and the anchored
+  // form failed on a call that still passes exactly this list — a coupling to argument COUNT that
+  // the criterion never asked for.
+  assert.match(src, /initialPrompt: triagePrompt\(entry, runId, reservedHeadTaskId, reservedIds\.slice\(1\)/, "the prompt reads it");
   assert.match(src, /lintFiledTasks\(worktreePath, reservedIds,/, "and so does the linter inside the loop");
 
   // The spend gate is unchanged and still pre-spawn.

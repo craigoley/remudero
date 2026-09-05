@@ -25,6 +25,7 @@
  * content masquerading as a real, if tiny, injected part.
  */
 import { createHash } from "node:crypto";
+import { countEnvelopes } from "./untrusted-envelope.js";
 
 /** One named part of an assembled prompt, as {@link buildPromptManifest} receives it. `value` is
  *  the EXACT string this part contributes to the rendered prompt (before any surrounding
@@ -33,6 +34,14 @@ import { createHash } from "node:crypto";
 export interface PromptManifestInput {
   name: string;
   value: string | null | undefined;
+  /**
+   * W1-T2700: this part is known to carry EXTERNAL text — an issue body, a PR comment, a CI log
+   * tail, a webhook payload. Declared by the CALLER, because only the assembly site knows an
+   * input's provenance; the manifest cannot infer it from the bytes. A part declared external
+   * whose {@link PromptManifestPart.envelopes} count is 0 handed that text to a worker BARE, and
+   * {@link unwrappedExternalParts} names it from the ledger row alone, after the fact.
+   */
+  external?: boolean;
 }
 
 /** One manifest row. `present: false` rows always carry `sha256: null` and `bytes: null` — see
@@ -42,6 +51,15 @@ export interface PromptManifestPart {
   present: boolean;
   sha256: string | null;
   bytes: number | null;
+  /**
+   * W1-T2700: how many untrusted-content envelopes this part's text contains. ALWAYS PRESENT, and
+   * `0` on an absent part — unlike `sha256`/`bytes`, "no envelopes" is a real, actionable fact
+   * about a part rather than a missing measurement, and a `null` here would force every reader to
+   * re-decide what an unknown count means. `external` echoes the caller's declaration so a reader
+   * can join the two without holding the assembly site's knowledge.
+   */
+  envelopes: number;
+  external: boolean;
 }
 
 /**
@@ -51,15 +69,34 @@ export interface PromptManifestPart {
  * want a stable row order should pass a stably-ordered `parts` array.
  */
 export function buildPromptManifest(parts: readonly PromptManifestInput[]): PromptManifestPart[] {
-  return parts.map(({ name, value }) => {
+  return parts.map(({ name, value, external }) => {
     if (!value) {
-      return { name, present: false, sha256: null, bytes: null };
+      return { name, present: false, sha256: null, bytes: null, envelopes: 0, external: Boolean(external) };
     }
     return {
       name,
       present: true,
       sha256: createHash("sha256").update(value, "utf8").digest("hex"),
       bytes: Buffer.byteLength(value, "utf8"),
+      envelopes: countEnvelopes(value),
+      external: Boolean(external),
     };
   });
+}
+
+/**
+ * THE MANIFEST'S OWN READER (W1-T2700 criterion 3). Names every part that was DECLARED external,
+ * was actually PRESENT this run, and carried ZERO envelopes — i.e. a worker was handed outside
+ * text bare. Returns names only: the manifest never held the bytes, and this must not tempt a
+ * caller into republishing prompt text.
+ *
+ * A RECORD, NEVER A GATE, exactly as this module's header already binds every reader here: an
+ * unwrapped part is reported so a human can go and wrap it. Nothing may consult this to decide a
+ * dispatch, a review, or an arm — it answers "did this already happen?", never "may this proceed?".
+ *
+ * An ABSENT external part is NOT reported: there was no text to wrap, so there is nothing to fix,
+ * and reporting it would bury the real rows under one per skipped optional part per run.
+ */
+export function unwrappedExternalParts(parts: readonly PromptManifestPart[]): string[] {
+  return parts.filter((p) => p.external && p.present && p.envelopes === 0).map((p) => p.name);
 }
