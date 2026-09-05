@@ -26,7 +26,7 @@ const BASELINE = join(REPO_ROOT, "scripts", "comment-load-baseline.json");
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import would be a TS7016. A dynamic
 // specifier is not statically resolved, so this loads the REAL module with no shadow copy.
-const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks, listMeasuredFiles, main, readBaseline, MAX_ADDED_BLOCK_LINES } =
+const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks, listMeasuredFiles, main, readBaseline, splitBaseInheritedViolations, MAX_ADDED_BLOCK_LINES } =
   (await import(pathToFileURL(SCRIPT).href)) as {
     countCommentLines: (text: string, path: string) => { comments: number; code: number };
     evaluateCommentLoadRatchet: (
@@ -46,6 +46,13 @@ const { countCommentLines, evaluateCommentLoadRatchet, findOversizedAddedBlocks,
     ) => Array<{ file: string; startLine: number; lines: number }>;
     listMeasuredFiles: (root: string) => string[];
     readBaseline: (text: string, path: string) => Record<string, number>;
+    splitBaseInheritedViolations: (
+      violations: Array<{ path: string; comments: number; baseline: number; overage: number }>,
+      baseComments: Record<string, number>,
+    ) => {
+      caused: Array<{ path: string; comments: number }>;
+      inherited: Array<{ path: string; comments: number; atBase: number }>;
+    };
     main: (argv: string[]) => number;
     MAX_ADDED_BLOCK_LINES: number;
   };
@@ -349,6 +356,60 @@ test("main --check: refuses to leave a required baseline change unwritten, and n
       before,
       "--check must leave the baseline byte-identical",
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── growth this diff caused, versus growth it inherited from the merge base ───────────────────
+
+test("splitBaseInheritedViolations: a file already that long at the merge base is INHERITED, not charged", () => {
+  const violations = [
+    { path: "src/main-grew.ts", comments: 361, baseline: 328, overage: 33 },
+    { path: "src/we-grew.ts", comments: 50, baseline: 40, overage: 10 },
+    { path: "src/we-grew-further.ts", comments: 60, baseline: 40, overage: 20 },
+  ];
+  const { caused, inherited } = splitBaseInheritedViolations(violations, {
+    "src/main-grew.ts": 361, // main landed this while the PR was open
+    "src/we-grew-further.ts": 55, // the base grew it to 55; this diff pushed it to 60
+    // src/we-grew.ts is absent at the base entirely
+  });
+  assert.deepEqual(inherited.map((v) => [v.path, v.atBase]), [["src/main-grew.ts", 361]]);
+  assert.deepEqual(caused.map((v) => v.path), ["src/we-grew.ts", "src/we-grew-further.ts"]);
+});
+
+test("splitBaseInheritedViolations: with no base counts at all, every violation stays CHARGED — it fails closed", () => {
+  const violations = [{ path: "src/a.ts", comments: 9, baseline: 1, overage: 8 }];
+  const { caused, inherited } = splitBaseInheritedViolations(violations, {});
+  assert.equal(inherited.length, 0);
+  assert.deepEqual(caused, violations);
+});
+
+test("CLI: growth main landed while the PR was open passes and is recorded; growth the PR added still fails", () => {
+  const root = fixtureRepo({ "src/a.ts": 1, "scripts/comment-load-baseline.json": 0 }, `// one\n${CLEAN}`);
+  try {
+    // `main` itself grows src/a.ts to three comment lines AFTER the ledger recorded one.
+    writeFileSync(join(root, "src", "a.ts"), `// one\n// two\n// three\n${CLEAN}`);
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "-qm", "main grows a comment"]);
+    // The branch is cut from that same main, so the growth is at its merge base.
+    git(root, ["checkout", "-qb", "work"]);
+    const inheritedOnly = runInProcess(["--root", root, "--base", "main"]);
+    assert.equal(inheritedOnly.code, 0, inheritedOnly.err);
+    assert.match(inheritedOnly.out, /src\/a\.ts carries 3 comment lines over a recorded 1, but already carried 3 at the merge base/);
+    assert.equal(
+      JSON.parse(readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8"))["src/a.ts"],
+      3,
+      "the ledger must be updated to the inherited truth, not left short",
+    );
+
+    // Now the BRANCH adds a fourth comment line of its own: charged, and refused.
+    writeFileSync(join(root, "src", "a.ts"), `// one\n// two\n// three\n// four\n${CLEAN}`);
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "-qm", "the branch grows it further"]);
+    const caused = runInProcess(["--root", root, "--base", "main"]);
+    assert.equal(caused.code, 1);
+    assert.match(caused.err, /src\/a\.ts: 4 comment lines > ceiling 3 \(\+1\)/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

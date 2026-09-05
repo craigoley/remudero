@@ -243,6 +243,38 @@ function measureAll(root, files) {
   return { comments, totals };
 }
 
+/**
+ * Split violations into the ones this diff caused and the ones it INHERITED from the merge base.
+ *
+ * TRAP this closes: the baseline records a count at a moment in time, and CI measures the MERGE
+ * ref, so every merge to main that adds a comment line makes an open PR's ledger short and refuses
+ * a PR that changed nothing. Observed three times on this gate's own PR in forty minutes.
+ *
+ * A file already carrying that many comment lines AT THE MERGE BASE is not growth this diff can be
+ * asked to answer for. `baseComments` holds the base counts, read only for files that breached the
+ * ledger, so the common clean run costs no extra git call.
+ */
+export function splitBaseInheritedViolations(violations, baseComments) {
+  const caused = [];
+  const inherited = [];
+  for (const v of violations) {
+    const atBase = baseComments[v.path];
+    if (atBase !== undefined && v.comments <= atBase) inherited.push({ ...v, atBase });
+    else caused.push(v);
+  }
+  return { caused, inherited };
+}
+
+/** Comment counts for `paths` as they stood at `base`, skipping any path absent there. */
+function commentCountsAtBase(root, base, paths) {
+  const counts = {};
+  for (const path of paths) {
+    const res = spawnSync("git", ["show", `${base}:${path}`], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (res.status === 0) counts[path] = countCommentLines(res.stdout, path).comments;
+  }
+  return counts;
+}
+
 function reportGrowth(violations, baselineRelPath) {
   console.error(`comment-load-ratchet: BLOCKED -- ${violations.length} file(s) carry more comment lines than their recorded ceiling:`);
   for (const v of violations) {
@@ -335,24 +367,39 @@ export function main(argv) {
     return 2;
   }
 
+  // The ledger is the FIRST-pass ceiling; a file that breached it is re-judged against the merge
+  // base, so growth main landed while this PR was open is not charged to this PR. Only breaching
+  // files are read at the base, so a clean run pays nothing for this.
+  const inheritedAtBase = commentCountsAtBase(root, base, verdict.violations.map((v) => v.path));
+  const split = splitBaseInheritedViolations(verdict.violations, inheritedAtBase);
+  for (const v of split.inherited) verdict.nextBaseline[v.path] = v.comments;
+  const causedViolations = split.caused;
+
   if (values.json) {
     console.log(JSON.stringify({
       schema_version: 1,
       base,
       files: files.length,
       totals: measured.totals,
-      violations: verdict.violations,
+      violations: causedViolations,
+      inherited_from_base: split.inherited,
       oversized_added_blocks: blocks,
       shrunk: verdict.shrunk,
       added: verdict.added,
       removed: verdict.removed,
     }));
-    return verdict.ok && blocks.length === 0 ? 0 : 1;
+    return causedViolations.length === 0 && blocks.length === 0 ? 0 : 1;
   }
 
-  if (!verdict.ok) reportGrowth(verdict.violations, baselineRelPath);
+  for (const v of split.inherited) {
+    console.log(
+      `comment-load-ratchet: ${v.path} carries ${v.comments} comment lines over a recorded ${v.baseline}, ` +
+        `but already carried ${v.atBase} at the merge base -- inherited, not this diff's growth; the ledger is updated.`,
+    );
+  }
+  if (causedViolations.length > 0) reportGrowth(causedViolations, baselineRelPath);
   if (blocks.length > 0) reportBlocks(blocks);
-  if (!verdict.ok || blocks.length > 0) return 1;
+  if (causedViolations.length > 0 || blocks.length > 0) return 1;
 
   const pct = (100 * measured.totals.comments) / (measured.totals.comments + measured.totals.code);
   console.log(
@@ -360,7 +407,7 @@ export function main(argv) {
       `against ${measured.totals.code} code lines (${pct.toFixed(1)}%); none over its ceiling, no added block over ${MAX_ADDED_BLOCK_LINES} lines.`,
   );
 
-  const drift = verdict.shrunk.length + verdict.added.length + verdict.removed.length;
+  const drift = verdict.shrunk.length + verdict.added.length + verdict.removed.length + split.inherited.length;
   if (values.check && drift > 0) {
     console.error(`comment-load-ratchet: CHECK FAILED -- ${drift} baseline change(s) are required and ${baselineRelPath} was left byte-identical:`);
     for (const a of verdict.added) console.error(`  add    "${a.path}": ${a.comments},`);
@@ -373,6 +420,7 @@ export function main(argv) {
     for (const s of verdict.shrunk) console.log(`  ratcheting down: ${s.path} ${s.from} -> ${s.to}`);
     for (const a of verdict.added) console.log(`  recording new file: ${a.path} at ${a.comments}`);
     for (const path of verdict.removed) console.log(`  dropping entry for a file no longer tracked: ${path}`);
+    for (const v of split.inherited) console.log(`  recording base-inherited growth: ${v.path} ${v.baseline} -> ${v.comments}`);
     // `_comment` is prose the baseline carries for whoever opens it; it is not a path, so
     // `evaluateCommentLoadRatchet` never sees it and it must be re-attached here or a write drops it.
     const next = baseline._comment === undefined ? verdict.nextBaseline : { _comment: baseline._comment, ...verdict.nextBaseline };
