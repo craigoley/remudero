@@ -240,8 +240,8 @@ export function cacheTokenLedgerFields(tokens: TokenUsage): {
 }
 
 /** Persisted-stderr length ceiling. Bounds the PERSISTED copy so a runaway transcript cannot bloat the ledger; it never bounds
- * what stays in memory on {@link WorkerResult}. Why: two "Not logged in" spawns died with their only diagnostic in memory
- * (W1-T238). */
+ * what stays in memory on {@link WorkerResult}.
+ * Why: two "Not logged in" spawns died with their only diagnostic in memory (W1-T238). */
 export const STDERR_EXCERPT_CAP = 4000;
 
 /** Truncate `s` to {@link STDERR_EXCERPT_CAP} chars, noting how much was cut — never a silent drop. */
@@ -355,8 +355,8 @@ export function workerLedgerFields(r: WorkerResult): {
     account_label: r.accountLabel,
     // A REFUSAL OUTRANKS THE ENVELOPE'S OWN SUBTYPE, and the ordering IS the fix: the subtype is exactly the field that lies
     // here. The old ternary rendered both arms "success" on the swallow path, because a SUCCESS envelope wrote `subtype`
-    // before the SDK threw. Every other path is unchanged. Why: 793 refusals across five rungs were recorded as completed
-    // work (W1-T2564).
+    // before the SDK threw. Every other path is unchanged.
+    // Why: 793 refusals across five rungs were recorded as completed work (W1-T2564).
     verdict: r.usageRefusal ? "usage_refused" : r.isError ? r.subtype : "success",
     ...(r.usageRefusal
       ? {
@@ -418,8 +418,8 @@ function defaultLogHomeReap(result: WorkerHomeReapResult, spawn: { runId?: strin
 
 /** The fields `ensureWorkerKeychain`'s {@link WorkerKeychainSummary} becomes once observed here. Logged on EVERY darwin
  * provisioning call, `expectedRunMs` supplied or not, so the rate the expiry margin is really exercised becomes answerable
- * off-host. Pure, for the same reason {@link workerHomeReapLogFields} is. Why: `observedHeadroomMs` shipped in W1-T2398 with
- * this call site discarding it (W1-T2518). */
+ * off-host. Pure, for the same reason {@link workerHomeReapLogFields} is.
+ * Why: `observedHeadroomMs` shipped in W1-T2398 with this call site discarding it (W1-T2518). */
 export function workerKeychainHeadroomLogFields(
   summary: WorkerKeychainSummary,
   expectedRunMs: number | undefined,
@@ -451,7 +451,8 @@ function defaultLogKeychainHeadroom(
 // can move the real binary out from under it mid-operation. Resolution below runs FRESH at spawn time —
 // operator override, live PATH lookup, then the install-location table — memoized per process and
 // preflight-checked, so a bad resolution fails loud before any worker-home or keychain work rather than
-// deep inside a spawn. Why: the vanished-binary incident (W1-T113; MASTER-PLAN Field Finding 12).
+// deep inside a spawn.
+// Why: the vanished-binary incident (W1-T113; MASTER-PLAN Field Finding 12).
 
 /** Operator escape hatch: an explicit path always wins over PATH/the table. */
 export const CLAUDE_BIN_ENV_OVERRIDE = "REMUDERO_CLAUDE_BIN";
@@ -1258,8 +1259,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   try {
     // Keychain-unlock gate, macOS only: guarantee the DEDICATED always-unlocked worker keychain before any spawn and point
     // the redirected HOME's slot at it, so a LOCKED login keychain can no longer kill the spawn "Not logged in" at $0. A
-    // credential problem throws WorkerKeychainError HERE, pre-spawn, with a named reason class. Why: a $0 zero-write death
-    // read as "containment UNPROVEN" (2026-07-21, W1-T235).
+    // credential problem throws WorkerKeychainError HERE, pre-spawn, with a named reason class.
+    // Why: a $0 zero-write death read as "containment UNPROVEN" (2026-07-21, W1-T235).
     let workerKeychainPath: string | undefined;
     const platform = args.keychain?.platform ?? process.platform;
     // Resolved fresh per spawn on EVERY platform, never captured once at boot, matching account-usage.ts's
@@ -1297,8 +1298,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }
     // A grant that FAILED is not a grant that was OPTIONAL. The absent-target skip stays silent, but a target that EXISTS and
     // could not be reached is a LOST CAPABILITY the worker then runs without. Carried on the RESULT rather than logged here,
-    // since this module writes no ledger rows by design. Why: a real `.claude` DIRECTORY in the symlink slot left the usage
-    // probe logged out for days with nothing on disk saying so (W1-T417-adjacent).
+    // since this module writes no ledger rows by design.
+    // Why: a real `.claude` DIRECTORY in the symlink slot left the usage probe logged out for days with nothing on disk
+    //      saying so (W1-T417-adjacent).
     const lostGrants = lostWorkerHomeGrants(
       materializeWorkerHome({ workerHome, realHome, workerKeychainPath }),
     );
@@ -1366,8 +1368,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // LIVE-SPAWN GUARD — the final authority gate before the SDK invocation, the only line that creates a paid worker.
     // Everything above is local and free and refuses on its own for bad input, so guarding higher would mask three of those
     // refusals. Scoped to a REAL spawn: an injected `args.queryFn` creates no process; what this stops is a test reaching the
-    // real SDK through an un-stubbed dep or an `as never` cast. Why: test/mounts-wiring.test.ts once spent $1.42+ and left
-    // six ghost branches (impl-EM).
+    // real SDK through an un-stubbed dep or an `as never` cast.
+    // Why: test/mounts-wiring.test.ts once spent $1.42+ and left six ghost branches (impl-EM).
     if (args.queryFn === undefined) {
       assertLiveSpawnAllowed(`spawnWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -2031,8 +2033,8 @@ export function parseReconReport(text: string): ReconReport | null {
 
 /** ANCHORED PR_URL extraction. The output contract demands a REPORT whose LAST line is exactly `PR_URL: <url>`, so only a line
  * matching `PR_URL:` anchored to its own start counts; every other pull-URL in the text is INERT, and when the contract is
- * honoured twice the LAST line wins. A missing or malformed line yields `undefined`, never a guess. Why: taking the first
- * pull-URL anywhere ledgered a run as merged via Dependabot's PR #80 when its real PR was #91 (W1-T62). */
+ * honoured twice the LAST line wins. A missing or malformed line yields `undefined`, never a guess.
+ * Why: taking the first pull-URL anywhere ledgered a run as merged via Dependabot's PR #80 when its real PR was #91 (W1-T62). */
 function anchoredPrUrl(text: string): string | undefined {
   const matches = [
     ...text.matchAll(/^[ \t]*PR_URL:[ \t]*(https:\/\/github\.com\/[^\s)"']+\/pull\/\d+)/gim),
@@ -2166,8 +2168,9 @@ export function worktreesDir(config: Config): string {
  * never `config.root` itself and never `$HOME`: a reaper pointed at `config.root` would walk live worktrees and non-worktree
  * entries alike (the 2026-07-31 failure), and a home-scoped one would gain `Documents`, `Library` and `.ssh` while still
  * refusing most of the leak. DERIVED, never a hardcoded absolute path, for the same public-repo-hygiene reason {@link
- * worktreesDir} follows. Why: 4.7G of linked worktrees sat one directory above the reaper's 44K scan surface, reachable by
- * nothing (W1-T2847; docs/forensics/worker.md). */
+ * worktreesDir} follows.
+ * Why: 4.7G of linked worktrees sat one directory above the reaper's 44K scan surface, reachable by nothing (W1-T2847;
+ *      docs/forensics/worker.md). */
 export function adhocLaneRoot(config: Config): string {
   return join(config.root, "lanes");
 }
@@ -2213,8 +2216,9 @@ export type NodeModulesLinkOutcome =
 /** Give a fresh worktree a `node_modules`, by SYMLINK — never by installing. INVARIANT: a symlink, never `npm ci`. An install
  * here is what emptied the shared `node_modules` under the live daemon on 2026-07-29, so the commit-msg hook's own "run `npm
  * ci` first" advice must not be taken. Best-effort by contract: every outcome is a RETURN VALUE, never a throw, because
- * creating a worktree must not fail over its dev CLIs. Why: the hook refuses to skip its gate when commitlint is absent, so
- * with no `node_modules` every commit from every worktree verb was rejected (W1-T137/#842; docs/forensics/worker.md). */
+ * creating a worktree must not fail over its dev CLIs.
+ * Why: the hook refuses to skip its gate when commitlint is absent, so with no `node_modules` every commit from every
+ *      worktree verb was rejected (W1-T137/#842; docs/forensics/worker.md). */
 export function linkWorktreeNodeModules(
   repoDir: string,
   worktreePath: string,
@@ -2726,9 +2730,9 @@ export function writeRunLock(worktreePath: string, info: RunLockInfo): void {
   // ATOMIC OVERWRITE: write to a sibling temp file, then rename() into place. rename(2) swaps the entry atomically on POSIX,
   // so a reader sees complete old or complete new content and never a torn intermediate. The temp name embeds pid and
   // timestamp so racing writers never clobber each other, and this uses the default `fs` import (see the import header) so
-  // the write is a spy-able property lookup. Why: a direct write let the prune process read a partial file, whose parse
-  // failure returned the same `null` as "no lock at all", so a live run read as debris and its worktree was force-removed
-  // (W1-T208).
+  // the write is a spy-able property lookup.
+  // Why: a direct write let the prune process read a partial file, whose parse failure returned the same `null` as "no lock
+  //      at all", so a live run read as debris and its worktree was force-removed (W1-T208).
   const target = runLockPath(worktreePath);
   const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
   fs.writeFileSync(tmp, JSON.stringify(info, null, 2));
@@ -3008,8 +3012,9 @@ export function reclaimStaleConfigLock(repoDir: string, opts: ConfigLockReclaimO
  * the admin records, then delete every remaining local `run-*` branch. Best-effort and per-item guarded; the caller's own
  * about-to-be-created branch does not exist yet, so it is safe. LIVENESS GUARD: a worktree whose sibling {@link runLockPath}
  * names a LIVE pid is SKIPPED. A CORRUPT lock is treated the SAME as an ABSENT one, never as proof of death — both go through
- * the age and grace guard, which is what makes a torn read survivable. Why: force-removing any `run-*` worktree once
- * destroyed a successful 65-turn implement mid-run (DIAGNOSIS.md diag/drain-concurrency; W1-T208). */
+ * the age and grace guard, which is what makes a torn read survivable.
+ * Why: force-removing any `run-*` worktree once destroyed a successful 65-turn implement mid-run (DIAGNOSIS.md
+ *      diag/drain-concurrency; W1-T208). */
 export function pruneStaleRuns(
   repoDir: string,
   worktreesRoot: string,
