@@ -36,6 +36,7 @@ import type {
 export type { SupersessionDiffFinding, SupersessionEvidence, SupersessionStatus, SupersessionVerdict };
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 import type { WorkflowRunObservation } from "./workflow-run.js";
+import type { ReviewCapacityPolicy } from "./review-capacity.js";
 // Re-exported so existing `import type { … } from "./sweep.js"` call sites keep working.
 export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 // W1-T2340: declared in a leaf module so `open-prs-rest.ts`'s producer can import it without
@@ -636,6 +637,10 @@ export interface SweepPolicy {
    * CONCERN") — see {@link loadReviewLanesPolicy}'s own doc.
    */
   reviewLanes: number;
+  /** Existing policy-row bounds plus the adaptive host/provider feedback thresholds. */
+  reviewLaneMin: number;
+  reviewLaneMax: number;
+  reviewCapacity: ReviewCapacityPolicy;
   /**
    * W1-T148 COST GOVERNOR (the $206/60-run W1-T1 spin-loop incident) — a DAILY
    * spend ceiling, in notional USD, on DISPATCH ONLY: at or over this many
@@ -989,15 +994,87 @@ export function validateReviewLanesRow(row: unknown): number {
   return value;
 }
 
+const REVIEW_CAPACITY_FIELDS = [
+  "hostWorkerBudget",
+  "workerMemoryReserveMib",
+  "healthyWindowSamples",
+  "sampleCadenceMs",
+  "telemetryCadenceMs",
+  "cpuPsiLowPct",
+  "cpuPsiHighPct",
+  "memoryPsiLowPct",
+  "memoryPsiHighPct",
+  "providerAllowancePct",
+  "settlementWindowMs",
+  "unhealthySettlementThreshold",
+  "minHealthySettlements",
+  "latencyExpansionRatio",
+] as const satisfies readonly (keyof ReviewCapacityPolicy)[];
+
+/** Direct bounded-row loader for W1-T2853's nested review-capacity policy. */
+export function validateReviewCapacityPolicy(raw: unknown): ReviewCapacityPolicy {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new PolicyError("policy.yaml: 'sweep.reviewCapacity' must be a mapping of bounded numeric rows.");
+  }
+  const output = {} as Record<keyof ReviewCapacityPolicy, number>;
+  for (const field of REVIEW_CAPACITY_FIELDS) {
+    const row = (raw as Record<string, unknown>)[field];
+    if (typeof row !== "object" || row === null || Array.isArray(row)) {
+      throw new PolicyError(`policy.yaml: 'sweep.reviewCapacity.${field}' must be a bounded numeric row.`);
+    }
+    const { value, min, max } = row as Record<string, unknown>;
+    if (
+      typeof value !== "number" || !Number.isFinite(value) ||
+      typeof min !== "number" || !Number.isFinite(min) ||
+      typeof max !== "number" || !Number.isFinite(max)
+    ) {
+      throw new PolicyError(`policy.yaml: 'sweep.reviewCapacity.${field}' must carry finite value/min/max numbers.`);
+    }
+    if (min > max) {
+      throw new PolicyError(`policy.yaml: 'sweep.reviewCapacity.${field}' has min (${min}) > max (${max}).`);
+    }
+    if (value < min || value > max) {
+      throw new PolicyError(
+        `policy.yaml: 'sweep.reviewCapacity.${field}.value' (${value}) is out of its declared bound [${min}, ${max}].`,
+      );
+    }
+    output[field] = value;
+  }
+  if (output.cpuPsiLowPct >= output.cpuPsiHighPct || output.memoryPsiLowPct >= output.memoryPsiHighPct) {
+    throw new PolicyError("policy.yaml: review-capacity PSI low watermarks must be below their high watermarks.");
+  }
+  for (const field of ["hostWorkerBudget", "healthyWindowSamples", "unhealthySettlementThreshold", "minHealthySettlements"] as const) {
+    if (!Number.isInteger(output[field]) || output[field] < 1) {
+      throw new PolicyError(`policy.yaml: 'sweep.reviewCapacity.${field}.value' must be a positive integer.`);
+    }
+  }
+  if (output.sampleCadenceMs <= 0 || output.telemetryCadenceMs <= 0 || output.settlementWindowMs <= 0) {
+    throw new PolicyError("policy.yaml: review-capacity cadence/window values must be positive.");
+  }
+  if (output.latencyExpansionRatio <= 1) {
+    throw new PolicyError("policy.yaml: 'sweep.reviewCapacity.latencyExpansionRatio.value' must be greater than 1.");
+  }
+  return output;
+}
+
 /** Reads the row {@link validateReviewLanesRow} validates. Split from it so every refusal arm
  *  above is reachable from a test without a temp policy file on disk — the file read stays here,
  *  the decisions stay there. */
-function loadReviewLanesPolicy(): number {
+function loadReviewPolicy(): { value: number; min: number; max: number; capacity: ReviewCapacityPolicy } {
   const path = installPolicyPath();
-  const raw = parseYaml(readFileSync(path, "utf8")) as { sweep?: { reviewLanes?: unknown } } | null;
-  return validateReviewLanesRow(raw?.sweep?.reviewLanes);
+  const raw = parseYaml(readFileSync(path, "utf8")) as {
+    sweep?: { reviewLanes?: unknown; reviewCapacity?: unknown };
+  } | null;
+  const value = validateReviewLanesRow(raw?.sweep?.reviewLanes);
+  const row = raw?.sweep?.reviewLanes as Record<string, unknown>;
+  return {
+    value,
+    min: row.min as number,
+    max: row.max as number,
+    capacity: validateReviewCapacityPolicy(raw?.sweep?.reviewCapacity),
+  };
 }
-const REVIEW_LANES_DEFAULT = loadReviewLanesPolicy();
+const REVIEW_POLICY = loadReviewPolicy();
 
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   staleDays: POLICY_SWEEP.staleDays,
@@ -1005,7 +1082,10 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   clarify: DEFAULT_CLARIFY_POLICY,
   wipLimit: POLICY_SWEEP.wipLimit,
   dispatchLanes: POLICY_SWEEP.dispatchLanes,
-  reviewLanes: REVIEW_LANES_DEFAULT,
+  reviewLanes: REVIEW_POLICY.value,
+  reviewLaneMin: REVIEW_POLICY.min,
+  reviewLaneMax: REVIEW_POLICY.max,
+  reviewCapacity: REVIEW_POLICY.capacity,
   dailyCostCeilingUsd: POLICY_SWEEP.dailyCostCeilingUsd,
   // W1-T1038: collected off plan/policy.yaml's own row (POLICY_SWEEP, above), the same relocation
   // dailyCostCeilingUsd/wipLimit/dispatchLanes already made — never a source literal.
@@ -4927,6 +5007,16 @@ export interface SweepDeps {
    */
   postReview?: (pr: OpenPrView) => void | Promise<void>;
   /**
+   * W1-T2853 — choose this pass's review width from one already-derived queue and ledger
+   * snapshot. Production supplies the local host/provider controller; omission preserves the
+   * committed `reviewLanes` behavior for CLI/test callers.
+   */
+  selectAdaptiveReviewWidth?: (input: {
+    queueDepth: number;
+    nowMs: number;
+    ledgerLines: ReadonlyArray<Record<string, unknown>>;
+  }) => number;
+  /**
    * W1-T2584 — MAY THE BOUNDED REVIEW POOL ADMIT ANOTHER HEAD FROM THIS PASS'S ALREADY-DERIVED
    * pending set? Consulted synchronously immediately before each worker pulls its next job.
    * Optional means `true`, preserving direct `rmd sweep` and every pre-existing fixture.
@@ -6169,6 +6259,31 @@ export function orderPendingReviews<T extends { pr: Pick<OpenPrView, "createdAt"
     if (ta !== undefined && tb !== undefined && ta !== tb) return ta - tb;
     return a.pr.prNumber - b.pr.prNumber;
   });
+}
+
+function effectiveReviewWidth(
+  deps: SweepDeps,
+  policy: SweepPolicy,
+  queueDepth: number,
+  nowMs: number,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): number {
+  const min = Math.max(1, Math.trunc(policy.reviewLaneMin));
+  const max = Math.max(min, Math.trunc(policy.reviewLaneMax));
+  const base = Math.min(max, Math.max(min, Math.trunc(policy.reviewLanes)));
+  if (!deps.selectAdaptiveReviewWidth) return base;
+  try {
+    const selected = deps.selectAdaptiveReviewWidth({ queueDepth, nowMs, ledgerLines });
+    if (!Number.isFinite(selected)) throw new Error(`non-finite width ${JSON.stringify(selected)}`);
+    return Math.min(max, Math.max(min, Math.trunc(selected)));
+  } catch (error) {
+    (deps.log ?? (() => {}))("review.capacity.selector_failed", {
+      queue_depth: queueDepth,
+      base_width: base,
+      error: String((error as Error)?.message ?? error),
+    });
+    return base;
+  }
 }
 
 export async function runSweep(
@@ -7502,7 +7617,6 @@ export async function runSweep(
   // `postReview` calls live at once. Workers keep pulling from `pendingReviews` — the reviews
   // THIS PASS already found eligible — until that finite set drains or a named admission stop
   // fires. It never goes looking for work: a pass with zero eligible reviews starts zero workers.
-  const reviewLanes = Math.max(1, policy.reviewLanes);
   // W1-T1218/W1-T2584: ORDER BEFORE THE PULL. `pendingReviews` is built by `push` inside the per-PR walk
   // above, so its order IS the enumeration order, and `openPrsRestArgs` requests
   // `pulls?state=open&per_page=100` with no `sort` — GitHub answers newest-first. Slicing that by
@@ -7510,6 +7624,7 @@ export async function runSweep(
   // The pull pool consumes this immutable oldest-first array by monotonically increasing index, so
   // completion order cannot reorder later starts.
   const orderedReviews = orderPendingReviews(pendingReviews);
+  const reviewLanes = effectiveReviewWidth(deps, policy, orderedReviews.length, now, ledgerLines);
   const postReview = deps.postReview;
   let nextReviewIndex = 0;
   let admissionStopReason: string | undefined;
@@ -7880,13 +7995,16 @@ export async function runSweepLightPass(
   // admission. The later read remains the race-safe boundary if a verdict lands after this one.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
-  const selectionPrior = priorActionsFromLedger(readLedger(deps.ledgerPath));
+  const selectionLedgerLines = readLedger(deps.ledgerPath);
+  const selectionPrior = priorActionsFromLedger(selectionLedgerLines);
   const outcomes: ReviewAdmissionOutcomes = {
     delivered: selectionPrior.reviewDelivered,
     refused: selectionPrior.reviewRefused,
     retryableThrows: selectionPrior.reviewRetryableThrows,
   };
-  const { spawning, planFilings } = selectReviewAdmissions(openPrs, policy, now, outcomes);
+  const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
+  const semanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines);
+  const { spawning, planFilings } = selectReviewAdmissions(openPrs, policy, now, outcomes, semanticBound);
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
@@ -7903,7 +8021,6 @@ export async function runSweepLightPass(
       .map((pr) => pr.prNumber),
   );
   const admittedNumbers = spawning.map((p) => `#${p.prNumber}`).join(", ");
-  const semanticBound = Math.max(1, policy.reviewLanes);
   return Promise.all(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
@@ -7913,10 +8030,11 @@ export async function runSweepLightPass(
       // CI wait must leave the await on both branches or the defect survives on one of them.
       const scopedDeps: SweepDeps =
         selectedNumbers.has(pr.prNumber) || outcomeDedupedNumbers.has(pr.prNumber)
-          ? { ...deps, detachFixWait: true }
+          ? { ...deps, detachFixWait: true, selectAdaptiveReviewWidth: undefined }
           : {
               ...deps,
               detachFixWait: true,
+              selectAdaptiveReviewWidth: undefined,
               actionable: (d) => (d === "post-review" ? false : baseActionable ? baseActionable(d) : true),
               // W1-T2426 (criterion 7): name the mechanism, not just the fact. A `post-review`
               // refused HERE was eligible and lost this pass's bounded admission — a different
@@ -8042,6 +8160,7 @@ export function selectReviewAdmissions(
   policy: SweepPolicy,
   now: number,
   outcomes: ReviewAdmissionOutcomes = EMPTY_REVIEW_ADMISSION_OUTCOMES,
+  reviewWidth: number = Math.max(1, policy.reviewLanes),
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility. The caller folds
   // these two sets once from the same PriorActions reader `runSweep` uses; filtering here happens
@@ -8068,8 +8187,22 @@ export function selectReviewAdmissions(
     .sort(oldestFirst)
     .slice(0, bound);
 
-  const spawning = [...rest].sort(oldestFirst).slice(0, Math.max(1, policy.reviewLanes));
+  const spawning = [...rest].sort(oldestFirst).slice(0, Math.max(1, reviewWidth));
   return { spawning, planFilings };
+}
+
+/** Number of spawning review candidates before the adaptive admission cut. */
+function reviewAdmissionQueueDepth(
+  openPrs: readonly OpenPrView[],
+  policy: SweepPolicy,
+  now: number,
+  outcomes: ReviewAdmissionOutcomes,
+): number {
+  return openPrs.filter((pr) =>
+    pr.isPlanFiling !== true &&
+    deriveDisposition(pr, policy, now).disposition === "post-review" &&
+    !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)
+  ).length;
 }
 
 /**
