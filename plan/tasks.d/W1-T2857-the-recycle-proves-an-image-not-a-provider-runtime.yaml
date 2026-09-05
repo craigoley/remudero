@@ -122,3 +122,11 @@
     deploy-script spawn. That preserves the existing macOS host-parity completeness gate without
     registering avoidable Bash-3 failures as permanent host debt. No production behavior or
     lifecycle authority is added by this amendment.
+
+    SCOPE BOUNDARY (W1-T2866): this scope amendment itself files neither
+    `deploy/container-runtime-contract.sh` nor `test/container-runtime-contract.test.ts` — it
+    only edits this plan record's declared `files:` span. The fail-closed empty/unreadable mount
+    postcondition those two files implement and prove is authored, reviewed and merged entirely
+    inside W1-T2857's own pull request; this amendment cannot weaken it, bypass it for a test, or
+    otherwise touch it, because it does not carry it. Any acceptance check for that postcondition
+    belongs to W1-T2857's PR, not to this plan-only amendment.
