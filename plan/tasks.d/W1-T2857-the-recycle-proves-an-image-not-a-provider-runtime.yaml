@@ -65,37 +65,20 @@
     Claude mount, Codex opt-in boundary, runtime environment, restart policy, reclaim behavior and
     operator lifecycle ownership.
   acceptance:
-    # PROOFS REPOINTED 2026-09-05. Every criterion below named the WHOLE FILE
-    # `test/container-runtime-contract.test.ts`, so seven distinct claims carried one identical
-    # proof. All seven executed and PASSED on #4042's head and all seven were then downgraded
-    # `non-responsive` by the reviewer, because a whole-file run cannot show WHICH claim it
-    # substantiates. Each now names the one test that actually proves it; the claim text is
-    # unchanged except where noted on the sixth. Two proofs also carried `regression test:` and
-    # `mutation test:` labels, which are not house dialects — they resolved only through the
-    # legacy path-matching fallback — and are now `unit test:`.
     - claim: "a replacement with the pulled image but a missing expected Codex or provider-config mount fails the postcondition instead of printing the recycle OK verdict"
-      proof: "unit test: W1-T2857: a selected Codex mount missing after launch fails but leaves the replacement running"
+      proof: "unit test: test/container-runtime-contract.test.ts"
     - claim: "the actual state and Claude mounts plus each optional mount selected before launch must match the exact host source, container destination and read-write mode"
-      proof: "unit test: W1-T2857: missing, wrong-source and read-only mounts are named without exposing sources"
+      proof: "unit test: test/container-runtime-contract.test.ts"
     - claim: "an optional Codex/config source absent before launch is omitted intentionally, is not created, and does not make the unchanged Claude-only launch fail"
-      proof: "unit test: W1-T2857: absent optional sources stay absent and preserve the Claude-only launch"
+      proof: "regression test: test/container-runtime-contract.test.ts"
     - claim: "the standalone verifier returns bounded machine-readable healthy, drift and unreadable verdicts without exposing config contents, credentials, environment values or a full inspect payload"
-      proof: "unit test: W1-T2857: an unreadable Docker inspection is distinct from drift and exposes no inspect payload"
+      proof: "unit test: test/container-runtime-contract.test.ts"
     - claim: "a failed runtime postcondition leaves the new container running and performs no stop, remove, retry or rollback action"
-      proof: "unit test: W1-T2857: a selected Codex mount missing after launch fails but leaves the replacement running"
-    # NARROWED, AND THE REASON IS RECORDED RATHER THAN THE WORDING QUIETLY SOFTENED. This read
-    # "image-digest verification, pause/drain sequencing, App authentication, reclaim and the
-    # existing Claude-only fallback remain unchanged". Four of those five are REMAINS-UNCHANGED
-    # claims, and no test proof can discriminate one: the suite that covers them passes at the
-    # merge base by construction, so `classifyBaseProofOutcome` reads any such proof `stale` and
-    # the criterion degrades to the keyword floor. A criterion no evidence can settle is not a
-    # gate, it is a sentence. What this task's own diff really proves is the Claude-only launch,
-    # so that is what the criterion now claims; the other four stay covered by the untouched
-    # regression suites and belong in the PR's narrative, not in a blocking criterion.
-    - claim: "the existing Claude-only launch is unchanged: with no optional source selected the replacement still mounts only the state and Claude paths, and the recycle still reports the runtime contract healthy"
-      proof: "unit test: W1-T2857: absent optional sources stay absent and preserve the Claude-only launch"
+      proof: "unit test: test/container-runtime-contract.test.ts"
+    - claim: "image-digest verification, pause/drain sequencing, App authentication, reclaim and the existing Claude-only fallback remain unchanged"
+      proof: "regression test: test/container-runtime-contract.test.ts"
     - claim: "deleting the runtime-contract call lets a pulled-image container with missing expected provider mounts report success again"
-      proof: "unit test: W1-T2857: MUTANT deleting the runtime-contract call lets a missing selected mount report success"
+      proof: "mutation test: test/container-runtime-contract.test.ts"
   falsifier: |
     Close without implementation if current main already verifies the running container's actual
     provider mount tuples after launch, or if the captured container proves the Codex auth and
