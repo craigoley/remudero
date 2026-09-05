@@ -500,7 +500,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
  */
 ```
 
-## CLAUDE_BIN_ENV_OVERRIDE
+## Toolchain resolution (section banner)
 
 `src/lib/worker.ts:713-730` at `ea02cc83`.
 
@@ -1084,7 +1084,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
   // see daemon.ts's `isSpawnInfraBlocked`, which does exactly that.
 ```
 
-## try
+## spawnWorker — the HOME isolation mechanism
 
 `src/lib/worker.ts:1767-1786` at `ea02cc83`.
 
@@ -1139,7 +1139,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
     // carry the account its spend is attributed to (W1-T268's ledger dimension).
 ```
 
-## spawnWorker — assertWorkerCredentialFile
+## spawnWorker — spawnWorker — the non-darwin credential rung
 
 `src/lib/worker.ts:1828-1842` at `ea02cc83`.
 
@@ -1188,7 +1188,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
     // compinit contamination).
 ```
 
-## spawnWorker — pidRef
+## spawnWorker — spawnWorker — worker process-tree containment
 
 `src/lib/worker.ts:1880-1890` at `ea02cc83`.
 
@@ -1220,7 +1220,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
       // a custom spawn (see the file-header note in worker-containment.ts).
 ```
 
-## spawnWorker — if
+## spawnWorker — spawnWorker — the live-spawn guard
 
 `src/lib/worker.ts:1933-1946` at `ea02cc83`.
 
@@ -1241,7 +1241,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
     // model spawn, and catches its own failure without weakening this guard.
 ```
 
-## spawnWorker — if (2)
+## spawnWorker — spawnWorker — replacing a thrown error with WorkerAbandonedError
 
 `src/lib/worker.ts:2029-2034` at `ea02cc83`.
 
@@ -1254,7 +1254,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
       // documented contract.
 ```
 
-## spawnWorker — captureWorkerUsageProjection
+## spawnWorker — spawnWorker — the teardown `finally`
 
 `src/lib/worker.ts:2041-2059` at `ea02cc83`.
 
@@ -1280,7 +1280,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
     // silent by construction, exactly like the reap it precedes; never gates or delays it.
 ```
 
-## UsageProbeSession
+## collectWorkerResult
 
 `src/lib/worker.ts:2075-2092` at `ea02cc83`.
 
@@ -1892,7 +1892,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
      */
 ```
 
-## hashFn
+## linkWorktreeNodeModules — the lockfile compare
 
 `src/lib/worker.ts:3121-3132` at `ea02cc83`.
 
@@ -2203,7 +2203,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
      *  caller decides what a refusal means for its dispatch. */
 ```
 
-## execFileSync
+## worktreeAdd — why `--no-track`
 
 `src/lib/worker.ts:3630-3635` at `ea02cc83`.
 
@@ -2216,7 +2216,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
   // pushable) and drops only the config write.
 ```
 
-## execFileSync (2)
+## worktreeAdd — core.hooksPath
 
 `src/lib/worker.ts:3666-3676` at `ea02cc83`.
 
@@ -2298,7 +2298,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
  */
 ```
 
-## target
+## writeRunLock
 
 `src/lib/worker.ts:3794-3807` at `ea02cc83`.
 
@@ -2353,7 +2353,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
  */
 ```
 
-## (end of file)
+## the stale `.git/config.lock` reclaimer (section banner)
 
 `src/lib/worker.ts:3990-4001` at `ea02cc83`.
 
@@ -2487,7 +2487,7 @@ Every comment block of six lines or more at that merge-base is archived below, i
         // pid cannot still be writing, so no grace period is owed to it.
 ```
 
-## (end of file) (2)
+## the worktree reaper (section banner)
 
 `src/lib/worker.ts:4254-4275` at `ea02cc83`.
 
