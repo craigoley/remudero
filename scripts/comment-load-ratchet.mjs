@@ -22,7 +22,7 @@
 //
 // Usage:
 //   node scripts/comment-load-ratchet.mjs [--base <ref>] [--root <dir>] [--baseline <path>]
-//   node scripts/comment-load-ratchet.mjs --json | --print | --check
+//   node scripts/comment-load-ratchet.mjs --json | --print | --check | --no-record
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -319,6 +319,7 @@ export function main(argv) {
         json: { type: "boolean", default: false },
         print: { type: "boolean", default: false },
         check: { type: "boolean", default: false },
+        "no-record": { type: "boolean", default: false },
       },
     }));
   } catch (e) {
@@ -415,6 +416,16 @@ export function main(argv) {
     for (const path of verdict.removed) console.error(`  remove "${path}"`);
     console.error(`  Re-run without --check to record these non-growth changes.`);
     return 1;
+  }
+  // W1-T2791's split, which this gate never adopted: the form a GATE runs must not write.
+  // `--no-record` enforces identically -- the verdict above already returned -- so a suite that
+  // spawns the gate cannot dirty the tracked tree every other worker reads.
+  if (drift > 0 && values["no-record"]) {
+    console.log(
+      `comment-load-ratchet: ${drift} baseline change(s) are pending and --no-record left ` +
+        `${baselineRelPath} byte-identical. Run \`npm run comment-load-ratchet\` to record them.`,
+    );
+    return 0;
   }
   if (drift > 0) {
     for (const s of verdict.shrunk) console.log(`  ratcheting down: ${s.path} ${s.from} -> ${s.to}`);

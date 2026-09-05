@@ -7987,6 +7987,13 @@ export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
   // change than the deadlock could wait for; if this blanket entry proves too wide, that is the
   // replacement, not a wider pattern.
   "scripts/source-size-baseline.json",
+  // W1-T2526's sibling: the per-file COMMENT-LINE ledger (scripts/comment-load-ratchet.mjs, run
+  // unconditionally in ci.yml). Same reason as the entry directly above, not the knowledge-budget
+  // one: this file IS read in CI, but it is a size LEDGER, not a score FLOOR -- it records how many
+  // comment lines a file has and grades no falsifier, so raising an entry cannot make a failing
+  // falsifier pass. The ratchet script itself stays on the surface; only its recorded counts are
+  // exempt.
+  "scripts/comment-load-baseline.json",
 ]);
 
 /**

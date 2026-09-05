@@ -146,10 +146,22 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/daemon.md",
+      "title": "daemon.ts forensics",
+      "summary": "Measured forensics, incidents and design arguments removed from `src/lib/daemon.ts` when its comments were compacted to the plain-language standard. The code k…",
+      "grepHint": "daemon.ts forensics"
+    },
+    {
       "path": "docs/forensics/drain.md",
       "title": "Forensics — `src/lib/drain.ts`",
       "summary": "A verbatim archive of comment blocks compacted out of `src/lib/drain.ts`. Each heading names",
       "grepHint": "Forensics — `src/lib/drain.ts`"
+    },
+    {
+      "path": "docs/forensics/inbox.md",
+      "title": "Forensics — `src/lib/inbox.ts`",
+      "summary": "`src/lib/inbox.ts` is the ratification inbox (MASTER-PLAN §7B): it tiers open proposals, drafts a",
+      "grepHint": "Forensics — `src/lib/inbox.ts`"
     },
     {
       "path": "docs/forensics/ledger.md",
@@ -162,6 +174,12 @@
       "title": "retro.ts forensics",
       "summary": "The measured facts, incidents and design arguments that used to live as comment prose inside",
       "grepHint": "retro.ts forensics"
+    },
+    {
+      "path": "docs/forensics/status.md",
+      "title": "status.ts comment forensics",
+      "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/status.ts` when its comments were compacted to the plain-language standa…",
+      "grepHint": "status.ts comment forensics"
     },
     {
       "path": "docs/forensics/sweep-map.md",

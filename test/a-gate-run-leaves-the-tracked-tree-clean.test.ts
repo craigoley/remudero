@@ -85,6 +85,37 @@ test("W1-T2791 (acceptance 1): running the fast gate's OWN source-size step leav
   assert.deepEqual(dirtied, [], "a gate run must leave the tracked tree exactly as it found it");
 });
 
+// ── acceptance 3: the SAME assertion, over EVERY step the fast gate runs ──────────────────────
+
+/**
+ * Acceptance 1 guards ONE step by name. `comment-load-ratchet` was added to FAST_GATE_STEPS
+ * afterwards pointing at its RECORDING form, and nothing objected: every suite run spawned it
+ * through `preflight --fast` (test/preflight-is-freshness-exempt-and-scrubs-the-guard-from-
+ * children.test.ts drives the real verb), it rewrote scripts/comment-load-baseline.json, and
+ * scripts/test-with-retry.mjs reddened the shard as TRACKED-TREE DIRT. Intermittently: the retry
+ * re-snapshots a tree the first run already dirtied, so the second pass sees no NEW dirt and
+ * passes. A guard scoped to one step cannot see the next step that escapes it, so this one is
+ * derived from the table.
+ */
+test("W1-T2791 (acceptance 3): EVERY step the fast gate runs leaves the tracked tree byte-identical, not just the one guarded by name", () => {
+  const offenders: string[] = [];
+  for (const entry of FAST_GATE_STEPS) {
+    let status: number | null = null;
+    const dirtied = dirtiedBy(REPO_ROOT, () => {
+      status = spawnSync("npm", ["run", "--silent", entry.script], { cwd: REPO_ROOT, encoding: "utf8" }).status;
+    });
+    // A step that never RAN dirties nothing and would pass this loop for the wrong reason — the
+    // vacuity acceptance 1 guards with the same assertion. Exit code is otherwise not the subject.
+    assert.ok(status === 0 || status === 1, `${entry.script} ran (status ${status})`);
+    if (dirtied.length > 0) offenders.push(`${entry.job} (npm run ${entry.script}) dirtied: ${dirtied.join(", ")}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `a gate run must leave the tracked tree exactly as it found it, for every step in the table:\n${offenders.join("\n")}`,
+  );
+});
+
 // ── acceptance 2: the SAME detector, falsified in the positive direction ───────────────────────
 
 test("W1-T2791 (acceptance 2): pointed at the RECORDING form with an unrecorded source file present, the detector FAILS and names the dirtied path", () => {
