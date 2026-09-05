@@ -93,6 +93,11 @@ export interface ProviderCapacity {
   provider: WorkerProviderId;
   readable: boolean;
   windows: ProviderCapacityWindow[];
+  /**
+   * Optional provider-level pressure used only for cross-subscription allocation. Concrete model
+   * eligibility and before/after attribution remain scoped to `windows`.
+   */
+  allocationWindows?: ProviderCapacityWindow[];
   detail?: string;
   accountLabel?: string;
   /** Concrete account-visible model chosen for this capacity reading. */
@@ -286,9 +291,19 @@ export class CodexToolchainBlockedError extends Error {
   }
 }
 
+function validCapacityWindow(window: ProviderCapacityWindow): boolean {
+  return Number.isFinite(window.usedPercent) && window.usedPercent >= 0 && window.usedPercent <= 100;
+}
+
+function providerAllocationWindows(capacity: ProviderCapacity): ProviderCapacityWindow[] {
+  const projected = capacity.allocationWindows?.filter(validCapacityWindow) ?? [];
+  return projected.length > 0 ? projected : capacity.windows;
+}
+
 function tightestRemaining(capacity: ProviderCapacity): number {
-  if (!capacity.readable || capacity.windows.length === 0) return Number.NEGATIVE_INFINITY;
-  return Math.min(...capacity.windows.map((window) => 100 - window.usedPercent));
+  const windows = providerAllocationWindows(capacity);
+  if (!capacity.readable || windows.length === 0) return Number.NEGATIVE_INFINITY;
+  return Math.min(...windows.map((window) => 100 - window.usedPercent));
 }
 
 const GOLDEN_RATIO_CONJUGATE = (Math.sqrt(5) - 1) / 2;
@@ -315,9 +330,7 @@ export function selectWorkerProvider(
         capacity.windows.length > 0 &&
         capacity.windows.every(
           (window) =>
-            Number.isFinite(window.usedPercent) &&
-            window.usedPercent >= 0 &&
-            window.usedPercent <= 100 &&
+            validCapacityWindow(window) &&
             window.usedPercent < ceiling,
         ),
     )
@@ -327,7 +340,7 @@ export function selectWorkerProvider(
         provider: capacity.provider,
         capacity,
         tightestRemainingPercent,
-        allocationWeight: (tightestRemainingPercent - reservePercent) ** 2,
+        allocationWeight: Math.max(1, tightestRemainingPercent - reservePercent) ** 2,
       };
     })
     .sort((a, b) => b.tightestRemainingPercent - a.tightestRemainingPercent);
@@ -504,6 +517,18 @@ function capacityFromBucket(bucket: CodexRateLimitBucket | undefined, accountLab
   return { provider: "codex", readable: true, windows, ...(accountLabel ? { accountLabel } : {}) };
 }
 
+function codexAllocationWindows(reading: CodexRateLimitResult, modelCapacity: ProviderCapacity): ProviderCapacityWindow[] {
+  const standard = capacityFromBucket(reading.rateLimits ?? reading.rateLimitsByLimitId?.codex ?? undefined);
+  const source = standard.readable ? [...standard.windows, ...modelCapacity.windows] : modelCapacity.windows;
+  const seen = new Set<string>();
+  return source.filter((window) => {
+    const key = `${window.name}\u0000${window.usedPercent}\u0000${String(window.resetsAt ?? "")}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).map((window) => ({ ...window }));
+}
+
 /** Map the documented app-server result without treating absent numbers as zero. */
 export function codexCapacityFromRateLimits(result: unknown): ProviderCapacity {
   if (!result || typeof result !== "object") {
@@ -651,6 +676,7 @@ export function selectCodexModel(
   for (const option of options) option.selected = option.id === selectedModel;
   return {
     ...selected.capacity,
+    allocationWindows: codexAllocationWindows(reading, selected.capacity),
     model: selectedModel,
     effort,
     modelDecision: {

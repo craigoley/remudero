@@ -1707,6 +1707,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           readable: capacity.readable,
           ...(capacity.model ? { model: capacity.model, effort: capacity.effort } : {}),
           windows: capacity.windows.map((window) => ({ name: window.name, used_percent: window.usedPercent })),
+          ...(capacity.allocationWindows
+            ? {
+                allocation_windows: capacity.allocationWindows.map((window) => ({
+                  name: window.name,
+                  used_percent: window.usedPercent,
+                })),
+              }
+            : {}),
           ...(capacity.detail ? { detail: capacity.detail } : {}),
         })),
       }),

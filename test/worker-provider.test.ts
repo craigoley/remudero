@@ -73,6 +73,42 @@ test("automatic provider routing strongly favors a reset subscription without st
   assert.ok((selected.allocationSharePercent ?? 0) > 93 && (selected.allocationSharePercent ?? 0) < 94);
 });
 
+test("automatic provider routing weights provider pressure separately from model eligibility", () => {
+  const claude = capacity("claude", 55);
+  const codex: ProviderCapacity = {
+    ...capacity("codex", 12),
+    allocationWindows: [
+      { name: "codex standard primary", usedPercent: 76 },
+      { name: "GPT-5.3-Codex-Spark primary", usedPercent: 12 },
+    ],
+  };
+  const counts = { claude: 0, codex: 0 };
+  for (let index = 0; index < 200; index += 1) {
+    counts[selectWorkerProvider([claude, codex], 5, index).provider] += 1;
+  }
+  assert.ok(counts.claude >= 150, `provider pressure should favor Claude, got ${JSON.stringify(counts)}`);
+  assert.ok(counts.codex > 0, "independently eligible Spark remains a bounded comparison sample");
+
+  const selected = selectWorkerProvider([claude, codex], 5, 0);
+  assert.equal(selected.provider, "claude");
+  assert.equal(selected.allocationWeight, 40 ** 2);
+  assert.ok((selected.allocationSharePercent ?? 0) > 81 && (selected.allocationSharePercent ?? 0) < 82);
+});
+
+test("provider pressure never hard-vetoes an independently eligible model", () => {
+  const constrainedCodex: ProviderCapacity = {
+    ...capacity("codex", 12),
+    allocationWindows: [{ name: "codex standard primary", usedPercent: 99 }],
+  };
+  const selection = selectWorkerProvider(
+    [{ provider: "claude", readable: false, windows: [], detail: "offline" }, constrainedCodex],
+    5,
+    0,
+  );
+  assert.equal(selection.provider, "codex");
+  assert.equal(selection.allocationWeight, 1, "exhausted provider pressure gets a comparison floor, not an inverted boost");
+});
+
 test("weighted routing stays balanced for a small lead and reverses with the headroom lead", () => {
   const claudeLead = providerSequence(40, 45);
   assert.ok(claudeLead.claude >= 105 && claudeLead.claude <= 115, JSON.stringify(claudeLead));
@@ -173,6 +209,33 @@ test("window consumption uses the largest reset-stable provider-window delta", (
     provider: "codex",
     percentConsumed: 2.5,
     windowName: "5h",
+    resetsAt: 100,
+  });
+});
+
+test("window consumption attributes only the selected model bucket, not provider allocation pressure", () => {
+  const before: ProviderCapacity = {
+    provider: "codex",
+    readable: true,
+    windows: [{ name: "Spark primary", usedPercent: 10, resetsAt: 100 }],
+    allocationWindows: [
+      { name: "Codex standard primary", usedPercent: 76, resetsAt: 200 },
+      { name: "Spark primary", usedPercent: 10, resetsAt: 100 },
+    ],
+  };
+  const after: ProviderCapacity = {
+    provider: "codex",
+    readable: true,
+    windows: [{ name: "Spark primary", usedPercent: 11, resetsAt: 100 }],
+    allocationWindows: [
+      { name: "Codex standard primary", usedPercent: 90, resetsAt: 200 },
+      { name: "Spark primary", usedPercent: 11, resetsAt: 100 },
+    ],
+  };
+  assert.deepEqual(providerWindowConsumption(before, after), {
+    provider: "codex",
+    percentConsumed: 1,
+    windowName: "Spark primary",
     resetsAt: 100,
   });
 });
@@ -492,6 +555,28 @@ test("Codex model selector uses independent model headroom for economy mounts", 
   assert.equal(selected.model, "gpt-5.3-codex-spark");
   assert.equal(selected.effort, "low");
   assert.deepEqual(selected.windows.map((window) => window.usedPercent), [10]);
+  assert.deepEqual(selected.allocationWindows?.map((window) => window.usedPercent), [80, 10]);
+});
+
+test("Codex model selector falls back to model-local allocation headroom when the standard bucket is absent", () => {
+  const selected = selectCodexModel(
+    visibleCodexModels,
+    {
+      rateLimitsByLimitId: {
+        codex_bengalfox: {
+          limitId: "codex_bengalfox",
+          limitName: "GPT-5.3-Codex-Spark",
+          primary: { usedPercent: 10 },
+        },
+      },
+    },
+    { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"] } },
+    "haiku",
+    "low",
+    CAPABILITY_FIXTURE,
+  );
+  assert.deepEqual(selected.windows.map((window) => window.usedPercent), [10]);
+  assert.deepEqual(selected.allocationWindows?.map((window) => window.usedPercent), [10]);
 });
 
 test("Codex model selector preserves balanced and frontier quality tiers", () => {
@@ -818,6 +903,10 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
             provider: "codex",
             readable: true,
             windows: [{ name: "codex 7d", usedPercent, resetsAt: 123 }],
+            allocationWindows: [
+              { name: "codex standard 7d", usedPercent: 76, resetsAt: 456 },
+              { name: "codex 7d", usedPercent, resetsAt: 123 },
+            ],
             accountLabel: "codex-account",
             model: "gpt-5.6-terra",
             effort: "high",
@@ -865,11 +954,21 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
   const routingEvent = diagnostics
     .map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return undefined; } })
     .find((event) => event?.event === "worker.provider.selected");
-  assert.equal(routingEvent?.allocation_weight, 85 ** 2);
-  assert.ok(Number(routingEvent?.allocation_share_percent) > 96);
+  assert.equal(routingEvent?.allocation_weight, 19 ** 2);
+  assert.ok(Number(routingEvent?.allocation_share_percent) > 61);
+  assert.ok(Number(routingEvent?.allocation_share_percent) < 62);
+  assert.deepEqual(
+    (routingEvent?.capacities as Array<Record<string, unknown>>)[1]?.allocation_windows,
+    [
+      { name: "codex standard 7d", used_percent: 76 },
+      { name: "codex 7d", used_percent: 10 },
+    ],
+  );
   const status = readProviderRoutingStatus(root);
-  assert.equal(status.selected?.allocationWeight, 85 ** 2);
-  assert.ok((status.selected?.allocationSharePercent ?? 0) > 96);
+  assert.equal(status.selected?.allocationWeight, 19 ** 2);
+  assert.ok((status.selected?.allocationSharePercent ?? 0) > 61);
+  assert.ok((status.selected?.allocationSharePercent ?? 0) < 62);
+  assert.deepEqual(status.providers?.find((provider) => provider.provider === "codex")?.allocationWindows?.map((window) => window.usedPercent), [76, 10]);
 });
 
 test("the unchanged Claude spawn path labels its successful provider", async () => {
