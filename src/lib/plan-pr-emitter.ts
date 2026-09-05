@@ -71,10 +71,16 @@ import type { GhApiFetcher } from "./open-prs-rest.js";
 /**
  * Render a BARE `Acceptance:` header (nothing else on that line, per the #394 lesson —
  * `parseAcceptanceBlock`'s header regex requires the line to be otherwise empty) followed
- * by CONTIGUOUS `- <claim> | <proof>` bullets, one per criterion, with no blank or prose
- * line between the header and the bullets (the #394 lesson, again — any such line
- * terminates the block early). Guaranteed to round-trip through `parseAcceptanceBlock`
- * with `criteria.length` matching.
+ * by CONTIGUOUS bullets, one criterion each, with no blank or prose line between the header
+ * and the bullets (the #394 lesson, again — any such line terminates the block early).
+ * Guaranteed to round-trip through `parseAcceptanceBlock` with `criteria.length` matching.
+ *
+ * TWO BULLET SHAPES, chosen per criterion, both of which that parser accepts: the house
+ * `- <claim> | <proof>` single line, and — whenever either side contains a `|` of its own —
+ * the `- claim: "<claim>"` / indented `  proof: "<proof>"` pair, which carries no separator
+ * for the parser to split at. Round-tripping is the whole contract of this function, and a
+ * pipe in a claim broke it silently: the criterion still parsed, so nothing failed, but its
+ * proof arrived as prose and the criterion fell to the keyword floor.
  *
  * Throws on an empty `criteria` list: an empty Acceptance block is unjudgeable by
  * construction (`parseAcceptanceBlock` would return `[]`, which fails CLOSED in
@@ -91,6 +97,17 @@ export function renderAcceptanceBlock(criteria: AcceptanceCriterion[]): string {
   }
   const lines = ["Acceptance:"];
   for (const { claim, proof } of criteria) {
+    // A `|` ANYWHERE in the claim or the proof cannot ride the single-line ` | ` form: the parser
+    // splits that line at a separator, so a pipe in the claim either truncates it (before
+    // `acceptanceSeparator` scanned from the right) or, in the proof, moves the split INTO the
+    // proof and demotes both halves. Emit the OTHER shape `parseAcceptanceBlock` accepts — a
+    // `claim:` bullet with an indented `proof:` continuation — where nothing is split at all.
+    // Both sides are quoted so `stripQuotes` returns exactly what was passed in, rather than
+    // eating a claim's own leading and trailing quote characters.
+    if (claim.includes("|") || proof.includes("|")) {
+      lines.push(`- claim: "${claim}"`, `  proof: "${proof}"`);
+      continue;
+    }
     lines.push(`- ${claim} | ${proof}`);
   }
   return lines.join("\n");

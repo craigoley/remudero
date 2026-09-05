@@ -6288,8 +6288,9 @@ function stripQuotes(s: string): string {
  * markdown `**Acceptance:**` or `## Acceptance`) — followed by bullet lines. Two
  * bullet shapes are recognized, both index-aligned one-per-criterion:
  *
- *   1. Single-line: `- <claim> | <proof>` (the `|` separates claim from proof; no
- *      `|` keeps the whole line as the claim with an empty proof).
+ *   1. Single-line: `- <claim> | <proof>` (see {@link acceptanceSeparator} for which `|`
+ *      separates claim from proof; no `|` keeps the whole line as the claim with an empty
+ *      proof).
  *   2. Multi-line (the house format actually emitted by plan/doc PRs, #277/#280):
  *      `- claim: "<claim>"` followed by an INDENTED, non-bullet `proof: "<proof>"`
  *      continuation line, which attaches to that same criterion rather than ending
@@ -6315,9 +6316,52 @@ const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\*
  *  {@link ACCEPTANCE_HEADER_RE}. Unchanged from the parser's previous inline literal. */
 const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
 
+/**
+ * Where a single-line bullet's claim ends and its proof begins — index plus separator width, or
+ * null when the bullet carries no `|` at all.
+ *
+ * THE SEPARATOR IS THE ONE THAT YIELDS AN EXECUTABLE PROOF. Splitting at the FIRST bare `|` (what
+ * this did before) truncated any claim carrying a pipe of its own — a `|| true` the claim quotes,
+ * a BRE alternation, a markdown table fragment — and handed the remainder to the proof, where
+ * `parseWhitelistedProof` refused it as prose. The criterion then fell SILENTLY to the keyword
+ * floor: no dialect error, no empty proof, `acceptanceAuthorTimeCheck` still `ok`, and nothing
+ * anywhere said the proof had stopped executing. `plan/tasks.d/W1-T2781-*.yaml` carries exactly
+ * such a claim today, so this was live in the plan, not hypothetical.
+ *
+ * WHY NOT SIMPLY THE LAST ` | `. That repairs a pipe in the CLAIM and breaks a pipe in the PROOF —
+ * `grep:` hands its pattern to execFile as one argv element, so a pattern may hold a ` | ` of its
+ * own, and the last one then lands INSIDE the proof. Both readings are guesses about which pipe an
+ * author meant; the dialect prefix is the one piece of evidence that is not a guess. So: the
+ * historical first-bare-`|` split is tried FIRST and kept whenever it already produces a dialect
+ * proof (every body that parses today does, which is what keeps this byte-for-byte compatible),
+ * then each ` | ` right-to-left, and only if NO split yields an executable proof does it fall back
+ * to the last ` | ` (else the first bare `|`) — the same degraded, keyword-floor reading as before.
+ */
+function acceptanceSeparator(item: string): { index: number; width: number } | null {
+  const bare = item.indexOf("|");
+  if (bare < 0) return null;
+  const spaced: { index: number; width: number }[] = [];
+  for (let i = item.indexOf(" | "); i >= 0; i = item.indexOf(" | ", i + 1)) spaced.push({ index: i, width: 3 });
+  const yieldsExecutableProof = (sep: { index: number; width: number }): boolean => {
+    const rhs = item.slice(sep.index + sep.width).trim();
+    return rhs.length > 0 && (matchesDialectPrefix(rhs) || matchesDialectPrefix(stripCodeSpan(rhs)));
+  };
+  const legacy = { index: bare, width: 1 };
+  if (yieldsExecutableProof(legacy)) return legacy;
+  for (let k = spaced.length - 1; k >= 0; k--) {
+    if (yieldsExecutableProof(spaced[k])) return spaced[k];
+  }
+  return spaced.length ? spaced[spaced.length - 1] : legacy;
+}
+
 export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
   const lines = (body ?? "").split("\n");
   const criteria: AcceptanceCriterion[] = [];
+  /** Index-aligned with `criteria`: for a `claim:`-labelled bullet that was NONETHELESS split at a
+   *  separator, the claim text as written BEFORE that split. An indented `proof:` continuation
+   *  below such a bullet proves the split was a false positive — the proof lives on that line, so
+   *  the pipe belonged to the claim — and restores this. Undefined for every other bullet. */
+  const unsplitLabelledClaims: (string | undefined)[] = [];
   let inBlock = false;
   for (const raw of lines) {
     const line = raw.replace(/\r$/, "");
@@ -6331,13 +6375,16 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
     const bullet = line.match(ACCEPTANCE_BULLET_RE);
     if (bullet) {
       const item = bullet[1].trim();
-      const pipe = item.indexOf("|");
-      let claim = (pipe >= 0 ? item.slice(0, pipe) : item).trim();
-      const proof = pipe >= 0 ? item.slice(pipe + 1).trim() : "";
-      // "- claim: <text>" form (no `|`): strip the label and any surrounding quotes.
+      const sep = acceptanceSeparator(item);
+      let claim = (sep ? item.slice(0, sep.index) : item).trim();
+      const proof = sep ? item.slice(sep.index + sep.width).trim() : "";
+      // "- claim: <text>" form: strip the label and any surrounding quotes.
       const claimLabel = claim.match(/^claim\s*:\s*(.*)$/i);
       if (claimLabel) claim = stripQuotes(claimLabel[1].trim());
-      if (claim) criteria.push({ claim, proof });
+      if (!claim) continue;
+      criteria.push({ claim, proof });
+      const whole = claimLabel && proof ? item.match(/^claim\s*:\s*(.*)$/i) : null;
+      unsplitLabelledClaims[criteria.length - 1] = whole ? stripQuotes(whole[1].trim()) : undefined;
       continue;
     }
     // An indented, non-bullet "proof:" line right under a "- claim: ..." bullet is a
@@ -6348,6 +6395,17 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       const last = criteria[criteria.length - 1];
       if (proofLabel && !last.proof) {
         last.proof = stripQuotes(proofLabel[1].trim());
+        continue;
+      }
+      // The bullet above was a `claim:` label carrying a separator of its own, and THIS line is
+      // the proof — so that split was a false positive. Restore the claim as written and take the
+      // proof from here. Consumed ONCE (the entry is cleared): a SECOND `proof:` line under the
+      // same bullet is still unrecognized and still ends the block, exactly as before.
+      const unsplit = proofLabel ? unsplitLabelledClaims[criteria.length - 1] : undefined;
+      if (proofLabel && unsplit !== undefined) {
+        last.claim = unsplit;
+        last.proof = stripQuotes(proofLabel[1].trim());
+        unsplitLabelledClaims[criteria.length - 1] = undefined;
         continue;
       }
     }
