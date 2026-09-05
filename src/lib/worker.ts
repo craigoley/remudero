@@ -1453,6 +1453,37 @@ function annotateClaudeCapacity(
   };
 }
 
+let activeWorkerSpawns = 0;
+
+/** Current whole-process worker occupancy. Builds and reviews share this one counter. */
+export function activeWorkerCount(): number {
+  return activeWorkerSpawns;
+}
+
+function claimWorkerOccupancy(): () => void {
+  activeWorkerSpawns += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeWorkerSpawns = Math.max(0, activeWorkerSpawns - 1);
+  };
+}
+
+/**
+ * Claim one process-wide worker slot for the complete async operation and release it on every
+ * settlement, including an AbortError/cancellation rejection. Exported so the finally contract
+ * is testable without a paid provider spawn.
+ */
+export async function withWorkerOccupancy<T>(operation: () => Promise<T>): Promise<T> {
+  const release = claimWorkerOccupancy();
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
 async function readFreshSelectedCapacity(
   args: SpawnWorkerArgs,
   config: Config,
@@ -1526,6 +1557,8 @@ async function finishSelectedCapacityMeasurement(
  *    does not survive two overlapping spawns (WS-2).
  */
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  const releaseWorkerOccupancy = claimWorkerOccupancy();
+  try {
   // Validate-before-spawn guard (WS-0 FF10a) enforced at the spawn boundary, not
   // by caller convention: `claude -p` SILENTLY IGNORES an invalid settings file
   // and drops containment, so the settings file is validated against the pinned
@@ -2021,6 +2054,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     } catch {
       // best-effort observability only — a logger failure must never surface as a failed teardown
     }
+  }
+  } finally {
+    releaseWorkerOccupancy();
   }
 }
 
