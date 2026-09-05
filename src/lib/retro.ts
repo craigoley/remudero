@@ -803,7 +803,10 @@ export function assertArchitectAboveWorker(architectModel: string, workerModel: 
 // name each writes on its terminal/telemetry line — the same discipline
 // every other miner in this file uses (DONE_STEPS, REPLAY_RESULT_STEP, …).
 
-const ARCHITECT_LANE_STEPS: Readonly<Record<string, string>> = {
+/** EXPORTED for scripts/mount-headroom-sweep.mjs (W1-T2668), which prices these same lanes and
+ *  must not carry a second copy of the mapping — the step name is the ONE thing that identifies a
+ *  synthesis rung's rows in the ledger, and two lists of it would drift silently. */
+export const ARCHITECT_LANE_STEPS: Readonly<Record<string, string>> = {
   retro: "retro.synthesized",
   triage: "triage.synthesized",
   plan: "plan.synthesized",

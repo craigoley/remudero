@@ -80,7 +80,8 @@ import { gunzipSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { gatherRuns } from "../src/lib/retro.ts";
+import { ARCHITECT_LANE_STEPS, gatherRuns } from "../src/lib/retro.ts";
+import { SYNTHESIS_ROLES } from "../src/lib/mounts.ts";
 import { ledgerRotationEntries } from "../src/lib/ledger-grep.ts";
 
 export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -288,6 +289,84 @@ export function computeClassSweep(runs) {
   }
   out.sort((a, b) => (a.taskClass < b.taskClass ? -1 : a.taskClass > b.taskClass ? 1 : 0));
   return out;
+}
+
+// ── W1-T2668: THE THREE ROWS THIS INSTRUMENT WAS BLIND TO ────────────────────────────────────
+//
+// `computeClassSweep` above groups by `task_class` over `gatherRuns`, which requires a `run.start`
+// and sums turns from implement/recon done-steps. retro, triage and inbox_draft are not task runs:
+// they carry no `task_class`, so they landed in "unknown" or nowhere at all. The one verb built to
+// turn "sonnet would do here" into a measurement could not see the three rows an operator would
+// act on — and `.remudero/mounts.yaml`'s own "$827 across 219 invocations" came from a hand query
+// that nothing re-derives.
+//
+// NEITHER THE POPULATION NOR THE STEP NAMES ARE A NEW LIST. The rungs come from `SYNTHESIS_ROLES`
+// (src/lib/mounts.ts) — the same constant `loadMounts` validates the `synthesis:` block against —
+// so a fourth synthesis row added tomorrow is priced tomorrow. The step each writes comes from
+// `ARCHITECT_LANE_STEPS` (src/lib/retro.ts), the ONE map that already identifies these lanes by
+// "the ONE ledger `step` name each writes". A second copy of either would drift; the export is
+// this task's only edit outside its own two files, and it is one line.
+//
+// THE DIVISOR IS NAMED, NOT REUSED. `computeClassSweep` divides by DISTINCT settled `task_id` —
+// cost per completed TASK. A synthesis rung has no `task_id` and completes no task, so dividing by
+// anything and calling it the same thing would be a category error. These rows report cost per
+// INVOCATION and say so in the field name (`costPerInvocationUsd`), which is what the shard
+// requires: "a stated equivalent (per invocation, named as such) rather than a silent reuse".
+
+/**
+ * One row per synthesis rung, from that rung's own terminal ledger step. Deduped by `run_id` the
+ * same way `parseAndDedupeLedgerLines` dedupes the corpus — a rung that ledgers its terminal line
+ * twice (a resumed retro, a rotation overlap) must count as ONE invocation, or the percentiles
+ * describe the ledger's shape rather than the rung's.
+ *
+ * Percentiles, never means — the same discipline `computeClassSweep` carries, for the same reason:
+ * one $40 outlier moves a mean and moves no percentile.
+ */
+export function computeSynthesisSweep(records) {
+  const out = [];
+  for (const rung of SYNTHESIS_ROLES) {
+    const step = ARCHITECT_LANE_STEPS[rung];
+    const byRunId = new Map();
+    let rowsWithoutRunId = 0;
+    for (const r of records) {
+      if (r.step !== step) continue;
+      if (typeof r.run_id !== "string" || r.run_id.length === 0) {
+        rowsWithoutRunId += 1;
+        continue;
+      }
+      if (!byRunId.has(r.run_id)) byRunId.set(r.run_id, r);
+    }
+    const rows = [...byRunId.values()];
+    const turns = rows.map((r) => (typeof r.num_turns === "number" ? r.num_turns : 0));
+    const costs = rows.map((r) => costOf(r));
+    const totalCostUsd = round2(costs.reduce((s, c) => s + c, 0));
+    out.push({
+      rung,
+      step,
+      invocations: rows.length,
+      rowsWithoutRunId,
+      turnsP50: percentile(turns, 50),
+      turnsP90: percentile(turns, 90),
+      turnsMax: turns.length ? Math.max(...turns) : null,
+      costP50: costs.length ? round2(percentile(costs, 50)) : null,
+      costP90: costs.length ? round2(percentile(costs, 90)) : null,
+      costMax: costs.length ? round2(Math.max(...costs)) : null,
+      totalCostUsd,
+      // NAMED per INVOCATION — see the block comment above. `null` rather than 0 when nothing was
+      // seen: an unmeasured rung must never render as a free one.
+      costPerInvocationUsd: rows.length === 0 ? null : round2(totalCostUsd / rows.length),
+    });
+  }
+  return out;
+}
+
+/** `cost_usd`, falling back to `total_cost_usd` — the SAME precedence `gatherRuns`'s `costLine`
+ *  and retro.ts's own lane-spend reader use, so a synthesis row is priced by the identical rule as
+ *  every other row in this report. */
+function costOf(r) {
+  if (typeof r.cost_usd === "number") return r.cost_usd;
+  if (typeof r.total_cost_usd === "number") return r.total_cost_usd;
+  return 0;
 }
 
 // ── W1-T2574: CELLS (type x risk x class) and, WITHIN each, ARMS (provider x served_model x
@@ -656,6 +735,8 @@ export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) 
       newestTs,
     },
     classes: computeClassSweep(runs),
+    // W1-T2668: the three rows the per-task_class grouping above is structurally unable to see.
+    synthesis: computeSynthesisSweep(records),
     // W1-T2574: (type x risk x class) cells, each carrying its own (provider x served_model x
     // effort) arms and every WITHIN-cell pairwise comparison — see this script's own header.
     cells: computeArmSweep(runs, armFields, newestTs, windowEvidence),
@@ -815,6 +896,29 @@ export function renderMountHeadroomReport(report) {
         `${row.costPerCompletedTaskUsd ?? "-"}`,
     );
   }
+
+  // W1-T2668: the synthesis rungs, in their OWN table immediately under the per-task_class one —
+  // never appended as extra rows to it. They are priced on a DIFFERENT divisor (per invocation,
+  // not per completed task) and carry no outcome split, so a shared table would put two different
+  // units in one column, which is how a reader ends up comparing them.
+  lines.push("");
+  lines.push(
+    "synthesis rung | invocations | turns p50/p90/max | cost p50/p90/max ($) | total $ | $/INVOCATION " +
+      "(never $/completed task — these rungs complete no task and carry no task_id)",
+  );
+  for (const row of report.synthesis ?? []) {
+    lines.push(
+      `${row.rung} (${row.step}) | ${row.invocations} | ` +
+        `${row.turnsP50 ?? "-"}/${row.turnsP90 ?? "-"}/${row.turnsMax ?? "-"} | ` +
+        `${row.costP50 ?? "-"}/${row.costP90 ?? "-"}/${row.costMax ?? "-"} | ` +
+        `${row.totalCostUsd} | ${row.costPerInvocationUsd ?? "-"}` +
+        (row.rowsWithoutRunId > 0 ? ` | ${row.rowsWithoutRunId} row(s) dropped: no run_id to dedupe on` : ""),
+    );
+  }
+  lines.push(
+    "  (this table REPORTS; it recommends no model and changes no mount — the ruling on any row " +
+      "belongs to a human, exactly as the per-task_class table above)",
+  );
 
   // W1-T2708: the lane-restore condition, READ OFF THE TOOL, immediately under the table whose
   // row it is drawn from — so "is burn per run down" is a reading rather than an argument, and a
