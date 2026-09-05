@@ -371,6 +371,9 @@ import {
   mergeDraftCaches,
   DAEMON_DRAFT_BATCH_CAP,
   evictRefusalPoisonedKeys,
+  markReopened,
+  parseReopenedKeysCache,
+  writeReopenedKeys,
   gitGrepAnchorTrue,
   inboxDraftPrompt,
   isDraftStale,
@@ -32940,11 +32943,27 @@ export function buildInboxDraftHook(
       // every boot runs it — while bounding a re-opened genuine failure to ONE extra attempt per
       // daemon start rather than one per poll. `buildInboxDraftHook` is constructed once per daemon
       // start (see its own doc), so this closure flag is that scope.
+      // W1-T2566: THE CLOSURE FLAG STAYS — it is what keeps this off the per-poll path, and the
+      // comment above records the test that caught the naive form. What it CANNOT do is survive a
+      // restart, which is precisely what resets it: at a MEASURED median daemon lifetime of 50.5
+      // minutes (479 processes, 32% under 30 min) a proposal that fails genuinely and repeatedly
+      // never acquires a cached draft, satisfies the eviction predicate on every boot, and is
+      // re-opened ~29 times a day at an $8.52 draft mean. The PERSISTED per-id marker below is the
+      // bound that survives the restart; the flag and the marker do different jobs.
       if (!attemptsMigrated) {
         attemptsMigrated = true;
-        const evicted = evictRefusalPoisonedKeys(attempts, drafts, new Set(proposals.map((p) => p.id)));
+        const reopenedPath = join(config.root, "state", "inbox-reopened-keys.json");
+        const reopened = parseReopenedKeysCache(readFileIfExists(reopenedPath));
+        // KEYED ON PROPOSAL ID, never a global "migration done" flag: an id never seen before is
+        // still re-opened on FIRST SIGHT, so a freshly-provisioned host recovers with no operator
+        // step — the property W1-T2564 chose a closure flag to get, preserved rather than traded.
+        const evicted = evictRefusalPoisonedKeys(attempts, drafts, new Set(proposals.map((p) => p.id)), new Set(Object.keys(reopened)));
         if (evicted.length > 0) {
           writeDraftAttemptPair(draftsPath, attemptsPath, drafts, attempts);
+          // Written AFTER the pair commits. A marker recorded for an eviction that never landed
+          // would silently retire a proposal the caches still consider due — the failure direction
+          // that costs work rather than one extra attempt.
+          writeReopenedKeys(reopenedPath, markReopened(reopened, evicted, new Date().toISOString()));
           log("inbox.draft_attempts_reopened", { evicted: evicted.length, evicted_ids: evicted.slice(0, 20), refused_this_batch: 0 });
         }
       }
