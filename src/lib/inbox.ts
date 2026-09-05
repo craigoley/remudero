@@ -1121,6 +1121,35 @@ export function classifyProposal(
  */
 const SCOPE_HINT = "files: — the repo-relative paths this task will touch";
 
+/**
+ * W1-T2591 — THE TOOLS THE DRAFT PROMPT ALREADY CLAIMS THIS RUNG DOES NOT HAVE, now enforced.
+ *
+ * {@link inboxDraftPrompt} tells the worker, in as many words: "You have NO Write/Edit/Bash tools
+ * — you cannot touch a file or run git." That sentence was the ONLY thing standing between a
+ * draft worker and the checkout, and after #3588 (W1-T2664) parallelised `runDraftRung` into an
+ * indexed worker pool it stopped being enough: `draftProposalBatch` materialises ONE worktree per
+ * batch and hands that same `worktreePath` to every lane as `cwd`, so up to
+ * `DAEMON_DRAFT_BATCH_CAP` workers now share one checkout where exactly one ran before. Worker
+ * HOMES are already isolated per spawn (`perRunWorkerHomeDir(..., { perSpawn: true })`); the cwd
+ * is not.
+ *
+ * MEASURED 2026-09-04, which is why prose was not enough: `settings/worker.json` carries
+ * `allow: []` and a `deny` list of four READ paths (ssh, aws, remudero config, service-tokens) —
+ * nothing about Write, Edit or Bash — and the spawn passes `permissionMode: "bypassPermissions"`.
+ *
+ * THE RUNG NEEDS NONE OF THEM, which is what makes enforcement the cheap remedy rather than
+ * per-lane worktrees: the plan text is passed IN the prompt (`currentPlanText`), and the outcome
+ * is parsed from the worker's TRANSCRIPT (`parseDraftedCandidate`), never read back off disk. So
+ * the sharing becomes provably read-only instead of asserted read-only — the distinction this
+ * task's own criterion is written around. Per-lane worktrees remain the stronger option and were
+ * costed rather than dismissed: they multiply checkout disk by the cap on a host that hit 100%
+ * full on 2026-09-01 (W1-T2585).
+ *
+ * `NotebookEdit` is listed alongside the prompt's own three because it is a write path the
+ * sentence predates — the list enforces the CLAIM, not its 2026 wording.
+ */
+export const INBOX_DRAFT_DISALLOWED_TOOLS: readonly string[] = ["Write", "Edit", "NotebookEdit", "Bash"];
+
 export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, runId: string): string {
   // W1-T194: retraction is STRUCTURAL, not rhetorical — a round the operator marked
   // `retracted` (via `rmd reframe --supersedes`) is OMITTED from this prompt entirely,

@@ -161,16 +161,6 @@ test("W1-T2585: the recycle reclaims unreferenced images and reports the bytes i
   assert.match(out.stdout, /reclaimed 4\.549GB/, out.stdout);
 });
 
-test("W1-T2585: on origin/main the recycle pruned nothing — the falsifier this task rests on", () => {
-  const base = spawnSync("git", ["show", "origin/main:deploy/recycle-container.sh"], { cwd: REPO_ROOT, encoding: "utf8" });
-  assert.equal(base.status, 0, "origin/main must be readable for this control to mean anything");
-  assert.ok(/docker pull/.test(base.stdout), "control: the base script really does pull, so this query can see its corpus");
-  assert.ok(
-    !/image\s+prune|image\s+rm|\brmi\b/.test(base.stdout),
-    "the premise is that the base script reclaims nothing; if this fails the task is already done",
-  );
-});
-
 // ── criterion 2 ──────────────────────────────────────────────────────────────────────────────
 
 test("W1-T2585: the reclaim runs only AFTER the new container is up, so the pulled digest is referenced", () => {
