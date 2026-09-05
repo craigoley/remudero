@@ -37133,6 +37133,93 @@ function logCliInvocation(cmd: string | undefined, argv: string[]): void {
  */
 const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight"]);
 
+/**
+ * A PROMISE REJECTION THAT ESCAPED EVERY HANDLER — the fourth named halt, alongside
+ * {@link DAEMON_EXIT_STALE} (75), {@link DAEMON_EXIT_BLOCKED} (76) and
+ * {@link DAEMON_EXIT_ENVIRONMENTAL} (77), and the same argument: a supervisor cannot read a
+ * message, only a number, so a halt worth telling apart gets its own value.
+ *
+ * This one is NOT a routine outcome. It means an `await`-less code path threw somewhere nothing
+ * was watching, which under Node's default is an unhandled-rejection crash with no ledger row at
+ * all — the shape that made `rmd serve` exit on one malformed request line (see
+ * `respondToRequestFailure` in lib/service.ts). 78 says "a defect escaped", which is exactly what
+ * the operator should read it as.
+ */
+export const CLI_EXIT_UNHANDLED_REJECTION = 78;
+
+/**
+ * Seams for {@link installUnhandledRejectionGuard}. Every one defaults to the real thing; a test
+ * supplies `target` so it drives the handler against its own emitter and never installs a
+ * process-level `exit` on the test runner.
+ */
+export interface UnhandledRejectionGuardDeps {
+  /** Where the listener is registered. Default `process`. */
+  target?: { on(event: "unhandledRejection", handler: (reason: unknown) => void): unknown };
+  /** Ledger append. Default {@link logUnhandledRejection}. */
+  log?: (reason: unknown) => void;
+  /** Operator-visible line. Default `console.error`. */
+  error?: (line: string) => void;
+  /** Process halt. Default `process.exit`. */
+  exit?: (code: number) => void;
+}
+
+/** The ledger row {@link installUnhandledRejectionGuard}'s handler writes — same telemetry-only
+ *  contract as {@link logCliInvocation}: a ledger that cannot be written must never be the reason
+ *  the operator loses the stderr line and the named exit code below it. */
+function logUnhandledRejection(reason: unknown): void {
+  try {
+    appendLedger(ledgerPathFor(loadConfig()), {
+      run_id: `CLI-${Date.now()}`,
+      task_id: "CLI",
+      step: "cli.unhandled_rejection",
+      verb: process.argv[2] ?? "(none)",
+      error: String((reason as Error)?.message ?? reason),
+    });
+  } catch {
+    // Telemetry-only — see this function's own doc.
+  }
+}
+
+/** Targets already carrying the guard, so the ONE registration a process gets is not multiplied by
+ *  every in-process `main()` call this repo's `callMain` tests make. Keyed on the TARGET rather
+ *  than a module-level boolean so a test proves the idempotence against its own emitter — a
+ *  boolean could only be exercised by installing a real `process.exit` listener on the runner. */
+const unhandledRejectionGuardedTargets = new WeakSet<object>();
+
+/**
+ * THE ONE `unhandledRejection` REGISTRATION IN THIS REPO. Before it, `git grep -c
+ * unhandledRejection -- src bin` read 0: any promise rejection nobody awaited killed the process
+ * with Node's default handling — no ledger row, no named exit code, and for a long-running service
+ * under launchd's 60 s restart throttle, an outage per occurrence.
+ *
+ * It is a BACKSTOP, not a recovery: the handler ledgers, prints, and halts with
+ * {@link CLI_EXIT_UNHANDLED_REJECTION}. Continuing past a rejection whose origin is unknown would
+ * leave the process in a state no caller has reasoned about, which is worse than a supervised
+ * restart. What changes is that the escape is now VISIBLE — a named code and a `cli.unhandled_rejection`
+ * row — rather than a stack on a stderr nobody reads.
+ *
+ * Under `node --test` this is harmless: the runner runs each test FILE in its own child, so the
+ * halt is scoped to that file and the run still prints its `# tests`/`# pass`/`# fail` summary
+ * (MEASURED — a run with an escaped rejection reported `# tests 6 / # fail 1` and exited 1, the
+ * failure attributed to the leaking test exactly as without the guard).
+ *
+ * @returns whether this call installed the listener — `false` on every real call after the first.
+ */
+export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps = {}): boolean {
+  const target = deps.target ?? process;
+  if (unhandledRejectionGuardedTargets.has(target)) return false;
+  unhandledRejectionGuardedTargets.add(target);
+  const log = deps.log ?? logUnhandledRejection;
+  const error = deps.error ?? console.error;
+  const exit = deps.exit ?? process.exit;
+  target.on("unhandledRejection", (reason: unknown) => {
+    log(reason);
+    error(`rmd: unhandled promise rejection -- ${String((reason as Error)?.stack ?? reason)}`);
+    exit(CLI_EXIT_UNHANDLED_REJECTION);
+  });
+  return true;
+}
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 export async function main(
   // W1-T79/W1-T221: the freshness check is injectable so a `callMain` test can drive the
@@ -37143,6 +37230,11 @@ export async function main(
     checkServiceFreshness?: typeof checkServiceFreshness;
   } = {},
 ): Promise<void> {
+  // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's
+  // own spawns included) must reach a ledger row and a named exit code, not Node's default crash.
+  // See {@link installUnhandledRejectionGuard} — it is idempotent, so the in-process `main()`
+  // calls this repo's `callMain` tests make do not stack listeners.
+  installUnhandledRejectionGuard();
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
   const arg = rest[0];
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
