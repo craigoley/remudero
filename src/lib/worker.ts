@@ -1698,6 +1698,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         preference: routingPolicy.preference,
         ...(preferenceBypass ? { preference_bypass: preferenceBypass } : {}),
         tightest_remaining_percent: selection.tightestRemainingPercent,
+        ...(selection.allocationWeight !== undefined ? { allocation_weight: selection.allocationWeight } : {}),
+        ...(selection.allocationSharePercent !== undefined
+          ? { allocation_share_percent: selection.allocationSharePercent }
+          : {}),
         capacities: capacities.map((capacity) => ({
           provider: capacity.provider,
           readable: capacity.readable,
@@ -2952,6 +2956,58 @@ export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntr
 export function worktreesDir(config: Config): string {
   return join(config.root, "worktrees");
 }
+
+/**
+ * W1-T2847 — THE DECLARED HOME FOR HAND-CUT (AD-HOC) LANES, and the ONLY new root this task adds.
+ *
+ * THE MEASUREMENT. `worktreesDir` is the one root `runWorktreeReapRung` ever passes to
+ * {@link reapStaleWorktrees}. On the Mac mini 2026-09-04, `config.root` held 214 entries of which
+ * **180 carried a `.git` FILE** — linked worktrees — sitting as SIBLINGS of `worktrees/`, which
+ * itself held 11. So the reaper's entire scan surface was 11 directories totalling 44K while 4.7G
+ * of the identical object class sat one directory above it, unreachable. Nothing else covers them
+ * either: `cloneReapRoots()` returns tmp roots only, `pruneStaleRuns` is handed `worktreesDir` at
+ * every call site, and `reapWorkerScratch` is fenced to `claudeScratchRoot()` children.
+ *
+ * A SIBLING OF `worktreesDir`, NEVER `config.root` ITSELF. Pointing any reaper at `config.root`
+ * is refused by this task's own design: those 180 worktrees are LIVE (`git worktree list
+ * --porcelain` reported `prunable` zero times), and 34 of the 214 entries are not worktrees at all
+ * — ledgers, PR bodies, manifests — which a reaper must never walk. Reaping the parent wholesale
+ * is the 2026-07-31 failure this repo already paid for once.
+ *
+ * AND NEVER `$HOME`. The same practice on the console account put lanes at `~/<name>`, and 154
+ * distinct ones accumulated over three days there; adding a home-scoped reap root would gain a
+ * root full of `Documents`, `Library` and `.ssh` while still refusing ~96% of that leak (those
+ * lanes are linked worktrees, and `clone-reaper.ts` requires `.git` to be a DIRECTORY by design).
+ * The fix is to move the practice INTO a bounded, fleet-owned directory — this one.
+ *
+ * DERIVED, never a hardcoded absolute path — the same `join(config.root, …)` shape
+ * {@link worktreesDir} and `workerHomeDir` already use, for the same public-repo-hygiene reason.
+ */
+export function adhocLaneRoot(config: Config): string {
+  return join(config.root, "lanes");
+}
+
+/**
+ * W1-T2847 — THE AGE CEILING FOR AN OPERATOR LANE, SIZED FOR A HUMAN RATHER THAN FOR A RUN.
+ *
+ * {@link DEFAULT_WORKTREE_REAP_GRACE_MS} is calibrated against run wall-clock, and reusing it here
+ * would fire on a healthy condition — this repo's recurring defect (W1-T312, W1-T380/#1392,
+ * W1-T382/#1401), which is why this constant exists rather than a shared one.
+ *
+ * WHAT IT WAS SIZED AGAINST, STATED. The population is hand-cut lanes on a developer machine. The
+ * longest LEGITIMATE idle window for one is a long weekend — a lane cut Friday evening and resumed
+ * Tuesday morning is roughly 84 hours idle and is not garbage. The observed creation window
+ * (2026-09-01 07:15 → 2026-09-03 18:58, 15/88/51 lanes per day) shows lanes retained across at
+ * least that span, and every one of the 180 measured was still on a live branch. Fourteen days is
+ * ~4x the longest legitimate idle window, which is the headroom the bound-fires-on-a-healthy-
+ * condition rule asks for, while still bounding a directory that grows at 15-88 entries a day.
+ *
+ * AGE IS THE BACKSTOP, NOT THE PREDICATE. {@link reapStaleWorktrees} fails closed on a live pid,
+ * on a branch still live upstream HOWEVER OLD, and on an incomplete activity probe. Against the
+ * measured population this ceiling therefore reclaims ZERO today, and that is the expected result:
+ * the value delivered is the bound, not an immediate reclaim.
+ */
+export const ADHOC_LANE_REAP_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
 
 /** This rmd install's own root — the SAME derivation `src/lib/policy.ts:344` uses from a
  *  `src/lib/` module. Its `node_modules` is guaranteed populated whenever rmd is running
@@ -4762,6 +4818,133 @@ export function runWorktreeReapRung(
     log("worktree.reap.error", { error: String((e as Error)?.message ?? e) });
   }
   return reapSummary;
+}
+
+/**
+ * W1-T2847 — THE AD-HOC LANE RUNG: the same reaper, pointed at {@link adhocLaneRoot}, shipping
+ * SURVEY-FIRST.
+ *
+ * NO SECOND REMOVAL, BY CONSTRUCTION. This delegates to {@link reapStaleWorktrees}, which already
+ * classifies a candidate from its own `.git` and removes a linked worktree through
+ * {@link planWorktreeRemoval}/{@link executeWorktreeRemoval} — `git worktree remove --force` in the
+ * resolved parent, falling back to `rmSync` only where no admin record can be stranded, and KEEPING
+ * on an unreadable `.git`. A bare `fs.rmSync` here would reinstate the 2026-07-31 defect that work
+ * exists to close, so there is deliberately no filesystem call in this function at all.
+ *
+ * THE LIVENESS DOCTRINE IS INHERITED WHOLE, not re-decided: live pid, live upstream branch however
+ * old, and an incomplete activity probe all KEEP, because that is what `reapStaleWorktrees` already
+ * does. This function adds one thing only — a different root and a different age ceiling.
+ *
+ * SURVEY-FIRST IS THE DEFAULT AND THE DEFAULT IS OFF. `enabled` defaults to `false`, so the pass
+ * runs with `dryRun: true` and ledgers exactly what it WOULD reclaim while removing nothing. That
+ * is the same posture `worktreeReapBoot` and `scratchReap` ship in, and against a measured
+ * population of 180 LIVE operator lanes it is not caution but the only responsible default: an
+ * operator reads several passes' dispositions before arming it. Arming is a separate operator
+ * decision, and the `enabled` seam is where it lands.
+ */
+export function runAdhocLaneReapRung(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    root?: () => string;
+    reap?: typeof reapStaleWorktrees;
+    /** Survey-only while this reads false — the shipped default. See the doc above. */
+    enabled?: () => boolean;
+    maxAgeMs?: number;
+    isPidAlive?: (pid: number, info: RunLockInfo) => boolean;
+    /** W1-T2847 design (vi), the REPORTING half. When given, the parent checkout whose
+     *  registration is read for lanes outside BOTH managed roots — see
+     *  {@link unmanagedWorktreeLanes}. Omitted ⇒ that report is skipped entirely. */
+    repoDir?: string;
+    listUnmanaged?: typeof unmanagedWorktreeLanes;
+  } = {},
+): WorktreeReapSummary | null {
+  try {
+    const enabled = (deps.enabled ?? (() => false))();
+    const reap = deps.reap ?? reapStaleWorktrees;
+    const root = (deps.root ?? (() => adhocLaneRoot(config)))();
+    const summary = reap(root, {
+      dryRun: !enabled,
+      maxAgeMs: deps.maxAgeMs ?? ADHOC_LANE_REAP_GRACE_MS,
+      isPidAlive: deps.isPidAlive ?? worktreeLockIsPidAlive,
+    });
+    // LEDGER THE SURVEY EVEN THOUGH NOTHING WAS REMOVED — that IS the deliverable while disarmed.
+    // `reapStaleWorktrees` populates `reaped`/`reapedLocks` under `dryRun` precisely so a caller
+    // can record what it would have reclaimed (W1-T406's own shape).
+    if (summary.reaped.length || summary.reapedLocks.length) {
+      log("adhoc_lane.reap", {
+        dry_run: !enabled,
+        root,
+        reaped: summary.reaped.length,
+        reaped_locks: summary.reapedLocks.length,
+      });
+    }
+    // W1-T378's doctrine, unchanged: an `activity-unknown` keep is the reaper declining to decide,
+    // and it is what bounds growth now that an ambiguous signal keeps rather than destroys.
+    const undecidable = (summary.keptReasons ?? []).filter((k) => k.reason === "activity-unknown");
+    if (undecidable.length) log("adhoc_lane.reap.undecidable", { kept: undecidable.map((k) => k.name) });
+    // W1-T2847 design (vi): NAME the lanes no cadence can reach. This is the whole reason 4.7G
+    // accumulated with no ledger row — the population was invisible, not merely unreaped. Reported
+    // beside the survey and NEVER acted on: by definition these sit outside both managed roots,
+    // and the measured 180 are all live.
+    if (deps.repoDir !== undefined) {
+      const unmanaged = (deps.listUnmanaged ?? unmanagedWorktreeLanes)(config, deps.repoDir);
+      if (unmanaged.length) log("adhoc_lane.unmanaged", { count: unmanaged.length, lanes: unmanaged });
+    }
+    return summary;
+  } catch (e) {
+    // Best-effort, exactly like the sibling boot sweeps — a reclaim rung never blocks a dispatch.
+    log("adhoc_lane.reap.error", { error: String((e as Error)?.message ?? e) });
+    return null;
+  }
+}
+
+/**
+ * W1-T2847 design (vi), the REPORTING half: every worktree git itself has registered for
+ * `repoDir` that lives under NEITHER {@link worktreesDir} NOR {@link adhocLaneRoot} — the lanes
+ * no cadence can reach.
+ *
+ * READS GIT'S OWN REGISTRATION, never a shell-command pattern. The design names this explicitly:
+ * the console account's 154 lanes were cut by Codex rather than Claude Code, so a session-hook
+ * matching `worktree add` in one agent's command log would have observed none of them.
+ * `git worktree list --porcelain` is agnostic about who created the entry.
+ *
+ * REPORTS, NEVER REAPS. The returned paths are outside both managed roots by definition, so
+ * nothing in this file may act on them — rationale (2) measured 180 such lanes ALL LIVE. This
+ * exists so the survey can NAME the unmanaged population instead of leaving it invisible, which is
+ * the whole reason 4.7G accumulated with no ledger row.
+ */
+export function unmanagedWorktreeLanes(
+  config: Config,
+  repoDir: string,
+  runGit: (args: string[], cwd: string) => string = defaultLaneListGit,
+): string[] {
+  let out: string;
+  try {
+    out = runGit(["worktree", "list", "--porcelain"], repoDir);
+  } catch {
+    return []; // unreadable registration ⇒ report nothing, never guess a population
+  }
+  const managed = [worktreesDir(config), adhocLaneRoot(config)];
+  const lanes: string[] = [];
+  for (const line of out.split("\n")) {
+    const m = /^worktree (.+)$/.exec(line.trim());
+    if (!m) continue;
+    const path = m[1];
+    // The main checkout reports itself first and is not a lane; a path under either managed root
+    // is already covered by a rung. Compared with a trailing separator so `…/lanes-old` can never
+    // read as being inside `…/lanes`.
+    if (path === repoDir) continue;
+    if (managed.some((root) => path === root || path.startsWith(`${root}/`))) continue;
+    lanes.push(path);
+  }
+  return lanes;
+}
+
+/** The real `git worktree list` reader {@link unmanagedWorktreeLanes} defaults to. Separated so the
+ *  survey's own seam is injectable without this file's tests shelling git for every case. */
+function defaultLaneListGit(args: string[], cwd: string): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", maxBuffer: 1 << 24 });
 }
 
 // ── gh helpers (run outside the sandbox; TLS fails under Seatbelt) ─────────

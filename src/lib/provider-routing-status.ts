@@ -68,6 +68,8 @@ export interface CodexModelDecisionStatus {
 export interface ProviderRoutingSelectedStatus {
   provider: WorkerProviderId;
   tightestRemainingPercent: number;
+  allocationWeight?: number;
+  allocationSharePercent?: number;
   accountLabel?: string;
   model?: string;
   effort?: string;
@@ -155,6 +157,10 @@ function providerId(value: unknown): WorkerProviderId | undefined {
 
 function safePercent(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100 ? value : undefined;
+}
+
+function safeAllocationWeight(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 10_000 ? value : undefined;
 }
 
 function isoTime(value: unknown): string | undefined {
@@ -347,6 +353,12 @@ function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
   const selectedCapacity = projectCapacity(input.selection.capacity);
   const tightestRemainingPercent = safePercent(input.selection.tightestRemainingPercent);
   if (tightestRemainingPercent === undefined) throw new Error("provider routing selection headroom is invalid");
+  const hasAllocation = input.selection.allocationWeight !== undefined || input.selection.allocationSharePercent !== undefined;
+  const allocationWeight = safeAllocationWeight(input.selection.allocationWeight);
+  const allocationSharePercent = safePercent(input.selection.allocationSharePercent);
+  if (hasAllocation && (allocationWeight === undefined || allocationSharePercent === undefined)) {
+    throw new Error("provider routing selection allocation is invalid");
+  }
   return {
     ...base,
     state: "selected",
@@ -355,6 +367,7 @@ function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
     selected: {
       provider: input.selection.provider,
       tightestRemainingPercent,
+      ...(allocationWeight !== undefined ? { allocationWeight, allocationSharePercent } : {}),
       ...(selectedCapacity?.accountLabel ? { accountLabel: selectedCapacity.accountLabel } : {}),
       ...(selectedCapacity?.model ? { model: selectedCapacity.model } : {}),
       ...(selectedCapacity?.effort ? { effort: selectedCapacity.effort } : {}),
@@ -663,11 +676,16 @@ function parseSnapshot(value: unknown, nowMs: number): ProviderRoutingStatus | u
     const provider = providerId(selectedRaw.provider);
     const tightestRemainingPercent = safePercent(selectedRaw.tightestRemainingPercent);
     if (!provider || tightestRemainingPercent === undefined) return undefined;
+    const hasAllocation = selectedRaw.allocationWeight !== undefined || selectedRaw.allocationSharePercent !== undefined;
+    const allocationWeight = safeAllocationWeight(selectedRaw.allocationWeight);
+    const allocationSharePercent = safePercent(selectedRaw.allocationSharePercent);
+    if (hasAllocation && (allocationWeight === undefined || allocationSharePercent === undefined)) return undefined;
     return {
       ...base,
       selected: {
         provider,
         tightestRemainingPercent,
+        ...(allocationWeight !== undefined ? { allocationWeight, allocationSharePercent } : {}),
         ...(safeLabel(selectedRaw.accountLabel) ? { accountLabel: safeLabel(selectedRaw.accountLabel) } : {}),
         ...(safeLabel(selectedRaw.model) ? { model: safeLabel(selectedRaw.model) } : {}),
         ...(safeLabel(selectedRaw.effort) ? { effort: safeLabel(selectedRaw.effort) } : {}),

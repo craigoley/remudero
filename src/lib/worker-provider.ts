@@ -144,6 +144,10 @@ export interface ProviderSelection {
   provider: WorkerProviderId;
   capacity: ProviderCapacity;
   tightestRemainingPercent: number;
+  /** Squared usable headroom after reserve; present on every live selector result. */
+  allocationWeight?: number;
+  /** Intended share among the eligible providers at this decision point. */
+  allocationSharePercent?: number;
 }
 
 export interface ProviderWindowConsumption {
@@ -287,9 +291,16 @@ function tightestRemaining(capacity: ProviderCapacity): number {
   return Math.min(...capacity.windows.map((window) => 100 - window.usedPercent));
 }
 
+const GOLDEN_RATIO_CONJUGATE = (Math.sqrt(5) - 1) / 2;
+
+function deterministicAllocationPoint(tieBreaker: number): number {
+  const index = Number.isFinite(tieBreaker) ? Math.abs(Math.trunc(tieBreaker)) : 0;
+  return (index * GOLDEN_RATIO_CONJUGATE) % 1;
+}
+
 /**
- * Select the eligible subscription with the most room in its tightest window.
- * Unreadable providers and providers at the reserve boundary are excluded.
+ * Select across eligible subscriptions in proportion to squared usable tight-window headroom.
+ * Unreadable providers and providers at the reserve boundary are excluded before weighting.
  */
 export function selectWorkerProvider(
   capacities: ProviderCapacity[],
@@ -310,12 +321,36 @@ export function selectWorkerProvider(
             window.usedPercent < ceiling,
         ),
     )
-    .map((capacity) => ({ provider: capacity.provider, capacity, tightestRemainingPercent: tightestRemaining(capacity) }))
+    .map((capacity) => {
+      const tightestRemainingPercent = tightestRemaining(capacity);
+      return {
+        provider: capacity.provider,
+        capacity,
+        tightestRemainingPercent,
+        allocationWeight: (tightestRemainingPercent - reservePercent) ** 2,
+      };
+    })
     .sort((a, b) => b.tightestRemainingPercent - a.tightestRemainingPercent);
   if (eligible.length === 0) throw new ProviderCapacityBlockedError(capacities);
+  const totalWeight = eligible.reduce((sum, item) => sum + item.allocationWeight, 0);
+  const weighted = eligible.map((item) => ({
+    ...item,
+    allocationSharePercent: item.allocationWeight / totalWeight * 100,
+  }));
   const best = eligible[0].tightestRemainingPercent;
-  const tied = eligible.filter((item) => item.tightestRemainingPercent === best);
-  return tied[Math.abs(tieBreaker) % tied.length];
+  const tied = weighted.filter((item) => item.tightestRemainingPercent === best);
+  if (tied.length === weighted.length) {
+    const index = Number.isFinite(tieBreaker) ? Math.abs(Math.trunc(tieBreaker)) : 0;
+    return tied[index % tied.length];
+  }
+
+  const targetWeight = deterministicAllocationPoint(tieBreaker) * totalWeight;
+  let cumulativeWeight = 0;
+  for (const item of weighted) {
+    cumulativeWeight += item.allocationWeight;
+    if (targetWeight < cumulativeWeight) return item;
+  }
+  return weighted[weighted.length - 1];
 }
 
 export function claudeCapacityFromUsage(snapshot: UsageSnapshot | undefined): ProviderCapacity {
