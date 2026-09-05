@@ -100,6 +100,7 @@ import {
 import { appendLedger } from "./ledger.js";
 import { buildAnalyticsRoute, type AnalyticsRouteDeps } from "./analytics-route.js";
 import { resolveFreshness } from "./console-freshness.js";
+import { renderConsoleShellScript } from "./console-shell-script.js";
 import { readIdleReasons, renderIdleReasonsHtml } from "./idle-reasons-panel.js";
 import { readLedgerLines } from "./status.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./ledger-replay.js";
@@ -1517,6 +1518,14 @@ export function renderShellHtml(
 </div>
 
 <script type="module">
+  // W1-T2731: the shell's PURE client helpers, emitted from the REAL, unit-tested function objects
+  // in lib/console-shell-script.ts via \`Function.prototype.toString()\` — the same technique
+  // W1-T281 already uses for \`resolveFreshness\` just below, and for the same reason: ONE
+  // definition, so this shell can never drift from the code the tests exercise. They were 56
+  // declarations inline here, and every line of them was credited as covered the instant
+  // renderShellHtml was called; as a real module lcov scores them line by line.
+${renderConsoleShellScript()}
+
   // Bootstrap: the SAME \`?token=\` query-param convention apps/dashboard/src/main.ts uses —
   // this page itself already required a bearer header to load (service.ts gates every route,
   // GET / included), so whatever fetched this page already has a token; this just lets that
@@ -1596,9 +1605,6 @@ export function renderShellHtml(
     return PHASE_ELAPSED_THRESHOLD_MS[phase] ?? PHASE_ELAPSED_THRESHOLD_MS.default ?? Infinity;
   }
 
-  function escapeHtml(text) {
-    return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  }
 
   /** One Sections row (W1-T376): "<heading> — N of M filed tasks merged", NEVER a percentage
    *  (design note (iii): a 1-task section reading 100% the moment its single task merges would
@@ -1607,9 +1613,6 @@ export function renderShellHtml(
    *  escapeHtml just above -- pulled out of the rendered shell and eval'd directly by
    *  test/plan-sections-render.test.ts, the same technique test/account-usage.test.ts already
    *  proved for usageWindowLabel. */
-  function planSectionRowHtml(s) {
-    return \`<li class="row plan-section-row"><span class="task-id">\${escapeHtml(s.heading)}</span><span class="detail">\${s.merged} of \${s.filed} filed tasks merged</span></li>\`;
-  }
 
   // W1-T189: an OPTIONAL client-side timeout. Plain fetch has none of its own, so a backend
   // stall (W1-T187's 35-58s /v1/status latency) never rejects on its own -- it just hangs,
@@ -1813,25 +1816,9 @@ export function renderShellHtml(
 
   // ── the five-state status color taxonomy (W1-T153 design system) — ONE mapping, reused
   // everywhere a task's state renders (NOW/NEEDS ME/UP NEXT/RECENT/rest), never re-derived. ──
-  function statusColorKey(t) {
-    if (t.needsHuman) return "needs-human";
-    if (t.status === "merged" || t.status === "done") return "merged";
-    if (t.status === "blocked") return "blocked";
-    if (t.status === "queued") return "queued";
-    return "running";
-  }
   const STATUS_LABELS = { running: "running", blocked: "blocked", "needs-human": "needs human", merged: "merged", queued: "queued" };
   function statusBadge(key) {
     return \`<span class="status-dot status-\${key}" aria-hidden="true"></span><span class="status-label status-\${key}">\${STATUS_LABELS[key]}</span>\`;
-  }
-  function formatElapsed(ms) {
-    if (typeof ms !== "number" || !Number.isFinite(ms)) return "";
-    const s = Math.max(0, Math.floor(ms / 1000));
-    const m = Math.floor(s / 60);
-    const h = Math.floor(m / 60);
-    if (h > 0) return \`\${h}h\${m % 60}m\`;
-    if (m > 0) return \`\${m}m\${s % 60}s\`;
-    return \`\${s}s\`;
   }
   // ── W1-T914 (fb-1784901239119-1be356 clause c / fb-1784919225707-0fab8b): the review
   // three-state, rendered right beside the PR link so a PR whose review has not run stops
@@ -1859,31 +1846,12 @@ export function renderShellHtml(
   // ISO-8601-with-milliseconds string anywhere in the UI (the falsifier: a UTC millisecond stamp
   // forces the reader to do arithmetic to answer "is this recent"). Every place this shell used
   // to render \`someDate.toISOString()\`/a bare \`generated_at\` routes through this pair instead. ──
-  function formatRelative(ms) {
-    if (typeof ms !== "number" || !Number.isFinite(ms)) return "";
-    if (ms < 1000) return "just now";
-    const s = Math.floor(ms / 1000);
-    if (s < 60) return \`\${s}s ago\`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return \`\${m}m ago\`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return \`\${h}h ago\`;
-    const d = Math.floor(h / 24);
-    return \`\${d}d ago\`;
-  }
   /** \`iso\` -> "14:23:05 EDT · 8s ago" -- local wall-clock time WITH THE TIMEZONE LABELED (the
    *  reader's own zone) PLUS a relative offset, BOTH computed from the SAME \`t\` and the SAME
    *  \`Date.now()\` so the absolute stamp and the age can never contradict (fb-…c124f9's "impossible
    *  arithmetic"; the labeled zone removes the "is 12:03 UTC or local?" ambiguity). Mirrors the
    *  unit-tested \`formatStamp\` in lib/console-freshness.ts. Falls back to the raw string only when
    *  \`iso\` fails to parse (never silently swallowed). */
-  function formatTimestamp(iso) {
-    if (!iso) return "unknown";
-    const t = Date.parse(iso);
-    if (Number.isNaN(t)) return String(iso);
-    const local = new Date(t).toLocaleTimeString(undefined, { timeZoneName: "short" });
-    return \`\${local} · \${formatRelative(Date.now() - t)}\`;
-  }
 
   // ── W1-T156 UI+TRUST: an animated per-row "in flight" indicator, replaced by a STATIC badge
   // (no animation at all -- not merely a slower one) under prefers-reduced-motion. ────────────
@@ -2204,40 +2172,6 @@ export function renderShellHtml(
    *  \`tsOf\` reads whatever field that item type actually carries (never fabricated for a type
    *  that doesn't -- e.g. an inbox-ready proposal has no timestamp at all, so it is silently
    *  skipped for AGE purposes while still counting toward the header's own N). */
-  function oldestAgoText(items, tsOf) {
-    let oldest;
-    for (const it of items) {
-      const raw = tsOf(it);
-      if (!raw) continue;
-      const t = Date.parse(raw);
-      if (!Number.isFinite(t)) continue;
-      if (oldest === undefined || t < oldest) oldest = t;
-    }
-    return oldest === undefined ? null : formatAgo(new Date(oldest).toISOString());
-  }
-  function isSameLocalDay(a, b) {
-    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-  }
-  function nowSummaryText(inFlight) {
-    if (inFlight.length === 0) return "nothing in flight";
-    const ago = oldestAgoText(inFlight, (t) => t.startedAt);
-    return \`\${inFlight.length} running\${ago ? \` · oldest \${ago}\` : ""}\`;
-  }
-  function needsMeSummaryText(rows) {
-    if (rows.length === 0) return "nothing needs you";
-    const ago = oldestAgoText(rows, (r) => r.ts);
-    return \`\${rows.length} open\${ago ? \` · oldest \${ago}\` : ""}\`;
-  }
-  function upNextSummaryText(head) {
-    if (head.length === 0) return "nothing waiting to gather";
-    const more = head.length > 1 ? \` (+\${head.length - 1} more)\` : "";
-    return \`next: \${head[0].id}\${more}\`;
-  }
-  function recentSummaryText(list) {
-    if (list.length === 0) return "no recent activity yet";
-    const landedToday = list.filter((e) => e.verb === "merged" && isSameLocalDay(new Date(e.ts), new Date())).length;
-    return \`\${landedToday} landed today · last \${formatAgo(list[0].ts)}\`;
-  }
   /** Whichever of the five section bodies DOM-contains \`el\` -- expands it (never persisted: this
    *  is a navigational reveal, e.g. a dep-link/deep-link jump, not the operator's own layout
    *  preference) if it is currently collapsed. A jump/deep-link into a row that lives in a
@@ -2273,12 +2207,6 @@ export function renderShellHtml(
    *  rendered by the separate ticking timer below) and \`lastActivityAt\` (a board-only ledger
    *  timestamp, not part of the status taxonomy the operator is announced about). A row whose
    *  ONLY difference is one of these must not "flip" (re-render/flash/announce). */
-  function withoutVolatile(p) {
-    // W1-T184: liveSpendUsd/liveTurns tick upward as an in-flight run spends/turns, exactly
-    // like elapsedMs ticks with wall-clock time -- neither is a genuine status "flip".
-    const { elapsedMs, lastActivityAt, liveSpendUsd, liveTurns, ...rest } = p;
-    return rest;
-  }
 
   /**
    * Absorb one projection into \`tasksById\`. TWO transports feed this: the GET /v1/status poll
@@ -2369,9 +2297,6 @@ export function renderShellHtml(
    *  actually READS: board.ts's counts.blocked has no consumer on this page, so fixing only the
    *  server field would have changed nothing he can see. A task with an open, unsuperseded
    *  escalation is STOPPED even though its own status is still "queued" or "running". */
-  function isBlockedRow(t) {
-    return t.status === "blocked" || t.needsHuman === true;
-  }
 
   /** running/queued reuse the EXACT predicates summaryText/statusColorKey already use for the
    *  SAME words elsewhere on this page (never a second, disagreeing derivation); blocked uses
@@ -2433,17 +2358,6 @@ export function renderShellHtml(
   }
 
   /** \`n\` bytes -> "12.3 GB" -- the disk-free figure's own display formatter. */
-  function formatBytes(n) {
-    if (typeof n !== "number" || !Number.isFinite(n)) return "unknown";
-    const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-    let v = n;
-    let i = 0;
-    while (v >= 1024 && i < units.length - 1) {
-      v /= 1024;
-      i += 1;
-    }
-    return \`\${v.toFixed(1)} \${units[i]}\`;
-  }
 
   /** The daemon-health widget's LIVE next-poll countdown -- ticked off the SAME 1s interval
    *  tickElapsed already runs on (never a second clock), reading the \`data-next-poll-at\`
@@ -2503,57 +2417,12 @@ export function renderShellHtml(
    *  verbatim, never folded into the generic branch below (standing rule 22: a refusal is
    *  rendered as a refusal, never as a zero). Everything else renders its own scalar/array
    *  fields as "key value" pairs, skipping \`status\`/\`refusedReason\` themselves. */
-  function selfMeasurementFigure(v) {
-    if (v === null || v === undefined) return { refused: false, text: "" };
-    if (typeof v !== "object" || Array.isArray(v)) return { refused: false, text: String(v) };
-    if (v.status === "refused") {
-      return { refused: true, text: v.refusedReason || "refused (no reason given)" };
-    }
-    const parts = [];
-    for (const k of Object.keys(v)) {
-      if (k === "status" || k === "refusedReason") continue;
-      const fv = v[k];
-      if (fv === null || fv === undefined) continue;
-      if (Array.isArray(fv)) parts.push(\`\${k}: \${fv.length}\`);
-      else if (typeof fv === "object") continue; // nested shapes (e.g. calibration classes) skipped, not zeroed
-      else parts.push(\`\${k}: \${fv}\`);
-    }
-    return { refused: false, text: parts.length ? parts.join(", ") : v.status || "measured" };
-  }
 
   /** One verb's row: name, latest figure-or-refusal, as-of, previous figure (design (ii)'s ONE
    *  PANEL). \`rows\` is GET /v1/self-measurement's own \`rows\` array, already newest-first
    *  (latestMeasurementRows' own sort, measurement-cadence.ts) -- never re-sorted here. A verb
    *  absent from EVERY row in \`rows\` renders "never measured", never a bare 0 (standing rule
    *  22, the same discipline {@link renderDaemonHealth}'s "unknown" fields already follow). */
-  function selfMeasurementRowHtml(verb, rows) {
-    let latest = null;
-    let latestTs = null;
-    let previous = null;
-    for (const row of rows) {
-      const result = row && row.result ? row.result : {};
-      if (!Object.prototype.hasOwnProperty.call(result, verb.key)) continue;
-      if (latest === null && latestTs === null) {
-        latest = result[verb.key];
-        latestTs = row.ts;
-      } else if (previous === null) {
-        previous = result[verb.key];
-        break;
-      }
-    }
-    if (latestTs === null) {
-      return \`<li class="row self-measurement-row" data-verb="\${escapeHtml(verb.key)}" data-self-measurement-state="never-measured"><span class="task-id">\${escapeHtml(verb.label)}</span><span class="detail">never measured</span></li>\`;
-    }
-    const figure = selfMeasurementFigure(latest);
-    const prevText = previous !== null ? \` · previously: \${escapeHtml(selfMeasurementFigure(previous).text)}\` : "";
-    const stateAttr = figure.refused ? "refused" : "measured";
-    return (
-      \`<li class="row self-measurement-row" data-verb="\${escapeHtml(verb.key)}" data-self-measurement-state="\${stateAttr}">\` +
-      \`<span class="task-id">\${escapeHtml(verb.label)}</span>\` +
-      \`<span class="detail">\${figure.refused ? "refused: " : ""}\${escapeHtml(figure.text)} · as of \${escapeHtml(formatTimestamp(latestTs))}\${prevText}</span>\` +
-      \`</li>\`
-    );
-  }
 
   /** Renders GET /v1/self-measurement's body -- the ONE console surface over
    *  \`measurement_cadence.ran\` rows (this task's own rationale (1)). \`status: "unreadable"\`
@@ -2586,20 +2455,10 @@ export function renderShellHtml(
    *  alone -- is carried here too, so "unknown" on the five-hour/seven-day fields says WHY
    *  ("unknown (too-old)") rather than a bare word indistinguishable from every other unknown
    *  cause. Render change only: the reason was already computed and already on the payload. */
-  function usageWindowLabel(w, reason) {
-    if (!w || w.percentUsed == null) return reason ? \`unknown (\${reason})\` : "unknown";
-    const pct = \`\${w.percentUsed}%\`;
-    return w.resetsAt ? \`\${pct} · resets \${formatClock(w.resetsAt)}\` : pct;
-  }
 
   /** Local wall-clock with the zone labeled, for a FUTURE instant (a window reset) -- the
    *  relative half of formatTimestamp would read "3h ago" for something 3h away, so resets get
    *  their own formatter rather than a misleading reuse. */
-  function formatClock(iso) {
-    const t = Date.parse(iso);
-    if (Number.isNaN(t)) return String(iso);
-    return new Date(t).toLocaleTimeString(undefined, { timeZoneName: "short" });
-  }
 
   /** Renders GET /v1/account-usage's body -- WHICH account the fleet is spending and how much of
    *  each window is gone. Read fresh per poll, so an account switch shows up on the next refresh
@@ -2932,9 +2791,6 @@ export function renderShellHtml(
   // ── W1-T222: the right-edge chevron -- the VISIBLE affordance that a row expands inline. Its
   // direction is driven purely by the row's own aria-expanded (CSS above), never baked into this
   // markup, so re-rendering a row's content (a status flip) never has to know its expand state.
-  function rowChevronHtml() {
-    return '<span class="row-chevron" aria-hidden="true">›</span>';
-  }
 
   // ── NOW — in-flight runs, live phase + LIVE-TICKING elapsed (W1-T156) + LIVE spend/turns (W1-T184) ──
   // W1-T183: each in-flight row also carries its own phase's ANOMALY threshold
@@ -2942,14 +2798,6 @@ export function renderShellHtml(
   // the marker and the row's own \`.anomaly\` class live, off the SAME ticking clock that already
   // drives the elapsed text, so a row that crosses its threshold mid-session is flagged without
   // waiting on the next status flip/re-render.
-  function liveSpendHtml(t) {
-    // NO DATA YET, never zeros (fb-1784902052582-c124f9): an in-flight run that has logged no
-    // spend/turns line yet reads "no data yet", not "$0.000 / 0 turns" as fact.
-    if (t.liveSpendPending) return \` · spend: <span class="spend-pending">no data yet</span>\`;
-    if (t.liveSpendUsd === undefined && t.liveTurns === undefined) return "";
-    const turns = t.liveTurns !== undefined ? \` / \${t.liveTurns} turns\` : "";
-    return \` · spend: \${costLabel(t.liveSpendUsd)}\${turns}\`;
-  }
   // W1-T944: the NOW row's worker-liveness span, riding the SAME served BoardRow field
   // (workerState/workerStateSince) phase/elapsed/spend already ride -- no second fetch, no
   // client-side re-derivation of the state itself. Text always, never colour alone (design note
@@ -2958,16 +2806,6 @@ export function renderShellHtml(
   // is called for is ALREADY known in-flight (nowRowHtml only calls it for a \`t.phase\` row --
   // design note v), so "no workerState" here means "no worker.state row yet", rendered as
   // "state unknown" (design note iii) rather than a blank or a healthy-looking default.
-  function workerStateHtml(t) {
-    if (t.workerState === "quiet") {
-      const since = escapeHtml(t.workerStateSince ?? "");
-      return \` · worker: <span class="worker-state worker-quiet" data-worker-since="\${since}">quiet …</span>\`;
-    }
-    if (t.workerState === "working" || t.workerState === "tool-executing") {
-      return \` · worker: <span class="worker-state">\${escapeHtml(t.workerState)}</span>\`;
-    }
-    return \` · worker: <span class="worker-state worker-unknown">state unknown</span>\`;
-  }
   function nowRowHtml(t) {
     const key = statusColorKey(t);
     const threshold = phaseThresholdMs(t.phase);
@@ -3050,11 +2888,6 @@ export function renderShellHtml(
   // presenting an action as a question hides real work. A row with no recognizable class (no
   // escalationTitle at all -- the generic-ask fallback below) renders NO badge at all, BYTE-
   // IDENTICAL to before this task.
-  function askTypeFromEscalationTitle(title) {
-    const m = title ? /^\\[(\\w+)\\]/.exec(title) : null;
-    if (!m) return undefined;
-    return m[1] === "GRILL" ? "question" : "action";
-  }
   function needsMeTaskRowHtml(t) {
     const ask = t.escalationTitle ? escapeHtml(t.escalationTitle) : "needs human attention (escalated)";
     const askType = askTypeFromEscalationTitle(t.escalationTitle);
@@ -3082,30 +2915,6 @@ export function renderShellHtml(
   // itself already applied before persisting) degrades to exactly \`rawHtml\`, unchanged from
   // before this task -- the falsifier this bar exists for is a card whose FIRST text is the
   // raw payload; when a valid summary exists, the raw payload is never that first text again.
-  function decisionSummaryHtml(e, rawHtml) {
-    const s = e && e.summary;
-    if (
-      !s ||
-      typeof s.headline !== "string" ||
-      typeof s.decision !== "string" ||
-      !Array.isArray(s.options) ||
-      s.options.length < 2
-    ) {
-      return rawHtml;
-    }
-    const optionsHtml = s.options
-      .map((o) => \`<li><strong>\${escapeHtml(o.label)}</strong> — \${escapeHtml(o.consequence)}</li>\`)
-      .join("");
-    return (
-      \`<div class="decision-summary">\` +
-      \`<p class="decision-headline">\${escapeHtml(s.headline)}</p>\` +
-      (s.what_happened ? \`<p class="decision-what-happened">\${escapeHtml(s.what_happened)}</p>\` : "") +
-      \`<p class="decision-decision">\${escapeHtml(s.decision)}</p>\` +
-      \`<ul class="decision-options">\${optionsHtml}</ul>\` +
-      \`</div>\` +
-      \`<details class="decision-raw"><summary>Show raw</summary>\${rawHtml}</details>\`
-    );
-  }
   // W1-T350: the Answer form is the ONE console control that submits raw operator text to
   // POST /v1/feedback, so it is "the console's own... submit control" this task's design (ii)
   // converts to arm-then-confirm with a read-back. First submit PREVIEWS (POST
@@ -3150,14 +2959,6 @@ export function renderShellHtml(
   // read-back of the drafted task ids in its armed label -- never a second confirm pattern.
   // REFRAME is a textarea (authored feedback captured VERBATIM), never a link to a terminal --
   // the wrong asymmetry (agreeing easy, disagreeing hard) a ratification gate must not have.
-  function draftedTasksHtml(draftedTasks) {
-    if (!draftedTasks || draftedTasks.length === 0) return "";
-    return (
-      \`<ul class="drafted-tasks">\` +
-      draftedTasks.map((t) => \`<li><span class="task-id">\${escapeHtml(t.id)}</span> \${escapeHtml(t.title)}</li>\`).join("") +
-      \`</ul>\`
-    );
-  }
   function needsMeInboxHtml(p) {
     const draftedTasks = p.draftedTasks ?? [];
     const readBack = draftedTasks.length > 0 ? draftedTasks.map((t) => t.id).join(", ") : p.proposalId;
@@ -3350,19 +3151,7 @@ export function renderShellHtml(
   const MAILBOX_SENDER = { escalation: "Fleet", reply: "You" };
   function loadMailboxState() { try { const p = JSON.parse(localStorage.getItem("rmd-console-mailbox-v1")); return { read: Array.isArray(p && p.read) ? p.read : [], resolved: Array.isArray(p && p.resolved) ? p.resolved : [] }; } catch { return { read: [], resolved: [] }; /* corrupt/missing storage reads as empty, not an error */ } }
   function saveMailboxState(state) { try { localStorage.setItem("rmd-console-mailbox-v1", JSON.stringify(state)); } catch { /* full/blocked storage must not break the click */ } }
-  function mailboxEscalationClass(title) { const m = title ? /^\\[(\\w+)\\]/.exec(title) : null; return m ? m[1] : "UNKNOWN"; // \`[CLASS]\` off \`escalationTitle\`'s prefix
-  }
-  function mailboxThreadKey(taskId, cls) { return \`thread:\${taskId}::\${cls}::\`; // the PREFIX every reply to this concern shares
-  }
   function buildMailboxThreads(tasks, replies) { if (!Array.isArray(tasks) || (replies !== undefined && replies !== null && !Array.isArray(replies))) return null; const safeReplies = Array.isArray(replies) ? replies : []; const threads = []; for (const t of tasks) { if (!t || !t.needsHuman || !t.escalationTitle || !t.taskId) continue; const cls = mailboxEscalationClass(t.escalationTitle); const key = mailboxThreadKey(t.taskId, cls); const messages = [{ role: "escalation", sender: MAILBOX_SENDER.escalation, body: t.escalationTitle, ts: t.escalationOpenedAt || "" }]; for (const r of safeReplies) if (r && typeof r.thread_id === "string" && r.thread_id.indexOf(key) === 0) messages.push({ role: "reply", sender: MAILBOX_SENDER.reply, body: r.raw || "", ts: r.ts || "" }); messages.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0)); threads.push({ threadId: key, taskId: t.taskId, escClass: cls, issueUrl: t.escalationIssueUrl, messages, latestTs: messages[messages.length - 1].ts }); } threads.sort((a, b) => (a.latestTs < b.latestTs ? 1 : a.latestTs > b.latestTs ? -1 : 0)); return threads; // one thread per NEEDS ME row, latest-message order; shaped-wrong returns null
-  }
-  function mailboxVisibleThreads(threads, resolvedIds, includeResolved) { if (includeResolved) return threads; const resolved = new Set(resolvedIds || []); return threads.filter((t) => !resolved.has(t.threadId)); // resolved hidden, never deleted
-  }
-  function mailboxUnreadCount(threads, readIds) { const read = new Set(readIds || []); return threads.filter((t) => !read.has(t.threadId)).length; // THREADS, not messages
-  }
-  function mailboxMarkRead(readIds, threadId) { const read = new Set(readIds || []); read.add(threadId); return Array.from(read); // pure, never mutates readIds
-  }
-  function mailboxMarkResolved(resolvedIds, threadId) { const resolved = new Set(resolvedIds || []); resolved.add(threadId); return Array.from(resolved);
   }
   function mailboxThreadsHtml(threads, readIds) { if (!Array.isArray(threads)) return ""; if (threads.length === 0) return \`<p class="mailbox-empty">no open threads</p>\`; const read = new Set(readIds || []); return threads.map((t) => { const unread = !read.has(t.threadId); const issueLink = t.issueUrl ? \`<a href="\${escapeHtml(t.issueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>\` : ""; const messagesHtml = t.messages.map((m) => \`<li class="mailbox-message mailbox-message-\${m.role}"><span class="mailbox-sender">\${escapeHtml(m.sender)}</span><span class="mailbox-body">\${escapeHtml(m.body)}</span></li>\`).join(""); return \`<li class="mailbox-thread\${unread ? " mailbox-thread-unread" : ""}" data-thread-id="\${escapeHtml(t.threadId)}"><div class="mailbox-thread-head"><span class="task-id">\${escapeHtml(t.taskId)}</span>\${unread ? '<span class="mailbox-unread-dot" aria-label="unread"></span>' : ""}</div><ul class="mailbox-messages">\${messagesHtml}</ul>\` + \`<span class="btn-row">\${issueLink}<button type="button" class="mailbox-open"\${unread ? "" : " disabled"} data-thread-id="\${escapeHtml(t.threadId)}">Open</button><button type="button" class="mailbox-resolve" data-thread-id="\${escapeHtml(t.threadId)}">Resolve</button></span>\` + \`<form class="mailbox-reply" data-task-id="\${escapeHtml(t.taskId)}" data-class="\${escapeHtml(t.escClass)}"><input type="text" placeholder="Reply…" /><button type="submit"\${writeGateAttrs()}>Reply</button></form></li>\`; }).join(""); // ALREADY-BUILT threads as markup; shaped-wrong draws NOTHING
   }
@@ -3430,11 +3219,6 @@ export function renderShellHtml(
       (e.proposal_pr ? \` <span class="btn-row"><a href="\${escapeHtml(e.proposal_pr)}" target="_blank" rel="noopener noreferrer">proposal PR</a></span>\` : "")
     );
   }
-  function acceptedSummaryText(rows) {
-    if (rows.length === 0) return "nothing accepted yet";
-    const ago = oldestAgoText(rows, (r) => r.ts);
-    return \`\${rows.length} accepted\${ago ? \` · most recent \${ago}\` : ""}\`;
-  }
   /** W1-T285: ACCEPTED is the missing consumer of feedback's \`accepted\` status -- an entry
    *  disappearing from NEEDS ME (it no longer matches "grilling"/"proposed") is not the same as an
    *  operator being able to SEE what accepting it did. Reads off the SAME \`feedbackEntries\` NEEDS
@@ -3500,16 +3284,6 @@ export function renderShellHtml(
 
   /** "5m ago"/"2h ago"/"3d ago" -- RECENT's relative-timestamp column (a distinct concept from
    *  \`formatElapsed\`'s live countUP for an in-flight NOW row's own \`elapsedMs\`). */
-  function formatAgo(ts) {
-    const ms = Date.now() - Date.parse(ts);
-    if (!Number.isFinite(ms)) return "";
-    if (ms < 60_000) return "just now";
-    const m = Math.floor(ms / 60_000);
-    if (m < 60) return \`\${m}m ago\`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return \`\${h}h ago\`;
-    return \`\${Math.floor(h / 24)}d ago\`;
-  }
 
   /** GitHub DECORATES: the PR link's label prefers the PR's own title (when GitHub resolved
    *  one); absent that, it degrades to the bare PR number/url -- never omits the link itself. */
@@ -3517,18 +3291,7 @@ export function renderShellHtml(
    *  ("#123 — the actual PR title") -- never the title ALONE (a bare title with no PR number
    *  reads ambiguously as free text, not a PR reference). Degrades to the bare number, then the
    *  raw url, as GitHub's decoration itself degrades -- the link is never omitted. */
-  function recentPrLinkHtml(e) {
-    if (!e.prUrl) return "";
-    const num = e.prNumber !== undefined ? \`#\${e.prNumber}\` : null;
-    const label = num && e.prTitle ? \`\${num} — \${e.prTitle}\` : e.prTitle || num || e.prUrl;
-    return \` · <a class="recent-pr-link" href="\${e.prUrl}" target="_blank" rel="noreferrer">\${escapeHtml(label)}</a>\`;
-  }
 
-  function recentSpendHtml(e) {
-    if (e.costUsd === undefined && e.numTurns === undefined) return "";
-    const turns = e.numTurns !== undefined ? \` / \${e.numTurns} turns\` : "";
-    return \` · <span class="recent-spend">spend: \${costLabel(e.costUsd)}\${turns}</span>\`;
-  }
 
   // W1-T141/W1-T435: the ONE-TAP OPERATOR VERDICT, on the RECENT feed's own terminal-outcome
   // rows -- "merged"/"verdict" (a review-derived merge or a classified blocked outcome, board.ts's
@@ -3642,20 +3405,6 @@ export function renderShellHtml(
   // Case-insensitive SUBSEQUENCE match over the haystack; returns null when the query is not a
   // subsequence (row hidden), else a score (higher = tighter, consecutive-run-weighted). An empty
   // query is a neutral match (score 0) — every row passes, natural order preserved.
-  function fuzzyScore(query, text) {
-    const q = String(query ?? "").trim().toLowerCase();
-    if (!q) return 0;
-    const s = String(text ?? "").toLowerCase();
-    let qi = 0, score = 0, lastHit = -2;
-    for (let si = 0; si < s.length && qi < q.length; si++) {
-      if (s[si] === q[qi]) {
-        score += si === lastHit + 1 ? 3 : 1; // reward adjacent matches (a tighter run scores higher)
-        lastHit = si;
-        qi++;
-      }
-    }
-    return qi === q.length ? score : null;
-  }
 
   // ── FIND view state (mirrored to/from the URL) ────────────────────────────────────────────
   const FIND_FACET_GROUPS = ["status", "workstream", "risk", "hasPr", "needsMe"];
@@ -3667,25 +3416,10 @@ export function renderShellHtml(
   };
 
   /** Workstream = the id prefix before \`-T\` (verified convention: W1/W2/W3/W12) — pure string parse. */
-  function taskWorkstream(id) {
-    const i = String(id).indexOf("-T");
-    return i > 0 ? id.slice(0, i) : id;
-  }
-  function searchHaystack(t) {
-    return \`\${t.taskId} \${t.title ?? ""}\`;
-  }
   function passesSearch(t) {
     return fuzzyScore(findState.q, searchHaystack(t)) !== null;
   }
   /** Does task \`t\` match facet GROUP's value \`value\` (independent of what is currently selected)? */
-  function facetValueMatches(t, group, value) {
-    if (group === "status") return statusColorKey(t) === value;
-    if (group === "workstream") return taskWorkstream(t.taskId) === value;
-    if (group === "risk") return (t.risk ?? "") === value;
-    if (group === "hasPr") return !!t.prUrl;
-    if (group === "needsMe") return !!t.needsHuman;
-    return true;
-  }
   /** Does \`t\` satisfy a group's CURRENTLY-ACTIVE selection? (An unselected group matches everything.) */
   function facetActiveMatches(t, group) {
     const sel = findState.facets[group];
@@ -3709,27 +3443,9 @@ export function renderShellHtml(
   // (compareById/compareByStatus/compareByRecency/compareByAge/sortBoardRows). Kept structurally
   // identical; a missing recency/age value sorts LAST in BOTH directions. ─────────────────────
   const TASK_STATUSES = ["queued", "recon", "prompted", "running", "review", "fixing", "diagnosing", "blocked", "merged", "done"];
-  function cmpMissingLast(av, bv, dir) {
-    if (av === undefined && bv === undefined) return 0;
-    if (av === undefined) return 1;
-    if (bv === undefined) return -1;
-    return dir === "desc" ? bv - av : av - bv;
-  }
-  function cmpById(a, b, dir) {
-    const base = a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0;
-    return dir === "desc" ? -base : base;
-  }
   function cmpByStatus(a, b, dir) {
     const base = TASK_STATUSES.indexOf(a.status) - TASK_STATUSES.indexOf(b.status);
     return dir === "desc" ? -base : base;
-  }
-  function cmpByRecency(a, b, dir) {
-    const av = a.lastActivityAt ? Date.parse(a.lastActivityAt) : undefined;
-    const bv = b.lastActivityAt ? Date.parse(b.lastActivityAt) : undefined;
-    return cmpMissingLast(av, bv, dir);
-  }
-  function cmpByAge(a, b, dir) {
-    return cmpMissingLast(a.elapsedMs, b.elapsedMs, dir);
   }
   const FIND_COMPARATORS = { id: cmpById, status: cmpByStatus, recency: cmpByRecency, age: cmpByAge };
   function sortFindRows(rows) {
@@ -3837,13 +3553,6 @@ export function renderShellHtml(
    *  else" not already surfaced in one of the four priority sections above), which stays the
    *  right number even while the FIND search/facets narrow what actually RENDERS inside; that is
    *  a further, separately-labelled view (#find-count) over this same corpus, not a disagreement. */
-  function restSummaryText(complement) {
-    if (complement.length === 0) return "nothing else to show";
-    const queued = complement.filter((t) => statusColorKey(t) === "queued").length;
-    const merged = complement.filter((t) => statusColorKey(t) === "merged").length;
-    const other = complement.length - queued - merged;
-    return \`queued: \${queued} · merged: \${merged} · other: \${other} (\${complement.length} total)\`;
-  }
   function renderRest(tasks, shownIds) {
     findTasks = tasks; // the FIND corpus is the whole board (see the section header note)
     const complement = tasks.filter((t) => !shownIds.has(t.taskId));
@@ -4362,9 +4071,6 @@ export function renderShellHtml(
   // ── W1-T2719: durable automatic-merge hold controls. One delegated listener serves the
   // permanent fleet form, current-held rows, and live blocked-PR rows. Confirmation text names
   // the exact action, scope and reason before the high-tier nonce round trip starts.
-  function mergeHoldConfirmationText(action, scope, reason) {
-    return \`Confirm \${action.toUpperCase()} automatic-merge hold for \${scope} — reason: \${reason}?\`;
-  }
   document.addEventListener("submit", async (e) => {
     const form = e.target.closest && e.target.closest(".merge-hold-action");
     if (!form) return;
@@ -4930,29 +4636,9 @@ export function renderShellHtml(
   // recurse through focusAndExpandTask, never a page navigation. Exactly ONE card is open at a
   // time, board-wide (opening a second closes the first) -- reconcileRows above is what keeps
   // that one open card glued to its own row across a background poll/SSE re-render.
-  function costLabel(costUsd) {
-    return typeof costUsd === "number" ? \`$\${costUsd.toFixed(3)}\` : "—";
-  }
-  function runRowHtml(run) {
-    const pr = run.prUrl ? \` · <a href="\${escapeHtml(run.prUrl)}" target="_blank" rel="noreferrer">PR</a>\` : "";
-    return \`<li><code>\${escapeHtml(run.runId)}</code> — \${escapeHtml(run.verdict ?? "no verdict yet")} · \${costLabel(run.costUsd)}\${pr}</li>\`;
-  }
-  function acceptanceRowHtml(c) {
-    return \`<li><strong>\${escapeHtml(c.claim)}</strong><div class="detail">proof: \${escapeHtml(c.proof)}</div></li>\`;
-  }
-  function depChainHtml(deps) {
-    if (!deps.length) return '<p class="empty">no dependencies</p>';
-    return \`<ul class="row-list">\${deps
-      .map((d) => \`<li><button type="button" class="card-dep-link" data-dep-id="\${escapeHtml(d)}">\${escapeHtml(d)}</button></li>\`)
-      .join("")}</ul>\`;
-  }
   /** \`live\`, when present, is this task's CURRENT tasksById projection (needsHuman/
    *  escalationIssueUrl) -- the card's issue link and write action both key off it rather than
    *  off the TaskCard response, which carries no live escalation state of its own. */
-  function cardIssueLinkHtml(live) {
-    if (!live || !live.escalationIssueUrl) return "";
-    return \`<p><a href="\${escapeHtml(live.escalationIssueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a></p>\`;
-  }
   /**
    * W1-T222: "actions RENDER PER AUTH SCOPE -- a read-only bookmark shows no write affordances
    * at all, rather than showing them and failing on click" (standing rule 22). \`hasWriteScope\`
@@ -4992,13 +4678,6 @@ export function renderShellHtml(
   }
   /** W1-T200: a pre-data-only skeleton, cleared the instant loadRowDetail below actually renders
    *  (success OR failure) -- never left standing as decoration once real content exists. */
-  function rowDetailSkeletonHtml() {
-    return (
-      '<div aria-busy="true">' +
-      '<div class="skeleton-bar"></div><div class="skeleton-bar"></div><div class="skeleton-bar"></div>' +
-      "</div>"
-    );
-  }
   async function loadRowDetail(taskId, detailEl) {
     let card;
     try {
@@ -5104,23 +4783,6 @@ export function renderShellHtml(
   // in turn). Mirrors apps/dashboard/src/main.ts's renderTraceGraph shape (the SAME GET
   // /v1/trace response), plus ONE addition: a run whose verdict starts with "blocked" is marked
   // .journey-fail -- the FAILING step an operator walks backwards from an outcome to find.
-  function journeyRunHtml(run) {
-    const failing = typeof run.verdict === "string" && run.verdict.startsWith("blocked");
-    const marker = failing ? ' <span class="journey-fail">⛔ BLOCKING STEP</span>' : "";
-    const pr = run.prUrl
-      ? \`<ul><li><a href="\${escapeHtml(run.prUrl)}" target="_blank" rel="noreferrer">PR</a>\${run.prState ? \` [\${escapeHtml(run.prState)}]\` : ""} — sha \${escapeHtml(run.mergeSha ?? "(not merged yet)")}</li></ul>\`
-      : "";
-    // NOTE: the ".journey-fail" class lives ONLY on the marker <span> above, never also on this
-    // wrapping <li> -- a caller counting ".journey-fail" elements must count exactly ONE per
-    // failing run, not two nested matches for the same run.
-    return \`<li>run \${escapeHtml(run.runId)}: \${escapeHtml(run.verdict ?? "no verdict yet")}\${marker}\${pr}</li>\`;
-  }
-  function journeyTaskHtml(t) {
-    const runs = (t.runs ?? []).length ? \`<ul>\${t.runs.map(journeyRunHtml).join("")}</ul>\` : "<ul><li>(no runs yet)</li></ul>";
-    return \`<li>task <button type="button" class="journey-task-link" data-task-id="\${escapeHtml(t.id)}">\${escapeHtml(t.id)}</button>: \${escapeHtml(t.title)}\${
-      t.origin ? \` (origin: \${escapeHtml(t.origin)})\` : ""
-    }\${runs}</li>\`;
-  }
   /**
    * W1-T2489: the SAME chain journeyHtml (below) already renders as nested <ul> text -- drawn
    * ALSO as an inline SVG node graph, over the identical { feedback, tasks } shape, no new
@@ -5129,101 +4791,6 @@ export function renderShellHtml(
    * graph therefore draws NOTHING; journeyHtml's own unconditional text rendering just below is
    * what turns that "" into a real fallback rather than a blank panel.
    */
-  function journeyGraphSvg(chain) {
-    const feedback = chain.feedback && typeof chain.feedback === "object" ? chain.feedback : null;
-    const tasks = Array.isArray(chain.tasks) ? chain.tasks : [];
-    if (!feedback && tasks.length === 0) return "";
-    const nodeW = 240, nodeH = 30, rowGap = 10, runIndent = 24, pad = 8;
-    const nodes = [];
-    let y = pad;
-    let feedbackIndex = null;
-    if (feedback) {
-      feedbackIndex = nodes.length;
-      nodes.push({
-        x: pad, y, w: nodeW, h: nodeH, kind: "feedback", failing: false, parent: null,
-        label: \`feedback#\${feedback.id}\`, sub: String(feedback.status ?? ""),
-      });
-      y += nodeH + rowGap;
-    }
-    tasks.forEach((t) => {
-      const taskIndex = nodes.length;
-      nodes.push({
-        x: pad, y, w: nodeW, h: nodeH, kind: "task", failing: false, parent: feedbackIndex,
-        label: \`task \${t.id}\`, sub: String(t.title ?? ""),
-      });
-      y += nodeH + rowGap;
-      const runs = Array.isArray(t.runs) ? t.runs : [];
-      runs.forEach((r) => {
-        const failing = typeof r.verdict === "string" && r.verdict.startsWith("blocked");
-        nodes.push({
-          x: pad + runIndent, y, w: nodeW - runIndent, h: nodeH, kind: "run", failing, parent: taskIndex,
-          label: \`run \${r.runId}\`, sub: String(r.verdict ?? "no verdict yet"),
-        });
-        y += nodeH + rowGap;
-      });
-    });
-    const width = pad * 2 + nodeW;
-    const height = y;
-    const edgesSvg = nodes
-      .map((n) => {
-        if (n.parent === null) return "";
-        const p = nodes[n.parent];
-        return \`<line class="journey-graph-edge" x1="\${p.x + 10}" y1="\${p.y + p.h}" x2="\${n.x + 10}" y2="\${n.y}" stroke="currentColor" stroke-opacity="0.4" />\`;
-      })
-      .join("");
-    const nodesSvg = nodes
-      .map((n) => {
-        const cls = \`journey-graph-node journey-graph-node-\${n.kind}\${n.failing ? " journey-graph-fail" : ""}\`;
-        const marker = n.failing ? " ⛔" : "";
-        return (
-          \`<g class="\${cls}">\` +
-          \`<rect x="\${n.x}" y="\${n.y}" width="\${n.w}" height="\${n.h}" rx="6" fill="currentColor" fill-opacity="0.08" stroke="currentColor" stroke-opacity="0.5" />\` +
-          \`<text x="\${n.x + 8}" y="\${n.y + 13}" font-size="10" fill="currentColor">\${escapeHtml(n.label)}\${marker}</text>\` +
-          \`<text x="\${n.x + 8}" y="\${n.y + 24}" font-size="9" fill="currentColor" fill-opacity="0.75">\${escapeHtml(n.sub)}</text>\` +
-          \`</g>\`
-        );
-      })
-      .join("");
-    return \`<svg class="journey-graph" viewBox="0 0 \${width} \${height}" width="\${width}" height="\${height}" role="img" aria-label="provenance graph">\${edgesSvg}\${nodesSvg}</svg>\`;
-  }
-  function journeyHtml(chain) {
-    const safeChain = chain && typeof chain === "object" ? chain : {};
-    const feedback = safeChain.feedback && typeof safeChain.feedback === "object" ? safeChain.feedback : null;
-    const tasks = Array.isArray(safeChain.tasks) ? safeChain.tasks : [];
-    const direction = typeof safeChain.direction === "string" ? safeChain.direction : "unknown";
-    // DEGRADE, NEVER DISAPPEAR (W1-T2489). Each section below is independently guarded: an empty
-    // graph, an unreachable /v1/trace (an empty/absent chain reaches here the same way), or a
-    // chain shape ANY one of these three sections can't read must still leave the OTHER sections
-    // -- and always the direction line -- standing. A caller that removes these try/catches (or
-    // calls journeyGraphSvg directly with no wrapper at all, criterion 8 below) is what would
-    // actually blank the panel; this function itself never does.
-    let svg = "";
-    try {
-      svg = journeyGraphSvg({ feedback, tasks });
-    } catch {
-      // graph draw failed on this chain shape -- absent, not blank: the text sections below still render.
-      svg = "";
-    }
-    let feedbackHtml = "";
-    try {
-      feedbackHtml = feedback
-        ? \`<p>feedback#\${escapeHtml(feedback.id)} [\${escapeHtml(feedback.status)}] — \${escapeHtml(feedback.raw)}\${
-            feedback.proposalPr ? \` → <a href="\${escapeHtml(feedback.proposalPr)}" target="_blank" rel="noreferrer">proposal PR</a>\` : ""
-          }</p>\`
-        : "";
-    } catch {
-      // feedback row unreadable -- drop just this line, the graph and task list are unaffected.
-      feedbackHtml = "";
-    }
-    let tasksHtml = "<p>(no tasks yet)</p>";
-    try {
-      tasksHtml = tasks.length ? \`<ul>\${tasks.map(journeyTaskHtml).join("")}</ul>\` : "<p>(no tasks yet)</p>";
-    } catch {
-      // one bad task entry must not blank the whole journey -- say so instead of an empty list.
-      tasksHtml = "<p>(unable to render tasks)</p>";
-    }
-    return \`\${svg}<p>direction: \${escapeHtml(direction)}</p>\${feedbackHtml}\${tasksHtml}\`;
-  }
   function toggleCardJourney(btn) {
     const body = btn.closest(".row-detail")?.querySelector(".card-journey-body");
     if (!body) return;
@@ -5566,16 +5133,6 @@ export function renderShellHtml(
   // technique is inlined here. Auto-reconnects with a short backoff on drop, and reports its
   // OWN connection lifecycle via \`onState\` ("connecting" | "connected" | "disconnected") so the
   // console can say so — never silently keep claiming "live" once the stream is gone. */
-  function parseSseFrame(frame) {
-    let event;
-    const dataLines = [];
-    for (const line of frame.split("\\n")) {
-      if (line.startsWith("event:")) event = line.slice("event:".length).trim();
-      else if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).trim());
-    }
-    if (!event || dataLines.length === 0) return undefined;
-    return { event, data: dataLines.join("\\n") };
-  }
 
   function subscribeStatusStream(onEvent, onState) {
     let stopped = false;

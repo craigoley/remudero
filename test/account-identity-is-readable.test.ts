@@ -27,6 +27,9 @@
 // cannot quietly reintroduce the discard this task closes.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+// W1-T2731: a real import — see the note above `extractClientSlice`, which stays for
+// `renderAccountUsage`, a DOM-driving function that could not travel to the module.
+import { usageWindowLabel } from "../src/lib/console-shell-script.js";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -217,8 +220,9 @@ function extractClientSlice(startMarker: string, endMarker: string): string {
 }
 
 test("W1-T2434: the five-hour and seven-day fields render the unknown REASON, not a bare 'unknown'", () => {
-  const slice = extractClientSlice("function usageWindowLabel", "/** Renders GET /v1/account-usage");
-  const label = new Function(`${slice} return usageWindowLabel;`)() as (w: unknown, reason?: string) => string;
+  // W1-T2731: a real import now — see this file's own note above `extractClientSlice`, which
+  // remains for `renderAccountUsage`, a DOM-driving function that could NOT travel to the module.
+  const label = usageWindowLabel as (w: unknown, reason?: string) => string;
 
   assert.equal(label(undefined, "too-old"), "unknown (too-old)", "the reason travels onto the five-hour/seven-day fields now");
   assert.equal(label(undefined, "unreadable"), "unknown (unreadable)");

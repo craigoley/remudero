@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+// W1-T2731: a real import — renderShellHtml emits THIS function object via `.toString()`, so
+// the old slice-out-of-the-shell technique's guarantee (no hand-copied stand-in can drift) is
+// now structural rather than textual.
+import { usageWindowLabel } from "../src/lib/console-shell-script.js";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
@@ -255,11 +259,7 @@ test("a stale or missing reading renders as unknown and never as 0% or as a stal
   // that turns a window into a string; it is inside serve.ts's client template literal, so it is
   // pulled out of the RENDERED shell and executed — the same technique that proves the script
   // parses at all. An unknown window must read the literal word "unknown", never "0%".
-  const script = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(renderShellHtml())![1];
-  // The slice spans usageWindowLabel AND the formatClock it calls — stopping short of the latter
-  // would extract a function that throws rather than one that answers.
-  const slice = script.slice(script.indexOf("function usageWindowLabel"), script.indexOf("/** Renders GET /v1/account-usage"));
-  const label = new Function(`${slice} return usageWindowLabel;`)() as (w: unknown) => string;
+  const label = usageWindowLabel as (w: unknown) => string;
   assert.equal(label(undefined), "unknown", "an ABSENT window renders the word unknown");
   assert.equal(label({}), "unknown", "a window with no percent renders unknown, never 0%");
   assert.equal(label({ percentUsed: 0, resetsAt: "2026-08-02T04:59:59.209129+00:00" }).startsWith("0%"), true, "a GENUINE zero still renders as 0% — unknown and zero are different states");

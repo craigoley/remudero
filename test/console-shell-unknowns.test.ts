@@ -18,6 +18,7 @@
 // nothing about what the shell actually ships.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { renderConsoleShellScript } from "../src/lib/console-shell-script.js";
 import { renderShellHtml } from "../src/lib/serve.js";
 
 const HTML = renderShellHtml();
@@ -52,6 +53,12 @@ function bannerHarness() {
   const factory = new Function(
     "elements",
     [
+      // W1-T2731: every PURE helper this sandbox needs now comes from
+      // lib/console-shell-script.ts, through the SAME `renderConsoleShellScript()` the shell
+      // itself splices in — so this is still the real shipped code, not a stand-in. `clientFn`
+      // could not reach them any more in any case: tsx MINIFIES the transpiled module, so the
+      // emitted text is one line per function and no source regex can carve it up.
+      renderConsoleShellScript(),
       "var document = { getElementById: function (id) { return elements[id] === undefined ? null : elements[id]; } };",
       // THE BANNER'S OWN COLLABORATORS, EXTRACTED VERBATIM TOO. `updateGithubBanner` renders its
       // page-load clock through the shell's real `formatTimestamp`/`formatRelative` over the real
@@ -60,8 +67,6 @@ function bannerHarness() {
       // SAME served script keeps this file's stated discipline -- never a reimplementation -- and
       // means the exact string the operator sees is what gets asserted on.
       clientConst("PAGE_LOADED_ISO"),
-      clientFn("formatRelative"),
-      clientFn("formatTimestamp"),
       clientFn("updateGithubBanner"),
       "return { updateGithubBanner: updateGithubBanner };",
     ].join("\n"),
@@ -143,13 +148,17 @@ function glanceHarness(opts: { tasksSnapshotKnown: boolean; latestSpend?: unknow
     "elements",
     "opts",
     [
+      // W1-T2731: every PURE helper this sandbox needs now comes from
+      // lib/console-shell-script.ts, through the SAME `renderConsoleShellScript()` the shell
+      // itself splices in — so this is still the real shipped code, not a stand-in. `clientFn`
+      // could not reach them any more in any case: tsx MINIFIES the transpiled module, so the
+      // emitted text is one line per function and no source regex can carve it up.
+      renderConsoleShellScript(),
       "var document = { getElementById: function (id) { return elements[id] === undefined ? null : elements[id]; } };",
       "var tasksSnapshotKnown = opts.tasksSnapshotKnown;",
       "var latestSpend = opts.latestSpend === undefined ? null : opts.latestSpend;",
       "var latestNeedsMeRows = opts.latestNeedsMeRows || [];",
       clientFn("setGlanceValue"),
-      clientFn("isBlockedRow"),
-      clientFn("costLabel"),
       clientFn("renderGlanceStrip"),
       "return { renderGlanceStrip: renderGlanceStrip };",
     ].join("\n"),

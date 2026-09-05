@@ -19,6 +19,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+// W1-T2731: the shell's pure helpers are a real module now; these sandboxes take them from it
+// (via the SAME emitter the shell uses) instead of regexing them out of the rendered HTML.
+import { renderConsoleShellScript } from "../src/lib/console-shell-script.js";
 import { computeBoardSnapshot, type BoardDeps } from "../src/lib/board.js";
 import { renderShellHtml } from "../src/lib/serve.js";
 import type { Plan, Task } from "../src/lib/plan.js";
@@ -213,14 +216,13 @@ test("W1-T1006: a blocked PR row offers no card link for a cardless id", () => {
   // over the structural proof above.
   const parts: Record<string, string | undefined> = {
     STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
-    escapeHtml: html.match(/function escapeHtml\(text\) \{[\s\S]*?\n  \}/)?.[0],
     statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
     needsMeBlockedPrRowHtml: html.match(/function needsMeBlockedPrRowHtml\(r\) \{[\s\S]*?\n  \}/)?.[0],
   };
   for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
 
   const renderRow = new Function(
-    `${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.needsMeBlockedPrRowHtml}\nreturn needsMeBlockedPrRowHtml(arguments[0]);`,
+    `${renderConsoleShellScript()}\n${parts.STATUS_LABELS}\n${parts.statusBadge}\n${parts.needsMeBlockedPrRowHtml}\nreturn needsMeBlockedPrRowHtml(arguments[0]);`,
   ) as (r: Record<string, unknown>) => string;
 
   // A row whose ledger line named a taskId that is NOT one of the 27 the plan actually holds
@@ -244,7 +246,6 @@ test("W1-T1006: needsMeBlockedPrRowHtml and needsMeBlockedPrUnverifiedHtml rende
   const html = renderShellHtml();
   const parts: Record<string, string | undefined> = {
     STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
-    escapeHtml: html.match(/function escapeHtml\(text\) \{[\s\S]*?\n  \}/)?.[0],
     statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
     needsMeBlockedPrRowHtml: html.match(/function needsMeBlockedPrRowHtml\(r\) \{[\s\S]*?\n  \}/)?.[0],
     needsMeBlockedPrUnverifiedHtml: html.match(/function needsMeBlockedPrUnverifiedHtml\(reason\) \{[\s\S]*?\n  \}/)?.[0],
@@ -252,10 +253,10 @@ test("W1-T1006: needsMeBlockedPrRowHtml and needsMeBlockedPrUnverifiedHtml rende
   for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
 
   const renderRow = new Function(
-    `${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.needsMeBlockedPrRowHtml}\nreturn needsMeBlockedPrRowHtml(arguments[0]);`,
+    `${renderConsoleShellScript()}\n${parts.STATUS_LABELS}\n${parts.statusBadge}\n${parts.needsMeBlockedPrRowHtml}\nreturn needsMeBlockedPrRowHtml(arguments[0]);`,
   ) as (r: Record<string, unknown>) => string;
   const renderUnverified = new Function(
-    `${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.needsMeBlockedPrUnverifiedHtml}\nreturn needsMeBlockedPrUnverifiedHtml(arguments[0]);`,
+    `${renderConsoleShellScript()}\n${parts.STATUS_LABELS}\n${parts.statusBadge}\n${parts.needsMeBlockedPrUnverifiedHtml}\nreturn needsMeBlockedPrUnverifiedHtml(arguments[0]);`,
   ) as (reason: string) => string;
 
   const checkable = renderRow({ prNumber: 2097, disposition: "blocked-ambiguous", reason: "review orphaned by a push, again" });

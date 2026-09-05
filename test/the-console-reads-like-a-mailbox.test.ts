@@ -21,6 +21,7 @@
 // stand-in would prove nothing about what the shell actually ships).
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { renderConsoleShellScript } from "../src/lib/console-shell-script.js";
 import { renderShellHtml } from "../src/lib/serve.js";
 
 const HTML = renderShellHtml();
@@ -68,16 +69,19 @@ function mailboxHarness(): Mailbox {
   const factory = new Function(
     [
       "var hasWriteScope = true;",
-      clientFn("escapeHtml"),
+      // W1-T2731: the PURE half — escapeHtml, mailboxEscalationClass/ThreadKey/VisibleThreads/
+      // UnreadCount/MarkRead/MarkResolved — now comes from lib/console-shell-script.ts, emitted
+      // by the SAME `renderConsoleShellScript()` the shell itself splices in. `clientFn` cannot
+      // reach them any more and should not: tsx MINIFIES the transpiled module, so the emitted
+      // text is one line per function and no source regex can carve it up. What `clientFn` bought
+      // — "the real shipped code, not a stand-in" — is now structural: there is one definition.
+      renderConsoleShellScript(),
+      // The DOM- and state-driven half is still inline in the template, so it still comes from the
+      // shipped script verbatim. `writeGateAttrs` reads the free variable `hasWriteScope` declared
+      // above rather than a parameter, which is why the extracted source runs unmodified.
       clientFn("writeGateAttrs"),
       clientConst("MAILBOX_SENDER"),
-      clientFn("mailboxEscalationClass"),
-      clientFn("mailboxThreadKey"),
       clientFn("buildMailboxThreads"),
-      clientFn("mailboxVisibleThreads"),
-      clientFn("mailboxUnreadCount"),
-      clientFn("mailboxMarkRead"),
-      clientFn("mailboxMarkResolved"),
       clientFn("mailboxThreadsHtml"),
       clientFn("mailboxHtml"),
       "return { buildMailboxThreads: buildMailboxThreads, mailboxVisibleThreads: mailboxVisibleThreads, " +
