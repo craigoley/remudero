@@ -1,0 +1,108 @@
+- id: W1-T2927
+  title: "A VERDICT WRITTEN INSIDE A CI RUNNER CAN NEVER REACH THE LEDGER THAT REPORTS IT — W1-T2707 would emit `mutation.ratchet_verdict` from scripts/mutation-ratchet.mjs, whose ONLY invocations are GitHub Actions jobs whose filesystem is discarded; D-10 would still read N=0"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 30.00
+  files: [test/a-verdict-written-in-a-runner-never-reaches-the-ledger-that-reports-it.test.ts]
+  origin: "operator-session#2026-09-05-w1-t2707-scope-check"
+  plan_refs: ["W1-T2707", "W1-T393", "W1-T133", "D-10"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AT origin/main 05c4ccbb WHILE SCOPING W1-T2707, WITH A POSITIVE CONTROL ON EVERY
+    QUERY. W1-T2707 is correct that the reader side is complete and that nothing writes:
+    `grep -ac ratchet_verdict scripts/mutation-ratchet.mjs` reads 0 against a same-file control
+    `grep -ac mutation` of 84, and the symbol resolves in five files — ledger.ts, retro.ts,
+    replay.ts, cost-anomaly.ts, test/mutation-gate-lifetime.test.ts — every one of them a reader.
+
+    WHAT W1-T2707 DOES NOT ADDRESS, AND WHY IT CANNOT SUCCEED WITHOUT IT. The emission it
+    specifies would run in a place whose filesystem does not survive the run:
+
+      (1) `scripts/mutation-ratchet.mjs` is invoked from exactly two places in this repo, both
+          GitHub Actions: `.github/workflows/ci.yml` (lines 771 and 785) and
+          `.github/workflows/mutation-nightly.yml` (lines 130 and 183). Nothing under `src/`
+          invokes it. `src/lib/ci-parity.ts` names it, but its entry runs the `--changed-files`
+          TRIGGER mode only — the file says so at its own call site, and the `--report` mode
+          appears there only inside a comment.
+      (2) No workflow uploads or commits `state/`. The mutation-ratchet job's only
+          `upload-artifact` path is `reports/stryker-incremental.json`.
+      (3) `mutationGateLifetime` folds over the DAEMON's ledger on the fleet host. The sweep does
+          write CI-observed facts there (`fix.ci_not_green`, `sweep.dispose`, …) — but from the
+          host, reading GitHub's API, never from inside a runner.
+
+    So a `mutation.ratchet_verdict` line appended by that script lands in a runner's ephemeral
+    filesystem and is destroyed with the job. D-10 would keep reading `N=0 verdicts, NO POSITIVE
+    CONTROL` while the call site LOOKS shipped — a worse state than the honest zero it reports
+    today, because the next reader has no reason to look again.
+
+    THE TENSION IS REAL AND W1-T2707 NAMES HALF OF IT. Its own rationale is right that the totals
+    exist ONLY in-process ("by the time CI has exited, the report is gone"), which is exactly why
+    the host-side sweep cannot reconstruct them from check states later. The totals are trapped in
+    the one place that cannot durably record them. That is the gap this task exists to close, and
+    it is a transport problem, not an emission problem.
+
+    NOT A CRITICISM OF W1-T2707's PREMISE. Rule 14's "the call site is a deliverable" still holds;
+    this says the deliverable is larger than one call and must not be declared done by the call
+    alone.
+  design: |
+    WHY `files:` NAMES ONLY THE TEST. The implementation files depend on which route (a)/(b)/(c)
+    the operator picks, and a shard that pre-named them would be picking one. The test file IS
+    named, because a pure-path `unit test:` proof only earns judgeCriterion's `not_yet_built`
+    carve-out when its path is a member of `files:` — without it the criteria would grade
+    `executed_fail` and refuse the PR that builds them. A builder adding source files beyond this
+    list is a ratified widening to record in the PR body, not a violation to work around.
+
+    OUT OF SCOPE, EXPLICITLY: answering D-10, ruling on the mutation gate, or changing what the
+    gate measures. This ships transport so that a verdict emitted by W1-T2707 has somewhere to go.
+
+    THE SHAPE IS AN OPERATOR DECISION, WHICH IS WHY `verify: human` AND `files: []`. At least
+    three candidate routes exist and they differ in blast radius, so a worker must not pick one
+    unilaterally:
+
+      (a) CI writes a durable artifact (an `upload-artifact` of the verdict line, or a
+          `$GITHUB_STEP_SUMMARY` marker) and a HOST-SIDE rung ingests it into the ledger on the
+          next sweep tick. Keeps the totals in the process that computed them; costs a new
+          ingestion rung and a retention window.
+      (b) CI posts the verdict to the console's write API, which appends the ledger line
+          host-side. No artifact retention, but it puts a CI job on the write path and needs a
+          credential scoped for it.
+      (c) The verdict is recorded on the PR itself (a check-run output or a comment the sweep
+          already reads), and the host-side sweep folds it in — no new transport, but the totals
+          become text a reader must parse rather than a typed line.
+
+    WHICHEVER IS CHOSEN, THE FALSIFIER IS THE SAME AND MUST RUN IN BOTH DIRECTIONS: after a real
+    Stryker run on a PR, `mutationGateLifetime` on the HOST reports `positiveControl: true` with a
+    run count that grew by exactly one; after a diff-scoped skip, it reports no new record at all.
+    A test that only proves a line was written inside the runner proves nothing this task is for.
+
+    SEQUENCING: this task and W1-T2707 are a pair. Landing W1-T2707 first is acceptable ONLY if
+    its PR body states, in the body a reviewer reads, that the emission is inert until this task
+    lands — otherwise the plan records a solved D-10 that is not solved.
+  acceptance:
+    - claim: "a verdict produced by a real mutation-ratchet run reaches the host ledger over the chosen transport, and mutationGateLifetime then reports positiveControl true with a run count grown by exactly one"
+      proof: "unit test: test/a-verdict-written-in-a-runner-never-reaches-the-ledger-that-reports-it.test.ts"
+    - claim: "a diff-scoped skip puts NO verdict record on that transport, so the host ledger gains nothing"
+      proof: "unit test: test/a-verdict-written-in-a-runner-never-reaches-the-ledger-that-reports-it.test.ts"
+    - claim: "the transport is exercised end to end over a real payload rather than asserted from the emitting side alone — a test that only proves a line was written inside the runner proves nothing this task is for"
+      proof: "unit test: test/a-verdict-written-in-a-runner-never-reaches-the-ledger-that-reports-it.test.ts"
+  note: |
+    risk:high, band_meaning:span — the chosen route may touch a workflow, a host-side rung and a
+    credential surface. `verify: human` and an EMPTY `files:` are deliberate: the route is an
+    operator decision (design (a)/(b)/(c)), and a worker that picked one alone could put a CI job
+    on the ledger write path without anyone ratifying it.
+
+    ID PROVENANCE: `rmd next-task-id --reserve` could not claim a reservation ref from the session
+    that filed this — GitHub answers 403 to a push into `refs/rmd-id/*` with this session's token
+    (ordinary branch pushes succeed), so the atomic claim was unavailable. The id was instead
+    verified free on all four surfaces the minter reads: not in the reservation namespace, not in
+    tasks.yaml or any shard, named by no open PR, and named by no merged PR in the last 400
+    closed. That check MATTERED rather than being a formality: the minter's own suggestion,
+    W1-T2883, is claimed by open PR #4084, which holds 2882-2926 — the exact collision the mint's
+    open-PR surface exists to prevent (the W1-T2316 reissue, #2965/#2970). This id sits above that
+    block. If a reservation ref is wanted, it can be created from a session whose token may push
+    that namespace.
