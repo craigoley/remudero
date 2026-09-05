@@ -102,7 +102,7 @@
     exist there), and any edit to CLAUDE.md itself.
   acceptance:
     - claim: "a net-positive CLAUDE.md diff is refused, with the failure naming both operands and the delta rather than only the verdict"
-      proof: "unit test: test/a-net-positive-claude-md-diff-is-not-refused.test.ts"
+      proof: "unit test: a net-positive CLAUDE.md diff is REFUSED"
     - claim: "a byte-neutral or net-negative CLAUDE.md diff passes, so the gate never refuses a sharpening or a fold"
       proof: "grep: a fold and a sharpening both pass in test/a-net-positive-claude-md-diff-is-not-refused.test.ts"
     - claim: "a diff that does not touch CLAUDE.md is unaffected, and an unresolvable base skips the net-byte arm rather than refusing or inventing a comparand"
