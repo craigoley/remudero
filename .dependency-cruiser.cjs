@@ -17,10 +17,14 @@ module.exports = {
       severity: "error",
       comment:
         "src/lib is the reusable core; it must not import the CLI entrypoint " +
-        "(src/run-task.ts) or the scratch spike script (src/spike.ts). Layering " +
-        "runs one way: CLI/spike may depend on lib, never the reverse.",
+        "(src/run-task.ts), the scratch spike script (src/spike.ts), or anything " +
+        "under src/cli/. Layering runs one way: CLI/spike may depend on lib, never " +
+        "the reverse. W1-T2883: src/cli/ does not exist yet — the run-task.ts " +
+        "decomposition chain creates it — and the boundary is pre-declared so the " +
+        "FIRST file to land there is already inside the rule rather than needing a " +
+        "second PR to notice it.",
       from: { path: "^src/lib" },
-      to: { path: "^src/(spike|run-task)\\.ts$" },
+      to: { path: "^src/(spike|run-task)\\.ts$|^src/cli/" },
     },
     {
       // WHY `warn` AND NOT `error`. Fifteen cycles already exist, fourteen of them entirely

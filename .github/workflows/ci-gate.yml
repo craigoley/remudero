@@ -152,7 +152,8 @@ jobs:
         "task-id-existence",
         "acceptance-author-gate",
         "unwired-gate",
-        "comment-load-ratchet"
+        "comment-load-ratchet",
+        "source-size"
         ]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
