@@ -1,0 +1,101 @@
+- id: W1-T2862
+  title: "THE SOURCE-SIZE SIGNAL HAS NO CONSUMER — positive-growth evidence is printed and discarded, so no decomposition work enters the automated feedback-to-triage pipeline and maintainability debt remains either a blocking CI hack or an operator memory"
+  repo: remudero
+  depends_on: [W1-T2734, W1-T2861]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 32.00
+  priority: 1
+  files:
+    - src/lib/ci-parity.ts
+    - src/lib/source-size-followup.ts
+    - src/lib/ledger.ts
+    - src/run-task.ts
+    - test/preflight-fast-mode.test.ts
+    - test/preflight-summary.test.ts
+    - test/source-size-followup.test.ts
+  origin: "operator-session#source-growth-files-high-priority-refactor-work-2026-09-05"
+  plan_refs: ["W1-T2734", "W1-T2861"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT ab669883. W1-T2734's `source-size-signal` prints a schema-versioned JSON
+    report containing path, before lines, after lines, delta lines and delta percent. The fast
+    preflight runner executes it, but `shellOut` deliberately reduces every successful command to
+    `PASS — npm run --silent source-size-signal`; the JSON payload reaches neither
+    `PreflightSummary` nor another caller. A repository-wide search finds no parser or consumer of
+    `source-size-signal-json` outside the producer's own tests. The task's stated decomposition
+    consumer therefore does not exist in material state.
+
+    THE OPERATOR'S POLICY REQUIRES BOTH HALVES. Source growth alone must not block the feature PR,
+    but a material maintainability hotspot must create separate, high-priority decomposition work.
+    Removing the obsolete block without consuming the signal would improve throughput by silently
+    accepting unbounded structural debt. Reinstating the baseline would preserve debt visibility by
+    serializing unrelated delivery. The correct loop is measure, pass the current PR, enqueue one
+    durable follow-up, deduplicate it, and let the normal auto-triage and plan-review pipeline judge
+    the proposed refactor.
+
+    DO NOT FILE ON EVERY POSITIVE DELTA. A one-line change in a large file is not evidence of a new
+    decomposition need, and one proposal per file would flood the same queue the signal is meant to
+    improve. Classify a material hotspot from the report's existing measurements: the resulting
+    file must be at least 1,000 lines and the change must either add at least 250 lines or increase
+    the file by at least 20 percent. Group all material files from one exact report into one feedback
+    entry. These initial cuts are explicit, versioned policy inputs rather than hidden magic; actual
+    outcome data can later tune them without changing the report schema.
+
+    THE FOLLOW-UP MUST RIDE THE EXISTING PIPELINE. File one `plan/feedback/` entry through
+    `captureFeedback`, marking the requested task as `priority: 1` and naming every triggering file
+    plus its measurements. The existing feedback landing and auto-triage rungs turn that durable
+    entry into a reviewed task shard. Do not write a task shard directly and do not auto-merge or
+    auto-deploy anything from this consumer.
+  design: |
+    Extend the fast-step descriptor with an explicit retain-success-output flag used only by the
+    source-size signal. Carry its bounded stdout in that step's durable summary rather than changing
+    `shellOut` globally. Parse only the named `source-size-signal-json:` line and require the current
+    schema version, finite non-negative counts, repo-relative `src/**/*.ts` paths and a summary head
+    matching the worktree's current HEAD. Invalid, oversized or stale evidence files nothing and
+    emits a named telemetry reason; it never guesses.
+
+    Add a pure classifier and feedback renderer in `source-size-followup.ts`, plus one orchestration
+    entry point that reads the ledger union, deduplicates by the sorted material-hotspot signature,
+    files through `captureFeedback`, and appends a decision-relevant
+    `source_size.followup.filed` receipt. Register that receipt for ledger retention. The exact same
+    file set and threshold-policy version must not file twice; a changed set or materially changed
+    measurement may file again.
+
+    Invoke the consumer once after an implementation worker returns and before its worktree is
+    removed, next to the existing preflight-summary read. The follow-up is best-effort with explicit
+    telemetry: inability to file must not rewrite the implementation verdict or block its PR. The
+    current PR remains governed only by correctness and integrity gates; the new feedback entry is
+    the maintainability obligation.
+  acceptance:
+    - claim: "a successful source-size fast step retains one bounded, schema-versioned hotspot payload in the durable preflight summary while every other successful step remains terse"
+      proof: "unit test: test/preflight-fast-mode.test.ts"
+    - claim: "a report with a resulting file of at least 1,000 lines and either at least 250 added lines or at least 20 percent growth produces one feedback entry naming the exact measurements and requesting priority 1 decomposition work"
+      proof: "unit test: test/source-size-followup.test.ts"
+    - claim: "small deltas, small resulting files, malformed or oversized payloads, non-source paths, stale summary heads and unknown schema versions file nothing and return a named reason"
+      proof: "unit test: test/source-size-followup.test.ts"
+    - claim: "all material files in one report are grouped into one entry and an exact prior signature in the ledger union suppresses a duplicate while a changed signature files again"
+      proof: "unit test: test/source-size-followup.test.ts"
+    - claim: "the filed receipt is retained as decision-relevant telemetry and contains policy version, signature, source task, source PR or branch when known, and feedback id without prompt text or credentials"
+      proof: "unit test: test/source-size-followup.test.ts"
+    - claim: "the implementation worker path consumes a current successful preflight summary before worktree removal, and a filing failure is reported without changing the worker verdict"
+      proof: "unit test: test/preflight-summary.test.ts"
+    - claim: "the new source-size follow-up module has a production call site in the implementation worker path rather than being reachable only from its own tests"
+      proof: "grep: consumeSourceSizeFollowup( in src/run-task.ts"
+    - claim: "deleting the classifier threshold or the worker-path consumer makes the focused suite fail, while restoring each makes it pass"
+      proof: "unit test: test/source-size-followup.test.ts"
+  falsifier: |
+    Close without implementation if current main already carries a production caller that parses
+    successful `source-size-signal-json` evidence and creates a deduplicated high-priority
+    feedback/task obligation. The repository-wide search at ab669883 found the marker only in the
+    producer and its own tests; successful `shellOut` explicitly discards stdout, and the only
+    preflight-summary consumer reports failures.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2862`; the held id
+    is authoritative. The thresholds are a versioned starting policy, not an industry truth. A
+    later calibration task should join hotspot outcomes to review findings, follow-up edits and
+    merge latency before changing them.
