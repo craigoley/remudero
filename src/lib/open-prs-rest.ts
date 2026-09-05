@@ -1621,6 +1621,159 @@ interface RestPrFile {
   deletions?: number;
 }
 
+/** BACKSTOP: GitHub serves at most 100 files on the single page this bounded reader requests. */
+export const PLAN_FILING_FILE_RESPONSE_CAP = 100;
+/** BACKSTOP: retained complete observations stay far above the measured open-PR population. */
+export const PLAN_FILING_FILE_CACHE_MAX_ENTRIES = 256;
+
+export interface PlanFilingFileCandidate {
+  number: number;
+  headRefOid: string;
+}
+
+export type PlanFilingFileObservation =
+  | { state: "complete"; paths: readonly string[]; cache: "hit" | "miss" }
+  | {
+      state: "unreadable";
+      reason: "per-pass-cap" | "fetch-failed" | "malformed" | "empty" | "response-cap";
+    };
+
+/** Process-lifetime state is owned by the caller, so one daemon shares it while tests stay isolated. */
+export interface PlanFilingFileCache {
+  entries: Map<string, readonly string[]>;
+  missCursors: Map<string, string>;
+}
+
+export function createPlanFilingFileCache(): PlanFilingFileCache {
+  return { entries: new Map(), missCursors: new Map() };
+}
+
+function planFilingFileCacheKey(owner: string, repo: string, candidate: PlanFilingFileCandidate): string {
+  return `${owner}/${repo}#${candidate.number}@${candidate.headRefOid}`;
+}
+
+function rememberPlanFilingFiles(
+  cache: PlanFilingFileCache,
+  key: string,
+  paths: readonly string[],
+  maxEntries: number,
+): void {
+  const prPrefix = key.slice(0, key.lastIndexOf("@") + 1);
+  for (const prior of cache.entries.keys()) {
+    if (prior.startsWith(prPrefix) && prior !== key) cache.entries.delete(prior);
+  }
+  cache.entries.delete(key);
+  cache.entries.set(key, [...paths]);
+  while (cache.entries.size > Math.max(0, maxEntries)) {
+    const oldest = cache.entries.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    cache.entries.delete(oldest);
+  }
+}
+
+function rememberPlanFilingMissCursor(
+  cache: PlanFilingFileCache,
+  repositoryKey: string,
+  candidateKey: string,
+  maxEntries: number,
+): void {
+  cache.missCursors.delete(repositoryKey);
+  cache.missCursors.set(repositoryKey, candidateKey);
+  while (cache.missCursors.size > Math.max(0, maxEntries)) {
+    const oldest = cache.missCursors.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    cache.missCursors.delete(oldest);
+  }
+}
+
+/**
+ * Read a bounded set of actual PR file lists. Complete positive and negative observations are
+ * cached by repository, PR and head SHA; failures and capped misses remain unknown and are never
+ * promoted to a plan-filing fact. A cache hit costs none of this pass's miss budget.
+ */
+export function hydratePlanFilingFiles(
+  owner: string,
+  repo: string,
+  candidates: readonly PlanFilingFileCandidate[],
+  fetch: GhApiFetcher,
+  cache: PlanFilingFileCache,
+  opts: { missCap: number; maxEntries?: number },
+): Map<number, PlanFilingFileObservation> {
+  const out = new Map<number, PlanFilingFileObservation>();
+  const missCap = Math.max(0, Math.floor(opts.missCap));
+  const maxEntries = opts.maxEntries ?? PLAN_FILING_FILE_CACHE_MAX_ENTRIES;
+  const uncached: Array<{ candidate: PlanFilingFileCandidate; key: string }> = [];
+  let misses = 0;
+
+  for (const candidate of candidates) {
+    const key = planFilingFileCacheKey(owner, repo, candidate);
+    const cached = cache.entries.get(key);
+    if (cached !== undefined) {
+      cache.entries.delete(key);
+      cache.entries.set(key, cached);
+      out.set(candidate.number, { state: "complete", paths: [...cached], cache: "hit" });
+      continue;
+    }
+    uncached.push({ candidate, key });
+  }
+
+  const repositoryKey = `${owner}/${repo}`;
+  const cursor = cache.missCursors.get(repositoryKey);
+  const cursorIndex = cursor === undefined ? -1 : uncached.findIndex(({ key }) => key === cursor);
+  const startIndex = cursorIndex < 0 ? 0 : (cursorIndex + 1) % Math.max(1, uncached.length);
+  const rotated = uncached.map((_, offset) => uncached[(startIndex + offset) % uncached.length]);
+  for (const { candidate, key } of rotated) {
+    if (misses >= missCap) {
+      out.set(candidate.number, { state: "unreadable", reason: "per-pass-cap" });
+      continue;
+    }
+    misses++;
+    rememberPlanFilingMissCursor(cache, repositoryKey, key, maxEntries);
+
+    let raw: unknown;
+    try {
+      raw = fetch(prFilesRestArgs(owner, repo, candidate.number));
+    } catch {
+      out.set(candidate.number, { state: "unreadable", reason: "fetch-failed" });
+      continue;
+    }
+    if (!Array.isArray(raw)) {
+      out.set(candidate.number, { state: "unreadable", reason: "malformed" });
+      continue;
+    }
+    if (raw.length === 0) {
+      out.set(candidate.number, { state: "unreadable", reason: "empty" });
+      continue;
+    }
+    if (raw.length >= PLAN_FILING_FILE_RESPONSE_CAP) {
+      out.set(candidate.number, { state: "unreadable", reason: "response-cap" });
+      continue;
+    }
+    const paths: string[] = [];
+    let malformed = false;
+    for (const value of raw) {
+      const filename = value && typeof value === "object" ? (value as RestPrFile).filename : undefined;
+      if (
+        typeof filename !== "string" ||
+        filename.length === 0 ||
+        filename.length > 1_024 ||
+        /[\0\r\n]/.test(filename)
+      ) {
+        malformed = true;
+        break;
+      }
+      paths.push(filename);
+    }
+    if (malformed) {
+      out.set(candidate.number, { state: "unreadable", reason: "malformed" });
+      continue;
+    }
+    rememberPlanFilingFiles(cache, key, paths, maxEntries);
+    out.set(candidate.number, { state: "complete", paths, cache: "miss" });
+  }
+  return out;
+}
+
 /**
  * W1-T2384 — ONE open PR's supersession verdict, over REST. The producer
  * {@link SupersessionVerdict} has never had; W1-T920 declared the field, the shape and the gated
