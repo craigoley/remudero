@@ -41,13 +41,26 @@ const selectedInput = () => ({
   reservePercent: 5,
   observedAtMs: NOW,
   cacheValidMs: 60_000,
-  capacities: [capacity("claude", 72), capacity("codex", 25)],
+  capacities: [
+    capacity("claude", 72),
+    capacity("codex", 25, {
+      allocationWindows: [
+        { name: "Codex standard primary", usedPercent: 76, resetsAt: NOW / 1000 + 7200 },
+        { name: "Codex model primary", usedPercent: 25, resetsAt: NOW / 1000 + 3600 },
+      ],
+    }),
+  ],
   selection: {
     provider: "codex" as const,
-    capacity: capacity("codex", 25),
-    tightestRemainingPercent: 75,
-    allocationWeight: 70 ** 2,
-    allocationSharePercent: 94.2,
+    capacity: capacity("codex", 25, {
+      allocationWindows: [
+        { name: "Codex standard primary", usedPercent: 76, resetsAt: NOW / 1000 + 7200 },
+        { name: "Codex model primary", usedPercent: 25, resetsAt: NOW / 1000 + 3600 },
+      ],
+    }),
+    tightestRemainingPercent: 24,
+    allocationWeight: 19 ** 2,
+    allocationSharePercent: 40.6,
   },
 });
 
@@ -69,9 +82,13 @@ test("the provider snapshot writes through a temp file + rename and the reader p
   assert.equal(read.selected?.provider, "codex");
   assert.equal(read.selected?.model, "gpt-5.6-terra");
   assert.equal(read.selected?.effort, "high");
-  assert.equal(read.selected?.allocationWeight, 70 ** 2);
-  assert.equal(read.selected?.allocationSharePercent, 94.2);
+  assert.equal(read.selected?.allocationWeight, 19 ** 2);
+  assert.equal(read.selected?.allocationSharePercent, 40.6);
   assert.equal(read.providers?.find((p) => p.provider === "codex")?.windows[0]?.usedPercent, 25);
+  assert.deepEqual(
+    read.providers?.find((p) => p.provider === "codex")?.allocationWindows?.map((window) => window.usedPercent),
+    [76, 25],
+  );
   assert.equal(read.providers?.find((p) => p.provider === "claude")?.windows[0]?.usedPercent, 72);
   const source = readFileSync(fileURLToPath(new URL("../src/lib/provider-routing-status.ts", import.meta.url)), "utf8");
   assert.match(source, /writeFileSync\(temporary[\s\S]+renameSync\(temporary, target\)/);
@@ -89,6 +106,11 @@ test("snapshot projection is bounded and redacted before JSON reaches disk", () 
       usedPercent: i,
       resetsAt: NOW / 1000 + i,
     })),
+    allocationWindows: Array.from({ length: 40 }, (_, i) => ({
+      name: i === 0 ? "OPENAI_API_KEY=sk-provider-secret" : `allocation-window-${i}`,
+      usedPercent: i,
+      resetsAt: NOW / 1000 + i,
+    })),
   });
   writeProviderRoutingStatus(root, {
     ...selectedInput(),
@@ -102,6 +124,7 @@ test("snapshot projection is bounded and redacted before JSON reaches disk", () 
   assert.equal(read.state, "selected");
   assert.equal(read.providers?.length, 2, "closed provider ids are unique and bounded to Claude/Codex");
   assert.ok(read.providers?.every((p) => p.windows.length <= 8));
+  assert.ok(read.providers?.every((p) => (p.allocationWindows?.length ?? 0) <= 8));
 });
 
 test("absent, malformed, unreadable, not-probed and stale are explicit and never become zero or healthy", () => {
@@ -385,12 +408,12 @@ test("the console panel renders reserve, both windows/resets, selected model/eff
   render(snapshot);
   assert.equal(elements["pr-state"]!.textContent, "stale last decision");
   assert.equal(elements["pr-reserve"]!.textContent, "5%");
-  assert.match(elements["pr-selected"]!.textContent, /codex.*gpt-5\.6-terra.*high.*75% remaining.*94\.2% automatic target share/);
-  assert.match(elements["pr-providers"]!.textContent, /claude.*72%.*reset.*codex.*25%.*reset/);
+  assert.match(elements["pr-selected"]!.textContent, /codex.*gpt-5\.6-terra.*high.*24% remaining.*40\.6% automatic target share/);
+  assert.match(elements["pr-providers"]!.textContent, /claude.*model headroom.*72%.*codex.*model headroom.*25%.*provider allocation.*76%/);
   assert.match(elements["pr-as-of"]!.textContent, /^at /);
 
   render({ ...snapshot, policy: { preference: "codex" } });
-  assert.match(elements["pr-selected"]!.textContent, /94\.2% explicit target share/);
+  assert.match(elements["pr-selected"]!.textContent, /40\.6% explicit target share/);
 
   render({ version: 1, state: "blocked", freshness: "fresh", enabledProviders: ["claude", "codex"], reservePercent: 5, observedAt: "2026-09-02T12:00:00.000Z", freshUntil: "2026-09-02T12:01:00.000Z", providers: [], blockedReason: "no-provider-headroom" });
   assert.match(elements["pr-state"]!.textContent, /blocked.*no-provider-headroom/);

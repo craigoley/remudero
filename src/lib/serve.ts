@@ -2726,7 +2726,11 @@ export function renderShellHtml(
               const windows = (provider.windows || []).map(function (window) {
                 return window.name + " " + window.usedPercent + "%" + (window.resetsAt ? " reset " + formatClock(window.resetsAt) : "");
               });
-              return identity + (windows.length ? " · " + windows.join(", ") : " · no readable windows");
+              const allocationWindows = (provider.allocationWindows || []).map(function (window) {
+                return window.name + " " + window.usedPercent + "%" + (window.resetsAt ? " reset " + formatClock(window.resetsAt) : "");
+              });
+              return identity + (windows.length ? " · model headroom " + windows.join(", ") : " · model headroom unknown") +
+                (allocationWindows.length ? " · provider allocation " + allocationWindows.join(", ") : "");
             })
             .join(" | ")
         : p.state === "not-probed"
