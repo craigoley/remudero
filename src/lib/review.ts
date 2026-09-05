@@ -8502,25 +8502,119 @@ export function checkDrillCoverage(diff: string, report?: string): RubricItemRes
 // ── The GUARD: no worker-authored criteria edit (rule 15) ──────────────────
 
 /**
- * True for `plan/tasks.yaml` itself OR a `plan/tasks.d/<id>-<slug>.yaml` shard (W1-T399): every
- * task record lives in one of the two, `loadPlan` (plan.ts) merges both into one view, and the
- * monolith has been frozen to new filings since PR #1060 — of the last twenty merged
- * implementation PRs, nineteen worked a shard task. A predicate keyed on the monolith path alone
- * is therefore blind to nearly the whole population Standing rule 15 exists to protect. Matched
- * STRUCTURALLY (a `plan/tasks.d/` prefix, exactly one path segment, a `.yaml` suffix) rather than
- * a loose glob, so it does not also admit a `plan/tasks.d/README.md` or a nested path {@link
- * loadPlan}'s own shard reader (`listShardFiles`) never recurses into.
+ * True for `plan/tasks.yaml` itself OR a `plan/tasks.d/<id>-<slug>.yaml` (or `.yml`) shard
+ * (W1-T399): every task record lives in one of the two, `loadPlan` (plan.ts) merges both into
+ * one view, and the monolith has been frozen to new filings since PR #1060 — of the last twenty
+ * merged implementation PRs, nineteen worked a shard task. A predicate keyed on the monolith path
+ * alone is therefore blind to nearly the whole population Standing rule 15 exists to protect.
+ * Matched STRUCTURALLY (a `plan/tasks.d/` prefix, exactly one path segment, a `.yaml`/`.yml`
+ * suffix) rather than a loose glob, so it does not also admit a `plan/tasks.d/README.md` or a
+ * nested path {@link loadPlan}'s own shard reader (`listShardFiles`) never recurses into.
+ *
+ * BOTH EXTENSIONS, NOT JUST `.yaml` (R-14, docs/audits/recon-2026-09-05.md): `listShardFiles`
+ * (plan.ts) and `materializeOriginShards` (run-task.ts) both load `.yaml` OR `.yml` shards, so a
+ * `.yml` shard's criteria are as live as a `.yaml` one's — but this predicate accepted only
+ * `.yaml` until this fix, so an identical criterion-editing diff tripped Rule 15 on a `.yaml`
+ * shard and passed silently on a byte-identical `.yml` one. Mirrors `SHARD_PATH_RE`'s existing
+ * `.ya?ml` above and `TASKS_SHARD_PATH_RE` in task-linter.ts, widened by the same fix.
  */
 function isTaskRecordPath(file: string): boolean {
-  return /(^|\/)plan\/tasks\.yaml$/.test(file) || /(^|\/)plan\/tasks\.d\/[^/]+\.yaml$/.test(file);
+  return /(^|\/)plan\/tasks\.yaml$/.test(file) || /(^|\/)plan\/tasks\.d\/[^/]+\.ya?ml$/.test(file);
 }
 
-/** plan/tasks.yaml OR plan/tasks.d/*.yaml lines belonging to a criterion's own field, of the
- *  given diff kind. */
+/**
+ * plan/tasks.yaml OR plan/tasks.d/*.ya?ml lines belonging to a criterion's own field, of the
+ * given diff kind — INCLUDING a criterion field's block-scalar CONTINUATION lines (R-16,
+ * docs/audits/recon-2026-09-05.md).
+ *
+ * Before this fix the match was a bare per-line regex (`^\s*(claim|proof|satisfied_by)\s*:`),
+ * which sees only a field's OWN header line. A field written as a YAML block scalar —
+ * `proof: >-` followed by indented continuation lines carrying the actual text — has NO `:` on
+ * those continuation lines at all, so an edit confined to them tripped neither
+ * `criterionFieldTampered` disjunct: `guard.passes` on a diff that rewrites what a criterion's
+ * proof literally says. Zero block-scalar proofs exist in the corpus today (every proof in
+ * `plan/tasks.d/` is single-line), but the loader accepts them (js-yaml has no opinion on scalar
+ * style) and nothing stops a future shard, hand-authored or machine-generated, from using one.
+ *
+ * FIXED BY WALKING THE DIFF'S OWN LINE ORDER as a tiny YAML-indent state machine, using every
+ * line the diff carries — `ctx` included — to track which field currently "owns" a deeper
+ * indent, mirroring the design note in the R-16 build brief: "walk the diff hunk's context to
+ * find the nearest preceding field line at a shallower indent". A single `openScalar` slot
+ * (rather than a full nested stack) suffices because at any point in a top-to-bottom walk only
+ * one block scalar can be currently open — a shallower field header always closes it (a DEDENT),
+ * so there is never more than one active owner to disambiguate.
+ *
+ * FAIL CLOSED, NEVER OPEN, when the owning field's own header line falls entirely outside this
+ * diff's hunk context (so no `openScalar` was ever recorded for it): any add/del line indented
+ * deeper than the nearest KNOWN `acceptance:` line, with no recognized owner, is still counted —
+ * per the build brief's own instruction — rather than silently passing an edit this walk cannot
+ * positively clear. A line outside any `acceptance:` block (e.g. a top-level `rationale: >-`
+ * continuation, which sits OUTSIDE `acceptance:` in the schema — plan.ts's `Task.rationale`) is
+ * never swept in by this fallback, which is what keeps a non-criterion field's edit unflagged
+ * (proven by `rule15-guard-sees-yml-and-block-scalars.test.ts`'s falsifier (iii)).
+ */
 function planTasksCriterionFieldLines(lines: DiffLine[], kind: "add" | "del"): DiffLine[] {
-  return lines.filter(
-    (l) => l.kind === kind && isTaskRecordPath(l.file) && /^\s*(claim|proof|satisfied_by)\s*:/.test(l.text),
-  );
+  // Function-local (never module-scope): a YAML mapping-key line, however it is indented —
+  // `<indent><"- "?><key>:<rest>` — matched once so a computed indent (dash included) and the
+  // key/rest are never derived two different ways. Requires `key` to be followed immediately by
+  // `:` (no intervening whitespace), which is what keeps a `unit test: <title>` or `grep:
+  // <pattern> in <path>` proof-dialect CONTENT line (a space before its colon) from ever being
+  // misread as a fresh field header — see the block-scalar walk below.
+  const fieldLineRe = /^(\s*)(-\s+)?([A-Za-z_][\w-]*)\s*:\s*(.*)$/;
+  // True when a field's own value (the text after its `:`) is a YAML block-scalar opener —
+  // `|`/`>` with an optional chomping (`+`/`-`) and/or explicit indent-indicator digit, and
+  // NOTHING else on the line. That is the only shape whose CONTINUATION lines carry no `key:`
+  // prefix of their own, which is exactly the shape Rule 15 must still see into (R-16).
+  const blockScalarOpenerRe = /^[|>][+-]?\d*$/;
+  // The three fields Rule 15 protects (W1-T58/W1-T400) — see criterionFieldTampered above.
+  const criterionFieldNames = new Set(["claim", "proof", "satisfied_by"]);
+
+  const out: DiffLine[] = [];
+  let currentFile = "";
+  let openScalar: { indent: number; name: string } | null = null;
+  let acceptanceIndent: number | null = null;
+
+  for (const l of lines) {
+    if (l.file !== currentFile) {
+      currentFile = l.file;
+      openScalar = null;
+      acceptanceIndent = null;
+    }
+    if (!isTaskRecordPath(l.file)) continue;
+
+    const rawIndent = /^(\s*)(-\s+)?/.exec(l.text);
+    const indent = (rawIndent?.[1]?.length ?? 0) + (rawIndent?.[2]?.length ?? 0);
+
+    // Still inside a previously-opened block scalar's continuation — classify by its OWNER and
+    // never reinterpret this line as a fresh field header, however "key:"-shaped its content
+    // looks (a `grep:` proof-dialect content line is exactly this shape).
+    if (openScalar !== null && indent > openScalar.indent) {
+      if (l.kind === kind && l.text.trim() !== "" && criterionFieldNames.has(openScalar.name)) {
+        out.push(l);
+      }
+      continue;
+    }
+    if (openScalar !== null) openScalar = null; // dedented to <= the scalar's own indent — closed
+
+    const m = fieldLineRe.exec(l.text);
+    if (m) {
+      const name = m[3];
+      const rest = m[4].trim();
+      if (blockScalarOpenerRe.test(rest)) openScalar = { indent, name };
+      if (name === "acceptance" && (acceptanceIndent === null || indent < acceptanceIndent)) {
+        acceptanceIndent = indent;
+      }
+      if (criterionFieldNames.has(name) && l.kind === kind) out.push(l);
+      continue;
+    }
+
+    // Neither a field header nor a tracked scalar's continuation — the owning field header must
+    // sit outside this diff's hunk context. Fail closed under a KNOWN acceptance: block only.
+    if (acceptanceIndent !== null && indent > acceptanceIndent && l.text.trim() !== "" && l.kind === kind) {
+      out.push(l);
+    }
+  }
+  return out;
 }
 
 /**

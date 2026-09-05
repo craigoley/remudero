@@ -222,6 +222,73 @@ function req<T>(v: T | undefined, field: string, id: string): T {
   return v;
 }
 
+/** The YAML type of a value as an author would recognise it — `null`, `array`, `object`, or the
+ *  `typeof`. A message that says "got null" or "got number" tells an author which line to look at;
+ *  "got object" for a null does not. */
+function yamlTypeOf(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
+}
+
+/**
+ * W1-T2908 — `acceptance:` IS THE ONE PLAN FIELD THAT WAS CAST RATHER THAN CHECKED, AND IT IS THE
+ * ONE THE WHOLE REVIEW ENGINE EXECUTES. `id`, `title`, `repo` and `type` all go through
+ * {@link req} in the same loop; `acceptance` went in as `e.acceptance as AcceptanceCriterion[]`,
+ * a type assertion that YAML has no obligation to honour. MEASURED at this head, by loading each
+ * shape and driving the first consumer that touches it:
+ *
+ *   `claim: 123`          -> lintTask throws `TypeError: (c.claim ?? "").slice is not a function`
+ *   `claim: true`         -> the same TypeError (a real YAML boolean)
+ *   `acceptance: "text"`  -> lintTask throws `TypeError: (task.acceptance ?? []).map is not a function`
+ *   `proof:` (empty)      -> lints CLEAN, then the REVIEWER throws
+ *                            `TypeError: Cannot read properties of null (reading 'trim')`
+ *
+ * §5C says the plan gate is FAIL-CLOSED. It does fail closed — but by accident, in whichever verb
+ * happened to touch the record first, with a message naming no shard, no criterion and no field.
+ * The last row is the worst of the four: it survives the linter entirely and detonates inside
+ * review, which is the furthest possible point from the shard that caused it.
+ *
+ * CORRECTION TO THE FILING, MEASURED RATHER THAN REPEATED: the rationale names `claim: yes` as the
+ * boolean case. It is not one here — this loader's YAML is 1.2, where `yes` parses as the STRING
+ * "yes" and lints clean. `claim: true` is the real boolean, and is what this validator is tested
+ * against. Reporting the filing's example unchanged would have shipped a fixture that proves
+ * nothing while looking like it covers the case.
+ *
+ * An ABSENT `acceptance` stays legal: whether a task needs criteria at all is the linter's
+ * question, not the loader's, and answering it here would reject shards the plan is full of.
+ */
+export function validateAcceptanceShape(raw: unknown, sourceLabel: string, taskId: string): AcceptanceCriterion[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const where = `${sourceLabel}: task ${taskId}`;
+  if (!Array.isArray(raw)) {
+    throw new PlanError(`${where}: 'acceptance' must be a list of criteria, got ${yamlTypeOf(raw)}`);
+  }
+  raw.forEach((entry, i) => {
+    const at = `${where}: acceptance[${i}]`;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new PlanError(`${at}: each criterion must be a mapping with 'claim' and 'proof', got ${yamlTypeOf(entry)}`);
+    }
+    const c = entry as Record<string, unknown>;
+    if (typeof c.claim !== "string" || c.claim.trim() === "") {
+      throw new PlanError(`${at}: 'claim' must be a non-empty string, got ${yamlTypeOf(c.claim)}`);
+    }
+    // `satisfied_by` (Architect-only, §12 rule 16) stands IN PLACE OF a proof: such a criterion is
+    // judged MET by citing an earlier PR, so it has no proof text to execute and requiring one
+    // would reject the form the plan already uses.
+    if (c.satisfied_by !== undefined) {
+      if (typeof c.satisfied_by !== "string" || c.satisfied_by.trim() === "") {
+        throw new PlanError(`${at}: 'satisfied_by' must be a non-empty string, got ${yamlTypeOf(c.satisfied_by)}`);
+      }
+      return;
+    }
+    if (typeof c.proof !== "string" || c.proof.trim() === "") {
+      throw new PlanError(`${at}: 'proof' must be a non-empty string (or 'satisfied_by' in its place), got ${yamlTypeOf(c.proof)}`);
+    }
+  });
+  return raw as AcceptanceCriterion[];
+}
+
 /**
  * Parse + field-validate a YAML task-list BLOB into {@link Task}s (schema v1) — WITHOUT
  * checking that every `depends_on` id actually resolves. Split out of {@link
@@ -280,7 +347,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
       attempts: typeof e.attempts === "number" ? e.attempts : 0,
       principles: e.principles as Record<string, unknown> | undefined,
       budget_usd: e.budget_usd as number | undefined,
-      acceptance: e.acceptance as AcceptanceCriterion[] | undefined,
+      acceptance: validateAcceptanceShape(e.acceptance, sourceLabel, id),
       hand_built: e.hand_built as boolean | undefined,
       pr: typeof e.pr === "number" ? e.pr : undefined,
       note: e.note as string | undefined,
