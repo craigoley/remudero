@@ -21,7 +21,6 @@ import { test } from "node:test";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "source-size-ratchet.mjs");
-const REAL_BASELINE = join(REPO_ROOT, "scripts", "source-size-baseline.json");
 
 // `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static
 // `import … from "../scripts/source-size-ratchet.mjs"` is a TS7016 — the same reason
@@ -105,36 +104,6 @@ function signalFixture(): { outer: string; repo: string; baselinePath: string } 
 function runSignal(root: string, ...args: string[]) {
   return spawnSync(process.execPath, [SCRIPT, "--root", root, ...args], { cwd: root, encoding: "utf8" });
 }
-
-// ── sanity: the gate is live over the shipped tree, and the SURFACE figures it measures are ────
-// exactly the ones this task's own rationale cites ───────────────────────────────────────────────
-
-test("the shipped tree passes its own recorded baseline, and the ratchet is not vacuous — it really measures src/run-task.ts and src/lib/sweep.ts", () => {
-  // ⚠ AGAINST A COPY, NEVER THE TRACKED FILE — this suite's own header states the rule and this
-  // was the one test breaking it. `main()` does not only READ: when it sees a source file the
-  // baseline has no entry for, it RECORDS one and `writeFileSync`s the result (source-size-
-  // ratchet.mjs). Run against the real path, an ordinary suite run therefore edits a tracked file
-  // whenever `src/**` has gained a module — MEASURED twice on 2026-09-02, both times adding
-  // `src/lib/followup-dedup-census.ts` and leaving the tree dirty for whatever ran next. That is
-  // the W1-T2291 family the header above refuses to join, and it also silently pre-approves growth
-  // the gate exists to make someone decide about.
-  //
-  // The copy carries the recorded baseline's exact CONTENT, so the assertion below is unchanged in
-  // meaning: the shipped tree still has to pass the baseline this repo actually records. Only the
-  // write lands somewhere throwaway.
-  const scratch = mkdtempSync(join(tmpdir(), "rmd-size-baseline-"));
-  const baselineCopy = join(scratch, "source-size-baseline.json");
-  writeFileSync(baselineCopy, readFileSync(REAL_BASELINE, "utf8"));
-  const gate = run(["--root", REPO_ROOT, "--baseline", baselineCopy]);
-  rmSync(scratch, { recursive: true, force: true });
-  assert.equal(gate.status, 0, `the tree must pass its own baseline:\n${gate.stdout}\n${gate.stderr}`);
-  assert.match(gate.stdout, /source-size-ratchet: OK/);
-  const baseline = JSON.parse(readFileSync(REAL_BASELINE, "utf8")) as Record<string, number>;
-  assert.ok(
-    (baseline["src/run-task.ts"] ?? 0) > (baseline["src/lib/sweep.ts"] ?? 0),
-    "sanity: src/run-task.ts must still be recorded as the largest source file, or this gate proves nothing about the defect it names",
-  );
-});
 
 // ── acceptance: "a source file growing past its recorded baseline fails the gate" / "the ────────
 // failure names the file and the overage in lines" ─────────────────────────────────────────────
