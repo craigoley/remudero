@@ -1655,6 +1655,19 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "a",
     "`execFileSync('git', ['ls-files', 'test'])` is scoped to test/ only, never src/",
   ),
+  // W1-T2905's own suite. SCOPE NOTE: the shard's `files:` names only the census test and its
+  // baseline; this entry is here because `censusPopulationDrift` REFUSES an undisclosed
+  // census-shaped file, and that gate cannot be satisfied from inside the two declared paths. The
+  // widening is one refusal row, no behaviour.
+  refusedForPredicate(
+    "test/source-text-assertion-census.test.ts",
+    "a",
+    "W1-T2905's source-text ratchet. Its `git ls-files test/*.test.ts` walks the TEST population and asserts a per-file " +
+      "readFileSync-of-src count against scripts/source-text-assertion-baseline.json — so it satisfies (b) and (c) but " +
+      "inverts (a): src/ is what its predicate LOOKS FOR inside test files, never the population it enumerates. The `src/` " +
+      "strings the recognizer sees are that predicate's own regexes and its fixture bodies, the same self-match shape as " +
+      "test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts above",
+  ),
   refusedForPredicate(
     "test/state-citation-check.test.ts",
     "b",
