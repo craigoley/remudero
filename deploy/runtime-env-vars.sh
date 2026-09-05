@@ -30,6 +30,16 @@
 # test/recycle-container.test.ts asserts all three copies of the list — this one and each script's
 # fallback — never disagree, so the fallback cannot go stale unnoticed either.
 #
+# NO COMMENTS INSIDE THE ARRAY. Its readers take the parenthesised body as bare whitespace-separated
+# tokens, so a `#` line between entries parses as two more NAMES and the three-copies check fails
+# naming them. (Learned the direct way: that check caught exactly this edit before it shipped.)
+#
+# W1-T2932 — NODE_OPTIONS is the daemon's V8 heap ceiling (`--max-old-space-size`). Undeclared until
+# now, which made a recycle REFUSE on any container carrying it. That refusal is correct and loud,
+# but the only way past it was a hand-rolled `docker rm -f` + `docker run` that skips all four of
+# recycle-container.sh's refusals — and on 2026-09-05 an operator took that path against a registry
+# whose auth had EXPIRED, which is refusal #3's own 2026-08-18 incident. A NAME, NEVER A VALUE: the
+# sizing is a host decision, so no VM's dimensions are baked into this repo.
 # ORDER IS NOT SIGNIFICANT — this is read as a set.
 RMD_DAEMON_RUNTIME_ENV_VARS=(
   GH_TOKEN
@@ -38,6 +48,7 @@ RMD_DAEMON_RUNTIME_ENV_VARS=(
   GH_APP_ID
   GH_APP_INSTALLATION_ID
   GH_APP_PRIVATE_KEY_PATH
+  NODE_OPTIONS
 )
 
 # W1-T1222: the console's own runtime names, read by `resolveServeHosts` in src/lib/serve.ts, NOT

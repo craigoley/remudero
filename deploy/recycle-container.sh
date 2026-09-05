@@ -91,7 +91,7 @@ set -euo pipefail
 # purpose, to drive a single script in isolation); test/recycle-container.test.ts asserts this
 # fallback, host-update.sh's own fallback, and deploy/runtime-env-vars.sh's real array never
 # disagree, so the fallback cannot silently go stale either.
-RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH)
+RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH NODE_OPTIONS)
 RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
 if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
   # shellcheck source=./runtime-env-vars.sh
