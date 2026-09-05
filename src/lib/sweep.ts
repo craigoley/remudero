@@ -3303,10 +3303,13 @@ export interface SweepDeps {
    */
   escalate: (pr: OpenPrView, reason: string, question: ClarificationQuestion) => void | Promise<void>;
   /**
-   * W1-T1223 — re-queue ONE cancelled required check's JOB, never the workflow run: a whole-run
-   * re-run would re-spend an already-green sibling sharing that run. Called AT MOST ONCE per
-   * `${headSha}@${checkName}` pair. Omitted, the sweep still names the cancelled check on its
-   * disposed line but takes no action — never a silent no-op, the stand-down is legible.
+   * W1-T1223 — re-queue ONE cancelled required check's JOB
+   * (`POST .../actions/jobs/{job_id}/rerun`), NEVER the workflow run
+   * (`.../runs/{run_id}/rerun-failed-jobs`): a whole-run re-run would re-spend an already-green
+   * sibling sharing that run. Called AT MOST ONCE per `${headSha}@${checkName}` pair. Omitted, the
+   * sweep still names the cancelled check on its disposed line but takes no action — never a
+   * silent no-op, the stand-down is legible.
+   * // Why: learnings/ci.yaml#rerun-the-job-not-the-run pins this endpoint literal.
    */
   requeueCheck?: (pr: OpenPrView, check: CancelledRequiredCheck) => void | Promise<void>;
   /**
