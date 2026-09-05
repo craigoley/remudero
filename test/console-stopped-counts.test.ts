@@ -3,6 +3,7 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { isBlockedRow as clientIsBlockedRow } from "../src/lib/console-shell-script.js";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import {
@@ -144,11 +145,25 @@ test("the GLANCE strip's own client-side predicate is the SAME as board.ts's —
   // counts.blocked has NO consumer on the page (renderGlanceStrip recomputes client-side), so a
   // server-only fix would have changed nothing he can see. This locks the mirror.
   const shell = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
-  assert.match(
-    shell,
-    /function isBlockedRow\(t\) \{\s*return t\.status === "blocked" \|\| t\.needsHuman === true;/,
-    "serve.ts's client script must carry the mirror of board.ts's isBlockedRow",
-  );
+  // W1-T2731: the client predicate is a REAL export of lib/console-shell-script.ts now, so "the
+  // SAME predicate" is asserted where it actually lives — over BEHAVIOUR, across the whole cross
+  // product of the two fields either predicate reads. The old assertion matched the client
+  // function's SOURCE TEXT inside serve.ts, which could only ever prove the two were spelled
+  // alike; a mirror that drifted in meaning while keeping its shape would have passed it. It also
+  // could not survive the move, and could not have survived a transpiler change either: the shell
+  // now emits this function minified.
+  for (const status of ["blocked", "queued", "running", "merged", "done", undefined]) {
+    for (const needsHuman of [true, false, undefined]) {
+      const row = { status, needsHuman } as { status?: string; needsHuman?: boolean };
+      assert.equal(
+        clientIsBlockedRow(row),
+        isBlockedRow(row as Parameters<typeof isBlockedRow>[0]),
+        `the console and board.ts must agree on {status: ${String(status)}, needsHuman: ${String(needsHuman)}} — otherwise the strip shows a number board.ts never computed`,
+      );
+    }
+  }
+  // AND THE WIRING, so this can never pass over a predicate the shell does not actually ship:
+  assert.match(shell, /\$\{renderConsoleShellScript\(\)\}/, "the shell splices the module that defines it");
   assert.match(shell, /setGlanceValue\("glance-blocked", tasks\.filter\(isBlockedRow\)\.length\)/, "the strip must USE it");
   assert.ok(
     !/setGlanceValue\("glance-blocked", tasks\.filter\(\(t\) => t\.status === "blocked"\)/.test(shell),
