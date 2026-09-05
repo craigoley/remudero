@@ -1,11 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { slug as kebabSlug } from "./feedback-docket.js";
-// The DEFAULT export -- a plain, mutable object -- so a test's `t.mock.method` can
-// actually intercept the calls `updateProposalRegistry` makes (named bindings off
-// `node:fs` are non-configurable; mocking them throws "Cannot redefine property"
-// instead of installing a spy). Same import-shape comment as src/lib/worker.ts's
-// run.lock / src/lib/status.ts's projection cache, the two atomic-write precedents this
-// module's own registry writer mirrors.
+// The DEFAULT export — a mutable object — so a test's `t.mock.method` can intercept the `fs` calls below. Named
+// bindings off `node:fs` are non-configurable, so mocking them throws.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { hostname } from "node:os";
@@ -18,12 +14,8 @@ import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry 
 import type { GhFailureReason } from "./status.js";
 import { isGhRateLimitError } from "./status.js";
 
-/** A draft-lint finding: the linter's own {@link "./task-linter.js".LintViolation}s (whose
- *  `check` is a strict LintCheck) PLUS the draft rung's own `draft-parse` finding for a fragment
- *  that won't even parse — structurally typed so both flow through one path without widening the
- *  linter's closed check union (and without a type-only line the diff-coverage gate can't cover). */
-// impl-FU: an ALIAS of the shared type, not a second declaration — this rung's loop was the
-// prototype and lib/relint.ts is that mechanism extracted for triage/plan to share.
+/** A draft-lint finding: the linter's own `LintViolation`s plus this rung's `draft-parse` finding. Structurally typed
+ *  so both flow through one path without widening the linter's closed union. */
 export type DraftLintViolation = RelintViolation;
 import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
@@ -34,53 +26,13 @@ import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
 
 /**
- * `rmd inbox` — the ratification inbox's DETERMINISTIC CORE (MASTER-PLAN P25(i), W1-T110).
+ * `rmd inbox` — the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110).
  *
- * P25's operator requirement, verbatim: "rmd should recommend what's ready to be ratified
- * and just request a thumbs up on each to agree, or a way to provide feedback to
- * reframe/replan the item." The 2026 field finding this task encodes is that approval
- * controls fail by FATIGUE — reflexive approval is a documented clickthrough
- * vulnerability, and the cure is risk-tiering plus surfacing only what is genuinely
- * actionable [research: hitl-approval-fatigue-2026]. This module is the TIERING: only
- * READY proposals ever surface, readiness is COMPUTED not asserted, and a proposal whose
- * trigger has not fired is DEFERRED-WITH-TRIGGER, never recommended (the P19/WS-2
- * dead-consumer discipline, now code).
- *
- * THE SPLIT (mirrors lib/plan-architect.ts and lib/dep-review.ts): drafting a candidate
- * ratification — a `plan/tasks.yaml` fragment + the MASTER-PLAN.md stamp line — is the
- * LLM's job (a bounded Architect worker, harness-spawned by run-task.ts, via
- * {@link runDraftRung} below). EVERYTHING AFTER drafting is deterministic:
- * {@link classifyProposal} is a PURE function (rule 2, policy-as-data) over an
- * already-drafted candidate + injected facts about the world (dependency merge-state,
- * evidence-anchor grep-truth, lint cleanliness, open conflicts) — no LLM call anywhere in
- * this module, so every branch is a unit fixture.
- *
- * DAEMON-SIDE, NOT CLI-PULL (W1-T192): the draft rung runs on the daemon's own poll cadence
- * (run-task.ts's `buildInboxDraftHook`, riding the SAME `deps.sweep()` seam the W1-T150
- * credit-backfill rung occupies) — a fired trigger or an invalidated (reframed) draft gets
- * redrafted there, with NO CLI invocation required. `rmd inbox` (`inboxCommand`) is a
- * viewer AND a manual force, never the only trigger — see {@link proposalsNeedingDraft}
- * (the shared, unthrottled predicate) vs {@link draftsDueOnDaemon} (the daemon's own
- * idempotence-throttled selection) below.
- *
- * READY = drafted tasks' deps all merged (deriveStatus, corrections-supreme, via the
- * caller's injected {@link MergedResolver}) AND the proposal's cited evidence anchors
- * still grep-true on main AND the drafted fragment passes `rmd lint-plan` AND no open
- * proposal conflicts. Otherwise the proposal is NOT_READY, each failing predicate named
- * (dep-unmet / evidence-drifted / draft-unclean / conflict) — or, when the proposal
- * names an unfired trigger (the P19/WS-2 "unbuilt consumer" case), DEFERRED_WITH_TRIGGER,
- * checked FIRST and unconditionally: a proposal whose consumer is not yet real is never
- * surfaced as a recommendation, no matter what the other four predicates say.
- *
- * `rmd approve` / `rmd reframe` (MASTER-PLAN P25 ii-iv, W1-T111) — the other half of the
- * inbox loop, appended below: APPROVE ({@link approveProposal}) is one bit that INITIATES
- * the plan PR for a READY classification's cached draft (never re-derived) through a
- * gate-injected {@link RatifyGateway}, refusing anything not READY with zero side effects;
- * REFRAME ({@link reframeProposal}) captures the operator's feedback verbatim, invalidates
- * the stale draft, and rides it into the NEXT {@link inboxDraftPrompt}. Both ledger exactly
- * one `ratify.*` line per call; {@link ratifyTelemetry} reduces those lines into the
- * approve/reframe rate the retro surfaces — the field's failure mode is a rubber-stamp
- * queue, so that rate is instrumentation, not decoration.
+ * Approval controls fail by fatigue, so only READY proposals surface and readiness is computed, never asserted
+ * [research: hitl-approval-fatigue-2026]. Drafting is an LLM's job ({@link runDraftRung}); everything after is
+ * deterministic, so {@link classifyProposal} is pure. READY = deps merged AND anchors still grep-true on main AND the
+ * fragment passes `rmd lint-plan` AND no open conflicts; an unfired trigger yields DEFERRED_WITH_TRIGGER, checked
+ * first (P19/WS-2). Why: P25's requirement verbatim — docs/forensics/inbox.md.
  */
 
 // ── Evidence anchors + triggers (proposal-level facts, supplied by the registry) ──────────
@@ -95,24 +47,14 @@ export interface EvidenceAnchor {
   path?: string;
 }
 
-/** A named, not-yet-fired precondition (MASTER-PLAN's HELD/TRIGGER proposal shape, e.g.
- *  P28's "ratify after W1-T110/W1-T111 ship"). `fired` is resolved by the CALLER — this
- *  module never guesses whether a trigger condition holds. */
+/** A named, not-yet-fired precondition (MASTER-PLAN's HELD/TRIGGER shape). `fired` is resolved by the CALLER. */
 export interface ProposalTrigger {
   description: string;
   fired: boolean;
 }
 
-/** One round of `rmd reframe` feedback (P25 iii, W1-T111) — captured VERBATIM, never
- *  summarized, so the redraft prompt carries the operator's own words.
- *
- *  `retracted` (W1-T194): true when the OPERATOR explicitly superseded this round via
- *  `rmd reframe --supersedes`. Retraction is a PROMPT-COMPOSITION concern, never a
- *  deletion — a retracted round stays in `reframeHistory` (and its original
- *  `ratify.reframed` ledger line is never rewritten); only {@link inboxDraftPrompt}
- *  stops emitting its text into the next redraft. Absent/false for every round that has
- *  never been retracted — the common case, and the ONLY way a round is ever marked this
- *  way is an explicit operator flag on a LATER round (never inferred from recency). */
+/** One round of `rmd reframe` feedback, captured verbatim (P25 iii, W1-T111). `retracted` (W1-T194) is set only by an
+ *  explicit `--supersedes`, never inferred from recency, and never deletes. */
 export interface ReframeRecord {
   feedback: string;
   retracted?: boolean;
@@ -128,74 +70,38 @@ export interface Proposal {
   trigger?: ProposalTrigger;
   /** Ids of OTHER proposals this one conflicts with, when they are also open. */
   conflictsWith?: string[];
-  /** Every `rmd reframe` round this proposal has been through, oldest first — "the
-   *  reframe history rides the proposal until resolution" (P25 iii design). Empty/absent
-   *  for a proposal that has never been reframed. */
+  /** Every `rmd reframe` round this proposal has been through, oldest first — "the reframe history rides the proposal
+   *  until resolution" (P25 iii design). Empty/absent for a proposal that has never been reframed. */
   reframeHistory?: ReframeRecord[];
-  /** W1-T2451: the board item (board-review.ts's `BoardItem.id`) that produced this proposal,
-   *  when it was minted by the board-review rung — absent for every OTHER proposal family (a
-   *  hand-authored `P##`, a feedback-docket `FD-…`, a rule-efficacy `rule-efficacy:…`), which
-   *  have no such ephemeral referent to track. board-review.ts mints EVERY finding with
-   *  `evidenceAnchors: []` (a PR number is not a git-grep-able fact), which makes the
-   *  `evidence_anchors` drift predicate below permanently unreachable for this family — without
-   *  this field, nothing ever expresses "the PR this proposal is ABOUT has merged/closed/had its
-   *  escalation handled", so such a proposal renders READY forever. This is what makes that fact
-   *  expressible: see {@link classifyProposal}'s referent-retirement check. */
+  /** W1-T2451: the board item this proposal was minted from, absent for every other family. It is what makes "the PR
+   *  this is ABOUT has resolved" expressible, since anchors here are always []. */
   originatingItemId?: string;
 }
 
 // ── The understood-request handoff (W1-T2500) ──────────────────────────────────────────────
 //
-// reply-interpreter.ts's `interpretReply` (W1-T2499) reaches `status: "understood"` — an empty
-// unanswered set — and stops there BY DESIGN ("it asks, it does not act"). Nothing carried that
-// state anywhere: an understood thread ended in a conversation, never a task. This is the
-// handoff, and ONLY the handoff — it mints a {@link Proposal} (this module's OWN existing shape,
-// nothing new) and hands it to the SAME tiering {@link classifyProposal} already runs every
-// OTHER proposal through, unchanged: trigger-deferral first, the ledger's `ratify.approved`
-// receipt overriding everything, every failing predicate collected rather than the first. This
-// function's job ends at minting the value classifyProposal reads — it never files a task
-// directly, never auto-approves, never adds a timer, and never paces anything.
-//
-// A THREAD WITH AN UNANSWERED CLARIFICATION EMITS NOTHING AND RUNS NOTHING. This is true by
-// CONSTRUCTION, not by a check this function could get wrong: it only ever returns a value when
-// `interpretation.status === "understood"`; a `"clarifying"` or `"exhausted"` result returns
-// `undefined`, and there is no other branch that could produce a {@link Proposal} from either.
+// `interpretReply` (reply-interpreter.ts) reaches `status: "understood"` and stops there by design. This mints a
+// {@link Proposal} for the same tiering and does nothing else: no task filed, nothing auto-approved, nothing paced.
 
-/** The understood request a caller hands to {@link proposalFromUnderstoodRequest} — the thread
- *  it traces back to, and the request text that thread now understands in full (every
- *  clarification, if any were asked, answered). */
+/** The understood request a caller hands to {@link proposalFromUnderstoodRequest} — the thread it traces back to, and
+ *  the request text that thread now understands in full (every clarification, if any were asked, answered). */
 export interface UnderstoodRequest {
-  /** The thread this proposal traces back to — folded into {@link understoodRequestProposalId}
-   *  (NEVER into {@link Proposal.originatingItemId}: that field is board-review's OWN referent
-   *  vocabulary, W1-T2451 — a thread id is not a `BoardItem.id`, and reusing the field would wire
-   *  this proposal into the board-referent-retirement mechanism for a referent it can never
-   *  resolve). The id itself is the back-reference; nothing else needs to be. */
+  /** The thread this traces back to. NEVER {@link Proposal.originatingItemId}, board-review's own referent
+   *  vocabulary, which would wire this into retirement for an unresolvable referent. */
   threadId: string;
-  /** The request text, quoted VERBATIM into the minted proposal's summary — never paraphrased,
-   *  mirroring `synthesizeFeedbackDocketProposal`'s own "verbatim, cited" discipline
-   *  (feedback-docket.ts). */
+  /** The request text, quoted VERBATIM into the minted proposal's summary — never paraphrased, mirroring
+   *  `synthesizeFeedbackDocketProposal`'s own "verbatim, cited" discipline (feedback-docket.ts). */
   requestText: string;
 }
 
-/** The proposal id {@link proposalFromUnderstoodRequest} mints for one thread — deterministic
- *  and derived, never random, so re-classifying the SAME understood thread twice (e.g. a second
- *  daemon poll before ratification) always names the SAME proposal rather than opening a
- *  duplicate one (mirrors `approveRunBranch`'s own "derived, never minted" discipline, and
- *  {@link deriveThreadId}'s own doc in inbox-thread.ts, which this id is built on top of). */
+/** The proposal id minted for one thread — derived, never random, so re-classifying the same understood thread names
+ *  the same proposal instead of opening a duplicate. */
 export function understoodRequestProposalId(threadId: string): string {
   return `thread:${threadId}`;
 }
 
-/**
- * Mint the {@link Proposal} an understood thread hands to the EXISTING tiering — the ONLY thing
- * this function does. Returns `undefined` when `interpretation.status !== "understood"`: a
- * thread that still has an unresolved clarification (`"clarifying"`) or has exhausted its rounds
- * (`"exhausted"`) emits nothing (acceptance: "a thread with an unanswered clarification emits
- * nothing and runs nothing"). The returned value is a plain {@link Proposal} with NO trigger, NO
- * `conflictsWith`, and empty `evidenceAnchors` — nothing here defers, auto-approves, or
- * pre-judges it; {@link classifyProposal} decides all of that itself, exactly as it already does
- * for every hand-authored `P##`, `FD-…`, and `rule-efficacy:…` proposal.
- */
+/** Mint the {@link Proposal} an understood thread hands to the tiering, and nothing else. `undefined` for
+ *  `"clarifying"` or `"exhausted"`, so such a thread emits nothing and runs nothing. */
 export function proposalFromUnderstoodRequest(request: UnderstoodRequest, interpretation: InterpretReplyResult): Proposal | undefined {
   if (interpretation.status !== "understood") return undefined;
   return {
@@ -207,46 +113,25 @@ export function proposalFromUnderstoodRequest(request: UnderstoodRequest, interp
 
 // ── Board-review referent retirement (W1-T2451) ────────────────────────────────────────────
 //
-// A board-review proposal's evidenceAnchors is permanently `[]` (see Proposal.originatingItemId's
-// doc), so the ordinary evidence-drift predicate can never retire one. This is the SEPARATE
-// mechanism the design calls for: the proposal's bound referent (above) is checked against the
-// board item's OWN current state, read in ONE BATCH per classification pass — never one read per
-// proposal (a per-proposal GitHub/git read here would repeat the exact N-calls-per-tick shape
-// every other batched-gateway surface in this codebase already refuses to reintroduce).
+// Such a proposal's `evidenceAnchors` is permanently `[]`, so evidence drift can never retire one. Its referent is
+// checked against the board item's own state instead, read in ONE BATCH per pass — never per proposal, which would
+// reintroduce the N-calls-per-tick shape.
 
-/** A board item's live state, as read off the board — the same status/escalation-count vocabulary
- *  board-review.ts's own `BoardItem` carries. Duplicated here rather than imported: board-
- *  review.ts already imports FROM inbox.ts (for {@link Proposal}/{@link updateProposalRegistry}),
- *  so importing back would be a cycle — the same "deliberate, small duplication" board-review.ts's
- *  own header doc argues for regarding measurement-cadence.ts's marker shape. */
+/** A board item's live state, in board-review.ts's own `BoardItem` vocabulary. Duplicated rather than imported,
+ *  because board-review.ts imports from this module and the cycle would close. */
 export interface BoardReferentState {
   status: "open" | "merged" | "dead";
   unhandledEscalations: number;
 }
 
-/**
- * The result of the ONE batched read of every board-review referent's current state this
- * classification pass — never a read per proposal. `"ok"` carries every item the read could
- * observe, keyed by {@link Proposal.originatingItemId} (or, for a proposal minted before that
- * field existed, the same id derived from the proposal's own string by
- * {@link deriveLegacyReferent}, W1-T2460); a proposal whose referent id is absent from `states`
- * (an unparseable/unknown/vanished referent) is treated exactly like `"unreadable"` for
- * THAT proposal — cannot-observe means WAIT (W1-T130), never a silent retirement. `"unreadable"`
- * means the WHOLE batched read failed (GitHub unreachable, transport error): every board-review
- * proposal keeps whatever classification it would otherwise have gotten and is marked unverified,
- * rather than any of them being folded into a guess in either direction.
- */
+/** The ONE batched read of every board-review referent's state this pass. A referent id absent from `states` is
+ *  `"unreadable"` for that proposal alone: cannot-observe means WAIT (W1-T130), never a silent retirement.
+ *  `"unreadable"` means the whole read failed, so each proposal keeps whatever classification it would otherwise have
+ *  had, marked unverified. */
 export type BoardReferentRead = { kind: "ok"; states: ReadonlyMap<string, BoardReferentState> } | { kind: "unreadable" };
 
-/** True once a board-review finding's OWN referent has left the state that produced it. A
- *  `board-review:stale:<ref>` finding resolves once the item is no longer open (merged or dead) —
- *  staleness is a property of an OPEN item, so a closed one cannot still be stale. A
- *  `board-review:escalation:<ref>` finding resolves the same way OR once its escalations are all
- *  handled while the item stays open (design: "merged, dead, or its escalation handled") — an
- *  escalation can be acknowledged without the PR itself closing. Kind is read off the proposal's
- *  OWN id prefix, the same namespace board-review.ts already mints and {@link approveRunBranch}'s
- *  own doc already enumerates — never re-derived from the referent's identity, which this task's
- *  whole point is that the id string should NOT have to carry. */
+/** True once a board-review finding's referent has left the state that produced it: no longer open, or escalations
+ *  handled. Kind is read off the proposal's own id prefix. */
 function boardReferentResolved(proposal: Proposal, state: BoardReferentState): boolean {
   if (state.status !== "open") return true;
   return proposal.id.startsWith("board-review:escalation:") && state.unhandledEscalations === 0;
@@ -254,27 +139,15 @@ function boardReferentResolved(proposal: Proposal, state: BoardReferentState): b
 
 type BoardReferentLookup = { kind: "live" } | { kind: "resolved"; referentId: string } | { kind: "unreadable" };
 
-/** W1-T2460: every board-review proposal minted BEFORE W1-T2451 (#3255) added
- *  {@link Proposal.originatingItemId} has no such field, yet its `id` already names the referent
- *  in its own trailing segment — `board-review.ts` mints exactly `board-review:stale:<itemId>` and
- *  `board-review:escalation:<itemId>`, so the item id was in the string all along. PARSE-AT-READ
- *  (this task's remedy (b), never remedy (a)'s one-time registry backfill): a pure derivation off
- *  the id string, called fresh on every classification pass, so it touches no state and needs no
- *  migration — reversible by reverting this function alone. FAILS SAFE: any id that is not one of
- *  those two shapes (a hand-authored `P##`, an `FD-…`, a `rule-efficacy:…`, or simply a
- *  board-review id some future producer mints under a different prefix) returns `undefined`, and
- *  {@link resolveBoardReferent} then falls through to `"live"` — exactly the classification that
- *  proposal already had today — rather than guessing a referent for it. */
+/** W1-T2460: parse the referent out of a legacy board-review id, which board-review.ts has always spelled
+ *  `board-review:<kind>:<id>`. Parse-at-read, not a registry backfill: pure and reversible. FAILS SAFE — any other
+ *  shape returns `undefined` and the proposal stays `"live"`. */
 function deriveLegacyReferent(proposalId: string): string | undefined {
   return /^board-review:(?:stale|escalation):(.+)$/.exec(proposalId)?.[1];
 }
 
-/** Resolves ONE proposal's referent against the batch {@link BoardReferentRead} — never issuing
- *  its own read. A proposal with no {@link Proposal.originatingItemId} recorded falls back to
- *  {@link deriveLegacyReferent}'s parse-at-read derivation (W1-T2460); a proposal for which
- *  NEITHER source names a referent (every non-board-review proposal, and any board-review id
- *  {@link deriveLegacyReferent} cannot parse) is simply `"live"`: this whole mechanism does not
- *  apply to it. */
+/** Resolve ONE proposal's referent against the batch read, never issuing its own. A proposal neither source names a
+ *  referent for is simply `"live"`: this mechanism does not apply to it. */
 function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | undefined): BoardReferentLookup {
   const referentId = proposal.originatingItemId ?? deriveLegacyReferent(proposal.id);
   if (!referentId) return { kind: "live" };
@@ -287,26 +160,21 @@ function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | unde
 
 // ── Drafted candidate (the LLM's output — a value from here on, never re-invoked) ─────────
 
-/** The Architect's draft for one proposal: a `plan/tasks.yaml` fragment + the
- *  MASTER-PLAN.md ratification stamp line, cached STATE-SIDE (never committed —
- *  `<config.root>/state/inbox-drafts.json`, never a repo path). */
+/** The Architect's draft for one proposal: a `plan/tasks.yaml` fragment + the MASTER-PLAN.md ratification stamp line,
+ *  cached STATE-SIDE (never committed — `<config.root>/state/inbox-drafts.json`, never a repo path). */
 export interface DraftedCandidate {
   proposalId: string;
   /** YAML text of the new task(s), parseable by {@link "./plan.js".loadPlanFromYaml}. */
   fragmentYaml: string;
   /** The MASTER-PLAN.md proposal-list stamp line the approve rung (W1-T111) will use. */
   stampLine: string;
-  /** {@link anchorFingerprint} of the proposal's evidence anchors AT DRAFT TIME — the
-   *  cache key the next inbox pass compares against to decide whether the cached draft
-   *  is still current or must be re-drafted. */
+  /** {@link anchorFingerprint} of the proposal's evidence anchors AT DRAFT TIME — the cache key the next inbox pass
+   *  compares against to decide whether the cached draft is still current or must be re-drafted. */
   anchorFingerprint: string;
 }
 
-/**
- * Order-independent digest of an anchor set — the draft cache's invalidation key. Pure
- * string composition (no crypto — this only needs to detect "the anchor SET changed
- * since this draft was cached", not to be collision-proof against adversarial input).
- */
+/** Order-independent digest of an anchor set — the draft cache's invalidation key. Plain string composition, not
+ *  crypto: it only needs to detect that the anchor SET changed. */
 export function anchorFingerprint(anchors: EvidenceAnchor[]): string {
   return anchors
     .map((a) => `${a.pattern}::${a.path ?? ""}`)
@@ -314,27 +182,18 @@ export function anchorFingerprint(anchors: EvidenceAnchor[]): string {
     .join("|");
 }
 
-/** True when a cached draft was computed against a DIFFERENT anchor set than the
- *  proposal's CURRENT one — "invalidated when main moves past the proposal's evidence
- *  anchors" (design). Orthogonal to (and checked alongside) whether each anchor is
- *  currently grep-true: a fixture that "moves" an anchor typically flips both at once. */
+/** True when a cached draft was computed against a different anchor set than the proposal's current one. Orthogonal
+ *  to whether each anchor is still grep-true; a fixture that moves an anchor usually flips both. */
 export function isDraftStale(draft: DraftedCandidate, currentAnchors: EvidenceAnchor[]): boolean {
   return draft.anchorFingerprint !== anchorFingerprint(currentAnchors);
 }
 
 // ── The draft rung's "needs a draft" predicate (W1-T192) ──────────────────────────────────
 //
-// Both `rmd inbox` (CLI, on-demand) and the daemon's per-poll draft rung must select the
-// SAME set of drafting candidates from the SAME facts — "REUSE it rather than re-deriving,
-// so the daemon and the CLI can never disagree about what is draftable" (design). This is
-// that ONE predicate; everything below layers on top of it.
+// `rmd inbox` and the daemon poll rung share this ONE predicate rather than re-deriving it and disagreeing.
 
-/** Every proposal that currently needs a fresh draft: not deferred by an unfired trigger,
- *  and either never drafted or its cached draft is stale ({@link isDraftStale}). Deliberately
- *  takes NO attempt-throttle input — this is the UNTHROTTLED predicate `rmd inbox`'s manual
- *  force uses (design: "`rmd inbox` KEEPS ITS ROLE... able to force a draft on demand"). The
- *  daemon-side rung layers {@link draftsDueOnDaemon}'s idempotence throttle on TOP of this,
- *  never instead of it. */
+/** Every proposal needing a fresh draft. Takes no throttle input by design — this is the unthrottled predicate behind
+ *  `rmd inbox`'s manual force, which {@link draftsDueOnDaemon} wraps. */
 export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache): Proposal[] {
   return proposals.filter((p) => {
     if (p.trigger && !p.trigger.fired) return false; // never drafted for a dead-consumer proposal
@@ -345,34 +204,24 @@ export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache)
 
 // ── Daemon-side idempotence (W1-T192) ──────────────────────────────────────────────────────
 //
-// The draft rung now spawns from an UNATTENDED 300s daemon poll (buildSweepHook's cadence,
-// run-task.ts), not only from a human typing `rmd inbox`. A single invalidation (a reframe
-// round, an evidence anchor moving) must produce ONE draft attempt, never one per poll — the
-// same "keyed to a stable cause, not to poll count" discipline the fix rung applies to a
-// head sha. {@link draftAttemptKey} is that stable cause fingerprint; {@link DraftAttemptCache}
-// records the key the daemon LAST ATTEMPTED (successfully or not) per proposal, distinct from
-// {@link DraftCache} (which records only SUCCESSFUL drafts) precisely so a FAILED attempt does
-// not get repeated every poll for the same cause either.
+// One invalidation must produce ONE draft attempt, not one per unattended poll. {@link draftAttemptKey} is the stable
+// cause fingerprint; {@link DraftAttemptCache} records the key last attempted, win or lose, so a failed attempt is
+// not repeated either.
 
-/** A proposal's current "draft cause" fingerprint: its evidence-anchor set plus how many
- *  `rmd reframe` rounds it has been through. This changes exactly when something that would
- *  make a genuinely DIFFERENT draft worth attempting changes — a new reframe round, or the
- *  anchor set moving — never on poll count alone. */
+/** A proposal's current draft-cause fingerprint: its evidence-anchor set plus its reframe-round count. It changes
+ *  exactly when a genuinely different draft becomes worth attempting, never on poll count alone. */
 export function draftAttemptKey(proposal: Proposal): string {
   return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}`;
 }
 
-/** `<config.root>/state/inbox-draft-attempts.json` — one {@link draftAttemptKey} per
- *  proposal id, recording the cause the DAEMON rung last attempted a draft for (win or
- *  lose). Daemon-only: `rmd inbox`'s manual force never reads or writes this cache — see
- *  {@link proposalsNeedingDraft}'s doc. */
+/** `<config.root>/state/inbox-draft-attempts.json` — one {@link draftAttemptKey} per proposal id, recording the cause
+ *  the daemon rung last attempted. Daemon-only: `rmd inbox`'s manual force never reads or writes it. */
 export interface DraftAttemptCache {
   [proposalId: string]: string;
 }
 
-/** Parse a {@link DraftAttemptCache} JSON blob; `{}` on missing/malformed input (mirrors
- *  {@link parseDraftCache}'s fail-soft-to-empty discipline — a daemon that has never
- *  attempted a draft yet is the normal pre-population state, not an error). */
+/** Parse a {@link DraftAttemptCache}; `{}` on missing or malformed input — a daemon that has never drafted is the
+ *  normal pre-population state, not an error. */
 export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCache {
   if (!text) return {};
   try {
@@ -387,60 +236,20 @@ export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCa
 /**
  * W1-T2561: the MOST proposals one daemon poll may spawn an Architect for.
  *
- * THE THROTTLE THIS SITS BESIDE BOUNDS REPETITION, NOT VOLUME. {@link DraftAttemptCache} already
- * guarantees ONE attempt per cause — it is why the same proposal is not redrafted every poll. It
- * says nothing about how many DISTINCT proposals may be drafted at once, and until this constant
- * the answer was "every one that is due", sequentially, in a single awaited batch.
- *
- * THAT IS UNBOUNDED BY CONSTRUCTION ONCE A PRODUCER IS WIRED TO THE REGISTRY.
- * `routeFollowupsToRegistry` (lib/retro.ts) appends every routable harvested follow-up with no cap
- * and no expiry, so the registry only grows. MEASURED 2026-09-01: the registry holds 317
- * proposals, all `followup:`-prefixed, 285 of them still needing a draft, against an
- * `inbox.draft_synthesized` mean of $8.52 — roughly $2,400 of latent spend behind a throttle whose
- * key (`anchorFingerprint::reframeCount`) any reframe round invalidates. In the seven hours to
- * 11:52Z the drafting rung spent $401 of a $540 total, 74% of the pipeline, and $1,992 across the
- * retained ledger.
- *
- * WHY A CAP RATHER THAN A HEADROOM GATE — AND THIS IS THE MEASUREMENT THAT DECIDED IT. The
- * intuitive fix is to refuse to draft while the governor is over its ceiling. Classifying every
- * retained `inbox.draft_synthesized` row by the `daemon.headroom` state in force at that instant
- * REFUTES it: 998 spawns costing $1,991.95 happened while `over_ceiling` was FALSE, against 24
- * spawns costing $0.00 while it was TRUE. The rung is not spending THROUGH exhaustion; it is what
- * DRIVES the account there, entirely while the governor still reads healthy. A gate on the
- * exhausted state would therefore have bounded $0 of the $1,992 actually spent. Pacing the arrival
- * rate is the lever; refusing at the ceiling is not.
- *
- * A CAP DELAYS WORK, IT NEVER DROPS IT. Whatever this slice defers stays due — no attempt key is
- * written for a proposal that was not attempted — so the next poll takes the next batch and the
- * queue drains at a bounded rate instead of in one stampede. Three is the arrival rate at roughly
- * one poll's own cadence: at the measured mean it caps a poll near $26 rather than near $2,400,
- * and a genuine burst of new proposals still reaches the Architect within a few minutes.
- *
- * PRIMARY CONTROL: this is the normal pacing lever, not a backstop reached only after another
- * control fails. POLICY DATA (rule 2) — a literal here, W1-T252/W1-T253's policy file is its
- * eventual home, the same disposition {@link UNREADABLE_DEGRADED_LIMIT} in lib/headroom.ts records
- * for its own bound.
- *
- * The tag above must be the ONLY token in this block that satisfies the gate. `KIND_TAG_RE`
- * (test/bound-kind-declared.test.ts) matches the upper-case spellings ANYWHERE in the preceding
- * comment block, so writing the other kind in upper case here would keep this constant passing
- * even with the tag deleted — which is why "backstop" above is lower case, and must stay that way.
+ * THE INVARIANT. {@link DraftAttemptCache} bounds REPETITION — one attempt per cause — and says nothing about how
+ * many DISTINCT proposals may draft at once, which `routeFollowupsToRegistry` (lib/retro.ts) made unbounded. THE
+ * TRAP: a headroom gate would have bounded nothing, because the rung is what DRIVES the account to exhaustion while
+ * the governor still reads healthy. A CAP DELAYS WORK, NEVER DROPS IT: no key is written for a proposal that was not
+ * attempted. PRIMARY CONTROL, not a fallback. DIRECTIVE: keep that upper-case tag here — `KIND_TAG_RE`
+ * (test/bound-kind-declared.test.ts) reads this block. Why: docs/forensics/inbox.md.
  */
-// W1-T2569 CORRECTION, MEASURED 2026-09-01: this is a per-batch SIZE, never a concurrency limit.
-// `runDraftRung` below is a sequential `for (const p of toDraft) { await ... }`, so a batch of 3
-// costs 3 x the per-draft duration END TO END (measured median 316s => ~948s per batch), and the
-// observed max concurrent draft workers was 2 — both of which came from two OVERLAPPING batches,
-// never from within one. The rung's real cadence was measured at a ~715s median between
-// `inbox.draft_batch` rows; the "300s poll cadence" this file used to cite was wrong on both
-// counts and is corrected above.
+// W1-T2569 correction: a per-batch SIZE, never a concurrency limit; the "300s poll cadence" this file used to cite
+// was wrong.
+// Why: the measured batch duration and rung cadence — docs/forensics/inbox.md.
 export const DAEMON_DRAFT_BATCH_CAP = 3;
 
-/** Proposals the DAEMON-SIDE draft rung should attempt THIS poll: {@link proposalsNeedingDraft}
- *  further throttled by {@link DraftAttemptCache} so the rung's poll cadence never re-spawns the
- *  Architect for the SAME cause — a proposal is due again only once its {@link draftAttemptKey}
- *  has actually changed since the daemon's last attempt (or it has never been attempted at
- *  all). `rmd inbox` never calls this — it calls {@link proposalsNeedingDraft} directly,
- *  unthrottled, which is what makes it a genuine manual force. */
+/** Proposals the DAEMON-SIDE rung should attempt this poll — {@link proposalsNeedingDraft} throttled so the same
+ *  cause is never re-spawned. `rmd inbox` skips this, which is what makes it a force. */
 export function draftsDueOnDaemon(
   proposals: Proposal[],
   drafts: DraftCache,
@@ -452,64 +261,30 @@ export function draftsDueOnDaemon(
 }
 
 /**
- * W1-T2564 MIGRATION: re-open every attempt key that never produced a draft.
+ * W1-T2564 MIGRATION: re-open every attempt key that never produced a draft. Not writing a key for a refusal fixes
+ * the write path forward and repairs nothing on disk, because `draftsDueOnDaemon` compares against a routed
+ * follow-up's key of literal `::0` and that is false forever.
  *
- * WHY A MIGRATION IS REQUIRED AT ALL. Not writing a key for a refusal fixes the write path
- * FORWARD and repairs nothing already on disk. MEASURED 2026-09-01: of 353 proposals ever
- * drafted, 267 had never once actually been drafted — every row for them a refusal — and all 267
- * carried a key with no cached draft. `draftsDueOnDaemon` filters on
- * `attempts[p.id] !== draftAttemptKey(p)`, and a routed follow-up's key is the literal `::0`
- * (empty anchors, no reframes), so that comparison is false forever. Without this they stay dead.
- *
- * ⚠ WHAT IT RE-OPENS BESIDES REFUSALS, STATED RATHER THAN CLAIMED ABSENT. The predicate is
- * "keyed, still live in the registry, and no cached draft" — which is NOT refusal-specific and
- * cannot be, because the ledger evidence a refusal leaves is not on disk in either cache. So it
- * ALSO re-opens genuine failures W1-T192 deliberately throttled: a worker that ran and emitted
- * unparseable output, and a spawn that threw. Those get ONE more attempt each.
- *
- * THAT COST IS BOUNDED ONLY BECAUSE OF WHERE THE CALLER RUNS IT, AND THAT IS NOT THIS FUNCTION'S
- * DOING. A re-opened genuine failure runs, fails the same way, and is keyed again by the unchanged
- * W1-T192 write. Called ONCE PER DAEMON START and BEFORE the batch (buildInboxDraftHook, run-task.ts)
- * that is one extra attempt per proposal per boot. CALLED PER POLL IT IS AN UNBOUNDED RETRY LOOP:
- * it would evict the key W1-T192 had just written in that same poll and re-open it forever. That is
- * not hypothetical — the per-poll form was written first and `test/run-task.test.ts`'s "an ORDINARY
- * failure still writes its attempt key" reddened on it. A new call site must place itself the same
- * way. `DAEMON_DRAFT_BATCH_CAP` (W1-T2561) bounds how many re-opened proposals can run per poll.
- *
- * THE ALTERNATIVE WAS WORSE. Keying refusals correctly going forward and leaving the 267 dead
- * trades a bounded one-off cost for permanent silent loss.
- *
- * NARROWED TO LIVE PROPOSALS. A key whose proposal has left the registry is left exactly as it
- * is: re-opening it could not schedule work (nothing selects it) and would only grow the file.
- *
- * IDEMPOTENT OVER UNCHANGED STATE — it mutates `attempts` in place and returns the ids it freed, so
- * an immediate second pass returns `[]`. That is what lets the daemon run it on EVERY BOOT rather
- * than behind a one-shot marker file a freshly-provisioned host would never have, while the
- * caller's own once-per-process flag is what stops it re-firing within a run.
+ * ⚠ THE PREDICATE IS "keyed, live, no cached draft" — not refusal-specific, because a refusal leaves its evidence in
+ * the ledger, not in either cache, so genuine failures W1-T192 throttled get one more attempt each. ⚠ CALLED PER POLL
+ * IT IS AN UNBOUNDED RETRY LOOP that evicts the key W1-T192 just wrote; once per daemon start it is one extra attempt
+ * per boot. Falsifier: the per-poll form reddened test/run-task.test.ts's "an ORDINARY failure still writes its
+ * attempt key". Why: the 353/267 measurement — docs/forensics/inbox.md.
  */
 export function evictRefusalPoisonedKeys(
   attempts: DraftAttemptCache,
   drafts: DraftCache,
   liveProposalIds: ReadonlySet<string>,
-  /**
-   * W1-T2566 — ids this host has ALREADY re-opened once, read from {@link ReopenedKeysCache}.
-   * An EXCLUSION, not a change to the predicate above: "keyed, live, no cached draft" still
-   * decides what is poisoned, and the predicate itself is explicitly out of this task's scope.
-   * What this adds is that a given id is re-opened AT MOST ONCE EVER rather than once per boot.
-   *
-   * Defaults to empty, so every existing caller is byte-identical.
-   */
+  /** W1-T2566 — ids this host has ALREADY re-opened. An EXCLUSION, not a change to the predicate: it makes an id
+   *  re-opened at most once ever rather than once per boot. Defaults to empty. */
   alreadyReopened: ReadonlySet<string> = new Set(),
 ): string[] {
   const freed: string[] = [];
   for (const id of Object.keys(attempts)) {
     if (!liveProposalIds.has(id)) continue;
     if (drafts[id]) continue;
-    // W1-T2566: a proposal that fails GENUINELY and repeatedly never acquires a cached draft, so
-    // it satisfies the predicate on EVERY boot. The closure flag that bounds this within a
-    // process cannot see across the restart that resets it, and at a MEASURED median daemon
-    // lifetime of 50.5 minutes (479 processes, 32% under 30 min) that is ~29 re-opens a day per
-    // stuck proposal at an $8.52 draft mean. This is the bound that survives a restart.
+    // W1-T2566: a repeatedly failing proposal never acquires a cached draft, so it satisfies the predicate every boot
+    // and a closure flag cannot see across the restart that resets it.
     if (alreadyReopened.has(id)) continue;
     delete attempts[id];
     freed.push(id);
@@ -518,24 +293,10 @@ export function evictRefusalPoisonedKeys(
 }
 
 /**
- * W1-T2569: MERGE this batch's own results onto the caches AS THEY ARE ON DISK RIGHT NOW, rather
- * than onto the snapshot this batch read when it started.
- *
- * THE LOST UPDATE IS INDEPENDENT OF THE RE-ENTRANCY GUARD AND MUST BE FIXED SEPARATELY.
- * `buildInboxDraftHook` reads `drafts`/`attempts` at the top of a batch and writes
- * `{...drafts, ...mine}` at the bottom. Any overlap at all — a guard that is bypassed, a lock
- * reclaimed as stale while its holder is in fact alive, a second host — makes the later writer's
- * spread silently drop everything the earlier one produced. A guard makes overlap unlikely; this
- * makes a lost update impossible, which is the half that still holds when the guard is wrong.
- *
- * MEASURED 2026-09-01, the defect this closes: 16 Architect spawns over 5 distinct proposals cost
- * $123.30 and left the drafts cache frozen at 62 entries, because each batch's write reverted the
- * previous batch's. Eligible read 285 -> 282 and then never moved again.
- *
- * PRECEDENCE IS THIS BATCH'S OWN RESULTS. Where both this batch and a concurrent writer produced
- * an entry for the SAME id, this batch's wins — it is the fresher observation, and the alternative
- * (dropping it) is the very lost update this exists to stop. Every id THIS batch did not touch is
- * carried through from disk verbatim.
+ * W1-T2569: merge this batch's results onto the caches AS THEY ARE ON DISK NOW, not onto the snapshot the batch read
+ * when it started. THE INVARIANT is independent of the re-entrancy guard: `buildInboxDraftHook` writes `{...drafts,
+ * ...mine}` at the bottom of a batch, so any overlap silently drops the earlier writer's work. Precedence is this
+ * batch's own results, the fresher observation. Why: the frozen 62-entry cache this closed — docs/forensics/inbox.md.
  */
 export function mergeDraftCaches(
   onDisk: { drafts: DraftCache; attempts: DraftAttemptCache },
@@ -548,29 +309,14 @@ export function mergeDraftCaches(
 }
 
 /**
- * W1-T2590: `<config.root>/state/inbox-draft-deferred-until.json` — the instant the account itself
- * said its window reopens, after a draft was refused for a usage/session limit.
+ * W1-T2590: `state/inbox-draft-deferred-until.json` — the instant the account itself said its window reopens, after a
+ * draft was refused for a usage or session limit. A refusal now writes no attempt key and retries next poll
+ * (W1-T2564), which made {@link DAEMON_DRAFT_BATCH_CAP} the only limit on a retry storm during an outage.
  *
- * WHY THIS EXISTS, AND WHY IT IS A PREREQUISITE RATHER THAN A NICETY. Before W1-T2564 a refused
- * draft wrote a {@link DraftAttemptCache} key and was never retried — the work was silently LOST.
- * After it, a refusal writes no key, stays due, and RETRIES ON THE NEXT POLL. That is the correct
- * fix and it changed what the batch cap bounds: during a live account outage
- * {@link DAEMON_DRAFT_BATCH_CAP} became the ONLY thing limiting a retry storm, in exactly the
- * condition that produced 494 refusals in seven hours. Raising the cap for recovery throughput
- * would raise the storm ceiling with it. THIS IS WHAT MAKES RAISING IT SAFE LATER.
- *
- * RETRYING INTO A SHUT DOOR IS THE THING BEING STOPPED. The refusal already states when the door
- * reopens: `detectUsageLimitRefusal` (lib/classify.ts) recovers it from the provider's own text —
- * MEASURED on the real captured string, `resetsAtMs` 2026-09-01T11:50:00.000Z, which was more
- * accurate than the headroom governor's own belief at that instant.
- *
- * ⚠ AN ABSENT RESET IS NOT A LICENCE TO DEFER FOREVER, AND IT IS THE COMMON-ENOUGH CASE.
- * `resetsAtMs` is present ONLY when the refusal stated a time AND that time carried an explicit
- * UTC marker — a bare clock time in an unknown zone is deliberately never converted, because
- * guessing the operator's zone would produce a confident wrong resume time. So a refusal can
- * legitimately arrive with NO usable instant, and {@link decideDraftDeferral} must then decline to
- * defer at all rather than invent a window. A deferral with no stated end is an outage that never
- * ends.
+ * ⚠ AN ABSENT RESET IS NOT A LICENCE TO DEFER FOREVER, and it is common enough: `resetsAtMs` is present only when the
+ * refusal stated a time with an explicit UTC marker, because guessing the operator's zone gives a confident wrong
+ * resume time, so {@link decideDraftDeferral} must then decline to defer. Why: the 494 refusals in seven hours —
+ * docs/forensics/inbox.md.
  */
 export interface DraftDeferralCache {
   /** Epoch ms the provider said its window reopens. */
@@ -579,9 +325,8 @@ export interface DraftDeferralCache {
   matched: string;
 }
 
-/** Parse a {@link DraftDeferralCache}; `undefined` for missing/malformed input (the same
- *  fail-soft-to-nothing discipline {@link parseDraftAttemptCache} keeps — a corrupt file must
- *  never wedge the rung shut, which is the failure direction that costs the most). */
+/** Parse a {@link DraftDeferralCache}; `undefined` on missing or malformed input. A corrupt file must never wedge the
+ *  rung shut, which is the failure direction that costs the most. */
 export function parseDraftDeferralCache(text: string | undefined): DraftDeferralCache | undefined {
   if (!text) return undefined;
   try {
@@ -589,25 +334,16 @@ export function parseDraftDeferralCache(text: string | undefined): DraftDeferral
     if (typeof raw?.deferredUntilMs !== "number" || !Number.isFinite(raw.deferredUntilMs)) return undefined;
     return { deferredUntilMs: raw.deferredUntilMs, matched: typeof raw.matched === "string" ? raw.matched : "" };
   } catch {
-    // Fail-soft to nothing, by contract (see this function's doc): a corrupt deferral file must
-    // read as "no deferral" rather than wedging the rung shut, so the parse cause is deliberately
-    // not carried out of here — absent and malformed are ONE answer to every caller.
+    // Fail-soft to nothing, by contract: absent and malformed are ONE answer to every caller, so the parse cause is
+    // deliberately not carried out of here.
     return undefined;
   }
 }
 
-/**
- * Should this poll's draft batch run, or is the account's own stated window still shut?
- *
- * PURE, so the decision is a unit fixture rather than a clock race. Returns the remaining wait
- * when deferring, so the caller can ledger a number an operator can act on instead of a bare
- * refusal.
- *
- * THE DEFERRAL IS SELF-LIMITING BY CONSTRUCTION — it is an INSTANT, not a duration or a latch. Past
- * that instant the rung runs again with no operator action and no expiry sweep, which is what makes
- * this safe to write from an unattended rung: the W1-T1067 failure mode (a stranded marker that
- * suppresses a rung forever) cannot occur because there is nothing here to strand.
- */
+/** Should this poll's draft batch run, or is the account's stated window still shut? PURE, so the decision is a unit
+ *  fixture rather than a clock race, and it returns the remaining wait so the caller can ledger a number.
+ *  SELF-LIMITING BY CONSTRUCTION — an INSTANT, not a latch, so the W1-T1067 stranded-marker failure mode has nothing
+ *  here to strand. */
 export function decideDraftDeferral(
   cache: DraftDeferralCache | undefined,
   nowMs: number,
@@ -622,18 +358,8 @@ export function decideDraftDeferral(
   };
 }
 
-/**
- * The deferral a batch's own outcomes justify, or `undefined` when they justify none.
- *
- * THE LATEST STATED RESET WINS. Two refusals in one batch can name different instants (a retry
- * that crossed a window boundary); deferring to the EARLIER one would resume into a door that is
- * still shut for the other. Taking the latest is the only choice that cannot under-wait.
- *
- * ⚠ A REFUSAL WITHOUT A STATED INSTANT CONTRIBUTES NOTHING — see {@link DraftDeferralCache}'s doc.
- * A batch of nothing but zone-less refusals defers nothing at all, and that is deliberate: it
- * retries on the next poll exactly as it does today, bounded by the batch cap, rather than
- * stopping the rung on a window whose end nobody stated.
- */
+/** The deferral a batch's outcomes justify. THE LATEST STATED RESET WINS: the earlier of two would resume into a shut
+ *  door. ⚠ A refusal with no stated instant contributes nothing. */
 export function deferralFromOutcomes(outcomes: DraftRungOutcome[]): DraftDeferralCache | undefined {
   let best: DraftDeferralCache | undefined;
   for (const o of outcomes) {
@@ -645,20 +371,14 @@ export function deferralFromOutcomes(outcomes: DraftRungOutcome[]): DraftDeferra
   return best;
 }
 
-/** `<config.root>/state/inbox-draft-inflight.json` — proposal id -> ISO spawn timestamp,
- *  for whichever proposals the daemon's draft rung (buildInboxDraftHook, run-task.ts)
- *  currently has an Architect worker running for (W1-T193). Written just before the batch's
- *  {@link runDraftRung} call and cleared in a `finally` once it resolves (win or lose), so a
- *  crash mid-draft is the only way an entry here can go stale — the same "never lies about
- *  its own state" bar W1-T156 set for liveness. Distinct from {@link DraftAttemptCache}
- *  (records the LAST-ATTEMPTED cause, kept indefinitely) — this cache only ever names what
- *  is happening RIGHT NOW. */
+/** `state/inbox-draft-inflight.json` — spawn timestamps for drafts an Architect is running now (W1-T193). Cleared in
+ *  a `finally`, so only a crash mid-draft leaves a stale entry. */
 export interface DraftInFlightCache {
   [proposalId: string]: string;
 }
 
-/** Parse a {@link DraftInFlightCache} JSON blob; `{}` on missing/malformed input (mirrors
- *  {@link parseDraftAttemptCache}'s fail-soft-to-empty discipline). */
+/** Parse a {@link DraftInFlightCache} JSON blob; `{}` on missing/malformed input (mirrors {@link
+ *  parseDraftAttemptCache}'s fail-soft-to-empty discipline). */
 export function parseDraftInFlightCache(text: string | undefined): DraftInFlightCache {
   if (!text) return {};
   try {
@@ -692,134 +412,57 @@ export interface InboxClassification {
   draftStale?: boolean;
   /** Present iff state === "ready" — the reasoning rides with the recommendation. */
   draft?: DraftedCandidate;
-  /** Present iff state === "drafting" — when the in-flight Architect worker for this
-   *  proposal's draft was spawned (W1-T193's "never renders nothing during a legitimate
-   *  multi-minute mid-draft window" bar). */
+  /** Present iff state === "drafting" — when the in-flight Architect worker for this proposal's draft was spawned
+   *  (W1-T193's "never renders nothing during a legitimate multi-minute mid-draft window" bar). */
   draftSpawnedAt?: string;
-  /** W1-T2451: present iff state === "retired" — names why the proposal's board-review referent
-   *  resolved (merged/dead/escalation-handled), so an operator reading the registry sees that a
-   *  finding existed and why it went moot, never a silent drop (retirement is a state, never a
-   *  deletion — the proposal itself stays in the registry unchanged). */
+  /** W1-T2451: present iff state === "retired" — why the referent resolved, so an operator sees the finding existed
+   *  and why it went moot. Retirement is a state, never a deletion. */
   retiredReason?: string;
-  /** W1-T2604: present iff state === "declined" — the operator-supplied reason a `POST
-   *  /v1/inbox/decline` call recorded, never inferred from the proposal's own title/summary
-   *  prose. Declining, like retiring, is a state, never a deletion: the proposal stays in the
-   *  registry unchanged, it just can never classify ready/not_ready/deferred/drafting again. */
+  /** W1-T2604: present iff state === "declined" — the operator's own reason, never inferred from the proposal's
+   *  prose. Like retirement, a state and never a deletion. */
   declinedReason?: string;
-  /** W1-T2451: true iff this proposal names a board-review referent (has an
-   *  {@link Proposal.originatingItemId}) whose current state could not be determined this pass —
-   *  either the whole batched {@link BoardReferentRead} failed, or this proposal's own id was
-   *  absent from it (unparseable/unknown referent). The classification's `state` is otherwise
-   *  computed exactly as it would be with no referent tracking at all — cannot-observe means
-   *  WAIT (W1-T130): a proposal is never silently retired, and never silently kept out of a
-   *  legitimate READY, just because its referent could not be read this pass. */
+  /** W1-T2451: true iff this proposal's referent could not be read this pass. `state` is otherwise computed as if
+   *  referent tracking did not exist — cannot-observe means WAIT (W1-T130). */
   referentUnverified?: boolean;
 }
 
 export interface ReadinessContext {
-  /** The CURRENT plan (plan/tasks.yaml on main) the drafted tasks would land into —
-   *  resolves depends_on ids the fragment cites that already exist. */
+  /** The CURRENT plan (plan/tasks.yaml on main) the drafted tasks would land into — resolves depends_on ids the
+   *  fragment cites that already exist. */
   plan: Plan;
-  /** Landed-ness resolver — GITHUB-DERIVED (deriveStatus) in the real runner, a plain
-   *  yaml-status check in fixtures. */
+  /** Landed-ness resolver — GITHUB-DERIVED (deriveStatus) in the real runner, a plain yaml-status check in fixtures. */
   isMerged: MergedResolver;
   /** Whether one evidence anchor is still grep-true (on main, in the real runner). */
   grepAnchorTrue: (anchor: EvidenceAnchor) => boolean;
   /** Every OTHER proposal id currently open (not yet ratified) — the conflict source. */
   openProposalIds: Set<string>;
-  /**
-   * True when the LEDGER already carries a `ratify.approved` line for this proposal id —
-   * checked FIRST, unconditionally, and OVERRIDING whatever the registry's own copy of this
-   * proposal claims (W1-T190). `rmd approve`'s ledger append and its registry rewrite are two
-   * independent writes; one can succeed while the other does not (a crash, an interrupted
-   * run), and a registry entry left stale by that drift must never be trusted at face value —
-   * the ledger is the one authoritative receipt. Real implementations derive this from
-   * {@link isRatifiedInLedger} over `readLedgerLines(ledgerPath)`; the P19 incident this task
-   * fixes is exactly a registry entry that drifted from an already-ledgered `ratify.approved`.
-   */
+  /** True when the ledger already carries `ratify.approved` for this id — checked FIRST and overriding the registry's
+   *  copy (W1-T190), which a crash between the two writes can leave stale. */
   isRatified: (proposalId: string) => boolean;
-  /**
-   * W1-T2604: the ledger's own answer to "has an operator explicitly DECLINED this proposal,
-   * and why?" — returns the recorded reason string when a `panel.proposal_declined` ledger
-   * line already exists for this proposal id, `undefined` otherwise. Checked immediately after
-   * {@link isRatified}, for the identical reason: a decline is an OPERATOR ACT, ledgered once
-   * at decline time, and is the ONE authoritative receipt — never re-derived from the
-   * proposal's own registry entry, and NEVER inferred from its title/summary prose (a keyword
-   * rule would let a worker retire its own proposal by phrasing, exactly the authority
-   * boundary this predicate exists to hold). OPTIONAL, exactly like {@link boardReferents}/
-   * {@link draftSpawnedAt}'s own optional siblings — every existing fixture/caller that never
-   * had a reason to think about a decline is unaffected (a proposal is simply never declined
-   * from their point of view). Real implementations derive this from
-   * {@link declinedReasonInLedger} over `readLedgerLines(ledgerPath)`.
-   */
+  /** W1-T2604: the reason a `panel.proposal_declined` ledger line records. ⚠ NEVER inferred from the proposal's own
+   *  prose — a keyword rule would let a worker retire its own proposal by phrasing. */
   isDeclined?: (proposalId: string) => string | undefined;
-  /**
-   * W1-T2451: the ONE batched read of every board-review referent's current state this
-   * classification pass — never a per-proposal read. Optional, exactly like
-   * {@link draftSpawnedAt}'s/{@link depsUnobservable}'s own optional siblings: every existing
-   * fixture/caller that never had a reason to think about a board-review referent is unaffected,
-   * and every proposal without an {@link Proposal.originatingItemId} ignores this entirely. When
-   * omitted, a proposal WITH an `originatingItemId` is treated as unreadable (never silently
-   * retired — cannot-observe means WAIT) rather than assumed live, so a caller that forgets to
-   * wire this in fails toward "keep showing it, marked unverified", not toward a false retirement.
-   */
+  /** W1-T2451: the ONE batched read of every referent's state this pass. Optional; omitting it makes such a proposal
+   *  unreadable rather than live, so a forgetful caller never false-retires one. */
   boardReferents?: BoardReferentRead;
-  /**
-   * Present iff the daemon's draft rung currently has an Architect worker running for this
-   * proposal id (W1-T193) — returns the ISO spawn timestamp, or `undefined` when no draft
-   * attempt is in flight for it. Real implementations derive this from
-   * {@link DraftInFlightCache} (`state/inbox-draft-inflight.json`); optional so every existing
-   * fixture/caller that never had a reason to think about drafting-in-flight is unaffected.
-   */
+  /** Present iff the daemon's rung currently has an Architect drafting this proposal (W1-T193) — the ISO spawn
+   *  timestamp. Derived from {@link DraftInFlightCache}; optional. */
   draftSpawnedAt?: (proposalId: string) => string | undefined;
-  /**
-   * W1-T510: the readiness predicate's THIRD value for a dependency's landed-ness. `isMerged`
-   * above is (necessarily — see {@link "./plan.js".MergedResolver}'s own two-valued signature,
-   * untouched by this task) a plain boolean, so it CANNOT itself distinguish "read, and not
-   * merged" from "never actually read" (throttled/auth/transport/truncated — W1-T119's
-   * `indeterminate`). This is that distinction, queried per DEPENDENCY task id: returns the
-   * classified {@link GhFailureReason} when the id's latest GitHub read was indeterminate, or
-   * `undefined` when it was genuinely observed (merged either way, `isMerged`'s answer stands).
-   * OPTIONAL, exactly like {@link isRatified}'s/{@link draftSpawnedAt}'s own optional siblings —
-   * every existing fixture/caller that never had a reason to think about an unobservable read
-   * behaves precisely as before (every id reports observed, so `isMerged`'s verdict is trusted
-   * outright, exactly as pre-W1-T510).
-   *
-   * {@link classifyProposal} consults this for every dependency id `isMerged` reported unmerged:
-   * an id THIS reports unobservable for is NEVER folded into the `deps_merged` dep-unmet
-   * predicate (the read never actually concluded "not merged", so no such claim is made) — it
-   * surfaces instead as its own `deps_observable` predicate naming the classified reason. THE
-   * POLARITY DOES NOT FLIP: an unobservable dep still keeps the proposal out of READY and
-   * `rmd approve` still refuses it — cannot-observe means WAIT (W1-T130), never READY on an
-   * unread dependency. Only WHAT IS SAID changes.
-   */
+  /** W1-T510: the readiness predicate's THIRD value for a dependency's landed-ness, since `isMerged` cannot tell
+   *  "read, and not merged" from "never actually read". THE INVARIANT: an unobservable id is never folded into
+   *  `deps_merged` and surfaces as `deps_observable`. THE POLARITY DOES NOT FLIP — it still keeps the proposal out of
+   *  READY (W1-T130). Only what is SAID changes. */
   depsUnobservable?: (taskId: string) => GhFailureReason | undefined;
 }
 
-/**
- * The ledger's own answer to "has this proposal already been ratified?" — the predicate
- * {@link ReadinessContext.isRatified} wraps in the real runner. Re-derived from the ledger on
- * EVERY read rather than trusted from any stored registry flag, so an EXISTING drifted
- * registry entry (the P19 case: `ratify.approved` landed in the ledger while the registry
- * entry sat untouched for three more hours) is healed the next time anything classifies it —
- * no migration step required, because nothing here ever trusted the stale copy in the first
- * place.
- */
+/** The ledger's answer to "has this proposal already been ratified?". Re-derived on every read rather than trusted
+ *  from a stored flag, so a drifted entry heals with no migration (W1-T190). */
 export function isRatifiedInLedger(ledgerLines: { step?: unknown; task_id?: unknown }[], proposalId: string): boolean {
   return ledgerLines.some((l) => l.step === "ratify.approved" && l.task_id === proposalId);
 }
 
-/**
- * W1-T2604: the ledger's own answer to "has an operator declined this proposal, and why?" —
- * the predicate {@link ReadinessContext.isDeclined} wraps in the real runner. `POST
- * /v1/inbox/decline` (lib/panel-graph.ts) appends exactly one `panel.proposal_declined` line
- * per decline, carrying the operator's `reason` verbatim; this is the ONE place that ledger
- * line is read back. Mirrors {@link isRatifiedInLedger}'s own "the ledger is the one
- * authoritative receipt, re-derived on every read" discipline — a decline is never trusted
- * from (or written to) the registry's own copy of the proposal. The LATEST matching line wins
- * on the (never expected) chance a proposal is declined more than once, so the most recent
- * operator reason is always what renders.
- */
+/** W1-T2604: the ledger's answer to "has an operator declined this, and why?". `POST /v1/inbox/decline` appends one
+ *  line carrying the reason verbatim; the latest wins. */
 export function declinedReasonInLedger(
   ledgerLines: { step?: unknown; task_id?: unknown; reason?: unknown }[],
   proposalId: string,
@@ -833,75 +476,33 @@ export function declinedReasonInLedger(
 }
 
 /**
- * THE ONE PLACE an approve run's `run_id` becomes a GIT REF NAME (and, through
- * `join(worktreesDir(config), branch)`, a WORKTREE DIRECTORY NAME). Sanitising happens HERE, at
- * the branch-name boundary, and NEVER on the proposal id itself: that id is a registry key in
- * `state/inbox-proposals.json` and a `task_id` VALUE on every ledger row the proposal ever wrote,
+ * THE ONE PLACE an approve run's `run_id` becomes a GIT REF NAME (and a worktree directory name). Sanitising happens
+ * HERE and NEVER on the proposal id, which is a registry key and a `task_id` on every ledger row the proposal wrote,
  * so rewriting it would orphan both.
  *
- * WHY IT EXISTS (MEASURED 2026-08-28T20:24:45Z and again at :46Z, the fleet host's ledger):
- * `approveCommand` mints `APPROVE-${proposalId}-${Date.now()}`, and `board-review.ts` mints
- * proposal ids of the form `board-review:escalation:#3039`. A COLON IS ILLEGAL IN A GIT REF, so
- * `git worktree add -b run-APPROVE-board-review:escalation:#3039-...` died with
- * `fatal: '...' is not a valid branch name` and NO proposal has ever been ratified — 0
- * `ratify.approved` rows across a 533,478-row three-form ledger union, against a control of 137
- * inbox/board-review rows in the same corpus. `#` is NOT the offender and never was: measured
- * through `git check-ref-format --branch`, `run-APPROVE-board-review-escalation-#3039-1` is
- * LEGAL while `run-APPROVE-board-review:escalation-3039-1` is ILLEGAL.
- *
- * NOT ONLY `board-review:`. Of the id shapes this codebase MINTS, three carry a colon and are
- * illegal — `board-review:stale:<ref>` and `board-review:escalation:<ref>` (lib/board-review.ts)
- * and `rule-efficacy:<ruleId>` ({@link ruleEfficacyProposalId}, lib/rule-efficacy.ts, latent
- * today because no such proposal is open) — while the feedback docket's `FD-<date>-<slug>`
- * (lib/feedback-docket.ts, already slugged at the mint) and the registry's own prose `P<N>` ids
- * are legal. So this is a general boundary defect, not a board-review special case, which is why
- * the transform below is TOTAL rather than a targeted replacement.
- *
- * INJECTIVITY — the property that stops two distinct runs sharing one branch, and hence one
- * worktree. The readable half is deliberately LOSSY (`board-review:x` and `board-review-x` slug
- * identically), so injectivity does NOT rest on it: a 12-hex-character SHA-256 prefix of the
- * ORIGINAL, unslugged `runId` is appended unconditionally. Two distinct run ids therefore reach
- * the same branch only on a 48-bit SHA-256 prefix collision. Unconditional, never "hash only when
- * the name was illegal", because a conditional transform reintroduces exactly the ambiguity the
- * digest exists to remove — a legal id could otherwise be crafted to equal some illegal id's
- * slugged form.
- *
- * SAFE TO CHANGE THE NAME FOR ALREADY-LEGAL SHAPES TOO: this lane has never pushed a branch.
- * `git ls-remote --heads origin 'run-APPROVE-*'` reads 0 (control: `run-W1-*` reads 59), and no
- * `run-APPROVE-*` worktree exists on the fleet host — so there is no prior name to preserve, and
- * {@link priorApproveRunBranch}, which derives a RESUME candidate from ledger evidence, routes
- * through this same function so the two derivations can never drift apart.
+ * THE TRAP IT CLOSES. A COLON IS ILLEGAL IN A GIT REF, and board-review.ts mints ids like
+ * `board-review:escalation:#3039`, so the worktree add died and no proposal had ever been ratified. Three minted
+ * shapes carry a colon while `FD-…` and `P<N>` are legal, so the transform below is TOTAL. INJECTIVITY rests entirely
+ * on the 12-hex SHA-256 prefix of the ORIGINAL `runId`, appended UNCONDITIONALLY, because the readable half is lossy.
+ * Why: the measured ledger evidence — docs/forensics/inbox.md.
  */
 export function approveRunBranch(runId: string): string {
   const slug = runId
-    // Whitelist. Every byte git forbids in a ref (space, control chars, and ~^:?*[\ ) plus "/"
-    // and "@" falls outside it, so one rule covers them all rather than a list that can rot.
+    // Whitelist. Every byte git forbids in a ref (space, control chars, and ~^:?*[\ ) plus "/" and "@" falls outside
+    // it, so one rule covers them all rather than a list that can rot.
     .replace(/[^A-Za-z0-9._-]/g, "-")
     .replace(/\.{2,}/g, "-") // git forbids ".." anywhere in a ref name
     .replace(/-{2,}/g, "-") // collapse runs, so the appended digest's own "-" stays a boundary
     .replace(/^[-.]+|[-.]+$/g, ""); // no leading "-"/"." and no trailing "." for git's own rules
-  // The digest closes the ".lock" tail rule too: the ref can never END in ".lock" with 12 hex
-  // characters after it.
+  // The digest closes the ".lock" tail rule too: the ref can never END in ".lock" with 12 hex characters after it.
   const digest = createHash("sha256").update(runId).digest("hex").slice(0, 12);
   return `run-${slug || "approve"}-${digest}`;
 }
 
-/**
- * W1-T903: the branch a PRIOR `rmd approve <proposalId>` run would have pushed, derived PURELY
- * from ledger evidence — `approveCommand` (run-task.ts) mints `run_id`s of the shape
- * `APPROVE-<proposalId>-<ms>` and its gateway always pushes `run-<run_id>`, so any ledger line
- * this proposal's own run_id ever appended (`approve.id_materialized`, `approve.error`,
- * `worktree.prune`, ...) names the branch by construction. EVIDENCE ONLY — the REMOTE read that
- * turns "a run_id exists" into "and it actually got pushed" is the caller's job (design iii);
- * this function never touches git or GitHub.
- *
- * SAFE TO TAKE THE MOST RECENT MATCH ONLY. `approveProposal` is reachable again for this
- * proposal only when the ledger does NOT already carry `ratify.approved` for it (a ratified
- * proposal classifies `ratified` and is refused before any gateway call, see refusalReason) — so
- * every EARLIER `APPROVE-<proposalId>-*` run already failed short of ratifying it, and only the
- * latest is worth resuming. `run_id`'s `<ms>` suffix is `Date.now()`, a fixed digit count for
- * centuries yet, so plain string comparison sorts it exactly as a numeric one would.
- */
+/** W1-T903: the branch a PRIOR `rmd approve` run would have pushed, derived purely from ledger evidence — run ids are
+ *  `APPROVE-<proposalId>-<ms>` and the gateway pushes `run-<run_id>`. EVIDENCE ONLY: confirming it was pushed is the
+ *  caller's job. Taking the most recent match is safe, because this is reachable only when the ledger lacks
+ *  `ratify.approved`. */
 export function priorApproveRunBranch(ledgerLines: { run_id?: unknown; task_id?: unknown }[], proposalId: string): string | undefined {
   const prefix = `APPROVE-${proposalId}-`;
   let best: string | undefined;
@@ -915,15 +516,8 @@ export function priorApproveRunBranch(ledgerLines: { run_id?: unknown; task_id?:
   return best === undefined ? undefined : approveRunBranch(best);
 }
 
-/**
- * Parse a drafted fragment's tasks — WITHOUT requiring every `depends_on` id to resolve
- * within the fragment itself (a fragment legitimately depends on tasks elsewhere in the
- * real plan, which {@link unmetOutsideDeps} checks against the merged plan separately,
- * a STRONGER check: an id that resolves nowhere is also necessarily unmerged, so it
- * surfaces as dep-unmet rather than a redundant parse failure). A genuine schema/YAML
- * problem (bad field types, duplicate ids, invalid risk/status, unparseable YAML) IS a
- * draft-unclean (lint) violation, not a crash — a fragment the linter can't even load
- * can never be READY. */
+/** Parse a fragment's tasks WITHOUT requiring every `depends_on` to resolve inside it — {@link unmetOutsideDeps}
+ *  checks that separately. A schema problem is draft-unclean, not a crash. */
 function safeParseFragment(fragmentYaml: string, proposalId: string): { plan: Plan } | { error: string } {
   try {
     const tasks = parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`);
@@ -933,35 +527,26 @@ function safeParseFragment(fragmentYaml: string, proposalId: string): { plan: Pl
   }
 }
 
-/** Merge a drafted fragment's tasks into the base plan — later (fragment) entries win,
- *  so a fragment task with the same id as an existing one shadows it for dep resolution. */
+/** Merge a drafted fragment's tasks into the base plan — later (fragment) entries win, so a fragment task with the
+ *  same id as an existing one shadows it for dep resolution. */
 function mergedPlan(base: Plan, fragment: Plan): Plan {
   const byId = new Map(base.byId);
   for (const t of fragment.tasks) byId.set(t.id, t);
   return { tasks: [...byId.values()], byId };
 }
 
-/** One dependency `unmetOutsideDeps` found INDETERMINATE rather than genuinely unmerged —
- *  `pair` mirrors the plain `task->dep` shape the `deps_merged` predicate's own list uses. */
+/** One dependency `unmetOutsideDeps` found INDETERMINATE rather than genuinely unmerged — `pair` mirrors the plain
+ *  `task->dep` shape the `deps_merged` predicate's own list uses. */
 interface UnobservableDep {
   pair: string;
   depId: string;
   reason: GhFailureReason;
 }
 
-/**
- * Dependency ids a drafted fragment's tasks name OUTSIDE the fragment itself (already
- * merged) that are not (yet) merged. A drafted task depending on a SIBLING task in the
- * SAME fragment is exempt — both land in the same plan PR together, so that is an
- * intra-fragment ordering concern, not an unmet-dependency one.
- *
- * W1-T510: `isMerged` is a plain boolean, so a dependency whose GitHub read was actually
- * INDETERMINATE (throttled/auth/transport/truncated) reports the same `false` as a
- * genuinely unmerged one — `isMerged` alone cannot tell the two apart. `depsUnobservable`
- * (per-dep-id, {@link ReadinessContext.depsUnobservable}) resolves that ambiguity: any
- * unmerged dep it names unobservable is split into `unobservable`, NEVER `unmet` — the
- * caller must never claim "not merged" about a dependency nobody actually read.
- */
+/** Dependency ids a fragment names OUTSIDE itself that are not yet merged; a SIBLING dep is exempt, since both land
+ *  in one plan PR. W1-T510: an INDETERMINATE read reports the same `false` as a genuinely unmerged dep, so any dep
+ *  `depsUnobservable` names is split into `unobservable`, NEVER `unmet` — never claim "not merged" about a dependency
+ *  nobody read. */
 function unmetOutsideDeps(
   basePlan: Plan,
   fragmentPlan: Plan,
@@ -995,50 +580,27 @@ function blockingLintMessages(basePlan: Plan, fragmentPlan: Plan): string[] {
   return out;
 }
 
-/**
- * The PURE readiness predicate. Trigger-deferral is checked FIRST and unconditionally —
- * a proposal naming an unfired trigger is DEFERRED_WITH_TRIGGER no matter what the other
- * four AND-clauses would otherwise say (the dead-consumer discipline: never recommend a
- * ratification whose consumer does not yet exist). Every other branch collects EVERY
- * failing predicate, not just the first — "each non-ready names its failing predicate"
- * means the whole set, not a first-match short-circuit.
- */
+/** The PURE readiness predicate. Trigger-deferral is checked first and unconditionally: an unfired trigger means
+ *  DEFERRED_WITH_TRIGGER whatever the other clauses say (the dead-consumer discipline). Every other branch collects
+ *  EVERY failing predicate, never the first. */
 export function classifyProposal(
   proposal: Proposal,
   draft: DraftedCandidate | undefined,
   ctx: ReadinessContext,
 ): InboxClassification {
-  // W1-T190: the ledger's ratify.approved receipt is checked FIRST, unconditionally, and
-  // OVERRIDES every other predicate below (including the trigger check) — a proposal the
-  // ledger already says is ratified is NEVER re-offered as READY (or as anything else that
-  // implies more approve action is possible), no matter what the registry's own copy of it
-  // still claims. This is the read-side half of the fix: the write-side half (the registry
-  // rewrite in run-task.ts's approveCommand) keeps the common case clean, but this check is
-  // what heals an EXISTING drifted entry, since it never trusts a stored flag at all.
+  // W1-T190: the ledger's ratify.approved receipt is checked FIRST and overrides every predicate below. This heals an
+  // existing drifted entry, because it never trusts a stored flag at all.
   if (ctx.isRatified(proposal.id)) {
     return { proposalId: proposal.id, state: "ratified", reasons: [] };
   }
-  // W1-T2604: an operator's decline is checked next, unconditionally, and OVERRIDES every
-  // predicate below (including the trigger check and the board-referent check that follows) —
-  // a declined proposal is deliberately never re-offered as ready/not_ready/deferred/drafting
-  // again, no matter what its own registry entry, draft cache, or evidence anchors say. This is
-  // the read-side half of "the console inbox can only say yes": the decline is recorded ONCE,
-  // in the ledger, by an explicit operator act (`POST /v1/inbox/decline`) — never inferred here
-  // from the proposal's own title/summary, which a worker writes and never ratifies.
+  // W1-T2604: an operator's decline is checked next and overrides everything below. It is recorded ONCE by an
+  // explicit operator act, never inferred here from prose a worker wrote.
   const declinedReason = ctx.isDeclined?.(proposal.id);
   if (declinedReason !== undefined) {
     return { proposalId: proposal.id, state: "declined", reasons: [], declinedReason };
   }
-  // W1-T2451: a board-review proposal's referent is checked next, before drafting/trigger/the
-  // four AND-clauses below. RESOLVED (the referent left the open board) is a terminal override,
-  // exactly like the ratified check above — a proposal about a PR that already merged, died, or
-  // had its escalation handled must never render READY, drafting, or deferred no matter what the
-  // rest of this function would otherwise say, because there is no longer a live referent for any
-  // of those states to be ABOUT. UNREADABLE never short-circuits: it only sets a flag threaded
-  // into whatever classification the rest of this function computes normally, so a proposal is
-  // never held out of a legitimate READY (or hidden into one) just because this pass's batched
-  // read failed — cannot-observe means WAIT (W1-T130), not "guess in either direction". LIVE (or
-  // no referent at all — every non-board-review proposal) changes nothing below.
+  // W1-T2451: RESOLVED is a terminal override — such a proposal has no live referent to be ABOUT. UNREADABLE never
+  // short-circuits: it only sets a flag, so a failed read never blocks a READY.
   const referent = resolveBoardReferent(proposal, ctx.boardReferents);
   if (referent.kind === "resolved") {
     return {
@@ -1052,13 +614,8 @@ export function classifyProposal(
     };
   }
   const referentUnverified = referent.kind === "unreadable" ? { referentUnverified: true as const } : {};
-  // W1-T193: an Architect worker currently drafting this proposal is checked next, before the
-  // ordinary not-ready/deferred predicates below — a proposal legitimately mid-draft for
-  // minutes (W1-T192's daemon-side rung) must never render as "not ready" (indistinguishable
-  // from broken) or fall through to a NOT_READY "no drafted candidate yet" that will be stale
-  // the moment the draft lands. In practice this never collides with the trigger check below —
-  // `proposalsNeedingDraft` already excludes an unfired-trigger proposal from ever being
-  // selected for drafting — but the order here is defensive, not load-bearing on that fact.
+  // W1-T193: an Architect currently drafting is checked before the ordinary predicates, since a proposal mid-draft
+  // for minutes must never render "not ready" — indistinguishable from broken.
   const draftSpawnedAt = ctx.draftSpawnedAt?.(proposal.id);
   if (draftSpawnedAt) {
     return { proposalId: proposal.id, state: "drafting", reasons: [], draftSpawnedAt, ...referentUnverified };
@@ -1067,9 +624,8 @@ export function classifyProposal(
     return {
       proposalId: proposal.id,
       state: "deferred_with_trigger",
-      // No AND-clause reasons here — the trigger gate is checked BEFORE those four and
-      // short-circuits regardless of what they'd say; {@link ProposalTrigger} names the
-      // unfired condition, which is the whole reason this proposal is never recommended.
+      // No AND-clause reasons: the trigger gate is checked BEFORE those four and short-circuits. {@link
+      // ProposalTrigger} names the unfired condition, which is the whole reason.
       reasons: [],
       trigger: proposal.trigger,
       ...referentUnverified,
@@ -1093,10 +649,8 @@ export function classifyProposal(
     if (unmet.length > 0) {
       reasons.push({ predicate: "deps_merged", detail: `dep-unmet: ${unmet.join(", ")} not merged` });
     }
-    // W1-T510: an unobservable dep is NEVER folded into `dep-unmet` above — it names the
-    // classified reason instead of accusing an unread dependency of being unmerged. Still an
-    // AND-clause failure (the proposal stays NOT READY — cannot-observe means wait, W1-T130),
-    // just an honest one.
+    // W1-T510: an unobservable dep is never folded into `dep-unmet` — it names the classified reason instead of
+    // accusing an unread dependency. Still an AND-clause failure, just an honest one.
     if (unobservable.length > 0) {
       const detail = unobservable.map((u) => `${u.depId} (${u.reason})`).join(", ");
       reasons.push({
@@ -1129,51 +683,24 @@ export function classifyProposal(
 
 // ── The draft rung: pure prompt + parser (LLM call is harness-owned, run-task.ts) ─────────
 
-/**
- * The bounded Architect worker's prompt for ONE proposal — asks for ONLY a `plan/tasks.yaml`
- * fragment + the MASTER-PLAN.md stamp line, nothing else. The worker has Read/Grep/Glob only
- * (no Write/Edit/Bash — see run-task.ts's `INBOX_DRAFT_WORKER_TOOLS`): it never touches a
- * file, it only produces text the harness parses with {@link parseDraftedCandidate} and
- * caches state-side. Mirrors lib/plan-architect.ts's single-prompt-definition discipline.
- */
+/** The bounded Architect worker's prompt for ONE proposal — a fragment plus the stamp line, nothing else. The worker
+ *  has Read/Grep/Glob only, enforced by {@link INBOX_DRAFT_DISALLOWED_TOOLS}. */
 const SCOPE_HINT = "files: — the repo-relative paths this task will touch";
 
 /**
- * W1-T2591 — THE TOOLS THE DRAFT PROMPT ALREADY CLAIMS THIS RUNG DOES NOT HAVE, now enforced.
+ * W1-T2591 — the tools the draft prompt already claims this rung does not have, now enforced.
  *
- * {@link inboxDraftPrompt} tells the worker, in as many words: "You have NO Write/Edit/Bash tools
- * — you cannot touch a file or run git." That sentence was the ONLY thing standing between a
- * draft worker and the checkout, and after #3588 (W1-T2664) parallelised `runDraftRung` into an
- * indexed worker pool it stopped being enough: `draftProposalBatch` materialises ONE worktree per
- * batch and hands that same `worktreePath` to every lane as `cwd`, so up to
- * `DAEMON_DRAFT_BATCH_CAP` workers now share one checkout where exactly one ran before. Worker
- * HOMES are already isolated per spawn (`perRunWorkerHomeDir(..., { perSpawn: true })`); the cwd
- * is not.
- *
- * MEASURED 2026-09-04, which is why prose was not enough: `settings/worker.json` carries
- * `allow: []` and a `deny` list of four READ paths (ssh, aws, remudero config, service-tokens) —
- * nothing about Write, Edit or Bash — and the spawn passes `permissionMode: "bypassPermissions"`.
- *
- * THE RUNG NEEDS NONE OF THEM, which is what makes enforcement the cheap remedy rather than
- * per-lane worktrees: the plan text is passed IN the prompt (`currentPlanText`), and the outcome
- * is parsed from the worker's TRANSCRIPT (`parseDraftedCandidate`), never read back off disk. So
- * the sharing becomes provably read-only instead of asserted read-only — the distinction this
- * task's own criterion is written around. Per-lane worktrees remain the stronger option and were
- * costed rather than dismissed: they multiply checkout disk by the cap on a host that hit 100%
- * full on 2026-09-01 (W1-T2585).
- *
- * `NotebookEdit` is listed alongside the prompt's own three because it is a write path the
- * sentence predates — the list enforces the CLAIM, not its 2026 wording.
+ * THE TRAP. That prompt sentence was the only thing between a draft worker and the checkout, and after #3588
+ * parallelised `runDraftRung` it stopped being enough: one worktree per batch is now shared by up to {@link
+ * DAEMON_DRAFT_BATCH_CAP} lanes, and worker HOMES are isolated while the cwd is not. The rung needs none of these
+ * tools, so enforcement is cheaper than per-lane worktrees, which would multiply checkout disk by the cap on a host
+ * that hit 100% full (W1-T2585). Why: the measured settings/worker.json permissions — docs/forensics/inbox.md.
  */
 export const INBOX_DRAFT_DISALLOWED_TOOLS: readonly string[] = ["Write", "Edit", "NotebookEdit", "Bash"];
 
 export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, runId: string): string {
-  // W1-T194: retraction is STRUCTURAL, not rhetorical — a round the operator marked
-  // `retracted` (via `rmd reframe --supersedes`) is OMITTED from this prompt entirely,
-  // never quoted, summarized, or "for context". Numbering stays POSITIONAL against the
-  // FULL history (never renumbered to the survivors' own count): a later `--supersedes`
-  // reference is always "round N" of the true history, so omitting a round here must
-  // never shift what a subsequent round number means.
+  // W1-T194: retraction is STRUCTURAL — a retracted round is omitted entirely, never summarised. Numbering stays
+  // POSITIONAL against the FULL history, so "round N" always means the same round.
   const history = proposal.reframeHistory ?? [];
   const numbered = history.map((round, i) => ({ round, n: i + 1 }));
   const survivors = numbered.filter(({ round }) => !round.retracted);
@@ -1224,11 +751,8 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "=== OUTPUT (exactly this shape, nothing else) ===",
     "Print ONE or more new tasks.yaml entries (schema v1 — id/title/repo/depends_on/type/verify/",
     "risk/status/attempts/acceptance/origin/files at minimum) between the two FRAGMENT markers below,",
-    // W1-T509-adjacent, W1-T512: `files:` is in that list because an ABSENT or EMPTY one is
-    // fail-closed at dispatch — `overlappingPaths` (lib/dispatch-overlap.ts) reports an
-    // undeclared task as overlapping EVERY co-dispatched candidate, so it can never batch and
-    // serialises the lane behind it. You have Read/Grep/Glob over a real worktree; name the
-    // paths you actually expect to touch rather than guessing or omitting the field.
+    // W1-T509-adjacent, W1-T512: an absent or empty `files:` is fail-closed at dispatch — `overlappingPaths` reports
+    // it as overlapping every candidate, so it can never batch.
     "then ONE stamp line for MASTER-PLAN.md's proposal list between the two markers below that —",
     "the same shape as an existing RATIFIED stamp (`- P## (...) — RATIFIED <date> -> <task ids>.`),",
     "with the task-id list written as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
@@ -1256,24 +780,16 @@ const STAMP_RE = /^[ \t]*STAMP:[ \t]*(.+)$/gim;
 const FENCE_LINE_RE = /^```[A-Za-z0-9_+-]*[ \t]*$/;
 
 /**
- * Strip a markdown code fence wrapping an Architect-drafted fragment — a ```yaml (or bare
- * ```) opening line and its matching ``` closing line — so a FENCED draft parses as plain
- * YAML instead of falsely failing draft-rung's `lint_clean` predicate (W1-T173; the P19
- * fixture: the inbox's own INAUGURAL ratification arrived fenced and was rejected as
- * draft-unclean even though its YAML content was perfectly well-formed — an LLM emitting
- * fenced YAML is the overwhelmingly common case, not an edge case). {@link inboxDraftPrompt}
- * now also instructs raw-YAML-only output, so this strip is a safety net, not the sole guard.
- *
- * A NO-OP when the fragment isn't fenced at all — returned byte-identical, so an already-
- * clean draft is untouched. FAILS LOUD (throws {@link PlanError}) on a malformed fence — an
- * opening ``` with no matching close, or a stray ``` line elsewhere in the document — rather
- * than guessing where the real content ends: a silent partial strip could truncate real
- * tasks unseen, which is strictly worse than a loud, named parse failure.
+ * Strip a markdown code fence wrapping an Architect-drafted fragment, so a FENCED draft parses as plain YAML instead
+ * of falsely failing the `lint_clean` predicate (W1-T173). A NO-OP when the fragment is not fenced. FAILS LOUD
+ * ({@link PlanError}) on a malformed fence rather than guessing where the content ends, because a silent partial
+ * strip could truncate real tasks unseen. Why: the P19 inaugural ratification this rejected —
+ * docs/forensics/inbox.md.
  */
 export function stripMarkdownFence(fragmentYaml: string): string {
   const lines = fragmentYaml.split(/\r?\n/);
-  // An Architect's fragment may have incidental leading/trailing blank lines around the
-  // fence itself — only the first/last NON-blank line counts as a candidate fence marker.
+  // An Architect's fragment may have incidental leading/trailing blank lines around the fence itself — only the
+  // first/last NON-blank line counts as a candidate fence marker.
   let start = 0;
   while (start < lines.length && lines[start].trim() === "") start++;
   let end = lines.length - 1;
@@ -1286,8 +802,8 @@ export function stripMarkdownFence(fragmentYaml: string): string {
   if (!closeIsFence) {
     throw new PlanError("draft fragment has an opening ``` fence with no matching closing ``` — refusing to guess where it ends");
   }
-  // A stray standalone ``` line strictly BETWEEN open and close is a malformed/nested fence
-  // — fail loud rather than silently picking the first/last markers and truncating content.
+  // A stray standalone ``` line strictly BETWEEN open and close is a malformed/nested fence — fail loud rather than
+  // silently picking the first/last markers and truncating content.
   for (let i = start + 1; i < end; i++) {
     if (FENCE_LINE_RE.test(lines[i].trim())) {
       throw new PlanError(`draft fragment has a stray \`\`\` fence marker mid-document at line ${i + 1} — refusing to guess where it ends`);
@@ -1296,17 +812,9 @@ export function stripMarkdownFence(fragmentYaml: string): string {
   return lines.slice(start + 1, end).join("\n");
 }
 
-/**
- * Extract the worker's FRAGMENT + STAMP off its concatenated output text. LAST-marker-wins
- * (mirrors lib/triage.ts's `parseTriageVerdict` / lib/plan-architect.ts's `parsePlanVerdict`
- * discipline — a worker's final answer, after any scratch reasoning, is the one that counts).
- * Returns `null` when either marker is missing — a malformed draft is never silently treated
- * as a candidate. The captured fragment is run through {@link stripMarkdownFence} BEFORE it
- * ever reaches `safeParseFragment`/`parseTasksFromYaml`/the draft cache (W1-T173) — a fence
- * a worker wraps around otherwise-valid YAML must never masquerade as draft-unclean; a
- * malformed fence throws {@link PlanError} out of this function instead (every caller —
- * {@link runDraftRung} — already isolates one proposal's parse in its own try/catch).
- */
+/** Extract the worker's FRAGMENT and STAMP off its concatenated output. LAST-marker-wins, like `parseTriageVerdict`.
+ *  `null` when either marker is missing — a malformed draft is never silently treated as a candidate. The fragment
+ *  runs through {@link stripMarkdownFence} first; a malformed fence throws, which {@link runDraftRung} isolates. */
 export function parseDraftedCandidate(text: string): ParsedDraft | null {
   const fragments = [...text.matchAll(FRAGMENT_RE)];
   const stamps = [...text.matchAll(STAMP_RE)];
@@ -1319,19 +827,12 @@ export function parseDraftedCandidate(text: string): ParsedDraft | null {
 
 // ── The draft rung's INJECTABLE orchestration core (W1-T192) ─────────────────────────────
 //
-// One Architect spawn per proposal is still the harness's job (run-task.ts materializes a
-// worktree and calls worker.ts's real `spawnWorker`) — but WHICH proposals get attempted,
-// how each spawn's output is parsed/logged, and whether one proposal's failure can strand
-// the rest of the batch, is exactly the "pure core / harness-owned I/O" split this module's
-// header describes for lib/plan-architect.ts/lib/dep-review.ts. `deps.spawn` is the ONE
-// injected side effect (mirrors lib/sweep.ts's `SweepDeps.dispatchFix`/lib/review.ts's
-// `runFixRung` `deps.spawn`), so both `rmd inbox` and the daemon rung ride this SAME loop
-// and it is provable from a unit fixture with no real worktree/gh/LLM call anywhere.
+// One Architect spawn per proposal stays the harness's job. WHICH proposals get attempted, and whether one failure
+// strands the batch, is the pure-core split this module's header describes. `deps.spawn` is the ONE injected side
+// effect, so the CLI and the daemon ride the SAME loop.
 
-/** One Architect worker call for one proposal's draft prompt — real wiring (run-task.ts)
- *  calls worker.ts's `spawnWorker` inside an already-materialized worktree; tests inject a
- *  fake. Returns the full {@link WorkerResult} so {@link runDraftRung} can log the SAME
- *  `workerLedgerFields` every other spawn site ledgers (cost/tokens/compaction/etc). */
+/** One Architect worker call for one proposal's draft prompt; tests inject a fake. Returns the full {@link
+ *  WorkerResult} so {@link runDraftRung} logs the same `workerLedgerFields` as every spawn. */
 export type DraftSpawn = (proposal: Proposal, prompt: string) => Promise<WorkerResult>;
 
 export interface DraftRungDeps {
@@ -1339,45 +840,23 @@ export interface DraftRungDeps {
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
-/** One proposal's draft-rung outcome — `ok: true` carries the {@link DraftedCandidate} to
- *  cache; `ok: false` names why (a malformed worker output, OR a genuine spawn-level
- *  exception) without ever throwing out of {@link runDraftRung}. */
+/** One proposal's draft-rung outcome — `ok: true` carries the candidate to cache; `ok: false` names why, whether
+ *  malformed output or a spawn-level exception, without ever throwing. */
 export type DraftRungOutcome =
   | { proposalId: string; ok: true; candidate: DraftedCandidate }
-  /**
-   * W1-T2564: `refused` marks a run the ACCOUNT turned away (a session/usage limit), as distinct
-   * from a run that happened and failed. THE DIFFERENCE IS NOT COSMETIC — it decides whether a
-   * {@link DraftAttemptCache} key is written. W1-T192 records a key on failure deliberately, so a
-   * genuinely failing cause is not retried every poll; but a REFUSAL IS NOT AN ATTEMPT, and keying
-   * it retires work that never ran. MEASURED: 267 of 353 proposals ever drafted had never once
-   * actually been drafted, all 267 keyed, none with a cached draft — and because a routed
-   * follow-up's key is the literal `::0` and never changes, none could ever become due again.
-   */
+  /** W1-T2564: `refused` marks a run the ACCOUNT turned away, as distinct from a run that happened and failed. That
+   *  decides whether a {@link DraftAttemptCache} key is written, and keying a refusal retires work that never ran.
+   *  Why: the 267-of-353 measurement — docs/forensics/inbox.md. */
   | { proposalId: string; ok: false; error: string; refused?: { matched: string; resetsAtMs?: number } };
 
-/**
- * Draft EVERY proposal in `toDraft` against `currentPlanText`, via {@link inboxDraftPrompt} +
- * {@link parseDraftedCandidate}. Independent proposals run concurrently up to
- * {@link DAEMON_DRAFT_BATCH_CAP}; a single proposal's bounded self-lint retries remain serial.
- * The same ceiling also protects the manual, unthrottled inbox caller from turning a large queue
- * into unbounded simultaneous subscription use. Each proposal's spawn+parse is isolated in its OWN try/catch
- * — W1-T192's fail-soft requirement: a genuine spawn-level exception for one proposal (a
- * network hiccup, an API error — distinct from the "no FRAGMENT/STAMP markers" malformed-
- * output case, which was already tolerated pre-W1-T192) never prevents the REST of the batch
- * from being attempted. This is what makes the SAME loop safe to call from an unattended
- * daemon poll, not only from a human watching `rmd inbox`'s output. Never throws.
- */
-/** cc71f2: the draft rung's own bounded self-lint. The first attempt is the ordinary draft;
- *  each further attempt is a redraft carrying the prior fragment's linter violations. Keeps the
- *  Architect from re-rolling blind while never looping unboundedly. */
-// impl-FU: re-exported from lib/relint.ts so triage/plan/inbox share ONE bound. The name is
-// kept because test/inbox.test.ts imports it.
+/** cc71f2: the draft rung's own bounded self-lint — the first attempt is the ordinary draft, and
+ *  each further attempt carries the prior fragment's violations, so the Architect never re-rolls
+ *  blind and never loops unboundedly. */
+// impl-FU: re-exported from lib/relint.ts so triage, plan and inbox share ONE bound.
 export const MAX_DRAFT_LINT_ATTEMPTS = MAX_RELINT_ATTEMPTS;
 
-/** Lint a drafted fragment exactly as `rmd lint-plan` would: parse it, then collect every
- *  BLOCK-severity violation across its tasks. A fragment that does not even parse is itself one
- *  block violation (the P37-class YAMLParseError), so it drives a redraft rather than being
- *  cached as a permanently-NOT-READY draft. */
+/** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
+ *  violation, so it drives a redraft rather than being cached as NOT-READY. */
 export function lintDraftedFragment(fragmentYaml: string, proposalId: string): DraftLintViolation[] {
   let tasks;
   try {
@@ -1392,8 +871,8 @@ export function lintDraftedFragment(fragmentYaml: string, proposalId: string): D
   return violations;
 }
 
-/** The redraft prompt: the failed fragment + its violations + the Rule-19 resolution doctrine
- *  (the #588 merits test), so the Architect fixes the SPECIFIC failures rather than re-rolling. */
+/** The redraft prompt: the failed fragment + its violations + the Rule-19 resolution doctrine (the #588 merits test),
+ *  so the Architect fixes the SPECIFIC failures rather than re-rolling. */
 export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string, violations: DraftLintViolation[]): string {
   return [
     `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + stamp in the same FRAGMENT/STAMP marker format.`,
@@ -1405,15 +884,17 @@ export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string,
   ].join("\n");
 }
 
+/** Draft EVERY proposal in `toDraft`. Independent proposals run concurrently up to {@link DAEMON_DRAFT_BATCH_CAP};
+ *  one proposal's self-lint retries stay serial. NEVER THROWS — each spawn and parse is isolated in its OWN try/catch
+ *  (W1-T192's fail-soft requirement), which is what makes this safe on an unattended poll. */
 export async function runDraftRung(toDraft: Proposal[], currentPlanText: string, deps: DraftRungDeps, runId: string): Promise<DraftRungOutcome[]> {
   const draftOne = async (proposal: Proposal): Promise<DraftRungOutcome> => {
     try {
       let prompt = inboxDraftPrompt(proposal, currentPlanText, runId);
       let parsed: ReturnType<typeof parseDraftedCandidate> = null;
       let violations: DraftLintViolation[] = [];
-      // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures
-      // in hand — bounded — so a fired proposal reaches READY without an operator cleanup pass
-      // (the P34/W1-T247 sizing gap that motivated this, and the P37-class YAMLParseError).
+      // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures in hand, bounded, so a
+      // fired proposal reaches READY without an operator cleanup pass.
       let lastWorker: Awaited<ReturnType<DraftRungDeps["spawn"]>> | undefined;
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
         const worker = await deps.spawn(proposal, prompt);
@@ -1436,12 +917,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         }
       }
       if (!parsed) {
-        // W1-T2564: A REFUSED RUN PRODUCES NO OUTPUT, SO IT LANDS HERE LOOKING LIKE MALFORMED
-        // OUTPUT. The marker absence is a SYMPTOM — the worker was turned away before it could
-        // emit anything — so the error string alone ("no FRAGMENT/STAMP markers") sent every
-        // reader toward the prompt and away from the account. `lastWorker.usageRefusal` is set at
-        // the one seam that still had the SDK's message (lib/worker.ts's swallow); reading it
-        // here re-labels the outcome without re-deriving anything.
+        // W1-T2564: A REFUSED RUN PRODUCES NO OUTPUT, SO IT LANDS HERE LOOKING MALFORMED. The bare error sent every
+        // reader toward the prompt; `lastWorker.usageRefusal` re-labels it.
         const refusal = lastWorker?.usageRefusal;
         const error = refusal
           ? `refused by the account before any output: ${refusal.matched}`
@@ -1471,9 +948,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         stampLine: parsed.stampLine,
         anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors),
       };
-      // A still-dirty draft after the bounded retries is cached anyway (the classification will
-      // surface it NOT-READY, exactly as before this rung existed) — but the unresolved set is
-      // named on the ledger so the retro/operator sees the rung tried and what it could not fix.
+      // A still-dirty draft after the bounded retries is cached anyway and surfaces NOT-READY, but the unresolved set
+      // is named on the ledger so the retro sees what the rung could not fix.
       deps.log("inbox.drafted", { proposal_id: proposal.id, lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
       return { proposalId: proposal.id, ok: true, candidate };
     } catch (e) {
@@ -1483,11 +959,9 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
     }
   };
 
-  // W1-T2664: the daemon's volume cap was also an accidental wall-clock multiplier. Live
-  // evidence on 2026-09-02 showed three independent drafts starting sequentially inside one full
-  // sweep; one completed after 347s and the batch crossed the sweep's 559s await bound. A tiny
-  // indexed worker pool makes elapsed time approach the slowest proposal instead of their sum,
-  // while preserving input order and keeping the existing cap as the hard concurrency ceiling.
+  // W1-T2664: the volume cap was also an accidental wall-clock multiplier. A tiny indexed pool makes elapsed time
+  // approach the slowest proposal, not their sum.
+  // Why: the measured sequential drafts that crossed the sweep's await bound — docs/forensics/inbox.md.
   const outcomes = new Array<DraftRungOutcome>(toDraft.length);
   let nextIndex = 0;
   const runLane = async (): Promise<void> => {
@@ -1503,15 +977,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
 
 // ── Real-world evidence-anchor adapter (git grep, never a network call) ──────────────────
 
-/**
- * REAL {@link ReadinessContext.grepAnchorTrue} implementation: `git grep` for the anchor's
- * pattern on `ref` (typically `origin/main`), scoped to `path` when given. `git grep`'s own
- * exit codes distinguish the two cases precisely: 0 (a match) ⇒ true; EXACTLY 1 (no match,
- * clean search) ⇒ false; anything else — 128 (bad ref/pathspec), a signal, git not found,
- * … — is a genuine error and is thrown, never silently folded into "not grep-true" (the same
- * status-vs-signal split lib/review.ts's `runWhitelistedProof` uses, refined to git grep's
- * specific 0/1/128 vocabulary rather than "any status is a clean fail").
- */
+/** REAL {@link ReadinessContext.grepAnchorTrue}. Git grep's exit codes decide: 0 is true, EXACTLY 1 is false, and
+ *  anything else is a genuine error and is thrown, never folded into "not true". */
 export function gitGrepAnchorTrue(cwd: string, ref: string, anchor: EvidenceAnchor): boolean {
   const args = anchor.path ? ["grep", "-I", "-q", "-e", anchor.pattern, ref, "--", anchor.path] : ["grep", "-I", "-q", "-e", anchor.pattern, ref];
   try {
@@ -1526,9 +993,8 @@ export function gitGrepAnchorTrue(cwd: string, ref: string, anchor: EvidenceAnch
 
 // ── Rendering (design (c): the reasoning rides with the recommendation) ──────────────────
 
-/** Human-readable inbox listing — READY items carry their drafted tasks; every non-ready
- *  item names its failing predicate(s); a deferred item names its trigger and is never
- *  presented as a recommendation. This is the ONLY rendering `rmd inbox` prints from. */
+/** Human-readable inbox listing — READY items carry their drafted tasks, every non-ready item names its failing
+ *  predicates, and a deferred item is never presented as a recommendation. */
 export function renderInbox(classifications: InboxClassification[]): string {
   if (classifications.length === 0) return "rmd inbox: no active proposals.";
   const lines: string[] = [];
@@ -1548,11 +1014,8 @@ export function renderInbox(classifications: InboxClassification[]): string {
   for (const c of ready) {
     lines.push("");
     lines.push(`READY — ${c.proposalId}`);
-    // W1-T2461: a READY row with no cached draft used to print an empty stamp line and an
-    // empty drafted-tasks block — two blank fields that read as a rendering failure, not as
-    // "this row has nothing yet". Name the absence on one line instead. Readiness itself is
-    // untouched: it is still computed from dependencies (`classifyProposal`), never from
-    // whether a draft happens to be cached, so this branch is purely a rendering choice.
+    // W1-T2461: a READY row with no cached draft used to print two blank fields, which read as a rendering failure.
+    // Readiness is untouched — still computed, never read off the draft cache.
     if (c.draft) {
       lines.push(`  stamp: ${c.draft.stampLine}`);
       lines.push(`  drafted tasks:\n${c.draft.fragmentYaml.replace(/^/gm, "    ")}`);
@@ -1576,24 +1039,20 @@ export function renderInbox(classifications: InboxClassification[]): string {
     lines.push(`DEFERRED-WITH-TRIGGER — ${c.proposalId} (never recommended)`);
     lines.push(`  trigger: ${c.trigger?.description ?? ""} (fired=${String(c.trigger?.fired ?? false)})`);
   }
-  // W1-T190: a ratified proposal is NEVER listed under READY, no matter what its own
-  // predicates would otherwise say — offering the ratify affordance again on something the
-  // backend (`rmd approve`) would refuse is the exact wrong-affordance shape W1-T182 removes
-  // elsewhere. Named here so it is visible, never silently dropped from the summary count.
+  // W1-T190: a ratified proposal is NEVER listed under READY, since offering an affordance `rmd approve` would refuse
+  // is the wrong-affordance shape W1-T182 removes elsewhere.
   for (const c of ratified) {
     lines.push("");
     lines.push(`RATIFIED — ${c.proposalId} (already ratified via a prior \`rmd approve\`; no longer active)`);
   }
-  // W1-T2451: a proposal whose referent resolved (merged/dead/escalation-handled) is named here,
-  // not silently dropped — retirement is a state, never a deletion, and this is where an operator
-  // sees that the finding existed and why it went moot.
+  // W1-T2451: a proposal whose referent resolved is named here, not silently dropped — retirement is a state, and
+  // this is where an operator sees the finding existed and why it went moot.
   for (const c of retired) {
     lines.push("");
     lines.push(`RETIRED — ${c.proposalId} (${c.retiredReason ?? "referent resolved"})`);
   }
-  // W1-T2604: a declined proposal is named here, not silently dropped — declining is a state,
-  // never a deletion, mirroring RETIRED immediately above (the two "state, never delete"
-  // families this codebase now has, each with its own reason field and its own trigger).
+  // W1-T2604: a declined proposal is named here too, mirroring RETIRED above — the two "state, never delete"
+  // families, each with its own reason field and its own trigger.
   for (const c of declined) {
     lines.push("");
     lines.push(`DECLINED — ${c.proposalId} (${c.declinedReason ?? "declined by an operator"})`);
@@ -1603,14 +1062,9 @@ export function renderInbox(classifications: InboxClassification[]): string {
 
 // ── The digest's ready-count block (W1-T112: the morning pulse) ──────────────────────────
 //
-// Same "latest wins" snapshot discipline as lib/ops.ts's AlertsPollSummary / lib/issues-
-// intake.ts's IssuesPollSummary: `rmd inbox` ledgers ONE `inbox.polled` line per invocation
-// carrying this summary, and digest.ts reads the LATEST such line inside its window — a
-// snapshot of the CURRENT ready count, not an additive event count, exactly like a
-// re-poll of unchanged alerts/issues never double-counts. Unlike alerts/issues, digest.ts
-// renders this SOFT: no line at all when `rmd inbox` never polled inside the window,
-// rather than an always-present "(no poll this window)" fallback — the inbox module can
-// land or not without the digest's rendered shape ever depending on it.
+// Latest-wins snapshot discipline, like ops.ts's AlertsPollSummary: digest.ts reads the LATEST `inbox.polled` line in
+// its window, a snapshot rather than an additive event count. Rendered SOFT, so this module can land or not without
+// the digest depending on it.
 
 export interface InboxPollSummary {
   /** How many active proposals classified READY this poll — the digest's "N ready" count. */
@@ -1627,9 +1081,7 @@ export function renderInboxPollSummary(s: InboxPollSummary): string {
   return `${s.ready} ready`;
 }
 
-// ── State-side registry shapes (harness reads/writes these; this module types them AND,
-// as of W1-T240, owns the one real write-side helper every writer must share — see
-// updateProposalRegistry below) ─────────────────────────────────────────────────────────
+// ── State-side registry shapes; W1-T240's one write-side helper for them is below ─────────────────
 
 /** `<config.root>/state/inbox-proposals.json` — the ACTIVE-proposal registry. */
 export interface ProposalRegistry {
@@ -1641,30 +1093,16 @@ export interface DraftCache {
   [proposalId: string]: DraftedCandidate;
 }
 
-/** W1-T1270: the discriminated outcome {@link parseProposalRegistryResult} reports —
- *  the same four input classes {@link parseProposalRegistry} collapses to `[]` kept
- *  apart, so a caller that cares WHY a read came back with no proposals can tell "this
- *  path has never fired" from "it fired and was drained" from "the file was torn on the
- *  last concurrent write" (the exact hazard {@link updateProposalRegistry}'s own header
- *  doc names: "a torn read becomes a SILENT empty registry").
- *   - `"absent"`  — no text at all: the file was never created. The normal
- *     pre-population state for a path that has never fired, NOT a fault.
- *   - `"fault"`   — text was present but unusable: a `JSON.parse` throw (`reason:
- *     "malformed"`, e.g. a reader observing a torn concurrent write) or a parsed value
- *     whose `proposals` key is missing/not-an-array (`reason: "wrong-shape"`, a
- *     foreign or corrupted blob).
- *   - `"ok"`      — a well-shaped registry. `proposals` may legitimately be `[]` (a
- *     fired-and-drained registry, or one freshly initialised empty) — that emptiness is
- *     never a fault. */
+/** W1-T1270: the discriminated outcome {@link parseProposalRegistryResult} reports, keeping apart the classes {@link
+ *  parseProposalRegistry} collapses to `[]`. `"absent"` is the normal pre-population state; `"fault"` is a parse
+ *  throw or a bad `proposals` key; `"ok"` may legitimately carry `[]`, which is never a fault. */
 export type ProposalRegistryParseResult =
   | { kind: "absent" }
   | { kind: "fault"; reason: "malformed" | "wrong-shape" }
   | { kind: "ok"; proposals: Proposal[] };
 
-/** Discriminated parse of a {@link ProposalRegistry} JSON blob — see
- *  {@link ProposalRegistryParseResult} for what each outcome means. Never throws.
- *  {@link parseProposalRegistry} is the fail-soft-to-`[]` projection of this for
- *  callers that don't need to distinguish absent/fault/empty. */
+/** Discriminated parse of a {@link ProposalRegistry} blob — see {@link ProposalRegistryParseResult} for what each
+ *  outcome means. Never throws. {@link parseProposalRegistry} is the fail-soft-to-`[]` projection of this. */
 export function parseProposalRegistryResult(text: string | undefined): ProposalRegistryParseResult {
   if (!text) return { kind: "absent" };
   let raw: unknown;
@@ -1680,49 +1118,28 @@ export function parseProposalRegistryResult(text: string | undefined): ProposalR
   return { kind: "ok", proposals: r.proposals as Proposal[] };
 }
 
-/** Parse a {@link ProposalRegistry} JSON blob; `[]` (never a throw) on missing/malformed
- *  input — an inbox with no registry yet is the normal pre-population state, not an error
- *  (mirrors lib/plan-index.ts's `loadPlanIndex` fail-soft-to-empty discipline). Every
- *  existing caller keeps this exact fail-soft shape unchanged; a caller that needs to
- *  know WHY a read came back with no proposals should call
- *  {@link parseProposalRegistryResult} instead (W1-T1270). */
+/** Parse a {@link ProposalRegistry} blob; `[]`, never a throw, on missing or malformed input. A caller needing to
+ *  know WHY it came back empty calls {@link parseProposalRegistryResult}. */
 export function parseProposalRegistry(text: string | undefined): Proposal[] {
   const result = parseProposalRegistryResult(text);
   return result.kind === "ok" ? result.proposals : [];
 }
 
-// ── W1-T2490: PROPOSAL SHARDING — a proposal gets the same one-record-per-file home
-// `plan/tasks.d/` already gave tasks and `plan/decisions.d/` gave decisions ───────────────
+// ── W1-T2490: PROPOSAL SHARDING — one record per file, as `plan/tasks.d/` gave tasks ──────
 //
-// `state/inbox-proposals.json` was the last plan artifact still a single blob: an arriving
-// proposal was a whole-file rewrite, and two minters filing DIFFERENT proposals in the same
-// window contended on the same file — exactly the collision shape `plan/tasks.d/` was built
-// to retire (the nine-PR appender train, #271). This mirrors that fix, not a new one:
-// `loadProposalRegistry` merges the legacy blob with a sibling `inbox-proposals.d/` shard
-// directory exactly as plan.ts's `loadPlan` merges `tasks.yaml` with `tasks.d/`, including
-// its duplicate-id refusal — the property that makes the merge safe rather than merely
-// convenient. `updateProposalRegistry` (below) is the only writer, so this is invisible to
-// every caller of it: same signature, same `Proposal[]` shape in and out.
-//
-// NOT IN SCOPE (this task's own rationale): changing what any minter proposes or when, the
-// inbox's tiering/`classifyProposal`, or deleting the legacy blob — an existing blob-sourced
-// proposal stays right where it is until an operator runs a migration codemod later; only a
-// NEW or actively-rewritten proposal ever lands in a shard file.
+// The registry was the last plan artifact still a single blob, so two minters filing in the same window contended on
+// one file. {@link loadProposalRegistry} now merges the legacy blob with a sibling `inbox-proposals.d/` exactly as
+// plan.ts's `loadPlan` merges `tasks.yaml` with `tasks.d/`, duplicate-id refusal included. Only a NEW or
+// actively-rewritten proposal lands in a shard.
 
-/** Sibling shard directory to `registryPath` (`state/inbox-proposals.d/`, next to
- *  `state/inbox-proposals.json`) — derived from the registry's own path, never hardcoded,
- *  so a test fixture using a differently-named registry file still resolves correctly. */
+/** Sibling shard directory to `registryPath` — derived from the registry's own path, never hardcoded. */
 export function proposalShardDir(registryPath: string): string {
   const stem = basename(registryPath, extname(registryPath));
   return join(dirname(registryPath), `${stem}.d`);
 }
 
-/** The shard file a given proposal `id` is written to — DERIVED, never stored: a slug
- *  prefix for human scanning plus a content hash of the id so two ids that slugify to the
- *  same text (differing only in punctuation) cannot collide and silently overwrite one
- *  another. Reading NEVER trusts this name back — {@link readProposalShards} keys on each
- *  shard's OWN `id` field, the same "derive, don't construct" discipline plan.ts's
- *  `taskRecordPath` doc argues for tasks. This is only where a WRITE lands. */
+/** The shard file a proposal `id` is written to — DERIVED: a slug prefix plus a content hash, so two ids that slugify
+ *  alike cannot collide. Reading keys on each shard's OWN `id`, never this name. */
 function proposalShardFilename(id: string): string {
   const hash = createHash("sha256").update(id).digest("hex").slice(0, 12);
   const slug = id
@@ -1737,13 +1154,8 @@ function proposalShardPath(registryPath: string, id: string): string {
   return join(proposalShardDir(registryPath), proposalShardFilename(id));
 }
 
-/** List the shard files under `shardDir` (sorted, deterministic order). `[]` when the
- *  directory does not exist — the back-compat case for every registry that has not
- *  migrated to sharding yet, mirroring plan.ts's `listShardFiles` ENOENT tolerance exactly.
- *  Any OTHER read failure (EACCES, ENOTDIR — the directory slot is occupied by something
- *  that is not a directory) is NOT forgiven: that means the shard population cannot be
- *  trusted, and reporting an empty population instead of refusing would silently hide
- *  every proposal it holds from `rmd inbox` and any other reader. */
+/** List the shard files under `shardDir`. `[]` when it does not exist, the unmigrated case; any OTHER read failure is
+ *  NOT forgiven, since an empty answer would hide every proposal it holds. */
 function listProposalShardFiles(shardDir: string): string[] {
   let entries: string[];
   try {
@@ -1755,10 +1167,8 @@ function listProposalShardFiles(shardDir: string): string[] {
   return entries.filter((f) => f.endsWith(".json")).sort();
 }
 
-/** Parse every shard under `shardDir`, keyed by each file's OWN declared `id` — never the
- *  filename (see {@link proposalShardFilename}'s doc). Two shard files declaring the SAME
- *  id is a genuine, never-expected collision and is refused loud rather than silently
- *  picked one way, mirroring plan.ts's `loadPlan` duplicate-task-id guard exactly. */
+/** Parse every shard, keyed by each file's OWN declared `id`, never the filename. Two files declaring the SAME id is
+ *  refused loud, mirroring plan.ts's duplicate-task-id guard. */
 function readProposalShards(shardDir: string): Map<string, { proposal: Proposal; path: string }> {
   const out = new Map<string, { proposal: Proposal; path: string }>();
   for (const file of listProposalShardFiles(shardDir)) {
@@ -1782,22 +1192,9 @@ function readProposalShards(shardDir: string): Map<string, { proposal: Proposal;
   return out;
 }
 
-/**
- * Load `registryPath` (the legacy `state/inbox-proposals.json` blob) merged with any shards
- * under the sibling `inbox-proposals.d/` directory, as ONE population — exactly as plan.ts's
- * `loadPlan` merges `tasks.yaml` with `tasks.d/`. SAME signature and return shape as the
- * `parseProposalRegistry(readFileIfExists(registryPath))` idiom every current reader already
- * uses (a path in, a `Proposal[]` out) — a future caller can swap to this with NO other
- * change, which is the point: the modules reading this registry today must not need to
- * learn sharding exists.
- *
- * A proposal id present in BOTH the blob and a shard resolves to the shard's copy, ONCE —
- * the expected steady state once {@link updateProposalRegistry} starts sharding new/edited
- * proposals instead of rewriting the whole blob for them (this task's rationale: "a proposal
- * that exists in the blob and as a shard must resolve once, not twice"). A proposal id
- * claimed by TWO DIFFERENT SHARD FILES is the genuine collision {@link readProposalShards}
- * refuses — that guard is what stops the both-places case from silently resolving twice.
- */
+/** Load `registryPath` merged with the sibling `inbox-proposals.d/` shards as ONE population, with the same signature
+ *  every current reader's idiom already has. An id in BOTH resolves to the shard's copy, ONCE; an id claimed by TWO
+ *  shard files is the collision {@link readProposalShards} refuses. */
 export function loadProposalRegistry(registryPath: string): Proposal[] {
   const blobProposals = parseProposalRegistry(fs.existsSync(registryPath) ? fs.readFileSync(registryPath, "utf8") : undefined);
   const shards = readProposalShards(proposalShardDir(registryPath));
@@ -1807,80 +1204,38 @@ export function loadProposalRegistry(registryPath: string): Proposal[] {
   return [...byId.values()];
 }
 
-// ── W1-T240: the ONE registry-write helper every writer of state/inbox-proposals.json
-// goes through ─────────────────────────────────────────────────────────────────────────
+// ── W1-T240: the ONE registry-write helper every writer of inbox-proposals.json goes through ──
 //
-// FOUR independent read-modify-write round trips on this file used to exist, each a
-// plain `readFileSync` + `JSON.parse` + `writeFileSync` with no mutual exclusion and no
-// atomicity: `rmd inbox`'s ratified-registry heal, `rmd approve`'s remove-on-ratify,
-// `rmd reframe`'s feedback write (all three run-task.ts), and the serve daemon's OWN
-// `GET /v1/inbox` heal (lib/panel-graph.ts) — the multi-writer path is genuine, not
-// theoretical, because `rmd serve` is a LONG-LIVED daemon, so any concurrent CLI
-// invocation overlaps it by construction. Two DIFFERENT failure modes result:
-//   - TORN FILE — a reader's `readFileSync` lands mid another writer's `writeFileSync`
-//     and observes a truncated/partial blob, which {@link parseProposalRegistry}'s
-//     deliberate fail-soft "malformed → []" discipline turns into a SILENT empty
-//     registry (every active proposal vanishes from `rmd inbox`), not a visible error.
-//   - LOST UPDATE — two updaters both read the same old content, both compute a new
-//     version from it, and whichever writes last wins outright, discarding the other's
-//     change (a pruned/consumed proposal resurrected, or a heal silently undone).
+// FOUR unsynchronised read-modify-write round trips used to exist, and the multi-writer path is genuine: `rmd serve`
+// is a long-lived daemon, so any concurrent CLI invocation overlaps it. Two failure modes result — a TORN FILE, which
+// {@link parseProposalRegistry}'s fail-soft "malformed -> []" turns into a SILENT empty registry rather than a
+// visible error; and a LOST UPDATE, where whichever updater writes last wins.
 //
-// {@link updateProposalRegistry} fixes both, and is the ONLY sanctioned way to write
-// this file (a fifth caller inherits the property by construction, never re-deriving
-// it): an O_EXCL lockfile (`${registryPath}.lock`) serializes every call against this
-// SAME path across every process that can write it — CLI invocations are independent OS
-// processes, so an in-process "single writer function" alone cannot prevent a lost
-// update between two of them; only a real inter-process lock can — and the write itself
-// lands via a sibling temp file + `renameSync` (POSIX rename is atomic on the same
-// filesystem, the SAME idiom already proven in this codebase at lib/status.ts's
-// projection cache, lib/worker.ts's run.lock, and lib/ledger.ts's rotation writer), so a
-// reader never observes a partial file. Unlike lib/drain-lock.ts / lib/inflight-lock.ts
-// (both "refuse immediately, a whole SECOND long-running process is the bug" guards),
-// a live holder of THIS lock is polled/retried up to `maxWaitMs` rather than refused —
-// every real critical section here is a synchronous JSON read-transform-write done in
-// microseconds, so a live holder means "wait a beat, it is about to release," not "a
-// second command must not run." A holder judged stale (a crash mid-update, or a dead
-// pid whose number a later process has since reused) is reclaimed via the SAME
-// {@link isHolderStale} predicate and {@link reclaimStaleLock} primitive
-// lib/drain-lock.ts and lib/inflight-lock.ts use (W1-T289/W1-T368): staleness is never
-// pid-liveness alone (a live PID reused by an unrelated process must not read as "the
-// same holder still running"), and the reclaim's delete is conditioned on the lock's
-// own on-disk identity (dev+ino+bytes) so two reclaimers racing over one dead lock
-// cannot both come away believing they hold it — the SAME lost-update hazard this
-// module's own header above describes for the registry file itself, previously left
-// open on the LOCK file that guards it.
-//
-// `update` receives a FRESH parse of whatever is on disk RIGHT NOW (read under the
-// lock), never a value some earlier, unlocked read produced — so a caller whose
-// intended change was computed against a possibly-stale snapshot (e.g. "drop this one
-// proposal id", or a ledger-derived set of ids to prune) still applies correctly
-// against the latest state. Returning `null` skips the write entirely (the common,
-// already-consistent case never touches disk).
+// This is the ONLY sanctioned writer, so a fifth caller inherits the property. An O_EXCL lockfile serialises every
+// call ACROSS PROCESSES, which an in-process single-writer function cannot do, and the write lands via a temp file
+// plus `renameSync`. A live holder is POLLED, not refused as in drain-lock.ts, because every critical section takes
+// microseconds. STALENESS IS NEVER PID-LIVENESS ALONE, so {@link reclaimStaleLock} (W1-T289/W1-T368) conditions its
+// delete on the lock's on-disk identity and two reclaimers cannot both believe they hold it.
 
 export interface UpdateProposalRegistryOpts {
-  /** Give up and throw if the lock can't be acquired within this long (ms). Default
-   *  2000 — every real critical section here is a synchronous JSON read-transform-
-   *  write, done in microseconds; a lock still held after 2s means a crashed holder
-   *  {@link defaultIsPidAlive} somehow missed, not real contention. */
+  /** Throw if the lock cannot be acquired within this long (ms). Default 2000 — every critical section takes
+   *  microseconds, so a lock held after 2s means a crashed holder, not contention. */
   maxWaitMs?: number;
   /** Poll interval while a live holder is waited out (ms). Default 20. */
   pollIntervalMs?: number;
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
   isPidAlive?: (pid: number) => boolean;
-  /** Injectable blocking sleep (tests fake it to skip real delay). Default = a real,
-   *  busy-wait-free sleep (mirrors lib/deployer.ts's own injected-sleep discipline). */
+  /** Injectable blocking sleep (tests fake it to skip real delay). Default = a real, busy-wait-free sleep (mirrors
+   *  lib/deployer.ts's own injected-sleep discipline). */
   sleep?: (ms: number) => void;
-  /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests).
-   *  Defaults to {@link import("./fs-race-safe.js").defaultGetProcessStartTime}. */
+  /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests). Defaults to {@link
+   *  import("./fs-race-safe.js").defaultGetProcessStartTime}. */
   getProcessStartTime?: (pid: number) => number | null;
-  /** Called whenever a reclaim attempt loses the race to another reclaimer (see
-   *  {@link reclaimStaleLock}). Defaults to a `console.error` trace; tests override it
-   *  to observe the event directly instead of scraping stderr. */
+  /** Called whenever a reclaim attempt loses the race to another reclaimer (see {@link reclaimStaleLock}). Defaults
+   *  to a `console.error` trace; tests override it to observe the event directly instead of scraping stderr. */
   onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
-  /** TEST-ONLY seam forwarded to {@link reclaimStaleLock}'s `beforeDelete` — lets a test
-   *  run a second reclaimer's whole acquire to completion inside this call's reclaim
-   *  window, to prove the delete-time identity check refuses to clear a lock that is no
-   *  longer the one it judged stale. Never set outside tests. */
+  /** TEST-ONLY seam forwarded to {@link reclaimStaleLock}'s `beforeDelete`, so a test can prove the delete-time
+   *  identity check refuses to clear a lock that is no longer the one it judged stale. */
   __beforeReclaimDelete?: () => void;
 }
 
@@ -1890,12 +1245,8 @@ interface RegistryLockInfo {
   startedAt?: string;
 }
 
-/** Parse raw lock file contents into a holder record, or `null` for missing/garbage —
- *  the {@link reclaimStaleLock} `parseHolder` contract, mirroring
- *  {@link import("./drain-lock.js").parseDrainLockInfo}. Takes the raw bytes rather than
- *  a path: {@link reclaimStaleLock} reads the lock through ONE descriptor (for its own
- *  dev+ino identity check) and hands this the exact bytes that read produced, never a
- *  second path re-resolution. */
+/** Parse raw lock contents into a holder record, or `null` for garbage — the `parseHolder` contract. Takes bytes, not
+ *  a path: {@link reclaimStaleLock} reads the lock through ONE descriptor. */
 function parseRegistryLockInfo(raw: string): RegistryLockInfo | null {
   try {
     const o = JSON.parse(raw);
@@ -1909,13 +1260,8 @@ function defaultRegistryLockSleep(ms: number): void {
   execFileSync("sleep", [String(ms / 1000)]);
 }
 
-/**
- * Read-modify-write `registryPath` (`state/inbox-proposals.json`), guarded end to end
- * against the lost-update/torn-file hazard this section's header doc describes. `update`
- * receives the CURRENT proposals (freshly re-read under the lock); returning the same
- * reference or a shallow-equal-in-spirit `null` skips the write. Returns the array
- * actually written, or `null` if nothing was.
- */
+/** Read-modify-write `registryPath`, guarded against the hazards this section's header describes. `update` sees the
+ *  CURRENT proposals, re-read under the lock; returning `null` skips the write. */
 export function updateProposalRegistry(
   registryPath: string,
   update: (current: Proposal[]) => Proposal[] | null,
@@ -1931,20 +1277,16 @@ export function updateProposalRegistry(
   const deadline = Date.now() + maxWaitMs;
   for (;;) {
     try {
-      // O_EXCL: create-or-fail, no TOCTOU gap — same discipline as acquireDrainLock /
-      // acquireInflightLock (lib/drain-lock.ts, lib/inflight-lock.ts).
+      // O_EXCL: create-or-fail, no TOCTOU gap — same discipline as acquireDrainLock / acquireInflightLock
+      // (lib/drain-lock.ts, lib/inflight-lock.ts).
       const fd = fs.openSync(lockPath, "wx");
       fs.writeSync(fd, JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() }));
       fs.closeSync(fd);
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      // R-4: staleness is judged by isHolderStale — host + pid-liveness + start-time
-      // reuse — NEVER by pid liveness alone (a live pid the recorded holder no longer
-      // owns must not read as "the same holder still running"). The reclaim itself goes
-      // through reclaimStaleLock, which conditions its delete on the lock's own on-disk
-      // identity (dev+ino+bytes), so two reclaimers racing over the SAME dead lock
-      // cannot both come away believing they hold it (see this section's header doc).
+      // R-4: staleness is judged by isHolderStale — host, pid liveness and start-time reuse — NEVER by pid liveness
+      // alone, and the reclaim's delete is conditioned on the lock's on-disk identity.
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseRegistryLockInfo,
         isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
@@ -1963,10 +1305,8 @@ export function updateProposalRegistry(
   }
 
   try {
-    // W1-T2490: `current` is the SHARD-MERGED population (same merge {@link
-    // loadProposalRegistry} does), read under this SAME lock — never a value some earlier,
-    // unlocked read produced. `shards` is kept so the write half below knows, for each id in
-    // `current`, whether it already lives in its own file.
+    // W1-T2490: `current` is the SHARD-MERGED population, read under this SAME lock. `shards` is kept so the write
+    // half below knows, per id, whether it already lives in its own file.
     const shardDir = proposalShardDir(registryPath);
     const shards = readProposalShards(shardDir);
     const blobProposals = parseProposalRegistry(fs.existsSync(registryPath) ? fs.readFileSync(registryPath, "utf8") : undefined);
@@ -1980,11 +1320,8 @@ export function updateProposalRegistry(
     const currentIds = new Set(current.map((p) => p.id));
     const nextIds = new Set(next.map((p) => p.id));
 
-    // A shard mirror ABSENT from `next` was just dispositioned (ratified, retired, pruned)
-    // — delete its file so the shard directory never goes on reviewably claiming a record
-    // an operator has dispositioned, and so a later {@link loadProposalRegistry} (and the
-    // idempotent `existingIds` check every minter already runs against `current`) never
-    // resurrects it — this task's idempotence-across-the-migration falsifier.
+    // A shard mirror ABSENT from `next` was just dispositioned, so its file goes: the directory must never claim a
+    // dispositioned record, and no later read may resurrect it.
     for (const { proposal, path: shardPath } of shards.values()) {
       if (!nextIds.has(proposal.id)) {
         try {
@@ -1995,17 +1332,9 @@ export function updateProposalRegistry(
       }
     }
 
-    // A `next` proposal that is NEW (its id was not in `current` at all) or already had a
-    // shard mirror gets its OWN file, atomically (sibling temp file + rename — the SAME
-    // idiom the blob write below uses) — MIRRORED alongside the blob write below, never
-    // instead of it. This is the write half of the sharded-home fix: a newly minted
-    // proposal is a single new file a reviewer can open on its own, while the blob write
-    // below is UNCHANGED from before this task — every one of the eight existing readers
-    // that still parses the blob directly keeps seeing the exact same complete population
-    // it always has ("the read path must not notice"). Promoting an UNTOUCHED legacy entry
-    // to a shard of its own is a migration step an operator takes later, not a side effect
-    // of an unrelated write (this task's own scope) — only a NEW or actively-rewritten
-    // proposal ever gains a mirror here.
+    // A `next` proposal that is NEW, or already had a shard mirror, gets its OWN file atomically — MIRRORED alongside
+    // the blob write below, never instead of it, so every existing reader keeps seeing the same population. Promoting
+    // an UNTOUCHED legacy entry is a migration, not a side effect of an unrelated write.
     for (const proposal of next) {
       const isNew = !currentIds.has(proposal.id);
       const hadShard = shards.has(proposal.id);
@@ -2018,12 +1347,8 @@ export function updateProposalRegistry(
       }
     }
 
-    // ATOMIC WRITE: sibling temp file + rename (see this section's header doc for the
-    // in-tree precedent this mirrors). Every call is a live `fs.` property lookup (never
-    // a destructured named import) so a test's `t.mock.method(fs, ...)` can intercept it —
-    // see this file's `import fs from "node:fs"` comment. UNCHANGED from before this task:
-    // the blob always carries the WHOLE of `next`, exactly as it always has, so no existing
-    // reader of this file needs to change to keep seeing every proposal.
+    // ATOMIC WRITE: temp file plus rename (see this section's header). Live `fs.` lookups so a test can intercept
+    // them. The blob always carries the WHOLE of `next`.
     const tmpPath = `${registryPath}.tmp-${process.pid}-${Date.now()}`;
     fs.writeFileSync(tmpPath, JSON.stringify({ proposals: next }, null, 2), "utf8");
     fs.renameSync(tmpPath, registryPath);
@@ -2039,57 +1364,31 @@ export function updateProposalRegistry(
 
 // ── W1-T241: the ONE atomic-write helper for the daemon draft rung's cache PAIR ───────────
 //
-// buildInboxDraftHook (run-task.ts) used to write `state/inbox-drafts.json` and
-// `state/inbox-draft-attempts.json` (the two caches above) as two independent plain
-// `writeFileSync` calls — each individually torn-write-prone (a reader's `readFileSync`
-// landing mid the write observes a truncated/partial blob, the same hazard
-// {@link updateProposalRegistry}'s own header doc describes for the registry), and the PAIR
-// itself non-atomic: a crash between the two calls could leave one file reflecting this
-// poll's outcome while the other still reflects the previous one.
-//
-// {@link writeDraftAttemptPair} fixes both. Each file lands via a sibling temp file +
-// `renameSync` — the SAME idiom {@link updateProposalRegistry} uses above — so a reader never
-// observes anything but a complete, previous-OR-next file, never a torn one. The two renames
-// then commit in a FIXED, safe order: drafts before attempts. That order is what makes a
-// crash BETWEEN the two renames self-healing rather than wedging: the only one-sided state it
-// can land is a fresh draft cached with no matching attempts entry yet — {@link
-// proposalsNeedingDraft} sees that cached draft as no longer stale and simply stops selecting
-// the proposal, so nothing re-attempts it — never the reverse (an attempt recorded with no
-// draft to show for it, which would let {@link draftsDueOnDaemon} throttle that cause FOREVER
-// with nothing ever having landed — exactly the idempotence violation this task closes). A
-// FAILED-outcome proposal whose attempts entry is lost to the same crash window merely gets
-// re-attempted next poll — a redundant redraft, never a stall.
+// The two caches used to be written as independent, torn-write-prone calls, and the PAIR was not atomic. Each now
+// lands via a temp file plus `renameSync`, and the renames commit in a FIXED order: drafts before attempts. THE
+// INVARIANT THAT BUYS: the only one-sided state a crash can land is a fresh draft with no attempts entry, which
+// {@link proposalsNeedingDraft} stops selecting. Never the reverse — an attempt with no draft would throttle that
+// cause FOREVER.
 export function writeDraftAttemptPair(draftsPath: string, attemptsPath: string, nextDrafts: DraftCache, nextAttempts: DraftAttemptCache): void {
   const draftsTmpPath = `${draftsPath}.tmp-${process.pid}-${Date.now()}`;
   const attemptsTmpPath = `${attemptsPath}.tmp-${process.pid}-${Date.now()}`;
-  // Both temp files are fully staged BEFORE either commits (see this section's header doc
-  // above). Every call here is a live `fs.` property lookup (never a destructured named
-  // import) so a test's `t.mock.method(fs, ...)` can intercept it — see this file's `import
-  // fs from "node:fs"` comment.
+  // Both temp files are fully staged BEFORE either commits (see this section's header). Live `fs.` property lookups,
+  // never destructured imports, so a test's `t.mock.method(fs, ...)` intercepts.
   fs.writeFileSync(draftsTmpPath, JSON.stringify(nextDrafts, null, 2), "utf8");
   fs.writeFileSync(attemptsTmpPath, JSON.stringify(nextAttempts, null, 2), "utf8");
   fs.renameSync(draftsTmpPath, draftsPath);
   fs.renameSync(attemptsTmpPath, attemptsPath);
 }
 
-/**
- * `<config.root>/state/inbox-reopened-keys.json` (W1-T2566) — one entry per proposal id this host
- * has re-opened, with the ISO stamp it happened at. The third cache beside `inbox-drafts.json` and
- * `inbox-draft-attempts.json`.
- *
- * ⚠ KEYED ON PROPOSAL ID, NEVER A GLOBAL "MIGRATION DONE" FLAG, AND THAT DISTINCTION IS THE
- * DELIVERABLE. W1-T2564 chose a closure flag precisely because every boot runs it, so a
- * freshly-provisioned host recovers with no operator step. A per-id marker preserves that — an id
- * never seen before is still re-opened on first sight — whereas one global flag would not, and
- * would reintroduce exactly the gap the closure flag was chosen to avoid.
- */
+/** `state/inbox-reopened-keys.json` (W1-T2566) — one entry per proposal id this host has re-opened. ⚠ KEYED ON
+ *  PROPOSAL ID, NEVER A GLOBAL "MIGRATION DONE" FLAG: W1-T2564 chose a closure flag because every boot runs it, so a
+ *  fresh host recovers with no operator step, and a per-id marker preserves that where one global flag would not. */
 export interface ReopenedKeysCache {
   [proposalId: string]: string;
 }
 
-/** Parse a {@link ReopenedKeysCache} JSON blob; `{}` on missing/malformed input — the same
- *  posture {@link parseDraftCache} takes, and for the same reason: an unreadable marker file must
- *  mean "nothing re-opened yet" (so the host still recovers), never a crash on the boot path. */
+/** Parse a {@link ReopenedKeysCache}; `{}` on missing or malformed input. An unreadable marker must mean "nothing
+ *  re-opened yet", so the host still recovers, never a crash on the boot path. */
 export function parseReopenedKeysCache(text: string | undefined): ReopenedKeysCache {
   if (!text) return {};
   try {
@@ -2101,23 +1400,22 @@ export function parseReopenedKeysCache(text: string | undefined): ReopenedKeysCa
     }
     return out;
   } catch {
-    // Deliberate: a malformed marker file re-opens each id once more rather than failing the
-    // boot. Losing the marker costs one extra attempt per id; failing the boot costs the fleet.
+    // Deliberate: a malformed marker file re-opens each id once more rather than failing the boot. Losing the marker
+    // costs one extra attempt per id; failing the boot costs the fleet.
     return {};
   }
 }
 
-/** W1-T2566 — record the ids just re-opened, preserving any stamp already present so a re-read
- *  never moves an existing entry's time. Pure: returns the next cache, mutating nothing. */
+/** W1-T2566 — record the ids just re-opened, preserving any stamp already present so a re-read never moves an
+ *  existing entry's time. Pure: returns the next cache, mutating nothing. */
 export function markReopened(current: ReopenedKeysCache, ids: readonly string[], at: string): ReopenedKeysCache {
   const next: ReopenedKeysCache = { ...current };
   for (const id of ids) if (next[id] === undefined) next[id] = at;
   return next;
 }
 
-/** W1-T2566 — commit the marker file with the same stage-then-rename discipline
- *  {@link writeDraftAttemptPair} uses, so a torn write can never leave a half-written marker that
- *  parses as "everything already re-opened". Live `fs.` lookups so a test can intercept them. */
+/** W1-T2566 — commit the marker with the same stage-then-rename discipline, so a torn write can never leave a
+ *  half-written marker that parses as "everything already re-opened". */
 export function writeReopenedKeys(path: string, next: ReopenedKeysCache): void {
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
   fs.writeFileSync(tmpPath, JSON.stringify(next, null, 2), "utf8");
@@ -2136,32 +1434,18 @@ export function parseDraftCache(text: string | undefined): DraftCache {
   }
 }
 
-/** Drop one proposal's cached draft — the invalidation `rmd reframe` applies so the next
- *  `rmd inbox` pass re-drafts rather than re-surfacing the stale candidate the operator
- *  just objected to. A no-op (returns an equivalent cache) when nothing is cached for
- *  `proposalId`. */
+/** Drop one proposal's cached draft — the invalidation `rmd reframe` applies so the next pass re-drafts rather than
+ *  re-surfacing the candidate just objected to. A no-op when none is cached. */
 export function invalidateDraft(drafts: DraftCache, proposalId: string): DraftCache {
   const next: DraftCache = { ...drafts };
   delete next[proposalId];
   return next;
 }
 
-/**
- * W1-T190 (round 2): the read-side override in {@link classifyProposal} stops a drifted
- * registry entry from ever being MISCLASSIFIED again, but the drifted entry itself — the
- * P19-shaped row `rmd approve`'s registry write never reached — otherwise sits in
- * `state/inbox-proposals.json` forever, unless something actually writes the correction
- * back. "The ledger receipt is authoritative — a registry disagreeing with it is DETECTED
- * and corrected, not trusted" means BOTH halves: classification never trusts the stale
- * flag (already true), AND the stale flag itself gets healed, not merely worked around, the
- * next time anything classifies these proposals against the ledger. This is that healing
- * step: given the SAME proposals + classifications one inbox pass already computed, prune
- * every proposal the ledger now says is ratified, so any OTHER consumer of the registry
- * file that does not itself call {@link classifyProposal} — a future feature, a support
- * script, a human `cat`ing the JSON — sees the corrected state too, not just this pass's
- * in-memory override. A no-op (same array reference, empty `prunedIds`) when nothing needs
- * healing, so callers can skip the write entirely on the common (already-clean) path.
- */
+/** W1-T190 (round 2): heal a drifted registry entry rather than merely work around it. The read-side override in
+ *  {@link classifyProposal} stops a misclassification, but the drifted row would sit there forever, so pruning it
+ *  lets any OTHER consumer see the corrected state. A no-op — same array reference, empty `prunedIds` — when nothing
+ *  needs healing. */
 export function pruneRatifiedProposals(
   proposals: Proposal[],
   classifications: InboxClassification[],
@@ -2176,58 +1460,26 @@ export function pruneRatifiedProposals(
 
 // ── W1-T2455: THE DUPLICATE CHECK AT THE RATIFICATION SEAM ──────────────────────────────────
 //
-// `duplicateTitleViolations` (task-linter.ts) has been WIRED since W1-T1076 — `duplicateCorpusOpts`
-// (run-task.ts) supplies its corpus — but TWO things keep it off the ratification path: its
-// severity is `warn` and `lintPlanCommand` only counts a task as failing inside
-// `if (blocking.length)`; and it is scoped to the `--base` pass and returns `{}` for the
-// whole-plan one. So `rmd approve` can file a task for a defect that already shipped, and on
-// 2026-08-29 it would have: of 32 drafted shards across the 18 cached drafts, TWO score a perfect
-// 1.00 against a shard already on `origin/main` (W1-T2452, W1-T2453) and one scores 0.57
-// (W1-T2451) — all three already merged.
-//
-// W1-T2486 CORRECTS A THIRD REASON THIS COMMENT USED TO GIVE, WHICH WAS FALSE: it used to also
-// claim `lint-plan` is not a required check — it is (ci-gate.yml's REQUIRED list names it, and
-// has since ci-gate started aggregating it). That third reason was also never load-bearing for
-// the conclusion above: a required check only holds merge on a REAL failure, and a `warn`-severity
-// violation never enters `lintPlanCommand`'s `blocking` array in the first place (see the first
-// reason above) — so being required changes nothing about whether THIS check's warn can stop a
-// ratification. The two reasons above are sufficient on their own and are the whole of why this
-// path stays open. `duplicateTitleViolations`' own escalation, added narrowly in task-linter.ts
-// (W1-T2486, `unansweredDuplicateTitleViolations`) for an UNANSWERED near-certain match, targets
-// the PLAN-FILING path, not this ratification seam, which is why THIS module's own
-// `draftedDuplicate` check below still carries the separate burden of catching it here.
-//
-// IT KEYS ON THE DRAFTED SHARD SLUG, NEVER ON THE PROPOSAL. Eleven proposal summaries read
-// literally `board-review: #NNNN carries 1 unhandled escalation(s)` — near-identical yet
-// LEGITIMATELY DISTINCT, one per PR. A proposal-level similarity check would collapse exactly
-// those. Scored on the slug instead, they land at 0.00-0.10, well under the cutoff.
-//
-// HONEST RECALL, MEASURED, NOT CLAIMED: this is a LEXICAL check and it catches the exact and
-// near-exact re-draft (3 of 32 at the shipped {@link DEFAULT_DUPLICATE_CUTOFF}). The ~21 drafts
-// that describe the SAME defect in different words score 0.08-0.18 and are NOT caught. No cutoff
-// is invented here to reach them: there is no clean separation between 0.18 and 0.10 in the
-// measured set, and lowering it would refuse sibling tasks in one arc. That residue is named, not
-// papered over.
+// `duplicateTitleViolations` (task-linter.ts) has been wired since W1-T1076, but TWO things keep it off this path:
+// its severity is `warn` while `lintPlanCommand` only fails a task inside `if (blocking.length)`; and it is scoped to
+// the `--base` pass and returns `{}` for the whole-plan one. So `rmd approve` can file a task for a defect that
+// already shipped. W1-T2486 corrected a false third reason this comment used to give — `lint-plan` IS required, but a
+// `warn` never enters the `blocking` array. IT KEYS ON THE DRAFTED SHARD SLUG, NEVER ON THE PROPOSAL, because eleven
+// board-review summaries read near-identically yet are legitimately distinct. HONEST RECALL: a LEXICAL check misses
+// drafts in other words, and no cutoff is invented to reach them.
+// Why: the measured 2026-08-29 scores and the named residue — docs/forensics/inbox.md.
 
-/**
- * The slug stem of each shard a drafted fragment would be filed as — the SAME stems
- * {@link ratificationShardFiles} emits, so the check scores exactly what would land on disk.
- *
- * PLACEHOLDER-TOLERANT BY NECESSITY: at approve time the fragment still carries `NEW-<n>` ids
- * (`materializeDraftTaskIds` runs later, inside the gateway's branch creation), so
- * `shardSlugFromPath` — whose regex requires a real `W1-T<n>` id — returns `undefined` for every
- * one of these paths. Measured: it scored 0 of 32 drafted shards. This reads the stem after the
- * FIRST `-` instead, which is the same text `planShardSlugCorpus` stores for a filed shard.
- */
+/** The slug stem of each shard a drafted fragment would be filed as — the SAME stems {@link ratificationShardFiles}
+ *  emits, so the check scores what would land on disk. PLACEHOLDER-TOLERANT BY NECESSITY: at approve time the
+ *  fragment still carries `NEW-<n>` ids, so `shardSlugFromPath` scored 0 of 32. This reads the stem after the FIRST
+ *  `-`. */
 export function draftedShardSlugs(fragmentYaml: string): DuplicateCorpusEntry[] {
   const shards = ratificationShardFiles(fragmentYaml);
   if (!shards.ok) return []; // an unsplittable fragment is refused by the writer, not here
   const out: DuplicateCorpusEntry[] = [];
   for (const f of shards.files) {
-    // The id is read from the shard's OWN contents, never guessed off the path: a lazy
-    // `<id>-` regex splits `NEW-1-<slug>` after "NEW" and leaves "1-" glued to the stem, which
-    // silently perturbs every score. `ratificationShardFiles` builds `<id>-<stem>.yaml`, so
-    // stripping the literal declared id is exact.
+    // The id is read from the shard's OWN contents, never guessed off the path: a lazy `<id>-` regex splits
+    // `NEW-1-<slug>` after "NEW" and leaves "1-" glued to the stem, perturbing every score.
     const id = /^\s*-\s*id:\s*(\S+)/m.exec(f.contents)?.[1];
     const prefix = id ? `plan/tasks.d/${id}-` : undefined;
     if (!prefix || !f.relPath.startsWith(prefix)) continue;
@@ -2246,15 +1498,8 @@ export interface DraftedDuplicate {
   score: number;
 }
 
-/**
- * The FIRST drafted shard in `fragmentYaml` that scores at or above the cutoff against `corpus`,
- * or `undefined` when none does. Pure: no fs, no git, no network — the corpus is the caller's to
- * supply, exactly as `RatifyGateway` owns every other side effect on this path.
- *
- * `corpus` EMPTY ⇒ `undefined`, never a refusal. A caller that could not build the corpus must
- * not have its ratification blocked by that failure — the same fail-open discipline
- * {@link duplicateTitleViolations} already applies to an absent `openTaskTitles`.
- */
+/** The FIRST drafted shard at or above the cutoff, or `undefined`. Pure. AN EMPTY `corpus` YIELDS `undefined`, never
+ *  a refusal — a corpus-build failure must not block a ratification. */
 export function draftedDuplicate(
   fragmentYaml: string,
   corpus: readonly DuplicateCorpusEntry[],
@@ -2272,9 +1517,8 @@ export function draftedDuplicate(
   return undefined;
 }
 
-/** The refusal text a {@link DraftedDuplicate} produces — names the score, the cutoff, the
- *  already-filed id, and the TWO additive answers, mirroring `duplicateTitleViolations`' own
- *  message: cite the prior task, or say why this differs. Never "file less work". */
+/** The refusal text a {@link DraftedDuplicate} produces — the score, the cutoff, the filed id, and the TWO additive
+ *  answers: cite the prior task, or say why this differs. Never "file less work". */
 export function draftedDuplicateRefusal(proposalId: string, dup: DraftedDuplicate, cutoff = DEFAULT_DUPLICATE_CUTOFF): string {
   return (
     `${proposalId} would file ${dup.draftedPath}, which scores ${dup.score.toFixed(2)} ` +
@@ -2288,63 +1532,39 @@ export function draftedDuplicateRefusal(proposalId: string, dup: DraftedDuplicat
 
 // ── rmd approve — one bit ratifies through the gate (MASTER-PLAN P25 ii, W1-T111) ────────
 //
-// APPROVE = one bit: the operator's thumbs-up INITIATES the plan PR carrying the
-// pre-drafted, lint-clean tasks + the RATIFIED stamp. W1-T2456: this said "rule 15 preserved"
-// for a doctrine §12 rule 15 does not carry; rule 27 permits automatic filing outright. What is
-// still true of THIS function is narrower and is its own scope: the approve bit initiates the
-// plan edit, and the gate still reviews.
-// {@link approveProposal} is the pure DECISION (valid only for READY, one
-// gateway call each, one ledger line); the git/gh SIDE EFFECTS are injected via
-// {@link RatifyGateway} (mirrors lib/escalate.ts's `IssueGateway` split) so this is
-// unit-testable without touching a real repo.
+// APPROVE = one bit: the thumbs-up INITIATES the plan PR carrying the pre-drafted, lint-clean tasks plus the RATIFIED
+// stamp. {@link approveProposal} is the pure DECISION; the side effects are injected via {@link RatifyGateway},
+// mirroring escalate.ts's `IssueGateway` split. W1-T2456 correction: this used to cite a §12 rule 15 the doctrine
+// does not carry — rule 27 permits automatic filing outright. The approve bit initiates; the gate still reviews.
 
-/** The exact fragment + stamp a READY classification carries — what `rmd approve` ships
- *  into the plan PR VERBATIM, never re-derived from the proposal at approve time (the
- *  draft the operator is approving is the SAME draft `rmd inbox` showed them). */
+/** The exact fragment and stamp a READY classification carries, shipped VERBATIM and never re-derived at approve
+ *  time: the operator approves the same draft `rmd inbox` showed them. */
 export interface RatificationPayload {
   proposalId: string;
   fragmentYaml: string;
   stampLine: string;
 }
 
-/** Git/GitHub side effects `approveProposal` drives. `createRatificationBranch`/`openPlanPr`
- *  are each called AT MOST ONCE on a READY classification that is NOT resuming a prior push
- *  (see the three OPTIONAL methods below, W1-T903) — a non-ready classification calls neither. */
+/** Git and GitHub side effects `approveProposal` drives. Each is called AT MOST ONCE on a READY classification not
+ *  resuming a prior push; a non-ready classification calls neither. */
 export interface RatifyGateway {
-  /** File the fragment as one `plan/tasks.d/` shard per drafted task — NEVER an append to
-     *  plan/tasks.yaml, which `lint-plan`'s `monolith-filing` rule refuses for a new id — plus the
-     *  stamp to MASTER-PLAN.md, in ONE branch, commit, and push it. Returns the branch name
-     *  actually pushed. Never called when a prior-run branch is resumed (`findPushedBranch`
-     *  below) — the whole point of resuming is skipping a second mint/commit/push. */
+  /** File the fragment as one `plan/tasks.d/` shard per task — NEVER an append to plan/tasks.yaml, which
+   *  `monolith-filing` refuses for a new id — plus the stamp, in ONE branch and commit. */
   createRatificationBranch(payload: RatificationPayload): string;
-  /** Open the plan PR for the pushed branch. Returns its URL. Skipped when `findExistingPr`
-   *  already found one (ADOPT) — a found PR is never re-created. */
+  /** Open the plan PR for the pushed branch. Returns its URL. Skipped when `findExistingPr` already found one (ADOPT)
+   *  — a found PR is never re-created. */
   openPlanPr(branch: string, proposalId: string): string;
 
-  /**
-   * OPTIONAL (W1-T903 design iii). The branch a PRIOR run of THIS proposal already pushed to
-   * the remote, CONFIRMED still present there — `undefined` when there is no such evidence, the
-   * branch is gone, or the gateway does not implement resumption at all. Omitting this method
-   * (every gateway that predates this feature) is exactly the pre-W1-T903 PROCEED path:
-   * `approveProposal` falls straight through to `createRatificationBranch`.
-   */
+  /** OPTIONAL (W1-T903 iii). The branch a PRIOR run of this proposal pushed, CONFIRMED still on the remote. Omitting
+   *  it is exactly the pre-W1-T903 path: straight through to `createRatificationBranch`. */
   findPushedBranch?(proposalId: string): string | undefined;
 
-  /**
-   * OPTIONAL (W1-T903 design ii/iii). True when a PR already exists for `branch` — checked
-   * BEFORE anything is created, so a prior run's `gh`/REST create that actually succeeded
-   * server-side but never returned a usable reference to the CLI is ADOPTED rather than
-   * duplicated. Called only after `findPushedBranch` names a confirmed branch.
-   */
+  /** OPTIONAL (W1-T903 ii/iii). True when a PR already exists for `branch`, checked BEFORE anything is created, so a
+   *  prior run's server-side success is ADOPTED rather than duplicated. */
   findExistingPr?(branch: string): { prUrl: string; prNumber: number } | undefined;
 
-  /**
-   * OPTIONAL (W1-T903 design iii/vi). COMPLETE an already-pushed branch that carries no PR
-   * yet: prepare whatever `openPlanPr`'s body needs (e.g. the filed task ids, read back from
-   * the ALREADY-COMMITTED plan/tasks.yaml) with NO new worktree commit, no re-push and no
-   * re-mint. Returns the same branch name, mirroring `createRatificationBranch`'s contract.
-   * Called only when `findPushedBranch` found a branch and `findExistingPr` found no PR on it.
-   */
+  /** OPTIONAL (W1-T903 iii/vi). COMPLETE an already-pushed branch carrying no PR, with NO new commit, re-push or
+   *  re-mint. Called only when a branch was found and no PR was. */
   completeRatificationBranch?(branch: string, proposalId: string): string;
 }
 
@@ -2354,13 +1574,12 @@ export type ApproveResult =
       proposalId: string;
       branch: string;
       prUrl: string;
-      /** W1-T903 design (v): from the REST response when freshly created/adopted, or parsed
-       *  off `prUrl` for a legacy gateway that only ever returned a bare url — `undefined` only
-       *  when neither source yields a usable integer. */
+      /** W1-T903 design (v): from the REST response when freshly created/adopted, or parsed off `prUrl` for a legacy
+       *  gateway that only ever returned a bare url — `undefined` only when neither source yields a usable integer. */
       prNumber?: number;
       payload: RatificationPayload;
-      /** W1-T903: true when this PR was ADOPTED from a prior run rather than opened by this
-       *  one — `createRatificationBranch`/`openPlanPr` were both skipped. */
+      /** W1-T903: true when this PR was ADOPTED from a prior run rather than opened by this one —
+       *  `createRatificationBranch`/`openPlanPr` were both skipped. */
       adopted?: boolean;
     }
   | {
@@ -2368,30 +1587,21 @@ export type ApproveResult =
       proposalId: string;
       state: InboxState;
       refusal: string;
-      /** W1-T2455: the already-filed task id this proposal's draft duplicates, when THAT is why
-       *  it was refused. Absent on every other refusal, so a reader can tell the two apart
-       *  without parsing `refusal` prose. */
+      /** W1-T2455: the already-filed task id this proposal's draft duplicates, when THAT is why it was refused.
+       *  Absent on every other refusal, so a reader can tell the two apart without parsing `refusal` prose. */
       duplicateOf?: string;
     };
 
-/** GitHub's PR url is always `.../pull/<number>` — the same idiom this codebase already uses
- *  ad hoc at a dozen call sites (e.g. run-task.ts's `armAndLogOutcome` prNum derivation).
- *  `undefined` on anything that doesn't match, never a thrown parse error — a malformed/legacy
- *  url degrades to "no number recorded" rather than blocking the ratification it decorates. */
+/** GitHub's PR url is always `.../pull/<number>`. `undefined` on anything else, never a thrown parse error: a legacy
+ *  url degrades to "no number recorded" rather than blocking the ratification. */
 function prNumberFromUrl(url: string): number | undefined {
   const n = Number(url.match(/\/pull\/(\d+)/)?.[1]);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-/**
- * W1-T903 design (vii): when the ratification's PR-create step throws a rate-limit-classified
- * error, describe it so it reads as THROTTLED — the branch survived, the pull request is what's
- * missing, and a plain re-run resumes it — never a bare failure that reads as "nothing
- * happened". A non-rate-limit failure is returned with its own message UNCHANGED: this reshapes
- * only the one class it exists for. NO NEW LEDGER STEP (design v) — the caller's existing
- * `approve.error` line carries this text verbatim, exactly as it already carries any other
- * gateway failure's message.
- */
+/** W1-T903 (vii): a rate-limit-classified PR-create failure is described as THROTTLED — the branch survived, the pull
+ *  request is missing, a plain re-run resumes it — never a bare failure that reads as "nothing happened". Any other
+ *  failure keeps its message UNCHANGED, and the caller's `approve.error` line carries this text verbatim. */
 export function describeApproveGatewayError(e: unknown, proposalId: string, branch: string): string {
   const message = String((e as Error)?.message ?? e);
   if (!isGhRateLimitError(e)) return message;
@@ -2402,8 +1612,8 @@ export function describeApproveGatewayError(e: unknown, proposalId: string, bran
   );
 }
 
-/** Human-readable reason a classification cannot be approved right now — every non-ready
- *  or deferred state names ITS failing predicate(s)/trigger, never a bare refusal. */
+/** Human-readable reason a classification cannot be approved right now — every non-ready or deferred state names ITS
+ *  failing predicate(s)/trigger, never a bare refusal. */
 export function refusalReason(c: InboxClassification): string {
   if (c.state === "ready") return "";
   if (c.state === "ratified") {
@@ -2428,38 +1638,18 @@ export function refusalReason(c: InboxClassification): string {
 export interface RatifyLedgerDeps {
   ledgerPath: string;
   runId: string;
-  /** W1-T2455: already-filed task records to score this proposal's DRAFTED SHARD SLUGS against —
-   *  `planShardSlugCorpus(git ls-tree origin/main -- plan/tasks.d/)`, built by the caller because
-   *  this function performs no IO. OMITTED or EMPTY ⇒ the check does not run and this function is
-   *  byte-identical to before this task, which is the fail-open a corpus-build failure must get:
-   *  a ratification is never blocked by the checker's own inability to read. */
+  /** W1-T2455: already-filed task records to score this proposal's drafted slugs against, built by the caller.
+   *  OMITTED or EMPTY means the check does not run — it never blocks on its own blindness. */
   duplicateCorpus?: readonly DuplicateCorpusEntry[];
 }
 
 /**
- * `rmd approve <P##>` — valid ONLY for a READY classification. Approving anything else is
- * REFUSED, naming the state, with ZERO gateway calls (a bit on a non-ready item initiates
- * NOTHING — rule 15). On a READY classification with NO evidence of a prior push, calls
- * {@link RatifyGateway.createRatificationBranch} then {@link RatifyGateway.openPlanPr} EXACTLY
- * once each (today's PROCEED path, unchanged), with the payload carrying the cached draft's
- * fragment + stamp verbatim.
- *
- * W1-T903 design (iii): when `gateway.findPushedBranch` names a branch a PRIOR run of this
- * SAME proposal already pushed (evidence the caller has already confirmed against the remote),
- * this checks for an existing PR FIRST — never creating anything before asking:
- *   - a PR is found (ADOPT): neither `createRatificationBranch` nor `openPlanPr` is called at
- *     all — the found PR is ledgered as this proposal's ratification, and nothing is opened.
- *   - no PR, but `completeRatificationBranch` is offered (COMPLETE): that replaces
- *     `createRatificationBranch` (no second mint/commit/push), then `openPlanPr` runs as usual.
- *   - the gateway offers `findPushedBranch` but not `completeRatificationBranch`: falls back to
- *     the PROCEED path — safe (a fresh branch is always correct), just not the cheapest option.
- *
- * Every outcome — approved (any of the three shapes above) or refused — ledgers exactly one
- * `ratify.*` line (`ratify.approved` / `ratify.approve_refused`), and `ratify.approved` is
- * appended ONLY after a pull request is confirmed to exist (adopted or freshly opened) — never
- * before, and never on a thrown gateway error (design vii: a throttled `openPlanPr` propagates,
- * decorated via {@link describeApproveGatewayError}, and ledgers nothing here at all — the
- * proposal stays exactly as READY as it was before this call).
+ * `rmd approve <P##>` — valid ONLY for a READY classification. Anything else is REFUSED, naming the state, with ZERO
+ * gateway calls: a bit on a non-ready item initiates NOTHING. On a READY classification with no prior push,
+ * `createRatificationBranch` then `openPlanPr` run exactly once each, carrying the cached draft verbatim. W1-T903
+ * (iii): when `findPushedBranch` names a prior run's branch, an existing PR is checked for FIRST, so a found PR is
+ * ADOPTED and a branch without one is COMPLETED. Exactly one `ratify.*` line per outcome, and `ratify.approved` only
+ * after a pull request is confirmed to exist — never on a thrown gateway error.
  */
 export function approveProposal(
   classification: InboxClassification,
@@ -2477,12 +1667,10 @@ export function approveProposal(
     });
     return { ok: false, proposalId: classification.proposalId, state: classification.state, refusal };
   }
-  // W1-T2455: a READY proposal whose DRAFT would re-file work already on origin/main is refused
-  // HERE, with ZERO gateway calls — the same shape and the same seam the non-ready refusal above
-  // uses, which is the precedent this rides on. BLOCKING ON THIS PATH ONLY: `duplicateTitleViolations`
-  // stays `warn` for the whole-plan lint pass, where a warn is correct and where promoting it
-  // would redden long-open sibling tasks. Ratification is different — it MINTS, and a mint is
-  // not something a later reader can undo cheaply.
+  // W1-T2455: a READY proposal whose DRAFT would re-file work already on origin/main is refused HERE, with ZERO
+  // gateway calls. BLOCKING ON THIS PATH ONLY: the same check stays `warn` for the whole-plan pass, where promoting
+  // it would redden long-open siblings. Ratification MINTS, and a mint is not something a later reader can undo
+  // cheaply.
   const dup = draftedDuplicate(classification.draft.fragmentYaml, deps.duplicateCorpus ?? []);
   if (dup) {
     const refusal = draftedDuplicateRefusal(classification.proposalId, dup);
@@ -2549,17 +1737,9 @@ export function approveProposal(
   };
 }
 
-/** The harness-authored commit message for a `rmd approve` ratification branch — never
- *  the LLM (mirrors lib/plan-architect.ts's `planCommitMessage` discipline in spirit: the
- *  fragment and stamp are the Architect's drafted TEXT, but the commit framing around
- *  them is the harness's, deterministically). Unlike `planCommitMessage`, this carries NO
- *  `Remudero-Task:` trailer: a ratification branch is a plan-FILING PR (it introduces the
- *  ratified task(s) into plan/tasks.yaml, it does not implement them), and
- *  `findMergedByTrailer` (lib/status.ts) would credit a trailer here as that task being
- *  DONE — permanently marking a brand-new, never-built task complete on merge. Uses
- *  {@link "./plan-pr-emitter.js".buildPlanPrCommitMessage} so the stamp line (#387: a real
- *  673-char single-paragraph stamp blew commitlint's body-max-line-length when spliced in
- *  raw) is WRAPPED, never spliced verbatim. */
+/** The harness-authored commit message for a ratification branch — never the LLM. Carries NO `Remudero-Task:`
+ *  trailer: this is a plan-FILING PR, and `findMergedByTrailer` (lib/status.ts) would mark a never-built task
+ *  complete on merge. Uses `buildPlanPrCommitMessage` so the stamp is WRAPPED, never spliced raw (#387). */
 export function approveCommitMessage(payload: RatificationPayload): string {
   return buildPlanPrCommitMessage({
     scope: "plan",
@@ -2577,13 +1757,10 @@ export function approveCommitMessage(payload: RatificationPayload): string {
 
 // ── Real-world ratification writers (plain text composition, harness-owned) ──────────────
 
-/** Append a drafted fragment's YAML task entries to the end of `plan/tasks.yaml`'s text.
- *  The fragment is already a valid top-level sequence (schema v1) sharing the same list,
- *  so this is pure string composition — never a YAML re-serialization that could reformat
- *  the rest of the file. */
-/** The longest slug the shards on main carry, so a filed shard is never truncated shorter than
- *  the convention it joins. MEASURED over the 696 shards at the time of writing: median 37, p95
- *  57, max 72, and 269 of them (39%) longer than `slug`'s own default of 40. */
+/** Append a drafted fragment's YAML entries to `plan/tasks.yaml`'s text. Pure string composition, never a YAML
+ *  re-serialization that could reformat the rest of the file. The longest slug the shards on main carry, so a filed
+ *  shard is never truncated shorter than the convention it joins. Measured over 696 shards: median 37, p95 57, max
+ *  72. */
 const SHARD_SLUG_MAX_LEN = 72;
 
 /** One ratification shard: where it goes, and the exact YAML that goes there. */
@@ -2595,26 +1772,12 @@ export interface RatificationShardFile {
 }
 
 /**
- * Split a drafted fragment into ONE `plan/tasks.d/` shard per task it carries.
- *
- * WHY THIS EXISTS: `applyFragmentToPlanYaml` below appends to `plan/tasks.yaml`, and `lint-plan`'s
- * `monolith-filing` rule refuses exactly that for a NEW id — "New tasks belong in their own shard".
- * The ratification path was the last writer still appending to the monolith, and because no
- * proposal had ever been ratified (0 `ratify.approved` rows before 2026-08-29) the write had never
- * once met the gate. Every READY proposal would have failed identically.
- *
- * TEXT SPLITTING, NEVER A YAML RE-SERIALIZATION — the same discipline `applyFragmentToPlanYaml`'s
- * own doc states, and for the same reason: the drafted block is authored, prose-heavy YAML (long
- * titles, block scalars, comments) and round-tripping it through a parser would reformat what a
- * human wrote and reviewed. Blocks are cut on a top-level `- ` at column zero, the only place a
- * new element can begin in a valid top-level sequence.
- *
- * N TASKS PRODUCE N FILES. A fragment may draft more than one (`NEW-1`, `NEW-2`, ...) and {@link
- * materializeDraftTaskIds} already returns `ids: string[]`, so the plural was supported upstream
- * and only the write site collapsed it into a single append.
- *
- * REFUSES RATHER THAN GUESSES: a block whose `- id:` cannot be read yields no file at all, because
- * writing a shard under a guessed name puts a task somewhere `lint-plan` cannot match to its id.
+ * Split a drafted fragment into ONE `plan/tasks.d/` shard per task. `applyFragmentToPlanYaml` appends to
+ * `plan/tasks.yaml`, which `lint-plan`'s `monolith-filing` refuses for a NEW id; this was the last writer still
+ * appending, and because no proposal had ever been ratified the write had never once met the gate. TEXT SPLITTING,
+ * NEVER A YAML RE-SERIALIZATION: round-tripping authored, prose-heavy YAML would reformat what a human wrote, so
+ * blocks are cut on a top-level `- ` at column zero. REFUSES RATHER THAN GUESSES — a block whose `- id:` cannot be
+ * read yields no file, because a shard under a guessed name puts a task where `lint-plan` cannot match it.
  */
 export function ratificationShardFiles(
   fragmentYaml: string,
@@ -2635,35 +1798,28 @@ export function ratificationShardFiles(
   for (const block of blocks) {
     const id = /^- id:\s*(\S+)/m.exec(block)?.[1];
     if (!id) return { ok: false, reason: `a drafted task block carries no readable "- id:" line (starts: ${block.slice(0, 60)})` };
-    // The title is the slug's source. A block with none still files — under the id alone — since
-    // the id is what `monolith-filing` matches on and the slug is readability.
+    // The title is the slug's source. A block with none still files — under the id alone — since the id is what
+    // `monolith-filing` matches on and the slug is readability.
     const title = /^\s+title:\s*(.*)$/m.exec(block)?.[1] ?? "";
-    // The cap is the SHARD convention's, not the docket's; the trailing-hyphen trim is this
-    // writer's own, since `slug` strips edges BEFORE slicing and a cut can land on a separator.
+    // The cap is the SHARD convention's, not the docket's; the trailing-hyphen trim is this writer's own, since
+    // `slug` strips edges BEFORE slicing and a cut can land on a separator.
     const stem = kebabSlug(title.replace(/^["']|["']$/g, ""), SHARD_SLUG_MAX_LEN).replace(/-+$/, "");
     files.push({ relPath: `plan/tasks.d/${id}${stem ? `-${stem}` : ""}.yaml`, contents: `${block.replace(/\s*$/, "")}\n` });
   }
   return { ok: true, files };
 }
 
-/** The filesystem surface {@link writeRatificationShards} needs — injected so the write is
- *  testable without a real worktree, the same seam discipline the rest of this module uses. */
+/** The filesystem surface {@link writeRatificationShards} needs — injected so the write is testable without a real
+ *  worktree, the same seam discipline the rest of this module uses. */
 export interface ShardWriteFs {
   mkdirSync: (dir: string, opts: { recursive: true }) => unknown;
   writeFileSync: (path: string, data: string, enc: "utf8") => void;
 }
 
-/**
- * Compose {@link ratificationShardFiles} and WRITE them under `worktreePath`, returning the
- * repo-relative paths written. THROWS on a refusal rather than returning a partial result: a
- * ratification that cannot name its own shard must write nothing, commit nothing and open no PR,
- * the same all-or-nothing contract {@link materializeDraftTaskIds} already states for the mint.
- *
- * EXTRACTED FROM THE GATEWAY so it is reachable by a test. `createRatificationBranch`
- * (run-task.ts) needs a real worktree, a real mint and real id reservations to run at all, so a
- * loop living inline there is untestable by construction — and an untestable write is exactly what
- * let the monolith append survive until the first ratification in the repo's history met the gate.
- */
+/** Compose {@link ratificationShardFiles} and WRITE them under `worktreePath`. THROWS on a refusal rather than
+ *  returning a partial result: a ratification that cannot name its own shard must write nothing and open no PR.
+ *  EXTRACTED FROM THE GATEWAY so it is reachable by a test — an untestable write is what let the monolith append
+ *  survive until the first ratification met the gate. */
 export function writeRatificationShards(
   worktreePath: string,
   fragmentYaml: string,
@@ -2683,9 +1839,8 @@ export function applyFragmentToPlanYaml(tasksYaml: string, fragmentYaml: string)
   return `${base}\n${fragmentYaml.trim()}\n`;
 }
 
-/** Splice a proposal's ratification stamp into MASTER-PLAN.md's proposal list: replaces
- *  an existing `- <id> (...)` bullet in place when the proposal was already captured
- *  there, otherwise appends the stamp as a new bullet at the end of the file. */
+/** Splice a ratification stamp into MASTER-PLAN.md's proposal list: replace an existing `- <id> (…)` bullet in place
+ *  when there is one, otherwise append the stamp at the end of the file. */
 export function applyStampToMasterPlan(masterPlanMd: string, proposalId: string, stampLine: string): string {
   const bulletRe = new RegExp(`^- ${proposalId} \\(.*$`, "m");
   if (bulletRe.test(masterPlanMd)) {
@@ -2697,34 +1852,22 @@ export function applyStampToMasterPlan(masterPlanMd: string, proposalId: string,
 
 // ── W1-T2471: RATIFY A BATCH — one branch, one commit, one MASTER-PLAN block, one PR ───────
 //
-// `approveProposal` above ships exactly ONE proposal per branch/commit/PR/review-spawn. With
-// 17 ready proposals in the inbox that is 17 full PR lifecycles for a diff that is pure plan
-// text, and PARALLEL single-approves cannot fix it: `applyStampToMasterPlan` REPLACES an
-// existing bullet but otherwise APPENDS AT EOF, so N independent branches built off one base
-// each append their own stamp at the SAME point and conflict pairwise on merge (measured).
-//
-// The fix folds N stamps SEQUENTIALLY in ONE working copy instead. `applyStampToMasterPlan` is
-// already a pure `(md, id, line) => md`, so N calls chained through ONE accumulator produce N
-// appended lines with no conflict — there is only ever one branch to conflict on. Everything
-// below is ADDITIVE: `approveProposal`/`RatifyGateway`/the single-proposal path above are
-// UNCHANGED, and this is a second, parallel entry point over an EXPLICIT, ORDERED set of
-// proposal ids the caller names — never a discovered or implicit "approve everything ready".
+// `approveProposal` ships ONE proposal per branch, commit, PR and review spawn, and PARALLEL single-approves cannot
+// fix that: `applyStampToMasterPlan` appends at EOF, so N branches off one base conflict pairwise on merge
+// (measured). Folding N stamps SEQUENTIALLY through ONE accumulator leaves only one branch to conflict on, over an
+// EXPLICIT, ORDERED set the caller names.
 
-/** One batch member that did NOT make it into a {@link RatifyBatchPlan}'s `accepted` list,
- *  carrying its OWN named reason — never a bare "not ready". Either the ordinary
- *  {@link refusalReason} for a non-ready/ratified/deferred/drafting/retired classification, or
- *  (Q5) a within-batch duplicate refusal for a READY member whose draft would re-file a title
- *  an EARLIER-accepted member of this same batch already drafted. */
+/** One batch member that did NOT reach `accepted`, carrying its OWN reason — the ordinary {@link refusalReason}, or a
+ *  duplicate refusal against an earlier-accepted member of this batch. */
 export interface BatchSkip {
   proposalId: string;
   state: InboxState;
   reason: string;
-  /** Present iff skipped for duplicating an already-filed task (the caller-supplied
-   *  origin/main corpus) OR an earlier-accepted member of this same batch. */
+  /** Present iff skipped for duplicating an already-filed task (the caller-supplied origin/main corpus) OR an
+   *  earlier-accepted member of this same batch. */
   duplicateOf?: string;
-  /** The drafted shard path that would have been written, present alongside `duplicateOf` —
-   *  same {@link DraftedDuplicate} fields {@link approveProposal}'s own duplicate-refusal
-   *  ledger line carries. */
+  /** The drafted shard path that would have been written, present alongside `duplicateOf` — same {@link
+   *  DraftedDuplicate} fields {@link approveProposal}'s own duplicate-refusal ledger line carries. */
   draftedPath?: string;
   score?: number;
 }
@@ -2733,48 +1876,31 @@ export interface BatchSkip {
 export type RatifyBatchPlan =
   | {
       ok: true;
-      /** Ready, non-duplicate members, in the order they were classified — what the gateway
-       *  files, one {@link RatificationPayload} per accepted proposal. */
+      /** Ready, non-duplicate members, in the order they were classified — what the gateway files, one {@link
+       *  RatificationPayload} per accepted proposal. */
       accepted: RatificationPayload[];
-      /** Every member that did NOT make `accepted`, each naming its own reason (Q4: an unready
-       *  member neither blocks nor drags in the rest of the batch). */
+      /** Every member that did NOT make `accepted`, each naming its own reason (Q4: an unready member neither blocks
+       *  nor drags in the rest of the batch). */
       skipped: BatchSkip[];
-      /** Every accepted member's shard files, concatenated in accepted order — N proposals'
-       *  worth of `- id:` blocks, exactly what {@link ratificationShardFiles} would produce for
-       *  each member alone (Q3: the writer is per-fragment and composes with no shared state). */
+      /** Every accepted member's shard files in accepted order — exactly what {@link ratificationShardFiles} produces
+       *  for each alone, since the writer holds no state. */
       shardFiles: RatificationShardFile[];
-      /** `masterPlanMd` with every accepted member's stamp folded in, IN ORDER, via repeated
-       *  {@link applyStampToMasterPlan} calls over ONE accumulator — never N independent patches
-       *  of the input (Q2: this is the whole reason a batch cannot hit the EOF-append conflict
-       *  that sinks N parallel single-approve branches). */
+      /** `masterPlanMd` with every stamp folded in, IN ORDER, through ONE accumulator — the whole reason a batch
+       *  cannot hit the EOF-append conflict that sinks N parallel branches. */
       masterPlanMd: string;
     }
   | {
       ok: false;
-      /** A BATCH-LEVEL refusal — nothing is filed for ANY member, accepted or skipped alike,
-       *  because two members drafting the same real task id collide on the same
-       *  `plan/tasks.d/<id>-<slug>.yaml` shard path (Q3): a precondition of the batch itself,
-       *  never a property of any one member's draft, so partial filing would silently clobber
-       *  whichever member wrote second. */
+      /** A BATCH-LEVEL refusal — nothing is filed for ANY member, because two members' drafts collide on one shard
+       *  path. Partial filing would silently clobber whichever wrote second. */
       refusal: string;
       skipped: BatchSkip[];
     };
 
-/**
- * Reduce a batch of already-computed {@link InboxClassification}s into a {@link RatifyBatchPlan}
- * — PURE, no fs/git/network, mirroring {@link approveProposal}'s own read-only decision/side-
- * effect split. `classifications` is the EXPLICIT, ORDERED set the caller named (Q4) — this
- * function never discovers, expands, or reorders it; each member was already classified
- * INDIVIDUALLY by the caller's own {@link classifyProposal} call.
- *
- * Q5 (within-batch duplicates): `opts.duplicateCorpus` seeds the check exactly as
- * {@link RatifyLedgerDeps.duplicateCorpus} does for a single approve, and GROWS by one accepted
- * member's own {@link draftedShardSlugs} before the NEXT member is checked — so two members
- * drafting the same title are caught even though neither is on origin/main yet. The growth is
- * PURELY ADDITIVE: an empty/omitted `duplicateCorpus` still fails open (the first member of an
- * empty-corpus batch is never refused for a duplicate it can't possibly have) — identical to
- * {@link draftedDuplicate}'s own existing corpus-empty contract, just re-seeded each iteration.
- */
+/** Reduce already-computed {@link InboxClassification}s into a {@link RatifyBatchPlan} — PURE, over the EXPLICIT,
+ *  ORDERED set the caller named, which this never expands or reorders. WITHIN-BATCH DUPLICATES:
+ *  `opts.duplicateCorpus` GROWS by each accepted member's own drafted slugs before the next is checked; an empty
+ *  corpus still fails open. */
 export function planRatificationBatch(
   classifications: readonly InboxClassification[],
   masterPlanMd: string,
@@ -2802,14 +1928,13 @@ export function planRatificationBatch(
       continue;
     }
     accepted.push({ proposalId: c.proposalId, fragmentYaml: c.draft.fragmentYaml, stampLine: c.draft.stampLine });
-    // Q5: fold this NOW-accepted member's own drafted shard slugs into the corpus BEFORE the
-    // next member is checked — dedupping against main UNION accepted-so-far, additive only.
+    // Q5: fold this NOW-accepted member's own drafted shard slugs into the corpus BEFORE the next member is checked —
+    // dedupping against main UNION accepted-so-far, additive only.
     corpus = [...corpus, ...draftedShardSlugs(c.draft.fragmentYaml)];
   }
 
-  // Q3: two accepted members' drafts declaring the SAME real task id would write the SAME
-  // shard path, silently clobbering one another. Checked over every accepted payload BEFORE
-  // any shard is folded into the result, refusing the WHOLE batch rather than half-filing it.
+  // Two accepted members declaring the SAME task id would write the SAME shard path. Checked over every accepted
+  // payload BEFORE any shard is folded in, refusing the WHOLE batch, not half of it.
   const shardFiles: RatificationShardFile[] = [];
   const ownerOf = new Map<string, string>(); // relPath -> the FIRST proposalId to claim it
   for (const payload of accepted) {
@@ -2838,16 +1963,13 @@ export function planRatificationBatch(
   return { ok: true, accepted, skipped, shardFiles, masterPlanMd: foldedMasterPlanMd };
 }
 
-/** Git/GitHub side effects {@link approveBatch} drives — ONE branch, ONE commit/push, ONE PR
- *  for the WHOLE accepted set, mirroring {@link RatifyGateway}'s single-proposal shape but
- *  called exactly once each regardless of how many members the batch accepts. */
+/** Git and GitHub side effects {@link approveBatch} drives — ONE branch, commit and PR for the WHOLE accepted set,
+ *  called exactly once each however many members the batch accepts. */
 export interface RatifyBatchGateway {
-  /** File every accepted payload's shards (one {@link writeRatificationShards} call per
-   *  payload composes with no shared state, Q3) plus the folded MASTER-PLAN.md text, in ONE
-   *  branch, commit and push. Returns the branch name actually pushed. */
+  /** File every accepted payload's shards plus the folded MASTER-PLAN.md text, in ONE branch, commit and push.
+   *  Returns the branch name actually pushed. */
   createRatificationBranch(payloads: RatificationPayload[]): string;
-  /** Open the plan PR for the pushed branch, naming every accepted proposal id. Returns its
-   *  URL. */
+  /** Open the plan PR for the pushed branch, naming every accepted proposal id. Returns its URL. */
   openPlanPr(branch: string, proposalIds: string[]): string;
 }
 
@@ -2872,23 +1994,12 @@ export type BatchApproveResult =
   | { ok: false; refusal: string; skipped: BatchSkip[] };
 
 /**
- * `rmd approve <P##> <P##> ...` — the N-proposal counterpart of {@link approveProposal}. Every
- * member is classified INDIVIDUALLY by the caller (this function never re-derives readiness)
- * and an unready one is SKIPPED, carrying its own named reason, NEVER admitting the rest and
- * NEVER aborting the whole batch (Q4) — except for the one batch-level precondition
- * {@link planRatificationBatch} checks before anything is written: two accepted members
- * colliding on the same shard path, which refuses the WHOLE batch before either gateway call.
- *
- * ONE gateway call each — `createRatificationBranch` then `openPlanPr` — for the WHOLE accepted
- * set, never once per member. Ledgers exactly one `ratify.approve_refused` line per skipped
- * member (same shape {@link approveProposal} writes for a single refusal) and exactly one
- * `ratify.approved` line per ACCEPTED member once the one PR exists — a reader diffing the
- * ledger sees the same one-line-per-proposal receipt whether it was ratified singly or in a
- * batch, just sharing one `pr_url`/`branch` across every accepted row.
- *
- * A batch of exactly ONE READY classification produces a `payload`/`shardFiles`/`masterPlanMd`
- * BYTE-IDENTICAL to what {@link approveProposal} would produce for that same classification —
- * test/ratify-batch.test.ts pins this directly against the single-proposal functions above.
+ * `rmd approve <P##> <P##> ...` — the N-proposal counterpart of {@link approveProposal}. Every member is classified
+ * INDIVIDUALLY by the caller and an unready one is SKIPPED with its own reason, never aborting the batch — except the
+ * one batch-level precondition: two accepted members colliding on one shard path, which refuses the WHOLE batch
+ * before either gateway call. ONE gateway call each for the WHOLE set, and one ledger line per member, so a reader
+ * sees the same one-line-per-proposal receipt either way. A batch of exactly ONE READY classification produces output
+ * BYTE-IDENTICAL to {@link approveProposal}'s — test/ratify-batch.test.ts pins it.
  */
 export function approveBatch(
   classifications: readonly InboxClassification[],
@@ -2932,11 +2043,8 @@ export function approveBatch(
   return { ok: true, branch, prUrl, prNumber, accepted: plan.accepted, skipped: plan.skipped, shardFiles: plan.shardFiles, masterPlanMd: plan.masterPlanMd };
 }
 
-/** The harness-authored commit message for a BATCH ratification branch — same no-LLM,
- *  no-Remudero-Task-trailer discipline as {@link approveCommitMessage} (a batch ratification
- *  branch is still a plan-FILING PR, it implements nothing). The subject deliberately omits
- *  the id list (unbounded N would blow commitlint's header-length rule) — every member's own
- *  stamp line, carrying its id, rides in the body instead. */
+/** The harness-authored commit message for a BATCH ratification branch — same discipline as {@link
+ *  approveCommitMessage}. The subject omits the id list, which unbounded N would overflow. */
 export function approveBatchCommitMessage(payloads: readonly RatificationPayload[]): string {
   return buildPlanPrCommitMessage({
     scope: "plan",
@@ -2953,29 +2061,18 @@ export function approveBatchCommitMessage(payloads: readonly RatificationPayload
   });
 }
 
-// ── Draft placeholder ids -> concrete ids AT APPROVE TIME (feedback#fb-1784766965325-c7b673,
-//    the SEQUENCING half; lib/task-id.ts is the DERIVATION half) ─────────────────────────────
+// ── Draft placeholder ids -> concrete ids AT APPROVE TIME (lib/task-id.ts is the derivation) ──
 //
-// {@link inboxDraftPrompt} now hands the drafting worker NO real id at all — it emits `NEW-1`,
-// `NEW-2`, ... placeholders (never W1-T shaped, so a cached draft can never pin a concrete id
-// even by accident). `rmd approve`'s `createRatificationBranch` calls {@link
-// materializeDraftTaskIds} to mint + RESERVE the real ids and rewrite every placeholder — the
-// fragment's `- id:` lines, any intra-fragment `depends_on` reference, and the stamp line's
-// task-id list — in one pass, before anything is written to the ratification worktree.
+// {@link inboxDraftPrompt} hands the worker NO real id — it emits `NEW-<n>` placeholders, never W1-T shaped, so a
+// cached draft can never pin a concrete id. {@link materializeDraftTaskIds} mints and RESERVES the real ids and
+// rewrites every placeholder before anything is written.
 
-/** The placeholder id shape {@link inboxDraftPrompt} instructs drafting workers to emit:
- *  `NEW-1`, `NEW-2`, ... in fragment order. Deliberately never `W1-T`-shaped, so it can never
- *  be mistaken for (or accidentally collide with) a real filed id. */
+/** The placeholder shape drafting workers emit: `NEW-1`, `NEW-2`, … in fragment order. Deliberately never
+ *  `W1-T`-shaped, so it can never be mistaken for or collide with a real filed id. */
 const DRAFT_PLACEHOLDER_DECL_RE = /^\s*(?:-\s*)?id:\s*["']?(NEW-\d+)/gm;
 
-/**
- * A drafted fragment's placeholder ids, in first-DECLARATION order (the `- id:` key, never a
- * stray `depends_on` mention — the same anchoring discipline {@link
- * "./task-id.js".declaredTaskIds} uses for real ids), deduplicated. Empty for a fragment that
- * carries no placeholders at all (every `- id:` already real — a pre-existing cached draft from
- * before this doctrine, or a fragment with zero tasks) — {@link materializeDraftTaskIds} treats
- * that as nothing-to-materialize, never an error.
- */
+/** A fragment's placeholder ids in first-DECLARATION order (the `- id:` key, never a stray `depends_on`). Empty means
+ *  nothing to materialize, never an error. */
 export function draftPlaceholderIds(fragmentYaml: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -2988,9 +2085,8 @@ export function draftPlaceholderIds(fragmentYaml: string): string[] {
   return out;
 }
 
-/** Replace every occurrence of each mapped placeholder — a `- id:` declaration OR a
- *  `depends_on`/stamp-line REFERENCE — with its materialized real id. Word-boundary-safe so
- *  `NEW-1` never eats into `NEW-10`/`NEW-11`: a digit run has no `\b` before its next digit. */
+/** Replace every mapped placeholder — a declaration or a reference — with its real id. Word-boundary-safe, so `NEW-1`
+ *  never eats into `NEW-10`: a digit run has no `\b` before it. */
 export function substitutePlaceholderIds(text: string, mapping: ReadonlyMap<string, string>): string {
   let out = text;
   for (const [placeholder, real] of mapping) {
@@ -2999,17 +2095,14 @@ export function substitutePlaceholderIds(text: string, mapping: ReadonlyMap<stri
   return out;
 }
 
-/** What {@link materializeDraftTaskIds} needs FROM its caller, I/O-injected so the
- *  materializer's own decision logic (what refuses, what gets rewritten) stays pure and
- *  unit-testable — the same mint/reserve split `rmd triage` and `rmd plan` already wire into
- *  run-task.ts, reused here rather than re-derived (design: "one derivation, one doctrine"). */
+/** What {@link materializeDraftTaskIds} needs FROM its caller, I/O-injected so its decision logic stays pure — the
+ *  same mint/reserve split `rmd triage` and `rmd plan` already wire in. */
 export interface DraftTaskIdMintDeps {
-  /** The shared mint (lib/task-id.ts's derivation, or run-task.ts's history-layered wrapper) —
-   *  called ONCE, after the placeholder count is known, before anything is reserved. */
+  /** The shared mint (lib/task-id.ts's derivation, or run-task.ts's history-layered wrapper) — called ONCE, after the
+   *  placeholder count is known, before anything is reserved. */
   mint(): { n: number; degraded: { source: string; reason: string }[] };
-  /** Reserve `count` ids at/above `startId` as a block ({@link
-   *  "./task-id-reservation.js".reserveTaskIdBlock}); THROWS on a non-contention failure (an
-   *  unwritable state dir — {@link "./task-id-reservation.js".TaskIdReservationError}). */
+  /** Reserve `count` ids at or above `startId` as a block; THROWS on a non-contention failure, such as an unwritable
+   *  state dir. */
   reserveBlock(startId: number, count: number): { ids: number[] };
 }
 
@@ -3017,18 +2110,10 @@ export type DraftTaskIdMaterialization =
   | { ok: true; fragmentYaml: string; stampLine: string; ids: string[] }
   | { ok: false; reason: string };
 
-/**
- * Materialize a drafted fragment's `NEW-<n>` placeholder ids into concrete, RESERVED `W1-Tnnn`
- * ids. A fragment with no placeholders at all is a pass-through no-op (nothing to mint, nothing
- * to reserve) — see {@link draftPlaceholderIds}.
- *
- * DEGRADE HONESTLY, NEVER GUESS (design (5)): a degraded mint source, or a reservation that
- * fails for a reason that is NOT contention, REFUSES — naming the unread source — rather than
- * falling back to an unreserved id. The caller (run-task.ts's `createRatificationBranch`) must
- * treat a `{ ok: false }` result as "write nothing, commit nothing, open no PR, leave the
- * proposal READY": a partial union here lands a duplicate id on main, which breaks `loadPlan`
- * for every consumer — strictly worse than refusing the approve and trying again.
- */
+/** Materialize `NEW-<n>` placeholders into concrete, RESERVED `W1-Tnnn` ids. DEGRADE HONESTLY, NEVER GUESS — a
+ *  degraded mint, or a reservation failing for anything but contention, REFUSES rather than falling back to an
+ *  unreserved id, and the caller must treat `{ ok: false }` as "write nothing, open no PR": a duplicate id on main
+ *  breaks `loadPlan`. */
 export function materializeDraftTaskIds(
   payload: { fragmentYaml: string; stampLine: string },
   deps: DraftTaskIdMintDeps,
@@ -3069,17 +2154,9 @@ export interface ReframeResult {
   drafts: DraftCache;
 }
 
-/**
- * Parse an `rmd reframe --supersedes <expr>` round expression (W1-T194 design (i)) against
- * the proposal's CURRENT `reframeHistory.length` — the same 1-indexed positional numbering
- * {@link inboxDraftPrompt} renders. Accepts a comma-separated list of round numbers and/or
- * inclusive ranges (`"2"`, `"1,3"`, `"2-3"`), or the literal `"ALL"` (case-insensitive)
- * meaning every round on record. Returns a sorted, deduplicated array of round numbers, or
- * `null` for anything that is not a definite, in-range expression — retraction must be
- * EXPLICIT (design: "never inferred from recency"), so an ambiguous, malformed, or
- * out-of-range expression is REFUSED rather than guessed at. `historyLength <= 0` always
- * yields `null`: there is no round yet to retract.
- */
+/** Parse an `rmd reframe --supersedes <expr>` expression (W1-T194) against the CURRENT `reframeHistory.length`, in
+ *  the 1-indexed numbering {@link inboxDraftPrompt} renders. Accepts numbers, inclusive ranges and `"ALL"`; returns
+ *  `null` for anything not definite and in range, because retraction must be EXPLICIT, never inferred from recency. */
 export function parseSupersedesExpr(expr: string, historyLength: number): number[] | null {
   if (historyLength <= 0) return null;
   const trimmed = expr.trim();
@@ -3107,24 +2184,11 @@ export function parseSupersedesExpr(expr: string, historyLength: number): number
   return [...rounds].sort((a, b) => a - b);
 }
 
-/**
- * `rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]` — the operator's objection
- * is captured VERBATIM (never summarized) and ledgered as `ratify.reframed`; the cached
- * draft is invalidated so the next `rmd inbox` pass re-drafts rather than re-surfacing the
- * candidate the operator just objected to; the feedback joins the proposal's
- * `reframeHistory` so {@link inboxDraftPrompt}'s NEXT invocation carries it into the
- * redraft — "the reframe history rides the proposal until resolution" (design). Opens NO
- * PR: reframe is feedback, not a ratification, and is valid for ANY classification state (a
- * READY item the operator still wants to object to is exactly the "one bit OR feedback"
- * choice P25 promises).
- *
- * `supersedes` (W1-T194, {@link parseSupersedesExpr}'s output — pre-validated 1-indexed
- * round numbers) marks those EXISTING rounds `retracted: true` in place: their text is
- * PRESERVED verbatim in `reframeHistory` (and the ORIGINAL `ratify.reframed` ledger line
- * for each is never touched — retraction is a NEW ledger line, this call's own) but
- * {@link inboxDraftPrompt} stops emitting them into the next redraft. Omitted/empty leaves
- * every prior round exactly as it was — retraction only ever happens on an explicit ask.
- */
+/** `rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]` — the objection is captured VERBATIM and ledgered
+ *  as `ratify.reframed`, the cached draft is invalidated so the next pass re-drafts, and the feedback joins
+ *  `reframeHistory`. Opens NO PR and is valid for ANY state — the "one bit OR feedback" choice P25 promises.
+ *  `supersedes` marks EXISTING rounds `retracted` in place: their text and ledger lines survive, but the prompt stops
+ *  emitting them. */
 export function reframeProposal(
   proposal: Proposal,
   feedback: string,
@@ -3152,11 +2216,9 @@ export function reframeProposal(
 
 // ── Approve/reframe telemetry — the retro's fatigue signal (MASTER-PLAN P25 iv, W1-T111) ─
 //
-// The field's failure mode is the rubber-stamp queue: a sustained approval rate near 100%
-// means the bit has become ceremony for that class [research: hitl-approval-fatigue-2026].
-// This is reduced the SAME way lib/retro.ts's own gather is (pure, over parsed ledger
-// records) and rendered as a standalone section the harness concatenates onto
-// `renderGather`'s output — lib/retro.ts itself stays untouched.
+// The failure mode is the rubber-stamp queue: a sustained approval rate near 100% means the bit has become ceremony
+// [research: hitl-approval-fatigue-2026]. Reduced the way retro.ts's own gather is, and rendered as a section the
+// harness appends.
 
 export interface RatifyTelemetry {
   approved: number;

@@ -155,7 +155,7 @@
   "src/lib/idle-reasons-panel.ts": 87,
   "src/lib/image-drift.ts": 93,
   "src/lib/inbox-thread.ts": 84,
-  "src/lib/inbox.ts": 1537,
+  "src/lib/inbox.ts": 599,
   "src/lib/inflight-lock.ts": 93,
   "src/lib/init.ts": 98,
   "src/lib/install-hash.ts": 30,
