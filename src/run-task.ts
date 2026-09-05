@@ -545,6 +545,8 @@ import {
   type TaskStatus,
   parseTasksFromYaml,
   taskRecordPath,
+  readBlobsAtRef,
+  mergePlanBlobs,
 } from "./lib/plan.js";
 import {
   DEFAULT_OVERLAP_WARNING_POLICY,
@@ -1635,33 +1637,88 @@ export function syncPlanFromOrigin(
   } catch (err) {
     throw new GitFetchError(`git show origin/main:${relPath} failed in ${repoDir}: ${String(err)}`);
   }
-  const tmpDir = makeTempDir("plan"); // W1-T115: shared rmd- prefix (lib/tmp.ts), same try/finally as before
-  try {
-    const tmpFile = join(tmpDir, "tasks.yaml");
-    writeFileSync(tmpFile, blob, "utf8");
-    // W1-T245: materialize origin/main's plan/tasks.d/ shards beside the monolith so the synced
-    // view equals loadPlan over a real checkout — everything from origin/main blobs, never the
-    // working tree (W1-T60 unweakened). Extracted so its two defensive git-failure paths are
-    // unit-covered with an injected runner.
-    materializeOriginShards(repoDir, dirname(relPath), tmpDir);
-    return { plan: loadPlan(tmpFile), staleDispatch };
-  } finally {
-    rmSync(tmpDir, { recursive: true, force: true });
-  }
+  // W1-T245: origin/main's plan/tasks.d/ shards belong to the synced view too, so it equals
+  // loadPlan over a real checkout — everything from origin/main blobs, never the working tree
+  // (W1-T60 unweakened).
+  //
+  // READ IN ONE BATCH AND MERGED IN MEMORY. This used to write the monolith and every shard into
+  // a temp directory purely so `loadPlan` would have a directory to glob, at the cost of one
+  // `git show` spawn plus one file write PER SHARD — 1,079 of each, 4.3 s, on every dispatching
+  // daemon tick (measured 2026-09-05). `mergePlanBlobs` applies loadPlan's OWN merge contract
+  // (duplicate id across monolith/shard fails loud, every `depends_on` resolves within the
+  // merged view) to the bytes directly, so the returned Plan is deep-equal to what the temp-file
+  // round trip produced; only the LABEL in an error message changes, from a temp path nobody
+  // could look up to the `origin/main:<path>` the bytes actually came from.
+  const shards = readOriginShardsAtRef(repoDir, dirname(relPath));
+  const plan = mergePlanBlobs([
+    { label: `origin/main:${relPath}`, text: blob },
+    ...shards.map((s) => ({ label: `origin/main:${s.relPath}`, text: s.text })),
+  ]);
+  return { plan, staleDispatch };
 }
 
 /** Injectable git invoker for {@link materializeOriginShards} — the real default shells out;
- *  a test passes a fake that throws to exercise the ls-tree and per-shard-show failure paths. */
-export type GitRunner = (args: string[]) => string;
+ *  a test passes a fake that throws to exercise the ls-tree and shard-read failure paths.
+ *  `stdin` is OPTIONAL (`git cat-file --batch` takes its object list there), so every existing
+ *  `(args) => string` fake stays assignable and keeps working unchanged. */
+export type GitRunner = (args: string[], stdin?: string) => string;
+
+/** The real default: one `git -C <repoDir> …`, with `stdin` piped when the verb wants it. */
+const defaultShardGitRunner = (repoDir: string): GitRunner => (args, stdin) =>
+  execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26, input: stdin });
+
+/**
+ * List `<planRelDir>/tasks.d/*.yaml` AT `ref` and read every shard blob in ONE
+ * `git cat-file --batch` — the ref's committed objects only, never the working tree.
+ *
+ * The LISTING is unchanged from W1-T245; what changed is the READ. One `git show <ref>:<shard>`
+ * per shard is one PROCESS SPAWN per task ever filed: measured 2026-09-05 at 1,079 shards,
+ * 4,258 ms of spawns (3.95 ms each) against 208 ms for a single batch returning identical bytes,
+ * paid on every dispatching daemon tick and every inbox approval. See
+ * {@link "./lib/plan.js".readBlobsAtRef} for the framing and its fail-loud contract.
+ *
+ * A failing `ls-tree` (no tasks.d/ at the ref, or a ref-dir lookup miss) is the plain no-shards
+ * case (matches listShardFiles's ENOENT tolerance); a shard that LISTS but cannot be read throws
+ * {@link GitFetchError} loudly — a torn read must never silently drop a task.
+ */
+export function readOriginShardsAtRef(
+  repoDir: string,
+  planRelDir: string,
+  runGit: GitRunner = defaultShardGitRunner(repoDir),
+  ref = "origin/main",
+): Array<{ relPath: string; text: string }> {
+  const shardRelDir = join(planRelDir, "tasks.d");
+  let shardListing: string;
+  try {
+    shardListing = runGit(["ls-tree", "--name-only", ref, `${shardRelDir}/`]);
+  } catch {
+    shardListing = "";
+  }
+  const shardRelPaths = shardListing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")));
+  if (shardRelPaths.length === 0) return [];
+  let texts: string[];
+  try {
+    texts = readBlobsAtRef(runGit, ref, shardRelPaths);
+  } catch (err) {
+    throw new GitFetchError(`git cat-file --batch over ${ref}:${shardRelDir}/ failed in ${repoDir}: ${String(err)}`);
+  }
+  return shardRelPaths.map((relPath, i) => ({ relPath, text: texts[i] }));
+}
 
 /**
  * Copy every `plan/tasks.d/*.yaml` shard at `ref` into `<tmpDir>/tasks.d/` beside the
  * already-written monolith, so {@link loadPlan}'s sibling-directory shard lookup sees them
- * (W1-T245: syncPlanFromOrigin was shard-blind). List via `git ls-tree`, read each via
- * `git show <ref>:<shard>` — the ref's blobs only, never the working tree. A failing
- * ls-tree (no tasks.d/ at the ref, or a ref-dir lookup miss) is the plain no-shards case
- * (matches listShardFiles's ENOENT tolerance); a shard that lists but fails to `git show`
- * throws {@link GitFetchError} loudly — a torn read must never silently drop a task.
+ * (W1-T245: syncPlanFromOrigin was shard-blind). The bytes come from
+ * {@link readOriginShardsAtRef} — one `git ls-tree` plus one `git cat-file --batch` over the
+ * ref's blobs, never the working tree — and this function only WRITES them out.
+ *
+ * ONLY ONE CALLER STILL NEEDS THAT: `rmd lint-plan --base <ref>`, whose raw-text scope pass
+ * (`readShardTexts`) re-reads both trees off disk to diff record TEXT, dropped fields included.
+ * The dispatch path (`syncPlanFromOrigin`) no longer writes anything — it merges the same blobs
+ * in memory via {@link "./lib/plan.js".mergePlanBlobs}.
  *
  * `ref` defaults to `"origin/main"` (this function's original, single-caller shape); W1-T246's
  * `lintPlanCommand` passes an ARBITRARY `--base <ref>` — the SAME shard-blindness (W1-T245)
@@ -1676,33 +1733,17 @@ export function materializeOriginShards(
   repoDir: string,
   planRelDir: string,
   tmpDir: string,
-  runGit: GitRunner = (args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }),
+  runGit: GitRunner = defaultShardGitRunner(repoDir),
   ref = "origin/main",
 ): string[] {
-  const shardRelDir = join(planRelDir, "tasks.d");
-  let shardListing: string;
-  try {
-    shardListing = runGit(["ls-tree", "--name-only", ref, `${shardRelDir}/`]);
-  } catch {
-    shardListing = "";
-  }
-  const shardRelPaths = shardListing
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")));
-  if (shardRelPaths.length === 0) return [];
+  const shards = readOriginShardsAtRef(repoDir, planRelDir, runGit, ref);
+  if (shards.length === 0) return [];
   const tmpShardDir = join(tmpDir, "tasks.d");
   mkdirSync(tmpShardDir, { recursive: true });
-  for (const shardRelPath of shardRelPaths) {
-    let shardBlob: string;
-    try {
-      shardBlob = runGit(["show", `${ref}:${shardRelPath}`]);
-    } catch (err) {
-      throw new GitFetchError(`git show ${ref}:${shardRelPath} failed in ${repoDir}: ${String(err)}`);
-    }
-    writeFileSync(join(tmpShardDir, basename(shardRelPath)), shardBlob, "utf8");
+  for (const { relPath, text } of shards) {
+    writeFileSync(join(tmpShardDir, basename(relPath)), text, "utf8");
   }
-  return shardRelPaths;
+  return shards.map((s) => s.relPath);
 }
 
 /**

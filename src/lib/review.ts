@@ -6725,8 +6725,9 @@ export interface PlanCriteriaAtHeadResult {
  *
  * SYNCHRONOUS BY CONSTRUCTION (claim 6): no `Promise`, no timer, no retry loop between resolving
  * criteria and handing them to {@link judgeReview} — a caller can do both in the same tick. Each
- * blob {@link loadPlanAtRef} needs is read exactly once (one `git show` per file, one
- * `git ls-tree` for the shard directory), never re-fetched.
+ * blob {@link loadPlanAtRef} needs is read exactly once (one `git show` for the monolith, one
+ * `git ls-tree` for the shard directory, and ONE `git cat-file --batch` for every shard in it —
+ * never one spawn per shard), never re-fetched.
  */
 /**
  * W1-T2623: the OBJECT IDENTITY of the plan bytes THIS resolve actually read — restoring, on the
@@ -6779,7 +6780,10 @@ export function resolvePlanCriteriaAtHead(
   repoRoot: string,
   planRelPath: string,
   headSha: string,
-  runGit?: (args: string[]) => string,
+  // `stdin` is OPTIONAL and forwarded straight to `loadPlanAtRef`: the shard read is one
+  // `git cat-file --batch`, which takes its object list there. An existing `(args) => string`
+  // fake stays assignable, but one that means to serve the shard read must now honour stdin.
+  runGit?: (args: string[], stdin?: string) => string,
 ): PlanCriteriaAtHeadResult {
   const taskId = extractTaskTrailerId(body ?? "");
   // CLAIM 4: no anchored trailer ⇒ unchanged — nothing to resolve, and no git object is ever
@@ -6791,7 +6795,8 @@ export function resolvePlanCriteriaAtHead(
   // second, differently-configured git runner for the read-identity probes below.
   const gitRunner =
     runGit ??
-    ((args: string[]) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }));
+    ((args: string[], stdin?: string) =>
+      execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26, input: stdin }));
 
   try {
     const plan = runGit === undefined ? loadPlanAtRef(repoRoot, planRelPath, headSha) : loadPlanAtRef(repoRoot, planRelPath, headSha, runGit);

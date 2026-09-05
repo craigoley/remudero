@@ -170,23 +170,26 @@ test("nothing added fetches twice or waits between resolving and judging", () =>
   const headSha = commit("plan with one shard");
 
   let calls = 0;
-  const countingRunGit = (args: string[]): string =>
-    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" });
-  const runGit = (args: string[]): string => {
+  // `stdin` is forwarded: the shard read is one `git cat-file --batch`, which takes its object
+  // list there. A fake that dropped it would hand git an empty request and read back nothing.
+  const countingRunGit = (args: string[], stdin?: string): string =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe", input: stdin });
+  const runGit = (args: string[], stdin?: string): string => {
     calls += 1;
-    return countingRunGit(args);
+    return countingRunGit(args, stdin);
   };
 
   const result = resolvePlanCriteriaAtHead(TRAILERED_BODY("W1-T1"), dir, "plan/tasks.yaml", headSha, runGit);
-  // Exactly: one `git show` for the monolith, one `git ls-tree` for tasks.d/, one `git show` per
-  // shard (one shard here), plus (W1-T2623) the read-identity probes over the SAME objects — one
+  // Exactly: one `git show` for the monolith, one `git ls-tree` for tasks.d/, ONE
+  // `git cat-file --batch` for every shard in it (one shard here, but the count no longer moves
+  // with that number), plus (W1-T2623) the read-identity probes over the SAME objects — one
   // `git rev-parse` for the monolith's blob oid, one for tasks.d/'s tree oid — never a retry,
   // never doubled, and never more than one probe per object even though both the content read
   // and the identity read touch it.
   assert.equal(
     calls,
     5,
-    "the monolith, the shard listing, the one shard, and the two read-identity rev-parse probes must each run exactly once",
+    "the monolith, the shard listing, the ONE batch read of every shard, and the two read-identity rev-parse probes must each run exactly once",
   );
   assert.deepEqual(result.criteria.map((c) => c.claim), ["criterion one"]);
   assert.match(
