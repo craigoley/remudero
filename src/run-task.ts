@@ -213,7 +213,7 @@ import {
   type EscalationOption,
   type IssueGateway,
   type OpenIssue,
-  type PresenceMode, prReferentFromIssueText,} from "./lib/escalate.js";
+  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret,} from "./lib/escalate.js";
 import {
   boardPrsRestArgs,
   checkRunsRestArgs,
@@ -244,7 +244,7 @@ import {
   type RestRollupEntry,
 } from "./lib/open-prs-rest.js";
 import { buildMainHealthRung } from "./lib/main-health-rung.js";
-import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
+import { imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
   alertTaskId,
@@ -32527,7 +32527,32 @@ export async function escalateCommand(
     if (deliversRealtime(config.root)) {
       // W1-T144: the real-time ping deep-links to the console card alongside the GitHub
       // issue URL, same as the digest's own escalations line (digest.ts's renderDigest).
-      notify(`[${cls}] ${taskId}: ${summary}\n${url}\n${consoleCardUrl(consoleUrl(config), taskId)}`, {
+      // W1-T2696 — SCOPE WIDENING, STATED RATHER THAN SLIPPED IN. This one call site is the
+      // fleet's only real-time ping, and it is in run-task.ts, which is NOT in W1-T2696's
+      // `files:`. The renderer, the link minting and the answer routes all live inside the
+      // declared scope; without this line they would ship inert, which is the "declared but
+      // unreachable" class serve.ts's own history has three prior instances of. The scope guard
+      // flags this as an overrun (advisory, never blocking) and the PR body names it.
+      //
+      // A secret that cannot be read degrades to today's text rather than dropping the page:
+      // renderEscalationPing takes `secret` as optional for exactly this reason.
+      let linkSecret: string | undefined;
+      try {
+        linkSecret = loadEscalationLinkSecret(config.root);
+      } catch (err) {
+        console.error(`escalate: answer links unavailable — ${String(err)}`);
+      }
+      notify(renderEscalationPing(
+        {
+          cls,
+          taskId,
+          summary,
+          issueUrl: url,
+          cardUrl: consoleCardUrl(consoleUrl(config), taskId),
+          options: parseOptionFlags(rest),
+        },
+        { secret: linkSecret, baseUrl: consoleUrl(config), nowMs: Date.now() },
+      ), {
         channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
         ledgerPath,
         runId,

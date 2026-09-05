@@ -128,6 +128,25 @@ const SELF_AUTHENTICATED: ReadonlyArray<{ path: string; refusedBy: string; prove
     refusedBy: "an HMAC signature over the raw body (x-hub-signature-256) plus a repository match",
     provenBy: "test/github-event-sweep-wake.test.ts — invalid signature -> 401, wrong repository -> 403",
   },
+  {
+    path: "/v1/escalation/confirm",
+    refusedBy:
+      "the same HMAC over the link's claims as the answer route below, checked before anything is " +
+      "rendered — this route is GET and deliberately has no side effect, so an iMessage link " +
+      "preview cannot consume a link",
+    provenBy:
+      "test/escalation-answer-links.test.ts — forged -> 403, expired -> 410, and a verified link " +
+      "renders 200 while leaving the single-use marker unwritten",
+  },
+  {
+    path: "/v1/escalation/answer",
+    refusedBy:
+      "an HMAC signature over the link's own claims (escalation id, class, route, expiry), plus " +
+      "an expiry check and a single-use marker — the operator's phone carries no bearer token",
+    provenBy:
+      "test/escalation-answer-links.test.ts — forged -> 403, expired/already-used -> 410, and a " +
+      "route or class swapped inside a valid link reads as forged",
+  },
 ];
 
 // ── design (i): "assert, for every route it finds: a declared scope" — every entry in the REAL

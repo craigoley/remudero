@@ -91,6 +91,14 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   ["POST /v1/policy/provider-routing", "W1-T2709: bounded live-policy write/root/audit/nonce behavior is covered by test/provider-routing-console-controls.test.ts"],
   ["POST /v1/policy/provider-routing/clear", "W1-T2709: live-policy clear/root/audit/nonce behavior is covered by test/provider-routing-console-controls.test.ts"],
   ["POST /v1/merge-hold", "W1-T2719: engage/release write the shared merge-hold ledger writer, not fleetControlRoot or questionsRoot — tier/nonce/scope/read-back behavior is covered by test/console-merge-hold-control.test.ts"],
+  [
+    "POST /v1/escalation/answer",
+    "W1-T2696: selfAuthenticated — it carries NO bearer-token semantics, so the bearer wiring this " +
+      "suite probes does not apply to it and a probe here would assert nothing. Its own authority " +
+      "(HMAC over the link's claims, expiry, single-use marker) and its refusals are covered by " +
+      "test/escalation-answer-links.test.ts, and its exemption from the scope audit is reviewed in " +
+      "test/route-scope-matrix.test.ts's SELF_AUTHENTICATED table.",
+  ],
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([

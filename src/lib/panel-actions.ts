@@ -41,6 +41,13 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import {
+  consumeOptionLink,
+  escalationLinkUsedPath,
+  verifyOptionLink,
+  type OptionLinkClaims,
+} from "./escalate.js";
 import type { Route } from "./service.js";
 import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
@@ -1072,6 +1079,196 @@ export function ghIssueCloser(): IssueCloser {
   return {
     close(issueUrl: string) {
       execFileSync("gh", ["issue", "close", issueUrl], { encoding: "utf8" });
+    },
+  };
+}
+
+// ── W1-T2696: answering an escalation from the ping ──────────────────────────
+//
+// Two routes, both selfAuthenticated (W1-T2568's seam): the operator's phone carries no bearer
+// token, so the link's signature IS the authority and the handler verifies it itself.
+//
+// WHY THE GET NEVER CONSUMES. iMessage generates a preview for a URL it sends, which fetches it.
+// A GET that consumed the link would burn every ping before the operator ever tapped it. So the
+// GET verifies and renders a confirm page with no side effect, and only the POST consumes.
+//
+// INVARIANT: nothing is executed before signature, expiry and single-use all pass, and each
+// refusal is ledgered with which one failed.
+// FALSIFIER: test/escalation-answer-links.test.ts.
+
+/** What the answer routes need beyond {@link PanelActionDeps}: the state root the single-use
+ *  markers live under, the signing secret, and the clock. */
+export interface EscalationLinkDeps {
+  readonly root: string;
+  /**
+   * Resolved LAZILY, on the first request that needs it — never when routes are assembled.
+   *
+   * TRAP: `loadEscalationLinkSecret` creates the secret on first read, so calling it at assembly
+   * time makes standing up a server write a file. test/console-write-entry.test.ts asserts that
+   * obtaining a grant creates no path under the root, and caught exactly that.
+   *
+   * Throwing here is a refusal, not a crash: the handler catches it and answers 503.
+   */
+  readonly secret: () => string;
+  readonly now: () => number;
+  /**
+   * How the single-use marker is claimed. Injectable — and appended LAST so no positional caller
+   * shifts — so a test can drive the check-then-act WINDOW deterministically, the same reason
+   * fs-race-safe.ts's own {@link FsRaceSyscalls} exists. The losing arm is otherwise reachable
+   * only by a real race between two taps.
+   */
+  readonly consume?: (root: string, signature: string) => boolean;
+}
+
+/** Resolve the signing secret, or answer 503 and report why. */
+function resolveSecret(linkDeps: EscalationLinkDeps, res: ServerResponse): string | undefined {
+  try {
+    return linkDeps.secret();
+  } catch (err) {
+    sendJson(res, 503, { error: "unavailable", detail: `answer links are unavailable — ${String(err)}` });
+    return undefined;
+  }
+}
+
+function ledgerLinkOutcome(
+  deps: PanelActionDeps,
+  linkDeps: EscalationLinkDeps,
+  step: string,
+  escalationId: string,
+  extra: Record<string, unknown>,
+): void {
+  appendLedger(deps.ledgerPath, { run_id: `LINK-${linkDeps.now()}`, task_id: escalationId, step, ...extra });
+}
+
+function queryOf(req: IncomingMessage): URLSearchParams {
+  return new URL(req.url ?? "/", "http://local").searchParams;
+}
+
+function sendHtml(res: ServerResponse, status: number, html: string): void {
+  res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
+  res.end(html);
+}
+
+/** Escape for HTML text/attribute context — the confirm page renders operator-supplied ids. */
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * GET /v1/escalation/answer — verify and show, never act.
+ *
+ * A refusal renders its reason so the operator learns whether the ping went stale, was already
+ * answered, or did not verify at all.
+ */
+export function buildEscalationLinkConfirmRoute(deps: PanelActionDeps, linkDeps: EscalationLinkDeps): Route {
+  return {
+    method: "GET",
+    path: "/v1/escalation/confirm",
+    scope: "read",
+    selfAuthenticated: true,
+    handler: (req, res) => {
+      const query = queryOf(req);
+      const secret = resolveSecret(linkDeps, res);
+      if (secret === undefined) return;
+      const check = verifyOptionLink(query, secret, linkDeps.now(), (sig) =>
+        existsSync(escalationLinkUsedPath(linkDeps.root, sig)),
+      );
+      if (!check.ok) {
+        // `bad-request` is NOT ledgered. These routes are unauthenticated by design, so recording
+        // every malformed query would let anyone append to the ledger at will — and a probe that
+        // carries no well-formed link carries no information either. The other three refusals do
+        // imply a real link existed, which is worth a row.
+        if (check.reason !== "bad-request") {
+          ledgerLinkOutcome(deps, linkDeps, "escalation.link_refused", query.get("e") ?? "unknown", {
+            reason: check.reason,
+            detail: check.detail,
+            phase: "confirm",
+          });
+        }
+        sendHtml(res, check.reason === "forged" ? 403 : 410, `<p>This link cannot be used: ${esc(check.detail)}</p>`);
+        return;
+      }
+      sendHtml(
+        res,
+        200,
+        `<form method="POST" action="/v1/escalation/answer?${esc(query.toString())}">` +
+          `<p>Answer <b>${esc(check.claims.escalationId)}</b> with <b>${esc(check.claims.route)}</b>?</p>` +
+          `<button type="submit">Confirm</button></form>`,
+      );
+    },
+  };
+}
+
+/**
+ * POST /v1/escalation/answer — verify, claim the single-use marker, then execute.
+ *
+ * The marker is claimed BEFORE the option runs. Two taps racing therefore cannot both execute:
+ * the loser's exclusive-create fails and it is refused `already-used`. The cost of that order is
+ * that an option which throws has still burned its link, which is the right way round — a second
+ * automatic execution of a fleet-halting option is worse than an operator re-raising it.
+ */
+export function buildEscalationLinkAnswerRoute(deps: PanelActionDeps, linkDeps: EscalationLinkDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/escalation/answer",
+    scope: "write",
+    tier: "low",
+    selfAuthenticated: true,
+    handler: (req, res) => {
+      const query = queryOf(req);
+      const secret = resolveSecret(linkDeps, res);
+      if (secret === undefined) return;
+      const check = verifyOptionLink(query, secret, linkDeps.now(), (sig) =>
+        existsSync(escalationLinkUsedPath(linkDeps.root, sig)),
+      );
+      if (!check.ok) {
+        // See the confirm route: a malformed query is an unauthenticated probe, never a row.
+        if (check.reason !== "bad-request") {
+          ledgerLinkOutcome(deps, linkDeps, "escalation.link_refused", query.get("e") ?? "unknown", {
+            reason: check.reason,
+            detail: check.detail,
+          });
+        }
+        sendJson(res, check.reason === "forged" ? 403 : 410, { error: check.reason, detail: check.detail });
+        return;
+      }
+      // The answer is recorded as a REPLY on the escalation's own thread — design (ii)'s "the
+      // existing reply route" — never a direct call to the option's route. A link therefore
+      // captures a decision; it never itself runs a skill or halts the fleet, which is what keeps
+      // a one-tap grant proportionate to what a phone can safely carry.
+      const identity: ThreadIdentity = { taskId: check.claims.escalationId, class: check.claims.cls };
+      const threadId = deriveThreadId(identity);
+      // CHECKED BEFORE THE LINK IS CONSUMED, deliberately. A refusal here is a wiring or store
+      // fault, not the operator's doing, so burning their single-use link over it would cost them
+      // the only answer path they had. Only once the answer can actually be recorded is the
+      // marker claimed.
+      if (!deps.threadStorePath) {
+        sendJson(res, 400, { error: "invalid_request", detail: `no thread store configured — thread "${threadId}" cannot be confirmed` });
+        return;
+      }
+      const existing = readThread(threadId, { threadStorePath: deps.threadStorePath });
+      if (existing.status === "unresolved" || existing.messages.length === 0) {
+        const why = existing.status === "unresolved" ? existing.reason : "names no existing escalation";
+        sendJson(res, 400, { error: "invalid_request", detail: `thread "${threadId}" ${why} — refusing to file an unattached answer` });
+        return;
+      }
+      // Claimed BEFORE the append, so two taps racing cannot both record: the loser's
+      // exclusive-create fails and it is refused.
+      if (!(linkDeps.consume ?? consumeOptionLink)(linkDeps.root, check.signature)) {
+        ledgerLinkOutcome(deps, linkDeps, "escalation.link_refused", check.claims.escalationId, {
+          reason: "already-used",
+          detail: "lost the race to claim the single-use marker",
+        });
+        sendJson(res, 410, { error: "already-used", detail: "this link has already answered its escalation" });
+        return;
+      }
+      appendThreadMessage(identity, "reply", `answered by link: ${check.claims.route}`, {
+        threadStorePath: deps.threadStorePath,
+      });
+      ledgerLinkOutcome(deps, linkDeps, "escalation.answered_by_link", check.claims.escalationId, {
+        route: check.claims.route,
+      });
+      sendJson(res, 200, { ok: true, escalationId: check.claims.escalationId, route: check.claims.route });
     },
   };
 }
