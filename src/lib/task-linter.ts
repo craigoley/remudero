@@ -2533,10 +2533,15 @@ export function declaredScopeViolation(task: Task): LintViolation | undefined {
  *  TASKS_SHARD_PATH_RE}. Mirrors {@link DECISIONS_LOG_PATH}'s root-relative convention. */
 const TASKS_MONOLITH_PATH = "plan/tasks.yaml";
 
-/** A `plan/tasks.d/<id>-<slug>.yaml` shard — the ONLY other place a task record lives
- *  (W1-T399). Matched structurally (a `plan/tasks.d/` prefix, one path segment, a `.yaml`
- *  suffix) rather than a loose glob, mirroring `src/lib/review.ts`'s `isTaskRecordPath`. */
-const TASKS_SHARD_PATH_RE = /^plan\/tasks\.d\/[^/]+\.yaml$/;
+/** A `plan/tasks.d/<id>-<slug>.yaml` (or `.yml`) shard — the ONLY other place a task record
+ *  lives (W1-T399). Matched structurally (a `plan/tasks.d/` prefix, one path segment, a
+ *  `.yaml`/`.yml` suffix) rather than a loose glob, mirroring `src/lib/review.ts`'s
+ *  `isTaskRecordPath`. Widened to `.ya?ml` (R-14, docs/audits/recon-2026-09-05.md): the loader
+ *  (`listShardFiles` in plan.ts, `materializeOriginShards` in run-task.ts) accepts both
+ *  extensions, so a `.yaml`-only match here let a task declare an out-of-plan-scope file
+ *  alongside its own `.yml` shard and pass this filing-time check the identical `.yaml` shape
+ *  would have blocked. */
+const TASKS_SHARD_PATH_RE = /^plan\/tasks\.d\/[^/]+\.ya?ml$/;
 
 /** True for the monolith or a shard — the two places {@link rule15FilingViolation} treats
  *  as "declares a task record". */
