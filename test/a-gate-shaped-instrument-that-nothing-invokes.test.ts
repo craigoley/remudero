@@ -37,18 +37,36 @@ type Scan = { unwired: string[]; stale: Stale[]; gateShaped: string[]; scanned: 
  *  not the full overloaded `typeof spawnSync`, so a fixture can hand a plain function literal
  *  without fighting spawnSync's option-dependent return-type overloads. */
 type GitSpawn = (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => { status: number | null; stdout: string; stderr: string };
+type NpmStale = { npmScript: string; why: string };
+type NpmScan = { unwired: string[]; stale: NpmStale[]; checkShaped: string[]; scanned: number };
+/** A stub {@link NpmScan} result -- old fixtures built before {@link mod.scanNpmScripts} existed
+ *  never intended to exercise the npm-script-name classifier (see `drive`'s doc below). */
+const EMPTY_NPM_SCAN: NpmScan = { unwired: [], stale: [], checkShaped: [], scanned: 0 };
+
 const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   GATE_SHAPED_RE: RegExp;
   EXECUTABLE_RE: RegExp;
   EXECUTING_KEYS: Set<string>;
   ALLOWANCE: Array<{ script: string; reason: string }>;
+  NPM_CHECK_SHAPED_RE: RegExp;
+  NPM_SCRIPT_ALLOWANCE: Array<{ npmScript: string; reason: string }>;
   listTrackedScripts: (repoRoot: string, spawn?: GitSpawn) => string[];
   isGateShaped: (relPath: string) => boolean;
+  isNpmScriptCheckShaped: (name: string) => boolean;
+  listNpmScriptNames: (repoRoot: string) => string[];
+  isNpmScriptWired: (name: string, wiringText: string) => boolean;
   collectExecutingStrings: (node: unknown, out?: string[]) => string[];
   collectWiringText: (repoRoot: string) => string;
   isWired: (relPath: string, wiringText: string) => boolean;
   scanRepo: (repoRoot: string, opts?: { allowance?: Array<{ script: string; reason: string }>; scripts?: string[]; wiringText?: string }) => Scan;
-  main: (opts?: { repoRoot?: string; scan?: (root: string) => Scan; log?: (s: string) => void; error?: (s: string) => void }) => number;
+  scanNpmScripts: (repoRoot: string, opts?: { allowance?: Array<{ npmScript: string; reason: string }>; scripts?: string[]; wiringText?: string }) => NpmScan;
+  main: (opts?: {
+    repoRoot?: string;
+    scan?: (root: string) => Scan;
+    scanNpm?: (root: string) => NpmScan;
+    log?: (s: string) => void;
+    error?: (s: string) => void;
+  }) => number;
 };
 
 /** A throwaway git repo holding exactly the `scripts/`, workflow and package.json content a case
@@ -82,13 +100,35 @@ const workflowRunning = (cmd: string) => `name: fixture\non: [pull_request]\njob
 /** Drive the real `main` over a fixture tree. A fixture starts from an EMPTY allowance: the
  *  shipped `ALLOWANCE` names four real repository scripts, and inheriting it into a temp tree
  *  reports all four as "no longer tracked" -- which is the guard behaving correctly, and noise
- *  here. The shipped allowance is exercised against the REAL repo by its own tests below. */
+ *  here. The shipped allowance is exercised against the REAL repo by its own tests below.
+ *
+ *  `scanNpm` is stubbed to {@link EMPTY_NPM_SCAN} -- these fixtures predate the npm-script-name
+ *  classifier (R-46) and were built to exercise ONLY the file-basename scanner; several of them
+ *  incidentally name a `pkgScripts` key like `solo:check`, which the widened classifier would
+ *  otherwise judge on its own terms and turn a `code: 0` expectation into a false failure. The
+ *  npm-script-name classifier gets its own dedicated fixtures and its own `driveNpm` below. */
 function drive(root: string, allowance: Array<{ script: string; reason: string }> = []): { code: number; out: string[]; err: string[] } {
   const out: string[] = [];
   const err: string[] = [];
   const code = mod.main({
     repoRoot: root,
     scan: (r) => mod.scanRepo(r, { allowance }),
+    scanNpm: () => EMPTY_NPM_SCAN,
+    log: (s) => out.push(s),
+    error: (s) => err.push(s),
+  });
+  return { code, out, err };
+}
+
+/** The `scanNpmScripts` sibling of `drive` -- stubs the FILE-basename scanner to a clean result
+ *  so these cases exercise only the npm-script-name classifier. */
+function driveNpm(root: string, allowance: Array<{ npmScript: string; reason: string }> = []): { code: number; out: string[]; err: string[] } {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = mod.main({
+    repoRoot: root,
+    scan: () => ({ unwired: [], stale: [], gateShaped: [], scanned: 0 }),
+    scanNpm: (r) => mod.scanNpmScripts(r, { allowance }),
     log: (s) => out.push(s),
     error: (s) => err.push(s),
   });
@@ -432,6 +472,17 @@ test("W1-T2735: collectWiringText tolerates a missing workflows dir and an unrea
   }
 });
 
+test("R-46: listNpmScriptNames tolerates a missing package.json (no throw) AND an unparseable one (its own catch arm)", () => {
+  const bare = mkdtempSync(join(tmpdir(), "rmd-unwired-gate-npm-bare-"));
+  try {
+    assert.deepEqual(mod.listNpmScriptNames(bare), [], "no package.json at all yields no scripts, not a throw");
+    writeFileSync(join(bare, "package.json"), "{ not json");
+    assert.deepEqual(mod.listNpmScriptNames(bare), [], "an unparseable package.json is tolerated the same way, via its own catch arm");
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
 test("W1-T2735: an unparseable workflow THROWS naming the file", () => {
   withFixture({ scripts: {}, workflows: { "broken.yml": "a:\n  - b\n c: [unclosed\n" }, pkgScripts: {} }, (root) => {
     assert.throws(() => mod.collectWiringText(root), /broken\.yml/, "a parse failure must name the file, not silently contribute nothing");
@@ -442,4 +493,124 @@ test("W1-T2735: the real CLI, run as a subprocess, exits 0 and prints its census
   const res = spawnSync(process.execPath, [SCRIPT], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(res.status, 0, `stdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
   assert.match(res.stdout, /unwired-gate-check: clean -- \d+ gate-shaped of \d+ tracked/);
+  assert.match(res.stdout, /\d+ check-shaped of \d+ package\.json scripts/, "R-46: the npm-script-name census must print alongside the file-basename one");
 });
+
+// ── R-46 (docs/audits/recon-2026-09-05.md): the SAME hazard, one level up ────────────────────
+//
+// GATE_SHAPED_RE judges a tracked scripts/ FILE's basename and is blind to `docs-index:check-
+// paths`: its file, scripts/generate-docs-index.mjs, does not end `-check.mjs`. The claim to be a
+// gate lives in the npm alias name instead. These tests prove the sibling classifier
+// (NPM_CHECK_SHAPED_RE / isNpmScriptCheckShaped / isNpmScriptWired / scanNpmScripts) the same way
+// the suite above proves the file-basename one: an unwired check-shaped npm script is named and
+// refused, one wired by either surface alone is accepted, a longer sibling's mention never credits
+// a shorter script name, the bare `"check"` aggregate script is excluded, and the allowance is
+// shrink-only.
+
+test("R-46: an npm script named like a gate that no workflow and no other npm script invokes is named by key and refused", () => {
+  withFixture(
+    { scripts: {}, workflows: { "ci.yml": workflowRunning("npm test") }, pkgScripts: { test: "node --test", "orphan:check": "node scripts/orphan.mjs" } },
+    (root) => {
+      const scan = mod.scanNpmScripts(root, { allowance: [] });
+      assert.deepEqual(scan.unwired, ["orphan:check"], "the planted unwired npm-script name is the only violation");
+
+      const { code, err } = driveNpm(root);
+      assert.equal(code, 1, "an unwired check-shaped npm script must make the check exit non-zero");
+      assert.ok(err.some((l) => l.includes("orphan:check")), `the offending SCRIPT NAME must be named; got:\n${err.join("\n")}`);
+    },
+  );
+});
+
+test("R-46: both `-check` and `:check`/`:check-<suffix>` npm-script shapes are refused; the bare aggregate `check` script is not", () => {
+  withFixture(
+    { scripts: {}, workflows: { "ci.yml": workflowRunning("npm test") }, pkgScripts: { test: "node --test", check: "node scripts/check.mjs", "alpha-check": "node scripts/a.mjs", "beta:check": "node scripts/b.mjs", "gamma:check-paths": "node scripts/c.mjs" } },
+    (root) => {
+      const scan = mod.scanNpmScripts(root, { allowance: [] });
+      assert.deepEqual(
+        scan.unwired.sort(),
+        ["alpha-check", "beta:check", "gamma:check-paths"],
+        "hyphenated, colon-suffixed and `-<suffix>`-extended check names are all gate-shaped; the bare aggregate `check` script (this repo's own `node scripts/check.mjs`) is not",
+      );
+    },
+  );
+});
+
+test("R-46: an npm script wired by the WORKFLOW surface alone is accepted", () => {
+  withFixture(
+    { scripts: {}, workflows: { "ci.yml": workflowRunning("npm run --silent solo:check") }, pkgScripts: { "solo:check": "node scripts/solo.mjs" } },
+    (root) => {
+      const { code, err } = driveNpm(root);
+      assert.equal(code, 0, `a workflow run: step naming the npm script alone is wiring; got:\n${err.join("\n")}`);
+    },
+  );
+});
+
+test("R-46: an npm script wired by ANOTHER npm script's value alone is accepted", () => {
+  withFixture(
+    { scripts: {}, workflows: { "ci.yml": workflowRunning("npm test") }, pkgScripts: { test: "node --test", full: "npm run solo:check && node scripts/other.mjs", "solo:check": "node scripts/solo.mjs" } },
+    (root) => {
+      const { code, err } = driveNpm(root);
+      assert.equal(code, 0, `a sibling npm script's own value naming this one is wiring; got:\n${err.join("\n")}`);
+    },
+  );
+});
+
+test("R-46: a shorter check-shaped npm script is never credited by a longer sibling's mention (the `:check` vs. `:check-paths` prefix hazard)", () => {
+  withFixture(
+    {
+      scripts: {},
+      workflows: { "ci.yml": workflowRunning("npm run --silent docs-index:check-paths") },
+      pkgScripts: { "docs-index:check": "node scripts/g.mjs --check", "docs-index:check-paths": "node scripts/g.mjs --check-paths" },
+    },
+    (root) => {
+      const scan = mod.scanNpmScripts(root, { allowance: [] });
+      assert.deepEqual(
+        scan.unwired,
+        ["docs-index:check"],
+        "`docs-index:check` is a PREFIX of the wired `docs-index:check-paths` string and must not be credited by it",
+      );
+    },
+  );
+});
+
+test("R-46: NPM_CHECK_SHAPED_RE / isNpmScriptCheckShaped agree, and isNpmScriptWired is two-sided (prefix AND suffix mentions both fail to credit)", () => {
+  assert.equal(mod.isNpmScriptCheckShaped("docs-index:check"), true);
+  assert.equal(mod.isNpmScriptCheckShaped("docs-index:check-paths"), true);
+  assert.equal(mod.isNpmScriptCheckShaped("mkdtemp-callsite-check"), true);
+  assert.equal(mod.isNpmScriptCheckShaped("check"), false, "the bare aggregate script must not be swept in");
+  assert.equal(mod.isNpmScriptCheckShaped("test:ci"), false);
+
+  // suffix mention (the file-basename hazard's exact shape, reused for npm names)
+  assert.equal(mod.isNpmScriptWired("foo-check", "run: node scripts/bar-foo-check.mjs"), false);
+  // prefix mention (the NEW hazard this predicate exists for)
+  assert.equal(mod.isNpmScriptWired("docs-index:check", "run: npm run docs-index:check-paths"), false);
+  // a real, isolated mention is still credited
+  assert.equal(mod.isNpmScriptWired("docs-index:check", "run: npm run --silent docs-index:check"), true);
+});
+
+test("R-46: every NPM_SCRIPT_ALLOWANCE entry names a real package.json script and carries a written reason", () => {
+  const names = new Set(mod.listNpmScriptNames(REPO_ROOT));
+  assert.ok(mod.NPM_SCRIPT_ALLOWANCE.length > 0, "the allowance records the check-shaped npm scripts whose wiring is owned elsewhere");
+  for (const entry of mod.NPM_SCRIPT_ALLOWANCE) {
+    assert.ok(names.has(entry.npmScript), `${entry.npmScript} must be a real package.json scripts entry`);
+    assert.ok(mod.isNpmScriptCheckShaped(entry.npmScript), `${entry.npmScript} must be check-shaped -- nothing else belongs in this allowance`);
+    assert.ok(entry.reason.trim().length >= 40, `${entry.npmScript} needs a written reason, not a placeholder`);
+  }
+});
+
+test("R-46: a recorded npm-script allowance entry whose script has since been wired is itself reported (shrink-only)", () => {
+  withFixture(
+    { scripts: {}, workflows: { "ci.yml": workflowRunning("npm run --silent drained:check") }, pkgScripts: { "drained:check": "node scripts/d.mjs" } },
+    (root) => {
+      const allowance = [{ npmScript: "drained:check", reason: "x".repeat(40) }];
+      const scan = mod.scanNpmScripts(root, { allowance });
+      assert.deepEqual(scan.unwired, [], "it is wired, so it is not an unwired violation");
+      assert.equal(scan.stale.length, 1, "but the row is now stale");
+      assert.match(scan.stale[0].why, /now wired/);
+    },
+  );
+});
+
+// The pre-existing "the check reads clean on the REAL repository" test above already calls
+// `mod.main` with no overrides, so it exercises BOTH classifiers against the real tree -- no
+// separate real-repo assertion is needed here.
