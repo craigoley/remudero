@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
@@ -499,6 +499,18 @@ export interface ReviewEvidence {
    * byte-identical to pre-W1-T460 behaviour.
    */
   baseUnreadablePaths?: ReadonlySet<string>;
+  /**
+   * (R-11) `true` when `baseCheckoutDir` is a REAL CHECKOUT of the merge-base — a detached git
+   * worktree `buildBaseProofDir` (run-task.ts) added at that commit — rather than the blob-only
+   * fallback it materialises when a worktree cannot be created. A `unit test:` proof can only be
+   * re-run honestly in the former: in a directory holding nothing but the blobs `grep:` proofs
+   * name, `node --test` finds no file and exits 1 with empty stdout, which the classifier used to
+   * read as "did not pass at base ⇒ discriminates" and certify `executed_pass` on a test that
+   * passes identically at both commits. FAILS CLOSED: absent (every caller that predates R-11)
+   * ⇒ a `unit test:` proof's base outcome is `base_unknown`, never `discriminates`; `grep:` proofs
+   * are unaffected either way, since a blob IS the file grep reads.
+   */
+  baseIsCheckout?: boolean;
   /**
    * Injected proof executor. Real callers omit this — {@link execWhitelistedProof}
    * (the real, whitelist-bounded shell-out) is the default. Tests inject a fake so
@@ -1355,6 +1367,64 @@ export function looksLikeProseDescription(body: string): boolean {
  */
 const DIALECT_GREP_PATH_RE = /^(.*?)\s+in\s+(\S*[./*]\S*)$/i;
 
+/**
+ * (R-12) The one-line statement of what a `grep:` proof may target, quoted verbatim by every
+ * surface that refuses a directory-shaped target: the parser (a `null`, so the proof never runs),
+ * `rmd check-proof`'s refusal line, and the filing-time linter's `proof-grep-safety` violation —
+ * so an author reads the same sentence wherever the refusal lands.
+ */
+export const GREP_PROOF_FILE_TARGET_REQUIREMENT =
+  "a `grep:` proof must name a FILE (a path whose final segment carries an extension, e.g. " +
+  "src/lib/plan.ts) — a directory target is not a proof of anything specific";
+
+/**
+ * (R-12) Does a `grep:` target NAME NO FILE — i.e. is it directory-shaped? Returns the refusal
+ * reason, or `undefined` for a file-shaped target.
+ *
+ * THE DEFECT THIS CLOSES. The executor's `-r` made a directory target "work" at the head, and the
+ * base-side check then materialised `git show <base>:<dir>` — which exits 0 with a TREE LISTING —
+ * as a FILE at that path: the base grep over the listing found nothing, so the proof graded
+ * `discriminates` → `executed_pass` even when the pattern already existed at the base (the
+ * control, the same pattern against a file under that directory, read `executed_stale`), and a
+ * sibling proof under the directory then hit `mkdirSync` ENOTDIR → `base_unreadable`. A directory
+ * is also not a proof of anything SPECIFIC: `grep: foo in src` is W1-T219's refused whole-repo
+ * search wearing a path.
+ *
+ * THE RULE IS TEXTUAL BECAUSE THE PARSE IS PURE (no cwd): the final path segment must carry an
+ * extension. MEASURED over every `grep:` proof in `plan/tasks.d` (173 distinct targets at
+ * 32415ea): 159 are blobs, 13 are absent forward references, and EXACTLY ONE is a tree —
+ * `src/lib`, which is also the only extensionless final segment. So the rule and the defect have
+ * the same single retrofit. COST, stated: an extensionless FILE (`bin/rmd`, `deploy/Dockerfile`)
+ * is refused too; no proof in the plan names one, and the remedy is a proof against a file that
+ * carries an extension. A dotted DIRECTORY (`plan/tasks.d`) passes this shape check and is caught
+ * by {@link assertGrepTargetIsFile} against the real checkout instead.
+ */
+export function grepProofTargetNamesNoFile(path: string): string | undefined {
+  const finalSegment = path.replace(/\/+$/, "").split("/").pop() ?? "";
+  if (finalSegment.includes(".")) return undefined;
+  return `target \`${path}\` names no file — ${GREP_PROOF_FILE_TARGET_REQUIREMENT}`;
+}
+
+/**
+ * (R-12) WHY a `grep:` proof body failed to parse, as one sentence for a human — `undefined` when
+ * the body parses (or is not a `grep:` proof at all). `rmd check-proof` prints it beside its
+ * `parse: REFUSED` line, which used to name no cause; the parser itself keeps returning `null`
+ * (its callers grade a `null` as prose/dialect-parse-error, and that contract is unchanged).
+ */
+export function explainGrepProofRefusal(proof: string): string | undefined {
+  const m = proof.trim().match(/^grep:\s*([\s\S]*)$/i);
+  if (!m) return undefined;
+  const trimmed = m[1].trim();
+  if (!trimmed) return "empty `grep:` body — nothing to search for";
+  const withPath = trimmed.match(DIALECT_GREP_PATH_RE);
+  if (!withPath) return "no `in <path>` clause — a `grep:` proof needs an explicit file target (W1-T219)";
+  const path = withPath[2];
+  if (path.includes("..")) return `target \`${path}\` traverses out of the checkout (\`..\`)`;
+  if (isAbsolute(path)) return `target \`${path}\` is an absolute path — a proof may only read files the PR head contains`;
+  if (path.includes("*")) return `target \`${path}\` carries a glob (\`*\`), which execFile never expands`;
+  return grepProofTargetNamesNoFile(path);
+}
+
 function parseDialectGrep(body: string): WhitelistedProof | null {
   const trimmed = body.trim();
   if (!trimmed) return null;
@@ -1396,10 +1466,17 @@ function parseDialectGrep(body: string): WhitelistedProof | null {
   // never resolve to a real file and would always exit non-zero, silently
   // manufacturing a spurious executed_fail. Refuse rather than run it.
   if (path.includes("*")) return null;
+  // (R-12) A DIRECTORY-SHAPED target is refused — see {@link grepProofTargetNamesNoFile} for the
+  // rule and the measured retrofit. This parse has no cwd, so it can only see the SHAPE; a real
+  // directory whose name happens to carry a dot (`plan/tasks.d`) is refused where it is
+  // observable, against the checkout, in {@link assertGrepTargetIsFile}.
+  if (grepProofTargetNamesNoFile(path) !== undefined) return null;
   // "-r" is a no-op on a plain FILE target (confirmed: `grep -rn pat
-  // file.ts` behaves identically to `grep -n pat file.ts`) and is what
-  // makes a DIRECTORY target work at all — always pass it so "in <path>"
-  // covers a file OR a directory without a second branch.
+  // file.ts` behaves identically to `grep -n pat file.ts`). It used to be what
+  // made a DIRECTORY target work at all; a directory target is refused since
+  // R-12 (above), and "-r" is kept so the emitted argv stays byte-identical
+  // for every file proof already written (test/proof-engine-declaration
+  // pins the exact `["-arn", "--", pattern, path]` shape).
   // "-a" (treat binary as text) makes the verdict INDEPENDENT OF THE HOST'S GREP. Without it a
   // target carrying a raw NUL byte is judged "binary" and the two implementations DISAGREE —
   // MEASURED on this host against the same file and pattern: BSD grep 2.6.0-FreeBSD exits 0 with
@@ -2229,6 +2306,41 @@ function assertGrepTargetsInsideCheckout(args: readonly string[], cwd: string): 
   }
 }
 
+/**
+ * (R-12) Thrown by {@link execWhitelistedProof} for a house-dialect `grep:` proof whose target IS A
+ * DIRECTORY in the checkout it is being run against. {@link grepProofTargetNamesNoFile} refuses the
+ * directory SHAPE at parse (no extension on the final segment); a dotted directory name
+ * (`plan/tasks.d`) passes that shape check, so it is refused here, against the real filesystem —
+ * the same two-layer split R-18 uses for an out-of-checkout target. A throw, never a verdict:
+ * {@link judgeCriterion}'s catch maps it to `exec_error` (the keyword floor), so a directory proof
+ * is never certified `executed_pass` on the strength of `-r` finding one incidental line anywhere
+ * beneath it, and never graded `discriminates` on a base tree it could not honestly be checked in.
+ */
+export class ProofTargetIsDirectoryError extends Error {
+  constructor(readonly target: string) {
+    super(`grep proof target \`${target}\` is a directory in this checkout — ${GREP_PROOF_FILE_TARGET_REQUIREMENT}`);
+  }
+}
+
+/**
+ * (R-12) Refuse a house-dialect `grep:` proof (`["-arn", "--", pattern, path]`) whose target
+ * resolves to a directory under `cwd`. Restricted to that shape on purpose — the legacy fenced
+ * `` `grep …` `` argv is the author's own and its operands are not reliably recoverable
+ * (see `proofGrepPatternAndPath`, task-linter.ts). An ABSENT target is skipped: that is grep's
+ * own exit 2 ⇒ `exec_error` (W1-T219), and pre-empting it here would change nothing.
+ */
+function assertGrepTargetIsFile(args: readonly string[], cwd: string): void {
+  if (args[1] !== "--" || args.length !== 4) return;
+  const target = args[3];
+  let isDirectory: boolean;
+  try {
+    isDirectory = statSync(join(cwd, target)).isDirectory();
+  } catch {
+    return; // absent ⇒ grep's own exit 2 reports it (exec_error), exactly as before
+  }
+  if (isDirectory) throw new ProofTargetIsDirectoryError(target);
+}
+
 export function execWhitelistedProof(
   whitelisted: WhitelistedProof,
   cwd: string,
@@ -2266,7 +2378,10 @@ export function execWhitelistedProof(
   }
   // R-18: BEFORE the spawn, and outside the try on purpose — a target outside the checkout is not
   // an execution outcome to be classified below, it is a refusal to run the proof at all.
-  if (whitelisted.kind === "grep") assertGrepTargetsInsideCheckout(args, cwd);
+  if (whitelisted.kind === "grep") {
+    assertGrepTargetsInsideCheckout(args, cwd);
+    assertGrepTargetIsFile(args, cwd); // R-12: same placement, same reason — a refusal, not an outcome
+  }
   try {
     const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
     if (whitelisted.nameFiltered) return nameFilteredOutcome(stdout);
@@ -2515,6 +2630,11 @@ export interface ProofExecContext {
    * `base_unreadable` rather than credited with a discrimination nobody measured. Absent/empty ⇒
    * byte-identical to pre-W1-T460 behaviour for every proof. */
   baseUnreadablePaths?: ReadonlySet<string>;
+  /** (R-11) mirrors {@link ReviewEvidence.baseIsCheckout} — `true` only when `baseCwd` is a real
+   * checkout of the merge-base (a worktree), the one tree a `unit test:` proof can be re-run in.
+   * Absent/false ⇒ every `unit test:` proof's base outcome is `base_unknown` (fail closed), and
+   * `grep:` proofs behave exactly as before. */
+  baseIsCheckout?: boolean;
   /** (W1-T456, DEFECT A) Repo-relative paths a `unit test:` proof may forward-reference without
    *  being scored `executed_fail` — the union of {@link shardDeclaredFilesInDiff}'s read of THIS
    *  diff's own added shard(s) and (when a task id resolved) that task's declared `files:`.
@@ -2570,24 +2690,28 @@ export interface ProofExecContext {
  * Returns `false` (never stale) whenever no `baseCwd` was supplied — this
  * check is purely additive and never runs, let alone downgrades anything, for
  * a caller that predates W1-T273's wiring — and whenever the base checkout
- * itself throws (an unreadable/absent merge-base checkout, or — the common
- * case for a `unit test:` proof today, since {@link materialiseBaseProofBlobs}
- * only ever populates the base dir for `grep:` proofs — a base tree that
+ * itself throws (an unreadable/absent merge-base checkout, or a base tree that
  * simply cannot run a `node --test` invocation at all) is an environment gap,
  * not a finding; degrades to "not stale" exactly like `exec_error` degrades
- * elsewhere in this module — never a silent hard-fail.
+ * elsewhere in this module — never a silent hard-fail. (R-11) The base tree is
+ * a real detached worktree at the merge-base since `buildBaseProofDir`
+ * (run-task.ts) learned to add one; {@link materialiseBaseProofBlobs} is the
+ * fallback for a worktree that cannot be created, and in that fallback a
+ * `unit test:` proof is `base_unknown` by construction (see
+ * {@link ProofExecContext.baseIsCheckout}).
  */
 /**
  * Materialise, into a throwaway directory, ONLY the base-revision blobs a review's `grep:` proofs
  * name — the cheap stand-in for a second checkout that {@link preexistingProofHits} needs.
  *
- * WHY NOT A SECOND WORKTREE (impl-GE). `preexistingProofHits` takes a directory and runs the SAME
- * `grep -arn -- <pattern> <path>` in it, so a full base checkout would work — but the reviewer
- * already pays for one `git worktree add` at the head, and a second doubles that plus the collision
- * surface its own comment warns about. Measured first: of 644 dialect proofs in the plan, **41 are
- * `grep:` and 599 are `unit test:`** — the guard applies to 6.4% of proofs, and only a `grep:` proof
- * can ever be judged stale (`preexistingProofHits` returns false for any other kind). Paying for a
- * whole checkout to serve 6.4% is the wrong trade; one `git show` per grep proof is not.
+ * (R-11) THE FALLBACK, NO LONGER THE DEFAULT. impl-GE chose blobs over a second worktree when only
+ * a `grep:` proof could be judged stale (41 of 644 dialect proofs at the time). W1-T362 then
+ * extended the staleness check to `unit test:` proofs — the other 599 — and a blob directory is a
+ * tree `node --test` cannot run in, so every one of them was re-run in a directory with no
+ * `package.json` and no `test/`, exited 1 with empty stdout, and was graded "discriminates".
+ * `buildBaseProofDir` (run-task.ts) now adds a real detached worktree at the merge-base and reaches
+ * this function ONLY when that worktree cannot be created; in that fallback a `unit test:` proof
+ * is graded `base_unknown` (never `discriminates`) via {@link ProofExecContext.baseIsCheckout}.
  *
  * A PATH ABSENT AT THE BASE IS SIMPLY NOT WRITTEN, which is the FORWARD-REFERENCE case and must not
  * be confused with staleness: a proof naming a file the branch creates correctly finds nothing here,
@@ -2734,7 +2858,10 @@ export function baseBlobErrorIsAbsence(e: unknown): boolean {
  *   "base_unknown"  — the base run itself threw (unreadable/absent merge-base checkout, a
  *                      `unit test:` proof's base tree that cannot even run `node --test`, …) — an
  *                      environment gap, never evidence either way; `executed_pass` stands, exactly
- *                      like `exec_error` degrades elsewhere in this module.
+ *                      like `exec_error` degrades elsewhere in this module. (R-11) ALSO every
+ *                      `unit test:` proof whose `baseCwd` is not a real checkout (`baseIsCheckout`
+ *                      absent or false — the blob-only fallback): the run is not attempted, because
+ *                      "no file here" is not "did not pass before the work".
  *   "base_unreadable" — (W1-T460) a base tree EXISTS, but THIS proof's base blob never reached it
  *                      because {@link materialiseBaseProofBlobs} could not read it. The base run is
  *                      not even attempted: a grep over a blob that was never written answers "no
@@ -2755,10 +2882,24 @@ function classifyBaseProofOutcome(
   exec: ProofExecutor,
   baseCwd: string,
   baseUnreadablePaths?: ReadonlySet<string>,
+  baseIsCheckout?: boolean,
 ): "stale" | "discriminates" | "base_unknown" | "base_unreadable" {
   const target = grepProofTargetPath(whitelisted);
   if (target !== undefined && baseUnreadablePaths?.has(target)) return "base_unreadable";
+  // (R-11) A `unit test:` proof can only be re-run in a REAL checkout of the base. In the blob-only
+  // fallback (or for a caller that never said what `baseCwd` is) `node --test` finds no file, exits
+  // 1 with empty stdout, and the executor returns "fail" — which the line below would grade
+  // `discriminates`, certifying a test that passes identically at both commits. That run answered
+  // nothing about the base, so it is `base_unknown`, never evidence. Fails closed on an absent flag.
+  if (whitelisted.kind === "test" && baseIsCheckout !== true) return "base_unknown";
   try {
+    // Only a run that genuinely COMPLETED with a non-pass result discriminates. A base run that
+    // could not execute at all — a spawn ENOENT, a timeout (ETIMEDOUT), the two W1-T1077/W1-T2740
+    // `PureProof…Error` classes for a runner that never reached a real subtest or stopped before
+    // its summary (a base worktree whose `npm ci` priming failed lands here: `--import tsx` cannot
+    // resolve, the file's own TAP wrapper is the only `not ok`) — THROWS out of `exec` and is
+    // caught below as `base_unknown`. None of those is evidence that the proof told done from
+    // not-done.
     return exec(whitelisted, baseCwd) === "pass" ? "stale" : "discriminates";
   } catch {
     return "base_unknown";
@@ -2770,12 +2911,13 @@ export function preexistingProofHits(
   exec: ProofExecutor,
   baseCwd: string | undefined,
   baseUnreadablePaths?: ReadonlySet<string>,
+  baseIsCheckout?: boolean,
 ): boolean {
   if (baseCwd === undefined) return false;
   // Only `"stale"` is a hit, so an unreadable base blob answers `false` here exactly like every
   // other non-stale outcome — this guard never manufactures a false positive (W1-T460 changes
   // WHICH outcome is reported, never this function's never-a-false-positive contract).
-  return classifyBaseProofOutcome(whitelisted, exec, baseCwd, baseUnreadablePaths) === "stale";
+  return classifyBaseProofOutcome(whitelisted, exec, baseCwd, baseUnreadablePaths, baseIsCheckout) === "stale";
 }
 
 /** Verdict one criterion against its proof, given the report + optional semantic. */
@@ -2959,7 +3101,7 @@ export function judgeCriterion(
             // both "is this stale" and, if not, why not (see classifyBaseProofOutcome).
             const baseOutcome =
               execCtx.baseCwd !== undefined
-                ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths)
+                ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout)
                 : undefined;
             if (baseOutcome === "base_unreadable") {
               // W1-T460: the base tree exists and sibling proofs were checked against it, but THIS
@@ -3018,7 +3160,11 @@ export function judgeCriterion(
               } else if (whitelisted.kind === "test" && baseOutcome === "base_unknown") {
                 reason +=
                   ` — NOTE: re-run against the PR's merge-base for staleness could not complete ` +
-                  `(base_unknown, an environment gap); executed_pass stands, downgrade withheld`;
+                  `(base_unknown, an environment gap: ` +
+                  (execCtx.baseIsCheckout === true
+                    ? `the base run itself could not execute`
+                    : `no merge-base checkout could be materialised, and a unit test cannot be re-run against blobs`) +
+                  `); executed_pass stands, downgrade withheld — no discrimination was measured`;
               }
             }
           } else if (outcome === "no-match") {
@@ -4433,6 +4579,7 @@ export function judgeReview(
         exec: proofMemo?.exec,
         baseCwd: evidence.baseCheckoutDir,
         baseUnreadablePaths: evidence.baseUnreadablePaths,
+        baseIsCheckout: evidence.baseIsCheckout,
         forwardReferenceFiles,
         // W1-T2737: the SAME `planOnly` computed above — one derivation, so the reviewer's
         // scope judgement and the forward-reference carve-out can never disagree.

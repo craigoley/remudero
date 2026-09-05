@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
 
-/** This repo's own root — used ONLY by the NOT-COMPARABLE test below, which needs a real
- *  `unit test:` proof (a `grep:`-only fixture dir cannot resolve one) rather than the throwaway
- *  single-file `headFixture` every other test in this suite uses. */
+/** This repo's own root — used by the base_unknown test below, which needs a real `unit test:`
+ *  proof (a `grep:`-only fixture dir cannot resolve one) rather than the throwaway single-file
+ *  `headFixture` most tests in this suite use, and by the real-worktree fixtures (R-11), whose
+ *  committed `node_modules` symlink points at this repo's own install so `--import tsx` resolves. */
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // ── W1-T912: `rmd check-proof` answered a different question than the reviewer asks ─────────────
@@ -256,9 +258,14 @@ test("a base blob genuinely ABSENT at <ref> (a forward reference) is reported AB
   }
 });
 
-// ── Acceptance #7: a `unit test:` proof is NOT COMPARABLE — only `grep:` gets a base blob at all ──
+// ── Acceptance #7 (rewritten by R-11): a `unit test:` proof with NO base checkout is UNKNOWN ──
+//
+// Before R-11 this verb printed NOT COMPARABLE for every `unit test:` proof, because only `grep:`
+// proofs ever got a base blob. The base is a real worktree now, so the only way a test proof has
+// no base is a worktree that could not be created — an unresolvable ref, as here — and the verb
+// then reports exactly what the reviewer grades: base_unknown, no downgrade, no discrimination.
 
-test("a `unit test:` proof reports NOT COMPARABLE rather than silently skipping the base check", () => {
+test("a `unit test:` proof whose merge-base worktree cannot be created reports UNKNOWN (base_unknown) rather than silently skipping the base check", () => {
   const { code, out } = runCheckProof(
     ["--base", FAKE_BASE_REF, "unit test:", "test/serve-identity-default-path.test.ts"],
     REPO_ROOT,
@@ -266,13 +273,122 @@ test("a `unit test:` proof reports NOT COMPARABLE rather than silently skipping 
   );
 
   assert.equal(code, CHECK_PROOF_EXIT.pass, "the real file genuinely passes at head");
-  assert.match(out, /^base:\s+NOT COMPARABLE/m);
-  assert.match(out, /only `grep:` proofs get a base blob materialized today \(kind=test\)/);
+  assert.match(out, /^base:\s+UNKNOWN — a merge-base worktree at deadbeef/m, out);
+  assert.match(out, /could not be created/);
+  assert.match(out, /cannot be re-run against materialised/);
+  assert.match(out, /base_unknown/, "named as the reviewer's own outcome");
+  assert.doesNotMatch(out, /NOT COMPARABLE/, "the pre-R-11 wording is gone — a unit test IS comparable now");
   assert.match(
     out,
     /^discrimination:\s+unknown\s+—\s+reported verdict above stands unchanged\s*$/m,
-    "not-comparable is reported, never silently skipped",
+    "unknown is reported, never silently skipped and never claimed as a discrimination",
   );
+});
+
+// ── R-11: the REAL worktree path, through the builder the reviewer wires ─────────────────────────
+
+/** Identity from `-c` flags, never ambient config (CLAUDE.md, "A fixture shelling git PLUMBING …"). */
+function git(dir: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+}
+
+/**
+ * A real two-commit repo: `base` files committed first, then `head` files on top. The `unit test:`
+ * case needs the base tree to be one `node --test --import tsx` can run in, so every fixture also
+ * commits a package.json, a stub of the hygiene import the proof argv names, and a `node_modules`
+ * symlink to this repo's own install (so the executor's `ensureDeps` sees an install and never
+ * runs `npm ci` in a fixture).
+ */
+function twoCommitRepo(base: Record<string, string>, head: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-check-proof-base-repo-"));
+  git(dir, "init", "--quiet", "-b", "main");
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "r11-check-proof-fixture", private: true, type: "module" }));
+  symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"));
+  mkdirSync(join(dir, "test", "setup"), { recursive: true });
+  writeFileSync(join(dir, "test", "setup", "tmp-hygiene.ts"), "export {};\n");
+  for (const [rel, body] of Object.entries(base)) {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), body);
+  }
+  git(dir, "add", "-A");
+  git(dir, "commit", "--quiet", "-m", "base");
+  for (const [rel, body] of Object.entries(head)) {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), body);
+  }
+  git(dir, "add", "-A");
+  git(dir, "commit", "--quiet", "--allow-empty", "-m", "head");
+  return dir;
+}
+
+test("R-11: a `grep:` proof is compared against a REAL worktree at --base <ref>, and the worktree is removed before the verb returns", () => {
+  const repo = twoCommitRepo({ "src/marker.txt": `${NEEDLE} already at the base\n` }, { "src/marker.txt": `${NEEDLE} still here at the head\n` });
+  try {
+    const { code, out } = runCheckProof(["--base", "HEAD~1", ...PROOF_ARGV], repo);
+    assert.equal(code, CHECK_PROOF_EXIT.executedStale, out);
+    assert.match(out, /^base hits:\s+1$/m, "the base grep ran against the checked-out base file");
+    assert.match(out, /^base:\s+pass$/m);
+    assert.match(out, /^discrimination:\s+executed_stale/m);
+    assert.equal(git(repo, "worktree", "list").split("\n").length, 1, "the base worktree was deregistered on the way out");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("R-11: a teardown that FAILS is reported on stderr and never masks the verdict already computed", () => {
+  const repo = twoCommitRepo({ "src/marker.txt": `${NEEDLE} already at the base\n` }, { "src/marker.txt": `${NEEDLE} still here at the head\n` });
+  const errs: string[] = [];
+  const realError = console.error;
+  console.error = (...args: unknown[]) => void errs.push(args.map(String).join(" "));
+  try {
+    const { code, out } = runCheckProof(["--base", "HEAD~1", ...PROOF_ARGV], repo, {
+      baseBlobDeps: {
+        removeWorktree: () => {
+          throw new Error("teardown refused by the fixture");
+        },
+      },
+    });
+    assert.equal(code, CHECK_PROOF_EXIT.executedStale, out);
+    assert.match(out, /^discrimination:\s+executed_stale/m, "the comparison completed before teardown ran");
+    assert.match(errs.join("\n"), /base worktree teardown failed .*teardown refused by the fixture/, "the failure is reported, not swallowed");
+    // The seam threw before the real removal, so the worktree is still registered — remove it here.
+    const stranded = git(repo, "worktree", "list", "--porcelain")
+      .split("\n")
+      .filter((l) => l.startsWith("worktree ") && !l.endsWith(repo))
+      .map((l) => l.slice("worktree ".length));
+    assert.equal(stranded.length, 1, "exactly the one base worktree the verb added");
+    git(repo, "worktree", "remove", "--force", stranded[0]);
+  } finally {
+    console.error = realError;
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("R-11: a `unit test:` proof that passes at BOTH trees is executed_stale here too — the exact defect the reviewer used to certify", () => {
+  const passing = 'import { test } from "node:test";\ntest("passes on both commits", () => {});\n';
+  const repo = twoCommitRepo({ "test/stale.test.ts": passing }, { "test/stale.test.ts": passing });
+  try {
+    const { code, out } = runCheckProof(["--base", "HEAD~1", "unit test:", "test/stale.test.ts"], repo);
+    assert.equal(code, CHECK_PROOF_EXIT.executedStale, out);
+    assert.match(out, /^base:\s+pass$/m, "the base run genuinely executed in the worktree");
+    assert.doesNotMatch(out, /^base hits:/m, "a hit count is a grep fact, not a TAP one");
+    assert.equal(git(repo, "worktree", "list").split("\n").length, 1, "the base worktree was deregistered on the way out");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("R-11: a `unit test:` file ABSENT at --base <ref> discriminates — the forward-referencing TDD case", () => {
+  const passing = 'import { test } from "node:test";\ntest("exists only on the head", () => {});\n';
+  const repo = twoCommitRepo({}, { "test/fresh.test.ts": passing });
+  try {
+    const { code, out } = runCheckProof(["--base", "HEAD~1", "unit test:", "test/fresh.test.ts"], repo);
+    assert.equal(code, CHECK_PROOF_EXIT.pass, out);
+    assert.match(out, /^base:\s+fail$/m, "`node --test` finds no such file at the base");
+    assert.match(out, /^discrimination:\s+discriminates/m);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 // ── Acceptance #8: the base run itself COULD NOT EXECUTE — an environment gap, not evidence ───────

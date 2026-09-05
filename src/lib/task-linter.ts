@@ -5,6 +5,7 @@ import { RETIREMENT_REASONS } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
+  grepProofTargetNamesNoFile,
   isDialectPrefixed,
   parseWhitelistedProof,
   type NameFilterResolution,
@@ -1101,8 +1102,25 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
     if (!split) continue;
     const pattern = split[1].trim();
     if (!pattern) continue;
-    const { blocking, warning } = breMetacharsIn(pattern);
     const where = `criterion ${i + 1} ("${(c.claim ?? "").slice(0, 56)}")`;
+    // (R-12) A DIRECTORY-SHAPED target is refused at filing time with the SAME rule and sentence
+    // `parseDialectGrep` (review.ts) applies at parse — so an author sees it here, when the shard is
+    // filed, instead of at review time as a proof that silently never executes (a `null` parse is
+    // graded prose/dialect-parse-error and contributes nothing). Pure, like every check in this
+    // module: the rule is textual (no extension on the final segment), and the executor's own
+    // filesystem check (`assertGrepTargetIsFile`) catches the dotted-directory remainder at run time.
+    const noFile = grepProofTargetNamesNoFile(split[2]);
+    if (noFile !== undefined) {
+      violations.push({
+        check: "proof-grep-safety",
+        severity: "block",
+        message:
+          `${where} \`grep:\` ${noFile}. The reviewer's parser refuses this proof, so it would never ` +
+          `execute and could certify nothing; name a file beneath that path instead (R-12).`,
+      });
+      continue;
+    }
+    const { blocking, warning } = breMetacharsIn(pattern);
     if (blocking.length) {
       violations.push({
         check: "proof-grep-safety",

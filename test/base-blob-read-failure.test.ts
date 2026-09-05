@@ -171,9 +171,20 @@ test("W1-T460 (1): a genuinely-absent base path is still swallowed — no unread
     { "src/app.ts": "export const unrelated = 1;\n", "src/brand-new.ts": "export function freshThing() {}\n" },
   );
   try {
-    // REAL default deps: real merge-base, real `git show`, real absence error.
+    // REAL default deps: real merge-base, real worktree (R-11) — and, forced onto the blob fallback
+    // below, real `git show` and its real absence error. Both shapes must read absence as absence.
     const built = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }], head);
-    assert.deepEqual([...built.baseUnreadablePaths], [], "a forward reference is ABSENCE, never a read failure");
+    assert.equal(built.baseIsCheckout, true);
+    assert.deepEqual([...built.baseUnreadablePaths], [], "a checkout at the base simply lacks the file — never a read failure");
+    execFileSync("git", ["-C", head, "worktree", "remove", "--force", built.baseCheckoutDir!], { stdio: "pipe" });
+    const fallback = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }], head, {
+      addWorktree: () => {
+        throw new Error("worktree refused by the fixture");
+      },
+    });
+    assert.equal(fallback.baseIsCheckout, false);
+    assert.equal(fallback.baseCheckoutDir, undefined, "nothing written for an absent path, as before W1-T460");
+    assert.deepEqual([...fallback.baseUnreadablePaths], [], "a forward reference is ABSENCE, never a read failure");
 
     // …and end to end, the proof keeps its positive override.
     const v = judgeCriterion({ claim: "freshThing exists", proof: "grep: freshThing in src/brand-new.ts" }, new Set(), undefined, {
@@ -318,6 +329,11 @@ test("W1-T460 (3): buildBaseProofDir surfaces the mixed case — a dir AND the u
       [{ proof: "grep: alpha in src/a.ts" }, { proof: "grep: beta in src/b.ts" }],
       head,
       {
+        // (R-11) The blob path is the FALLBACK now — reached only when the merge-base worktree
+        // cannot be added — so this forces it; a real checkout has no per-blob read to break.
+        addWorktree: () => {
+          throw new Error("worktree refused by the fixture");
+        },
         // Only the second path's read breaks; everything else is the real default path.
         showBlob: (cwd, rev, rel) => {
           if (rel === "src/b.ts") throw readFailureError();
@@ -326,6 +342,7 @@ test("W1-T460 (3): buildBaseProofDir surfaces the mixed case — a dir AND the u
       },
     );
     assert.ok(built.baseCheckoutDir, "the readable proof still yields a base tree");
+    assert.equal(built.baseIsCheckout, false, "the fallback, by construction");
     assert.equal(readFileSync(join(built.baseCheckoutDir, "src/a.ts"), "utf8"), "alpha\n");
     assert.deepEqual([...built.baseUnreadablePaths], ["src/b.ts"]);
   } finally {
@@ -402,8 +419,13 @@ test("W1-T460 (5): the production showBlob pipes git's stderr — a review over 
     writeFileSync(
       script,
       `import { buildBaseProofDir } from ${JSON.stringify(join(REPO_ROOT, "src", "run-task.ts"))};\n` +
-        `const built = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }], ${JSON.stringify(head)});\n` +
-        `process.stdout.write(JSON.stringify({ dir: built.baseCheckoutDir === undefined, unreadable: [...built.baseUnreadablePaths] }));\n`,
+        `import { execFileSync } from "node:child_process";\n` +
+        // (R-11) The real default path adds a WORKTREE, so `git show` never runs for it; the
+        // fallback — forced by a throwing `addWorktree` — is where the piped `git show` lives now.
+        `const real = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }], ${JSON.stringify(head)});\n` +
+        `execFileSync("git", ["-C", ${JSON.stringify(head)}, "worktree", "remove", "--force", real.baseCheckoutDir], { stdio: "pipe" });\n` +
+        `const built = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }], ${JSON.stringify(head)}, { addWorktree: () => { throw new Error("worktree refused by the fixture"); } });\n` +
+        `process.stdout.write(JSON.stringify({ checkout: real.baseIsCheckout, dir: built.baseCheckoutDir === undefined, unreadable: [...built.baseUnreadablePaths] }));\n`,
     );
     // NODE_V8_COVERAGE is stripped from the child: it exists to observe git's STDERR, and a
     // coverage report merged from a process that LOADS the module graph without exercising it
@@ -416,7 +438,7 @@ test("W1-T460 (5): the production showBlob pipes git's stderr — a review over 
     assert.equal(r.status, 0, `child failed: ${r.stderr}`);
     assert.doesNotMatch(r.stderr, /fatal:/, "git's absence message must not surface on a PASSING review");
     // …and silencing it did not break the classification the fix depends on.
-    assert.deepEqual(JSON.parse(r.stdout), { dir: true, unreadable: [] }, "absence is still swallowed, still not a read failure");
+    assert.deepEqual(JSON.parse(r.stdout), { checkout: true, dir: true, unreadable: [] }, "absence is still swallowed, still not a read failure");
   } finally {
     rmSync(head, { recursive: true, force: true });
     rmSync(dirname(script), { recursive: true, force: true });
@@ -435,12 +457,16 @@ test("W1-T460 (5): the call site spreads BOTH of buildBaseProofDir's facts onto 
   const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   assert.match(
     src,
-    /\.\.\.\(worktreePath \? buildBaseProofDir\(criteria, worktreePath\) : \{\}\)/,
-    "reviewCommand must spread the builder's result into the evidence it hands runReview",
+    /const baseProof = worktreePath \? buildBaseProofDir\(criteria, worktreePath\) : undefined/,
+    "reviewCommand must build the base facts from its materialised head worktree",
   );
-  // A spread is only correct while the builder's keys ARE the evidence field names — assert that
-  // relationship rather than trusting it, since a rename would silently drop both fields.
-  assert.match(src, /baseCheckoutDir: string \| undefined; baseUnreadablePaths: ReadonlySet<string>/, "the builder returns exactly those two keys");
+  // (R-11) The spread became three NAMED fields — the builder's result now also drives teardown
+  // of the base worktree, which a spread onto the evidence could not express — so each fact is
+  // pinned by name: the dir, W1-T460's unreadable set, and R-11's checkout flag.
+  assert.match(src, /baseCheckoutDir:\s*baseProof\?\.baseCheckoutDir/, "the dir reaches runReview");
+  assert.match(src, /baseUnreadablePaths:\s*baseProof\?\.baseUnreadablePaths/, "…and W1-T460's per-proof fact beside it");
+  assert.match(src, /baseIsCheckout:\s*baseProof\?\.baseIsCheckout/, "…and whether the dir is a checkout at all");
+  assert.match(src, /export interface BaseProofDir \{\n  baseCheckoutDir: string \| undefined;\n  baseUnreadablePaths: ReadonlySet<string>;\n  baseIsCheckout: boolean;/, "the builder returns exactly those keys, by name");
 });
 
 test("W1-T460 (5): when the worktree could not be materialised, the base facts are still well-formed", async () => {
