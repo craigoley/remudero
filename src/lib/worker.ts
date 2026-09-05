@@ -1698,6 +1698,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         preference: routingPolicy.preference,
         ...(preferenceBypass ? { preference_bypass: preferenceBypass } : {}),
         tightest_remaining_percent: selection.tightestRemainingPercent,
+        ...(selection.allocationWeight !== undefined ? { allocation_weight: selection.allocationWeight } : {}),
+        ...(selection.allocationSharePercent !== undefined
+          ? { allocation_share_percent: selection.allocationSharePercent }
+          : {}),
         capacities: capacities.map((capacity) => ({
           provider: capacity.provider,
           readable: capacity.readable,

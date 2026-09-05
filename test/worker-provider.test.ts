@@ -26,6 +26,14 @@ import {
   type ProviderCapacity,
 } from "../src/lib/worker-provider.js";
 import {
+  selectWorkerProviderForPolicy,
+  type EffectiveProviderRoutingPolicy,
+} from "../src/lib/provider-routing-policy.js";
+import {
+  readProviderRoutingStatus,
+  writeProviderRoutingStatus,
+} from "../src/lib/provider-routing-status.js";
+import {
   clearClaudeCapacityCache,
   createClaudeExecutableCache,
   readClaudeProviderCapacity,
@@ -45,6 +53,33 @@ function capacity(provider: "claude" | "codex", ...usedPercent: number[]): Provi
 
 test("provider selector uses the subscription with the most tight-window headroom", () => {
   assert.equal(selectWorkerProvider([capacity("claude", 30, 70), capacity("codex", 25, 40)]).provider, "codex");
+});
+
+function providerSequence(claudeUsed: number, codexUsed: number, dispatches = 200): Record<"claude" | "codex", number> {
+  const counts = { claude: 0, codex: 0 };
+  for (let index = 0; index < dispatches; index += 1) {
+    counts[selectWorkerProvider([capacity("claude", claudeUsed), capacity("codex", codexUsed)], 5, index).provider] += 1;
+  }
+  return counts;
+}
+
+test("automatic provider routing strongly favors a reset subscription without starving its healthy peer", () => {
+  const counts = providerSequence(0, 70);
+  assert.ok(counts.claude >= 180, `expected at least 90% Claude dispatches, got ${counts.claude}/200`);
+  assert.ok(counts.codex > 0, "a healthy lower-headroom Codex subscription remains sampled");
+
+  const selected = selectWorkerProvider([capacity("claude", 0), capacity("codex", 70)], 5, 0);
+  assert.equal(selected.allocationWeight, 95 ** 2);
+  assert.ok((selected.allocationSharePercent ?? 0) > 93 && (selected.allocationSharePercent ?? 0) < 94);
+});
+
+test("weighted routing stays balanced for a small lead and reverses with the headroom lead", () => {
+  const claudeLead = providerSequence(40, 45);
+  assert.ok(claudeLead.claude >= 105 && claudeLead.claude <= 115, JSON.stringify(claudeLead));
+
+  const codexLead = providerSequence(45, 40);
+  assert.ok(codexLead.codex >= 105 && codexLead.codex <= 115, JSON.stringify(codexLead));
+  assert.equal(claudeLead.claude, codexLead.codex, "reversing capacities reverses the deterministic share");
 });
 
 test("provider selector excludes an exhausted provider even when another window is empty", () => {
@@ -73,8 +108,48 @@ test("provider selector rejects an out-of-range percentage instead of treating i
 
 test("provider selector alternates exact ties using its supplied tie breaker", () => {
   const values = [capacity("claude", 10), capacity("codex", 10)];
-  assert.equal(selectWorkerProvider(values, 5, 0).provider, "claude");
-  assert.equal(selectWorkerProvider(values, 5, 1).provider, "codex");
+  const sequence = Array.from({ length: 20 }, (_, index) => selectWorkerProvider(values, 5, index));
+  assert.deepEqual(sequence.map((selection) => selection.provider), Array.from({ length: 20 }, (_, index) => index % 2 === 0 ? "claude" : "codex"));
+  assert.ok(sequence.every((selection) => selection.allocationSharePercent === 50));
+});
+
+function routingPolicy(preference: "automatic" | "claude" | "codex"): EffectiveProviderRoutingPolicy {
+  return {
+    provenance: "default",
+    committed: {
+      enabledProviders: ["claude", "codex"],
+      preference: "automatic",
+      reservePercent: 5,
+      parks: [],
+      codexModelPreference: null,
+    },
+    enabledProviders: ["claude", "codex"],
+    routableProviders: ["claude", "codex"],
+    preference,
+    reservePercent: 5,
+    parks: [],
+  };
+}
+
+test("an explicit provider preference remains authoritative and falls back only when ineligible", () => {
+  const capacities = [capacity("claude", 0), capacity("codex", 70)];
+  assert.equal(selectWorkerProviderForPolicy(capacities, routingPolicy("codex"), 0).selection.provider, "codex");
+
+  const reserveFallback = selectWorkerProviderForPolicy(
+    [capacity("claude", 0), capacity("codex", 95)],
+    routingPolicy("codex"),
+    0,
+  );
+  assert.equal(reserveFallback.selection.provider, "claude");
+  assert.deepEqual(reserveFallback.preferenceBypass, { provider: "codex", reason: "below-reserve" });
+
+  const unreadableFallback = selectWorkerProviderForPolicy(
+    [capacity("claude", 0), { provider: "codex", readable: false, windows: [], detail: "offline" }],
+    routingPolicy("codex"),
+    0,
+  );
+  assert.equal(unreadableFallback.selection.provider, "claude");
+  assert.deepEqual(unreadableFallback.preferenceBypass, { provider: "codex", reason: "unreadable" });
 });
 
 test("window consumption uses the largest reset-stable provider-window delta", () => {
@@ -698,7 +773,7 @@ test("Codex spawn carries a subscription refusal through the shared ledger seam"
   assert.equal(workerLedgerFields(result).verdict, "usage_refused");
 });
 
-test("spawnWorker routes an opted-in call to Codex, preserves containment, and ledgers the provider", async () => {
+test("spawnWorker routes an opted-in call to Codex, preserves containment, and publishes its intended allocation", async (t) => {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -708,6 +783,8 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and l
   let spawnedArgs: string[] = [];
   let spawnedEnv: Record<string, string | undefined> = {};
   const codexCapacityRequests: Array<{ forceRefresh?: boolean; selectedModel?: string }> = [];
+  const diagnostics: string[] = [];
+  t.mock.method(console, "error", (...parts: unknown[]) => diagnostics.push(parts.map(String).join(" ")));
   stdin.on("data", (chunk: Buffer) => {
     prompt += chunk.toString("utf8");
   });
@@ -747,6 +824,7 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and l
           };
         },
         tieBreaker: 0,
+        writeStatus: (_root, input) => writeProviderRoutingStatus(root, input),
       },
       containment: {
         spawn: (options) => {
@@ -784,6 +862,14 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and l
     window: "codex 7d",
     resets_at: 123,
   });
+  const routingEvent = diagnostics
+    .map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return undefined; } })
+    .find((event) => event?.event === "worker.provider.selected");
+  assert.equal(routingEvent?.allocation_weight, 85 ** 2);
+  assert.ok(Number(routingEvent?.allocation_share_percent) > 96);
+  const status = readProviderRoutingStatus(root);
+  assert.equal(status.selected?.allocationWeight, 85 ** 2);
+  assert.ok((status.selected?.allocationSharePercent ?? 0) > 96);
 });
 
 test("the unchanged Claude spawn path labels its successful provider", async () => {
