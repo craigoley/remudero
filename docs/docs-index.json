@@ -146,6 +146,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/ledger.md",
+      "title": "ledger.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "ledger.ts forensics"
+    },
+    {
       "path": "docs/forensics/status.md",
       "title": "status.ts comment forensics",
       "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/status.ts` when its comments were compacted to the plain-language standa…",
