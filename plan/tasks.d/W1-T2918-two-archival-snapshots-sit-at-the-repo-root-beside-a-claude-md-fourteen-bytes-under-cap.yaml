@@ -1,0 +1,44 @@
+- id: W1-T2918
+  title: "TWO ARCHIVAL SNAPSHOTS SIT AT THE REPO ROOT WITH CODE COMMENTS POINTING AT THEM — DIAGNOSIS.md and FINDINGS.md are dated snapshots no gate reads, cited from five src files and README as if current, while CLAUDE.md sits 14 bytes under its 44,000-byte cap: move the snapshots under docs/archive, repoint every citation, and add the root-markdown census that keeps the root to the files the loop actually reads"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§8A", "§12A", "W1-T2507"]
+  files: [DIAGNOSIS.md, FINDINGS.md, docs/archive/DIAGNOSIS.md, docs/archive/FINDINGS.md, README.md, src/run-task.ts, src/lib/worker.ts, src/lib/drain-lock.ts, src/lib/worker-home.ts, src/lib/inflight-lock.ts, test/credential-arms-match-the-observed-text.test.ts, scripts/task-id-existence-baseline.json, test/root-level-markdown-census.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-58 (OBSERVED). At f7ceb86, `DIAGNOSIS.md` and `FINDINGS.md` sit at
+    the repo root; both are dated snapshots (FINDINGS' installed-version table is two months
+    stale by the audit's README finding, R-56, already corrected in the audit PR to stop
+    sending readers there). Nothing under src/ or scripts/ READS either file, but five source
+    files cite them in comments (`src/run-task.ts`, `src/lib/worker.ts`,
+    `src/lib/drain-lock.ts`, `src/lib/worker-home.ts`, `src/lib/inflight-lock.ts` — MEASURED,
+    `grep -rl`), `test/credential-arms-match-the-observed-text.test.ts` reads one of them, and
+    `scripts/task-id-existence-baseline.json` carries a row for one. §8A's knowledge
+    architecture names the files the loop reads — `learnings/*.yaml`, `plan/`, MASTER-PLAN,
+    DECISIONS, LEARNINGS, CLAUDE.md — and these are not among them; a root file that looks
+    authoritative and is not is a context tax paid by every reader who opens it. The
+    CLAUDE.md headroom (43,986 of 44,000 bytes, `node scripts/claude-md-budget-ratchet.mjs`)
+    is noted for the record: W1-T2507 ruled that the answer to pressure on that cap is to
+    MOVE content out, not raise it, and this task changes nothing about that ratchet.
+
+    THE FIX: `git mv` both files under `docs/archive/` with a one-paragraph header dating the
+    snapshot and naming what superseded it; repoint the five comment citations, the test's
+    read path and the baseline row; update README's docs map (added by the audit PR) to list
+    the archive. Then a census test that lists the markdown files at the repo root and compares
+    to an allowlist of the ones the loop reads (README, CLAUDE, MASTER-PLAN, DECISIONS,
+    LEARNINGS, CHANGELOG, CONTRIBUTING, LICENSE-adjacent), refusing a new root `.md` that is not
+    on the list — so the root cannot re-accrete snapshots.
+  acceptance:
+    - claim: "the two snapshots live under the docs archive and README's map says so"
+      proof: "grep: docs/archive/DIAGNOSIS in README.md"
+    - claim: "no source comment cites a root-level snapshot path that no longer exists"
+      proof: "grep: docs/archive/FINDINGS in src/lib/worker.ts"
+    - claim: "a new root-level markdown file outside the allowlist is refused"
+      proof: "unit test: test/root-level-markdown-census.test.ts"

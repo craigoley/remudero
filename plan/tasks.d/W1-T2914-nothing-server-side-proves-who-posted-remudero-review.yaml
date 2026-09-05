@@ -1,0 +1,48 @@
+- id: W1-T2914
+  title: "NOTHING SERVER-SIDE PROVES WHO POSTED remudero-review — the worker env allowlist carries GH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN, gh runs outside the sandbox via excludedCommands, and the only thing between a prompt-injected worker and a self-posted remudero-review=success is deny-floor rule 4, a regex its own header calls a tripwire: a GitHub ruleset on main must require the status from the reviewer's own app identity, one the worker token cannot assume"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§8", "§4A", "§12", "W1-T990", "W1-T2262", "W1-T1040"]
+  files: [deploy/github-ruleset-main.json, docs/review-gate.md, docs/operator-guide.md]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-19 (OBSERVED; PARTIAL against W1-T990 — fleet authorship as an
+    App — and W1-T2262 — ref rules; neither gives the STATUS server-side provenance). At
+    f7ceb86: `src/lib/env.ts:89` allowlists `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` into the
+    worker's environment; `settings/worker.json:47` lists `gh *` under the sandbox's
+    `excludedCommands`, so `gh` runs UNSANDBOXED with the operator credential;
+    `hooks/deny-floor.sh:60-66` (rule 4) pattern-matches a `gh api … statuses` call and its own
+    header says it is "a tripwire, NOT a boundary". `docs/review-gate.md:3` states that
+    `remudero-review` is a REQUIRED status check on main. Put together: a worker steered by
+    hostile repository content can post `remudero-review=success` on its own PR with the token
+    it already holds, and the branch protection accepts it because a required status check has
+    no notion of WHO may post it. That is the autonomy ceiling §4 names — a harness may be
+    trusted to merge unattended only to the extent its own PASS is expensive to forge.
+
+    THE FIX IS A REPOSITORY RULESET, WHICH IS WHY THIS IS verify: human — the change is made in
+    GitHub's settings by the operator, and no worker can or should hold the permission to make
+    it. GitHub rulesets' `required_status_checks` entries carry an `integration_id`: the
+    check is satisfied only when posted by that GitHub App. The deliverables a worker CAN
+    produce: (1) `deploy/github-ruleset-main.json` — the ruleset body, importable from the
+    repository's Rules settings, requiring `remudero-review` with the reviewer App's
+    `integration_id` (the App W1-T990 introduces; until it exists the file carries a
+    placeholder and says so) plus `ci-gate`; (2) `docs/review-gate.md` gains a section
+    explaining that the status is provenance-bound and that a status posted by a user token is
+    IGNORED by the ruleset; (3) `docs/operator-guide.md` gains the apply-and-verify steps —
+    apply the ruleset, then from a worker-shaped token post a `remudero-review=success` on a
+    test PR and confirm the merge button stays blocked. The operator performs (3) and records
+    the result in the PR; that is the human verification.
+  acceptance:
+    - claim: "the review-gate doc names the ruleset field that binds the status to the reviewer app's identity"
+      proof: "grep: integration_id in docs/review-gate.md"
+    - claim: "the review-gate doc states that a status from a user token does not satisfy the ruleset"
+      proof: "grep: ruleset in docs/review-gate.md"
+    - claim: "the operator guide carries the apply-and-verify steps, including the forged-status control"
+      proof: "grep: github-ruleset-main in docs/operator-guide.md"

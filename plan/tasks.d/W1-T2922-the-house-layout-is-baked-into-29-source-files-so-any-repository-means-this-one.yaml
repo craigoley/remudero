@@ -1,0 +1,47 @@
+- id: W1-T2922
+  title: "THE HOUSE LAYOUT IS BAKED INTO 29 SOURCE FILES, SO 'ANY REPOSITORY' MEANS THIS ONE — plan/tasks.d in 29 non-test src files, MASTER-PLAN.md in 18, .remudero/ in 17, learnings/ in 14; learnings.ts resolves join(repoRoot, \"learnings\") and plan-architect.ts says it has no --repo targeting: resolve one RepoLayout per target in repo-location.ts and thread it through the plan, learnings and alert-policy loaders"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§3A", "§8A", "§10"]
+  files: [src/lib/repo-location.ts, src/lib/plan.ts, src/lib/learnings.ts, src/lib/alert-lane.ts, src/lib/plan-architect.ts, test/repo-layout.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 §6, move 1 (OBSERVED counts, re-counted by the orchestrator). The
+    core goal is a harness that manages ANY repository it is assigned; at f7ceb86 repo
+    targeting exists (`--repo`, `<root>/repos/<name>/`, `.remudero/managed-repos.json`) but the
+    harness's own layout is assumed by non-test src files: `plan/tasks.d` in 29 of them,
+    `MASTER-PLAN.md` in 18, `.remudero/` in 17, `learnings/` in 14. `src/lib/learnings.ts:471`
+    is `return join(repoRoot, "learnings")`; `src/lib/plan-architect.ts:23` states it has no
+    `--repo` targeting; `loadAlertPolicy` (`src/lib/alert-lane.ts:169`) takes a bare path its
+    callers build from the house layout; `managed-repos.json` ships `{"repos": []}`. A target
+    repository without a `plan/tasks.d/` or a `learnings/` directory therefore throws in the
+    first loader that assumes one, and the ceiling on generality is not a feature gap but a
+    path assumption repeated 78 times.
+
+    THE FIX, AS THE AUDIT SHAPES IT: `src/lib/repo-location.ts` gains `interface RepoLayout {
+    root; planDir; planMonolith; masterPlan; learningsDir; principlesDir; alertPolicy;
+    stateDir }` and `resolveRepoLayout(target)` that fills it from the target's own
+    `.remudero/layout.json` when present and from the house defaults otherwise — so this repo
+    is the default and a foreign layout is one small file. Thread it through the three loaders
+    the audit names in this task: `loadPlan` (planDir/monolith), `learningsDir` (no more
+    `join(repoRoot, "learnings")`), and `loadAlertPolicy`'s callers; give `plan-architect.ts`
+    its `--repo`. The remaining 20-odd files keep their literals for now — the test is the
+    first ratchet: it counts `"plan/tasks.d"`, `"MASTER-PLAN.md"`, `".remudero/"` and
+    `"learnings/"` literals in non-test src and refuses growth from the post-change count. THE
+    FALSIFIER FROM THE AUDIT: `rmd daemon --repo <sandbox> --dry-run` against a fixture repo
+    with no `plan/tasks.d/` and no `learnings/` prints a plan and zero learnings without
+    throwing; the test builds that fixture and runs the loaders through the layout.
+  acceptance:
+    - claim: "a repository layout is resolved once per target and defaults to the house layout"
+      proof: "grep: RepoLayout in src/lib/repo-location.ts"
+    - claim: "the learnings loader reads its directory from the layout instead of a house literal"
+      proof: "grep: resolveRepoLayout( in src/lib/learnings.ts"
+    - claim: "a target with no plan directory and no learnings directory loads without throwing, and the house-literal count cannot grow"
+      proof: "unit test: test/repo-layout.test.ts"

@@ -1,0 +1,45 @@
+- id: W1-T2900
+  title: "EIGHT CONFIGURATION SOURCES, SIXTEEN HAND-ROLLED validate* FUNCTIONS AND NO SCHEMA — validateConfig checks five semantic rules and no field shape after JSON.parse(...) as Partial<Config>, 102 process.env reads in 26 files and 24 RMD_*/REMUDERO_* names have no registry: declare the config shape once, validate every source through it, and register every environment variable the harness reads"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§8", "§9"]
+  files: [src/lib/config.ts, src/lib/config-schema.ts, src/lib/env.ts, test/config-schema.test.ts, test/env-var-registry.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-36 (OBSERVED). At f7ceb86, `validateConfig`
+    (`src/lib/config.ts:304`) runs after `JSON.parse(...) as Partial<Config>` (`:468`) and
+    checks five semantic rules; nothing checks that a field IS a number or a string, so a typo'd
+    key or a string where a number belongs is accepted and fails later, somewhere else, as a
+    `TypeError` or a silently-false comparison. Across src/lib there are 11 `export function
+    validate*` entry points (MEASURED) and 16 by the audit's wider count, one per source, each
+    with its own idea of what a shape error looks like. `git grep -cE 'process\.env\b' -- src`
+    sums to 102 reads in 26 files, and 24 distinct `RMD_*`/`REMUDERO_*` names are read across
+    22 files with no registry — so `rmd doctor` cannot list what the environment can set, and
+    CLAUDE.md's code-trap "read re-entrancy from process.env, not an injected env argument"
+    (#2248) has to be prose because no seam names the variables.
+
+    THE FIX, WITHOUT A NEW DEPENDENCY unless the PR argues for one: `src/lib/config-schema.ts`
+    declares the `Config` shape as data (field name, type, default, source, description — a
+    small hand-written schema table is enough; a library is optional) and exports
+    `validateConfigShape(raw, source)` returning a typed `Config` or a named `ConfigError`
+    listing every offending field with its source file and path. `config.ts` calls it for each
+    of the eight sources before the semantic rules. The same module exports the ENV REGISTRY:
+    one array of `{ name, purpose, readBy }` for every `RMD_*`/`REMUDERO_*` name, and
+    `src/lib/env.ts` reads through it. The registry test walks src/ for `process.env.RMD_` and
+    `process.env.REMUDERO_` reads and refuses any name absent from the registry — the
+    forward-only census shape this repo uses. The schema test feeds a config with a string
+    where a number belongs and asserts the named error cites the field and source.
+  acceptance:
+    - claim: "every configuration source is shape-validated before the semantic rules run"
+      proof: "grep: validateConfigShape( in src/lib/config.ts"
+    - claim: "a wrong-typed field is refused with an error naming the field and its source"
+      proof: "unit test: test/config-schema.test.ts"
+    - claim: "every RMD_ or REMUDERO_ variable src reads is in one registry"
+      proof: "unit test: test/env-var-registry.test.ts"

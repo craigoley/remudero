@@ -1,0 +1,46 @@
+- id: W1-T2906
+  title: "NOTHING COMPARES A BASELINE SCORE TO origin/main AND THE INLINE ALLOWANCES NEVER TIGHTEN — a PR can lower any score in scripts/*-baseline.json and every ratchet reads the lowered file as its floor, while the census allowances (64 bare catches allowed in run-task.ts, 79 bound-kind rows) fire only on growth: one required step refuses a baseline decrease against origin/main, and the censuses fail when the allowance is slack"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§5C", "§12", "W1-T479"]
+  files: [scripts/baseline-monotonic-check.mjs, .github/workflows/ci.yml, src/lib/ci-parity.ts, test/baseline-monotonic-against-origin-main.test.ts, test/catch-erasure-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-43 (OBSERVED; the line-floor half is ALREADY W1-T479 and is not
+    repeated here). At f7ceb86 twelve `scripts/*-baseline.json` files exist (assertion-
+    discrimination, bound-kind, claude-md-budget, clock-sweep, coverage, cycle, knowledge-
+    budget, learnings-budget, mutation, source-size, state-citation, task-id-existence). Every
+    ratchet reads ITS OWN baseline from the PR's tree, so a PR that edits the JSON to a lower
+    score passes its ratchet by construction — the judge review might notice, nothing
+    deterministic does. CLAUDE.md's coverage section already warns of the sibling hazard
+    ("origin/main MOVES under you mid-session … stamp the sha"), but no gate reads the score
+    on `origin/main` at all. The inline censuses are the second half:
+    `test/catch-erasure-ratchet.test.ts:141-148` enters a file at an allowance of zero and
+    fails only when `actual > allowed`, so an allowance of 64 for run-task.ts stays 64 after a
+    PR removes twenty bare catches — the ratchet can only be tightened by hand, and never is.
+
+    THE FIX: (1) `scripts/baseline-monotonic-check.mjs` reads each baseline's SCORE FIELD
+    (a small table in the script names the field and direction per file — `linesPct` up,
+    `maxCycles` down, `capBytes` down, and so on) from `git show origin/main:<path>` and from
+    the working tree, and exits non-zero on a regression in the ratchet's own direction; a
+    baseline whose field moves the wrong way must say why in a `bumpRationale` that names a
+    PR, the convention `claude-md-budget-baseline.json` already follows. Run it as a step of
+    an existing required job in `ci.yml` and register it in `CI_PARITY_TABLE`. (2) In the
+    catch-erasure and bound-kind censuses, a file whose actual count is BELOW its allowance
+    by more than a stated slack fails with "lower the allowance to N" — so the allowance
+    tracks the code downward. The monotonic test drives the script with a fixture pair of
+    baselines and asserts a decrease is refused and an increase with rationale passes.
+  acceptance:
+    - claim: "a PR that lowers a baseline score against origin/main is refused by a required check"
+      proof: "grep: baseline-monotonic in .github/workflows/ci.yml"
+    - claim: "the monotonic check refuses a regression and accepts a rationalised bump"
+      proof: "unit test: test/baseline-monotonic-against-origin-main.test.ts"
+    - claim: "a census allowance that sits slack above the actual count fails and names the new allowance"
+      proof: "grep: actual < allowed in test/catch-erasure-ratchet.test.ts"

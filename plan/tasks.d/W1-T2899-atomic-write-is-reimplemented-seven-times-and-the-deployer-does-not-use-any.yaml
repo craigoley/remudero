@@ -1,0 +1,43 @@
+- id: W1-T2899
+  title: "ATOMIC WRITE IS RE-IMPLEMENTED SEVEN TIMES AND THE DEPLOYER MARKERS USE NONE OF THEM — a private writeFileAtomic in ledger.ts, four private write*Atomic under onboard/, writeSweepWakeMarkerAtomic, and inline writeFileSync+renameSync in ten files, while fs-race-safe.ts (the module that owns the lock primitives) exports no writeAtomic: lift one, route the copies through it, and make the deployer markers atomic"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§12", "W1-T2388"]
+  files: [src/lib/fs-race-safe.ts, src/lib/ledger.ts, src/lib/deployer.ts, src/lib/github-event-wake.ts, src/lib/onboard/inventory.ts, src/lib/onboard/recon.ts, src/lib/onboard/session.ts, src/lib/onboard/synthesize.ts, test/write-atomic.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-39 (OBSERVED). At f7ceb86: `function writeFileAtomic` is private
+    in `src/lib/ledger.ts:1234`; `writeInventoryAtomic` (`onboard/inventory.ts:422`),
+    `writeReconArtifactAtomic` (`onboard/recon.ts:506`), `writeJsonAtomic`
+    (`onboard/session.ts:318`) and `writeSynthesisArtifactAtomic` (`onboard/synthesize.ts:350`)
+    are four more private copies; `writeSweepWakeMarkerAtomic` (`github-event-wake.ts:270`) is
+    a sixth; and inline `writeFileSync` + `renameSync` pairs appear in ten files.
+    `src/lib/fs-race-safe.ts` — the module whose exports are `createOrReadExclusive`,
+    `reclaimStaleLock`, `isHolderStale` — exports no `writeAtomic`. The deployer's markers
+    (`src/lib/deployer.ts:1143-1196`) are written NON-atomically, which is the case that
+    matters: a marker torn by a crash mid-write is read by the next boot as a corrupt or empty
+    deploy state. Standing rule 23 (write-side atomicity) is doctrine without a primitive.
+
+    THE FIX: export `writeAtomic(path, content, opts?)` from `fs-race-safe.ts` — temp file in
+    the same directory, `fsync`, `rename`, with the same-filesystem guarantee the copies each
+    assume — and route the six named copies and the deployer markers through it, deleting the
+    private implementations. The inline pairs in other files migrate where the diff is a
+    one-line swap; list any left behind in the PR. The test proves the primitive: a write that
+    throws between temp and rename leaves the original file intact, a completed write is
+    byte-identical, and the deployer marker path goes through it (a recorder on the seam). The
+    ledger rotation lock (R-1, in flight as its own task) is a different primitive and is not
+    touched here.
+  acceptance:
+    - claim: "fs-race-safe exports one atomic write primitive"
+      proof: "grep: export function writeAtomic( in src/lib/fs-race-safe.ts"
+    - claim: "the deployer markers are written through the primitive"
+      proof: "grep: writeAtomic( in src/lib/deployer.ts"
+    - claim: "an interrupted write leaves the previous file intact and a completed write is byte-identical"
+      proof: "unit test: test/write-atomic.test.ts"

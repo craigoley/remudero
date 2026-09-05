@@ -1,0 +1,41 @@
+- id: W1-T2889
+  title: "buildSweepEffects TAKES TWENTY-THREE POSITIONAL PARAMETERS — the house rule 'append the injectable LAST so no positional caller shifts' has been applied twenty-two times to one signature, so every new seam widens the arity and no caller can be read: collapse the parameters into one typed BuildSweepEffectsDeps object before the sweep orchestration moves (decomposition step 6)"
+  repo: remudero
+  depends_on: [W1-T2888]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§8A", "W1-T2883"]
+  files: [src/run-task.ts, test/build-sweep-effects-takes-one-deps-object.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Step 6 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29, R-33).
+    OBSERVED at f7ceb86: `export function buildSweepEffects(` at `src/run-task.ts:29297` spans
+    1,005 lines and declares 23 positional parameters (`:29296-29312`); `runFixRung` and
+    `daemonCommand` carry 14/13/12-parameter signatures of the same origin. The audit names the
+    mechanism: CLAUDE.md's coverage rule "append the injectable parameter LAST so no positional
+    caller shifts" is correct for ONE addition and manufactures this shape when applied twenty
+    times. R-33's census counts 154 `*Deps` interfaces and 325 `deps:` parameters elsewhere in
+    src/ — the deps-object convention is already the house shape; this signature is the outlier.
+
+    THIS MUST LAND BEFORE STEP 7 (moving the sweep orchestration to lib): moving a 23-parameter
+    function moves the problem, and the composition root at the end of the chain (step 11) needs
+    one object per subsystem to compose. THE FIX: declare `BuildSweepEffectsDeps` in run-task.ts
+    (or a lib types module) with one named field per former parameter, defaults preserved
+    exactly, and change the signature to `buildSweepEffects(deps: BuildSweepEffectsDeps)`.
+    Update every caller (`git grep -l buildSweepEffects` — the test population is large; run all
+    of it, per CLAUDE.md's caller-sweep rule). No behaviour change; the new test constructs the
+    deps object with recorders and asserts the produced effects match the pre-change output for
+    the same inputs, and a type-level test asserts that a missing required field fails to compile
+    (`// @ts-expect-error`).
+  acceptance:
+    - claim: "buildSweepEffects takes one typed deps object instead of positional parameters"
+      proof: "grep: buildSweepEffects(deps in src/run-task.ts"
+    - claim: "the deps object type is declared with one named field per former parameter"
+      proof: "grep: BuildSweepEffectsDeps in src/run-task.ts"
+    - claim: "the same inputs through the deps object produce the same effects as before"
+      proof: "unit test: test/build-sweep-effects-takes-one-deps-object.test.ts"

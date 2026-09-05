@@ -1,0 +1,38 @@
+- id: W1-T2892
+  title: "runTaskBody IS A 1,947-LINE ZERO-PARAMETER CLOSURE — it reads and writes roughly forty variables of the enclosing runTask (2,385 lines) by capture, so no part of the run can be tested, moved or reasoned about without the whole: lift it into a function that takes an explicit RunTaskContext and returns its outcome (decomposition step 9)"
+  repo: remudero
+  depends_on: [W1-T2891]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§3", "§8A", "W1-T2883"]
+  files: [src/run-task.ts, test/run-task-body-takes-an-explicit-context.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Step 9 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29). OBSERVED at
+    f7ceb86: `runTask` begins at `src/run-task.ts:11951` and spans 2,385 lines; inside it,
+    `runTaskBody` (`:12388`) is a closure of 1,947 lines with NO parameters that reads and
+    mutates the enclosing function's locals by capture. That is why the loop of §3 — prompt,
+    dispatch, review, fix, arm — cannot be tested below the level of "run a whole task through a
+    fake worker", and why every extraction so far has moved leaves around it rather than
+    through it. It is also why `test/run-task.test.ts` is 8,570 lines and 75 s (R-40).
+
+    THE FIX, MECHANICAL AND BEHAVIOUR-PRESERVING: enumerate the captured variables (the
+    TypeScript compiler will list them when the closure is moved out of scope), declare a
+    `RunTaskContext` interface holding them — mutable fields as explicit mutable fields, not
+    hidden — and change the closure into `runTaskBody(ctx: RunTaskContext)` returning what the
+    closure used to leave in locals. `runTask` builds the context and calls it. No logic changes;
+    the diff is a signature and a rename of captured reads to `ctx.` accesses. Prove it with the
+    existing run-task suites (all of them — this is exactly the caller-sweep case) plus a new
+    test that builds a minimal context and drives one rung of the body in isolation, which was
+    impossible before. Lower nothing in the size baseline for this step; the line count barely
+    moves. What it buys is that step 10 can move the body's phases into lib one at a time.
+  acceptance:
+    - claim: "the run body takes an explicit typed context instead of capturing runTask's locals"
+      proof: "grep: RunTaskContext in src/run-task.ts"
+    - claim: "one rung of the body can be driven from a minimal context without running a whole task"
+      proof: "unit test: test/run-task-body-takes-an-explicit-context.test.ts"

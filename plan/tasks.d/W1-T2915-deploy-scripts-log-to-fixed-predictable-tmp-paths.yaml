@@ -1,0 +1,38 @@
+- id: W1-T2915
+  title: "DEPLOY SCRIPTS LOG TO FIXED, PREDICTABLE /tmp PATHS — recycle-container.sh tees docker pull into /tmp/recycle-container-pull.log and then greps it for the auth verdict, under a sticky world-writable /tmp where another user can pre-create the path: use mktemp for every operator-run script's scratch file"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§8", "§4A"]
+  files: [deploy/recycle-container.sh, deploy/host-update.sh, deploy/verify-image.sh, test/deploy-scripts-use-mktemp.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-21 (OBSERVED). At f7ceb86, `deploy/recycle-container.sh:697`
+    runs `docker pull "${REF}" 2>&1 | tee /tmp/recycle-container-pull.log` and line 700 greps
+    that same fixed path for `authentication required|unauthorized|denied` to decide whether
+    the pull failed on credentials. `/tmp` on the host is sticky and world-writable: a
+    pre-existing file or symlink at that name owned by another uid makes the `tee` fail or
+    write through a link, and a pre-seeded file containing the word `denied` flips the
+    script's verdict. The other operator-run scripts under `deploy/` (`host-update.sh`,
+    `verify-image.sh`) are in scope for the same sweep; the audit names recycle-container.sh's
+    two lines as the observed instance. This is low severity — the scripts run only from the
+    operator's shell — and it is a one-line class of fix that should be closed as a class.
+
+    THE FIX: every scratch file in `deploy/*.sh` is created with `mktemp` (a `TMP=$(mktemp)`
+    with a `trap 'rm -f "$TMP"' EXIT`), never a literal `/tmp/<name>` path. The test walks
+    `deploy/*.sh` and asserts no line writes to a literal `/tmp/` path (the read side of the
+    same literal is caught by the same regex), and that every script using `mktemp` also
+    installs the cleanup trap — a small census with an empty allowlist. CLAUDE.md's grep
+    caveat applies to the sweep: use `grep -a` or `git grep`, since the harness grep is a
+    ugrep wrapper that skips a file holding one NUL byte.
+  acceptance:
+    - claim: "the container recycle script creates its scratch log with mktemp"
+      proof: "grep: mktemp in deploy/recycle-container.sh"
+    - claim: "no operator-run deploy script writes to a literal /tmp path and every mktemp has a cleanup trap"
+      proof: "unit test: test/deploy-scripts-use-mktemp.test.ts"

@@ -1,0 +1,39 @@
+- id: W1-T2887
+  title: "THE AUTO-MERGE ARM CLUSTER IS A LIB MODULE THAT HAPPENS TO LIVE IN THE CLI — armAutoMerge, armAutoMergeDetailed, attemptArm, armAutoMergeAtOpen, disarmAutoMerge, armIfVerdictPermits, realArmDeps and their classifiers (run-task.ts:2147-3464) form one closed cluster around decideAutoMergeArm (review.ts): move it to src/lib/arm-auto-merge.ts (decomposition step 4)"
+  repo: remudero
+  depends_on: [W1-T2886]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§8A", "W1-T2883"]
+  files: [src/run-task.ts, src/lib/arm-auto-merge.ts, test/arm-auto-merge.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Step 4 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29). OBSERVED at
+    f7ceb86: the arm cluster is contiguous in `src/run-task.ts` — `isRealArmDepsObject` (:2147),
+    `requireExplicitArmSeam` (:2321), `realArmDeps` (:2333), `armAutoMerge` (:2473),
+    `armAutoMergeDetailed` (:2494), `attemptArm` (:2662), `armAutoMergeAtOpen` (:2976),
+    `classifyDisarmFailure` (:3038), `disarmOutcomeWithdrawn` (:3056), `disarmAutoMerge` (:3064),
+    `armRunIdFromLedger` (:3094), `disposeDisarm` (:3210) and `armIfVerdictPermits` (:3464). Its
+    decision function `decideAutoMergeArm` already lives in `src/lib/review.ts:5105`; the cluster
+    is the effectful half of one seam whose pure half is already in lib. CLAUDE.md's
+    "armIfVerdictPermits once ran before the log('review.posted') its own gate required" bullet
+    (#968-#981) is the history of this cluster being hard to see whole.
+
+    THE FIX: move the cluster into `src/lib/arm-auto-merge.ts`; `src/run-task.ts` imports and
+    RE-EXPORTS every moved name so the existing arm tests (`test/automerge-*.test.ts` and the
+    run-task suites) resolve unchanged. Keep the `armIfVerdictPermits` call site BELOW the
+    `review.posted` log line — the move must not reorder that. Lower the run-task.ts ceiling in
+    `scripts/source-size-baseline.json` by the lines removed. The new test drives `armAutoMerge`
+    through a recording `ArmDeps` and asserts the same gh invocations and ledger rows as before.
+  acceptance:
+    - claim: "run-task.ts imports the arm cluster from lib instead of defining it"
+      proof: "grep: lib/arm-auto-merge\" in src/run-task.ts"
+    - claim: "arming through the lib module issues the same gh calls and ledger rows as before the move"
+      proof: "unit test: test/arm-auto-merge.test.ts"
+    - claim: "the arm entry point is exercised through the lib module in the test"
+      proof: "grep: armAutoMerge( in test/arm-auto-merge.test.ts"

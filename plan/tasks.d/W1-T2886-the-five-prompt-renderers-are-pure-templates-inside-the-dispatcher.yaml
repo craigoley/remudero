@@ -1,0 +1,38 @@
+- id: W1-T2886
+  title: "THE FIVE PROMPT RENDERERS ARE PURE TEMPLATES INSIDE THE DISPATCHER — renderImplementPrompt, renderReconPrompt, renderDiagnosePrompt, renderFixPrompt and renderPrerequisitePrPrompt turn a task and its evidence into text and nothing else, yet live at five scattered offsets of run-task.ts: move them to src/lib/prompt-render.ts beside prompt-manifest.ts (decomposition step 3)"
+  repo: remudero
+  depends_on: [W1-T2885]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§2", "§8A", "W1-T2883"]
+  files: [src/run-task.ts, src/lib/prompt-render.ts, test/prompt-render.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Step 3 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29). OBSERVED at
+    f7ceb86: `renderFixPrompt` (`src/run-task.ts:6121`), `renderPrerequisitePrPrompt` (`:7571`),
+    `renderReconPrompt` (`:11610`), `renderDiagnosePrompt` (`:11651`) and `renderImplementPrompt`
+    (`:11722`) are the prompt renderers; `src/lib/prompt-manifest.ts` already exists as the
+    lib-side home for prompt structure, and the provenance gate (§2: every CONTEXT claim cites
+    `[src: …]`) is enforced on their OUTPUT, which makes them the natural unit to test in
+    isolation. Today a test of one renderer compiles the whole 37,508-line file first (~1,022 ms
+    per test process, R-40).
+
+    THE FIX: move the five renderers and the private template helpers only they use into
+    `src/lib/prompt-render.ts`; `src/run-task.ts` imports and RE-EXPORTS them by the same names.
+    Anything a renderer needs from run-task.ts (constants, the manifest) must already live in lib
+    or move with it — the module cannot import the entrypoint. Lower the run-task.ts ceiling in
+    `scripts/source-size-baseline.json` by the lines removed. The new test renders each prompt
+    from a fixed task and asserts the rendered text is byte-identical to the pre-move output for
+    the same inputs, and that every CONTEXT line still carries a `[src:` citation.
+  acceptance:
+    - claim: "run-task.ts imports the prompt renderers from lib instead of defining them"
+      proof: "grep: lib/prompt-render\" in src/run-task.ts"
+    - claim: "each renderer produces byte-identical text for the same inputs after the move and keeps its provenance citations"
+      proof: "unit test: test/prompt-render.test.ts"
+    - claim: "the renderers are called through the lib module in the test, not only re-exported"
+      proof: "grep: renderImplementPrompt( in test/prompt-render.test.ts"

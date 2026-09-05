@@ -1,0 +1,51 @@
+- id: W1-T2896
+  title: "GITHUB IS CALLED FIVE WAYS AND RATE-LIMIT PACING SEES ONE — the paced ghJson, 50 direct execFileSync(\"gh\") sites in 18 files, ghJsonAsync, GhApiFetcher plus its pacer, ghGateway with seven domain factories, and a raw fetch; only 8 of 246 execFileSync sites carry a timeout, so one half-open socket parks the daemon: make one transport module the only way out, with a default timeout and a census that refuses a new direct spawn"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§9", "W1-T525", "W1-T2217", "W1-T2440", "W1-T1024"]
+  files: [src/lib/github-transport.ts, src/lib/worker.ts, src/lib/open-prs-rest.ts, src/lib/escalate.ts, src/lib/self-sync.ts, src/lib/github-app.ts, src/lib/review.ts, src/lib/panel-actions.ts, src/lib/daemon-health.ts, src/lib/issues-intake.ts, src/lib/feedback-landing.ts, src/lib/retro.ts, src/lib/status.ts, src/lib/ops.ts, src/lib/onboard/recon.ts, src/lib/onboard/synthesize.ts, src/lib/onboard/inventory.ts, src/lib/feedback.ts, src/lib/specialist-panel.ts, src/lib/github-posture.ts, src/run-task.ts, test/gh-transport-census.test.ts, test/github-transport.test.ts, scripts/gh-transport-baseline.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-32 (OBSERVED) and R-6 (OBSERVED census, INFERRED hang). W1-T525
+    already states the goal — "there is no single point where a gh call can be counted" — and
+    scopes the metered seam to `open-prs-rest.ts` and `worker.ts`. This task is the migration
+    that seam needs to mean anything: at f7ceb86, `ghJson` (`src/lib/worker.ts:5118`) is the
+    only paced entry, while `git grep -lE 'execFileSync\(\s*"gh"' -- src` lists 18 files (50
+    sites: run-task.ts, worker.ts, review.ts, panel-actions.ts, escalate.ts, daemon-health.ts,
+    issues-intake.ts, feedback-landing.ts, retro.ts, status.ts, ops.ts, onboard/recon.ts,
+    onboard/synthesize.ts, onboard/inventory.ts, feedback.ts, specialist-panel.ts,
+    github-posture.ts, spike.ts), `ghJsonAsync`, `GhApiFetcher` with `createGhCallPacer`
+    (`open-prs-rest.ts:217`), `ghGateway` and seven domain gateway factories, and a raw `fetch`
+    in `github-app.ts:329`. Pacing (W1-T1024's starvation finding) sees `ghJson` callers only.
+    R-6: `ghJson`'s `exec` option type carries `encoding` and `maxBuffer` and NO `timeout`; the
+    daemon's `ghJson`, the escalation gateway (`escalate.ts:1521`) and every `git fetch` in
+    `self-sync.ts:217,512` can block the single-threaded daemon indefinitely on a half-open
+    socket, in a state launchd does not restart. W1-T2217/W1-T2440 fixed the board path only.
+
+    THE FIX: `src/lib/github-transport.ts` owns `ghJson` (moved from worker.ts, re-exported
+    there for one release), `ghJsonAsync`, the pacer, and a DEFAULT `timeout` on every spawn
+    (a named constant; the value is the worker's to set from the observed p99 in the ledger's
+    `board_gateway.fetch_bytes` rows, and must be stated in the PR). Every direct
+    `execFileSync("gh", …)` site migrates onto it; the seven gateway factories are built on it;
+    the raw `fetch` in github-app.ts is either routed through it or documented as the one
+    deliberate exception with a comment naming this task. The census test reads
+    `scripts/gh-transport-baseline.json` (today's per-file count, captured in this PR at the
+    post-migration value — which must be zero outside the transport module) and refuses any
+    file gaining a direct spawn. `ghJson` moving out of worker.ts is also the edge W1-T2895's
+    cycle cut needs; that task depends on this one.
+  acceptance:
+    - claim: "the escalation gateway reaches GitHub through the paced transport rather than its own spawn"
+      proof: "grep: ghJson( in src/lib/escalate.ts"
+    - claim: "worker.ts imports the transport instead of defining the spawn"
+      proof: "grep: github-transport\" in src/lib/worker.ts"
+    - claim: "a direct gh spawn outside the transport module is refused by a census with a recorded baseline"
+      proof: "unit test: test/gh-transport-census.test.ts"
+    - claim: "every spawn through the transport carries a timeout and a timed-out call surfaces as a named failure, not a hang"
+      proof: "unit test: test/github-transport.test.ts"

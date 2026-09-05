@@ -1,0 +1,40 @@
+- id: W1-T2912
+  title: "ESCALATION DEDUP FAILS OPEN WHEN THE OPEN-ISSUE READ THROWS — findOpenEscalation returns undefined on a failed REST listOpen exactly as it does on no match, so a REST outage while GraphQL create still works files one duplicate needs-human issue per tick for the length of the outage: a failed read must refuse to create, not report no match"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§4", "§9", "W1-T372", "W1-T414"]
+  files: [src/lib/escalate.ts, test/escalation-dedup-fails-closed-on-list-error.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-9 (OBSERVED). At f7ceb86, `src/lib/escalate.ts:1125` documents
+    that "a listOpen read failure (or a gateway that omits listOpen altogether) falls" through
+    to the no-match branch, and the lookup at `:1163-1173` returns `undefined` for three
+    different situations: no open issue matches, the gateway has no `listOpen`, and `listOpen`
+    threw. The caller at `:1524-1527` treats `undefined` as "create one". So when the REST
+    surface is rate-limited or down (W1-T1024 measured graphql and core budgets exhausting
+    independently, so this split state is real) while the GraphQL `create` mutation still
+    succeeds, every tick files a fresh `needs-human` issue for the same condition — and the
+    operator's inbox, the very channel escalation exists to keep legible, fills with
+    duplicates. W1-T372/W1-T414 built the dedup; this is the failure mode of its read side.
+
+    THE FIX: distinguish the three outcomes — `{ kind: "none" }`, `{ kind: "found", issue }`,
+    `{ kind: "unreadable", error }` — and on `unreadable` DO NOT create: log a ledger row
+    (`escalation.dedup_unreadable` with the error text) and return, so the next tick retries
+    the read; the condition being escalated is durable and will still be there. A gateway that
+    omits `listOpen` altogether is a configuration error and should be the one loud failure at
+    construction, not a silent no-match per tick. The test injects a gateway whose `listOpen`
+    throws and whose `create` records calls, runs the escalation path twice, and asserts zero
+    creates and two ledger rows; the control with a `listOpen` that returns an empty list
+    asserts exactly one create.
+  acceptance:
+    - claim: "a throwing open-issue read produces no new issue and a ledger row instead"
+      proof: "unit test: test/escalation-dedup-fails-closed-on-list-error.test.ts"
+    - claim: "the dedup lookup distinguishes an unreadable surface from a genuine no-match"
+      proof: "grep: escalation\\.dedup_unreadable in src/lib/escalate.ts"

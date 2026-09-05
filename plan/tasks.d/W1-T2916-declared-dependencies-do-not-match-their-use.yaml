@@ -1,0 +1,46 @@
+- id: W1-T2916
+  title: "DECLARED DEPENDENCIES DO NOT MATCH THEIR USE — playwright is a devDependency that rmd review needs at runtime, @swc/core has zero textual references yet the depcruise parser requires it, overrides.qs has no recorded rationale, and the SDK guards cite pinned 0.3.233 (and four other versions elsewhere) against an installed 0.3.251: declare each dependency where it is used, record why each override exists, and pin the cited SDK version to the installed one by test"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§6", "§8", "W1-T934"]
+  files: [package.json, package-lock.json, .dependency-cruiser.cjs, src/lib/settings.ts, src/lib/review.ts, test/dependency-declarations-match-use.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-55 (OBSERVED). At f7ceb86: `package.json:91` lists `playwright`
+    under `devDependencies` while `src/lib/review.ts:1856,1872` requires it at runtime for the
+    review's browser step — a production install (`npm ci --omit=dev`, the shape the container
+    image could adopt) would ship a reviewer that cannot review. `@swc/core` (`:85`) is
+    referenced by no source text (`git grep` reads zero) but `.dependency-cruiser.cjs:56-60`
+    selects the swc parser, which needs it; a dependency-pruning pass would remove it and the
+    depcruise gate would fail with no explanation. `overrides.qs` (`:93-95`) pins `qs` with no
+    comment saying which advisory or transitive conflict it answers. `src/lib/settings.ts:15,36,
+    116,120` say "verified equal to SandboxSettingsSchema at SDK 0.3.233" while `package.json`
+    installs `@anthropic-ai/claude-agent-sdk ^0.3.251`, and other files cite 0.3.209, 0.3.210,
+    0.3.217 and 0.3.220 — five versions named, none installed. W1-T934 covers dependency
+    LICENCE policy and not this.
+
+    THE FIX: (1) move `playwright` to `dependencies` (or, if the review's browser step is
+    meant to be optional, make its absence a named refusal at the seam and say so — the worker
+    decides on the evidence and states it); (2) add a `// depcruise parser` comment naming
+    `@swc/core` in `.dependency-cruiser.cjs` and a `_dependencyRationale` note in package.json
+    for both it and `overrides.qs`; (3) replace the hard-coded SDK version strings in
+    settings.ts with one constant read from the installed package's version, and make the
+    "verified equal" claim a TEST that compares the local key sets against the installed SDK's
+    `SandboxSettingsSchema` — so a bump that changes the schema reddens instead of leaving a
+    stale citation. The test file asserts: every runtime import in src/ resolves to a
+    `dependencies` entry (not `devDependencies`), every override carries a rationale key, and
+    the SDK version cited in settings.ts equals the installed one.
+  acceptance:
+    - claim: "every package src imports at runtime is declared under dependencies"
+      proof: "unit test: test/dependency-declarations-match-use.test.ts"
+    - claim: "each override records why it exists"
+      proof: "grep: _overridesRationale in package.json"
+    - claim: "the depcruise config names the parser dependency it silently requires"
+      proof: "grep: @swc/core in .dependency-cruiser.cjs"

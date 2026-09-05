@@ -1,0 +1,40 @@
+- id: W1-T2920
+  title: "loadPlan COSTS A SECOND AND 200 MB PER CALL AND taskRecordPath RE-PARSES EVERY SHARD TO FIND ONE ID — YAML parse is 92% of a 1.0-1.3 s load that runs per tick and per dispatch prompt, and the record lookup walks all 1,078 shards parsing each until the id matches (866 ms worst case) because the loaded Task does not remember which file it came from: record sourcePath at parse and make the lookup constant-time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§2", "§9", "W1-T2513"]
+  files: [src/lib/plan.ts, src/run-task.ts, test/task-record-path-is-constant-time.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-25 (OBSERVED). At f7ceb86, `loadPlan` (`src/lib/plan.ts:432-479`)
+    costs 1.0-1.3 s and roughly 200 MB of heap churn per call, 92% of it in YAML parsing of
+    1,078 shards plus the 1.0 MB monolith; it runs on every daemon/drain tick and on every
+    dispatch prompt (W1-T2513 measured the per-lane re-load). `taskRecordPath`
+    (`plan.ts:369-395`) answers "which file holds task X" by re-reading and re-parsing shards
+    in directory order until one contains the id — 866 ms worst case, once per dispatch
+    prompt — because `Task` carries no memory of its source file even though the loader knew
+    it at parse time. This is the smaller sibling of R-22/R-23 (the per-shard `git show` loop
+    and the O(tasks × ledger) projection, both in flight as their own tasks) and is
+    independent of them: it is a data-model gap, not a spawn or an index.
+
+    THE FIX: (1) `Task` gains a `sourcePath` (the shard path or the monolith path plus index)
+    set by `loadPlanFromYaml`/`loadPlan` at parse; `taskRecordPath` becomes a lookup on the
+    loaded plan and its filesystem walk is deleted (or kept only as the fallback for a plan
+    loaded from a raw string with no path). (2) One parse per file per load: where the loader
+    parses a shard twice (once for the id, once for the record) it parses once. The test
+    builds a plan directory with several hundred generated shards, loads it once, and asserts
+    `taskRecordPath` for the LAST shard performs zero file reads (a recorder on the fs seam),
+    and that every task's `sourcePath` points at the file that declares it. No wall-clock
+    assertion — the read count is the falsifier, per R-45's finding on elapsed-time tests.
+  acceptance:
+    - claim: "a loaded task remembers the file that declares it"
+      proof: "grep: sourcePath in src/lib/plan.ts"
+    - claim: "looking up a task's record path performs no file reads after the plan is loaded"
+      proof: "unit test: test/task-record-path-is-constant-time.test.ts"

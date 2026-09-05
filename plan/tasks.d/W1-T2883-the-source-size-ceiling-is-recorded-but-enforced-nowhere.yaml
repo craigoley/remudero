@@ -1,0 +1,49 @@
+- id: W1-T2883
+  title: "THE SOURCE-SIZE CEILING IS RECORDED AND ENFORCED NOWHERE — scripts/source-size-baseline.json holds ceilings HEAD already exceeds (run-task.ts 37,500 vs 37,508; review.ts 9,500 vs 9,569), --baseline mode is wired into no workflow, and the decomposition chain that follows needs a ratchet that only tightens: wire it as a blocking check, re-capture it at head, and pre-declare the src/cli layering rule the chain lands in"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§5C", "§8A", "W1-T2488"]
+  files: [.github/workflows/ci.yml, .dependency-cruiser.cjs, scripts/source-size-baseline.json, scripts/source-size-ratchet.mjs, src/lib/ci-parity.ts, test/source-size-baseline-is-enforced.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Step 0 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; findings R-29,
+    R-30). Every later step in the chain extracts a cluster out of `src/run-task.ts` and must be
+    able to ratchet the file's ceiling DOWN as it lands; that needs a ceiling something enforces.
+
+    OBSERVED at f7ceb86: `scripts/source-size-baseline.json` records `run-task.ts` 37,500 and
+    `review.ts` 9,500 while the files measure 37,508 and 9,569 — `npm run source-size-ratchet`
+    reads BLOCKED today. `scripts/source-size-ratchet.mjs --baseline` is named by no workflow;
+    `.github/workflows/ci.yml` contains the string `source-size-ratchet` zero times (MEASURED,
+    `grep -c`), and `src/lib/ci-parity.ts` (W1-T2488's registration) runs only the signal mode,
+    which reports growth and never fails. A recorded ceiling nothing enforces is dead
+    configuration that drifts: the audit's quick-win list says delete it or wire it, and the
+    chain needs it wired.
+
+    THE FIX, IN THIS ORDER: (1) re-capture the baseline at the current head so the gate is green
+    on day one (raise the two stale ceilings to the measured sizes with a `_comment` naming this
+    task and the audit, never silently); (2) run `--baseline` mode as a step of an existing PR
+    job in `ci.yml` and register it in `CI_PARITY_TABLE` so `rmd preflight --ci-parity` shells
+    the same command; (3) in `.dependency-cruiser.cjs`, extend `lib-no-spike-or-cli`'s `to:`
+    so `src/lib` may not import `src/cli/` either — the directory does not exist yet (step 10 of
+    the chain, the registry as dispatcher, creates it) and pre-declaring the boundary means the
+    first file to land there is already inside the rule. The ratchet must refuse GROWTH of any
+    baselined file and accept a decrease; a later PR that shrinks a file re-captures the ceiling
+    downward in the same diff (the coverage-ratchet convention).
+
+    FALSIFIER: the new test runs the ratchet's baseline mode over a fixture where one file
+    exceeds its recorded ceiling by one line and asserts a non-zero exit, then over a fixture
+    at exactly the ceiling and asserts zero.
+  acceptance:
+    - claim: "the source-size baseline mode runs as a PR check and a file over its ceiling reddens it"
+      proof: "grep: source-size-ratchet in .github/workflows/ci.yml"
+    - claim: "src/lib is forbidden from importing src/cli before the first file lands there"
+      proof: "grep: src/cli in .dependency-cruiser.cjs"
+    - claim: "the baseline mode refuses growth by one line and accepts a file at exactly its ceiling"
+      proof: "unit test: test/source-size-baseline-is-enforced.test.ts"

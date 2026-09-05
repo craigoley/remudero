@@ -1,0 +1,41 @@
+- id: W1-T2911
+  title: "THE SELF-SYNC RE-EXEC FORWARDS NO SIGNAL, SO SIGTERM TO THE PARENT ORPHANS THE CHILD MID-VERB — defaultReexec spawns the fresh checkout synchronously and installs no handler, so launchd or docker stopping the outer process leaves the inner one running a verb nobody supervises: forward the termination signals and exit with the child's status"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§4", "§13", "W1-T2769"]
+  files: [src/lib/self-sync.ts, test/reexec-forwards-signals.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-8 (OBSERVED). At f7ceb86, `defaultReexec`
+    (`src/lib/self-sync.ts:459-477`) re-runs the verb from the refreshed checkout with a
+    synchronous spawn and no signal handling: the parent blocks in `spawnSync`, and a SIGTERM
+    delivered to the parent (launchd unload, `docker stop`, the deploy supervisor's recycle)
+    terminates the parent while the child keeps running whatever verb it was in — a daemon
+    tick, a review, a deploy step — with no supervisor, no lock owner alive to reclaim from,
+    and a ledger that records the parent's exit and nothing about the child. CLAUDE.md's code
+    trap on this seam ("a test stubbing only log let the real defaultReexec fire, which replays
+    process.argv … killing six runners at exit 143") shows how easily this path is reached.
+    W1-T2769 documents the freshness gate that triggers the re-exec; it does not touch the
+    signal shape.
+
+    THE FIX: spawn the child asynchronously (or keep `spawnSync` but with a signal-forwarding
+    wrapper around it), install handlers for SIGTERM, SIGINT and SIGHUP in the parent that
+    forward the same signal to the child and wait for it, then exit with the child's exit code
+    (or 128 plus the signal number when the child died by signal — the shell convention the
+    ledger's `exited N` rows already read). The `RMD_SELF_SYNC_DONE` re-entrancy guard is read
+    from `process.env` as today. The test spawns a parent that re-execs a script sleeping for a
+    few seconds, sends SIGTERM to the parent, and asserts the child receives it (it writes a
+    marker on the signal) and that the parent's exit status reflects the child's; a control
+    with no signal asserts the ordinary exit-code pass-through is unchanged.
+  acceptance:
+    - claim: "a termination signal to the re-exec parent reaches the child and the parent exits with the child's status"
+      proof: "unit test: test/reexec-forwards-signals.test.ts"
+    - claim: "the re-exec seam names the signals it forwards"
+      proof: "grep: SIGTERM in src/lib/self-sync.ts"

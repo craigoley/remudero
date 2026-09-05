@@ -1,0 +1,51 @@
+- id: W1-T2895
+  title: "THIRTEEN TOLERATED IMPORT CYCLES HANG ON SIX SINGLE-SYMBOL EDGES — every ring the cycle ratchet counts passes through isInPlanScope, ghJson, readLedgerLines, playwrightCacheRoot, utcWeekWindowMs or DEFAULT_POLL_INTERVAL_MS plus one type-only edge, so six leaf moves cut every ring: make them, ratchet maxCycles to 0 and flip no-circular to error"
+  repo: remudero
+  depends_on: [W1-T2896]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§8A"]
+  files: [.dependency-cruiser.cjs, scripts/cycle-baseline.json, src/lib/review.ts, src/lib/status.ts, src/lib/retro.ts, src/lib/daemon-health.ts, src/lib/worker-home.ts, src/lib/worker.ts, src/lib/plan-scope.ts, src/lib/time-window.ts, src/lib/poll-interval.ts, test/no-circular-is-an-error.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-31 (OBSERVED for the rings; INFERRED that no ring is masked by
+    another). At f7ceb86 `npm run cycle-ratchet -- --print` reports 13 distinct cycles at a
+    ceiling of 13 (`scripts/cycle-baseline.json` `maxCycles`), and `.dependency-cruiser.cjs`'s
+    `no-circular` rule is `severity: "warn"` with a comment that says raising it to `error` "is
+    a SEPARATE, REVIEWED DECISION and belongs with the work that actually cuts the cycles". This
+    is that work. Every ring passes through one of six single-symbol edges: `isInPlanScope`
+    (`src/lib/review.ts:11`), `ghJson` (`review.ts:15`, imported from worker.ts),
+    `readLedgerLines` (`review.ts:22`, from status.ts), `playwrightCacheRoot`
+    (`src/lib/worker-home.ts:23`), `utcWeekWindowMs` (`src/lib/retro.ts:35`),
+    `DEFAULT_POLL_INTERVAL_MS` (`src/lib/daemon-health.ts:47`), plus one `import type` edge that
+    a type-only import already breaks under `importsNotUsedAsValues`.
+
+    ORDER AND OWNERSHIP: `ghJson` moves in W1-T2896 (the single GitHub transport), which is why
+    this task depends on it — do not move `ghJson` here. The other five move to leaf modules
+    that import nothing from the ring: `isInPlanScope` to `src/lib/plan-scope.ts`,
+    `utcWeekWindowMs` to `src/lib/time-window.ts`, `DEFAULT_POLL_INTERVAL_MS` to
+    `src/lib/poll-interval.ts`, `readLedgerLines` stays exported from status.ts but review.ts
+    stops importing it (route through the ledger reader the union task W1-T2898 introduces, or
+    inject it), and `playwrightCacheRoot` moves beside its only consumer. Re-run
+    `npm run cycle-ratchet -- --print` after EACH move; if a ring survives all six, the audit's
+    INFERRED half was wrong — report the surviving ring in the PR with its path and stop at the
+    lowest count reached rather than adding exclusions. When the count reads 0: set `maxCycles`
+    to 0 and `no-circular` to `severity: "error"`, and replace the rule's why-warn comment with
+    the date and this task. The new test runs depcruise over a two-file fixture with a cycle
+    using the repo's own config and asserts a non-zero exit, and imports each new leaf module
+    to assert it calls through (`utcWeekWindowMs(` and siblings) and that its own import list
+    names nothing from the former ring.
+  acceptance:
+    - claim: "the cycle ceiling is zero"
+      proof: "grep: \"maxCycles\": 0 in scripts/cycle-baseline.json"
+    - claim: "a new import cycle under the repo's own depcruise config fails rather than warns"
+      proof: "unit test: test/no-circular-is-an-error.test.ts"
+    - claim: "the plan-scope predicate lives in a leaf module that review.ts imports"
+      proof: "grep: lib/plan-scope\" in src/lib/review.ts"
+    - claim: "each new leaf module is exercised by the test and imports nothing from the ring it cut"
+      proof: "grep: utcWeekWindowMs( in test/no-circular-is-an-error.test.ts"

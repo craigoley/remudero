@@ -1,0 +1,41 @@
+- id: W1-T2908
+  title: "acceptance[] IS CAST, NOT VALIDATED, SO A MALFORMED CRITERION THROWS A BARE TypeError — plan.ts:283 reads acceptance: e.acceptance as AcceptanceCriterion[] and a shard with claim: 123, claim: yes or a null proof: makes lintTask throw a TypeError instead of a named PlanError that says which shard and which field: validate the shape at load, fail closed, name the field"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§2", "§5C", "§12"]
+  files: [src/lib/plan.ts, test/plan-acceptance-shape.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-17 (OBSERVED). At f7ceb86, `src/lib/plan.ts:283` reads
+    `acceptance: e.acceptance as AcceptanceCriterion[] | undefined` — a type assertion, not a
+    check. YAML happily yields `claim: 123` as a number, `claim: yes` as a boolean, and
+    `proof:` with nothing after it as `null`; each is a shape the type says cannot exist, so the
+    first consumer that calls `.trim()` or `.startsWith()` on it — `lintTask`
+    (`src/lib/task-linter.ts:676`) or the reviewer's `parseWhitelistedProof` — throws a bare
+    `TypeError: Cannot read properties of null`. §5C says the plan gate is FAIL-CLOSED; this
+    fails closed by accident, with a message that names no shard, no criterion and no field,
+    in whichever verb happened to touch the record first. The other plan fields (`id`,
+    `title`, `files`) are checked by name in the same loader; `acceptance` is the one that is
+    not, and it is the one the whole review engine executes.
+
+    THE FIX: `validateAcceptanceShape(raw, sourceLabel, taskId)` in plan.ts, called where the
+    cast is today, that walks the array and requires each element to be an object whose
+    `claim` and `proof` are non-empty strings (or `satisfied_by` a string in place of `proof`,
+    the Architect-only form §12 rule 16 defines), throwing a `PlanError` that names the source
+    file, the task id, the criterion index and the offending field with its actual YAML type.
+    An absent `acceptance` stays legal (other checks decide whether a task needs one). The test
+    loads a shard for each malformed shape the audit names — numeric claim, boolean claim, null
+    proof, a string where the array belongs — and asserts the thrown error is a `PlanError`
+    whose message carries the index and field; a well-formed shard still loads.
+  acceptance:
+    - claim: "the acceptance array is shape-validated at load rather than cast"
+      proof: "grep: validateAcceptanceShape( in src/lib/plan.ts"
+    - claim: "a numeric claim, a boolean claim or a null proof throws a PlanError naming the shard, index and field"
+      proof: "unit test: test/plan-acceptance-shape.test.ts"

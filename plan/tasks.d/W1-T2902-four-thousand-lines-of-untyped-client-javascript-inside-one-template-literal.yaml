@@ -1,0 +1,48 @@
+- id: W1-T2902
+  title: "FOUR THOUSAND LINES OF UNTYPED CLIENT JAVASCRIPT LIVE INSIDE ONE TEMPLATE LITERAL — renderShellHtml (serve.ts:631) is a 5,080-line function whose string carries ~4,208 lines of browser code that no linter, type-checker, coverage instrument or the no-hand-rolled-fetch gate can see, beside an apps/dashboard that cannot load as shipped: make the shell client a real TypeScript module the server inlines at build, and rule on the dashboard"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§7", "§7A", "W1-T2731", "W1-T314", "W1-T334", "W1-T336"]
+  files: [src/lib/serve.ts, src/lib/console-shell-script.ts, src/lib/console-shell-client.ts, apps/dashboard/index.html, apps/dashboard/src/main.ts, apps/dashboard/package.json, docs/control-surface.md, test/console-shell-client.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-35 (OBSERVED for size; INFERRED that apps/dashboard is
+    superseded). At f7ceb86 `export function renderShellHtml(` at `src/lib/serve.ts:631`
+    returns one template literal of roughly 4,208 lines of client-side JavaScript. W1-T2731
+    measured the coverage consequence (every line credited the instant the function runs) and
+    #4073 extracted the PURE client helpers into `src/lib/console-shell-script.ts`; the
+    remaining body — event wiring, `fetch("/v1/…")` calls, DOM rendering — is still a string.
+    Because it is a string: `tsc` does not type it, eslint does not lint it, the coverage
+    instrument cannot see a branch in it, and the `no-hand-rolled-fetch` gate, which exists to
+    force every client through `@remudero/api-client` (§7A), cannot see its fetches. Meanwhile
+    `apps/dashboard/index.html:92` loads `./main.js`, `tsc` emits under `dist/…/src/`, and
+    `apps/dashboard/src/main.ts:43` imports `@remudero/api-client/client` bare with no import
+    map or bundler — it cannot load as shipped and nothing tests that it does.
+
+    THE FIX: (1) move the client body into `src/lib/console-shell-client.ts` as real TypeScript
+    (a browser-targeted module, typed against the api-client's response types, calling the
+    api-client rather than raw fetch); (2) `renderShellHtml` inlines it — read at build time
+    through the existing `console-shell-script.ts` seam or compiled by the package's build step
+    — so the served HTML is byte-equivalent in behaviour and the server keeps zero runtime
+    dependency on a bundler; (3) the client module gets its own test file running under the
+    existing DOM harness the shell tests use, so a branch in the client is a branch the
+    instrument sees. (4) RULE on apps/dashboard in docs/control-surface.md (the doc that describes the surfaces; DECISIONS.md is the operator's log and a verify:auto task may not write it): either fix its loading (import
+    map plus a build that emits beside index.html, with a test that loads it) or delete it as
+    superseded by the shell — the worker decides on the evidence and records the ruling; a
+    dashboard that cannot load is not an option to leave.
+  acceptance:
+    - claim: "the shell client is a TypeScript module the server inlines rather than a string literal"
+      proof: "grep: console-shell-client\" in src/lib/serve.ts"
+    - claim: "the client module is exercised directly under the DOM harness"
+      proof: "unit test: test/console-shell-client.test.ts"
+    - claim: "the server inlines the client module through one named source seam"
+      proof: "grep: consoleShellClientSource( in src/lib/serve.ts"
+    - claim: "the fate of apps/dashboard is ruled in the control-surface doc"
+      proof: "grep: apps/dashboard in docs/control-surface.md"

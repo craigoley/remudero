@@ -1,0 +1,44 @@
+- id: W1-T2903
+  title: "FIXTURES ARE COPY-PASTED ACROSS HUNDREDS OF TEST FILES — 218 git init sites in 130 files, 62 distinct repo-builder function names, 70 fake-GitHub builders in 129 files, 81 files hand-writing a PATH-shim gh, 26 ledger helpers, and test/helpers/ holds seven modules imported by at most 17 files each: ship the four shared fixtures and a copy-count census that only shrinks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§5", "§8A"]
+  files: [test/helpers/git-repo.ts, test/helpers/fake-github.ts, test/helpers/gh-shim.ts, test/helpers/ledger-fixture.ts, test/fixture-copy-census.test.ts, scripts/fixture-copy-baseline.json, test/helpers/git-repo.test.ts, test/helpers/fake-github.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 R-41 (OBSERVED). At f7ceb86: `git grep -hoE 'function
+    [a-zA-Z]*(Repo|Checkout|Clone|Worktree|Bare)[A-Za-z]*\(' -- 'test/*.test.ts' | sort -u | wc
+    -l` reads 62; 218 `git init` sites sit in 130 files; 70 distinct fake-GitHub builder names
+    appear in 129 files (`function fakeGitHub(` alone in 41); 81 files write their own `gh`
+    PATH shim; 26 distinct ledger helpers exist. `test/helpers/` holds seven modules
+    (`captured-console`, `declared-routes`, `import-sweep`, `mutant-module`,
+    `mutation-sandbox`, `triage-proof-needle`, plus a licence check) and none is a fixture
+    builder. CLAUDE.md's ledger-and-evidence rule "a fixture shelling git PLUMBING fails on every
+    CI runner and passes on every dev machine" (#1971, after #1964 failed the same way) is the
+    cost of 130 hand-rolled copies: the identity-env fix had to be found twice because there was
+    no one fixture to fix.
+
+    THE FIX: four shared builders under `test/helpers/` — `gitRepo()` (identity env set, tmp
+    hygiene shim honoured, optional bare/worktree/remote shapes), `fakeGitHub()` (the recording
+    gateway shape the daemon and review tests need, with the seven domain-gateway methods),
+    `ghShim()` (a PATH-shim `gh` that answers from a scripted table and records argv), and a
+    ledger fixture (`writeLedger(rows)`, rotation forms included). Each builder has its own test.
+    Migrate ENOUGH callers to prove the builders cover the real shapes — the worker picks the
+    files with the highest copy counts and reports the count migrated. The census test scans
+    `test/*.test.ts` for the copy signatures the audit counted and compares per-signature totals
+    against `scripts/fixture-copy-baseline.json`, refusing growth; the baseline is captured
+    post-migration in this PR so it only ever moves down.
+  acceptance:
+    - claim: "a shared git repository fixture sets the identity env and honours the tmp hygiene shim"
+      proof: "unit test: test/helpers/git-repo.test.ts"
+    - claim: "a shared fake GitHub gateway records every call it receives"
+      proof: "unit test: test/helpers/fake-github.test.ts"
+    - claim: "the per-signature copy counts are recorded and cannot grow"
+      proof: "unit test: test/fixture-copy-census.test.ts"

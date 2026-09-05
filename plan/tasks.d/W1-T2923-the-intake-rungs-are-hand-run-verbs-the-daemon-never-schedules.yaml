@@ -1,0 +1,47 @@
+- id: W1-T2923
+  title: "THE INTAKE RUNGS ARE HAND-RUN VERBS THE DAEMON NEVER SCHEDULES — ops, issues, alert-fix, the inbox and the feedback docket exist as CLI verbs with no checkOpsPoll, checkIssuesIntake or checkInbox hook anywhere in run-task.ts, so a repository's issues are ingested only when a human types the command: give each rung the minIntervalMinutes/maxPerDay policy shape digestCadence already has and run them on the daemon tick"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§3", "§4", "§7B", "§5D", "W1-T1019"]
+  files: [src/lib/daemon.ts, src/run-task.ts, src/lib/issues-intake.ts, src/lib/ops.ts, plan/policy.yaml, test/intake-rungs-run-on-the-daemon-cadence.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Audit recon-2026-09-05 §6, move 2 (OBSERVED: `grep -c 'checkOpsPoll|checkIssuesIntake|
+    checkInbox' src/run-task.ts` reads 0). At f7ceb86 the lifecycle §3 describes — intake,
+    triage, recon, implement, review, merge, retro — is daemon-wired for the harness's OWN
+    plan, but the rungs that bring work IN from a repository are hand-run: `ops`
+    (`COMMANDS` entry at `src/run-task.ts:36703`), `alert-fix` (`:36709`), `issues`
+    (`:36715`) and `inbox` (`:36787`) are CLI verbs with no daemon hook, and the feedback
+    docket (§7B) is approved from the inbox by hand. `plan/policy.yaml:885` already declares
+    the cadence shape the daemon uses for digests — `digestCadence` with
+    `minIntervalMinutes` and `maxPerDay` — and `src/lib/daemon.ts:1538` reads it. A harness
+    that manages a repository's lifecycle autonomously cannot depend on a human to notice a
+    new issue; with `managed-repos.json` non-empty, nothing in the loop ever polls the managed
+    repository's issues.
+
+    THE FIX: an `intakeCadence` block in `plan/policy.yaml` with one row per rung (`ops`,
+    `issues`, `alertFix`, `inbox`, `feedbackDocket`), each `{ minIntervalMinutes, maxPerDay,
+    enabled }`; a `checkIntakeRungs(deps)` in daemon.ts called from the tick that runs each
+    enabled rung's existing library function (`issues-intake.ts`, `ops.ts`, the alert lane,
+    the inbox reader) through the same interval/cap bookkeeping `digestCadence` uses, writing
+    the rung's existing ledger step (`issues_intake.polled` and siblings) so the run is
+    visible in `rmd ledger-grep`. Rungs default to `enabled: false` in this PR — the operator
+    enables per repository — so the daemon's behaviour on the fleet is unchanged until a row
+    is flipped. THE AUDIT'S FALSIFIER, AS THE TEST: after one tick with a non-empty
+    `managed-repos.json` and the issues rung enabled, the ledger holds at least one
+    `issues_intake.polled` row with no CLI invocation, against a control tick with the rung
+    disabled that holds zero; a second tick inside `minIntervalMinutes` runs nothing.
+  acceptance:
+    - claim: "each intake rung has a cadence row in policy with the interval and daily cap the digest already uses"
+      proof: "grep: intakeCadence in plan/policy.yaml"
+    - claim: "the daemon tick runs the enabled intake rungs through one scheduler"
+      proof: "grep: checkIntakeRungs( in src/lib/daemon.ts"
+    - claim: "one tick with the issues rung enabled polls issues with no CLI invocation, and a tick inside the interval runs nothing"
+      proof: "unit test: test/intake-rungs-run-on-the-daemon-cadence.test.ts"

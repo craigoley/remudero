@@ -1,0 +1,41 @@
+- id: W1-T2888
+  title: "THE THIN REPORT VERBS PAD THE DISPATCHER BY THOUSANDS OF LINES — receiptCommand, replayCommand, ledgerGrepCommand, traceCommand, digestCommand, digestPlistCommand, doctorCommand, statusCommand and the three learnings* verbs read state and print; none owns a lane or a lock, and all sit in run-task.ts: move them to src/lib/report-commands.ts behind their existing deps seams (decomposition step 5)"
+  repo: remudero
+  depends_on: [W1-T2887]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: retro#recon-2026-09-05
+  plan_refs: ["§1", "§8A", "W1-T2883"]
+  files: [src/run-task.ts, src/lib/report-commands.ts, test/report-commands.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    Step 5 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29). OBSERVED at
+    f7ceb86: 53 `*Command` handlers are defined in `src/run-task.ts` (MEASURED,
+    `grep -cE '^(export )?async function \w+Command\('`), 75 command handlers in all totalling
+    13,602 lines. The read-and-print subset — `receiptCommand` (:16470), `replayCommand`
+    (:16528), `ledgerGrepCommand` (:17072), `digestPlistCommand` (:25613), `doctorCommand`
+    (:26570), `statusCommand` (:26692), `digestCommand` (:34901), `learningsCommand` (:36045),
+    `learningsExportCommand` (:36074), `learningsImportCommand` (:36132), `traceCommand`
+    (:36326) — takes a deps object, reads the ledger/plan/GitHub through it, prints, and returns
+    an exit code. None dispatches a worker, holds a lock, or mutates the plan. They are the
+    cheapest large cluster to move because their seams are already explicit.
+
+    THE FIX: move these verbs and the private formatters only they use into
+    `src/lib/report-commands.ts`; the `COMMANDS` registry entries in run-task.ts keep pointing at
+    them via import, and run-task.ts RE-EXPORTS the names so existing tests resolve. Where a verb
+    reaches a run-task.ts helper that is not yet in lib, move that helper if it is pure, or leave
+    the verb for a later step and say so in the PR — do not create a lib -> run-task import.
+    Lower the run-task.ts ceiling in `scripts/source-size-baseline.json` by the lines removed.
+    The new test runs each moved verb through a recorder and asserts exit code and stdout match
+    the pre-move output on a fixed state directory.
+  acceptance:
+    - claim: "run-task.ts imports the report verbs from lib instead of defining them"
+      proof: "grep: lib/report-commands\" in src/run-task.ts"
+    - claim: "each moved verb prints the same output and exit code from a fixed state directory"
+      proof: "unit test: test/report-commands.test.ts"
+    - claim: "the status verb is invoked through the lib module in the test"
+      proof: "grep: statusCommand( in test/report-commands.test.ts"
