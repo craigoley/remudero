@@ -146,6 +146,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/containment.md",
+      "title": "Forensics: src/lib/containment.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/containment.ts` used to",
+      "grepHint": "Forensics: src/lib/containment.ts"
+    },
+    {
       "path": "docs/forensics/daemon.md",
       "title": "daemon.ts forensics",
       "summary": "Measured forensics, incidents and design arguments removed from `src/lib/daemon.ts` when its comments were compacted to the plain-language standard. The code k…",
@@ -164,16 +170,34 @@
       "grepHint": "Forensics — `src/lib/inbox.ts`"
     },
     {
+      "path": "docs/forensics/learnings.md",
+      "title": "learnings.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "learnings.ts forensics"
+    },
+    {
       "path": "docs/forensics/ledger.md",
       "title": "ledger.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
       "grepHint": "ledger.ts forensics"
     },
     {
+      "path": "docs/forensics/open-prs-rest.md",
+      "title": "Forensics — `src/lib/open-prs-rest.ts`",
+      "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/open-prs-rest.ts`. Each",
+      "grepHint": "Forensics — `src/lib/open-prs-rest.ts`"
+    },
+    {
       "path": "docs/forensics/retro.md",
       "title": "retro.ts forensics",
       "summary": "The measured facts, incidents and design arguments that used to live as comment prose inside",
       "grepHint": "retro.ts forensics"
+    },
+    {
+      "path": "docs/forensics/review.md",
+      "title": "Forensics — `src/lib/review.ts`",
+      "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/review.ts` when its",
+      "grepHint": "Forensics — `src/lib/review.ts`"
     },
     {
       "path": "docs/forensics/status-board.md",
