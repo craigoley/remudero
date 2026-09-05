@@ -107,7 +107,12 @@ test("W1-T2877: an unresolvable host value is refused rather than guessed", () =
     // `${VAR-default}` not `${VAR:-default}`: the colon form would substitute this host's path for
     // an EMPTY override, silently provisioning a second machine against a volume it does not have.
     // Guessing a state root is how PAUSE and STOP end up written where nothing reads them.
-    for (const env of [{ RMD_STATE_DIR: "" }, { RMD_IMAGE: "" }, { RMD_SERVICE_USER: "" }]) {
+    const emptyEnvCases: Array<Record<string, string>> = [
+      { RMD_STATE_DIR: "" },
+      { RMD_IMAGE: "" },
+      { RMD_SERVICE_USER: "" },
+    ];
+    for (const env of emptyEnvCases) {
       const r = run([], env, root);
       assert.equal(r.status, 2, `an empty ${Object.keys(env)[0]} must be refused, not defaulted`);
       assert.match(r.stderr, /FATAL/);
