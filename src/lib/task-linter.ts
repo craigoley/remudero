@@ -246,6 +246,81 @@ export function subsystemsOf(
   return ids;
 }
 
+/**
+ * W1-T2814 — WHICH DECLARED COMPANION, IF IT WERE THIS TASK'S OWN FALSIFIER, WOULD REMOVE THE SPAN.
+ *
+ * PURELY DIAGNOSTIC. This decides what a violation's MESSAGE may offer; it is never consulted by
+ * {@link sizingViolation}'s block/warn decision, and {@link subsystemsOf}'s carve-out is unchanged.
+ * W1-T2525 narrowed that discount DELIBERATELY — a task listing someone else's test file is still
+ * spanning concerns — and widening it here (fuzzy matching, prefix matching, "any single test
+ * file") would be weakening a gate rather than explaining one.
+ *
+ * THE DEFECT THIS SERVES. `subsystemsOf`'s own-falsifier discount keys on STRING EQUALITY between
+ * two names a filer chooses independently — the shard's filename slug and the test's
+ * {@link moduleIdFromPath} — so a few words' difference defeats it and a one-source-one-test task
+ * reads as spanning two concerns. MEASURED: W1-T2809's filing tripped
+ * `[sizing] spans 2 distinct subsystems/concerns (census-discovery-is-blind-to-a-second-idiom,
+ * ci-parity) at risk:medium` over exactly that shape, and renaming the shard so its slug matched
+ * the test made it pass at `risk: medium` with no other change.
+ *
+ * AND WHY THE MESSAGE, NOT THE PREDICATE, IS THE FIX. The violation text names two exits — "raise
+ * to risk:high or decompose". REGRADING SILENCES IT IDENTICALLY, and looks like the intended
+ * remedy, so a lane that does not open `subsystemsOf` inflates the band and gets no signal it did
+ * anything wrong: no second message, no warning, no ledger row. `risk` drives sizing exemptions,
+ * dispatch ordering and effort routing, so anything reading that field downstream may be reading a
+ * FILENAME MISMATCH encoded as real span.
+ *
+ * Returns the companion path(s) — in declaration order — for which
+ * `subsystemsOf(task, …, moduleIdFromPath(path))` scores below 2, i.e. renaming the shard to that
+ * module id would legitimately engage W1-T2525's discount. Empty when the slug is unknown (there
+ * is nothing to rename toward), when no companion is declared, or when the span survives the
+ * rename anyway — a task spanning two real source stems gets no such suggestion, which is what
+ * keeps the third exit from becoming a dodge.
+ */
+export function ownFalsifierRenameCandidates(
+  task: Task,
+  ownFalsifierSlug: string | undefined,
+  dataArtifactClasses: ReadonlyArray<DataArtifactClass> = DATA_ARTIFACT_CLASSES,
+  companionClasses: ReadonlyArray<CompanionPathClass> = COMPANION_PATH_CLASSES,
+): string[] {
+  if (ownFalsifierSlug === undefined) return [];
+  const out: string[] = [];
+  for (const f of task.files ?? []) {
+    if (!isCompanionPath(f, companionClasses)) continue;
+    const id = moduleIdFromPath(f);
+    if (id === undefined || id === ownFalsifierSlug) continue; // already matching — nothing to rename
+    if (subsystemsOf(task, dataArtifactClasses, companionClasses, id).size < 2) out.push(f);
+  }
+  return out;
+}
+
+/**
+ * W1-T2814 — THE THIRD EXIT, WITH ITS CONDITION ATTACHED. Appended to the sizing block message
+ * only when {@link ownFalsifierRenameCandidates} finds the rename would actually resolve the span,
+ * so it is never a bare suggestion on a task spanning two real concerns.
+ *
+ * THE CONDITION IS NOT OPTIONAL, AND IT IS WHY THIS IS NOT ONE MORE SENTENCE. Advertising a rename
+ * INVITES GAMING IT: read as "rename your shard to match your test", any task spanning two genuine
+ * concerns could silence Rule 19 by renaming a file, and this text would have built the next silent
+ * distortion while fixing the current one. So the exit states the property that makes the discount
+ * legitimate — the named suite is the one written to prove THESE acceptance criteria — and names
+ * the misuse outright, so a reader can tell "the carve-out applies to me" apart from "rename to
+ * make this go away" without opening `subsystemsOf`.
+ */
+export function ownFalsifierRenameExit(candidates: readonly string[]): string {
+  if (candidates.length === 0) return "";
+  const named = candidates.map((c) => `\`${c}\``).join(", ");
+  const id = moduleIdFromPath(candidates[0]);
+  return (
+    ` — or, ONLY IF ${named} is THIS task's own falsifier (the suite written to prove THESE ` +
+    `acceptance criteria, not a suite that already exists for another concern), rename this shard ` +
+    `so its filename slug is \`${id}\` and the two match: the span here exists solely because those ` +
+    `two names differ, and W1-T2525's own-falsifier discount then applies. If the suite is not this ` +
+    `task's own falsifier, the span is REAL and renaming to silence it is gaming Rule 19, not ` +
+    `satisfying it — decompose instead`
+  );
+}
+
 /** ≥2 subsystems while risk<high ⇒ a sizing violation (raise to high or decompose).
  *
  *  W1-T2503: `if (task.risk === "high") return undefined` used to be the WHOLE
@@ -282,12 +357,17 @@ export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation 
   if (task.risk !== "high") {
     const subsystems = subsystemsOf(task, undefined, undefined, ownFalsifierSlug);
     if (subsystems.size < 2) return undefined;
+    // W1-T2814: the third exit rides on THIS message alone. The band-inflation harm the task
+    // measures is caused by this text's two exits, one of which (regrade to high) silences the
+    // violation identically; the `band_meaning: span` warn below has already admitted a wide span
+    // and offers no exit to take wrongly.
     return {
       check: "sizing",
       severity: "block",
       message:
         `spans ${subsystems.size} distinct subsystems/concerns (${[...subsystems].sort().join(", ")}) ` +
-        `at risk:${task.risk} — Rule 19: raise to risk:high or decompose into one task per concern`,
+        `at risk:${task.risk} — Rule 19: raise to risk:high or decompose into one task per concern` +
+        ownFalsifierRenameExit(ownFalsifierRenameCandidates(task, ownFalsifierSlug)),
     };
   }
 
