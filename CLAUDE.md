@@ -55,14 +55,13 @@ forensic detail, so the narrative does not need to live here.
   the first bullet (#1714's first draft); a blank line ANYWHERE after the bullets begin (tolerated
   only BEFORE the first one); and ANY indented line that is not a fresh `proof:`, which is why a
   claim WRAPPED onto a second line silently truncates everything below it.
-  **TWO SHAPES PARSE — measured 2026-08-13:** the house form `renderAcceptanceBlock`
-  (`src/lib/plan-pr-emitter.ts`) itself emits, `- <claim> | <proof>`; and `- claim: …` with an
-  INDENTED `  proof: …` continuation. **ONLY THOSE TWO.** Any other separator — above all an EM
-  DASH — reads as part of the CLAIM, so the bullet parses as one claim with NO proof and
-  `acceptanceAuthorTimeCheck` (`src/lib/review.ts`) refuses `empty-proofs`, reddening
-  `acceptance-author-gate`. IT IS SILENT: the body reads correctly to a human and `check-proof`
-  never sees a proof to check; #2534/#2535/#2555 each shipped one. Convert every ` — proof: ` to
-  ` | `. *(2026-08-23)*
+  **ONLY TWO SHAPES PARSE:** `- <claim> | <proof>` and `- claim: …` / indented `  proof: …`. Since
+  #4082, `renderAcceptanceBlock` emits the second whenever either side has a `|`, and
+  `acceptanceSeparator` resolves it by EVIDENCE — the first bare `|` only if executable, else each
+  ` | ` right-to-left — so a claim's own `|` no longer truncates it. An EM DASH is still no
+  separator: it reads as part of the CLAIM, so the bullet parses with NO proof, SILENTLY —
+  `acceptanceAuthorTimeCheck` refuses `empty-proofs`, reddening `acceptance-author-gate`;
+  #2534/#2535/#2555 each shipped one. Convert every ` — proof: ` to ` | `. *(2026-08-23, #4082)*
   **AFTER A PIPE, WRITE THE BARE PROOF** — `| proof:` doubles the label, the proof becomes
   `proof: grep: …`, and `check-proof` refuses it (`parse: REFUSED`, exit 2); that capped #1598 at
   0/3. (The two-line `claim:`/`proof:` form is still BULLETED — its first line is a `-`.)

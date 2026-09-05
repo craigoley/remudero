@@ -48,6 +48,7 @@
 // test can exercise the CLI process directly (spawn + exit code) as well as the measurement/
 // comparison logic in isolation, mirroring test/learnings-budget-ratchet.test.ts's convention.
 
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -87,6 +88,110 @@ export function evaluateRatchet(actualBytes, baseline) {
   return violations;
 }
 
+/**
+ * W1-T2831 — THE CAP AND §8A ARE TWO DIFFERENT RULES, AND ONLY ONE OF THEM WAS ENFORCED.
+ *
+ * Everything above this line compares ONE number — the file's total size — against `capBytes`.
+ * MASTER-PLAN §8A asks something else entirely: that each CHANGE pay for itself. A total-size
+ * ceiling is silent about per-change discipline for as long as headroom lasts, and CLAUDE.md's own
+ * preamble names what that means — a rule stated only in prose "can be violated silently and
+ * repeatedly", and the fix is to make something refuse it rather than to sharpen the wording.
+ *
+ * MEASURED over 2026-08-14..2026-09-04, 32 commits touching CLAUDE.md. Only FOUR made the file
+ * smaller. And the classification you reach for first is the wrong one:
+ *
+ *   by LINES:  5 add-with-no-deletion | 11 added <= removed | 16 partial
+ *   by BYTES:  16 net additions       | 4 net folds         | 12 net-neutral rewrites
+ *
+ * Twelve are in-place rewrites a line count scores as folds — `22ba6cba` reads 27 added / 26
+ * removed, and its first added and first removed lines are THE SAME SENTENCE REWORDED, for +14
+ * bytes. So the gate compares BYTES on both sides or it enforces a different rule from the one it
+ * claims.
+ *
+ * AND THE OBVIOUS PREDICATE IS WRONG. A gate refusing "an addition that carries no deletion" would
+ * have PASSED ALL FOUR commits that consumed the live headroom — every one of them already deletes
+ * something. That predicate is a proxy satisfied by exactly the failing cases: it would have
+ * shipped a green gate and an unchanged trend. The predicate is NET BYTES.
+ */
+
+/** Resolve the ref to compare against, and say WHERE it came from — a gate that reports a delta
+ *  without naming its two operands is the stale-operand shape (CLAUDE.md hazard (h)).
+ *
+ *  RUN-TIME RESOLUTION IS PREFERRED AND THE ENV VALUE IS THE DOCUMENTED FALLBACK. `BASE_SHA` is a
+ *  GitHub EVENT-PAYLOAD SNAPSHOT: a re-run replays the same sha, so a poisoned base does not clear
+ *  by re-running. `git merge-base` re-derives it against the tracking branch on every invocation.
+ *  Returns `null` when neither path yields a ref — a run on `main` itself, a shallow clone, a
+ *  detached head with no tracking branch. */
+export function resolveBaseRef(deps = {}) {
+  const git = deps.git ?? defaultGit;
+  const env = deps.env ?? process.env;
+  const remote = deps.remoteRef ?? "origin/main";
+  try {
+    const ref = git(["merge-base", "HEAD", remote]).trim();
+    if (ref) return { ref, source: `git merge-base HEAD ${remote}` };
+  } catch {
+    // No tracking branch, a shallow clone, or not a repo at all: fall through to the env value.
+    // Kept as a fall-through rather than a refusal — an unresolvable base is a SKIP, not a block.
+  }
+  const fromEnv = (env.BASE_SHA ?? "").trim();
+  if (fromEnv) return { ref: fromEnv, source: "BASE_SHA (event-payload snapshot; a re-run replays it)" };
+  return null;
+}
+
+/** The byte size of `file` AT `ref`, or `null` when the ref does not carry that path — a file the
+ *  base did not have is not a comparand, and inventing 0 for it would report the whole file as
+ *  growth on the commit that introduces it. */
+export function measureBytesAtRef(file, ref, deps = {}) {
+  const git = deps.git ?? defaultGit;
+  try {
+    return Buffer.byteLength(git(["show", `${ref}:${file}`]), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** The real git edge. Separate from the pure logic above so a falsifier can drive every arm
+ *  without a repo, AND so this default is itself exercised by a test that really shells out —
+ *  a seam every test fakes is a seam nothing covers. */
+export function defaultGit(args) {
+  return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+}
+
+/**
+ * §8A AS A PREDICATE: a CLAUDE.md change must not be net-positive in bytes.
+ *
+ * THREE STATES ARE NOT VIOLATIONS, and each is reachable:
+ *   - `baseBytes === null` — no resolvable base, or the base did not carry the file. The arm is
+ *     SKIPPED with a stated reason. A check that cannot determine its own comparand must not claim
+ *     to have enforced one, which is the posture `capBytes: null` already establishes above.
+ *   - delta === 0 — the in-place reword, the twelve-commit shape the measurement found.
+ *   - delta < 0 — a fold. A gate that refuses a sharpening is worse than no gate, because the
+ *     sharpening is the behaviour §8A is trying to buy.
+ *
+ * THERE IS NO OVERRIDE, AND THAT IS A DESIGN CONSTRAINT RATHER THAN AN OMISSION. No `--allow-growth`,
+ * no env bypass, no commit-message trailer, no per-PR exemption list: an escape hatch would be
+ * reached for on the first inconvenient PR and the rule returns to prose with extra steps. If a
+ * rule genuinely earns its bytes, the author folds first or files a compression task first — that
+ * IS the discipline §8A names.
+ */
+export function evaluateNetBytes(headBytes, baseBytes, operands = {}) {
+  if (baseBytes === null || baseBytes === undefined) return [];
+  const delta = headBytes - baseBytes;
+  if (delta <= 0) return [];
+  const baseOperand =
+    operands.baseRef === undefined
+      ? `base ${baseBytes}`
+      : `base ${baseBytes} at ${operands.baseRef}${operands.baseSource ? ` via ${operands.baseSource}` : ""}`;
+  const headOperand =
+    operands.headLabel === undefined ? `head ${headBytes}` : `head ${headBytes} at ${operands.headLabel}`;
+  return [
+    `CLAUDE.md grew by ${delta} bytes (${baseOperand} -> ${headOperand}) — MASTER-PLAN §8A: ` +
+      `compression is a deliverable, not just accretion. Fold, sharpen or migrate something out in ` +
+      `the SAME change so the diff is byte-neutral or smaller. Content that names a concrete repo ` +
+      `path belongs in learnings/*.yaml, whose files: glob delivers it to the task that governs it.`,
+  ];
+}
+
 function main(argv) {
   const { values } = parseArgs({
     args: argv,
@@ -107,9 +212,9 @@ function main(argv) {
 
   const baseline = JSON.parse(readFileSync(values.baseline, "utf8"));
 
-  let violations;
+  let capViolations;
   try {
-    violations = evaluateRatchet(actualBytes, baseline);
+    capViolations = evaluateRatchet(actualBytes, baseline);
   } catch (err) {
     // Refuse before printing anything about a cap -- a run that cannot determine its threshold
     // must never print "cap <n> bytes" as if it were enforcing one.
@@ -122,13 +227,50 @@ function main(argv) {
     `claude-md-budget-ratchet: ${values.file} is ${actualBytes} bytes (cap ${baseline.capBytes ?? "unset"} bytes)`,
   );
 
+  let netViolations = [];
+  // W1-T2831 — THE NET-BYTE ARM, on the SAME invocation. Not a parallel checker: a second script
+  // with its own notion of the same budget is a second thing to keep in step, and this repo has
+  // already measured what happens when one predicate exists in two copies. A run that trips both
+  // the cap and §8A reports both, in one list, and CI needs no new job.
+  const base = resolveBaseRef();
+  if (base === null) {
+    console.log("claude-md-budget-ratchet: base unresolved, net-byte check skipped (no merge-base and no BASE_SHA)");
+  } else {
+    const baseBytes = measureBytesAtRef(values.file, base.ref, {});
+    if (baseBytes === null) {
+      console.log(
+        `claude-md-budget-ratchet: base ${base.ref} does not carry ${values.file}, net-byte check skipped ` +
+          `(via ${base.source})`,
+      );
+    } else {
+      // BOTH OPERANDS AND THE BASE'S PROVENANCE, on every run and not only on a refusal — a delta
+      // reported without naming what it was taken against is the stale-operand shape.
+      console.log(
+        `claude-md-budget-ratchet: net bytes ${actualBytes - baseBytes} (base ${baseBytes} at ${base.ref} ` +
+          `via ${base.source} -> head ${actualBytes})`,
+      );
+      netViolations = evaluateNetBytes(actualBytes, baseBytes, {
+        baseRef: base.ref,
+        baseSource: base.source,
+        headLabel: "working tree",
+      });
+    }
+  }
+
+  const violations = [...capViolations, ...netViolations];
   if (violations.length > 0) {
-    console.error(`claude-md-budget-ratchet: BLOCKED -- ${values.file} is over the recorded size budget:`);
+    console.error(`claude-md-budget-ratchet: BLOCKED -- ${values.file} fails its size contract:`);
     for (const v of violations) console.error(`  - ${v}`);
-    console.error(
-      "  Fold, sharpen, or delete existing rules to bring it back under the cap, or -- if the growth is " +
-        "deliberate and reviewed -- raise scripts/claude-md-budget-baseline.json's capBytes.",
-    );
+    // THE CAP'S REMEDY IS PRINTED ONLY FOR A CAP VIOLATION. It names raising capBytes, which for a
+    // NET-BYTE refusal would read as the override §8A's whole design forbids — "raise the ceiling"
+    // is not an answer to "this change did not pay for itself". The net-byte violation carries its
+    // own remedy in its own text, and that remedy is fold, sharpen or migrate.
+    if (capViolations.length > 0) {
+      console.error(
+        "  Fold, sharpen, or delete existing rules to bring it back under the cap, or -- if the growth is " +
+          "deliberate and reviewed -- raise scripts/claude-md-budget-baseline.json's capBytes.",
+      );
+    }
     process.exitCode = 1;
     return;
   }
