@@ -233,6 +233,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "workerAbandon",
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
+    "keychainProvisionLockWaitMs",
     "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "githubEventWake",
     "armCalibrationBands",
   ];
@@ -562,6 +563,11 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // constant bounded this persistent set, so its capacity is intentionally net-new policy data.
     "githubEventWake.dedupCapacity",
     "githubEventWake.checkSettleMs",
+    // R-3: the keychain provisioning lock's wait deadline joins them too. NET-NEW because the wait
+    // it bounds had no bound at ALL to lift — no source literal, no constant, nothing:
+    // `acquireKeychainProvisionLock` polled forever. See plan/policy.yaml's own row for what the
+    // value is anchored on, given that an unbounded wait recorded no population to derive it from.
+    "keychainProvisionLockWaitMs",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);
