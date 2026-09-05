@@ -17,6 +17,9 @@ import {
   type MemInfo,
   classifyWorktreeBase,
   type WorktreeBaseRow,
+  // R-49 — the node-version-pin arm's one filesystem read, injected the same way readGitLocks and
+  // readCheckoutDepth already are below.
+  readNvmrcVersion,
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -26593,6 +26596,8 @@ export interface DoctorDeps {
   readLockFiles?: (dir: string) => { locks: string[]; unreadableReason?: string };
   /** W1-T2332 — the `checkout-depth` arm's only measurement. Defaults to {@link readCheckoutDepth}. */
   readCheckoutDepth?: (cwd: string) => { shallow: boolean; commitCount: number } | undefined;
+  /** R-49 — the `node-version-pin` arm's only measurement. Defaults to {@link readNvmrcVersion}. */
+  readNvmrcVersion?: (root: string) => string | undefined;
 }
 
 /**
@@ -26667,6 +26672,10 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     workerCount: 0,
     ...(((v) => (v === undefined ? {} : { checkoutDepth: v }))((deps.readCheckoutDepth ?? readCheckoutDepth)(repoRoot))),
     worktreeBases,
+    // R-49: THIS process's own running interpreter, measured here — the caller — exactly like
+    // every other injected reading above, never read inside buildDoctorReport itself.
+    runningNodeVersion: process.versions.node,
+    ...(((v) => (v === undefined ? {} : { nvmrcVersion: v }))((deps.readNvmrcVersion ?? readNvmrcVersion)(repoRoot))),
   });
 
   if (rest.includes("--json")) out(JSON.stringify({ worst: report.worst, checks: report.checks }, null, 2));

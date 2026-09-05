@@ -17,4 +17,23 @@ while [ -h "$SOURCE" ]; do
   [[ "$SOURCE" != /* ]] && SOURCE="$LINK_DIR/$SOURCE"
 done
 DIR="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+
+# R-49 (docs/audits/recon-2026-09-05.md): `.nvmrc`, package.json#engines and deploy/Dockerfile all
+# pin an exact Node version, but `npm ci` only WARNS (EBADENGINE) on a mismatch and lets a stale
+# install through — the only thing that actually refuses today is a random test failure
+# (scripts/coverage-merge-ratchet.mjs's assertPinnedNodeVersion) far from where an operator could
+# act on it. The operator ruled against `engine-strict` in .npmrc (it would refuse `npm ci` on
+# every off-pin machine, agent containers included), so this warns and CONTINUES — never refuses.
+# bash-3.2-safe: no associative arrays, no `[[ =~ ]]`, no arrays at all.
+if [ -f "$DIR/.nvmrc" ]; then
+  RMD_EXPECTED_NODE="$(cat "$DIR/.nvmrc")"
+  RMD_EXPECTED_NODE="${RMD_EXPECTED_NODE#v}"
+  RMD_ACTUAL_NODE="$(node --version 2>/dev/null || true)"
+  RMD_ACTUAL_NODE="${RMD_ACTUAL_NODE#v}"
+  if [ -n "$RMD_ACTUAL_NODE" ] && [ "$RMD_ACTUAL_NODE" != "$RMD_EXPECTED_NODE" ]; then
+    echo "rmd: node $RMD_ACTUAL_NODE differs from the pinned $RMD_EXPECTED_NODE in .nvmrc; see rmd doctor" >&2
+  fi
+  unset RMD_EXPECTED_NODE RMD_ACTUAL_NODE
+fi
+
 exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"

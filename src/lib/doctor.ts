@@ -656,6 +656,56 @@ export function judgePauseHonoured(pauseAgeMs: number | undefined, lastDispatchA
   };
 }
 
+/**
+ * R-49 (docs/audits/recon-2026-09-05.md) — NODE VERSION PIN. `.nvmrc`, `package.json#engines`
+ * (`>=22.22.3`) and `deploy/Dockerfile` all pin an exact Node version, but `npm ci` only WARNS
+ * (EBADENGINE) on a mismatch and lets a stale install through — MEASURED at f7ceb86: this
+ * container runs 22.22.2 against a 22.22.3 pin and `npm ci` succeeds. The only thing that actually
+ * REFUSES on the drift is `assertPinnedNodeVersion` (`scripts/coverage-merge-ratchet.mjs`)
+ * throwing inside `test/merge-lcov.test.ts` — a random test failure, nowhere near where an
+ * operator could act on it. The operator explicitly ruled against `engine-strict` in `.npmrc`: it
+ * would refuse `npm ci` on every machine not on the exact patch version, agent containers
+ * included. This arm is the surface that reports the drift where an operator actually looks.
+ *
+ * WARN, NEVER FAIL — a running node one patch off the declared pin is not the "daemon is down"
+ * severity {@link judgeLedgerFreshness}/{@link judgeCheckoutDepth} reserve FAIL for; it is a drift
+ * worth a look, the same tier {@link judgeMemory}'s WARN band already uses. An unreadable `.nvmrc`
+ * is WARN "unreadable", NEVER OK — the same fail-safe direction {@link judgeCheckoutDepth} already
+ * applies to its own unreadable case: a read that FAILED must never render as a read that SAID
+ * "matches" (W1-T472 design (v), measured eight times in this file's own history).
+ *
+ * PURE — takes both versions already measured, exactly like every sibling judge* function above;
+ * the reader below does the one filesystem touch.
+ */
+export function judgeNodeVersionPin(runningVersion: string, pinnedVersion: string | undefined): Check {
+  const name = "node-version-pin";
+  const threshold = "node version matches .nvmrc";
+  const bare = (v: string) => v.replace(/^v/, "").trim();
+  const running = bare(runningVersion);
+  if (pinnedVersion === undefined) {
+    return {
+      name,
+      verdict: "WARN",
+      measured: `running ${running}, .nvmrc unreadable`,
+      threshold,
+      detail: "the .nvmrc read failed — do not read this as a match",
+    };
+  }
+  const pinned = bare(pinnedVersion);
+  if (running !== pinned) {
+    return {
+      name,
+      verdict: "WARN",
+      measured: `running ${running}, .nvmrc pins ${pinned}`,
+      threshold,
+      detail:
+        "this host is running a node version .nvmrc does not declare — npm ci only warns (EBADENGINE) on this, " +
+        "it never refuses; see .nvmrc",
+    };
+  }
+  return { name, verdict: "OK", measured: `running ${running}, matches .nvmrc`, threshold };
+}
+
 // ── readers (I/O only, no judging) ────────────────────────────────────────────────────────────
 
 export interface MemInfo {
@@ -682,6 +732,22 @@ export function readMemInfo(readText: (p: string) => string = (p) => readFileSyn
     return parseMemInfo(readText("/proc/meminfo"));
   } catch {
     return {};
+  }
+}
+
+/**
+ * `.nvmrc`'s declared pin, trimmed — `undefined` on any read failure (missing file, unreadable),
+ * exactly {@link readMemInfo}'s own catch-to-undefined discipline. `readText` is injectable so
+ * {@link judgeNodeVersionPin} is testable with no real filesystem, the same shape as every other
+ * reader in this file.
+ */
+export function readNvmrcVersion(pkgRoot: string, readText: (p: string) => string = (p) => readFileSync(p, "utf8")): string | undefined {
+  try {
+    return readText(join(pkgRoot, ".nvmrc")).trim();
+  } catch {
+    // An absent or unreadable .nvmrc is not a mismatch -- judgeNodeVersionPin's own `undefined`
+    // branch reports this as "unreadable", never as a healthy match (W1-T472 design (v)).
+    return undefined;
   }
 }
 
@@ -839,6 +905,13 @@ export interface DoctorInputs {
    *  module never touches the filesystem or git, per the file header). Defaults to `[]`, which
    *  {@link judgeWorktreeBases} reads as "0 live worktree(s)" — never a finding. */
   worktreeBases?: readonly WorktreeBaseRow[];
+  /** R-49 — the running interpreter's own version (`process.versions.node`), measured by the
+   *  caller exactly like `nowMs` above: this module reads no ambient global state itself. */
+  runningNodeVersion: string;
+  /** R-49 — `.nvmrc`'s declared pin, already read by the caller via {@link readNvmrcVersion}.
+   *  `undefined` means the read failed — {@link judgeNodeVersionPin} reports that as unreadable,
+   *  never as a healthy match. */
+  nvmrcVersion?: string;
 }
 
 /**
@@ -864,6 +937,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeWorktreeBases(inputs.worktreeBases ?? []),
     judgeDiskHeadroom(inputs.diskFreeBytes),
     judgeMemory(inputs.mem.availableBytes, inputs.mem.totalBytes, inputs.mem.swapTotalBytes),
+    judgeNodeVersionPin(inputs.runningNodeVersion, inputs.nvmrcVersion),
   ];
   const worst = worstVerdict(checks);
   return { checks, worst, exitCode: exitCodeFor(worst), text: renderDoctor(checks) };
