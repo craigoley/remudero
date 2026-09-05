@@ -649,6 +649,7 @@ import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
   materialiseBaseProofBlobs,
   REVIEW_CONTEXT,
+  REVIEW_ENGINE_REVISION,
   applyVerdictStability,
   bodyContradictsDiff,
   recognizeChangesetClaims,
@@ -5258,6 +5259,7 @@ async function runReview(args: {
       ledgerPath: args.ledgerPath,
       prUrl,
       reviewInputDigest: inputDigest,
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycle(prUrl),
     });
   } catch (e) {
@@ -5542,6 +5544,7 @@ async function runReview(args: {
     prUrl,
     reviewInputDigest: inputDigest,
     reviewDecisionDigest: decisionDigest,
+    reviewEngineRevision: REVIEW_ENGINE_REVISION,
     evaluatorProvenance,
     fetchLifecycle: () => fetchPrLifecycle(prUrl),
   });
@@ -5598,6 +5601,7 @@ async function runReview(args: {
     head_sha: headSha,
     pr_url: prUrl,
     ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}),
+    review_engine_revision: REVIEW_ENGINE_REVISION,
     review_decision_digest: decisionDigest,
     decision_verdict: verdict,
     evaluator_provenance: evaluatorProvenance,
@@ -15264,6 +15268,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       ledgerPath,
       prUrl: view.url,
       reviewInputDigest: inputDigest,
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycle(view.url),
     });
   } catch (e) {
@@ -15496,6 +15501,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       runId,
       prUrl: view.url,
       reviewInputDigest: inputDigest,
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycle(view.url),
     });
     if (!posted.posted) {
@@ -15513,6 +15519,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       head_sha: view.headRefOid,
       pr_url: view.url,
       review_input_digest: inputDigest,
+      review_engine_revision: REVIEW_ENGINE_REVISION,
       dep_review: true,
       proof_exec: [], // W1-T228: never executes a proof — explicit so lastPostedReviewStatusFromLedger reads "no_evidence"
     });
@@ -15571,6 +15578,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     runId,
     prUrl: view.url,
     reviewInputDigest: inputDigest,
+    reviewEngineRevision: REVIEW_ENGINE_REVISION,
     fetchLifecycle: () => fetchPrLifecycle(view.url),
   });
   if (postedFailure.posted) {
@@ -15583,6 +15591,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       head_sha: view.headRefOid,
       pr_url: view.url,
       review_input_digest: inputDigest,
+      review_engine_revision: REVIEW_ENGINE_REVISION,
       dep_review: true,
       proof_exec: [],
     });

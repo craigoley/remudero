@@ -36,7 +36,22 @@
 
     (ii) Each enumerated ingestion point wraps at the point of prompt assembly: the issue body in
     src/run-task.ts's issues capture, the feedback text in src/lib/triage.ts's grounding, review
-    comments and CI text in src/lib/sweep.ts's fix prompt, webhook text where W1-T2568 renders it.
+    comments and CI text in `renderFixPrompt`, webhook text where W1-T2568 renders it.
+
+    (ii-a) CORRECTION, MEASURED AT HEAD. The filing placed the fix rung's prompt in
+    src/lib/sweep.ts. IT IS NOT THERE. `renderFixPrompt` is DEFINED in src/run-task.ts, and
+    sweep.ts's only mention of it is one doc comment; sweep.ts consumes `CiFailure.logTail` for
+    CLASSIFICATION alone (`classifyRedCause`, `failingTestFilesFromCiFailures`) and assembles no
+    prompt. Counted with a positive control on the same corpus, same tool, same flags:
+    `grep -acE 'renderFixPrompt|prompt|spawnWorker|Prompt'` reads 6 in src/lib/sweep.ts against
+    234 in src/run-task.ts. So criterion 4's proof is repointed to src/run-task.ts and sweep.ts
+    leaves `files:` — a criterion naming a file the work cannot honestly touch is unsatisfiable
+    except by decorating that file, which is the test theatre the proof dialect exists to refuse.
+
+    (ii-b) COMPOSE WITH `neutralizeFenceMarkers`, DO NOT REPLACE IT. src/lib/fix-fence.ts already
+    neutralises fence markers at the render sites inside `renderFixPrompt` (CI log tails, check
+    names, merge-conflict logs, paths). That defends the FENCE; the envelope marks the TRUST
+    BOUNDARY. Both apply: neutralise, then wrap.
 
     (iii) The prompt manifest (W1-T2297) gains `envelopes: n`; a prompt that carried a known
     external part with `envelopes: 0` is reported by the manifest's own reader.
@@ -56,16 +71,17 @@
     - claim: "the prompt manifest records the envelope count and its reader names a prompt that carried an external part unwrapped"
       proof: "unit test: test/untrusted-envelope.test.ts"
     - claim: "the fix rung's prompt assembly calls the wrapper"
-      proof: "grep: envelope( in src/lib/sweep.ts"
+      proof: "grep: envelope( in src/run-task.ts"
   risk: high
   band_meaning: span
   origin: "oper#external-scan-2026-09-02"
   plan_refs: ["W1-T2297", "W1-T2568", "W1-T1279", "W1-T2699", "§4A", "§8"]
-  files: [src/lib/untrusted-envelope.ts, src/run-task.ts, src/lib/triage.ts, src/lib/sweep.ts, test/untrusted-envelope.test.ts]
+  files: [src/lib/untrusted-envelope.ts, src/run-task.ts, src/lib/triage.ts, test/untrusted-envelope.test.ts]
   status: queued
   attempts: 0
   note: |
-    risk:high, band_meaning:span — four ingestion points across three modules under Rule 19;
+    risk:high, band_meaning:span — four ingestion points across two modules under Rule 19
+    (src/lib/sweep.ts dropped per design (ii-a): it assembles no prompt);
     runtime blast radius is prompt text only.
 
     SOURCES: OpenClaw docs/security/THREAT-MODEL-ATLAS.md ("Prompt Injection (Direct &

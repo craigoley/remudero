@@ -137,6 +137,33 @@ if [ -d "${CONTAINER_CONFIG_DIR}" ]; then
 else
   echo "recycle-container: NOTE — no container config directory at ${CONTAINER_CONFIG_DIR}; recycling without a Remudero config mount" >&2
 fi
+
+# Resolve the reusable provider-runtime verifier before any lifecycle action. The PWD fallback is
+# load-bearing for a copied script (the mutation fixtures exercise that supported test shape); an
+# ordinary checkout always resolves the sibling first.
+RUNTIME_CONTRACT_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/container-runtime-contract.sh" || true
+if [ ! -x "${RUNTIME_CONTRACT_FILE:-}" ] && [ -x "${PWD}/deploy/container-runtime-contract.sh" ]; then
+  RUNTIME_CONTRACT_FILE="${PWD}/deploy/container-runtime-contract.sh"
+fi
+if [ ! -x "${RUNTIME_CONTRACT_FILE:-}" ]; then
+  echo "recycle-container: REFUSING — provider-runtime verifier is missing or not executable." >&2
+  echo "  Expected deploy/container-runtime-contract.sh beside this script or under the current checkout." >&2
+  exit 1
+fi
+
+# The expectations are derived from the SAME pre-launch decisions that populate docker run. State
+# and Claude are unconditional. Codex and provider config are included only when their host source
+# existed and the corresponding mount argument was selected above.
+RUNTIME_CONTRACT_EXPECT_ARGS=(
+  --expect "${STATE_DIR}" "${STATE_MOUNT_DEST}" rw
+  --expect "${CRED_DIR}" "${CRED_MOUNT_DEST}" rw
+)
+if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
+  RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CODEX_DIR}" "${CODEX_MOUNT_DEST}" rw)
+fi
+if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
+  RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CONTAINER_CONFIG_DIR}" "${CONTAINER_CONFIG_MOUNT_DEST}" rw)
+fi
 DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
 
 DRAIN_LOCK="${STATE_DIR}/state/drain.lock"
@@ -979,6 +1006,20 @@ if [ -z "${STARTED_IMAGE_ID}" ] || [ "${STARTED_IMAGE_ID}" != "${PULLED_IMAGE_ID
   echo "  which does NOT match the digest this run pulled (${PULLED_IMAGE_ID})." >&2
   echo "  A container came up, but not on the image this run obtained — investigate before trusting it." >&2
   exit 1
+fi
+
+# ── 7.5. PROVE THE PROVIDER RUNTIME MOUNTS SELECTED BEFORE LAUNCH ──
+# Image identity is not runtime eligibility. Compare the running container with the exact state,
+# Claude and optional provider mounts selected above. The verifier prints no host source and reads
+# no credential or config content. A failure happens AFTER docker run by construction, so keep the
+# replacement alive for diagnosis; stopping or retrying here would destroy the evidence.
+if RUNTIME_CONTRACT_VERDICT="$("${RUNTIME_CONTRACT_FILE}" --container "${CONTAINER_NAME}" "${RUNTIME_CONTRACT_EXPECT_ARGS[@]}")"; then
+  echo "recycle-container: runtime contract healthy — ${RUNTIME_CONTRACT_VERDICT}"
+else
+  RUNTIME_CONTRACT_STATUS=$?
+  echo "recycle-container: FAILED RUNTIME CONTRACT — ${RUNTIME_CONTRACT_VERDICT}" >&2
+  echo "  The new container remains running for investigation; no stop, remove, retry or rollback was attempted." >&2
+  exit "${RUNTIME_CONTRACT_STATUS}"
 fi
 
 echo "recycle-container: OK — ${CONTAINER_NAME} recycled onto ${PULLED_IMAGE_ID}"

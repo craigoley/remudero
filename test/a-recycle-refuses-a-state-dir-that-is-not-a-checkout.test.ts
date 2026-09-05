@@ -57,6 +57,12 @@ function writeStubs(dir: string): void {
     "      exit 1", // no container by this name ever exists in this suite
     "    fi",
     '    case "$fmt" in',
+    "      *Mounts*)",
+    '        printf "%s\\t/home/node/Remudero\\ttrue\\n" "${RMD_STATE_DIR:-$HOME/rmd-state2}"',
+    '        printf "%s\\t/home/node/.claude\\ttrue\\n" "${RMD_CLAUDE_DIR:-$HOME/.claude}"',
+    '        codex="${RMD_CODEX_DIR:-$HOME/.codex}"; [ ! -d "$codex" ] || printf "%s\\t/home/node/.codex\\ttrue\\n" "$codex"',
+    '        config="${RMD_CONTAINER_CONFIG_DIR:-$HOME/.config/remudero-container}"; [ ! -d "$config" ] || printf "%s\\t/home/node/.config/remudero\\ttrue\\n" "$config"',
+    "        exit 0 ;;",
     "      *.Image*) echo \"sha256:PULLEDID\"; exit 0 ;;",
     "    esac",
     "    exit 0 ;;",

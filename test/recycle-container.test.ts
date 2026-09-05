@@ -139,6 +139,12 @@ function writeStubs(dir: string): void {
     '      case "$STUB_MODE" in no-container) exit 1 ;; *) exit 0 ;; esac',
     "    fi",
     '    case "$fmt" in',
+    "      *Mounts*)",
+    "        printf '%s\\t%s\\ttrue\\n' \"$RMD_STATE_DIR\" /home/node/Remudero",
+    "        printf '%s\\t%s\\ttrue\\n' \"$RMD_CLAUDE_DIR\" /home/node/.claude",
+    '        if [ -d "${RMD_CODEX_DIR:-}" ]; then printf \'%s\\t%s\\ttrue\\n\' "$RMD_CODEX_DIR" /home/node/.codex; fi',
+    '        if [ -d "${RMD_CONTAINER_CONFIG_DIR:-}" ]; then printf \'%s\\t%s\\ttrue\\n\' "$RMD_CONTAINER_CONFIG_DIR" /home/node/.config/remudero; fi',
+    "        exit 0 ;;",
     "      *Config.Image*)",
     '        echo "test-registry/remudero:old"',
     "        exit 0 ;;",
@@ -202,6 +208,10 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
   const dir = mkdtempSync(join(tmpdir(), "recycle-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "recycle-rec-"));
   const state = opts.stateDir ?? mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const providerRuntime = join(rec, "provider-runtime");
+  mkdirSync(providerRuntime);
+  const claudeDir = join(providerRuntime, "claude");
+  mkdirSync(claudeDir);
   writeStubs(dir);
   const r = spawnSync("bash", [opts.scriptPath ?? SCRIPT], {
     encoding: "utf8",
@@ -212,6 +222,9 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
       STUB_REC: rec,
       STUB_MODE: mode,
       RMD_STATE_DIR: state,
+      RMD_CLAUDE_DIR: claudeDir,
+      RMD_CODEX_DIR: join(providerRuntime, "absent-codex"),
+      RMD_CONTAINER_CONFIG_DIR: join(providerRuntime, "absent-config"),
       RMD_RECYCLE_WAIT_S: "1",
       RMD_RECYCLE_POLL_S: "1",
       // W1-T2555: this suite drives docker orchestration (stop/rm/run, locks, drift), never the
