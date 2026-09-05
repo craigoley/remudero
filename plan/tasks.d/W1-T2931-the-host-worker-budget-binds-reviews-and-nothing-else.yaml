@@ -52,6 +52,28 @@
     sized against a population never observed; here the bound is sized correctly and simply is not
     consulted by the party that fills the host. Prefer counting the sweep's own in-flight workers
     against `hostWorkerBudget` before starting another, over inventing a second number.
+    OPERATOR RULING 2026-09-05, AND IT IS THE PRINCIPLE THIS TASK SHOULD ENCODE RATHER THAN A BARE
+    CEILING: "when there is this much open, the process should be smart enough to decrease the build
+    throughput and focus cpu on clearing the queue." Today the priority is exactly INVERTED. Build
+    work (the sweep's per-PR fan-out, the drain's dispatch) takes host it never counts, and the
+    review lane — the only claimant that reads `hostWorkerBudget` — is the one that concedes, so a
+    DEEPER board makes the queue drain SLOWER at the exact moment it needs to drain faster. Measured
+    above: queue 3 -> 6 while width fell 2 -> 1.
+
+    SO THE FIX IS A PRIORITY, NOT ONLY A CAP. A shared ceiling alone would still let whichever lane
+    asks first win the host. What the ruling asks for is that review/merge work is served BEFORE new
+    build work when the board is deep, so build throughput yields as depth rises. Depth is already
+    measurable without inventing a signal: `queue_depth` is on the `review.capacity` row, and
+    board-review (W1-T2304) already derives depth thresholds it declines to take from open count
+    alone — reuse its reading rather than adding a second definition. Note the direction carefully:
+    build lanes give way to the queue, never the reverse, because an unreviewed green PR is finished
+    work that only needs draining, while a new dispatch is work not yet started.
+
+    DO NOT IMPLEMENT THIS AS A GLOBAL PAUSE. `rmd pause` already exists for the emergency and stops
+    everything including the reviews that would clear the board; an operator reached for it on
+    2026-09-05 at load 34 precisely because no proportional lever existed. The deliverable is the
+    proportional one.
+
   acceptance:
     - claim: "the sweep counts its in-flight workers against the host budget before starting another"
       proof: "unit test: W1-T2931: the sweep stops fanning out at the host budget"
