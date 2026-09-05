@@ -39,10 +39,84 @@
 // via that one env var; when it is unset, behavior is byte-for-byte unchanged from before this
 // task (the retry always fires on a non-zero first attempt, same as today).
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+
+/**
+ * W1-T2715 — A TEST THAT WRITES INTO THE TRACKED TREE IS OBSERVED BY EVERY OTHER WORKER, and the
+ * check for it belongs HERE, around the whole suite, rather than inside each test-file process.
+ *
+ * MEASURED, THREE INSTANCES IN ONE SESSION (2026-09-02), each found by accident rather than by a
+ * gate: the shipped-tree check ran the REAL source-size ratchet against the REAL baseline and that
+ * script RECORDS a newly-seen source file, so it wrote twice and left the tree dirty (worse than
+ * debris — a test that writes a gate's own baseline MOVES the gate); a probe shard under
+ * test/fixtures/ removed only in a `finally` survived a killed run and made the NEXT run fail that
+ * suite's own "the probe shard must not already exist" assertion, READING AS A REGRESSION; and a
+ * fixture task file was left modified in a third worktree.
+ *
+ * WHY NOT PER-PROCESS, WHICH IS WHAT THE SHARD FIRST DESCRIBED. That design was built and MEASURED
+ * UNSOUND. `node --test` runs test files in parallel, so a per-process before/after snapshot sees
+ * OTHER workers' in-flight fixtures and blames whoever happens to exit while they exist. Over the
+ * full 13,961-test suite it fired three times and every one was a MISATTRIBUTION — the blamed
+ * processes were not the creators, and run alone all four files involved were clean. The shard's
+ * own falsifier names exactly that outcome: "Re-design rather than build if the check proves
+ * unable to attribute a path to the process that made it under parallel execution."
+ *
+ * ONE PROCESS, ONE BEFORE, ONE AFTER. This wrapper spawns the suite exactly once (twice on the
+ * retry path), so there is no concurrent writer to confuse it and no attribution to get wrong. It
+ * also SEES CHILD-PROCESS WRITES — instance 1 was a spawned ratchet, which no in-process `fs`
+ * wrapper could ever observe. Cost is two `git status` calls per SUITE (~104ms measured) against
+ * ~2,148 for the per-process design (~112s).
+ *
+ * WHAT IS GIVEN UP, STATED: this names the PATH but not the test file that wrote it. Criterion 1
+ * asks for the path, and finding the writer from it is one `git grep` — measured at under a minute
+ * for all three instances above. A check that is right beats one that is precise and wrong.
+ *
+ * SNAPSHOT-AND-COMPARE, NEVER A BARE `git status`: a checkout may legitimately be dirty when a run
+ * starts (an operator's own edits), and only paths absent BEFORE and present AFTER are the suite's.
+ */
+
+/** `git status --porcelain` as a sorted line set, or `null` when git could not be read at all —
+ *  not a repo, no git binary, a permission error. `null`, never `[]`: "could not look" and "looked
+ *  and found nothing" must not collapse into the same value. */
+export function readTrackedTreeState(cwd = process.cwd(), runGit = defaultStatusReader) {
+  try {
+    return runGit(cwd).split("\n").filter(Boolean).sort();
+  } catch {
+    return null;
+  }
+}
+
+function defaultStatusReader(cwd) {
+  // UNTRACKED ENTRIES INCLUDED (no `-uno`): instance 2 was an untracked probe shard and it still
+  // broke the next run. Measured cost of the two forms here: 52ms with untracked, 9ms without —
+  // and the cheap one is blind to the instance that cost the most diagnosis.
+  return execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+}
+
+/** Porcelain lines present after the suite and absent before it. `null` on either side ⇒ `[]`:
+ *  an unreadable snapshot attributes nothing and must never render as "everything is new". A line
+ *  that DISAPPEARED is not dirt either — a fixture cleaning up after itself is the healthy case. */
+export function newTrackedTreeDirt(before, after) {
+  if (before === null || after === null) return [];
+  const seen = new Set(before);
+  return after.filter((line) => !seen.has(line));
+}
+
+/** The message a dirty run prints, naming every path — a gate that reported only a count would
+ *  cost the diagnosis the debris already costs. `null` when there is nothing to report. */
+export function trackedTreeDirtReport(dirt) {
+  if (dirt.length === 0) return null;
+  return (
+    `TRACKED-TREE DIRT: the suite left ${dirt.length} change(s) in the tracked tree, which every ` +
+    `other worker in a concurrent run observes and the NEXT run reads as a regression:\n` +
+    dirt.map((d) => `  ${d}`).join("\n") +
+    `\nWrite fixtures under mkdtemp, never into the tracked tree. ` +
+    `Find the writer with: git grep -n '<the path above>' -- test/ scripts/`
+  );
+}
 
 /**
  * Extracts failing test names from a Node test-runner run's combined output. Handles both
@@ -136,14 +210,19 @@ export async function main(argv) {
     return 2;
   }
 
+  // W1-T2715: the BEFORE half, taken once around the whole suite — see this module's own doc for
+  // why this is not per-test-process. Read before anything is spawned, so an operator's own
+  // pre-existing edits are never attributed to the run.
+  const treeBefore = readTrackedTreeState();
+
   const startedAt = Date.now();
   const first = await runOnce(cmd, args);
   if (first.code === 0) {
-    return 0;
+    return reportTrackedTreeDirt(treeBefore, 0);
   }
 
   if (process.env.TEST_RETRY === "0") {
-    return first.code;
+    return reportTrackedTreeDirt(treeBefore, first.code);
   }
 
   const firstPassElapsedMs = Date.now() - startedAt;
@@ -159,7 +238,7 @@ export async function main(argv) {
         `${budgetSeconds}s budget, not enough for another pass`,
       firstNames,
     );
-    return first.code;
+    return reportTrackedTreeDirt(treeBefore, first.code);
   }
 
   const second = await runOnce(cmd, args);
@@ -169,7 +248,21 @@ export async function main(argv) {
   if (second.code !== 0) {
     recordFlakeEvidence("retry ALSO failed", parseFailingTestNames(second.output));
   }
-  return second.code;
+  return reportTrackedTreeDirt(treeBefore, second.code);
+}
+
+/**
+ * W1-T2715: the AFTER half. Called on EVERY return path, so a run that failed its tests still says
+ * whether it also dirtied the tree — the two are independent facts and a red suite must not hide a
+ * leak. Never LOWERS an exit code: a failing suite keeps its own code, and only a green-but-dirty
+ * run is turned red by this. Reads git; writes nothing.
+ */
+function reportTrackedTreeDirt(treeBefore, code) {
+  const report = trackedTreeDirtReport(newTrackedTreeDirt(treeBefore, readTrackedTreeState()));
+  if (report === null) return code;
+  process.stderr.write(`${report}\n`);
+  recordFlakeEvidence("tracked-tree dirt", []);
+  return code === 0 ? 1 : code;
 }
 
 const isMain = Boolean(process.argv[1]) && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
