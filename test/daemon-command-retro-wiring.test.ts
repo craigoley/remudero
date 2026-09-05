@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { daemonCommand } from "../src/run-task.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 
@@ -59,5 +60,14 @@ test("daemonCommand: a SELF-TARGET non-dry-run boot wires checkRetroTrigger + ru
     typeof captured.runRetroTrigger,
     "function",
     "a self-target daemon wires the automated-retro runner",
+  );
+  const source = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  assert.ok(
+    /buildRetroDaemonHooks\(\{\s*log\s*\}\)/.test(source),
+    "the production daemon construction hands its ledger sink to the subprocess-backed hook",
+  );
+  assert.ok(
+    /else\s+await\s+runAutomatedRetroSubprocess\(decision,\s*\{\s*log:\s*deps\.log\s*\}\)/.test(source),
+    "the default automated-retro hook reaches the subprocess adapter rather than retroCommand in the daemon pid",
   );
 });

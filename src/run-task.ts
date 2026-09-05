@@ -477,6 +477,11 @@ import {
   type RunRetroPrepublishPreflightOptions,
   type RetroPrepublishProvenance,
 } from "./lib/retro-preflight.js";
+import {
+  AUTOMATED_RETRO_DECISION_ENV,
+  decodeAutomatedRetroDecision,
+  runAutomatedRetroSubprocess,
+} from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
 import {
   buildPlanPrBody,
@@ -19917,16 +19922,17 @@ export function autoTriageCheck(
 export function buildRetroDaemonHooks(deps: {
   check?: () => RetroTriggerDecision | undefined;
   runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
 } = {}): {
   checkRetroTrigger: () => RetroTriggerDecision | undefined;
   runRetroTrigger: (decision: Extract<RetroTriggerDecision, { fire: true }>) => Promise<void>;
 } {
   const check = deps.check ?? (() => retroTriggerCheck());
-  const runRetro = deps.runRetro ?? retroCommand;
   return {
     checkRetroTrigger: () => check(),
     runRetroTrigger: async (decision) => {
-      await runRetro([], { automated: decision });
+      if (deps.runRetro) await deps.runRetro([], { automated: decision });
+      else await runAutomatedRetroSubprocess(decision, { log: deps.log });
     },
   };
 }
@@ -24951,7 +24957,7 @@ export async function daemonCommand(
 
   const runDaemonFn = deps.runDaemon ?? runDaemon;
   // W1-T160: the retro cadence hooks (self-target only) — see buildRetroDaemonHooks.
-  const retroHooks = target.isSelf ? buildRetroDaemonHooks() : undefined;
+  const retroHooks = target.isSelf ? buildRetroDaemonHooks({ log }) : undefined;
   // impl-DM: the auto-triage rung's producer. SELF-TARGET ONLY, for the same reason the retro is —
   // it reads THIS repo's plan/feedback and writes THIS repo's plan, never a drained target's.
   // Without this line `deps.checkAutoTriage` is undefined and the whole rung is dead code, which is
@@ -37282,7 +37288,11 @@ export async function main(
     process.exit(await nextTaskIdCommand(rest));
   }
   if (cmd === "retro") {
-    process.exit(await retroCommand(rest));
+    const encodedAutomatedDecision = process.env[AUTOMATED_RETRO_DECISION_ENV];
+    const automated = encodedAutomatedDecision === undefined
+      ? undefined
+      : decodeAutomatedRetroDecision(encodedAutomatedDecision);
+    process.exit(await retroCommand(rest, automated ? { automated } : {}));
   }
   if (cmd === "drain") {
     process.exit(await drainCommand(rest));

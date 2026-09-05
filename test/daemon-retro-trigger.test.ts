@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDaemon } from "../src/lib/daemon.js";
 import { evaluateRetroTrigger, mergedSince, resolveMarkerForGather, saveMarker, type RunSummary } from "../src/lib/retro.js";
+import { AutomatedRetroSubprocessError } from "../src/lib/retro-subprocess.js";
 import type { RunResult } from "../src/lib/run-result.js";
 
 // ── W1-T160: the DAEMON'S scheduling contract for the retro cadence trigger ───────
@@ -161,13 +162,14 @@ test("runDaemon: a checkRetroTrigger that THROWS is caught, logged, and never ha
   assert.ok(lines.some((l) => l.step === "daemon.retro_trigger.check_failed"), "the failure must be logged, not swallowed silently");
 });
 
-test("runDaemon: a fired retro whose runRetroTrigger THROWS is caught, logged (daemon.retro_trigger.run_failed), and never halts the loop", async () => {
+test("runDaemon: an automated retro child exit 134 reaches run_failed and the same daemon continues to a later clean stop", async () => {
   const plan = fixturePlan();
   const now = new Date("2026-07-29T00:00:00.000Z");
   // A marker-absent evaluation with 0 merges fires on the days threshold (unbounded).
   const policy = { mergesThreshold: 25, daysThreshold: 7 };
   let stopChecks = 0;
   let runCalls = 0;
+  const daemonPid = process.pid;
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const summary = await runDaemon(plan, {
     refreshMerged: () => () => true,
@@ -183,11 +185,13 @@ test("runDaemon: a fired retro whose runRetroTrigger THROWS is caught, logged (d
     checkRetroTrigger: () => evaluateRetroTrigger(0, undefined, now, policy), // marker absent -> fires reason=days
     runRetroTrigger: async () => {
       runCalls++;
-      throw new Error("fixture: the automated retro run exploded");
+      throw new AutomatedRetroSubprocessError({ exitCode: 134, signal: null, stdoutTail: "", stderrTail: "heap OOM" });
     },
     log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
   });
   assert.equal(summary.stopReason, "stopped", "a runRetroTrigger throw must never crash the daemon loop");
+  assert.equal(process.pid, daemonPid, "the daemon process itself survives the child failure");
+  assert.ok(stopChecks > 1, "the same daemon reached a later tick before stopping cleanly");
   assert.equal(runCalls, 1, "the fired retro was invoked exactly once before it threw");
   assert.ok(
     lines.some((l) => l.step === "retro_triggered"),
@@ -195,6 +199,10 @@ test("runDaemon: a fired retro whose runRetroTrigger THROWS is caught, logged (d
   );
   assert.ok(
     lines.some((l) => l.step === "daemon.retro_trigger.run_failed"),
-    "the runRetroTrigger failure must be logged (run_failed), not swallowed silently",
+    "the child failure must be logged (run_failed), not swallowed silently",
+  );
+  assert.match(
+    String(lines.find((l) => l.step === "daemon.retro_trigger.run_failed")?.extra.error),
+    /exit 134/,
   );
 });
