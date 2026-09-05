@@ -27,9 +27,7 @@ const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 
 // The REQUIRED array exactly as it read before this PR (single-line JSON literal) — the
 // pre-reformat fixture. Order and membership must be byte-identical to what W1-T107 replaced,
-// PLUS every entry a later PR has appended since (most recently R-51, docs/audits/
-// recon-2026-09-05.md: the five-name promotion of leak-grep/assertion-discrimination/
-// task-id-existence/acceptance-author-gate/unwired-gate).
+// PLUS every entry a later PR has appended since (most recently comment-load-ratchet).
 const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "ci",
   "lint-plan",
@@ -50,6 +48,7 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "task-id-existence",
   "acceptance-author-gate",
   "unwired-gate",
+  "comment-load-ratchet",
 ]);
 
 async function loadCiGate() {
@@ -97,7 +96,7 @@ test("ci-gate-required-format: the format is one entry per line, and the convent
       `expected exactly one quoted entry per line, got: ${JSON.stringify(line)}`,
     );
   }
-  assert.equal(entryLines.length, 19, "expected 19 one-per-line REQUIRED entries");
+  assert.equal(entryLines.length, 20, "expected 20 one-per-line REQUIRED entries");
 
   // The comment immediately above the block must name the conflict class this format avoids —
   // concurrent PRs editing the same single line.

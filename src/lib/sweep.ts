@@ -43,149 +43,28 @@ export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merg
 // closing an open-prs-rest <-> sweep cycle — see workflow-run.ts's own doc.
 export type { WorkflowRunObservation } from "./workflow-run.js";
 
+// Why: the pipeline was edge-triggered, so a verdict fired once and a missing consumer stranded
+// the PR open-and-orphaned (#111/#113/#123) — docs/forensics/sweep.md.
 /**
- * lib/sweep.ts — the level-triggered PR-pipeline reconciler (W1-T77, ratifies
- * P22 core).
+ * lib/sweep.ts — the level-triggered PR-pipeline reconciler (W1-T77, ratifies P22 core).
  *
- * The pipeline was EDGE-TRIGGERED: a verdict fired once (from a live run) and if
- * its consumer was missing the PR stranded open-and-orphaned (#111/#113/#123 sat
- * open for a whole session). This reconciler is LEVEL-TRIGGERED, like
- * Kubernetes/Prow-tide: each daemon poll + on-demand `rmd sweep` re-derives EVERY
- * open PR's disposition FRESH from observed state and takes the one gated action.
- * It is the third policy-gated ACT lane (§5D): dep lane (W1-T54) · alert lane
- * (P20) · this PR-pipeline reconciler.
+ * Every daemon poll and every `rmd sweep` re-derives each open PR's disposition fresh from
+ * observed state, then takes the one gated action. The predicate is a pure function of observed
+ * state and the exported {@link SweepPolicy} table (rule 2) — never an LLM judgment, never a
+ * literal in a branch. Each PR gets exactly one {@link Disposition}; {@link DISPOSITION_RULES}
+ * carries the rows and each row's own doc states its trap.
  *
- * DETERMINISTIC, POLICY-AS-DATA (rule 2): the disposition predicate is a pure
- * function of observed PR state + an exported {@link SweepPolicy} table — NEVER an
- * LLM classification, never a magic number buried in an if-branch. Every threshold
- * a test might flip lives in the policy object so a fixture can override it.
+ * HUNG WORKERS ARE OUT OF SCOPE: worker liveness is run-state, not PR-state.
  *
- * Every open PR gets EXACTLY ONE of seven dispositions and its gated action:
- *   - MERGEABLE        — POSITIVELY matched only: required checks green AND review
- *                        success -> arm auto-merge (per-repo merge SERIALIZATION
- *                        slots are a future WS-2 task and deliberately NOT built
- *                        here — today we just ARM, honoring P22's capture
- *                        ADDENDUM). Never inferred from the mere ABSENCE of a
- *                        failure — see BLOCKED-AMBIGUOUS's terminal row below (the
- *                        #161 fix, W1-T93): a CI-red PR whose review was SKIPPED
- *                        matches no failure rule either, and used to fall through
- *                        to this row's old unconditional catch-all, arming a PR
- *                        GitHub's required-CI gate would then stall FOREVER —
- *                        never fixed, never escalated, invisible.
- *   - BLOCKED-FIXABLE  — EITHER (a) a required check is red — the blocked_ci shape,
- *                        the #170 fix (W1-T100), BROADENED by W1-T138 (the
- *                        #303/#305/#292/#315 fix) to fire regardless of the review
- *                        verdict sitting beside it (a review can post, then a
- *                        slower required check settle red; a fix strike's own
- *                        push can newly break one) — and strikes left -> dispatch
- *                        the W1-T76 fix rung in ci-log mode (W1-T94), carrying the
- *                        failing check names + log tails, CHECKED FIRST, before a
- *                        review verdict is ever classified as the block; OR (b) —
- *                        only once checks are NOT red — a failing review with
- *                        actionable unmet criteria and strikes left -> dispatch
- *                        the SAME rung (reused, not reimplemented) carrying the
- *                        FULL unmet set at once. FIX FIRST, ask after exhaustion: a
- *                        checks-red PR reaches the question rung only THROUGH the
- *                        strike ladder below, never straight there.
- *   - STALE/SUPERSEDED — a newer PR credits the same task, or no activity in N days
- *                        -> close with a stated reason (the #111/#113 manual chore).
- *   - BLOCKED-AMBIGUOUS— fix strikes exhausted (shared ladder — review AND ci-log
- *                        strikes count against the SAME cap, one exhaustion route),
- *                        contradictory criteria, a required check with zero observed
- *                        runs whose ONE deterministic post attempt already came back
- *                        refused (W1-T176 — see POST-REVIEW below for the FIRST-SEEN
- *                        case, which is deterministic-action, never this row), OR the
- *                        TERMINAL catch-all (anything not positively mergeable, not
- *                        failure-shaped, and not the blocked_ci shape above — e.g.
- *                        checks still pending with no review) -> the
- *                        CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new
- *                        rung): {@link renderClarificationQuestion} renders a
- *                        SPECIFIC, decidable operator question from ledger ground
- *                        truth (never a generic needs-human), which the real wiring
- *                        (run-task.ts's `buildSweepEffects`) logs to the §2 question
- *                        backlog AND opens via W1-T8's `escalate()` as the
- *                        notification transport — so it is never silent and never
- *                        armed.
- *   - POST-REVIEW      — (the 2026-07-22 #584 stall; W1-T176) required checks green,
- *                        remudero-review has ZERO observed check runs, and no prior
- *                        post attempt for this exact head was refused -> run the
- *                        review lane (the SAME deterministic `rmd review` an operator
- *                        would run) rather than asking. An absent required check is a
- *                        mechanically DECIDABLE state ("post it"), not ambiguity — the
- *                        #393/#391 fixture (2026-07-20): every other check SUCCESS,
- *                        remudero-review absent, escalated with two mis-framed
- *                        options while `rmd review` was the actual one-command
- *                        remedy. FAIL-CLOSED: at most one deterministic attempt per
- *                        head sha — a refused attempt routes the NEXT pass to
- *                        BLOCKED-AMBIGUOUS above instead of re-posting forever.
- *                        ORPHANED-BY-PUSH (W1-T225; the 2026-07-21 PRs #477/#484
- *                        jam): the SAME zero-observed-runs shape also arises when a
- *                        PR WAS reviewed on an earlier head and a later push left the
- *                        new head with no remudero-review status at all — the old
- *                        verdict is correctly bound to the sha it was posted against
- *                        (push-invalidates-review is never weakened here), but
- *                        nothing had ever re-dispatched the lane on the new head, so
- *                        the PR sat ABSENT — indistinguishable from a check that
- *                        simply hasn't run yet — and auto-merge waited forever.
- *                        `OpenPrView.reviewOrphanedByPush` distinguishes this from a
- *                        PR awaiting its FIRST review (the reason string differs;
- *                        the dispatch is identical: run the review lane, posting a
- *                        FRESH verdict, never the prior one carried forward). Repeated
- *                        judgments of the SAME head+body input are bounded: once
- *                        `priorReviewAttemptsForInput` reaches `policy.reviewOrphanCap`, the
- *                        row above escalates for visibility. A new commit or body edit is a new
- *                        input and resets this count immediately.
- *                        W1-T1018 (operator ruling 2026-08-19): this is no longer a
- *                        PERMANENT wall — {@link reviewInputBackoffElapsed} lets the
- *                        row above yield back to THIS row once enough wall-clock time
- *                        has passed since the lane's last attempt, so a PR that heals
- *                        (a repaired base, a fixed contradiction) keeps getting
- *                        re-reviewed rather than being stranded green-and-silenced
- *                        forever (rationale (1)-(4), PR #2159).
- *   - WAIT             — (W1-T114, the 30-issue predicate-storm fix) required
- *                        checks pending/queued AND the newest check's start is
- *                        younger than a staleness ceiling (policy-as-data,
- *                        {@link SweepPolicy.pendingCeilingMinutes}) -> no action
- *                        this pass, a ledgered wait line, re-derived fresh next
- *                        sweep. Pending is TIME, not ambiguity — escalating on it
- *                        manufactured alert fatigue at machine speed (~24 of 30
- *                        live needs-human issues, 2026-07-19, were exactly this
- *                        shape). Ceiling EXCEEDED -> stale-pending, the SAME
- *                        blocked-ambiguous escalate path below, its reason naming
- *                        the elapsed minutes and the ceiling — a check stuck past
- *                        the ceiling IS ambiguity.
- *
- * SCOPING (honest): HUNG workers are EXPLICITLY DEFERRED to a future WS-2 task.
- * Worker liveness is RUN-state, not PR-state, and this sweep's domain is PR state
- * ONLY — it does not attempt to detect or reap hung workers.
- *
- * INVARIANTS:
- *   - No open PR ends a sweep with disposition=none — {@link deriveDisposition} is
- *     TOTAL over its input.
- *   - IDEMPOTENCE (the level-triggered core): dispositions are re-derived fresh
- *     every sweep, but ACTIONS are deduped against what is already true — a second
- *     sweep over UNCHANGED observed state dispatches NO new actions. Dedup is keyed
- *     on the shared ledger (persists across sweeps even when the input fixtures are
- *     byte-identical): a prior `sweep.disposed` line that recorded `acted: true`
- *     suppresses the same action. Fix dispatch is additionally keyed on the head sha
- *     so a NEW push (state changed) legitimately re-earns a strike, up to the cap.
- *   - Every disposition produces one `sweep.disposed` ledger line via appendLedger.
- *   - W1-T2345 — A DERIVATION IS NOT AN ACTION, BUT IT IS NOT FREE EITHER: the invariant above
- *     lets an unchanging verdict re-derive every pass forever, by design — the sweep IS
- *     level-triggered and must keep re-deriving. What it must not do is carry that repetition at
- *     full weight silently: once one PR's (disposition, head_sha) pair — never its rendered
- *     `reason`, whose prose can carry a live counter that changes every tick even when the
- *     verdict has not (see {@link repeatDispositionStreaksFromLedger}'s own doc) — repeats
- *     {@link SweepPolicy.repeatDispositionBound} consecutive times, the sweep escalates ONCE via
- *     the SAME `deps.escalate()` the blocked-ambiguous rung already calls (reaching the existing
- *     digest/inbox surface with no new transport), and stays quiet until either the head moves or
- *     the bound is re-armed some other way. The disposition itself is NEVER replaced or cached —
- *     it is re-derived exactly as before this task; only its repetition gets a second, distinct
- *     signal once it stops being informative on its own.
- *
- * All external effects (arm / dispatch-fix / close / escalate, and reading the
- * ledger for prior actions) are INJECTED — this module never calls `gh`/git/network
- * directly, mirroring how runFixRung/escalate are structured.
+ * Invariants:
+ *   - {@link deriveDisposition} is TOTAL — no open PR ends a sweep with disposition=none.
+ *   - Idempotence: dispositions re-derive every pass, but actions dedup against the shared
+ *     ledger, so an unchanged pass dispatches nothing. Fix dispatch is also keyed on the head
+ *     sha, so a new push re-earns a strike up to the cap.
+ *   - Every disposition writes one `sweep.disposed` ledger line.
+ *   - Repetition is signalled, never cached: a repeated (disposition, head_sha) pair escalates
+ *     ONCE at {@link SweepPolicy.repeatDispositionBound} (W1-T2345).
+ *   - Every external effect is injected; this module never calls gh, git or the network.
  */
 
 /** One of the dispositions every open PR is reconciled into. */
@@ -200,32 +79,19 @@ export type Disposition =
   | "wait";
 
 /**
- * W1-T920 — a THREE-VALUED finding (design note iii): "unreadable" is a distinct outcome, never
- * collapsed into "unique". Only `"superseded"` may ever gate a CLOSE — see
- * {@link OpenPrView.supersessionVerdict} and the `DISPOSITION_RULES` row it feeds. W1-T932:
- * `"unique"` gained a SECOND, narrower consumer — a different `DISPOSITION_RULES` row may read
- * it to let the bare-number `supersededBy` match YIELD (never to close anything itself; see that
- * row's own doc and {@link SweepPolicy.conceptCoexistenceEnabled}) — so "never acts" below now
- * describes `"indeterminate"` only, not `"unique"`.
- *
- *   - `"superseded"`  — another PR (open or merged) already covers this PR's task; evidence is
- *     REQUIRED (see {@link SupersessionEvidence}) — "superseded" alone is unauditable.
- *   - `"unique"`      — the trailer/diff read completed and found no supersession. Distinct from
- *     "indeterminate": this is a POSITIVE finding, not a default.
- *   - `"indeterminate"` — the read itself failed or was inconclusive (a trailer scan threw, a diff
- *     query errored, a merged-by-trailer lookup was rate-limited, or the diff read back EMPTY with
- *     no corpus control to trust — design note iv). NEVER acts on any disposition — named
- *     separately so a caller can tell "checked, none found" from "could not check", the same
- *     fail-open direction `readLiveState`'s `ok:false` already uses elsewhere in this module.
+ * W1-T920 — a THREE-VALUED finding: "unreadable" is never collapsed into "unique".
+ *   - `"superseded"` — evidence REQUIRED ({@link SupersessionEvidence}); the bare label is
+ *     unauditable. The ONLY value that may gate a CLOSE.
+ *   - `"unique"` — a POSITIVE "checked, none found", not a default. W1-T932 lets a row read it
+ *     to make a bare-number `supersededBy` match YIELD, never to close anything.
+ *   - `"indeterminate"` — the read failed. NEVER acts on any disposition.
  */
 
 /**
- * W1-T920 (design note iv) — the diff finding carries its OWN corpus control. A diff read that
- * comes back with zero hunks is indistinguishable, from the hunk count ALONE, from a diff read
- * that broke and returned nothing — the #1955 hand-diagnosis measured exactly this shape (131
- * lines, zero hunks, four symbols already on main). `rawLineCount` is the control: a verdict
- * built from a zero-length raw read must never claim `"superseded"` — see the DISPOSITION_RULES
- * row's own doc for how a detector is expected to enforce this before ever setting `status`.
+ * W1-T920 — the diff finding carries its OWN corpus control. A zero-hunk read is
+ * indistinguishable from a broken read on the hunk count alone, so `rawLineCount` is the
+ * control: a verdict built from a zero-length raw read must never claim `"superseded"`.
+ * // Why: the #1955 hand-diagnosis measured that shape — docs/forensics/sweep.md.
  */
 
 /**
@@ -235,11 +101,9 @@ export type Disposition =
  */
 
 /**
- * W1-T920 — one open PR's supersession finding, read (never computed) by the disposition. See
- * {@link OpenPrView.supersessionVerdict}'s own doc for the honest scope note: the DETECTOR that
- * populates this is a separate, out-of-scope shard (this task's own design note, "WHAT MUST NOT
- * BE BUILT") — this type and the disposition row that reads it are the full wired MECHANISM,
- * unit-tested against caller-supplied verdicts, but nothing in the real gateway sets one yet.
+ * W1-T920 — one open PR's supersession finding, READ and never computed by the disposition.
+ * Scope note: the DETECTOR that populates this is a separate, out-of-scope shard. This type and
+ * the row reading it are the full wired mechanism, but nothing in the real gateway sets one yet.
  */
 
 /**
@@ -252,13 +116,10 @@ export interface CiFailure {
   name: string;
   logTail: string;
   /**
-   * The commit sha this check's failure is attributable to, when the read can identify one
-   * (W1-T186, the #420 fixture: commitlint lints the whole base..head RANGE, so a required
-   * check reported against the PR can be tripped by a commit that is NOT one of the PR's own —
-   * #417's own three commits measured 92/90/76 chars while the 101-char header that actually
-   * failed commitlint was `0e63429` on MAIN). `undefined` when the failure could not be
-   * attributed to a specific sha — the ordinary case, where the check simply failed against the
-   * PR's own head (`OpenPrView.headSha`), and the escalation names that instead.
+   * The commit sha this failure is attributable to, when the read can identify one (W1-T186).
+   * `undefined` in the ordinary case, where the check failed against the PR's own head.
+   * // Why: commitlint lints the whole base..head RANGE, so a required check can be tripped by a
+   * // commit that is not the PR's own (#420) — docs/forensics/sweep.md.
    */
   sha?: string;
   /**
@@ -269,34 +130,23 @@ export interface CiFailure {
    */
   outsidePrRange?: boolean;
   /**
-   * WHY this failure's {@link logTail} is empty, when it is empty. The producer's log
-   * read is best-effort and NEVER throws — but until this field existed, every way of failing
-   * collapsed into the SAME `logTail: ""` a genuinely silent check produces, so a worker handed a
-   * denied read behaved exactly as if nothing had failed. Present ONLY when `logTail` is empty and
-   * a cause was observed; ABSENT whenever a tail was actually captured, so `logUnavailable !==
-   * undefined` is a sound test for "the log could not be read" and never fires on a real tail.
+   * WHY {@link logTail} is empty, when it is. Present ONLY when it is empty and a cause was
+   * observed, ABSENT whenever a tail was captured — so `logUnavailable !== undefined` is a sound
+   * test for "the log could not be read" and never fires on a real tail.
+   * // Why: every way of failing used to collapse into one empty tail (W1-T2291).
    */
   logUnavailable?: CiLogUnavailableCause;
   /**
-   * WHICH SOURCE filled {@link logTail}, when one did. `"log"` is the job's own failing-log tail —
-   * the preferred source, and the only one that existed before W1-T2298. `"annotations"` is the
-   * check-run annotation fallback, used ONLY when the log read came back empty or failed, so a
-   * readable log can never be displaced by it and every existing recogniser keeps matching exactly
-   * what it matched before. ABSENT whenever `logTail` is empty, which is the same condition under
-   * which {@link logUnavailable} is PRESENT — the two are complements, never both meaningful at once.
+   * WHICH SOURCE filled {@link logTail}. `"annotations"` is the fallback, used ONLY when the log
+   * read came back empty or failed, so a readable log can never be displaced by it. ABSENT
+   * whenever `logTail` is empty — the exact condition under which {@link logUnavailable} is
+   * present. The two are complements, never both meaningful at once.
    */
   tailSource?: CiTailSource;
   /**
-   * WHAT THE ANNOTATION FALLBACK DID, when it was reached at all — present only after the log read
-   * came back empty or failed, absent entirely when the log answered. `recovered` means the tail in
-   * {@link logTail} came from annotations; `empty` means the endpoint answered with no message;
-   * `failed` means the fetch itself threw, `detail` carrying the error as observed.
-   *
-   * SEPARATE FROM {@link logUnavailable} ON PURPOSE. W1-T2291 gave every way of failing a NAMED
-   * cause, and a fallback that overwrote that name would take the answer back: `fetch-failed` and
-   * `empty-log` still mean exactly what they meant, and this field says what was tried afterwards.
-   * A reader wanting "why is there no tail" reads the cause; one wanting "was the second source
-   * tried, and what did it say" reads this.
+   * WHAT THE ANNOTATION FALLBACK DID, when reached — absent entirely when the log answered.
+   * // Why: kept separate from {@link logUnavailable} on purpose, because a fallback that
+   * // overwrote the named cause would take back the answer W1-T2291 gave.
    */
   annotationFallback?: CiAnnotationFallback;
 }
@@ -390,19 +240,14 @@ export type CiAnnotationFallback =
   | { outcome: "failed"; detail: string };
 
 /**
- * The closed set of reasons a failing check's log tail came back empty — a NAMED
- * outcome rather than an absence. `no-job-id`: the check's `detailsUrl` carried no Actions job id,
- * so no read was ever attempted. `fetch-failed`: a read WAS attempted and failed, `detail`
- * carrying the underlying error as observed (a proxy denial, a missing scope, an oversized log)
- * — never interpreted, never guessed at. `empty-log`: the read SUCCEEDED and the job genuinely
- * printed nothing, the one case where silence is the honest answer.
+ * The closed set of reasons a log tail came back empty — a NAMED outcome, never an absence.
+ * `no-job-id`: no Actions job id, so no read was attempted. `fetch-failed`: a read was attempted
+ * and failed, `detail` carrying the error as observed. `empty-log`: the read SUCCEEDED and the
+ * job printed nothing.
  */
 /**
- * BACKSTOP on the length of a `fetch-failed` cause's `detail`. Not a primary control: the detail
- * is an error message from `gh`/Node, which is short in every observed case — the primary control
- * on prompt size is what the fix prompt renders at all. This exists only so a pathologically long
- * error string can never dominate a prompt or an escalation body, and is deliberately far above
- * any real message so that truncating is evidence of something unusual, not routine operation.
+ * BACKSTOP on a `fetch-failed` detail's length, not a primary control — what the fix prompt
+ * renders is. Set far above any observed message, so truncating is evidence of something unusual.
  */
 export const MAX_CI_LOG_FAILURE_DETAIL = 500;
 
@@ -412,11 +257,10 @@ export type CiLogUnavailableCause =
   | { kind: "empty-log" };
 
 /**
- * One sentence naming why a log tail is missing, for BOTH consumers (the fix prompt in
- * run-task.ts and this module's own escalation text) — so the two can never drift into
- * describing the same cause differently. Every branch says plainly that the log could not be
- * read; none of them can be mistaken for a check that simply printed nothing, except the one
- * branch that means exactly that.
+ * One sentence naming why a log tail is missing, for BOTH consumers — the fix prompt in
+ * run-task.ts and this module's own escalation text — so the two can never drift into describing
+ * the same cause differently. No branch can be mistaken for a check that simply printed nothing,
+ * except the one branch that means exactly that.
  */
 export function describeCiLogUnavailable(cause: CiLogUnavailableCause): string {
   switch (cause.kind) {
@@ -430,37 +274,21 @@ export function describeCiLogUnavailable(cause: CiLogUnavailableCause): string {
 }
 
 /**
- * PURE, DETERMINISTIC classification (rule 2 — never an LLM judgment call) of
- * whether a merge conflict is safe to auto-resolve toward the union of both
- * sides: every conflicting file must show ZERO deletions on BOTH sides since
- * the merge-base. A single deleted line on either side — or no file evidence
- * at all (an unreadable/uncaptured diff) — fails CLOSED to `false`: a wrong
- * auto-resolution is worse than a strand (design note iii, verbatim).
+ * PURE, DETERMINISTIC classification (rule 2) of whether a conflict is safe to auto-resolve
+ * toward the union of both sides: every conflicting file must show ZERO deletions on BOTH sides
+ * since the merge-base. A single deletion on either side — or no file evidence at all — fails
+ * CLOSED to `false`. A wrong auto-resolution is worse than a strand (design note iii).
  */
 export function isPureConcurrentAddition(files: readonly ConflictFileDiff[]): boolean {
   return files.length > 0 && files.every((f) => f.oursDeleted === 0 && f.theirsDeleted === 0);
 }
 
 /**
- * W1-T2548 — THE DECLARED GENERATOR REGISTRY (rationale (3)/(4)): every conflict this repo has
- * actually PRODUCED is a same-key VALUE change — a deleted line plus an added line under an
- * existing key — which {@link isPureConcurrentAddition} refuses BY CONSTRUCTION (it counts
- * deletions on both sides and same-key edits always carry one). MEASURED 2026-08-30, six
- * conflicts in one evening, every one `scripts/source-size-baseline.json`, one JSON key, two
- * different numbers whose merged truth matched NEITHER recorded side — a textual union would
- * have been wrong, not merely unhelpful.
- *
- * For a path THIS TABLE NAMES, the file has a generator that reproduces it from the tree, so the
- * resolution is not a merge at all: re-run the generator on the MERGED tree and its output is
- * correct by construction (never a chosen side, never a diff heuristic — rationale (4), "the
- * safety argument is the generator, not a heuristic"). A path absent from this table stays
- * refused exactly as it was before this task — admission is bounded by a list a human wrote, not
- * by an inference {@link isRegenerableArtifactConflict} (below) could get wrong.
- *
- * DATA (rule 2), never a code change to admit a new path: each value is the `package.json`
- * script name that reproduces the file from the tree — the SAME identifier its own `npm run
- * <name>[:check]` pair already carries, so a reader can reproduce this table's own claim with one
- * command rather than trusting a private label invented only for this table.
+ * W1-T2548 — THE DECLARED GENERATOR REGISTRY. For a path this table names, re-running the
+ * generator on the MERGED tree is correct by construction, so the resolution is not a merge at
+ * all. A path absent from the table stays refused: admission is bounded by a list a human wrote,
+ * never an inference. Each value is the `package.json` script name — DATA (rule 2).
+ * // Why: every conflict this repo has produced is a same-key VALUE change — docs/forensics/sweep.md.
  */
 export const REGENERABLE_ARTIFACT_GENERATORS: Readonly<Record<string, string>> = Object.freeze({
   "scripts/source-size-baseline.json": "source-size-ratchet",
@@ -473,15 +301,10 @@ export const REGENERABLE_ARTIFACT_GENERATORS: Readonly<Record<string, string>> =
 });
 
 /**
- * W1-T2548 — PURE, DETERMINISTIC classification (rule 2) of whether every conflicting path
- * carries a DECLARED generator ({@link REGENERABLE_ARTIFACT_GENERATORS}) — the discriminator the
- * `conflicted` row admits a same-key value conflict on, alongside (never instead of)
- * {@link isPureConcurrentAddition}. Requires ALL files registered, not merely one: a conflict
- * that touches a hand-written path alongside a regenerable one is refused WHOLE (acceptance 4)
- * — a partial admission would still have to decide what to do with the hand-written half, which
- * is exactly the judgment call this predicate exists to avoid. Deletions on either side are
- * irrelevant here (unlike the pure-addition arm) — a same-key value change is expected to carry
- * them, and the generator re-run supersedes both recorded values regardless.
+ * W1-T2548 — PURE, DETERMINISTIC classification (rule 2) of whether EVERY conflicting path carries
+ * a declared generator, admitted alongside and never instead of {@link isPureConcurrentAddition}.
+ * Requires ALL files registered: a conflict straddling a hand-written path is refused WHOLE.
+ * Deletions are irrelevant here — the generator re-run supersedes both recorded values regardless.
  */
 export function isRegenerableArtifactConflict(
   files: readonly ConflictFileDiff[],
@@ -501,26 +324,11 @@ function undeclaredGeneratorPaths(
 }
 
 /**
- * W1-T2536 — WHICH of the refusal row's disjuncts actually fired, as a phrase for that row's own
- * `reason`. Before this, the row said "involves a deletion (or no file evidence was captured)"
- * UNCONDITIONALLY, so a conflict with FULL evidence and ZERO deletions on both sides — the
- * dominant real shape on this repo, two PRs each adding a different key to
- * `scripts/source-size-baseline.json` — was refused by a sentence in which BOTH disjuncts were
- * false, sending every reader to look for a deletion that was not there.
- *
- * THE THIRD ARM IS THE ONE THAT DID NOT EXIST. A conflict can reach this row with evidence
- * captured and no deletions anywhere, and the reason is then neither disjunct: it is that
- * {@link SweepPolicy.mergeConflictAdmissionEnabled} is off. That arm is UNREACHABLE at the
- * shipped default (W1-T2536 turns admission on, so the row above claims exactly this population)
- * and is written anyway — the flag is policy DATA, an operator may set it false, and a refusal
- * that then re-acquired the old lie is the defect this helper exists to remove.
- *
- * W1-T2548 — NAMES THE MIXED CASE (acceptance 4/5): a deletion-involved conflict whose paths
- * straddle {@link REGENERABLE_ARTIFACT_GENERATORS} — at least one declared, at least one not —
- * now says so explicitly, so a hand-written path riding alongside a regenerable one is
- * diagnosable without re-deriving the registry lookup by hand. A conflict where NO path is
- * declared (the ordinary hand-written-source shape this row has always refused) keeps saying
- * plainly "involves a deletion" — the registry is irrelevant to that population.
+ * W1-T2536/W1-T2548 — WHICH refusal disjunct actually fired, as a phrase for the row's `reason`:
+ * a deletion, no captured evidence, admission disabled, or the MIXED case whose paths straddle
+ * {@link REGENERABLE_ARTIFACT_GENERATORS}. The disabled arm is unreachable at the shipped default
+ * and written anyway, because the flag is policy DATA an operator may set false.
+ * // Why: the row once said "involves a deletion" unconditionally — docs/forensics/sweep.md.
  */
 export function conflictRefusalCause(
   files: readonly ConflictFileDiff[],
@@ -530,12 +338,9 @@ export function conflictRefusalCause(
   if (files.length === 0) return "no file evidence was captured";
   if (files.some((f) => f.oursDeleted > 0 || f.theirsDeleted > 0)) {
     const undeclared = undeclaredGeneratorPaths(files, generators);
-    // W1-T2548 — MIXED ONLY (acceptance 4/5): name the offending path(s) only when the
-    // conflict straddles the registry — at least one path IS declared and at least one is
-    // not — so a reader is told WHICH half broke admission rather than having to re-derive
-    // it. A conflict where NO path is declared (the dominant hand-written-source shape) keeps
-    // the plain "involves a deletion" this row has always said — the registry is irrelevant
-    // to that population, so naming its absence would tell the reader nothing new.
+    // Name the offending path(s) only when the conflict STRADDLES the registry. Where no path is
+    // declared — the dominant hand-written-source shape — the plain "involves a deletion" stands,
+    // because naming the registry's absence would tell the reader nothing new (W1-T2548).
     if (undeclared.length > 0 && undeclared.length < files.length) {
       return `involves a deletion, and ${undeclared.join(", ")} ${undeclared.length === 1 ? "has" : "have"} no declared generator`;
     }
@@ -548,11 +353,9 @@ export function conflictRefusalCause(
 }
 
 /**
- * W1-T78 policy (policy-as-data, rule 2 — never hardcoded): how many strikes a
- * fix-rung RE-DISPATCH gets once an operator answers a clarification
- * question. Nested inside {@link SweepPolicy} — the SAME config object every
- * `runSweep` caller already threads — rather than a second, separately-sourced
- * policy object.
+ * W1-T78 policy (rule 2) — how many strikes a fix-rung RE-DISPATCH gets once an operator answers
+ * a clarification question. Nested inside {@link SweepPolicy}, the same config object every
+ * `runSweep` caller already threads, rather than a second separately-sourced policy object.
  */
 export interface ClarifyPolicy {
   /** true (default): the answer resets the counter to a FRESH strikeCap. false: exactly one bounded extra strike. */
@@ -575,66 +378,26 @@ export interface SweepPolicy {
   /** W1-T78: re-dispatch strike-cap policy once an operator answers a clarification question. */
   clarify: ClarifyPolicy;
   /**
-   * W1-T121 QUEUE GOVERNOR (the 23-open-PR incident) — a WIP limit on
-   * DISPATCH ONLY: at or above this many open PRs, dispatch of NEW tasks is
-   * deferred; drainage (sweep/heal/arm/merge, at ANY depth) is never gated.
-   * A ROW in this table, not a constant near a call site — see
-   * {@link checkQueueGovernor}, this policy's consumer.
+   * W1-T121 QUEUE GOVERNOR — a WIP limit on DISPATCH ONLY: at or above this many open PRs, new
+   * dispatch is deferred. Drainage (sweep/heal/arm/merge, at any depth) is never gated.
+   * See {@link checkQueueGovernor}, this row's consumer.
+   * // Why: the 23-open-PR incident. Detail in docs/forensics/sweep.md.
    */
   wipLimit: number;
   /**
-   * W1-T172 PARALLEL DISPATCH (P19, DECISIONS.md 2026-07-21) — the number of
-   * concurrent dispatch LANES a drain pass may fill, bounded by `wipLimit`
-   * above (the governor is the CEILING; lanes only raise the RATE it fills,
-   * never the bound). A ROW in THIS SAME table — one threshold home, never a
-   * second — see `laneDispatchBudget` (drain.ts), this row's consumer.
-   * Started at 2 deliberately: the WS-2 concurrent-keychain question is
-   * unvalidated and per-repo merge serialization is server-side auto-merge
-   * rather than a queue of our own. Raising N is a policy-data row edit, not
-   * a code change — the point of holding it here rather than as a constant.
-   * W1-T325: this is now literally true — `plan/policy.yaml`'s `sweep.dispatchLanes`
-   * row is the source of the default below (read via {@link loadDefaultPolicy}), not
-   * a source literal. The relocation retunes nothing; the value stays 2.
-   * W1-T473: USED TO ALSO be the review lane ceiling — `runSweep` consulted this SAME
-   * field a second time (`Math.max(1, policy.dispatchLanes)`) to bound how many
-   * `post-review` PRs it runs CONCURRENTLY in one pass, "honouring the same lane
-   * number" dispatch uses rather than inventing a second, independently-tuned
-   * ceiling. W1-T1049 (rationale (3)/(4)): that coupling silently pinned drainage's
-   * OWN concurrency budget to a dispatch-only ruling — the operator's "stays at 3"
-   * ruling on THIS field was never about review — and let the two ceilings ADD on
-   * the host with nothing anywhere naming their sum. `runSweep` now reads {@link
-   * SweepPolicy.reviewLanes} instead, a SIBLING field, never a second use of this
-   * one. This field's own MEANING is unchanged and no longer shared — still only the
-   * dispatch-lane count `daemon.ts`'s `laneCount` and `test/policy-consumers.test.ts`
-   * read.
+   * W1-T172 (P19) — concurrent dispatch LANES a drain pass may fill, bounded by {@link wipLimit}:
+   * the governor is the CEILING, lanes only raise the rate it fills. Sourced from
+   * `plan/policy.yaml`, so retuning is a data edit.
+   * // Why: this also bounded the REVIEW lane until W1-T1049 split it out, which pinned drainage
+   * // to a dispatch-only ruling and let two ceilings add — docs/forensics/sweep.md.
    */
   dispatchLanes: number;
   /**
-   * W1-T1049 — THE REVIEW LANE'S OWN CONCURRENCY BUDGET (rationale (3)/(4)): bounds
-   * how many `post-review` PRs `runSweep` runs CONCURRENTLY in one pass. Floored at 1
-   * in `runSweep` exactly like `daemon.ts`'s `laneCount` floors `dispatchLanes` — a
-   * misconfigured 0 must never silently mean "review nothing" (design (ii); the code
-   * floor survives regardless of this field's own `min`). A CEILING, NEVER A TARGET
-   * (design (iii)): only ever bounds the reviews THIS PASS already found eligible —
-   * a pass with zero eligible reviews starts zero lanes no matter this number.
-   *
-   * Until this field existed, `runSweep` read {@link SweepPolicy.dispatchLanes}
-   * above A SECOND TIME for this (W1-T473) — a coupling W1-T473's own design (ii)
-   * named the cost of in advance ("silently couples two unrelated ceilings
-   * forever") and which then bound: raising or lowering drainage's own budget meant
-   * reopening a dispatch-only ruling, and the two ceilings ADDED on the host with
-   * nothing naming their sum (measured: 3 dispatch lanes + 3 review lanes = 6
-   * concurrent Claude workers on a host measured to fit about 4).
-   *
-   * DEFAULTS to `dispatchLanes`' own present value (3, read via {@link
-   * loadReviewLanesPolicy} directly off `plan/policy.yaml`'s `sweep.reviewLanes`
-   * row) — the split changes NO effective behavior by itself, only who controls the
-   * number, and the flip is reversible AS DATA, never a src edit plus CI plus
-   * deploy. Sourced OUTSIDE `src/lib/policy.ts`'s `PolicyValues`/
-   * `loadDefaultPolicy` schema deliberately: this task's own declared `files:` is
-   * `src/lib/sweep.ts` + `plan/policy.yaml` + one test file, and extending that
-   * schema is a second concern this shard does not reopen (design (i): "ONE
-   * CONCERN") — see {@link loadReviewLanesPolicy}'s own doc.
+   * W1-T1049 — THE REVIEW LANE'S OWN CONCURRENCY BUDGET. Floored at 1 in `runSweep`, so a
+   * misconfigured 0 can never mean "review nothing". A CEILING, NEVER A TARGET: it bounds only
+   * the reviews a pass already found eligible. Read directly off `plan/policy.yaml`.
+   * // Why: this used to be a second read of {@link dispatchLanes}, and the two ceilings added to
+   * // 6 workers on a host that fits about 4 — docs/forensics/sweep.md.
    */
   reviewLanes: number;
   /** Existing policy-row bounds plus the adaptive host/provider feedback thresholds. */
@@ -642,45 +405,23 @@ export interface SweepPolicy {
   reviewLaneMax: number;
   reviewCapacity: ReviewCapacityPolicy;
   /**
-   * W1-T148 COST GOVERNOR (the $206/60-run W1-T1 spin-loop incident) — a DAILY
-   * spend ceiling, in notional USD, on DISPATCH ONLY: at or over this many
-   * ledgered dollars spent so far TODAY, NEW dispatch is deferred; drainage
-   * (sweep/heal/arm/merge, at ANY depth) is never gated by it — a half-finished
-   * PR must still merge, a block must still escalate, and stranding in-flight
-   * work to save money is a worse failure than the spend itself. A ROW in this
-   * table (rule 2, policy-as-data), never a constant near a dispatch call site
-   * — see {@link checkCostGovernor}, this policy's consumer. Distinct from
-   * `budget_usd`/`DEFAULT_BUDGET_USD` (run-task.ts), the PER-RUN hard cap on a
-   * single worker spawn: this is the CROSS-RUN, daily total the per-run cap
-   * cannot see (60 runs each safely under their own per-run cap is exactly how
-   * the $206 incident accumulated).
-   * W1-T330: this is now literally true — `plan/policy.yaml`'s `sweep.dailyCostCeilingUsd`
-   * row is the source of the default below (read via {@link loadDefaultPolicy}), not a
-   * source literal. The relocation retunes nothing; the value stays whatever the row carries.
+   * W1-T148 COST GOVERNOR — a DAILY spend ceiling on DISPATCH ONLY. Drainage is never gated by it:
+   * stranding in-flight work to save money is a worse failure than the spend. Distinct from the
+   * PER-RUN cap — this is the cross-run daily total that cap cannot see.
+   * // Why: the $206/60-run spin loop, 60 runs each under their own per-run cap.
    */
   dailyCostCeilingUsd: number;
   /**
-   * W1-T1038 (the 2026-08-19 host stall) — a DAILY-GOVERNOR TWIN of {@link dailyCostCeilingUsd}
-   * immediately above, ONE FIELD APART BY DESIGN: same "policy-as-data, dispatch-only,
-   * never gates drainage" shape, but the OPPOSITE fail direction on an unreadable observation —
-   * see {@link checkMemoryGovernor}, this row's consumer, and `dispatch-governor.ts`'s
-   * `checkDispatchGovernors`, which enforces that opposite direction at the composition point.
-   * Below this many MiB of `/proc/meminfo`'s `MemAvailable`, NEW dispatch is deferred; at or
-   * above it, dispatch proceeds. SHIPS AT 0 (`plan/policy.yaml`'s row) — inert, since
-   * `MemAvailable` can never read below zero, until an operator raises it against a measured
-   * figure this task's own rationale says does not exist yet.
+   * W1-T1038 — a DAILY-GOVERNOR TWIN of {@link dailyCostCeilingUsd}: same dispatch-only shape, but
+   * the OPPOSITE fail direction on an unreadable observation, enforced at the composition point.
+   * SHIPS AT 0 — inert until an operator raises it against a measured figure that does not exist yet.
    */
   memoryFloorMib: number;
   /**
-   * W1-T114 (the 30-issue predicate-storm fix) — the STALENESS CEILING for the
-   * WAIT disposition: required checks pending/queued with the newest check's
-   * start younger than this many minutes -> wait, no action; at or beyond it
-   * -> stale-pending, the escalate path. A ROW in this table (rule 2,
-   * policy-as-data), not a constant buried in the predicate — a fixture proves
-   * this by lowering the seeded ceiling and flipping a wait to an escalate with
-   * ZERO code changes. Default generous enough for the slowest required check
-   * to register and settle (an hour) — a check still pending PAST that IS
-   * ambiguity, not merely in-flight.
+   * W1-T114 — the STALENESS CEILING for the WAIT disposition: pending inside it means wait, at or
+   * beyond it the escalate path. A fixture proves this is data by lowering it and flipping a wait
+   * with zero code changes. Generous enough for the slowest required check to settle; a check
+   * still pending past that IS ambiguity, not merely in-flight.
    */
   pendingCeilingMinutes: number;
   /**
@@ -690,284 +431,97 @@ export interface SweepPolicy {
    */
   absentCeilingMinutes: number;
   /**
-   * Retry threshold for one unchanged review input. The field name is retained for configuration
-   * compatibility, but the counter is no longer a lifetime budget over historical heads: only
-   * completed `review.posted` judgments for the exact PR URL + head + body digest count. A new
-   * commit or body edit resets it to zero; refusals and legacy rows without an input identity do
-   * not consume it. A row in this policy table, never a constant buried in the predicate.
-   *
-   * W1-T1018 (operator ruling 2026-08-19 — "I don't really like the idea of a review
-   * budget. We just need back off."): reaching this cap NO LONGER stops the sweep
-   * re-dispatching the review lane permanently — that was the defect (rationale (1)-(4)):
-   * a bound firing on a HEALTHY condition (a repaired base, checks green, diff sound)
-   * walled a good PR off forever. See {@link reviewOrphanBackoffMinutes} for what
-   * replaces the cessation: escalate AND keep going, never one instead of the other.
+   * Retry threshold for ONE UNCHANGED review input — not a lifetime budget over historical heads.
+   * Only completed judgments for the exact PR URL + head + body digest count; a new commit or body
+   * edit resets it to zero, and refusals never consume it.
+   * // Why: W1-T1018 — reaching the cap no longer stops re-dispatch, because a bound firing on a
+   * // HEALTHY condition walled good PRs off forever. See {@link reviewOrphanBackoffMinutes}.
    */
   reviewOrphanCap: number;
   /**
-   * W1-T1018 (design (i)/(ii)) — THE ELAPSED-TIME BACKOFF that replaces the old
-   * permanent cessation `reviewOrphanCap` alone used to enforce. Once an unchanged input's
-   * completed-attempt count reaches `reviewOrphanCap`, the sweep still escalates, but the review
-   * lane resumes dispatching once this many minutes have elapsed since that exact input's last
-   * completed judgment ({@link OpenPrView.reviewInputLastAttemptAt}
-   * — see {@link reviewInputBackoffElapsed}, the predicate this row feeds). KEYED TO
-   * ELAPSED TIME, NEVER ATTEMPT COUNT (design note verbatim: "a delay keyed to the
-   * number of attempts is a budget with pauses — it still exhausts monotonically and
-   * still ends in permanent silence"). A ROW in this table (rule 2, policy-as-data).
-   * NET-NEW, and deliberately NOT sourced from `plan/policy.yaml` (this task's own
-   * declared file list is `src/lib/sweep.ts` + `src/run-task.ts` + the two test
-   * files only) — a hardcoded literal in {@link DEFAULT_SWEEP_POLICY}, the same
-   * choice `pendingCeilingMinutes` above already made.
+   * W1-T1018 — THE ELAPSED-TIME BACKOFF that replaced permanent cessation: once an unchanged input
+   * reaches the cap the sweep still escalates, but the lane resumes after this long. KEYED TO
+   * ELAPSED TIME, NEVER ATTEMPT COUNT — a delay keyed to attempts is a budget with pauses, which
+   * exhausts monotonically and still ends in permanent silence.
    */
   reviewOrphanBackoffMinutes: number;
   /**
-   * W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half). A
-   * classified surface (a `sweep.disposed` row's own `disposition`) that at least this many
-   * DISTINCT PRs have been REPAIRED for (`acted: true`) inside {@link repairFilingWindowDays}
-   * is due for exactly ONE `repair#<surface>` §7B feedback entry — see {@link dueRepairFilings},
-   * this row's consumer. "One occurrence is a repair, a recurrence is a defect" (design note ii):
-   * a threshold of 1 would file on the very first repair, which this row's own
-   * `plan/policy.yaml` bound (min 2) forecloses.
+   * W1-T905 — "repair the instance, FILE THE CLASS". A classified surface that at least this many
+   * DISTINCT PRs have been repaired for inside {@link repairFilingWindowDays} is due for exactly
+   * one `repair#<surface>` §7B entry. One occurrence is a repair, a recurrence is a defect — so
+   * the row's own `plan/policy.yaml` bound (min 2) forecloses filing on the first repair.
    */
   repairFilingThreshold: number;
   /** W1-T905 — the RECURRENCE WINDOW (days) {@link repairFilingThreshold} counts distinct-PR
    *  repairs within. See {@link dueRepairFilings}. */
   repairFilingWindowDays: number;
   /**
-   * W1-T920 — gates the SUPERSESSION disposition row in {@link DISPOSITION_RULES}: with this
-   * `false` (the default), `OpenPrView.supersessionVerdict` is never consulted and the row never
-   * matches, byte-for-byte today's behaviour, no matter what a verdict says. `true` lets a
-   * `"superseded"` verdict (never a bare "unique"/"indeterminate" one, and never the PR's own
-   * resemblance to another) close the PR. A ROW in this table, not a special-cased read outside
-   * it (unlike `sweep.armSessionPrs`, which gates an ARM task-id resolution rather than a
-   * disposition): this flag governs exactly the same kind of threshold `staleDays` already does
-   * for the row immediately below it, so it lives beside it.
+   * W1-T920 — gates the SUPERSESSION row in {@link DISPOSITION_RULES}. `false` (the default)
+   * means `supersessionVerdict` is never consulted and the row never matches, byte-for-byte
+   * today's behaviour. `true` lets a `"superseded"` verdict — never a bare "unique" or
+   * "indeterminate", never the PR's own resemblance to another — close the PR.
    */
   supersessionDisposalEnabled: boolean;
   /**
-   * W1-T932 — gates whether a `"unique"` {@link SupersessionVerdict} may let the BARE-NUMBER
-   * `stale` row in {@link DISPOSITION_RULES} YIELD, so a concept PR is not disposed stale merely
-   * because a higher-numbered sibling concept is also open (the arithmetic in `run-task.ts`'s
-   * `resolveOpenPrTaskId` sets `supersededBy` on EVERY lower-numbered peer sharing a task,
-   * unconditionally — see this task's own rationale (1)). `false` (the default) preserves
-   * today's behaviour byte-for-byte: the bare-number row matches on `supersededBy != null`
-   * alone, no matter what any verdict says.
-   *
-   * DELIBERATELY A SEPARATE FLAG FROM {@link supersessionDisposalEnabled} immediately above, not
-   * a second use of it: that flag governs whether a verdict may CLOSE a PR (row 0's own
-   * `"superseded"` match); this one governs whether a verdict may SAVE one from row 1's
-   * arithmetic instead. Two different blast radii — closing the wrong PR loses work outright,
-   * while wrongly sparing one merely leaves an ordinary duplicate open a sweep pass longer — so
-   * each gets its own row and its own gate (design note ii: "a guard that works for ordinary
-   * duplicate PRs must keep working").
-   *
-   * Reads ONLY `pr.supersessionVerdict?.status === "unique"` — the verdict's own POSITIVE
-   * "checked, found no supersession" finding (see {@link SupersessionStatus}'s own doc), never
-   * `"indeterminate"` (an unreadable read is not a finding, design note iii) and never an absent
-   * verdict. FAILS CLOSED: no verdict, or one whose `status` is not literally `"unique"`, leaves
-   * the bare-number row matching exactly as it does today — an ordinary duplicate PR (which
-   * carries no verdict at all) is still disposed stale by that row regardless of this flag.
-   *
-   * NET-NEW, and deliberately NOT sourced from `plan/policy.yaml` (unlike
-   * `supersessionDisposalEnabled` above): this task's own declared file list is
-   * `src/lib/sweep.ts` + `test/sweep.test.ts` only, so this default lives as a hardcoded literal
-   * in {@link DEFAULT_SWEEP_POLICY} — mirrors how `pendingCeilingMinutes` (below) stays a
-   * literal rather than a collected policy row.
+   * W1-T932 — gates whether a `"unique"` verdict lets the BARE-NUMBER `stale` row YIELD, so a
+   * concept PR is not disposed stale merely because a higher-numbered sibling is open. Reads ONLY
+   * `status === "unique"` and FAILS CLOSED; `false` preserves today's behaviour byte-for-byte.
+   * // Why: a SEPARATE flag from {@link supersessionDisposalEnabled} — the blast radii differ.
    */
   conceptCoexistenceEnabled: boolean;
   /**
-   * W1-T984 — GATES THE `conflicted` DISPOSITION ROW, MIRRORING `supersessionDisposalEnabled`
-   * EXACTLY (a policy-as-data flag, default FALSE, that a row's `when` conjuncts on). Wiring a
-   * real per-PR conflict-evidence producer (`hydrateMergeConflictEvidence`, lib/open-prs-rest.ts)
-   * makes {@link OpenPrView.mergeConflict} populated for the first time in production — but
-   * {@link isPureConcurrentAddition} counts DELETIONS ONLY, so it CANNOT distinguish a genuine
-   * pure-concurrent-addition from an add/add collision (two sides adding the SAME PATH with
-   * DIFFERENT content, where the merge-base has no version of the file at all, so both deletion
-   * counts are structurally zero — see that predicate's own doc). Admitting on that untrusted
-   * signal is a judgement call W1-T984 had no evidence to make (rationale (5)/(6)): the design
-   * intends the dispatched fix worker to be the SECOND, semantic gate, but at that time that
-   * refusal path had never once been exercised, and the only two reconstructible admits on record
-   * were BOTH semantic collisions. W1-T984 therefore shipped the producer with this flag OFF and
-   * named turning it on "a LATER task's call (design note viii(b)), once the semantic predicate
-   * exists".
+   * W1-T984/W1-T2536 — GATES THE `conflicted` ROW. Shipped OFF awaiting a semantic predicate;
+   * turned ON because that predicate cannot live here — GitHub's COMPARE API never carries a
+   * HUNK, so only the dispatched fix worker, which merges in a worktree, can decide disjointness.
    *
-   * W1-T2536 IS THAT TASK, AND ITS ANSWER IS THAT THE SEMANTIC PREDICATE CANNOT LIVE HERE. The
-   * discriminator W1-T984 wanted — "are the two sides' added lines disjoint" — is not derivable
-   * from this evidence at all: `hydrateMergeConflictEvidence` (lib/open-prs-rest.ts) builds it
-   * from GitHub's COMPARE API, whose per-file answer is "how many lines did each side delete
-   * since the merge base" — a SUPERSET of git's real conflict set that never carries a HUNK.
-   * Only something holding the actual conflict hunks can decide disjointness, and in this system
-   * exactly one thing does: the dispatched fix worker, which merges in a worktree and reads the
-   * markers. The predicate W1-T984 asked for IS the worker; keeping the flag off until a purely
-   * textual one appeared was waiting for something structurally unavailable.
-   *
-   * WHAT MAKES ADMITTING SAFE IS THE FENCE DOWNSTREAM, NOT THE PREDICATE UPSTREAM — the argument
-   * W1-T984 never wrote down. A worker that resolves WRONGLY cannot merge the result: its push
-   * creates a NEW HEAD, and `remudero-review` is a required COMMIT STATUS (per-sha; branch
-   * protection requires it beside `ci-gate`), so the resolved head carries no verdict at all and
-   * is blocked until a fresh review posts AND passes. A resolution that clobbered the PR's own
-   * work fails that review on the PR's own proofs, which must hit head. So the worst case of
-   * admitting is a red PR that escalates — the SAME place a dirty PR lands today, minus one
-   * strike. "A wrong auto-resolution is worse than a strand" (W1-T94 design note iii) stays true
-   * and stays enforced; it is enforced by the gate, which can SEE the resolution, rather than by
-   * an admission predicate, which cannot.
-   *
-   * THE COST OF LEAVING IT OFF WAS MEASURED, NOT ASSUMED. With the flag off, the row below is the
-   * one every dirty PR reaches, and its refusal named a deletion unconditionally. On 2026-08-30
-   * the dominant real conflict shape on this repo was two PRs each ADDING a different `"path": N`
-   * key to `scripts/source-size-baseline.json` — zero deletions on BOTH sides, full evidence
-   * captured — so every one of them was refused by a sentence whose every disjunct was false.
-   * That row now names which disjunct actually fired (see its own comment).
-   *
-   * NET-NEW, and deliberately NOT sourced from `plan/policy.yaml` — the same choice
-   * `conceptCoexistenceEnabled` immediately above already made and recorded: a hardcoded literal
-   * in {@link DEFAULT_SWEEP_POLICY}, which keeps `plan/policy.yaml` out of this task's `files:`.
+   * WHAT MAKES ADMITTING SAFE IS THE FENCE DOWNSTREAM, NOT THE PREDICATE UPSTREAM: a wrong
+   * resolution mints a NEW HEAD, and `remudero-review` is a required per-sha status, so the worst
+   * case is a red PR that escalates. "A wrong auto-resolution is worse than a strand" stays
+   * enforced — by the gate, which can SEE the resolution. // Why: docs/forensics/sweep.md.
    */
   mergeConflictAdmissionEnabled: boolean;
   /**
-   * W1-T2345 (MEASURED 2026-08-26, `sweep.disposed` ledger rows, 44,603 rows across 1,156 PRs) —
-   * THE UNBOUNDED-IDENTICAL-DISPOSITION BOUND: once one PR's (disposition, head_sha) pair — see
-   * {@link repeatDispositionStreaksFromLedger}'s own doc for why the KEY excludes the rendered
-   * `reason` text — repeats this many CONSECUTIVE `sweep.disposed` rows, the sweep escalates via
-   * the SAME `deps.escalate()` the blocked-ambiguous rung already calls.
+   * W1-T2345 — THE UNBOUNDED-IDENTICAL-DISPOSITION BOUND: a repeated (disposition, head_sha) pair
+   * escalates once at this many consecutive rows. See {@link repeatDispositionStreaksFromLedger}
+   * for why the key excludes the rendered `reason`.
    *
-   * W1-T2382 — THE GUARANTEE IS ONCE PER HEAD *PER ROTATION WINDOW*, NOT ONCE PER HEAD. This doc
-   * said "exactly once (never again until the head moves)" and the storage layer does not provide
-   * that. The streak and the `escalated` marker are both folded out of `sweep.disposed` ROWS, and
-   * `rotateLedger`'s PASS 3 collapses every row for one `pr@head` to a single line, PREFERRING the
-   * last `acted: true` row. The trip's `repeat_escalated: true` flag rides an `acted: false` row —
-   * so the evidence is not shed by chance, it is SELECTED AGAINST. After a rotation the fold sees a
-   * fresh run of length 1 and the bound re-arms.
-   *
-   * MEASURED: #3025 escalated at streak 188 and again at EXACTLY 50 three hours later on the
-   * identical head; #3039 at 106 then 50. The seconds land exactly on the bound because the streak
-   * restarted at 1 — rotation at 06:48:35Z, second fire at 08:53:16Z, 124.7 minutes against a
-   * measured 2.49-2.65 min/row and a bound of 50 which is roughly 125 minutes.
-   *
-   * AND THE WINDOW IS BYTE-DRIVEN, NOT CLOCK-DRIVEN. `rotateLedger` fires on a 4 MiB size ceiling,
-   * so the window is SHORTEST EXACTLY WHEN THE FLEET IS BUSIEST — which is when stuck heads
-   * accumulate. There is no interval a reader can quote; only a volume.
-   *
-   * THE COST, MEASURED AND RECORDED SO THIS IS NOT RE-OPENED: roughly 5-6 re-fires per day per
-   * stuck head, against roughly 543 dispositions per day without the counter — about 99% of the
-   * intended reduction is still delivered. One extra fire costs one ledger row plus a comment on an
-   * ALREADY-OPEN issue, and #3085's digest reader dedups by PR number, so it gains nothing from the
-   * repeat. THIS IS A RECORD, NOT A FIX: the remedy would be editing rotation's PASS 3, the
-   * highest-blast-radius edit available for a defect costing one row every four hours, and
-   * `src/lib/ledger.ts` is deliberately outside this task's `files:` — that exclusion IS the ruling.
-   *
-   * WHY 50, DERIVED AGAINST THE MERGE-TIME POPULATION, NOT PICKED: the measured PR's longest
-   * identical-verdict run (keyed this way) was 186, reached at 132 minutes of PR age. Across the
-   * last 98 merged PRs, median time-to-merge is 24 minutes and 8% exceed four hours — N=50 trips
-   * on that SAME 8% (a bound at N=20 or N=30 would instead fire on 28.6%/17.4% of ALL PRs, i.e. on
-   * ordinary, healthy work still inside the p75 the brief warns about). N=50 also fires 3.5x
-   * earlier than the existing 8-hour board-review rung (W1-T2304) on the case that motivated
-   * this — the two arms are ORTHOGONAL (that rung is age-triggered and misses a PR that is stuck
-   * but young; this one is repetition-triggered and misses a PR that is merely old while still
-   * making progress), never a retune of one another.
-   *
-   * NEVER PRE-EMPTS {@link pendingCeilingMinutes} — that field's own doc says it "stays exactly as
-   * it was" for this task, and 132 minutes (this bound's OWN measured trip point) is already past
-   * the 60-minute ceiling, so a `wait`-turned-`blocked-ambiguous` PR always crosses that ceiling
-   * first. NET-NEW, and deliberately NOT sourced from `plan/policy.yaml` — the same choice
-   * `conceptCoexistenceEnabled`/`mergeConflictAdmissionEnabled` above already made: a hardcoded
-   * literal in {@link DEFAULT_SWEEP_POLICY}, since this task's own `files:` is `src/lib/sweep.ts`
-   * + `test/sweep.test.ts` only.
+   * ONCE PER HEAD PER ROTATION WINDOW, NOT ONCE PER HEAD (W1-T2382): rotation prefers the last
+   * `acted: true` row while the marker rides an `acted: false` one, so the evidence is SELECTED
+   * AGAINST and the bound re-arms. The window is BYTE-DRIVEN, so it is shortest when the fleet is
+   * busiest. NEVER PRE-EMPTS {@link pendingCeilingMinutes}.
+   * // Why: 50 is derived against the merge-time population — docs/forensics/sweep.md.
    */
   repeatDispositionBound: number;
   /**
-   * W1-T2439 (half two) — HOW MANY PLAN-FILING PRs THE NON-SPAWNING REVIEW LANE MAY ADMIT PER
-   * LIGHT PASS. The spawning lane is bounded by {@link SweepPolicy.reviewLanes} (see
-   * {@link selectReviewAdmissions}); this
-   * governs only PRs whose {@link OpenPrView.isPlanFiling} reads `true`, whose review takes the
-   * deterministic path and spawns no judge in 98 percent of cases.
+   * W1-T2439 — HOW MANY PLAN-FILING PRs THE NON-SPAWNING REVIEW LANE MAY ADMIT PER LIGHT PASS.
+   * The spawning lane is bounded by {@link reviewLanes} instead.
    *
-   * THE NUMBER IS DERIVED, NOT PICKED, from the two quantities the shard requires and both
-   * measured at this sha:
-   *
-   *   COST. A deterministic review costs FIVE GitHub calls: one `gh pr view --json
-   *   statusCheckRollup`, plus TWO guarded posts (pending and final) each of which is one
-   *   `fetchLifecycle()` read plus one `POST repos/{owner}/{repo}/statuses/{sha}`. The cheap path
-   *   is cheap, NOT free — the daemon hit `API rate limit already exceeded` repeatedly on
-   *   2026-08-27, which is why this is a number and not the absence of one.
-   *
-   *   CADENCE. `plan/policy.yaml`'s `pollIntervalMs` is 60_000 and the same file records healthy
-   *   sweep ticks at 61.8 s median, so a pass runs about 60 times an hour.
-   *
-   *   QUEUE. The observed wait this bound has to clear is p50 94 s against 3.0 s of work — about
-   *   1.6 passes, so a queue two deep at the median.
-   *
-   * SO: a bound of 3 clears the median queue in ONE pass, and its worst case costs
-   * 3 x 5 x 60 = 900 calls/hour, 18 percent of the 5,000/hour core budget — bounded, statable,
-   * and well under the lane it exists to unblock. A bound of 8 would clear p90 in one pass and
-   * cost 2,400/hour (48 percent), which is the shape this repo has rejected before. 3 is the
-   * smallest number that satisfies "more than one" AND clears the median.
+   * THE NUMBER IS DERIVED, NOT PICKED, from three measured quantities: a deterministic review
+   * costs five GitHub calls, a pass runs about 60 times an hour, and the queue is two deep at the
+   * median. // Why: the daemon hit "API rate limit already exceeded" — docs/forensics/sweep.md.
    */
   planFilingAdmissionBound: number;
 }
 
 /**
- * The default policy — 14-day stale window, 2 fix strikes (mirrors
- * fixStrikeCap), 10-PR WIP limit, 2 dispatch lanes (W1-T172, start N=2),
- * 60-minute pending ceiling, $500/day cost ceiling. The default is a BOUNDED
- * fail-safe (rule 2: an absent policy value falls back to a bounded default,
- * never unbounded spend), RAISED from $150 to $500 on 2026-08-04 after the
- * governor fired in production for the first time — $152.28 observed against
- * the $150 ceiling, deferring every dispatch (`daemon.cost_governor` /
- * `dispatch_deferred_budget`, run DAEMON-1785853416568) — on a day whose spend
- * was roughly ten times the prior day's. The $150 figure predated any
- * measurement of a heavy day.
+ * The shipped default policy. A BOUNDED FAIL-SAFE (rule 2): an absent value falls back to a
+ * bounded default, never to unbounded spend.
  *
- * THE TRADE-OFF IS DELIBERATE AND MUST NOT BE MISREAD: at $500 this ceiling
- * would NOT by itself have caught the $206/60-run W1-T1 incident, which the
- * $150 figure was chosen against. It remains a bound on RUNAWAY spend, not a
- * budget — the per-run `DEFAULT_BUDGET_USD` cap and the INDEPENDENT headroom
- * governor are the other two limits, and the headroom window was at 28% of a
- * 95% limit when this was raised, nowhere near binding.
+ * THE COST CEILING'S TRADE-OFF MUST NOT BE MISREAD: it bounds RUNAWAY spend, not a budget, and
+ * would not by itself have caught the incident the original figure was chosen against. The
+ * per-run cap and the headroom governor are the other two limits.
  *
- * W1-T253 (P37 CONSUMERS): `staleDays`/`strikeCap`/`wipLimit` are three fields that task's
- * substrate (W1-T252) collected into `plan/policy.yaml` — read here via {@link
- * loadDefaultPolicy} (self-locates the policy file from its own install location, never cwd)
- * rather than a source literal, so a plan-reviewed policy edit retunes them with zero code
- * change. W1-T325 collects `dispatchLanes` the same way, closing the gap its own doc comment
- * (above) and W1-T170/W1-T172's merged task notes already described as a policy row while the
- * source still carried a literal. W1-T330 collects `dailyCostCeilingUsd` the same way — a
- * RELOCATION, not a retune (the value is unchanged at whatever plan/policy.yaml's row carries).
- * `pendingCeilingMinutes` is NOT a collected constant for this task and stays exactly as it was.
- * W1-T1049 collects `reviewLanes` similarly (a plan-data row a reviewed PR retunes with zero
- * code change) but DELIBERATELY NOT via {@link loadDefaultPolicy}/`POLICY_SWEEP` above — see
- * {@link loadReviewLanesPolicy}'s own doc for why this one field reads `plan/policy.yaml`
- * directly instead of through `src/lib/policy.ts`'s schema.
- *
- * W1-T331 — `dailyCostCeilingUsd` ON THIS OBJECT IS FROZEN AT IMPORT, DELIBERATELY UNCHANGED BY
- * THAT TASK: `loadDefaultPolicy()` below runs once, at module load, and this const is never
- * rebuilt afterward — a RUNNING daemon holds whatever value was current at its own boot no
- * matter how `plan/policy.yaml` changes later (W1-T330 put the ceiling IN the policy row; it did
- * not make a live process re-read that row). `checkCostGovernor`'s own doc, immediately below,
- * covers who reads the ceiling LIVE instead: `run-task.ts`'s `costGovernorGateFor` resolves a
- * per-consultation `dailyCostCeilingUsd` argument when the daemon's tick loop supplies one
- * (`daemon.ts`'s `runDaemon`, via the injected `reloadDailyCostCeilingUsd` dep, snapshotted once
- * per tick), falling back to THIS frozen default only when no live value is available (e.g. the
- * bounded `rmd drain` one-shot path, or a caller that never wires the reload dep at all). This
- * default therefore stays exactly what its name says — the SHIPPED default / degraded-read
- * fallback — never the live daemon's operative ceiling.
+ * Several rows are COLLECTED from `plan/policy.yaml` rather than written as source literals, so a
+ * plan-reviewed edit retunes them with no code change. Each was a RELOCATION, never a retune.
+ * // Why: this object is FROZEN AT IMPORT (W1-T331) — docs/forensics/sweep.md.
  */
 const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
 
 /**
  * W1-T1049 — reads `plan/policy.yaml`'s `sweep.reviewLanes` row DIRECTLY, never through
- * `src/lib/policy.ts`'s `loadDefaultPolicy`/`PolicyValues` schema `POLICY_SWEEP` above goes
- * through. That module is deliberately NOT one of this task's declared `files:`
- * (`src/lib/sweep.ts` + `plan/policy.yaml` + `test/review-lane-budget.test.ts` only) —
- * registering a new field in its `PolicyValues` interface and `EXPECTED_ORIGIN_KIND` registry
- * is a second concern this shard does not reopen (design (i): "ONE CONCERN").
- *
- * Validated the SAME way `policy.ts`'s own (unexported) `numberField` validates every other
- * bounded numeric row — finite `value`/`min`/`max`, `min <= value <= max` — so a malformed row
- * fails LOUD at load, exactly like every other policy row in this repo, never a silent
- * fallback that could mask a bad edit (rule 2: an absent/malformed policy value is a refused
- * load, not unbounded or silently-default behavior). `installPolicyPath`/`PolicyError` are
- * both pre-existing exports of `policy.ts` — referencing them is not an edit to that file.
+ * `policy.ts`'s schema, which is deliberately outside this task's declared files. Validated the
+ * same way every other bounded numeric row is, so a malformed row fails LOUD at load rather than
+ * falling back silently and masking a bad edit (rule 2).
  */
 export function validateReviewLanesRow(row: unknown): number {
   if (typeof row !== "object" || row === null) {
@@ -1118,13 +672,10 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
 };
 
 /**
- * W1-T923 — one GATE failure (never an unmet acceptance criterion — see
- * {@link OpenPrView.actionableGateFailures}'s own doc) whose remedy is a SINGLE,
- * unambiguous form, so the fix rung can act on it directly. `reason` is carried
- * VERBATIM from the ledger's structured `reasons` array (the SAME array
- * {@link CriterionVerdict.reason} is built from for an unmet criterion) — never
- * parsed out of `failure_reason` prose (design note vi: structured, or honestly
- * absent, never a regex over free text presented as robust).
+ * W1-T923 — one GATE failure whose remedy is a SINGLE, unambiguous form, so the fix rung can act
+ * on it directly. Never an unmet acceptance criterion — see {@link OpenPrView.actionableGateFailures}.
+ * `reason` is carried VERBATIM from the ledger's structured `reasons` array, never parsed out of
+ * `failure_reason` prose: structured, or honestly absent, never a regex over free text.
  */
 export interface ActionableGateFailure {
   reason: string;
@@ -1145,27 +696,18 @@ export interface OpenPrView {
   /** Rolled-up required-checks state on the head. */
   checksState: "green" | "red" | "pending" | "none";
   /**
-   * W1-T114: ISO-8601 timestamp of the NEWEST required check's start on this
-   * head — the WAIT disposition's only time input, populated when
-   * `checksState === "pending"` (undefined/unparseable otherwise, including
-   * when the real gateway has not been wired to surface it yet). Absent ⇒ the
-   * WAIT/stale-pending rows never match (fail toward the pre-existing
-   * catch-all escalate, never a silent indefinite wait on state we can't date).
+   * W1-T114 — ISO-8601 start of the NEWEST required check on this head, the WAIT disposition's
+   * only time input. Populated when `checksState === "pending"`, undefined otherwise. Absent
+   * means the WAIT and stale-pending rows never match, failing toward the catch-all escalate
+   * rather than an indefinite silent wait on state we cannot date.
    */
   checksPendingSince?: string;
   /**
-   * W1-T913 — THE OWNERSHIP RECORD'S OTHER HALF (the ledger side lives in `lib/review.ts`'s
-   * `review.pending_posted` line / {@link "./review.js".lastPendingReviewStatusFromLedger}): the
-   * `ts` this run's `postReviewPending` posted its CURRENT-head pending at, when `reviewState ===
-   * "pending"`. This is the staleness clock the post-review disposition row below needs — a naive
-   * pending post would make `reviewState` read "pending" forever and the post-review row (which
-   * used to key on `reviewState === "none"` alone) would never offer this head again, silently
-   * stranding a PR whose owning run died mid-review. `undefined` when unreadable (rotation lost
-   * the line, or the record belongs to a DIFFERENT head than the one currently observed) —
-   * deliberately read as STALE, never as fresh, by {@link reviewPendingIsStale}: the safe
-   * direction here is re-driving an already-finished review (idempotent — see
-   * `postReviewPending`'s own exact-input guard, with a legacy per-head fallback), never stranding one whose state we can't
-   * date.
+   * W1-T913 — when the current head's pending was posted, the staleness clock the post-review row
+   * needs. `undefined` reads as STALE rather than fresh: re-driving a finished review is
+   * idempotent, stranding one whose state we cannot date is not.
+   * // Why: a naive pending post makes `reviewState` read "pending" forever, so a row keyed on
+   * // "none" alone would never offer the head again — docs/forensics/sweep.md.
    */
   reviewPendingSince?: string;
   /**
@@ -1176,84 +718,35 @@ export interface OpenPrView {
    */
   reviewPendingOwnerDead?: boolean;
   /**
-   * W1-T2299 — ISO-8601 timestamp the CURRENT `reviewState` reading was posted at, when readable.
-   * For a terminal state (`"success"`/`"failure"`) this is the `remudero-review` commit status's
-   * own `created_at` — the SAME REST field {@link RollupCheckEntry.startedAt}'s own doc already
-   * names as a StatusContext's `startedAt` mapping ("a status context's mapped from createdAt"),
-   * read here off the identical rollup entry {@link reviewStateFromRollup} (run-task.ts) already
-   * scans, at NO extra request.
+   * W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
+   * already scanned, at no extra request.
    *
-   * THIS IS NOT A BODY-EDIT TIMESTAMP, AND MUST NEVER BE DOCUMENTED AS ONE (the task's own design
-   * note (iii)): GitHub's pull-request object exposes exactly four time fields — `created_at`,
-   * `updated_at`, `closed_at`, `merged_at` — and none of them is body-specific. The post-review
-   * disposition row that reads this field alongside {@link lastActivityAt} therefore detects
-   * ACTIVITY AFTER A VERDICT (a comment, a label, a title edit, a review comment, OR a body edit —
-   * indistinguishable at this field's resolution), never a body edit in particular. A gaming edit
-   * buys a re-judgement, not a pass — the reviewer posts a FRESH verdict either way and the prior
-   * one is never carried forward — which is what makes admitting more than strictly bodies-changed
-   * tolerable; see that row's own doc for the bound that keeps it from being exploitable.
-   *
-   * `undefined` when the rollup carries no `remudero-review` entry, or its timestamp is absent —
-   * read as "cannot date the verdict", which the consuming predicate treats as NOT superseded
-   * (fail CLOSED toward the pre-existing behaviour: a failing head with no readable verdict
-   * timestamp stays exactly as unofferable as it was before this field existed).
+   * NOT A BODY-EDIT TIMESTAMP, AND MUST NEVER BE DOCUMENTED AS ONE: GitHub exposes no
+   * body-specific time field, so this detects ACTIVITY AFTER A VERDICT. A gaming edit buys a
+   * re-judgement, not a pass. `undefined` fails closed, treated as NOT superseded.
    */
   reviewVerdictPostedAt?: string;
   /**
-   * The unmet acceptance criteria from a failing review ([] otherwise). For any task-id-less PR,
-   * `buildOpenPrViews` can populate this from the ledger under the same synthetic `PR-<n>` id
-   * `reviewCommand`/`escalationTaskIdFor` already use. A non-empty list routes the observed
-   * failure to `blocked-fixable` and the existing synthetic fix task; it does not make the PR
-   * attributable to a plan task or widen `criteriaRecoverable` below.
+   * The unmet acceptance criteria from a failing review, `[]` otherwise. For a task-id-less PR,
+   * `buildOpenPrViews` populates this from the ledger under the same synthetic `PR-<n>` id
+   * `reviewCommand` already uses. A non-empty list routes to `blocked-fixable`; it does not make
+   * the PR attributable to a plan task or widen {@link criteriaRecoverable} below.
    */
   unmetCriteria: CriterionVerdict[];
   /**
-   * W1-T440: true when a `Remudero-Task:` trailer resolved a task id, so `unmetCriteria`
-   * above is attributable to a plan task. False means no trailer resolved; `unmetCriteria` may
-   * still contain the task-id-less review's own evidence via its synthetic `PR-<n>` key. Row 7
-   * of {@link DISPOSITION_RULES} reads this only after both structured fixable lists are empty,
-   * to say which empty a failing review with no unmet criteria actually is — a genuine
-   * contradiction (criteria WERE checked and none came back unmet) versus an unrecoverable
-   * one (there was no trailer to check them against). `undefined` (no producer has set it,
-   * e.g. an older fixture) is treated the SAME as `true` — the pre-existing "contradictory"
-   * wording — so this is additive, never a silent behavior change for an unset field.
-   *
-   * DELIBERATELY NOT WIDENED by the synthetic-key ledger read above: that read can populate
-   * `unmetCriteria` for any task-id-less PR, but this field still answers ONLY "did a
-   * `Remudero-Task:` trailer resolve a task id" — test/openpr-taskid-resolver.test.ts locks a
-   * plan-only filing PR to `criteriaRecoverable: false` regardless, so widening this field's
-   * meaning would read as silently crediting an unattributed PR, which #1527 forbids.
+   * W1-T440 — true when a trailer resolved a task id, so {@link unmetCriteria} is attributable to
+   * a plan task. Row 7 reads it only after both fixable lists are empty, to say WHICH empty a
+   * failing review is. `undefined` is treated as `true`, so this is additive.
+   * // Why: deliberately NOT widened by the synthetic-key read — widening would read as crediting
+   * // an unattributed PR, which #1527 forbids and a test locks.
    */
   criteriaRecoverable?: boolean;
   /**
-   * W1-T923 — a SIBLING list to {@link unmetCriteria}, never a widening of it. The motivating
-   * gap: PR #1991 failed review with `unmet_criteria: []` (every acceptance criterion passed,
-   * 12/12 `executed_pass`) yet its `failure_reason` named the exact remedy — a GATE failure,
-   * not an unmet criterion, so both `blocked-fixable` rows below (`unmetCriteria.length > 0` /
-   * `isBlockedCi`) missed it and it fell to row 7's escalate-only "criteria unrecoverable/
-   * contradictory", where NOTHING about the named remedy is ever read. This list is what a
-   * gate failure's OWN structured remedy populates instead.
-   *
-   * ONE ENTRY PER GATE FAILURE WITH A SINGLE-FORM REMEDY ONLY (design note iv): a remedy that
-   * offers a CHOICE between forms (#1991's own falsifier — the provenance check accepted either
-   * `Chosen (RECOMMENDED, auto)` OR an operator-attribution line, crediting different authors) is
-   * EXCLUDED from this list entirely, never included-but-flagged — a worker picking the wrong one
-   * of several named options misattributes a ratified ruling, which is worse than asking a human.
-   *
-   * NEVER KEYED ON `failure_class` (design note v): PR #1991 is classed `test_theater` — the
-   * class this design would otherwise treat as unautomatable — while its `failure_reason` names
-   * two exact strings; keying on that field alone mis-sorts the very case this list exists for.
-   * Whatever populates this list must key on the STRUCTURED presence of a single-form remedy,
-   * never on which bucket the classifier sorted the failure into.
-   *
-   * `criteriaRecoverable` (immediately above) is DELIBERATELY untouched by this field's own
-   * producer — a PR can carry `unmetCriteria: []`, `criteriaRecoverable: false` (no trailer to
-   * resolve criteria from) AND a non-empty `actionableGateFailures` all at once; that combination
-   * stays legible rather than being collapsed into one signal (design note i).
-   *
-   * `[]`/undefined when no gate failure named a single-form remedy — DISPOSITION_RULES' row 7
-   * (blocked-ambiguous, "no actionable unmet criteria") stays byte-identical for every PR that
-   * does not carry this list (design note iii).
+   * W1-T923 — a SIBLING list to {@link unmetCriteria}, never a widening of it: what a GATE
+   * failure's own structured remedy populates. ONE ENTRY PER SINGLE-FORM REMEDY ONLY — a remedy
+   * offering a CHOICE is EXCLUDED entirely, never included-but-flagged, because a worker picking
+   * the wrong option misattributes a ratified ruling. NEVER KEYED ON `failure_class`.
+   * // Why: #1991 passed every criterion yet named its exact remedy — docs/forensics/sweep.md.
    */
   actionableGateFailures?: ActionableGateFailure[];
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
@@ -1261,50 +754,20 @@ export interface OpenPrView {
   /** A NEWER open PR crediting the same task supersedes this one. */
   supersededBy?: number;
   /**
-   * W1-T920 — a {@link SupersessionVerdict} for this PR, gated behind
-   * `policy.supersessionDisposalEnabled` (default OFF) in `DISPOSITION_RULES`'s supersession row.
-   * Distinct from {@link supersededBy} immediately above: that field is a bare NUMBER, matched
-   * unconditionally (no policy gate) purely on "a newer open PR shares this task's trailer" — the
-   * kind of IDENTITY match design note (ii) forbids relying on alone (the #1873/#1874 falsifier:
-   * byte-identical titles and file lists, the better one decided by an ARGUED difference, never a
-   * match). This field instead carries a REASON — evidence a detector is expected to have
-   * verified before ever claiming `"superseded"` — and the rows it feeds read ONLY `status`,
-   * never any of the PR's own fields, so two PRs identical in every OTHER respect are still
-   * disposed however their OWN verdicts read.
-   *
-   * TWO CONSUMER ROWS as of W1-T932, not one: the original CLOSE row (`status === "superseded"`,
-   * gated by `policy.supersessionDisposalEnabled`) and a second row that lets the bare-number
-   * `supersededBy` row YIELD when `status === "unique"`, gated separately by
-   * `policy.conceptCoexistenceEnabled` — see that field's own doc for why the gates are kept
-   * apart. W1-T2779 adds one unconditional, positive yield to that second row for
-   * `status === "complementary"`: a plan-only filing and its non-plan implementation are stages,
-   * not competing concepts, so the experimental concept flag does not govern them.
-   *
-   * SCOPE (honest, mirrors how `pendingAnswer`/`isPlanFiling` shipped their mechanism ahead of
-   * their producer): this field, {@link SupersessionVerdict}, and its `DISPOSITION_RULES` rows
-   * are the full MECHANISM, wired end-to-end and unit-tested here — but nothing in `run-task.ts`
-   * populates it yet. THE DETECTOR (a trailer scan + diff comparison, per design note (iv)'s
-   * corpus-control requirement) is a SEPARATE, out-of-scope shard (this task's own design note,
-   * "WHAT MUST NOT BE BUILT") — `supersessionVerdict` is therefore always `undefined` in the real
-   * gateway today, so neither flag being ON changes anything in production until that detector
-   * lands and wires a producer here. See `KNOWN_UNWIRED` (lib/producer-completeness.ts).
+   * W1-T920 — a {@link SupersessionVerdict} for this PR, gated and default OFF. Distinct from
+   * {@link supersededBy}: that is a bare NUMBER matched on a shared trailer, the IDENTITY match
+   * design note (ii) forbids relying on alone. This carries a REASON, and the rows reading it read
+   * ONLY `status`, never the PR's own fields. Three consumer rows: close on `"superseded"`, yield
+   * on `"unique"` behind its own flag, and W1-T2779's unconditional yield on `"complementary"`.
+   * SCOPE (honest): fully wired but unpopulated, so neither flag changes production today.
    */
   supersessionVerdict?: SupersessionVerdict;
   /** ISO-8601 timestamp of the PR's last activity (for the stale window). */
   lastActivityAt: string;
   /**
-   * W1-T1201 — ISO-8601 timestamp of the PR's CREATION, read ONLY by {@link deriveDisposition}'s
-   * age clamp: A PR CANNOT BE IDLE LONGER THAN IT HAS EXISTED, so the age fed to
-   * `DISPOSITION_RULES` is the LESSER of "days since last activity" and "days since this
-   * timestamp" — the incident this closes: eleven live PRs, hours old, were closed `abandoned —
-   * no activity in 400d` by a shifted-clock test run, because `ageDays` (derived from
-   * `lastActivityAt` alone) had no upper bound relative to the PR's own creation.
-   *
-   * OPTIONAL so every existing fixture and producer stays valid — absent or unparseable reads as
-   * NO bound (today's pre-clamp arithmetic, unchanged), never as "just created", the same
-   * fail-toward-today's-behaviour default this module gives every field a caller hasn't wired
-   * yet (mirrors `checksPendingSince`/`supersessionVerdict` — see `KNOWN_UNWIRED`,
-   * lib/producer-completeness.ts).
+   * W1-T1201 — read ONLY by {@link deriveDisposition}'s age clamp: A PR CANNOT BE IDLE LONGER THAN
+   * IT HAS EXISTED. Absent or unparseable reads as NO bound, never as "just created".
+   * // Why: eleven live PRs, hours old, were closed "no activity in 400d" by a shifted clock.
    */
   createdAt?: string;
   /** The head commit sha — keys fix-dispatch idempotence (a new push re-earns a strike). */
@@ -1320,93 +783,45 @@ export interface OpenPrView {
    * onto a Dependabot branch) and never the clarification rung. */
   isDependabot?: boolean;
   /**
-   * W1-T528: is this PR a DRAFT? The operator's hold, and — once GitHub's own auto-merge is
-   * armed — the ONLY veto {@link selectUpdateBranchTarget} still has to check for itself
-   * (a red/blocked/already-current PR is already excluded by {@link armedButStalled}'s own
-   * two-fact filter, never re-checked here). `true` excludes a PR from that selection; unset
-   * reads as "not a draft", the SAME fail-open default this module applies to every other
-   * unread fact (e.g. an unread `mergeState`, {@link armedButStalled}'s own doc).
-   *
-   * PRODUCER WIRED: `mapRestPr` (lib/open-prs-rest.ts) carries GitHub's `draft` through as
-   * `OpenPrRest.isDraft`, and `buildOpenPrViews` (run-task.ts) assigns it here, so the
-   * exclusion below fires against the real gateway rather than only in unit tests. This
-   * shipped one PR later than the mechanism: the original W1-T528 `files:` (Rule 19)
-   * excluded `lib/open-prs-rest.ts`, which left the field with NO producer and failed
-   * `test/producer-completeness.test.ts` — the standing check that stops an unwired tenth
-   * field from landing silently. Wiring it was the smaller correction, because the field
-   * guards an ACTION (this is the only thing standing between the update rung and a PR the
-   * operator has deliberately put on hold), so allowlisting it in `KNOWN_UNWIRED` would have
-   * shipped an inert safety exclusion.
-   *
-   * `draft` IS returned by the `/pulls` LIST endpoint — it is part of GitHub's
-   * `pull-request-simple` schema, unlike {@link RestPullRow.merged}, whose absence from list
-   * rows caused the 2026-07-31 merged-ness incident. `undefined` therefore means "GitHub
-   * omitted it", not "not a draft"; the check below is `=== true`, so an absent field leaves
-   * a PR eligible for update. That fail-open direction is deliberate and narrow: GitHub
-   * refuses to arm auto-merge on a draft in the first place, and only ARMED PRs reach here,
-   * so the exposure is an operator drafting an already-armed PR.
+   * W1-T528 — the operator's hold, and once auto-merge is armed the ONLY veto
+   * {@link selectUpdateBranchTarget} still checks for itself. The check is `=== true`, so an
+   * absent field leaves a PR eligible. That fail-open direction is narrow and deliberate: GitHub
+   * refuses to arm a draft and only ARMED PRs reach here, so the exposure is an operator drafting
+   * an already-armed PR. Unlike {@link RestPullRow.merged}, `draft` IS in GitHub's list schema.
    */
   isDraft?: boolean;
   /**
-   * W1-T196: true when this PR is a plan-FILING PR — one that introduces new
-   * task(s) into `plan/tasks.yaml` and, per W1-T136 criterion 5, deliberately
-   * carries NO `Remudero-Task:` trailer (lib/plan-pr-emitter.ts's correctness
-   * rule: crediting a filing PR's own trailer would mark the task it just
-   * filed DONE on merge, before it is ever built). A `taskId`-unresolved PR
-   * with this true is a KNOWN, non-emergency attribution gap — the sweep
-   * stands down instead of escalating a `[BLOCKED] UNKNOWN: PR #...` issue
-   * with no operator-decidable question (the #440 fixture). MUST be a
-   * POSITIVE signal read from the emitter's own output (e.g. the
-   * `filingAcceptanceCriteria` claim text uniquely present in a filing PR's
-   * body) — never inferred from the absent trailer alone (that would also
-   * swallow a genuinely broken/missing trailer on an IMPLEMENTING PR, a real
-   * defect worth surfacing) and never inferred from the diff touching only
-   * `plan/**` (a hand-authored plan PR would misclassify).
-   *
-   * SCOPE (honest, mirrors how `pendingAnswer`/`reviewOrphanedByPush` shipped
-   * their mechanism ahead of their producer): this field and the stand-down
-   * it drives in `runSweep` are the full MECHANISM, wired end-to-end and
-   * unit-tested here — but `run-task.ts`'s `buildOpenPrViews` does not
-   * populate it yet. Until that producer wiring lands, this is always
-   * `undefined` in the real gateway, so every unattributable PR keeps
-   * escalating exactly as before this field existed (fail-open toward
-   * surfacing, never silently swallowing a real defect by omission).
+   * W1-T196 — true when this PR files new tasks and so deliberately carries NO trailer; crediting
+   * a filing PR's own trailer would mark the task DONE on merge, before it is built. MUST be a
+   * POSITIVE signal from the emitter's own output — never inferred from the absent trailer, which
+   * would swallow a genuinely broken one, and never from the diff touching only `plan/**`.
+   * SCOPE (honest): wired and tested, but no producer sets it, so every unattributable PR keeps
+   * escalating — fail-open toward surfacing.
    */
   isPlanFiling?: boolean;
   /** The failing review's one-line summary (context for fix/escalate). */
   reviewSummary?: string;
   /**
-   * Failing required-check name+log-tail evidence — the W1-T94 ci-log fix
-   * mode's input (W1-T100, the #170 fix). Populated when `checksState ===
-   * "red"`, or when a child named by ci-gate's checked-in REQUIRED contract
-   * has already concluded red while the aggregate is pending; `[]`/undefined
-   * when no failing-check detail could be captured (the fix prompt then
-   * degrades to "no detail captured", `renderFixPrompt`, never a crash).
+   * Failing required-check name and log-tail evidence — the W1-T94 ci-log fix mode's input
+   * (W1-T100, the #170 fix). Populated when `checksState === "red"`, or when a child named by
+   * ci-gate's checked-in REQUIRED contract concluded red while the aggregate is still pending.
+   * `[]`/undefined degrades the fix prompt to "no detail captured", never a crash.
    */
   ciFailures?: CiFailure[];
   /**
-   * W1-T1223 (design i) — required checks whose LATEST attempt is CANCELLED with no later
-   * attempt on this head, distinct from a genuine failure ({@link ciFailures} names both; this
-   * names only the cancellations). Populated ALONGSIDE `ciFailures`, when `checksState ===
-   * "red"`; `[]`/undefined when checks aren't red or nothing cancelled contributed to the red
-   * verdict. Never makes `checksState` anything but "red" — see {@link CancelledRequiredCheck}'s
-   * own doc.
+   * W1-T1223 — required checks whose LATEST attempt is CANCELLED with no later attempt on this
+   * head, distinct from a genuine failure ({@link ciFailures} names both; this names only the
+   * cancellations). Populated alongside `ciFailures` when `checksState === "red"`. Never makes
+   * `checksState` anything but "red" — see {@link CancelledRequiredCheck}.
    */
   cancelledRequiredChecks?: CancelledRequiredCheck[];
   /** W1-T2504/W1-T2599 — concluded red children from ci-gate's checked-in REQUIRED contract. */
   redRequiredChecks?: string[];
   /**
-   * W1-T2340 — this head's own workflow runs (`actions/runs` filtered by head sha), each with
-   * its jobs' OWN status — the raw input {@link stalledRunReason} reads. `undefined` when the
-   * listing could not be fetched at all (never degrades to `[]`, which would silently read as
-   * "GitHub scheduled nothing" instead of "we could not check") — {@link stalledRunReason}
-   * refuses to report a stall on `undefined`, the same fail-toward-no-positive-claim direction
-   * {@link checksStateFromRollup} takes on an unreadable required-contexts list.
-   *
-   * NOT YET POPULATED by the real gateway — wiring `run-task.ts`'s live populate is separate
-   * follow-up work, outside this task's declared `files:`. Every existing caller that never
-   * sets this field keeps reading `undefined`, so the new disposition row below never fires for
-   * them.
+   * W1-T2340 — this head's own workflow runs, the raw input {@link stalledRunReason} reads.
+   * `undefined` when the listing could not be fetched, never degrading to `[]`, which would read
+   * as "GitHub scheduled nothing" instead of "we could not check". NOT YET POPULATED by the real
+   * gateway, so the new disposition row never fires for existing callers.
    */
   workflowRuns?: readonly WorkflowRunObservation[];
   /**
@@ -1416,14 +831,11 @@ export interface OpenPrView {
    */
   mergeState?: MergeState;
   /**
-   * GitHub's OWN raw `mergeable` boolean, observed verbatim (W1-T186 — the #412/#413 fixture: a
-   * PR reading `mergeable: false, mergeable_state: "dirty"` registers ZERO check runs BY
-   * CONSTRUCTION, so an escalation that only ever had `checksState`/`reviewState` to read from
-   * could not help but describe that as a checks/review problem). Carried ALONGSIDE the
-   * already-simplified {@link mergeState} rather than replacing it — every existing
-   * `mergeState === "dirty"` disposition row is unchanged — so the escalation renderer can name
-   * the exact fact GitHub reported, not just the bucket it was sorted into. `undefined` when
-   * unread, same fail-closed default as `mergeState`.
+   * GitHub's OWN raw `mergeable`, observed verbatim (W1-T186), carried ALONGSIDE the simplified
+   * {@link mergeState} rather than replacing it — so the escalation can name the exact fact
+   * GitHub reported rather than the bucket it was sorted into. `undefined` when unread.
+   * // Why: a dirty PR registers ZERO check runs, so an escalation reading only checks and review
+   * // had to misdescribe it (#412/#413).
    */
   mergeable?: boolean;
   /**
@@ -1448,103 +860,50 @@ export interface OpenPrView {
    */
   strikeHistory?: StrikeAttempt[];
   /**
-   * An operator's answer to a PRIOR clarification question (W1-T78), if one
-   * has been recorded for this PR and not yet consumed. Its `constraint`
-   * feeds the NEXT fix-rung dispatch verbatim (never a silent guess); routes
-   * this PR to `blocked-fixable` instead of `blocked-ambiguous` even with
-   * strikes at cap (a new, config-driven strike allowance — see
-   * {@link ClarifyPolicy}/{@link strikeCapForAnswer}), so the answer actually
-   * re-arms the rung rather than immediately re-exhausting it.
-   *
-   * SCOPE (honest, mirrors how W1-T77 shipped BLOCKED-AMBIGUOUS's interim
-   * escalate() route for THIS task to upgrade): this field, its
-   * DISPOSITION_RULES row, and `dispatchFix`'s constraint/strikeCap threading
-   * are the full MECHANISM, wired end-to-end and unit-tested — but nothing in
-   * `run-task.ts` populates it yet (`buildOpenPrViews`/`fixCommand` never set
-   * it). Recording an operator's answer against a specific question — a
-   * CLI/control-panel PRODUCER for this field — is a future task; until it
-   * lands, `pendingAnswer` is always `undefined` in the real gateway, so every
-   * BLOCKED-AMBIGUOUS PR keeps asking (never silently re-arms itself).
+   * An operator's answer to a prior clarification question (W1-T78). Its `constraint` feeds the
+   * next fix dispatch VERBATIM, never a silent guess, and routes the PR to `blocked-fixable` even
+   * at cap, so the answer re-arms the rung rather than immediately re-exhausting it.
+   * SCOPE (honest): wired end-to-end and tested, but nothing populates it, so every
+   * blocked-ambiguous PR keeps asking and never silently re-arms itself.
    */
   pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
   /**
-   * W1-T176 (the #393/#391 fixture): true when the ledger already carries a
-   * `review.post_refused` outcome for this exact task/PR/head/body input —
-   * the deterministic `rmd review` post (the post-review disposition, row
-   * below) was already attempted once for this push and DECLINED, so
-   * GitHub's live rollup still shows zero check runs for the required
-   * review context. Distinguishes a FIRST-SEEN zero-runs required check
-   * (still routes to post-review — the deterministic-action lane, since an
-   * absent required check is mechanically decidable: "post it") from a
-   * SECOND absence for the unchanged input, which the discriminator below escalates
-   * instead of retrying — `postReviewStatusGuarded`'s own guard never
-   * self-retries a refusal, so a second poll observing this true means the
-   * one deterministic remedy already ran its course for this exact input;
-   * looping would just re-invoke a lane that has already declined once.
-   * `review.post_failed` (a transient `gh` error, not a refusal) deliberately
-   * does NOT set this — that case must keep retrying, never escalate on a
-   * mere network hiccup. A new commit or body edit changes the input, so this reverts to
-   * `false`/`undefined` and the PR re-earns one fresh deterministic attempt.
-   * Populated by the real gateway (run-task.ts's `buildOpenPrViews`) from the
-   * SAME ledger read it already does for `unmetCriteria`/`priorStrikes`;
-   * `undefined` in any caller that hasn't wired it (e.g. `rmd fix`'s
-   * single-PR build, which never reaches the post-review row at all) reads
-   * as "no refusal recorded," never escalates by omission.
+   * W1-T176 — true when the ledger already carries a refusal for this exact task/PR/head/body
+   * input. This separates a FIRST-SEEN zero-runs required check, which still routes to
+   * post-review because an absent required check is mechanically decidable, from a SECOND absence
+   * for the unchanged input, which escalates rather than retrying a lane that already declined.
+   * A transient `gh` error deliberately does NOT set this — a network hiccup must keep retrying.
+   * A new commit or body edit re-earns one attempt; `undefined` never escalates by omission.
    */
   reviewPostRefused?: boolean;
   /**
-   * W1-T176 (design boundary (ii)): true when THIS sweep pass could not read
-   * branch protection's required-contexts list (`ghRequiredStatusCheckContexts`
-   * returned `undefined`/empty — a missing rule, an unprivileged token, `gh`
-   * itself unreachable). Gates the zero-runs discriminator rows (the row above
-   * and the post-review row below) OFF: without a readable required-contexts
-   * list we cannot POSITIVELY confirm remudero-review is even required on this
-   * branch, so classifying its absence as a decidable "post it" action would be
-   * assuming permissive on missing information — the one thing design boundary
-   * (ii) forbids ("an unreadable gate must never be assumed permissive").
-   * `undefined`/`false` (the default every existing caller/fixture implicitly
-   * uses) behaves exactly as before this field existed — both rows apply
-   * normally. `true` routes a checks-green/review-none PR past both rows to
-   * the ordinary catch-all rows below, which still classify it
-   * blocked-ambiguous (never silently mergeable) — the SAME escalate path,
-   * never a new one.
+   * W1-T176 — true when THIS pass could not read branch protection's required-contexts list.
+   * Gates the zero-runs discriminator rows OFF: without that list we cannot POSITIVELY confirm
+   * the review is required here, and calling its absence a decidable "post it" would assume
+   * permissive on missing information. `true` routes the PR to the catch-all, which still
+   * classifies it blocked-ambiguous, never mergeable.
    */
   requiredContextsUnreadable?: boolean;
   /**
-   * W1-T2399 — WHY the repo-wide required-contexts read was unreadable, captured where the read
-   * happens (`readRequiredStatusCheckContexts`, status.ts) and carried here so the escalation can
-   * name it WITHOUT a second GitHub call. Present only when {@link requiredContextsUnreadable} is
-   * true AND the cause was a genuine read failure; protection that readably declares NO required
-   * contexts leaves this undefined, which is the whole point of the split.
+   * W1-T2399 — WHY the required-contexts read was unreadable, captured where the read happens and
+   * carried here so the escalation can name it without a second GitHub call. Present only on a
+   * genuine read failure; protection that readably declares NO required contexts leaves this
+   * undefined, which is the point of the split.
    */
   requiredContextsReadFailure?: { branch: string; reason: string };
   /**
-   * W1-T225 (the 2026-07-21 PRs #477/#484 jam): true when the ledger already
-   * carries a `review.posted` (or `review.post_refused`) outcome for THIS
-   * task at an EARLIER head sha than {@link headSha} — i.e. this PR HAS been
-   * reviewed before, just not on the head the sweep is looking at right now.
-   * Distinguishes a PR whose review was ORPHANED BY A PUSH (reviewed once,
-   * then silenced by a later commit) from one AWAITING ITS FIRST REVIEW ever
-   * (`undefined`/`false` — every existing caller/fixture that hasn't wired
-   * this reads exactly as before: the post-review row still dispatches, just
-   * with the original "review never posted" reason). Only changes the REASON
-   * string the post-review row states — never the dispatch itself: either way the remedy is
-   * "run the review lane and post a fresh verdict for this head," and a
-   * verdict from an earlier, now-superseded head is NEVER copied forward
-   * (push-invalidates-review is not weakened by this field).
-   *
-   * The real gateway populates this from historical posted/refused rows. It is deliberately
-   * separate from the retry counter below: old heads explain why a status is absent, but never
-   * spend the current input's budget.
+   * W1-T225 — true when the ledger carries a review outcome for this task at an EARLIER head: the
+   * PR has been reviewed, just not on the head being looked at now. Changes only the REASON the
+   * post-review row states, never the dispatch — either way the remedy is a FRESH verdict for
+   * this head, and a verdict from a superseded head is never copied forward.
    */
   reviewOrphanedByPush?: boolean;
   /**
-   * Number of completed review judgments for the exact current input: task/synthetic PR key,
-   * PR URL, head sha and versioned head+body digest. A new commit or body edit resets this to zero.
-   * `review.post_refused`, legacy rows without the identity and other PRs never count. Undefined
-   * reads as zero for the existing orphan retry budget. Recovery from a GitHub FAILURE with no
-   * matching ledger judgment additionally requires an explicit zero and {@link reviewInputDigest},
-   * so legacy/unwired callers cannot be mistaken for evidence that the ledger is missing a run.
+   * Completed judgments for the exact current input: task key, PR URL, head sha and body digest.
+   * A new commit or body edit resets this to zero; refusals and legacy rows never count.
+   * Recovering from a GitHub FAILURE with no matching judgment additionally requires an explicit
+   * zero and {@link reviewInputDigest}, so an unwired caller can never be mistaken for evidence
+   * that the ledger is missing a run.
    */
   priorReviewAttemptsForInput?: number;
   /**
@@ -1565,11 +924,10 @@ export interface DispositionResult {
 }
 
 /**
- * One PR status-check-rollup entry, structurally — a CheckRun or StatusContext
- * as `gh pr list/view --json statusCheckRollup` reports it. Kept minimal (name
- * ONLY the fields {@link checksStateFromRollup} reads) so this deterministic
- * core never depends on run-task.ts's richer `RollupCheck` wiring shape —
- * that type is structurally assignable here without an import.
+ * One PR status-check-rollup entry, structurally — a CheckRun or StatusContext as
+ * `gh pr list/view --json statusCheckRollup` reports it. Names ONLY the fields
+ * {@link checksStateFromRollup} reads, so this deterministic core never depends on run-task.ts's
+ * richer `RollupCheck` shape, which stays structurally assignable here without an import.
  */
 export interface RollupCheckEntry {
   name?: string;
@@ -1587,34 +945,18 @@ export interface RollupCheckEntry {
 }
 
 /**
- * Conclusions GitHub's OWN branch-protection merge-eligibility treats as
- * SATISFYING a required check (W1-T103, the #170 stuck-ambiguous fix): a
- * required check that reports SKIPPED or NEUTRAL still counts as green — only
- * a genuinely unresolved/incomplete check (anything not in this set and not a
- * failure below) holds checksState at "pending".
- *
- * EXPORTED (W1-T2274) so run-task.ts's poll loops (`checkWaitStalled`, `pollToGate`,
- * `ciGateFromRollup`) can read the SAME ok-set this file's checksState predicate reads, instead
- * of the narrower private literal (`state !== "SUCCESS"`) that read a cleanly-concluded NEUTRAL
- * or SKIPPED check as still pending — the same #1698/#1699 shape this set already fixed here.
+ * Conclusions GitHub's OWN merge-eligibility treats as SATISFYING a required check (W1-T103):
+ * SKIPPED and NEUTRAL count as green, so only a genuinely unresolved check holds "pending".
+ * EXPORTED so the poll loops read the SAME ok-set this file's predicate reads, rather than a
+ * narrower private test that read a cleanly-concluded NEUTRAL as still pending.
  */
 export const REQUIRED_CHECK_OK = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
 
 /**
- * Conclusions that veto a required check outright — checksState goes "red". EXPORTED (W1-T457)
- * so run-task.ts's `fetchCiFailures` — the failing-list PRODUCER — filters on the exact SAME set
- * this file's checksState PREDICATE vetoes on, rather than hand-copying a narrower one that can
- * silently drift out of agreement (the #1728 defect: `checksState` read "red" off a CANCELLED
- * entry this set includes, while `fetchCiFailures` filtered to FAILURE|ERROR only and reported
- * nothing — a red predicate with an empty evidence list, dispatching the ci-log fix rung against
- * nothing to fix).
- *
- * STALE ADDED (W1-T2274): GitHub marks a check run STALE when its result can no longer be
- * attributed to the head — "this reading is void", closer to CANCELLED than to either pole, and
- * previously in NEITHER set anywhere in the tree, which held `checksStateFromRollup` at
- * "pending" forever for it (the one conclusion even the #1698 fix left unclassified). Folded in
- * here rather than given a fifth `checksState` member, exactly as CANCELLED already is — this
- * file's own doc on that decision (see `cancelledRequiredCheckNames`) is the reason, unchanged.
+ * Conclusions that veto a required check outright. EXPORTED (W1-T457) so the failing-list PRODUCER
+ * filters on the exact same set this file's PREDICATE vetoes on and the two cannot drift. STALE is
+ * folded in here rather than given a fifth `checksState` member, exactly as CANCELLED is: it means
+ * "this reading is void". // Why: the drift and STALE's years unclassified — docs/forensics/sweep.md.
  */
 export const REQUIRED_CHECK_FAIL = new Set([
   "FAILURE",
@@ -1627,25 +969,12 @@ export const REQUIRED_CHECK_FAIL = new Set([
 ]);
 
 /**
- * Group rollup entries by check name (a CheckRun's `name`) or commit-status context (a
- * StatusContext's `context`) and keep ONLY the entry with the latest {@link RollupCheckEntry.startedAt}
- * — the SAME rule `.github/workflows/ci-gate.yml`'s own dedupe already applies one surface over
- * (W1-T123, test/ci-gate-dedupe.test.ts's #242 fixture: `group_by(name) | map(max_by(started_at))`),
- * copied here rather than reinvented (W1-T457's design note (i): "the fix is to give the sweep the
- * rule the gate already has, not to invent one").
- *
- * WHY THIS IS NEEDED, MEASURED (W1-T457, PR #1728's HEAD 94c97e33): a SHA accumulates one rollup
- * entry PER ATTEMPT, not one per check name — `statusCheckRollup` reported TWO `ci-gate` entries
- * on that one sha, `completed/cancelled` started 13:48:42 and `completed/success` started
- * 13:50:02. Without this dedupe, {@link checksStateFromRollup} saw the stale CANCELLED entry (a
- * member of {@link REQUIRED_CHECK_FAIL}) and read "red" FOREVER even though the check's own
- * newest attempt had already gone green — a superseded attempt could never be outvoted by its own
- * successor.
- *
- * An entry with no `startedAt` at all sorts as OLDER than any timestamped entry sharing its key,
- * and a tie (including two entries both missing it) keeps the LAST one encountered — this
- * function's contract is only that duplicates collapse to exactly one row per name/context, never
- * that array order carries meaning on its own.
+ * Group rollup entries by check name or status context and keep ONLY the latest
+ * {@link RollupCheckEntry.startedAt} — the SAME rule ci-gate's own dedupe applies one surface
+ * over, copied rather than reinvented. An entry with no `startedAt` sorts OLDER, and a tie keeps
+ * the LAST encountered: the contract is only that duplicates collapse to one row per key.
+ * // Why: a sha accumulates one entry PER ATTEMPT, so a superseded CANCELLED entry read "red"
+ * // forever and could never be outvoted by its own successor — docs/forensics/sweep.md.
  */
 export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: readonly T[]): T[] {
   const latest = new Map<string, T>();
@@ -1658,52 +987,15 @@ export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: 
 }
 
 /**
- * Aggregate ONLY the REQUIRED contexts into the sweep's checksState (W1-T103,
- * the #170 stuck-ambiguous fix). `requiredContexts` is branch protection's OWN
- * list — read once per repo by the real gateway (status.ts's
- * `ghRequiredStatusCheckContexts`) and threaded in here, never hardcoded
- * (rule 2, policy-as-data) — matched against each rollup entry's `name` or
- * `context`.
+ * Aggregate ONLY the REQUIRED contexts into `checksState` (W1-T103). `requiredContexts` is branch
+ * protection's OWN list, threaded in rather than hardcoded (rule 2); non-required contexts stay in
+ * the raw rollup for other consumers but never vote here.
  *
- * LIVE INCIDENT this fixes (#170 post-heal): the pre-fix derivation scanned
- * EVERY reported check with no required/non-required distinction, so a single
- * SKIPPED non-required context (e.g. a path-filtered or schedule-only
- * workflow's stub run) held checksState at "pending" forever even when every
- * REQUIRED context was green and GitHub itself would happily merge the PR —
- * the sweep just couldn't see it, and dispositioned it blocked-ambiguous on
- * every pass. Non-required contexts are still carried in the raw rollup for
- * OTHER consumers (fetchCiFailures' evidence) but never vote on checksState
- * here.
- *
- * `requiredContexts` empty/undefined (e.g. the branch-protection API was
- * unreadable) degrades to the PRE-FIX conservative behavior — every reported
- * context counts, AND only SUCCESS satisfies one (the SKIPPED/NEUTRAL
- * leniency above is itself part of THIS fix, so it does not apply when we
- * can't confirm which contexts are actually required) — fail-closed: an
- * unreadable protection rule must never manufacture a false green.
- *
- * `remudero-review` is EXCLUDED from the gate unconditionally (W1-T394, the
- * PR #1441 blocked-routing fix) — even when it IS a required context and even
- * in the unreadable-protection fallback above. `statusCheckRollup` mixes CHECK
- * RUNS (a CI job's own verdict) with COMMIT STATUSES, and `remudero-review` is
- * posted as a commit status carrying the REVIEW verdict, not a check run — it
- * already has its own dedicated derivation ({@link reviewStateFromRollup} in
- * run-task.ts, surfaced as `OpenPrView.reviewState`). Counting it here too made
- * a red review indistinguishable from a red required CI check: `isBlockedCi`
- * (below) went true on a review failure alone, routing the PR to the ci-log fix
- * rung — which has no failing job to read — and made the review-shaped
- * DISPOSITION_RULES row (`reviewState === "failure"`) unreachable, since the
- * checks-red row is ordered ahead of it and claimed every review failure too.
- * Every OTHER commit status (there is no second one this codebase tracks
- * separately) still counts — this exclusion is specific to the ONE context
- * that already has its own signal, never a general check-run/commit-status
- * split (that split is NOT in scope here — see the task's design note).
- *
- * DEDUPED BY {@link dedupeRollupByLatestAttempt} BEFORE JUDGING (W1-T457): a SHA can carry more
- * than one rollup entry for the SAME check name (one per attempt), and only the LATEST attempt's
- * conclusion should vote — a SUPERSEDED entry (e.g. a CANCELLED run of a check whose later
- * attempt on the same sha went SUCCESS) must never permanently veto this function's answer. See
- * that function's own doc for the measured live incident this closes.
+ * UNREADABLE PROTECTION FAILS CLOSED — every reported context counts, because an unreadable rule
+ * must never manufacture a false green. `remudero-review` IS EXCLUDED UNCONDITIONALLY (W1-T394),
+ * even in that fallback: it is a commit status carrying the REVIEW verdict, and counting it here
+ * made a red review indistinguishable from red CI. DEDUPED before judging, so only the latest
+ * attempt votes. // Why: the #170 and #1441 incidents — docs/forensics/sweep.md.
  */
 export function checksStateFromRollup(
   rollup: RollupCheckEntry[] | undefined,
@@ -1713,38 +1005,21 @@ export function checksStateFromRollup(
   if (all.length === 0) return "none";
   const required = new Set(requiredContexts ?? []);
   const knownRequired = required.size > 0;
-  // W1-T457: dedupe to ONE entry per check name/context — the LATEST attempt — before this
-  // gate is judged. Dedup never changes gate.length's zero-ness (grouping only merges rows
-  // that share a key, it cannot invent or drop a key entirely), so the "required but not yet
-  // registered" distinction just below is unaffected by it.
+  // Dedupe to ONE entry per check name — the LATEST attempt — before judging. Dedup cannot change
+  // whether `gate` is empty (grouping merges rows sharing a key, it never drops a key), so the
+  // "required but not yet registered" distinction just below is unaffected (W1-T457).
   const gate = dedupeRollupByLatestAttempt(
     knownRequired ? all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")) : all,
   );
   // Required contexts are configured but none has registered on this head yet
   // (e.g. the workflow hasn't started) — waiting, not "no checks at all".
   if (gate.length === 0) return knownRequired ? "pending" : "none";
-  // ONE OK-SET, KNOWN CONTEXTS OR NOT (2026-08-13). This used to narrow to `new Set(["SUCCESS"])`
-  // whenever the required list was unreadable — an asymmetry that landed in the SAME commit as
-  // REQUIRED_CHECK_OK (#196/W1-T103) and, unlike its sibling, carried no stated reason. It has none
-  // available: REQUIRED_CHECK_OK's own doc is a claim about GITHUB'S merge-eligibility semantics —
-  // "a required check that reports SKIPPED or NEUTRAL still counts as green" — and those semantics
-  // do not change because OUR token could not read branch protection.
-  //
-  // WHAT THE ASYMMETRY COST, measured live: `ghRequiredStatusCheckContexts` fails SOFT to undefined
-  // on any error, and a container's PAT gets 403 "Resource not accessible by personal access token"
-  // on the protection endpoint (the mini's token returns ["remudero-review","ci-gate"]). So every
-  // sweep in a container took this branch, and `osv-scanner`'s NEUTRAL — present on essentially
-  // every PR here — read as PENDING FOREVER, because NEUTRAL never becomes SUCCESS. Issue #1698
-  // escalated PR #1692 with "checks pending 65m (>= 60m ceiling)" while nothing was running, and
-  // `rmd status` showed #1699 at "checks pending 237m". That is the 57-unretirable-issues shape
-  // (see pendingAgeMinutes' doc) recurring with the bound firing LATE rather than never.
-  //
-  // NOT WIDENED TO A NEW `unknown` checksState, deliberately: `OpenPrView["checksState"]` is a
-  // four-member union read at 17 comparison sites in this file, and a fifth member every existing
-  // row silently fails to match is precisely the false-predicate-falls-through-to-a-row-that-acts
-  // shape that produced the 57 issues in the first place. Aligning the sets changes one expression
-  // and leaves the vocabulary alone. A genuinely unresolved check is in NEITHER set and still holds
-  // `pending`, which is the property the strict fallback was reaching for.
+  // ONE OK-SET, KNOWN CONTEXTS OR NOT. This used to narrow to SUCCESS alone whenever the required
+  // list was unreadable, but REQUIRED_CHECK_OK's doc is a claim about GITHUB'S merge-eligibility
+  // semantics, which do not change because OUR token could not read branch protection.
+  // NOT WIDENED TO A NEW `unknown` state, deliberately: a fifth member every existing row silently
+  // fails to match is the false-predicate-falls-through shape that produced the issue storm.
+  // Why: the measured cost of the asymmetry is in docs/forensics/sweep.md.
   const ok = REQUIRED_CHECK_OK;
   let anyPending = false;
   for (const c of gate) {
@@ -1756,14 +1031,11 @@ export function checksStateFromRollup(
 }
 
 /**
- * W1-T1223 — one required check whose LATEST (deduped) attempt is CANCELLED, never superseded by
- * a later attempt on the same head. `checksState` stays "red" for this exactly as it does for a
- * genuine failure (design note i refuses a fifth `checksState` member for the SAME reason
- * {@link checksStateFromRollup}'s own doc already gives — a member every existing comparison site
- * silently fails to match is the false-predicate-falls-through shape). This is the SEPARATE
- * observable that names WHICH red required check is an ABSENT verdict rather than a bad one, so
- * the sweep can re-queue its job instead of dispatching a fix-rung worker against a diff that
- * carries no defect.
+ * W1-T1223 — one required check whose LATEST attempt is CANCELLED. `checksState` stays "red"
+ * exactly as for a genuine failure; a fifth member is refused for the reason
+ * {@link checksStateFromRollup} gives. This is the SEPARATE observable naming which red check is
+ * an ABSENT verdict rather than a bad one, so the job can be re-queued instead of a worker
+ * dispatched against a diff with no defect.
  */
 export interface CancelledRequiredCheck {
   name: string;
@@ -1775,80 +1047,32 @@ export interface CancelledRequiredCheck {
    */
   jobId?: string;
   /**
-   * W1-T2431 — GitHub's OWN `run_attempt` for the workflow run this check belongs to, read off
-   * the SAME rollup {@link jobId} is already parsed from (no new gateway, no new credential —
-   * the rationale's Option A). This is a SURFACE the fleet does not write: it increments whether
-   * the re-run was fired by `deps.requeueCheck`'s own `actions/jobs/{job_id}/rerun` call OR by an
-   * operator running `gh run rerun --job` by hand, so — unlike a ledger row the fleet only writes
-   * about its own act — it counts an equivalent operator act too (rationale (2)/(4): 3 of 7
-   * measured re-runs carried no `sweep.check_requeued` ledger row anywhere in the union).
-   *
-   * `undefined` when the real gateway has not read it (see {@link cancelledCheckAlreadyRequeuedFromSurface}'s
-   * own doc for the fail-toward-no-positive-claim default) — SCOPE, mirroring how
-   * `workflowRuns`/`pendingAnswer` above shipped their mechanism ahead of their producer: this
-   * field, {@link cancelledCheckAlreadyRequeuedFromSurface}, and its `runSweep` call site are the
-   * full MECHANISM, wired end-to-end and unit-tested here, but `run-task.ts`'s
-   * `cancelledRequiredChecks` does not populate it yet. Until that producer wiring lands this is
-   * always `undefined` in the real gateway, so the ledger-derived half of the decision (below)
-   * keeps bounding the re-queue exactly as it does today — this is a WIDENING of the `true` case,
-   * never a replacement that could narrow it.
+   * W1-T2431 — GitHub's OWN `run_attempt`, read off the SAME rollup {@link jobId} is parsed from:
+   * no new gateway, no new credential. This is a SURFACE the fleet does not write, so it counts an
+   * operator's own re-run too. SCOPE: no producer sets it, so it is always `undefined` today —
+   * a WIDENING of the `true` case, never a replacement that could narrow it.
    */
   runAttempt?: number;
 }
 
 /**
- * W1-T2431 — whether THIS check's run has already been re-run at least once, read off GitHub's
- * own {@link CancelledRequiredCheck.runAttempt} rather than a ledger row the fleet wrote about
- * its own re-queue action. `runAttempt` is GitHub's ground truth for the run, so it reads true
- * for a re-run fired by ANY actor — the fleet's `requeueCheck` or an operator's `gh run rerun`
- * — which is precisely the acting-party distinction a ledger keyed on the fleet's own write
- * cannot make (this task's whole premise). It also closes rationale (6) for free: a value read
- * fresh off GitHub every pass cannot be archived by `rotateLedger`, because it is not a ledger
- * row at all — so the count the caller derives from it survives a rotation the ledger-only half
- * would not.
- *
- * `undefined` or `<= 1` reads as "not yet re-run" — the SAME fail-toward-no-positive-claim
- * direction {@link checksStateFromRollup} takes on an unreadable required-contexts list and
- * {@link stalledRunReason} takes on an unreadable run listing: an unread/absent `runAttempt`
- * must never MANUFACTURE a prior re-queue that did not happen, so a first cancellation with no
- * real attempt history still re-queues exactly as it does today. Callers OR this with the
- * ledger-derived reading ({@link requeuedCheckKeysFromLedger}) rather than substitute it — this
- * only WIDENS which pairs read "already requeued", it never narrows the existing ledger-only
- * guarantee.
+ * W1-T2431 — whether this check's run has already been re-run, read off GitHub's own
+ * `runAttempt` rather than a ledger row the fleet wrote about its own action. Being ground truth
+ * it reads true for ANY actor, the distinction a fleet-keyed ledger cannot make, and it survives
+ * rotation because it is not a ledger row at all. `undefined` or `<= 1` reads as "not yet re-run":
+ * an unread value must never MANUFACTURE a prior re-queue. Callers OR this with the ledger set.
  */
 export function cancelledCheckAlreadyRequeuedFromSurface(runAttempt: number | undefined): boolean {
   return typeof runAttempt === "number" && runAttempt > 1;
 }
 
 /**
- * W1-T1223 (design i) — which check on this rollup has a LATEST (deduped) attempt that is
- * CANCELLED. A check genuinely FAILING (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED/STARTUP_FAILURE)
- * is never named here — only the literal CANCELLED conclusion is, which is what distinguishes
- * "nobody reached a verdict" from "a verdict came back bad" (the falsifier design note vii states
- * explicitly). `requiredContexts` empty/undefined names nothing, the same fail-toward-"no
- * positive claim" direction `checksStateFromRollup` takes when it cannot confirm what is actually
- * required — reading it stays the ONE precondition (branch protection must be confirmed readable
- * before this arm acts at all), never written, and never used to narrow WHICH check gets named.
- *
- * W1-T2283 — NO LONGER NARROWED TO `requiredContexts` ITSELF. The pre-fix version filtered the
- * candidate set down to declared-required contexts BEFORE testing for CANCELLED — on this
- * repository branch protection names exactly `remudero-review` and `ci-gate`, so that filter left
- * a candidate set of one name, and the check that actually gets cancelled (`coverage-ratchet`, a
- * REQUIRED sibling of the aggregate `ci-gate` rather than a declared-required context itself) was
- * dropped before its CANCELLED conclusion was ever read. `ci-gate` — the aggregate — reports its
- * OWN conclusion as FAILURE, never CANCELLED, when a sibling it depends on is cancelled (measured
- * live on #2794 and #2841), so the old filter-then-test order could never reach a positive result
- * in this repository: two independent refusals, and widening either alone reached nothing.
- * {@link fetchCiFailures} (run-task.ts) already reads CANCELLED off the SAME rollup with no
- * required-contexts narrowing at all — this brings the arm that ACTS on a cancellation into
- * agreement with the evidence miner that already SEES it, rather than inventing a second,
- * disagreeing rule. `required.size === 0` still refuses (branch protection unreadable — the one
- * case a live CI mutation must never be attempted from), and {@link REVIEW_CONTEXT} stays excluded
- * unconditionally (design note iv — it is a status the fleet posts itself, never a job to
- * re-queue), but a NAMED check no longer has to be a member of `required` to be surfaced: `ci-gate`
- * failing because a dependency was cancelled is not the same event as `ci-gate` failing because a
- * test broke, and only the CANCELLED conclusion — read here off the check that actually carries
- * it — names the first.
+ * W1-T1223 — which check has a LATEST (deduped) attempt that is CANCELLED. A genuinely FAILING
+ * check is never named: only the literal CANCELLED conclusion separates "nobody reached a verdict"
+ * from "a verdict came back bad". An unreadable `requiredContexts` names nothing, since a live CI
+ * mutation must never be attempted from an unreadable gate. W1-T2283: a named check no longer has
+ * to be a member of `required`, bringing the arm that ACTS into agreement with the miner that
+ * already SEES. // Why: the old filter-then-test order could never reach a positive result.
  */
 export function cancelledRequiredCheckNames(
   rollup: RollupCheckEntry[] | undefined,
@@ -1869,38 +1093,13 @@ export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requ
 const JOB_TERMINAL_STATUSES = new Set(["completed"]);
 
 /**
- * W1-T2340 (the corrected discriminator W1-T2327's criterion 1 was amended into, after
- * measurement falsified the original job-count reading — see this task's own rationale) — names
- * the reason a head's own workflow runs should be read as STALLED rather than pending, or
- * `undefined` when none of them are.
+ * W1-T2340 — names the reason a head's workflow runs read as STALLED rather than pending.
  *
- * THE DISCRIMINATOR: a job whose STATUS is non-terminal, inside a run whose CONCLUSION is
- * terminal. Not an absence of jobs (the falsified reading — measured wrong on #2974, which
- * carried twenty-three check-runs, three of them green, from runs that had already concluded): a
- * job PINNED non-terminal by a run that has already finished and will never schedule anything
- * further. NEEDS NO THRESHOLD (acceptance 3) — a concluded run cannot become "more concluded"
- * with the passage of time, so there is nothing to wait out and no ceiling to tune, which is why
- * this function takes no `policy`/`now` parameter at all.
- *
- * ANY terminal conclusion trips it, not only `startup_failure` (acceptance 6) — a cancelled or
- * abandoned run pins a job exactly the same way, and the join does not special-case one
- * conclusion string over another: `conclusion` being present at all IS "this run is done."
- *
- * A run still in progress (`conclusion` undefined/empty) is untouched (acceptance 4) — its jobs
- * are left alone here whatever their own status, because a run that has not concluded may
- * legitimately still schedule or advance them; "work in flight still reads as in flight."
- *
- * FAILS TOWARD "NOT STALLED" ON EVERY UNREADABLE INPUT — never invents a stall: `runs` undefined
- * (the listing could not be fetched at all) returns `undefined` immediately, the same
- * fail-toward-no-positive-claim direction {@link checksStateFromRollup} takes on an unreadable
- * required-contexts list.
- *
- * PURE AND SYNCHRONOUS (acceptance 7 — nothing added paces, throttles or sleeps a call): one loop
- * over `runs`, each job list read once — no fetch, no wait, no retry, and nothing here schedules a
- * second look. The read this function judges is whatever the caller already fetched for this
- * sweep pass; a run that only becomes stalled a minute from now is simply not yet stalled on THIS
- * read, and the next sweep pass (a level trigger, never a loop of this function's own) judges it
- * fresh.
+ * THE DISCRIMINATOR: a job whose STATUS is non-terminal inside a run whose CONCLUSION is terminal
+ * — pinned by a run that will schedule nothing further. NOT an absence of jobs, the reading
+ * measurement falsified. NEEDS NO THRESHOLD, so this takes no `policy` or `now` parameter at all.
+ * A run still in progress is untouched, and every unreadable input FAILS TOWARD "NOT STALLED".
+ * PURE and SYNCHRONOUS: nothing here fetches, waits or schedules a second look.
  */
 export function stalledRunReason(runs: readonly WorkflowRunObservation[] | undefined): string | undefined {
   if (runs === undefined) return undefined;
@@ -1919,27 +1118,11 @@ export function stalledRunReason(runs: readonly WorkflowRunObservation[] | undef
 }
 
 /**
- * W1-T1278 (condition A) — of `redNames` (the required check names a fix rung's CI-LOG evidence
- * currently believes are red, possibly stale — see this task's own rationale for the measured
- * MEDIAN 104-minute gap between a `blocked_ci` read and the PR actually resolving), which are
- * STILL red on a FRESH `rollup` read: their LATEST (deduped, {@link dedupeRollupByLatestAttempt} —
- * the SAME rule {@link checksStateFromRollup} itself reads red from) attempt is still a member of
- * {@link REQUIRED_CHECK_FAIL}.
- *
- * A name is dropped from the returned set ONLY when the fresh deduped entry sharing its key
- * carries an observed `startedAt` AND a currently NON-TERMINAL status — neither
- * {@link REQUIRED_CHECK_OK} nor {@link REQUIRED_CHECK_FAIL} — i.e. a LATER ATTEMPT the rung can
- * see is executing RIGHT NOW, on THIS same fresh read of THIS same head. That is deliberately
- * narrower than "no longer red": a fresh entry that already concluded SUCCESS is left exactly as
- * before this task (out of this narrow gate's scope — design note (ii) forbids widening past the
- * one shape it names, "an attempt already in flight", since one notch wider is "never fix a red
- * PR"). An implementation that instead inferred "in flight" from a name, a timestamp on the STALE
- * failure, or a retry count would be GUESSING, which design note (iii) forbids explicitly — this
- * reads the check-run set's own observed status, nothing else.
- *
- * A name ABSENT from the fresh rollup entirely, or present with no `startedAt` at all (an
- * unreadable/indeterminate read), is NEVER dropped — it fails toward "still red", the same
- * fail-open-toward-proceeding direction every other stand-down source in this file already takes:
+ * W1-T1278 — of the checks a fix rung believes are red, possibly stale, which are STILL red on a
+ * FRESH rollup read. A name is dropped ONLY for an observed `startedAt` with a currently
+ * NON-TERMINAL status — a later attempt executing RIGHT NOW. That is deliberately narrower than
+ * "no longer red", because one notch wider is "never fix a red PR", and inferring in-flight from a
+ * name or a retry count would be GUESSING. A name absent from the fresh rollup is NEVER dropped:
  * an unreadable rollup must never manufacture a stand-down.
  */
 export function stillRedRequiredNames(redNames: readonly string[], rollup: RollupCheckEntry[] | undefined): string[] {
@@ -1964,15 +1147,10 @@ export interface CancelledCheckRequeueDecision {
 }
 
 /**
- * W1-T1223 (design ii/iii) — BOUNDED BY A LEDGERED RECORD, NEVER A CLOCK OR AN IN-MEMORY COUNTER.
- * `alreadyRequeued` is read back fresh from the ledger by the caller ({@link
- * requeuedCheckKeysFromLedger}) for this EXACT `${headSha}@${checkName}` pair — the same
- * idempotence shape {@link import("./cost-anomaly.js").alreadyLedgeredCostAnomalyRunIds} already
- * uses. Zero prior re-queues for this pair re-queues the job once; a SECOND observation of the
- * SAME pair (the check was cancelled again on the SAME head, after the one re-queue this lane
- * already ran) escalates instead of repeating — no timer, no retry budget: exactly one re-queue
- * is either sufficient (a preempted runner) or diagnostic (a concurrency group, a capacity fault,
- * or a workflow-level cancel — something re-queueing cannot reach).
+ * W1-T1223 — BOUNDED BY A LEDGERED RECORD, NEVER A CLOCK OR AN IN-MEMORY COUNTER. Zero priors
+ * re-queues once; a SECOND observation of the same pair escalates instead of repeating. No timer
+ * and no retry budget: one re-queue is either sufficient, for a preempted runner, or diagnostic,
+ * for a fault re-queueing cannot reach.
  */
 export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): CancelledCheckRequeueDecision {
   if (alreadyRequeued) {
@@ -1993,11 +1171,10 @@ export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): Cancell
 export const CHECK_REQUEUE_STEP = "sweep.check_requeued";
 
 /**
- * W1-T1223 (design ii) — every `${headSha}@${checkName}` pair the ledger already records a
- * {@link CHECK_REQUEUE_STEP} row for. `runSweep` writes this row BEFORE calling `deps.requeueCheck`
- * (ledgered before it can be repeated), so a pass that crashes between the write and the real
- * GitHub call still bounds the NEXT pass toward escalating rather than re-queueing a second time —
- * the safer failure direction for an action that mutates CI state unattended.
+ * W1-T1223 — every `${headSha}@${checkName}` pair the ledger already records a
+ * {@link CHECK_REQUEUE_STEP} row for. `runSweep` writes the row BEFORE calling
+ * `deps.requeueCheck`, so a pass crashing between the write and the GitHub call still bounds the
+ * next pass toward escalating — the safer direction for an action that mutates CI state unattended.
  */
 export function requeuedCheckKeysFromLedger(lines: Array<Record<string, unknown>>): Set<string> {
   const out = new Set<string>();
@@ -2011,52 +1188,29 @@ export function requeuedCheckKeysFromLedger(lines: Array<Record<string, unknown>
 
 // ── W1-T2204 — MAIN'S OWN CHECK ROLLUP HAS NO READER ─────────────────────────────────────────
 //
-// Every predicate above this line reads a PR's rollup. Nothing anywhere in the fleet reads the
-// DEFAULT BRANCH's own — the shard's own control count is `checksState` at 80 hits in this file
-// against 0 for any of `mainChecks`/`trunkHealth`/`defaultBranch`. This section is that reader:
-// a pure transform from an already-fetched rollup (the SAME `RollupCheckEntry[]` shape
-// `checksStateFromRollup` already takes — no new gateway, no new `gh` call site) to a NAMED
-// observation of main's health, plus the two decisions Q3 requires stay separate from it: whether
-// to escalate (never a fourth taxonomy class), and whether that escalation, BY ITSELF, may stand
-// down dispatch of unrelated tasks (it may not — only a recorded operator ruling can).
+// Every predicate above reads a PR's rollup; nothing reads the DEFAULT BRANCH's own. This section
+// is that reader — a pure transform to a NAMED observation of main's health — plus two decisions
+// kept separate: whether to escalate, and whether that escalation may by itself stand down
+// dispatch of unrelated tasks (it may not).
 //
-// WHY "pending" ISN'T ENOUGH ON ITS OWN (acceptance 2/3): `checksStateFromRollup`'s
-// `REQUIRED_CHECK_OK` counts SKIPPED as green — correct for a PR, where GitHub's own
-// merge-eligibility already treats a skipped required check as satisfied. Main's push run is a
-// DIFFERENT question: this shard measured `ci.yml`'s `on:` block leaving thirteen required jobs
-// `pull_request`-only, so a push registers them SKIPPED not because the trunk is healthy but
-// because the workflow never asked the question — and `coverage-ratchet` is WORSE than skipped,
-// concluding SUCCESS on a push having run its own env-guard exit-0 instead of the real suite. A
-// watcher built on `checksStateFromRollup`'s PR-shaped leniency would read that rollup green. This
-// reader does not: SKIPPED and known-vacuous-success names are collected as `nonEvidenceChecks`
-// and excluded from ever making the verdict "green" — main only reads green off a check that
-// genuinely concluded, not one that registered and said nothing.
+// WHY "pending" ISN'T ENOUGH: SKIPPED counts as green for a PR but is a DIFFERENT question for
+// main, where a push can register a job SKIPPED because the workflow never asked. Skipped and
+// known-vacuous names are collected as non-evidence and can never make the verdict green.
 
 /**
- * Check names KNOWN — from `.github/workflows/ci.yml`'s own guard, cited verbatim in W1-T2204's
- * rationale — to conclude SUCCESS on a push to main having executed no real work:
- * `coverage-ratchet`'s Test/diff/ratchet steps each carry `[ "${GITHUB_EVENT_NAME}" =
- * "pull_request" ] || { echo "…skipping…"; exit 0; }`. The check-runs API carries no field for
- * "did this job actually do anything" — this is a NAMED, CITED allowlist of the jobs this repo's
- * own workflow is known to special-case this way (policy-as-data, rule 2), not a general detector.
- * A future vacuous-on-push job is added here by name, never by inventing new detection logic.
+ * Check names KNOWN, from the workflow's own guard, to conclude SUCCESS on a push having executed
+ * no real work. The check-runs API carries no field for "did this job do anything", so this is a
+ * NAMED, CITED allowlist (policy-as-data, rule 2), never a general detector. A future
+ * vacuous-on-push job is added here BY NAME, never by inventing detection logic.
  */
 export const PUSH_VACUOUS_SUCCESS_CHECK_NAMES: ReadonlySet<string> = new Set(["coverage-ratchet"]);
 
 /**
- * Main's health, as read off its own rollup — the sibling of {@link OpenPrView.checksState} for
- * the default branch rather than a PR. Three members ONLY, matching the three real postures a
- * trunk read can support (acceptance 3 is exactly the middle one, named so a caller can never
- * mistake it for "green"):
- *   - "green"       — at least one required check GENUINELY concluded passing, none failed, none
- *                      are still outstanding.
- *   - "red"         — at least one required check concluded with a {@link REQUIRED_CHECK_FAIL}
- *                      conclusion. Never auto-acted on beyond {@link mainHealthEscalationDecision}
- *                      below — Q3 forbids a revert unconditionally.
- *   - "undetermined"— no failure, but EITHER a required check is still running (nothing to read
- *                      yet) OR every required check that DID conclude was skipped/known-vacuous
- *                      (nothing real to read). Never collapsed into "green": that collapse is the
- *                      exact vacuous-pass this task exists to refuse.
+ * Main's health read off its own rollup — the default-branch sibling of `checksState`. Three
+ * members only: "green" (a required check GENUINELY concluded passing, none failed, none
+ * outstanding), "red" (never auto-acted on beyond an escalation; a revert is forbidden outright),
+ * and "undetermined" (still running, or every concluded check skipped or known-vacuous). The last
+ * is NEVER collapsed into "green" — that collapse is the vacuous pass this reader exists to refuse.
  */
 export type MainHealthState = "green" | "red" | "undetermined";
 
@@ -2076,17 +1230,11 @@ export interface MainHealthObservation {
 }
 
 /**
- * Read main's own check rollup into a {@link MainHealthObservation} (acceptance 1). Reuses
- * {@link dedupeRollupByLatestAttempt} and the exact required-contexts filter
- * {@link checksStateFromRollup} already applies — the SAME gate, so this can never disagree with
- * that function about which entries are even in play — but judges the gate against a STRICTER
- * question than "does GitHub consider this required check satisfied": SKIPPED and
- * `vacuousSuccessNames` members never count as evidence the trunk is healthy (acceptance 2), and a
- * gate with a still-outstanding required check, or with nothing but non-evidence entries, reads
- * "undetermined" rather than "green" (acceptance 3). `requiredContexts` empty/undefined degrades
- * exactly like {@link checksStateFromRollup}'s own fallback — every reported context counts, fail
- * toward the narrower gate rather than manufacturing a false positive off an unreadable protection
- * rule.
+ * Read main's rollup into a {@link MainHealthObservation}, reusing the exact dedupe and
+ * required-contexts filter {@link checksStateFromRollup} applies so the two can never disagree
+ * about which entries are in play — but judging them against a STRICTER question: skipped and
+ * known-vacuous members never count as evidence, and an outstanding check reads "undetermined".
+ * An unreadable protection rule degrades toward the narrower gate, never a false positive.
  */
 export function mainHealthFromRollup(
   sha: string,
@@ -2178,15 +1326,10 @@ export function mainHealthFromRollup(
 }
 
 /**
- * Which of the fleet's existing THREE escalation classes a red-trunk finding is carried inside
- * (acceptance 4) — `escalate.ts`'s own doc: "The loop never waits on a human except for four
- * classes" (BLOCKED, MANUAL, HARD_STOP, GRILL), and GRILL is feedback-intake-only (MASTER-PLAN
- * §7B) and unreachable from a sweep read, so the choice is among the three the sweep can actually
- * raise. MANUAL is the fit, not a fourth class: `escalate.ts` lists "eyeball/playtest gates" among
- * MANUAL's members — something genuinely off that only a human can look at and rule on. BLOCKED is
- * the wrong shape (it is a specific PR's fix-rung exhausted after diagnose, not a trunk-wide
- * reading), and HARD_STOP is the wrong shape too (destructive ops / spend / force-push / secrets —
- * this call site never takes an action, it only reports).
+ * Which existing escalation class carries a red-trunk finding. MANUAL is the fit, not a fourth
+ * class: it already covers something genuinely off that only a human can rule on. BLOCKED is the
+ * wrong shape (a specific PR's rung exhausted) and so is HARD_STOP (destructive ops, spend,
+ * secrets) — this call site never takes an action, it only reports.
  */
 export function mainHealthEscalationClass(): EscalationClass {
   return "MANUAL";
@@ -2200,12 +1343,9 @@ export interface MainHealthEscalationDecision {
 }
 
 /**
- * A red trunk produces an escalation inside the existing taxonomy and NOTHING else (acceptance 4)
- * — in particular this function never touches a merge, never reverts one, and returns a decision
- * object only, for a caller to act on. Anything short of "red" (including "undetermined") does not
- * escalate: an in-flight or vacuous rollup is not itself evidence of a problem, only of an
- * incomplete or uninformative read, and escalating on that would be the same false-positive shape
- * this task's falsifier calls out for the opposite direction (a false green).
+ * A red trunk produces an escalation inside the existing taxonomy and NOTHING else: never a merge,
+ * never a revert, just a decision object. Anything short of "red", including "undetermined", does
+ * not escalate — an in-flight or vacuous rollup is evidence of an incomplete read, not a problem.
  */
 export function mainHealthEscalationDecision(observation: MainHealthObservation): MainHealthEscalationDecision {
   if (observation.state !== "red") {
@@ -2222,16 +1362,12 @@ export function mainHealthEscalationDecision(observation: MainHealthObservation)
 }
 
 /**
- * Q3's asymmetry, held as its own boolean rather than folded into {@link
- * mainHealthEscalationDecision} (acceptance 5): a red trunk escalates, but that escalation must
- * NEVER, by itself, stop dispatch of unrelated tasks — "the fleet merged four PRs tonight while a
- * red branch sat unattended… but a watcher that halts the queue on any red trunk converts one
- * broken test into a full stop, which is worse." `operatorRuling` is the ledgered decision an
- * operator has actually recorded in response to the escalation; omitting it (the default with no
- * second argument at all) is exactly "no ruling recorded yet", so the falsifier this shard states
- * — "an unrelated task's dispatch stops on a red trunk with no operator ruling recorded" — can
- * never fire off this function alone: without an explicit `true`, it always returns `false`,
- * red trunk or not.
+ * The asymmetry, held as its own boolean rather than folded into
+ * {@link mainHealthEscalationDecision}: a red trunk escalates, but that escalation must NEVER by
+ * itself stop dispatch of unrelated tasks — a watcher that halts the queue on any red trunk
+ * converts one broken test into a full stop, which is worse. `operatorRuling` is the ledgered
+ * decision an operator actually recorded; omitting it is exactly "no ruling recorded yet", so
+ * without an explicit `true` this always returns `false`, red trunk or not.
  */
 export function mainHealthShouldStandDownDispatch(observation: MainHealthObservation, operatorRuling?: boolean): boolean {
   return observation.state === "red" && operatorRuling === true;
@@ -2239,50 +1375,24 @@ export function mainHealthShouldStandDownDispatch(observation: MainHealthObserva
 
 // ── W1-T1275 — THE REQUIRED ROLLUP NEVER RECOMPUTES ONCE ITS OWN RUN CONCLUDES ───────────────
 //
-// `.github/workflows/ci-gate.yml` already dedupes by name and already re-reads inside a bounded
-// grace window (W1-T261, test/ci-gate-reaggregate.test.ts's bash-script suite above) — but every
-// re-read lives INSIDE that one run. Once it posts a terminal conclusion, nothing brings it back:
-// the #2612 incident (this task's rationale) held a green suite behind a stale `failure` verdict
-// for 155.4 minutes after ci-gate itself concluded, 30.7 of them after the last required sibling
-// had gone green. Design note (ii) requires the SAME per-job Actions route W1-T1223's
-// `requeueCheck` already uses (`actions/jobs/{job_id}/rerun`) — this section supplies the pure
-// detection and the ledgered bound; the real Actions call is `deps.reaggregateCiGate`'s wiring
-// (out of this task's declared files — see the task record's own note).
-//
-// The check named "ci-gate" IS the one branch protection actually requires (this file's own
-// `checksStateFromRollup` doc: "the mini's token returns [\"remudero-review\",\"ci-gate\"]") — the
-// individual siblings (`ci`, `coverage-ratchet`, …) are what CI-GATE ITSELF treats as required,
-// never a second GitHub-side requirement this sweep must separately track.
+// ci-gate.yml dedupes by name and re-reads inside a bounded grace window, but every re-read lives
+// INSIDE that one run: once it posts a terminal conclusion nothing brings it back. This section is
+// the pure detection and the ledgered bound; the real Actions call is the caller's wiring. The
+// check named "ci-gate" IS what branch protection requires — its siblings are what CI-GATE ITSELF
+// treats as required, never a second GitHub-side requirement to track.
+// Why: #2612 held a green suite behind a stale failure for 155.4 minutes.
 export const CI_GATE_CHECK_NAME = "ci-gate";
 
 /**
- * #2918 — `ci-gate` REPORTED AS A FAILURE IT CANNOT BE.
+ * #2918 — `ci-gate` REPORTED AS A FAILURE IT CANNOT BE. It is a DOWNSTREAM AGGREGATOR: red
+ * BECAUSE a sibling is red, green when its inputs are. A list naming both it and the sibling that
+ * caused it reports two failures where there is one, and a worker handed the second can only chase
+ * a symptom.
  *
- * ATTRIBUTED TO THE PR, NOT A TASK, DELIBERATELY: #2918 carries no task id on any credit path —
- * no `Remudero-Task:` trailer on its body or either commit, and its head `fix/ci-gate-not-a-peer-
- * failure` is not the `run-<id>-<epoch>` shape the branch-name path reads. This block previously
- * cited W1-T2296, which is the incident-replay shard filed the same night for an unrelated
- * purpose; the existence gate accepted it because that id resolves, not because it matched. Do
- * not "restore" a task id here without one that actually owns this work.
- *
- * `ci-gate` is a DOWNSTREAM AGGREGATOR: its failing step is literally "Aggregate sibling check
- * results", and its own annotations read `required check(s) failing — entering a 600s grace window`
- * then `required check(s) FAILED — holding merge`. It goes red BECAUSE a sibling is red and green
- * when its inputs are. So a failure list naming both `ci-gate` and the sibling that caused it
- * reports two failures where there is one, and the second is not fixable in isolation — a fix-rung
- * worker handed it can only chase a symptom.
- *
- * MEASURED 2026-08-26 across the open board: on 5 of 6 red PRs `ci-gate` was one of the reported
- * failures, always downstream, never independently fixable.
- *
- * THE ONE CASE THAT IS KEPT is `ci-gate` failing ALONE. That is the real signal — the aggregate
- * concluded against siblings that are not (or are no longer) failing, which is the stale-verdict
- * shape {@link staleCiGateTransition} exists to name. Dropping it there would erase the only
- * evidence that anything is wrong, so this filter never empties a non-empty list.
- *
- * PURE, and deliberately NOT a change to what a check REPORTS: this narrows what the fleet is
- * TOLD failed, never what CI decided. `checksStateFromRollup`'s red verdict is untouched, so a PR
- * whose only red is `ci-gate` still reads red and still holds the merge.
+ * THE ONE CASE THAT IS KEPT is `ci-gate` failing ALONE — the stale-verdict shape
+ * {@link staleCiGateTransition} names — so this never empties a non-empty list. PURE, and not a
+ * change to what a check REPORTS: it narrows what the fleet is TOLD failed, never what CI decided.
+ * // Why: attributed to the PR, not a task, deliberately — docs/forensics/sweep.md.
  */
 export function withoutDownstreamGateFailure(failures: readonly CiFailure[]): CiFailure[] {
   const others = failures.filter((f) => f.name !== CI_GATE_CHECK_NAME);
@@ -2292,14 +1402,11 @@ export function withoutDownstreamGateFailure(failures: readonly CiFailure[]): Ci
 }
 
 /**
- * W1-T1275 (design iii/iv) — the ONE (head, sibling-transition) shape that makes `ci-gate`'s own
- * concluded verdict stale: its own latest (deduped) attempt concluded a NON-SUCCESS terminal
- * state, and a required sibling's own latest (deduped) attempt is a terminal SUCCESS that started
- * AFTER ci-gate's own latest attempt started — proof the sibling's outcome flipped on this SAME
- * head after the gate had already read and concluded. `jobId` mirrors {@link
- * CancelledRequiredCheck.jobId}: parsed by a future real-gateway producer from ci-gate's OWN
- * check-run `detailsUrl`, never the sibling's — design (ii) re-drives the AGGREGATOR's job, not
- * the sibling's (the sibling already succeeded; there is nothing left to re-run there).
+ * W1-T1275 — the ONE (head, sibling-transition) shape that makes `ci-gate`'s concluded verdict
+ * stale: its own latest deduped attempt concluded a NON-SUCCESS terminal state, and a required
+ * sibling's latest attempt is a terminal SUCCESS that STARTED AFTER ci-gate's did — proof the
+ * sibling flipped on this same head after the gate had already read. `jobId` is ci-gate's OWN,
+ * never the sibling's: the AGGREGATOR is re-driven, since the sibling already succeeded.
  */
 export interface StaleCiGateTransition {
   jobId?: string;
@@ -2311,22 +1418,11 @@ export interface StaleCiGateTransition {
 }
 
 /**
- * W1-T1275 (design iii) — detect the ONE shape design note iii pins, and NOTHING wider. `ci-gate`
- * itself must have a concluded (deduped) attempt in {@link REQUIRED_CHECK_FAIL} — the SAME
- * terminal-fail set {@link checksStateFromRollup} vetoes on, never a separately-invented one — or
- * this returns `undefined`: a gate that is still pending/in-progress has no concluded verdict yet
- * to be stale (criterion 2's other half — "time passed" or "the gate is red" alone is never
- * enough). Then, among every OTHER (deduped) entry, only a literal `SUCCESS` whose `startedAt` is
- * STRICTLY LATER than ci-gate's own qualifies — a sibling that is still failing, still pending, or
- * whose success predates ci-gate's own read proves nothing changed, and this returns `undefined`
- * too (criterion 2: "a suite that is genuinely still failing is never re-run by this path"). When
- * more than one sibling qualifies, the one with the latest `startedAt` is named — the most recent
- * transition is what actually makes the verdict stale.
- *
- * Reuses {@link dedupeRollupByLatestAttempt} — the SAME rule ci-gate.yml's own script and {@link
- * checksStateFromRollup} already apply (rationale 3) — read-only: this function never changes
- * which attempt the gate's own dedupe picks, only observes its result (acceptance: "the gate's
- * latest-attempt-per-name resolution is unchanged").
+ * W1-T1275 — detect the ONE shape design note iii pins, and NOTHING wider. `ci-gate` must have a
+ * CONCLUDED failing attempt, since a still-pending gate has no verdict to be stale, and only a
+ * literal SUCCESS started STRICTLY LATER qualifies as the sibling. A genuinely failing suite is
+ * never re-run by this path. Read-only over the shared dedupe: the gate's own attempt resolution
+ * is unchanged.
  */
 export function staleCiGateTransition(rollup: RollupCheckEntry[] | undefined): StaleCiGateTransition | undefined {
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
@@ -2349,10 +1445,9 @@ export function staleCiGateTransition(rollup: RollupCheckEntry[] | undefined): S
   return { siblingName: latest.name ?? latest.context ?? "unknown", siblingStartedAt: latest.startedAt! };
 }
 
-/** `${headSha}@${siblingName}@${siblingStartedAt}` — the (head, sibling-transition) identity
- *  {@link CI_GATE_REAGGREGATE_STEP}'s ledger rows are keyed on (design iv). Two DIFFERENT
- *  transitions on the same head (a second sibling flipping later, or the same sibling re-flipping
- *  at a new `startedAt`) are two DIFFERENT keys, each earning its own bounded recompute. */
+/** The (head, sibling-transition) identity {@link CI_GATE_REAGGREGATE_STEP}'s rows are keyed on.
+ *  Two DIFFERENT transitions on one head are two DIFFERENT keys, each earning its own bounded
+ *  recompute (W1-T1275, design iv). */
 export function ciGateReaggregateKey(headSha: string, transition: StaleCiGateTransition): string {
   return `${headSha}@${transition.siblingName}@${transition.siblingStartedAt}`;
 }
@@ -2364,12 +1459,10 @@ export interface CiGateReaggregateDecision {
 }
 
 /**
- * W1-T1275 (design iv) — BOUNDED BY A LEDGERED RECORD, never a clock or an in-memory counter,
- * mirroring {@link cancelledCheckRequeueDecision}'s exact shape. Zero prior recomputes for this
- * EXACT (head, sibling-transition) pair re-drives the gate's job once; a repeat observation of
- * the SAME pair (this pass reading the identical stale transition again, before GitHub's own
- * re-run has settled) never repeats the Actions call — "at most once per head and sibling
- * transition" (criterion 3), which is what makes a re-run storm impossible by construction.
+ * W1-T1275 — BOUNDED BY A LEDGERED RECORD, never a clock or an in-memory counter, mirroring
+ * {@link cancelledCheckRequeueDecision}. Zero priors for this exact (head, sibling-transition)
+ * pair re-drives the gate's job once; a repeat observation never repeats the Actions call. At
+ * most once per head and transition — which makes a re-run storm impossible by construction.
  */
 export function ciGateReaggregateDecision(alreadyReaggregated: boolean): CiGateReaggregateDecision {
   if (alreadyReaggregated) {
@@ -2388,12 +1481,10 @@ export function ciGateReaggregateDecision(alreadyReaggregated: boolean): CiGateR
 export const CI_GATE_REAGGREGATE_STEP = "sweep.ci_gate_reaggregated";
 
 /**
- * W1-T1275 (design iv) — every `${headSha}@${siblingName}@${siblingStartedAt}` pair the ledger
- * already records a {@link CI_GATE_REAGGREGATE_STEP} row for. `runSweep` writes this row BEFORE
- * calling `deps.reaggregateCiGate` (ledgered before it can be repeated — the SAME ordering {@link
- * requeuedCheckKeysFromLedger}'s own doc gives for the identical reason), so a pass that crashes
- * between the write and the real GitHub call still bounds the NEXT pass toward standing down
- * rather than re-driving the SAME transition a second time.
+ * W1-T1275 — every transition key the ledger already records a {@link CI_GATE_REAGGREGATE_STEP}
+ * row for. `runSweep` writes the row BEFORE calling `deps.reaggregateCiGate`, the same ordering
+ * {@link requeuedCheckKeysFromLedger} uses for the same reason: a pass crashing between the write
+ * and the GitHub call still bounds the next pass toward standing down.
  */
 export function reaggregatedCiGateKeysFromLedger(lines: Array<Record<string, unknown>>): Set<string> {
   const out = new Set<string>();
@@ -2413,71 +1504,28 @@ export function reaggregatedCiGateKeysFromLedger(lines: Array<Record<string, unk
 const MS_PER_DAY = 86_400_000;
 
 /**
- * The blocked_ci shape (the #170 fix, W1-T100; BROADENED by W1-T138, the
- * #303/#305/#292/#315 fix): a required check is red — the failing signal IS
- * the CI log, never a reviewer verdict, and it takes PRECEDENCE over any
- * review verdict sitting beside it, because GitHub will not merge past a red
- * required check no matter what the review says. W1-T100 originally required
- * `reviewState === "none"` too (only "no review has posted at all" counted),
- * but that is provably too narrow: a review can post (success OR failure)
- * and a required check can STILL be, or subsequently go, red — (1)
- * `ciGateFromRollup` (the live gate `waitForCiGreen` polls) only waits for a
- * check literally named `ci` plus "nothing red YET"; a slower required check
- * (commitlint, CodeQL, osv) can still be pending when it fires green and let
- * review run BEFORE that slower check settles red; (2) a fix-rung strike's
- * OWN commit can newly break a required check (a too-long commit header trips
- * commitlint; an edited regex trips CodeQL) while leaving a STALE review
- * verdict computed before that push sitting in the rollup. Both produced the
- * live incident this fix closes: `unmetCriteria`-shaped (reviewer-unmet)
- * dispatches burned every strike re-litigating a review verdict while the
- * ACTUAL merge-blocking check sat untouched, then escalated as "blocked_review
- * fix rung exhausted" naming criteria instead of the check. EXPORTED (not
- * just shared across this table's own rows) so every OTHER caller that needs
- * the same classification — `routeFix`'s strike-cap-honored escalate check
- * and its evidence-shape selection, `runSweep`'s evidence-shape selection,
- * `runFixRung`'s own mid-rung mode re-check — imports this ONE definition
- * rather than hand-copying the check, which would silently drift the moment
- * this predicate is refined again.
+ * The blocked_ci shape (W1-T100, broadened by W1-T138): a required check is red. The failing
+ * signal IS the CI log, and it takes PRECEDENCE over any review verdict beside it, because GitHub
+ * will not merge past a red required check whatever the review says. The original also required
+ * `reviewState === "none"`, which is too narrow: a slower check can settle red after review ran.
  *
- * `pr.checksState` is `"red"` ONLY for a required CHECK RUN failure (W1-T394,
- * the PR #1441 fix) — {@link checksStateFromRollup} excludes the
- * `remudero-review` commit status from the gate that derives it, so a red
- * review alone can never make this true. A review failure is read off
- * `pr.reviewState` instead, by DISPOSITION_RULES' separate review-shaped row.
- * This keeps `isBlockedCi`'s own contract exactly as documented above ("a
- * required check is red — the failing signal IS the CI log") true by
- * construction, for every caller listed here.
+ * `checksState` is red ONLY for a required CHECK RUN failure — the review status is excluded
+ * (W1-T394) — so a red review can never make this true. EXPORTED so every caller imports this ONE
+ * definition rather than a hand-copy that would drift on the next refinement.
+ * // Why: strikes were burnt re-litigating a review while the blocking check sat untouched.
  */
 export function isBlockedCi(pr: OpenPrView): boolean {
   return pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0; // W1-T2504
 }
 
 /**
- * W1-T1269 — does the CURRENT unmet-criteria set repeat, claim-for-claim, the set the most
- * recently RECORDED fix-rung strike was already dispatched to resolve? THE EARLIER STOP this
- * task adds, never a longer leash (design note iv): DISPOSITION_RULES row 5.5 escalates on a
- * `true` here so a dispatch that could only reproduce a strike already PROVEN to add no
- * information is preempted before the ordinary strike cap is ever reached.
+ * W1-T1269 — does the CURRENT unmet-criteria set repeat, claim-for-claim, what the most recent
+ * strike was already dispatched to resolve? THE EARLIER STOP, never a longer leash: a dispatch
+ * that could only reproduce a strike already proven to add nothing is preempted before the cap.
  *
- * KEYED ON IDENTITY, NEVER ON COUNT (design note i — the weaker measure this task refuses):
- * compares the two claim SETS, not their sizes. A strike that fixes one criterion while
- * breaking another leaves the COUNT unchanged but the SET different, and correctly reads as
- * progress here (returns `false`) — `unmetCriteria.length` alone cannot tell that case apart
- * from a genuine repeat.
- *
- * STOPS ONLY ON AN EXACT MATCH (design note ii — the conservative reading, deliberately): the
- * stronger INCLUSION-DESCENT rule (stop unless the new set is a strict subset of the old one)
- * is REFUSED — it would also stop a strike that swapped which criteria are unmet, which is
- * lateral progress, not a repeat. Only byte-identical claim sets (same size, same membership)
- * count as "no progress"; anything else — including a different set of the SAME size — falls
- * through and the rung keeps its remaining strikes (design note vi, the falsifier that must run
- * both ways).
- *
- * FAILS CLOSED, always, never a guess: `false` when there is no recorded strike, when the most
- * recently recorded strike's {@link StrikeAttempt.unmetClaims} was never populated (every
- * producer that hasn't wired that field yet — see its own SCOPE note), or when either side's
- * claim set is empty (an empty set means "resolved," never "repeated"). Every existing
- * caller/fixture that predates this field behaves exactly as before this function existed.
+ * KEYED ON IDENTITY, NEVER ON COUNT, and STOPS ONLY ON AN EXACT MATCH — the stronger
+ * inclusion-descent rule is REFUSED, because it would also stop a strike that swapped which
+ * criteria are unmet, which is lateral progress. FAILS CLOSED on an empty or absent claim set.
  */
 export function fixRungRepeatsIdenticalFailure(pr: OpenPrView): boolean {
   const history = pr.strikeHistory ?? [];
@@ -2490,23 +1538,11 @@ export function fixRungRepeatsIdenticalFailure(pr: OpenPrView): boolean {
 }
 
 /**
- * W1-T923 (design note iv) — given the STRUCTURED `reasons` a gate failure's ledger row
- * carried, decide whether it names a SINGLE, unambiguous remedy. Exactly one reason is one
- * automatable form and is copied through VERBATIM (never re-derived); zero or TWO-OR-MORE
- * reasons are excluded entirely — a remedy offering a CHOICE between forms (the #1991
- * falsifier: the provenance check accepted `Chosen (RECOMMENDED, auto)` OR an
- * operator-attribution line, crediting different authors) must be EXCLUDED from the
- * actionable list, not merely flagged inside it, because a worker acting on the wrong one
- * of several named options misattributes a ratified ruling — the file where a false claim
- * does the most damage.
- *
- * PURE AND EXPORTED so the "single form vs a choice" predicate has its OWN direct test
- * coverage, never only indirectly through the wider routing pipeline —
- * `run-task.ts`'s `actionableGateFailuresFromLedger` is the ONLY caller, mapping the
- * ledger's raw `reasons` array through this before it ever reaches
- * {@link OpenPrView.actionableGateFailures}. Reads NOTHING about `failure_class` — it never
- * even sees it — so a judgement-classed row (`test_theater`, the class #1991 itself carries)
- * qualifies exactly the same as any other, by construction (design note v).
+ * W1-T923 — given the STRUCTURED `reasons` a gate failure carried, decide whether it names a
+ * SINGLE, unambiguous remedy. Exactly one is copied through VERBATIM; zero, or two or more, are
+ * excluded ENTIRELY rather than flagged, because a worker acting on the wrong one of several named
+ * options misattributes a ratified ruling. Reads NOTHING about `failure_class`, so a
+ * judgement-classed row qualifies exactly like any other, by construction.
  */
 export function actionableGateFailuresFromReasons(reasons: readonly string[]): ActionableGateFailure[] {
   return reasons.length === 1 ? [{ reason: reasons[0] }] : [];
@@ -2514,34 +1550,25 @@ export function actionableGateFailuresFromReasons(reasons: readonly string[]): A
 
 /**
  * W1-T527 — WHY a PR is red, which {@link isBlockedCi} deliberately does not ask. Four causes
- * reached the identical `blocked-fixable` dispatch, and only ONE of them is the fix rung's
- * territory:
+ * reached the identical dispatch, and only ONE is the fix rung's territory:
  *
- *   - `base-caused`   — the same required check failing on EVERY open PR this pass. A property of
- *                       origin/main, not of any diff. NO edit to any of those diffs would help.
- *   - `gate-conflict` — the review names an unsatisfiable condition (Standing rule 25
- *                       entanglement), which is explicitly NON-SUPPRESSIBLE, so no re-review can
- *                       soften it and no single patch can satisfy both gates.
- *   - `environment`   — a near-total failure ratio inside ONE check whose log tail repeats a
- *                       single message (the Playwright build-mismatch shape: 96 of 97 failures
- *                       carrying the same `browserType.launch` line).
+ *   - `base-caused`   — the same check failing on EVERY open PR this pass; a property of main,
+ *                       not of any diff, so no edit to those diffs would help.
+ *   - `gate-conflict` — an unsatisfiable condition (Standing rule 25), NON-SUPPRESSIBLE, so no
+ *                       re-review softens it and no patch satisfies both gates.
+ *   - `environment`   — a near-total failure ratio inside ONE check repeating a single message.
  *   - `in-diff`       — the residue, and the fix rung's existing territory, unchanged.
  *
  * PRECEDENCE IS THE SHARD'S, NOT AN OPTIMISATION: base-caused is asked FIRST because it exonerates
- * every diff in the pass at once, so it must win over any per-PR reading of the same failure.
- *
- * PURE FOLD, NO I/O: every discriminator reads evidence the sweep ALREADY holds — `ciFailures`
- * (populated whenever `checksState === "red"`) and the whole `openPrs` array `runSweep` is handed.
- * On a day that reached 7,965 GitHub calls against a 5,000 ceiling, a classifier that cost a
- * network read per PR would not be worth having.
+ * every diff at once. PURE FOLD, NO I/O — a classifier costing a network read per PR is not worth
+ * having.
  */
 export type RedCause = "base-caused" | "gate-conflict" | "environment" | "in-diff";
 
 /**
- * The Standing rule 25 refusal text `renderReviewSummary` emits (`src/lib/review.ts`, the
- * `instrumentEntanglement` arm). Matched as TEXT because the structured
- * `ReviewVerdict.instrumentEntangled` boolean is not carried on {@link OpenPrView} — see
- * {@link namesUnsatisfiableGate}'s own doc for what that costs and why it is still safe.
+ * The Standing rule 25 refusal text `renderReviewSummary` emits. Matched as TEXT because the
+ * structured `ReviewVerdict.instrumentEntangled` boolean is not carried on {@link OpenPrView} —
+ * see {@link namesUnsatisfiableGate} for what that costs and why it is still safe.
  */
 const UNSATISFIABLE_GATE_MARKER = /entangled: instrument path\(s\)/i;
 
@@ -2553,15 +1580,10 @@ const ENVIRONMENT_REPEAT_RATIO = 0.9;
 /**
  * The required check failing on EVERY open PR in this pass, or `undefined`.
  *
- * THE VACUITY GUARD IS THE LOAD-BEARING PART. With a single open PR, "failing on every open PR" is
- * trivially true of that PR's own failure, and a lone genuinely-broken diff would exonerate itself
- * and never be fixed. One PR is not a cross-PR measurement, so fewer than two returns `undefined`
- * — the same discipline as requiring a positive control before believing a query.
- *
- * A pass containing any PR that is NOT failing this check (green, pending, or failing something
- * else) yields `undefined`: a base outage reddens all of them, so a survivor is evidence AGAINST
- * the base being the cause. That is deliberately the conservative direction — it fails toward
- * dispatching the fix rung, never toward silently standing down.
+ * THE VACUITY GUARD IS THE LOAD-BEARING PART: with a single open PR the claim is trivially true of
+ * its own failure, so a lone broken diff would exonerate itself. Fewer than two returns
+ * `undefined`. Any PR NOT failing this check also yields `undefined` — a base outage reddens all
+ * of them, so a survivor is evidence AGAINST the base, and that fails toward dispatching.
  */
 export function baseCausedCheckName(pr: OpenPrView, allPrs: readonly OpenPrView[]): string | undefined {
   const own = pr.ciFailures ?? [];
@@ -2578,19 +1600,12 @@ export function baseCausedCheckName(pr: OpenPrView, allPrs: readonly OpenPrView[
 
 /**
  * True when the review named a condition no patch can satisfy (Standing rule 25 entanglement).
+ * READS BOTH CARRIERS BECAUSE ONE IS CURRENTLY INERT, worth stating rather than hiding.
  *
- * READS BOTH CARRIERS BECAUSE ONE OF THEM IS CURRENTLY INERT, AND THAT IS WORTH STATING RATHER
- * THAN HIDING: `OpenPrView.reviewSummary` is hardwired to `undefined` at BOTH of its producer
- * sites in `src/run-task.ts`, so in a live sweep today only the `unmetCriteria` reason can carry
- * the marker. The summary arm is read anyway because the field is typed, populated in
- * reconstruction paths, and costs nothing — but this predicate is NOT the safety property.
- *
- * THE SAFETY PROPERTY IS STRUCTURAL, NOT DETECTIVE. A rule-25 refusal fails the `remudero-review`
- * COMMIT STATUS, and `checksStateFromRollup` excludes that context from `checksState` by
- * construction (W1-T394), so such a PR is review-red and never checks-red. Since the stand-down
- * below fires only on `ciFailures`-derived evidence, a gate conflict CANNOT be stood down even if
- * this predicate returns false. Detection changes the ledger's reason text; it does not change
- * whether the escalation survives.
+ * THE SAFETY PROPERTY IS STRUCTURAL, NOT DETECTIVE: a rule-25 refusal fails the review COMMIT
+ * STATUS, which `checksState` excludes, so such a PR is review-red and never checks-red. The
+ * stand-down fires only on `ciFailures`, so a gate conflict cannot be stood down even if this
+ * returns false. Detection changes the ledger's reason text, not whether the escalation survives.
  */
 export function namesUnsatisfiableGate(pr: OpenPrView): boolean {
   if (pr.reviewSummary && UNSATISFIABLE_GATE_MARKER.test(pr.reviewSummary)) return true;
@@ -2599,15 +1614,10 @@ export function namesUnsatisfiableGate(pr: OpenPrView): boolean {
 
 /**
  * The check whose log tail is one message repeated near-totally, or `undefined`.
- *
- * W1-T517's `findSiblingDisagreements` (`src/lib/host-parity.ts`) IS THE OTHER HALF OF THIS
- * DISCRIMINATOR AND IS DELIBERATELY NOT CALLED HERE — it requires BOTH poles (at least one
- * `success` and one `failure` on the same sha), and {@link OpenPrView} carries `ciFailures`, which
- * is failures-only and populated only when `checksState === "red"`. There is no success pole to
- * hand it. Feeding it would need the producer (`fetchCiFailures`, `src/run-task.ts`) to emit
- * passing runs too, and this task does not declare that file. Reimplementing its fold here is
- * exactly what its own doc forbids, so the ratio arm carries this class alone and the sibling arm
- * is named as available work rather than faked.
+ * `findSiblingDisagreements` is the other half of this discriminator and is DELIBERATELY NOT
+ * CALLED: it needs BOTH poles, and {@link OpenPrView} carries failures only. Reimplementing its
+ * fold here is what its own doc forbids, so the ratio arm carries this class alone and the sibling
+ * arm is named as available work rather than faked.
  */
 export function environmentFaultCheckName(pr: OpenPrView): string | undefined {
   for (const failure of pr.ciFailures ?? []) {
@@ -2637,22 +1647,18 @@ export function classifyRedCause(pr: OpenPrView, allPrs: readonly OpenPrView[]):
 
 /**
  * The two classes the fix rung cannot reach, and therefore the only two that change behaviour.
- *
- * `in-diff` dispatches exactly as before this task existed; `gate-conflict` refuses and escalates
- * exactly as before (design note iii: that path is already correct and stays byte-identical). A
- * stand-down leaves `acted:false`, and `priorActionsFromLedger` skips every row where
- * `line.acted !== true` — so no strike is spent and the PR is re-derived fresh next pass.
+ * `in-diff` dispatches exactly as before; `gate-conflict` refuses and escalates byte-identically.
+ * A stand-down leaves `acted:false`, and `priorActionsFromLedger` skips those rows — so no strike
+ * is spent and the PR is re-derived fresh next pass.
  */
 export function redCauseStandsDown(cause: RedCause): boolean {
   return cause === "base-caused" || cause === "environment";
 }
 
 /**
- * The stand-down reason carried on the existing `sweep.disposed` line — NOT a new ledger step.
- * Design note (vi): `daemon.tree_dirty` and `daemon.stale_code` both fire with nothing reading
- * either, and `CiFailure.outsidePrRange` is narrated by `describeCiFailures` and never acted on.
+ * The stand-down reason carried on the EXISTING `sweep.disposed` line, not a new ledger step.
  * This class is READ by the dispatch decision itself, which is what makes it an actor rather than
- * a fourth dead signal.
+ * a fourth dead signal beside `daemon.tree_dirty` and `CiFailure.outsidePrRange`.
  */
 export function describeRedCause(cause: RedCause, pr: OpenPrView, allPrs: readonly OpenPrView[]): string {
   if (cause === "base-caused") {
@@ -2664,15 +1670,11 @@ export function describeRedCause(cause: RedCause, pr: OpenPrView, allPrs: readon
 }
 
 /**
- * W1-T2620 (design i/v) — per PR, the `main_tip_sha` most recently recorded on a base-caused
- * `sweep.disposed` ROW — the marker this task rides on the EXISTING step (never a fourth ledger
- * signal). `undefined` for a PR never yet observed base-caused: nothing has "advanced" without a
- * baseline to compare against (see {@link selectBaseCausedRelease}'s own doc for why that PR is
- * therefore never release-eligible on its first observation).
- *
- * Reads `main_tip_sha` alone — never `stand_down_reason`'s prose — because the field is written
- * ONLY from the base-caused branch below; no other disposition ever sets it, so no text match is
- * needed to tell base-caused rows apart from any other `sweep.disposed` row.
+ * W1-T2620 — per PR, the `main_tip_sha` most recently recorded on a base-caused `sweep.disposed`
+ * row: the marker this task rides on the EXISTING step, never a fourth ledger signal.
+ * `undefined` for a PR never observed base-caused, since nothing has advanced without a baseline.
+ * Reads `main_tip_sha` alone, never prose: that field is written only from the base-caused branch,
+ * so no text match is needed to tell those rows apart.
  */
 export function lastBaseCausedTipFromLedger(lines: readonly Record<string, unknown>[]): Map<number, string> {
   const out = new Map<number, string>();
@@ -2687,20 +1689,11 @@ export function lastBaseCausedTipFromLedger(lines: readonly Record<string, unkno
 }
 
 /**
- * W1-T2620 (design ii/iii) — AT MOST ONE base-caused PR to release THIS pass, oldest activity
- * first. THE RELEASE CONDITION IS "main has moved since this PR last stood down", never "the
- * cause is known" (design note i) — so eligibility never touches {@link DEFAULT_FIX_CLASSES}.
- *
- * Eligible: {@link classifyRedCause} reads `"base-caused"` for this PR against `prs` THIS pass,
- * AND {@link lastBaseCausedTipFromLedger}'s own record for this PR is DEFINED and differs from
- * `mainTipSha` — main has advanced since the last pass that observed this exact PR base-caused.
- * A PR with no prior record is NOT eligible: with no baseline, nothing has "advanced" yet, so it
- * stands down (exactly as before this task existed) and gets its first tip recorded instead.
- *
- * {@link oldestActivityFirst} is the SAME comparator {@link selectUpdateBranchTarget}/
- * {@link selectReviewAdmission} already use for the identical "a loser this pass is strictly
- * older next pass, so it cannot starve" argument (design note iii, the ratified W1-T528 cost
- * argument reused verbatim) — never a second, independently-invented ordering.
+ * W1-T2620 — AT MOST ONE base-caused PR released per pass, oldest activity first. THE RELEASE
+ * CONDITION IS "main has moved since this PR last stood down", never "the cause is known". A PR
+ * with no prior record is NOT eligible: with no baseline nothing has advanced, so it stands down
+ * and gets its first tip recorded. Ordered by the SAME comparator the other selectors use, so a
+ * loser is strictly older next pass and cannot starve.
  */
 export function selectBaseCausedRelease(
   prs: readonly OpenPrView[],
@@ -2774,33 +1767,20 @@ export async function selectStaleBaseRelease(
 }
 
 /**
- * The four named "why is this actually blocked" states an escalation must distinguish
- * (W1-T186) — never a single overloaded `checksState`/`reviewState` pair. Exactly one applies
- * (or none, for an ordinary review-failure/contradictory block, where these four facts say
- * nothing extra beyond the criterion itself):
+ * The named "why is this actually blocked" states an escalation must distinguish (W1-T186), never
+ * a single overloaded `checksState`/`reviewState` pair. Exactly one applies, or none for an
+ * ordinary review-failure block:
+ *   - CONFLICTED: observed dirty. Zero check runs is EXPECTED — GitHub does not start checks on an
+ *     unmergeable ref. Action: merge main into the branch.
+ *   - FAILING: a required check ran and CONCLUDED failure. Action: name it.
+ *   - ABSENT: a required context has ZERO observed runs on an otherwise-mergeable PR. Action: post it.
+ *   - PENDING: checks exist and are still running. Action: wait, then escalate past the ceiling.
+ *   - GATE_UNREADABLE (W1-T2399): the repo-wide protection read failed — a fact about the REPO,
+ *     not this PR's checks, and reported as ABSENT before, contradicting its own green checks.
  *
- *   - CONFLICTED: `mergeState`/`mergeable` observed dirty/false. The PR cannot merge regardless
- *     of any check's state — zero check runs here is EXPECTED (GitHub does not start checks on
- *     an unmergeable ref), never a checks/review signal. Action: merge main into the branch.
- *   - FAILING: a required check ran and CONCLUDED failure (`checksState === "red"`). Action:
- *     names the check — see {@link describeCiFailures}.
- *   - ABSENT: a required context has ZERO observed check runs on an otherwise-mergeable PR —
- *     either the whole rollup is empty (`checksState === "none"`) or, the W1-T176 shape,
- *     `remudero-review` specifically never posted while every OTHER required check is green
- *     (`checksState === "green" && reviewState === "none"`). Action: post/kick off the check.
- *   - PENDING: checks exist and are still running (`checksState === "pending"`). Action: wait
- *     (or, once a staleness ceiling is exceeded, escalate naming the elapsed time — the
- *     stale-pending row already does this via `reason`; this state still names the fact).
- *
- * CHECKED IN THIS ORDER, CONFLICTED FIRST: the #412/#413 live incident was PRECISELY a PR that
- * was both `checksState: "none"` (zero check runs) AND `mergeState: "dirty"` — reading "none"
- * before "dirty" would have mis-sorted it as ABSENT (post the check) when the check will NEVER
- * run until the conflict resolves. This is the split acceptance 3 requires: `checksState: "none"`
- * is no longer read as one fact meaning two different things.
+ * CHECKED IN THIS ORDER, CONFLICTED FIRST: reading "none" before "dirty" mis-sorts a conflicted PR
+ * as ABSENT and posts a check that can never run until the conflict resolves (#412/#413).
  */
-/** W1-T2399 adds `GATE_UNREADABLE`: the repo-wide protection read failed, which is a fact about
- *  the REPO rather than about this PR's checks. It used to be reported as `ABSENT` — a claim that
- *  the required check had zero observed runs, contradicted by the PR's own green `checksState`. */
 export type ObservedBlockerState = "CONFLICTED" | "FAILING" | "ABSENT" | "PENDING" | "GATE_UNREADABLE";
 
 export function observedBlockerState(pr: OpenPrView): ObservedBlockerState | undefined {
@@ -2841,58 +1821,23 @@ export type AbsentRepushDecision =
 export const ABSENT_REPUSH_CAP = 1;
 
 /**
- * THE ABSENT-CHECK-SUITE REMEDY'S DECISION (W1-T186 follow-up). Pure: every inch of evidence is
- * a parameter, so the three real cases below are fixtures rather than a live experiment.
+ * THE ABSENT-CHECK-SUITE REMEDY'S DECISION (W1-T186 follow-up). PURE: every inch of evidence is a
+ * parameter, so the real cases are fixtures rather than a live experiment. GitHub sometimes creates
+ * NO check-suite for a pushed sha, and pushing a fresh sha created them immediately every time.
  *
- * ── WHY A REMEDY AT ALL ─────────────────────────────────────────────────────────────────────
- * GitHub sometimes creates NO Actions check-suite for a pushed sha. Observed three times
- * (#921, #940, #966): only the `claude`/`vercel` app suites existed, zero Actions check-runs,
- * while ci.yml is unconditional and Actions was healthy on other branches at that same moment.
- * On #921 the sweep disposed `blocked-ambiguous` and escalated 244 times over 7h45m with
- * `acted:false` — the right diagnosis, no remedy, and (light-pass stand-down) not even an issue.
- * Pushing a fresh sha created 6 suites and 20 check-runs immediately, every time.
+ * THE DISCRIMINATOR IS ABSENT vs PENDING, and BOTH halves are required, because re-pushing a PR
+ * whose checks merely have not STARTED cancels in-flight runs and resets the review. STRUCTURE
+ * reuses {@link checksStateFromRollup}: only a COMPLETELY EMPTY rollup reads "none". TIME bounds
+ * the seconds before the first context registers, clocked on `lastActivityAt` — anything else
+ * advancing it only makes the PR look YOUNGER, so the error direction is toward doing nothing.
  *
- * ── THE DISCRIMINATOR: ABSENT vs PENDING ────────────────────────────────────────────────────
- * Re-pushing a PR whose checks merely have not STARTED yet would be destructive churn — it
- * cancels in-flight runs and resets the review. Two independent facts separate them, and BOTH
- * are required:
- *
- *   1. STRUCTURE. `checksStateFromRollup` already draws this line and we reuse it rather than
- *      re-deriving: a rollup with entries but no REQUIRED context registered yet returns
- *      "pending" (`gate.length === 0 && knownRequired`), and ONLY a COMPLETELY EMPTY rollup
- *      returns "none". So "the workflow is starting" normally reads PENDING, because the
- *      instant any context registers the rollup is non-empty. `checksState === "none"` means
- *      nothing at all registered — the missing-suite shape.
- *   2. TIME. The residual ambiguity is the seconds between the push and the FIRST context
- *      registering, during which the rollup is legitimately empty. `policy.absentCeilingMinutes`
- *      bounds it. The clock is `lastActivityAt` (the PR's `updatedAt`), which a push always
- *      advances; anything else that advances it (a comment) only makes the PR look YOUNGER and
- *      so makes this fire LESS — the error direction is toward doing nothing, never toward
- *      churn.
- *
- * The W1-T176 sub-shape of ABSENT — `checksState === "green" && reviewState === "none"`, where
- * every other required context is green and only `remudero-review` never posted — is
- * DELIBERATELY EXCLUDED. Its rollup is not empty and its remedy is to post the review (the
- * post-review lane already owns it); a re-push there would throw away a green CI run to fix a
- * missing status the sweep can post directly.
- *
- * ── WHY A PASSING REVIEW IS EXCLUDED ────────────────────────────────────────────────────────
- * `remudero-review` is posted PER HEAD SHA, so minting a new sha discards it and costs a full
- * review cycle. A PR that already carries a passing review is never re-pushed here, whatever
- * its checks say — that certification is the expensive artifact in this system.
+ * The W1-T176 sub-shape and a PASSING REVIEW are both DELIBERATELY EXCLUDED: the review is posted
+ * per head sha, so minting a new sha discards the expensive artifact in this system.
+ * // Why: #921 escalated 244 times over 7h45m with no remedy — docs/forensics/sweep.md.
  */
 /**
- * W1-T1103 (design i): how many minutes since this PR's head was last pushed, or `undefined`
- * when the age cannot be read. Factored out of {@link absentChecksRepushDecision}'s own "time
- * half" (below) so the NOT-YET-SCHEDULED disposition row in {@link DISPOSITION_RULES} reads the
- * IDENTICAL clock rather than a second, independently-drifting computation of "how long has this
- * head sat with zero check runs" — the two questions ("re-push yet?" and "escalate yet?") are the
- * same question about the same evidence, and rationale (3)'s own point is that TIME is the one
- * discriminator a bare run-count cannot carry, so both readers must derive it identically.
- *
- * `pr.lastActivityAt` (the PR's `updatedAt`) is the same clock the sibling function has always
- * used: a push always advances it, and the fail direction on an unreadable value is `undefined`
- * (never a guessed age) — the caller decides what "cannot date" means for its own disposition.
+ * W1-T1103 — minutes since this head was last pushed. Factored out so the NOT-YET-SCHEDULED row
+ * reads the IDENTICAL clock: "re-push yet?" and "escalate yet?" are one question about one input.
  */
 export function absentAgeMinutes(pr: OpenPrView, now: number): number | undefined {
   const pushedAt = Date.parse(pr.lastActivityAt);
@@ -2989,16 +1934,12 @@ function mergeableFactLine(pr: OpenPrView): string {
 }
 
 /**
- * Render the named observed-blocker facts (W1-T186) that {@link renderClarificationQuestion}
- * prepends to every question — the operator sees WHICH of the four named states fired and the
- * facts that support it, not just a re-derived "checks X, review Y" summary. "" when
- * {@link observedBlockerState} found none of the four to name (an ordinary review-failure block),
- * so the caller falls back to the criterion/reason text alone, exactly as before this task.
+ * Render the named observed-blocker facts (W1-T186) prepended to every clarification question, so
+ * the operator sees WHICH state fired and the facts supporting it. "" when none was named.
  *
- * FALSIFIER-SHAPED CONSTRAINT: the CONFLICTED branch below must never contain the word "CI" or
- * the token "blocked_ci" — both are FALSE for a conflicted PR (GitHub never even started a check,
- * let alone failed one), and this codebase's own #412/#413 incident is exactly an escalation that
- * said "blocked_ci"/"checks pending" for a PR that was neither.
+ * FALSIFIER-SHAPED CONSTRAINT: the CONFLICTED branch must never contain the word "CI" or the token
+ * "blocked_ci" — both are FALSE for a conflicted PR, and #412/#413 is exactly an escalation that
+ * said so for a PR that was neither.
  */
 function renderObservedFacts(pr: OpenPrView, state: ObservedBlockerState | undefined): string {
   const mergeableFact = mergeableFactLine(pr);
@@ -3040,57 +1981,32 @@ function renderObservedFacts(pr: OpenPrView, state: ObservedBlockerState | undef
 }
 
 /**
- * One row of the POLICY-AS-DATA table (rule 2): a mapping from an observed
- * PR-state predicate to the disposition it produces, plus the stated reason.
- * The disposition SELECTION lives in {@link DISPOSITION_RULES} — a data
- * structure, never imperative if/else branches — exactly the shape the dep lane
- * (W1-T54, `MANIFEST_PATTERNS`) and alert lane express their policy in. Adding,
- * removing, or reordering a disposition is a TABLE edit, never a code branch.
+ * One row of the POLICY-AS-DATA table (rule 2): an observed-state predicate, the disposition it
+ * produces, and the stated reason. Selection lives in {@link DISPOSITION_RULES} — a data
+ * structure, never imperative branches — the same shape the dep and alert lanes use. Adding,
+ * removing or reordering a disposition is a TABLE edit, never a code branch.
  */
 interface DispositionRule {
   readonly disposition: Disposition;
   /**
-   * Observed-state predicate over the PR + the tunable {@link SweepPolicy}
-   * thresholds. `now` (W1-T114) is the same sweep-pass clock {@link ageDays}
-   * was derived from — threaded so the WAIT/stale-pending rows can derive the
-   * PENDING age from {@link OpenPrView.checksPendingSince} without a second,
-   * independently-sourced clock.
+   * Observed-state predicate over the PR and the tunable {@link SweepPolicy} thresholds. `now` is
+   * the same sweep-pass clock {@link ageDays} came from, threaded so the WAIT and stale-pending
+   * rows derive the pending age without a second, independently-sourced clock.
    */
   readonly when: (pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number) => boolean;
   readonly reason: (pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number) => string;
 }
 
 /**
- * W1-T114: how many minutes checks have been pending on this head, or undefined when there is
- * genuinely nothing to date. PURE, fail-toward-undefined: never guesses an age it cannot support
- * from observed state.
+ * W1-T114 — minutes checks have been pending on this head, or `undefined` when there is nothing to
+ * date. PURE and fail-toward-undefined: never guesses an age observed state cannot support.
  *
- * ─── WHY THIS HAS A FALLBACK, AND WHY THAT IS THE WHOLE FIX ──────────────────────────────────
- * W1-T114 shipped the WAIT/stale-pending rows reading `checksPendingSince`, and left an explicit
- * hatch for "callers that haven't wired the timestamp yet" (see the row comments below). **NOBODY
- * EVER WIRED IT.** Measured at `d63bee7`: `checksPendingSince` has six references in `src/`, all in
- * THIS file, and not one of them is a write — `buildOpenPrViews`, the real gateway, never sets it.
- *
- * So `pendingAgeMinutes` returned `undefined` on every real PR, both W1-T114 rows required
- * `mins !== undefined`, and EVERY pending PR fell through to the terminal catch-all and escalated.
- * That produced 57 open `needs-human` issues in one day, all titled
- * `… not positively mergeable — checks pending, review none — escalating`, including one for PR
- * #1038 whose checks went green and merged minutes later. The bound existed, was tested against
- * fixtures that supply the field, and was dead in production.
- *
- * THE FALLBACK IS THE SIBLING REMEDY'S OWN SOURCE, not a new invention. PR #977's ABSENT-checks
- * remedy solves the identical "how long has this been stuck" question for `checksState: "none"`
- * and dates it off `pr.lastActivityAt` (`decideAbsentRepush`, this file) — a field the real gateway
- * DOES populate (`run-task.ts`'s `lastActivityAt: pr.updatedAt`). Using the same source here makes
- * W1-T114's bound live with no gateway change, and keeps `checksPendingSince` as the strictly more
- * precise reading for any caller that later wires it.
- *
- * IT IS A CEILING ON *WAITING*, NOT A LICENCE TO IGNORE. Past `pendingCeilingMinutes` the
- * stale-pending row still escalates — W1-T78's purpose is preserved exactly; only the first hour of
- * a normal CI run stops being treated as ambiguity.
- *
- * PRECEDENCE IS DELIBERATE: the precise field wins when present, so wiring it later is a pure
- * upgrade and can never be masked by the coarser fallback.
+ * THE FALLBACK IS THE WHOLE FIX: `checksPendingSince` was never wired by any producer, so both
+ * rows required a value that was always `undefined` and every pending PR escalated.
+ * `lastActivityAt` IS populated, so the bound goes live with no gateway change. It is A CEILING ON
+ * WAITING, NOT A LICENCE TO IGNORE — past the ceiling the stale-pending row still escalates, and
+ * the precise field wins when present so wiring it later is a pure upgrade.
+ * // Why: the dead bound produced 57 needs-human issues in one day — docs/forensics/sweep.md.
  */
 function pendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
   const raw = pr.checksPendingSince ?? pr.lastActivityAt;
@@ -3101,13 +2017,10 @@ function pendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
 }
 
 /**
- * W1-T913: how many minutes `remudero-review` has read PENDING (posted by this system itself,
- * {@link "./review.js".postReviewPending}) on this head, or undefined when there is nothing to
- * date. Mirrors {@link pendingAgeMinutes}'s own fallback discipline exactly: the precise field
- * ({@link OpenPrView.reviewPendingSince}, the ledger's own `ts` on the `review.pending_posted`
- * line) wins when present; `lastActivityAt` is the coarser stand-in otherwise (a field the real
- * gateway already populates for every PR), so a pending PR is never stranded merely because the
- * newer field's own producer lagged or a rotation ate its ledger line.
+ * W1-T913 — minutes `remudero-review` has read PENDING on this head, posted by this system
+ * itself, or `undefined` when there is nothing to date. Mirrors {@link pendingAgeMinutes}'s
+ * fallback discipline exactly: the precise field wins when present, `lastActivityAt` stands in
+ * otherwise, so a pending PR is never stranded because a producer lagged or a rotation ate its row.
  */
 function reviewPendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
   const raw = pr.reviewPendingSince ?? pr.lastActivityAt;
@@ -3118,21 +2031,13 @@ function reviewPendingAgeMinutes(pr: OpenPrView, now: number): number | undefine
 }
 
 /**
- * W1-T913 — THE STUCK-PENDING FALSIFIER'S PREDICATE (design (b)): is a currently-PENDING
- * `remudero-review` old enough that the sweep should stop trusting it as "already attended to"
- * and offer this head to the post-review lane again? Reuses `policy.pendingCeilingMinutes` — the
- * SAME ceiling `checksState === "pending"` already waits out (W1-T114) — rather than a second,
- * independently-tuned threshold: both questions are "how long is merely in-flight before it reads
- * as stuck", and one policy row answering both keeps them from drifting apart.
+ * W1-T913 — is a currently-PENDING review old enough that the sweep should stop trusting it and
+ * offer this head to the post-review lane again? Reuses `policy.pendingCeilingMinutes` rather than
+ * a second threshold that could drift from it.
  *
- * UNDATED READS STALE — the OPPOSITE error direction from {@link absentChecksRepushDecision}'s
- * own "never re-push on state we cannot date" refusal: that remedy's caution exists because a
- * wrong re-push discards a real, in-flight check run. Re-offering this head to the post-review
- * lane risks no such loss — {@link "./review.js".postReviewPending}'s own exact-input guard
- * (with a legacy per-head fallback) makes a redundant pending post a no-op, and a redundant `reviewCommand` re-run simply
- * re-posts the SAME terminal verdict once it judges. "a pending that no path can re-drive does
- * not ship" (the task's own design note) means the unreadable case must lean toward actionable,
- * never toward silently stranding a PR whose owning run died mid-review.
+ * UNDATED READS STALE — the OPPOSITE direction from the re-push remedy's caution, which exists
+ * because a wrong re-push discards a real in-flight run. Re-offering this head risks no such loss:
+ * a redundant pending post is a no-op. A pending that no path can re-drive does not ship.
  */
 function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {
   const age = reviewPendingAgeMinutes(pr, now);
@@ -3140,28 +2045,13 @@ function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number):
 }
 
 /**
- * W1-T1018 (operator ruling 2026-08-19, "I don't really like the idea of a review budget. We just
- * need back off.") — design (i)/(ii)/(iii)'s ELAPSED-TIME BACKOFF, replacing the permanent
- * cessation the cap row used to enforce alone. Has ENOUGH WALL-CLOCK TIME passed since the
- * exact review input's last completed judgment ({@link OpenPrView.reviewInputLastAttemptAt}) that
- * the cap row below should
- * YIELD back to the ordinary post-review dispatch instead of escalating again?
+ * W1-T1018 — the ELAPSED-TIME BACKOFF replacing permanent cessation. Has enough wall-clock time
+ * passed since this input's last completed judgment for the cap row to YIELD?
  *
- * "ESCALATE AND KEEP GOING, NEVER ESCALATE INSTEAD OF GOING" (design ii): the cap still fires the
- * FIRST time `priorReviewAttemptsForInput` reaches `policy.reviewOrphanCap` (this reads `false` with no
- * attempt timestamp on record yet, so the cap row matches exactly as it always has). Once the
- * completed judgment that reached the cap is on record and `policy.reviewOrphanBackoffMinutes` has elapsed with
- * no NEWER attempt superseding it, this flips `true` and the lane resumes — never a permanent
- * wall, only a paced one.
- *
- * The reset is structural: a new head or body creates another digest, so both the count and clock
- * become empty immediately. Activity that does not change review input keeps the existing clock.
- *
- * FAILS TOWARD ESCALATING, never toward silent retrying — this task's own risk note names that as
- * the dangerous direction ("retry forever, never escalate... is silent"). A missing or unparseable
- * timestamp (every caller that has not wired {@link OpenPrView.reviewInputLastAttemptAt} yet, e.g.
- * `rmd fix`'s single-PR build) reads `false` — byte-identical to today's permanent-cap behaviour
- * until a real attempt timestamp exists to back off from.
+ * ESCALATE AND KEEP GOING, NEVER ESCALATE INSTEAD OF GOING: the cap still fires the first time,
+ * then the lane resumes once the backoff elapses — never a permanent wall, only a paced one. The
+ * reset is structural, since a new head or body creates another digest. FAILS TOWARD ESCALATING,
+ * never toward silent retrying, which is the dangerous direction.
  */
 export function reviewInputBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {
   if (!pr.reviewInputLastAttemptAt) return false;
@@ -3171,23 +2061,11 @@ export function reviewInputBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, n
 }
 
 /**
- * W1-T2299 — THE SUPERSEDED-INPUT DETECTOR: has something happened to this PR AFTER its current
- * `remudero-review` verdict was posted? Compares {@link OpenPrView.lastActivityAt} (the PR's own
- * `updated_at` — see that field's own doc) against {@link OpenPrView.reviewVerdictPostedAt} (the
- * verdict's `created_at`, read off the SAME rollup entry `reviewStateFromRollup` already scans).
- *
- * NAMED FOR WHAT IT ACTUALLY DETECTS (design note iii): "activity", never "a body edit" — GitHub's
- * PR object carries no body-specific timestamp, so a comment, a label, or a title edit reads
- * identically to a genuine body correction here. See {@link OpenPrView.reviewVerdictPostedAt}'s
- * own doc for why that coarseness is tolerable: the disposition consumer also requires ZERO
- * completed judgments for the current exact head+body digest. A real head/body correction resets
- * that digest's attempt count to zero; a comment, status update, label, or title edit does not.
- *
- * FAILS CLOSED: either timestamp missing or unparseable reads `false` — "cannot tell whether the
- * input changed" is never treated as "it did." That is the SAME direction as the field's own doc
- * describes, and it is the safe one here (unlike {@link reviewPendingIsStale}'s deliberately
- * opposite "undated reads stale"): failing open would re-offer a head this system has no evidence
- * actually changed, spending the shared budget for nothing.
+ * W1-T2299 — THE SUPERSEDED-INPUT DETECTOR: has anything happened to this PR AFTER its current
+ * verdict was posted? NAMED FOR WHAT IT DETECTS — "activity", never "a body edit", since GitHub
+ * carries no body-specific timestamp. That coarseness is tolerable because the consumer ALSO
+ * requires zero judgments for the current digest, which only a real correction resets.
+ * FAILS CLOSED: a missing timestamp reads `false`, so "cannot tell" is never treated as "it did".
  */
 export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
   if (!pr.reviewVerdictPostedAt) return false;
@@ -3199,192 +2077,47 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
 }
 
 /**
- * THE POLICY TABLE — the ordered rules mapping observed PR-state -> disposition.
- * Precedence is table order (first match wins); the terminal rule matches
- * unconditionally, so a disposition is ALWAYS produced (the no-disposition=none
- * invariant is structural, not a branch). Because the mapping is DATA, a test —
- * or a future policy edit — flips a disposition by changing a threshold in
- * {@link SweepPolicy} or a row here, with ZERO change to {@link deriveDisposition}
- * (acceptance 3):
+ * THE POLICY TABLE — ordered rules mapping observed PR-state to a disposition. Precedence is TABLE
+ * ORDER, first match wins, and the terminal row matches unconditionally, so the "no disposition is
+ * ever none" invariant is STRUCTURAL rather than a branch. Because the mapping is DATA, a test or
+ * a policy edit flips a disposition with no change to {@link deriveDisposition}. Each row's own
+ * comment states its trap and citation; this is the index.
  *
- *   0. VERDICT-SUPERSEDED (W1-T920, DECISIONS.md #1987) — `policy.supersessionDisposalEnabled`
- *      is on AND `pr.supersessionVerdict.status === "superseded"` -> close, reason naming the
- *      verdict's own evidence (superseding PR + task id + diff finding). ORDERED FIRST, ahead of
- *      row 1's bare `supersededBy` match, because a REASON-bearing verdict is the more precise
- *      finding when both are present. Reads ONLY `status` — never the PR's own title/trailer/file
- *      list — so two PRs identical in every other respect are disposed however their OWN verdicts
- *      read (the #1873/#1874 falsifier design note (ii) names). DEFAULT OFF, and with no producer
- *      yet setting `supersessionVerdict` in the real gateway (a separate, out-of-scope detector
- *      shard), this row never matches in production regardless of the flag — see
- *      `OpenPrView.supersessionVerdict`'s own SCOPE note.
- *   1. SUPERSEDED  — a newer PR credits the same task: close regardless of review. W1-T932: this
- *      row now YIELDS (does not match) when `policy.conceptCoexistenceEnabled` is on AND this
- *      PR's OWN `supersessionVerdict.status` reads `"unique"` — a detector's POSITIVE finding
- *      that this PR is not actually superseded despite a higher-numbered peer sharing its task.
- *      `false` (the default) and any other verdict shape (absent, `"indeterminate"`, or a
- *      `"superseded"`/malformed one) leave this row matching exactly as before — an ordinary
- *      duplicate PR, which carries no verdict at all, is untouched by this clause and is still
- *      disposed stale here. See {@link SweepPolicy.conceptCoexistenceEnabled}'s own doc for why
- *      this is a SEPARATE gate from row 0's `supersessionDisposalEnabled`.
- *   2. STALE       — no activity in >= policy.staleDays: abandoned, close.
- *   3. ANSWERED (W1-T78) — an operator answered a clarification question AND the
- *      answer-extended strike allowance is not itself exhausted -> blocked-fixable
- *      (re-dispatch WITH the answer as an added constraint), even when the
- *      ORIGINAL strikeCap was already hit — this is what makes an answer actually
- *      re-arm the rung instead of landing straight back on row 4's escalate.
- *   3.5. VERDICT OVERTAKEN BY ACTIVITY (W1-T2299, rationale: "a corrected PR body cannot reach
- *      the reviewer that judged the old one") — the THIRD admitting arm the post-review row (8.5)
- *      already promises alongside never-reviewed and orphaned-by-a-push: a `remudero-review`
- *      FAILURE whose head has seen activity since that verdict posted AND whose exact current
- *      head+body digest has zero completed judgments -> post-review, re-running the review lane so
- *      a corrected input can reach a fresh judgement. Same-input activity has one or more exact-
- *      input judgments and falls through immediately to ordinary failure/fix handling; it never
- *      enters a review/dedup loop. Nothing about the verdict range changes — `runReview` posts
- *      fresh every time, so this can still fail. Ordered ahead of rows 4/6/7 (which otherwise
- *      claim every failing review first).
- *   3.6. UNOWNED FAILURE RECOVERY — GitHub reports a `remudero-review` FAILURE for the exact
- *      current input, but the local ledger has zero matching completed `review.posted` judgments.
- *      Re-run the authoritative reviewer once so its structured evidence can drive rows 4/6/7.
- *      Requires the real gateway's explicit zero plus versioned input digest; legacy fixtures do
- *      not move. A prior exact-input post refusal also makes this row yield, bounding the recovery.
- *   4. FAILING + strikes exhausted (>= cap)              -> blocked-ambiguous (escalate).
- *      GENERALIZED (W1-T100, the #170 fix): "strikes exhausted" also covers the
- *      blocked_ci shape (checks red) — ci-log strikes share the SAME counter and
- *      cap as review strikes, one ladder, one exhaustion route (design note iv).
- *      Ordered ahead of row 5 below so an exhausted blocked_ci PR escalates
- *      rather than re-matching the positive fixable row forever.
- *   5. blocked_ci (W1-T100, the #170 fix; BROADENED by W1-T138, the
- *      #303/#305/#292/#315 fix): a required check is red, strikes left (row 4
- *      above already routed the exhausted case) -> blocked-fixable, dispatching
- *      the SAME W1-T76 rung in ci-log mode (W1-T94) — failing check names + log
- *      tails, never a reviewer verdict. ORDERED BEFORE rows 6/7 (review-shaped)
- *      DELIBERATELY (the W1-T138 fix): a red required check is checked FIRST,
- *      before ever classifying a block as reviewer-unmet — GitHub will not merge
- *      past a red required check no matter what the review says, and a review
- *      verdict sitting beside a red check may be STALE (computed before the
- *      push that broke the check, or before a slower required check settled) —
- *      so it is never the right thing to re-litigate first. This also means a PR
- *      can be BOTH checks-red AND review-failing at once; ci-log wins, and once
- *      the check goes green a fresh review runs and rows 6/7 take over from
- *      there if IT still fails. FIX FIRST: this PR reaches the question rung
- *      (row 11) only by exhausting the ladder through row 4, never straight here.
- *   5.5. FAILING + the unmet criteria repeat, claim-for-claim, what the most recently
- *      recorded strike was already dispatched to fix (W1-T1269) -> blocked-ambiguous
- *      (escalate BEFORE the cap, never at a raised one). Ordered after row 5 (a checks-red
- *      PR still gets ci-log treatment first) and after row 4 (a PR already at cap keeps
- *      that row's own "exhausted" reason, unaffected) but strictly before row 6, so a
- *      dispatch that would only reproduce a strike already proven to add no information is
- *      preempted the FIRST time it recurs, not merely once the cap is spent. Keys on
- *      IDENTITY (`claim` text, via {@link fixRungRepeatsIdenticalFailure}), never on
- *      `.length` — a strike that swaps which criteria are unmet, even at the same count, is
- *      lateral progress and still falls through to row 6 below with its remaining strikes.
- *      Fails CLOSED (never matches) until a producer populates
- *      {@link StrikeAttempt.unmetClaims} — see that field's own SCOPE note.
- *   6. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
- *      Only reached with checks NOT red (row 5 above already claimed that case) and the
- *      unmet set not a proven repeat (row 5.5 above already claimed that case). W1-T923:
- *      ALSO matches a GATE failure (empty unmetCriteria) that named its own single-form
- *      remedy via {@link OpenPrView.actionableGateFailures} — a third disjunct, never a
- *      separate row (see that field's own doc for the #1991 motivating case).
- *   7. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
- *   7.5. CONFLICTED (W1-T106, the #170 DIRTY strand): `mergeState === "dirty"`
- *      — ABOVE mergeable, so a conflicting PR is NEVER armed no matter how
- *      green. Two rows, in order: (a) a PURE-concurrent-addition conflict
- *      (isPureConcurrentAddition) OR a same-key value conflict confined to
- *      paths with a DECLARED generator (isRegenerableArtifactConflict,
- *      W1-T2548) -> `conflicted`, dispatching the W1-T94 merge-conflict fix
- *      mode; (b) anything else dirty (a deletion-involved conflict touching
- *      an undeclared path, or an unclassifiable one) -> `blocked-ambiguous`,
- *      REFUSING auto-resolution and escalating instead — never a wrong clobber.
- *   8. CI GREEN + REVIEW SUCCESS (POSITIVE match only)   -> mergeable (arm).
- *   8.5. ZERO-RUNS REQUIRED CHECK / POST-REVIEW (W1-T176 discriminator + the
- *      2026-07-22 #584 stall): checks green, remudero-review has ZERO
- *      observed check runs -> DETERMINISTIC-ACTION on its FIRST sighting for
- *      this exact review input: `post-review`, running the SAME `rmd review` an
- *      operator would run rather than asking — an absent required check is
- *      mechanically decidable (the #393/#391 fixture: every other check
- *      SUCCESS, remudero-review absent, escalated with two mis-framed
- *      options while `rmd review` was the one-command remedy). A SECOND
- *      absence for the SAME head+body input — a prior deterministic attempt already
- *      came back REFUSED — is the one shape here that still escalates ->
- *      blocked-ambiguous, checked FIRST (ordered before the post-review row
- *      in the table) so a refused head never re-reaches the dispatch and
- *      loops; the FAIL-CLOSED boundary is "at most one refused attempt per unchanged input,"
- *      never zero and never unbounded.
- *   8.6. REVIEW ORPHANED BY A PUSH, BOUNDED (W1-T225; the 2026-07-21
- *      #477/#484 jam): the SAME zero-observed-runs shape, but this PR WAS
- *      reviewed on an earlier head (`OpenPrView.reviewOrphanedByPush`) — a
- *      later push left the new head silent rather than re-dispatching the
- *      lane, and ABSENT reads as "not yet run," never as a block, so
- *      auto-merge waited forever. Ordered BEFORE the post-review row (same
- *      dispatch, `post-review`, just a reason that names the orphaning
- *      rather than "review never posted," so an operator can tell the two
- *      shapes apart) and, when `priorReviewAttemptsForInput` has already reached
- *      `policy.reviewOrphanCap`, checked as its OWN row here (ordered before
- *      post-review) so a PR that keeps getting pushed — or whose re-review
- *      keeps failing to stick — escalates instead of re-dispatching forever;
- *      the fresh verdict this posts NEVER re-uses the prior one (invalidation
- *      is not weakened). W1-T1018 (operator ruling 2026-08-19 — "I don't
- *      really like the idea of a review budget. We just need back off."):
- *      reaching the cap no longer WALLS the PR off — it ALSO requires
- *      {@link reviewInputBackoffElapsed} to read `false` (i.e. not enough
- *      wall-clock time has passed since the last real attempt). Once the
- *      backoff interval elapses this row yields and the post-review row
- *      below dispatches again — escalate for visibility, AND keep retrying,
- *      never one instead of the other.
- *   8.7. STALLED-BY-A-TERMINAL-RUN (W1-T2340, the corrected discriminator W1-T2327's criterion 1
- *      was amended into): `checksState === "pending"` AND {@link stalledRunReason} names a run
- *      whose own conclusion already went terminal while one of its jobs stayed non-terminal ->
- *      blocked-ambiguous, escalating immediately rather than waiting out the pending ceiling —
- *      the run that pinned the job is done and will never move it, so there is nothing left to
- *      wait for. Ordered BEFORE row 9 for exactly that reason: a datable-pending PR that is
- *      ALSO this shape must be named "stalled," never "waiting," on the very pass it becomes
- *      detectable. `OpenPrView.workflowRuns` undefined (unpopulated by every caller today) never
- *      matches, so this row is a pure addition until the real gateway wires the observation.
- *   9. WAIT (W1-T114, the 30-issue predicate-storm fix): checks pending AND a
- *      datable, in-window newest-check-start (policy.pendingCeilingMinutes) ->
- *      wait — no action, ledgered, re-derived next sweep. Never reached when
- *      the review is FAILING (rows 4/6/7 above already claimed that) or checks
- *      are red (row 5 above). Undated pending (no `checksPendingSince`, e.g.
- *      the gateway not yet wired) never matches — falls through to row 11.
- *  10. STALE-PENDING (W1-T114): same predicate as row 9 but the ceiling is MET
- *      or EXCEEDED -> blocked-ambiguous, the SAME escalate path row 11 uses,
- *      reason naming the elapsed minutes and the ceiling — a check stuck past
- *      the ceiling IS ambiguity, unlike merely in-flight (row 9).
- *  11. TERMINAL catch-all (the #161 fix, W1-T93): anything not positively
- *      mergeable, not already failure-shaped, not the blocked_ci shape above,
- *      and not a DATABLE pending state (rows 9/10) — e.g. checks pending with
- *      no check-start to date, or review still pending with checks green/none
- *      already routed elsewhere — lands here: blocked-ambiguous (the
- *      CLARIFICATION-QUESTION rung, W1-T78), naming the observed checks/review
- *      state. The catch-all is the LEAST permissive disposition, never the
- *      most permissive one; mergeable is ONLY ever positively matched (row 8),
- *      never a fallback.
- *
- * Stale/superseded rows precede the failing/mergeable rows so tightening the
- * stale threshold flips an otherwise-mergeable PR to a close. Row 3 (answered)
- * precedes row 4 (strikes exhausted) so an answer's extended allowance actually
- * overrides exhaustion; rows 4-7 (blocked_ci / review FAILING) precede row 8 so
- * a CI-green-but-review-failing (or checks-red) PR still routes to fix/escalate,
- * not mergeable. Rows 9/10 (wait / stale-pending) are ordered AFTER every
- * failure/success row and BEFORE the row-11 catch-all so a genuinely-red or
- * review-failing PR never gets stranded waiting, and a datable pending PR is
- * never left to the catch-all's generic reason once W1-T114's ceiling can
- * speak to it directly.
+ *   0.   VERDICT-SUPERSEDED (W1-T920) — a `"superseded"` verdict closes. Reads ONLY `status`.
+ *   1.   SUPERSEDED — a newer PR credits the same task; close. YIELDS on `"unique"` (W1-T932).
+ *   2.   STALE — no activity in >= `policy.staleDays`; close.
+ *   3.   ANSWERED (W1-T78) — an operator's answer re-arms the rung past the original cap.
+ *   3.5. VERDICT OVERTAKEN BY ACTIVITY (W1-T2299) — activity since the verdict, zero judgments
+ *        for the current digest; re-run the lane.
+ *   3.6. UNOWNED FAILURE RECOVERY — a failure the ledger has no judgment for; re-run once.
+ *   4.   FAILING + strikes exhausted -> escalate. Covers blocked_ci: one counter, one route.
+ *   5.   blocked_ci — a required check is red, strikes left -> ci-log fix mode. ORDERED BEFORE the
+ *        review rows, because a verdict beside a red required check may be STALE.
+ *   5.5. Unmet criteria repeat claim-for-claim (W1-T1269) -> escalate BEFORE the cap.
+ *   6.   FAILING + actionable unmet criteria -> fix rung. Also a GATE failure naming a
+ *        single-form remedy (W1-T923) — a third disjunct, never a separate row.
+ *   7.   FAILING + no actionable criteria (contradictory) -> escalate.
+ *   7.5. CONFLICTED (W1-T106) — ABOVE mergeable, so a conflicting PR is NEVER armed however green.
+ *        Only a pure-addition or declared-generator conflict auto-resolves; the rest escalate.
+ *   8.   CI GREEN + REVIEW SUCCESS, POSITIVELY matched only -> mergeable (arm).
+ *   8.5. ZERO-RUNS REQUIRED CHECK (W1-T176) — first sighting posts the review; a SECOND absence
+ *        after a refusal escalates, checked first so a refused head never loops.
+ *   8.6. REVIEW ORPHANED BY A PUSH (W1-T225) — same dispatch, a reason naming the orphaning. At
+ *        cap it escalates only while {@link reviewInputBackoffElapsed} reads false.
+ *   8.7. STALLED-BY-A-TERMINAL-RUN (W1-T2340) — the run that pinned the job has concluded, so
+ *        nothing is left to wait for. Ordered before WAIT for that reason.
+ *   9.   WAIT (W1-T114) — pending with a datable, in-window start; no action, ledgered.
+ *  10.   STALE-PENDING — the same predicate past the ceiling; escalate naming the elapsed minutes.
+ *  11.   TERMINAL catch-all (W1-T93) — the LEAST permissive disposition, never the most.
+ *        `mergeable` is only ever positively matched at row 8, never reached as a fallback.
  */
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
-    // W1-T920 (DECISIONS.md #1987, the 2026-08-16 ruling) — ROUTED THROUGH THE EXISTING "stale"
-    // disposition, never a new one: `runSweep`'s "stale" case already closes via `deps.close`
-    // (the SAME effect W1-T921 already made reversible — no `--delete-branch`, see that call
-    // site's own comment) and already writes ONE `sweep.disposed` ledger row (design note vii —
-    // "no new ledger step without a named reader"). This is a NEW ROW, not a change to the
-    // existing `supersededBy` row immediately below: that row matches on a bare NUMBER
-    // (unconditional, no policy gate); this one matches on a REASON-bearing verdict, gated
-    // behind `policy.supersessionDisposalEnabled` (default OFF), and reads NOTHING about the
-    // PR itself besides `status` — never title, trailer, or file list (design note ii, the
-    // #1873/#1874 falsifier). `"unique"` and `"indeterminate"` are BOTH inert here: an
-    // unreadable verdict must never be treated as a finding (design note iii).
+    // W1-T920 (DECISIONS.md #1987) — ROUTED THROUGH THE EXISTING "stale" disposition, never a new
+    // one: that case already closes reversibly and already writes ONE `sweep.disposed` row, and
+    // no new ledger step ships without a named reader. A NEW ROW, not a change to the bare-number
+    // row below: this one matches a REASON-bearing verdict, gated and default OFF, and reads
+    // NOTHING about the PR but `status`. `"unique"` and `"indeterminate"` are both inert here.
     disposition: "stale",
     when: (pr, policy) => policy.supersessionDisposalEnabled === true && pr.supersessionVerdict?.status === "superseded",
     // Guards `evidence` defensively (never a `!` assertion) even though `when` above already
@@ -3400,15 +2133,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
-    // W1-T932 — LETS THIS ROW YIELD, NEVER DISABLES IT (design note ii: "a guard that works for
-    // ordinary duplicate PRs must keep working"). An ordinary duplicate carries no
-    // `supersessionVerdict` at all, so the added clause below is false for it and this row
-    // matches exactly as it always has. Gated behind `conceptCoexistenceEnabled` — a SEPARATE
-    // flag from row 0's `supersessionDisposalEnabled` (see that field's own doc: different
-    // blast radii, one gate each). Reads ONLY `status === "unique"`, the verdict's own POSITIVE
-    // "checked, not superseded" finding (see {@link SupersessionStatus}'s own doc) — never
-    // `"indeterminate"` (an unreadable read is not a finding) and never an absent/malformed
-    // verdict: fail CLOSED, today's arithmetic-only behaviour is the default in every other case.
+    // W1-T932 — LETS THIS ROW YIELD, NEVER DISABLES IT: a guard that works for ordinary duplicate
+    // PRs must keep working, and an ordinary duplicate carries no verdict at all, so the added
+    // clause is false for it and this row matches as it always has. Gated behind
+    // `conceptCoexistenceEnabled`, a SEPARATE flag from row 0's. Reads ONLY `status === "unique"`,
+    // never `"indeterminate"` or an absent verdict — fail CLOSED to today's arithmetic.
     disposition: "stale",
     when: (pr, policy) =>
       pr.supersededBy != null &&
@@ -3423,25 +2152,19 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `abandoned — no activity in ${Math.floor(ageDays)}d (>= ${policy.staleDays}d threshold)`,
   },
   {
-    // W1-T54's dep lane, ROUTED (the 2026-07-22 #533/#534 stall): before this
-    // row the sweep had NO Dependabot branch at all, so dep PRs sat ungated
-    // until an operator ran `rmd dep-review` by hand — and the failure rows
-    // below would misroute them (a ci-log fix rung must never push commits
-    // onto a Dependabot branch). The lane itself holds on red checks and
-    // escalates majors, so routing is safe in every checks/review state;
-    // superseded/stale above still close first.
+    // W1-T54's dep lane, ROUTED. Before this row dep PRs sat ungated until an operator ran
+    // `rmd dep-review` by hand, and the failure rows below would misroute them — a ci-log fix rung
+    // must never push commits onto a Dependabot branch. The lane holds on red checks and escalates
+    // majors, so routing is safe in every state; superseded and stale above still close first.
     disposition: "dep-review",
     when: (pr) => pr.isDependabot === true,
     reason: (pr) => `dependabot PR — dep-review lane (checks ${pr.checksState}, review ${pr.reviewState})`,
   },
   {
-    // W1-T78: an operator's answer to a clarification question RE-ARMS the fix
-    // rung — but only within its own (config-policy) strike allowance, never
-    // unconditionally, so a bad answer still eventually escalates rather than
-    // looping forever. W1-T100: generalized to the blocked_ci shape too (via
-    // the SAME `isBlockedCi` row 4/5 share) — without this, a strike-exhausted
-    // blocked_ci PR could never be re-armed by an answer once `pendingAnswer`
-    // production wiring lands, and would loop on the question rung forever.
+    // W1-T78: an operator's answer RE-ARMS the fix rung, but only within its own strike
+    // allowance, so a bad answer still eventually escalates rather than looping. W1-T100
+    // generalised it to the blocked_ci shape via the same `isBlockedCi` rows 4 and 5 share —
+    // without that, a strike-exhausted blocked_ci PR could never be re-armed by an answer.
     disposition: "blocked-fixable",
     when: (pr, policy) => {
       if (!pr.pendingAnswer) return false;
@@ -3450,47 +2173,23 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       const clarify: ClarifyPolicy = {
         resetStrikeCounterOnAnswer: pr.pendingAnswer.resetStrikeCounter ?? policy.clarify.resetStrikeCounterOnAnswer,
       };
-      // strikeCapForAnswer returns the ADDITIONAL strikes the answer grants (the
-      // SAME number the real re-dispatch passes as runFixRung's own fresh
-      // strikeCap, since runFixRung always counts a NEW call from 0) — so the
-      // cumulative ceiling this answered PR gets is the ORIGINAL cap plus that
-      // allowance, never an unconditional bypass of the ledger's running count.
+      // `strikeCapForAnswer` returns the ADDITIONAL strikes an answer grants, so the cumulative
+      // ceiling is the ORIGINAL cap plus that allowance — never an unconditional bypass of the
+      // ledger's running count.
       return pr.priorStrikes < policy.strikeCap + strikeCapForAnswer(policy.strikeCap, clarify);
     },
     reason: (pr) =>
       `operator answered the clarification question — re-dispatching the fix rung with the added constraint (strike ${pr.priorStrikes + 1})`,
   },
   {
-    // W1-T2299 — A CORRECTED INPUT CAN REACH THE REVIEWER THAT JUDGED THE OLD ONE (rationale
-    // (1)-(4)): the row immediately below this one (and rows 4/6/7 further down) claim EVERY
-    // `reviewState === "failure"` PR, so a posted FAILURE used to make a head permanently
-    // unofferable to `remudero-review` — nothing in any of those predicates ever read the PR's own
-    // timestamps, which is why editing the body (or anything else on the PR) after a failing
-    // verdict moved nothing. This row is the third admitting arm the post-review row's own doc
-    // (two rows below) already promises: never-reviewed, orphaned-by-a-push, stuck-pending, and
-    // now this one — activity after a verdict. ORDERED BEFORE rows 4/6/7 so it actually gets a
-    // turn. It requires strict ZERO completed judgments for this exact head+body digest. A real
-    // head/body correction resets the exact-input counter before this predicate runs; coarse PR
-    // activity that leaves the digest unchanged keeps the existing count and falls through to the
-    // ORDINARY failure handling (rows 4/6/7). That prevents the disposition/delivery-dedup split
-    // from selecting this lane forever for an input the reviewer already judged.
+    // W1-T2299 — A CORRECTED INPUT CAN REACH THE REVIEWER THAT JUDGED THE OLD ONE. Rows 4/6/7 claim
+    // every failing PR and none reads a timestamp, so a posted FAILURE used to make a head
+    // permanently unofferable. Requires STRICT ZERO judgments for this exact head+body digest, so
+    // coarse activity leaving the digest unchanged falls through to those rows.
     //
-    // THE REVIEWER KEEPS ITS TEETH (design note viii): this only changes WHICH INPUT is judged —
-    // `runReview`/`reviewCommand` post a FRESH verdict from scratch every time (see the post-review
-    // row's own doc, "the prior verdict is NEVER carried forward"), so a re-offered head can still
-    // fail, and a weakened claim still has to survive the same reviewer a corrected one does.
-    //
-    // NOTHING RE-OFFERS AN ALREADY-JUDGED INPUT (design note x, the strictly-additive requirement):
-    // {@link reviewVerdictOvertakenByActivity} fails CLOSED on unreadable timestamps, and the
-    // strict explicit-zero exact-input check fails closed for legacy/unwired callers. Either shape
-    // falls straight through to rows 4/6/7.
-    //
-    // W1-T2793 — THIS COARSE ADMISSION IS NOT AUTHORITY TO OVERWRITE A DIFFERENT BODY. GitHub
-    // `updated_at` can only say that activity occurred; immediately before the resulting verdict
-    // is posted, review.ts's one guarded status site compares this attempt's head+body digest with
-    // the digest returned by its fresh lifecycle read. A body that moved again is refused there.
-    // The pair is deliberate: this row makes a changed input reachable; the write guard proves
-    // that the subject it finally publishes is still that input.
+    // THE REVIEWER KEEPS ITS TEETH — only WHICH INPUT is judged changes, and a fresh verdict is
+    // posted from scratch, so a re-offered head can still fail. NOT AUTHORITY TO OVERWRITE A
+    // DIFFERENT BODY (W1-T2793): the guarded status site re-compares the digest before publishing.
     disposition: "post-review",
     when: (pr) =>
       pr.checksState === "green" &&
@@ -3506,14 +2205,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `a fresh verdict is posted and the prior one is never carried forward`,
   },
   {
-    // 2026-09-02 #3597 incident: GitHub can carry an exact-head remudero-review FAILURE that this
-    // daemon did not ledger (for example an externally posted status, lost/rotated state, or a
-    // host move). The generic failure rows can only recover structured reasons from
-    // `review.posted`; with no matching row they escalated "contradictory" forever and never ran
-    // the reviewer that could recreate authoritative evidence. The real gateway explicitly
-    // produces BOTH identity signals below. Requiring strict zero (not undefined) keeps every
-    // legacy/unwired caller byte-identical. `reviewPostRefused` makes the deterministic recovery
-    // one-shot for unchanged input: a refusal falls through to the ordinary escalation path.
+    // GitHub can carry an exact-head remudero-review FAILURE this daemon never ledgered — an
+    // externally posted status, lost state, or a host move. The generic failure rows recover
+    // structured reasons only from `review.posted`, so with no matching row they escalated
+    // "contradictory" forever. Requiring STRICT zero, not undefined, keeps legacy callers
+    // byte-identical; `reviewPostRefused` makes the recovery one-shot for an unchanged input.
     disposition: "post-review",
     when: (pr) =>
       pr.checksState === "green" &&
@@ -3533,14 +2229,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // (design note iv: one ladder, one exhaustion route).
     disposition: "blocked-ambiguous",
     when: (pr, policy) => (pr.reviewState === "failure" || isBlockedCi(pr)) && pr.priorStrikes >= policy.strikeCap,
-    // W1-T186 (the #420 fixture): once checks are the reason strikes exhausted, NAME the check
-    // + sha here too — not just in the rendered ClarificationQuestion — so the ledgered/summary
-    // reason itself never reads as the generic, uninvestigable "fix strikes exhausted".
+    // W1-T186: once checks are the reason strikes exhausted, NAME the check and sha here too, so
+    // the ledgered reason never reads as the generic, uninvestigable "fix strikes exhausted".
     //
-    // W1-T2452: the denominator is {@link fixCeilingInForce}, NEVER the bare `policy.strikeCap`
-    // — an answered PR whose live operator answer extended its ceiling renders against THAT
-    // ceiling, so a legitimate "reached the extended ceiling, escalating again" reads as exactly
-    // that instead of an impossible overshoot of the base cap.
+    // W1-T2452: the denominator is {@link fixCeilingInForce}, NEVER the bare `policy.strikeCap` —
+    // an answered PR renders against its EXTENDED ceiling, so reaching it reads as exactly that
+    // rather than an impossible overshoot of the base cap.
     reason: (pr, policy) => {
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       return isBlockedCi(pr)
@@ -3549,14 +2243,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
-    // W1-T100 (the #170 fix); BROADENED + PROMOTED ahead of the review-failing
-    // rows by W1-T138 (the #303/#305/#292/#315 fix — see the table doc above):
-    // blocked_ci is POSITIVELY fixable — never the terminal catch-all's
-    // escalate, and never re-litigated as a review-unmet block just because a
-    // (possibly stale) review verdict also sits on this head. The exhausted
-    // case already matched row 4 above (this row is ordered after it), so only
-    // a non-exhausted checks-red PR reaches here — fix FIRST, ask only after
-    // exhaustion.
+    // W1-T100, broadened and PROMOTED ahead of the review-failing rows by W1-T138: blocked_ci is
+    // POSITIVELY fixable — never the catch-all's escalate, and never re-litigated as a
+    // review-unmet block just because a possibly stale verdict also sits on this head. The
+    // exhausted case already matched row 4, so only a non-exhausted checks-red PR reaches here.
+    // Fix FIRST, ask only after exhaustion.
     disposition: "blocked-fixable",
     when: (pr) => isBlockedCi(pr),
     // W1-T2452: denominator is {@link fixCeilingInForce}, not the bare `policy.strikeCap` — see
@@ -3565,15 +2256,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr, policy) => `${pr.checksState === "red" ? "required checks red" : describeCiFailures(pr)} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`, // W1-T2504: "red" is byte-identical; else names the specific check.
   },
   {
-    // W1-T1269 — row 5.5 (table doc above): AN EARLIER STOP, NEVER A LONGER LEASH. Ordered
-    // after row 4 (a PR already at the cap keeps that row's own "exhausted" reason, byte
-    // identical) and after row 5 (checks-red still gets ci-log treatment first — "ci-log wins"
-    // is unaffected), but strictly before row 6 below, so a dispatch that would only reproduce
-    // a strike already proven to add no information is preempted the first time it recurs
-    // rather than waiting for the cap. `fixRungRepeatsIdenticalFailure` fails CLOSED — it never
-    // matches until a producer populates `StrikeAttempt.unmetClaims` (see that field's own
-    // SCOPE note), so this row is inert in production today, exactly like `pendingAnswer`'s own
-    // shipped-ahead-of-producer precedent.
+    // W1-T1269 — AN EARLIER STOP, NEVER A LONGER LEASH. Ordered after row 4 (a PR at the cap
+    // keeps that row's own reason) and after row 5 (checks-red still gets ci-log first), but
+    // strictly before row 6, so a dispatch that would only reproduce a strike already proven to
+    // add nothing is preempted the first time it recurs. `fixRungRepeatsIdenticalFailure` fails
+    // CLOSED until a producer populates `StrikeAttempt.unmetClaims`, so this row is inert today.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr),
     reason: (pr, policy) =>
@@ -3581,20 +2268,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `no further strike can add information — escalating before the cap`,
   },
   {
-    // Reached only when checks are NOT red (row 5 above already claimed that
-    // case) and the unmet set is not a proven repeat (row 5.5 above already claimed that
-    // case) — a pure review-shaped block. Genuinely REACHABLE for a review
-    // failure (W1-T394): `isBlockedCi`/`pr.checksState` never go true off a
-    // red `remudero-review` alone (checksStateFromRollup excludes it from the
-    // checks gate), so a checks-green PR whose review is failing lands here
-    // instead of being claimed by row 5 above.
+    // Reached only when checks are NOT red (row 5 claimed that) and the unmet set is not a proven
+    // repeat (row 5.5 claimed that) — a pure review-shaped block. Genuinely REACHABLE for a review
+    // failure (W1-T394): `checksState` never goes red off `remudero-review` alone, so a
+    // checks-green PR whose review fails lands here rather than being claimed by row 5.
     //
-    // W1-T923: a THIRD disjunct, never a new rule (design note iii) — a GATE failure (empty
-    // `unmetCriteria`) that named its own single-form remedy routes here exactly like a
-    // criterion failure does, via `actionableGateFailures` (see that field's own doc). This is
-    // the ONLY change to this row: when `unmetCriteria` is non-empty the `when`/`reason` below
-    // are byte-identical to before this task, and a PR that carries neither list still falls
-    // through to row 7 unchanged.
+    // W1-T923 adds a THIRD disjunct, never a new rule: a GATE failure with empty `unmetCriteria`
+    // that named a single-form remedy routes here exactly like a criterion failure. When
+    // `unmetCriteria` is non-empty this row is byte-identical to before that task.
     disposition: "blocked-fixable",
     when: (pr) => pr.reviewState === "failure" && (pr.unmetCriteria.length > 0 || (pr.actionableGateFailures?.length ?? 0) > 0),
     // W1-T2452: denominator is {@link fixCeilingInForce} in both branches — see that
@@ -3610,22 +2291,19 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
-    // W1-T440: the SAME empty (`pr.unmetCriteria` is `[]`) has two distinct causes, and the
-    // reason used to name the wrong one unconditionally. `criteriaRecoverable === false` is the
-    // OBSERVED signal (set by `buildOpenPrViews`, run-task.ts) that no `Remudero-Task:` trailer
-    // resolved a task id, so `unmetFromLedger` was never consulted — the criteria were never
-    // RECOVERABLE, not contradicted. `criteriaRecoverable !== false` (true, or unset on an older
-    // fixture) means a trailer DID resolve and the ledger genuinely came back with nothing unmet
-    // — that arm keeps today's wording verbatim, byte-identical for every attributable PR.
+    // W1-T440: the SAME empty `unmetCriteria` has two distinct causes, and the reason used to
+    // name the wrong one unconditionally. `criteriaRecoverable === false` is the OBSERVED signal
+    // that no trailer resolved a task id, so the criteria were never RECOVERABLE, not
+    // contradicted. Anything else means a trailer DID resolve and the ledger genuinely returned
+    // nothing unmet — that arm keeps today's wording verbatim for every attributable PR.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.reviewState === "failure",
     reason: (pr) =>
       pr.criteriaRecoverable === false
         ? // W1-T2541: name the DERIVED repair, not only the defect. `diagnoseBodyDefects` reads the
-          // head ref the same way `projectPlan` already does, so the trailer it names invents
-          // nothing — and MEASURED 2026-08-31, this exact reason was posted on #3363 while NINE
-          // criteria sat unread in its own shard, and on #3400/#3403 while both were green.
-          // Diagnosis only: nothing here edits a body (see lib/body-repair.ts).
+          // Names the trailer the same way `projectPlan` does, so it invents nothing. Diagnosis
+          // only: nothing here edits a body (see lib/body-repair.ts).
+          // Why: measured 2026-08-31 on #3363/#3400/#3403 — docs/forensics/sweep.md.
           `review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating` +
           (() => {
             const d = diagnoseBodyDefects("", [], { headRef: pr.headRefName });
@@ -3635,40 +2313,19 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
         : "review failing with no actionable unmet criteria (contradictory) — escalating",
   },
   {
-    // W1-T106 (the #170 DIRTY strand): CONFLICTED is a POSITIVE disposition,
-    // ABOVE mergeable — a dirty PR is NEVER armed no matter how green its
-    // checks or how successful its review (the #170 live incident: review
-    // PASS, all checks SUCCESS, auto-merge armed, yet stuck DIRTY for hours).
-    // Ordered here (after the review-failure rows, before mergeable) — none
-    // of rows 3-7 above reference `mergeState`, so this placement changes
-    // nothing about their precedence; it only guarantees row 8 (mergeable)
-    // never sees a dirty PR. Deterministically fixable (rule 2, never an LLM
-    // judgment call) ONLY when {@link isPureConcurrentAddition} clears every
-    // conflicting file — both sides purely ADDED, neither deleted anything
-    // the other still relies on — OR (W1-T2548) when {@link
-    // isRegenerableArtifactConflict} clears every conflicting file instead:
-    // every path carries a DECLARED generator, so a deletion on either side is
-    // irrelevant and the resolution is that generator's own output on the
-    // merged tree, never a chosen side. A conflict satisfying neither arm
-    // (a deletion on an undeclared path, or no evidence captured at all)
-    // falls through to the very next row, never here.
-    //
-    // W1-T984: gated behind `policy.mergeConflictAdmissionEnabled` (default FALSE — see that
-    // field's own doc) — the SAME shape row 0's `supersessionDisposalEnabled` conjunct already
-    // uses. `hydrateMergeConflictEvidence` (lib/open-prs-rest.ts) now populates real evidence in
-    // production for the first time, but `isPureConcurrentAddition` cannot tell a genuine
-    // pure-concurrent-addition from an add/add collision (both score TRUE — rationale (5)), so
-    // admitting on the predicate alone is a judgement call this task declines to make. With the
-    // flag off, this row never matches no matter what evidence flows, and a dirty PR falls to the
-    // very next row exactly as it always has.
+    // W1-T106 — CONFLICTED is a POSITIVE disposition, ABOVE mergeable: a dirty PR is NEVER armed
+    // however green. None of rows 3-7 reference `mergeState`, so this placement changes no
+    // precedence; it only guarantees row 8 never sees a dirty PR. Deterministically fixable (rule
+    // 2, never an LLM judgment) ONLY when {@link isPureConcurrentAddition} or
+    // {@link isRegenerableArtifactConflict} clears EVERY file; a conflict satisfying neither arm
+    // falls to the next row. Why: the flag's history and the #170 incident — docs/forensics/sweep.md.
     disposition: "conflicted",
     when: (pr, policy) => {
       if (policy.mergeConflictAdmissionEnabled !== true || pr.mergeState !== "dirty") return false;
       const files = pr.mergeConflict?.files ?? [];
-      // W1-T2548: a SECOND, independent admission arm alongside the pure-addition one below —
-      // either clears this row on its own (never required together). isRegenerableArtifactConflict
-      // is checked first only because its reason (below) is the more specific of the two when both
-      // happen to hold (e.g. a registered path that also carries zero deletions).
+      // W1-T2548: a SECOND, independent admission arm — either clears this row alone, never both
+      // required. The registry arm is checked first only because its reason is the more specific
+      // of the two when both happen to hold.
       return isRegenerableArtifactConflict(files) || isPureConcurrentAddition(files);
     },
     reason: (pr) => {
@@ -3688,20 +2345,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
-    // W1-T106: the OTHER half of the same #170 strand — a dirty PR whose
-    // conflict involves a DELETION on either side (or whose file evidence
-    // could not be captured at all) is NEVER auto-resolved: "a wrong
-    // auto-resolution is worse than a strand" (design note iii, verbatim).
-    // REFUSE into escalate — the SAME blocked-ambiguous disposition/rung
-    // every other ambiguous block already routes through (never a
-    // reimplementation), naming the conflicting files so the operator does
-    // not have to go re-derive them by hand.
+    // W1-T106 — the OTHER half of the same strand: a dirty PR whose conflict involves a DELETION
+    // on either side, or whose evidence could not be captured, is NEVER auto-resolved. "A wrong
+    // auto-resolution is worse than a strand" (design note iii, verbatim). REFUSE into escalate,
+    // the SAME blocked-ambiguous rung every other ambiguous block routes through, naming the
+    // conflicting files so an operator need not re-derive them.
     //
-    // W1-T984: with the row above gated off by default, THIS is the row every dirty PR reaches —
-    // so the escalation naming the real conflicting paths AND each side's deletion count (not
-    // just the path) is the user-visible fix this task delivers. `files: none captured` now means
-    // exactly what it says (evidence genuinely could not be read) rather than "no producer ever
-    // tried".
+    // W1-T984: this escalation names the real paths AND each side's deletion count, so
+    // `files: none captured` now means evidence genuinely could not be read.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.mergeState === "dirty",
     reason: (pr, policy) => {
@@ -3714,14 +2365,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
-    // W1-T2860 — GitHub can carry an exact-head remudero-review SUCCESS without the matching
-    // completed `review.posted` ledger row W1-T230 requires before it will arm auto-merge. The
-    // success status alone cannot recreate the review's structured proof evidence, so route the
-    // contradiction through the same authoritative reviewer used by every other post-review row.
-    // This is deliberately symmetric with the unowned FAILURE recovery above: both exact-input
-    // identity signals must be present, and the count must be STRICTLY zero so legacy/unwired
-    // callers keep the ordinary mergeable disposition. A refusal bounds retries for the unchanged
-    // input; a changed head/body digest receives its own zero count and can be judged afresh.
+    // W1-T2860 — GitHub can carry an exact-head remudero-review SUCCESS without the completed
+    // `review.posted` row W1-T230 requires before arming. The status alone cannot recreate the
+    // structured proof evidence, so route the contradiction through the same authoritative
+    // reviewer. Deliberately symmetric with the unowned FAILURE recovery above: both identity
+    // signals must be present and the count STRICTLY zero, so legacy callers stay mergeable.
     disposition: "post-review",
     when: (pr) =>
       pr.checksState === "green" &&
@@ -3736,25 +2384,20 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `#${pr.prNumber} before auto-merge; one exact-input post refusal stops retries`,
   },
   {
-    // POSITIVE MATCH ONLY (the #161 fix, W1-T93): mergeable is NEVER inferred
-    // from the mere absence of a failure — it requires required-checks green AND
-    // review success, named explicitly (P22's own words: "required contexts
-    // green, review success, unmerged").
+    // POSITIVE MATCH ONLY (W1-T93): mergeable is NEVER inferred from the mere absence of a
+    // failure. It requires required-checks green AND review success, named explicitly — P22's own
+    // words, "required contexts green, review success, unmerged".
     disposition: "mergeable",
     when: (pr) => pr.checksState === "green" && pr.reviewState === "success",
     reason: () => "review success, required checks green — arming auto-merge",
   },
   {
-    // W1-T176 (the #393/#391 fixture): a required check with ZERO observed
-    // runs is DETERMINISTIC-ACTION, not blocked-ambiguous — but only ONCE.
-    // Ordered STRICTLY BEFORE the post-review row below so a PR whose
-    // deterministic post already came back REFUSED for this exact head never
-    // re-reaches that row's dispatch — the "post it" remedy already ran its
-    // course; retrying would loop against a lane that has already declined.
-    // This is the SAME blocked-ambiguous escalate path every other ambiguous
-    // block uses (ledger dedup, clarification-question rendering, escalate()
-    // dispatch — nothing new to wire), so an operator sees a genuine question
-    // instead of the PR sitting silently deduped forever with no trace.
+    // W1-T176 — a required check with ZERO observed runs is DETERMINISTIC-ACTION, not
+    // blocked-ambiguous, but only ONCE. Ordered STRICTLY BEFORE the post-review row so a PR whose
+    // post already came back REFUSED for this head never re-reaches that dispatch: the remedy has
+    // run its course, and retrying would loop against a lane that already declined. Uses the SAME
+    // escalate path as every other ambiguous block, so an operator sees a genuine question
+    // instead of the PR sitting silently deduped forever.
     disposition: "blocked-ambiguous",
     when: (pr) =>
       pr.checksState === "green" &&
@@ -3766,21 +2409,13 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       "attempt for this exact review input was refused — escalating rather than retrying indefinitely",
   },
   {
-    // W1-T225 (the 2026-07-21 PRs #477/#484 jam) — THE LOOP FALSIFIER: a PR
-    // whose review was orphaned by a push re-earns the review lane (the row
-    // below), but not unboundedly for the SAME current head+body input. Ordered strictly before
-    // that row so a status that repeatedly disappears after completed judgments eventually asks
-    // an operator. A new push or body edit resets the exact-input counter immediately. This is the SAME
-    // discipline the fix-rung strike ladder (row 4) and the CI re-run cap
-    // (W1-T224) already hold elsewhere. `reviewOrphanedByPush !== true` (a PR
-    // awaiting its FIRST review) never matches this row — only a PR that has
-    // demonstrably been reviewed before can exhaust this cap.
-    //
-    // W1-T1018 (operator ruling 2026-08-19 — "we just need back off", not a budget): reaching the
-    // cap is no longer a PERMANENT wall. `reviewInputBackoffElapsed` must ALSO read `false` for
-    // this row to match — once `policy.reviewOrphanBackoffMinutes` has elapsed since the lane's
-    // last real attempt with no resolution, this row yields and the post-review row below
-    // dispatches again (design ii: "escalate AND keep going").
+    // W1-T225 — THE LOOP FALSIFIER: a PR whose review was orphaned by a push re-earns the review
+    // lane below, but not unboundedly for the SAME head+body input. Ordered strictly before that
+    // row so a status that repeatedly disappears after completed judgments eventually asks an
+    // operator. A new push or body edit resets the exact-input counter immediately. A PR awaiting
+    // its FIRST review never matches — only one demonstrably reviewed before can exhaust this cap.
+    // W1-T1018: the cap is no longer a PERMANENT wall — {@link reviewInputBackoffElapsed} must
+    // ALSO read false, so once the backoff elapses this row yields and dispatch resumes.
     disposition: "blocked-ambiguous",
     when: (pr, policy, _ageDays, now) =>
       pr.checksState === "green" &&
@@ -3795,41 +2430,15 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `${policy.reviewOrphanBackoffMinutes}m of backoff, never stopping outright`,
   },
   {
-    // POST-REVIEW ROUTING (the 2026-07-22 #584 stall; NARROWED by W1-T176 —
-    // see two rows above): a checks-GREEN PR whose remudero-review was never
-    // posted at all previously fell to the terminal catch-all below and
-    // ESCALATED ("checks green, review none") — a hand-opened PR could sit
-    // fully green forever with a needs-human issue as its only disposition,
-    // because nothing ever invoked the review lane on it, AND (W1-T176's own
-    // fixture, #393/#391) an operator round-trip was spent on a decision the
-    // machine could already make: an ABSENT required check is mechanically
-    // decidable ("post it"), never ambiguous, on its FIRST sighting. Route it
-    // to the SAME reviewCommand the operator verb runs (dedup per exact input, like
-    // dep-review): the posted verdict then drives the NEXT pass — success ->
-    // mergeable/arm, failure -> the fix/escalate rows. A PR with no criteria
-    // (no trailer, no Acceptance block) posts FAIL fail-closed, which is a
-    // LEGIBLE gate state rather than a clarification escalation. Dependabot
-    // PRs never reach here (their own row above); checks-pending stays with
-    // rows 9/10 below (W1-T114) when datable, the catch-all otherwise
-    // (review-before-green is not the lane's order).
+    // POST-REVIEW ROUTING (the #584 stall, narrowed by W1-T176): a checks-GREEN PR whose review was
+    // never posted used to fall to the catch-all and ESCALATE, so a hand-opened PR could sit fully
+    // green forever. An ABSENT required check is mechanically decidable on its FIRST sighting, so
+    // route it to the SAME `reviewCommand` the operator verb runs. A PR with no criteria posts FAIL
+    // fail-closed, a LEGIBLE gate state rather than an escalation.
     //
-    // W1-T225 (the 2026-07-21 PRs #477/#484 jam): the SAME row also carries a
-    // PR whose review was ORPHANED BY A PUSH (reviewed on an earlier head,
-    // silent on this one — the cap row immediately above already claimed the
-    // bounded-out case) — the dispatch is identical (run the review lane,
-    // posting a FRESH verdict; the prior verdict is NEVER carried forward),
-    // only the stated reason differs, so an operator reading the ledger can
-    // tell "never reviewed" from "orphaned by a push" apart at a glance.
-    //
-    // W1-T913/W1-T2844 — THE STUCK-PENDING FALSIFIER: `reviewState === "pending"` also matches
-    // here once the durable owner is positively proven dead, OR once {@link reviewPendingIsStale}
-    // says the pending has sat past `pendingCeilingMinutes` (or its age is unreadable). This is
-    // design (b)'s load-bearing constraint: a naive pending
-    // post would make `reviewStateFromRollup` return "pending" instead of "none" and this row
-    // would never offer the head again, silently disabling the sweep's own re-post/re-drive lane
-    // the moment a review's owning run died mid-flight. A FRESH pending (not yet stale) is
-    // deliberately EXCLUDED here — the row immediately below claims that shape as `wait`, so an
-    // in-flight review is never redundantly re-dispatched every sweep tick.
+    // W1-T225 also routes a review ORPHANED BY A PUSH here — identical dispatch, different reason,
+    // prior verdict never carried forward. W1-T913/W1-T2844: `"pending"` matches once the owner is
+    // proven dead or the pending is stale; a FRESH pending is EXCLUDED, claimed as `wait` below.
     disposition: "post-review",
     when: (pr, policy, _ageDays, now) =>
       pr.checksState === "green" &&
@@ -3856,14 +2465,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
-    // W1-T913: a FRESH (not-yet-stale) `remudero-review` pending — a review this system itself
-    // already dispatched (`postReviewPending`, `lib/review.ts`) is genuinely IN FLIGHT. Ordered
-    // STRICTLY AFTER the post-review row above so a STALE pending is claimed there first; anything
-    // reaching this row has already failed that row's staleness check, i.e. is still within
-    // `pendingCeilingMinutes`. Without this row a fresh pending would fall through to the terminal
-    // catch-all below and ESCALATE every sweep tick for the entire duration of an ordinary review
-    // — the exact green-at-a-glance defect this task fixes would be traded for an escalation storm
-    // on every PR merely being reviewed, which is strictly worse than the silence it replaces.
+    // W1-T913: a FRESH, not-yet-stale pending is a review this system already dispatched and is
+    // genuinely IN FLIGHT. Ordered STRICTLY AFTER the post-review row, so anything reaching here
+    // has already failed that row's staleness check. Without this row a fresh pending would fall
+    // to the catch-all and ESCALATE every tick for the duration of an ordinary review — trading
+    // the silence this task fixes for an escalation storm, which is strictly worse.
     disposition: "wait",
     when: (pr) => pr.checksState === "green" && pr.reviewState === "pending",
     reason: (pr, policy, _ageDays, now) => {
@@ -3875,27 +2481,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
-    // W1-T2340 — A HEAD PENDING ONLY BECAUSE A RUN HAS ALREADY CONCLUDED BUT PINNED ONE OF ITS
-    // OWN JOBS NON-TERMINAL reads exactly like ordinary in-flight CI to the datable-pending rows
-    // immediately below — `checksState` reads "pending" either way (a terminal run can leave a
-    // PARTIALLY registered rollup, and `checksStateFromRollup` already reads that as pending,
-    // never "none"). Left alone, this head would wait out `policy.pendingCeilingMinutes` (60m,
-    // or forever if undated) before the stale-pending row even considered it, even though the
-    // run that pinned the job is DONE and will never move it. Ordered STRICTLY BEFORE the
-    // datable-pending rows so a stalled head is named the moment it becomes detectable, never
-    // after waiting out a ceiling built for ordinary in-flight checks — see
-    // {@link stalledRunReason}'s own doc: this shape needs no threshold at all.
-    //
-    // GATED ON `checksState === "pending"` EXPLICITLY, never `"none"`: this row can therefore
-    // never fire on the same input the ABSENT re-push arm requires (`checksState === "none"`),
-    // and a partially registered rollup stays "pending" so that sibling arm is never starved of
-    // the case it already owns.
-    //
-    // TAKES NO ACTION OF ITS OWN — re-running a terminally concluded run is a decision this task
-    // explicitly leaves to the operator (W1-T2327 measured GitHub itself refusing the obvious
-    // remedy: `403 this workflow run cannot be retried`), never assumed here. Disposition is the
-    // SAME blocked-ambiguous escalate path every other ambiguous block already uses — one
-    // ledger-deduped issue per head, never a second mechanism.
+    // W1-T2340 — A HEAD PENDING ONLY BECAUSE A CONCLUDED RUN PINNED ONE OF ITS JOBS reads exactly
+    // like ordinary in-flight CI to the rows below, and would wait out the ceiling even though the
+    // run that pinned the job is DONE. Ordered STRICTLY BEFORE them so a stalled head is named the
+    // moment it is detectable; this shape needs no threshold at all. GATED ON `"pending"`
+    // EXPLICITLY, never `"none"`, so it cannot fire on the input the ABSENT arm owns. TAKES NO
+    // ACTION — re-running a concluded run is left to the operator, GitHub having refused it 403.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.checksState === "pending" && stalledRunReason(pr.workflowRuns) !== undefined,
     reason: (pr) =>
@@ -3903,14 +2494,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `finished still blocks the merge; escalating once rather than waiting on something that will not arrive`,
   },
   {
-    // WAIT (W1-T114, the 30-issue predicate-storm fix, LIVE INCIDENT
-    // 2026-07-19: ~24 of 30 open needs-human issues were exactly this shape —
-    // "checks pending, review success — escalating"). Never reached with a
-    // FAILING review or red checks (rows 4-7 above already claimed those) —
-    // only checks-pending survives to here. Requires a DATABLE age
-    // (`checksPendingSince` present and parseable); undated pending falls
-    // through to row 11's catch-all unchanged (the pre-W1-T114 behavior, for
-    // callers that haven't wired the timestamp yet).
+    // WAIT (W1-T114). Never reached with a FAILING review or red checks — rows 4-7 claimed those,
+    // so only checks-pending survives here. Requires a DATABLE age; undated pending falls through
+    // to the catch-all unchanged, the pre-W1-T114 behaviour for callers that never wired the
+    // timestamp.
+    // Why: ~24 of 30 open needs-human issues on 2026-07-19 were exactly this shape.
     disposition: "wait",
     when: (pr, policy, _ageDays, now) => {
       if (pr.checksState !== "pending") return false;
@@ -3921,12 +2509,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m (< ${policy.pendingCeilingMinutes}m ceiling) — waiting, re-deriving next sweep`,
   },
   {
-    // STALE-PENDING (W1-T114): the SAME datable-pending shape as row 9 above,
-    // but the ceiling is met or exceeded — a check stuck this long IS
-    // ambiguity, not merely in-flight. Disposition is blocked-ambiguous, the
-    // SAME escalate path row 11 uses (ledger dedup, clarification-question
-    // rendering, escalate() dispatch — nothing new to wire), with the elapsed
-    // minutes and the ceiling both named in the reason.
+    // STALE-PENDING (W1-T114): the SAME datable-pending shape as the row above, but the ceiling is
+    // met or exceeded — a check stuck this long IS ambiguity, not merely in-flight. Uses the SAME
+    // escalate path as the catch-all, with the elapsed minutes and the ceiling both named.
     disposition: "blocked-ambiguous",
     when: (pr, policy, _ageDays, now) => {
       if (pr.checksState !== "pending") return false;
@@ -3937,34 +2522,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `stale-pending — checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m (>= ${policy.pendingCeilingMinutes}m ceiling) — escalating`,
   },
   {
-    // NOT-YET-SCHEDULED (W1-T1103, design i) — the THIRD reading of `checksState === "none"`
-    // W1-T186's ABSENT/CONFLICTED split does not have. Rationale (1)/(3): a head seconds old
-    // with zero check runs and a head hours old with zero runs are the SAME count and OPPOSITE
-    // situations — a mergeable PR whose workflow simply has not been SCHEDULED yet is
-    // indistinguishable from a genuinely-missing required check by run count alone, and every
-    // prior row (CONFLICTED, mergeable, the W1-T176 refused-post row, the review-orphan-cap row,
-    // post-review, the two green+pending rows, the two datable-pending rows) requires
-    // `checksState` to be `"dirty"`-implying, `"green"`, or `"pending"` — none of them claim the
-    // bare structural-empty shape, so a young `"none"` head reaches this row exactly as it always
-    // fell through to the terminal catch-all below.
-    //
-    // THE DISCRIMINATOR IS THE SAME CLOCK `absentChecksRepushDecision` ALREADY OWNS (never a
-    // second, guessed constant — rationale (1)'s own falsifier: "a bound that fires on a healthy
-    // condition is this repo's recurring defect"). `policy.absentCeilingMinutes` is this repo's
-    // own measured time-to-first-check-run, already load-bearing for the re-push remedy below —
-    // reusing it here means the two questions ("re-push yet?" and "escalate yet?") answer off one
-    // policy row, not two that could drift apart.
-    //
-    // UNDATED FAILS TOWARD ESCALATE, NOT WAIT (`absentAgeMinutes` returning `undefined` makes the
-    // predicate below false) — the OPPOSITE polarity from a knowingly-young head, and the SAME
-    // direction `absentChecksRepushDecision`'s own "never re-push on state we cannot date" refusal
-    // already takes: an unreadable age is not evidence of youth, and treating it as YOUNG would
-    // let a genuinely-broken check suite wait forever behind an unparseable timestamp.
-    //
-    // ABOVE THE CEILING, NOTHING CHANGES: the row does not match, the PR falls through to the
-    // terminal catch-all exactly as before this task, and `runSweep`'s existing blocked-ambiguous
-    // dispatch (the ABSENT re-push remedy, then escalate) is untouched — design (i)'s own words,
-    // "above it the existing ABSENT path is unchanged."
+    // NOT-YET-SCHEDULED (W1-T1103) — the THIRD reading of `checksState === "none"`: a head seconds
+    // old with zero runs and one hours old with zero runs are the SAME count and OPPOSITE
+    // situations. THE DISCRIMINATOR IS THE CLOCK the re-push remedy ALREADY OWNS, never a second
+    // guessed constant — a bound firing on a healthy condition is this repo's recurring defect.
+    // UNDATED FAILS TOWARD ESCALATE: an unreadable age is not evidence of youth, and treating it as
+    // young would let a broken suite wait forever behind a bad timestamp.
     disposition: "wait",
     when: (pr, policy, _ageDays, now) => {
       if (pr.checksState !== "none") return false;
@@ -3976,14 +2539,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `since the last push (< ${policy.absentCeilingMinutes}m ceiling) — not yet scheduled, not genuinely absent — waiting`,
   },
   {
-    // TERMINAL rule (matches unconditionally) — the LEAST permissive disposition
-    // (the #161 fix, W1-T93), not the most permissive one. A checks-red PR is
-    // the blocked_ci shape and is caught by row 5 above (W1-T100/W1-T138); a
-    // DATABLE checks-pending PR is caught by row 9/10 above (W1-T114) — neither
-    // ever lands here. Anything ELSE not positively mergeable and not
-    // failure-shaped (e.g. checks/review still pending with no datable
-    // check-start) matches no earlier rule and no longer falls through to
-    // mergeable by default: it lands here and ESCALATES, naming the observed
+    // TERMINAL rule, matching unconditionally — the LEAST permissive disposition (W1-T93), not the
+    // most. A checks-red PR is caught by row 5 and a DATABLE checks-pending PR by rows 9/10, so
+    // neither lands here. Anything else not positively mergeable and not failure-shaped no longer
+    // falls through to mergeable by default: it lands here and ESCALATES, naming the observed
     // state, so it is never silent and never armed.
     disposition: "blocked-ambiguous",
     when: () => true,
@@ -3993,27 +2552,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
 ];
 
 /**
- * Derive ONE open PR's disposition from observed state + policy — PURE, TOTAL,
- * deterministic (rule 2: policy-as-data, never LLM-classified). This function
- * holds NO disposition branches: it computes the one derived scalar the table
- * needs (the PR's age in days) and returns the first {@link DISPOSITION_RULES}
- * row whose predicate matches. The mapping from state to disposition is entirely
- * in the data table.
+ * Derive ONE open PR's disposition from observed state and policy — PURE, TOTAL, deterministic.
+ * Holds NO disposition branches: it computes the one derived scalar the table needs and returns
+ * the first matching {@link DISPOSITION_RULES} row.
  *
- * W1-T1201 (design i) — AGE IS CLAMPED TO THE PR'S OWN LIFETIME, HERE, ONCE, BEFORE ANY ROW
- * READS IT: `ageDays` is the LESSER of "days since last activity" and "days since
- * {@link OpenPrView.createdAt}", so every `DISPOSITION_RULES` row that reads the computed value
- * (today, only the bare `ageDays >= policy.staleDays` stale row) inherits the bound rather than
- * re-deriving it. `createdAt` absent or unparseable clamps to `+Infinity` (no bound) — today's
- * pre-clamp arithmetic, unchanged, the same fail-toward-existing-behaviour this module gives
- * every unwired field.
- *
- * THE CLAMP DOES NOT SILENTLY RESCUE (design iii): when it actually changes the outcome — the
- * raw activity age crosses the stale threshold but the clamped age does not — the returned
- * `reason` names the suppression explicitly, appended to whichever OTHER row's reason actually
- * fired, rather than reading identically to an ordinary non-stale disposition. A rescue nobody
- * can see is how a shifted clock stays invisible until it closes eleven PRs (this task's own
- * incident).
+ * W1-T1201 — AGE IS CLAMPED TO THE PR'S OWN LIFETIME, HERE, ONCE, BEFORE ANY ROW READS IT, so
+ * every row inherits the bound. An absent `createdAt` clamps to `+Infinity`, today's arithmetic.
+ * THE CLAMP DOES NOT SILENTLY RESCUE: when it changes the outcome the `reason` says so, because a
+ * rescue nobody can see is how a shifted clock stays invisible until it closes eleven PRs.
  */
 export function deriveDisposition(
   pr: OpenPrView,
@@ -4033,11 +2579,10 @@ export function deriveDisposition(
     return { disposition: "blocked-ambiguous", reason: "default (no rule matched) — escalating" };
   }
   const reason = rule.reason(pr, policy, ageDays, now);
-  // W1-T1201 (design iii): the clamp above can only ever SUPPRESS the bare `ageDays >=
-  // policy.staleDays` stale row — the only row that reads the computed scalar (this function's
-  // own doc). When the raw (unclamped) activity age would have crossed that threshold but the
-  // lifetime-clamped age does not, that suppression is a BROKEN-CLOCK SIGNAL, never a routine
-  // non-event, so it is folded into whichever other row's reason actually fired.
+  // W1-T1201: the clamp can only ever SUPPRESS the bare stale row, the only row reading the
+  // computed scalar. When the raw activity age would have crossed that threshold but the clamped
+  // age does not, that suppression is a BROKEN-CLOCK SIGNAL, never a routine non-event, so it is
+  // folded into whichever other row's reason actually fired.
   const clockSkewSuppressedStale =
     lifetimeAgeDays < activityAgeDays && activityAgeDays >= policy.staleDays && ageDays < policy.staleDays;
   if (!clockSkewSuppressedStale) return { disposition: rule.disposition, reason };
@@ -4051,30 +2596,14 @@ export function deriveDisposition(
 }
 
 /**
- * W1-T983 — IS THIS OPEN PR'S DISPOSITION THE CAPPED-GREEN-REVIEW-ORPHAN SHAPE: the ONE
- * blocked-ambiguous disposition this task reclassifies to a reaching escalation tier, out of
- * every other blocked-ambiguous shape (merge conflicts, fix-rung strikes exhausted, stale
- * pending, the terminal catch-all, ...) which all keep the class they have today. PURE and
- * callable with no spawn and no GitHub — every input is a field {@link OpenPrView} already
- * carries plus {@link SweepPolicy.reviewOrphanCap}, mirrored EXACTLY off the SAME four
- * conditions the review-orphan-cap row of {@link DISPOSITION_RULES} above already reads
- * (`checksState`, `reviewState`, `reviewOrphanedByPush`, `priorReviewAttemptsForInput` against the cap,
- * `requiredContextsUnreadable`), never re-derived independently — so this predicate and that
- * row's `when` clause cannot drift apart.
+ * W1-T983 — is this PR's disposition the CAPPED-GREEN-REVIEW-ORPHAN shape: the ONE
+ * blocked-ambiguous disposition reclassified to a reaching escalation tier, while every other
+ * keeps the class it has today. PURE, with no spawn and no GitHub call, and mirrored EXACTLY off
+ * the conditions the cap row already reads, so the two cannot drift apart.
  *
- * `run-task.ts`'s sweep-escalate closure (`buildSweepEffects`) is the sole reader: `true` here
- * is the only thing that moves ONE escalation off today's silent BLOCKED default. See that call
- * site's own doc for the measured ping-rate this narrow reclassification stays inside — the
- * cap fires ~1.7/day (rationale (3): five issues over three days), never the ~15.6/day BLOCKED
- * average a blanket tier change (reclassifying every blocked-ambiguous escalation) would
- * reinstate (rationale (4)).
- *
- * W1-T1018: DELIBERATELY still four conditions, no fifth `now`/backoff check added here. The
- * elapsed-time backoff ({@link reviewInputBackoffElapsed}) gates the DISPOSITION_RULES cap row
- * itself — a PR only ever REACHES this predicate (via the escalate closure) when that row already
- * matched at the SAME sweep pass's `deriveDisposition` call, which means backoff had already read
- * un-elapsed a moment earlier. Threading `now` through here too would only rewiden the surface the
- * signature-anchored mutation test below has to track, for no behavioural gain.
+ * W1-T1018: DELIBERATELY still four conditions, no fifth backoff check — a PR only reaches this
+ * predicate when the cap row already matched at the same pass, so backoff read un-elapsed a moment
+ * earlier. // Why: the cap fires rarely, which is what keeps this inside the measured ping rate.
  */
 export function isCappedReviewOrphanEscalation(pr: OpenPrView, policy: SweepPolicy): boolean {
   return (
@@ -4087,68 +2616,27 @@ export function isCappedReviewOrphanEscalation(pr: OpenPrView, policy: SweepPoli
 }
 
 /**
- * ARMING PARITY WITH THE RUN FLOW — the fix for the gap run-task.ts named in its own
- * capped-refusal comment ("`sweep.ts`'s independent 'checks green + review
- * success -> mergeable' reconciliation does not yet consult `capped`/an
- * override — a PR this refuses stays OPEN and UNARMED, but a later sweep poll
- * could still arm it via that separate path").
+ * ARMING PARITY WITH THE RUN FLOW — a PR the run flow refused stayed open and unarmed, but a later
+ * sweep poll could still arm it through this separate path.
  *
- * LIVE INSTANCE (2026-07-28): PR #800's verdict carried `capped: true` at
- * `proof_exec 0/5` — five `exec_error` proofs, nothing executed. The run flow
- * refused it. This reconciler armed it at 17:48:57Z and GitHub merged it 35
- * seconds later, unattended, with zero acceptance proofs ever executed.
+ * NOT A SECOND IMPLEMENTATION, which is exactly how the two paths drifted apart: this delegates to
+ * {@link decideAutoMergeArm}, the SAME predicate the run flow calls, so the W1-T205 carve-out
+ * travels with it and a `planOnly` CAPPED verdict still arms. The one shape this takes away is the
+ * one the run flow already refuses.
  *
- * NOT A SECOND IMPLEMENTATION — that duplication is exactly how the two paths
- * drifted apart. This delegates to {@link decideAutoMergeArm}, the SAME pure
- * predicate `runTask`'s arming path calls, so the W1-T205 carve-out it already
- * encodes travels with it: a `planOnly` CAPPED verdict is STRUCTURALLY capped
- * (a plan PR files or amends a task; it has no code to run a proof against) and
- * STILL ARMS, with no operator override, or every retro/triage/plan/approve PR
- * in the system would stall. The one shape this takes away is the one the run
- * flow already refuses: capped, not plan-only, no ledgered operator override.
- *
- * `tddStrict` is passed `false` because W1-T229 removed it from the GATE — it
- * survives on {@link decideAutoMergeArm}'s signature purely for
- * `resolveAutoMergeArm`'s override-provenance bookkeeping, and never changes
- * which verdicts arm. The override is recovered head-bound from the SAME
- * `automerge.capped_override_granted` ledger line `runTask` reads
- * ({@link cappedOverrideFromLedger}), so an operator who unblocks a PR by hand
- * unblocks it for BOTH paths, not just the one they happened to be looking at.
- *
- * FAIL-OPEN ON ABSENT EVIDENCE (see {@link postedArmFactsFromLedger}): a head
- * with no recoverable ledgered verdict arms exactly as it did before this
- * function existed. Refusal requires positively observing `capped: true,
- * plan_only: false` for THIS head.
- *
- * W1-T1028 — RECOVERS EVIDENCE FOR A HAND-FILED PR TOO, NOT JUST A PLAN TASK'S. Before this,
- * evidence recovery was keyed on `pr.taskId` RAW: a PR with no `Remudero-Task:` trailer (a
- * hand-filed PR, `pr.taskId === undefined`) made {@link postedArmFactsFromLedger} bail on its
- * own `!taskId` guard EVERY time, so this function always took the fail-open branch above —
- * arming was never actually REFUSED for a capped or irreversible hand-filed PR by this gate,
- * only by the run flow's OWN independent re-check downstream (`armAutoMerge`, run-task.ts),
- * which is the disagreement this task's rationale traces end to end: this gate says arm on
- * evidence it never looked for, the handoff refuses on evidence it never needed to look for
- * either, and the two only ever agreed by accident. The recovery key below is `pr.taskId ??
- * PR-<n>` — the SAME synthetic id the review lane already ledgers `review.posted` under for a
- * task-less PR ({@link "../run-task.js".escalationTaskIdFor}, `taskId ?? PR-<n>`, inlined here
- * rather than imported to keep this module free of a run-task.ts dependency) — so a hand-filed
- * PR that WAS reviewed is judged on the SAME head-bound verdict the run flow would find, and
- * one that was NEVER reviewed still takes the fail-open branch above, unchanged. This is what
- * makes the decision this function returns the head-bound one the handoff should carry, rather
- * than a blind pass for the entire population an absent task id used to hide from it.
+ * FAIL-OPEN ON ABSENT EVIDENCE: refusal requires positively observing `capped: true,
+ * plan_only: false` for THIS head. W1-T1028 keys recovery on the same synthetic id the review lane
+ * ledgers under, so a hand-filed PR is judged on the verdict the run flow would find.
+ * // Why: #800 armed at proof_exec 0/5 and merged 35 seconds later — docs/forensics/sweep.md.
  */
 export function decideSweepArm(
   pr: OpenPrView,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
-  // W1-T1028 — appended LAST, the SAME idiom {@link decideAutoMergeArm}'s own `irreversible`
-  // parameter already uses, so no positional caller shifts and today's behaviour is byte-for-
-  // byte unchanged when omitted. `OpenPrView` gains no new field for this: the run flow's own
-  // classification (`irreversibleSignalForWorktree`, run-task.ts) is worktree-bound and the
-  // sweep's reconciliation pass has no worktree for an arbitrary open PR to classify from —
-  // inventing an always-`undefined`-in-production field would only add an unproducible entry
-  // to `OpenPrView` (see producer-completeness.test.ts) for no present caller to fill. A future
-  // caller that DOES have a head-bound classification (a ledgered one, or a fresh worktree scan)
-  // can supply it here without this function's signature changing again.
+  // W1-T1028 — appended LAST, the SAME idiom {@link decideAutoMergeArm} already uses, so no
+  // positional caller shifts and omitting it is byte-for-byte today's behaviour. `OpenPrView`
+  // gains no field: the run flow's classification is worktree-bound and this pass has no worktree,
+  // so the field would be permanently unproducible. A future caller with a head-bound
+  // classification can supply it here without the signature changing again.
   irreversible?: boolean,
 ): ArmDecision {
   const armId = pr.taskId ?? `PR-${pr.prNumber}`;
@@ -4176,48 +2664,23 @@ export interface ArmedStalledPr {
 }
 
 /**
- * W1-T528 — the terminal outcome of ONE `gh pr update-branch` request (design v: async, and this
- * shard does not pretend to settle every failure mode — only these three are established without
- * a live call against a real PR).
- *  - `"updated"`: GitHub ACCEPTED the request (the update itself completes asynchronously).
- *  - `"conflict"`: GitHub refused (a real merge conflict, or a diverged-not-merely-behind head) —
- *    reported on the ledger and never retried by this same call.
- *  - `"error"`: any other failure (network, auth, rate limit) — informational; a later pass's own
- *    fresh selection may try again, this call does not.
+ * W1-T528 — the terminal outcome of ONE `gh pr update-branch` request. Only these three are
+ * established without a live call against a real PR.
+ *  - `"updated"`: GitHub ACCEPTED the request; the update itself completes asynchronously.
+ *  - `"conflict"`: GitHub refused — a real conflict, or a diverged-not-merely-behind head.
+ *    Reported on the ledger and never retried by this same call.
+ *  - `"error"`: any other failure. Informational; a later pass may re-select, this call does not.
  */
 export type UpdateBranchOutcome = "updated" | "conflict" | "error";
 
 /**
- * W1-T520 — ARMED AND BEHIND, THE TWO FACTS NOTHING JOINED.
+ * W1-T520 — ARMED AND BEHIND, THE TWO FACTS NOTHING JOINED. Separately unremarkable; together they
+ * describe a PR that has done everything it can and stopped, indistinguishable from one still
+ * waiting for CI.
  *
- * The sweep already holds both halves per PR and never puts them together:
- * {@link OpenPrView.autoMergeArmed} says a PR has asked GitHub to merge it, and
- * {@link OpenPrView.mergeState} says its head is `behind` the base. Separately,
- * each is unremarkable. TOGETHER they describe a PR that has done everything it
- * can and stopped: it will not merge, nothing will retry it, and it is
- * indistinguishable in the ledger and on every surface from a PR still waiting
- * for CI.
- *
- * WHY THE DETECTOR AND NOT THE FIX. `allow_update_branch` OFFERS the update
- * button; it does not press it. Re-derived 2026-08-15: with that setting TRUE,
- * EIGHT OF NINE open PRs read `behind` and SEVEN of those were armed, unchanged
- * for hours. But this predicate is deliberately INERT about that — it reports
- * and does not act, because acting means minting a NEW HEAD, and a verdict is
- * input-pinned (`priorActionsFromLedger` keys `reviewDelivered` on task + PR URL + head + body
- * digest), so every update discards the verdict it was waiting
- * on. Clearing N that way costs N+(N-1)+…+1 reviews. The action half needs a
- * selection rule and its own ruling; this shard scopes it OUT.
- *
- * PURE, AND FAIL-QUIET. No I/O, no GitHub call: the caller supplies what it
- * already fetched, the shape every other decision in this module takes. A PR
- * whose `mergeState` was never read is `undefined` and yields nothing — an
- * unread fact is not a stall, the same fail-closed default `mergeState` carries
- * everywhere else in this file.
- *
- * THE QUIET CASE IS THE COMMON CASE AND IS FREE. Armed-and-current yields
- * nothing; behind-but-unarmed yields nothing. A detector that fired on either
- * would name every open PR every pass, which is the noise floor that makes an
- * advisory unreadable.
+ * WHY THE DETECTOR AND NOT THE FIX: acting mints a NEW HEAD, and a verdict is input-pinned, so
+ * every update discards the verdict it was waiting on. PURE AND FAIL-QUIET — an unread
+ * `mergeState` yields nothing, because an unread fact is not a stall.
  */
 export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
   const out: ArmedStalledPr[] = [];
@@ -4235,31 +2698,16 @@ export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
 }
 
 /**
- * W1-T528 — THE ACTION HALF OF W1-T520. SELECTS AT MOST ONE PR FROM {@link armedButStalled}'S
- * OWN SET, NEVER A SECOND PREDICATE COMPUTING THE SAME TWO FACTS (design note i).
+ * W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
+ * set, never a second predicate recomputing the same two facts.
  *
- * ONE PER PASS, OLDEST HEAD FIRST (design ii): updating mints a NEW head and a verdict is
- * input-pinned (`priorActionsFromLedger` includes the head in its exact-input key), so every
- * update discards the verdict it was waiting on — updating the WHOLE stalled set each pass costs
- * N+(N-1)+…+1 reviews (observed: updating one put four others behind and the fleet re-updated
- * them itself). {@link oldestActivityFirst} is the SAME comparator {@link selectReviewAdmission}
- * (W1-T526) uses for its own disjoint population (design iii) — a loser this pass is strictly
- * older next pass, the only ranking that cannot starve a PR forever.
+ * ONE PER PASS, OLDEST HEAD FIRST — updating mints a NEW head and a verdict is input-pinned, so
+ * updating the whole stalled set each pass costs N+(N-1)+…+1 reviews. The comparator is shared with
+ * the review admission, so a loser is strictly older next pass and cannot starve.
  *
- * TWO EXCLUSIONS ON TOP OF THE DETECTOR'S OWN TWO FACTS (design iv) — a red/blocked/
- * awaiting-human PR and an already-current PR need NO re-check here: an armed PR whose checks
- * are red cannot itself read `mergeState: "behind"`, and a current PR is not `"behind"` at all,
- * so both are already excluded by `armedButStalled` and re-testing either would be the second
- * predicate this design forbids.
- *  - A DRAFT ({@link OpenPrView.isDraft} `=== true`) — the operator's hold. NEVER touched.
- *  - AN IN-FLIGHT HEAD: {@link taskIdFromRunBranch} reads the task id a `run-<taskId>-<epochMs>`
- *    branch attributes to (the SAME extractor `projectPlan`, status.ts, already uses) and, when
- *    it names a task present in `inFlightTaskIds`, that PR is skipped — a live worker is still
- *    pushing to this exact head (the #1902 shape: a mid-pass push raced its own PR's
- *    `remudero-review`). Intended as `liveInflightRuns` (run-task.ts) — "in flight" here means
- *    exactly what it means everywhere else in the fleet (see that function's own doc), never a
- *    second, looser definition. A head that is not a run-branch at all (foreign/human-authored)
- *    can never match and is never excluded by this rule.
+ * TWO EXCLUSIONS on top of the detector's facts, since a red or already-current PR is already
+ * excluded by `armedButStalled`: a DRAFT, the operator's hold, is never touched; and an IN-FLIGHT
+ * HEAD, where a live worker is still pushing. A head that is not a run-branch can never match.
  */
 export function selectUpdateBranchTarget(
   prs: readonly OpenPrView[],
@@ -4268,10 +2716,9 @@ export function selectUpdateBranchTarget(
   staleGateWorkflowsByPr: ReadonlyMap<number, readonly string[]> = new Map(),
   updatedForWorkflow: ReadonlySet<string> = new Set(),
 ): ArmedStalledPr | undefined {
-  // W1-T1212 (design ii): the UNION of two disjoint-by-construction predicates, never a widening
-  // of either — `armedButStalled` still answers "armed and behind" and nothing here re-derives
-  // it. A PR named by both (should the two facts ever coincide) contributes ONE candidate: the
-  // first writer wins, and which shape wins carries no meaning `oldestActivityFirst` reads below.
+  // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either.
+  // A PR named by both contributes ONE candidate; the first writer wins, and which shape wins
+  // carries no meaning the comparator below reads.
   const combined = new Map<number, ArmedStalledPr>();
   for (const c of [...armedButStalled(prs), ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow)]) {
     if (!combined.has(c.prNumber)) combined.set(c.prNumber, c);
@@ -4294,9 +2741,9 @@ export function selectUpdateBranchTarget(
 }
 
 /**
- * One PR {@link redPrWithStaleGate} selected — sibling to {@link ArmedStalledPr}, carrying the
- * ONE extra fact the caller needs: which failing check's workflow definition moved on main,
- * so the pair can be remembered (design note iv) and never re-selected for the same workflow.
+ * One PR {@link redPrWithStaleGate} selected — sibling to {@link ArmedStalledPr}, carrying the ONE
+ * extra fact the caller needs: which failing check's workflow moved on main, so the pair can be
+ * remembered and never re-selected for the same workflow.
  */
 export interface StaleGatePr extends ArmedStalledPr {
   /** The currently-failing check whose workflow blob differs between this PR's merge ref and main. */
@@ -4304,43 +2751,15 @@ export interface StaleGatePr extends ArmedStalledPr {
 }
 
 /**
- * W1-T1212 — A RED PR RUNS A FROZEN COPY OF THE VERY GATE THAT BLOCKS IT. `pull_request`
- * evaluates `refs/pull/<n>/merge`, whose base parent is pinned at the PR's last `synchronize` —
- * so a gate fixed on main (the #2477 shape: a filter added to `.github/workflows/ci-gate.yml`)
- * never reaches a PR sitting on an older merge ref, and the PR fails a check main would now pass.
- * `armedButStalled` cannot reach this population at all: a red PR is never armed (GitHub does not
- * merge-eligibility-arm a checks-red head), so it can never enter `armedButStalled`'s own
- * `autoMergeArmed === true` gate, and the loop this closes has no exit that does not involve a
- * human (rationale (2)).
+ * W1-T1212 — A RED PR RUNS A FROZEN COPY OF THE VERY GATE THAT BLOCKS IT: the merge ref's base
+ * parent is pinned at the last `synchronize`, so a gate fixed on main never reaches an older merge
+ * ref and the PR fails a check main would now pass. `armedButStalled` cannot reach this
+ * population, since a red PR is never armed.
  *
- * SIBLING TO `armedButStalled`, NEVER A WIDENING OF IT (design note ii): this predicate asks a
- * DIFFERENT question — "is this red PR's OWN failing gate stale" — over a population
- * `armedButStalled` structurally excludes. `selectUpdateBranchTarget` selects across the union of
- * both, one PR per pass, oldest head first, exactly as it already does for the armed-and-behind
- * set.
- *
- * THE DISCRIMINATOR IS EXACT (design note i), never "behind main" alone (rationale (4): with
- * `required_status_checks.strict` false, behind-ness alone would fire on essentially every open
- * PR and pay a rebase storm for nothing). `staleGateWorkflowsByPr` is the caller's own answer,
- * per PR, to "which of THIS head's currently-failing checks (a subset of {@link
- * OpenPrView.ciFailures}) are defined by a workflow file whose blob sha differs between the
- * merge ref and main right now" — a single contents read per file (run-task.ts wires the real
- * `gh api` read; this predicate stays pure and takes the answer as data, the same shape
- * `inFlightTaskIds` already takes for a fact only run-task.ts can fetch).
- *
- * REFUSED BY NAME (design note iv):
- *  - CONFLICTED (`mergeState === "dirty"` or `mergeable === false`) — resolving a conflict is
- *    judgement, and GitHub refuses an update-branch request against one anyway
- *    ({@link UpdateBranchOutcome} already carries `"conflict"` for exactly that). Never attempted
- *    here, however stale the PR's own gate copy is.
- *  - ALREADY UPDATED FOR THIS WORKFLOW — `updatedForWorkflow` carries every `${prNumber}:${name}`
- *    pair this lane has already requested an update for; a second request for the SAME pair is a
- *    no-op that still spends a head, so a PR whose only stale name(s) are all already-spent is
- *    skipped, never re-selected. A PR with an UNSPENT stale name is still eligible even if it
- *    also carries an already-spent one — `.find` below picks the first fresh name.
- *
- * The draft veto and the in-flight-head veto (design note v) are NOT re-checked here — they are
- * `selectUpdateBranchTarget`'s own job, applied to the union exactly once.
+ * SIBLING TO THAT PREDICATE, NEVER A WIDENING. THE DISCRIMINATOR IS EXACT, never "behind main"
+ * alone, which would fire on essentially every open PR and pay a rebase storm for nothing.
+ * REFUSED BY NAME: a CONFLICTED PR, and one whose stale names are ALL already spent. The draft and
+ * in-flight vetoes are {@link selectUpdateBranchTarget}'s job, applied to the union exactly once.
  */
 export function redPrWithStaleGate(
   prs: readonly OpenPrView[],
@@ -4365,25 +2784,17 @@ export function redPrWithStaleGate(
   return out;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// W1-T78 — the CLARIFICATION-QUESTION rung (ratifies P22's new rung): an
-// ambiguous (BLOCKED-AMBIGUOUS) block yields a SPECIFIC, decidable operator
-// question, never silence. `renderClarificationQuestion` is PURE and
-// deterministic — it renders ONLY from what the sweep/ledger observed (the
-// unmet criterion's claim/proof/reason already carried on {@link OpenPrView},
-// plus the per-strike ledger history) and never invents a criterion or a
-// resolution that was not itself observed. Emitted per the §2 QUESTION
-// contract's shape ({@link toQuestionEntry}, matching worker.ts's
-// `QuestionEntry`) — extended with the PR/run context and exactly two
-// candidate resolutions a plain QUESTION does not carry — to the durable
-// question backlog, with W1-T8's `escalate()` as the notification transport
-// (both wired in run-task.ts's `buildSweepEffects`, the real gateway).
-// ────────────────────────────────────────────────────────────────────────────
+// ── W1-T78 — THE CLARIFICATION-QUESTION rung (ratifies P22's new rung) ───────────────────────
+//
+// An ambiguous block yields a SPECIFIC, decidable operator question, never silence.
+// `renderClarificationQuestion` is PURE: it renders ONLY what the sweep and ledger observed and
+// never invents a criterion or a resolution. Emitted per the §2 QUESTION contract's shape to the
+// durable backlog, with `escalate()` as the notification transport — both wired in run-task.ts.
 
 /**
- * One recorded fix-rung strike's outcome for a task, ledger ground truth ONLY
- * — "what the fix worker tried" (never inferred, never guessed). Derived from
- * `fix.dispatch`/`fix.review` ledger lines by run-task.ts's `deriveStrikeHistory`.
+ * One recorded fix-rung strike's outcome for a task — "what the fix worker tried", ledger ground
+ * truth ONLY, never inferred. Derived from `fix.dispatch`/`fix.review` rows by
+ * run-task.ts's `deriveStrikeHistory`.
  */
 export interface StrikeAttempt {
   strike: number;
@@ -4391,21 +2802,11 @@ export interface StrikeAttempt {
   /** Unmet criteria count going INTO this strike. */
   unmetCount: number;
   /**
-   * W1-T1269 — the unmet criteria CLAIM SET (never just {@link unmetCount}'s size) going INTO
-   * this strike, keyed by each {@link CriterionVerdict.claim}'s own text — the identity
-   * `fixRungRepeatsIdenticalFailure` compares against the current `OpenPrView.unmetCriteria` to
-   * tell a strike that failed IDENTICALLY (same claims, same reasons) from one that fixed half
-   * (a smaller count) or fixed one thing while breaking another (the SAME count, a DIFFERENT
-   * set) — `unmetCount` alone cannot separate the last two.
-   *
-   * SCOPE (honest, mirrors how `pendingAnswer`/`reviewOrphanedByPush` shipped their own
-   * mechanism ahead of their producer): this field, {@link fixRungRepeatsIdenticalFailure}, and
-   * its `DISPOSITION_RULES` row (5.5) are the full MECHANISM, wired end-to-end and unit-tested
-   * here — but `run-task.ts`'s `deriveStrikeHistory` does not populate it yet, so every
-   * `StrikeAttempt` the real gateway records today carries `unmetClaims: undefined`.
-   * `fixRungRepeatsIdenticalFailure` fails CLOSED on `undefined` (never matches), so this is
-   * additive: the earlier-stop row stays permanently inert in production until that follow-up
-   * producer lands, and every existing caller/fixture is byte-identical.
+   * W1-T1269 — the unmet criteria CLAIM SET going into this strike. This is the identity
+   * {@link fixRungRepeatsIdenticalFailure} compares, telling a strike that failed IDENTICALLY from
+   * one that fixed half or fixed one thing while breaking another — {@link unmetCount} cannot
+   * separate those. SCOPE (honest): no producer populates it, and the predicate fails CLOSED, so
+   * row 5.5 stays inert in production.
    */
   unmetClaims?: readonly string[];
   /** Whether CI reached green after this strike (a review only runs once it does). */
@@ -4421,9 +2822,8 @@ export interface ClarificationResolution {
 }
 
 /**
- * The rendered output of the CLARIFICATION-QUESTION rung for ONE
- * BLOCKED-AMBIGUOUS PR: the exact decision, both candidate resolutions, and
- * the run/PR context — never a generic needs-human.
+ * The rendered output of the clarification rung for ONE blocked-ambiguous PR: the exact decision,
+ * both candidate resolutions, and the run and PR context — never a generic needs-human.
  */
 export interface ClarificationQuestion {
   taskId: string;
@@ -4442,21 +2842,18 @@ export interface ClarificationQuestion {
   /** Exactly two candidate resolutions — never a silent guess, never more than two. */
   resolutions: readonly [ClarificationResolution, ClarificationResolution];
   /**
-   * W1-T186: which of {@link ObservedBlockerState}'s four named states this escalation
-   * observed, or `undefined` when none applies (an ordinary review-failure/contradictory
-   * block, where the criterion fields above already say everything there is to say).
+   * W1-T186: which named {@link ObservedBlockerState} this escalation observed, or `undefined`
+   * for an ordinary review-failure block where the criterion fields already say everything.
    */
   observedState?: ObservedBlockerState;
 }
 
 /**
- * Render ONE blocked-ambiguous PR's clarification question, deterministically,
- * from ledger ground truth ONLY: the task id, the unmet criterion (claim vs
- * the reviewer's stated requirement vs the spec's own proof text), and what
- * the fix worker already tried per strike. PURE — no guessing: when there is
- * no single unmet criterion to point at (the contradictory-criteria row or the
- * terminal catch-all), the question names the observed disposition `reason`
- * instead of inventing one, but it is NEVER silent either way.
+ * Render ONE blocked-ambiguous PR's clarification question deterministically, from ledger ground
+ * truth ONLY: the task id, the unmet criterion (claim vs the reviewer's requirement vs the spec's
+ * own proof text), and what the fix worker tried per strike. PURE, no guessing — with no single
+ * criterion to point at, the question names the observed disposition `reason` instead of
+ * inventing one, but it is NEVER silent either way.
  */
 export function renderClarificationQuestion(
   pr: OpenPrView,
@@ -4508,11 +2905,9 @@ export function renderClarificationQuestion(
     : `Task ${pr.taskId}, PR #${pr.prNumber} (${pr.prUrl}): ${reason} — ${tried}. There is no single actionable unmet ` +
       `criterion to point at. ${decisionSuffix}`;
 
-  // W1-T186: prepend the named observed-blocker facts (CONFLICTED/FAILING/ABSENT/PENDING, plus
-  // the raw mergeable/mergeableState GitHub reported) EVERY escalation carries them when
-  // observed — never only the criterion-shaped ones. "" when observedBlockerState found none of
-  // the four to name AND no mergeable/mergeableState was read, so an ordinary review-failure
-  // question renders byte-identical to before this task.
+  // W1-T186: prepend the named observed-blocker facts to EVERY escalation that has them, never
+  // only the criterion-shaped ones. "" when none was found and no mergeable state was read, so an
+  // ordinary review-failure question renders byte-identical to before this task.
   const observedState = observedBlockerState(pr);
   const observedFacts = renderObservedFacts(pr, observedState);
   const question = observedFacts ? `${observedFacts} ${baseQuestion}` : baseQuestion;
@@ -4532,11 +2927,9 @@ export function renderClarificationQuestion(
 }
 
 /**
- * Render a {@link ClarificationQuestion} into the §2 QUESTION contract's own
- * shape (worker.ts's `QuestionEntry`) for the durable question backlog —
- * `current_assumption` names what stays true while the PR is unanswered (it
- * never proceeds on a guess; it stays blocked), matching the contract's own
- * "the worker proceeds on this" framing.
+ * Render a {@link ClarificationQuestion} into the §2 QUESTION contract's shape for the durable
+ * backlog. `current_assumption` names what stays true while the PR is unanswered: it never
+ * proceeds on a guess, it stays blocked.
  */
 export function toQuestionEntry(q: ClarificationQuestion, ts: string): QuestionEntry {
   return {
@@ -4550,13 +2943,10 @@ export function toQuestionEntry(q: ClarificationQuestion, ts: string): QuestionE
 
 // ── W1-T2345 — THE UNBOUNDED-IDENTICAL-DISPOSITION COUNTER ──────────────────────────────────
 //
-// A disposition that CANNOT change on an unchanged head is re-derived at full weight forever
-// (measured: one PR dispositioned 301 times over 8.7h; the longest run of one verdict on one
-// unchanged head, keyed correctly, was 186). The sweep was right every time — this bounds the
-// REPETITION, never the verdict: {@link deriveDisposition} is untouched, `sweep.disposed` still
-// writes one row every pass (the level-triggered invariant this module's own header names), and
-// nothing here paces, throttles, or sleeps a call. See `SweepPolicy.repeatDispositionBound`'s own
-// doc for the N=50 derivation.
+// A disposition that CANNOT change on an unchanged head is re-derived at full weight forever.
+// This bounds the REPETITION, never the verdict: {@link deriveDisposition} is untouched,
+// `sweep.disposed` still writes one row every pass, and nothing here paces or sleeps a call.
+// Why: measured run lengths and the N=50 derivation are in docs/forensics/sweep.md.
 
 /** One PR's identical-verdict run, as folded off `sweep.disposed` rows already on the ledger —
  *  see {@link repeatDispositionStreaksFromLedger}'s own doc for the fold rules. */
@@ -4572,45 +2962,14 @@ interface RepeatDispositionRun {
 }
 
 /**
- * Fold every `sweep.disposed` row (any lines array — the caller's own pre-pass ledger read,
- * exactly like {@link priorActionsFromLedger}'s sibling folds) into each `pr_number`'s trailing
- * identical-verdict run: how many CONSECUTIVE rows, ending at the last one this ledger has for
- * that PR, share the SAME `(disposition, head_sha)` pair.
+ * Fold every `sweep.disposed` row into each PR's trailing identical-verdict run.
  *
- * KEYED ON `(disposition, head_sha)`, NEVER ON THE RENDERED `reason` — the task's own measurement
- * (rationale Q1) is why: a `wait` row's `reason` carries a live minute counter ("checks pending
- * 362m", then "365m", then "367m") that renders differently on every tick even though the
- * verdict has not moved at all. Keyed on that text the longest run on the measured PR was 11 and
- * a bound of 3 first tripped at 487 minutes — seven minutes AFTER the existing 8-hour board-review
- * rung (W1-T2304) would already have fired, i.e. useless. Keyed on the verdict itself instead, the
- * SAME corpus's longest run was 186, tripping a bound of 50 at 132 minutes — 3.5x earlier.
- *
- * EVERY `sweep.disposed` ROW COUNTS, REGARDLESS OF `acted` — a `wait` row is always `acted:false`
- * and a deduped `mergeable` row is `acted:false` too, and both are still genuine DERIVATIONS of
- * the identical unchanging verdict (design Q3: "the counter counts derivations, it never replaces
- * one"). Gating this fold on `acted === true`, the way {@link priorActionsFromLedger}'s OWN
- * action-dedup sets do, would silently exempt exactly the shapes (`wait`, a deduped repeat) this
- * task exists to bound.
- *
- * A row for a DIFFERENT `pr_number`, or one whose `disposition`/`head_sha` differs from the run in
- * progress, breaks it: the next row for that PR starts a FRESH run of length 1, `escalated: false`
- * — this is the head-move reset the acceptance criteria ask for. `escalated` is carried forward
- * unconditionally once set (a row's own `repeat_escalated: true`, written only on the pass that
- * trips the bound — see `runSweep`'s own call site) for as long as the run continues, so the
- * escalation this fold gates does not re-fire while the head stays put AND THE ROWS IT READS
- * SURVIVE.
- *
- * W1-T2382 — THAT SECOND CLAUSE IS THE WHOLE CAVEAT, AND IT USED TO BE MISSING. This fold reads
- * `sweep.disposed` rows, and rotation's PASS 3 keeps one row per `pr@head`, preferring the last
- * `acted: true` one; the flag rides an `acted: false` row, so the marker is SELECTED AGAINST rather
- * than merely aged out. Post-rotation this fold legitimately sees a run of length 1 and reports
- * `escalated: false` — it is reading what is there, and the defect is not in this function. See
- * {@link SweepPolicy.repeatDispositionBound}'s own doc for the measurement, the cost, and why the
- * remedy is deliberately out of scope.
- *
- * Rows with no numeric `pr_number`, no string `head_sha`, or no string `disposition` are skipped
- * — the same fail-open shape every sibling ledger fold in this module already takes on a
- * malformed/pre-feature row, never a thrown parse error.
+ * KEYED ON `(disposition, head_sha)`, NEVER ON THE RENDERED `reason`, which carries a live counter
+ * that renders differently every tick though the verdict has not moved. EVERY ROW COUNTS
+ * REGARDLESS OF `acted` — gating on it would exempt exactly the shapes this bound exists for. A
+ * differing row breaks the run, which is the head-move reset. `escalated` carries forward only for
+ * as long as THE ROWS IT READS SURVIVE: rotation selects against the marker, so post-rotation this
+ * legitimately reports a fresh run and the defect is not in this function (W1-T2382).
  */
 function repeatDispositionStreaksFromLedger(lines: ReadonlyArray<Record<string, unknown>>): Map<number, RepeatDispositionRun> {
   const runs = new Map<number, RepeatDispositionRun>();
@@ -4633,17 +2992,11 @@ function repeatDispositionStreaksFromLedger(lines: ReadonlyArray<Record<string, 
 }
 
 /**
- * Render the repeat-bound trip as a {@link ClarificationQuestion}. Unlike
- * {@link renderClarificationQuestion}, there is no single unmet criterion to point at — the two
- * resolutions name the two honest outcomes of a verdict that is not itself disputed, only stuck
- * repeating.
- *
- * W1-T2381: NO PRODUCTION CALLER. It was written to feed `deps.escalate()` from the repeat-bound
- * trip; that call is gone (W1-T2345 refused the issue surface in terms and the measurement backed
- * the refusal — see the trip's own comment). The function is RETAINED rather than deleted because
- * it is exported and pinned by a test, so removing it would delete a passing test for behaviour
- * nobody has ruled on; its former doc claimed it "reaches the existing digest/inbox surface",
- * which is no longer true and is corrected here rather than left to read as current.
+ * Render the repeat-bound trip as a {@link ClarificationQuestion}: with no single unmet criterion
+ * to point at, the two resolutions name the honest outcomes of a verdict that is not disputed,
+ * only stuck repeating. W1-T2381: NO PRODUCTION CALLER — the call it was written for is gone.
+ * RETAINED because it is exported and pinned by a test, so deleting it would delete a passing test
+ * for behaviour nobody has ruled on.
  */
 export function renderRepeatEscalationQuestion(
   pr: OpenPrView,
@@ -4685,31 +3038,21 @@ export function renderRepeatEscalationQuestion(
 }
 
 /**
- * The ADDITIONAL strikes an operator's clarification answer grants — PURE,
- * table-free (the policy has exactly one lever today; a second lever is a
- * field on {@link ClarifyPolicy}, never a branch here). Two uses, ONE number:
- * (1) it IS the fresh `strikeCap` the real re-dispatch passes to `runFixRung`
- * (which always counts a NEW call from 0), and (2) `DISPOSITION_RULES`' answer
- * row adds it to `policy.strikeCap` to get the cumulative ledger ceiling an
- * answered PR is allowed to reach before it escalates again — never an
- * unconditional bypass of the running strike count.
+ * The ADDITIONAL strikes an operator's clarification answer grants — PURE and table-free (a second
+ * lever is a field on {@link ClarifyPolicy}, never a branch here). Two uses, ONE number: it IS the
+ * fresh `strikeCap` the re-dispatch passes to `runFixRung`, and the answered row adds it to
+ * `policy.strikeCap` for the cumulative ceiling — never an unconditional bypass of the count.
  */
 export function strikeCapForAnswer(originalCap: number, policy: ClarifyPolicy = DEFAULT_CLARIFY_POLICY): number {
   return policy.resetStrikeCounterOnAnswer ? originalCap : 1;
 }
 
 /**
- * W1-T2452 — THE CUMULATIVE STRIKE CEILING ACTUALLY IN FORCE for a PR: `strikeCap`
- * ordinarily, or the EXTENDED ceiling (`strikeCap + strikeCapForAnswer(...)`) once an
- * operator's clarification answer is live — the SAME extended number the "answered"
- * {@link DISPOSITION_RULES} row already checks (its own `when`, `pr.priorStrikes <
- * policy.strikeCap + strikeCapForAnswer(...)`, above) — never a second, independently
- * computed ceiling that could diverge from the routing decision. Every rendered strike
- * ratio (the exhaustion/blocked-fixable `reason`s below) and the real fix-rung dispatch
- * budget (`buildSweepEffects`'s `dispatchFix`, run-task.ts) both read THIS one function, so
- * neither can silently drift from the other — the defect this task fixes was exactly that
- * drift (a rendered ratio naming `strikeCap` while the dispatch site computed a DIFFERENT
- * number for the same PR).
+ * W1-T2452 — THE CUMULATIVE STRIKE CEILING ACTUALLY IN FORCE: `strikeCap` ordinarily, or the
+ * EXTENDED ceiling once an operator's answer is live — the SAME number the answered
+ * {@link DISPOSITION_RULES} row checks, never a second computation that could diverge from the
+ * routing decision. Every rendered strike ratio and the real dispatch budget read THIS function,
+ * so neither can drift from the other; that drift was the defect this closes.
  */
 export function fixCeilingInForce(
   pr: Pick<OpenPrView, "pendingAnswer">,
@@ -4724,22 +3067,11 @@ export function fixCeilingInForce(
 }
 
 /**
- * W1-T2452 — THE STRIKE BUDGET TO DISPATCH for one `runFixRung` call: the REMAINDER against
- * {@link fixCeilingInForce}, NEVER a fresh full cap. `runFixRung` always counts a NEW call
- * from 0 strikes (see that function's own loop, `strikes < opts.strikeCap`) — handing it a
- * fresh full cap every dispatch let one PR's cumulative ledger strike count exceed the
- * ceiling by up to `cap - 1` on every dispatch after the first (observed: "fix strikes
- * exhausted (3/2)" on PR #3043, cap=2). Passing `ceiling - priorStrikes` instead means the
- * ledger's running count can never exceed `ceiling`, however many dispatches it takes.
- *
- * Returns `null` when the remainder is non-positive. THIS IS THE LOAD-BEARING HALF (design
- * note ii): the caller MUST NOT dispatch a zero/negative-budget rung in that case — a
- * silent zero-budget dispatch would convert an overspend into a no-op that strands an
- * otherwise-fixable PR forever. A `null` return means the caller's own routing disagreed
- * with the ceiling actually in force (row 4 of {@link DISPOSITION_RULES} already routes
- * `priorStrikes >= strikeCap` to escalate, so this should be unreachable in production) —
- * the caller must ledger that disagreement and take the exhaustion/escalate path instead,
- * never spend a worker on a budget of zero.
+ * W1-T2452 — THE STRIKE BUDGET TO DISPATCH: the REMAINDER against {@link fixCeilingInForce}, NEVER
+ * a fresh full cap, because `runFixRung` counts each new call from 0 and a fresh cap let the
+ * cumulative ledger count exceed the ceiling. Returns `null` when the remainder is non-positive,
+ * and THIS IS THE LOAD-BEARING HALF: a silent zero-budget dispatch converts an overspend into a
+ * no-op that strands an otherwise-fixable PR forever, so the caller must escalate instead.
  */
 export function fixDispatchBudget(priorStrikes: number, ceiling: number): number | null {
   const remaining = ceiling - priorStrikes;
@@ -4756,30 +3088,12 @@ function lastMatching<T extends Record<string, unknown>>(lines: ReadonlyArray<T>
 }
 
 /**
- * W1-T435: the fix rung's OPERATOR-STEERED re-arm, producing the SAME {@link
- * OpenPrView.pendingAnswer} shape W1-T78 already wired end-to-end but never had a producer
- * for (see that field's own "SCOPE" doc) — routed through the identical `blocked-fixable`
- * DISPOSITION_RULES row and `strikeCapForAnswer` ceiling, never a second re-arm mechanism.
- * ONE evidence pass, TWO console-native sources, both local files (no GitHub read):
- *
- *   1. A `wrong`/`needs-follow-up` one-tap verdict (POST /v1/drain/feedback,
- *      lib/panel-actions.ts's `buildDrainFeedbackRoute`) carrying a STEERING NOTE — the
- *      `operator_feedback` ledger line's `note`, quoted VERBATIM (never paraphrased, matching
- *      `runFixRung`'s own `constraint` contract) with attribution, so the fix worker sees it
- *      as the operator's own words, not a synthesized instruction. A `good` verdict — praise —
- *      NEVER contributes: re-arming on praise would spin the rung forever on a PR nobody
- *      objected to (this task's second falsifier direction).
- *   2. An ANSWERED clarification (POST /v1/questions/answer, lib/panel-actions.ts's
- *      `buildAnswerQuestionRoute`, written to `plan/questions.ndjson` by worker.ts's
- *      `appendQuestionAnswer`) — the answer text, verbatim, exactly as W1-T78's mechanism
- *      always intended to consume it. A QUESTION with no matching answer line contributes
- *      nothing (this task's first falsifier direction's mirror: silence never re-arms either).
- *
- * Both sources key on `taskId` alone (never `drainRunId`/head sha) — the fix rung dispatches
- * per TASK, and an operator's verdict/answer is a judgment on the task's current attempt,
- * addressed by whichever strike comes next. `undefined` when neither source has anything —
- * the caller ({@link "../run-task.js".buildOpenPrViews}) then leaves `pendingAnswer` unset,
- * exactly as it always has for every PR this producer hasn't reached yet.
+ * W1-T435 — the fix rung's OPERATOR-STEERED re-arm, producing the SAME
+ * {@link OpenPrView.pendingAnswer} shape W1-T78 wired but never had a producer for, routed through
+ * the identical row and ceiling rather than a second mechanism. ONE pass over TWO local sources:
+ * a one-tap verdict carrying a STEERING NOTE, quoted VERBATIM with attribution, and an ANSWERED
+ * clarification. A `good` verdict NEVER contributes — re-arming on praise would spin the rung
+ * forever on a PR nobody objected to. Both key on `taskId` alone, since the rung dispatches per TASK.
  */
 export function operatorVerdictEvidence(
   taskId: string,
@@ -4804,23 +3118,11 @@ export function operatorVerdictEvidence(
 }
 
 /**
- * The block evidence `dispatchFix` carries — GENERALIZED (W1-T100, the #170
- * fix) from a bare reviewer-unmet array to the W1-T94 mode-evidence shape, so
- * a checks-red PR's dispatch carries ci-log input instead of an always-empty
- * unmet array. Exactly one field is meaningful per disposition (mirrors
- * run-task.ts's `FixEvidence`, the fix rung's own mode-input shape):
- * `unmetCriteria` for a failing review with checks NOT red (blocked-fixable
- * via review, W1-T76 unchanged), `ciFailures` for a checks-red PR — REGARDLESS
- * of what the review verdict beside it says, even a failing one (blocked-fixable
- * via ci-log, W1-T94/W1-T100, broadened by W1-T138 — see {@link isBlockedCi}).
- *
- * W1-T2236: `actionableGateFailures` rides ALONGSIDE `unmetCriteria` on a review-mode
- * dispatch — the SAME {@link OpenPrView.actionableGateFailures} `DISPOSITION_RULES`'
- * `blocked-fixable` row already required (as an alternative to a non-empty `unmetCriteria`) to
- * route this PR here at all. Before this field existed, that structured remedy was computed and
- * named in the disposed line's own reason and then discarded at exactly this boundary — the
- * dispatch carried only `unmetCriteria` (`[]` for the gate-failure shape), and the fix rung's
- * mode table fell through to its old `reviewer-unmet` catch-all with nothing to render.
+ * The block evidence `dispatchFix` carries, GENERALIZED (W1-T100) from a bare unmet array to the
+ * mode-evidence shape, so a checks-red PR carries ci-log input instead of an always-empty list.
+ * Exactly one field is meaningful per disposition. W1-T2236: `actionableGateFailures` rides
+ * ALONGSIDE `unmetCriteria` on a review-mode dispatch — before it, that structured remedy was
+ * computed, named in the reason, then discarded at exactly this boundary.
  */
 export interface FixDispatchEvidence {
   unmetCriteria: CriterionVerdict[];
@@ -4832,22 +3134,11 @@ export interface FixDispatchEvidence {
 }
 
 /**
- * TERMINAL-STATE PREDICATE (W1-T177) — the ONE definition every spending site
- * (a fix-rung strike, a sweep disposition, the exhaustion escalation, the
- * cold-dispatch pre-flight) and the operator verb (`routeFix`) share, so a
- * merged/closed PR is refused IDENTICALLY everywhere rather than via
- * independently-hardcoded copies that drift (the #388/#398 fixture: the
- * interactive `rmd fix` path had this check inline; the unattended
- * sweep/rung/escalate paths did not, and spent a strike + a needs-human issue
- * + a fresh sweep rung on an already-merged PR within seven minutes). Only
- * `"OPEN"` carries a live block; anything else — MERGED, CLOSED, or an
- * unresolved/missing state — returns a human-legible stand-down reason.
- *
- * This function classifies a SUCCESSFULLY-READ state string ONLY. It is
- * never asked to guess about a failed/indeterminate read — every call site
- * that reads state live is responsible for its OWN fail-open direction (an
- * unreadable state must never be treated as terminal; see each site's
- * `ok:false` handling) before ever calling this predicate.
+ * TERMINAL-STATE PREDICATE (W1-T177) — the ONE definition every spending site and the operator verb
+ * share, so a merged or closed PR is refused IDENTICALLY everywhere rather than through hardcoded
+ * copies that drift. Only `"OPEN"` carries a live block. Classifies a SUCCESSFULLY-READ state
+ * ONLY: each call site owns its own fail-open direction, and an unreadable state must never be
+ * treated as terminal.
  */
 export function terminalStateReason(state: string | undefined): string | undefined {
   if (state === "OPEN") return undefined;
@@ -4855,10 +3146,9 @@ export function terminalStateReason(state: string | undefined): string | undefin
 }
 
 /**
- * One fresh, live read of a PR's GitHub state (W1-T177). `ok:false` marks a
- * genuinely FAILED or INDETERMINATE read (network/auth/rate-limit) — the
- * caller must treat that exactly as if no check ran at all, never as
- * terminal. `state` is present only when `ok`.
+ * One fresh, live read of a PR's GitHub state (W1-T177). `ok:false` marks a genuinely FAILED or
+ * INDETERMINATE read, which the caller must treat exactly as if no check ran, never as terminal.
+ * `state` is present only when `ok`.
  */
 export interface LiveStateResult {
   ok: boolean;
@@ -4868,9 +3158,9 @@ export interface LiveStateResult {
 }
 
 /**
- * The outcome names `armAutoMerge` returns (run-task.ts's `ArmOutcome`). Mirrored here rather
- * than imported to keep lib/sweep.ts free of a run-task.ts dependency; `armOutcomeArmed` below
- * is the single place that decides which of them count as having actually armed.
+ * The outcome names `armAutoMerge` returns. Mirrored rather than imported to keep lib/sweep.ts
+ * free of a run-task.ts dependency; {@link armOutcomeArmed} is the single place deciding which of
+ * them count as having actually armed.
  */
 export type ArmOutcomeName =
   | "no-task-id"
@@ -4883,32 +3173,25 @@ export type ArmOutcomeName =
   | "direct-merge-preflight-refused"
   | "direct-merge-update-failed"
   | "arm-error-ignored"
-  // W1-T947: `armAutoMergeAtOpen` refused because the diff is classified IRREVERSIBLE
-  // (W1-T919) — mirrored here for the same reason every other member is, so `armOutcomeArmed`
-  // (below) keeps type-checking against run-task.ts's `ArmOutcome` without importing it.
+  // W1-T947: refused because the diff is classified IRREVERSIBLE — mirrored here for the same
+  // reason every other member is, so {@link armOutcomeArmed} type-checks without the import.
   | "irreversible-refused"
-  // W1-T1000002: `attemptArm` refused because an operator hold stands over this PR — mirrored
-  // here for the same reason `irreversible-refused` is: a deliberate refusal, never armed here
-  // or later (until the hold is released, at which point a fresh pass re-derives whole).
+  // W1-T1000002: refused because an operator hold stands over this PR. A deliberate refusal,
+  // never armed here or later, until the hold is released and a fresh pass re-derives whole.
   | "hold-refused";
 
 /**
- * W1-T1117: `armFailureAction`'s (run-task.ts) return value, mirrored here rather than imported
- * for the same reason {@link ArmOutcomeName} already is — `lib/sweep.ts` stays free of a
- * run-task.ts dependency. `"direct-merge"` is deliberately absent: that class never reaches an
- * `"arm-error-ignored"` outcome (it takes the direct-merge fallback instead), so it can never be
- * the `failureClass` a caller attaches below.
+ * W1-T1117: `armFailureAction`'s return, mirrored here for the same reason
+ * {@link ArmOutcomeName} is. `"direct-merge"` is deliberately absent: that class never reaches an
+ * `"arm-error-ignored"` outcome, so it can never be the `failureClass` a caller attaches below.
  */
 export type ArmFailureClass = "transient" | "retryable" | "unknown";
 
 /**
- * W1-T1117: the richer shape `SweepDeps.arm` may return instead of the bare {@link
- * ArmOutcomeName} — the SAME "outcome ∪ richer object" widening run-task.ts's own
- * `ArmAttemptResult` already established for `armAutoMergeDetailed`, reused here rather than
- * reinvented. `failureClass` is populated ONLY alongside the `"arm-error-ignored"` outcome (see
- * the "mergeable" arm below for how it changes the dedup decision); every other outcome either
- * never attempted a merge (no failure to classify) or resolved to a different, already-distinct
- * outcome (`direct-merged` / `direct-merge-failed`), so this field carries nothing for them.
+ * W1-T1117: the richer shape `SweepDeps.arm` may return instead of the bare
+ * {@link ArmOutcomeName} — the same widening run-task.ts already established, reused rather than
+ * reinvented. `failureClass` is populated ONLY alongside `"arm-error-ignored"`; every other
+ * outcome either never attempted a merge or resolved to an already-distinct outcome.
  */
 export interface ArmAttemptOutcome {
   outcome: ArmOutcomeName;
@@ -4918,21 +3201,14 @@ export interface ArmAttemptOutcome {
 /**
  * TRUE only for outcomes that genuinely armed or merged.
  *
- *   armed          — `gh pr merge --auto` succeeded; auto-merge is registered.
- *   direct-merged  — GitHub refused `--auto` on an already-clean PR and the fallback merged it
- *                    outright. A success, though not an arm: the PR leaves `openPrs` next pass,
- *                    so nothing is left to retry.
+ *   armed          — auto-merge is registered.
+ *   direct-merged  — GitHub refused `--auto` on an already-clean PR and the fallback merged it.
+ *                    A success though not an arm: the PR leaves `openPrs` next pass.
  *
- * Every other outcome armed NOTHING:
- *   no-task-id / head-unavailable / ledger-refused  — returned before any arm was attempted.
- *   direct-merge-failed / arm-error-ignored         — the attempt was made and did not stick.
- *   irreversible-refused                            — a deliberate refusal (W1-T947), not a
- *                                                      failure; never armed here or later.
- * Whether a "not armed" outcome is RETRIED on a later pass is a separate question this function
- * does not answer — see the "mergeable" arm's own dedup logic below, which (W1-T1117) treats an
- * `"arm-error-ignored"` outcome carrying an `"unknown"` {@link ArmFailureClass} as terminal
- * (seeds the dedup, no retry) while every other non-armed outcome, including a `"transient"`/
- * `"retryable"`-classified `arm-error-ignored`, keeps re-deriving every pass exactly as before.
+ * Every other outcome armed NOTHING: no-task-id, head-unavailable and ledger-refused returned
+ * before any attempt; direct-merge-failed and arm-error-ignored attempted and did not stick;
+ * irreversible-refused is a deliberate refusal, never a failure. Whether a non-armed outcome is
+ * RETRIED is a separate question the mergeable arm's dedup logic answers.
  */
 export function armOutcomeArmed(outcome: ArmOutcomeName | void): boolean {
   // An `undefined` return is a fake/effect that predates this signature — treat it as armed,
@@ -4942,13 +3218,10 @@ export function armOutcomeArmed(outcome: ArmOutcomeName | void): boolean {
 }
 
 /**
- * W1-T2231 — the SAME "undefined ⇒ the pre-existing assumption" idiom {@link armOutcomeArmed}
- * already establishes for `deps.arm`, applied to `deps.dispatchFix`'s own return (see that
- * field's own doc): a `false` return is the ONLY signal that stands a `blocked-fixable`/
- * `conflicted` dispatch's `spent` field down to `false` — `undefined` (every existing fake, and
- * today's real wiring) and `true` both read as spent, matching exactly what every caller already
- * assumed before this task, which is why the count on every OTHER pre-existing ledger row is
- * unchanged (rationale (5): zero phantom firings on the measured corpus).
+ * W1-T2231 — the SAME "undefined means the pre-existing assumption" idiom {@link armOutcomeArmed}
+ * establishes for `deps.arm`, applied to `deps.dispatchFix`. A `false` return is the ONLY signal
+ * that stands a dispatch's `spent` field down; `undefined` and `true` both read as spent, which
+ * is why the count on every pre-existing ledger row is unchanged.
  */
 export function dispatchFixSpent(outcome: boolean | void): boolean {
   if (outcome === undefined) return true;
@@ -4958,80 +3231,45 @@ export function dispatchFixSpent(outcome: boolean | void): boolean {
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
 export interface SweepDeps {
   /**
-   * Arm GitHub auto-merge (armAutoMerge). Idempotent at the GitHub level.
+   * Arm GitHub auto-merge. Idempotent at the GitHub level.
    *
-   * RETURNS ITS OUTCOME. `armAutoMerge` does not throw — it returns one of seven
-   * {@link ArmOutcomeName} values, five of which mean it armed NOTHING. The effect used to
-   * discard that value and the sweep recorded `acted: true` regardless, which both hid the
-   * refusal and (because `acted:true` seeds `prior.armed`) made it permanent: every later
-   * pass logged `deduped: true, acted: false` and never retried. Observed live on PR #960 —
-   * `acted=TRUE "arming auto-merge"` at 20:45:21, `deduped=true` at 21:14:07, and GitHub
-   * reporting `auto_merge: null` with no `auto_merge_enabled` event ever.
-   *
-   * `void` remains valid so existing fakes that return nothing keep compiling; an undefined
-   * return is treated as "armed" (the pre-existing assumption) rather than silently standing
-   * down, so this change cannot make a working lane worse.
-   *
-   * W1-T1117: may also return the richer {@link ArmAttemptOutcome} — every existing fake
-   * returning a bare {@link ArmOutcomeName} (or `void`) keeps compiling and behaving exactly as
-   * before; only production wiring (`buildSweepEffects`, run-task.ts) attaches a `failureClass`.
+   * RETURNS ITS OUTCOME: `armAutoMerge` does not throw, and most outcomes mean it armed NOTHING.
+   * The effect used to discard that value while the sweep recorded `acted: true` regardless, which
+   * hid the refusal and made it PERMANENT, because that seeds the dedup. `void` stays valid and
+   * reads as "armed", the pre-existing assumption. // Why: observed live on PR #960.
    */
   arm: (
     pr: OpenPrView,
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
   /**
-   * W1-T1000002 — WITHDRAW AN ARM THIS LANE DID NOT PLACE. Called ONLY when an operator hold
-   * ({@link import("./review.js").automergeHoldFromLedger}) stands over a PR {@link
-   * OpenPrView.autoMergeArmed} already reports armed — the converging half of the hold design:
-   * a disarm alone is undone by the very next pass (the arming dedup reads GitHub's live armed
-   * bit, which a disarm resets), so this fires EVERY pass the hold still stands and the PR still
-   * reads armed, which is exactly as often as it takes, and zero times once GitHub's own bit
-   * reads false. SAFE WHEN NOT ARMED — the real wiring is `disarmAutoMerge` (run-task.ts), which
-   * never throws — so no extra probe per PR per pass is needed to learn whether an arm exists
-   * before withdrawing it.
-   *
-   * Optional: omitted (every pre-existing fixture), a held-and-armed PR is still refused by
-   * `alreadyDone` above (never re-armed BY THIS LANE) but nothing withdraws the STANDING arm —
-   * never a silent regression for a fixture built before this task existed.
+   * W1-T1000002 — WITHDRAW AN ARM THIS LANE DID NOT PLACE, called only when an operator hold
+   * stands over a PR already reporting armed. A disarm alone is undone by the next pass, whose
+   * dedup reads GitHub's live armed bit, so this fires EVERY pass the hold stands and the PR reads
+   * armed — as often as it takes, and zero times once that bit reads false. SAFE WHEN NOT ARMED,
+   * so no extra probe is needed. Omitted, the PR is still never re-armed by this lane, but nothing
+   * withdraws a STANDING arm — never a silent regression for an older fixture.
    */
   disarmAutoMerge?: (pr: OpenPrView, hold: AutomergeHold) => void | Promise<void>;
   /** Close a superseded/abandoned PR with a stated reason. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   /**
-   * Invoke the W1-T54 dep-review lane on a Dependabot PR and return its
-   * DECISION ("arm" | "hold" | "escalate" | "refuse") so the disposed ledger
-   * line records the outcome and dedup can distinguish TERMINAL outcomes
-   * (arm/escalate/refuse — never re-run for the same head, or a major would
-   * open a fresh escalation issue every poll) from "hold" (re-run next sweep:
-   * a red check can go green on the SAME sha). Optional — omitted, the
-   * disposition is ledgered with a stand-down note and nothing runs.
+   * Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
+   * line records the outcome and dedup can tell TERMINAL outcomes (never re-run for the same head,
+   * or a major would open a fresh issue every poll) from "hold", which re-runs next sweep because
+   * a red check can go green on the SAME sha. Omitted, the disposition is ledgered and nothing runs.
    */
   depReview?: (pr: OpenPrView) => string | void | Promise<string | void>;
   /**
-   * Invoke the review lane (reviewCommand) on a checks-green PR whose
-   * remudero-review was never posted (the post-review disposition). Posted
-   * verdicts are per-head, so dedup is unconditional per `pr@head` — a fresh
-   * push mints a new head and re-routes naturally. Optional — omitted, the
-   * disposition is ledgered with a stand-down note and nothing runs.
-   *
-   * W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls to this same
-   * function — `runSweep` no longer awaits one `postReview` before starting
-   * the next. Concurrency is bounded (`policy.reviewLanes` — its own row as
-   * of W1-T1049, no longer `policy.dispatchLanes`) and every concurrent call
-   * is guaranteed a DISTINCT
-   * exact review-input key — `runSweep` claims each key synchronously
-   * before scheduling its call, so this function is never asked to run twice
-   * for the same task+PR+head+body at once. A caller wiring a real effect here (e.g.
-   * spawning a reviewer worker) needs no locking of its own for THAT — it may
-   * still want its own guard against unrelated concurrent posters (see
-   * `postReviewStatusGuarded`'s `acquireReviewStatusLock`, which this dep's
-   * real wiring already goes through).
+   * Invoke the review lane on a checks-green PR whose review was never posted. Verdicts are
+   * per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
+   * W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
+   * with each review-input key claimed synchronously before scheduling — so this is never asked to
+   * run twice for the same input at once.
    */
   postReview?: (pr: OpenPrView) => void | Promise<void>;
   /**
-   * W1-T2853 — choose this pass's review width from one already-derived queue and ledger
-   * snapshot. Production supplies the local host/provider controller; omission preserves the
-   * committed `reviewLanes` behavior for CLI/test callers.
+   * W1-T2853 — choose this pass's review width from one already-derived queue and ledger snapshot.
+   * Omission preserves the committed `reviewLanes` behaviour for CLI and test callers.
    */
   selectAdaptiveReviewWidth?: (input: {
     queueDepth: number;
@@ -5039,34 +3277,20 @@ export interface SweepDeps {
     ledgerLines: ReadonlyArray<Record<string, unknown>>;
   }) => number;
   /**
-   * W1-T2584 — MAY THE BOUNDED REVIEW POOL ADMIT ANOTHER HEAD FROM THIS PASS'S ALREADY-DERIVED
-   * pending set? Consulted synchronously immediately before each worker pulls its next job.
-   * Optional means `true`, preserving direct `rmd sweep` and every pre-existing fixture.
-   *
-   * The daemon's real full-sweep wiring supplies one callback owned by `runGatedSweep`: it turns
-   * false when the wall-clock bound abandons the pass, or whenever the existing STOP/PAUSE gates
-   * become active. This does not interrupt a reviewer already running; it stops only later
-   * admissions, whose review keys are released and whose heads re-derive next pass. Keeping the
-   * callback here, beside `postReview`, makes the boundary explicit and avoids turning a timer
-   * expiry into cancellation at an arbitrary GitHub-write boundary.
+   * W1-T2584 — MAY THE BOUNDED REVIEW POOL ADMIT ANOTHER HEAD from this pass's already-derived
+   * pending set? Consulted synchronously before each worker pulls its next job; optional means
+   * `true`. The daemon's callback turns false when the wall-clock bound abandons the pass or a
+   * STOP/PAUSE gate becomes active. It never interrupts a running reviewer — only later
+   * admissions, whose keys are released and whose heads re-derive next pass, so a timer expiry
+   * never becomes cancellation at an arbitrary GitHub-write boundary.
    */
   continueReviewAdmissions?: () => boolean;
   /**
-   * Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at
-   * once (W1-T94/W1-T100) — the FULL unmet set for a review-mode dispatch, or
-   * ci-log evidence (failing check names + log tails) for a blocked_ci
-   * dispatch. See {@link FixDispatchEvidence}.
-   *
-   * W1-T2231: MAY return whether this call demonstrably SPENT a strike — i.e. wrote its own
-   * `fix.dispatch` row — before returning. `false` means the lane was invoked and stood down
-   * internally (run-task.ts's own `dispatchStarted` names the live example: a preflight refusal
-   * or an uncreditable-head return, both clean returns that write no `fix.*` row at all) without
-   * spending anything; `true` means it did. `void`/`undefined` remains valid — every existing
-   * fake, and today's real wiring, keeps compiling and behaving EXACTLY as before ({@link
-   * dispatchFixSpent} treats an absent return as spent, the pre-existing assumption) — so this
-   * widening alone regresses no lane. See {@link SweepAction.spent}'s own doc for the field this
-   * feeds and why `acted` itself is never touched by it (design note (i) — a second field, never
-   * a redefinition of the first).
+   * Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at once — the FULL unmet
+   * set for a review dispatch, or ci-log evidence for a blocked_ci one.
+   * W1-T2231: MAY return whether this call demonstrably SPENT a strike. `undefined` reads as spent,
+   * the pre-existing assumption, so this widening regresses no lane and `acted` is never touched
+   * by it — a second field, never a redefinition of the first.
    */
   dispatchFix: (
     pr: OpenPrView,
@@ -5074,66 +3298,49 @@ export interface SweepDeps {
   ) => boolean | void | Promise<boolean | void>;
   /**
    * Escalate a BLOCKED-AMBIGUOUS PR. `question` is the rung's rendered
-   * {@link ClarificationQuestion} (W1-T78) — the real wiring logs it to the §2
-   * question backlog AND uses W1-T8's `escalate()` as the notification
-   * transport, carrying the SAME two candidate resolutions as its options.
+   * {@link ClarificationQuestion}: the real wiring logs it to the §2 backlog AND uses
+   * `escalate()` as the notification transport, carrying the same two resolutions as its options.
    */
   escalate: (pr: OpenPrView, reason: string, question: ClarificationQuestion) => void | Promise<void>;
   /**
-   * W1-T1223 (design ii/iv) — re-queue ONE cancelled required check's JOB, never the workflow
-   * run (`POST .../actions/jobs/{job_id}/rerun`, never `.../runs/{run_id}/rerun-failed-jobs` — a
-   * whole-run re-run would re-spend an already-green sibling job sharing the same workflow run).
-   * `runSweep` calls this AT MOST ONCE per `${headSha}@${checkName}` pair — see {@link
-   * cancelledCheckRequeueDecision} and {@link requeuedCheckKeysFromLedger} for the bound. Optional:
-   * omitted, the sweep still names the cancelled check on its disposed line but takes no re-queue
-   * action — never a silent no-op, the stand-down is legible on the ledger.
+   * W1-T1223 — re-queue ONE cancelled required check's JOB
+   * (`POST .../actions/jobs/{job_id}/rerun`), NEVER the workflow run
+   * (`.../runs/{run_id}/rerun-failed-jobs`): a whole-run re-run would re-spend an already-green
+   * sibling sharing that run. Called AT MOST ONCE per `${headSha}@${checkName}` pair. Omitted, the
+   * sweep still names the cancelled check on its disposed line but takes no action — never a
+   * silent no-op, the stand-down is legible.
+   * // Why: learnings/ci.yaml#rerun-the-job-not-the-run pins this endpoint literal.
    */
   requeueCheck?: (pr: OpenPrView, check: CancelledRequiredCheck) => void | Promise<void>;
   /**
-   * W1-T1223 (design iii) — a SECOND cancellation of the SAME required check on the SAME head
-   * sha, observed after this lane already spent its one re-queue on that pair. Distinct from
-   * `escalate` above (which carries a rendered {@link ClarificationQuestion} asking an operator
-   * to pick between two candidate diffs) — this names the check and both cancellations to a
-   * human; there is no diff to choose between, only a CI-side fault re-queueing cannot reach.
-   * Optional: omitted, the sweep still names the second cancellation on its disposed line.
+   * W1-T1223 — a SECOND cancellation of the SAME check on the SAME head, after this lane already
+   * spent its one re-queue. Distinct from `escalate`, which asks an operator to pick between two
+   * candidate diffs: here there is no diff to choose, only a CI-side fault re-queueing cannot
+   * reach. Omitted, the sweep still names the second cancellation on its disposed line.
    */
   escalateCancelledCheck?: (pr: OpenPrView, check: CancelledRequiredCheck, reason: string) => void | Promise<void>;
   /**
-   * W1-T1275 (design ii/iii) — an OPTIONAL fresh read of ONE PR's live required-check rollup,
-   * consulted immediately before a blocked-fixable disposition acts — the SAME "never the
-   * `openPrs` snapshot this whole sweep pass started from" shape {@link readLiveState} (W1-T177)
-   * already uses just below, for the identical reason: `staleCiGateTransition` (this file) needs
-   * to compare `ci-gate`'s own concluded `startedAt` against a required sibling's CURRENT latest
-   * attempt, not a frame captured when this `OpenPrView` was built. Deliberately NOT a field on
-   * `OpenPrView` itself — that shape would need a producer literal wired into `buildOpenPrViews`
-   * (run-task.ts, out of this task's declared scope; see the task record's own note) merely to
-   * satisfy `test/producer-completeness.test.ts`, for a value that is only ever correct freshly
-   * read anyway. Optional: omitted, `staleCiGateTransition` is called with `undefined` and always
-   * returns `undefined` — this whole lane never fires, the pre-existing behaviour byte for byte.
+   * W1-T1275 — an OPTIONAL fresh read of ONE PR's live rollup, consulted immediately before a
+   * blocked-fixable disposition acts. Never the snapshot this pass started from, for the same
+   * reason {@link readLiveState} takes that shape: {@link staleCiGateTransition} must compare
+   * against a sibling's CURRENT latest attempt. Deliberately NOT a field on `OpenPrView`, which
+   * would need a producer literal merely to satisfy producer-completeness for a value only ever
+   * correct freshly read. Omitted, the lane never fires — the pre-existing behaviour byte for byte.
    */
   readCiGateRollup?: (pr: OpenPrView) => (RollupCheckEntry[] | undefined) | Promise<RollupCheckEntry[] | undefined>;
   /**
-   * W1-T1275 (design ii/iv) — re-drive `ci-gate`'s OWN check-run job (the per-job Actions route,
-   * the SAME endpoint {@link requeueCheck} above already uses — no new credential, no new client)
-   * when {@link staleCiGateTransition}, applied to {@link SweepDeps.readCiGateRollup}'s fresh read,
-   * names a required sibling that reached a terminal success LATER than the gate's own concluded
-   * verdict. `runSweep` calls this AT MOST ONCE per (head, sibling-transition) — see {@link
-   * ciGateReaggregateDecision} and {@link reaggregatedCiGateKeysFromLedger} for the bound.
-   * Optional: omitted, the sweep still ledgers which transition it observed and stands down,
-   * taking no re-drive action — never a silent no-op, exactly like {@link requeueCheck}'s own
-   * contract.
+   * W1-T1275 — re-drive `ci-gate`'s OWN job through the same per-job Actions route
+   * {@link requeueCheck} uses, when {@link staleCiGateTransition} names a sibling that reached a
+   * terminal success LATER than the gate's own verdict. Called AT MOST ONCE per (head,
+   * sibling-transition). Omitted, the sweep still ledgers the transition and stands down.
    */
   reaggregateCiGate?: (pr: OpenPrView, transition: StaleCiGateTransition) => void | Promise<void>;
   /**
-   * W1-T177: an OPTIONAL fresh re-read of ONE PR's live GitHub state,
-   * consulted immediately before a blocked-fixable disposition actually
-   * spends a fix-rung strike — never the `openPrs` snapshot this whole sweep
-   * pass started from (`buildOpenPrViews`'s ONE `gh pr list` at sweep start,
-   * run-task.ts), which may already be stale by the time a later PR in the
-   * SAME pass is reached (the #388 fixture: merged mid-sweep, dispatched
-   * anyway). Omitted, or a failed/indeterminate read (`ok:false`), behaves
-   * EXACTLY as before this check existed — dispatch proceeds; standing down
-   * fires ONLY on a positive, freshly-observed terminal reading.
+   * W1-T177 — an OPTIONAL fresh re-read of ONE PR's live state, consulted immediately before a
+   * blocked-fixable disposition SPENDS a strike. Never the snapshot this pass started from, which
+   * may already be stale by the time a later PR is reached (#388: merged mid-sweep, dispatched
+   * anyway). Omitted, or a failed read, behaves exactly as before this check existed — standing
+   * down fires ONLY on a positive, freshly observed terminal reading.
    */
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
   /**
@@ -5143,139 +3350,77 @@ export interface SweepDeps {
    */
   readRedBaseRefreshFacts?: (pr: OpenPrView) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
   /**
-   * W1-T254 (the #707 fix's LIGHT-SWEEP restriction): when supplied, gates
-   * which disposition's action is allowed to actually fire THIS pass — a
-   * disposition failing the predicate stands down with
-   * "deferred to full sweep (light pass)" instead of running (still
-   * ledgered every pass, never silently skipped). Omitted ⇒ every
-   * disposition acts, unchanged from before this existed. The daemon's
-   * restricted light-sweep ticker (running CONCURRENTLY with an in-flight
-   * `runOne`) wires `d => d === "post-review"` — only the deterministic,
-   * sha-pinned re-post is safe to run alongside a task; dispatchFix/close/
-   * escalate/depReview/arm stay strictly single-threaded, standing down
-   * here until the NEXT full sweep picks them up. W1-T473: "mutex-serialized"
-   * described the WHOLE pass being single-threaded — post-review calls
-   * WITHIN one pass now run concurrently with each other too (bounded by
-   * `policy.reviewLanes` as of W1-T1049 — its own row, no longer
-   * `policy.dispatchLanes` — real per-input mutual exclusion —
-   * see `runSweep`'s own doc), so it is no longer accurate to call this ONE
-   * lane serialized; it is the one lane safe to run alongside `runOne`.
+   * W1-T254 — when supplied, gates which disposition may actually act THIS pass; one that fails
+   * the predicate stands down, still ledgered, never silently skipped. The light-sweep ticker
+   * admits only `post-review`, the deterministic sha-pinned re-post safe alongside a running task,
+   * so every other lane waits for the next full sweep. Those calls now run concurrently with each
+   * other, so this lane is no longer "serialized" — it is the one safe to run alongside `runOne`.
    */
   actionable?: (d: Disposition) => boolean;
   /**
-   * W1-T2426 — WHY {@link SweepDeps.actionable} REFUSED, when the caller can say.
-   *
-   * `actionable` is a PREDICATE: it returns `false` and carries no reason, so every disposition it
-   * gates records the one generic sentence "deferred to full sweep (light pass)". That is legible
-   * enough when the light pass is gating a lane it never runs, and NOT legible when the same
-   * sentence also covers a `post-review` that WAS eligible and merely lost this pass's single
-   * admission — the two are different events with the same row. MEASURED: 289 such rows across 18
-   * PRs, worst 98 on one PR, none of them naming which mechanism applied.
-   *
-   * Consulted ONLY when `actionable` has already refused, so it can never admit anything and
-   * cannot change a single disposition. Absent ⇒ the generic sentence, byte-identical to today —
-   * the same "no predicate ⇒ no opinion" default the rest of this seam set uses.
-   *
-   * ⚠ W1-T526's light-pass comment says its stand-down uses "the SAME … reason every other gated
-   * disposition already gets … never a new reason string". That was the right call when nothing
-   * distinguished the two events; W1-T2426's criterion 7 asks for the mechanism to be named, and
-   * this seam does it WITHOUT a new mechanism — the refusal is still `actionable`'s, and only the
-   * sentence recorded for it changes.
+   * W1-T2426 — WHY {@link SweepDeps.actionable} REFUSED, when the caller can say. That predicate is
+   * bare, so every disposition it gates recorded one generic sentence — legible for a lane the
+   * light pass never runs, NOT legible for a `post-review` that was eligible and merely lost this
+   * pass's admission. Consulted ONLY after a refusal, so it can never admit anything.
+   * // Why: 289 such rows across 18 PRs, none naming the mechanism.
    */
   standDownReasonFor?: (d: Disposition) => string | undefined;
 
   /**
-   * W1-T2379 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set ONLY by {@link runSweepLightPass}, whose
-   * caller is `startInFlightTicker`'s awaited tick; every other caller (`rmd sweep`, the daemon's
-   * full per-iteration sweep) leaves it undefined and awaits the dispatch exactly as before, so
-   * no non-tick path changes at all.
-   *
-   * WHAT IT CHANGES, PRECISELY: `deps.dispatchFix` is still CALLED on this pass, and this pass
-   * still writes its own `sweep.disposed` row with `acted: true` before returning — the dedup
-   * seed `priorActionsFromLedger` reads and `fixRungStalledWithoutNewHead` (W1-T1110) re-arms
-   * from is untouched. Only the `await` on that call moves, into
-   * {@link drainDetachedSweepActions}. `spent` is therefore left `undefined`, which is already
-   * what today's real (void-returning) wiring produces, so no ledger row's shape changes either.
-   *
-   * IT IS NOT AN ADMISSION CHANGE. `lightPassActionable` (W1-T1211) still decides WHETHER a fix
-   * may be dispatched from a light pass, and still admits `blocked-fixable`/`conflicted` under
-   * `fixRungAllowed`. This decides only how long the dispatcher's CALLER blocks.
+   * W1-T2379 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set ONLY by {@link runSweepLightPass}.
+   * WHAT IT CHANGES, PRECISELY: the dispatch is still CALLED and still writes its `acted: true` row
+   * before returning, so the dedup seed is untouched — only the `await` moves into
+   * {@link drainDetachedSweepActions}. NOT AN ADMISSION CHANGE: this decides only how long the
+   * caller blocks, never whether a fix may be dispatched.
    */
   detachFixWait?: boolean;
   /**
    * THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Pushes an EMPTY commit to the PR's own
-   * branch, minting a fresh head sha, and returns it. Optional: omitted (or absent, as in every
-   * pre-existing fixture) the lane stands down exactly as it does today and the ordinary
-   * escalation runs — never a silent no-op, the stand-down is named on the disposed line.
+   * branch, minting a fresh head sha, and returns it. Omitted, the lane stands down and the
+   * ordinary escalation runs — never a silent no-op, the stand-down is named on the disposed line.
    */
   repushAbsent?: (pr: OpenPrView) => Promise<string | undefined>;
   /**
-   * W1-T528 — press the update-branch button. Invoked AT MOST ONCE per pass, on the SINGLE PR
-   * {@link selectUpdateBranchTarget} chose (never a loop, never a second attempt on the same
-   * target THIS pass — see `runSweep`'s own wiring). Optional: omitted, the pass reports the
-   * whole stalled set via `sweep.armed_stalled` exactly as before this existed and requests
-   * nothing. A `"conflict"` outcome (GitHub 422) is REPORTED via a ledger line and never
-   * retried by this call (design v) — whether a LATER pass tries the same or a different PR is
-   * that pass's own fresh selection, not a retry loop here.
+   * W1-T528 — press the update-branch button. Invoked AT MOST ONCE per pass, on the single PR
+   * {@link selectUpdateBranchTarget} chose: never a loop, never a second attempt this pass.
+   * Omitted, the pass reports the stalled set and requests nothing. A `"conflict"` outcome is
+   * REPORTED and never retried by this call; a later pass makes its own fresh selection.
    */
   updateBranch?: (pr: ArmedStalledPr) => UpdateBranchOutcome | Promise<UpdateBranchOutcome>;
   /**
-   * W1-T528: task ids with a LIVE in-flight run right now — intended as `liveInflightRuns`
-   * (run-task.ts) mapped to its own `taskId` field. Consulted by {@link selectUpdateBranchTarget}
-   * to skip a head a live worker is still pushing to. Omitted ⇒ empty set ⇒ no PR is excluded on
-   * this axis, exactly as if every PR's worker had already finished.
+   * W1-T528: task ids with a LIVE in-flight run right now. Consulted by
+   * {@link selectUpdateBranchTarget} to skip a head a live worker is still pushing to. Omitted
+   * means an empty set, exactly as if every PR's worker had already finished.
    */
   inFlightTaskIds?: ReadonlySet<string>;
   /**
-   * W1-T1212 — per red PR, the failing check names (a subset of that PR's own
-   * {@link OpenPrView.ciFailures}) whose defining workflow file's blob sha differs between this
-   * PR's OWN merge ref and main RIGHT NOW — the ONLY population {@link redPrWithStaleGate} draws
-   * from. Intended as a per-pass `gh api` contents read (run-task.ts) — cheap and exact (that
-   * predicate's own design note i), never re-derived from `checksState` alone, which is what let
-   * a red PR spin forever behind a gate that had already moved on main (the #2434/#2477
-   * incident this task closes). Omitted ⇒ empty map ⇒ no red PR is ever selected on this axis,
-   * exactly as before this field existed.
+   * W1-T1212 — per red PR, the failing check names whose defining workflow blob differs between
+   * this PR's OWN merge ref and main RIGHT NOW: the ONLY population {@link redPrWithStaleGate}
+   * draws from. Cheap and exact, never re-derived from `checksState` alone, which is what let a
+   * red PR spin forever behind a gate that had already moved on main. Omitted means an empty map.
    */
   staleGateWorkflowsByPr?: ReadonlyMap<number, readonly string[]>;
   /**
-   * W1-T1212 (design note iv, "never fire twice on the same PR for the same workflow"): every
-   * `${prNumber}:${workflowName}` pair this lane has ALREADY requested an update-branch for — an
-   * update mints a new head, and a second request for the same stale pair is a no-op that still
-   * spends one, so once fired the pair must be remembered and skipped. Intended as a ledger scan
-   * over prior `sweep.update_branch.updated` rows' own `stale_workflow` field (run-task.ts) — the
-   * SAME durable sink every other dedup in this module already reads, never a second store.
-   * Omitted ⇒ empty set ⇒ every stale pair stays eligible, exactly as before this field existed.
+   * W1-T1212 — every `${prNumber}:${workflowName}` pair this lane has ALREADY requested an update
+   * for. An update mints a new head and a second request for the same pair is a no-op that still
+   * spends one, so a fired pair must be remembered and skipped. Read from prior ledger rows, the
+   * SAME durable sink every other dedup here uses, never a second store. Omitted means empty.
    */
   updatedForWorkflow?: ReadonlySet<string>;
   /**
-   * W1-T2620 (design i) — an OPTIONAL, per-PASS read of `origin/main`'s CURRENT tip sha, consulted
-   * ONCE before the per-PR walk below (never per PR) — this module never calls `gh`/git directly,
-   * so the read is entirely the caller's own (intended as one `gh api repos/.../commits/main`
-   * read, run-task.ts). Feeds {@link selectBaseCausedRelease}'s "main has moved since this PR
-   * last stood down" release condition for the base-caused stand-down (never the `mergeState:
-   * "behind"` GitHub already reports — see that classifier's own doc for why a base-caused PR,
-   * red by construction, cannot itself read `"behind"`).
-   *
-   * OMITTED (the default, every pre-existing fixture) ⇒ `undefined` ⇒ the release lane below
-   * never fires and this pass is BYTE-IDENTICAL to before this task existed (criterion 6) — a
-   * base-caused stand-down behaves exactly as it always has.
+   * W1-T2620 — an OPTIONAL, per-PASS read of `origin/main`'s CURRENT tip, consulted ONCE before
+   * the per-PR walk, never per PR. This module never calls gh or git, so the read is the caller's.
+   * Feeds {@link selectBaseCausedRelease}'s "main has moved" condition — never the `behind`
+   * GitHub reports, since a base-caused PR is red by construction and cannot read `"behind"`.
+   * Omitted, the release lane never fires and the pass is BYTE-IDENTICAL to before this task.
    */
   readMainTip?: () => string | undefined | Promise<string | undefined>;
   /**
-   * W1-T2620 (design iv) — RELEASE the one base-caused stand-down {@link selectBaseCausedRelease}
-   * chose this pass (never a loop, never a second attempt on the same target — the SAME "AT MOST
-   * ONCE per pass" shape {@link SweepDeps.updateBranch}'s own doc uses). `mainTipSha` is the tip
-   * that made this PR eligible, carried through so the effect can narrate it.
-   *
-   * THE LEAF IS THE ONE THAT EXISTS (design note iv): intended as the SAME `pushEmptyCommit` leaf
-   * `sweepPostFixReverification` already wires (run-task.ts) — never a second outward path, and
-   * never `updateBranchViaGh` (that lane's own `armedButStalled` population is disjoint — green,
-   * armed, `behind` — from a base-caused PR, which is red by construction).
-   *
-   * Optional: omitted, a selected release target still stands down with the ordinary
-   * `describeRedCause` sentence and no push is attempted — never a silent no-op, exactly like
-   * {@link SweepDeps.requeueCheck}'s own contract. A THROW is caught by the caller and treated
-   * identically (design vi, FAIL QUIET: never launder a red into a false "released" ledger line).
+   * W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
+   * AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS — the same
+   * push leaf already wired elsewhere, never a second outward path. Omitted, the target still
+   * stands down with the ordinary sentence; a THROW is caught and treated identically, FAIL QUIET,
+   * never a false "released" ledger line.
    */
   releaseBaseCausedStandDown?: (pr: OpenPrView, mainTipSha: string) => void | Promise<void>;
   /** Absolute path to state/ledger.ndjson — dedup source + sweep.disposed sink. */
@@ -5296,31 +3441,18 @@ export interface SweepDeps {
    */
   dryRun?: boolean;
   /**
-   * W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half).
-   * Best-effort capture of a §7B feedback entry for ONE classified surface {@link
-   * dueRepairFilings} found due this pass. Optional: omitted, `runSweep` computes nothing and
-   * files nothing — a pre-existing fixture with no knowledge of this dep keeps compiling and
-   * behaving exactly as before this task. NEVER allowed to fail the pass that produced the
-   * repairs it reports on: `runSweep` wraps every call in the SAME per-PR throw containment the
-   * action switch already has (W1-T254) — a throw here is swallowed, the rest of the pass (and
-   * every later PR in it) is untouched.
-   *
-   * The real wiring (`buildSweepEffects`, src/run-task.ts) is the ONE place this calls
-   * `captureFeedback` (src/lib/feedback.ts) — and is ALSO where the dedup check lives: an
-   * `existsSync` read on `feedbackEntryPath(root, filing.id)` before ever writing, mirroring
-   * `src/lib/issues-intake.ts`'s own caller-side dedup for `fb-issue-<owner>-<repo>-<n>`. This
-   * pure module never touches the filesystem itself (design note ix) — {@link dueRepairFilings}
-   * recomputes fresh from ledger rows every call, with no memory of what was already filed; the
-   * injected dep's own idempotent write is the entire "no second store" guarantee (design iii).
+   * W1-T905 — best-effort capture of a §7B entry for ONE surface found due this pass.
+   * NEVER ALLOWED TO FAIL THE PASS that produced the repairs it reports on: every call is wrapped
+   * in the SAME throw containment the action switch has. This pure module never touches the
+   * filesystem — the fold recomputes fresh with no memory of what was filed, and the injected
+   * dep's own idempotent write is the entire "no second store" guarantee.
    */
   captureRepairFeedback?: (filing: RepairFilingCapture) => void | Promise<void>;
   /**
-   * W1-T931 COST-ANOMALY SENTINEL — the `plan/policy.yaml` `costAnomaly.multiplier`/
-   * `costAnomaly.minSamples` policy this pass consults (see `src/lib/cost-anomaly.ts`'s module
-   * header for the full rationale). Optional: omitted, `runSweep` resolves
-   * `loadDefaultCostAnomalyPolicy()` (memoized for the process lifetime, same "load once" shape
-   * `loadDefaultPolicy` above already uses) — a test that wants a different multiplier/minSamples
-   * without touching `plan/policy.yaml` on disk passes its own {@link CostAnomalyPolicy} here.
+   * W1-T931 COST-ANOMALY SENTINEL — the `plan/policy.yaml` policy this pass consults; see
+   * `cost-anomaly.ts`'s header for the rationale. Omitted, `runSweep` resolves the default,
+   * memoized for the process lifetime. A test wanting different thresholds without touching
+   * `plan/policy.yaml` on disk passes its own policy here.
    */
   costAnomalyPolicy?: CostAnomalyPolicy;
 }
@@ -5337,27 +3469,16 @@ export interface SweepAction {
   /** Set only for `blocked-ambiguous` (W1-T78) — the rendered clarification question. */
   question?: ClarificationQuestion;
   /**
-   * W1-T254: set when this PR's gated action THREW — `acted` is false, but
-   * this is distinct from dedup/dry-run/stand-down: the action was
-   * attempted and failed, named here rather than propagating out of
-   * `runSweep` and aborting the rest of the pass.
+   * W1-T254: set when this PR's gated action THREW. `acted` is false, but this is distinct from
+   * dedup, dry-run and stand-down: the action was attempted and failed, and is named here rather
+   * than propagating out of `runSweep` and aborting the rest of the pass.
    */
   actionError?: string;
   /**
-   * W1-T2231 — set ONLY for the two dispatch-based repair surfaces (`blocked-fixable`/
-   * `conflicted`) whose `deps.dispatchFix` call returned a concrete {@link
-   * dispatchFixSpent}-interpreted verdict: `true` ⇒ the invocation demonstrably spent a strike
-   * (its own `fix.dispatch` row exists), `false` ⇒ it was invoked and stood down internally
-   * without spending anything. `undefined` for every other disposition (no dispatch verb exists
-   * to answer the question) AND for a dispatch-based one whose `dispatchFix` still returns
-   * nothing (today's real wiring, {@link SweepDeps.dispatchFix}'s own doc) — `undefined` is
-   * deliberately NEVER read as "no repair" by {@link dueRepairFilings} below, only an EXPLICIT
-   * `false` is, so no pre-existing ledger row or fixture regresses.
-   *
-   * THIS IS NEVER `acted`, AND NEVER CHANGES IT (design note (i)): `acted` still means "the lane
-   * was invoked" (see that field's own doc) and stays the dedup gate's seed exactly as before
-   * (`priorActionsFromLedger`'s `fixed` set, design note (ii)/(iii)) — `spent` exists solely so
-   * {@link dueRepairFilings} can stop reading an invocation as a repair.
+   * W1-T2231 — set ONLY for the two dispatch-based repair surfaces whose dispatch returned a
+   * concrete verdict. `undefined` everywhere else, including today's real wiring, and deliberately
+   * NEVER read as "no repair" — only an EXPLICIT `false` is. THIS IS NEVER `acted`, AND NEVER
+   * CHANGES IT: `acted` still means "the lane was invoked" and stays the dedup seed.
    */
   spent?: boolean;
 }
@@ -5371,11 +3492,9 @@ export interface SweepSummary {
   /** How many gated effects actually fired (deduped ones are excluded). */
   actionsTaken: number;
   /**
-   * W1-T99: how many gated effects were ATTEMPTED and THREW — distinct from
-   * `actionsTaken` (succeeded) and from PRs that never attempted (deduped/dry-run/
-   * stood-down). Each one also has its own `sweep.action_failed` ledger line and
-   * this PR's `actions[].actionError`; this is the pass-level count a caller reads
-   * at a glance without re-deriving it from `actions`.
+   * W1-T99: how many gated effects were ATTEMPTED and THREW — distinct from `actionsTaken` and
+   * from PRs that never attempted. Each also has its own `sweep.action_failed` ledger line; this
+   * is the pass-level count a caller reads without re-deriving it from `actions`.
    */
   actionsFailed: number;
   /** Per-PR detail, in input order. */
@@ -5393,56 +3512,29 @@ interface PriorActions {
   fixed: Set<string>;
   closed: Set<number>;
   /**
-   * `pr@head` keys, exactly like `armed`/`fixed`/`depReviewed` above (W1-T514).
-   * PR-number-only until this task, which let one `acted:true` blocked-ambiguous
-   * line at head A dedup the SAME PR forever — including a genuinely NEW block at
-   * a later head B, where `escalate()`'s own composite key (`headSha`, `cause` —
-   * W1-T195) already knows how to open a fresh issue instead of appending to a
-   * stale one. That transport-side fix was unreachable as long as this gate never
-   * let a second head through. A new head must re-earn the attempt, same as every
-   * sibling arm; the SAME head still dedupes (no per-push storm).
+   * `pr@head` keys, exactly like the sibling sets (W1-T514). PR-number-only until then, which let
+   * one `acted:true` line at head A dedup the SAME PR forever, including a genuinely NEW block at
+   * head B — where `escalate()`'s own composite key already knows to open a fresh issue. That
+   * transport-side fix was unreachable while this gate never let a second head through. A new head
+   * re-earns the attempt; the SAME head still dedupes, so there is no per-push storm.
    */
   escalated: Set<string>;
   /** `pr@head` keys whose dep-review reached a TERMINAL outcome (arm/escalate/refuse). */
   depReviewed: Set<string>;
   /**
-   * exact-input keys with a DELIVERED `review.posted` verdict. Fully attributed rows key on
-   * task + PR URL + head + body digest; legacy rows retain `taskId@head`
-   * (W1-T254/W1-T1213). NOT keyed off `sweep.disposed acted:true` like every other set
-   * here: an `acted:true` post-review dispose only proves the LANE WAS INVOKED, never
-   * that it reached a verdict (e.g. `postReviewStatusGuarded` can refuse internally
-   * without throwing) — keying dedup on the attempt used to suppress the same input
-   * forever after a single no-op invocation (a latent sibling of the #707 bug). A
-   * posted verdict ALSO flips the PR's live `reviewState` away from "none" on the next
-   * `buildOpenPrViews` read, so the row stops matching the post-review disposition rule
-   * at all — this set exists mainly as a fast, ledger-local echo of that fact.
-   *
-   * W1-T1213: split off `reviewRefused` below — a DELIVERED VERDICT and a REFUSED
-   * ATTEMPT are not the same fact and must not share one key. See `reviewRefused`'s
-   * own doc for why a REFUSAL alone needs a set at all.
+   * Exact-input keys with a DELIVERED verdict. NOT keyed off `sweep.disposed acted:true` like the
+   * other sets: that proves only the LANE WAS INVOKED, never that it reached a verdict, and keying
+   * on the attempt suppressed the same input forever after one no-op invocation. W1-T1213 split off
+   * {@link reviewRefused} — a DELIVERED VERDICT and a REFUSED ATTEMPT are not the same fact.
    */
   reviewDelivered: Set<string>;
   /**
-   * Exact-input keys with an explicit `review.post_refused` refusal (W1-T254) that
-   * still suppresses this input — i.e. every refusal EXCEPT the one class
-   * {@link isReopenedClosedLifecycleRefusal} names as provably stale. A refusal leaves
-   * GitHub's live status untouched (unlike a posted verdict — see `reviewDelivered`'s
-   * doc), so without a key here the post-review lane would re-route to, and re-invoke,
-   * the same unchanged input every single pass.
-   *
-   * W1-T1213: `priorActionsFromLedger` (below) never admits the "PR is already closed"
-   * lifecycle refusal into this set. That refusal's own named condition — the PR being
-   * closed — is FALSIFIED BY CONSTRUCTION the moment this dedup is even consulted again:
-   * every {@link OpenPrView} comes from a `state=open` read, so a PR reaching this check
-   * is, by construction, open. Excluding that one refusal class re-arms the head for
-   * the post-review lane WITHOUT deciding anything — `decideReviewStatusPost`
-   * (`src/lib/review.ts`) still runs on the next attempt and re-tests the same lifecycle
-   * gate fresh, and can refuse again (writing a fresh row, re-dedupping). Every OTHER
-   * semantic or lifecycle refusal — including the sibling "PR is already merged" half
-   * of that same branch (a merged PR can never return to `state=open`, so it has no
-   * falsifier) — keeps suppressing forever, no clock consulted. W1-T2753 splits the
-   * sweep-owned "attempt threw" transport/process outcome into `reviewRetryableThrows`
-   * below because a thrown attempt is not a durable refusal.
+   * Exact-input keys with an explicit refusal that still suppresses this input — every refusal
+   * EXCEPT the class {@link isReopenedClosedLifecycleRefusal} names as provably stale. A refusal
+   * leaves GitHub's status untouched, so without a key the lane would re-invoke the same input
+   * every pass. W1-T1213: the "already closed" refusal is never admitted, because its own condition
+   * is FALSIFIED BY CONSTRUCTION. That re-arms the head WITHOUT deciding anything — the lifecycle
+   * gate is re-tested fresh. Every OTHER refusal, "already merged" included, suppresses forever.
    */
   reviewRefused: Set<string>;
   /**
@@ -5453,38 +3545,26 @@ interface PriorActions {
    */
   reviewRetryableThrows: Map<string, number | undefined>;
   /**
-   * W1-T970 — `${prNumber}@${headSha}` keys, built off the risk judge's OWN step
-   * (`risk_judge.escalated`), the SAME shape `reviewDelivered`/`reviewRefused` above take off
-   * `review.posted`/`review.post_refused`: a set built from another lane's own ledger line, never
-   * from `sweep.disposed`. PR-NUMBER-KEYED, NOT TASK-ID-KEYED — deliberately unlike those two:
-   * the sibling sets `armed`/`fixed`/`escalated` already key on `pr_number`, the sweep has
-   * `pr.prNumber` in hand at the lookup, and `runRiskJudge` (risk-judge.ts) now emits it, so
-   * there is no `??` fallback anywhere on this path — the exact `${pr.taskId ?? ""}@${pr.headSha}`
-   * collapse that shipped a matching-nothing row in #1931 has no equivalent here by construction.
-   * A refusal expires on a NEW head sha (the key itself) or an explicit operator override
-   * (`cappedOverrideFromLedger` — see the `mergeable` arm of `alreadyDone`'s switch below); it is
-   * never cleared by time.
-   *
-   * W1-T1116: a MAP, not a Set, keyed identically — the VALUE is the escalation's own `issue_url`
-   * (or `undefined` when an older row predates that field), read back by the `mergeable` arm so a
-   * refused hold can name the SAME issue the sibling `risk_judge.escalated` row already points at,
-   * rather than a reader having to find that row itself.
+   * W1-T970 — keys built off the risk judge's OWN step, never from `sweep.disposed`.
+   * PR-NUMBER-KEYED, deliberately unlike the review sets: the sweep has the number in hand and the
+   * producer emits it, so there is no `??` fallback anywhere on this path and the
+   * matching-nothing collapse that shipped in #1931 has no equivalent here. A refusal expires on a
+   * NEW head sha or an explicit override, never by time. A MAP since W1-T1116, so a refused hold
+   * can name the SAME issue rather than making a reader find that row.
    */
   riskRefused: Map<string, string | undefined>;
   /**
-   * ABSENT-check-suite re-push history, read from this module's OWN `sweep.absent_repush`
-   * ledger step. TWO keys because one is not enough: `shas` (`<pr>@<oldHead>`) gives
-   * same-head idempotence exactly like {@link PriorActions.fixed}, and `count` (per PR) is
-   * the BOUND — a re-push mints a NEW sha, so a sha key alone would license an unbounded
-   * chain of empty commits on a PR GitHub never schedules.
+   * ABSENT-check-suite re-push history, read from this module's OWN `sweep.absent_repush` step.
+   * TWO keys because one is not enough: `shas` gives same-head idempotence, and `count` per PR is
+   * the BOUND — a re-push mints a NEW sha, so a sha key alone would license an unbounded chain of
+   * empty commits on a PR GitHub never schedules.
    */
   absentRepushes: Map<number, { count: number; shas: Set<string> }>;
 }
 
-/** One review outcome key. Fully attributed rows use the material input; legacy rows and
- * unwired fixtures retain the historical task+head key so migration does not change their local
- * semantics. A real current view always carries `reviewInputDigest`, so a legacy row cannot pin a
- * changed body forever. */
+/** One review outcome key. Attributed rows use the material input; legacy rows and unwired
+ *  fixtures retain the historical task+head key, so migration changes no local semantics. A real
+ *  current view always carries `reviewInputDigest`, so a legacy row cannot pin a changed body. */
 function reviewOutcomeKey(
   taskId: string,
   prUrl: string | undefined,
@@ -5502,22 +3582,14 @@ function reviewOutcomeKeyForPr(pr: OpenPrView): string {
 }
 
 /**
- * W1-T529 (iv) — WHAT EACH LANE'S STAND-DOWN COSTS, NAMED SO THE COST IS CHOSEN RATHER THAN
- * DISCOVERED, and carried verbatim into the PR's own `stand_down_reason` so a declined pass is
- * legible instead of looking idle.
- *
- * THIS TABLE NAMES A COST; IT DOES NOT DECIDE ANYTHING. By the time it is read the guarded call
- * has ALREADY been refused — {@link GhPaceFloorStandDownError} is thrown by `GhCallPacer.wait()`
- * BEFORE the call it guards ever runs (lib/open-prs-rest.ts's `paceGhEntry`, whose `wait()` sits
- * outside its own `try` precisely so this propagates un-rewrapped). So there is no "should this
- * lane stand down" branch to gate: the lane already did. A disposition missing from this table
- * still stands down, under the generic reason in {@link budgetFloorStandDown} — the table only
- * makes the specific cost sayable, which is what design (iv) asks for.
+ * W1-T529 — WHAT EACH LANE'S STAND-DOWN COSTS, NAMED SO THE COST IS CHOSEN RATHER THAN DISCOVERED,
+ * and carried verbatim into the PR's own reason so a declined pass reads as declined, not idle.
+ * THIS TABLE NAMES A COST; IT DECIDES NOTHING — by the time it is read the guarded call has ALREADY
+ * been refused. A disposition missing from it still stands down under the generic reason.
  */
 const BUDGET_FLOOR_LANE_COST: Partial<Record<Disposition, string>> = {
   // Design (iv), verbatim: "A SKIPPED REVIEW leaves a GREEN PR UNMERGED — visible, recoverable
-  // next pass." RECOVERABLE is the load-bearing half — see `budgetFloorStandDown`'s own doc for
-  // the refusal key this deliberately does NOT write.
+  // next pass." RECOVERABLE is load-bearing — see the refusal key this deliberately does NOT write.
   "post-review": "a green PR is left unmerged this pass and re-derives next tick",
   // Design (iv), verbatim: "A SKIPPED FIX STRIKE MUST NOT CONSUME THE STRIKE."
   "blocked-fixable": "a fix dispatch is skipped and NO strike is spent",
@@ -5536,29 +3608,14 @@ const BUDGET_FLOOR_LANE_COST: Partial<Record<Disposition, string>> = {
 };
 
 /**
- * W1-T529 (iv) — IS THIS THROW THE BUDGET FLOOR, AND WHAT DOES DECLINING THIS LANE COST? Returns
- * the `standDownReason` to record when it is, and `undefined` for every other throw — which stays
- * on the ordinary `actionError`/`sweep.action_failed` path, byte-for-byte unchanged.
+ * W1-T529 — IS THIS THROW THE BUDGET FLOOR, AND WHAT DOES DECLINING THIS LANE COST? Returns the
+ * stand-down reason when it is, `undefined` for every other throw.
  *
- * WHY THE TWO CLASSES MUST NOT SHARE A PATH. A stand-down is not a failed action: the call never
- * ran, nothing about THIS PR was observed, and nothing about it is known to be wrong. Routing it
- * through `actionError` would (a) count it in `actionsFailed`, and (b) in the post-review lane
- * write a `review.post_refused` row — and that row is not a diagnostic, it is a VERDICT.
- * {@link OpenPrView.reviewPostRefused}'s own doc says a second absence for the same input is
- * escalated rather than retried, because "the one deterministic remedy already ran its course for
- * this exact input"; `reviewPostRefusedFor` (run-task.ts) keys task + PR URL + head + body digest,
- * so a changed commit or body immediately clears it. A PR that was merely
- * unaffordable for one tick would be deduped permanently and then escalated as ambiguous. That
- * same doc already draws exactly this line for the transient case: `review.post_failed` "does NOT
- * set this — that case must keep retrying, never escalate on a mere network hiccup." An exhausted
- * budget is that class, not the refusal class.
- *
- * AND NO SECOND NO-STRIKE MECHANISM (design (iv) in writing: "PRESERVE THAT EXISTING PROPERTY
- * RATHER THAN INVENT A SECOND MECHANISM"). Every caller sets `acted = false`, and that alone is
- * the guarantee: {@link priorActionsFromLedger} admits a `sweep.disposed` row into
- * `armed`/`fixed`/`escalated`/`closed`/`depReviewed` only when `line.acted === true`, so a
- * stood-down lane seeds no dedup key, spends no strike, and is re-derived whole next pass — the
- * property W1-T527 established, reused rather than reimplemented.
+ * WHY THE TWO CLASSES MUST NOT SHARE A PATH: a stand-down is not a failed action — the call never
+ * ran. Routing it through `actionError` would write a `review.post_refused` row, and that row is
+ * not a diagnostic but a VERDICT, so a PR merely unaffordable for one tick would be deduped
+ * permanently and then escalated. AND NO SECOND NO-STRIKE MECHANISM: every caller sets
+ * `acted = false`, which alone is the guarantee.
  */
 function budgetFloorStandDown(e: unknown, disposition: Disposition): string | undefined {
   if (!(e instanceof GhPaceFloorStandDownError)) return undefined;
@@ -5568,13 +3625,11 @@ function budgetFloorStandDown(e: unknown, disposition: Disposition): string | un
 
 /**
  * W1-T1213 — is `reason` the SPECIFIC "PR is already closed" half of `decideReviewStatusPost`'s
- * (`src/lib/review.ts`) lifecycle refusal? Matched on that function's own literal, verbatim —
- * the task's own recon confirms the string is `decideReviewStatusPost`'s, so this is the
- * intended read, not a guess at prose that could drift.
+ * lifecycle refusal? Matched on that function's own literal, verbatim, so this is the intended
+ * read rather than a guess at prose that could drift.
  *
- * DELIBERATELY NOT the "PR is already merged" sibling half of the SAME branch: a merged PR has
- * no GitHub transition back to `state=open`, so that refusal has no falsifier and must keep
- * suppressing forever, exactly like every other refusal reason (design (ii)/(v)).
+ * DELIBERATELY NOT the "already merged" sibling: a merged PR has no transition back to
+ * `state=open`, so that refusal has no falsifier and must keep suppressing forever.
  */
 function isReopenedClosedLifecycleRefusal(reason: unknown): boolean {
   return typeof reason === "string" && reason.startsWith("PR is already closed — refusing to post remudero-review");
@@ -5646,16 +3701,14 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       }
       continue;
     }
-    // W1-T970: OUTCOME-KEYED off the risk judge's OWN step, exactly like `reviewDelivered`/
-    // `reviewRefused` above — never `sweep.disposed`. PR-NUMBER-KEYED, NOT TASK-ID-KEYED (see PriorActions.riskRefused's
-    // doc for why) — both fields are REQUIRED, no `??` fallback, so a pre-W1-T970 escalation row
-    // (written before `runRiskJudge` emitted these fields) is never matched.
+    // W1-T970: OUTCOME-KEYED off the risk judge's OWN step, never `sweep.disposed`. PR-number
+    // keyed, and both fields are REQUIRED with no `??` fallback, so a pre-W1-T970 row written
+    // before the producer emitted them is never matched.
     if (line.step === "risk_judge.escalated") {
       if (typeof line.pr_number === "number" && typeof line.head_sha === "string") {
-        // W1-T1116: carry `issue_url` along with the key — see PriorActions.riskRefused's own
-        // doc for why this is a Map now, not a Set. `undefined` (not a `??` fallback) when an
-        // older row predates the field, so the `mergeable` arm can tell "no issue to name" from
-        // "row missing" without a sentinel string.
+        // W1-T1116: carry `issue_url` with the key. `undefined` rather than a `??` fallback when
+        // an older row predates the field, so the `mergeable` arm can tell "no issue to name"
+        // from "row missing" without a sentinel string.
         riskRefused.set(`${line.pr_number}@${line.head_sha}`, typeof line.issue_url === "string" ? line.issue_url : undefined);
       }
       continue;
@@ -5723,59 +3776,20 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
 }
 
 /**
- * W1-T1110 — HAS THE MOST RECENT `fix.dispatch` FOR THIS TASK ALREADY CONCLUDED WITHOUT LANDING
- * A NEW HEAD? `prior.fixed` (above) is keyed `pr@headSha` off `sweep.disposed` ROWS and records
- * only that a fix was DISPATCHED — an attempt, never an outcome (see that field's own doc). The
- * key clears on a new head, and the head only changes when a fix runs and PUSHES; a dispatch
- * whose worker demonstrably ran (spending a real strike — see `fix.dispatch`) and then ENDED —
- * review still failing, or CI never green — without landing a push leaves the key set and the
- * head unmoved, so every later pass reads `alreadyDone` and stands down FOREVER (rationale (4)).
+ * W1-T1110 — HAS THE MOST RECENT `fix.dispatch` FOR THIS TASK ALREADY CONCLUDED WITHOUT LANDING A
+ * NEW HEAD? `prior.fixed` records only that a fix was DISPATCHED, never an outcome, and clears
+ * only on a new head — so a dispatch that ran and ENDED without pushing leaves the key set and the
+ * head unmoved, and every later pass stands down FOREVER.
  *
- * Reads exactly the two of design note (iii)'s three named steps that answer "concluded, and
- * did NOT succeed": a `fix.review` row with `state !== "success"` (a real review ran and still
- * failed), or a `fix.ci_not_green` row (CI never went green for that strike). The THIRD named
- * step, `fix.resolved`, is read too — but deliberately never counted as "stalled": it fires only
- * once `review.state === "success"`, i.e. a strike that genuinely landed a working push. Re-arming
- * on a resolved strike would risk a second, redundant dispatch on a task the rung already
- * finished; the caller's own sha-keyed `prior.fixed.has(pr@headSha)` check already retires that
- * head the moment GitHub reflects the new push, so nothing here needs to also flip it — a
- * dispatch that DID move the head must keep suppressing a second attempt (acceptance 3).
+ * Reads the two steps that answer "concluded, and did NOT succeed". `fix.resolved` is read but
+ * never counted as stalled, since re-arming on a landed push risks a redundant dispatch. TASK-ID
+ * KEYED, safe because every caller already guards on the PR's CURRENT head being the dispatched
+ * one, and scoped to the MOST RECENT dispatch so an earlier conclusion never re-arms a live strike.
  *
- * TASK-ID KEYED, not head-sha keyed: none of these three steps carries a `head_sha` (they are
- * strike-scoped, logged by `runFixRung` per round — see run-task.ts's `deps.log("fix.review", …)`
- * / `deps.log("fix.ci_not_green", …)` / `deps.log("fix.resolved", …)` — never push-scoped), so
- * there is nothing else to key them by except the SAME `task_id` `fix.dispatch` already stamps on
- * every line it writes (W1-T78's `dispatchFix` fix — see `priorStrikesFor`'s own doc in
- * run-task.ts). Reading them without a sha is safe because every caller of this function already
- * guards on `prior.fixed.has(pr@headSha)` being true for the PR's CURRENT, live head — i.e. the
- * head has provably not moved since the dispatch that set that key, so any strike this task has
- * run since is necessarily against that SAME stuck head.
- *
- * Scoped to the MOST RECENT `fix.dispatch` only, by design: each `fix.dispatch` line resets the
- * verdict, so an EARLIER strike's stalled conclusion never re-arms a LATER, still-in-flight
- * strike on the same head — design (i)'s idempotence (two dispatches racing the same sha must
- * still not both spend a strike) survives unchanged.
- *
- * `undefined` taskId ⇒ `false`: a cold blocked-fixable dispatch with no resolvable task carries
- * no `task_id` to key against, and this must never throw or false-positive on nothing to read.
- *
- * W1-T1210 — A TASKID WITH NO `fix.dispatch` ROW OF ITS OWN IS THE SAME "CONCLUDED WITHOUT
- * LANDING A NEW HEAD" SHAPE, ONE STEP EARLIER. `dispatchFix` (sweep.ts's own caller) can throw
- * before `runFixRung` ever starts — `.git/config.lock` contention was the observed cause
- * (rationale, incident note) — and the `sweep.disposed` row that seeds `prior.fixed` gets
- * written with `acted: true` regardless (the swallow W1-T1127 closed GOING FORWARD, not
- * retroactively for rows it already wrote). Such a seed owns no `fix.dispatch` row at all — not
- * even the first line a real rung writes — so it can never produce a `fix.review`/
- * `fix.ci_not_green`/`fix.resolved` for this function to read, and the loop above leaves
- * `stalled` at its `false` initial value forever, exactly as if the rung were still healthily in
- * flight. It is not: nothing ever started. The absence of `fix.dispatch` itself — read from rows
- * already in the ledger, no new read, no state file, no clock (design (ii)/(v)) — is the
- * falsifier: a taskId that HAS a `fix.dispatch` row keeps the loop's existing verdict untouched
- * (acceptance: "a gate with an owning fix row still suppresses"); a taskId with NONE is treated
- * as stalled too (acceptance: "a gate with no owning fix row no longer suppresses"), so the
- * caller's `alreadyDone` clears and the next pass is eligible to re-derive — never itself a
- * dispatch (design (iv); the strike cap at the spending site, untouched, still bounds whatever
- * follows).
+ * W1-T1210 — A TASKID WITH NO `fix.dispatch` ROW IS THE SAME SHAPE ONE STEP EARLIER: the caller
+ * can throw before the rung starts while the seeding row is still written `acted: true`. Such a
+ * seed owns no fix row, so nothing can mark it stalled and it reads as healthily in flight when
+ * nothing started. The ABSENCE of the row is the falsifier. // Why: docs/forensics/sweep.md.
  */
 function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
   if (!taskId) return false;
@@ -5798,24 +3812,18 @@ function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, tas
   return stalled || !dispatched;
 }
 
-// ── W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half) ──
+// ── W1-T905 — "repair the instance, FILE THE CLASS" ──────────────────────────────────────────
 //
-// A `sweep.disposed` row already NAMES a classified surface on its own `disposition` field
-// every time the sweep repairs a PR (`DISPOSITION_RULES` above), but nothing ever rolls that
-// classification up across PRs — a defect the fleet repairs fifteen times is rediscovered by
-// hand fifteen times, the exact operator-archaeology channel §7B exists to close (rationale).
-//
-// THIS IS NOT A ROUTER, A LANE OR A RUNG (design note i): no new disposition, no new `when:`,
-// no new repair verb. The ONE thing added is the bridge from a RECURRING classified surface to
-// a §7B feedback entry — a pure fold ({@link dueRepairFilings}) over rows that already exist,
-// plus one injected capture dep ({@link SweepDeps.captureRepairFeedback}).
+// A `sweep.disposed` row already NAMES a classified surface every time the sweep repairs a PR, but
+// nothing rolls that up across PRs, so a defect repaired fifteen times is rediscovered by hand
+// fifteen times. THIS IS NOT A ROUTER, A LANE OR A RUNG: the ONE addition is the bridge from a
+// recurring surface to a §7B entry — a pure fold over rows that already exist.
 
-/** The dispositions {@link priorActionsFromLedger}'s own switch above treats as an actual
- *  REPAIR verb having fired (`fixed`/`closed`/`escalated`) — `mergeable` (armed) is the HEALTHY
- *  outcome, not a defect, and `dep-review`/`post-review`/`wait` are ROUTING/no-op states with no
- *  repair verb of their own. Recurrence filing is scoped to exactly these four so a `mergeable`
- *  PR arming fifteen times (ordinary, healthy throughput) never floods the §7B inbox — the
- *  wrong-recurrence-key failure mode this task's own risk note names explicitly. */
+/** The dispositions {@link priorActionsFromLedger}'s switch treats as an actual REPAIR verb having
+ *  fired. `mergeable` is the HEALTHY outcome, not a defect, and the routing states have no repair
+ *  verb of their own. Scoped to exactly these four so a PR arming fifteen times — ordinary, healthy
+ *  throughput — never floods the §7B inbox, the wrong-recurrence-key failure this task's risk note
+ *  names explicitly. */
 const REPAIR_SURFACE_DISPOSITIONS: ReadonlySet<Disposition> = new Set(["blocked-fixable", "blocked-ambiguous", "stale", "conflicted"]);
 
 /** One PR's own repair, as read off its `sweep.disposed` row — never invented (design v). */
@@ -5841,43 +3849,22 @@ export interface RepairFilingRecurrence {
   windowEnd: string;
   /** Distinct PRs (by `prNumber`) repaired for `surface` inside the window — length >= threshold. */
   instances: RepairFilingInstance[];
-  /** Deterministic — `fb-repair-<surface>-<window-bucket>` (mirrors `src/lib/issues-intake.ts`'s
-   *  `fb-issue-<owner>-<repo>-<n>`): STABLE for the SAME surface across every pass inside the
-   *  SAME window, so the real wiring's `existsSync` dedup (design iii) never re-files twice for
-   *  one window, and a genuinely new window can file again once the pattern persists into it. */
+  /** Deterministic — `fb-repair-<surface>-<window-bucket>`. STABLE for the same surface across
+   *  every pass inside the SAME window, so the caller-side dedup never re-files twice for one
+   *  window, and a genuinely new window can file again once the pattern persists into it. */
   id: string;
 }
 
 /**
- * PURE fold over already-written `sweep.disposed` ledger rows (design vi — no new ledger row,
- * nothing new to read): for each {@link REPAIR_SURFACE_DISPOSITIONS} surface, counts the
- * DISTINCT PRs (`acted: true`) repaired for it inside the CURRENT policy window (an epoch-
- * anchored bucket of `policy.repairFilingWindowDays`, so the same window yields the same bucket
- * — and therefore the same {@link RepairFilingRecurrence.id} — on every call for as long as
- * `now` stays inside it). A surface reaching `policy.repairFilingThreshold` distinct PRs is
- * DUE — "fifteen PRs repaired for one surface must produce ONE entry, never fifteen, and a
- * single repair must produce NONE: one occurrence is a repair, a recurrence is a defect"
- * (design ii, verbatim). Counting DISTINCT PRs, not raw rows, is deliberate: a single PR stuck
- * on the same surface across many sweep passes (re-dispatched each time) must never inflate the
- * count on its own — recurrence is measured across the FLEET's PRs, never one PR's retry count.
+ * PURE fold over already-written `sweep.disposed` rows — no new ledger row, nothing new to read.
+ * Counts the DISTINCT PRs repaired for each surface inside the current epoch-anchored window, so
+ * the same window yields the same filing id. Fifteen PRs repaired for one surface must produce ONE
+ * entry, never fifteen, and a single repair must produce NONE.
  *
- * No I/O, no dedup memory of its own — recomputes fresh from `lines` every call. The caller
- * (`runSweep`) decides whether a returned candidate is ACTUALLY worth writing (via the injected
- * {@link SweepDeps.captureRepairFeedback}, whose real wiring is what performs the idempotent
- * write — see that field's own doc).
- *
- * W1-T2231 — `acted: true` PROVES ONLY THAT THE LANE WAS INVOKED, NEVER THAT A REPAIR HAPPENED.
- * `blocked-fixable`/`conflicted` never assign `acted` around their `deps.dispatchFix` call (it
- * keeps whatever the pass-level default already set — see {@link SweepAction.acted}'s own doc),
- * so a dispatch that stood down internally and opened no strike still reads `acted: true`. This
- * fold additionally excludes any row whose {@link SweepAction.spent} reads EXPLICITLY `false` —
- * a dispatch demonstrably invoked and demonstrably spending nothing. `spent === undefined` (every
- * OTHER surface, which has no dispatch verb to answer the question, and any dispatch-based row
- * whose `dispatchFix` fake/wiring still returns void — {@link SweepDeps.dispatchFix}'s own doc)
- * counts exactly as it always has: this is a NARROWING of what counts as a repair, never a
- * rejoin against a different key (`task_id`, `pr@head`, or anything else) — see rationale (5) for
- * why a task_id join is the wrong shape here (a `task_id: "SWEEP"` seed is unjoinable BY
- * CONSTRUCTION and must not be conflated with a genuine no-spend stand-down).
+ * DISTINCT PRs rather than raw rows is deliberate: one PR stuck across many passes must never
+ * inflate the count alone. No I/O and no dedup memory — it recomputes fresh every call.
+ * W1-T2231: `acted: true` proves only that the LANE WAS INVOKED, so a row whose `spent` reads
+ * EXPLICITLY `false` is excluded. A NARROWING, never a rejoin against a different key.
  */
 export function dueRepairFilings(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -5894,11 +3881,9 @@ export function dueRepairFilings(
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
     const surface = line.disposition as Disposition;
     if (!REPAIR_SURFACE_DISPOSITIONS.has(surface)) continue;
-    // W1-T2231: `acted: true` only proves the lane fired — a dispatch-based surface
-    // (blocked-fixable/conflicted) additionally marks a demonstrably-empty invocation
-    // `spent: false` (see `SweepAction.spent`'s own doc), and THAT is what a repair count must
-    // exclude. `undefined` (every other surface, and a dispatch whose return carried no verdict)
-    // is deliberately NOT treated as `false` here — only an explicit no-spend excludes a row.
+    // W1-T2231: `acted: true` only proves the lane fired. A dispatch-based surface marks a
+    // demonstrably-empty invocation `spent: false`, and THAT is what a repair count must exclude.
+    // `undefined` is deliberately NOT treated as `false` — only an explicit no-spend excludes.
     if (line.spent === false) continue;
     const ts = typeof line.ts === "string" ? line.ts : undefined;
     if (!ts) continue;
@@ -5907,11 +3892,9 @@ export function dueRepairFilings(
     const prNumber = typeof line.pr_number === "number" ? line.pr_number : undefined;
     if (prNumber === undefined) continue;
     const perPr = bySurface.get(surface) ?? new Map<number, RepairFilingInstance>();
-    // Last-write-wins per PR (lines are read in ledger/append order) — a PR re-dispatched
-    // several times this window is counted ONCE, carrying its MOST RECENT SPENDING repair's
-    // evidence (W1-T2231: a later `spent: false` row for the same PR is excluded above, by
-    // `continue`, before ever reaching this `perPr.set` — it can never overwrite an earlier
-    // genuine repair with a no-spend reason).
+    // Last-write-wins per PR — a PR re-dispatched several times this window is counted ONCE,
+    // carrying its most recent SPENDING repair's evidence. A later `spent: false` row is excluded
+    // above, so it can never overwrite an earlier genuine repair with a no-spend reason.
     perPr.set(prNumber, {
       prNumber,
       prUrl: typeof line.pr_url === "string" ? line.pr_url : "",
@@ -5950,11 +3933,10 @@ export interface RepairFilingCapture {
 }
 
 /**
- * Render ONE due surface's evidence body (design v): the classified surface, the window/
- * threshold that triggered filing, and — per repaired PR — the PR number/url, head sha and the
- * disposition `reason` already ledgered for it (which, for a CI-failure surface, already names
- * the failing check(s) + sha(s) `describeCiFailures` captured). NEVER invents a cause: root
- * cause is explicitly stated as unobserved, since this fold only ever reports RECURRENCE.
+ * Render ONE due surface's evidence body: the classified surface, the window and threshold that
+ * triggered filing, and per repaired PR the number, url, head sha and the disposition `reason`
+ * already ledgered for it. NEVER invents a cause — root cause is explicitly stated as unobserved,
+ * since this fold only ever reports RECURRENCE.
  */
 export function renderRepairFilingRaw(filing: RepairFilingRecurrence): string {
   const lines = filing.instances.map(
@@ -5984,88 +3966,34 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
 });
 
 /**
- * W1-T513 — THE CROSS-CALL REVIEW-KEY MUTEX. Before this task, `claimedReviewKeys` (below) was
- * declared FRESH INSIDE every `runSweep` call, so it only ever arbitrated between PRs handled by
- * that ONE call — real protection for `runSweepLightPass`'s own concurrent per-PR calls (W1-T473),
- * but no protection at all between two SEPARATE `runSweep` invocations running at the same time:
- * the daemon's full `deps.sweep()` walk racing a `sweepLight()` tick, or two overlapping light
- * passes fired from two different `startInFlightTicker` instances. `test/daemon.test.ts`'s own
- * "TODAY's post-review dedup is a ledger READ, not a mutex" fixture demonstrated the resulting
- * race directly: two concurrent `runSweep([pr], …)` calls over the identical PR both scheduled
- * `postReview` for it, because neither call's `Set` ever saw the other's claim.
- *
- * MODULE-SCOPED SO IT IS SHARED BY EVERY CALLER IN THE SAME PROCESS, WITHOUT NEW WIRING: `rmd
- * sweep`, the daemon's full-sweep hook, and its light-sweep hook (`buildSweepHook`/
- * `buildSweepLightHook`, `src/run-task.ts`) already build a FRESH `SweepDeps` object every call
- * but run in the SAME process — a module-level `Set` is therefore visible to all of them with no
- * change needed outside this file.
- *
- * NOT PROCESS-GLOBAL-FOREVER: a key is added synchronously when a pool worker is ready to START
- * that review, not while the earlier disposition walk merely discovers it. It is removed the
- * instant that attempt settles. A pending job therefore owns no mutex while an unrelated action
- * later in the walk stalls, and a continuation-gated unstarted tail owns nothing to release.
- * A legitimate later pass over the same still-unreviewed head is never permanently locked out —
- * only a genuinely concurrent second action-time claim is refused.
+ * W1-T513 — THE CROSS-CALL REVIEW-KEY MUTEX. The claim set used to be declared FRESH INSIDE every
+ * `runSweep` call, so it arbitrated only between PRs in that ONE call and gave no protection at
+ * all between two SEPARATE invocations racing. MODULE-SCOPED so every caller in the process shares
+ * it without new wiring. NOT PROCESS-GLOBAL-FOREVER: a key is added when a worker is ready to
+ * START, not while the walk discovers it, and removed the instant the attempt settles.
  */
 const inFlightReviewKeys = new Set<string>();
 
 /**
- * W1-T2520 — THE FIX-DISPATCH MUTEX, {@link inFlightReviewKeys}'s SIBLING FOR THE OTHER LANE:
- * `deps.dispatchFix` — "the one lane W1-T1211 admits into the light pass that spends a worker"
- * ({@link detachedSweepActions}'s own doc below) — never got one. `priorStrikesFor` (run-task.ts)
- * derives `OpenPrView.priorStrikes` by COUNTING `fix.dispatch` ledger rows at OpenPrView-build
- * time, with no exclusion between that count and the dispatch it gates: two calls in this SAME
- * process (the daemon's full sweep racing a light-pass tick, or two overlapping light passes) can
- * both build an `OpenPrView` off the SAME pre-dispatch ledger state and both see `priorStrikes`
- * under the cap — OBSERVED LIVE as 13 fix-worker dispatches across two PRs against a `strikeCap`
- * of 2, and one review posted three times to one sha (the same race showing through the review
- * lane once three fix workers each finished and each ran a review).
+ * W1-T2520 — THE FIX-DISPATCH MUTEX, {@link inFlightReviewKeys}'s SIBLING for the other lane.
+ * `priorStrikes` is derived by COUNTING dispatch rows at view-build time, with no exclusion
+ * between that count and the dispatch it gates, so two calls in one process can both read the same
+ * pre-dispatch state and both see strikes under the cap.
  *
- * A CLAIM ALONE IS NOT ENOUGH, which is why this is not simply a second copy of
- * {@link inFlightReviewKeys}: a SECOND, non-concurrent call reaching this PR after the first
- * already dispatched would still be carrying the FIRST call's now-stale `pr.priorStrikes` — the
- * exact "read-modify-write race" shape the counter advancing slower than the dispatch rate is the
- * signature of. {@link claimFixDispatch} (below, inside `runSweep`) also RE-READS the ledger and
- * RE-COUNTS strikes the instant the claim is taken, so the count two callers act on can never be
- * the same stale snapshot — see that function's own doc for the read-under-the-claim mechanics.
- *
- * MODULE-SCOPED for the exact reason {@link inFlightReviewKeys} is (its own doc above): every
- * caller builds a fresh `SweepDeps` but runs in the SAME process, so a module-level `Set` needs no
- * new wiring outside this file.
- *
- * KEYED IDENTICALLY TO {@link inFlightReviewKeys} — `${taskId}@${headSha}` — "the key is the PR,
- * or the (task, head sha) pair — whichever the review mutex already keys on, so there is one
- * spelling of 'this PR is being worked' rather than two" (this task's own rationale). A SEPARATE
- * `Set` from `inFlightReviewKeys`, never a shared one: the review and fix-dispatch lanes are
- * different budgets that must never block each other's claim.
- *
- * NOT PROCESS-GLOBAL-FOREVER, the same discipline as {@link inFlightReviewKeys}: a key is added
- * the instant it is claimed and removed the instant that claim's fate is decided — refused before
- * dispatch (strikes already exhausted under the claim, or a concurrent claim already held it), or
- * the dispatch itself SETTLES, success or throw alike. A key never outlives the single in-flight
- * attempt that claimed it, so a legitimate later pass over the same still-open PR is never
- * permanently locked out — only a genuinely concurrent second claim, or a real cap breach, is
- * refused. The fix rung keeps working: a PR with strikes left still gets its strike; this adds
- * exclusion, never a refusal.
+ * A CLAIM ALONE IS NOT ENOUGH: a later, non-concurrent call would still carry the first call's
+ * stale count, so {@link claimFixDispatch} RE-READS the ledger the instant the claim is taken.
+ * KEYED IDENTICALLY to the review mutex so there is one spelling of "this PR is being worked", but
+ * a SEPARATE Set — the two lanes are different budgets and must never block each other.
+ * // Why: observed live as 13 dispatches across two PRs against a cap of 2.
  */
 const inFlightFixKeys = new Set<string>();
 
 /**
- * W1-T2788 — select the fix-rung ledger generation attributable to `currentHeadSha`.
- *
- * New `fix.dispatch` rows name the exact input head they targeted and therefore require exact
- * equality. Historical rows have no head field. Those legacy rows reset only when the ledger has
- * a trustworthy `sweep.disposed` observation for this task at the current head; only rows after
- * the most recent such boundary belong to the current generation. With no boundary, legacy rows
- * remain selected so an incomplete history fails closed instead of manufacturing strike budget.
- *
- * `fix.review` has historically carried no head either. Associate it only with the most recent
- * selected dispatch carrying the same strike number. A dispatch from another head clears that
- * association before its review is seen, so clarification history cannot inherit another head's
- * outcome when strike numbers restart.
- *
- * Omitting `currentHeadSha` preserves the pre-W1-T2788 all-task fold for callers that do not have
- * a head identity. Production cap callers always provide one.
+ * W1-T2788 — select the fix-rung ledger generation attributable to `currentHeadSha`. New rows name
+ * the head they targeted and require exact equality; legacy rows carry no head and reset only at a
+ * trustworthy observation for this task at the current head, so an incomplete history fails closed
+ * rather than manufacturing strike budget. `fix.review` also carries no head, so associate it only
+ * with the most recent selected dispatch sharing its strike number.
  */
 export function fixLedgerRowsForHead(
   lines: Array<Record<string, unknown>>,
@@ -6114,20 +4042,11 @@ export function fixLedgerRowsForHead(
 }
 
 /**
- * W1-T2520 — the fresh under-claim counterpart to {@link priorStrikesFor} (run-task.ts). It keeps
- * the default `"keyword_only"` regime (no amnesty), while W1-T2788 feeds it the SAME current-head
- * generation selected by {@link fixLedgerRowsForHead}. This module remains free of a run-task.ts
- * dependency; the shared generation fold lives here and run-task imports downward. What this
- * function adds is FRESHNESS: it reads the ledger AFTER taking the claim below, so two callers
- * cannot act on the same stale count.
- *
- * COUNTS DISTINCT `strike` NUMBERS, NOT RAW ROWS — deliberately NOT `priorStrikesFor`'s own plain
- * `n++` per matching line. A real dispatch's `strike` field is the count `priorStrikesFor` itself
- * returned at call time (run-task.ts's own `fix.dispatch` log sites), so two GENUINE strikes for
- * one task can never share a number; a duplicate `strike` value on two `fix.dispatch` rows is
- * always the SAME attempt re-described (a fuller row appended after a leaner one, never a second
- * worker spent). Rows carrying no numeric `strike` at all are each counted on their own — the
- * ledger gives this fold nothing to dedupe them BY, so it must not silently drop one.
+ * W1-T2520 — the fresh under-claim counterpart to `priorStrikesFor`. What it adds is FRESHNESS: it
+ * reads the ledger AFTER taking the claim, so two callers cannot act on the same stale count.
+ * COUNTS DISTINCT `strike` NUMBERS, NOT RAW ROWS — two GENUINE strikes can never share a number, so
+ * a duplicate value is always the SAME attempt re-described. Rows with no numeric `strike` are each
+ * counted on their own, the ledger giving this fold nothing to dedupe them by.
  */
 function freshFixDispatchCount(
   lines: Array<Record<string, unknown>>,
@@ -6149,41 +4068,23 @@ function freshFixDispatchCount(
 }
 
 /**
- * W1-T2379 — THE DETACHED-WAIT REGISTRY, module-scoped for exactly the reason
- * {@link inFlightReviewKeys} above is: every caller builds a fresh `SweepDeps` but runs in the
- * SAME process, so a module-level container is visible to all of them with no wiring outside
- * this file.
+ * W1-T2379 — THE DETACHED-WAIT REGISTRY, module-scoped for the reason {@link inFlightReviewKeys}
+ * is. WHY IT EXISTS: the ticker awaits the light pass, which awaits every open PR, and
+ * `dispatchFix` waits on CI — so the tick's period was the interval plus the longest action, a
+ * term bounded by GitHub Actions rather than anything this repo sets.
  *
- * WHAT IT HOLDS AND WHY IT EXISTS. `startInFlightTicker` (lib/daemon.ts) awaits
- * `deps.sweepLight()`; {@link runSweepLightPass} returns `Promise.all` over every open PR; and
- * `deps.dispatchFix` — the one lane W1-T1211 admits into the light pass that spends a worker —
- * waits on CI. So the tick's period was `pollIntervalMs + max(action duration)`, and the second
- * term is bounded by GitHub Actions rather than by anything this repo sets. A measured pass ran
- * 16m41s against a 60s interval.
- *
- * NOT FIRE-AND-FORGET, WHICH IS THE WHOLE DIFFICULTY. `runSweep` records `acted: true` for a
- * dispatched fix from the pass-level default (see {@link SweepAction.acted}), and
- * `priorActionsFromLedger` seeds `prior.fixed` from that row — which is the dedup that stops a
- * second strike, and which `fixRungStalledWithoutNewHead` (W1-T1110) later re-arms FROM ROWS THE
- * RUN ITSELF WROTE. A remedy that returned before the row was written would silently break the
- * re-arm. So the dispatch is STARTED and the row is WRITTEN synchronously, inside the pass; only
- * the CI wait that follows is moved out of the await, into this registry, where
- * {@link drainDetachedSweepActions} can still be awaited by the ticker's own `stop()`.
- *
- * A DETACHED REJECTION IS SWALLOWED HERE ON PURPOSE, and it is not a silent loss: the pass has
- * already recorded `acted: true`, so the head is deduped for this strike, and a dispatch that
- * ends without landing a new head is EXACTLY the state `fixRungStalledWithoutNewHead` exists to
- * re-arm from. Rethrowing instead would surface as an unhandled rejection long after the pass
- * that caused it returned, attributable to nothing.
+ * NOT FIRE-AND-FORGET, WHICH IS THE WHOLE DIFFICULTY: the dispatch is STARTED and its `acted: true`
+ * row WRITTEN synchronously inside the pass, because that row seeds the dedup and is what
+ * {@link fixRungStalledWithoutNewHead} re-arms from. Only the CI wait moves out of the await. A
+ * DETACHED REJECTION IS SWALLOWED ON PURPOSE — rethrowing would surface long after the pass
+ * returned, attributable to nothing.
  */
 const detachedSweepActions = new Set<Promise<void>>();
 
 /**
- * W1-T2379: hand a started action to {@link detachedSweepActions} so the caller need not await
- * it. The promise stored is ALREADY settled-safe (its rejection is caught here), so a drain can
- * never itself reject. The registry owns it until its own settlement; changing daemon phases
- * does not change that lifetime. Returns nothing — a caller that wants the outcome must await
- * the original.
+ * W1-T2379: hand a started action to {@link detachedSweepActions} so the caller need not await it.
+ * The stored promise is already settled-safe — its rejection is caught here — so a drain can never
+ * itself reject. Returns nothing: a caller wanting the outcome must await the original.
  */
 function detachSweepAction(work: Promise<unknown>): void {
   const held: Promise<void> = work.then(
@@ -6195,11 +4096,9 @@ function detachSweepAction(work: Promise<unknown>): void {
 }
 
 /**
- * W1-T2379 — LET WORK ALREADY IN FLIGHT FINISH RATHER THAN ABORTING IT. Awaits every action
- * detached by {@link runSweepLightPass} and settles once they all have. W1-T2744: this is an
- * explicit daemon-lifetime/test seam, never part of a phase-local ticker's stop — the registry
- * itself retains every action while a phase transition keeps the review clock live. Safe to call
- * when nothing is detached (resolves immediately) and safe to call twice.
+ * W1-T2379 — LET WORK ALREADY IN FLIGHT FINISH RATHER THAN ABORTING IT. Awaits every detached
+ * action and settles once they all have. W1-T2744: an explicit daemon-lifetime seam, never part of
+ * a phase-local ticker's stop. Safe to call when nothing is detached, and safe to call twice.
  */
 export async function drainDetachedSweepActions(): Promise<void> {
   while (detachedSweepActions.size > 0) {
@@ -6214,57 +4113,28 @@ export function detachedSweepActionCount(): number {
 }
 
 /**
- * THE SHARED ENTRY POINT (acceptance 4): BOTH `rmd sweep` and the daemon poll
- * loop call this ONE function. Re-derives every open PR's disposition fresh, takes
- * the ONE gated action per PR (deduped against prior actions for idempotence),
- * writes one `sweep.disposed` ledger line per PR, and returns a summary both
- * callers can log.
+ * THE SHARED ENTRY POINT: BOTH `rmd sweep` and the daemon poll loop call this ONE function. It
+ * re-derives every open PR's disposition fresh, takes the ONE gated action per PR, writes one
+ * `sweep.disposed` line per PR, and returns a summary both callers log.
  *
- * W1-T473 — REVIEW CONCURRENCY: every disposition EXCEPT `post-review` still
- * runs exactly as before, one PR at a time, in `openPrs` order. `post-review`
- * PRs are instead collected and run in a SECOND, bounded-concurrency phase
- * after the walk — a fixed-size pull pool keeps up to `Math.max(1, policy.reviewLanes)`
- * `postReview` calls in flight at once (the review lane's OWN budget as of W1-T1049 — no longer
- * `policy.dispatchLanes`) until the already-derived pending set is drained or a named admission
- * stop fires, each against
- * a DISTINCT `${taskId}@${headSha}` key claimed synchronously during the walk
- * (real mutual exclusion the single-threaded walk used to supply for free —
- * see `PriorActions.reviewDelivered`/`reviewRefused`'s docs). The lane count bounds simultaneous
- * reviewers, never total pass throughput. A provider-capacity stop or a false
- * `continueReviewAdmissions` leaves every unstarted head recoverable on the next pass — a ceiling,
- * never a target: a pass with zero eligible reviews starts zero lanes. `summary.actions` still
- * comes back in `openPrs` order regardless of which phase finalized each PR.
+ * W1-T473 — REVIEW CONCURRENCY: every disposition EXCEPT `post-review` runs as before, one PR at a
+ * time in `openPrs` order. `post-review` PRs run in a SECOND, bounded phase, each against a
+ * DISTINCT key claimed synchronously during the walk — the real mutual exclusion the
+ * single-threaded walk used to supply for free. The lane count is a CEILING, never a target, and
+ * `summary.actions` still returns in `openPrs` order whichever phase finalized each PR.
  */
 /**
- * W1-T1218 — THE REVIEW LANE'S ORDER, AS A PURE FUNCTION. Returns a NEW array ordered
- * OLDEST-FIRST, so the bounded workers pull entries that have waited longest instead of whichever
- * ones the enumeration happened to list first.
+ * W1-T1218 — THE REVIEW LANE'S ORDER, AS A PURE FUNCTION: a NEW array ordered OLDEST-FIRST, so
+ * bounded workers pull the entries that have waited longest.
  *
- * WHY THIS EXISTS. `runSweep` builds its pending set by `push` inside the per-PR walk, so
- * insertion order is enumeration order, and `openPrsRestArgs` asks for
- * `pulls?state=open&per_page=100` with no `sort` — GitHub answers `created:desc`. Cutting that by
- * position alone means the entries below the cut are the OLDEST ones, and "re-derived next pass"
- * re-derives the same set in the same order: while the queue is deeper than the budget, a PR
- * below the cut is deferred every pass, indefinitely. Sorting first makes that impossible by
- * construction — the oldest eligible review always takes a lane. The sibling enumeration in the
- * same module, `boardPrsRestArgs`, already states its order and calls it "LOAD-BEARING, not
- * cosmetic"; this was an omission on the other one, not a design.
+ * WHY: insertion order is enumeration order and GitHub answers the unsorted listing newest-first,
+ * so cutting by position puts the OLDEST entries below the cut and re-deriving reproduces the same
+ * order — a PR below the cut is deferred indefinitely. THE KEY IS `createdAt`, with `prNumber` as
+ * both tiebreak and substitute, which keeps the comparator TOTAL.
  *
- * THE KEY IS `createdAt`, WITH `prNumber` AS BOTH TIEBREAK AND SUBSTITUTE. `createdAt` is already
- * carried on {@link OpenPrView} (W1-T1201) and needs no new read. It is OPTIONAL, and its own doc
- * forbids reading an absent value as "just created" — so an entry whose timestamp is missing or
- * unparseable orders by `prNumber`, which is always present and exactly monotone with creation.
- * That keeps the comparator TOTAL and the resulting order deterministic for every input.
- *
- * THE COST, NAMED RATHER THAN SOLD. Creation time is not the same as waiting time: a long-lived
- * PR whose head was pushed ninety seconds ago can take a lane ahead of a younger PR whose head
- * has waited hours, and both shapes exist on live data. Head PUSH time would be the better
- * waiting key and {@link OpenPrView} does not carry it — only `headSha` — so sorting on it needs
- * a new field and is a separate change. This is a fairness imperfection; it is not a starvation
- * one, because no entry can sit below the cut on every pass once the set is ordered.
- *
- * INERT WHEN THE QUEUE IS SHALLOW (W1-T476's stability argument, applied here): when every
- * pending entry gets a lane, ordering them changes no outcome at all.
+ * THE COST, NAMED RATHER THAN SOLD: creation time is not waiting time, so a long-lived PR pushed
+ * moments ago can take a lane ahead of a younger one waiting hours. That is a fairness
+ * imperfection, not a starvation one, and it is INERT when every entry gets a lane.
  */
 export function orderPendingReviews<T extends { pr: Pick<OpenPrView, "createdAt" | "prNumber"> }>(
   jobs: readonly T[],
@@ -6322,10 +4192,9 @@ export async function runSweep(
   const now = deps.now ? deps.now() : Date.now();
   const log = deps.log ?? (() => {});
 
-  // Dedup is keyed on the ledger (it persists across sweeps even when the input
-  // is byte-identical) — the level-triggered idempotence mechanism. The SAME
-  // read also feeds {@link decideSweepArm}'s head-bound verdict/override
-  // recovery, so arming parity costs this pass no extra ledger read.
+  // Dedup is keyed on the ledger, which persists across sweeps even when the input is
+  // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
+  // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
   const prior = priorActionsFromLedger(ledgerLines);
   // W1-T1223 (design ii) — read fresh every pass, off the SAME ledger read above; never held in
@@ -6337,15 +4206,11 @@ export async function runSweep(
   // W1-T2345 — the SAME fresh-every-pass, ledger-only fold as `requeuedCheckKeys`/
   // `reaggregatedCiGateKeys` above. See `repeatDispositionStreaksFromLedger`'s own doc.
   const priorRepeatRuns = repeatDispositionStreaksFromLedger(ledgerLines);
-  // W1-T2620 (design i) — ONE read per pass, never per PR: see `SweepDeps.readMainTip`'s own doc
-  // for why this module still never calls `gh`/git directly. Omitted (the default) ⇒ `undefined`
-  // ⇒ `baseCausedReleaseTarget` stays `undefined` and the base-caused branch below is
-  // BYTE-IDENTICAL to before this task existed (criterion 6).
+  // W1-T2620 — ONE read per pass, never per PR; this module still never calls gh or git directly.
+  // Omitted, the base-caused branch below is BYTE-IDENTICAL to before this task existed.
   const mainTipSha = deps.readMainTip ? await deps.readMainTip() : undefined;
-  // W1-T2620 (design ii/iii) — AT MOST ONE base-caused PR selected for release THIS pass, oldest
-  // activity first, computed ONCE before the per-PR walk (never re-derived per PR — the SAME
-  // shape `selectUpdateBranchTarget` already uses for its own single-winner selection). See
-  // `selectBaseCausedRelease`'s own doc for the eligibility rule.
+  // W1-T2620 — AT MOST ONE base-caused PR selected for release THIS pass, oldest activity first,
+  // computed ONCE before the walk — the same single-winner shape `selectUpdateBranchTarget` uses.
   const baseCausedReleaseTarget =
     mainTipSha === undefined
       ? undefined
@@ -6377,17 +4242,12 @@ export async function runSweep(
   const repeatMeta = new Map<number, { streak: number; escalated: boolean }>();
 
   // ── W1-T931 COST-ANOMALY SENTINEL ───────────────────────────────────────────────────────────
-  // Hung off THIS pass, not a new src/run-task.ts verdict call site (design note vi): `runSweep`
-  // already read the whole ledger just above, and already runs on the daemon's cadence,
-  // drainage included — exactly the "cost-governance path" `checkCostGovernor`/
-  // `dailyCostCeilingUsd` already live on. Independent of `openPrs` (a zero-PR pass still checks
-  // the ledger for a class median outlier), guarded by `!deps.dryRun` like every other ledger
-  // write this module performs, and wrapped in the SAME per-pass throw containment the repair-
-  // filing capture below uses — a detector failure must never fail the reconciliation pass it
-  // shares a ledger read with. `recordCostAnomalies` itself is idempotent per run id (it reads
-  // this SAME `ledgerLines` for already-ledgered `cost.anomaly` rows before writing any more) and
-  // performs NO effect beyond that one ledger append — no dispatch, no merge, no worker control
-  // (design note v).
+  // Hung off THIS pass rather than a new call site: `runSweep` already read the whole ledger and
+  // already runs on the daemon's cadence — the cost-governance path the ceiling already lives on.
+  // Independent of `openPrs` (a zero-PR pass still checks for a class median outlier), guarded by
+  // `!deps.dryRun` like every other write here, and wrapped in the SAME throw containment: a
+  // detector failure must never fail the reconciliation pass it shares a ledger read with.
+  // `recordCostAnomalies` is idempotent per run id and performs no effect beyond one append.
   if (!deps.dryRun) {
     try {
       recordCostAnomalies(ledgerLines, deps.costAnomalyPolicy ?? loadDefaultCostAnomalyPolicy(), {
@@ -6400,16 +4260,13 @@ export async function runSweep(
   }
 
   const byDisposition = ZERO_COUNTS();
-  // Filled by INDEX, never pushed — post-review actions below are finalized
-  // out of pass order (concurrently, in a second phase), so `actions[i]` is
-  // the only way to keep the "in input order" invariant {@link
-  // SweepSummary.actions}'s own doc promises while still letting reviews run
-  // concurrently with each other.
+  // Filled by INDEX, never pushed — post-review actions are finalized out of pass order, so
+  // `actions[i]` is the only way to keep the "in input order" invariant {@link SweepSummary.actions}
+  // promises while still letting reviews run concurrently with each other.
   const actions: SweepAction[] = new Array(openPrs.length);
-  // W1-T905: this pass's OWN newly-appended `sweep.disposed` rows, mirrored here as they are
-  // written (never re-read from disk) so the repair-filing fold after the loop can see a
-  // recurrence that crossed threshold WITHIN this very pass — `ledgerLines` above was read
-  // before this pass's own writes and is never refreshed.
+  // W1-T905: this pass's OWN newly-appended rows, mirrored as they are written and never re-read
+  // from disk, so the repair-filing fold can see a recurrence that crossed threshold WITHIN this
+  // pass — `ledgerLines` was read before these writes and is never refreshed.
   const passDisposedRows: Array<Record<string, unknown>> = [];
   let actionsTaken = 0;
   // W1-T99: counted distinctly from actionsTaken/noneCount so a caller can tell
@@ -6421,32 +4278,20 @@ export async function runSweep(
   let staleBaseAttemptedPrNumber: number | undefined;
 
   // ── W1-T473/W1-T513 — REVIEW CONCURRENCY BUDGET STATE ──────────────────────
-  // `claimedReviewKeys` is the REAL mutual exclusion concurrency needs. A pool worker consults
-  // and updates it synchronously immediately before its `postReview` attempt, so two workers
-  // sharing a `${taskId}@${headSha}` key can never run that effect concurrently. Discovery alone
-  // does not claim: the pass-level `prior.reviewDelivered`/`prior.reviewRefused` snapshot may be
-  // stale by worker start, so `claimReview` also re-reads those durable outcomes under the claim.
-  //
-  // W1-T513: now the module-level {@link inFlightReviewKeys}, not a fresh
-  // per-call `Set` — a fresh Set only ever arbitrated between PRs inside THIS
-  // one call, never between two SEPARATE, genuinely concurrent `runSweep`
-  // calls (the daemon's full sweep racing a light-pass tick, or two
-  // overlapping light passes). Sharing the module-level Set closes that gap
-  // with no change to the exact-input exclusion boundary.
+  // `claimedReviewKeys` is the REAL mutual exclusion concurrency needs. A worker consults and
+  // updates it synchronously immediately before its `postReview` attempt, so two workers sharing
+  // a key can never run that effect concurrently. Discovery alone does not claim: the pass-level
+  // snapshot may be stale by worker start, so `claimReview` re-reads the durable outcomes under
+  // the claim. W1-T513 made it the module-level set, closing the gap a fresh per-call Set left
+  // between two genuinely concurrent `runSweep` calls, with no change to the exclusion boundary.
   const claimedReviewKeys = inFlightReviewKeys;
 
   /**
    * W1-T2771 — CLAIM AT ACTION TIME, THEN RE-READ THE OUTCOME UNDER THE CLAIM. The old placement
-   * added the key while the sequential disposition walk was still running. A later fix action
-   * could then hold a review candidate's key for minutes before the pool existed; every light
-   * pass saw a duplicate for that candidate while the candidate itself monopolised the light
-   * pass's scarce admission. No review was in flight.
-   *
-   * The fresh ledger read is the other half of moving the claim. A light pass may now review this
-   * input while an older full sweep is still walking. The older pass's top-of-function `prior`
-   * snapshot predates that verdict, so claiming without re-reading would spend a second review
-   * after the light pass released its mutex. The read happens synchronously after `add`, making
-   * the mutex plus durable outcome one atomic decision boundary inside this process.
+   * claimed during the sequential walk, so a later fix action could hold a review candidate's key
+   * for minutes with no review in flight while that candidate monopolised a scarce admission. The
+   * fresh read is the other half: reading synchronously after `add` makes the mutex and the durable
+   * outcome one atomic decision boundary.
    */
   function claimReview(
     reviewKey: string,
@@ -6488,17 +4333,12 @@ export async function runSweep(
   }
 
   /**
-   * W1-T2520 — CLAIM THIS PR'S FIX-DISPATCH KEY (or refuse), the fix-rung twin of the review-key
-   * claim just above (`claimedReviewKeys`) but for {@link inFlightFixKeys}, the OTHER lane that
-   * spends a worker. Refuses in exactly two shapes, both SYNCHRONOUS — no `await` ever separates
-   * the check from the claim, the same guarantee `claimedReviewKeys` gives: (1) a genuinely
-   * concurrent second claim for a key already in flight, or (2) — RE-DERIVED THE INSTANT THE
-   * CLAIM IS TAKEN, never trusted off the `OpenPrView` snapshot this whole pass started from —
-   * the strike count freshly re-read off the ledger has already reached the ceiling
-   * `fixCeilingInForce` computes for this PR. Either refusal releases nothing it never held; only
-   * a successful claim's `run` releases it, in a `finally`, once the guarded call SETTLES —
-   * success or throw alike — exactly the discipline `claimedReviewKeys`'s own release site (below)
-   * documents.
+   * W1-T2520 — CLAIM THIS PR'S FIX-DISPATCH KEY, or refuse: the fix-rung twin of the review claim
+   * above, for the OTHER lane that spends a worker. Refuses in exactly two shapes, both
+   * SYNCHRONOUS — no `await` ever separates the check from the claim: a genuinely concurrent
+   * second claim, or a strike count RE-READ off the ledger the instant the claim is taken (never
+   * trusted off this pass's snapshot) that has already reached {@link fixCeilingInForce}.
+   * Only a successful claim releases, in a `finally`, once the guarded call SETTLES either way.
    */
   function claimFixDispatch(
     pr: OpenPrView,
@@ -6511,10 +4351,9 @@ export async function runSweep(
       };
     }
     inFlightFixKeys.add(fixKey);
-    // READ UNDER THE CLAIM: a fresh ledger read, taken only now that the claim is held, so a
-    // fix.dispatch row a concurrent caller already wrote before this instant is counted here even
-    // though this pass's own `ledgerLines` (read at the TOP of runSweep, before any claim existed)
-    // predates it.
+    // READ UNDER THE CLAIM: taken only now the claim is held, so a `fix.dispatch` row a concurrent
+    // caller wrote before this instant is counted here even though this pass's own `ledgerLines`,
+    // read before any claim existed, predates it.
     const freshLines = readLedger(deps.ledgerPath);
     const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
     const freshStrikes = freshFixDispatchCount(freshLines, pr.taskId, pr.headSha);
@@ -6545,25 +4384,20 @@ export async function runSweep(
     pr: OpenPrView;
     reason: string;
     question: ClarificationQuestion | undefined;
-    // W1-T513: carried alongside the job so both release sites (deferred-to-next-pass,
-    // below, and the runNow lane below that) can release the SAME key they claimed —
-    // recomputing it from `pr` a second time would work too, but carrying it removes any
-    // chance of the two computations drifting apart.
+    // W1-T513: carried alongside the job so both release sites release the SAME key they claimed.
+    // Recomputing it from `pr` would work too, but carrying it removes any chance of the two
+    // computations drifting apart.
     reviewKey: string;
   }> = [];
 
   /**
-   * The tail every disposition shares once its `acted`/`actionError`/
-   * `standDownReason` are known — factored out so the main walk (synchronous
-   * dispositions) and the concurrent review batch (below) ledger and log
-   * IDENTICALLY. Unconditional counting (`actionsTaken`/`actionsFailed`)
-   * matches the original inline placement exactly: a deduped/wait PR reaches
-   * here with `acted:false` and no `actionError`, so neither counter moves.
+   * The tail every disposition shares once `acted`, `actionError` and `standDownReason` are known
+   * — factored out so the synchronous walk and the concurrent review batch ledger and log
+   * IDENTICALLY. Unconditional counting matches the original inline placement exactly: a deduped
+   * PR reaches here with `acted:false` and no error, so neither counter moves.
    *
-   * W1-T1061: `armOutcome` rides alongside `standDownReason` rather than only inside it —
-   * `standDownReason` stays the human sentence (`"arm outcome: no-task-id"`), but a caller
-   * counting outcomes from this lane no longer has to split that sentence on a colon to do
-   * it; see `arm_outcome` on the ledgered `disposedLine` below.
+   * W1-T1061: `armOutcome` rides alongside `standDownReason` rather than only inside it, so a
+   * caller counting outcomes need not split that sentence on a colon.
    */
   function finalizeDisposition(
     index: number,
@@ -6580,10 +4414,9 @@ export async function runSweep(
     // W1-T2231: {@link SweepAction.spent}'s own doc — `undefined` for every call site except the
     // main per-PR walk's "blocked-fixable"/"conflicted" arms below.
     spent: boolean | undefined,
-    // W1-T2620 (design v): the release marker riding the EXISTING `sweep.disposed` step — see
-    // `lastBaseCausedTipFromLedger`'s own doc. `undefined` for every call site except the main
-    // per-PR walk's "blocked-fixable" arm, and even there ONLY when this pass classified the PR
-    // base-caused AND a main tip was actually read (`SweepDeps.readMainTip` wired).
+    // W1-T2620: the release marker riding the EXISTING `sweep.disposed` step. `undefined` for
+    // every call site except the walk's "blocked-fixable" arm, and even there only when this pass
+    // classified the PR base-caused AND a main tip was actually read.
     baseCausedMainTipSha: string | undefined = undefined,
   ): void {
     if (standDownReason) {
@@ -6612,24 +4445,21 @@ export async function runSweep(
       reason,
       deduped,
       ...(actionError ? { action_error: actionError } : {}),
-      // W1-T254: the exact ambiguity that misread a dry-run line as a daemon
-      // action during the #707 diagnosis — THIS line (unlike the ledgered
-      // `sweep.disposed` below) fires unconditionally through the injected
-      // `log`, which the real wiring persists to the SAME ledger regardless
-      // of `--dry-run`. Tagged so a preview pass is never mistaken for one.
+      // W1-T254: THIS line fires unconditionally through the injected `log`, which the real wiring
+      // persists to the SAME ledger regardless of `--dry-run`. Tagged so a preview pass is never
+      // mistaken for a daemon action — the exact ambiguity that misread one during the #707
+      // diagnosis.
       ...(deps.dryRun ? { dry_run: true } : {}),
     });
 
-    // One ledger line per disposition (the INVARIANT). Skipped under --dry-run —
-    // a preview must leave no trace, so a real run afterward still acts. The
-    // rendered question rides along whenever one exists (W1-T78) — an
-    // UNANSWERED question stays ledgered on every subsequent sweep, even once
-    // `acted` goes false (deduped: no repeat escalate()).
+    // One ledger line per disposition (the INVARIANT). Skipped under --dry-run, because a preview
+    // must leave no trace so a real run afterwards still acts. The rendered question rides along
+    // whenever one exists: an UNANSWERED question stays ledgered on every subsequent sweep, even
+    // once `acted` goes false.
     if (!deps.dryRun) {
-      // W1-T2345 — this PASS's own repeat-streak figures, computed once per PR earlier in the
-      // walk (see `repeatMeta`'s own doc) and read back here by `index` so all four
-      // `finalizeDisposition` call sites (including the two reached only from the deferred
-      // post-review batch) carry it with no change to their own signatures.
+      // W1-T2345 — this PASS's own repeat-streak figures, computed once per PR earlier in the walk
+      // and read back by `index`, so all four `finalizeDisposition` call sites carry it with no
+      // change to their own signatures.
       const repeat = repeatMeta.get(index);
       const disposedLine = {
         run_id: deps.runId,
@@ -6644,36 +4474,29 @@ export async function runSweep(
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason ? { stand_down_reason: standDownReason } : {}),
-        // W1-T2345: `repeat_streak` rides every row (grep/test-provable, and cheap — it is
-        // always in hand by this point) so `repeatDispositionStreaksFromLedger`'s NEXT-pass fold
-        // never has to guess it back out of row order; `repeat_escalated` is present ONLY on the
-        // one pass that actually fired the one-time escalation (see that fold's own doc for why
-        // this is the field the "stays quiet until the head moves" guarantee is built on).
+        // W1-T2345: `repeat_streak` rides every row — always in hand by this point — so the next
+        // pass's fold never has to guess it back out of row order. `repeat_escalated` is present
+        // ONLY on the pass that actually fired the one-time escalation, which is the field the
+        // "stays quiet until the head moves" guarantee is built on.
         ...(repeat !== undefined ? { repeat_streak: repeat.streak } : {}),
         ...(repeat?.escalated ? { repeat_escalated: true } : {}),
-        // W1-T1061: the FIELD sibling to `stand_down_reason`'s prose — present whenever
-        // `deps.arm` returned a concrete outcome for THIS pr this pass (armed or not),
-        // absent whenever no arm was even attempted (every other disposition, and a
-        // mergeable PR that stood down before reaching `deps.arm` at all). This is the
-        // same value `standDownReason`'s `arm outcome: ${armOutcome}` sentence names, so
-        // the two can never drift apart — one write site, read twice.
+        // W1-T1061: the FIELD sibling to `stand_down_reason`'s prose — present whenever `deps.arm`
+        // returned a concrete outcome this pass, armed or not, and absent when no arm was
+        // attempted. Same value the sentence names, so the two cannot drift: one write, read twice.
         ...(armOutcome ? { arm_outcome: armOutcome } : {}),
-        // W1-T2231: present ONLY when the "blocked-fixable"/"conflicted" arm below captured a
-        // concrete `dispatchFixSpent` verdict for THIS call — see `SweepAction.spent`'s own doc.
-        // `dueRepairFilings` (below) reads this field, never `acted`, to decide whether a
-        // dispatch-based repair surface's row is an actual repair.
+        // W1-T2231: present ONLY when the dispatch arms captured a concrete verdict for THIS call.
+        // `dueRepairFilings` reads this field, never `acted`, to decide whether a dispatch-based
+        // repair surface's row is an actual repair.
         ...(spent !== undefined ? { spent } : {}),
         ...(question ? { question: question.question } : {}),
-        // W1-T2620 (design v) — rides this EXISTING step rather than minting a fourth ledger
-        // signal: present ONLY when this pass classified the PR base-caused AND a main tip was
-        // actually read (`SweepDeps.readMainTip` wired) — see `lastBaseCausedTipFromLedger`'s own
-        // doc for the fold that reads it back next pass.
+        // W1-T2620 — rides this EXISTING step rather than minting a fourth ledger signal. Present
+        // ONLY when this pass classified the PR base-caused AND a main tip was read; see
+        // {@link lastBaseCausedTipFromLedger} for the fold that reads it back next pass.
         ...(baseCausedMainTipSha !== undefined ? { main_tip_sha: baseCausedMainTipSha } : {}),
       };
       appendLine(deps.ledgerPath, disposedLine);
-      // W1-T905: mirrored in-memory, with THIS PASS'S OWN `ts` (never re-read off disk — see
-      // `passDisposedRows`'s own doc) — `appendLine`/`appendLedger` stamp their own write-time
-      // `ts` on the real ledger line, which this never touches; the copy below exists solely so
+      // W1-T905: mirrored in-memory with THIS PASS'S OWN `ts`, never re-read off disk. The real
+      // append stamps its own write-time `ts`, which this never touches; the copy exists solely so
       // `dueRepairFilings` can see a same-pass recurrence without a second ledger read.
       passDisposedRows.push({ ...disposedLine, ts: new Date(now).toISOString() });
     }
@@ -6684,36 +4507,17 @@ export async function runSweep(
 
   // ── PER-PASS HEARTBEAT, WRITTEN BEFORE THE LOOP ────────────────────────────────────────────
   // A BLIND SWEEP AND A QUIET FLEET ARE INDISTINGUISHABLE without this. `sweep.disposed` writes a
-  // decision for every PR every tick, so its ABSENCE across a window is the only signal today —
-  // and absence is exactly what a healthy quiet period looks like. Measured on 2026-08-05, a day
-  // the daemon was continuously up: `sweep.disposed` had gaps of 66.3, 53.0 and 46.7 minutes that
-  // were entirely healthy (nothing open to dispose), which is why no threshold over that step can
-  // work.
+  // decision per PR per tick, so its ABSENCE is the only other signal — and absence is exactly
+  // what a healthy quiet period looks like, which is why no threshold over that step can work.
   //
-  // WHY `sweep.summary` IS NOT ALREADY THIS. It fires on an EMPTY pass (there is no early return
-  // between here and it, and the ledger carries more summaries than disposeds), but it sits AFTER
-  // the loop, so a pass that dies mid-way writes nothing at all. That is not hypothetical: the
-  // 13:06:57 -> 13:30:28 window on 2026-08-05 is a 23.5-minute gap in `sweep.summary` that
-  // CONTAINS four `sweep.disposed` rows — passes were starting and not finishing, and PR #1348
-  // opened and closed entirely inside it. `deriveDisposition` runs at the top of each iteration,
-  // OUTSIDE the per-action try/catch below, so a throw there escapes `runSweep` entirely.
+  // `sweep.summary` is not already this: it sits AFTER the loop, so a pass that dies mid-way
+  // writes nothing at all. POSITION IS THE WHOLE POINT — written here, a pass that throws mid-loop
+  // still leaves this row, so "started but never summarised" becomes a legible state.
   //
-  // POSITION IS THE WHOLE POINT: written here, a pass that throws mid-loop still leaves this row,
-  // so "started but never summarised" becomes a legible state instead of silence.
-  //
-  // `enumerated` is the count, not a bare pulse — a pass that enumerated 12 and summarised nothing
-  // is a different failure from a pass that enumerated 0 and summarised cleanly, and only the count
-  // separates them. It is deliberately the ONLY count here: how many were DISPOSITIONED cannot be
-  // known before the loop runs, and `sweep.summary`'s own `total` already carries it for any pass
-  // that completes. The pair — this row present, a summary absent — is the mid-pass-death signal.
-  //
-  // REGISTERED in RENDER_RELEVANT_LEDGER_STEPS (ledger.ts), NOT DECISION_RELEVANT_LEDGER_STEPS: the
-  // decision set is the NEVER-ROTATED core, and this row is recency-bounded like the rest of that
-  // render-relevant category, so it rotates on that window rather than being kept forever. The
-  // reader is `judgeSweepLiveness`, the `sweep-liveness` arm in `src/lib/doctor.ts` (W1-T1236),
-  // which pairs this row with the `sweep.summary` that should follow it, by time order, to detect a
-  // pass that died mid-loop. The registration that made this row render-relevant landed in W1-T1237,
-  // which is the discipline `test/ledger-rotation.test.ts` enforces.
+  // `enumerated` is deliberately the ONLY count: how many were dispositioned cannot be known
+  // before the loop runs. The pair — this row present, a summary absent — is the mid-pass-death
+  // signal `judgeSweepLiveness` reads. Registered RENDER_RELEVANT, not DECISION_RELEVANT, so it
+  // rotates on the recency window rather than being kept forever (W1-T1237).
 
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
@@ -6722,12 +4526,9 @@ export async function runSweep(
     const { disposition, reason } = deriveDisposition(pr, policy, now);
     byDisposition[disposition]++;
 
-    // W1-T2345 — THE UNBOUNDED-IDENTICAL-DISPOSITION COUNTER, computed for EVERY disposition
-    // (never only blocked-ambiguous) and BEFORE the per-disposition dedup/action logic below —
-    // this bounds the DERIVATION itself, orthogonal to whatever per-head dedup (armed/fixed/
-    // escalated/closed) a specific disposition's own gated action already has. See
-    // `repeatDispositionStreaksFromLedger`'s own doc for the (disposition, head_sha) key and why
-    // it excludes `reason`'s prose.
+    // W1-T2345 — computed for EVERY disposition, never only blocked-ambiguous, and BEFORE the
+    // per-disposition dedup below: this bounds the DERIVATION itself, orthogonal to whatever
+    // per-head dedup a specific disposition's own gated action already has.
     const priorRepeatRun = priorRepeatRuns.get(pr.prNumber);
     const repeatRunContinues =
       priorRepeatRun !== undefined && priorRepeatRun.headSha === pr.headSha && priorRepeatRun.disposition === disposition;
@@ -6735,54 +4536,38 @@ export async function runSweep(
     const repeatAlreadyEscalated = repeatRunContinues && priorRepeatRun ? priorRepeatRun.escalated : false;
     const repeatBoundTripped = repeatStreak >= policy.repeatDispositionBound;
     let repeatEscalatedNow = false;
-    // Skipped entirely under --dry-run (a preview must leave no trace — the same rule
-    // `finalizeDisposition`'s own `sweep.disposed` write already follows) and whenever a prior
-    // pass already fired this run's escalation (`repeatAlreadyEscalated`) — the "stays
-    // quiet until the head moves" half of the acceptance criteria.
+    // Skipped entirely under --dry-run — a preview must leave no trace — and whenever a prior pass
+    // already fired this run's escalation, which is the "stays quiet until the head moves" half of
+    // the acceptance criteria.
     if (repeatBoundTripped && !repeatAlreadyEscalated && !deps.dryRun) {
       try {
-        // W1-T2381: THE LEDGER ROW IS THE WHOLE OUTPUT — no `deps.escalate()` call.
-        //
-        // W1-T2345's own rationale refused the issue surface in terms ("a second queue nobody
-        // drains is not an answer and this task refuses to file one. The escalation surface is
-        // THE DIGEST"), and its build routed the trip to `deps.escalate()` anyway. MEASURED over
-        // the eight trips that produced: ONE `escalation.issue_opened` and SEVEN
-        // `escalation.deduped` comments landing on issues titled for a DIFFERENT cause, because
-        // the dedup key is task+head+cause and never the repeat condition. `escalation.deduped`
-        // has exactly one consumer in `src/` — its own writer — so seven of eight trips reached
-        // no reader at all.
-        //
-        // THE SURFACE IS `digest.ts`, which reads this row directly (#3085) and therefore reaches
-        // 8 in 8. It consumes exactly the three fields written below.
+        // W1-T2381: THE LEDGER ROW IS THE WHOLE OUTPUT — no `deps.escalate()` call. W1-T2345's own
+        // rationale refused the issue surface in terms ("the escalation surface is THE DIGEST")
+        // and its build routed the trip there anyway; the dedup key is task+head+cause and never
+        // the repeat condition, so the comments landed on issues titled for a different cause.
+        // THE SURFACE IS `digest.ts`, which reads this row directly and consumes exactly the three
+        // fields written below. // Why: measured over eight trips — docs/forensics/sweep.md.
         log("sweep.repeat_escalated", { pr_number: pr.prNumber, disposition, streak: repeatStreak, head_sha: pr.headSha });
         repeatEscalatedNow = true;
       } catch (e) {
-        // W1-T254 per-PR throw containment, KEPT after W1-T2381 removed the escalate call: the
-        // remaining `log` is a real ledger append and can still throw on I/O (ENOSPC, EACCES),
-        // and one PR's failed write must never take the whole pass. `repeatEscalatedNow` stays
-        // false, so THIS attempt is not recorded as having fired — the next pass (streak now one
-        // higher) tries again rather than silently forgetting the notification forever.
+        // W1-T254 per-PR throw containment, KEPT after the escalate call was removed: the
+        // remaining `log` is a real ledger append and can still throw on I/O, and one PR's failed
+        // write must never take the whole pass. `repeatEscalatedNow` stays false, so the next pass
+        // tries again rather than silently forgetting the notification forever.
         log("sweep.repeat_escalate_failed", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
       }
     }
     repeatMeta.set(prIndex, { streak: repeatStreak, escalated: repeatEscalatedNow });
 
-    // W1-T196: a blocked-ambiguous PR that never resolved a task id is a
-    // KNOWN, non-emergency state ONLY when it is POSITIVELY a plan-filing PR
-    // (`isPlanFiling` — see its own doc comment) — a filing PR carries no
-    // trailer BY DESIGN, so there is no task to ask about and no
-    // operator-decidable question (the #440 fixture: "[BLOCKED] UNKNOWN: PR
-    // #439 needs a clarification" — there is no clarification to give). An
-    // unattributed PR that is NOT flagged plan-filing still escalates below,
-    // unchanged: that is a genuine attribution defect (a missing/malformed
-    // trailer on an IMPLEMENTING PR), not a designed gap, and stays surfaced.
+    // W1-T196: a blocked-ambiguous PR with no task id is a KNOWN, non-emergency state ONLY when it
+    // is POSITIVELY a plan-filing PR — one carries no trailer BY DESIGN, so there is no task to ask
+    // about and no operator-decidable question. An unattributed PR NOT flagged plan-filing still
+    // escalates, unchanged: that is a genuine attribution defect, not a designed gap.
     const unattributableFiling = disposition === "blocked-ambiguous" && !pr.taskId && pr.isPlanFiling === true;
 
-    // W1-T78: render the clarification question up front for blocked-ambiguous
-    // PRs — it is ledgered EVERY sweep (so an unanswered question stays
-    // visible), even on a deduped sweep where `escalate` itself does not fire.
-    // Skipped for an unattributable filing PR (above): there is no task-bound
-    // question to render, only a stand-down.
+    // W1-T78: render the question up front for blocked-ambiguous PRs — it is ledgered EVERY sweep
+    // so an unanswered question stays visible, even on a deduped pass where `escalate` never
+    // fires. Skipped for an unattributable filing PR: there is only a stand-down to record.
     const question =
       disposition === "blocked-ambiguous" && !unattributableFiling
         ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? [])
@@ -6790,64 +4575,52 @@ export async function runSweep(
 
     // Is this action already true (deduped)? Keyed per disposition.
     let alreadyDone: boolean;
-    // W1-T1000002: set ONLY by the "mergeable" case below, ONLY when an operator hold stands
-    // over a PR GitHub ALREADY reports armed — the converging withdrawal fires unconditionally
-    // (never gated on `acted`, which a held PR always has false) so a standing arm this lane did
-    // not place is withdrawn on the very pass that observes it, not merely refused going forward.
+    // W1-T1000002: set ONLY when an operator hold stands over a PR GitHub ALREADY reports armed.
+    // The withdrawal fires unconditionally, never gated on `acted` (which a held PR always has
+    // false), so a standing arm this lane did not place is withdrawn on the pass that observes it.
     let holdToWithdraw: AutomergeHold | undefined;
-    // W1-T1110: set ONLY by the "blocked-fixable"/"conflicted" case below, when a PRIOR
-    // dispatch against this exact head is still deduping (`prior.fixed.has(...)` true AND its
-    // rung has not stalled out — see `fixRungStalledWithoutNewHead`'s own doc). Named here, not
-    // just silently stood down (rationale (5)): the light-pass arm one branch below already sets
-    // `standDownReason` for its own stand-down, and this arm previously did not, which is the
-    // defect two readers independently misread as an unwired action path.
+    // W1-T1110: set ONLY when a PRIOR dispatch against this exact head is still deduping and its
+    // rung has not stalled out. Named here rather than silently stood down: the light-pass arm one
+    // branch below already set a reason and this arm did not, which is the defect two readers
+    // independently misread as an unwired action path.
     let dedupStandDownReason: string | undefined;
     switch (disposition) {
       case "mergeable": {
-        // PREFER OBSERVED STATE: GitHub's own `autoMergeArmed` is the authority for
-        // "already armed". The sweep's own memory is only a fallback, and now sha-keyed so a
-        // new head re-earns the attempt rather than being deduped on a stale success.
+        // PREFER OBSERVED STATE: GitHub's own `autoMergeArmed` is the authority for "already
+        // armed"; the sweep's memory is a fallback, now sha-keyed so a new head re-earns the
+        // attempt rather than being deduped on a stale success.
         //
-        // W1-T970: a head the risk judge escalated is refused HERE, in `alreadyDone`, NOT in
-        // this rule's own `when` predicate and NOT in the merge path — see PriorActions.riskRefused's
-        // doc. Marking it `alreadyDone` (rather than a distinct branch) gives it the SAME
-        // non-action shape every other dedup in this switch already has: `acted:false`, no
-        // escalation, no strike, re-derived whole next pass. It clears on a NEW head sha (the
-        // key itself, checked first so a fresh head never pays for a stale override lookup) OR
-        // an explicit operator override — reusing `cappedOverrideFromLedger` VERBATIM (the SAME
-        // verb, the SAME head-bound read-back the CAPPED-verdict override already uses; design
-        // (v) is explicit that this is not a second override vocabulary).
+        // W1-T970: a head the risk judge escalated is refused HERE, in `alreadyDone`, never in the
+        // rule's `when` and never in the merge path. That gives it the SAME non-action shape every
+        // other dedup has: no escalation, no strike, re-derived whole next pass. It clears on a NEW
+        // head sha or an explicit operator override, reusing the existing verb — not a second
+        // override vocabulary.
         const riskRefusedKey = `${pr.prNumber}@${pr.headSha}`;
         const refused =
           prior.riskRefused.has(riskRefusedKey) &&
           !(pr.taskId !== undefined && cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha) !== undefined);
-        // W1-T1000002: A HOLD IS A LEDGERED REFUSAL, NOT A BARE DISARM — see review.ts's
-        // `automergeHoldFromLedger` doc. Deliberately NEVER sha-keyed (unlike `refused` above):
-        // a hold binds the PR, not any one head, so a push while held changes nothing here.
-        // `acted:false` follows from `alreadyDone:true` exactly like `refused` — no dedup key is
-        // seeded, so the pass re-derives whole the moment an operator releases it (design (iii)/
-        // (vii): no separate resume path, the SAME property `refused`'s W1-T970 precedent gives).
+        // W1-T1000002: A HOLD IS A LEDGERED REFUSAL, NOT A BARE DISARM. Deliberately NEVER
+        // sha-keyed, unlike `refused` above: a hold binds the PR, not any one head, so a push
+        // while held changes nothing. No dedup key is seeded, so the pass re-derives whole the
+        // moment an operator releases it — no separate resume path.
         const hold = automergeHoldFromLedger(ledgerLines, pr.prNumber);
         if (hold && pr.autoMergeArmed === true) holdToWithdraw = hold;
         const armedByGitHub = pr.autoMergeArmed === true;
         const armedByPriorPass = !armedByGitHub && prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
         alreadyDone = armedByGitHub || armedByPriorPass || refused || hold !== undefined;
-        // W1-T1116: NAME WHICH DISJUNCT FIRED — this switch previously left every one of these
-        // three silent (rationale (3)/(4)), the exact gap the "blocked-fixable"/"conflicted" arm
-        // above (W1-T1110) already closed for its own dedup, and the ONLY reason two readers
-        // misdiagnosed a correctly-held #2432 as a never-clearing dedup in one night (rationale
-        // (5)). Order matches the `||` above: an operator reading the row learns the FIRST true
-        // disjunct, exactly the one that actually short-circuited `alreadyDone`. W1-T1000002 adds
-        // the hold as a fourth disjunct and a fourth reason, in the same order as the `||`.
+        // W1-T1116: NAME WHICH DISJUNCT FIRED. This switch left all of them silent, the same gap
+        // the fix arm above already closed for its own dedup, and the only reason two readers
+        // misdiagnosed a correctly-held #2432 as a never-clearing dedup in one night. Order matches
+        // the `||` above, so a reader learns the FIRST true disjunct — the one that actually
+        // short-circuited `alreadyDone`.
         if (armedByGitHub) {
           dedupStandDownReason = "auto-merge already armed (observed on GitHub) — nothing to re-arm";
         } else if (armedByPriorPass) {
           dedupStandDownReason = `auto-merge already armed by a prior sweep pass at this head (${pr.headSha.slice(0, 7)})`;
         } else if (refused) {
-          // Design (i): carry the SAME `issue_url` the sibling `risk_judge.escalated` row
-          // already holds (rationale (2)/(7)) — the pointer exists one row away; this only
-          // moves it to the row a reader reaches first. Never widens the override: naming the
-          // escape is not taking it (design (v)).
+          // Carry the SAME `issue_url` the sibling `risk_judge.escalated` row already holds: the
+          // pointer exists one row away, and this only moves it to the row a reader reaches first.
+          // Never widens the override — naming the escape is not taking it.
           const issueUrl = prior.riskRefused.get(riskRefusedKey);
           dedupStandDownReason = issueUrl
             ? `risk judge escalated this head, no operator override recorded — see ${issueUrl}`
@@ -6862,14 +4635,11 @@ export async function runSweep(
         // W1-T106: same dedup set as blocked-fixable — see priorActionsFromLedger.
         const dispatchedThisHead = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`);
         // W1-T1110 — RE-ARM A STALLED DISPATCH: `dispatchedThisHead` records only that a fix was
-        // DISPATCHED against this head, never that it succeeded (rationale (3)). If the ledger
-        // shows that dispatch's own rung already ENDED without landing a new head (a real review
-        // still failing, or CI never green — `fixRungStalledWithoutNewHead`), treating it as
-        // still "already done" would dedup this PR against a head nothing will ever move again
-        // (rationale (4)) — so it does NOT suppress this pass; the strike cap (unchanged, design
-        // (iv)) still bounds however many more attempts follow. A dispatch that instead resolved
-        // (landed a working push) is never read as stalled, so it keeps suppressing a second
-        // attempt on this same, now-stale head (acceptance 3).
+        // DISPATCHED, never that it succeeded. If the ledger shows that rung already ENDED without
+        // landing a new head, treating it as "already done" would dedup this PR against a head
+        // nothing will ever move again — so it does NOT suppress this pass, and the strike cap
+        // still bounds whatever follows. A dispatch that RESOLVED is never read as stalled, so it
+        // keeps suppressing a second attempt on this same, now-stale head.
         alreadyDone = dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
         if (alreadyDone) {
           dedupStandDownReason =
@@ -6880,9 +4650,8 @@ export async function runSweep(
       }
       case "stale":
         alreadyDone = prior.closed.has(pr.prNumber);
-        // W1-T2427: NAME THE DEDUP. Same shape the `mergeable` (W1-T1116) and
-        // `blocked-fixable`/`conflicted` (W1-T1110) arms already use — the fact is already in
-        // hand (this very membership test), so the sentence costs no read and no ledger line.
+        // W1-T2427: NAME THE DEDUP, the same shape the sibling arms use. The fact is already in
+        // hand from this very membership test, so the sentence costs no read and no ledger line.
         // This arm has been QUIET since 2026-08-17, which is not the same as fixed: the code was
         // unchanged, so it went silent again the next time a closed PR was deduped.
         if (alreadyDone) {
@@ -6916,31 +4685,23 @@ export async function runSweep(
         }
         break;
       case "post-review": {
-        // W1-T254: OUTCOME-keyed — see PriorActions.reviewDelivered/reviewRefused's docs. Keyed
-        // by taskId (never prNumber — review.posted/review.post_refused carry
-        // no PR number, only the taskId the review lane itself resolved,
-        // matching `lastPostedReviewStatusFromLedger`'s established key).
+        // W1-T254: OUTCOME-keyed, by taskId rather than prNumber — the review rows carry no PR
+        // number, only the taskId the lane resolved.
         //
-        // W1-T1213: a DELIVERED verdict suppresses this head forever, exactly as before. A
-        // REFUSED attempt also suppresses — UNLESS `priorActionsFromLedger` excluded it from
-        // `reviewRefused` as the stale "PR is already closed" refusal, in which case reaching
-        // this very check already proves the PR is open again, and the head is offered to the
-        // post-review lane once more (which re-tests `decideReviewStatusPost` fresh — see that
-        // set's own doc; this clears the dedup, it does not post a verdict or arm anything).
+        // W1-T1213: a DELIVERED verdict suppresses this head forever, as before. A REFUSED attempt
+        // also suppresses UNLESS it was the stale "PR is already closed" refusal, in which case
+        // reaching this check already proves the PR is open again. That clears the dedup; it does
+        // not post a verdict or arm anything.
         const reviewKey = reviewOutcomeKeyForPr(pr);
         const reviewDelivered = prior.reviewDelivered.has(reviewKey);
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
         const retryBackoff = retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now);
         alreadyDone = reviewDelivered || reviewDurablyRefused || retryBackoff !== undefined;
-        // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT LOOK IDENTICAL TODAY (W1-T1110's
-        // criterion: not "did it decline" but "could a reader otherwise tell it from a broken
-        // action path"). An `acted:false` post-review row with no reason reads the same whether
-        // this dedup fired, `deps.postReview` was never wired, the light-pass admission was lost
-        // to another PR (`selectReviewAdmission`, W1-T526), or the pass was a dry run. Only the
-        // first of those is this arm, and only this arm can say so — the other three name
-        // themselves elsewhere in the flow. Naming the KEY and WHICH set matched is what let
-        // W1-T2426 fail to attribute PR #3152's nine stand-downs: the mechanism was confirmed
-        // independently and the instance could not be, from these rows.
+        // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT OTHERWISE LOOK IDENTICAL: this
+        // dedup firing, `deps.postReview` never being wired, the light-pass admission being lost
+        // to another PR, or a dry run. Only the first is this arm, and only this arm can say so;
+        // the other three name themselves elsewhere. Naming the KEY and WHICH set matched is what
+        // was missing when an earlier task could confirm the mechanism but not the instance.
         if (alreadyDone) {
           dedupStandDownReason = reviewDelivered
             ? `a verdict was already DELIVERED for ${reviewKey} — the re-post is deduped by this ` +
@@ -6953,19 +4714,15 @@ export async function runSweep(
         break;
       }
       case "wait":
-        // W1-T114: WAIT never gates an effect — there is nothing to dispatch,
-        // only time to let pass. Forcing `alreadyDone` true (rather than
-        // adding a no-op case to the action switch below) keeps `acted`
-        // false unconditionally, so the ledger line always reads
-        // `acted:false` — a wait is re-derived and re-ledgered every pass,
-        // never counted as an action taken.
+        // W1-T114: WAIT never gates an effect — there is nothing to dispatch, only time to let
+        // pass. Forcing `alreadyDone` true, rather than adding a no-op case to the action switch,
+        // keeps `acted` false unconditionally, so a wait is re-derived and re-ledgered every pass
+        // and never counted as an action taken.
         alreadyDone = true;
-        // W1-T1116 (design iv) — the fourth silent guard: forcing `alreadyDone` true
-        // unconditionally is BY DESIGN here (unlike the other three disjuncts, there is no
-        // "refusal" to distinguish from), but the row still read `acted:false` with nothing
-        // saying why. `reason` (destructured above from `deriveDisposition`) already narrates
-        // exactly what is being waited on — reused verbatim rather than inventing a second
-        // sentence that could drift from it.
+        // W1-T1116 — the fourth silent guard. Forcing `alreadyDone` true is BY DESIGN here, since
+        // unlike the other disjuncts there is no refusal to distinguish, but the row still read
+        // `acted:false` with nothing saying why. `reason` already narrates what is being waited
+        // on, reused verbatim rather than inventing a second sentence that could drift from it.
         dedupStandDownReason = reason;
         break;
       default:
@@ -6973,9 +4730,8 @@ export async function runSweep(
     }
 
     // W1-T2789: a prior blocked-ambiguous escalation is not a successful base refresh. The
-    // exact-path release has its own `(PR, head, main tip)` success key, so it must remain
-    // retryable after a read/write failure even when the ordinary escalation action was already
-    // recorded for this head.
+    // exact-path release has its own success key, so it must remain retryable after a read or write
+    // failure even when the ordinary escalation was already recorded for this head.
     if (staleBaseReleaseTarget?.pr.prNumber === pr.prNumber) {
       alreadyDone = false;
       dedupStandDownReason = undefined;
@@ -6985,54 +4741,39 @@ export async function runSweep(
     // The dep-review lane's decision for THIS pass (dep-review disposition only)
     // — ledgered so priorActionsFromLedger can tell terminal from hold.
     let depReviewOutcome: string | undefined;
-    // W1-T177: set ONLY when the terminal-state check below stood the
-    // blocked-fixable dispatch down — distinct from `alreadyDone` (dedup)
-    // and from `deps.dryRun` (preview), so the disposed line can name WHY
-    // `acted` is false without conflating the three. W1-T1110: seeded from
-    // `dedupStandDownReason` (set above, in the "blocked-fixable"/"conflicted" arm of the
-    // `alreadyDone` switch) so a still-deduped fix dispatch NAMES ITSELF on this same field —
-    // the light-pass arm's exact shape, one branch away — rather than standing down silently.
+    // W1-T177: set ONLY when the terminal-state check stood the dispatch down — distinct from
+    // `alreadyDone` (dedup) and `deps.dryRun` (preview), so the disposed line can name WHY `acted`
+    // is false without conflating the three. W1-T1110 seeds it from `dedupStandDownReason` so a
+    // still-deduped fix dispatch NAMES ITSELF on this same field rather than standing down
+    // silently — the light-pass arm's exact shape, one branch away.
     let standDownReason: string | undefined = dedupStandDownReason;
-    // W1-T1061: the FIELD twin of `standDownReason`'s prose, set ONLY when the "mergeable"
-    // case below actually calls `deps.arm(pr)` and gets a concrete (non-void) outcome back —
-    // every other disposition, and a mergeable PR that stands down in `decideSweepArm` before
-    // ever reaching `deps.arm`, leaves this `undefined` so `finalizeDisposition` writes no
-    // `arm_outcome` field at all (acceptance: "a disposal with no arm attempt carries no
-    // outcome field").
+    // W1-T1061: the FIELD twin of `standDownReason`'s prose, set ONLY when the mergeable case
+    // actually calls `deps.arm` and gets a concrete outcome back. Every other disposition, and a
+    // mergeable PR standing down before reaching `deps.arm`, leaves this `undefined` so no
+    // `arm_outcome` field is written at all.
     let armOutcome: ArmOutcomeName | undefined;
-    // W1-T2231: set ONLY by the "blocked-fixable"/"conflicted" cases below when
-    // `deps.dispatchFix` returns a concrete (non-void) verdict — see `SweepAction.spent`'s own
-    // doc. Every other disposition, and a dispatch whose fake/real wiring still returns nothing,
-    // leaves this `undefined` so `finalizeDisposition` writes no `spent` field at all.
+    // W1-T2231: set ONLY by the dispatch cases when `deps.dispatchFix` returns a concrete verdict.
+    // Every other disposition, and a dispatch whose wiring returns nothing, leaves this
+    // `undefined` so no `spent` field is written at all.
     let spent: boolean | undefined;
-    // W1-T2620 (design v): set ONLY by the "blocked-fixable" case's base-caused branch below,
-    // when this pass classified the PR base-caused AND a main tip was actually read — see
-    // `SweepDeps.readMainTip`'s own doc. Every other disposition leaves this `undefined` so
-    // `finalizeDisposition` writes no `main_tip_sha` field at all.
+    // W1-T2620: set ONLY by the base-caused branch, when this pass classified the PR base-caused
+    // AND a main tip was actually read. Every other disposition leaves this `undefined` so no
+    // `main_tip_sha` field is written at all.
     let baseCausedMainTipSha: string | undefined;
-    // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate
-    // straight out of `runSweep` as one un-attributed `sweep.error`, aborting
-    // the WHOLE pass (every later PR in `openPrs` went unreconciled this
-    // poll). Named here and ledgered on THIS PR's own `sweep.disposed` line
-    // below instead — the loop always reaches the next PR.
+    // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
+    // `runSweep` as one unattributed error, aborting the WHOLE pass so every later PR went
+    // unreconciled. Named here and ledgered on THIS PR's own line instead, so the loop always
+    // reaches the next PR.
     let actionError: string | undefined;
-    // W1-T473: set true ONLY by the "post-review" case below when a real
-    // `postReview` dep is wired and eligible to run — this PR's finalize call
-    // is deferred to the bounded concurrent batch after the loop, never run
-    // inline here.
+    // W1-T473: set true ONLY when a real `postReview` dep is wired and eligible, deferring this
+    // PR's finalize call to the bounded concurrent batch after the loop rather than running inline.
     let deferredReview = false;
 
     if (acted) {
-      // W1-T254 — LIGHT-SWEEP RESTRICTION: `actionable` defaults to
-      // "everything" (SweepDeps.actionable is optional), so `rmd sweep` and
-      // the daemon's per-iteration full sweep are unchanged. The daemon's
-      // restricted light-sweep ticker (running CONCURRENTLY with an
-      // in-flight `runOne`) passes `d => d === "post-review"` so only that
-      // deterministic, sha-pinned re-post ever runs alongside a task —
-      // every other lane stands down here, re-derived and re-attempted
-      // (never dropped) on the very next full sweep. See `SweepDeps.actionable`'s
-      // own doc for why "mutex-serialized" no longer describes this ONE lane
-      // as of W1-T473.
+      // W1-T254 — LIGHT-SWEEP RESTRICTION. `actionable` defaults to everything, so `rmd sweep` and
+      // the daemon's full sweep are unchanged. The light ticker passes `d => d === "post-review"`
+      // so only that deterministic, sha-pinned re-post runs alongside a task; every other lane
+      // stands down here and is re-derived and re-attempted, never dropped, on the next full sweep.
       if (deps.actionable && !deps.actionable(disposition)) {
         acted = false;
         // W1-T2426: the caller may name WHICH mechanism refused; absent, the generic sentence
@@ -7043,13 +4784,11 @@ export async function runSweep(
         try {
           switch (disposition) {
             case "mergeable": {
-              // ARMING PARITY (see decideSweepArm): the run flow's own capped
-              // refusal is worthless while this independent path arms the same
-              // verdict seconds later (PR #800). Stand down instead of arming —
-              // `acted:false` keeps this PR out of `prior.armed`, so the next
-              // pass re-derives it fresh and arms the moment executed proof (or
-              // a ledgered operator override) lands. No escalation, no strike,
-              // no retry: the refusal is a NON-action, named on the ledger line.
+              // ARMING PARITY (see {@link decideSweepArm}): the run flow's capped refusal is
+              // worthless while this independent path arms the same verdict seconds later. Stand
+              // down instead — `acted:false` keeps this PR out of `prior.armed`, so the next pass
+              // re-derives it and arms the moment executed proof or a ledgered override lands. No
+              // escalation, no strike, no retry: the refusal is a NON-action, named on the line.
               const armDecision = decideSweepArm(pr, ledgerLines);
               if (!armDecision.arm) {
                 acted = false;
@@ -7060,30 +4799,25 @@ export async function runSweep(
               // seven branches it took, and five of them armed nothing. Discarding it is what
               // let `acted:true` be recorded for a PR that was never armed.
               const armResult = await deps.arm(pr);
-              // W1-T1117: `deps.arm` may return the bare `ArmOutcomeName` it always could, or the
-              // richer `ArmAttemptOutcome` (outcome + failureClass) — unwrap to the outcome name
-              // once, here, so every read below (including `armOutcome`/`armOutcomeArmed`, both
-              // unchanged) stays on the plain string it already expected.
+              // W1-T1117: `deps.arm` may return the bare name it always could, or the richer
+              // outcome-plus-failureClass object. Unwrap once, here, so every read below stays on
+              // the plain string it already expected.
               const armOutcomeName = typeof armResult === "object" && armResult !== null ? armResult.outcome : armResult;
-              // W1-T1061: capture the concrete outcome onto the OUTER `armOutcome` (read by
-              // `finalizeDisposition` below) whenever one came back — a `void` return is the
-              // legacy "treat as armed" shape `armOutcomeArmed` already special-cases, and it
-              // names no real branch, so no field is written for it either.
+              // W1-T1061: capture the concrete outcome onto the outer `armOutcome` whenever one
+              // came back. A `void` return is the legacy "treat as armed" shape and names no real
+              // branch, so no field is written for it either.
               if (armOutcomeName !== undefined) armOutcome = armOutcomeName;
               if (!armOutcomeArmed(armOutcomeName)) {
                 acted = false;
                 // The refusal used to go only to `say` -> stdout -> daemon.out.log, leaving no
                 // trace in the ledger where anyone looks. Name it on the disposed line.
                 standDownReason = `arm outcome: ${String(armOutcomeName)}`;
-                // W1-T1117 (design ii/iv): an `arm-error-ignored` outcome classified `"unknown"`
-                // is the ONE non-armed outcome that must NOT retry — the classifier could not
-                // decode the failure at all, so nothing says the SAME attempt will ever succeed
-                // (unlike `"transient"`/`"retryable"`, which stay on the `acted:false` line just
-                // set above, exactly as every arm-error-ignored outcome already behaved). This
-                // reinstates the terminal (dedup-seeding) shape the plan record's rationale (1)
-                // always intended for a genuinely non-retryable refusal — see this arm's own
-                // `deps.arm` production wiring (run-task.ts's `buildSweepEffects`) for where
-                // `failureClass` is actually populated.
+                // W1-T1117: an `arm-error-ignored` outcome classified `"unknown"` is the ONE
+                // non-armed outcome that must NOT retry — the classifier could not decode the
+                // failure at all, so nothing says the SAME attempt will ever succeed. A
+                // `"transient"` or `"retryable"` one stays on the `acted:false` line just set,
+                // exactly as every arm-error-ignored outcome already behaved. This reinstates the
+                // terminal, dedup-seeding shape intended for a genuinely non-retryable refusal.
                 const failureClass = typeof armResult === "object" && armResult !== null ? armResult.failureClass : undefined;
                 if (armOutcomeName === "arm-error-ignored" && failureClass === "unknown") {
                   acted = true;
@@ -7093,23 +4827,20 @@ export async function runSweep(
               break;
             }
             case "blocked-fixable": {
-              // W1-T177 — TERMINAL-STATE CHECK AT THE SPENDING SITE: re-read this
-              // PR's state FRESH, right before a fix-rung strike is actually
-              // spent, never the `openPrs` snapshot this whole sweep pass started
-              // from. Optional dep; omitted or an indeterminate read (`ok:false`)
-              // behaves exactly as before — dispatch proceeds (fail OPEN, never
-              // fail-closed-to-stand-down; see `readLiveState`'s own doc).
+              // W1-T177 — TERMINAL-STATE CHECK AT THE SPENDING SITE: re-read this PR's state
+              // FRESH, right before a strike is actually spent, never the snapshot this pass
+              // started from. Omitted or indeterminate behaves exactly as before — dispatch
+              // proceeds, failing OPEN rather than closed to a stand-down.
               const live = await deps.readLiveState?.(pr);
               let terminal: string | undefined;
               if (live) {
                 if (live.ok) {
                   terminal = terminalStateReason(live.state);
                 } else {
-                  // FAIL OPEN, ledgered: the read failed/was indeterminate — this
-                  // must never be treated as terminal (that would silently halt
-                  // every blocked-fixable dispatch on a gh outage). Proceed to
-                  // dispatchFix exactly as before this check existed; the failed
-                  // read is still legible on the ledger.
+                  // FAIL OPEN, ledgered: an indeterminate read must never be treated as terminal,
+                  // which would silently halt every blocked-fixable dispatch on a gh outage.
+                  // Proceed exactly as before this check existed; the failed read stays legible
+                  // on the ledger.
                   log("sweep.dispose.indeterminate", { pr_number: pr.prNumber });
                 }
               }
@@ -7118,36 +4849,29 @@ export async function runSweep(
                 standDownReason = terminal;
                 break;
               }
-              // W1-T527 — CLASSIFY BEFORE SELECTING, because the strike is spent at
-              // dispatch and cannot be refunded afterwards. `classifyRedCause` is a pure
-              // fold over evidence already in hand (this PR's `ciFailures` plus the WHOLE
-              // `openPrs` array this pass was handed), so it costs no GitHub call. Only
-              // base-caused and environment stand down; `in-diff` and `gate-conflict` fall
-              // through to the dispatch below exactly as they did before this existed.
+              // W1-T527 — CLASSIFY BEFORE SELECTING, because the strike is spent at dispatch and
+              // cannot be refunded. `classifyRedCause` is a pure fold over evidence already in
+              // hand, so it costs no GitHub call. Only base-caused and environment stand down;
+              // `in-diff` and `gate-conflict` fall through exactly as before.
               const redCause = classifyRedCause(pr, openPrs);
               if (redCauseStandsDown(redCause)) {
                 acted = false;
                 standDownReason = describeRedCause(redCause, pr, openPrs);
                 // W1-T2620 — THE BASE-CAUSED STAND-DOWN'S EXIT CONDITION. Nothing else about this
-                // branch moves: `classifyRedCause`/`redCauseStandsDown`/`describeRedCause`'s TEXT
-                // and the strike accounting (`acted` stays false either way) are all untouched —
-                // see this task's own design note (vii)'s "explicitly out of scope" list.
+                // branch moves: the classifier, its text and the strike accounting are untouched.
                 //
-                // `main_tip_sha` rides THIS PR's own disposed line whenever this pass classified
-                // it base-caused AND a tip was actually read — recorded on the ORDINARY stand-down
-                // path too (not only a release) so the NEXT pass's `lastBaseCausedTipFromLedger`
-                // fold has a baseline to compare against (design i: "main has moved SINCE THIS PR
-                // LAST STOOD DOWN", never "the cause is known").
+                // `main_tip_sha` rides THIS PR's own line whenever this pass classified it
+                // base-caused and a tip was read — recorded on the ORDINARY stand-down path too,
+                // not only a release, so the next pass's fold has a baseline to compare against.
                 if (redCause === "base-caused" && mainTipSha !== undefined) {
                   baseCausedMainTipSha = mainTipSha;
                   // `selectBaseCausedRelease` already picked AT MOST ONE PR for this pass, oldest
                   // activity first (design iii) — this PR releases only if it IS that winner.
                   if (baseCausedReleaseTarget?.prNumber === pr.prNumber && deps.releaseBaseCausedStandDown) {
-                    // The "released" sentence is set ONLY once the effect is actually about to be
-                    // (or has been) attempted — omitted (`SweepDeps.releaseBaseCausedStandDown`'s
-                    // own doc), this PR falls through to the ordinary `describeRedCause` sentence
-                    // set above, exactly like every other stood-down PR: never a silent no-op, and
-                    // never a "released" claim with no push behind it.
+                    // The "released" sentence is set ONLY once the effect is about to be attempted.
+                    // Omitted, this PR falls through to the ordinary stand-down sentence like every
+                    // other stood-down PR: never a silent no-op, and never a "released" claim with
+                    // no push behind it.
                     try {
                       await deps.releaseBaseCausedStandDown(pr, mainTipSha);
                       standDownReason =
@@ -7155,10 +4879,9 @@ export async function runSweep(
                         `this head last stood down against an earlier tip; redriving through the ` +
                         `existing post-fix leaf (no strike spent)`;
                     } catch (e) {
-                      // FAIL QUIET (design vi) — NEVER LAUNDER A RED: a failed release leaves
-                      // this PR standing down exactly like the ordinary base-caused sentence,
-                      // never a false "released" ledger line. Retried next pass exactly like
-                      // any other stood-down PR — no strike was ever at stake here either way.
+                      // FAIL QUIET — NEVER LAUNDER A RED: a failed release leaves this PR standing
+                      // down exactly like the ordinary sentence, never a false "released" line.
+                      // Retried next pass like any other stood-down PR; no strike was at stake.
                       log("sweep.base_caused_release.error", {
                         pr_number: pr.prNumber,
                         main_tip_sha: mainTipSha,
@@ -7169,19 +4892,14 @@ export async function runSweep(
                 }
                 break;
               }
-              // W1-T1275 (design i/ii/iii/iv/v) — CI-GATE'S OWN CONCLUDED VERDICT CAN GO STALE: a
-              // required sibling's success can land AFTER the gate's own run has already
-              // concluded and posted a terminal FAILURE (the #2612 incident this task fixes).
-              // Fires BEFORE `dispatchFix` so a stale verdict never spends a fix-rung strike on a
-              // diff that carries no defect — the same "gate reconciliation, the sweep's own
-              // lane, never the fix rung's" reasoning the cancelled-check lane immediately below
-              // already applies (design v). Bounded to firing the real re-drive AT MOST ONCE per
-              // (head, sibling-transition) via the ledger (design iv); this pass never marks the
-              // gate green itself either way (design i) — it only asks GitHub to re-evaluate, and
-              // stands down so no fix-rung strike is spent while that settles. The rollup is a
-              // FRESH read (`deps.readCiGateRollup`, design ii-iii's own doc) rather than a field
-              // cached on `pr` — the whole point is comparing against the CURRENT state, never a
-              // frame captured when this `OpenPrView` was built.
+              // W1-T1275 — CI-GATE'S OWN CONCLUDED VERDICT CAN GO STALE: a required sibling's
+              // success can land AFTER the gate's run has concluded and posted a terminal FAILURE.
+              // Fires BEFORE `dispatchFix` so a stale verdict never spends a strike on a diff that
+              // carries no defect — gate reconciliation is the sweep's own lane, never the fix
+              // rung's. Bounded to AT MOST ONCE per (head, sibling-transition) via the ledger.
+              // This pass never marks the gate green itself; it only asks GitHub to re-evaluate.
+              // The rollup is a FRESH read, never a field cached on `pr` — comparing against a
+              // captured frame is exactly what this cannot do.
               const ciGateRollup =
                 isBlockedCi(pr) && deps.readCiGateRollup ? await deps.readCiGateRollup(pr) : undefined;
               const staleTransition = staleCiGateTransition(ciGateRollup);
@@ -7189,10 +4907,9 @@ export async function runSweep(
                 const key = ciGateReaggregateKey(pr.headSha, staleTransition);
                 const decision = ciGateReaggregateDecision(reaggregatedCiGateKeys.has(key));
                 if (decision.reaggregate) {
-                  // LEDGERED BEFORE THE CALL (design iv), the same ordering `sweep.check_requeued`
-                  // uses just below for the identical reason: a crash between this write and the
-                  // real GitHub call still bounds the NEXT pass toward standing down rather than
-                  // re-driving the SAME transition a second time.
+                  // LEDGERED BEFORE THE CALL, the same ordering the re-queue uses below for the
+                  // identical reason: a crash between this write and the real GitHub call still
+                  // bounds the NEXT pass toward standing down rather than re-driving twice.
                   appendLine(deps.ledgerPath, {
                     run_id: deps.runId,
                     task_id: pr.taskId ?? "SWEEP",
@@ -7213,11 +4930,10 @@ export async function runSweep(
                   : `stale ci-gate verdict already re-driven for this transition — awaiting the fresh result`;
                 break;
               }
-              // W1-T1223 (design i/ii/iii/iv/v) — A CANCELLED REQUIRED CHECK HAS NO DEFECT IN
-              // THE DIFF FOR A FIX-RUNG WORKER TO READ. Fires BEFORE `dispatchFix` so a PR whose
-              // ENTIRE red verdict is one or more cancellations never spends a fix-rung strike on
-              // nothing (the #2434/#2444 incident this task fixes). Gate reconciliation, the
-              // sweep's own lane — never the fix rung's (design v).
+              // W1-T1223 — A CANCELLED REQUIRED CHECK HAS NO DEFECT IN THE DIFF for a fix-rung
+              // worker to read. Fires BEFORE `dispatchFix` so a PR whose ENTIRE red verdict is
+              // cancellations never spends a strike on nothing. Gate reconciliation, the sweep's
+              // own lane — never the fix rung's.
               const cancelledChecks = isBlockedCi(pr) ? pr.cancelledRequiredChecks ?? [] : [];
               if (cancelledChecks.length > 0) {
                 let requeuedAny = false;
@@ -7225,19 +4941,17 @@ export async function runSweep(
                 for (const check of cancelledChecks) {
                   const key = `${pr.headSha}@${check.name}`;
                   // W1-T2431: OR the ledger-derived reading with the surface-derived one — a
-                  // re-run this fleet ledgered OR one GitHub's own run_attempt shows already
-                  // happened (an operator's `gh run rerun`, invisible to the ledger alone) both
-                  // read "already requeued". See `cancelledCheckAlreadyRequeuedFromSurface`'s own
-                  // doc: this only widens the true case, the ledger-only guarantee is untouched.
+                  // re-run this fleet ledgered, OR one GitHub's `run_attempt` shows already
+                  // happened (an operator's own re-run, invisible to the ledger), both read
+                  // "already requeued". This only widens the true case.
                   const decision = cancelledCheckRequeueDecision(
                     requeuedCheckKeys.has(key) || cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt),
                   );
                   if (decision.requeue) {
-                    // LEDGERED BEFORE THE CALL (design ii: "the attempt is LEDGERED BEFORE it
-                    // can be repeated") — a crash between this write and the real GitHub call
-                    // still bounds the NEXT pass toward escalating rather than re-queueing the
-                    // same pair a second time. Not `deps.dryRun`-guarded: reaching this line
-                    // already proves `acted` was true, which `deps.dryRun` forces false above.
+                    // LEDGERED BEFORE THE CALL — the attempt is recorded before it can be
+                    // repeated, so a crash between this write and the real GitHub call still
+                    // bounds the NEXT pass toward escalating. Not dry-run-guarded: reaching this
+                    // line already proves `acted` was true, which `deps.dryRun` forces false.
                     appendLine(deps.ledgerPath, {
                       run_id: deps.runId,
                       task_id: pr.taskId ?? "SWEEP",
@@ -7258,15 +4972,12 @@ export async function runSweep(
                     outcomes.push(`escalated "${check.name}" (${decision.reason})`);
                   }
                 }
-                // A cancelled check carries no diff defect (design v) — when EVERY red required
-                // check this pass named is a cancellation, stand down here instead of falling
-                // through to `dispatchFix`, which would otherwise burn a fix-rung strike on
-                // nothing. `acted` stays FALSE regardless of outcome — the SAME load-bearing
-                // choice `sweep.absent_repush` makes just above (see its own comment): claiming
-                // `acted:true` on this disposed line would seed `prior.fixed` for this head,
-                // which would then dedupe the WHOLE blocked-fixable disposition away next pass
-                // and this re-queue/escalate logic would never run again to observe the second
-                // cancellation design (iii) requires escalating.
+                // A cancelled check carries no diff defect — when EVERY red required check named
+                // this pass is a cancellation, stand down here rather than falling through to
+                // `dispatchFix` and burning a strike on nothing. `acted` stays FALSE regardless:
+                // claiming true would seed `prior.fixed` for this head, dedupe the whole
+                // blocked-fixable disposition away next pass, and stop this logic ever running
+                // again to observe the second cancellation that must escalate.
                 const genuineFailures = (pr.ciFailures ?? []).filter((f) => !cancelledChecks.some((c) => c.name === f.name));
                 if (genuineFailures.length === 0) {
                   acted = false;
@@ -7274,30 +4985,22 @@ export async function runSweep(
                   break;
                 }
               }
-              // W1-T100: the evidence shape follows the SAME `isBlockedCi`
-              // predicate DISPOSITION_RULES routed on (never a second,
-              // independently-hardcoded check) — a failing review carries the
-              // unmet set (review mode), a blocked_ci PR carries ci-log evidence
-              // instead (never a mix; see FixDispatchEvidence). W1-T2236: the review-mode
-              // branch also carries `pr.actionableGateFailures` — the SAME structured remedy
-              // this disposition's OWN row (above) already required, as an alternative to a
-              // non-empty `unmetCriteria`, to route this PR to `blocked-fixable` at all; carrying
-              // it through here is what lets the fix rung's mode table select on it instead of
-              // discarding it at this boundary (see FixDispatchEvidence's own doc).
+              // W1-T100: the evidence shape follows the SAME `isBlockedCi` predicate the table
+              // routed on, never a second hardcoded check — a failing review carries the unmet set,
+              // a blocked_ci PR carries ci-log evidence, never a mix. W1-T2236: the review branch
+              // also carries `actionableGateFailures`, the same structured remedy this row already
+              // required to route the PR here at all, so the fix rung can select on it rather than
+              // discarding it at this boundary.
               //
-              // W1-T2231: capture whatever verdict `dispatchFix` returns — `acted` stays
-              // untouched (this call NEVER assigned it, and still never does; the dedup gate
-              // reads `acted`, not `spent` — design note (ii)/(iii)). A concrete (non-void)
-              // return sets `spent` for `dueRepairFilings` alone to read; `void` (today's real
-              // wiring, every pre-existing fake) leaves it `undefined` — no `spent` field is
-              // written at all, so no existing ledger row's shape changes.
+              // W1-T2231: capture whatever verdict `dispatchFix` returns. `acted` is untouched —
+              // the dedup gate reads `acted`, never `spent`. A `void` return writes no `spent`
+              // field at all, so no existing ledger row's shape changes.
               const fixEvidence = isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
                 : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures };
-              // W1-T2520 — THE FIX-DISPATCH CLAIM: see `claimFixDispatch`'s own doc for why a
-              // claim alone (without the fresh re-read it also performs) would not have stopped
-              // the observed race. A refusal here spends nothing — `deps.dispatchFix` is never
-              // called — and stands down exactly like any other declined disposition.
+              // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
+              // alone, without the fresh re-read it also performs, would not have stopped the
+              // observed race. A refusal spends nothing and stands down like any declined lane.
               const fixClaim = claimFixDispatch(pr);
               if (!fixClaim.ok) {
                 acted = false;
@@ -7331,13 +5034,11 @@ export async function runSweep(
                 standDownReason = terminal;
                 break;
               }
-              // The DISPOSITION_RULES "conflicted" row already gated this on
-              // isPureConcurrentAddition — dispatch carries the merge-conflict
-              // evidence, never a mix with ci-log/reviewer-unmet shapes.
+              // The "conflicted" row already gated this on the admission predicates, so the
+              // dispatch carries merge-conflict evidence and never a mix with the other shapes.
               //
-              // W1-T2231: the SAME "conflicted" analogue of blocked-fixable's own capture just
-              // above — REPAIR_SURFACE_DISPOSITIONS (below) treats both as dispatch-based repair
-              // surfaces, so both must feed `spent` the same way.
+              // W1-T2231: the "conflicted" analogue of the blocked-fixable capture above — both are
+              // dispatch-based repair surfaces, so both must feed `spent` the same way.
               const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict };
               // W1-T2520: the conflicted twin of the blocked-fixable claim above, same reasoning
               // — see `claimFixDispatch`'s own doc.
@@ -7360,12 +5061,11 @@ export async function runSweep(
               await deps.close(pr, reason);
               break;
             case "blocked-ambiguous":
-              // W1-T2789 — an exhausted checks-red PR cannot reach runFixRung's W1-T2671
-              // pre-strike base-gap check: the disposition table routes it here first. When the
-              // shared exact-path decision selected THIS oldest candidate, perform the same
-              // update-branch write as queue maintenance before escalating. The ordinary
-              // blocked-ambiguous disposition remains the recorded state, and `acted` remains
-              // false so this zero-strike release never seeds the escalation/fix dedup.
+              // W1-T2789 — an exhausted checks-red PR cannot reach the fix rung's own pre-strike
+              // base-gap check, because the table routes it here first. When the shared exact-path
+              // decision selected THIS oldest candidate, perform the same update-branch write as
+              // queue maintenance before escalating. The ordinary disposition stays recorded and
+              // `acted` stays false, so this zero-strike release never seeds a dedup.
               if (staleBaseReleaseTarget?.pr.prNumber === pr.prNumber) {
                 const live = await deps.readLiveState?.(pr);
                 if (live?.ok !== true) {
@@ -7439,11 +5139,10 @@ export async function runSweep(
                 // GitHub pacer. Preserve today's escalation for this pass below.
               }
               // W1-T196: stand down instead of escalating `task: UNKNOWN` — see
-              // `unattributableFiling`'s doc comment above. No `deps.escalate`
-              // call, no issue, but NEVER silent: the stand-down reason names
-              // both the PR and the unresolved attribution on this pass's
-              // `sweep.disposed` ledger line below (the SAME trace discipline
-              // `standDownReason` gives every other non-actionable disposition).
+              // `unattributableFiling` above. No escalate call and no issue, but NEVER silent: the
+              // stand-down reason names both the PR and the unresolved attribution on this pass's
+              // own disposed line, the same trace discipline every other non-actionable
+              // disposition gets.
               const absentDecision = absentChecksRepushDecision(
                 pr,
                 policy,
@@ -7451,19 +5150,16 @@ export async function runSweep(
                 prior.absentRepushes.get(pr.prNumber) ?? { count: 0, shas: new Set<string>() },
               );
               if (!unattributableFiling && absentDecision.repush && deps.repushAbsent) {
-                // THE REMEDY. Fires INSTEAD OF this pass's escalation — the escalation path
-                // itself is unchanged, and the next pass re-derives from the new head: if the
-                // fresh sha gets its suites the PR simply proceeds, and if it does not, the cap
-                // in `absentChecksRepushDecision` routes it to the ordinary escalate below.
+                // THE REMEDY, firing INSTEAD OF this pass's escalation. The escalation path itself
+                // is unchanged and the next pass re-derives from the new head: if the fresh sha
+                // gets its suites the PR proceeds, and if not, the cap routes it to escalate.
                 const oldHead = pr.headSha;
                 const newHead = await deps.repushAbsent(pr);
-                // LEDGERED, because #968's lesson was that a fire-and-forget action nobody
-                // records becomes invisible state: the PR, both shas, and the reason.
-                // appendLine, NOT log(): `log` is an optional narration sink (a no-op when
-                // unwired), but `priorActionsFromLedger` READS this step back to enforce the
-                // bound — so it has to land in deps.ledgerPath, the same file and the same
-                // mechanism `sweep.disposed` uses. Skipped under --dry-run for the same reason
-                // that line is: a preview must leave no trace that changes a later real pass.
+                // LEDGERED, because a fire-and-forget action nobody records becomes invisible
+                // state: the PR, both shas, and the reason. `appendLine`, NOT `log()` — `log` is an
+                // optional narration sink, but `priorActionsFromLedger` READS this step back to
+                // enforce the bound, so it has to land in `deps.ledgerPath`. Skipped under
+                // --dry-run for the same reason the disposed line is.
                 if (!deps.dryRun) {
                   appendLine(deps.ledgerPath, {
                     run_id: deps.runId,
@@ -7482,11 +5178,10 @@ export async function runSweep(
                   new_head: newHead ?? null,
                 });
                 // `acted` stays FALSE, and this is load-bearing rather than cosmetic. `acted:true`
-                // on a blocked-ambiguous line is what feeds `prior.escalated`, so claiming it here
-                // would tell every later pass "this PR was already escalated" — and the PR would
-                // then never escalate at all, which is the very silent-forever failure this remedy
-                // exists to end. The re-push is a DIFFERENT action with its own ledger line (the
-                // one the bound reads); the disposition's own action did not fire, so it says so.
+                // on a blocked-ambiguous line feeds `prior.escalated`, so claiming it would tell
+                // every later pass this PR was already escalated — and it would then never escalate
+                // at all, the very silent-forever failure this remedy exists to end. The re-push is
+                // a DIFFERENT action with its own ledger line, the one the bound reads.
                 acted = false;
                 standDownReason = `ABSENT re-push fired instead of escalating this pass — ${absentDecision.reason}`;
               } else if (unattributableFiling) {
@@ -7514,13 +5209,10 @@ export async function runSweep(
               break;
             case "post-review":
               if (deps.postReview) {
-                // W1-T473: NEVER await inline — that is exactly the "reviews
-                // run one at a time" shape this task removes. This PR's own
-                // key is claimed and it is queued into `pendingReviews`
-                // immediately below (still inside this same synchronous
-                // switch/try, before any `await` in this iteration), and the
-                // actual call + finalize happen in the bounded concurrent
-                // batch after the loop.
+                // W1-T473: NEVER await inline — that is exactly the one-at-a-time shape this
+                // removes. The key is claimed and the PR queued immediately below, still inside
+                // this synchronous switch before any `await` in this iteration; the call and
+                // finalize happen in the bounded concurrent batch after the loop.
                 deferredReview = true;
               } else {
                 acted = false;
@@ -7530,25 +5222,21 @@ export async function runSweep(
           }
         } catch (e) {
           acted = false;
-          // W1-T529 (iv) — DEGRADE, DO NOT RETRY, AND DO NOT CALL IT A FAILURE. A budget floor
-          // stand-down means the guarded call was refused BEFORE it ran, so this lane did not
-          // fail — it declined. Recorded as a stand-down (this PR's own `sweep.disposed` line
-          // carries `stand_down_reason`, the field every other non-actionable disposition
-          // already uses) rather than as an `actionError`, so it neither counts in
-          // `actionsFailed` nor writes the `sweep.action_failed` row below. `acted` is false
-          // either way, which is the whole no-strike guarantee — see `budgetFloorStandDown`.
+          // W1-T529 — DEGRADE, DO NOT RETRY, AND DO NOT CALL IT A FAILURE. A budget floor
+          // stand-down means the guarded call was refused BEFORE it ran, so this lane declined
+          // rather than failed. Recorded as a stand-down on this PR's own line rather than an
+          // `actionError`, so it neither counts in `actionsFailed` nor writes the failure row.
+          // `acted` is false either way, which is the whole no-strike guarantee.
           const floorStandDown = budgetFloorStandDown(e, disposition);
           if (floorStandDown !== undefined) {
             standDownReason = floorStandDown;
           } else {
             actionError = String((e as Error)?.message ?? e);
-            // W1-T99 — the canonical crash this task fixes (2026-07-17: the first live
-            // BLOCKED-class escalation's `gh issue create` threw on a missing label and
-            // took the WHOLE reconciler down with it). This PR's own `sweep.disposed`
-            // line below already carries `action_error`; this is a SEPARATE, distinctly
-            // named step so a failed action is grep-able on its own, never buried inside
-            // the per-pass disposed record. Reached only when !deps.dryRun (acted is
-            // gated on that above), so a preview run still leaves no trace.
+            // W1-T99 — the canonical crash this fixes: the first live BLOCKED-class escalation's
+            // `gh issue create` threw on a missing label and took the WHOLE reconciler down. This
+            // PR's own disposed line already carries `action_error`; this is a SEPARATE, distinctly
+            // named step so a failed action is grep-able on its own rather than buried in the
+            // per-pass record. Reached only when not a dry run, so a preview leaves no trace.
             appendLine(deps.ledgerPath, {
               run_id: deps.runId,
               task_id: pr.taskId ?? "SWEEP",
@@ -7563,14 +5251,11 @@ export async function runSweep(
       }
     }
 
-    // W1-T1000002 — CONVERGE: WITHDRAW WHAT THIS LANE DID NOT ARM. Runs regardless of `acted`
-    // (a held PR always has `acted:false` from the dedup above, so the ordinary action switch
-    // never reaches `deps.arm`) — a disarm alone is undone by the very next pass (the arming
-    // dedup reads GitHub's OWN live armed bit), so the withdrawal must be issued on every pass
-    // that still observes hold-stands-and-armed, not merely once. Safe when not armed and never
-    // throws (see `SweepDeps.disarmAutoMerge`'s own doc), so this costs nothing on the common
-    // quiet pass — `holdToWithdraw` is `undefined` for every disposition but a held, armed
-    // "mergeable" one.
+    // W1-T1000002 — CONVERGE: WITHDRAW WHAT THIS LANE DID NOT ARM. Runs regardless of `acted`,
+    // since a held PR always has it false and the action switch never reaches `deps.arm`. A disarm
+    // alone is undone by the next pass, whose arming dedup reads GitHub's OWN live armed bit, so
+    // the withdrawal must be issued on every pass that still observes hold-stands-and-armed. Safe
+    // when not armed and never throws, so it costs nothing on the common quiet pass.
     if (holdToWithdraw && deps.disarmAutoMerge) {
       try {
         await deps.disarmAutoMerge(pr, holdToWithdraw);
@@ -7597,10 +5282,9 @@ export async function runSweep(
     }
 
     if (deferredReview) {
-      // W1-T2771: discovery is not execution and therefore owns no mutex. Carry the stable key
-      // into the pool, where `claimReview` atomically claims it immediately before the attempt.
-      // This lets a concurrent light pass review the head while this walk is stalled later on an
-      // unrelated effect, without weakening the one-live-attempt invariant.
+      // W1-T2771: discovery is not execution and therefore owns no mutex. Carry the stable key into
+      // the pool, where `claimReview` atomically claims it immediately before the attempt — so a
+      // concurrent light pass can review the head while this walk stalls on an unrelated effect.
       const reviewKey = reviewOutcomeKeyForPr(pr);
       pendingReviews.push({ index: prIndex, pr, reason, question, reviewKey });
       continue;
@@ -7624,27 +5308,17 @@ export async function runSweep(
   }
 
   // ── W1-T1049 — REVIEW CONCURRENCY BUDGET, NOW ITS OWN ───────────────────────
-  // Reviews get their OWN lane ceiling (`policy.reviewLanes`) — no longer a
-  // SECOND consultation of `policy.dispatchLanes` (W1-T473's original wiring).
-  // That coupling silently pinned drainage's own concurrency budget to a
-  // dispatch-only ruling and let the two ceilings ADD on the host with
-  // nothing naming their sum (rationale (3)/(4)): `dispatchLanes` above keeps
-  // its EXACT present meaning — still the field `daemon.ts`'s `laneCount` and
-  // `test/policy-consumers.test.ts` read — this is a SIBLING row, never a
-  // retune of it. Floored at 1 exactly like `daemon.ts`'s `laneCount` floors
-  // `dispatchLanes` — a misconfigured `reviewLanes: 0` must never silently
-  // mean "review nothing".
+  // Reviews get their OWN ceiling (`policy.reviewLanes`), no longer a SECOND consultation of
+  // `policy.dispatchLanes`. That coupling pinned drainage's budget to a dispatch-only ruling and
+  // let the two ceilings ADD with nothing naming their sum. `dispatchLanes` keeps its EXACT
+  // meaning; this is a SIBLING row, never a retune of it. Floored at 1, so a misconfigured 0 can
+  // never silently mean "review nothing".
   //
-  // A CEILING, NOT A TARGET OR A THROUGHPUT CAP: `reviewLanes` bounds only the number of
-  // `postReview` calls live at once. Workers keep pulling from `pendingReviews` — the reviews
-  // THIS PASS already found eligible — until that finite set drains or a named admission stop
-  // fires. It never goes looking for work: a pass with zero eligible reviews starts zero workers.
-  // W1-T1218/W1-T2584: ORDER BEFORE THE PULL. `pendingReviews` is built by `push` inside the per-PR walk
-  // above, so its order IS the enumeration order, and `openPrsRestArgs` requests
-  // `pulls?state=open&per_page=100` with no `sort` — GitHub answers newest-first. Slicing that by
-  // position gave the lanes to the NEWEST entries and deferred the same oldest tail every pass.
-  // The pull pool consumes this immutable oldest-first array by monotonically increasing index, so
-  // completion order cannot reorder later starts.
+  // A CEILING, NOT A TARGET: it bounds only the calls live at once. Workers keep pulling from the
+  // set THIS PASS already found eligible until it drains or an admission stop fires; it never goes
+  // looking for work. W1-T1218/W1-T2584: ORDER BEFORE THE PULL — the pending set's order is
+  // enumeration order and GitHub answers newest-first, so slicing by position gave lanes to the
+  // NEWEST entries and deferred the same oldest tail every pass.
   const orderedReviews = orderPendingReviews(pendingReviews);
   const reviewLanes = effectiveReviewWidth(deps, policy, orderedReviews.length, now, ledgerLines);
   const postReview = deps.postReview;
@@ -7666,11 +5340,11 @@ export async function runSweep(
       } catch (e) {
         // NOT AN ERASING CATCH, and the reason is stated here because the ratchet cannot see it
         // otherwise: the failure text is carried INTO `closeAdmissions` inside a TEMPLATE STRING,
-        // and `test/catch-erasure-ratchet.test.ts` has no route that recognises that — its four
-        // are a rethrow, a console/logger call, a `reason:`-style key in the RETURN SHAPE, or a
-        // comment like this one. The error is preserved verbatim in the stop reason an operator
-        // reads, and the gate FAILS CLOSED: an unreadable continuation signal stops admitting
-        // rather than admitting on an unknown, which is the whole reason it is consulted.
+        // which `test/catch-erasure-ratchet.test.ts` has no route to recognise — its routes are a
+        // rethrow, a logger call, a `reason:` key in the return shape, or a comment like this one.
+        // The error is preserved verbatim in the stop reason an operator reads, and the gate FAILS
+        // CLOSED: an unreadable continuation signal stops admitting rather than admitting on an
+        // unknown, which is the whole reason it is consulted.
         closeAdmissions(
           `review admission continuation gate failed closed (${String((e as Error)?.message ?? e)}) — re-derived next pass`,
         );
@@ -7714,27 +5388,19 @@ export async function runSweep(
             await postReview(job.pr);
           } catch (e) {
             acted = false;
-            // W1-T529 (iv) — THE ONE THROW THAT MUST NOT LEAVE A DEDUP KEY. Design (v) (the
-            // `review.post_refused` arm below) is right about every ORDINARY throw: without a key
+            // W1-T529 — THE ONE THROW THAT MUST NOT LEAVE A DEDUP KEY. Design (v), the
+            // `review.post_refused` arm below, is right about every ORDINARY throw: without a key
             // the attempt repeats every pass, unbounded. It is exactly wrong about this one.
             //
             // A floor stand-down says nothing about this PR — the guarded call never ran — while
-            // `review.post_refused` is read by `reviewPostRefusedFor` (run-task.ts) as a VERDICT
-            // that ESCALATES unchanged input rather than retrying it, keyed by task + PR URL +
-            // head + body digest so a commit or body edit clears it. Writing it here converts
-            // "unaffordable for one tick" into
-            // "permanently refused, then escalated as blocked-ambiguous" — for a PR nothing ever
-            // looked at. Design (iv) names the correct cost instead: "a green PR is left unmerged,
-            // visible, recoverable next pass", and RECOVERABLE is only true if no key is written.
-            // The precedent is already here: `review.post_failed` (a transient `gh` error)
-            // deliberately does not set `reviewPostRefused` either — "never escalate on a mere
-            // network hiccup" (OpenPrView.reviewPostRefused's own doc).
+            // `review.post_refused` is read as a VERDICT that ESCALATES unchanged input rather than
+            // retrying it. Writing it here converts "unaffordable for one tick" into "permanently
+            // refused, then escalated", for a PR nothing ever looked at. The precedent is already
+            // here: `review.post_failed` deliberately does not set that flag either.
             //
-            // AND THE REPEAT IS STILL BOUNDED, just not by a key. The pacer CONSUMES its trip on
-            // the one call it refuses (`standDown` is cleared inside `wait()` before it throws,
-            // lib/open-prs-rest.ts), so the very next guarded call is let through to re-derive
-            // against a live reading and the floor cannot re-fire without a fresh sub-floor one.
-            // What design (v) bounds is a throw that RECURS ON ITS OWN; this one cannot.
+            // AND THE REPEAT IS STILL BOUNDED, just not by a key: the pacer CONSUMES its trip on the
+            // call it refuses, so the next guarded call re-derives against a live reading. What
+            // design (v) bounds is a throw that RECURS ON ITS OWN; this one cannot.
             const floorStandDown = budgetFloorStandDown(e, "post-review");
             if (floorStandDown !== undefined) {
               standDownReason = floorStandDown;
@@ -7753,13 +5419,12 @@ export async function runSweep(
                 disposition: "post-review",
                 error: actionError,
               });
-              // W1-T529 design (v)/W1-T2753 — THE BOUNDED RETRY KEY. `sweep.action_failed`
-              // alone leaves no exact-input outcome key and would retry this throw every pass.
-              // The `review.post_refused` row below preserves the established material input
-              // shape, but W1-T2753 classifies this one prefix into `reviewRetryableThrows`, not
-              // the durable `reviewRefused` set: the latest dated throw suppresses only through
-              // the existing pending ceiling, then re-admits the unchanged input. `acted` stays
-              // `false`, so this never touches the fix-strike lane's `acted:true` dedup.
+              // W1-T529/W1-T2753 — THE BOUNDED RETRY KEY. `sweep.action_failed` alone leaves no
+              // exact-input outcome key and would retry this throw every pass. The row below keeps
+              // the established material-input shape, but this prefix is classified into
+              // `reviewRetryableThrows`, not the durable `reviewRefused` set: the latest dated
+              // throw suppresses only through the pending ceiling, then re-admits the unchanged
+              // input. `acted` stays false, so this never touches the fix lane's dedup.
               appendLine(deps.ledgerPath, {
                 run_id: deps.runId,
                 // This row is an outcome key, not only a diagnostic. Fully attributed views use
@@ -7780,17 +5445,12 @@ export async function runSweep(
           }
         }
       } finally {
-        // W1-T513: release `job.reviewKey` from the module-level {@link
-        // inFlightReviewKeys} mutex the instant this attempt SETTLES —
-        // success or failure alike, and BEFORE `finalizeDisposition`, which
-        // only ledgers/logs and never gates a future pass. On success
-        // `postReview` has already durably written the "reviewed" state a
-        // later pass's own fresh ledger read will see (so it never even
-        // reaches this claim again); on failure (W1-T529/W1-T2753) the
-        // `review.post_refused` line just above establishes a bounded retry clock.
-        // Releasing the in-process claim here is safe because the ledger guard blocks
-        // another attempt until that clock expires; holding it longer would only hide
-        // the durable timing evidence from subsequent passes.
+        // W1-T513: release the key from the module-level mutex the instant this attempt SETTLES,
+        // success or failure alike, and BEFORE `finalizeDisposition`, which only ledgers and never
+        // gates a future pass. On success `postReview` has already durably written the reviewed
+        // state a later pass will see; on failure the row just above establishes a bounded retry
+        // clock. Releasing here is safe because that ledger guard blocks another attempt until the
+        // clock expires, and holding it longer would only hide the timing evidence.
         claim.release();
       }
       finalizeDisposition(
@@ -7809,11 +5469,10 @@ export async function runSweep(
       );
   };
 
-  // W1-T2584 — FIXED-SIZE PULL POOL. There are at most `reviewLanes` worker promises and at most
-  // that many live `postReview` effects. Each pull increments `nextReviewIndex` synchronously
-  // before its first await, which preserves `orderedReviews`' oldest-first start order even when
-  // reviewers settle out of order. The whole already-derived set drains in one pass unless
-  // capacity or the injected daemon/operator continuation gate closes admissions.
+  // W1-T2584 — FIXED-SIZE PULL POOL. At most `reviewLanes` worker promises and that many live
+  // effects. Each pull increments the index synchronously before its first await, preserving
+  // oldest-first START order even when reviewers settle out of order. The whole already-derived
+  // set drains in one pass unless capacity or the injected continuation gate closes admissions.
   const workerCount = Math.min(reviewLanes, orderedReviews.length);
   await Promise.all(
     Array.from({ length: workerCount }, async () => {
@@ -7826,9 +5485,8 @@ export async function runSweep(
   );
 
   // Only a named admission stop can leave an unstarted tail. W1-T2771: these jobs were discovered
-  // but never pulled, so they own NO module-level mutex key. In particular, do not `delete` their
-  // key here: a concurrent pass may own it for a real active review. Ledger `acted:false` with no
-  // outcome key so the ordinary level-triggered next pass can derive the head again.
+  // but never pulled, so they own NO mutex key — do not `delete` theirs here, since a concurrent
+  // pass may own it for a real active review. Ledger `acted:false` with no outcome key.
   const unstartedReviews = orderedReviews.slice(nextReviewIndex);
   for (const job of unstartedReviews) {
     finalizeDisposition(
@@ -7861,12 +5519,10 @@ export async function runSweep(
     actions_taken: actionsTaken,
     actions_failed: actionsFailed,
   });
-  // W1-T520 — the stall report. One line PER STALLED PR naming both facts, and NOTHING when the
-  // set is empty, which is the common case: a quiet pass writes no row at all rather than a
-  // `stalled: 0` heartbeat nobody reads. Emitted through `appendLine` (the same durable sink
-  // `sweep.disposed` uses) rather than `log`, because `log` is an optional narration hook a caller
-  // may leave unwired — see `deps.log`'s own contract. This still REPORTS the WHOLE set; W1-T528
-  // (right below) is what ACTS, and only on one of them.
+  // W1-T520 — the stall report. One line PER STALLED PR naming both facts, and NOTHING when the set
+  // is empty: a quiet pass writes no row rather than a `stalled: 0` heartbeat nobody reads. Emitted
+  // through `appendLine`, the durable sink, because `log` is an optional hook a caller may leave
+  // unwired. This REPORTS the whole set; the lane below is what ACTS, and only on one of them.
   for (const stalled of armedButStalled(openPrs)) {
     appendLine(deps.ledgerPath, {
       run_id: deps.runId,
@@ -7879,11 +5535,10 @@ export async function runSweep(
       merge_state: "behind",
     });
   }
-  // W1-T528 — PRESS THE BUTTON. {@link selectUpdateBranchTarget} picks AT MOST ONE PR from the
-  // set just reported — oldest head first, draft/in-flight excluded (see that function's own
-  // doc) — and, when `deps.updateBranch` is wired, requests GitHub update it. Never a loop: one
-  // call, whatever the outcome — a conflict is REPORTED and skipped, never retried by this same
-  // pass (design v). `dryRun` leaves no trace, mirroring every other action in this module.
+  // W1-T528 — PRESS THE BUTTON. {@link selectUpdateBranchTarget} picks AT MOST ONE PR from the set
+  // just reported and, when the dep is wired, requests GitHub update it. Never a loop: one call
+  // whatever the outcome, and a conflict is REPORTED and skipped rather than retried this pass.
+  // `dryRun` leaves no trace, mirroring every other action here.
   if (!deps.dryRun && deps.updateBranch) {
     const target = selectUpdateBranchTarget(
       openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber),
@@ -7931,14 +5586,11 @@ export async function runSweep(
       }
     }
   }
-  // W1-T905 — "repair the instance, FILE THE CLASS". A PURE fold ({@link dueRepairFilings}) over
-  // this pass's own view of `sweep.disposed` (the ledger's prior rows PLUS this pass's own,
-  // mirrored above) followed by AT MOST ONE best-effort capture per due surface. `dryRun` and an
-  // unwired `captureRepairFeedback` both leave no trace, matching every other action in this
-  // module. Wrapped in the SAME per-PR throw containment the action switch already has (W1-T254,
-  // design viii): a capture/landing failure here must never fail the pass that produced the
-  // repairs it reports on, and never touches any OTHER PR's disposition this pass or any later
-  // one — the fold recomputes fresh from ledger state every call, with no memory of its own.
+  // W1-T905 — "repair the instance, FILE THE CLASS": a PURE fold over this pass's own view of
+  // `sweep.disposed` (prior rows plus this pass's, mirrored above), then AT MOST ONE best-effort
+  // capture per due surface. Wrapped in the SAME throw containment the action switch has — a
+  // capture failure must never fail the pass that produced the repairs it reports on, and the fold
+  // recomputes fresh every call with no memory of its own.
   if (!deps.dryRun && deps.captureRepairFeedback) {
     const due = dueRepairFilings([...ledgerLines, ...passDisposedRows], now, policy);
     for (const filing of due) {
@@ -7957,45 +5609,18 @@ export async function runSweep(
 }
 
 /**
- * W1-T463 — THE DIAGNOSIS FOR "a restricted light sweep ticks every 60s and a PR still sat
- * 21-green and unreviewed for ~15 minutes". `runSweep`'s own `for (const pr of openPrs)` loop
- * is SEQUENTIAL: every gated effect it fires is awaited before the next PR is even
- * dispositioned. The restricted light sweep (`buildSweepLightHook`, run-task.ts) exists so a
- * review can post WHILE a dispatch is in flight (`startInFlightTicker`, daemon.ts, ticks every
- * `pollIntervalMs`) — but it used to hand its WHOLE `openPrs` snapshot to `runSweep` as ONE
- * call, and `SweepDeps.postReview` (`buildSweepEffects`, run-task.ts) is not a cheap status
- * flip: it runs the real `reviewCommand`, which materializes a worktree and EXECUTES every
- * whitelisted proof for that PR (test/retro-sweep-ticker.test.ts pins the mechanism this
- * closes: `startInFlightTicker` does not schedule its NEXT `pollIntervalMs` sleep until
- * `sweepLight()` itself resolves, so the "every ~60s" promise only bounds when a pass STARTS,
- * never how long it runs). One slow-to-judge PR therefore blocked every OTHER
- * post-review-eligible PR queued behind it in the SAME pass — a fast, already-decided PR
- * ordered later in that tick's `buildOpenPrViews` snapshot silently missed its review by
- * however long the PRs ahead of it took, which is the observed ~15-minute shape.
+ * W1-T463 — THE DIAGNOSIS FOR "a light sweep ticks every 60s and a PR still sat green and
+ * unreviewed for ~15 minutes". `runSweep`'s loop is SEQUENTIAL: every gated effect is awaited
+ * before the next PR is dispositioned. The light sweep handed its WHOLE snapshot to `runSweep` as
+ * ONE call, and `postReview` is not a cheap status flip — it materializes a worktree and executes
+ * every whitelisted proof — so one slow PR blocked every eligible PR behind it.
  *
- * THE FIX IS SCOPED TO THIS ONE CALLER, NEVER `runSweep` ITSELF (which `rmd sweep` and the
- * daemon's full per-poll sweep still call, unchanged, over the whole array in one sequential
- * pass): every open PR gets its OWN `runSweep` call, all fired CONCURRENTLY. This is NOT a
- * second review lane (design (ii)/(iv) — no new mechanism, no new per-PR mutex to build): each
- * single-PR call still goes through the exact SAME dedup/disposition/ledger path `runSweep` has
- * always used, and no PR is ever handed to more than one of these concurrent calls, so there is
- * no race on any PR's own dedup key. The cost is one pass-level ledger read for admission plus
- * one fresh read per PR's own action-time call — a few extra small, local file reads, bounded by
- * the open-PR count the light sweep already fetches every tick. W1-T2583's pass-level read keeps
- * the scarce admission aligned with those later idempotence reads; it never replaces them.
- *
- * AN EMPTY PASS STILL GETS EXACTLY ONE `runSweep` CALL. Mapping `openPrs` directly would call
- * `runSweep` zero times on a quiet tick, silently dropping the `sweep.pass`/`sweep.summary`
- * per-pass heartbeat `runSweep`'s own doc explains at length (a healthy quiet pass and a
- * blind/dead one must stay distinguishable) — see `test/run-task.test.ts`'s "runs the
- * restricted light sweep over an empty PR set" fixture, which pins exactly this.
- *
- * W1-T513 ADDENDUM: "no PR is ever handed to more than one of these concurrent calls" above is
- * true only WITHIN one `runSweepLightPass` invocation's own `openPrs.map` — it says nothing
- * about a SECOND, separately-fired call (another light pass tick, or the daemon's full
- * `deps.sweep()`) running at the same time over the SAME PR. That cross-call case is exactly
- * what {@link inFlightReviewKeys} now closes, module-wide, inside `runSweep` itself — this
- * function needed no change of its own to inherit that protection.
+ * THE FIX IS SCOPED TO THIS ONE CALLER, never `runSweep` itself: every open PR gets its OWN call,
+ * fired CONCURRENTLY. NOT a second review lane and no new per-PR mutex — each call goes through the
+ * same dedup and ledger path, and no PR is handed to two of them. AN EMPTY PASS STILL GETS EXACTLY
+ * ONE CALL, or the per-pass heartbeat would vanish on a quiet tick and a healthy quiet pass would
+ * stop being distinguishable from a dead one. The cross-call case is
+ * {@link inFlightReviewKeys}'s job.
  */
 export async function runSweepLightPass(
   openPrs: OpenPrView[],
@@ -8003,18 +5628,16 @@ export async function runSweepLightPass(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
   if (openPrs.length === 0) return [await runSweep([], deps, policy)];
-  // W1-T526/W1-T2792 — THE QUEUE-ADMISSION RULE (see {@link selectReviewAdmissions}'s own doc).
-  // The light/event pass admits at most the existing `reviewLanes` semantic width, never the old
-  // hidden hard-coded one. Every other PR's own `deps.actionable` is wrapped so its disposition is
-  // still reconciled and its admission loss is attributable.
+  // W1-T526/W1-T2792 — THE QUEUE-ADMISSION RULE. The light pass admits at most the existing
+  // `reviewLanes` semantic width, never the old hidden hard-coded one. Every other PR's own
+  // `deps.actionable` is wrapped so its disposition is still reconciled and its loss attributable.
   const now = deps.now ? deps.now() : Date.now();
-  // W1-T2439/W1-T2792: the light pass admits from BOTH lanes — the spawning one at the existing
-  // policy review width, and the non-spawning plan-filing one at its own smaller, derived bound. The
-  // admitted SET is what each PR's own scoped deps are decided against; nothing else moves.
-  // W1-T2583: READ THE LEDGER ONCE FOR SELECTION, BEFORE RANKING. `runSweep` still performs its
-  // own fresh read for every scoped action below; this pass-level fold is only the liveness filter
-  // that keeps a head the action-time guard already knows it will dedup from spending a scarce
-  // admission. The later read remains the race-safe boundary if a verdict lands after this one.
+  // W1-T2439/W1-T2792: the light pass admits from BOTH lanes — the spawning one at the policy
+  // review width, and the non-spawning plan-filing one at its own smaller derived bound. The
+  // admitted SET is what each PR's scoped deps are decided against; nothing else moves.
+  // W1-T2583: READ THE LEDGER ONCE FOR SELECTION, BEFORE RANKING. `runSweep` still performs its own
+  // fresh read for every scoped action; this pass-level fold is only the liveness filter that keeps
+  // a head the action-time guard will dedup from spending a scarce admission.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
@@ -8031,10 +5654,9 @@ export async function runSweepLightPass(
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
   ]);
-  // Known outcome-deduped heads did not compete for either bound, but they must still pass through
-  // `runSweep`'s existing action-time guard so their own ledger row says DELIVERED/REFUSED instead
-  // of falsely claiming they lost an admission. This never dispatches a review: the append-only
-  // outcome row that excluded them is re-read before the action switch.
+  // Known outcome-deduped heads did not compete for either bound, but must still pass through
+  // `runSweep`'s action-time guard so their own row says DELIVERED or REFUSED rather than falsely
+  // claiming they lost an admission. This never dispatches a review.
   const outcomeDedupedNumbers = new Set(
     openPrs
       .filter((pr) =>
@@ -8058,10 +5680,9 @@ export async function runSweepLightPass(
               detachFixWait: true,
               selectAdaptiveReviewWidth: undefined,
               actionable: (d) => (d === "post-review" ? false : baseActionable ? baseActionable(d) : true),
-              // W1-T2426 (criterion 7): name the mechanism, not just the fact. A `post-review`
-              // refused HERE was eligible and lost this pass's bounded admission — a different
-              // event from a lane the light pass never runs, and until now both wrote the same
-              // sentence. The configured bound itself is untouched: this records the refusal.
+              // W1-T2426: name the mechanism, not just the fact. A `post-review` refused HERE was
+              // eligible and lost this pass's bounded admission — a different event from a lane the
+              // light pass never runs, and both used to write the same sentence.
               standDownReasonFor: (d) =>
                 d === "post-review"
                   ? (pr.isPlanFiling === true
@@ -8108,38 +5729,15 @@ function reviewAdmissionOutcomeKnown(
 }
 
 /**
- * W1-T526 — WHICH OPEN PRS, IF ANY, {@link runSweepLightPass} admits into `post-review` this
- * pass. Branch protection's `strict: true` means only ONE open PR can merge before every OTHER
- * one reads `behind`, and a `behind` PR's next push mints a NEW head sha — `reviewDelivered`
- * (`priorActionsFromLedger`, above) is sha-pinned, so that push throws away the very verdict
- * this lane just posted. Before this task `runSweepLightPass` fanned every post-review-eligible
- * PR out to its own concurrent `runSweep` call (design note, its own doc above), so a queue of N
- * such PRs cost N + (N-1) + … + 1 reviews to land N merges instead of N — quadratic in queue
- * depth, and the eight-open-PR incident this task fixes measured 36 reviews to land 8. W1-T2792
- * keeps that protection bounded but removes the unrelated hard-coded one-at-a-time bottleneck:
- * the light path now uses the same configured `reviewLanes` ceiling as the full sweep.
+ * W1-T526 — WHICH OPEN PRS the light pass admits into `post-review`. Branch protection's `strict`
+ * setting means only ONE open PR can merge before every other reads `behind`, and that PR's next
+ * push mints a NEW head, throwing away the sha-pinned verdict this lane just posted — so unbounded
+ * fan-out cost N + (N-1) + … + 1 reviews to land N merges.
  *
- * PURE, OVER THE WHOLE SNAPSHOT, USING THE SAME CLASSIFIER `runSweep` ITSELF USES:
- * {@link deriveDisposition} decides eligibility — a red, conflicted, blocked-ambiguous, or
- * strike-exhausted PR never derives `post-review` in the first place, so it is never a
- * candidate here and can never hold the queue (design iii: only a PR this pass would actually
- * dispatch `post-review` for is ever chosen, and a chosen PR whose review fails leaves no new
- * ledger/dedup state, so the very next pass re-derives eligibility fresh and may choose it
- * again, or may not — the slot is never reserved).
- *
- * OLDEST-HEAD-FIRST, CHOSEN BECAUSE IT CANNOT STARVE (design ii): ranking by "most ready" or by
- * `openPrs` order lets a freshly-pushed PR overtake forever. Ranking by the age of the head
- * itself is monotone instead — a PR that loses this pass is STRICTLY OLDER next pass (nothing
- * un-ages a head), so every eligible PR reaches the front of the queue within a bounded number
- * of passes: the starvation falsifier is that the loser of one pass wins a later one once
- * nothing older remains. {@link OpenPrView.lastActivityAt} is the SAME clock
- * `absentChecksRepushDecision` (above) already reads as "when this head was pushed" — a push
- * always advances it — reused here rather than a second, independent age source. An unreadable
- * age (`Date.parse` -> `NaN`) never outranks a readable one (fails toward not jumping the
- * queue on state we cannot date, the same direction `absentChecksRepushDecision` fails); it can
- * still be chosen when it is the only eligible PR. Ties (equal age, or all ages unreadable)
- * break on ascending PR number, purely for a deterministic, test-stable choice — the ordering
- * rule itself does not depend on which side of a tie wins.
+ * PURE, over the whole snapshot, using the SAME classifier `runSweep` uses: a red, conflicted or
+ * exhausted PR never derives `post-review`, so it can never hold the queue. OLDEST-HEAD-FIRST
+ * BECAUSE IT CANNOT STARVE — head age is monotone, so a loser is strictly older next pass. An
+ * unreadable age never outranks a readable one, and ties break on PR number for determinism.
  */
 export function selectReviewAdmission(
   openPrs: readonly OpenPrView[],
@@ -8150,32 +5748,16 @@ export function selectReviewAdmission(
 }
 
 /**
- * W1-T2439 (half two) — THE SPLIT ADMISSION, AND WHY THE PREDICATE IS `isPlanFiling` AND NOT THE
- * REVIEW'S OUTCOME.
+ * W1-T2439 — THE SPLIT ADMISSION, AND WHY THE PREDICATE IS `isPlanFiling` AND NOT THE REVIEW'S
+ * OUTCOME: the outcome is written AFTER the review runs, so this function cannot see it.
  *
- * `reviewer_outcome` is written on the `review.posted` row AFTER the review runs, and this
- * function receives only `readonly OpenPrView[]`, a policy and a clock — it cannot see an outcome
- * that does not exist yet. {@link OpenPrView.isPlanFiling} is the one signal available at
- * admission, which is exactly why this task's half one wired its producer first.
+ * TWO LANES, AND ONLY ONE CAN SPAWN: the spawning lane is every PR not flagged a plan filing,
+ * bounded at the configured review width; the non-spawning lane is plan filings, bounded by
+ * {@link SweepPolicy.planFilingAdmissionBound}.
  *
- * TWO LANES, AND ONLY ONE OF THEM CAN SPAWN:
- *   - SPAWNING — every PR whose `isPlanFiling` is not `true`. W1-T2792 bounds this lane at
- *     `max(1, policy.reviewLanes)`, using the same oldest-first ordering W1-T526 established.
- *   - NON-SPAWNING — PRs whose `isPlanFiling` is `true`, whose review takes the deterministic path.
- *     Bounded by {@link SweepPolicy.planFilingAdmissionBound}, whose number is derived in its own
- *     doc rather than picked.
- *
- * ⚠ FAIL-OPEN ON AN UNPOPULATED SIGNAL. `isPlanFiling === undefined` — every fixture that predates
- * half one, and any gateway that does not populate it — is treated as SPAWNING, so it competes for
- * the semantic lane exactly as it does today. The split can only ever ADD throughput on a positive
- * signal; an absent one changes nothing.
- *
- * ⚠ AND THE 2 PERCENT THAT DO REACH THE JUDGE ARE CHARGED TO THE SPAWNING SIDE, BY CONSTRUCTION
- * RATHER THAN BY DETECTION: this split never exceeds the configured spawning bound, so a plan
- * filing whose review turns out to spawn consumes judge capacity that was never expanded for it.
- * That is the honest guarantee available at admission time — the shard's Q1 establishes that
- * detecting the outcome beforehand is unbuildable, so the design charges it instead of predicting
- * it.
+ * FAIL-OPEN ON AN UNPOPULATED SIGNAL — `undefined` is treated as SPAWNING, so the split can only
+ * ADD throughput on a positive signal. The few filings that DO reach the judge are charged to the
+ * spawning side BY CONSTRUCTION, since detecting the outcome beforehand is unbuildable.
  */
 export function selectReviewAdmissions(
   openPrs: readonly OpenPrView[],
@@ -8184,10 +5766,9 @@ export function selectReviewAdmissions(
   outcomes: ReviewAdmissionOutcomes = EMPTY_REVIEW_ADMISSION_OUTCOMES,
   reviewWidth: number = Math.max(1, policy.reviewLanes),
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
-  // W1-T2583: selection and execution must agree on outcome-keyed eligibility. The caller folds
-  // these two sets once from the same PriorActions reader `runSweep` uses; filtering here happens
-  // before either lane ranks or truncates. The action-time lookup remains in `runSweep` as the
-  // safety boundary for a verdict/refusal that races this snapshot.
+  // W1-T2583: selection and execution must agree on outcome-keyed eligibility, so the caller folds
+  // both sets once from the same reader `runSweep` uses and filters here before either lane ranks.
+  // The action-time lookup stays in `runSweep` as the boundary for a verdict racing this snapshot.
   const eligible = openPrs.filter((pr) =>
     deriveDisposition(pr, policy, now).disposition === "post-review" &&
     !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now));
@@ -8229,30 +5810,14 @@ function reviewAdmissionQueueDepth(
 
 /**
  * W1-T2426 — THE ADMISSION KEY, AND WHY IT IS NOT {@link OpenPrView.lastActivityAt}.
+ * {@link selectReviewAdmission} argues oldest-first cannot starve because nothing un-ages a head.
+ * THAT PREMISE IS FALSE FOR THE WINNER: POSTING A VERDICT IS ITSELF AN UPDATE, so reviewing resets
+ * the key of the PR it reviewed and a PR whose review FAILED is thrown behind PRs that waited less.
  *
- * {@link selectReviewAdmission}'s own doc above argues that oldest-first cannot starve because
- * "a PR that loses this pass is STRICTLY OLDER next pass (nothing un-ages a head)". THAT PREMISE
- * IS FALSE FOR THE WINNER. `lastActivityAt` is populated from the PR's `updatedAt`
- * (`run-task.ts`'s `lastActivityAt: pr.updatedAt` and `lastActivityAt: raw.updatedAt`), and
- * POSTING A VERDICT IS ITSELF AN UPDATE: measured across seven PRs carrying a `review.posted`
- * row, GitHub's `updated_at` sits at or just after the post — +4s, +5s, +8s, +8s, +19s, +38s and
- * +90s. So the act of reviewing resets the key of the PR it reviewed, and an oldest-first queue
- * sorts that PR LAST. The loser is fine — it really is older next pass — but a PR whose review
- * FAILED is thrown behind PRs that have waited strictly less time than it has, and it must win
- * the whole queue again before it is re-attempted.
- *
- * THE ANSWER IS ALREADY IN THIS FILE. W1-T1218's {@link orderPendingReviews} ranks the review
- * lane on `createdAt` and says in its own doc why: an IMMUTABLE key. That site is immune to this
- * defect by that choice, and this one adopts it.
- *
- * THE FALLBACK CAN ONLY UNDER-RANK, NEVER OVER-RANK. {@link OpenPrView.createdAt} is OPTIONAL —
- * both real producers populate it (`run-task.ts`, and `open-prs-rest.ts` when the row carries
- * `created_at`), and it is optional only so fixtures and unwired producers stay valid. When it is
- * absent or unparseable this falls back to `lastActivityAt`, and that direction is safe by
- * construction: `updatedAt >= createdAt` for every PR, so a fallback candidate is scored YOUNGER
- * than its true age and can only be passed over, never allowed to jump the queue. That is the
- * same "fails toward not jumping the queue on state we cannot date" direction the comparator's
- * own unreadable-age rule already takes.
+ * THE ANSWER IS ALREADY IN THIS FILE — {@link orderPendingReviews} ranks on the IMMUTABLE
+ * `createdAt`. THE FALLBACK CAN ONLY UNDER-RANK, NEVER OVER-RANK: since `updatedAt >= createdAt`,
+ * a fallback candidate is scored YOUNGER than its true age and can only be passed over.
+ * // Why: measured across seven PRs — docs/forensics/sweep.md.
  */
 export function reviewAdmissionKey(pr: Pick<OpenPrView, "createdAt" | "lastActivityAt">): string {
   const created = pr.createdAt;
@@ -8261,14 +5826,11 @@ export function reviewAdmissionKey(pr: Pick<OpenPrView, "createdAt" | "lastActiv
 }
 
 /**
- * THE OLDEST-HEAD-FIRST COMPARATOR ITSELF — lifted out of {@link selectReviewAdmission} (W1-T526)
- * so W1-T528's disjoint `update-branch` selection can CONSUME it rather than shipping a second
- * ordering that could silently disagree (design note iii, W1-T528's own doc: "whichever of the
- * two is built first exports the oldest-head-first comparator from `src/lib/sweep.ts` and the
- * second consumes it"). Byte-identical logic to what {@link selectReviewAdmission} always ran —
- * see that function's own doc, directly above, for the full starvation argument this ranking
- * exists to satisfy; it applies unchanged to any `{prNumber, lastActivityAt}` population, not
- * only the post-review one.
+ * THE OLDEST-HEAD-FIRST COMPARATOR ITSELF, lifted out of {@link selectReviewAdmission} so
+ * W1-T528's disjoint `update-branch` selection CONSUMES it rather than shipping a second ordering
+ * that could silently disagree. Byte-identical logic to what that function always ran — see its
+ * doc for the starvation argument, which applies unchanged to any `{prNumber, lastActivityAt}`
+ * population, not only the post-review one.
  */
 export function oldestActivityFirst<T extends { prNumber: number; lastActivityAt: string }>(
   candidates: readonly T[],
@@ -8278,21 +5840,17 @@ export function oldestActivityFirst<T extends { prNumber: number; lastActivityAt
 }
 
 /**
- * W1-T2426 — THE RANKING ITSELF, with the key it ranks on supplied by the caller.
+ * W1-T2426 — THE RANKING ITSELF, with the key supplied by the caller.
  *
- * ONE IMPLEMENTATION, TWO KEYS — DELIBERATELY NOT TWO COMPARATORS. W1-T528's design note (iii),
- * quoted in {@link oldestActivityFirst}'s doc above, required that the two rungs share an ordering
- * "rather than shipping a second ordering that could silently disagree". Extracting the key rather
- * than forking the comparator keeps that guarantee: the tie-break on ascending `prNumber`, the
- * `-Infinity` treatment of an unparseable date, and the strict `>` that makes the FIRST maximal
- * candidate win are all defined exactly once and cannot drift apart.
+ * ONE IMPLEMENTATION, TWO KEYS, DELIBERATELY NOT TWO COMPARATORS: extracting the key rather than
+ * forking the comparator keeps the shared-ordering guarantee, so the tie-break, the `-Infinity`
+ * treatment of an unparseable date, and the strict `>` that makes the FIRST maximal candidate win
+ * are each defined exactly once and cannot drift.
  *
- * {@link oldestActivityFirst} IS UNCHANGED IN BEHAVIOUR and remains the key W1-T528's
- * `update-branch` selection consumes. That is not an oversight — see {@link reviewAdmissionKey}
- * for why only the review-admission call site moves: for `update-branch`, `updatedAt` advancing
- * when the branch is updated is the CORRECT ranking, because a just-updated branch should not be
- * re-selected ahead of one that has waited; for `post-review` the same advance is pathological,
- * because reviewing is not the work finishing, it is the work being attempted.
+ * {@link oldestActivityFirst} is UNCHANGED and remains what `update-branch` consumes. That is not
+ * an oversight: for `update-branch`, `updatedAt` advancing is the CORRECT ranking, because a
+ * just-updated branch should not be re-selected ahead of one that has waited. For `post-review`
+ * the same advance is pathological — reviewing is the work being attempted, not finishing.
  */
 function oldestByKey<T extends { prNumber: number }>(
   candidates: readonly T[],
@@ -8324,26 +5882,17 @@ export function renderSweepSummary(s: SweepSummary): string {
   );
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// W1-T121 — the QUEUE GOVERNOR (the 23-open-PR incident). No backpressure
-// existed anywhere in the pipeline, so authoring rate converted DIRECTLY into
-// queue depth with nothing to arrest it. Little's law is the argument:
-// throughput comes from BOUNDING WIP, not from pushing harder on intake.
+// ── W1-T121 — THE QUEUE GOVERNOR (the 23-open-PR incident) ───────────────────────────────────
 //
-// CORROBORATION, the governor's thesis run by hand: with the dispatcher DOWN
-// and only the sweep loop running, the queue drained 23 -> 14 open PRs in a
-// single pass window; and with dispatch halted again, the remaining ten
-// drained to ZERO. Drainage is demonstrably healthy while intake is zero —
-// the two halves are separable IN PRACTICE, which is exactly what makes a
-// DISPATCH-ONLY throttle safe rather than a stall.
+// No backpressure existed anywhere in the pipeline, so authoring rate converted DIRECTLY into
+// queue depth with nothing to arrest it. Little's law is the argument: throughput comes from
+// BOUNDING WIP, not from pushing harder on intake.
 //
-// ASYMMETRY IS THE WHOLE DESIGN: {@link checkQueueGovernor} is a pure
-// predicate its caller consults ONLY on the NEW-task dispatch path (e.g.
-// drain.ts's `nextRunnable` / the daemon poll loop) — it is NEVER consulted
-// by `runSweep` above, which arms/fixes/closes/escalates already-open PRs at
-// ANY depth, ungated. A governor that also throttled drainage would deepen
-// the very queue it exists to bound.
-// ────────────────────────────────────────────────────────────────────────────
+// ASYMMETRY IS THE WHOLE DESIGN: {@link checkQueueGovernor} is a pure predicate consulted ONLY on
+// the NEW-task dispatch path. It is NEVER consulted by `runSweep`, which arms, fixes, closes and
+// escalates already-open PRs at ANY depth, ungated — a governor that also throttled drainage would
+// deepen the very queue it exists to bound.
+// Why: the drain-with-dispatch-down corroboration is in docs/forensics/sweep.md.
 
 /** {@link checkQueueGovernor}'s verdict for one dispatch-path consultation. */
 export interface QueueGovernorResult {
@@ -8356,13 +5905,10 @@ export interface QueueGovernorResult {
 }
 
 /**
- * The queue governor's pure predicate (design (ii)): at or above
- * `policy.wipLimit` open PRs, NEW dispatch is deferred; below it, dispatch
- * proceeds normally. THRESHOLDS ARE POLICY DATA (rule 2) — `policy.wipLimit`
- * is the ONLY thing that moves this decision; there is no second, ad-hoc
- * constant anywhere near a real dispatch call site. Never call this from
- * `runSweep` or any of its deps (arm/dispatchFix/close/escalate) — see the
- * asymmetry note above.
+ * The queue governor's pure predicate: at or above `policy.wipLimit` open PRs, NEW dispatch is
+ * deferred; below it, dispatch proceeds. THRESHOLDS ARE POLICY DATA (rule 2) — that field is the
+ * ONLY thing that moves this decision, and there is no second ad-hoc constant near a dispatch call
+ * site. Never call this from `runSweep` or any of its deps; see the asymmetry note above.
  */
 export function checkQueueGovernor(
   openPrCount: number,
@@ -8376,11 +5922,9 @@ export function checkQueueGovernor(
 }
 
 /**
- * A throttled pass is NOT silent (design (iv)): the real dispatch path calls
- * this exactly when {@link checkQueueGovernor} returns `deferred: true`,
- * writing one `dispatch_deferred_wip` ledger line carrying the observed open
- * count — so a quiet daemon (nothing runnable) stays distinguishable from a
- * THROTTLED one (runnable work exists, held back by the governor).
+ * A throttled pass is NOT silent: the dispatch path calls this exactly when
+ * {@link checkQueueGovernor} defers, writing one ledger line carrying the observed open count — so
+ * a quiet daemon with nothing runnable stays distinguishable from a THROTTLED one.
  */
 export function logQueueGovernorDeferral(
   result: QueueGovernorResult,
@@ -8397,46 +5941,28 @@ export function logQueueGovernorDeferral(
   });
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// W1-T148 — the COST GOVERNOR (the $206/60-run W1-T1 spin-loop incident). A
-// spin loop burned ~$206 over ~60 runs with no DAILY ceiling anywhere — every
-// individual run stayed safely under its own per-run `budget_usd` cap
-// (run-task.ts's `DEFAULT_BUDGET_USD`), so that per-run backstop never fired;
-// nothing was watching the CROSS-RUN total. Pairs with W1-T130's
-// CANNOT-OBSERVE-MEANS-WAIT polarity — the same "when in doubt, WAIT not
-// spend" doctrine, here applied to budget rather than observability, and the
-// architectural TWIN of the W1-T121 queue governor just above: a WIP limit
-// bounds intake by COUNT, this bounds intake by DOLLARS. Same asymmetry, same
-// reason: {@link checkCostGovernor} is a pure predicate its caller consults
-// ONLY on the NEW-task dispatch path — it is NEVER consulted by `runSweep`
-// above, which arms/fixes/closes/escalates already-open PRs at ANY day-cost,
-// ungated. A governor that also throttled drainage would strand in-flight
-// work to save money — a worse failure than the spend itself (a half-finished
-// PR must still merge, a block must still escalate).
-// ────────────────────────────────────────────────────────────────────────────
+// ── W1-T148 — THE COST GOVERNOR (the $206/60-run spin-loop incident) ─────────────────────────
+//
+// A spin loop burned roughly $206 over 60 runs with no DAILY ceiling anywhere: every individual
+// run stayed safely under its own per-run cap, so that backstop never fired and nothing was
+// watching the CROSS-RUN total. The architectural TWIN of the queue governor above — a WIP limit
+// bounds intake by COUNT, this bounds it by DOLLARS.
+//
+// Same asymmetry, same reason: {@link checkCostGovernor} is consulted ONLY on the dispatch path,
+// NEVER by `runSweep`, which drains already-open PRs at any day-cost. Throttling drainage would
+// strand in-flight work to save money — a worse failure than the spend itself.
 
 /**
- * Sums ONE ledgered dollar figure per RUN (keyed by `run_id`), for every run
- * with at least one ledger line whose `ts` falls within `[windowStartMs,
- * windowEndMs)`, then totals those per-run figures — a window's ledgered
- * cost. {@link deriveDayCostUsd}/{@link deriveWeekCostUsd} (W1-T159) are both
- * this ONE reduction over a different window, never a separately reimplemented
- * scan — "if both need the same ledger reduction, factor it once" (W1-T184's
- * queue_note, filed against exactly this pairing).
+ * Sums ONE ledgered dollar figure per RUN, for every run with at least one line inside the window,
+ * then totals them. {@link deriveDayCostUsd} and {@link deriveWeekCostUsd} are both this ONE
+ * reduction over a different window, never a separately reimplemented scan.
  *
- * PER-RUN, NOT PER-LINE (avoids double-counting): a run's `verdict` line (or,
- * absent one — e.g. a run still in flight — its first `cost_usd`-bearing
- * line) already carries that run's RUNNING TOTAL cost, the same "running
- * total, not incremental" fact board.ts's `liveRunSpend` documents for
- * `budget.warning`/`verdict` lines. Summing every `cost_usd`-bearing line
- * for a run (verdict AND its own implement.done/fix.done contributors) would
- * count that run's spend twice over; taking exactly one figure per run_id —
- * mirroring retro.ts's `gatherRuns` costLine precedent (verdict line
- * preferred, else the first cost_usd line seen) — does not.
+ * PER-RUN, NOT PER-LINE, WHICH AVOIDS DOUBLE-COUNTING: a run's `verdict` line — or, absent one,
+ * its first cost-bearing line — already carries that run's RUNNING TOTAL. Summing every
+ * cost-bearing line for a run would count its spend twice over.
  *
- * A line with no `ts` string, an unparseable `ts`, or a `ts` outside the
- * window, is excluded; a run whose only in-window lines carry no `cost_usd`
- * contributes 0.
+ * A line with no `ts`, an unparseable one, or one outside the window is excluded; a run whose only
+ * in-window lines carry no cost contributes 0.
  */
 export function deriveWindowCostUsd(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -8483,11 +6009,9 @@ export function utcWeekWindowMs(now: number): [start: number, end: number] {
 }
 
 /**
- * The day's ledgered cost — `now`'s UTC calendar day, per-run (see
- * {@link deriveWindowCostUsd} for the shared reduction). BEHAVIOR UNCHANGED from
- * this function's pre-W1-T159 form: same window (today's UTC calendar day), same
- * per-run/verdict-preferred reduction — {@link checkCostGovernor}'s existing call
- * site sees byte-identical results.
+ * The day's ledgered cost — `now`'s UTC calendar day, per-run (see {@link deriveWindowCostUsd}).
+ * BEHAVIOR UNCHANGED from this function's pre-W1-T159 form: same window, same verdict-preferred
+ * per-run reduction, so {@link checkCostGovernor}'s call site sees byte-identical results.
  */
 export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
   const [start, end] = utcDayWindowMs(now);
@@ -8495,11 +6019,10 @@ export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, 
 }
 
 /**
- * The WEEK-TO-DATE ledgered cost (W1-T159): the current UTC ISO week (Monday 00:00 UTC through
- * `now`'s week), same per-run reduction as {@link deriveDayCostUsd}. The GLANCE strip's own
- * falsifier is exactly why this exists beside the day figure: "a daily-only figure cannot answer
- * whether today is normal — ~2.54 USD burned post-merge looked unremarkable in isolation and is
- * only legible against a weekly baseline" (plan/tasks.yaml, this task's amended criterion).
+ * The WEEK-TO-DATE ledgered cost (W1-T159): the current UTC ISO week, same per-run reduction as
+ * {@link deriveDayCostUsd}. The GLANCE strip's own falsifier is why this exists beside the day
+ * figure — a daily-only figure cannot answer whether today is normal, since a modest post-merge
+ * burn looks unremarkable in isolation and is only legible against a weekly baseline.
  */
 export function deriveWeekCostUsd(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
   const [start, end] = utcWeekWindowMs(now);
@@ -8517,21 +6040,14 @@ export interface CostGovernorResult {
 }
 
 /**
- * The cost governor's pure predicate: at or over `policy.dailyCostCeilingUsd`
- * ledgered dollars spent today, NEW dispatch is deferred; below it, dispatch
- * proceeds normally. THRESHOLDS ARE POLICY DATA (rule 2) —
- * `policy.dailyCostCeilingUsd` is the ONLY thing that moves this decision.
- * Never call this from `runSweep` or any of its deps (arm/dispatchFix/close/
- * escalate) — see the asymmetry note above.
+ * The cost governor's pure predicate: at or over `policy.dailyCostCeilingUsd` ledgered dollars
+ * spent today, NEW dispatch is deferred. THRESHOLDS ARE POLICY DATA (rule 2) — that field is the
+ * ONLY thing that moves this decision. Never call this from `runSweep` or any of its deps.
  *
- * W1-T331: THIS FUNCTION WAS NEVER THE FROZEN PART — `policy` is already a per-call argument,
- * so any caller that builds/resolves its own `SweepPolicy` per consultation already gets a live
- * decision. The bug W1-T330 alone left open was that every real caller omitted `policy` and
- * silently took the default parameter, which resolves to {@link DEFAULT_SWEEP_POLICY} — a
- * const captured once at import (see that constant's own doc). `run-task.ts`'s
- * `costGovernorGateFor` is the fix: it builds an explicit `SweepPolicy` from a per-consultation
- * ceiling (sourced live by `daemon.ts`'s `runDaemon`, once per tick) and passes it here instead
- * of relying on the default.
+ * W1-T331: THIS FUNCTION WAS NEVER THE FROZEN PART — `policy` is already a per-call argument, so
+ * any caller building its own policy per consultation gets a live decision. The bug was that every
+ * real caller omitted it and silently took the default parameter, which resolves to the const
+ * captured once at import. The fix builds an explicit policy from a per-consultation ceiling.
  */
 export function checkCostGovernor(
   dayCostUsd: number,
@@ -8545,11 +6061,9 @@ export function checkCostGovernor(
 }
 
 /**
- * A throttled pass is NOT silent: the real dispatch path calls this exactly
- * when {@link checkCostGovernor} returns `deferred: true`, writing one
- * `dispatch_deferred_budget` ledger line naming the day-cost + ceiling — so a
- * quiet daemon (nothing runnable) stays distinguishable from a
- * BUDGET-THROTTLED one (runnable work exists, held back by the governor).
+ * A throttled pass is NOT silent: the dispatch path calls this exactly when
+ * {@link checkCostGovernor} defers, writing one ledger line naming the day-cost and ceiling — so a
+ * quiet daemon stays distinguishable from a BUDGET-THROTTLED one.
  */
 export function logCostGovernorDeferral(
   result: CostGovernorResult,
@@ -8566,30 +6080,19 @@ export function logCostGovernorDeferral(
   });
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// W1-T1038 — the MEMORY GOVERNOR (the 2026-08-19 host stall). Dispatch has priced every draw in
-// dollars ({@link checkCostGovernor} above) and in turns (`num_turns`) since the ledger began,
-// and never once in bytes: across the full deduped ledger, zero fields carry
-// mem/rss/heap/swap/avail while 1,109 rows carry `cost_usd`. At 18:43:54.955Z the host went
-// unreachable with three workers live, 4.69 GiB available minutes earlier. NOTHING WAS
-// KILLED — zero `oom-kill`/`Out of memory`/`Killed process`/`oom_reaper` lines across
-// journalctl/syslog/kern.log, a measured absence, not a lost log: with no swap the kernel could
-// not page out anonymous memory, so it evicted and re-faulted executable pages under reclaim
-// livelock, which never arms the OOM killer.
+// ── W1-T1038 — THE MEMORY GOVERNOR (the 2026-08-19 host stall) ───────────────────────────────
 //
-// THE ONE DELIBERATE ASYMMETRY WITH ITS TWO SIBLINGS ABOVE. {@link checkCostGovernor} and
-// {@link checkQueueGovernor} are consulted through `dispatch-governor.ts`'s
-// `checkDispatchGovernors`, whose own doc is headed "FAIL-CLOSED ON AN UNREADABLE OBSERVATION":
-// an unreadable cost/queue reading is treated as if it were confirmed over ceiling. THIS
-// GOVERNOR'S UNREADABLE CASE MUST NOT JOIN THAT ARM. Three-lane dispatch has been 100% of draws
-// since 2026-08-14 (51 sets, admitted mean 3.00, one failure in six days); a guard that refused
-// dispatch on every `/proc/meminfo` hiccup would convert a once-in-six-days event into a 100%
-// outage. FAIL OPEN: an unreadable observation PERMITS the dispatch. That direction is enforced
-// one layer up, at the composition point (`checkDispatchGovernors`'s own comment) — THIS
-// predicate never sees a probe failure at all; its input is already a resolved number, and the
-// failure (an unreadable `/proc/meminfo`) happens in the real wiring one layer further up still
-// (`run-task.ts`'s `memoryGovernorGateFor`).
-// ────────────────────────────────────────────────────────────────────────────
+// Dispatch has priced every draw in dollars and in turns since the ledger began, and never once in
+// bytes. The host went unreachable with three workers live. NOTHING WAS KILLED — a measured
+// absence of every OOM signature, not a lost log: with no swap the kernel could not page out
+// anonymous memory, so it evicted and re-faulted executable pages under reclaim livelock, which
+// never arms the OOM killer.
+//
+// THE ONE DELIBERATE ASYMMETRY WITH ITS TWO SIBLINGS: those are composed under a FAIL-CLOSED rule,
+// where an unreadable reading counts as over ceiling. THIS GOVERNOR'S UNREADABLE CASE MUST NOT
+// JOIN THAT ARM — a guard refusing dispatch on every `/proc/meminfo` hiccup would convert a
+// once-in-six-days event into a total outage. FAIL OPEN, enforced one layer up at the composition
+// point; this predicate never sees a probe failure at all.
 
 /** {@link checkMemoryGovernor}'s verdict for one dispatch-path consultation. */
 export interface MemoryGovernorResult {
@@ -8604,24 +6107,16 @@ export interface MemoryGovernorResult {
 }
 
 /**
- * The memory governor's pure predicate (design (i)): STRICTLY BELOW `policy.memoryFloorMib` MiB
- * available, NEW dispatch is deferred; at or above it, dispatch proceeds normally. Same shape as
- * {@link checkCostGovernor}/{@link checkQueueGovernor} immediately above — the observation, the
- * floor, and whether it defers — and the SAME dispatch-only asymmetry those two document: never
- * call this from `runSweep` or any of its deps (arm/dispatchFix/close/escalate); it is consulted
- * ONLY on the NEW-dispatch path.
+ * The memory governor's pure predicate: STRICTLY BELOW `policy.memoryFloorMib` available, NEW
+ * dispatch is deferred; at or above it, dispatch proceeds. Same shape and the SAME dispatch-only
+ * asymmetry as its two siblings — never call it from `runSweep` or any of its deps.
  *
- * SHIPS INERT (design (vi)): `policy.memoryFloorMib` defaults to 0 (`plan/policy.yaml`'s own
- * row), and `observedAvailableMib` can never be negative, so `deferred` is `false` on every call
- * until an operator raises the floor against a measured figure — the threshold this task's own
- * rationale (7) says is NOT YET KNOWN and must not be guessed. Measuring it is this task's own
- * row ({@link logMemoryObservation}, below), never this default.
+ * SHIPS INERT: the floor defaults to 0 and the observation can never be negative, so this never
+ * defers until an operator raises the floor against a measured figure — one this task's rationale
+ * says is NOT YET KNOWN and must not be guessed. Measuring it is {@link logMemoryObservation}'s job.
  *
- * DEFER, NEVER KILL (design (iii)): this predicate only ever gates the NEXT dispatch. It takes
- * a plain number and returns a plain object — there is no parameter through which it could
- * reach, signal, or otherwise touch a running process, so a live worker that crosses the floor
- * mid-run keeps running exactly as {@link checkCostGovernor}/{@link checkQueueGovernor} already
- * never touch an in-flight run either.
+ * DEFER, NEVER KILL: this only gates the NEXT dispatch. It takes a plain number and returns a
+ * plain object, so there is no parameter through which it could reach a running process.
  */
 export function checkMemoryGovernor(
   availableMib: number,
@@ -8635,21 +6130,16 @@ export function checkMemoryGovernor(
 }
 
 /**
- * THE OBSERVATION IS LEDGERED ON EVERY CONSULTATION (design (iv)) — unlike {@link
- * logCostGovernorDeferral}/{@link logQueueGovernorDeferral} immediately above, which fire ONLY
- * when their governor's `deferred` is `true`, this caller ledgers unconditionally, admitted
- * readings included. A deferral-only row would sample exactly the population that never happens
- * while the floor ships disabled (design note (vi)) — the evidence this task exists to gather
- * (what a live dispatch actually observes, design notes (7)/(8)) is the ADMITTED reading, not
- * the currently-unreachable deferred one.
+ * THE OBSERVATION IS LEDGERED ON EVERY CONSULTATION — unlike the two deferral loggers above, which
+ * fire only when their governor defers, this ledgers unconditionally, admitted readings included.
+ * A deferral-only row would sample exactly the population that never happens while the floor ships
+ * disabled; the evidence this exists to gather is the ADMITTED reading.
  *
- * NOT registered in `ledger.ts`'s `DECISION_RELEVANT_LEDGER_STEPS` (design note (v)): nothing
- * reads this step back yet — THE READER IS THE OPERATOR, scanning the ledger union by hand.
- * Membership is required only once a future predicate reads this step back to decide something,
- * and that predicate's own PR is the one that adds it. Written WITHOUT the literal comparison
- * expression on purpose: test/ledger-rotation.test.ts derives the decision-relevant set by
- * scanning this file's TEXT for that pattern, comments included, so spelling it out here
- * manufactures a consumer that does not exist and fails that test on prose alone.
+ * NOT registered in `ledger.ts`'s decision-relevant set: nothing reads this step back yet — THE
+ * READER IS THE OPERATOR. Membership is required only once a future predicate reads it back, and
+ * that predicate's own PR is the one that adds it. Written WITHOUT the literal comparison
+ * expression on purpose: test/ledger-rotation.test.ts derives that set by scanning this file's
+ * TEXT, comments included, so spelling it out here manufactures a consumer that does not exist.
  */
 export function logMemoryObservation(
   result: MemoryGovernorResult,
@@ -8671,12 +6161,9 @@ export function logMemoryObservation(
  * How many CONSECUTIVE `sweep.post_review.failed` lines — with no intervening `.done` — mean the
  * post-review path has STALLED rather than hiccupped.
  *
- * DERIVED FROM THE LEDGER, NOT PICKED. Over the live file unioned with every rotation, the
- * consecutive-failure runs (a success resets the count) were: one run of 1, two runs of 4, one run
- * of 5, and one run of 77. The short runs recovered in 2.6–3.5 minutes; the run of 77 spanned 32.5
- * minutes and was still going when an operator found it by hand. The observed transient maximum is
- * 5 and the observed stall is 77, with NO observation between — so 8 sits inside an empty gap, with
- * ~60% margin over the worst transient and far below the stall. Raise this only against new data.
+ * DERIVED FROM THE LEDGER, NOT PICKED. The observed transient maximum is 5 and the observed stall
+ * is 77, with NO observation between, so 8 sits inside an empty gap with real margin over the
+ * worst transient and far below the stall. Raise this only against new data.
  */
 export const POST_REVIEW_STALL_THRESHOLD = 8;
 
@@ -8691,19 +6178,17 @@ export interface PostReviewStallVerdict {
   /** `ts` of the oldest failure in the run, so the escalation can state how long it has been going. */
   oldestFailureTs?: string;
   /**
-   * The run's error text with digit runs replaced by `<N>`. NORMALISATION IS LOAD-BEARING: the 91
-   * observed failures carried 10 DISTINCT raw error strings and exactly ONE normalised string,
-   * because the text embeds the PR number (`gh pr view 1339 …` vs `gh pr view 1340 …`). Grouping on
-   * the RAW text would split one systematic stall into ten unrelated-looking groups and defeat the
-   * whole point of noticing that a failure repeats.
+   * The run's error text with digit runs replaced by `<N>`. NORMALISATION IS LOAD-BEARING: the
+   * observed failures carried ten distinct raw strings and exactly ONE normalised string, because
+   * the text embeds the PR number. Grouping on the RAW text would split one systematic stall into
+   * ten unrelated-looking groups and defeat the whole point of noticing that a failure repeats.
    */
   normalisedError?: string;
   /**
-   * true when every failure in the run is an API quota exhaustion. Carried so the escalation can say
-   * so — a quota failure is fleet-stopping but self-clearing at a known reset, which asks something
-   * different of the operator than a persistent bug does. It deliberately does NOT gate
-   * {@link PostReviewStallVerdict.stalled}: a systematic stall is worth surfacing whatever its cause,
-   * and gating on a recognised error string would make the detector blind to every unrecognised one.
+   * true when every failure in the run is an API quota exhaustion. Carried so the escalation can
+   * say so — a quota failure is fleet-stopping but self-clearing at a known reset, which asks
+   * something different of an operator than a persistent bug. It deliberately does NOT gate
+   * `stalled`: gating on a recognised error string would blind the detector to every other one.
    */
   rateLimited: boolean;
 }
@@ -8716,11 +6201,10 @@ function normaliseErrorText(s: string): string {
 /**
  * Is the sweep's post-review path stalled? Pure over ledger lines, oldest-first.
  *
- * THE DEFECT THIS EXISTS FOR (measured 2026-08-05): `sweep.post_review.failed` had fired 91 times —
- * every one a GraphQL rate-limit — across a week, and NOTHING SURFACED IT. Green PRs sat unreviewed
- * while the sweep retried each tick and logged another identical line. The operator found it by
- * hand. A transport fix removes THIS cause; it does not remove the class, because the next
- * systematic post-review failure for a different reason would be equally silent.
+ * THE DEFECT THIS EXISTS FOR: `sweep.post_review.failed` had fired dozens of times across a week
+ * — every one a rate limit — and NOTHING SURFACED IT. Green PRs sat unreviewed while the sweep
+ * retried each tick and logged another identical line, until an operator found it by hand. A
+ * transport fix removes THIS cause; it does not remove the class.
  *
  * COUNTS THE CURRENT RUN ONLY, and any `.done` resets it — the question is "is it stalled NOW",
  * not "has it ever failed a lot". A lifetime count would latch permanently after the first bad day.
@@ -8748,32 +6232,22 @@ export function detectPostReviewStall(
   };
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// W1-T150 — the LEVEL-TRIGGERED CREDIT BACKFILL rung (ratifies P30, the
-// identical P22 argument applied to the MERGE EVENT rather than open-PR
-// pipeline state — MASTER-PLAN's "0 of 195 runs ledgered a merge while GitHub
-// showed 28" fixture). A run's terminal `verdict` line is EDGE-TRIGGERED at
-// run-end: a run that ends (blocked_ci, blocked, no_pr, …) before its OWNED PR
-// merges never revisits the question, so the ledger's per-task credit can sit
-// wrong forever even though GitHub's own state has since moved on. Every
-// consumer that reads the `verdict` field directly rather than the
-// GitHub-derived union (deriveStatus/status.ts already gets this right via
-// its sibling-credit rung, MASTER-PLAN P29(i)/W1-T149) inherits the stale
-// answer. This rung closes that gap the SAME way `runSweep` above closes the
-// open-PR one: re-derive fresh every poll, act once, do nothing on a repeat
-// pass over unchanged state.
-// ────────────────────────────────────────────────────────────────────────────
+// ── W1-T150 — THE LEVEL-TRIGGERED CREDIT BACKFILL rung (ratifies P30) ────────────────────────
+//
+// The same P22 argument applied to the MERGE EVENT rather than open-PR pipeline state. A run's
+// terminal `verdict` line is EDGE-TRIGGERED at run-end, so a run that ends before its OWNED PR
+// merges never revisits the question and the ledger's per-task credit can sit wrong forever even
+// though GitHub's state has moved on. Every consumer reading `verdict` directly rather than the
+// GitHub-derived union inherits the stale answer. This rung closes that gap the SAME way
+// `runSweep` closes the open-PR one: re-derive fresh every poll, act once, no-op on a repeat.
 
 /**
- * One task's observed merge-credit candidacy — the input to the credit
- * backfill rung. `merged` is the CALLER's ownership-asserted, trailer-anchored
- * verdict (reusing W1-T149's ownership rule via status.ts's `deriveStatus` —
- * this module never talks to GitHub directly, exactly like {@link OpenPrView}
- * above): true only when a MERGED PR is owned by this task's own
- * `run-<taskId>-*` branch and carries its anchored `Remudero-Task:` trailer
- * (any run of the task — sibling credit). `false` covers every other observed
- * state (open, closed, no owned PR at all) — the backfill must NEVER fire on
- * anything short of an observed merge (acceptance 3, the falsifier).
+ * One task's observed merge-credit candidacy. `merged` is the CALLER's ownership-asserted,
+ * trailer-anchored verdict — this module never talks to GitHub directly, exactly like
+ * {@link OpenPrView}: true only when a MERGED PR is owned by this task's own `run-<taskId>-*`
+ * branch and carries its anchored trailer, for any run of the task (sibling credit). `false`
+ * covers every other observed state, because the backfill must NEVER fire on anything short of an
+ * observed merge — that is the falsifier.
  */
 export interface CreditCandidate {
   taskId: string;
@@ -8801,41 +6275,29 @@ export interface CreditBackfillSummary {
 }
 
 /*
- * `hasMergeCredit` USED TO LIVE HERE and was removed 2026-08-13, not merely bypassed.
- *
- * It answered "has this task's merge already been credited" — either a live run's own terminal
- * `verdict: "merged"` line or a PRIOR `verdict.merged` correction from this rung — over an array
- * the caller had read with `readLedgerLines`, WHICH OPENS EXACTLY ONE FILE. That single-file read
- * was the defect: rotation caps a step at `MAX_RETAINED_LINES_PER_STEP`, so older credit left the
- * live file and the same tasks were re-credited forever.
+ * `hasMergeCredit` USED TO LIVE HERE and was removed 2026-08-13, not merely bypassed. It answered
+ * "has this task's merge already been credited" over an array read with `readLedgerLines`, WHICH
+ * OPENS EXACTLY ONE FILE — and that single-file read was the defect: rotation caps a step, so older
+ * credit left the live file and the same tasks were re-credited forever.
  *
  * `readMergeCreditedTaskIds` (status.ts) now answers the same question across all three ledger
- * forms and returns the ids as a set. Its semantics are preserved exactly where they were right:
- * still keyed on `task_id` ALONE and never `run_id`, because sibling credit (P29(i)/W1-T149) means
- * ANY run of this task recording a merge counts — not only the run whose candidate is being
- * reconciled this pass. The line-shape test is still `isMergeCreditLine`, imported rather than
- * restated, for the reason the deleted comment gave: two hand-maintained copies of "what a merge
- * credit looks like" is what once let a back-credited task stay circuit-broken. Leaving this
- * function here beside the new reader would recreate exactly that.
+ * forms. Its semantics are preserved where they were right: still keyed on `task_id` ALONE and
+ * never `run_id`, because sibling credit means ANY run of this task recording a merge counts. The
+ * line-shape test is imported rather than restated — two hand-maintained copies of "what a merge
+ * credit looks like" is what once let a back-credited task stay circuit-broken.
  */
 
 /**
- * THE CREDIT-BACKFILL RUNG (W1-T150). For every candidate whose OWNED PR is
- * `merged` but whose ledger carries no merge credit yet, append EXACTLY ONE
- * `verdict.merged` correction line naming the PR (acceptance 1). A candidate
- * whose PR is not merged is always a no-op (acceptance 3). A repeat pass over
- * unchanged state — including one that only sees THIS pass's own just-written
- * corrections — appends nothing further (acceptance 2): `alreadyCredited` is
- * (re-)computed per candidate against the ledger snapshot PLUS every
- * correction this same pass has already appended, so two candidates naming
- * the same task within one pass still credit exactly once.
+ * THE CREDIT-BACKFILL RUNG (W1-T150). For every candidate whose OWNED PR is `merged` but whose
+ * ledger carries no credit yet, append EXACTLY ONE `verdict.merged` correction naming the PR. A
+ * candidate whose PR is not merged is always a no-op. A repeat pass appends nothing further:
+ * `alreadyCredited` is recomputed per candidate against the snapshot PLUS every correction this
+ * same pass appended, so two candidates naming one task still credit exactly once.
  *
- * Mirrors {@link runSweep}'s shape deliberately (same injected ledger
- * reader/appender, same `dryRun` leaves-no-trace contract) so both rungs of
- * the one reconciler behave identically — but is a SEPARATE entry point: its
- * input domain (one credit candidate per TASK, sourced from `deriveStatus`)
- * is disjoint from `runSweep`'s (one {@link OpenPrView} per OPEN PR) — a
- * merged PR is no longer open and would never appear in `openPrs`.
+ * Mirrors {@link runSweep}'s shape deliberately — same injected reader and appender, same
+ * leaves-no-trace `dryRun` contract — but is a SEPARATE entry point: its input domain is one
+ * candidate per TASK, disjoint from `runSweep`'s one view per OPEN PR, since a merged PR is no
+ * longer open and would never appear there.
  */
 export async function runCreditBackfill(
   candidates: CreditCandidate[],
@@ -8845,12 +6307,10 @@ export async function runCreditBackfill(
   const log = deps.log ?? (() => {});
 
   // THE CREDIT QUESTION IS "EVER", AND ONE FILE CANNOT ANSWER IT. This used to read
-  // `readLedgerLines`, which opens exactly ONE path, against a step whose rows rotation caps at
-  // `MAX_RETAINED_LINES_PER_STEP` (200 newest). Credit older than that left the live file, this
-  // check said "not credited", the task was re-credited, and the fresh row evicted another —
-  // self-sustaining. MEASURED 2026-08-13: 385 distinct credited tasks in the live file minus the
-  // 200 rotation retains = 185, and the live file held EXACTLY 185 `sweep.credit_backfill` rows.
-  // See {@link readMergeCreditedTaskIds} for the full arithmetic and the read-cost measurements.
+  // `readLedgerLines`, which opens exactly ONE path, against a step whose rows rotation caps.
+  // Credit older than the cap left the live file, this check said "not credited", the task was
+  // re-credited, and the fresh row evicted another — self-sustaining.
+  // Why: the measured arithmetic is in docs/forensics/sweep.md and {@link readMergeCreditedTaskIds}.
   const credited = readMergeCreditedTaskIds(deps.ledgerPath, {
     // Only the tasks this pass could ask about, so the walk stops as soon as they are all resolved
     // rather than reading to the cap. Measured: real plan ids resolve below depth 8.
@@ -8876,24 +6336,17 @@ export async function runCreditBackfill(
         pr_url: c.prUrl,
         source: "sweep.credit_backfill",
       });
-      // Reflected into THIS pass's own snapshot (not just re-read from disk on
-      // the NEXT sweep) so a second candidate naming the same task later in
-      // this same array — e.g. a duplicate produced by the caller — is
-      // credited exactly once, never twice, without waiting on a fresh poll.
-      // Reflected into THIS pass's own view (not just re-read on the next sweep) so a duplicate
+      // Reflected into THIS pass's own view, not just re-read on the next sweep, so a duplicate
       // candidate naming the same task later in the same array credits exactly once.
       credited.add(c.taskId);
       corrected++;
     }
 
-    // LOG ONLY WHAT WAS ACTED ON. This ran once per candidate per sweep, and the
-    // daemon sweeps every poll, so a backfill that corrects nothing still wrote a
-    // line per already-credited task forever — 5,209 no-op lines, all of them
-    // `corrected: false`. The ledger is the provenance spine and its SIZE is the
-    // read cost behind W1-T187's 310x projection regression; a per-poll restatement
-    // of unchanged state buys nothing and is charged to every reader. The summary
-    // line below still reports `total` on every pass, so the sweep's COVERAGE stays
-    // observable even when its per-candidate detail is silent.
+    // LOG ONLY WHAT WAS ACTED ON. This ran once per candidate per sweep, and the daemon sweeps
+    // every poll, so a backfill correcting nothing still wrote a line per already-credited task
+    // forever — thousands of no-op rows. The ledger is the provenance spine and its SIZE is a read
+    // cost charged to every reader. The summary below still reports `total` on every pass, so
+    // COVERAGE stays observable even when the per-candidate detail is silent.
     if (acted) {
       log("sweep.credit_backfill", {
         task_id: c.taskId,
@@ -8912,50 +6365,40 @@ export async function runCreditBackfill(
   return summary;
 }
 
-// ── ESCALATION-LIFECYCLE RECONCILER (fb-1784756088300-6a481e) ──────────────────
-// The sweep RAISES needs-human issues (W1-T8) but nothing ever CLOSED them when the
-// blocker resolved: 84% of open needs-human issues (26/31 on 2026-07-22) were stale —
-// each referenced a fix PR that later merged through its normal gate. This is the missing
-// third leg of the escalation lifecycle (creation W1-T8, dedup-at-creation W1-T195,
-// CLOSURE here), and it rides the SAME sweep seam + same level-triggered doctrine as
-// runCreditBackfill above: the CALLER re-derives each OPEN needs-human issue's referenced
-// task via the #737/#741-corrected deriveStatus and hands the derivation here. A referent is
-// TERMINAL — and the escalation auto-closes, naming the resolution — either because it MERGED
-// (deriveStatus's `merged`, which also covers a task CREDITED via an operator correction, W1-T162)
-// or because its PR CLOSED WITHOUT MERGING (deriveStatus's `prState`, e.g. superseded/abandoned —
-// the sweep's own stale/superseded PR-close, W1-T77, is the common producer of this shape;
-// W1-T162 closed this gap, which previously left a closed-but-unmerged referent reading as
-// falsely "still live" forever). A still-LIVE referent (PR open/blocked-pending-fix, or a task
-// with no PR yet) is left untouched; an INDETERMINATE derivation (W1-T119 — GitHub could not be
-// read) is left untouched too, never closed on a read this pass could not trust. Bounded per
-// cycle so a large backlog drains gradually rather than in a burst of `gh issue close` calls,
-// and every close is ledgered.
+// ── ESCALATION-LIFECYCLE RECONCILER (fb-1784756088300-6a481e) ────────────────────────────────
+//
+// The sweep RAISES needs-human issues but nothing ever CLOSED them when the blocker resolved, so
+// the large majority of open ones were stale. This is the missing third leg of the lifecycle —
+// creation, dedup-at-creation, CLOSURE here — and it rides the SAME sweep seam and level-triggered
+// doctrine as the credit backfill above: the CALLER re-derives each open issue's referenced task
+// and hands the derivation here.
+//
+// A referent is TERMINAL, and the escalation auto-closes naming the resolution, when it MERGED or
+// when its PR CLOSED WITHOUT MERGING. A still-LIVE referent is left untouched, and so is an
+// INDETERMINATE derivation — never closed on a read this pass could not trust. Bounded per cycle
+// so a large backlog drains gradually, and every close is ledgered.
 
 /** How many stale escalations one reconcile pass may close — bounds the write burst so a
  *  large backlog (the observed 94-open shape) drains across several sweeps, never one. */
 export const MAX_ESCALATION_CLOSES_PER_CYCLE = 20;
 
 /**
- * QUEUE LABELS this reconciler retires issues from (W1-T349): `needs-human` (unchanged) plus
- * `fleet-notice` — a residual-escalation-judge demotion (escalate.ts's `escalateWithJudge`)
- * leaves the NEEDS ME board, which keys on `needs-human`, but the design's own promise —
- * "recovery is relabelling — nothing is deleted, nothing is unfiled" — only holds if THIS
- * reconciler can still find and retire it once its referent resolves. Below this point nothing
- * else changes: {@link EscalationReconcileCandidate} carries no label field at all, so {@link
- * runEscalationReconcile} already treats a fleet-notice-sourced candidate identically to a
- * needs-human one — by construction, not by an added branch.
+ * QUEUE LABELS this reconciler retires issues from (W1-T349): `needs-human` plus `fleet-notice`.
+ * A residual-escalation-judge demotion leaves the NEEDS ME board, which keys on `needs-human`, but
+ * the design's promise — "recovery is relabelling, nothing is deleted" — only holds if THIS
+ * reconciler can still find and retire it once its referent resolves.
+ * {@link EscalationReconcileCandidate} carries no label field, so a fleet-notice-sourced candidate
+ * is already treated identically to a needs-human one by construction, not by an added branch.
  */
 export const RETIRABLE_ESCALATION_LABELS: readonly string[] = [NEEDS_HUMAN_LABEL, FLEET_NOTICE_LABEL];
 
 /**
- * List every OPEN issue across {@link RETIRABLE_ESCALATION_LABELS}, deduped by issue number (an
- * issue cannot carry both queue labels by construction — escalate.ts's `escalate()`/
- * `escalateWithJudge()` create with exactly ONE queue label — but the dedup costs nothing and
- * protects against a future producer that double-labels). Same fail-soft contract as a single
- * `listOpen` call: a read failure on ANY label aborts the WHOLE list (never a partial result the
- * caller could mistake for "nothing else is open") — the caller's existing catch already treats
- * that as "do nothing this cycle, never a confident zero open" (run-task.ts's
- * `buildEscalationReconcileCandidates`).
+ * List every OPEN issue across {@link RETIRABLE_ESCALATION_LABELS}, deduped by issue number. An
+ * issue cannot carry both queue labels by construction, but the dedup costs nothing and protects
+ * against a future producer that double-labels.
+ *
+ * Same fail-soft contract as a single listing: a read failure on ANY label aborts the WHOLE list,
+ * never a partial result a caller could mistake for "nothing else is open".
  */
 export function listRetirableEscalationIssues(issues: IssueGateway): OpenIssue[] {
   const seen = new Map<number, OpenIssue>();
@@ -8973,12 +6416,10 @@ export interface EscalationReconcileCandidate {
   issueNumber?: number;
   taskId: string;
   /**
-   * W1-T347: the W1-T346 ask-type classification for this issue, when the caller can supply
-   * it (read back off the issue's `needs-question`/`needs-action` label). `"question"` routes
-   * a terminal-referent close through {@link renderMootedCloseComment} instead of {@link
-   * renderReconcileCloseComment} — see the guard in {@link runEscalationReconcile}. `"action"`
-   * OR omitted (the untyped, pre-W1-T346 corpus) keeps today's close path byte-identical: this
-   * is the legacy default and MUST NOT change behavior.
+   * W1-T347: the ask-type classification for this issue, when the caller can supply it from the
+   * issue's own label. `"question"` routes a terminal-referent close through
+   * {@link renderMootedCloseComment}. `"action"` OR omitted — the untyped legacy corpus — keeps
+   * today's close path byte-identical, and MUST NOT change behaviour.
    */
   askType?: AskType;
   /** The referent's state, derived by the caller via the #737/#741-corrected deriveStatus. */
@@ -9023,16 +6464,16 @@ export interface EscalationReconcileDeps {
   maxCloses?: number;
   /**
    * What the candidate BUILDER saw on intake, so the summary can distinguish "nothing was open"
-   * from "everything open was dropped". Optional and defaulted: a caller that does not supply it
-   * gets exactly the line it got before, never a crash and never a fabricated zero.
+   * from "everything open was dropped". Optional and defaulted: a caller that omits it gets
+   * exactly the line it got before, never a crash and never a fabricated zero.
    */
   intake?: { issuesSeen: number; droppedNoTaskTrailer: number; droppedNoReferent: number };
 }
 
 /**
- * The closing citation posted on a reconciled issue — NAMES THE RESOLUTION (the merged PR, or
- * the closed-without-merging PR that superseded/abandoned it) so the closure is legible, never
- * a silent disappearance. Pure + exported for a direct assertion.
+ * The closing citation posted on a reconciled issue — NAMES THE RESOLUTION, the merged PR or the
+ * closed-without-merging one that superseded it, so the closure is legible rather than a silent
+ * disappearance. Pure and exported for a direct assertion.
  */
 export function renderReconcileCloseComment(c: EscalationReconcileCandidate): string {
   const pr = c.derived.prNumber !== undefined ? `#${c.derived.prNumber}` : (c.derived.prUrl ?? "its PR");
@@ -9051,20 +6492,14 @@ export function renderReconcileCloseComment(c: EscalationReconcileCandidate): st
 }
 
 /**
- * W1-T347 — the guard {@link renderReconcileCloseComment} above does NOT apply to: a
- * `needs-question` issue whose referent went terminal is MOOTED, not resolved, and closing it
- * in {@link renderReconcileCloseComment}'s voice ("is now merged, resolved by") claims an
- * answer nobody gave. The measured cost: 50 of 151 reconciler auto-closes carried question-form
- * titles, and #1200 ("needs a scope decision, not another retry") auto-closed 9 minutes after
- * an unrelated PR merged, citing the merge as if it had answered the question.
+ * W1-T347 — the guard {@link renderReconcileCloseComment} does NOT apply to: a `needs-question`
+ * issue whose referent went terminal is MOOTED, not resolved, and closing it in that function's
+ * voice claims an answer nobody gave.
  *
- * Names the mooting event (the same PR the resolved-close cites) but states PLAINLY that the
- * question was never answered — only mooted by the referent going terminal — and tells the
- * reader where to re-raise it if it still stands. Starts with a FIXED, DISTINCT prefix ("MOOTED
- * by the escalation-lifecycle reconciler") so a later sweep/census can tell a mooted close from
- * a resolved one by exact string match, never by parsing prose (design clause iii).
- *
- * Pure + exported for a direct assertion, mirroring {@link renderReconcileCloseComment}.
+ * This names the mooting event but states PLAINLY that the question was never answered, and says
+ * where to re-raise it. Starts with a FIXED, DISTINCT prefix so a later census can tell a mooted
+ * close from a resolved one by exact string match, never by parsing prose.
+ * // Why: a third of reconciler auto-closes carried question-form titles — docs/forensics/sweep.md.
  */
 export function renderMootedCloseComment(c: EscalationReconcileCandidate): string {
   const pr = c.derived.prNumber !== undefined ? `#${c.derived.prNumber}` : (c.derived.prUrl ?? "its PR");
@@ -9086,11 +6521,10 @@ export function renderMootedCloseComment(c: EscalationReconcileCandidate): strin
 }
 
 /**
- * Reconcile OPEN needs-human issues against their referent's CURRENT derived state. Separate
+ * Reconcile OPEN needs-human issues against their referent's CURRENT derived state. A separate
  * entry point mirroring {@link runCreditBackfill}: its input domain is one OPEN issue per
- * candidate (the caller lists them and derives each referent), disjoint from runSweep's OPEN
- * PRs. Best-effort, per-issue throw-contained: one failed `gh issue close` never strands the
- * rest (the W1-T99 lesson).
+ * candidate, disjoint from `runSweep`'s open PRs. Best-effort and per-issue throw-contained, so
+ * one failed close never strands the rest — the W1-T99 lesson.
  */
 export async function runEscalationReconcile(
   candidates: EscalationReconcileCandidate[],
@@ -9171,13 +6605,11 @@ export async function runEscalationReconcile(
   }
 
   const summary: EscalationReconcileSummary = { total: candidates.length, closed, results };
-  // `total: 0` USED TO BE AMBIGUOUS — see EscalationIntake (run-task.ts) for the recon this cost.
-  // `issues_seen` is always emitted (one integer, negligible on a line that fires ~16x/hour) so the
-  // healthy case is positively identifiable rather than merely un-alarming.
-  //
-  // The per-reason tally rides ONLY on the abnormal path. On every healthy pass issuesSeen === total
-  // and the line is one field wider than before; the detail appears exactly when there is something
-  // to explain, which is also when an operator is reading it.
+  // `total: 0` USED TO BE AMBIGUOUS. `issues_seen` is always emitted — one integer, negligible on a
+  // line that fires often — so the healthy case is positively identifiable rather than merely
+  // un-alarming. The per-reason tally rides ONLY on the abnormal path: on a healthy pass the line
+  // is one field wider than before, and the detail appears exactly when there is something to
+  // explain, which is also when an operator is reading it.
   const intake = deps.intake;
   const dropped =
     intake && intake.issuesSeen > summary.total
@@ -9193,60 +6625,27 @@ export async function runEscalationReconcile(
   return summary;
 }
 
-// ── POST-FIX RE-VERIFICATION RECONCILER (W1-T124) — the DRAINAGE-side
-// complement to the W1-T121 queue governor above: the governor stops the
-// queue GROWING, this rung stops it ROTTING. Filed from #271 holding-note
-// item 5.
+// ── POST-FIX RE-VERIFICATION RECONCILER (W1-T124) ────────────────────────────────────────────
 //
-// THE INCIDENT, twice. The 14-PR pile, then a sharper 2026-07-19 instance: FOUR
-// PRs (#265/#249/#245/#236) went red on `ci-gate: timed out waiting for
-// required check(s) to complete: mutation-ratchet` while mutation-ratchet
-// itself completed SUCCESS on those same heads moments later — the gate timed
-// out on the ~13-minute Stryker tax W1-T108 later removed, the work was fine.
-// Nothing re-examined the PRs the already-fixed cause had poisoned; all four
-// needed a hand-pushed fresh head to clear. A red caused by infrastructure,
-// whose cause is now merged, should not need a human to notice it.
+// The DRAINAGE-side complement to the queue governor above: the governor stops the queue GROWING,
+// this rung stops it ROTTING. A red caused by infrastructure whose cause is now merged should not
+// need a human to notice it — but nothing re-examined the PRs an already-fixed cause had poisoned,
+// and each needed a hand-pushed fresh head to clear.
 //
-// DESIGN (i): a failure-pattern -> fix-PR mapping held as DATA ({@link
-// FixClass} rows in {@link DEFAULT_FIX_CLASSES}) — covering a new systemic
-// fix is a ROW, never a branch in {@link runPostFixReverification} below,
-// exactly how {@link DISPOSITION_RULES} keeps disposition itself out of
-// deriveDisposition's control flow.
+// DESIGN (i): the failure-pattern-to-fix-PR mapping is held as DATA ({@link DEFAULT_FIX_CLASSES}),
+// so covering a new systemic fix is a ROW, never a branch — exactly how {@link DISPOSITION_RULES}
+// keeps disposition out of `deriveDisposition`'s control flow.
 //
-// DESIGN (iii): the re-drive must work against REAL ci-gate semantics. Until
-// W1-T123 (already merged, a hard dependency of this task) deduped check-runs
-// by NAME and evaluated only the latest attempt, a re-run in place could never
-// clear a stale red — ci-gate itself, once it posts a terminal FAILURE/
-// TIMED_OUT conclusion, would keep reading its OWN stale attempt forever. This
-// module never talks to GitHub directly (mirrors every other rung in this
-// file): HOW to re-drive — re-request the ci-gate check-run in place (the
-// W1-T123 world this rung ships into) vs. push a refresh commit (the
-// pre-W1-T123 fallback design note iii names) — is entirely the injected
-// {@link PostFixReverificationDeps.redrive} effect's own decision, never this
-// reconciler's.
-//
-// DESIGN (iv), STRIKE ACCOUNTING (load-bearing — see the task rationale: "self
-// -healing is capped by the very counter it exists to relieve" otherwise). A
-// re-verification pass itself never spends a strike (dedup below is keyed on
-// the redrive, not on `dispatchFix`/the fix-rung ladder at all). And because
-// this rung matches ONLY the PR's currently-recorded failure against a fixed
-// class (acceptance 2's falsifier proves an unmatched PR is never touched),
-// every strike a MATCHED PR carries into this pass was spent chasing that
-// SAME now-fixed infrastructure artifact — so a successful redrive credits
-// back the PR's full `priorStrikes` count when re-deriving its disposition,
-// both ledgered (for a future external strike-ledger consumer to reconcile)
-// and reflected LIVE in the disposition this pass returns (never deferred to
-// a second pass just to prove the credit took effect).
-// ────────────────────────────────────────────────────────────────────────────
+// DESIGN (iii): the re-drive must work against REAL ci-gate semantics, which is why W1-T123's
+// dedupe-by-name is a hard dependency — before it, a re-run in place could never clear a stale red.
+// This module never talks to GitHub directly, so HOW to re-drive is the caller's own wiring.
+// Why: the measured incidents are in docs/forensics/sweep.md.
 
 /**
- * One failure-pattern -> fix-PR class mapping ROW (design note i): DATA, not
- * code. `matchesFailure` is a PURE predicate over the SAME {@link OpenPrView}
- * shape every other rung in this file reads — never an LLM classification
- * (rule 2) — mirroring how {@link DISPOSITION_RULES}' own rows carry a
- * predicate function as their "data": the mapping lives in this table, not in
- * `runPostFixReverification`'s control flow, so covering a new systemic fix
- * never touches the reconciler itself.
+ * One failure-pattern to fix-PR class mapping ROW: DATA, not code. `matchesFailure` is a PURE
+ * predicate over the SAME {@link OpenPrView} shape every other rung reads, never an LLM
+ * classification (rule 2) — so covering a new systemic fix appends a row here and never touches
+ * {@link runPostFixReverification}'s control flow.
  */
 export interface FixClass {
   /** Stable id for ledger lines, dedup keys, and test fixtures — never reused across rows. */
@@ -9260,13 +6659,10 @@ export interface FixClass {
 }
 
 /**
- * The 2026-07-19 regression fixture's own class (acceptance 4): `ci-gate`
- * itself times out waiting for a required check that had, or would shortly
- * have, actually succeeded on the SAME head — the W1-T123 dedupe-by-name fix
- * is what makes a re-drive of this class able to clear at all (design note
- * iii). Matches on the failing check's recorded name AND its log tail,
- * never on checksState alone — a genuinely red mutation-ratchet (an actual
- * mutation survivor, not a gate timeout) must never match this class.
+ * The 2026-07-19 regression fixture's own class: `ci-gate` times out waiting for a required check
+ * that had, or shortly would have, succeeded on the SAME head. Matches on the failing check's
+ * recorded name AND its log tail, never on `checksState` alone — a genuinely red mutation-ratchet
+ * must never match this class.
  */
 export const CI_GATE_TIMEOUT_FIX_CLASS: FixClass = {
   id: "ci-gate-required-check-timeout",
@@ -9281,13 +6677,10 @@ export const CI_GATE_TIMEOUT_FIX_CLASS: FixClass = {
 };
 
 /**
- * W1-T474 row 1 — the coverage-tier fix (#1758, `39f198a`): `coverage-ratchet` reads
- * `scripts/coverage-baseline.json` from the PR's OWN checked-out tree (the `pull_request`
- * default `refs/pull/N/merge`, per W1-T474's rationale (7)), so a PR that merged BEFORE #1758
- * raised the floor still fails against the file #1758 already fixed — its diff never touched
- * coverage. Matches on the required check's recorded name AND the ratchet's own "BLOCKED"
- * wording (`scripts/coverage-ratchet.mjs`), never on `checksState` alone — a PR that genuinely
- * lowered coverage must never match this class.
+ * W1-T474 row 1 — the coverage-tier fix. The ratchet reads its baseline from the PR's OWN checked
+ * out tree, so a PR merged before the fix still fails against the file that fix already corrected,
+ * though its diff never touched coverage. Matches on the check name AND the ratchet's own
+ * "BLOCKED" wording, never on `checksState` alone: a PR that genuinely lowered coverage must not match.
  */
 export const COVERAGE_TIER_FIX_CLASS: FixClass = {
   id: "coverage-ratchet-stale-floor",
@@ -9302,12 +6695,10 @@ export const COVERAGE_TIER_FIX_CLASS: FixClass = {
 };
 
 /**
- * W1-T474 row 2 — the capability-snapshot regeneration (#1762, `b537b08`): the `claims` required
- * check's `capability-snapshot:check` assertion (`scripts/generate-capability-snapshot.mjs`)
- * fails whenever the checked-out `MASTER-PLAN.md` doesn't match a fresh regeneration — and, per
- * rationale (7), the `pull_request` default checkout is the pinned merge ref against the OLD
- * base, so every PR merged before #1762 regenerated the snapshot reads the stale block. Matches
- * on the check's own STALE wording, never on checksState alone.
+ * W1-T474 row 2 — the capability-snapshot regeneration. The check fails whenever the checked-out
+ * `MASTER-PLAN.md` does not match a fresh regeneration, and the default checkout is the merge ref
+ * against the OLD base, so every PR merged before the fix reads the stale block. Matches on the
+ * check's own STALE wording, never on `checksState` alone.
  */
 export const CAPABILITY_SNAPSHOT_FIX_CLASS: FixClass = {
   id: "capability-snapshot-stale",
@@ -9322,12 +6713,11 @@ export const CAPABILITY_SNAPSHOT_FIX_CLASS: FixClass = {
 };
 
 /** The live class table this reconciler consults by default — a new systemic fix is a row appended
- *  here (design note i), never a change to {@link runPostFixReverification}. */
+ *  here, never a change to {@link runPostFixReverification}. */
 /**
- * The DIFF-SCOPED coverage failure's own wording — `scripts/diff-coverage.mjs`'s blocking sentence,
- * NOT the aggregate ratchet's. {@link COVERAGE_TIER_FIX_CLASS} keys on "BLOCKED -- coverage is below
- * a floor", which `scripts/coverage-ratchet.mjs` prints; the per-diff gate that actually blocks most
- * PRs prints a different sentence and therefore matched nothing at all.
+ * The DIFF-SCOPED coverage failure's own wording, NOT the aggregate ratchet's.
+ * {@link COVERAGE_TIER_FIX_CLASS} keys on the floor sentence; the per-diff gate that actually
+ * blocks most PRs prints a different one and therefore matched nothing at all.
  */
 const DIFF_COVERAGE_BLOCK_RE = /diff-coverage: BLOCKED -- this diff adds source line\(s\) with zero covering tests/i;
 
@@ -9341,20 +6731,13 @@ export interface DiffCoverageReport {
 }
 
 /**
- * REPORTS a diff-scoped coverage block and the lines it names. **A REPORTER, NEVER A REPAIRER, AND
- * THE DISTINCTION IS STRUCTURAL RATHER THAN STYLISTIC** (W1-T2298 design Q2): {@link FixClass}
- * requires a `fixPrNumber` whose documented meaning is the merged PR whose fix resolves the class,
- * and the reconciler gates on that number having merged before it consults the predicate at all.
- * All three existing rows are that shape — a PR failing against a stale tree some merged PR already
- * fixed, cleared by re-driving. A diff-coverage block is not: its remedy is a test for a specific
- * line in a specific file, different for every PR, and no merged PR resolves it. A fourth row would
- * mean inventing a number that does not mean what the field says, and a match would dispatch a
- * redrive that re-runs the same gate and fails identically — a cycle spent to learn nothing.
- *
- * So this names the failing check and the uncovered lines on a surface an operator or a later agent
- * already reads, and dispatches nothing. It is also why the annotation fallback matters: before
- * W1-T2298 the lines existed only in a check-run annotation nothing read, so this function would
- * have had an empty tail to search however well it was written.
+ * REPORTS a diff-scoped coverage block and the lines it names. A REPORTER, NEVER A REPAIRER, AND
+ * THE DISTINCTION IS STRUCTURAL: {@link FixClass} requires a `fixPrNumber` meaning the merged PR
+ * whose fix resolves the class, and every existing row is that shape. A diff-coverage block is
+ * not — its remedy is a test for a specific line, different for every PR, and no merged PR
+ * resolves it. A fourth row would invent a number that does not mean what the field says, and a
+ * match would redrive the same gate to fail identically. So this names the check and the uncovered
+ * lines on a surface someone already reads, and dispatches nothing.
  */
 export function diffCoverageReport(failures: readonly CiFailure[]): DiffCoverageReport | undefined {
   for (const f of failures) {
@@ -9376,14 +6759,11 @@ export const DEFAULT_FIX_CLASSES: readonly FixClass[] = [
 ];
 
 /**
- * The injected redrive effect's outcome. `fresh`, when present, is a brand
- * new {@link OpenPrView} read AFTER the redrive settled — this reconciler
- * never invents one and never re-uses the STALE pre-redrive view to derive a
- * disposition (that would just re-observe the same stale red it set out to
- * clear). Absent `fresh` ⇒ the redrive was dispatched but no settled read is
- * available yet (e.g. the re-run is still in flight): this pass records the
- * redrive (so it is never repeated) and stops there — the PR's disposition is
- * re-derived by the NEXT ordinary sweep once GitHub's own state has caught up.
+ * The injected redrive effect's outcome. `fresh`, when present, is a brand new {@link OpenPrView}
+ * read AFTER the redrive settled — this reconciler never invents one and never re-uses the STALE
+ * pre-redrive view, which would just re-observe the red it set out to clear. Absent `fresh` means
+ * the redrive was dispatched with no settled read yet: this pass records it so it is never
+ * repeated, and the NEXT ordinary sweep re-derives once GitHub's state has caught up.
  */
 export interface RedriveResult {
   fresh?: OpenPrView;
@@ -9394,10 +6774,9 @@ export interface RedriveResult {
  *  trace contract) so all three reconciler rungs in this file behave identically to their callers. */
 export interface PostFixReverificationDeps {
   /**
-   * Re-drive the PR's matched required check for the given class (design
-   * note iii) — re-request the ci-gate check-run in place, or push a refresh
-   * commit, entirely the effect's own decision; this module never calls
-   * `gh`/git directly.
+   * Re-drive the PR's matched required check for the given class. Whether that means re-requesting
+   * the check-run in place or pushing a refresh commit is entirely the effect's own decision; this
+   * module never calls gh or git directly.
    */
   redrive: (pr: OpenPrView, fixClass: FixClass) => RedriveResult | Promise<RedriveResult>;
   ledgerPath: string;
@@ -9408,20 +6787,13 @@ export interface PostFixReverificationDeps {
   /** Preview only: derive matches, take no effects, write no ledger lines. */
   dryRun?: boolean;
   /**
-   * OPTIONAL reader for a PR's currently-failing required checks (W1-T977), consulted ONLY when
-   * this pass's own snapshot carries `ciFailures: undefined` AND `checksState === "pending"` —
-   * the one state {@link CI_GATE_TIMEOUT_FIX_CLASS} exists to match and the one state
-   * `buildOpenPrViews` (run-task.ts) never populates `OpenPrView.ciFailures` for: that producer
-   * only fetches `ciFailures` when the AGGREGATE `checksState` is `"red"`, but a `ci-gate`
-   * timeout is BY DEFINITION observed while a sibling required check is still running, i.e.
-   * `checksState === "pending"` — so the class was structurally unable to see its own trigger.
-   * Never consulted when `checksState` is `"green"`/`"none"` (nothing failing to read) or
-   * already `"red"` (the snapshot's own `ciFailures` already carries it) — narrowly scoped to
-   * the one gap this task closes, never a blanket re-fetch, and never widening what
-   * `buildOpenPrViews` itself populates (design note iii — no other rung's view changes).
-   * OMITTED (the default), behaviour is BYTE-IDENTICAL to before this dep existed: every
-   * existing caller/fixture that doesn't supply it sees a pending PR's `ciFailures` stay
-   * `undefined` exactly as today (criterion 5).
+   * OPTIONAL reader for a PR's currently-failing checks (W1-T977), consulted ONLY when this pass's
+   * snapshot carries `ciFailures: undefined` AND `checksState === "pending"` — the one state
+   * {@link CI_GATE_TIMEOUT_FIX_CLASS} exists to match and the one state the producer never
+   * populates, because a gate timeout is BY DEFINITION observed while a sibling is still running.
+   * The class was structurally unable to see its own trigger. Never consulted when green, none, or
+   * already red, so this is narrowly scoped and never a blanket re-fetch. OMITTED, behaviour is
+   * BYTE-IDENTICAL to before this dep existed.
    */
   readCiFailures?: (pr: OpenPrView) => CiFailure[] | undefined | Promise<CiFailure[] | undefined>;
 }
@@ -9447,20 +6819,14 @@ export interface PostFixReverificationSummary {
 }
 
 /**
- * THE POST-FIX RE-VERIFICATION RUNG (W1-T124, acceptance 1/2/3/4). For every
- * open PR whose CURRENTLY-recorded failure matches a {@link FixClass} row
- * whose `fixPrNumber` is in `mergedFixPrNumbers` (the caller's own merged-PR
- * read — this module never talks to GitHub, exactly like {@link
- * CreditCandidate.merged} above): re-drive its matched check EXACTLY ONCE
- * (deduped on the ledger, keyed by `pr@headSha@class` — a NEW push legitimately
- * re-earns a redrive, mirroring how fix-dispatch dedup is head-keyed in {@link
- * runSweep}), and — when the redrive returns a settled fresh view — re-derive
- * its disposition with strikes credited back to zero (design note iv).
+ * THE POST-FIX RE-VERIFICATION RUNG (W1-T124). For every open PR whose CURRENTLY-recorded failure
+ * matches a {@link FixClass} row whose `fixPrNumber` the caller reports merged — this module never
+ * talks to GitHub — re-drive its matched check EXACTLY ONCE, deduped on the ledger by
+ * `pr@headSha@class` so a NEW push legitimately re-earns one, mirroring fix-dispatch dedup. When
+ * the redrive returns a settled fresh view, re-derive the disposition with strikes credited back.
  *
- * A PR whose failure does NOT match any merged class is entirely untouched:
- * no redrive call, no ledger line, `outcome: "unmatched"` (acceptance 2's
- * falsifier — proves the mapping does real work rather than blanket-rerunning
- * every open PR).
+ * A PR matching no merged class is entirely untouched — no redrive, no ledger line — which is the
+ * falsifier proving the mapping does real work rather than blanket-rerunning every open PR.
  */
 export async function runPostFixReverification(
   openPrs: OpenPrView[],
@@ -9468,9 +6834,8 @@ export async function runPostFixReverification(
   deps: PostFixReverificationDeps,
   classes: readonly FixClass[] = DEFAULT_FIX_CLASSES,
 ): Promise<PostFixReverificationSummary> {
-  // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex can't match this because
-  // it's bound to a name and invoked below, so this is documentary only — see that task's own
-  // rationale for why the enforced corpus and the regex are both left alone here.
+  // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex cannot match this because it
+  // is bound to a name and invoked below, so this is documentary only.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const appendLine = deps.appendLine ?? appendLedger;
@@ -9481,13 +6846,11 @@ export async function runPostFixReverification(
   let redriven = 0;
 
   for (const pr of openPrs) {
-    // W1-T977: the shared snapshot's own `ciFailures` is undefined for a PENDING PR by
-    // construction (`buildOpenPrViews` only fetches it when `checksState === "red"`) — but a
-    // `ci-gate` required-check timeout is observed EXACTLY while a sibling is still pending, so
-    // matching on the snapshot field alone can never fire for the one class this loop exists to
-    // catch. Consult the injected reader ONLY in that gap (undefined + pending) — never for a
-    // green/none PR (nothing failing) and never overriding an already-populated red snapshot —
-    // so every other rung's view of `pr` stays untouched (design note iii).
+    // W1-T977: the shared snapshot's `ciFailures` is undefined for a PENDING PR by construction,
+    // but a `ci-gate` timeout is observed EXACTLY while a sibling is still pending — so matching on
+    // the snapshot field alone can never fire for the one class this loop exists to catch. Consult
+    // the injected reader ONLY in that gap, never for a green PR and never overriding a red
+    // snapshot, so every other rung's view of `pr` stays untouched.
     let extraCiFailures: CiFailure[] | undefined;
     if (pr.ciFailures === undefined && pr.checksState === "pending" && deps.readCiFailures) {
       try {
@@ -9504,10 +6867,9 @@ export async function runPostFixReverification(
       continue;
     }
 
-    // Head-keyed dedup (mirrors runSweep's fix-dispatch dedup): a NEW push
-    // legitimately re-earns a redrive even for the same class, but a repeat
-    // pass over the SAME unchanged head never re-drives twice (acceptance 1:
-    // "re-driven exactly once").
+    // Head-keyed dedup, mirroring `runSweep`'s fix-dispatch dedup: a NEW push legitimately re-earns
+    // a redrive even for the same class, but a repeat pass over the SAME unchanged head never
+    // re-drives twice.
     const redriveKey = `${pr.prNumber}@${pr.headSha}@${cls.id}`;
     const already = lines.some((l) => l.step === "sweep.post_fix_redriven" && l.redrive_key === redriveKey);
     if (already) {
@@ -9525,10 +6887,8 @@ export async function runPostFixReverification(
     try {
       redrive = await deps.redrive(pr, cls);
     } catch (e) {
-      // PER-PR THROW CONTAINMENT (the W1-T99 lesson, mirrored from
-      // runEscalationReconcile above): one failed redrive never strands the
-      // rest of this pass, and — since nothing is ledgered on failure — it
-      // retries on the very next sweep rather than being silently dropped.
+      // PER-PR THROW CONTAINMENT (the W1-T99 lesson): one failed redrive never strands the rest of
+      // this pass, and since nothing is ledgered on failure it retries on the very next sweep.
       log("sweep.post_fix_redrive_failed", {
         pr_number: pr.prNumber,
         fix_class: cls.id,
