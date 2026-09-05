@@ -1553,6 +1553,14 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     },
   },
   refusedForPredicate(
+    "test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts",
+    "a",
+    "W1-T2680's own suite. Its single ls-files call is `git ls-files test/*.test.ts`, used as a CONTROL to size the test " +
+      "directory (so the verb under test can be shown not to return the whole of it) — it walks test/, never src/, and asserts " +
+      "nothing about every file it counts. The `src/` strings the recognizer also sees are FIXTURE changed-file lists fed to the " +
+      "verb, not a population it reads. Carries no baseline table either",
+  ),
+  refusedForPredicate(
     "test/a-count-assertion-names-its-members.test.ts",
     "a",
     "walks git ls-files scoped to test/*.test.ts only — never src/ — so it is not a src-population walk; its own header states " +
