@@ -10,6 +10,7 @@
   files:
     - src/run-task.ts
     - src/lib/review.ts
+    - test/codex-reviewer-production-wiring.test.ts
     - test/codex-reviewer-materialized-checkout.test.ts
   origin: "operator-session#codex-reviewer-empty-readonly-checkout-2026-09-05"
   plan_refs: ["W1-T65", "W1-T115", "W1-T185", "W1-T2748"]
@@ -100,6 +101,14 @@
     FAIL lines. Otherwise, deleting the snapshot preparation from the final implementation must
     restore a captured empty non-repository cwd and fail the integration test.
   note: |
+    DECLARED-FILES CORRECTION: `test/codex-reviewer-production-wiring.test.ts` is the existing
+    load-bearing W1-T2829 regression that asserts the behavior this task intentionally replaces:
+    it requires the reviewer cwd to be a non-repository scratch directory and requires Codex argv
+    to contain `--skip-git-repo-check`. W1-T2868 cannot implement its opposite contract while that
+    test remains unchanged. Omitting this path would under-declare the implementation's required
+    diff and leave the existing suite red. This is a plan-only, human-authored `files:` correction;
+    acceptance criteria are unchanged.
+
     ID PROVENANCE: `rmd next-task-id --reserve` reported W1-T2868 and atomically held
     `refs/rmd-id/W1-T2868` on origin after one attempt. The shard uses the held id.
 
