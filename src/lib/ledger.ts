@@ -3,6 +3,7 @@ import {
   closeSync,
   cpSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -16,6 +17,8 @@ import {
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
+import { isHolderStale, reclaimStaleLock, type FileIdentity } from "./fs-race-safe.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 
 /**
@@ -1230,8 +1233,13 @@ function readSyncRange(path: string, start: number, end: number): string {
  *  atomic on any POSIX filesystem, so a concurrent reader (readLedgerLines/readLedgerTail)
  *  only ever sees the whole old file or the whole new one, never a partial rewrite. `content`
  *  accepts a `Buffer` (gzip's own output, W1-T2482) as well as a `string`, so the same atomic
- *  staging idiom covers a compressed archive without a UTF-8 round trip corrupting its bytes. */
-function writeFileAtomic(path: string, content: string | Buffer): void {
+ *  staging idiom covers a compressed archive without a UTF-8 round trip corrupting its bytes.
+ *
+ *  `beforeRename` (R-1, 2026-09-05) runs with the staged file fully written, IMMEDIATELY before
+ *  the rename syscall; returning `false` withdraws the swap — the staged file is unlinked, the
+ *  path is left exactly as it was, and this returns `false`. It is how {@link rotateLedger}
+ *  refuses to rename over a live file that is no longer the inode it snapshotted. */
+function writeFileAtomic(path: string, content: string | Buffer, beforeRename?: () => boolean): boolean {
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.rotate-tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
   const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8");
@@ -1244,7 +1252,91 @@ function writeFileAtomic(path: string, content: string | Buffer): void {
   } finally {
     closeSync(fd);
   }
+  if (beforeRename && !beforeRename()) {
+    rmSync(tmpPath, { force: true }); // withdraw the stage; leave nothing behind
+    return false;
+  }
   renameSync(tmpPath, path);
+  return true;
+}
+
+/** The whole live file read through ONE descriptor, with that descriptor's `fstat` identity —
+ *  so `size`, `content` and `{dev, ino}` all describe the same open file, never three separate
+ *  path re-resolutions ({@link reclaimStaleLock} reads its lock the same way, for the same
+ *  reason). {@link rotateLedger} compares `identity` against a by-name `stat` right before its
+ *  final rename: a mismatch means the path no longer holds the file this snapshot came from. */
+function readSnapshotWithIdentity(path: string): { size: number; content: string; identity: FileIdentity } {
+  const fd = openSync(path, "r");
+  try {
+    const st = fstatSync(fd);
+    const buf = Buffer.alloc(st.size);
+    readSync(fd, buf, 0, st.size, 0);
+    return { size: st.size, content: buf.toString("utf8"), identity: { dev: st.dev, ino: st.ino } };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Sibling of the live ledger that serialises {@link rotateLedger} across processes —
+ *  `<ledgerPath>.rotate.lock`. Ends in neither `.ndjson` nor `.ndjson.gz`, so ledger-grep.ts's
+ *  `ledgerRotationEntries` (which classifies rotations by those suffixes) never mistakes it
+ *  for an archive — the same reason `writeFileAtomic`'s `.rotate-tmp-*` staging names are
+ *  invisible to that reader. */
+export function ledgerRotationLockPath(ledgerPath: string): string {
+  return `${ledgerPath}.rotate.lock`;
+}
+
+/** What the rotation lock records about its holder — the SAME `{pid, host, startedAt}` shape
+ *  (and the same parser) `acquireDrainLock` already uses, so {@link isHolderStale}'s three
+ *  rungs (host, pid liveness, process start time) judge it exactly as they judge every other
+ *  lock in this repo, with no rotation-specific holder shape or liveness logic to drift. */
+type LedgerRotationLockInfo = DrainLockInfo;
+
+/**
+ * R-1 (docs/audits/recon-2026-09-05.md, reproduced twice): `rmd serve` and the daemon append to
+ * ONE ledger, and until this lock nothing excluded two rotators. Both would snapshot the same
+ * over-ceiling file; the first's final rename left a small live file; the second's catch-up
+ * read (`sizeNow > size0` below) then saw a SMALLER file, took an EMPTY tail, and its own
+ * rename overwrote the first's output — every line appended between the two renames (a
+ * `review.posted` the arming gate keys on, a `run.start`/`pr.opened` the dispatch breaker
+ * counts, an `*.escalated` dedup marker) existed afterwards in neither the live file nor any
+ * archive, and each rotator left its own duplicate archive.
+ *
+ * Try to take the rotation lock. Returns a release function on success, or `null` when a LIVE
+ * holder owns it — the caller then SKIPS this rotation rather than waiting: the append that
+ * triggered it has already landed, and the live holder's own catch-up read folds that line in
+ * (or the next over-ceiling append rotates it). Append is the priority; rotation can wait.
+ *
+ * Same acquire shape as `acquireDrainLock`: an `O_EXCL` create is the atomic win, and a holder
+ * that is dead by {@link isHolderStale}'s judgment (a crash mid-rotation leaves the lock
+ * behind) is cleared through {@link reclaimStaleLock}, whose delete is conditioned on the
+ * lock's on-disk identity so two reclaimers of one dead lock cannot both come away holding it.
+ */
+function tryAcquireRotationLock(lockPath: string): (() => void) | null {
+  const info: LedgerRotationLockInfo = { pid: process.pid, host: hostname(), startedAt: new Date().toISOString() };
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, "wx");
+      try {
+        writeSync(fd, JSON.stringify(info));
+      } finally {
+        closeSync(fd);
+      }
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const result = reclaimStaleLock(lockPath, {
+        parseHolder: parseDrainLockInfo,
+        isStale: (held) => isHolderStale(held, { isPidAlive: defaultIsPidAlive }),
+      });
+      if (result.outcome === "live") return null;
+      // "missing" | "reclaimed" | "lost" → retry the atomic create from the top.
+    }
+  }
+  // `force`: a lock some other actor already cleared (a reclaimer that mis-judged this holder
+  // stale) must not turn release into a throw — the rotation's own outcome was decided by the
+  // identity guard, not by whether the lock file survived.
+  return () => rmSync(lockPath, { force: true });
 }
 
 function datedArchivePath(path: string, now: Date): string {
@@ -1335,17 +1427,33 @@ export interface LedgerRotationResult {
  * needs no reader-side change; it only stops the writer from producing the form the reader was
  * built to read but never received.
  *
- * CONCURRENCY: appendLedger never holds a long-lived file descriptor — open, one writeSync,
- * close, every single call (see its own doc) — so the only exposure here is the window
- * between this function's initial snapshot read and its final atomic rename. That window is
- * narrowed to one extra statSync + delta read taken immediately before the rename (mirrors
- * status.ts's readLedgerTail's own incremental-catch-up shape): any line appended by another
- * process between the snapshot and that final check is still folded into the live file
- * unfiltered (never dropped, never mis-classified as noise on a partial read) rather than
- * risking loss. A line landing in the sliver AFTER that final check and BEFORE the rename
- * syscall itself is the one residual hazard — the same one ordinary `logrotate` has against a
- * writer it cannot signal to reopen its handle; this codebase's append path never holding a
- * long-lived fd is what keeps that sliver this narrow rather than open-ended.
+ * CONCURRENCY — TWO ROTATORS (R-1, 2026-09-05): rotation is serialised across processes by
+ * {@link tryAcquireRotationLock} (`<path>.rotate.lock`), taken AFTER the cheap ceiling check
+ * (so an under-ceiling append still costs one stat and never touches the lock) and BEFORE the
+ * snapshot. A second rotator finding a live holder returns `{ rotated: false }` at once — its
+ * own append already landed, and the holder's catch-up read below folds it in. Once held, the
+ * ceiling is RE-CHECKED: a rotator that queued behind a completed rotation would otherwise
+ * re-archive the freshly shrunk file. And immediately before the final rename the live path is
+ * `stat`ed by name and compared, `dev`+`ino`, against the snapshot's own `fstat`: a mismatch
+ * means something replaced the file under this rotation (a holder mis-judged stale, a
+ * pre-lock binary still running off the mount), and the rename is WITHDRAWN rather than
+ * clobbering whatever is there now — the archive already written stays on disk (relocated,
+ * never deleted) and the outcome is `{ rotated: false }`. Without the lock, the second
+ * rotator's catch-up saw the first's SMALLER live file, took an empty tail, and renamed over
+ * it: every line appended between the two renames was in no file at all.
+ *
+ * CONCURRENCY — ONE APPENDER: appendLedger never holds a long-lived file descriptor — open,
+ * one writeSync, close, every single call (see its own doc) — so the only exposure is the
+ * window between the snapshot read and the final rename. That window is narrowed to one extra
+ * statSync + delta read taken immediately before the rename (mirrors status.ts's
+ * readLedgerTail's own incremental-catch-up shape): any line appended by another process
+ * between the snapshot and that final check is still folded into the live file unfiltered
+ * (never dropped, never mis-classified as noise on a partial read) rather than risking loss.
+ * A line landing in the sliver AFTER that final check and BEFORE the rename syscall itself is
+ * the one residual hazard — the same one ordinary `logrotate` has against a writer it cannot
+ * signal to reopen its handle; appends are deliberately NOT gated on the lock (append is the
+ * priority), and the append path never holding a long-lived fd is what keeps that sliver this
+ * narrow rather than open-ended.
  */
 export function rotateLedger(
   path: string,
@@ -1361,15 +1469,33 @@ export function rotateLedger(
   const archiveFsDeps = opts.archiveFsDeps ?? realArchiveFs;
   if (!ledgerExceedsRotationCeiling(path, ceilingBytes, fsDeps)) return { rotated: false };
 
-  const size0 = statSync(path).size;
-  const snapshot = readSyncRange(path, 0, size0);
+  const release = tryAcquireRotationLock(ledgerRotationLockPath(path));
+  if (release === null) return { rotated: false }; // a live rotator holds it — its catch-up covers us
+  try {
+    // Re-check under the lock: if the holder we queued behind just rotated, the file is
+    // already small and there is nothing left to do (see the doc above).
+    if (!ledgerExceedsRotationCeiling(path, ceilingBytes, fsDeps)) return { rotated: false };
+    return rotateLedgerLocked(path, ceilingBytes, archiveFsDeps, opts.now);
+  } finally {
+    release();
+  }
+}
 
-  const plainArchivePath = datedArchivePath(path, opts.now?.() ?? new Date());
+/** The rotation proper — runs ONLY with the rotation lock held (see {@link rotateLedger}). */
+function rotateLedgerLocked(
+  path: string,
+  ceilingBytes: number,
+  archiveFsDeps: LedgerArchiveFsDeps,
+  now: (() => Date) | undefined,
+): LedgerRotationResult {
+  const { size: size0, content: snapshot, identity: snapshotIdentity } = readSnapshotWithIdentity(path);
+
+  const plainArchivePath = datedArchivePath(path, now?.() ?? new Date());
   const archivePath = writeArchive(plainArchivePath, snapshot, archiveFsDeps);
 
   // ONE clock read for the whole rotation — the health-window filter, the shed pointer's size
   // estimate, and the shed pointer's actual `ts` all agree on the same instant.
-  const nowDate = opts.now?.() ?? new Date();
+  const nowDate = now?.() ?? new Date();
   const nowMs = nowDate.getTime();
   const nowIso = nowDate.toISOString();
   let archivedLineCount = 0;
@@ -1550,7 +1676,21 @@ export function rotateLedger(
   }
 
   const newLiveContent = (keptLines.length > 0 ? keptLines.join("\n") + "\n" : "") + tail;
-  writeFileAtomic(path, newLiveContent);
+  const swapped = writeFileAtomic(path, newLiveContent, () => {
+    // Immediately before the rename: is the live path STILL the inode this rotation
+    // snapshotted? If not, something replaced it under us and renaming would clobber it. (A
+    // ledger REMOVED mid-rotation already throws out of the catch-up stat above, as it always
+    // has — this guard decides only between "same file" and "a different file".)
+    const st = statSync(path);
+    return st.dev === snapshotIdentity.dev && st.ino === snapshotIdentity.ino;
+  });
+  if (!swapped) {
+    console.error(
+      `ledger: rotation of ${path} withdrawn — the live file changed identity since the snapshot ` +
+        `(another rotator replaced it); its lines are untouched and the snapshot archive ${archivePath} is kept`,
+    );
+    return { rotated: false };
+  }
 
   return {
     rotated: true,
