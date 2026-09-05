@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,9 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { CLAUDE_BIN_ENV_OVERRIDE } from "../src/lib/worker.js";
 import { runReview } from "../src/run-task.js";
 import { judgeReview, planOnlyDiff, reviewerOutcome } from "../src/lib/review.js";
+
+const REPO_ROOT = process.cwd();
+const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 
 /**
  * W1-T2472: a PLAN-ONLY review spawned an advisory reviewer worker to discover there was nothing
@@ -138,12 +142,12 @@ async function driveReview(diffText: string): Promise<Driven> {
 case "$1 $2" in
   "api "*)
     case "$*" in
-      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"cafebabe0002"}}' ;;
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
       *) echo '{}' ;;
     esac ;;
   "pr view")
     case "$*" in
-      *headRefOid*) echo '{"headRefOid":"cafebabe0002"}' ;;
+      *headRefOid*) echo '{"headRefOid":"${HEAD}"}' ;;
       *state*) echo '{"state":"OPEN"}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -191,6 +195,7 @@ esac
       arm: () => "skipped",
       disarm: () => {},
       reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
+      headCheckoutDir: REPO_ROOT,
       ledgerPath,
       runId: "REVIEW-PLAN-ONLY-SPAWN-1",
     } as never);
