@@ -164,6 +164,12 @@
       "grepHint": "Forensics — `src/lib/inbox.ts`"
     },
     {
+      "path": "docs/forensics/learnings.md",
+      "title": "learnings.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "learnings.ts forensics"
+    },
+    {
       "path": "docs/forensics/ledger.md",
       "title": "ledger.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",

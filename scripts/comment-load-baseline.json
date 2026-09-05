@@ -166,7 +166,7 @@
   "src/lib/knowledge-dedup.ts": 98,
   "src/lib/last-seen.ts": 41,
   "src/lib/launchd.ts": 315,
-  "src/lib/learnings.ts": 763,
+  "src/lib/learnings.ts": 339,
   "src/lib/ledger-grep.ts": 202,
   "src/lib/ledger-replay.ts": 86,
   "src/lib/ledger.ts": 441,
