@@ -1,0 +1,59 @@
+- id: W1-T2875
+  title: "A FAILING RETRO CAN NEVER SHRINK ITS OWN SCOPE — state/last-retro.json advances only when a retro SUCCEEDS, so once a retro dies on cost every later attempt re-scopes from the same frozen marker with strictly MORE runs, and the failure ratchets itself permanent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§8", "W1-T2833", "W1-T2484", "W1-T2803"]
+  files: [src/run-task.ts, src/lib/retro.ts, test/a-failing-retro-can-never-shrink-its-own-scope.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2833/#4018 bounded the retro's follow-up ledger read, which was linear in ROTATIONS. This is
+    the OTHER half and it is a control-flow defect, not a cost one: `state/last-retro.json` is
+    written only on the SUCCESS path, so a retro that dies before writing it leaves `sinceTs` frozen.
+    The next retro re-scopes from that same instant over a run window that has only grown. Cost per
+    attempt therefore rises monotonically while the marker stands still, and a retro that fails once
+    on cost is guaranteed to fail every subsequent time, sooner each time. The failure is not
+    transient; it ratchets.
+
+    MEASURED ON THE AZURE HOST 2026-09-05, after #4018 had already merged (02:27:30Z) and while the
+    daemon's boot sha provably CONTAINED it:
+      state/last-retro.json mtime .................. 2026-09-03T02:24:39Z (two days stale)
+      retro.start 07:52:48 ......................... runs_in_scope=67  since=2026-09-03T02:24:39
+      retro.start 08:29:43 ......................... runs_in_scope=68  since=2026-09-03T02:24:39
+      scope across the eight hours ................. 63 -> 64 -> 65 -> 66 -> 67 -> 68, never down
+      heap OOM aborts in that window ............... 6, each `FATAL ERROR: Ineffective mark-compacts
+                                                     near heap limit` at ~2046 MB, exit 134
+    So the rotation fix did not stop it, because the driver is the frozen `since`, not the rotations.
+
+    THE SECOND-ORDER FAILURE IS WHAT ACTUALLY COST THE FLEET. The daemon runs
+    `--restart=on-failure:5`, deliberately, so that a clean STOP is not undone. That budget is a
+    COUNT, not a rate: six aborts exhausted it, docker stopped trying, and the fleet sat dead for
+    THREE HOURS while PRs piled up green and unreviewed. Nothing surfaced it — `serve` stayed up and
+    kept accepting webhook wakes that no daemon consumed, so the console looked alive throughout.
+    A host-side watchdog now revives a crash-capped daemon every 5 minutes, and the daemon's heap
+    ceiling was raised to 4096 MB; BOTH ARE MITIGATIONS THAT BUY TIME, NOT THIS FIX. With the marker
+    frozen, a larger ceiling is reached later and then behaves identically.
+
+    THE FIX IS THAT PROGRESS MUST BE RECORDED INDEPENDENTLY OF THE VERDICT. A retro that consumed a
+    window has consumed it whether or not it produced a good report; the marker is a read cursor, not
+    a quality signal. Candidate shapes, to be decided by the build: advance the marker on any
+    TERMINAL outcome rather than only on success; or cap the scope at a fixed run count and advance
+    the cursor by exactly what was consumed, so a backlog drains in bounded chunks instead of being
+    retried whole. Either way the invariant to test is the one that failed here — that two
+    consecutive failing retros must not see a strictly growing window.
+
+    DO NOT hand-advance the marker on the host as the remedy. That discards the unconsumed window
+    silently and leaves the ratchet in place for the next occurrence.
+  acceptance:
+    - claim: "the marker advances after a retro that fails, so a second attempt sees a window no larger than the first"
+      proof: "unit test: W1-T2875: a failing retro advances the marker"
+    - claim: "two consecutive failing retros do not produce a strictly growing run scope"
+      proof: "unit test: W1-T2875: consecutive failures do not grow the scope"
+    - claim: "a corrupt marker still fails closed rather than replaying the whole window"
+      proof: "unit test: W1-T2875: a corrupt marker still fails closed"
