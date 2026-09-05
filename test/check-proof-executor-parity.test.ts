@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { execWhitelistedProof, parseWhitelistedProof } from "../src/lib/review.js";
@@ -33,6 +35,71 @@ const REPO_ROOT = join(__dirname, "..");
 // the fixture's resolution at exactly the one file the rationale measured against.
 const NAME_FILTERED_FIXTURE = ["fixHead", "Acceptable"].join("");
 const NO_MATCH_PROOF = `unit test: ${NAME_FILTERED_FIXTURE}`;
+
+// ── W1-T2706: THE CANDIDATE SET IS A DEPENDENCY ON THE WHOLE REPO, SO IT SAYS SO OUT LOUD ───────
+//
+// `resolveNameFilteredCandidates` greps test SOURCES for the literal above with a FIXED STRING, so
+// ANY file that merely NAMES the fixture's symbol becomes a candidate — a doc comment is enough.
+// MEASURED, twice in one afternoon from two unrelated diffs: #3619 added a suite whose header cites
+// the symbol while explaining something else entirely, the set went 1 -> 2, and both assertions
+// below reddened on a PR that never touched check-proof; the repair comment then spelled the symbol
+// again and made this suite its own third candidate.
+//
+// WHAT THESE TESTS ACTUALLY PROVE IS NOT THE COUNT. It is that a proof resolving to a real file
+// but matching NO test title still collapses to `no-match` — the raw child genuinely exits 0, the
+// historical false-green. That held at every count observed. The count is scaffolding, and it is
+// the only part an outside diff can move. So the set stays PINNED (loosening it to a substring
+// match would stop proving the set at all), and what changes is the FAILURE: it now names the file
+// that joined and the two ways out, because the author who trips it has no connection to
+// check-proof and sees only an opaque `candidates:` mismatch today.
+
+/** The files expected to name the fixture's symbol, pinned. Re-derive with the command in
+ *  {@link candidateSetDiagnosis}'s remedy when a legitimate new namer appears. */
+const PINNED_NAMING_FILES = [
+  "test/fix-branch-checkout-serialization.test.ts",
+  "test/fix-rung-no-task.test.ts",
+] as const;
+
+/**
+ * `null` when `actual` is exactly the pinned set; otherwise the message this suite fails with —
+ * naming the offending file(s) and the remedy.
+ *
+ * PURE, and that is deliberate: the falsifier this task requires drives it with a SYNTHETIC extra
+ * file. Creating a real one would mean writing into the tracked tree from a test, which W1-T2715's
+ * suite-level gate now refuses outright.
+ */
+export function candidateSetDiagnosis(actual: readonly string[]): string | null {
+  const pinned: string[] = [...PINNED_NAMING_FILES].sort();
+  const got = [...actual].sort();
+  const joined = got.join("|");
+  if (joined === pinned.join("|")) return null;
+  const added = got.filter((f) => !pinned.includes(f));
+  const gone = pinned.filter((f) => !got.includes(f));
+  return [
+    "check-proof-executor-parity: the fixture proof's resolved candidate set changed.",
+    added.length > 0 ? `  JOINED: ${added.join(", ")}` : "",
+    gone.length > 0 ? `  NO LONGER NAMES IT: ${gone.join(", ")}` : "",
+    "  WHY YOUR DIFF DID THIS: this suite's fixture proof resolves by grepping test/ sources for a",
+    "  literal symbol, so a file that merely MENTIONS that symbol — a doc comment is enough, it does",
+    "  not have to call it — becomes a candidate. Your file almost certainly names it in prose.",
+    "  THE REMEDY, either one:",
+    "    (1) stop naming the symbol in that file (assemble it, as this suite does for its own copy), or",
+    "    (2) re-derive the pinned set here, if the new file names it for a real reason:",
+    "        git grep -lF -- \"$(node -e 'process.stdout.write([\"fixHead\",\"Acceptable\"].join(\"\"))')\" test/",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** The set as the TREE reports it right now, by the same fixed-string search the resolver uses —
+ *  never a second hand-maintained list that could drift from what check-proof actually resolves. */
+function filesNamingFixtureSymbolInTree(symbol: string = NAME_FILTERED_FIXTURE): string[] {
+  const out = execFileSync("git", ["grep", "-lF", "--", symbol, "test/"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  return out.split("\n").filter(Boolean).sort();
+}
 
 /** Run `checkProofCommand` with stdout captured, from `cwd` (default: this repo). Restores both,
  *  always — same discipline as test/check-proof-suite-run.test.ts, which established that these
@@ -108,10 +175,7 @@ test("ACCEPTANCE #1: check-proof reports the SAME no-match verdict as the review
   // while still pinning both paths and the count. The invariant is the three assertions below — the
   // raw child still exits 0 (the historical false-green) and the collapsed verdict must still read
   // no-match. Measured at this head: candidates 2, exit 0, hits 24, verdict no-match.
-  assert.deepEqual(resolvedCandidateFiles(out).sort(), [
-    "test/fix-branch-checkout-serialization.test.ts",
-    "test/fix-rung-no-task.test.ts",
-  ]);
+  assert.equal(candidateSetDiagnosis(resolvedCandidateFiles(out)), null);
   assert.match(out, /^exit:\s+0\s*$/m, "the RAW child process exit code is genuinely 0 — the historical false-green");
   assert.match(out, /^verdict:\s+no-match\s*$/m, "the collapsed verdict must read no-match, not pass");
 
@@ -126,10 +190,7 @@ test("ACCEPTANCE #2: check-proof still prints parse kind, resolved candidates, t
   assert.match(out, new RegExp(`^proof:\\s+unit test: ${NAME_FILTERED_FIXTURE}\\s*$`, "m"));
   assert.match(out, /^parse:\s+OK — kind=test \(name-filtered\)\s*$/m);
   const candidates = resolvedCandidateFiles(out);
-  assert.deepEqual(candidates.slice().sort(), [
-    "test/fix-branch-checkout-serialization.test.ts",
-    "test/fix-rung-no-task.test.ts",
-  ]);
+  assert.equal(candidateSetDiagnosis(candidates), null);
   const argv = out.match(/^argv:\s+(.+)\s*$/m)?.[1];
   assert.ok(argv, "check-proof must report the executor argv");
   assert.match(argv, new RegExp(`^node --test .*--test-name-pattern ${NAME_FILTERED_FIXTURE} `));
@@ -181,4 +242,73 @@ test("ACCEPTANCE #3: the verb's own --help text states the verdict-to-exit-code 
   assert.match(spec!.detail, /1 fail/);
   assert.match(spec!.detail, /3 no-match/);
   assert.match(spec!.detail, /never read as fail/i, "the help text must say WHY the codes are kept apart");
+});
+
+// ── W1-T2706: the dependency stated, the diagnosis proven, the self-defence pinned ──────────────
+
+test("W1-T2706: the uniqueness property this suite depends on is STATED and checked against the tree, not left implicit in a regex", () => {
+  // The property: exactly the pinned files name the fixture's symbol. Derived from the tree by the
+  // SAME fixed-string search `resolveNameFilteredCandidates` uses, so this can never pass while
+  // check-proof would resolve something else.
+  const inTree = filesNamingFixtureSymbolInTree();
+  assert.ok(inTree.length > 0, "control: the search finds the fixture's namers at all — a zero here would make every assertion below vacuous");
+
+  // THE CONTROL THAT MAKES THIS A MEASUREMENT OF THE TREE. Without it, replacing the search with
+  // `[...PINNED_NAMING_FILES]` leaves this test asserting `pinned === pinned` and passing — MEASURED:
+  // that falsifier reddened NOTHING until this clause existed. The same search, for a DIFFERENT
+  // symbol this suite knows the tree contains, must return a DIFFERENT non-empty set; a function
+  // that returned the pinned constant would answer identically for both.
+  const other = filesNamingFixtureSymbolInTree("resolveNameFilteredCandidates");
+  assert.ok(other.length > 0, "control: the search finds a second, unrelated symbol too — so it really searches");
+  assert.notDeepEqual(other, inTree, "and answers DIFFERENTLY for it — a constant could not");
+
+  // And every path it returned genuinely contains the symbol on disk, so the set is not merely
+  // a plausible-looking list.
+  for (const f of inTree) {
+    assert.ok(
+      readFileSync(join(REPO_ROOT, f), "utf8").includes(NAME_FILTERED_FIXTURE),
+      `${f} was reported as a namer but does not contain the symbol`,
+    );
+  }
+  assert.equal(
+    candidateSetDiagnosis(inTree),
+    null,
+    "the tree's namers must be exactly the pinned set; if this fails, the message names the file that joined",
+  );
+});
+
+test("W1-T2706: a NEW file naming the symbol fails with THAT FILE NAMED and the remedy — never an opaque candidates mismatch", () => {
+  // Driven with a SYNTHETIC extra file. A real one would mean writing into the tracked tree from a
+  // test, which W1-T2715's suite-level gate refuses — and the diagnosis is a pure function precisely
+  // so this falsifier does not need to.
+  const intruder = "test/some-unrelated-suite-that-mentions-it.test.ts";
+  const msg = candidateSetDiagnosis([...PINNED_NAMING_FILES, intruder]);
+  assert.ok(msg, "a changed set must produce a diagnosis, not silence");
+  assert.match(msg, new RegExp(`JOINED: ${intruder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), "the offending file is NAMED");
+  assert.match(msg, /a doc comment is enough/, "and WHY an unrelated diff did it");
+  assert.match(msg, /THE REMEDY, either one/, "and what to do about it");
+  assert.match(msg, /git grep -lF/, "including the command that re-derives the pinned set");
+
+  // The other direction: a file that STOPS naming it is reported too, not silently tolerated.
+  const shrunk = candidateSetDiagnosis([PINNED_NAMING_FILES[0]]);
+  assert.ok(shrunk, "a shrinking set is also a changed set");
+  assert.match(shrunk, /NO LONGER NAMES IT: test\/fix-rung-no-task\.test\.ts/);
+
+  // And the healthy case stays silent, in either order — grep promises no traversal order.
+  assert.equal(candidateSetDiagnosis([...PINNED_NAMING_FILES]), null);
+  assert.equal(candidateSetDiagnosis([...PINNED_NAMING_FILES].reverse()), null);
+});
+
+test("W1-T2706: the fixture stays ASSEMBLED, so this suite can never become its own candidate", () => {
+  // Asserted over this file's own bytes. The literal is assembled here too — spelling it out to
+  // check for its absence would be the very defect under test.
+  const own = readFileSync(join(__dirname, "check-proof-executor-parity.test.ts"), "utf8");
+  const literal = ["fixHead", "Acceptable"].join("");
+  const spelled = own.split(literal).length - 1;
+  assert.equal(spelled, 0, `this suite must never spell the fixture's symbol verbatim (found ${spelled}) — doing so makes it its own candidate`);
+  assert.match(own, /\["fixHead", "Acceptable"\]\.join\(""\)/, "and it stays assembled, which is what keeps that true");
+  // The control that makes the zero above a measurement rather than a typo: the assembled value is
+  // really the symbol the fixture proof carries.
+  assert.equal(NO_MATCH_PROOF, `unit test: ${literal}`);
+  assert.ok(!filesNamingFixtureSymbolInTree().includes("test/check-proof-executor-parity.test.ts"), "and the TREE agrees this file is not a namer");
 });
