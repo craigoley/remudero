@@ -165,7 +165,8 @@ export interface ProviderWindowConsumption {
     | "capacity-unreadable"
     | "no-reset-stable-window"
     | "counter-regressed"
-    | "overlapping-provider-work";
+    | "overlapping-provider-work"
+    | "account-mismatch";
 }
 
 export interface ProviderWindowMeasurement {
@@ -229,6 +230,23 @@ export function providerWindowConsumption(
 ): ProviderWindowConsumption {
   if (before.provider !== after.provider) {
     return { provider: before.provider, percentConsumed: null, reason: "provider-mismatch" };
+  }
+  // W1-T2828: refuse a CROSS-ACCOUNT subtraction.
+  //
+  // TRAP: what protects this today is incidental, not designed. A window is comparable only when
+  // name AND resetsAt match exactly, so a mid-spawn account switch usually lands in
+  // no-reset-stable-window or counter-regressed. Two accounts whose weekly windows share a reset
+  // timestamp would match, and the delta between them would be attributed to one worker's spend.
+  //
+  // Only a KNOWN mismatch refuses. One reading without a label cannot establish that the accounts
+  // differ, and refusing there would stop attributing ordinary spend on every host that has run
+  // fine without a label for months.
+  if (
+    before.accountLabel !== undefined &&
+    after.accountLabel !== undefined &&
+    before.accountLabel !== after.accountLabel
+  ) {
+    return { provider: before.provider, percentConsumed: null, reason: "account-mismatch" };
   }
   if (!before.readable || !after.readable) {
     return { provider: before.provider, percentConsumed: null, reason: "capacity-unreadable" };
@@ -366,11 +384,17 @@ export function selectWorkerProvider(
   return weighted[weighted.length - 1];
 }
 
-export function claudeCapacityFromUsage(snapshot: UsageSnapshot | undefined): ProviderCapacity {
+export function claudeCapacityFromUsage(
+  snapshot: UsageSnapshot | undefined,
+  accountLabel?: string,
+): ProviderCapacity {
   if (!snapshot) return { provider: "claude", readable: false, windows: [], detail: "capacity unreadable" };
   return {
     provider: "claude",
     readable: true,
+    // Same shape as the Codex path's own label (capacityFromBucket), so a reader comparing two
+    // rows never has to know which provider produced which format.
+    ...(accountLabel ? { accountLabel } : {}),
     windows: [
       { name: "session (5h)", usedPercent: snapshot.session.percentUsed, resetsAt: snapshot.session.resetsAt },
       ...snapshot.weekly.map((window) => ({
