@@ -87,6 +87,12 @@
     Both filings of this shard omitted the header and reddened that gate; recorded here because
     the shard is what a later filer reads.
 
+    AND FIX THE BODY BEFORE THE PUSH, NOT AFTER. `acceptance-author-gate` reads the PR body from
+    `GITHUB_EVENT_PATH` — the event payload, which SNAPSHOTS the body when the event fired. A
+    re-run replays that same payload, so it buys nothing, and a body edited after the push is
+    not seen until the NEXT head. Correct the body first, then push; otherwise each fix costs a
+    whole extra cycle, which is exactly what it cost here.
+
     RENUMBERED FROM W1-T2967 TO W1-T2971 on 2026-09-06, minutes after filing. #4295 filed a
     DIFFERENT W1-T2967 ("one whole-file proof cannot answer several criteria") and merged first
     at 0d7776e9; this shard merged second at c24fad98, so main briefly carried two records
