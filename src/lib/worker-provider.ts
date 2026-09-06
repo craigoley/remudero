@@ -391,6 +391,26 @@ export function claudeCapacityFromUsage(
   accountLabel?: string,
 ): ProviderCapacity {
   if (!snapshot) return { provider: "claude", readable: false, windows: [], detail: "capacity unreadable" };
+  const weeklyWindows: ProviderCapacityWindow[] = snapshot.weekly.map((window) => ({
+    name: `weekly (${window.label})`,
+    usedPercent: window.percentUsed,
+    resetsAt: window.resetsAt,
+  }));
+  // W1-T2949 — CROSS-PROVIDER ALLOCATION MUST COMPARE COMPARABLE HORIZONS.
+  //
+  // `windows` (below) stays the COMPLETE eligibility set — the five-hour session window remains a
+  // hard gate there, so an unreadable, invalid, or reserve-bound session still excludes Claude
+  // before `selectWorkerProvider` ever computes a weight (it filters on `capacity.windows`, never
+  // on `allocationWindows`). Only the SEPARATE `allocationWindows` projection — read exclusively by
+  // `providerAllocationWindows` for cross-provider weighting — is narrowed to the weekly windows
+  // whenever at least one is readable. A five-hour burst window and a weekly subscription window
+  // have different horizons; comparing them directly let an ordinary burst cycle on the reset
+  // five-hour window mask materially more Claude weekly headroom and divert most automatic work to
+  // Codex (fleet-observed 54% session / 7% weekly Claude vs 29% weekly Codex producing a 72.155%
+  // Codex share). When Claude reports no weekly window at all, this projection is OMITTED so
+  // `providerAllocationWindows`'s own fallback (`projected.length > 0 ? projected : capacity.windows`)
+  // uses the existing session window instead of this function inventing zero or full headroom.
+  const validWeeklyWindows = weeklyWindows.filter(validCapacityWindow);
   return {
     provider: "claude",
     readable: true,
@@ -399,12 +419,9 @@ export function claudeCapacityFromUsage(
     ...(accountLabel ? { accountLabel } : {}),
     windows: [
       { name: "session (5h)", usedPercent: snapshot.session.percentUsed, resetsAt: snapshot.session.resetsAt },
-      ...snapshot.weekly.map((window) => ({
-        name: `weekly (${window.label})`,
-        usedPercent: window.percentUsed,
-        resetsAt: window.resetsAt,
-      })),
+      ...weeklyWindows,
     ],
+    ...(validWeeklyWindows.length > 0 ? { allocationWindows: validWeeklyWindows } : {}),
   };
 }
 
