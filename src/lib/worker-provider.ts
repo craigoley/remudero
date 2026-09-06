@@ -40,6 +40,7 @@ interface CodexSpawnArgs {
   effort?: string;
   maxTurns?: number;
   tools?: string[];
+  sandboxIntent?: "disposable-review";
   runId?: string;
   taskId?: string;
   containment?: {
@@ -1235,10 +1236,11 @@ export function codexGitWritableRoots(cwd: string, configRoot: string): string[]
   }
 }
 
-function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
+function codexExecArgs(args: CodexSpawnArgs, config: Config, privateTmpDir: string, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
-  const readOnly = Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+  const disposableReview = args.sandboxIntent === "disposable-review";
+  const readOnly = !disposableReview && Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
   const skipGitRepoCheck = readOnly && !isGitWorktree(args.cwd);
   const shared = [
     "--json",
@@ -1265,12 +1267,13 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   if (model) shared.push("--model", model);
   if (effort) shared.push("-c", `model_reasoning_effort=\"${effort}\"`);
   if (args.resumeSessionId) return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
-  const gitWritableRoots = readOnly ? [] : codexGitWritableRoots(args.cwd, config.root);
+  const gitWritableRoots = readOnly || disposableReview ? [] : codexGitWritableRoots(args.cwd, config.root);
   return [
     "exec",
     ...shared,
     "--sandbox", readOnly ? "read-only" : "workspace-write",
-    ...(readOnly ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
+    ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
+    ...(disposableReview ? ["--add-dir", privateTmpDir] : []),
     ...gitWritableRoots.flatMap((root) => ["--add-dir", root]),
     "-C", args.cwd,
     "-",
@@ -1303,7 +1306,7 @@ async function spawnCodexWorkerInPrivateTemp(
   let timedOut = false;
   const childEnv = { ...codexSpawnEnv(config, args), TMPDIR: privateTmpDir };
   const contained = spawn(
-    { command: bin, args: codexExecArgs(args, config, selection), cwd: args.cwd, env: childEnv },
+    { command: bin, args: codexExecArgs(args, config, privateTmpDir, selection), cwd: args.cwd, env: childEnv },
     (chunk) => stderrChunks.push(chunk),
     args.onSpawnError,
   );

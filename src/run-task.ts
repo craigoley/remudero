@@ -5414,7 +5414,7 @@ async function runReview(args: {
             // site. The reviewer still needs inspection tools to fetch the diff and run proofs;
             // the shared list excludes every write tool, which also lets the Codex adapter use its
             // narrowly gated non-repository trust bypass for this throwaway cwd.
-            tools: SPECIALIST_TOOLS,
+            tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review",
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );

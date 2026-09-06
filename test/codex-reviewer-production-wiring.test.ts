@@ -10,7 +10,7 @@ import { spawnCodexWorker } from "../src/lib/worker-provider.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { runReview } from "../src/run-task.js";
 
-test("W1-T2829/W1-T2868: runReview gives Codex an exact materialized checkout under the read-only sandbox", async () => {
+test("W1-T2946: runReview gives Codex a test-capable disposable review sandbox", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-codex-review-wiring-"));
   const binDir = mkdtempSync(join(tmpdir(), "rmd-codex-review-gh-"));
   const oldPath = process.env.PATH;
@@ -51,6 +51,7 @@ esac
     let reviewerCwdWasGit: boolean | undefined;
     let reviewerHead: string | undefined;
     let codexArgs: string[] = [];
+    let codexTmpDir: string | undefined;
     let reviewerError: string | undefined;
     const reviewerSpawnWorker = async (spawnArgs: SpawnWorkerArgs): Promise<WorkerResult> => {
       observedSpawn = spawnArgs;
@@ -88,6 +89,7 @@ esac
           containment: {
             spawn: (options) => {
               codexArgs = options.args;
+              codexTmpDir = options.env.TMPDIR;
               return { process: proc as never, pid: 28_290 };
             },
             teardown: () => {},
@@ -133,6 +135,7 @@ esac
     assert.equal(reviewerCwdWasGit, true, "the reviewer cwd must be a real Git checkout");
     assert.equal(reviewerHead, headSha, "the reviewer must inspect the exact PR head");
     assert.deepEqual(observedTools, ["Read", "Grep", "Glob", "Bash"], "the production call site must preserve inspection while excluding write tools");
+    assert.equal(observedSpawn?.sandboxIntent, "disposable-review");
     assert.equal(observedSpawn?.model, "gpt-5.5");
     assert.equal(observedSpawn?.effort, "high");
     assert.equal(observedSpawn?.maxTurns, 10);
@@ -140,7 +143,11 @@ esac
     assert.match(observedSpawn?.prompt ?? "", /REVIEW_VERDICT <n>:/);
     assert.equal(existsSync(observedSpawn?.cwd ?? root), false, "the semantic review scratch cwd must be removed after the spawn");
     assert.equal(codexArgs.includes("--skip-git-repo-check"), false, "a materialized repository must not need the non-repository bypass");
-    assert.deepEqual(codexArgs.slice(codexArgs.indexOf("--sandbox"), codexArgs.indexOf("--sandbox") + 2), ["--sandbox", "read-only"]);
+    assert.deepEqual(codexArgs.slice(codexArgs.indexOf("--sandbox"), codexArgs.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+    assert.equal(codexArgs[codexArgs.indexOf("--add-dir") + 1], codexTmpDir, "the private test scratch must be writable");
+    assert.equal(codexArgs.filter((arg) => arg === "--add-dir").length, 1, "a review must not gain writable Git metadata roots");
+    assert.equal(codexArgs.includes("sandbox_workspace_write.network_access=true"), false, "reviews do not gain network access");
+    assert.equal(existsSync(codexTmpDir ?? root), false, "the private writable test scratch is reaped after review");
     assert.equal(execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headSha);
     assert.equal(execFileSync("git", ["-C", sourceDir, "status", "--porcelain"], { encoding: "utf8" }), "");
   } finally {
