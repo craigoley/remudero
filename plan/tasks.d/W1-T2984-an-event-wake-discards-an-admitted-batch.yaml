@@ -1,0 +1,52 @@
+- id: W1-T2984
+  title: "A GITHUB EVENT WAKE DISCARDS AN ALREADY-ADMITTED DISPATCH BATCH — the interphase clock is stopped with a bare `continue` between selection and dispatch, so on a repo taking 77 wakes in five minutes the daemon selects work, logs it as attempted, and throws it away before runOne is ever called"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "W1-T254", "W1-T343", "W1-T2960", "W1-T2965", "W1-T2981"]
+  files: [src/lib/daemon.ts, test/an-event-wake-must-not-discard-an-admitted-batch.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FIFTH BLOCKER OF ONE OUTAGE, AND THE FOURTH OF ONE SHAPE. W1-T2960 fixed the pre-admission
+    freshness re-check; W1-T2965 fixed the top-of-tick exit that made it unreachable; W1-T2981
+    detached the retro rung that held the whole tick. All three are merged and live. The daemon now
+    reaches dispatch every tick and its summary reads `attempted : W1-T2655, W1-T2673` where for
+    days it read `attempted : (none)`. IT STILL BUILDS NOTHING.
+
+    THE BATCH IS SELECTED, ANNOUNCED, AND THEN THROWN AWAY. Between the `daemon.iteration` rows and
+    the `Promise.allSettled(admitted.map(runOne))` that actually dispatches, the loop stops the
+    interphase review clock with a bare `if (await stopInterphaseReviewClock()) continue;`. That
+    predicate returns true when a GitHub event wake was consumed anywhere in the tick. The
+    `continue` then restarts the loop, discarding a batch that has ALREADY been selected and
+    ALREADY been pushed onto `attempted`.
+
+    MEASURED 2026-09-06, two consecutive ticks:
+      21:32:12  dispatch.concurrent_set  tasks=[W1-T2655, W1-T2673]  lane_count=2
+      21:32:12  daemon.iteration         task=W1-T2655
+      21:32:12  daemon.iteration         task=W1-T2673
+      ...       NOTHING. no run.start, no worktree for either task, cost `notional $0.0000`
+    Only `run-RETRO-*` worktrees exist on the host; no `run-W1-T2655-*` was ever created. And
+    `github.wake.accepted` fired 77 times in five minutes, so the wake lands in essentially every
+    tick: dispatch starves permanently while every liveness signal, and even the summary's own
+    `attempted` list, reports work.
+
+    THE ATTEMPTED LIST IS WHAT MAKES THIS INVISIBLE. A reader checking "is the daemon dispatching"
+    sees task ids in `attempted` and concludes yes. The `$0.0000` beside them is the only tell.
+
+    THE FIX IS W1-T2960'S, VERBATIM: an interrupt evaluated AFTER selection must not discard the
+    selection. Stop the clock — the in-flight ticker below must own it, and the wake's intent is
+    retained by the clock itself — then dispatch the batch and honour the wake at the NEXT tick
+    boundary. Nothing downstream reads the wake, and `worktreeAdd` cuts every worker a fresh
+    worktree from origin/main HEAD regardless, so deferring one cycle costs nothing. The deferral
+    must be LEDGERED: a silent one is how this survived four rounds of fixing the same shape.
+  acceptance:
+    - claim: "an event wake no longer discards an admitted batch, so runOne is actually called"
+      proof: "unit test: W1-T2984: an event wake does not discard an admitted batch"
+    - claim: "the deferred wake is named in the ledger rather than dropped silently"
+      proof: "unit test: W1-T2984: the deferred wake is named in the ledger"

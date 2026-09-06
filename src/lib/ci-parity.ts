@@ -1600,11 +1600,62 @@ interface KnownCensusSuite {
   readonly walks: readonly string[];
 }
 
+/**
+ * W1-T2969 — THE REGISTRY-SHAPED CENSUSES. MEASURED 2026-09-06: of four census-baseline CI failures
+ * across #4283 and #4290, the derived half named ONE. The other three each pin a REGISTRY (command
+ * names, policy keys, source-text reads) and reference no symbol either diff touched, so the
+ * mandated caller sweep was blind to all three. Each walks a population as the derived four do, but
+ * none is a fast-gate member and none may become one: that admission is a measured COST decision.
+ */
+const REGISTRY_CENSUS_SUITES: readonly KnownCensusSuite[] = [
+  {
+    // A fixed list of verb names plus two exact counts; adding a COMMANDS verb moves all three.
+    job: "command-registry-census",
+    testFile: "test/help-renders-a-summary-not-a-paragraph.test.ts",
+    walks: ["src/run-task.ts"],
+  },
+  {
+    // `expectedTopLevelKeys` pins the section set, `NET_NEW` the fields with no source literal to
+    // lift from. A new policy row moves both.
+    job: "policy-surface-census",
+    testFile: "test/policy.test.ts",
+    walks: ["src/lib/policy.ts", "plan/policy.yaml"],
+  },
+  {
+    // W1-T2905 ratchets the per-file count of source-text reads in tests, and ANY added test file
+    // can trip it — so the whole prefix joins, never one path.
+    job: "source-text-census",
+    testFile: "test/source-text-assertion-census.test.ts",
+    walks: ["test/"],
+  },
+  {
+    // CLAUDE.md's OWN worked example for item (j) — "#2639 added one seamed policy read and reddened
+    // test/config-reader-seams.test.ts ... that references nothing it touched." It walks src/ and
+    // pins an EXACT count of unredirectable policy reads, so any file gaining one moves it; measured
+    // a fifth time when W1-T2971's fourth cadence hook builder took it 25 -> 26.
+    job: "config-reader-seams-census",
+    testFile: "test/config-reader-seams.test.ts",
+    walks: ["src/"],
+  },
+];
+
 export const KNOWN_CENSUS_SUITES: readonly KnownCensusSuite[] = CENSUS_ADMITTED_MEMBERS.map((m) => ({
   job: m.job,
   testFile: m.testFile,
   walks: m.walks ?? [],
 }));
+
+/**
+ * THE MEMBERSHIP SET — WIDER THAN {@link KNOWN_CENSUS_SUITES} AND A SEPARATE SYMBOL, because the two
+ * answer different questions: "which suites does this path join" reads THIS, "does this suite carry
+ * a verdict row" reads the ADMITTED projection, and `unknownCoverage` comes from THAT. Union them
+ * and test/config-reader-seams.test.ts leaves the unknown report holding no verdict row — refused
+ * BY NAME by W1-T2809's suite, and by W1-T2523's demanding the exact opposite of anything KNOWN.
+ */
+export const CENSUS_MEMBERSHIP_SUITES: readonly KnownCensusSuite[] = [
+  ...KNOWN_CENSUS_SUITES,
+  ...REGISTRY_CENSUS_SUITES,
+];
 
 /** A changed path and the job names it enters — `suites` is `[]` when it joins none, never omitted. */
 export interface CensusMembershipEntry {
@@ -1613,23 +1664,24 @@ export interface CensusMembershipEntry {
 }
 
 /** Pure, non-blocking output: no `ok`, no verdict — a report a caller prints, never a gate.
- *  `unknownCoverage` names every re-derived caller {@link KNOWN_CENSUS_SUITES} does not model,
+ *  `unknownCoverage` names every re-derived caller {@link KNOWN_CENSUS_SUITES} does not carry,
  *  because this cannot say which prefixes an unrecognised suite walks and will not guess. */
 export interface CensusMembershipReport {
   readonly entries: readonly CensusMembershipEntry[];
   readonly unknownCoverage: readonly string[];
 }
 
-/** PURE core: membership by prefix match against {@link KNOWN_CENSUS_SUITES}. No git, filesystem or spawn. */
+/** PURE core: membership by prefix match against {@link CENSUS_MEMBERSHIP_SUITES}. No git, filesystem or spawn. */
 export function censusSuiteMembership(
   changedPaths: readonly string[],
   srcFilteredCallers: readonly string[],
 ): CensusMembershipReport {
+  // TWO QUESTIONS, TWO SETS (W1-T2969) — see CENSUS_MEMBERSHIP_SUITES for why they cannot be one.
   const knownTestFiles = new Set(KNOWN_CENSUS_SUITES.map((s) => s.testFile));
   const unknownCoverage = [...new Set(srcFilteredCallers.filter((f) => !knownTestFiles.has(f)))].sort();
   const entries = changedPaths.map((path) => ({
     path,
-    suites: KNOWN_CENSUS_SUITES.filter((s) => s.walks.some((prefix) => path.startsWith(prefix))).map((s) => s.job),
+    suites: CENSUS_MEMBERSHIP_SUITES.filter((s) => s.walks.some((prefix) => path.startsWith(prefix))).map((s) => s.job),
   }));
   return { entries, unknownCoverage };
 }

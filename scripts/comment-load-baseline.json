@@ -108,7 +108,7 @@
   "src/lib/bundle.ts": 100,
   "src/lib/ci-failure-corpus.ts": 65,
   "src/lib/ci-gate-required.ts": 2,
-  "src/lib/ci-parity.ts": 476,
+  "src/lib/ci-parity.ts": 500,
   "src/lib/classify.ts": 201,
   "src/lib/claude-model-health.ts": 20,
   "src/lib/cli-args.ts": 20,
@@ -265,6 +265,6 @@
   "src/lib/worker.ts": 1136,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16200,
+  "src/run-task.ts": 16195,
   "src/spike.ts": 18
 }
