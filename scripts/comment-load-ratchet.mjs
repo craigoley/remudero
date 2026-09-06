@@ -36,10 +36,10 @@ export const MEASURED_ROOTS = ["src", "scripts", "deploy", ".github/workflows", 
 
 export const DEFAULT_BASELINE_RELATIVE_PATH = "scripts/comment-load-baseline.json";
 
-/** The longest comment block a diff may ADD, per docs/comment-standard.md's "any other block"
- *  row. Function docs (12) and file headers (25) are conventions this script cannot tell apart
- *  from an ordinary block without a parser, so it enforces only the outermost limit. */
-export const MAX_ADDED_BLOCK_LINES = 40;
+/** The longest comment block a diff may ADD, per docs/comment-standard.md's "any other block" row.
+ *  Lowered from 40 to the standard's own file-header limit on 2026-09-06: the compaction programme
+ *  archived under docs/forensics/ left no block over 40. Function docs (12) need a parser to tell apart. */
+export const MAX_ADDED_BLOCK_LINES = 25;
 
 const HASH_EXTENSION_RE = /\.(?:sh|ya?ml|toml)$/;
 const DOCKERFILE_RE = /(?:^|\/)Dockerfile(?:\.[^/]*)?$/;

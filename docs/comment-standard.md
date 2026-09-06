@@ -38,11 +38,13 @@ broke. Then cite the record (PR number, task id, `DECISIONS.md` date) instead of
 |---|---|---|
 | Function or symbol doc | 12 lines | review — read this page |
 | File header | 25 lines | review — read this page |
-| Any other block | 40 lines | `comment-load-ratchet`, on **added** blocks |
+| Any other block | 25 lines | `comment-load-ratchet`, on **added** blocks |
 | Comment lines per file | today's count, never more | `comment-load-ratchet`, against `scripts/comment-load-baseline.json` |
 
-Only the last two rows refuse a PR; the 12- and 25-line limits are conventions a reviewer applies,
-and nothing measures them. The per-file ceiling is the recorded count **or** what the file already
+Only the last two rows refuse a PR; the function-doc and file-header limits are conventions a
+reviewer applies, and nothing measures them. The block ceiling was 40 until 2026-09-06, when the
+compaction programme left no measured file carrying a block over 40 and it was lowered to the
+header limit it now matches. The per-file ceiling is the recorded count **or** what the file already
 carried at the merge base, whichever is higher — CI measures the merge ref, so without that second
 half every merge to `main` would refuse open PRs that changed nothing. Inherited growth is recorded
 for you; growth you added is yours.
@@ -105,10 +107,10 @@ PR **migrates or keeps every pinned phrase**.
 
 ## What the ratchet does not do
 
-It refuses two things: a file whose comment count grew, and a newly added comment block over 40
-lines. It does not judge whether a comment is good, does not measure the 12- and 25-line limits, and
-does not read `test/`. It is a ceiling on volume, not a verdict on quality. Compacting the files
-that are already large is separate work, one file per PR.
+It refuses two things: a file whose comment count grew, and a newly added comment block over 25
+lines. It does not judge whether a comment is good, does not measure the function-doc or file-header
+limit, and does not read `test/`. It is a ceiling on volume, not a verdict on quality. Compacting
+the files that are already large is separate work, one file per PR.
 
 **Known follow-up, measured 2026-09-05.** The baseline matches `INSTRUMENT_SURFACE`, so a PR that
 adds executable code *and* a comment to a `src/` file — and so must raise that ceiling — reads
