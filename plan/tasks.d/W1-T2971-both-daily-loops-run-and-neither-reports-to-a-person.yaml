@@ -1,0 +1,77 @@
+- id: W1-T2971
+  title: "BOTH DAILY LOOPS RUN WHERE NOBODY READS THEM — digestCadence delivers to an unbuilt console mailbox and ciLearningCadence is off entirely, so the fleet's two daily reports reach the operator through no surface at all; turn the learning rung on and route both reports to the email channel"
+  repo: remudero
+  depends_on: [W1-T2968, W1-T2970]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files:
+    - plan/policy.yaml
+    - src/run-task.ts
+    - test/the-two-daily-reports-reach-a-person.test.ts
+  origin: "operator-session#daily-daemon-and-pr-improvement-rundown-by-email-2026-09-06"
+  plan_refs: ["W1-T2968", "W1-T2970", "W1-T2969", "W1-T2277", "W1-T2959"]
+  status: queued
+  attempts: 0
+  rationale: |
+    TWO LOOPS, TWO DIFFERENT FAILURES, ONE MISSING READER. `digestCadence` is `enabled: true` at
+    1440 minutes and delivers into `inboxNotifyChannel` — the console mailbox W1-T2497 has not
+    built. `ciLearningCadence` is `enabled: false` and is the only cadence row that is, so the
+    learning rung does not fire at all. The operator asked for a regular report of what the daemon
+    accomplished and a daily rundown of the improvement loop; today neither is readable, for
+    unrelated reasons.
+
+    THE `enabled: false` DEFAULT WAS EARNED AND ITS REASON IS SPENT. policy.yaml's block comment
+    is explicit: every sibling earns safe-on by being read-only, and this row is off because "THIS
+    RUNG FILES … a machine writing records into an operator's plan is an opt-in, not a safe
+    default". That reasoning is correct and this task is the opt-in, taken deliberately and by the
+    operator, with W1-T2969's judged gate and W1-T2970's ceiling standing between the rung and the
+    plan. The row is flipped WITH its comment rewritten to say what now holds it safe, never
+    flipped while leaving a comment that argues the opposite.
+
+    1440 / 1 IS ALREADY THE OPERATOR'S OWN WORD. The block comment records it: "1440 / 1 IS THE
+    OPERATOR'S OWN WORD: 'daily'." So this task changes the `enabled` value and nothing else about
+    the pacing.
+  design: |
+    (i) THE POLICY CHANGE IS ONE VALUE AND ITS JUSTIFICATION. `ciLearningCadence.enabled` becomes
+    `true`, and the block comment above it is rewritten to name what makes it safe now — the judged
+    gate, the filing ceiling, the idempotency key — rather than left asserting a default that no
+    longer holds. A flipped flag under a comment that still argues for the old value is the
+    contradiction CLAUDE.md's ledger doctrine refuses in ledger lines, and it is no better here.
+
+    (ii) BOTH CADENCES GAIN THE EMAIL CHANNEL ADDITIVELY. The digest keeps its inbox write and
+    gains an email send; the learning rung's daily report sends through the same channel. Neither
+    is rerouted, so the console inherits both when it lands.
+
+    (iii) ONE MESSAGE A DAY, NOT TWO, WHEN BOTH FIRE IN THE SAME WINDOW. `digestCadence` and
+    `ciLearningCadence` both pace at 1440 with their own markers, so on an ordinary day both are
+    due. The report composes into a single email with the daemon digest and the improvement
+    rundown as sections, because two mails a day from one fleet is the noise the digest's own
+    cadence exists to avoid.
+
+    (iv) A REPORT THAT COULD NOT BE DELIVERED SAYS SO IN THE LEDGER. Delivery uses the existing
+    `notify` seam, which already ledgers every send and degrades rather than throwing, so an
+    undeliverable report never breaks a cadence and never passes silently.
+
+    (v) THE EMAIL NAMES WHAT WAS FILED AND UNDER WHOSE RULING. The improvement section lists each
+    filed shard with its judge verdict and resulting verify level, and names every finding the
+    ceiling excluded — so the operator can see what the machine concluded without opening the plan.
+  acceptance:
+    - claim: "ciLearningCadence is enabled and its policy comment states what makes it safe now rather than arguing for the default it no longer carries"
+      proof: "unit test: test/the-two-daily-reports-reach-a-person.test.ts"
+    - claim: "the daemon digest and the improvement rundown compose into a single daily email rather than two separate sends when both cadences are due in the same window"
+      proof: "unit test: test/the-two-daily-reports-reach-a-person.test.ts"
+    - claim: "the digest keeps its existing console-inbox delivery, so email is an additional reader and not a reroute"
+      proof: "unit test: test/the-two-daily-reports-reach-a-person.test.ts"
+    - claim: "the improvement section names each filed shard with its judge verdict and resulting verify level, and names every finding the ceiling excluded"
+      proof: "unit test: test/the-two-daily-reports-reach-a-person.test.ts"
+    - claim: "an undeliverable report is ledgered as undelivered and breaks neither cadence"
+      proof: "unit test: test/the-two-daily-reports-reach-a-person.test.ts"
+  falsifier: |
+    Close without implementation if the console mailbox has shipped and the operator reads both
+    reports there, or if the operator withdraws the opt-in and ciLearningCadence is to stay off.
+    Flipping the policy row while leaving its block comment arguing for the old default does not
+    satisfy this task.
