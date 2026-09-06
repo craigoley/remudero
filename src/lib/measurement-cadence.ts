@@ -1343,6 +1343,17 @@ export interface CiLearningMintResult {
   unreadableShas: string[];
 }
 
+/** One ci-learning fire's outcome as the daemon's poll loop logs it — counts, never the drafts: a
+ *  ledger row is fixed-width and a backlog is not. Lives beside the rung, per the
+ *  `DigestCadenceRunResult`/`MeasurementCadenceRunResult` convention that the producer owns it. */
+export interface CiLearningCadenceRunResult {
+  status: CiLearningMintResult["status"];
+  draftCount: number;
+  excludedCount: number;
+  /** Rollups that could not be read. Carried so a partial window never reads as a complete one. */
+  unreadableCount: number;
+}
+
 /**
  * Draft one bounded, exactly-deduped, MARKED shard per repaired CI failure.
  *

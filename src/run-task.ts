@@ -524,6 +524,7 @@ import {
   measurementCadenceCheck,
   ciLearningCadenceCheck,
   type CiLearningCadencePolicy,
+  type CiLearningCadenceRunResult,
   measurementCadenceMarkerPath,
   mintCiLearningShards,
   recordCiLearningCadenceFire,
@@ -24994,6 +24995,55 @@ function memoiseBoardSnapshotByRepo(
   };
 }
 
+/**
+ * W1-T2972: the CI-failure learning rung's PRODUCER, mirroring {@link buildDigestCadenceDaemonHooks}.
+ *
+ * THE HALF W1-T2959 DID NOT SHIP: it built the row, marker, decision and minter, all tested and
+ * green, but nothing called `ciLearningCadenceCheck` except the CLI verb — so the "daily" loop ran
+ * only by hand. This pair puts it on the daemon's tick.
+ *
+ * RECORD THE FIRE FIRST, {@link buildMeasurementCadenceDaemonHooks}'s stated crash-safety
+ * discipline: a body that throws costs one skipped period, not a re-fire on every poll forever.
+ *
+ * REPORT-ONLY: drafts MARKED, PARKED shards and writes no plan record. Whether the rung files is
+ * W1-T2968's question, not reopened here.
+ */
+export function buildCiLearningDaemonHooks(deps: {
+  config?: Config;
+  policy?: Policy;
+  now?: () => Date;
+  /** Injected so a test drives the whole rung with ZERO network; production reads the real window. */
+  loadWindow?: (days: number) => CiFailureCorpusInput;
+} = {}): {
+  checkCiLearningCadence: () => MeasurementCadenceDecision;
+  runCiLearningCadence: () => Promise<CiLearningCadenceRunResult>;
+} {
+  const configFor = () => deps.config ?? loadConfig();
+  const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
+  return {
+    checkCiLearningCadence: () =>
+      ciLearningCadenceCheck({
+        root: configFor().root,
+        policy: policyFor().values.ciLearningCadence,
+        now: deps.now?.(),
+      }),
+    runCiLearningCadence: async () => {
+      const root = configFor().root;
+      // THE FIRE FIRST — see this function's own doc for why the order is the safety property.
+      recordCiLearningCadenceFire(root, deps.now?.() ?? new Date());
+      const input = deps.loadWindow ? deps.loadWindow(1) : loadCiFailureWindow(1);
+      const corpus = collectCiFailureCorpus(input);
+      const result = mintCiLearningShards(corpus, []);
+      return {
+        status: result.status,
+        draftCount: result.drafts.length,
+        excludedCount: result.excludedFindings.length,
+        unreadableCount: result.unreadableShas.length,
+      };
+    },
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -25612,6 +25662,12 @@ export async function daemonCommand(
   // dead code, which is not a hypothetical here: that is precisely what shipped in #2952 and
   // stayed dead for the eight hours between its merge and this fix.
   const boardReviewHooks = target.isSelf ? buildBoardReviewDaemonHooks({ config }) : undefined;
+  // W1-T2972: the CI-failure learning rung. SELF-TARGET ONLY, same reason as the rungs above — the
+  // marker it advances and the pull-request window it joins against both belong to THIS process's
+  // own config.root, never a drained target's. WITHOUT THIS LINE `deps.checkCiLearningCadence` is
+  // undefined and the whole rung is dead code, which is not hypothetical: it is what W1-T2959
+  // shipped, after #1066 and #2952 each shipped it before that.
+  const ciLearningHooks = target.isSelf ? buildCiLearningDaemonHooks({ config }) : undefined;
   try {
     const summary = await runDaemonFn(
       plan,
@@ -25887,6 +25943,12 @@ export async function daemonCommand(
             // cited "(Rule 15)" for a doctrine that rule does not carry; see §12 rule 27.
         checkBoardReview: boardReviewHooks?.checkBoardReview,
         runBoardReview: boardReviewHooks?.runBoardReview,
+        // CI-LEARNING RUNG (W1-T2972). Same shape as the three cadences above and gated the same
+        // way, with one deliberate difference: its `ciLearningCadence` policy row ships DEFAULT
+        // OFF, because unlike its read-only siblings this rung drafts records. Wiring it here is
+        // what makes that switch mean something; the operator throws it.
+        checkCiLearningCadence: ciLearningHooks?.checkCiLearningCadence,
+        runCiLearningCadence: ciLearningHooks?.runCiLearningCadence,
         // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
         // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
         // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once
