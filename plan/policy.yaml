@@ -984,6 +984,36 @@ boardReview:
     min: 1
     max: 24
 
+# W1-T2959's daily CI-failure learning rung — its OWN row, deliberately not folded into any cadence
+# above, for the reason digestCadence's comment already states: a short interval on one rung must
+# never drag another. Reuses the SAME two-bound decision function (`decideMeasurementCadence`) with
+# a DIFFERENT policy value and a DIFFERENT marker (state/last-ci-learning-cadence.json).
+#
+# ⚠ DEFAULT OFF, AND IT IS THE ONLY CADENCE ROW HERE THAT IS. Every sibling earns `enabled: true` by
+# being READ-ONLY — measurementCadence, digestCadence and boardReview each say so in as many words,
+# and boardReview's spells out "does not push, merge, mint or file". THIS RUNG FILES. Its records
+# carry Law 5's `author_class: machine` mark and sit at `verify: human`, so `isDispatchEligible`
+# parks every one and none can act on its own conclusion — but a machine writing records into an
+# operator's plan is an opt-in, not a safe default, and inheriting a sibling's justification that
+# does not apply is exactly how a default gets set without anyone deciding it.
+#
+# 1440 / 1 IS THE OPERATOR'S OWN WORD: "daily". Not copied from digestCadence, which arrives at the
+# same number for a different reason (one digest a day is one message a day).
+ciLearningCadence:
+  enabled:
+    value: false
+    origin: "net-new"   # NOT safe-on: this rung FILES — see the block comment above
+  minIntervalMinutes:
+    value: 1440
+    origin: "net-new"
+    min: 15
+    max: 1440
+  maxPerDay:
+    value: 1
+    origin: "net-new"
+    min: 1
+    max: 24
+
 retro:
   mergesThreshold:
     value: 25

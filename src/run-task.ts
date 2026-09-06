@@ -522,7 +522,11 @@ import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } fro
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import {
   measurementCadenceCheck,
+  ciLearningCadenceCheck,
+  type CiLearningCadencePolicy,
   measurementCadenceMarkerPath,
+  mintCiLearningShards,
+  recordCiLearningCadenceFire,
   recordMeasurementCadenceFire,
   renderVerbCensusDigestLine,
   runMeasurementCadenceReport,
@@ -17454,6 +17458,88 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
     const files = pair.repairFiles?.length ? `  repair=${pair.repairFiles.join(",")}` : "";
     console.log(`  ${pair.state === "repaired" ? "REPAIRED" : "OPEN    "} #${pair.pr} ${pair.gate}  red=${pair.redSha.slice(0, 8)}${green}${files}`);
   }
+  return 0;
+}
+
+/** `rmd ci-learning [--days N] [--force]` — W1-T2959: the daily rung that turns W1-T2957's repaired
+ *  failure pairs into MARKED, PARKED shard drafts.
+ *
+ *  REPORTS THE DRAFTS; DOES NOT WRITE THE PLAN. Every draft carries `author_class: machine` and
+ *  `verify: human`, which `machineAuthorVerifyViolation` refuses at `verify: auto` — a machine may
+ *  propose work into the plan, and only an operator releases it (Law 5). Filing is deliberately a
+ *  separate operator step: the safety argument is that a machine conclusion cannot act on itself,
+ *  and a rung that both concluded and committed would be that argument's only weak point. */
+export function ciLearningCommand(
+  rest: string[],
+  deps: CiFailuresCommandDeps & { root?: string; policy?: CiLearningCadencePolicy } = {},
+): number {
+  const badArg = unknownArgError("ci-learning", rest, ["--days"], ["--force"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const at = rest.indexOf("--days");
+  const days = at >= 0 ? Number(rest[at + 1]) : 1;
+  if (!Number.isFinite(days) || days <= 0) {
+    console.error("rmd ci-learning: --days must be a positive number of days");
+    return 2;
+  }
+
+  let root: string;
+  try {
+    root = deps.root ?? loadConfig().root;
+  } catch {
+    console.error("rmd ci-learning: cannot resolve a root — unreadable config");
+    return 1;
+  }
+
+  // The cadence bound, unless the operator overrides it for this one run.
+  if (!rest.includes("--force")) {
+    let policy: CiLearningCadencePolicy;
+    try {
+      policy = deps.policy ?? loadPolicy(join(root, "plan", "policy.yaml")).values.ciLearningCadence;
+    } catch (e) {
+      // An unreadable policy is not a permissive one: a rung that DRAFTS must never fire because
+      // its own bound could not be read.
+      console.error(`rmd ci-learning: policy unreadable (${(e as Error).message}) — failing closed`);
+      return 1;
+    }
+    const decision = ciLearningCadenceCheck({ root, policy });
+    if (!decision.fire) {
+      console.log(`rmd ci-learning: not firing — ${decision.reason}`);
+      return 0;
+    }
+  }
+
+  let input: CiFailureCorpusInput;
+  try {
+    input = deps.loadWindow ? deps.loadWindow(days) : loadCiFailureWindow(days);
+  } catch (e) {
+    // A window that could not be READ is not a window with no red gate — the naked zero forbidden.
+    console.error(
+      `rmd ci-learning: the pull-request window could not be read (${(e as Error).message}) — ` +
+        "drafting nothing rather than reporting an empty window, which would read as 'nothing to learn'",
+    );
+    return 1;
+  }
+
+  const corpus = collectCiFailureCorpus(input);
+  const result = mintCiLearningShards(corpus, []);
+  console.log(`rmd ci-learning — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
+  console.log(`  status: ${result.status}`);
+  if (result.unreadableShas.length > 0) {
+    // A partial read must never render as a complete one.
+    console.log(`  UNREADABLE rollups (never counted as green): ${result.unreadableShas.length}`);
+  }
+  for (const d of result.drafts) {
+    console.log(`  DRAFT ${d.findingId}  author_class=${d.author_class} verify=${d.verify}`);
+    console.log(`    ${d.title}`);
+    console.log(`    remedy surface: ${d.remedySurface}  repair touched: ${d.repairFiles.join(",") || "(none recorded)"}`);
+  }
+  for (const e of result.excludedFindings) {
+    console.log(`  EXCLUDED by the ceiling (named, not dropped): ${e}`);
+  }
+  if (!rest.includes("--force")) recordCiLearningCadenceFire(root, new Date());
   return 0;
 }
 
@@ -37064,6 +37150,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2957: the one failure corpus that arrives with its own fix. For every pull request touched in the window, reads the gate rollup at each commit as the UNION of check runs and commit STATUSES (never /check-runs alone, which cannot see remudero-review) and pairs each red gate with the LATER commit on the SAME pull request that turned that SAME gate green, retaining the repair delta. A red with no observed repair is kept OPEN, never dropped and never reported repaired; a rollup that could not be read is named UNREADABLE, never counted as green, so an empty window and a blind one are distinguishable. Deduped per sha by latest attempt, so a superseded CANCELLED entry never outvotes its own SUCCESS successor. REPORT-ONLY: files nothing, mints no id, writes no guidance (Law 5).",
   },
   {
+    name: "ci-learning",
+    syntax: "rmd ci-learning [--days N] [--force]",
+    summary: "Draft a marked, parked shard for each repaired CI failure in the window.",
+    detail: "W1-T2959: the daily learning rung over `ci-failures`' corpus. Paces on its OWN policy row (ciLearningCadence, DEFAULT OFF — the only cadence row that is, because this rung drafts records rather than only reading) and its OWN marker (state/last-ci-learning-cadence.json), through the same two-bound decideMeasurementCadence every sibling cadence shares, never a second decision function; --force runs once past the bound without recording a fire. Only a REPAIRED pair is mintable, because the lesson is in the delta and an open failure has no fix yet. Caps one firing at CI_LEARNING_MINT_CEILING drafts as a PRIMARY control, NAMES every finding the ceiling excluded rather than dropping it, and keys idempotency on a deterministic pr+gate id. Every draft carries Law 5's author_class: machine and verify: human, so machineAuthorVerifyViolation refuses it at verify:auto and isDispatchEligible parks it — a machine may propose into the plan, only an operator releases. A remedy names learnings/*.yaml, never CLAUDE.md, because spawnWorker passes settingSources: [] and no dispatched worker reads it. REPORT-ONLY: prints the drafts, writes no plan record and mints no id.",
+  },
+  {
     name: "rule-efficacy",
     syntax: "rmd rule-efficacy [--no-escalate]",
     summary: "Report each rule's post-citation repeat-incident rate over the ledger union.",
@@ -37969,6 +38061,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ciFailuresCommand(rest)) cannot carry a DA hit without forking the process; ciFailuresCommand's own logic — arg validation, the --days bound, the window load and every corpus status render — is unit-tested in test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts (same irreducible-glue shape as the sibling rule-efficacy/check-proof/emissions dispatch cases).
   if (cmd === "ci-failures") {
     process.exit(ciFailuresCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ciLearningCommand(rest)) cannot carry a DA hit without forking the process; ciLearningCommand's own logic — arg validation, the --days bound, the cadence refusal, the window-load failure and every draft/excluded render — is unit-tested in test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts (same irreducible-glue shape as the sibling ci-failures/rule-efficacy/check-proof dispatch cases).
+  if (cmd === "ci-learning") {
+    process.exit(ciLearningCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ruleEfficacyCommand(rest)) cannot carry a DA hit without forking the process; ruleEfficacyCommand's own logic — arg validation, the signature-table walk, the PREVENTING/REPEATING/UNMEASURABLE render, and the escalation write — is unit-tested in test/rule-efficacy.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
   if (cmd === "rule-efficacy") {

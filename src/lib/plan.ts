@@ -72,6 +72,10 @@ export interface ContextClaim {
   src: string;
 }
 
+/** Who CONCLUDED a plan record (Law 5's "author class"), as distinct from `origin:`, which names
+ *  who commissioned it. Absent reads `"operator"`, the pre-field default. */
+export type TaskAuthorClass = "machine" | "operator";
+
 export interface Task {
   id: string;
   title: string;
@@ -107,6 +111,11 @@ export interface Task {
   /** Provenance (Rules 16/17): where this task came from — `architect`, `feedback#…`, `alert#…`,
    *  `issue#…`. Never defaulted — its absence is itself what the §5C linter's provenance check reports. */
   origin?: string;
+  /** W1-T2959 — LAW 5's author-class mark, which `origin:` does NOT satisfy ("origin tags carry
+   *  commission, not intent"): a record commissioned by an operator and CONCLUDED by a machine is
+   *  indistinguishable under `origin:` alone. Absent ⇒ a person's shard, so nothing already in the
+   *  plan changes meaning. `"machine"` is refused at `verify: auto`, parking it for an operator. */
+  author_class?: TaskAuthorClass;
   /** Pre-authored worker instruction (the "what to do"). */
   prompt?: string;
   /** Pre-cited context claims folded into the rendered prompt's CONTEXT block. */

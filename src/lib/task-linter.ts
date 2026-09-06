@@ -59,6 +59,7 @@ export type LintCheck =
   | "post-merge-criterion-removed"
   | "post-merge-proof-changed"
   | "post-merge-correction-without-prompt"
+  | "machine-author-verify"
   | "blocked-task-disposition"
   | "blocked-record-unruled"
   | "provenance"
@@ -1610,6 +1611,31 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
   };
 }
 
+/**
+ * W1-T2959 — LAW 5's arm: a MACHINE-CONCLUDED shard may not sit at `verify: auto`. THE PROHIBITION
+ * IS ON AN UNMARKED RECORD, NOT ON FILING — a marked record that cannot dispatch itself can neither
+ * present itself as ratified nor act on its own conclusion.
+ *
+ * SAME TRIGGER SHAPE AS {@link rulingVerifyViolation}, for its stated reason: `isDispatchEligible`
+ * refuses `verify !== "auto"`, so refusing at auto PARKS the shard until the operator looks.
+ *
+ * ABSENT `author_class` PASSES, load-bearing rather than lenient: every record predating this field
+ * is a person's, so a blanket refusal would block the plan and make this green meaningless.
+ * Falsifier: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts.
+ */
+export function machineAuthorVerifyViolation(task: Task): LintViolation | undefined {
+  if (task.author_class !== "machine") return undefined;
+  if (task.verify === "human") return undefined;
+  return {
+    check: "machine-author-verify",
+    severity: "block",
+    message:
+      `task ${task.id} is marked author_class: machine at verify:${task.verify} — ` +
+      "a machine-concluded shard must be verify: human so isDispatchEligible parks it for an " +
+      "operator. A machine may propose work into the plan; only a person releases it (Law 5).",
+  };
+}
+
 // ── DECLARED SCOPE (W1-T504 — an undeclared files: lints clean and then serializes the fleet) ─
 // An undeclared `files:` lints clean and then serialises the lane: `overlappingPaths` is
 // fail-closed on it, and `undeclaredScopeLast` only demotes such a task to the end of its priority
@@ -2338,6 +2364,8 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   if (prov) violations.push(prov);
   const ruling = rulingVerifyViolation(task);
   if (ruling) violations.push(ruling);
+  const machineAuthor = machineAuthorVerifyViolation(task);
+  if (machineAuthor) violations.push(machineAuthor);
   const rule15 = rule15FilingViolation(task);
   if (rule15) violations.push(rule15);
   const declaredScope = declaredScopeViolation(task);

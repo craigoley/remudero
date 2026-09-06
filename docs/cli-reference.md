@@ -30,6 +30,7 @@ usage:
   rmd reap-branches   # Dry-run classification of every remote branch as deletable, guarded or held.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
+  rmd ci-learning [--days N] [--force]   # Draft a marked, parked shard for each repaired CI failure in the window.
   rmd rule-efficacy [--no-escalate]   # Report each rule's post-citation repeat-incident rate over the ledger union.
   rmd coverage-improve [--lcov <path>]   # File one feedback entry ranking src/ files by uncovered branches (85-90% band).
   rmd verdict-calibration   # Join armed-merge review verdicts to post-merge revert/follow-up-fix rates.
@@ -244,6 +245,16 @@ rmd ci-failures [--days N]
 ```
 
 W1-T2957: the one failure corpus that arrives with its own fix. For every pull request touched in the window, reads the gate rollup at each commit as the UNION of check runs and commit STATUSES (never /check-runs alone, which cannot see remudero-review) and pairs each red gate with the LATER commit on the SAME pull request that turned that SAME gate green, retaining the repair delta. A red with no observed repair is kept OPEN, never dropped and never reported repaired; a rollup that could not be read is named UNREADABLE, never counted as green, so an empty window and a blind one are distinguishable. Deduped per sha by latest attempt, so a superseded CANCELLED entry never outvotes its own SUCCESS successor. REPORT-ONLY: files nothing, mints no id, writes no guidance (Law 5).
+
+### `rmd ci-learning`
+
+Draft a marked, parked shard for each repaired CI failure in the window.
+
+```
+rmd ci-learning [--days N] [--force]
+```
+
+W1-T2959: the daily learning rung over `ci-failures`' corpus. Paces on its OWN policy row (ciLearningCadence, DEFAULT OFF — the only cadence row that is, because this rung drafts records rather than only reading) and its OWN marker (state/last-ci-learning-cadence.json), through the same two-bound decideMeasurementCadence every sibling cadence shares, never a second decision function; --force runs once past the bound without recording a fire. Only a REPAIRED pair is mintable, because the lesson is in the delta and an open failure has no fix yet. Caps one firing at CI_LEARNING_MINT_CEILING drafts as a PRIMARY control, NAMES every finding the ceiling excluded rather than dropping it, and keys idempotency on a deterministic pr+gate id. Every draft carries Law 5's author_class: machine and verify: human, so machineAuthorVerifyViolation refuses it at verify:auto and isDispatchEligible parks it — a machine may propose into the plan, only an operator releases. A remedy names learnings/*.yaml, never CLAUDE.md, because spawnWorker passes settingSources: [] and no dispatched worker reads it. REPORT-ONLY: prints the drafts, writes no plan record and mints no id.
 
 ### `rmd rule-efficacy`
 
