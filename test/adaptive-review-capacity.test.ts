@@ -55,6 +55,7 @@ function healthy(nowMs: number, over: Partial<ReviewCapacityObservation> = {}): 
     activeWorkers: 0,
     memAvailableMib: 4096,
     cpuPsiSomeAvg10Pct: 1,
+    cpuPsiFullAvg10Pct: 0,
     memoryPsiSomeAvg10Pct: 1,
     provider: { fresh: true, readable: true, headroomPct: 80, reservePct: 5, ageMs: 1000 },
     settlements: { successes: 2, failures: 0, timeouts: 0 },
@@ -89,6 +90,7 @@ test("the captured Azure pressure sample sheds an earned lane instead of expandi
     activeWorkers: 2,
     memAvailableMib: 4268.28125,
     cpuPsiSomeAvg10Pct: 10.99,
+    cpuPsiFullAvg10Pct: 0,
     memoryPsiSomeAvg10Pct: 31.40,
   }));
   assert.equal(result.decision.effectiveWidth, 2);
@@ -97,7 +99,7 @@ test("the captured Azure pressure sample sheds an earned lane instead of expandi
 
 test("direct pressure signals shed subsequent admissions without changing in-flight occupancy", () => {
   const pressured: Array<[string, Partial<ReviewCapacityObservation>, string]> = [
-    ["cpu", { cpuPsiSomeAvg10Pct: 25 }, "cpu-pressure"],
+    ["cpu", { cpuPsiFullAvg10Pct: 25 }, "cpu-pressure"],
     ["memory reserve", { memAvailableMib: 1000 }, "memory-reserve"],
     ["provider refusal", { provider: { fresh: true, readable: false, refused: true, ageMs: 10 } }, "provider-refused"],
     ["review failures", { settlements: { successes: 0, failures: 2, timeouts: 0 } }, "review-unhealthy"],
@@ -123,6 +125,7 @@ test("direct pressure signals shed subsequent admissions without changing in-fli
 test("missing/stale optional telemetry never authorises above base and does not collapse base", () => {
   const unavailable = healthy(0, {
     cpuPsiSomeAvg10Pct: undefined,
+    cpuPsiFullAvg10Pct: undefined,
     memoryPsiSomeAvg10Pct: undefined,
     provider: { fresh: false, readable: false, ageMs: 120_000 },
     settlements: { successes: 0, failures: 0, timeouts: 0 },
@@ -156,7 +159,7 @@ test("host-worker budget and provider reserve plus allowance are scale-up prereq
 test("backlog, low-water pressure and settlement history independently refuse expansion", () => {
   const cases: Array<[string, Partial<ReviewCapacityObservation>, string]> = [
     ["queue already fits", { queueDepth: 2 }, "backlog-not-sustained"],
-    ["cpu above low water", { cpuPsiSomeAvg10Pct: 6 }, "backlog-not-sustained"],
+    ["cpu above low water", { cpuPsiFullAvg10Pct: 6 }, "backlog-not-sustained"],
     ["memory above low water", { memoryPsiSomeAvg10Pct: 6 }, "backlog-not-sustained"],
     ["provider reserve", {
       provider: { fresh: true, readable: true, headroomPct: 6, reservePct: 5, ageMs: 100 },
@@ -220,13 +223,17 @@ test("review-capacity policy rows are finite, bounded data", () => {
 test("host PSI/memory readers preserve measured values and make failures explicit as absence", () => {
   const measured = readReviewHostObservation((target) => {
     if (target === "/proc/meminfo") return "MemTotal: 8000000 kB\nMemAvailable: 4370720 kB\n";
-    if (target === "/sys/fs/cgroup/cpu.pressure") return "some avg10=10.99 avg60=1.00 avg300=1.00 total=10\n";
+    // W1-T2985 — a REAL cgroup cpu.pressure file carries BOTH lines, and the shed now decides on
+    // `full`. This fixture carried only `some`, which would leave the new reading absent.
+    if (target === "/sys/fs/cgroup/cpu.pressure")
+      return "some avg10=10.99 avg60=1.00 avg300=1.00 total=10\nfull avg10=0.42 avg60=0.10 avg300=0.05 total=4\n";
     if (target === "/sys/fs/cgroup/memory.pressure") return "some avg10=31.40 avg60=2.00 avg300=2.00 total=20\n";
     throw new Error(`unexpected ${target}`);
   });
   assert.deepEqual(measured, {
     memAvailableMib: 4370720 / 1024,
     cpuPsiSomeAvg10Pct: 10.99,
+    cpuPsiFullAvg10Pct: 0.42,
     memoryPsiSomeAvg10Pct: 31.40,
   });
 

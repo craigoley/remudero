@@ -2690,7 +2690,20 @@ export async function runDaemon(
     // mid-batch re-posts within one poll interval instead of sitting invisible until every lane returns
     // (W1-T254). Cleared once every lane settles, on every exit path, and never aborted mid-call. It also
     // emits this dispatch's liveness rows — see {@link startInFlightTicker}.
-    if (await stopInterphaseReviewClock()) continue;
+        // W1-T2984 — STOP THE CLOCK, BUT NEVER THROW AWAY AN ADMITTED BATCH. This read
+        // `if (await stopInterphaseReviewClock()) continue;`, so a GitHub event wake consumed
+        // anywhere in this tick discarded work ALREADY selected and already logged
+        // `daemon.iteration` — before `runOne` was ever called. MEASURED 2026-09-06: two
+        // consecutive ticks logged `dispatch.concurrent_set [W1-T2655, W1-T2673]` and
+        // `daemon.iteration` for both, then `cost: notional $0.0000`, no `run.start`, and no
+        // worktree for either task. `github.wake.accepted` fired 77 times in five minutes, so a
+        // wake lands in essentially every tick and dispatch starves while looking healthy.
+        // Same shape as W1-T2960's freshness re-check and W1-T2981's retro rung: an interrupt
+        // evaluated AFTER selection, discarding the selection. The clock is still stopped — the
+        // ticker below must own it — but the batch is dispatched and the wake is honoured at the
+        // NEXT tick boundary. Every worker is cut a fresh worktree from origin/main HEAD anyway.
+        const interphaseWakeSeen = await stopInterphaseReviewClock();
+        if (interphaseWakeSeen) log("daemon.dispatch.wake_deferred", { tasks: admitted.map((t) => t.id) });
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
 
     // Concurrent dispatch, mirroring `runDrainLanes`: settle-all, never fail-fast, so a sibling lane's rejection can
