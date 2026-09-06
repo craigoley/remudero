@@ -368,6 +368,12 @@
       "grepHint": "measurement-cadence.ts forensics"
     },
     {
+      "path": "docs/forensics/mkdtemp-callsite-check.md",
+      "title": "mkdtemp-callsite-check.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and citations that were removed from",
+      "grepHint": "mkdtemp-callsite-check.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/mount-headroom-sweep.md",
       "title": "mount-headroom-sweep.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
