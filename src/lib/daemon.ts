@@ -2455,29 +2455,44 @@ export async function runDaemon(
             reason: "an open triage PR already carries this feedback id's provenance",
           });
         } else {
-          log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
           if (deps.runAutoTriage) {
             const fired = decision;
-            if (await stopInterphaseReviewClock()) continue;
-            try {
-              // The same wrapper, reused verbatim. Triage holds for minutes after opening its PR and this loop is
-              // single-threaded, so an unwrapped await would black out every reconciliation for that duration.
-              await sweepLightDuringRetro(
-                deps,
-                pollIntervalMs,
-                log,
-                () => deps.runAutoTriage!(fired.feedbackId),
-                diskHeadroomLatch,
-                sweepRetrigger,
+            // W1-T2986 — DETACHED, exactly as W1-T2981 detached the retro beside it. This rung sits
+            // between the dispatch-set computation and the idle branch and used to `await` an
+            // unbounded run wrapped in a light-sweep ticker, so a fired triage held the whole tick
+            // and dispatch was never reached — the shape that took the fleet down for two days, with
+            // the ticker keeping every liveness signal green throughout. MEASURED across the ledger
+            // union: 185 `auto_triage.fired` against 1241 `auto_triage.skipped`, so roughly one tick
+            // in eight would have stalled on it once the retro stopped doing so first.
+            //
+            // Triage gates nothing: it spends, which is why it stays below the headroom rung, but no
+            // rung downstream reads its result. It goes on the same registry the sweep's fix
+            // dispatches and the retro use, which `stopForFreshness` drains, so a restart still lets
+            // a running triage finish. A second concurrent triage is refused and the refusal named.
+            if (detachedActionInFlight("auto-triage")) {
+              log("auto_triage.already_detached", { feedback: fired.feedbackId, reason: fired.reason });
+            } else {
+              log("auto_triage.fired", { feedback: fired.feedbackId, reason: fired.reason });
+              detachSweepAction(
+                sweepLightDuringRetro(
+                  deps,
+                  pollIntervalMs,
+                  log,
+                  () => deps.runAutoTriage!(fired.feedbackId),
+                  diskHeadroomLatch,
+                  sweepRetrigger,
+                ).catch((e) => {
+                  log("auto_triage.run_failed", {
+                    feedback: fired.feedbackId,
+                    error: String((e as Error)?.message ?? e),
+                  });
+                }),
+                { actionKind: "auto-triage", taskId: "DAEMON" },
               );
-            } catch (e) {
-              log("auto_triage.run_failed", {
-                feedback: fired.feedbackId,
-                error: String((e as Error)?.message ?? e),
-              });
-            } finally {
-              restartInterphaseReviewClock();
+              log("auto_triage.detached", { feedback: fired.feedbackId });
             }
+          } else {
+            log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
           }
         }
       } else if (decision) {
