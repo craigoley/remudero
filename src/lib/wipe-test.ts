@@ -1,3 +1,6 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   candidateShardFiles,
   loadLayeredLearningsForTaskFiles,
@@ -5,6 +8,8 @@ import {
   selectLearnings,
 } from "./learnings.js";
 import { appendLedger } from "./ledger.js";
+import { readLedgerLines } from "./status.js";
+import type { Config } from "./config.js";
 import type { LayeredLearningsHomes, LearningsIndex } from "./learnings.js";
 import type { RunResult } from "./run-result.js";
 import type { ProofExecOutcome } from "./review.js";
@@ -179,6 +184,11 @@ export function computeWipeTestDelta(pair: WipeTestPair): WipeTestDelta {
 /** The ledger `step` a pair's deltas are recorded under, so {@link aggregateWipeTestPairs}
  *  can be recomputed from the ledger, not only from pairs held in memory. */
 export const WIPE_TEST_PAIR_STEP = "wipetest.pair";
+
+/** Minimum same-factor pair count before a production report may call the aggregate signal.
+ *  Below this floor, the report refuses and names the pair count instead of printing an
+ *  anecdotal rate. */
+export const WIPE_TEST_PAIRING_FLOOR = 2;
 
 /** Did this arm do any measurable work? Zero turns and zero cost means no worker ran,
  *  whatever the verdict names as the cause. Why: docs/forensics/wipe-test.md#armdidnowork. */
@@ -522,4 +532,152 @@ export function deriveWipeTestRunResult(
     strikes,
     proofExec,
   };
+}
+
+export interface WipeTestPairSubject {
+  id: string;
+  files?: readonly string[];
+  selectedShards?: readonly string[];
+}
+
+export interface WipeTestRunTaskOptions {
+  planPath?: string;
+  config?: Config;
+  skipGitSync?: boolean;
+  maskLearnings?: boolean;
+  maskRecon?: boolean;
+  noMerge?: boolean;
+}
+
+export type WipeTestRunTask = (taskId: string, opts: WipeTestRunTaskOptions) => Promise<RunResult>;
+
+export interface WipeTestPairRunDeps {
+  config: Config;
+  repoRoot: string;
+  owner: string;
+  selfRepo: string;
+  targetArgs?: string[];
+  runTaskFn: WipeTestRunTask;
+  execFileSyncFn?: typeof execFileSync;
+  ledgerPath?: string;
+  runId?: string;
+  pairIndex?: number;
+  resolveMergedState: (taskId: string, planPath: string, config: Config) => WipeTestMergedState;
+  now?: () => Date;
+}
+
+export type WipeTestPairRunResult =
+  | {
+      status: "measured";
+      target: WipeTestTarget;
+      planPath: string;
+      runId: string;
+      pair: WipeTestPair;
+      delta: WipeTestDelta;
+    }
+  | {
+      status: "refused";
+      reason: string;
+      target?: WipeTestTarget;
+      planPath?: string;
+      runId?: string;
+    };
+
+function ledgerPathForRoot(root: string): string {
+  return join(root, "state", "ledger.ndjson");
+}
+
+function renderGeneratedSubjectTask(subject: WipeTestPairSubject, repo: string): string {
+  const files = JSON.stringify([...(subject.files ?? [])]);
+  return [
+    `- id: ${JSON.stringify(subject.id)}`,
+    `  title: ${JSON.stringify(`wipe-test sandbox subject ${subject.id}`)}`,
+    `  repo: ${JSON.stringify(repo)}`,
+    "  depends_on: []",
+    "  type: implement",
+    "  verify: auto",
+    "  risk: low",
+    "  files: " + files,
+    "  note: |",
+    "    Synthetic wipe-test cadence subject, generated from the learnings index.",
+  ].join("\n") + "\n";
+}
+
+function materializeGeneratedSubject(planPath: string, subject: WipeTestPairSubject, repo: string): void {
+  if (!subject.files) return;
+  const shardDir = join(dirname(planPath), "tasks.d");
+  mkdirSync(shardDir, { recursive: true });
+  writeFileSync(join(shardDir, `${subject.id}.yaml`), renderGeneratedSubjectTask(subject, repo), "utf8");
+}
+
+/** Run one wipe-test pair. This is the shared core behind the operator CLI verb and the cadence
+ *  rung: both paths resolve the target, prepare the sandbox checkout, preflight the subject, run
+ *  the two isolated arms, and ledger through {@link ledgerWipeTestPair}. */
+export async function runWipeTestPair(
+  subject: WipeTestPairSubject,
+  factor: WipeTestFactor,
+  deps: WipeTestPairRunDeps,
+): Promise<WipeTestPairRunResult> {
+  const targetArgs = deps.targetArgs ?? [];
+  const resolved = resolveWipeTestTarget(targetArgs);
+  if ("error" in resolved) return { status: "refused", reason: resolved.error };
+  const { repo } = resolved.target;
+
+  const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
+  const ledgerPath = deps.ledgerPath ?? ledgerPathForRoot(deps.config.root);
+  const isSelf = repo === deps.selfRepo;
+  const reposDir = join(deps.config.root, "repos");
+  const planPath = isSelf ? join(deps.repoRoot, "plan", "tasks.yaml") : join(reposDir, repo, "plan", "tasks.yaml");
+
+  if (!isSelf) {
+    const repoDir = join(reposDir, repo);
+    if (!existsSync(repoDir)) {
+      mkdirSync(dirname(repoDir), { recursive: true });
+      execFileSyncFn("gh", ["repo", "clone", `${deps.owner}/${repo}`, repoDir], { stdio: "inherit" });
+    } else {
+      execFileSyncFn("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
+      execFileSyncFn("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
+    }
+  }
+  materializeGeneratedSubject(planPath, subject, repo);
+
+  const preflight = resolveWipeTestPreflight(subject.id, deps.resolveMergedState(subject.id, planPath, deps.config));
+  if ("error" in preflight) {
+    return { status: "refused", reason: preflight.error, target: resolved.target, planPath };
+  }
+
+  // ledger-read-intent: live — arm ordering matches the original CLI path, which deliberately
+  // counts only already-written live pair rows before dispatching either arm.
+  const priorLedgerLines = readLedgerLines(ledgerPath);
+  const pairIndex =
+    deps.pairIndex ??
+    priorLedgerLines.filter((l) => l.task_id === subject.id && l.step === WIPE_TEST_PAIR_STEP).length;
+  const dispatchOrder = resolveWipeTestArmOrder(pairIndex);
+  const runId = deps.runId ?? `WIPETEST-${deps.now?.().getTime() ?? Date.now()}`;
+
+  const rawResults: Partial<Record<WipeTestArm, RunResult>> = {};
+  for (const arm of dispatchOrder) {
+    const label = `${factor}${arm === "A" ? " ON" : " MASKED"}`;
+    console.log(`### rmd wipe-test — ${subject.id} on ${deps.owner}/${repo}: arm ${arm} (${label})`);
+    rawResults[arm] = await deps.runTaskFn(subject.id, {
+      planPath,
+      config: deps.config,
+      skipGitSync: true,
+      ...(wipeTestFactorMasksLearnings(factor, arm) ? { maskLearnings: true } : {}),
+      ...(wipeTestFactorMasksRecon(factor, arm) ? { maskRecon: true } : {}),
+      noMerge: true,
+    });
+  }
+
+  // ledger-read-intent: live — derive arm metrics from the same live ledger rows the original
+  // CLI path read immediately after both arms completed.
+  const ledgerLines = readLedgerLines(ledgerPath);
+  const pair: WipeTestPair = {
+    taskId: subject.id,
+    factor,
+    armA: deriveWipeTestRunResult(rawResults.A!, ledgerLines),
+    armB: deriveWipeTestRunResult(rawResults.B!, ledgerLines),
+  };
+  const delta = ledgerWipeTestPair(ledgerPath, runId, pair);
+  return { status: "measured", target: resolved.target, planPath, runId, pair, delta };
 }

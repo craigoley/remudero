@@ -652,21 +652,12 @@ import { loadOperatorNotesForTask, renderOperatorNotes } from "./lib/operator-no
 import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
 import {
   computeMatchedLearningsForArm,
-  deriveWipeTestRunResult,
-  ledgerWipeTestPair,
-  resolveWipeTestArmOrder,
   resolveWipeTestArmPermission,
   resolveWipeTestFactor,
-  resolveWipeTestPreflight,
   resolveWipeTestTarget,
-  wipeTestFactorMasksLearnings,
-  wipeTestFactorMasksRecon,
-  WIPE_TEST_PAIR_STEP,
+  runWipeTestPair,
   WIPE_TEST_SANDBOX_DEFAULT,
-  type WipeTestArm,
-  type WipeTestFactor,
   type WipeTestMergedState,
-  type WipeTestPair,
 } from "./lib/wipe-test.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
@@ -32557,13 +32548,6 @@ export async function wipeTestCommand(
     return 2;
   }
 
-  const resolved = resolveWipeTestTarget(rest.slice(1));
-  if ("error" in resolved) {
-    console.error(resolved.error + "\n" + USAGE);
-    return 2;
-  }
-  const { repo } = resolved.target;
-
   // W1-T2512: WHICH FACTOR this pair varies — resolved the SAME way as `--repo` right above
   // (a pure, validated flag lookup), refused loud on an unrecognized value rather than
   // silently falling back to the default. Omitted defaults to "learnings" — see
@@ -32576,89 +32560,38 @@ export async function wipeTestCommand(
   }
   const { factor } = resolvedFactor;
 
-  const config = deps.config ?? loadConfig();
-  const runTaskFn = deps.runTaskFn ?? runTask;
-  const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
-  const ledgerPath = ledgerPathFor(config);
-  const self = resolveOwnerRepo();
-  const isSelf = repo === self.repo;
-  const reposDir = join(config.root, "repos");
-  const planPath = isSelf ? join(repoRoot, "plan", "tasks.yaml") : join(reposDir, repo, "plan", "tasks.yaml");
-
-  // Same clone-if-absent / fetch+reset-if-present pattern `rmd daemon`'s non-self
-  // target uses (daemonCommand, above) — a wipe-test target needs an up-to-date
-  // checkout to dispatch against exactly the way the daemon does.
-  if (!isSelf) {
-    const repoDir = join(reposDir, repo);
-    if (!existsSync(repoDir)) {
-      mkdirSync(dirname(repoDir), { recursive: true });
-      execFileSyncFn("gh", ["repo", "clone", `${self.owner}/${repo}`, repoDir], { stdio: "inherit" });
-    } else {
-      execFileSyncFn("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
-      execFileSyncFn("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
-    }
-  }
-
-  // ── PRE-FLIGHT (W1-T1252 design note (i)): refuse a subject `runTask`'s own W1-T319
-  // already-merged guard would refuse, BEFORE either arm is dispatched — against the
-  // JUST-SYNCED plan above, so "merged" here means exactly what it means there, never a
-  // re-invented definition. `resolveMergedState`'s default (`selectTask`) throws on an
-  // unknown task id before ever touching GitHub, same as runTaskFn's own pre-network
-  // ordering (proved by the "deps omitted" test below).
-  const resolveMergedState = deps.resolveMergedState ?? ((tid, pp, cfg) => defaultWipeTestMergedState(tid, pp, cfg, self.owner));
-  const preflight = resolveWipeTestPreflight(taskId, resolveMergedState(taskId, planPath, config));
-  if ("error" in preflight) {
-    console.error(preflight.error);
+  const resolvedTarget = resolveWipeTestTarget(rest.slice(1));
+  if ("error" in resolvedTarget) {
+    console.error(resolvedTarget.error + "\n" + USAGE);
     return 2;
   }
 
-  const runId = `WIPETEST-${Date.now()}`;
+  const config = deps.config ?? loadConfig();
+  const runTaskFn = deps.runTaskFn ?? runTask;
+  const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
+  const self = resolveOwnerRepo();
+  const resolveMergedState = deps.resolveMergedState ?? ((tid, pp, cfg) => defaultWipeTestMergedState(tid, pp, cfg, self.owner));
 
-  // W1-T1256 (design note (vii)): ARM ORDER ALTERNATION. `pairIndex` — the count of pairs
-  // already ledgered for this task — decides DISPATCH order via `resolveWipeTestArmOrder`, so
-  // arm A (learnings ON) is not always the arm that runs first. This is a GUARD, not the fix
-  // (the no-merge boundary below is): it converts any RESIDUAL leak the boundary misses from a
-  // fixed, one-directional bias into scatter. Read BEFORE either arm dispatches — the read
-  // AFTER (below) additionally carries whatever these two arms themselves write.
-  const priorLedgerLines = readLedgerLines(ledgerPath);
-  const pairIndex = priorLedgerLines.filter((l) => l.task_id === taskId && l.step === WIPE_TEST_PAIR_STEP).length;
-  const dispatchOrder = resolveWipeTestArmOrder(pairIndex);
-
-  // W1-T1256 (design note (iv)/(ix)): THE NO-MERGE BOUNDARY. `noMerge: true` on BOTH arms —
-  // neither may arm or merge its own PR, so a successful arm A can never move `origin/main`
-  // and flip arm B's already-merged read out from under it (the remote channel no local
-  // reset/reclone can reach). The pair is measured at the verdict, before either arm's PR
-  // could ever merge.
-  const rawResults: Partial<Record<WipeTestArm, RunResult>> = {};
-  for (const arm of dispatchOrder) {
-    const label = `${factor}${arm === "A" ? " ON" : " MASKED"}`;
-    console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm ${arm} (${label})`);
-    rawResults[arm] = await runTaskFn(taskId, {
-      planPath,
-      config,
-      skipGitSync: true,
-      // W1-T2512: generalises the old hard-coded `arm === "B" ? { maskLearnings: true } : {}`
-      // into two independent per-factor checks — {@link wipeTestFactorMasksLearnings}/
-      // {@link wipeTestFactorMasksRecon} are each true for exactly one (factor, arm) pair, so
-      // for `factor: "learnings"` this spreads BYTE-IDENTICALLY to before (maskRecon's spread
-      // is always empty; maskLearnings is omitted, not `false`, on arm A).
-      ...(wipeTestFactorMasksLearnings(factor, arm) ? { maskLearnings: true } : {}),
-      ...(wipeTestFactorMasksRecon(factor, arm) ? { maskRecon: true } : {}),
-      noMerge: true,
-    });
-  }
-  const rawArmA = rawResults.A!;
-  const rawArmB = rawResults.B!;
-
-  const ledgerLines = readLedgerLines(ledgerPath);
-  const pair: WipeTestPair = {
-    taskId,
+  const result = await runWipeTestPair(
+    { id: taskId },
     factor,
-    armA: deriveWipeTestRunResult(rawArmA, ledgerLines),
-    armB: deriveWipeTestRunResult(rawArmB, ledgerLines),
-  };
-  const delta = ledgerWipeTestPair(ledgerPath, runId, pair);
-  console.log("\n" + JSON.stringify({ pair, delta }, null, 2));
+    {
+      config,
+      repoRoot,
+      owner: self.owner,
+      selfRepo: self.repo,
+      targetArgs: rest.slice(1),
+      runTaskFn,
+      execFileSyncFn,
+      ledgerPath: ledgerPathFor(config),
+      resolveMergedState,
+    },
+  );
+  if (result.status === "refused") {
+    console.error(result.reason + (result.target ? "" : "\n" + USAGE));
+    return 2;
+  }
+  console.log("\n" + JSON.stringify({ pair: result.pair, delta: result.delta }, null, 2));
   return 0;
 }
 
