@@ -139,6 +139,18 @@ export interface PolicyValues {
     minIntervalMinutes: number;
     maxPerDay: number;
   };
+  /** W1-T2959's daily CI-failure learning rung — its own row, separate from every cadence above so
+   *  none drags another. DEFAULTS OFF, and it is the ONLY cadence row here that does: every sibling
+   *  justifies its safe-on default by being READ-ONLY ("does not push, merge, mint or file"), and
+   *  this rung FILES machine-authored plan records. Those records are marked and park at
+   *  `verify: human`, so they can never dispatch themselves — but they are still records appearing
+   *  in an operator's plan, which is an opt-in and not a default.
+   *  Why: docs/forensics/policy.md#cilearningcadence. */
+  ciLearningCadence: {
+    enabled: boolean;
+    minIntervalMinutes: number;
+    maxPerDay: number;
+  };
   headroom: {
     curve: PolicyHeadroomRung[];
     reservePct: number;
@@ -247,6 +259,9 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "boardReview.enabled": "net-new",
   "boardReview.minIntervalMinutes": "net-new",
   "boardReview.maxPerDay": "net-new",
+  "ciLearningCadence.enabled": "net-new",
+  "ciLearningCadence.minIntervalMinutes": "net-new",
+  "ciLearningCadence.maxPerDay": "net-new",
   "retro.mergesThreshold": "lifted",
   "retro.daysThreshold": "lifted",
   "headroom.curve": "lifted",
@@ -557,6 +572,17 @@ export function validatePolicy(raw: unknown): Policy {
         maxPerDay: numberField("boardReview.maxPerDay", boardReviewRaw.maxPerDay, origin),
       }
     : { enabled: true, minIntervalMinutes: 120, maxPerDay: 6 };
+  // W1-T2959's CI-learning row — same optional, absent-means-default shape as the three cadences
+  // above, with ONE difference that is the whole point: the absent default is DISABLED, because
+  // this rung files records rather than only reading. See PolicyValues.ciLearningCadence.
+  const ciLearningRaw = raw.ciLearningCadence as Record<string, unknown> | undefined;
+  const ciLearningCadence = ciLearningRaw
+    ? {
+        enabled: booleanField("ciLearningCadence.enabled", ciLearningRaw.enabled, origin),
+        minIntervalMinutes: numberField("ciLearningCadence.minIntervalMinutes", ciLearningRaw.minIntervalMinutes, origin, bounds),
+        maxPerDay: numberField("ciLearningCadence.maxPerDay", ciLearningRaw.maxPerDay, origin),
+      }
+    : { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 };
   const retroMergesThreshold = numberField("retro.mergesThreshold", retroRaw.mergesThreshold, origin);
   const retroDaysThreshold = numberField("retro.daysThreshold", retroRaw.daysThreshold, origin);
 
@@ -627,6 +653,7 @@ export function validatePolicy(raw: unknown): Policy {
       measurementCadence,
       digestCadence,
       boardReview,
+      ciLearningCadence,
       headroom: { curve, reservePct, enabled: headroomEnabled },
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },

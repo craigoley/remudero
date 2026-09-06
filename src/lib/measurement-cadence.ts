@@ -15,6 +15,7 @@ import {
 import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { proofQueueAudit, type ProofQueueAuditOffender, type ProofQueueAuditOpts, type ProofQueueAuditReport } from "./proof-queue-audit.js";
 import { attributeVerbs, deriveCliVerbs, deriveStepPrefixes, EMISSIONS_ALLOWLIST } from "./emissions.js";
+import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
 import type { Task } from "./plan.js";
 
 /**
@@ -1253,4 +1254,145 @@ export function latestMeasurementRows(
   }
   rows.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
   return { status: "ok", rows: rows.slice(0, Math.max(0, n)) };
+}
+
+// ── W1-T2959: the daily CI-failure learning rung — its own policy row, its own marker, the SHARED
+// decision function, and a bounded minter whose every draft carries Law 5's author-class mark.
+// Why: docs/forensics/measurement-cadence.md
+
+/** This rung's policy shape — the same subset `DigestCadencePolicy` takes, and for the same reason:
+ *  the rung reads a corpus and drafts, so it never needs `escalate`. */
+export interface CiLearningCadencePolicy {
+  enabled: boolean;
+  minIntervalMinutes: number;
+  maxPerDay: number;
+}
+
+/** This rung's OWN fire marker. Distinct from `measurementCadenceMarkerPath` and
+ *  `digestCadenceMarkerPath` for the reason `digestCadenceCheck`'s own comment states: a short
+ *  interval on one rung must never throttle another. */
+export function ciLearningCadenceMarkerPath(root: string): string {
+  return join(root, "state", "last-ci-learning-cadence.json");
+}
+
+/** The decision, reusing {@link decideMeasurementCadence} rather than a second decision function —
+ *  so the disabled / corrupt-marker / interval / daily-cap arms stay one implementation. */
+export function ciLearningCadenceCheck(opts: {
+  root: string;
+  policy: CiLearningCadencePolicy;
+  now?: Date;
+}): MeasurementCadenceDecision {
+  const marker = readMeasurementCadenceMarker(ciLearningCadenceMarkerPath(opts.root));
+  return decideMeasurementCadence({
+    policy: { ...opts.policy, escalate: false },
+    marker,
+    now: opts.now ?? new Date(),
+  });
+}
+
+/** Record a fire, reusing {@link recordMeasurementCadenceFire}'s rolling-24h window. */
+export function recordCiLearningCadenceFire(root: string, at: Date): void {
+  const path = ciLearningCadenceMarkerPath(root);
+  mkdirSync(dirname(path), { recursive: true });
+  recordMeasurementCadenceFire(path, at, 24 * 60 * 60 * 1000);
+}
+
+/** A PRIMARY control, never a backstop — the same standing {@link ADOPTION_MINT_CEILING} holds, and
+ *  the same number, so one fire can never flood the plan with machine-authored records. */
+export const CI_LEARNING_MINT_CEILING = ADOPTION_MINT_CEILING;
+
+/** The primary key: the PR the failure happened on plus the gate that went red, never a similarity
+ *  score. Deterministic, so a rerun over an unchanged corpus recognises what it already filed —
+ *  the discipline {@link adoptionProposalId} already holds. */
+export function ciLearningShardId(finding: Pick<CiFailurePair, "pr" | "gate">): string {
+  return `ci-learning:${finding.pr}:${finding.gate}`;
+}
+
+/** THE SURFACE A REMEDY MUST NAME. `spawnWorker` passes `settingSources: []` (src/lib/worker.ts),
+ *  the SDK's isolation mode, so a DISPATCHED WORKER NEVER READS CLAUDE.md — measured, not assumed.
+ *  Workers are reached by matched `learnings/*.yaml` entries injected into `renderImplementPrompt`,
+ *  so a draft whose remedy named CLAUDE.md would improve interactive sessions and change nothing
+ *  about the fleet's own pull requests: the loop would look like it worked and fix nothing. */
+export const CI_LEARNING_REMEDY_SURFACE = "learnings/*.yaml";
+
+/** One drafted shard, MARKED and PARKED. Not a `Task`: this rung mints no plan id — assigning one
+ *  is the caller's, through the reservation path — so a draft carries the finding's own
+ *  deterministic key instead and cannot be mistaken for a filed record. */
+export interface CiLearningShardDraft {
+  /** {@link ciLearningShardId} — the idempotency key, not a plan id. */
+  findingId: string;
+  title: string;
+  gate: string;
+  pr: number;
+  /** The files the repair actually touched: the lesson is in the delta, not the red. */
+  repairFiles: string[];
+  /** LAW 5: the author class rides the record. */
+  author_class: "machine";
+  /** So `isDispatchEligible` refuses it and it PARKS for an operator. */
+  verify: "human";
+  /** {@link CI_LEARNING_REMEDY_SURFACE}. */
+  remedySurface: string;
+}
+
+/** One firing's outcome. */
+export interface CiLearningMintResult {
+  /** `"unreadable"`: at least one rollup in the window was never seen, so absence proves nothing —
+   *  reported even when pairs WERE found, because a partial read must never read as complete.
+   *  `"clear"`: the window was seen and yielded nothing new. `"backlog"`: at least one draft.
+   *  A measured absence, never a bare zero (P48's no-naked-zero clause). */
+  status: "clear" | "backlog" | "unreadable";
+  drafts: CiLearningShardDraft[];
+  /** Every finding the ceiling excluded, NAMED rather than dropped. */
+  excludedFindings: string[];
+  /** Every sha whose rollup could not be read, carried through from the corpus. */
+  unreadableShas: string[];
+}
+
+/**
+ * Draft one bounded, exactly-deduped, MARKED shard per repaired CI failure.
+ *
+ * ONLY A REPAIRED PAIR IS MINTABLE. An open failure has no fix attached, and this loop exists to
+ * learn from the DELTA — a bare failure count teaches nothing, which is the invariant
+ * `collectCiFailureCorpus` is built on.
+ *
+ * THE TARGET IS ZERO REPEAT FAILURES, NOT ZERO RED. A first-time red is how a convention gets
+ * discovered; a rung chasing zero red would be chasing the signal that teaches.
+ */
+export function mintCiLearningShards(
+  corpus: CiFailureCorpus,
+  alreadyFiledFindingIds: readonly string[],
+): CiLearningMintResult {
+  const unreadableShas = [...corpus.unreadableShas];
+  const blind = corpus.status === "unreadable";
+  const already = new Set(alreadyFiledFindingIds);
+
+  const ordered = corpus.pairs
+    .filter((p) => p.state === "repaired")
+    .filter((p) => !already.has(ciLearningShardId(p)))
+    .sort((a, b) => (a.pr !== b.pr ? a.pr - b.pr : a.gate.localeCompare(b.gate)));
+
+  const drafts: CiLearningShardDraft[] = [];
+  const excludedFindings: string[] = [];
+  for (const p of ordered) {
+    if (drafts.length >= CI_LEARNING_MINT_CEILING) {
+      excludedFindings.push(ciLearningShardId(p)); // named, never dropped
+      continue;
+    }
+    drafts.push({
+      findingId: ciLearningShardId(p),
+      title:
+        `THE ${p.gate} GATE WENT RED ON #${p.pr} AND WAS REPAIRED — carry the lesson to the lane ` +
+        `that hit it, so the same gate does not refuse a second pull request for the same reason`,
+      gate: p.gate,
+      pr: p.pr,
+      repairFiles: [...(p.repairFiles ?? [])],
+      author_class: "machine",
+      verify: "human",
+      remedySurface: CI_LEARNING_REMEDY_SURFACE,
+    });
+  }
+
+  // The weaker claim wins: a window that was never fully seen cannot report "clear".
+  const status: CiLearningMintResult["status"] = blind ? "unreadable" : drafts.length > 0 ? "backlog" : "clear";
+  return { status, drafts, excludedFindings, unreadableShas };
 }

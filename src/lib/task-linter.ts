@@ -61,6 +61,7 @@ export type LintCheck =
   | "post-merge-correction-without-prompt"
   | "blocked-task-disposition"
   | "blocked-record-unruled"
+  | "machine-author-verify"
   | "provenance"
   | "call-site"
   | "monolith-filing"
@@ -1610,6 +1611,39 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
   };
 }
 
+/**
+ * W1-T2959 — LAW 5's enforcement arm: a MACHINE-CONCLUDED shard may not sit at `verify: auto`.
+ *
+ * Law 5 reads "RECORDS LAUNDER AUTHORITY UNLESS THE AUTHOR CLASS RIDES THE RECORD — unmarked
+ * records read as ratified; origin tags carry commission, not intent", and predicts that any new
+ * record channel without a mandatory author-class mark will carry a machine conclusion a later
+ * reader treats as an operator ruling. THE PROHIBITION IS ON AN UNMARKED RECORD, NOT ON FILING:
+ * a marked record that cannot dispatch itself launders nothing, because it can neither present
+ * itself as ratified nor act on its own conclusion.
+ *
+ * SAME TRIGGER SHAPE AS {@link rulingVerifyViolation}, for the same stated reason:
+ * `isDispatchEligible` already refuses any task whose `verify !== "auto"`, so refusing the marked
+ * shard at auto PARKS it until the operator looks. The operator's approval is then one flip rather
+ * than authoring a shard from scratch.
+ *
+ * ABSENT `author_class` PASSES, and that is load-bearing rather than lenient: every record filed
+ * before this field exists is a person's, so a blanket refusal would block the entire plan and make
+ * this arm's green meaningless. Falsifier:
+ * test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts.
+ */
+export function machineAuthorVerifyViolation(task: Task): LintViolation | undefined {
+  if (task.author_class !== "machine") return undefined;
+  if (task.verify === "human") return undefined;
+  return {
+    check: "machine-author-verify",
+    severity: "block",
+    message:
+      `task ${task.id} is marked author_class: machine at verify:${task.verify} — ` +
+      "a machine-concluded shard must be verify: human so isDispatchEligible parks it for an " +
+      "operator. A machine may propose work into the plan; only a person releases it (Law 5).",
+  };
+}
+
 // ── DECLARED SCOPE (W1-T504 — an undeclared files: lints clean and then serializes the fleet) ─
 // An undeclared `files:` lints clean and then serialises the lane: `overlappingPaths` is
 // fail-closed on it, and `undeclaredScopeLast` only demotes such a task to the end of its priority
@@ -2338,6 +2372,8 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   if (prov) violations.push(prov);
   const ruling = rulingVerifyViolation(task);
   if (ruling) violations.push(ruling);
+  const machineAuthor = machineAuthorVerifyViolation(task);
+  if (machineAuthor) violations.push(machineAuthor);
   const rule15 = rule15FilingViolation(task);
   if (rule15) violations.push(rule15);
   const declaredScope = declaredScopeViolation(task);
