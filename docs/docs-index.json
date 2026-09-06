@@ -362,6 +362,12 @@
       "grepHint": "Forensics — `src/lib/review.ts`"
     },
     {
+      "path": "docs/forensics/risk-judge.md",
+      "title": "risk-judge.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "risk-judge.ts forensics"
+    },
+    {
       "path": "docs/forensics/self-sync.md",
       "title": "self-sync.ts forensics",
       "summary": "Measured forensics, incidents and design arguments removed from `src/lib/self-sync.ts` when its",
