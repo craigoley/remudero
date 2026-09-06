@@ -1,0 +1,89 @@
+- id: W1-T2968
+  title: "A DRAFT NOBODY FILES IS A REPORT NOBODY READS — `mintCiLearningShards` returns marked, parked drafts and the verb PRINTS them, so the acceptance claim 'one firing FILES at most the ceiling many records' is satisfied by a console line and nothing enters the plan; give the rung a writer that lands each draft as a real `plan/tasks.d/` record under a reserved id"
+  repo: remudero
+  depends_on: [W1-T2967]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 18.00
+  files:
+    - src/lib/measurement-cadence.ts
+    - src/run-task.ts
+    - test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts
+  origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
+  plan_refs: ["W1-T2959", "W1-T2967", "W1-T326", "W1-T353", "W1-T413", "W1-T1004"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2959 SHIPPED A GAP BETWEEN ITS OWN CLAIM AND ITS OWN CODE, AND THAT IS WHY THIS IS FILED
+    RATHER THAN LEFT AS POLISH. Its acceptance criterion 2 reads "one firing FILES at most the
+    ceiling many records"; `mintCiLearningShards` returns `drafts` and `ciLearningCommand` console
+    logs them. The PR body disclosed it ("reports drafts and writes nothing: filing stays a separate
+    operator step"), so it was not hidden — but a criterion and an implementation that say different
+    things is a claim the plan cannot rely on later.
+
+    THE SAFETY ARGUMENT DOES NOT REQUIRE THE GAP, WHICH IS THE POINT. Law 5's demand is that the
+    author class RIDE THE RECORD, not that no record be written. W1-T2958/W1-T2959 already built
+    the compliant shape: `author_class: machine` plus `verify: human`, which
+    `machineAuthorVerifyViolation` refuses at `verify: auto` and `isDispatchEligible` parks. A
+    marked, parked record in `plan/tasks.d/` can neither present itself as ratified nor dispatch
+    itself. Printing it to a console instead does not make it safer; it makes it invisible.
+  design: |
+    (i) THE ID COMES FROM THE RESERVATION PATH, NEVER A COUNTER. Reuse the shipped mint
+    (`src/lib/task-id-reservation.ts`) so a machine-filed id races the fleet's own ids correctly.
+    A rung that picked `max(id)+1` would collide the first time two hosts fired in one minute —
+    the exact race `refs/rmd-id/` settles.
+
+    (ii) THE WRITER IS A SEAM. The filing function takes an injected writer and an injected minter,
+    so every test runs with zero git and zero filesystem writes outside a tmp root. The real
+    defaults are the one line each a unit test cannot reach; name that boundary explicitly.
+
+    (iii) EVERY WRITTEN RECORD CARRIES THE MARK AND PARKS, AND A TEST ASSERTS IT ON THE BYTES THAT
+    LAND — not on the draft object. `author_class: machine`, `verify: human`, and a `files:` list
+    the linter accepts. Re-read the written YAML through `loadPlan` and lint it with `lintTask`:
+    if the record this rung writes would not pass the repo's own linter, it must not be written.
+
+    (iv) IDEMPOTENCY IS ALREADY SOLVED AND MUST STAY SOLVED. `ciLearningShardId`'s pr+gate key
+    already dedups drafts; the writer must consult what is ALREADY IN THE PLAN, so a rung that
+    fires twice over one corpus writes once. Deriving "already filed" from the corpus alone is not
+    enough — the plan is the record.
+
+    (v) THE FILING PR SHAPE, IF ONE IS OPENED AT ALL. W1-T2959's design (vi) and W1-T413: a
+    plan-only PR must carry NO `Remudero-Task:` trailer, and must NEVER sit on a
+    `run-<id>-<epoch>` branch naming the id it files — `ownsOwnRunBranch` waves that shape through
+    the diff refusal. Emit a bare `## Acceptance` header instead.
+
+    (vi) NOT IN SCOPE: editing `learnings/*.yaml` or CLAUDE.md from the rung. The parked shard is
+    the output, and a human decides what guidance changes.
+  acceptance:
+    - claim: "a firing writes each draft as a real plan record under a reserved id, and the written record parses back as a task"
+      proof: "unit test: test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts"
+    - claim: "every record the rung writes carries the machine author mark and awaits a person, asserted on the bytes that land rather than on the draft"
+      proof: "unit test: test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts"
+    - claim: "a record the rung writes passes the repository's own task linter, so it can never file something the plan would refuse"
+      proof: "unit test: test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts"
+    - claim: "a second firing over the same corpus writes nothing new, because the writer consults what the plan already holds"
+      proof: "unit test: test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts"
+    - claim: "the identifier comes from the shipped reservation path rather than a count of existing records"
+      proof: "unit test: test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts"
+  falsifier: |
+    THE LINTER CHECK IS THE ONE THAT MATTERS, AND IT MUST FAIL CLOSED. Write a record with
+    `verify: auto` and assert `lintTask` BLOCKS it via `machineAuthorVerifyViolation` — if the rung
+    can emit a dispatchable machine-authored record, the whole Law 5 argument is gone and this task
+    has recreated the laundering shape with a writer attached.
+
+    IDEMPOTENCY IS FALSIFIED BY FIRING TWICE against a plan that already holds the first record —
+    not against an empty one, which passes trivially.
+
+    AND PROVE THE WRITER IS LOAD-BEARING: with it removed, a test asserting a record exists on disk
+    must redden. A suite that only inspects the returned drafts would pass with nothing written,
+    which is exactly the defect this task exists to close.
+  note: |
+    FILED 2026-09-06 from the operator's approval of recommendation 1. This is the half of that
+    recommendation the operator explicitly chose ("file vs draft-and-report" — he took file).
+
+    risk:high / band_meaning:blast — this is the first rung in the repo that WRITES A PLAN RECORD
+    without a human in the loop. The blast radius, not the line count, sets the band, and the
+    parking requirement is the containment.

@@ -1,0 +1,84 @@
+- id: W1-T2970
+  title: "UN-CREDITING A TASK TODAY MEANS EDITING A MERGED PULL REQUEST BODY — `deriveStatus` reads credit from the trailer and the run-branch head ref, both of which live in history, so correcting a task that reads merged-but-never-built requires rewriting the past and leaves no reason behind; give the projection an operator-ratified override record it consults instead"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 16.00
+  files:
+    - src/lib/status.ts
+    - test/un-crediting-a-task-today-means-editing-a-merged-pr-body.test.ts
+  origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
+  plan_refs: ["W1-T413", "W1-T1004", "W1-T444"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE TWO CREDIT PATHS BOTH READ HISTORY. CLAUDE.md's plan-hygiene section states them: the
+    `Remudero-Task:` trailer on a merged pull request body, and `findMergedByHeadBranch` matching
+    `run-<taskId>-<digits>` on the structured head ref. `deriveStatus` applies two refusals on top
+    (`isPlanOnlyFilingPr`, `planOnlyDiffRefusal`), but `ownsOwnRunBranch` short-circuits the diff
+    refusal as a stated cost control, so a filing PR on the task's own run branch is waved through.
+
+    MEASURED 2026-09-06 (upper bound, not a count — the exact figure needs the daemon host's
+    ledger, which the measuring environment could not read): up to 23 tasks read merged while
+    credited by a pull request on their own run branch. Whether each was really built is a question
+    the projection cannot answer.
+
+    THE ONLY LEVER TODAY IS DESTRUCTIVE. Removing credit means editing the body of a MERGED pull
+    request — rewriting a record after the fact, unreviewably, with no field anywhere to say why.
+    That is the shape Law 5 exists to refuse in the other direction, and it is worse here because
+    the edit is invisible: nothing in the plan or the ledger would show that a correction happened
+    or who made it.
+  design: |
+    (i) AN OVERRIDE RECORD, NOT A HISTORY EDIT. A committed, reviewable file whose rows say: this
+    task id is NOT credited by that pull request, and here is the reason. `deriveStatus` consults
+    it as an additional refusal rung. The correction becomes a diff a reviewer reads, exactly as
+    `scripts/comment-load-baseline.json`'s own comment argues for raising a ceiling.
+
+    (ii) IT MAY ONLY EVER SUBTRACT CREDIT. An override that GRANTS credit would let a row assert a
+    task shipped when no pull request says so — a record laundering authority, Law 5's own shape.
+    Refuse an add-credit row at load, by name.
+
+    (iii) EVERY ROW CARRIES ITS AUTHOR CLASS AND ITS REASON. `verify: human` on this task is not
+    ceremony: the record is an operator ruling about what did and did not ship, and
+    `rulingVerifyViolation`'s own comment gives the mechanism — `isDispatchEligible` refuses
+    anything not `verify: auto`, so this parks until a person builds it deliberately.
+
+    (iv) AN UNREADABLE OVERRIDE FILE FAILS TOWARD THE STATUS QUO, NOT TOWARD UN-CREDITING. A
+    corrupt or missing file must leave `deriveStatus` answering exactly as it does today; a read
+    failure that silently un-credited every task would re-dispatch the whole backlog.
+
+    (v) NOT IN SCOPE: deciding WHICH of the residual tasks to un-credit. That is the operator's
+    ruling, one row at a time, and this task only builds the place to record it.
+  acceptance:
+    - claim: "a task credited by a merged pull request reads as not merged once an override row names that pairing, and the row's reason travels with the answer"
+      proof: "unit test: test/un-crediting-a-task-today-means-editing-a-merged-pr-body.test.ts"
+    - claim: "a row that tries to grant credit rather than remove it is refused by name, so the record can never assert that something shipped"
+      proof: "unit test: test/un-crediting-a-task-today-means-editing-a-merged-pr-body.test.ts"
+    - claim: "an unreadable or absent override file leaves the projection answering exactly as it does today"
+      proof: "unit test: test/un-crediting-a-task-today-means-editing-a-merged-pr-body.test.ts"
+    - claim: "a task with no override row is graded exactly as before this change, through both the trailer path and the branch name path"
+      proof: "unit test: test/un-crediting-a-task-today-means-editing-a-merged-pr-body.test.ts"
+  falsifier: |
+    THE FAIL-SAFE DIRECTION IS THE ONE THAT MATTERS. Corrupt the override file and assert credit is
+    UNCHANGED. A guard that fails toward un-crediting would re-dispatch every merged task in the
+    plan the first time the file is malformed.
+
+    AND PROVE THE SUBTRACT-ONLY RULE LOAD-BEARING: construct an add-credit row and assert the load
+    REFUSES it. Without that case the record is a general-purpose credit editor, which is the thing
+    this design refuses to build.
+
+    REGRESSION LOCK: grade a task with no row at all through BOTH credit paths and require the same
+    verdict as before. This task must narrow nothing that already works.
+  note: |
+    FILED 2026-09-06 from the operator's approval of recommendation 4. He was shown the choice
+    between editing merged pull request bodies and an override record, and took the record.
+
+    `verify: human` is deliberate and is the design, not a placeholder: see design (iii).
+
+    risk:high / band_meaning:blast — `deriveStatus` decides what the fleet dispatches. A defect here
+    either re-dispatches shipped work or hides unbuilt work; the line count is small and irrelevant
+    to the band.
