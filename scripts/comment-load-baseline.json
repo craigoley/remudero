@@ -94,7 +94,7 @@
   "scripts/tracked-source-write-check.mjs": 108,
   "scripts/unwired-gate-check.mjs": 80,
   "scripts/worker-branch-shape.mjs": 83,
-  "src/lib/account-usage.ts": 395,
+  "src/lib/account-usage.ts": 180,
   "src/lib/alert-lane.ts": 133,
   "src/lib/analytics-route.ts": 118,
   "src/lib/auto-triage.ts": 332,
