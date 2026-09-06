@@ -250,7 +250,7 @@
   "src/lib/tier.ts": 67,
   "src/lib/tmp.ts": 83,
   "src/lib/trace.ts": 115,
-  "src/lib/triage.ts": 380,
+  "src/lib/triage.ts": 169,
   "src/lib/tty.ts": 70,
   "src/lib/untrusted-envelope.ts": 69,
   "src/lib/verdict-calibration.ts": 219,

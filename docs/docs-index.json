@@ -416,6 +416,12 @@
       "grepHint": "Forensics: src/lib/task-linter.ts"
     },
     {
+      "path": "docs/forensics/triage.md",
+      "title": "Forensics: src/lib/triage.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/triage.ts` used to",
+      "grepHint": "Forensics: src/lib/triage.ts"
+    },
+    {
       "path": "docs/forensics/unwired-gate-check.md",
       "title": "unwired-gate-check.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
