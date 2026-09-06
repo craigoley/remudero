@@ -1484,6 +1484,11 @@ export async function runDaemon(
   let dailyCostCeilingUsd: number | undefined;
   let costUsd = 0;
   let ticks = 0;
+  // W1-T2965 — cycles this LIFETIME has entered past both operator holds and the freshness read.
+  // Not `ticks`: those are incremented on many completion paths, and the deferral below must be
+  // bounded by the loop's own control flow. Incremented BELOW the freshness read, so paused
+  // heartbeats — which `continue` before reaching it — cannot spend a starved process's one cycle.
+  let cyclesEntered = 0;
   /** Last emitted idle-reason signature — see the cadence note at the idle rung. */
   let lastIdleSignature: string | undefined;
   // Per-task transient retry state, threaded across ticks for the same task id. Dropped once a task's
@@ -1767,8 +1772,26 @@ export async function runDaemon(
     // daemon is neither stopped nor paused. Never interrupts in-flight work (W1-T126, W1-T936).
     const freshness = deps.checkFreshness?.();
     if (freshness?.stale) {
-      return stopForFreshness(freshness);
+      // FORWARD PROGRESS OUTRANKS FRESHNESS FOR THE FIRST CYCLE, AND ONLY THE FIRST (W1-T2965).
+      // This exit sits ABOVE the sweep and dispatch, so W1-T2960's admission-gate deferral is
+      // unreachable on a lifetime that reads stale here first. When the daemon's own merges advance
+      // main faster than a container boots that is self-sustaining: 33 consecutive lifetimes ended
+      // `idle ticks: 0` and the fleet dispatched nothing for two days, while the bounded sweep
+      // `stopForFreshness` runs on its way out kept every liveness signal green. A process that
+      // completes no cycle makes no progress however fresh the code it would restart onto is, so it
+      // gets exactly one. Not a timer or backoff — those need sizing against a moving merge rate
+      // (W1-T312, W1-T380, W1-T382). One-shot: the three-clocks guard (W1-T126) fires at the next
+      // tick boundary, and the operator holds above still outrank it (W1-T936).
+      if (cyclesEntered > 0) {
+        return stopForFreshness(freshness);
+      }
+      log("daemon.freshness_deferred", {
+        old_sha: freshness.oldSha,
+        new_sha: freshness.newSha,
+        phase: "pre_cycle",
+      });
     }
+    cyclesEntered++;
 
     // Console "drain now", consumed once at the top of a cycle. Its whole effect is "run one dispatch
     // cycle immediately", which this loop body already is, so consuming and ledgering it is the action.

@@ -162,8 +162,14 @@ test("loop, THROUGH THE ADAPTER: a service assessment of clean+behind stops the 
     checkStop: () => (++ticks >= 4 ? (requestStop(root, "escape hatch"), stopDetail(root)) : undefined),
     checkFreshness: () => daemonFreshnessFromService(CLEAN_BEHIND),
   });
-  assert.equal(s.stopReason, "stale", "behind origin -> the loop asks for a restart, and does so on tick 1");
-  assert.ok(ticks <= 1, `freshness wins immediately; it must not take ${ticks} ticks to notice`);
+  assert.equal(s.stopReason, "stale", "behind origin -> the loop asks for a restart, promptly");
+  // W1-T2965 — this read `ticks <= 1`. A lifetime that has completed NO cycle is now granted exactly
+  // one before the top-of-tick exit applies, so the adapter's stale verdict is honoured on the
+  // SECOND consultation rather than the first. The subject of this test is the ADAPTER wiring —
+  // that clean+behind reaches the loop as `stale` at all — and that is unchanged. The bound stays
+  // tight on purpose: the escape hatch fires at 4, so a regression that never returned stale still
+  // fails here rather than hanging, which is what the comment above is protecting.
+  assert.ok(ticks <= 2, `freshness wins within the one granted cycle; it must not take ${ticks} ticks to notice`);
   rmSync(root, { recursive: true, force: true });
 });
 
