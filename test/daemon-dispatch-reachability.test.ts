@@ -103,9 +103,9 @@ test(
 // ── poll before it, and its own light-sweep ticker never itself dispatches while it runs ────
 
 test(
-  "W1-T2265 claims 2/5/6: a tick that fires the retro still reaches dispatch on that SAME tick with " +
-    "no extra poll-interval sleep, the retro is still awaited (blocking), and its light-sweep ticker " +
-    "never dispatches while the retro is in flight",
+  "W1-T2265 claims 2/5 (W1-T2971 reverses claim 6): a tick that fires the retro still reaches " +
+    "dispatch on that SAME tick with no extra poll-interval sleep, and now reaches it WITHOUT " +
+    "waiting for the retro, which is detached rather than awaited",
   async () => {
     const plan = fixturePlan();
     const lines: Array<{ step: string }> = [];
@@ -149,9 +149,23 @@ test(
       { max: 1 },
     );
     assert.equal(s.stopReason, "max_reached");
-    assert.ok(lightSweeps >= 3, `the retro's own light-sweep ticker actually ran while it was in flight (saw ${lightSweeps})`);
-    assert.equal(runOneCallsBeforeRetroSettled, 0, "dispatch never fired while the retro was still in flight (claim 6)");
-    assert.equal(runOneCalls, 1, "dispatch WAS reached once the retro settled (claim 2)");
+    // W1-T2971 REVERSES CLAIM 6. It read `runOneCallsBeforeRetroSettled === 0` — "dispatch never
+    // fired while the retro was still in flight". That is the behaviour that took the fleet down:
+    // the retro rung sits ABOVE the dispatch pick and awaited an unbounded run, so on 2026-09-06 a
+    // daemon logged `retro_triggered` (marker 3.7 days / 446 merges behind) and then wrote no
+    // `daemon.idle` and no dispatch row at all. `daemon.idle` is written on every empty dispatch
+    // set, so its absence proved the loop never reached the branch. Meanwhile the light sweep kept
+    // reviewing and merging, so every liveness signal stayed green while nothing was built.
+    //
+    // A retro gates nothing: it spends — hence its place below the headroom rung — but no rung
+    // downstream reads its result. Claims 2 and 5 below are UNCHANGED and are in fact served more
+    // strongly now: dispatch is reached on the same tick, and without waiting at all.
+    assert.ok(
+      runOneCallsBeforeRetroSettled >= 1,
+      "dispatch fired WHILE the retro was still in flight — the retro is detached, not awaited (W1-T2971)",
+    );
+    assert.equal(runOneCalls, 1, "dispatch WAS reached (claim 2)");
+    void lightSweeps;
     assert.equal(
       ticksAtDispatch,
       1,
