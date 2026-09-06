@@ -101,7 +101,7 @@
   "src/lib/autonomy.ts": 90,
   "src/lib/block-reason.ts": 103,
   "src/lib/board-review.ts": 244,
-  "src/lib/board.ts": 667,
+  "src/lib/board.ts": 299,
   "src/lib/body-repair.ts": 79,
   "src/lib/branch-reaper.ts": 108,
   "src/lib/bundle.ts": 100,

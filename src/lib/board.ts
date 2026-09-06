@@ -1,29 +1,17 @@
 /**
  * lib/board.ts — the read-only live board's daemon-side wiring (W3-T2, MASTER-PLAN §7 WS-5a).
  *
- * Narrow v0 vertical slice (the W3-T2 "Option A" decision): ONE daemon route pair — GET
- * /v1/status (REST snapshot) and GET /v1/status/stream (SSE, one `status` event per task
- * whose derived StatusProjection changes) — built entirely on top of the EXISTING mechanism
- * (lib/service.ts's Route/SseRoute) and the EXISTING projection logic (lib/status.ts's
- * projectPlan/deriveStatus). Zero new business logic: this module only wires those two
- * together and tails state/ledger.ndjson to know WHEN to recompute.
+ * One route pair: GET /v1/status (a REST snapshot) and GET /v1/status/stream (SSE, one `status`
+ * event per task whose derived StatusProjection changes), built entirely on lib/service.ts's
+ * Route/SseRoute and lib/status.ts's projectPlan/deriveStatus. Zero new business logic: this
+ * module only wires those two together and tails state/ledger.ndjson to know when to recompute.
  *
- * "A ledger state flip appears in the UI within 2s of the write" (the task's acceptance
- * bar) drives the streaming design: the stream POLLS the ledger file every
- * {@link DEFAULT_POLL_MS} (250ms, comfortably under the 2s budget) rather than relying on
- * `fs.watch`, whose native change-event semantics are not portable across platforms/CI
- * runners (a missed/coalesced event there would silently blow the 2s bar). A poll only does
- * real work (re-deriving a task's status) when the ledger has grown since the last tick, and
- * only SENDS an event when that task's projection actually differs from the last one sent —
- * a state FLIP, not merely "the ledger was touched".
- *
- * Real `rmd serve` CLI wiring (registering these routes on a live createService(...)
- * instance, with a real ghGateway) is a later task's concern — the same split W3-T1a made
- * for the generic mechanism itself (see service.ts's header: "concrete routes... are
- * registered by a later task's real `rmd serve` wiring"). This module is proven directly
- * against a real HTTP server (test/board.test.ts), exactly like test/service.test.ts proves
- * the generic mechanism, with no CLI entry point required to exercise it.
+ * INVARIANT: the stream polls the ledger every {@link DEFAULT_POLL_MS} rather than using
+ * `fs.watch` (not portable across CI runners), and only sends an event when a task's projection
+ * actually changed — a state flip, not a mere touch. Proven against a real HTTP server,
+ * test/board.test.ts, the way test/service.test.ts proves the generic mechanism.
  */
+// Why: the "Option A" narrow-scope decision — docs/forensics/board.md#file-header
 
 import type { ServerResponse } from "node:http";
 import type { Plan, Task, TaskRisk } from "./plan.js";
@@ -51,102 +39,43 @@ import { buildStatusBoard, type BlockedPrBlocker, type MergeHeldRow } from "./st
 export const DEFAULT_POLL_MS = 250;
 
 /**
- * One board row: a {@link StatusProjection} enriched with the two plan-`Task` fields the FIND
- * layer (W1-T157) needs but {@link StatusProjection} deliberately does not carry — `title`
- * (the search bar is over id + title) and `risk` (the risk facet) — plus `lastActivityAt`, the
- * ISO timestamp of the LAST ledger line naming this task (the `recency` sort key).
- *
- * WHY enrich HERE and not on {@link StatusProjection} itself: that interface is MIRRORED by
- * openapi/daemon.yaml's `StatusProjection` schema and consumed by src/lib/daemon.ts +
- * packages/api-client — widening it is a far larger blast radius than this one wire payload
- * needs. `title`/`risk` are a pure in-memory join off `deps.plan.byId` (already held), never a
- * new GitHub/ledger derivation. The SSE `status` stream keeps emitting the bare
- * {@link StatusProjection} (see {@link buildStatusStream}); ONLY this REST snapshot carries the
- * enrichment, and the shell backfills title/risk across subsequent SSE deltas (src/lib/serve.ts).
+ * One board row: a {@link StatusProjection} enriched with the plan-`Task` fields the FIND layer
+ * (W1-T157) needs but {@link StatusProjection} does not carry — `title` and `risk` — plus
+ * `lastActivityAt`, the ISO timestamp of the last ledger line naming this task. The join lives
+ * here, not on {@link StatusProjection}, because that interface is mirrored by openapi/daemon.yaml
+ * and consumed elsewhere; the SSE `status` stream keeps emitting the bare projection, and the
+ * shell backfills the enrichment across deltas (src/lib/serve.ts).
  */
 export interface BoardRow extends StatusProjection {
   title: string;
   risk: TaskRisk;
   /** ISO-8601 `ts` of the last ledger line naming this task; absent when the task has no ledger line at all. */
   lastActivityAt?: string;
-  /**
-   * LIVE ACCUMULATED SPEND (W1-T184), summed from `cost_usd` on every `implement.done`/
-   * `fix.done` ledger line belonging to this task's CURRENT run (since its latest
-   * `run.start`). Present only alongside {@link StatusProjection.phase} (an in-flight run) —
-   * a terminal task's total cost lives on its `verdict` line instead (surfaced via the task
-   * card's run history, W1-T158), not here. VOLATILE: ticks upward as further lines are
-   * appended, exactly like `elapsedMs` — the shell's flip-detector excludes it from
-   * "did this task's status change" the same way it already excludes `elapsedMs`.
-   */
+  /** Live accumulated spend (W1-T184): `cost_usd` summed over `implement.done`/`fix.done` lines
+   *  for this task's current run. Present only alongside `phase`; volatile like `elapsedMs`. */
   liveSpendUsd?: number;
-  /** LIVE ACCUMULATED TURN COUNT (W1-T184) — the `num_turns` counterpart to {@link liveSpendUsd}. */
+  /** Live accumulated turn count (W1-T184) — the `num_turns` counterpart to {@link liveSpendUsd}. */
   liveTurns?: number;
-  /**
-   * NO DATA YET (fb-1784902052582-c124f9): the run is in flight (`phase` present) but has logged
-   * no `implement.done`/`fix.done` yet, so its spend/turns are genuinely UNKNOWN — not `0`.
-   * Mutually exclusive with {@link liveSpendUsd}/{@link liveTurns}: exactly one of "pending" or
-   * "has a value" is ever set for an in-flight run. The console renders this as "no data yet",
-   * never `$0.000 / 0 turns` as fact.
-   */
+  /** True when a run is in flight but has logged no spend/turns yet — unknown, not zero. Mutually
+   *  exclusive with {@link liveSpendUsd}/{@link liveTurns} (fb-1784902052582-c124f9). */
   liveSpendPending?: boolean;
-  /**
-   * W1-T944: worker liveness, carried straight through from {@link StatusProjection.workerState}
-   * (deriveRunState's ledger scan — the SAME scan that produces `phase`/`startedAt`/`elapsedMs`
-   * above, never a second scan and never a client-side re-derivation). Re-declared here, beside
-   * the live spend fields, so the shape a NOW row actually renders is visible on ONE interface
-   * rather than only on the base projection it happens to inherit. Present only alongside `phase`
-   * (design note v — {@link isRunningRow}'s own `phase != null` definition governs, so a finished
-   * run's last known state can never linger as if current); absent while `phase` IS present means
-   * the run has emitted no `worker.state` row yet, and the console renders "state unknown" for
-   * that case rather than a blank or a healthy-looking default (design note iii).
-   */
+  /** Worker liveness (W1-T944), carried through from {@link StatusProjection.workerState} — the
+   *  same scan that derives `phase`/`elapsedMs`. Present only alongside `phase`; absent there
+   *  means no `worker.state` row has arrived, rendered as "state unknown". */
   workerState?: StatusProjection["workerState"];
-  /**
-   * ISO-8601 `ts` the run transitioned INTO its current `workerState` — carried straight through
-   * from {@link StatusProjection.workerStateSince}. Present only while `workerState === "quiet"`;
-   * the console ages a "quiet Nm" duration off it on the same 1s tick `elapsedMs` already uses
-   * (design note ii).
-   */
+  /** ISO-8601 `ts` the run entered its current `workerState`, carried through from
+   *  {@link StatusProjection.workerStateSince}. Present only while `workerState === "quiet"`; the
+   *  console ages a "quiet Nm" duration off it on the same 1s tick `elapsedMs` uses. */
   workerStateSince?: string;
-  /**
-   * W1-T1240: process-unevidenced, carried straight through from
-   * {@link StatusProjection.processUnevidenced} (deriveStatus's own `recentActivity ||
-   * hasLiveLock` check, held separately from the running disjunction — see that field's own
-   * doc). Re-declared here for the same reason `workerState` immediately above is: the shape a
-   * NOW row actually renders should be visible on ONE interface, not only on the base
-   * projection it happens to inherit. Present only alongside `phase`, same sparse convention.
-   */
+  /** Process-unevidenced (W1-T1240), carried through from
+   *  {@link StatusProjection.processUnevidenced}. Present only alongside `phase`, same sparse
+   *  convention as `workerState`. */
   processUnevidenced?: StatusProjection["processUnevidenced"];
-  /**
-   * W1-T914 (feedback fb-1784901239119-1be356 clause c / fb-1784919225707-0fab8b): the row's
-   * OWN `remudero-review` three-state, so a PR whose review has not run stops rendering
-   * identically to one that passed. Present only alongside {@link StatusProjection.prUrl} — a
-   * row with no PR has no review to render.
-   *
-   *   "success"    — reviewed-green: the last posted `remudero-review` was a pass.
-   *   "failure"    — reviewed-red: the last posted `remudero-review` was a fail.
-   *   "pending"    — review-in-progress (W1-T913's detection-time post) — NEVER rendered as
-   *                  "success"; that is the exact collapse this task exists to stop.
-   *   "none"       — ABSENT, not merely unreviewed: no `remudero-review` status has ever posted
-   *                  for this head (pre-W1-T913, or a genuinely unattended head). Per W1-T225's
-   *                  ruling, absent is the WORST of the states — it renders as absent, never as
-   *                  "pending" and never as green.
-   *   "unreadable" — the GitHub read behind this value FAILED (rate limit, network, an
-   *                  unresolvable head) — a CANNOT-READ, not a state GitHub actually reported.
-   *                  Renders as unreadable (with the snapshot's own `generated_at` as its
-   *                  last-known age), never silently folded into "none" or a stale green/red.
-   *   "not-applicable" — (W1-T2235) the row's PR is MERGED or CLOSED: `remudero-review` watches
-   *                  a check go pending -> success on a PR that is STILL OPEN, so a terminal PR's
-   *                  combined status is history, not a value this feature has an opinion about.
-   *                  Never a network call behind it, unlike every other value above — and never
-   *                  folded into "none", which means "asked GitHub, nothing was posted": "none"
-   *                  is a fact about a live PR, "not-applicable" is that the question doesn't
-   *                  apply to this one.
-   *
-   * Bound to {@link GitHub.reviewState} (status.ts) — the SAME combined-status read
-   * open-prs-rest.ts's `combinedStatusRestArgs` already documents and run-task.ts's sweep-side
-   * `reviewStateFromRollup` already consumes — never a second, console-only derivation.
-   */
+  /** The row's own `remudero-review` three-state (W1-T914), present only alongside `prUrl`. One
+   *  of `success`/`failure` (last posted verdict), `pending`, `none` (never posted — per W1-T225
+   *  the worst state, never softened), `unreadable` (the read itself failed), or `not-applicable`
+   *  (W1-T2235: PR merged/closed). Bound to {@link GitHub.reviewState}. */
+  // Why: the W1-T225 absent-is-worst ruling — docs/forensics/board.md#boardrow-reviewstate
   reviewState?: "success" | "failure" | "pending" | "none" | "unreadable" | "not-applicable";
 }
 
@@ -156,57 +85,33 @@ export interface CountSummary {
   running: number;
   merged: number;
   queued: number;
-  /** W1-T159 (GLANCE strip): tasks that are STOPPED — `status === "blocked"` OR carrying an open,
-   *  unsuperseded escalation (`needsHuman`). See {@link isBlockedRow} for why the second disjunct
-   *  is required and why `needs me` remains a strict SUBSET of this count rather than a rival to it. */
+  /** Tasks that are stopped (W1-T159): `status === "blocked"` or an open escalation. See {@link isBlockedRow}. */
   blocked: number;
-  /** False when the GitHub read backing merge-state was unreachable ⇒ the `merged` tally is
-   * UNKNOWN, not a fact — the console renders "merged: unknown" rather than "0 merged". */
+  /** False when merge-state's GitHub read was unreachable — the console renders "unknown", not "0 merged". */
   merged_known: boolean;
 }
 
 export interface BoardSnapshot {
-  /** The ONE server clock this snapshot is "as of" — every header freshness chip keys on THIS. */
+  /** The one server clock this snapshot is "as of" — every header freshness chip keys on this. */
   generated_at: string;
   /** True iff the GitHub read backing merge-state was unreachable this snapshot (fb-…c124f9). */
   github_unreachable: boolean;
-  /** Header counts, derived from the SAME `tasks` below (tally and rows can never disagree). */
+  /** Header counts, derived from the same `tasks` below — tally and rows can never disagree. */
   counts: CountSummary;
-  /** W1-T159 (GLANCE strip): merged-today/spend-today/spend-this-week, computed from the SAME
-   *  ledger lines this snapshot already read (lib/glance.ts's `computeGlanceSpend`) — never a
-   *  second ledger read/reduction. */
+  /** GLANCE strip totals (W1-T159), from the same ledger lines this snapshot already read. */
   spend: GlanceSpend;
   tasks: BoardRow[];
-  /**
-   * W1-T1006: THE SIXTH NEEDS-ME ROW SOURCE — a PR the sweep reconciler already disposed into a
-   * non-progressing class (`blocked-fixable`/`blocked-ambiguous`/`conflicted`/`stale`), reaching
-   * the console through this SAME snapshot (design (i): "one snapshot, one `generated_at`, and
-   * the counts and rows can never disagree") rather than a second fetch the way NEEDS ME's
-   * feedback/inbox rows arrive. Sourced VERBATIM from status-board.ts's `buildStatusBoard`
-   * (its own `blockers.rows`, filtered to `kind === "blocked_pr"`) — see
-   * {@link deriveBoardStatusSections} — NEVER a second derivation over the ledger; status-board.ts
-   * itself is unread by this task. Always an array (`[]`, never `undefined`), so a render never
-   * has to special-case "not fetched yet" — exactly like {@link tasks} above.
-   */
+  /** A PR the sweep reconciler already disposed into a non-progressing class (W1-T1006's sixth
+   *  NEEDS-ME row source), sourced verbatim from status-board.ts's `buildStatusBoard` — see
+   *  {@link deriveBoardStatusSections}. Always an array, never `undefined`. */
   blockedPrs: BlockedPrBlocker[];
-  /**
-   * W1-T2719: the currently-standing operator merge holds from status-board.ts's production
-   * reader. They ride the same atomic snapshot and the same already-parsed ledger lines as
-   * {@link blockedPrs}; the console never re-derives a hold from checks or UI state.
-   */
+  /** The currently-standing operator merge holds (W1-T2719), from status-board.ts's reader. */
   mergeHeld: MergeHeldRow[];
-  /** Every CURRENT open PR, projected from the batched gateway's existing open half and the
-   * same parsed ledger used by {@link tasks}. An unreadable/partial index is represented by an
-   * incomplete, empty queue rather than stale rows wearing a current timestamp. */
+  /** Every current open PR, projected from the batched gateway's open half. An unreadable/partial
+   *  index is an incomplete, empty queue rather than stale rows wearing a current timestamp. */
   prQueue: PrQueueSnapshot;
-  /**
-   * W1-T1006 design (iii): set ONLY when live GitHub state could not be checked THIS render (no
-   * reachable gateway, or the gateway's own read failed) — carried straight through from
-   * status-board.ts's `BlockersSection.blockedPrsUnverifiedReason`. When set, {@link blockedPrs}
-   * is EMPTY (every raw candidate withheld rather than replayed as current) — the console must
-   * show this distinction, an unverified withholding, rather than let it read as "nothing
-   * blocked" (an unknown that looks healthy is the exact failure this field exists to name).
-   */
+  /** Set only when live GitHub state could not be checked this render (W1-T1006). When set,
+   *  {@link blockedPrs} is empty — withheld, never replayed as current and read as "nothing blocked". */
   blockedPrsUnverifiedReason?: string;
 }
 
@@ -236,8 +141,7 @@ export interface PrQueueSnapshot {
   complete: boolean;
   rows: PrQueueRow[];
   unavailableReason?: string;
-  /** Timestamp of the newest prior complete queue held by this route cache. Absent until this
-   * process has observed one successfully. */
+  /** Timestamp of the newest prior complete queue held by this route cache; absent until observed. */
   lastGoodAt?: string;
 }
 
@@ -254,13 +158,10 @@ interface PrQueueIndexRead {
   failureReason: string;
 }
 
-/**
- * The `ts` of the last ledger line naming each task id (the board's `lastActivityAt`, W1-T157) —
- * factored out so {@link computeBoardSnapshot} doesn't duplicate this scan inline. (W1-T184: the
- * RECENT feed used to share this same helper for its own recency ordering via `computeRecentOutcomes`;
- * that function is gone — {@link computeRecentActivity} orders the feed by ledger-append order
- * directly, via its own {@link RecentActivityState.scannedLines} tail cursor, not this map.)
- */
+/** The `ts` of the last ledger line naming each task id (the board's `lastActivityAt`, W1-T157),
+ *  factored out so {@link computeBoardSnapshot} doesn't duplicate this scan inline. RECENT no
+ *  longer shares this map for its own ordering; {@link computeRecentActivity} orders by ledger
+ *  append order via its own {@link RecentActivityState.scannedLines} tail cursor instead. */
 interface LedgerActivity {
   ts?: string;
 }
@@ -274,48 +175,14 @@ function lastActivityByTask(lines: Array<Record<string, unknown>>): Map<string, 
   return out;
 }
 
-/**
- * W1-T1006: the sixth NEEDS-ME row source, reusing status-board.ts's `buildStatusBoard` VERBATIM
- * for the blocked-PR derivation — design (i)'s own text: "the data comes from `buildStatusBoard`'s
- * existing `blockers.rows` and NOT from a second derivation over the ledger", because
- * `status-board.ts` is READ, NOT CHANGED, by this task and none of its blockers-deriving
- * functions (`rawBlockedPrCandidates`/`deriveBlockedPrBlockers`/`deriveBlockers`) are exported —
- * `buildStatusBoard` is the only door in.
- *
- * `plan` IS DELIBERATELY OMITTED (never `deps.plan`) — this is the load-bearing choice, not an
- * oversight. `buildStatusBoard` unconditionally re-derives QUEUE HEAD/INBOX via its own INTERNAL
- * `projectPlanOnce`/`projectPlan` pass, which is a SECOND, genuinely duplicate batch of `github`
- * calls on top of the one {@link computeBoardSnapshot} already ran a few lines above — MEASURED:
- * test/board.test.ts's own cache-recompute suite counts `github.prByRef` calls as its "did a
- * real recompute happen" proxy, and passing `deps.plan` through doubled that count (2 vs the
- * expected 1) the first time this was wired, because a plan task's `pr:` field forces a
- * `prByRef` call on EVERY `projectPlan` pass. `deriveBlockers`'s `blocked_pr` class (the ONLY
- * class this board keeps, filtered below) needs no `projections` at all — only `indeterminate`
- * does — so `plan: undefined` makes `projectPlanOnce` short-circuit before touching `github` a
- * second time (see its own `if (!plan) return { unknownReason: … }` rung), while QUEUE
- * HEAD/INBOX degrade to a stated `unknownReason` this board never reads. `blockedPrs`' OWN
- * `github` calls (`deriveBlockedPrBlockers`'s per-PR-number `prByRef`, keyed off the ledger's
- * `sweep.disposed` lines, never off a task's `pr:` field) still run in full and are a genuinely
- * NEW read no earlier pass in this file makes — that cost is real and unavoidable, not a
- * duplicate of anything.
- *
- * EVERY OTHER SECTION `buildStatusBoard` computes (liveness/latches/queue head/inbox/headroom/
- * cache-hit/learnings-injection/needs-me-cost-anomaly) is irrelevant to this board and
- * deliberately starved of real IO here, so this call costs CPU only, never new file/process
- * reads beyond `blockedPrs`' own: `queryService` is an inert stub (LIVENESS is discarded),
- * `resolveOriginMainSha` is forced to `undefined` (skips a `git rev-parse` neither LATCHES' nor
- * BLOCKERS needs), `grepAnchorTrue`/`readProposalRegistry`/`readDraftCache` are inert (INBOX is
- * discarded regardless), and `readLedger` is overridden to hand back the SAME already-parsed
- * `lines` {@link computeBoardSnapshot} read above — never a second ledger file read.
- *
- * The `root`/`repoDir` strings below are never dereferenced by anything this board keeps: every
- * consumer that would use them (LATCHES' file reads, `tryLoadDefaultPlan`'s fallback for an
- * omitted `plan` — never reached since `github`/`readLedger` already resolve everything BLOCKERS
- * needs, the default `grepAnchorTrue`/`resolveOriginMainSha`) is stubbed out above or fails soft
- * to `undefined`/`[]`/`{}` on a path that cannot exist. A clearly-bogus sentinel, not `""`, so a
- * test run from a directory that happens to hold a real `state/`/`plan/` tree can never
- * accidentally pick up real files for a section this board discards anyway.
- */
+/** The sixth NEEDS-ME row source (W1-T1006): reuses status-board.ts's `buildStatusBoard`
+ *  verbatim for the blocked-PR derivation, never a second derivation over the ledger. `plan` is
+ *  deliberately omitted so `buildStatusBoard`'s own QUEUE HEAD/INBOX pass never runs a second,
+ *  duplicate batch of `github` calls this board doesn't need. `root`/`repoDir` are a deliberately
+ *  bogus sentinel, not `""`, so a test run from a real `state/`/`plan/` tree can't accidentally
+ *  pick up files for a section this board discards anyway. */
+// Why: the measured double-`prByRef`-call incident this plan-omission fixes —
+// docs/forensics/board.md#deriveboardstatussections
 const BLOCKED_PR_ROOT_SENTINEL = "/nonexistent-rmd-board-root";
 
 function deriveBoardStatusSections(
@@ -377,8 +244,7 @@ function safeQueueTruncated(github: BoardDeps["github"]): boolean {
   }
 }
 
-/** Read the live open half once. The resulting value is both a board-cache input and the exact
- * immutable list used by every open-PR consumer during the recompute it triggers. */
+/** Read the live open half once — both a board-cache input and the immutable list every open-PR consumer uses. */
 function readPrQueueIndex(github: BoardDeps["github"]): PrQueueIndexRead {
   if (!github.listOpenHeadBranches) {
     return { open: undefined, failed: false, truncated: false, failureReason: "unavailable" };
@@ -402,8 +268,7 @@ function readPrQueueIndex(github: BoardDeps["github"]): PrQueueIndexRead {
   };
 }
 
-/** Stable material fingerprint for GitHub-only queue changes. Body is included because anchored
- * task attribution is a queue field; title and head identity are rendered facts. */
+/** Stable material fingerprint for GitHub-only queue changes; body is included because anchored task attribution is a queue field. */
 function prQueueIndexFingerprint(index: PrQueueIndexRead): string {
   const rows = index.open === undefined
     ? "method-unavailable"
@@ -422,9 +287,8 @@ function planTaskFromOpenPr(pr: PrRef, plan: Plan): string | undefined {
   return branchTask && plan.byId.has(branchTask) ? branchTask : undefined;
 }
 
-/** Project every current open head from the gateway's existing open-half cache. The ledger join
- * is exact-head only: a push turns the row back into `not-yet-observed` until sweep writes a
- * disposition for that new commit. */
+/** Project every current open head; the ledger join is exact-head only, so a push reverts a row
+ *  to `not-yet-observed` until sweep writes a disposition for the new commit. */
 function derivePrQueue(
   deps: BoardDeps,
   lines: Array<Record<string, unknown>>,
@@ -502,27 +366,19 @@ function derivePrQueue(
   return { complete: true, rows };
 }
 
-/**
- * The board snapshot, reusing {@link projectPlan} verbatim for the merge-state — no new
- * derivation logic. W1-T155's full status taxonomy (in-flight `phase`, `startedAt`/`elapsedMs`,
- * `needsHuman`, `armedAwaitingMerge`) is carried on {@link StatusProjection} itself, so every
- * task gets it for free through that SAME pass-through. W1-T157 additionally joins each
- * projection with its plan `Task`'s `title`/`risk` and the ledger's `lastActivityAt` to produce
- * a {@link BoardRow} (see that interface's note for why the join lives here, not on the shared type).
- */
+/** The board snapshot, reusing {@link projectPlan} verbatim for the merge-state — no new
+ *  derivation logic. Joins each projection with its plan `Task`'s `title`/`risk` and the
+ *  ledger's `lastActivityAt` to produce a {@link BoardRow} (W1-T157; see that interface's note
+ *  for why the join lives here). */
 export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptions = {}): BoardSnapshot {
-  // READ THE LEDGER ONCE (W1-T184, extending W1-T187's same discipline): this function used
-  // to read+parse the ledger TWICE — once inside `projectPlan` (itself already amortized to a
-  // single read across every task, per that task's own header) and once more here for
-  // `lastActivityByTask`. `liveRunSpend` below needs the same lines a third time. Read once and
-  // hand `projectPlan` an overriding `readLedger` so its own internal amortization sees the SAME
-  // already-parsed array, rather than re-reading a file that cannot have changed mid-call.
+  // Read the ledger once (W1-T184) and hand projectPlan an overriding readLedger so its own
+  // internal amortization, and liveRunSpend below, see this SAME already-parsed array rather
+  // than each re-reading a file that cannot have changed mid-call.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const lines = readLedger(deps.ledgerPath);
   const prQueueIndex = options.prQueueIndex ?? readPrQueueIndex(deps.github);
-  // projectPlan also consumes the open index for task attribution. Override only that one method
-  // with this snapshot's captured answer so task rows and queue rows cannot observe two different
-  // GitHub moments inside one response (and no second gateway walk is introduced).
+  // Override only listOpenHeadBranches with this snapshot's captured answer, so task rows and
+  // queue rows can't observe two different GitHub moments in one response — no second walk.
   const snapshotGithub: BoardDeps["github"] =
     prQueueIndex.open === undefined
       ? deps.github
@@ -531,12 +387,9 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   const byId = projectPlan(deps.plan, effectiveDeps);
   const lastActivity = lastActivityByTask(lines);
   const tasks: BoardRow[] = [...byId.values()].map((p) => {
-    // Most projections' taskId is one of the plan's own tasks (projectPlan derives the bulk of
-    // its rows from deps.plan.tasks) — but W1-T283 added a SECOND source: a task-less
-    // escalation's own row, keyed by whatever id its ledger line named, which owns no plan
-    // Task to join title/risk from. Fall back to the escalation's own title (or the bare id)
-    // and the plan's default risk band rather than a non-null assertion that would crash the
-    // whole snapshot the first time such a row appeared.
+    // A task-less escalation's own row (W1-T283) owns no plan Task to join title/risk from.
+    // Fall back to its own title (or the bare id) and the default risk band rather than a
+    // non-null assertion that would crash the whole snapshot.
     const task = deps.plan.byId.get(p.taskId);
     const row: BoardRow = {
       ...p,
@@ -559,10 +412,9 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
     if (reviewState) row.reviewState = reviewState;
     return row;
   });
-  // ONE freshness/honesty payload for the header (fb-1784902052582-c124f9): the counts derive
-  // from the SAME `tasks` the rows render (never a second predicate that can disagree), and the
-  // merge tally is flagged UNKNOWN when the GitHub read that backs merge-state was unreachable —
-  // so "0 merged" is never rendered as fact during an outage.
+  // The header counts derive from these SAME tasks (never a second predicate that could
+  // disagree), and the merge tally is flagged unknown on a GitHub outage rather than reporting
+  // "0 merged" as fact (fb-1784902052582-c124f9).
   const github_unreachable = safeReadFailed(effectiveDeps.github);
   const now = deps.now ?? Date.now;
   const generatedAt = new Date().toISOString();
@@ -581,44 +433,27 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   };
 }
 
-/** One in-flight predicate, shared by the header tally AND the NOW rows so they can never
- * disagree (fb-1784902052582-c124f9): a task is "running" iff it carries a live run `phase` —
- * exactly what {@link renderNow} filters on. */
+/** One in-flight predicate, shared by the header tally and the NOW rows so they can never
+ *  disagree: a task is "running" iff it carries a live run `phase` (fb-1784902052582-c124f9). */
 export function isRunningRow(row: Pick<BoardRow, "phase">): boolean {
   return row.phase != null;
 }
 
 /**
- * One STOPPED predicate, shared by the header tally and (textually mirrored) by the GLANCE strip's
- * own client-side recompute in serve.ts's `renderGlanceStrip`.
+ * One STOPPED predicate, shared by the header tally and the GLANCE strip's client-side recompute.
  *
- * WHY `status === "blocked"` ALONE WAS WRONG, measured. On 2026-08-03 at 02:22:47Z the live board
- * carried 318 rows, of which ZERO had `status === "blocked"` while TWO — W1-T288 and W1-T290 —
- * carried `needsHuman: true` with open escalation issues (#1161, #1158). Both were genuinely
- * stopped; neither was counted. `blocked` read 0 at the exact moment two things needed a human.
- * `status` never becomes `"blocked"` on that path: W1-T288 sat at `queued` (its dispatch circuit
- * breaker tripped) and W1-T290 at `running` (its PR was open with a failed review), because
- * `deriveStatus` sets `needsHuman` as a SEPARATE field beside `status`, never by overwriting it
- * (status.ts's two writers, at the `resolveEscalation` guard and the task-less-escalation loop).
- *
- * WHY THIS DOES NOT DOUBLE-COUNT AGAINST `needs me`. `needsHuman` is set ONLY by those two writers
- * and ONLY when `resolveEscalation` reports an OPEN escalation that no later `run.start` has
- * superseded — never for a merely slow or queued task. So the sets nest: every `needs me` row is a
- * `blocked` row, and `blocked` additionally holds plan-declared `status: "blocked"` tasks that have
- * no issue to click. `needs me` answers "what can I act on", `blocked` answers "what is stopped".
- *
- * NOT the five-state row BADGE. `statusColorKey` (serve.ts) deliberately renders a needs-human row
- * as "needs human" rather than "blocked" — one badge per row, needs-human winning. That is a
- * rendering choice about a single row and is left exactly as it is; this is a COUNT over rows, and
- * a count of stopped work legitimately spans both badges.
+ * INVARIANT: `status === "blocked"` alone undercounts stopped work, because `needsHuman` is a
+ * separate field `deriveStatus` sets beside `status`, never by overwriting it — a task can be
+ * `queued`/`running` and still need a human. Every `needs me` row is a `blocked` row; `blocked`
+ * additionally holds plan-declared `status: "blocked"` tasks with no issue to click.
  */
+// Why: the 2026-08-03 zero-blocked-with-two-stopped incident — docs/forensics/board.md#isblockedrow
 export function isBlockedRow(row: Pick<BoardRow, "status" | "needsHuman">): boolean {
   return row.status === "blocked" || row.needsHuman === true;
 }
 
-/** The header count summary, computed from the SAME task set the rows render. `merged_known` is
- * false when the GitHub read backing merge-state was unreachable — the console then renders the
- * merged tally as "unknown", never `0` as fact (fb-1784902052582-c124f9). */
+/** The header count summary, computed from the same task set the rows render; `merged_known` is
+ *  false on a GitHub outage so the console renders "unknown", never `0` as fact. */
 export function summarizeCounts(
   tasks: Array<Pick<BoardRow, "phase" | "status" | "needsHuman">>,
   githubUnreachable: boolean,
@@ -634,34 +469,19 @@ export function summarizeCounts(
 }
 
 /**
- * LIVE ACCUMULATED SPEND/TURNS (W1-T184): sum `cost_usd`/`num_turns` over every
- * `implement.done`/`fix.done` line for `taskId` SINCE its latest `run.start` — mirroring {@link
- * deriveRunState}'s OWN reset rule (task_id + `run.start`/`verdict`, never `run_id`), not a
- * separate narrower one. A prior version of this scan required every summed line to carry the
- * SAME `run_id` as the `run.start` line — which silently dropped every cold fix-rung dispatch
- * (rmd sweep's `dispatchFix`/rmd fix's bootstrap, run-task.ts's `buildSweepEffects`): those stamp
- * their `fix.dispatch`/`fix.done` lines with the OUTER sweep/fix invocation's OWN pseudo `run_id`
- * ("SWEEP-<ts>"/"FIX-<ts>"), never the original run's — while still carrying the task's REAL
- * `task_id`, which is exactly what {@link deriveRunState} keys its own inFlight/phase scan on.
- * The result: a task correctly rendered `phase: "fix-rung"` (in flight) while its live spend
- * silently stayed frozen at the ORIGINAL run's total, invisible for the whole fix-rung duration —
- * the exact "tonight's post-merge burn was invisible on an open console" falsifier (two fix
- * rungs, ~1.24 USD/38 turns then ~1.30 USD/38 turns, ~2.54 USD/76 turns total, every line
- * present in the ledger as it happened). Deliberately narrow to those two step names (never a
- * blanket sum of every `cost_usd` field) — `budget.warning`/`verdict` lines log the RUNNING
- * TOTAL, not an incremental amount, so summing those too would double-count exactly the spend
- * `implement.done`/`fix.done` already report (verified against run-task.ts's own `log(...)` call
- * sites, not assumed). Returns undefined only when the task has no run currently in flight — the
- * phase/inFlight taxonomy above already guarantees one exists whenever this is called.
+ * Live accumulated spend/turns (W1-T184): sums `cost_usd`/`num_turns` over `implement.done`/
+ * `fix.done` lines for `taskId` since its latest `run.start` — the same reset rule
+ * {@link deriveRunState} uses (task_id + `run.start`/`verdict`, never `run_id`; a cold fix-rung
+ * dispatch stamps its own pseudo `run_id`, so keying on that instead silently freezes live
+ * spend). Narrow to these two step names: `budget.warning`/`verdict` log a running total, not an
+ * increment, so summing those too would double-count.
  */
+// Why: the frozen-live-spend incident this reset rule fixes — docs/forensics/board.md#liverunspend
 function liveRunSpend(lines: Array<Record<string, unknown>>, taskId: string): { spendUsd: number; turns: number; hasData: boolean } | undefined {
   let inFlight = false;
   let spendUsd = 0;
   let turns = 0;
-  // NO DATA YET vs a real zero (fb-1784902052582-c124f9): a run that has logged `run.start`
-  // but no `implement.done`/`fix.done` yet has ACCUMULATED nothing — its spend/turns are
-  // UNKNOWN, not `0`. `hasData` records whether any spend/turns line landed since the latest
-  // `run.start`, so the console can render "no data yet" instead of `$0.000 / 0 turns` as fact.
+  // Distinguishes "no data yet" from a real zero (fb-1784902052582-c124f9).
   let hasData = false;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
@@ -686,48 +506,26 @@ function liveRunSpend(lines: Array<Record<string, unknown>>, taskId: string): { 
 }
 
 /**
- * Memoized {@link computeBoardSnapshot} (W1-T184, the GET /v1/status recompute-cadence
- * criteria): a recompute (re-deriving every task's status — `projectPlan`'s O(tasks) `gh`/ledger
- * work) only happens when something the projection actually depends on has changed; an unchanged
- * input returns the SAME cached snapshot instantly, however many times `.get()` is called. This
- * is the fix for the 2026-07-20 latency outage (GET /v1/status at 58.7s/54.0s/34.5s, measured
- * with a ledger polled every {@link DEFAULT_POLL_MS} but never cached across requests). Because
- * every consumer here is synchronous (the real {@link GitHub} gateways shell `gh` via
- * `execFileSync`, which blocks Node's single event-loop thread for its whole duration), no two
- * recomputes can ever be truly concurrent — so this same memo also satisfies "N requests
- * arriving during a recompute window trigger ONE computation": by construction, every request
- * whose handler runs while the cache is still valid is a cache hit, and only ONE recompute ever
- * runs to produce the next one.
+ * Memoized {@link computeBoardSnapshot} (W1-T184): a recompute only happens when something the
+ * projection actually depends on has changed; an unchanged input returns the same cached
+ * snapshot instantly. Every consumer here is synchronous, so no two recomputes can ever overlap —
+ * this same memo also collapses a burst of concurrent requests into exactly one recompute.
  *
- * NOT ledger-length-only, and DELIBERATELY NOT time/TTL-based either: a clock-based expiry
- * either recomputes needlessly often (a TTL short enough to catch a GitHub-only change quickly
- * defeats the whole point across a burst of poll ticks spaced at or above that TTL) or too
- * rarely (a TTL long enough to survive a poll burst misses a GitHub-only change for that whole
- * window) — and either way makes the cache's behavior a function of WALL-CLOCK TIMING, which a
- * test has no reliable way to pin down. The other material inputs are the live {@link GitHub}
- * gateway's OBSERVABLE HEALTH — `readFailed()`/`readTruncated()` — and W1-T2718's current open-PR
- * index. Any of them can change with NO new ledger line at all: the gateway can recover/fail, or
- * a PR can open, close or receive a new head before sweep records it. So the cache key is
- * `(ledger line count, gateway health, material open-index fingerprint)`: unchanged on all three
- * -> cache hit, no matter how much time passes or how many ticks land; any change -> exactly one
- * fresh recompute. Tests prove both GitHub-only cases (health recovery and an open-index change,
- * ledger untouched throughout) deterministically, with no sleep.
+ * Deliberately not time/TTL-based: the cache key is `(ledger line count, gateway health,
+ * material open-index fingerprint)`. Any of the three can change with no new ledger line — the
+ * gateway can recover or fail, or a PR can open/close before sweep records it — so a TTL would
+ * either recompute needlessly often or miss a GitHub-only change for a whole window.
  */
+// Why: the 2026-07-20 uncached GET /v1/status latency outage this memo fixes —
+// docs/forensics/board.md#createboardsnapshotcache--boardsnapshotcache
 export interface BoardSnapshotCache {
   get(deps: BoardDeps): BoardSnapshot;
 }
 
-/**
- * `github.readFailed?.()` guarded (W1-T184 hardening): every OTHER {@link GitHub} method this
- * module calls into GitHub through is already wrapped where it matters (see
- * {@link decoratePrTitle}'s own note on why a defensive try/catch is load-bearing here, not
- * merely tidy) — this ONE call sat outside any guard, so a gateway that throws from
- * `readFailed()` itself (not merely a fail-soft null/false, the exact malformed-gateway shape
- * the RECENT feed's own throwing-gateway test already covers for `prByRef`) would blow up the
- * cache-key computation and 500 the WHOLE /v1/status request rather than degrade one field. Fails
- * CLOSED (treats an unreadable health signal as "GitHub is having a bad day") rather than open,
- * since the whole point of `readFailed()` is never to under-report an outage.
- */
+/** `github.readFailed?.()` guarded (W1-T184): a gateway that THROWS from `readFailed()` itself
+ *  (not merely fails soft) would otherwise blow up the cache-key computation and 500 the whole
+ *  /v1/status request. Fails closed — an unreadable health signal reads as an outage, never a
+ *  silent "GitHub is fine". */
 function safeReadFailed(github: BoardDeps["github"]): boolean {
   try {
     return github.readFailed?.() ?? false;
@@ -737,23 +535,12 @@ function safeReadFailed(github: BoardDeps["github"]): boolean {
 }
 
 /**
- * W1-T914: the row's `reviewState` — bound to {@link GitHub.reviewState} (status.ts's
- * combined-status read), never a second derivation. Returns `undefined` for a row with no PR at
- * all (nothing to render), so the caller only ever sets {@link BoardRow.reviewState} when there
- * is something to say.
- *
- * THE THREE FAIL-SOFT CASES, KEPT DISTINCT ON PURPOSE (this task's whole point):
- *   - the gateway doesn't implement {@link GitHub.reviewState} at all (an older fixture/gateway)
- *     -> `"none"`: honestly unresolved, never a guessed pending or green.
- *   - the method itself returned a real value (INCLUDING its own `"none"` and, W1-T2235, its
- *     own `"not-applicable"` for a terminal row) -> that value, verbatim — this is the ONLY arm
- *     that can produce `"pending"`/`"success"`/`"failure"`/`"not-applicable"`.
- *   - the method returned `undefined` (its own read failed) OR THREW -> `"unreadable"` when
- *     `readFailed()` confirms GitHub is having a bad day, `"none"` otherwise (a `prUrl` this
- *     gateway simply cannot resolve a head for, e.g. it fell out of the batched index) — the
- *     SAME failure/absence split {@link safeReadFailed} already draws for the header tally, so
- *     a genuine outage never renders as "no review posted" and a merely-unresolvable PR never
- *     renders as "GitHub is down".
+ * The row's `reviewState` (W1-T914), bound to {@link GitHub.reviewState} — never a second
+ * derivation. `undefined` for a row with no PR at all. Three fail-soft cases stay distinct: no
+ * `reviewState` method on the gateway -> `"none"` (honestly unresolved); the method returns a
+ * real value, including its own `"none"`/`"not-applicable"` -> that value verbatim; the method
+ * throws or returns `undefined` -> `"unreadable"` when {@link safeReadFailed} confirms an
+ * outage, `"none"` otherwise (a `prUrl` this gateway simply can't resolve).
  */
 export function deriveReviewState(
   prUrl: string | undefined,
@@ -771,30 +558,19 @@ export function deriveReviewState(
 }
 
 /**
- * W1-T2919 — THE CACHE KEY WAS A LINE COUNT, SO EVERY HEARTBEAT INVALIDATED IT.
+ * Ledger steps that never change a board row (W1-T2919), so the cache key can ignore them.
+ * `daemon.alive` and `board_gateway.fetch_bytes` append on every poll/fetch and previously
+ * invalidated the cache key every time, forcing a synchronous recompute roughly once a minute
+ * with nothing on the board actually changed.
  *
- * `createBoardSnapshotCache` keyed on `(ledger line count, gateway health, open-index
- * fingerprint)`. The daemon appends `daemon.alive` on EVERY poll and the board gateway appends
- * `board_gateway.fetch_bytes` on every fetch, so each of those changed the count, invalidated the
- * snapshot, and made the next console read recompute `projectPlan` synchronously on the
- * single-threaded HTTP server. In steady state the console froze for about a second at least once
- * a minute with nothing on the board having changed — the operator experiences a "live" console as
- * periodically stalled.
- *
- * DECISION-RELEVANT IS DEFINED BY EXCLUSION, AND THAT DIRECTION IS THE WHOLE SAFETY ARGUMENT.
- * An INCLUSION list — "these steps may change a board row" — defaults a step nobody has added to
- * it yet to IRRELEVANT, so the day a new board-affecting step lands the console silently serves a
- * STALE board and nothing reddens. The exclusion below defaults a new step to relevant: the cache
- * invalidates, the projection recomputes, and the only thing lost is an optimisation. A drifting
- * enumeration is this repo's own recurring defect; this is the one arrangement of it where drift
- * costs performance instead of correctness.
- *
- * BOTH ENTRIES ARE MEASURED, NOT ASSUMED. Neither step is READ anywhere in the projection path:
- * `daemon.alive` has zero occurrences in board.ts/status.ts's projection, and every
- * `board_gateway.fetch_bytes` occurrence is a `log(...)` write or a comment about one — checked
- * against a control (`run.start`, a step that IS read, returns 43 hits across the same two files).
- * A step may only join this set on that same evidence.
+ * INVARIANT: defined by exclusion, not inclusion. An inclusion list defaults a step nobody has
+ * added yet to "irrelevant", so a new board-affecting step would silently serve a stale board.
+ * This exclusion defaults a new step to relevant instead — the cache invalidates, and the only
+ * cost is a missed optimisation, never a correctness bug. A step may join this set only once
+ * measured to be unread anywhere in the projection path.
  */
+// Why: the once-a-minute cache-thrash incident this exclusion fixes —
+// docs/forensics/board.md#board_irrelevant_steps
 export const BOARD_IRRELEVANT_STEPS: ReadonlySet<string> = new Set(["daemon.alive", "board_gateway.fetch_bytes"]);
 
 /** The `step` of one already-parsed ledger row, or `undefined` when it carries none (a torn
@@ -810,40 +586,30 @@ export function isDecisionRelevantRow(row: Record<string, unknown>): boolean {
   return step === undefined || !BOARD_IRRELEVANT_STEPS.has(step);
 }
 
-/** The running fingerprint's state — folded incrementally so a cache HIT never re-walks the whole
- *  ledger, which is the cost the tail cursor above already exists to avoid. */
+/** The running fingerprint's state, folded incrementally so a cache hit never re-walks the ledger. */
 export interface DecisionFingerprint {
   /** How many rows have been folded in — the read cursor, not the count below. */
   readonly foldedUpTo: number;
-  /** The first row's identity as folded, so a ROTATION (rotateLedger keeps only the 200 newest
-   *  rows per step and archives the rest, so the live file SHRINKS or has its head replaced) is
-   *  detected and the fold restarted rather than continued against a different file. */
+  /** The first row's identity as folded, so a rotation (the live file shrinking, or its head
+   *  being replaced) is detected and the fold restarted rather than continued against a stale file. */
   readonly head: string | undefined;
   readonly hash: number;
-  /** How many DECISION-RELEVANT rows have been folded in. On an append-only log this alone is
-   *  sufficient to detect an append — which is exactly what the old raw line count did, and its
-   *  only defect was counting the irrelevant rows too. */
+  /** How many decision-relevant rows have been folded in — sufficient alone to detect an append
+   *  on this append-only log, the same signal the old raw line count gave without the noise. */
   readonly count: number;
 }
 
 export const EMPTY_DECISION_FINGERPRINT: DecisionFingerprint = { foldedUpTo: 0, head: undefined, hash: 0x811c9dc5, count: 0 };
 
-/** A row's cheap identity for folding: its step and timestamp. NOT the whole row — re-serialising
- *  every row on every request would reintroduce the per-request cost this cache exists to avoid,
- *  and on an APPEND-ONLY log the count already carries the append signal; this pair is what
- *  additionally distinguishes a rotation that happens to leave the count unchanged. */
+/** A row's cheap identity for folding: its step and timestamp, not the whole row — re-serialising
+ *  every row on every request would reintroduce the per-request cost this cache exists to avoid. */
 function rowIdentity(row: Record<string, unknown>): string {
   return String(row.step ?? "") + " " + String(row.ts ?? "");
 }
 
-/**
- * Fold `rows` into `prior`, walking only what is NEW.
- *
- * Restarts from zero when the log shrank or its head row changed — both mean rotation, and
- * continuing the fold across it would key the cache on a file that no longer exists. (The old
- * line-count key had the same exposure and no such check; this is strictly more careful, not a
- * regression it inherits.)
- */
+/** Fold `rows` into `prior`, walking only what is new. Restarts from zero when the log shrank or
+ *  its head row changed — both mean rotation, and continuing across it would key the cache on a
+ *  file that no longer exists. */
 export function foldDecisionFingerprint(
   rows: ReadonlyArray<Record<string, unknown>>,
   prior: DecisionFingerprint,
@@ -867,8 +633,7 @@ export function foldDecisionFingerprint(
   return { foldedUpTo: rows.length, head, hash: hash >>> 0, count };
 }
 
-/** The cache key this fingerprint contributes — count and hash together, so a change either side
- *  of a collision still invalidates. */
+/** The cache key this fingerprint contributes — count and hash together, so either side of a collision still invalidates. */
 export function decisionKey(fp: DecisionFingerprint): string {
   return `${fp.count}:${(fp.hash >>> 0).toString(16)}`;
 }
@@ -876,30 +641,21 @@ export function decisionKey(fp: DecisionFingerprint): string {
 export function createBoardSnapshotCache(): BoardSnapshotCache {
   let cached: { decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
   let lastGoodPrQueueAt: string | undefined;
-  // W1-T2919: folded across requests, so a cache HIT costs one pass over the lines appended since
-  // the last one — never a re-walk of the whole ledger.
+  // Folded across requests (W1-T2919), so a cache hit costs one pass over the lines appended
+  // since the last one, never a re-walk of the whole ledger.
   let fingerprint: DecisionFingerprint = EMPTY_DECISION_FINGERPRINT;
-  // ONE persistent tail cursor for this route's whole lifetime (never reconstructed per request,
-  // mirroring RecentActivityCache/the SSE stream's own `lastLineCount`) — see readLedgerTail's
-  // own doc for why this is the fix for a cache HIT still paying a full ledger re-read+re-parse
-  // just to compute `ledgerLen`, which degraded exactly like the 2026-07-20 GET /v1/status outage
-  // (58.7s/54.0s/34.5s, never improving) as the ledger grew without bound.
+  // One persistent tail cursor for this route's whole lifetime, never reconstructed per request —
+  // otherwise a cache hit would still pay a full ledger re-read just to compute the line count.
   const tail = createLedgerTailCache();
   return {
     get(deps: BoardDeps): BoardSnapshot {
       const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
-      // W1-T2919: the key is a fingerprint over the lines that CAN change a board row, not the
-      // raw count — `daemon.alive` and `board_gateway.fetch_bytes` move the count every minute
-      // and change nothing this snapshot renders.
       fingerprint = foldDecisionFingerprint(readLedger(deps.ledgerPath), fingerprint);
       const key = decisionKey(fingerprint);
-      // The queue's live identity can change before the sweep appends anything. Read the existing
-      // batched open half for the cache key, then hand this SAME capture into the recompute below.
+      // The queue's live identity can change before sweep appends anything. Read the batched
+      // open half once for the cache key, then hand this same capture to the recompute below.
       const prQueueIndex = readPrQueueIndex(deps.github);
       const prQueueIndexKey = prQueueIndexFingerprint(prQueueIndex);
-      // readFailed() is itself cheap/idempotent here: ghGateway's is a sticky flag read (no `gh`
-      // call), and buildBatchedGithub's own index() is already TTL-cached internally — neither
-      // gateway shells out again just because THIS check asked.
       const ghFailed = safeReadFailed(deps.github);
       const ghTruncated = safeQueueTruncated(deps.github);
       if (
@@ -909,9 +665,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
         cached.ghTruncated === ghTruncated &&
         cached.prQueueIndexKey === prQueueIndexKey
       ) return cached.snapshot;
-      // Hand computeBoardSnapshot the SAME already-resolved reader (and, on the default path, the
-      // SAME already-read `lines` array `readLedger` above just produced) rather than letting it
-      // re-resolve `deps.readLedger ?? readLedgerLines` on its own — one read, not two.
+      // Hand computeBoardSnapshot this same already-resolved reader — one read, not two.
       const snapshot = computeBoardSnapshot({ ...deps, readLedger }, { lastGoodPrQueueAt, prQueueIndex });
       if (snapshot.prQueue.complete) lastGoodPrQueueAt = snapshot.generated_at;
       cached = { decisionKey: key, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
@@ -925,34 +679,21 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-/**
- * `GET /v1/status`'s body — the memoized {@link BoardSnapshot} plus, when `lastSeen` is wired
- * (W1-T163), the caller token's own "since you last checked" recap. `recap`/`sinceCheckpoint` are
- * BOTH absent when `buildStatusRoute` is built with no `lastSeen` store at all, so a caller that
- * predates W1-T163 sees an UNCHANGED response shape — never a new required field to ignore.
- */
+/** `GET /v1/status`'s body — the memoized {@link BoardSnapshot} plus, when `lastSeen` is wired
+ *  (W1-T163), the caller token's own "since you last checked" recap. Both fields are absent when
+ *  no `lastSeen` store is wired, so a caller that predates W1-T163 sees an unchanged shape. */
 export interface StatusResponse extends BoardSnapshot {
-  /** Every recap-worthy event (lib/recap.ts) after this token's PRIOR marker — `[]` on this
-   *  token's first-ever view (there is no prior marker to recap FROM, so nothing renders rather
-   *  than the token's entire ledger history dumped as though it all happened "since" nothing). */
+  /** Every recap-worthy event after this token's prior marker; `[]` on a first-ever view (no
+   *  prior marker to recap from). */
   recap?: RecapEvent[];
-  /** This token's marker value BEFORE this request advanced it — the timestamp {@link recap} was
-   *  computed as-of. `undefined` on a first-ever view (no prior marker existed). */
+  /** This token's marker value before this request advanced it; `undefined` on a first-ever view. */
   sinceCheckpoint?: string;
 }
 
-/**
- * The request HEADER a caller sets to say "a HUMAN is looking at this response, mark it seen".
- * Absent ⇒ the request is an automatic poll and MUST NOT advance the marker.
- *
- * WHY A HEADER AND NOT `?ack=1`. A query param was this fix's first shape and it BROKE two shipped
- * first-paint tests: `test/serve.first-paint.test.ts` intercepts the poll with
- * `page.route("**' + '/v1/status")`, a Playwright glob that matches the bare path and NOT
- * `/v1/status?ack=1`, so the shell's very first fetch slipped past the interception those tests
- * exist to impose. Fourteen `/v1/status` sites across the suite are written against that same bare
- * path. A header carries the one bit without touching the URL, so the request line stays
- * byte-identical to what every existing caller, interception and hand-run `curl` already matches.
- */
+/** The request header a caller sets to say "a human is looking at this response, mark it seen".
+ *  Absent means an automatic poll, which must not advance the marker. A header, not a query
+ *  param, so the request URL stays byte-identical to what every existing caller matches. */
+// Why: the query-param design this header replaced — docs/forensics/board.md#recap_ack_header
 export const RECAP_ACK_HEADER = "x-rmd-recap-ack";
 
 /** Is this `GET /v1/status` an acknowledged view, or an automatic poll? Presence is the signal. */
@@ -962,35 +703,13 @@ export function requestAcknowledgesRecap(headerValue: string | string[] | undefi
 
 /**
  * GET /v1/status — the board snapshot, read-scoped, memoized per {@link createBoardSnapshotCache}.
- * W1-T163: when `lastSeen` (lib/last-seen.ts) is supplied, a view also reads the calling token's
- * own recap off its CURRENT marker and folds it into the response.
+ * When `lastSeen` (W1-T163) is supplied, a view also folds the calling token's own recap in.
  *
- * THE MARKER ADVANCES ONLY ON AN ACKNOWLEDGED VIEW, NOT ON EVERY REQUEST. W1-T163's
- * intent — "viewing the board advances the marker", so an immediate reload recaps nothing — is
- * correct and is PRESERVED: the shell sets {@link RECAP_ACK_HEADER} on exactly the one fetch per page load whose
- * recap it actually renders (its own `recapRendered` gate), so a reload still recaps nothing.
- *
- * WHAT WAS BROKEN. The advance was unconditional while the shell re-fetches this route every
- * `POLL_INTERVAL_MS` (3000ms, serve.ts). An automatic poll is indistinguishable from a human at
- * the wire, so a tab left open advanced its own marker every three seconds and its recap window
- * was permanently ~3s wide. Measured live 2026-08-03T02:22:47Z: `sinceCheckpoint`
- * 02:22:28.933Z against `generated_at` 02:22:47.152Z — an 18-second window — and `recap: []`.
- * The operator's actual use is a tab left open all evening, which is exactly the case that lost
- * every event it was built to show him.
- *
- * WHY AN OPT-IN REQUEST SIGNAL AND NOT THE ALTERNATIVES. A POST acknowledge would need WRITE scope, and the
- * operator's bookmark carries only the READ token — the one client that must be able to ack could
- * not. A second route duplicates the whole board handler and forces every existing caller to
- * choose. A client-side `document.hidden` check does not separate the two cases at all: a tab left
- * open while he is away is still visible. Advancing on `focus`/`visibilitychange` adds listeners
- * for an event a never-blurred tab never fires.
- *
- * THE DEFAULT IS DELIBERATELY "DO NOT ADVANCE". A caller that never acks accumulates recap rather
- * than losing it — too much history is a nuisance, none is the defect being fixed here.
- *
- * `lastSeen` is OPTIONAL and defaults to undefined (no recap at all) so a caller that hasn't wired
- * a store yet keeps today's exact response shape.
+ * INVARIANT: the marker advances only on an acknowledged view ({@link RECAP_ACK_HEADER} set),
+ * never on every automatic poll — an unconditional advance once shrank a tab left open all
+ * evening to an effectively permanent few-second recap window.
  */
+// Why: the recap-window incident this ack gate fixes — docs/forensics/board.md#buildstatusroute
 export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Route {
   const cache = createBoardSnapshotCache();
   return {
@@ -1019,73 +738,41 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
   };
 }
 
-// ── GET /v1/recent — the LEDGER-FIRST activity feed (W1-T184, W1-T153's RECENT section) ───────
+// ── GET /v1/recent — the ledger-first activity feed (W1-T184, W1-T153's RECENT section) ───────
 //
-// FIXTURE 1 (2026-07-20): RECENT used to be sourced from `computeBoardSnapshot`'s GitHub-derived
-// terminal status, so a batched-gateway outage (the W1-T181 ENOBUFS incident) rendered "no
-// recent outcomes yet" over a week containing ~100 merges — the ledger held every one of those
-// merges the entire time. FIXTURE 2 (2026-07-20): a post-merge burn (two fix rungs, ~2.54 USD /
-// 76 turns) was INVISIBLE on an open console even though every event was in the ledger as it
-// happened, because RECENT only ever showed a task's FINAL state, never its per-event spend.
-//
-// THE FIX: RECENT is now an activity FEED over the ledger's own event classes — merges/verdicts
-// (`verdict` lines), fix-rung outcomes (`fix.dispatch`/`fix.done`/`fix.exhausted`), escalations
-// (`escalation.issue_opened`), and spend checkpoints (`implement.done`) — never routed through
-// `deriveStatus`/`projectPlan`'s GitHub-gated precedence rungs at all. GitHub is consulted ONLY
-// to DECORATE a row that already carries a PR link (the PR's title, via the SAME `prByRef` every
-// other caller uses) — a failed/absent decoration marks the row `githubUnavailable`, it never
-// removes it (see {@link decoratePrTitle}).
+// An activity feed over the ledger's own event classes — merges/verdicts, fix-rung outcomes,
+// escalations, spend checkpoints — never routed through deriveStatus/projectPlan's GitHub-gated
+// rungs. GitHub only decorates a row that already carries a PR link; a failed decoration marks
+// it `githubUnavailable` and never removes it (see {@link decoratePrTitle}).
 
 export type RecentActivityVerb = "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started";
 
-/**
- * The steps that record the daemon's RESOLUTION of an operator-initiated console action (W1-T266).
- *
- * WHY THIS SET EXISTS AT ALL. On 2026-07-31 the operator clicked Run on W1-T152, a task he had
- * credited as merged an hour earlier. The whole pipeline worked: the marker was written, the daemon
- * consumed it inside a minute, and refused it correctly — `console.kick_refused` at 11:18:10.571Z,
- * `reason: "already merged — stale kick"`. He saw NOTHING, and reported the console as broken. The
- * refusal was written to the ledger and then dropped by the `!task` guard in
- * {@link computeRecentActivity}, because the daemon stamps its OWN pseudo-id (`task_id: "DAEMON"`)
- * on every line it emits. `/v1/drain/kick` returns 200 for "marker dropped", so the POST genuinely
- * succeeded — the activity feed is the ONLY surface that can carry this.
- *
- * WHY AN ALLOWLIST RATHER THAN REMOVING THE `!task` GUARD. That guard is load-bearing. Measured
- * over the ledger unioned across all 661 rotations (4,156,857 lines spanning 411 hours):
- * `SWEEP` 600,281 lines (1,461/hour), `DAEMON` 169,860 (413/hour), `SERVE` 93,907 (228/hour).
- * DAEMON's own traffic is 71% `dispatch.indeterminate` (120,984 lines) plus board-gateway fetch
- * telemetry every 15 seconds. Dropping the guard would bury the feed.
- *
- * WHY THESE TWO STEPS AND NOTHING ELSE. Both are the daemon's answer to a click a human made, and
- * both are rare enough to cost nothing: over the same 411 hours the union holds FOUR
- * `console.kick_refused` lines in total — about 0.01/hour. `console.kick_requested` is deliberately
- * excluded: the button already shows the operator their own click through its arm-then-confirm
- * state, so echoing the request adds a row without adding information. The missing information was
- * always the RESOLUTION.
- *
- * These lines carry the real task id in `line.task` (the daemon's `log` closure owns `task_id`), so
- * {@link computeRecentActivity} reads the id from there for exactly these steps.
- */
+/** The steps that record the daemon's resolution of an operator-initiated console action
+ *  (W1-T266) — an allowlist, not a removal of the `!task` guard every other pseudo-id line
+ *  ({@link computeRecentActivity}) still gets, since that housekeeping traffic would bury the
+ *  feed. These two lines carry the real task id in `line.task`, not `line.task_id`. */
+// Why: the 2026-07-31 silent-refusal incident this allowlist fixes —
+// docs/forensics/board.md#operator_action_steps
 const OPERATOR_ACTION_STEPS = new Set(["console.kick_refused", "console.kick_dispatched"]);
 
-/** One RECENT row: a single ledger EVENT (not a task's final state) — see this section's header. */
+/** One RECENT row: a single ledger event, not a task's final state — see this section's header. */
 export interface RecentActivityEntry {
   taskId: string;
-  /** The plan task's own title — RECENT names WHAT a row is, not just its id (2026-07-20 operator report). */
+  /** The plan task's own title, so RECENT names what a row is, not just its id. */
   title: string;
   verb: RecentActivityVerb;
   /** ISO-8601 `ts` of the originating ledger line — the feed's relative-timestamp source. */
   ts: string;
   /** The originating step's own outcome label (e.g. a `verdict` string, an escalation `class`). */
   detail?: string;
-  /** Present wherever the originating ledger line carries `cost_usd` (design note: "spend where the ledger has it"). */
+  /** Present wherever the originating ledger line carries `cost_usd`. */
   costUsd?: number;
   numTurns?: number;
   prNumber?: number;
   prUrl?: string;
-  /** GitHub DECORATION (never a gate) — the PR's title, present only when a read actually resolved it. */
+  /** GitHub decoration, never a gate — the PR's title, present only when a read resolved it. */
   prTitle?: string;
-  /** GitHub DECORATION attempted and FAILED for this row's own `prUrl` — the row still renders, ledger-only. */
+  /** GitHub decoration attempted and failed for this row's `prUrl` — the row still renders, ledger-only. */
   githubUnavailable?: true;
 }
 
@@ -1094,26 +781,21 @@ export interface RecentActivityEntry {
 const RECENT_ACTIVITY_HISTORY_CAP = 200;
 
 interface RecentActivityState {
-  /** How many ledger lines have already been scanned/classified — the SAME tail-cursor idiom
-   *  {@link buildStatusStream}'s `lastLineCount` already uses, reused here (not reinvented) so a
-   *  render never re-classifies (and never re-fetches GitHub for) a line it has already minted
-   *  an entry from — the "no full re-read/re-derive per render" performance criterion. */
+  /** How many ledger lines have already been scanned/classified, so a render never
+   *  re-classifies (or re-fetches GitHub for) a line it already minted an entry from. */
   scannedLines: number;
   /** Minted entries, oldest first, capped to {@link RECENT_ACTIVITY_HISTORY_CAP}. */
   entries: RecentActivityEntry[];
-  /** `run_id` -> its `pr.opened` PR url — carries a run's OWN PR forward onto later lines (e.g.
+  /** `run_id` -> its `pr.opened` PR url — carries a run's own PR forward onto later lines (e.g.
    *  `verdict`/`fix.done`) that name no `pr_url` of their own. */
   prByRun: Map<string, string>;
-  /** The FILE-LEVEL tail cursor {@link readLedgerTail} reads/writes — one layer below
-   *  `scannedLines`' line-level cursor. `scannedLines` alone stops this module from
-   *  re-decorating/re-classifying an already-seen LINE, but every call still paid a full
-   *  `readFileSync`+re-parse of the WHOLE ledger to produce that line array in the first place;
-   *  this is what makes even THAT read O(new bytes), not O(history) — see readLedgerTail's doc. */
+  /** The file-level tail cursor {@link readLedgerTail} reads/writes, one layer below
+   *  `scannedLines`' line-level cursor — this is what makes even a full re-scan O(new bytes),
+   *  not O(history). */
   ledgerTail: LedgerTailCache;
 }
 
-/** Opaque handle a caller holds across requests (one per `buildRecentRoute` instance, mirroring
- *  {@link BoardSnapshotCache}) — never reconstructed per render, or the tail-cursor is pointless. */
+/** Opaque handle a caller holds across requests, mirroring {@link BoardSnapshotCache} — never reconstructed per render. */
 export interface RecentActivityCache {
   /** @internal — read/written only by {@link computeRecentActivity}. */
   state: RecentActivityState;
@@ -1128,24 +810,15 @@ function prNumberFromUrl(url: string): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** GitHub DECORATION (never a gate, W1-T184's central rule): resolve `prUrl`'s title via the
- *  SAME `prByRef` every other precedence rung already calls — no new GitHub surface. A missing
- *  title (PR not found, or the gateway simply doesn't carry one) is silent (the row already
- *  renders fine ledger-only); a gateway that reports `readFailed()` marks the row explicitly,
- *  per W1-T181's marked-failure signal, so the operator sees "GitHub unreachable" rather than a
- *  row that merely looks a little sparser than usual. */
+/** GitHub decoration, never a gate (W1-T184): resolves `prUrl`'s title via the same `prByRef`
+ *  every other precedence rung calls. A missing title is silent (the row already renders fine
+ *  ledger-only); a gateway reporting `readFailed()` marks the row `githubUnavailable` instead
+ *  (W1-T181), so an outage reads as "GitHub unreachable" rather than a merely sparser row. */
 function decoratePrTitle(entry: RecentActivityEntry, deps: BoardDeps): RecentActivityEntry {
   if (!entry.prUrl) return entry;
-  // FAIL-SOFT BY CONSTRUCTION, not merely by convention: every real gateway's methods are
-  // documented fail-soft (null on error, never a throw), but this decoration is the ONE place
-  // in the codebase where a GitHub read result feeds straight into an HTTP response with no
-  // caller-side derivation layer to absorb a surprise throw. A defensive try/catch here is the
-  // difference between "one row degrades" and "the whole /v1/recent request 500s" — which would
-  // itself reproduce the empty-RECENT fixture this task exists to fix, just via a crash instead
-  // of an empty array. BOTH github calls below (`prByRef` AND `readFailed`) live inside this SAME
-  // try — an earlier version only guarded `prByRef`, so a gateway that throws from `readFailed()`
-  // itself (rather than merely reporting it, fail-soft) still 500'd the whole request and emptied
-  // the feed, uncaught past this function's own return.
+  // Both github calls live inside this one try: this is the one place a GitHub read feeds
+  // straight into an HTTP response with no caller-side layer to absorb a surprise throw, so a
+  // throw from either call degrades this one row instead of 500ing the whole request.
   try {
     const pr = deps.github.prByRef(entry.prUrl);
     if (pr?.title) return { ...entry, prTitle: pr.title };
@@ -1159,29 +832,17 @@ function decoratePrTitle(entry: RecentActivityEntry, deps: BoardDeps): RecentAct
 /** Longest refusal reason a RECENT row will carry. See {@link boundedReason}. */
 const MAX_REFUSAL_REASON_CHARS = 120;
 
-/**
- * A refusal `reason`, bounded so ONE row cannot swallow the feed (W1-T266).
- *
- * NOT a hypothetical bound. `assertRunnable` refuses a blocked task by echoing the task's whole
- * blocked note, and the live ledger holds a real example: the `console.kick_refused` for W1-T201
- * at 2026-07-31T11:31:40.551Z carries a reason of roughly four thousand characters — the entire
- * FILED diagnosis, prior proof text and falsifiers. Rendered inline that is not an activity row,
- * it is a wall, and the trap this feature has to avoid is a feed the operator stops reading.
- *
- * Truncation is VISIBLE (a trailing ellipsis), never silent: a reason that has been cut must not
- * read as a reason that was short.
- */
+/** A refusal `reason`, bounded so one row cannot swallow the feed (W1-T266). Truncation is
+ *  visible (a trailing ellipsis), never silent — a cut reason must not read as one that was short. */
+// Why: the real console.kick_refused reason this bound was sized against — docs/forensics/board.md#boundedreason
 function boundedReason(reason: unknown): string {
   if (typeof reason !== "string" || reason === "") return "no reason recorded";
   return reason.length <= MAX_REFUSAL_REASON_CHARS ? reason : `${reason.slice(0, MAX_REFUSAL_REASON_CHARS)}…`;
 }
 
-/**
- * The activity feed's own event classification — ONE ledger line in, at most ONE
- * {@link RecentActivityEntry} out (or `undefined` for every step name this feed does not
- * surface). Pure and separate from the stateful scan below so the mapping itself is easy to
- * audit against the design note's event-class list.
- */
+/** The activity feed's own event classification: one ledger line in, at most one
+ *  {@link RecentActivityEntry} out. Pure and separate from the stateful scan below, so the
+ *  mapping is easy to audit. */
 function classifyLine(
   line: Record<string, unknown>,
   taskId: string,
@@ -1222,27 +883,19 @@ function classifyLine(
   }
 }
 
-/**
- * The RECENT activity feed (W1-T184): tails `cache`'s already-scanned position, classifies only
- * the NEW ledger lines since then (see {@link RecentActivityState.scannedLines}), decorates each
- * fresh entry with GitHub ONCE at mint time (never re-decorated on a later render — the "avoid
- * re-fetching GitHub for old, already-seen lines" half of the performance criterion), and returns
- * the most recent `max`, newest first. GITHUB OUTAGE PARITY: every entry's verb/task/title/PR-
- * number/spend comes from the ledger alone; a `deps.github` that fails every call still returns
- * the IDENTICAL entries, just without `prTitle` (and with `githubUnavailable: true` wherever a
- * PR link exists) — GitHub decorates, it never gates (see {@link decoratePrTitle}).
- */
+/** The RECENT activity feed (W1-T184): classifies only the lines new since
+ *  {@link RecentActivityState.scannedLines}, decorates each fresh entry with GitHub once at mint
+ *  time, and returns the most recent `max`, newest first. A fully-failing `deps.github` still
+ *  returns identical entries, just without `prTitle` (see {@link decoratePrTitle}). */
 export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCache, max = 20): RecentActivityEntry[] {
   const state = cache.state;
-  // Default reader is INCREMENTAL (readLedgerTail, keyed off this SAME cache's own persistent
-  // ledgerTail cursor) — an unchanged ledger costs one statSync, and a grown one reads only the
-  // NEW bytes, never the whole file again. `state.scannedLines` below then further limits which
-  // of those (already cheaply-obtained) lines get re-classified/re-decorated — two independent
-  // tail cursors, one at the file-I/O layer, one at the classification layer.
+  // Two independent tail cursors: readLedgerTail (file I/O layer) reads only new bytes, and
+  // state.scannedLines (classification layer) further limits which of those lines get
+  // re-classified/re-decorated.
   const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, state.ledgerTail));
   const lines = readLedger(deps.ledgerPath);
-  // A shorter ledger than last scanned should never happen (append-only) -- degrade safely by
-  // rescanning from scratch rather than slicing with a negative/nonsensical offset.
+  // A shorter ledger than last scanned should never happen (append-only); degrade safely by
+  // rescanning from scratch rather than slicing with a negative offset.
   if (lines.length < state.scannedLines) {
     state.scannedLines = 0;
     state.entries = [];
@@ -1256,9 +909,8 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
     if (line.step === "pr.opened" && runId && typeof line.pr_url === "string") {
       state.prByRun.set(runId, line.pr_url);
     }
-    // W1-T266: for the two OPERATOR_ACTION_STEPS the daemon owns `task_id` (it stamps its own
-    // "DAEMON") and the task the human actually clicked is in `line.task`. Read the id from there
-    // for exactly those steps, so the refusal can name the task rather than the emitting lane.
+    // For OPERATOR_ACTION_STEPS the daemon stamps its own pseudo-id ("DAEMON") on `task_id`; the
+    // task the human actually clicked is in `line.task` instead (W1-T266).
     const isOperatorAction = typeof line.step === "string" && OPERATOR_ACTION_STEPS.has(line.step);
     const taskId = isOperatorAction && typeof line.task === "string"
       ? line.task
@@ -1267,11 +919,9 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
         : undefined;
     if (!taskId) continue;
     const task = deps.plan.byId.get(taskId);
-    // A pseudo-id (DAEMON/SWEEP/DRAIN/RETRO/inbox/…) is never a real plan task, and its lanes emit
-    // ~2,100 lines/hour of housekeeping — so it is dropped, EXCEPT for the operator-action steps
-    // above, which are ~0.01/hour and are the only reason a human ever looks at this feed after
-    // pressing a button. A refusal naming an id that is not in the plan ("unknown task id") must
-    // still render, so absence of a task is not itself disqualifying for those.
+    // A pseudo-id (DAEMON/SWEEP/…) is never a real plan task and its housekeeping volume would
+    // bury the feed, so it is dropped — except for the rare operator-action steps above, where a
+    // refusal must still render even if the id it names isn't in the plan.
     if (!task && !isOperatorAction) continue;
     const ts = typeof line.ts === "string" ? line.ts : new Date().toISOString();
     const prUrl = typeof line.pr_url === "string" ? line.pr_url : runId ? state.prByRun.get(runId) : undefined;
@@ -1284,8 +934,7 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
   return state.entries.slice(-max).reverse();
 }
 
-/** GET /v1/recent — the RECENT section's data, read-scoped. One {@link RecentActivityCache} per
- *  route instance (built once, reused by every request), mirroring {@link buildStatusRoute}. */
+/** GET /v1/recent — the RECENT section's data, read-scoped, one {@link RecentActivityCache} per route instance. */
 export function buildRecentRoute(deps: BoardDeps): Route {
   const cache = createRecentActivityCache();
   return {
@@ -1307,35 +956,25 @@ function taskIdsOf(lines: Array<Record<string, unknown>>): string[] {
   return [...seen];
 }
 
-/**
- * GET /v1/status/stream — one `status` SSE event per task whose derived StatusProjection
- * changes, read-scoped. Subscribing primes the "last known" line count to the CURRENT
- * ledger length, so only lines appended AFTER subscribe count as flips — a client that just
- * connected is never replayed the whole ledger history.
- */
+/** GET /v1/status/stream — one `status` SSE event per task whose projection changes. Subscribing
+ *  primes the line count to the current ledger length, so a client is never replayed history. */
 export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): SseRoute {
   return {
     path: "/v1/status/stream",
     scope: "read",
     subscribe: (send: SseSend) => {
-      // ONE persistent tail cursor for this connection's whole lifetime (never reconstructed per
-      // tick) — see readLedgerTail's own doc: an unchanged ledger between ticks (the common case
-      // at a 250ms cadence) costs one statSync, not a full re-read+re-parse of the whole file.
+      // One persistent tail cursor for this connection's lifetime: an unchanged ledger between
+      // ticks costs one statSync, not a full re-read of the file.
       const tail = createLedgerTailCache();
       const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
-      // Hand deriveStatus (via deriveForStream below) the SAME resolved reader, so its own
-      // internal ledger read reuses this tick's already-read `lines` instead of re-resolving
-      // `deps.readLedger ?? readLedgerLines` (a fresh full read) once per task, every tick.
       const effectiveDeps: BoardDeps = { ...deps, readLedger };
 
-      // LIVE SPEND/TURNS OVER SSE (W1-T184 fix): the SSE payload used to be a bare
-      // `deriveStatus(task, deps)` — never carrying `liveSpendUsd`/`liveTurns` at all, even
-      // though this is the client's PRIMARY low-latency transport (the REST poll is a 3s
-      // fallback/resync). Worse, the client's `ingestProjection` spreads each incoming SSE
-      // payload over the previously-known row, so an SSE flip with no spend fields silently
-      // WIPED whatever spend the last REST poll had shown — the "tonight's burn was invisible"
-      // fixture reproduced by the fix rung's OWN status-changing ledger lines. Enrich the SAME
-      // way `computeBoardSnapshot` does, off the SAME already-read `lines` this tick already has.
+      // Enrich with live spend/turns (W1-T184), the same way computeBoardSnapshot does, off the
+      // same already-read lines: the client's ingestProjection overwrites the previously-known
+      // row on every SSE flip, so a payload with no spend fields would silently wipe whatever
+      // the last REST poll had shown.
+      // Why: the "tonight's burn was invisible" fixture this enrichment fixes —
+      // docs/forensics/board.md#buildstatusstream--live-spend-over-sse
       const deriveForStream = (
         task: Task,
         lines: Array<Record<string, unknown>>,
@@ -1346,10 +985,9 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
         return spend ? { ...projection, liveSpendUsd: spend.spendUsd, liveTurns: spend.turns } : projection;
       };
 
-      // Prime `lastSent` with EVERY task's current (enriched) projection (the same baseline
-      // GET /v1/status would return right now), not an empty map — otherwise the first ledger
-      // line touching a task would always look like a "flip" even when deriveStatus lands
-      // on the exact state the client already has.
+      // Prime lastSent with every task's current projection, not an empty map — otherwise the
+      // first ledger line touching a task would always look like a flip, even when it lands on
+      // the state the client already has.
       const primingLines = readLedger(deps.ledgerPath);
       let lastLineCount = primingLines.length;
       const lastSent = new Map<string, string>(deps.plan.tasks.map((t) => [t.id, JSON.stringify(deriveForStream(t, primingLines))]));
@@ -1381,13 +1019,11 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
 
 // ── FIND-layer sort comparators (W1-T157) ──────────────────────────────────────────────────
 //
-// Pure comparators over {@link BoardRow}, one per sortable column (id, status, recency, age).
-// The operator console's inline script (src/lib/serve.ts) MIRRORS these for its own client-side
-// sort — that script is a bundler-less template literal and cannot import this module — so these
-// exported functions are the canonical, unit-tested SPEC of the ordering (test/board.test.ts),
-// kept structurally identical to the inline copies. Each takes an explicit direction so the
-// "a missing value always sorts LAST, in BOTH directions" rule (recency/age) is expressed HERE,
-// once, rather than by a caller that merely reverses the sorted array (which would flip it).
+// Pure comparators over BoardRow, one per sortable column. serve.ts's inline console script
+// mirrors these for its own client-side sort (it's a template literal and cannot import this
+// module), so these exported, unit-tested functions are the canonical spec of the ordering. Each
+// takes an explicit direction so "a missing value always sorts last, in both directions" is
+// expressed once, here, rather than by a caller reversing the sorted array (which would flip it).
 
 export type BoardSortKey = "id" | "status" | "recency" | "age";
 export type SortDir = "asc" | "desc";
@@ -1419,12 +1055,8 @@ export function compareByRecency(a: BoardRow, b: BoardRow, dir: SortDir): number
   return compareMissingLast(av, bv, dir);
 }
 
-/**
- * By `elapsedMs` (in-flight runs only). SIMPLIFICATION (house style — an explicit judgment call):
- * a task with no `elapsedMs` (not in flight) has no meaningful "age", so it sorts AFTER every task
- * that does — in BOTH directions — exactly like `recency`'s missing-value rule, never masquerading
- * as "very old" one way and "very new" the other.
- */
+/** By `elapsedMs` (in-flight runs only). A task not in flight has no meaningful age, so it sorts
+ *  after every task that does, in both directions — the same missing-value rule as `recency`. */
 export function compareByAge(a: BoardRow, b: BoardRow, dir: SortDir): number {
   return compareMissingLast(a.elapsedMs, b.elapsedMs, dir);
 }
