@@ -91,6 +91,7 @@
         "control-surface-fail-loud-stop-one-shot",
         "cost-separates-never-ran-from-ran-and-failed",
         "criteria-go-stale-on-relocation",
+        "ls-remote-grep-matches-the-sha-column",
         "no-live-operator-in-headless-worker",
         "probe-must-exercise-the-real-consuming-client",
         "reviewer-floor-casing-blind",
@@ -100,12 +101,15 @@
         "bin/rmd",
         "plan/tasks.yaml",
         "src/lib/dispatch-claim.ts",
+        "src/lib/drain.ts",
         "src/lib/fleet-control.ts",
         "src/lib/init.ts",
         "src/lib/isolation.ts",
         "src/lib/review.ts",
         "src/lib/serve.ts",
         "src/lib/service.ts",
+        "src/lib/status.ts",
+        "src/lib/sweep.ts",
         "src/run-task.ts"
       ]
     },
@@ -120,6 +124,7 @@
         "maxbudget-between-turns",
         "playwright-mcp-accessibility-tree",
         "playwright-run-code-unsafe-is-rce",
+        "proc-environ-is-an-exec-time-snapshot",
         "screenshots-are-token-expensive",
         "sdk-builtin-tools-are-the-boundary",
         "sdk-result-envelope",
@@ -143,6 +148,7 @@
         "src/lib/settings.ts",
         "src/lib/tier.ts",
         "src/lib/triage.ts",
+        "src/lib/worker-provider.ts",
         "src/lib/worker.ts",
         "src/run-task.ts"
       ]
@@ -213,6 +219,9 @@
       "platform.yaml"
     ],
     "diagnosis": [
+      "failures.yaml"
+    ],
+    "dispatch": [
       "failures.yaml"
     ],
     "docs": [
