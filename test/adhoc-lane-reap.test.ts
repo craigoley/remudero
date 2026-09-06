@@ -347,3 +347,47 @@ test("W1-T2950: an UNRESOLVABLE canonical path is undecidable — it keeps, and 
   );
   assert.doesNotMatch(git(["worktree", "list", "--porcelain"], repo), /^prunable/m);
 });
+
+test("W1-T2950: a canonicalized candidate with NO matching registration is still removed as terminal debris", () => {
+  // Criterion 4. The identity compare must not turn every unregistered directory into a keep —
+  // `unregistered` is a PROVEN no-match and stays terminal, and only `undecidable` rescues. Without
+  // this, the fix would trade a destroy-live-work bug for a reclaim-nothing one.
+  const { root, repo } = laneFixture();
+  const laneRoot = adhocLaneRoot(cfg(root));
+  const debris = join(laneRoot, "hole-1-debris");
+  mkdirSync(debris, { recursive: true }); // a real directory git has never registered
+  const old = (Date.now() - ADHOC_LANE_REAP_GRACE_MS * 2) / 1000;
+  utimesSync(debris, old, old);
+
+  const summary = reapStaleWorktrees(laneRoot, {
+    now: () => Date.now(),
+    isPidAlive: () => false,
+    branchIsLiveUpstream: () => false,
+  });
+  assert.ok(
+    summary.reaped.includes("hole-1-debris"),
+    `an unregistered, aged directory is still terminal — saw reaped=${JSON.stringify(summary.reaped)} kept=${JSON.stringify(summary.keptReasons)}`,
+  );
+  assert.ok(!existsSync(debris), "and it is actually gone");
+  assert.doesNotMatch(git(["worktree", "list", "--porcelain"], repo), /^prunable/m);
+});
+
+test("W1-T2950: canonical paths are ONLY comparison keys — removal and the ledger keep the original spelling", () => {
+  // Criterion 5. The canonical form must never leak into what is removed or reported: a summary
+  // naming a /private/var path for a lane the operator cut at /var is a different directory as far
+  // as any later reader is concerned.
+  const { root, repo, realLane } = aliasedLaneFixture();
+  const laneRoot = adhocLaneRoot(cfg(root));
+  const summary = reapStaleWorktrees(laneRoot, {
+    now: () => Date.now(),
+    isPidAlive: () => false,
+    branchIsLiveUpstream: () => false, // branch gone: the lane IS terminal, so removal runs
+  });
+  for (const name of summary.reaped) {
+    assert.doesNotMatch(name, /^\//, `the ledger records a lane NAME, never an absolute canonical path — saw ${name}`);
+  }
+  assert.ok(!existsSync(realLane), "the real lane was removed through its parent");
+  // THE PARENT CONTRACT: removal routed through git, so no admin record is stranded. That is the
+  // 2026-07-31 defect and #3981's fix, and the identity change must not have bypassed it.
+  assert.doesNotMatch(git(["worktree", "list", "--porcelain"], repo), /^prunable/m);
+});
