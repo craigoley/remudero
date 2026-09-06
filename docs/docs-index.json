@@ -152,6 +152,12 @@
       "grepHint": "account-usage.ts comment forensics"
     },
     {
+      "path": "docs/forensics/assertion-discrimination-check.md",
+      "title": "assertion-discrimination-check.mjs forensics",
+      "summary": "The measured forensics, incident narrative and design arguments removed from",
+      "grepHint": "assertion-discrimination-check.mjs forensics"
+    },
+    {
       "path": "docs/forensics/auto-triage.md",
       "title": "Forensics: src/lib/auto-triage.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/auto-triage.ts` used",
