@@ -723,11 +723,9 @@ export interface DaemonDeps {
    *  registry proposals, and nothing else — it does not push, merge, mint or file, and Rule 15
    *  stands. Best-effort, and a fired review never gates dispatch or changes a verdict. */
   runBoardReview?: () => Promise<BoardReviewReport>;
-  /** W1-T2971 — the daily CI-failure learning rung. Its own policy row and marker file, the same
-   *  two-bound decision function every cadence above shares, so none can drag another. Optional,
-   *  exactly like its siblings: a daemon passing neither behaves as it did before this rung
-   *  existed. WITHOUT THE PRODUCER LINE IN run-task.ts these are undefined and the whole rung is
-   *  dead code — the shape #1066 and #2952 each shipped, and W1-T2959 made three. */
+  /** W1-T2971 — the daily CI-failure learning rung: own policy row, own marker, the shared
+   *  two-bound decision. Optional like its siblings. WITHOUT run-task.ts's producer line these are
+   *  undefined and the rung is dead code — the shape #1066 and #2952 shipped, W1-T2959 making three. */
   checkCiLearningCadence?: () => MeasurementCadenceDecision;
   /** Run one ci-learning tick, returning counts this loop logs. Report-only: it drafts MARKED,
    *  PARKED shards and files nothing (Law 5). Best-effort — a throw is logged and the tick
@@ -1940,9 +1938,8 @@ export async function runDaemon(
       }
     }
 
-    // W1-T2971: the CI-failure learning rung. Same tick discipline and same best-effort contract as
-    // the two cadences above, on its own policy row and marker file. The rung DRAFTS marked, parked
-    // shards and files nothing, so a fire spends no budget and changes no plan record.
+    // W1-T2971: same tick discipline and best-effort contract as the two cadences above, on its own
+    // row and marker. DRAFTS marked, parked shards and files nothing — a fire spends no budget.
     if (deps.checkCiLearningCadence) {
       let ciLearningDecision: MeasurementCadenceDecision | undefined;
       try {
@@ -1955,8 +1952,7 @@ export async function runDaemon(
         if (deps.runCiLearningCadence) {
           try {
             const result = await deps.runCiLearningCadence();
-            // The UNREADABLE count rides the row: a fire that saw a partial window must never be
-            // read later as one that saw a clean, empty one (P48).
+            // The UNREADABLE count rides the row: a partial window must never read as a clean one (P48).
             log("ci_learning_cadence.ran", {
               status: result.status,
               drafts: result.draftCount,

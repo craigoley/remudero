@@ -1343,11 +1343,9 @@ export interface CiLearningMintResult {
   unreadableShas: string[];
 }
 
-/** One ci-learning fire's outcome as the DAEMON's poll loop logs it — counts, never the drafts
- *  themselves, because a ledger row is a fixed-width record and a backlog is unbounded. Lives here
- *  beside the rung rather than in daemon.ts, matching `MeasurableRuleSignature`'s neighbours and
- *  the `DigestCadenceRunResult`/`MeasurementCadenceRunResult` convention: the producer module owns
- *  its own result shape. */
+/** One ci-learning fire's outcome as the daemon's poll loop logs it — counts, never the drafts: a
+ *  ledger row is fixed-width and a backlog is not. Lives beside the rung, per the
+ *  `DigestCadenceRunResult`/`MeasurementCadenceRunResult` convention that the producer owns it. */
 export interface CiLearningCadenceRunResult {
   status: CiLearningMintResult["status"];
   draftCount: number;

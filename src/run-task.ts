@@ -24998,19 +24998,15 @@ function memoiseBoardSnapshotByRepo(
 /**
  * W1-T2971: the CI-failure learning rung's PRODUCER, mirroring {@link buildDigestCadenceDaemonHooks}.
  *
- * THE HALF W1-T2959 DID NOT SHIP. That task built the policy row, the marker, the two-bound
- * decision and the minter, and every unit of it is tested and green — but nothing called
- * `ciLearningCadenceCheck` except the CLI verb, so the "daily" loop ran only when a person typed
- * it. This is the pair that puts it on the daemon's own tick.
+ * THE HALF W1-T2959 DID NOT SHIP: it built the row, marker, decision and minter, all tested and
+ * green, but nothing called `ciLearningCadenceCheck` except the CLI verb — so the "daily" loop ran
+ * only by hand. This pair puts it on the daemon's tick.
  *
- * RECORD THE FIRE FIRST, the same crash-safety discipline
- * {@link buildMeasurementCadenceDaemonHooks}'s `run` states: if the body throws or the process
- * dies mid-run, the marker has already advanced, so a crash-looping daemon costs one skipped
- * period rather than re-firing the rung on every poll forever.
+ * RECORD THE FIRE FIRST, {@link buildMeasurementCadenceDaemonHooks}'s stated crash-safety
+ * discipline: a body that throws costs one skipped period, not a re-fire on every poll forever.
  *
- * REPORT-ONLY. The run drafts MARKED, PARKED shards (`author_class: machine`, `verify: human`) and
- * writes no plan record: whether the rung files is W1-T2968's question, deliberately not reopened
- * here so the wiring can land without re-litigating the Law 5 argument.
+ * REPORT-ONLY: drafts MARKED, PARKED shards and writes no plan record. Whether the rung files is
+ * W1-T2968's question, not reopened here.
  */
 export function buildCiLearningDaemonHooks(deps: {
   config?: Config;
