@@ -80,6 +80,13 @@
     anyway and the tick completed. Without it a daemon that crashes inside the rung re-fires it
     every poll forever.
   note: |
+    A PLAN-ONLY FILING PULL REQUEST MUST CARRY A BARE `## Acceptance` HEADER AND NO
+    `Remudero-Task:` TRAILER. `acceptance-author-gate` fails CLOSED on a body with neither
+    ("review has nothing to resolve criteria from"), and the trailer is the wrong half of the
+    OR: W1-T413 credits a merged plan-only PR carrying one as the named task's implementation.
+    Both filings of this shard omitted the header and reddened that gate; recorded here because
+    the shard is what a later filer reads.
+
     RENUMBERED FROM W1-T2967 TO W1-T2971 on 2026-09-06, minutes after filing. #4295 filed a
     DIFFERENT W1-T2967 ("one whole-file proof cannot answer several criteria") and merged first
     at 0d7776e9; this shard merged second at c24fad98, so main briefly carried two records
