@@ -1,58 +1,24 @@
 #!/usr/bin/env node
-// scripts/diff-class.mjs — W1-T2428: the fast-lane classifier.
+// scripts/diff-class.mjs — W1-T2428: classifies a diff as PLAN_ONLY, DOCS_ONLY, or SOURCE, so
+// `ci` and `coverage-ratchet` can skip suites that class cannot fail (no `src/**` or `test/**`
+// file moved). The class comes from `isInPlanScope` (src/lib/plan-architect.ts), the same
+// predicate the reviewer's sweep uses (W1-T205) — never a second scope-rule implementation.
 //
-// A plan-only or docs-only diff cannot fail `ci`'s Typecheck/Test or `coverage-ratchet`'s
-// coverage collection — no `src/**` or `test/**` file moved. Measured 2026-08-27: plan-only is
-// 36 of 60 recent merges (60%) and 58.7% of CI spend, at a mean 1,873s each (`ci` 685s +
-// `coverage-ratchet` 1,187s). This script answers ONE question — "what class is this diff?" —
-// so a CI job can skip the suites that cannot fail on it, WITHOUT ever skipping the job itself
-// (see plan/tasks.d/W1-T2428-*.yaml's Q4: a job that stops REGISTERING deadlocks merge forever;
-// the fix is always a step-level bash guard inside a job that still runs).
+// THREE CLASSES: PLAN_ONLY (every file in plan scope), DOCS_ONLY (every file in plan scope or
+// under `docs/`), SOURCE (anything else, including an empty or unreadable list). `classify()`
+// never throws and fails closed to SOURCE, never PLAN_ONLY, on anything undeterminable.
 //
-// THE CLASS COMES FROM THE REAL PREDICATE, NEVER A FOURTH REIMPLEMENTATION. `isInPlanScope`
-// (src/lib/plan-architect.ts) is already canonical — it is what the sweep computes `planOnly`
-// from for the reviewer (W1-T205), and its own doc says it is the WIDEST correct definition of
-// plan scope (it includes `docs/ORIENTATION.md`, regenerated FROM `MASTER-PLAN.md` by `rmd
-// retro`). This script imports that function directly; a bash reimplementation of scope rules
-// would be a fourth predicate, drifting from the three (`isInPlanScope`, `nonPlanFilesInDiff`,
-// `TASKS_SHARD_PATH_RE`) that already disagree with each other today (see the task's rationale,
-// Q1) — one more disagreeing definition is not the fix.
+// USAGE: `--changed-files <path>` classifies a newline-separated file list (`-` reads stdin);
+// `--list-plan-reading-suites` prints the suites `planReadingSuiteFiles` selects; W1-T2680's
+// `--list-census-suites --changed-files <path>` prints the suites `censusSuiteFiles` selects —
+// suites a `git grep -l <symbol>` caller sweep cannot reach, because a census names none of the
+// symbols a diff touches.
 //
-// THREE CLASSES:
-//   PLAN_ONLY — every changed file is in plan scope (`isInPlanScope`).
-//   DOCS_ONLY — every changed file is EITHER in plan scope OR under `docs/`.
-//   SOURCE    — anything else, including an empty or undeterminable file list. A diff carrying
-//               ONE path outside plan-or-docs scope is SOURCE, whatever else it also carries —
-//               there is no "mostly plan" class.
+// OUTPUT: classify mode prints one class token to stdout (reason on stderr) and always exits 0.
+// Both --list-* modes print one test path per line and, on an enumeration error, print NOTHING and
+// exit 1 — a caller reading zero lines from a nonzero exit must fail closed and run the full suite.
 //
-// FAIL CLOSED. `classify()` never throws: an unreadable file list, an internal error, or an
-// empty file list all resolve to SOURCE (never PLAN_ONLY — an empty list read as "nothing to
-// check" would be catastrophically wrong on a truncated `git diff`/paginated file list). The CLI
-// (`main`) mirrors this at the process boundary: it always exits 0 and always prints exactly one
-// recognized class token on stdout, so a caller's bash guard never has to special-case a crash.
-//
-// USAGE (CI, via `node --import tsx scripts/diff-class.mjs`, the same tsx binding
-// scripts/acceptance-author-gate.mjs uses for a `.mjs` file importing a `.ts` module):
-//   node --import tsx scripts/diff-class.mjs --changed-files <path>   (path to a newline-
-//     separated file list, e.g. `git diff --name-only <base>...HEAD > changed-files.txt`; `-`
-//     reads the list from stdin)
-//   node --import tsx scripts/diff-class.mjs --list-plan-reading-suites   (prints, one per line,
-//     every test/**/*.test.ts file the PLAN-ONLY/DOCS-ONLY fast lane must still run — see
-//     `planReadingSuiteFiles` below)
-//   node --import tsx scripts/diff-class.mjs --list-census-suites --changed-files <path>
-//     (W1-T2680: prints every suite that WALKS a population the changed files belong to, or READS
-//     one of them as text — the suites a `git grep -l <symbol>` caller sweep cannot reach BY
-//     CONSTRUCTION, because a census names none of the symbols any particular diff touches)
-//
-// OUTPUT (classify mode): stdout carries EXACTLY one line — the class token (`PLAN_ONLY`,
-// `DOCS_ONLY`, or `SOURCE`). The human-readable reason goes to stderr, so a bash guard can do
-// `CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files f.txt)"` and get a clean
-// value with nothing else to strip. Exit code is always 0 in this mode.
-//
-// OUTPUT (--list-plan-reading-suites mode): stdout carries one repo-relative test file path per
-// line, sorted. On any enumeration error, prints NOTHING and exits 1 — a caller reading zero
-// lines from a nonzero exit must fail closed (run the FULL suite), never trust an empty list as
-// "no suites matter".
+// Why: docs/forensics/diff-class.md#module-header (CI-spend measurement, scope-predicate rationale).
 
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
@@ -60,11 +26,10 @@ import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { isInPlanScope, outOfPlanScopeFiles } from "../src/lib/plan-architect.ts";
 
-/** Repo root, derived from this script's own location — never a cwd assumption (same convention
- *  as scripts/acceptance-author-gate.mjs's REPO_ROOT). */
+/** Repo root, derived from this script's own location — never a cwd assumption. */
 export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** The three recognized class tokens, exported so the test/CLI never hand-copy the literal set. */
+/** The three recognized class tokens, exported so callers never hand-copy the literal set. */
 export const CLASSES = Object.freeze({
   PLAN_ONLY: "PLAN_ONLY",
   DOCS_ONLY: "DOCS_ONLY",
@@ -72,21 +37,17 @@ export const CLASSES = Object.freeze({
 });
 
 /**
- * Whether a repo-relative path is a "docs" path for the DOCS_ONLY class — deliberately narrow
- * (the `docs/` directory only), never a `.md` extension match: `README.md`/`MASTER-PLAN.md` at
- * repo root already have their own homes (plan scope covers `MASTER-PLAN.md`; a bare `.md` glob
- * would also swallow e.g. a `src/`-adjacent README a docs-only diff should NOT be classified
- * around).
+ * Whether a repo-relative path counts as "docs" for DOCS_ONLY — the `docs/` prefix only, never a
+ * bare `.md` match: `MASTER-PLAN.md` is already plan scope, and a bare extension match would also
+ * swallow a `src/`-adjacent README a docs-only diff should not be classified around.
  */
 export function isDocsPath(path) {
   return path.startsWith("docs/");
 }
 
 /**
- * Parse a changed-file list out of raw text — one path per line, blank lines and surrounding
- * whitespace ignored. This is the shape `git diff --name-only <base>...HEAD` already produces
- * (the same convention every other diff-scoped job in ci.yml uses, e.g. mutation-ratchet's
- * `changed-files.txt`).
+ * Parses a changed-file list — one path per line, blanks ignored. Matches `git diff --name-only
+ * <base>...HEAD`'s own output shape, the convention every diff-scoped ci.yml job uses.
  */
 export function parseChangedFiles(rawText) {
   if (typeof rawText !== "string") return [];
@@ -97,9 +58,8 @@ export function parseChangedFiles(rawText) {
 }
 
 /**
- * Classify a changed-file list. NEVER THROWS — see the module header's FAIL CLOSED section.
- * `files` should already be a parsed array (see `parseChangedFiles`); a non-array, `null`, or
- * `undefined` input is itself an "undeterminable" case and resolves to SOURCE.
+ * Classifies a changed-file list. Never throws: a non-array, `null`/`undefined`, or empty input
+ * is itself an "undeterminable" case and resolves to SOURCE — see the module header.
  * @param {unknown} files
  * @returns {{ class: string, reason: string }}
  */
@@ -143,22 +103,18 @@ export function classify(files) {
 }
 
 /**
- * Whether `content` (a test file's raw source) carries a repo-root constant — the pattern every
- * suite reading a REPO file (as opposed to a per-test tmpdir fixture) declares, per this task's
- * rationale: `const REPO_ROOT = join(__dirname, "..")` (test/plan-proposals.test.ts's own shape)
- * or an inline `join(__dirname, "..", ...)` with no intermediate variable.
+ * Whether `content` (a test file's source) reads a repo-root path — the `REPO_ROOT` constant, or
+ * an inline `join(__dirname, "..")`. Exported for its own unit tests below; `planReadingSuiteFiles`
+ * no longer gates on it (see that function's doc).
  */
 export function hasRepoRootConstant(content) {
   return /\bREPO_ROOT\b/.test(content) || /join\(\s*__dirname\s*,/.test(content);
 }
 
 /**
- * Whether `content` names a plan-or-docs repo path — `plan/`, `docs/`, or `MASTER-PLAN.md`,
- * quoted as a string literal. Also recognizes the common path-join spelling
- * `join(REPO_ROOT, "docs", ...)` / `join(REPO_ROOT, "plan", ...)`: the old literal-prefix
- * predicate missed that form because `"docs"` is its own quoted segment, not a string beginning
- * `docs/`. This is still deliberately over-inclusive relative to "reads it": running one extra
- * harmless suite is cheaper than silently dropping a suite that CAN fail.
+ * Whether `content` names a plan or docs path — `plan/`, `docs/`, or `MASTER-PLAN.md` as a string
+ * literal, including the `join(REPO_ROOT, "docs", ...)` spelling. Deliberately over-inclusive:
+ * running one extra harmless suite is cheaper than silently dropping one that can fail.
  */
 export function namesPlanOrDocsPath(content) {
   return (
@@ -169,17 +125,13 @@ export function namesPlanOrDocsPath(content) {
 }
 
 /**
- * THE 94-FILE PLAN-READING SET, ENUMERATED FROM THE TREE — never a hand-copied list (acceptance
- * criterion 5). Walks `test/**\/*.test.ts` and returns every file (repo-relative, POSIX
- * separators, sorted) that BOTH reads a repo-root file (`hasRepoRootConstant`) AND names a plan
- * or docs path (`namesPlanOrDocsPath`) — the intersection the task's rationale (Q1) measures at
- * 94 files, with two controls proven in test/fast-lane-classifier.test.ts: `plan-proposals.test.ts`
- * (reads `MASTER-PLAN.md` off `REPO_ROOT`) is IN the intersection; `sweep.test.ts` (a pure-source
- * suite with no repo-root constant at all) is NOT.
- *
- * Directory-only, not recursive into `test/helpers`/`test/setup` — those are shared fixtures, not
- * suites `npm test`'s own `test/**\/*.test.ts` glob would select either way.
+ * The plan-reading suite set, enumerated from the tree at run time — never a hand-copied list.
+ * Directory-only: `test/helpers`/`test/setup` are shared fixtures, not suites `npm test`'s glob
+ * selects either way. Qualifies by `namesPlanOrDocsPath(content)` alone — `hasRepoRootConstant`
+ * used to gate this too but was dropped: MEASURED, it excluded six suites that can fail on a
+ * plan-only diff, and no other source-shape spelling separated the set either.
  */
+// Why: docs/forensics/diff-class.md#planreadingsuitefiles.
 export function planReadingSuiteFiles(root = REPO_ROOT) {
   const testDir = join(root, "test");
   const out = [];
@@ -187,27 +139,6 @@ export function planReadingSuiteFiles(root = REPO_ROOT) {
     if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
     const abs = join(testDir, entry.name);
     const content = readFileSync(abs, "utf8");
-    // W1-T2428 (the `ci` half): NAMING A PLAN/DOCS PATH IS THE WHOLE PREDICATE. The
-    // `hasRepoRootConstant(content) &&` conjunct that stood here was MEASURED under-inclusive and
-    // is removed rather than widened, because no source-shape spelling separates the set:
-    //
-    //   With a malformed plan staged (a shard duplicating an existing id) and the 106 suites this
-    //   conjunct EXCLUDED run to completion — 2,425 tests, every chunk carrying its own `# tests`
-    //   summary, against a baseline of 0 failures on a WELL-FORMED plan — SIX suite files failed:
-    //   credited-proof-visibility-seam-defaults, learnings-injection-w1t6, merged-claim-audit,
-    //   mounts-wiring, retro, task-linter. Every one of them can fail on a plan-only diff and
-    //   every one was being skipped.
-    //
-    //   WIDENING THE CONJUNCT DOES NOT FIX IT. Four of the six reach the repo root through
-    //   `new URL(..., import.meta.url)` rather than a `REPO_ROOT` constant, so adding that idiom
-    //   recovers four — but `credited-proof-visibility-seam-defaults` carries NO root-reaching
-    //   idiom at all and still fails, and `sweep.test.ts` carries the SAME `import.meta.url` idiom
-    //   while genuinely not caring about the plan. The spelling and the property are independent.
-    //
-    // DROPPING THE CONJUNCT CAPTURES 6 OF 6 and costs 158 suites of 802 — the lane still skips
-    // 80%. That trade is the direction this function's own doc already names: over-including runs
-    // one extra harmless suite, under-including silently drops one that CAN fail, "which is the
-    // failure mode this whole classifier exists to avoid".
     if (namesPlanOrDocsPath(content)) {
       out.push(relative(root, abs).split(sep).join("/"));
     }
@@ -219,9 +150,8 @@ export function planReadingSuiteFiles(root = REPO_ROOT) {
 // ── W1-T2680: THE SUITES A `git grep <symbol>` SWEEP CANNOT REACH ─────────────────────────────
 
 /**
- * The directory prefixes a changed file can belong to, as a suite would NAME them. A suite is
- * relevant to a diff only if it reaches the AREA the diff touched — without this, every census in
- * the repo answers every question, which is the same as no answer (this task's own falsifier).
+ * The directory-prefix areas (`src/`, `test/`, `src/lib/`, ...) a changed file belongs to — the
+ * unit `censusSuiteFiles` matches a candidate suite against.
  */
 export function changedAreas(files) {
   const areas = new Set();
@@ -235,40 +165,12 @@ export function changedAreas(files) {
 }
 
 /**
- * Whether `content` ENUMERATES A POPULATION of repo files — the shape that makes a suite
- * unreachable from any symbol a diff changes, because it names none of them.
- *
- * `execFileSync("git", ...)` ALONE IS NOT THIS, and that distinction is the whole difficulty.
- * test/serve.test.ts shells git six times — `init`, `config`, `add`, `commit` — against a
- * per-test tmpdir fixture, and it is an ordinary suite this verb must NOT list. What separates a
- * census is enumeration OF THE TREE: `ls-files`, a directory read, or a real glob call.
- *
- * A BARE `src/**`-SHAPED STRING IS NOT ENUMERATION EITHER, and a clause matching one was tried and
- * REMOVED: MEASURED, it fired on `a-printed-remedy-is-never-applied.test.ts` for the string
- * a `node --test` command string carrying a recursive test glob — a COMMAND that suite asserts
- * about, not a population it walks. (Written as prose deliberately: a star-star-slash inside a
- * block comment CLOSES it, which is how this very comment first broke the file.) Every
- * genuine walker in this repo reaches the tree through one of the three calls above, so the glob
- * clause bought nothing and cost a false positive on every `src/` change.
+ * `content` reduced to text where naming an area means something: relative path literals
+ * (`"../src/lib/x.js"`, which are imports) and comments (which are prose) both stripped. Both
+ * subtractions were measured necessary — without them, a bare `content.includes("src/")` also
+ * matches every file's own imports and any mention inside a doc comment.
  */
-/**
- * `content` reduced to the text where NAMING AN AREA MEANS SOMETHING: relative path literals
- * (`"../src/lib/x.js"`) and comments both removed.
- *
- * THIS IS WHAT KEEPS ARM (a) FROM ANSWERING "THE WHOLE TEST DIRECTORY", and both halves were
- * MEASURED necessary against the real tree of 1,084 suites, for a `src/lib/` change:
- *
- *   raw `content.includes("src/")`            128 of 1,084 — every file imports from `../src/...`
- *   minus relative path literals               82
- *   minus comments as well                     54
- *
- * A census names its population as a BARE path in CODE — `join(REPO_ROOT, "src")`, `"src/*.ts"`
- * passed to `git ls-files`. The `../` spelling is an import, and a `src/lib/x.ts` inside a doc
- * comment is prose: `a-printed-remedy-is-never-applied.test.ts` and
- * `a-count-assertion-names-its-members.test.ts` were both listed for every `src/` change on the
- * strength of a comment alone, which is the "hands you the whole directory" failure this task's
- * own falsifier names.
- */
+// Why: docs/forensics/diff-class.md#withoutrelativepathliterals.
 export function withoutRelativePathLiterals(content) {
   return content
     .replace(/\/\*[\s\S]*?\*\//g, " ")
@@ -276,6 +178,13 @@ export function withoutRelativePathLiterals(content) {
     .replace(/["'`](?:\.\.\/)+[^"'`]*["'`]/g, '""');
 }
 
+/**
+ * Whether `content` enumerates a population of repo files — `ls-files`, a directory read, or a
+ * real glob call; shelling `git` for something else (e.g. a tmpdir fixture's `init`/`add`/`commit`)
+ * is not this. A bare `src/**`-shaped string was tried as a fourth signal and removed: it
+ * false-positived on a suite asserting about a `node --test` command string, not a population walked.
+ */
+// Why: docs/forensics/diff-class.md#enumeratespopulation-the-removed-glob-clause.
 export function enumeratesPopulation(content) {
   return (
     /\bls-files\b/.test(content) ||
@@ -285,26 +194,17 @@ export function enumeratesPopulation(content) {
 }
 
 /**
- * Every repo-relative source path this test file READS AS TEXT — `readFileSync` over a path
- * spelled inside the file. This is the SECOND census shape and it is not optional: acceptance
- * criterion 2 names test/mounts-wiring.test.ts, which enumerates NOTHING. It reads
- * `../src/run-task.ts` as a string and asserts on its SHAPE, so a diff that changes that file's
- * shape breaks it while naming no symbol the suite mentions. Measured on this repo the same day
- * this verb was built: two suites of exactly this shape (console-stopped-counts, decision-summary)
- * went red in CI on a diff whose prescribed caller sweep had run green over 45 files.
+ * Every repo-relative source path a test file reads AS TEXT — a path spelled inside a
+ * `readFileSync` call. This is the second census shape: a suite can assert on a changed file's
+ * shape (e.g. test/mounts-wiring.test.ts) while naming no symbol it mentions.
  */
+// Why: docs/forensics/diff-class.md#sourcetextpathsread.
 export function sourceTextPathsRead(content) {
   const paths = new Set();
-  // ONLY paths spelled INSIDE a readFileSync call. Collecting every path-shaped literal in the
-  // file and merely REQUIRING a readFileSync somewhere was tried and MEASURED wrong: it listed
-  // test/sweep.test.ts — the negative control this task's criterion 3 names — because that suite
-  // carries `"src/config.ts"` and `"src/lib/widget.ts"` as FIXTURE DATA, fake paths fed to a
-  // conflict-resolution helper, and never reads either. A path in a fixture is an argument to the
-  // code under test; a path in `readFileSync` is a dependency on the tree. Only the second is this.
+  // Only paths spelled INSIDE a readFileSync call — a fixture string elsewhere doesn't count.
   const CALL = /\breadFileSync\s*\(/g;
   for (let m = CALL.exec(content); m; m = CALL.exec(content)) {
-    // The call's own argument text — bounded, so a later unrelated literal cannot be attributed to
-    // it. 240 chars covers `readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8")`.
+    // The call's own argument text, bounded to 240 chars (covers the longest real call in this tree).
     const arg = content.slice(m.index, m.index + 240);
     for (const q of arg.matchAll(/["'`](?:\.\.\/)+((?:src|scripts|test|plan)\/[^"'`]*)["'`]/g)) paths.add(q[1]);
     for (const q of arg.matchAll(/["'`]((?:src|scripts|test|plan)\/[^"'`*]*\.[a-z]+)["'`]/g)) paths.add(q[1]);
@@ -313,24 +213,13 @@ export function sourceTextPathsRead(content) {
 }
 
 /**
- * THE ANSWER TO "WHICH SUITES DOES MY DIFF JOIN, THAT NAME NONE OF ITS SYMBOLS" — enumerated from
- * the tree at run time, never from a registry. A census added tomorrow is found tomorrow; a
- * hardcoded list rots the moment someone adds one, which is the failure mode W1-T2521 already
- * names for census gates.
- *
- * A suite is listed when it is relevant to the CHANGED AREAS by either arm:
- *   (a) it ENUMERATES a population and names an area the diff touched, or
- *   (b) it READS AS TEXT a specific file the diff changed.
- *
- * Arm (b) is exact (a path match), so it cannot over-include. Arm (a) is deliberately the looser
- * one, and it is bounded by the area check rather than by cleverness: over-listing runs one extra
- * suite, under-listing is the silent miss this verb exists to end — the same asymmetry
- * `planReadingSuiteFiles` above already resolved in the same direction, for the same reason.
- *
- * An EMPTY changed-file set yields an EMPTY list (criterion 5): with no areas, nothing is relevant.
- * That is NOT a fail-closed case like `classify()`'s — this verb ADDS suites to a run, so an empty
- * answer costs nothing, while "every suite" would be the whole directory and no answer at all.
+ * The suites a diff joins that name none of its symbols — enumerated from the tree at run time,
+ * never a registry. Listed when relevant to the changed areas: enumerates a population and names
+ * a touched area, or reads a specific changed file as text. The first arm is deliberately loose
+ * (over-listing costs one suite; under-listing is the silent miss this verb exists to end); the
+ * second is exact. An empty changed-file set yields an empty list, unlike `classify()`'s SOURCE.
  */
+// Why: docs/forensics/diff-class.md#censussuitefiles.
 export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
   const files = (changedFiles ?? []).filter((f) => typeof f === "string" && f.length > 0);
   if (files.length === 0) return [];
