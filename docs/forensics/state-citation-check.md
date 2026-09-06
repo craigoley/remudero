@@ -7,7 +7,8 @@ under a heading naming the symbol it explained. The file itself keeps a one-line
 wherever the history mattered.
 
 Line numbers below are positions in `scripts/state-citation-check.mjs` at the merge base of the
-compaction PR (`origin/main` at 2d6b3cdae1c0ed50764cf33f0f94e42b6f49917b).
+compaction PR (`origin/main` at dd4684effcfe55dbdec3cad943fa7cdb789c556c; the file's content is
+unchanged there from 7febdd0, its last prior edit on `main`).
 
 ## The file header
 
