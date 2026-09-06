@@ -320,6 +320,12 @@
       "grepHint": "Forensics: src/lib/task-linter.ts"
     },
     {
+      "path": "docs/forensics/worker-branch-shape.md",
+      "title": "worker-branch-shape.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "worker-branch-shape.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/worker.md",
       "title": "`src/lib/worker.ts` — comment forensics",
       "summary": "Verbatim archive of the measured facts, incidents and design arguments that used to live in",

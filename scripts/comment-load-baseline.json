@@ -93,7 +93,7 @@
   "scripts/test-with-retry.mjs": 117,
   "scripts/tracked-source-write-check.mjs": 108,
   "scripts/unwired-gate-check.mjs": 176,
-  "scripts/worker-branch-shape.mjs": 185,
+  "scripts/worker-branch-shape.mjs": 83,
   "src/lib/account-usage.ts": 395,
   "src/lib/alert-lane.ts": 133,
   "src/lib/analytics-route.ts": 118,
