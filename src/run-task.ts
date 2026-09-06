@@ -21960,8 +21960,14 @@ async function retroCommand(
     // `ts` is the CONSUMED CURSOR, never `now()` where the cursor is newer: a capped pass hands its
     // remainder to the next one, and stamping `now()` would jump past runs this pass never read.
     // The comparison keeps it MONOTONIC so a stale gather can never walk the marker backwards.
+    // `marker?.ts` is undefined in TWO states -- no marker file at all, and a marker carrying no
+    // timestamp -- and for this consumer they genuinely coincide: both mean "no prior cursor to
+    // compare against". Read through an explicit `=== undefined` rather than a negated optional
+    // chain, which test/catch-erasure-ratchet.test.ts counts as a conflator: a truthiness test
+    // would ALSO swallow an empty-string ts as absent and hide a malformed marker.
+    const priorTs = marker?.ts;
     const markerTs =
-      gather.consumedThroughTs && (!marker?.ts || gather.consumedThroughTs > marker.ts)
+      gather.consumedThroughTs && (priorTs === undefined || gather.consumedThroughTs > priorTs)
         ? gather.consumedThroughTs
         : new Date().toISOString();
     const nextMarker = {
