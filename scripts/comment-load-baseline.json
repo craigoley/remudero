@@ -53,7 +53,7 @@
   "scripts/coverage-ratchet.mjs": 126,
   "scripts/coverage-session-blanking-check.mjs": 60,
   "scripts/credential-reach-baseline.json": 0,
-  "scripts/credit-surface-gate.mjs": 96,
+  "scripts/credit-surface-gate.mjs": 45,
   "scripts/cycle-baseline.json": 0,
   "scripts/cycle-ratchet.mjs": 44,
   "scripts/diff-class.mjs": 100,
