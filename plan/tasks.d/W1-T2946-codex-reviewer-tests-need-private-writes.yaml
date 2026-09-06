@@ -8,10 +8,12 @@
   budget_usd: 40.00
   risk: high
   files:
+    - src/lib/review.ts
     - src/lib/worker.ts
     - src/lib/worker-provider.ts
     - src/run-task.ts
     - test/codex-disposable-review-sandbox.test.ts
+    - test/review-engine-revision-rearm.test.ts
     - test/codex-reviewer-production-wiring.test.ts
   origin: "operator-session#codex-reviewer-tmpdir-read-only-2026-09-06"
   plan_refs: ["W1-T2748", "W1-T2868"]
@@ -50,6 +52,11 @@
     the advisory result. Ordinary read-only specialists and isolation probes remain read-only.
     Implementation workers keep their existing workspace-write, network and Git-root contract.
 
+    Bump the central review-engine revision because the reviewer execution contract changed. The
+    revision already participates in both the review-input and review-decision digests; prove the
+    bump gives an unchanged PR head and body a new admission and decision identity, so the old
+    read-only terminal verdict cannot be replayed after this fix ships.
+
     Prove the production `runReview` call site, exact Codex argv, private TMPDIR lifetime, absent
     network grant, absent Git-root grant, and the read-only contrast through containment spawn
     recorders. Delete the intent at the call site to prove the regression test fails.
@@ -64,6 +71,8 @@
       proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
     - claim: "deleting the explicit intent restores the read-only argv and fails the production wiring proof"
       proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "the reviewer contract revision changes both replay identities, re-arming unchanged PR heads after the sandbox fix ships"
+      proof: "unit test: test/review-engine-revision-rearm.test.ts"
   falsifier: |
     Close this task without implementation if the raw #4175 Codex transcript shows its failing
     tests could write their scratch directories, or if Codex CLI 0.152.0 can run those tests under
