@@ -307,6 +307,34 @@ else
   SUPERVISOR_VERDICT="STALE — last deploy cycle $(human_age "$SUPERVISOR_AGE_S") ago"
 fi
 
+DISPATCH_LAST_TS=""
+DISPATCH_BLOCK_REASON="none"
+if [ -f "$LEDGER" ]; then
+  DISPATCH_LINE="$(grep -F '"step":"run.start"' "$LEDGER" 2>/dev/null | grep -F '"lane":"run-task"' | tail -n 1)"
+  if [ -n "$DISPATCH_LINE" ]; then
+    DISPATCH_LAST_TS="$(printf '%s' "$DISPATCH_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+  fi
+  BLOCK_LINE="$(grep -E '"step":"(daemon_selfrestart_for_freshness|daemon\.pause|dispatch\.skipped)"' "$LEDGER" 2>/dev/null | tail -n 1)"
+  if [ -n "$BLOCK_LINE" ]; then
+    BLOCK_STEP="$(printf '%s' "$BLOCK_LINE" | grep -o '"step":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+    BLOCK_WHY="$(printf '%s' "$BLOCK_LINE" | grep -o '"reason":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+    DISPATCH_BLOCK_REASON="${BLOCK_STEP}${BLOCK_WHY:+:${BLOCK_WHY}}"
+  fi
+fi
+
+DISPATCH_LAST_EPOCH="$(epoch_of "$DISPATCH_LAST_TS")"
+DISPATCH_AGE_S=""
+if [ -n "$DISPATCH_LAST_EPOCH" ]; then DISPATCH_AGE_S="$((NOW_EPOCH - DISPATCH_LAST_EPOCH))"; fi
+
+DISPATCH_STALLED_AFTER_S=21600
+if [ -z "$DISPATCH_AGE_S" ]; then
+  DISPATCH_VERDICT="unknown"
+elif [ "$DISPATCH_AGE_S" -le "$DISPATCH_STALLED_AFTER_S" ]; then
+  DISPATCH_VERDICT="building"
+else
+  DISPATCH_VERDICT="STALLED — last build dispatch $(human_age "$DISPATCH_AGE_S") ago; last block: ${DISPATCH_BLOCK_REASON}"
+fi
+
 # ── probe: cheap diagnostics ──────────────────────────────────────────────────────────────────
 # `df -Pk` is the POSIX-portable form and reports 1K blocks on both macOS and Linux, so this one
 # expression is correct on the mini and on any future host. `readDiskFreeBytes`
@@ -506,6 +534,10 @@ daemon_last_age_s=${DAEMON_AGE_S:-unknown}
 daemon_boot_ts=${DAEMON_BOOT_TS:-none}
 daemon_boot_age_s=${BOOT_AGE_S:-unknown}
 daemon_boot_head_sha=${DAEMON_BOOT_SHA:-none}
+dispatch_verdict=${DISPATCH_VERDICT}
+dispatch_last_ts=${DISPATCH_LAST_TS:-none}
+dispatch_last_age_s=${DISPATCH_AGE_S:-unknown}
+dispatch_block_reason=${DISPATCH_BLOCK_REASON}
 supervisor_verdict=${SUPERVISOR_VERDICT}
 supervisor_last_ts=${SUPERVISOR_LAST_TS:-none}
 supervisor_last_step=${SUPERVISOR_LAST_STEP:-none}
@@ -568,7 +600,7 @@ fi
 # The subject line IS the phone-readable answer — it is what shows on the branch listing without
 # opening anything. Both verdicts ride in it, because the two failures it separates (a dead
 # daemon on a healthy host, a broken install on a healthy host) call for different responses.
-SUBJECT="heartbeat ${NOW_ISO}: daemon ${DAEMON_VERDICT%% *} | rmd ${RMD_VERDICT%%:*}"
+SUBJECT="heartbeat ${NOW_ISO}: daemon ${DAEMON_VERDICT%% *} | build ${DISPATCH_VERDICT%% *} | rmd ${RMD_VERDICT%%:*}"
 
 if [ "${RMD_HEARTBEAT_DRY_RUN:-}" = "1" ]; then
   printf '%s\n' "$SUBJECT"
