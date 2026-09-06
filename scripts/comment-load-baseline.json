@@ -75,7 +75,7 @@
   "scripts/mount-headroom-sweep.mjs": 296,
   "scripts/mutation-baseline.json": 0,
   "scripts/mutation-nightly-scope.json": 0,
-  "scripts/mutation-ratchet.mjs": 286,
+  "scripts/mutation-ratchet.mjs": 296,
   "scripts/mutation-relevant-paths.json": 0,
   "scripts/needs-human-issue.mjs": 69,
   "scripts/no-hand-rolled-fetch-check.mjs": 32,

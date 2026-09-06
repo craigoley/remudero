@@ -618,6 +618,41 @@ export function emitRatchetVerdict(input, deps) {
   }
 }
 
+/**
+ * Decide and record one verdict: resolve where it goes, and emit it there.
+ *
+ * EXPORTED WITH INJECTED DEPS so BOTH arms are reachable. As an inline closure the catch below
+ * could not be driven: {@link emitRatchetVerdict} contains the WRITE failure and returns rather
+ * than throwing, so nothing reached the arm guarding the steps before it -- which is the arm a
+ * missing import once hit, crashing this gate after it had printed its verdict. diff-coverage
+ * flagged it as an added line with no covering test and was right.
+ *
+ * Every failure here is returned and reported, never thrown: the gate's exit code is not a
+ * ledger's to veto.
+ */
+export function recordRatchetVerdict(conclusion, totals, deps) {
+  try {
+    const { path: ledgerPath, source } = deps.resolveLedger();
+    // Nobody asked for a ledger: there is nothing to record to, and saying so on every PR would be
+    // noise on a gate whose stdout is pinned byte-for-byte by its own suite.
+    if (!ledgerPath) return { recorded: false, reason: 'unconfigured' };
+    const res = deps.emit(
+      { runId: deps.runId(), prUrl: deps.prUrl(), conclusion, ...totals },
+      { ...deps.io, ledgerPath },
+    );
+    if (res.emitted) {
+      // stderr, never stdout: this gate's stdout is pinned byte-for-byte by
+      // test/a-test-outside-strykers-command-is-invisible.test.ts (W1-T2524 criteria 3 and 4), and
+      // a verdict record is not part of the score it reports.
+      deps.log(`mutation-ratchet: verdict ${conclusion} recorded to ${ledgerPath} (via ${source})`);
+    }
+    return { recorded: !!res.emitted, ledgerPath, source };
+  } catch (err) {
+    deps.log(`mutation-ratchet: verdict NOT recorded: ${err.message}`);
+    return { recorded: false, reason: err.message };
+  }
+}
+
 function main(argv) {
   const { values } = parseArgs({
     args: argv,
@@ -993,45 +1028,32 @@ function main(argv) {
     return;
   }
 
-  // W1-T2707: one line per REAL PR-gate run, on BOTH conclusions. Defined after the totals are
-  // known and used at both exits, so neither can take a path that skips it.
-  const recordVerdict = (conclusion) => {
-    try {
-      const { path: ledgerPath, source } = resolveLedgerPath(process.env, { ledger: values.ledger });
-      // Nobody asked for a ledger: there is nothing to record to, and saying so on every PR would
-      // be noise on a gate whose stdout is pinned byte-for-byte by its own suite.
-      if (!ledgerPath) return;
-      const res = emitRatchetVerdict(
-        {
-          runId: resolveVerdictRunId(process.env),
-          prUrl: resolveVerdictPrUrl(process.env),
-          conclusion,
-          killed: actual.killed,
-          survived: actual.survived,
-          timeout: actual.timeout,
-          noCoverage: actual.noCoverage,
-        },
-        {
-          ledgerPath,
+  // W1-T2707: one line per REAL PR-gate run, on BOTH conclusions. The decision lives in the
+  // exported recordRatchetVerdict; this closure only supplies the process-level deps.
+  const recordVerdict = (conclusion) =>
+    recordRatchetVerdict(
+      conclusion,
+      {
+        killed: actual.killed,
+        survived: actual.survived,
+        timeout: actual.timeout,
+        noCoverage: actual.noCoverage,
+      },
+      {
+        resolveLedger: () => resolveLedgerPath(process.env, { ledger: values.ledger }),
+        runId: () => resolveVerdictRunId(process.env),
+        prUrl: () => resolveVerdictPrUrl(process.env),
+        emit: emitRatchetVerdict,
+        io: {
           now: () => new Date().toISOString(),
           host: () => hostname(),
           mkdir: mkdirSync,
           append: appendFileSync,
-          log: (m) => console.error(m),
+          log: (msg) => console.error(msg),
         },
-      );
-      if (res.emitted) {
-        // stderr, never stdout: this gate's stdout is pinned byte-for-byte by
-        // test/a-test-outside-strykers-command-is-invisible.test.ts (W1-T2524 criteria 3 and 4),
-        // and a verdict record is not part of the score it reports.
-        console.error(`mutation-ratchet: verdict ${conclusion} recorded to ${ledgerPath} (via ${source})`);
-      }
-    } catch (err) {
-      // A LOST MEASUREMENT IS NOT A FAILED BUILD, so the WHOLE emission is contained -- measured, a
-      // missing import crashed the gate here AFTER it had printed its verdict.
-      console.error(`mutation-ratchet: verdict NOT recorded: ${err.message}`);
-    }
-  };
+        log: (msg) => console.error(msg),
+      },
+    );
 
   console.log(
     `mutation-ratchet: score ${actual.scorePct.toFixed(2)}% (baseline ${(baseline.scorePct ?? 0).toFixed(2)}%) -- ` +

@@ -18,8 +18,13 @@ const gate = (await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.
   resolveVerdictRunId: (env: Record<string, string | undefined>, spawn?: unknown) => string;
   resolveVerdictPrUrl: (env: Record<string, string | undefined>) => string | undefined;
   emitRatchetVerdict: (i: Record<string, unknown>, d: Record<string, unknown>) => { emitted: boolean };
+  recordRatchetVerdict: (
+    conclusion: string,
+    totals: Record<string, number>,
+    deps: Record<string, unknown>,
+  ) => { recorded: boolean; reason?: string; ledgerPath?: string; source?: string };
 };
-const { emitRatchetVerdict, ratchetVerdictLine, RATCHET_VERDICT_STEP, resolveLedgerPath, resolveVerdictPrUrl, resolveVerdictRunId } =
+const { emitRatchetVerdict, ratchetVerdictLine, RATCHET_VERDICT_STEP, recordRatchetVerdict, resolveLedgerPath, resolveVerdictPrUrl, resolveVerdictRunId } =
   gate;
 import { MUTATION_GATE_VERDICT_STEP, mutationGateVerdictLine, mutationGateLifetime } from "../src/lib/retro.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -201,6 +206,70 @@ test("resolveVerdictPrUrl builds a URL only for a pull_request ref", () => {
   );
   assert.equal(resolveVerdictPrUrl({ GITHUB_REF: "refs/heads/main", GITHUB_REPOSITORY: "o/r" }), undefined);
   assert.equal(resolveVerdictPrUrl({}), undefined);
+});
+
+// ── recordRatchetVerdict: both arms, including the one that guards the steps before the write ──
+
+const TOTALS = { killed: 1, survived: 0, timeout: 0, noCoverage: 0 };
+
+function recordDeps(over: Record<string, unknown> = {}) {
+  return {
+    resolveLedger: () => ({ path: "/tmp/ledger.ndjson", source: "flag" }),
+    runId: () => "r1",
+    prUrl: () => undefined,
+    emit: () => ({ emitted: true }),
+    io: {},
+    log: () => {},
+    ...over,
+  };
+}
+
+test("recordRatchetVerdict: a failure BEFORE the write is reported and never thrown — the arm a missing import once hit", () => {
+  // This is the arm diff-coverage found uncovered, and it could not be reached while the logic
+  // was an inline closure: emitRatchetVerdict contains the WRITE failure and returns rather than
+  // throwing, so nothing exercised the guard around resolving the path, the run id or the host.
+  // The arm exists because a missing `homedir` import crashed this gate AFTER it had printed its
+  // verdict — a failure in exactly those earlier steps.
+  const logged: string[] = [];
+  const res = recordRatchetVerdict("success", TOTALS, recordDeps({
+    runId: () => {
+      throw new Error("ReferenceError: homedir is not defined");
+    },
+    log: (m: string) => logged.push(m),
+  }));
+
+  assert.equal(res.recorded, false);
+  assert.match(res.reason ?? "", /homedir is not defined/, "the real reason is returned, not swallowed");
+  assert.match(logged.join("\n"), /verdict NOT recorded/, "and printed — a lost measurement is never silent");
+});
+
+test("recordRatchetVerdict: an unconfigured ledger records nothing, says nothing, and is not an error", () => {
+  const logged: string[] = [];
+  const res = recordRatchetVerdict("success", TOTALS, recordDeps({
+    resolveLedger: () => ({ path: undefined, source: "unconfigured" }),
+    emit: () => {
+      throw new Error("must not be reached");
+    },
+    log: (m: string) => logged.push(m),
+  }));
+
+  assert.equal(res.recorded, false);
+  assert.equal(res.reason, "unconfigured");
+  assert.deepEqual(logged, [], "silence, not a warning — nobody asked for a ledger");
+});
+
+test("recordRatchetVerdict: the happy arm passes the conclusion and the run's own totals straight through", () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const res = recordRatchetVerdict("failure", { killed: 7, survived: 3, timeout: 1, noCoverage: 2 }, recordDeps({
+    emit: (input: Record<string, unknown>) => {
+      seen.push(input);
+      return { emitted: true };
+    },
+  }));
+
+  assert.equal(res.recorded, true);
+  assert.equal(res.ledgerPath, "/tmp/ledger.ndjson");
+  assert.deepEqual(seen[0], { runId: "r1", prUrl: undefined, conclusion: "failure", killed: 7, survived: 3, timeout: 1, noCoverage: 2 });
 });
 
 // ── a lost ledger write is a lost measurement, never a failed build ───────────────────────────
