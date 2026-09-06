@@ -1,54 +1,28 @@
 #!/usr/bin/env tsx
-// scripts/plan-state-claims.mjs
+// scripts/plan-state-claims.mjs — the plan-state self-consistency gate (W1-T409, MASTER-PLAN
+// §8A/§12A). Refuses a task id that MASTER-PLAN.md's "## SHIPPED log" section records as landed
+// while another line elsewhere asserts it "not shipped" / "unbuilt" / "did not ship" (the
+// vocabulary W1-T410 established) — a document contradicting itself. Checks MASTER-PLAN.md
+// against only itself, offline; W1-T410's planStateTruthRung checks it against real GitHub state.
+// Why: an id absent from both sides needs that online check instead — see W1-T149.
+// docs/forensics/plan-state-claims.md#why-this-gate-exists
 //
-// PLAN-STATE SELF-CONSISTENCY gate (W1-T409, MASTER-PLAN §8A/§12A).
+// The SHIPPED-log side resolves both the long-form `W<n>-T<n>` id and the house-style compressed
+// pair `T<n>/#<pr>`, the pair resolved only against the plan's own known ids so an unrecognized
+// number is dropped, never guessed. The not-shipped side reuses src/lib/retro.ts's
+// extractAssertedUnbuiltTaskIds for membership; the per-line citation here is a separate,
+// display-only re-scan.
+// Why: reuse is required by both split tasks' own design notes.
+// docs/forensics/plan-state-claims.md#the-two-extractors
 //
-// W1-T392 split into two halves along the seam its own design note drew: THIS half reads
-// MASTER-PLAN.md against ITSELF (offline, no network, no live GitHub state — claims.yaml's own
-// contract); W1-T410 (src/lib/retro.ts's planStateTruthRung) reads it against GitHub merge state.
-// THIS HALF WOULD NOT HAVE CAUGHT THE W1-T149 INCIDENT — a consistency check over two lists cannot
-// see an id absent from BOTH. It is filed anyway because a document that contradicts itself (an id
-// recorded as landed in the SHIPPED log while another line asserts it did not land) is a real,
-// decidable defect with a real gate available.
+// A scan reading nothing must never report OK: `shippedExamined` and `notShippedLinesExamined`
+// both gate the UNEXAMINED verdict, but `notShippedExamined` alone does not, because an honestly
+// empty not-shipped region is not a broken scan.
+// Why: W1-T1232. docs/forensics/plan-state-claims.md#the-positive-control
 //
-// WHAT IS REFUSED: a task id appearing BOTH in the "## SHIPPED log" section of MASTER-PLAN.md AND
-// in a not-shipped assertion (the vocabulary W1-T410 established: "not shipped", "unbuilt", "did
-// not ship") anywhere else in the same file.
-//
-// THE SHIPPED-LOG EXTRACTOR READS BOTH NOTATIONS the section actually uses: full `W<n>-T<n>` ids,
-// and the house-style COMPRESSED PAIR `T<n>/#<pr>` a long-form-only regex cannot see (measured:
-// 197 of 284 distinct SHIPPED-log task numbers appear ONLY in compressed-pair form). The bare
-// number carries no workstream prefix — the section mixes W1/W2/W3 — so it is resolved against the
-// PLAN'S OWN id set (plan/tasks.yaml + plan/tasks.d/*.yaml, loaded via lib/plan.ts's `loadPlan`,
-// the same merge every other consumer uses) rather than guessed by prepending `W1-`. An id the plan
-// does not know is not resolved and is never invented into a contradiction.
-//
-// THE NOT-SHIPPED EXTRACTOR REUSES `extractAssertedUnbuiltTaskIds` (src/lib/retro.ts, shipped by
-// W1-T410) rather than re-deriving the clause-scoped phrase-binding logic a second time — the
-// reuse obligation both split tasks' design notes name explicitly. That function's `ids` are the
-// ones this gate treats as "asserted not-shipped"; the per-line citation this gate prints alongside
-// a contradiction is derived locally (the exported type carries counts, not per-id line refs) by
-// re-scanning for the same not-shipped vocabulary next to the id's text — a display-only lookup,
-// never a second membership decision.
-//
-// A POSITIVE CONTROL, ONE PER SIDE, ON THE FACT THAT DISTINGUISHES A BROKEN SCAN FROM AN HONEST
-// EMPTY RESULT (W1-T1232): the shipped-log side has no "read but bound nothing" state, so
-// `shippedExamined === 0` still exits non-zero as UNEXAMINED unconditionally. The not-shipped side
-// reuses `extractAssertedUnbuiltTaskIds`'s `examinedLines` (phrase-bearing lines READ, whether or
-// not a task id bound) rather than the bound-id count: `notShippedLinesExamined === 0` means the
-// phrase extractor matched nothing anywhere in the document — a suspect scan (renamed vocabulary,
-// encoding fault) — and still exits UNEXAMINED. A region the extractor READ but bound no id in
-// (every phrase-bearing clause named a proposal or nothing) is an honest absence, not a broken
-// scan, and is reported OK — see MASTER-PLAN.md's rule 9, which tells an author to DELETE a
-// corrected id from this region rather than annotate it, and which this distinction exists to
-// keep from tripping the gate. The rendered report names the phrase-bearing line count either way.
-//
-// Usage:
-//   node --import tsx scripts/plan-state-claims.mjs [--master-plan MASTER-PLAN.md] [--plan plan/tasks.yaml]
-//
-// Run under `node --import tsx` (not plain `node`): this script imports directly from .ts modules
-// (src/lib/plan.ts, src/lib/retro.ts), the same convention scripts/generate-capability-snapshot.mjs
-// and scripts/recovery-drill.mjs already establish.
+// Run under `node --import tsx`, not plain `node` — it imports src/lib/plan.ts and
+// src/lib/retro.ts directly, same as scripts/generate-capability-snapshot.mjs.
+// Usage: node --import tsx scripts/plan-state-claims.mjs [--master-plan <path>] [--plan <path>]
 
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
@@ -61,15 +35,12 @@ const SHIPPED_LOG_HEADER_RE = /^## SHIPPED log\s*$/;
 const SECTION_HEADER_RE = /^## /;
 const LONG_FORM_ID_RE = /\bW(\d+)-T(\d+)\b/g;
 const COMPRESSED_PAIR_RE = /\bT(\d+)\/#\d+\b/g;
-/** Mirrors src/lib/retro.ts's own (module-private) NOT_SHIPPED_PHRASE_RE — duplicated here ONLY to
- *  locate a citation LINE for an id extractAssertedUnbuiltTaskIds already decided is asserted
- *  not-shipped; it is never used to decide membership (that decision is entirely the reused
- *  function's), so this is a display lookup, not a second phrase-extractor. */
+/** Mirrors retro.ts's own (module-private) NOT_SHIPPED_PHRASE_RE, to locate a citation line only —
+ *  membership is decided entirely by extractAssertedUnbuiltTaskIds, never by this regex. */
 const NOT_SHIPPED_PHRASE_RE = /not shipped|unbuilt|did not ship/i;
 
-/** The `## SHIPPED log` section's line range within `lines` (0-indexed, `start` inclusive of the
- *  first line AFTER the header, `end` exclusive) — from the header to the next `## ` heading, or
- *  EOF. `{ start: -1, end: -1 }` when no `## SHIPPED log` heading exists at all. */
+/** The `## SHIPPED log` section's line range in `lines` (0-indexed; `start` is the line after the
+ *  header, `end` exclusive). `{ start: -1, end: -1 }` when there is no such header. */
 export function shippedLogLineRange(lines) {
   let start = -1;
   for (let i = 0; i < lines.length; i++) {
@@ -89,9 +60,8 @@ export function shippedLogLineRange(lines) {
   return { start, end };
 }
 
-/** Every known task id's trailing number (`W1-T148` -> `["148", "W1-T148"]`) as a
- *  number -> ids map, so a bare compressed-pair number resolves ONLY when the plan's own id set
- *  names exactly one id ending `-T<number>` — never invented, never guessed by prefix. */
+/** Every known id's trailing number (`W1-T148` -> `148`) mapped to the id(s) ending `-T<number>`,
+ *  so a compressed-pair number resolves only when exactly one known id matches. */
 function numberToKnownIds(knownIds) {
   const map = new Map();
   for (const id of knownIds) {
@@ -105,13 +75,10 @@ function numberToKnownIds(knownIds) {
 }
 
 /**
- * Extract every task id the `## SHIPPED log` section records as landed, in EITHER notation, bound
- * to the line (1-indexed) and line text that first recorded it — design (iv)'s citation.
- *
- * `knownIds`: the plan's own id set (lib/plan.ts `loadPlan`). A long-form `W<n>-T<n>` match is
- * taken as-is (unambiguous). A compressed-pair `T<n>/#<pr>` match resolves ONLY when exactly one
- * known id ends `-T<n>` — zero or multiple candidates means the number is not resolved and is
- * dropped, never invented (design (ii)/acceptance criterion 4).
+ * Every task id the `## SHIPPED log` section records as landed, in either notation, mapped to the
+ * line (1-indexed) and text that first recorded it. `knownIds` resolves a compressed-pair number;
+ * an ambiguous or unknown number is dropped, never invented.
+ * docs/forensics/plan-state-claims.md#extractshippedlogids
  */
 export function extractShippedLogIds(masterPlanMd, knownIds) {
   const lines = masterPlanMd.split("\n");
@@ -136,15 +103,11 @@ export function extractShippedLogIds(masterPlanMd, knownIds) {
   return shipped;
 }
 
-/** Every line (1-indexed), in document order, asserting `id` not-shipped -- the contradiction
- *  citation's full site list (design (i), W1-T2223). A second, independent not-shipped site for
- *  the same id must not be invisible just because a different site happens to sort first; see the
- *  module doc's note on why this is a display-only re-scan, not a second extractor -- membership
- *  (which ids are contradictions at all) is decided entirely by `extractAssertedUnbuiltTaskIds`,
- *  never by this function or by `NOT_SHIPPED_PHRASE_RE`. */
+/** Every line (1-indexed), in document order, asserting `id` not-shipped — the full citation site
+ *  list for a contradiction (W1-T2223). Membership is decided by extractAssertedUnbuiltTaskIds;
+ *  this is a display-only re-scan, never a second decision. */
 export function notShippedLines(masterPlanMd, id) {
-  // Only a W1- id can appear in bare `T<n>` form -- extractAssertedUnbuiltTaskIds's own
-  // normalizeAssertedTaskId assumes bare T<n> means W1-T<n> throughout this corpus.
+  // Bare `T<n>` means `W1-T<n>` here, matching extractAssertedUnbuiltTaskIds's own assumption.
   const bareForm = id.startsWith("W1-") ? id.slice(3) : undefined; // "W1-T148" -> "T148"
   const bareRe = bareForm ? new RegExp(`\\b${bareForm}\\b`) : undefined;
   const lines = masterPlanMd.split("\n");
@@ -159,25 +122,18 @@ export function notShippedLines(masterPlanMd, id) {
   return sites;
 }
 
-/** The first line (1-indexed) asserting `id` not-shipped. Kept as the single-site lookup its name
- *  has always promised (design (i): "the function's name is honest — it returns the first — so
- *  the fix is at the record, not at the name"); {@link notShippedLines} is now the contradiction
- *  record's actual citation source. `undefined` when `id` is never asserted not-shipped anywhere,
- *  same as before. */
+/** The first line (1-indexed) asserting `id` not-shipped — kept as the single-site lookup its name
+ *  promises; {@link notShippedLines} is the contradiction record's actual citation source.
+ *  `undefined` when `id` is never asserted not-shipped. */
 export function firstNotShippedLine(masterPlanMd, id) {
   return notShippedLines(masterPlanMd, id)[0];
 }
 
 /**
- * The gate's whole decision: every SHIPPED-log id (both notations, short-form resolved against
- * `knownIds`) crossed against every not-shipped id (reused from W1-T410's
- * `extractAssertedUnbuiltTaskIds`). `contradictions` names each id found on both sides, with a
- * citation line from the shipped side and EVERY not-shipped citation site (design (i)/(iv),
- * W1-T2223 -- not only the first one found). `shippedExamined` and `notShippedLinesExamined` are
- * the positive control's two counts (design (iii)) — both must be nonzero for a scan to count as
- * having examined anything at all (W1-T1232: the not-shipped side's control is the PHRASE-LINE
- * count, not the bound-id count — see the module doc). `notShippedExamined` is the bound-id count,
- * carried through separately so the report can still say how many ids it found.
+ * The gate's whole decision: every SHIPPED-log id crossed against every not-shipped id (reused
+ * from extractAssertedUnbuiltTaskIds). `contradictions` names each id found on both sides, with
+ * every not-shipped citation site (W1-T2223), not only the first. `shippedExamined` and
+ * `notShippedLinesExamined` are the positive control's two counts — see the module header.
  */
 export function checkPlanStateConsistency(masterPlanMd, knownIds) {
   const shipped = extractShippedLogIds(masterPlanMd, knownIds);
@@ -188,8 +144,7 @@ export function checkPlanStateConsistency(masterPlanMd, knownIds) {
   const contradictions = [];
   for (const [id, shippedRef] of shipped) {
     if (!notShippedSet.has(id)) continue;
-    // W1-T2223 (design (i)): every not-shipped site, not just the first -- a second, independent
-    // citation for the same id must not be invisible just because a different site sorts first.
+    // Every not-shipped site, not just the first (W1-T2223) — see the module header.
     const sites = notShippedLines(masterPlanMd, id);
     const notShippedRefs =
       sites.length > 0 ? sites : [{ lineNumber: undefined, lineText: "(not-shipped citation line not found)" }];
@@ -209,21 +164,12 @@ export function checkPlanStateConsistency(masterPlanMd, knownIds) {
   };
 }
 
-/** Render {@link checkPlanStateConsistency}'s result as the CLI's human-readable report. Three
- *  DISTINCT shapes (design (iii)): UNEXAMINED never reads like OK, and OK never reads like a
- *  contradiction report -- "zero contradictions found and zero claims examined must never print
- *  the same text". UNEXAMINED fires on `shippedExamined === 0` (unchanged) or
- *  `notShippedLinesExamined === 0` (W1-T1232: no not-shipped-phrase-bearing line was read at all --
- *  a broken scan) -- NEVER on `notShippedExamined === 0` alone, which just means every
- *  phrase-bearing line that WAS read bound a proposal or nothing, an honest empty result. All
- *  three shapes name the phrase-bearing line count so a reader can tell which case fired.
- *
- *  W1-T2223 (design (i)/(ii)): the contradiction report lists EVERY not-shipped citation site for
- *  an id, not only the first, and when a not-shipped site resolves to the SAME physical line as
- *  the shipped citation it is folded into one combined "SHIPPED AND NOT-SHIPPED" line rather than
- *  printed twice under the same line number -- a reader must not have to notice that for
- *  themselves. An id with exactly one citation site whose line differs from the shipped line
- *  renders exactly as it always has (design criterion 5). */
+/** Renders {@link checkPlanStateConsistency}'s result as the CLI's report, in three shapes that
+ *  must never read alike: UNEXAMINED (an empty scan), OK (zero contradictions), or a contradiction
+ *  list. UNEXAMINED fires on a zero shipped or not-shipped-line count, never on a zero bound
+ *  not-shipped-id count alone — an honest empty result. A not-shipped site on the same physical
+ *  line as its shipped citation folds into one combined line rather than printing twice (W1-T2223).
+ *  docs/forensics/plan-state-claims.md#renderreport */
 export function renderReport(result) {
   const { shippedExamined, notShippedExamined, notShippedLinesExamined, contradictions } = result;
   if (shippedExamined === 0 || notShippedLinesExamined === 0) {
@@ -246,10 +192,8 @@ export function renderReport(result) {
     "",
   ];
   for (const c of contradictions) {
-    // design (ii): a not-shipped site sharing the shipped citation's exact line number reads as
-    // ONE combined line, never as a SHIPPED line followed by a NOT-SHIPPED line naming the same
-    // number -- that duplication is what made a genuinely two-site contradiction (#2718) read as
-    // a single-site one.
+    // A same-line not-shipped site folds into the SHIPPED line (W1-T2223) rather than repeating
+    // the line number — see renderReport's doc.
     const sameLine = c.notShippedRefs.filter((r) => r.lineNumber === c.shippedLineNumber);
     const otherSites = c.notShippedRefs.filter((r) => r.lineNumber !== c.shippedLineNumber);
     if (sameLine.length > 0) {
@@ -301,12 +245,7 @@ function main(argv) {
     return;
   }
 
-  // No try/catch here, unlike the two reads above: `masterPlanMd` is always a string (readFileSync
-  // succeeded with an explicit "utf8" encoding) and `knownIds` is always an array of validated,
-  // non-empty string ids (loadPlan's own parseTasksFromYaml rejects a task with a missing/blank
-  // id before this line is ever reached) -- checkPlanStateConsistency's extractors are pure
-  // string/regex operations over those two guaranteed-valid inputs and have no other failure
-  // mode to catch.
+  // Both inputs are already validated above, so checkPlanStateConsistency cannot throw here.
   const result = checkPlanStateConsistency(masterPlanMd, knownIds);
   const report = renderReport(result);
   if (

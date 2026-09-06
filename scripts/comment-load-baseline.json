@@ -79,7 +79,7 @@
   "scripts/mutation-relevant-paths.json": 0,
   "scripts/needs-human-issue.mjs": 69,
   "scripts/no-hand-rolled-fetch-check.mjs": 32,
-  "scripts/plan-state-claims.mjs": 121,
+  "scripts/plan-state-claims.mjs": 60,
   "scripts/recovery-drill.mjs": 148,
   "scripts/shell-screenshot.mjs": 16,
   "scripts/source-size-baseline.json": 0,
