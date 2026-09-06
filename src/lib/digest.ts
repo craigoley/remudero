@@ -19,20 +19,12 @@ import {
 } from "./measurement-cadence.js";
 
 /**
- * Daily digest (W1-T8 title; assembled here, delivered here, SCHEDULED by the
- * daemon loop later (W1-T12) — this module owns no clock/cron of its own).
- *
- * MASTER-PLAN §4: "Interrupts collapse to a daily digest; real-time pings only for
- * MANUAL + hard-stop." BLOCKED escalations and ordinary run outcomes (merges,
- * blocked_* verdicts, notional cost) accumulate in the ledger all day and are
- * rolled into ONE message here, instead of paging on every one.
- *
- * W1-T2277 GIVES THIS MODULE THE CLOCK ITS OWN HEADER SAID IT DIDN'T OWN: the
- * `digest cadence` section at the bottom of this file (search "W1-T2277") is the PURE
- * decision half — `src/run-task.ts`'s `buildDigestCadenceDaemonHooks` is the PRODUCER
- * that wires it into `lib/daemon.ts`'s poll loop, mirroring `lib/measurement-cadence.ts`'s
- * own consumer/producer split exactly (see that module's header for why the split matters —
- * #1066 shipped a consumer with no producer).
+ * The daily digest (W1-T8): interrupts collapse into one daily message (MASTER-PLAN §4) instead
+ * of paging on every merge, block or escalation; real-time pings stay reserved for MANUAL and
+ * hard-stop. This module assembles and delivers it; the daemon loop (W1-T12) owns the clock,
+ * except the digest's own cadence decision ("digest cadence" below, W1-T2277), pure here and
+ * wired to that loop from `src/run-task.ts`'s `buildDigestCadenceDaemonHooks`. Why: the split's
+ * full rationale — docs/forensics/digest.md
  */
 
 /** One ledger line, loosely typed like {@link readLedgerLines}'s return. */
@@ -43,14 +35,10 @@ export function collectSince(lines: LedgerLine[], sinceIso: string): LedgerLine[
   return lines.filter((l) => typeof l.ts === "string" && (l.ts as string) >= sinceIso);
 }
 
-// ── W1-T929: THE CACHE-HIT RATIO — cache_read/(cache_read+input+cache_creation) ─────────────
-//
-// worker.ts's TokenUsage already nests `cacheRead`/`input`/`cacheCreation` on the `tokens`
-// field of every worker AND brain-plane ledger line (workerLedgerFields, W1-T6); nothing read
-// it. This is the ONE derivation (design note (i)): `cacheHitRatio` is the sole arithmetic,
-// `aggregateCacheHitTotals` is the sole grouping traversal, and BOTH this module's `summarize`
-// and status-board.ts's `buildStatusBoard` walk it — the two surfaces can disagree on how they
-// RENDER a figure, never on what the figure IS.
+// ── W1-T929: the cache-hit ratio — cache_read/(cache_read+input+cache_creation). cacheHitRatio
+// is the sole arithmetic and aggregateCacheHitTotals the sole grouping traversal; this module's
+// summarize and status-board.ts's buildStatusBoard both walk them, so the two surfaces can
+// disagree on how they render a figure, never on what it is. Why: docs/forensics/digest.md
 
 /** The three token counts a cache-hit ratio is derived from — exactly the fields worker.ts's
  *  `TokenUsage` nests on every ledgered call line (`tokens.cacheRead`/`input`/`cacheCreation`). */
@@ -61,59 +49,44 @@ export interface CacheHitTokens {
 }
 
 /**
- * THE cache-hit ratio (feedback fb-1785237559155-feef92, MASTER-PLAN §8A): `cache_read /
- * (cache_read + input + cache_creation)` — the SAME formula the feedback named, computed off
- * ONE set of summed token counts (a single line, or a whole run/class grain). Exported so
- * status-board.ts calls this SAME function (grep-provable: `cacheHitRatio(` in
- * src/lib/status-board.ts) instead of re-deriving a second opinion of the same number.
- *
- * Returns `undefined` — NEVER `0` — when the denominator is zero: a line predating the cache
- * columns, or a call whose envelope carried no tokens at all (e.g. a genuine transport
- * failure), is UNKNOWN, not a fabricated 0% hit rate (design note (iii)).
+ * The cache-hit ratio (feedback fb-1785237559155-feef92, MASTER-PLAN §8A): `cache_read /
+ * (cache_read + input + cache_creation)`. status-board.ts calls this same function rather than
+ * re-deriving its own opinion. Returns `undefined`, never `0`, when the denominator is zero — a
+ * line with no token data is UNKNOWN, not a fabricated 0% hit rate.
  */
 export function cacheHitRatio(tokens: CacheHitTokens): number | undefined {
   const denom = tokens.cacheRead + tokens.input + tokens.cacheCreation;
   return denom > 0 ? tokens.cacheRead / denom : undefined;
 }
 
-/**
- * One grouping's (one run, or one task class) summed token totals, plus how many of its call
- * lines actually carried usable token data — the `coveredLines`/`callLines` pair a `cacheHitRatio`
- * of `undefined` renders its coverage fraction from (design note (iii): "UNKNOWN … WITH THE
- * COVERAGE FRACTION beside the figure").
- */
+/** One grouping's summed token totals, plus how many of its call lines carried usable token
+ *  data — the `coveredLines`/`callLines` pair a `cacheHitRatio` of `undefined` renders its
+ *  coverage fraction from. */
 export interface CacheHitGrain extends CacheHitTokens {
-  /** Total worker/brain-plane call lines observed for this grouping. */
   callLines: number;
   /** Of `callLines`, how many carried a non-zero token envelope (usable data). */
   coveredLines: number;
 }
 
-/** Both grains the feedback asked for (design note (ii)): per RUN (a single bad run legible)
- *  and per task CLASS (the grain that detects a regression), over the SAME window. */
+/** Both grains the feedback asked for: per run (a single bad run legible) and per task class
+ *  (the grain that detects a regression), over the same window. */
 export interface CacheHitTotals {
   /** Keyed by ledger `run_id`. */
   byRun: Record<string, CacheHitGrain>;
-  /**
-   * Keyed by the run's `run.start` line `task_class` field — mirrors retro.ts's
-   * `aggregateByClass`: a run whose `run.start` line predates W1-T167, or fell outside this
-   * window, is grouped under `"unknown"` rather than dropped, so an omitted class is itself a
-   * fact this table shows, not silently loses.
-   */
+  /** Keyed by the run's `run.start` `task_class` field (mirrors retro.ts's `aggregateByClass`);
+   *  a run with no resolvable class groups under `"unknown"` rather than being dropped. */
   byClass: Record<string, CacheHitGrain>;
 }
 
-/** A ledger line is a worker/brain-plane CALL line iff it carries `workerLedgerFields`' `model`
- *  + `effort` pair (W1-T6) — present on every call, predating the cache columns themselves, so
- *  this predicate never mistakes a `run.start`/`verdict`/poll line for a call that just has no
- *  token data. */
+/** A ledger line is a worker/brain-plane call iff it carries the `model`+`effort` pair every
+ *  call has had since before the cache columns existed, so this never mistakes a
+ *  `run.start`/`verdict`/poll line for a call that simply has no token data. */
 function isCallLine(l: LedgerLine): boolean {
   return typeof l.model === "string" && typeof l.effort === "string";
 }
 
-/** The line's token counts, off its nested `tokens` field (worker.ts's `TokenUsage`, spread
- *  verbatim by `appendLedger` — never snake_cased), or `undefined` when the shape isn't there
- *  at all (a line predating `tokens`, or malformed). */
+/** The line's token counts, off its nested `tokens` field, or `undefined` when that shape
+ *  isn't there (a line predating `tokens`, or malformed). */
 function lineTokens(l: LedgerLine): CacheHitTokens | undefined {
   const t = l.tokens;
   if (!t || typeof t !== "object") return undefined;
@@ -127,9 +100,9 @@ function emptyCacheHitGrain(): CacheHitGrain {
   return { cacheRead: 0, input: 0, cacheCreation: 0, callLines: 0, coveredLines: 0 };
 }
 
-/** Fold one call line into `grain` — always counts toward `callLines`; only adds to the token
- *  totals (and `coveredLines`) when the line's envelope actually carried a non-zero denominator,
- *  so an uncovered call can never silently pass as a healthy 0% hit rate. */
+/** Fold one call line into `grain` — always counts toward `callLines`, but only adds to the
+ *  token totals and `coveredLines` when the envelope had a non-zero denominator, so an
+ *  uncovered call can never silently read as a healthy 0% hit rate. */
 function foldCacheHitLine(grain: CacheHitGrain, tokens: CacheHitTokens): void {
   grain.callLines++;
   if (tokens.cacheRead + tokens.input + tokens.cacheCreation <= 0) return;
@@ -140,14 +113,11 @@ function foldCacheHitLine(grain: CacheHitGrain, tokens: CacheHitTokens): void {
 }
 
 /**
- * Group `lines` (any ledger window) into per-run and per-class {@link CacheHitGrain} totals —
- * the ONE traversal both `summarize` (below) and status-board.ts's `buildStatusBoard` walk, so
- * the two surfaces can never disagree on WHICH lines count or how they're bucketed.
- *
- * `undefined` when NOTHING in `lines` carries usable cache data at all (design note (iv), the
- * same soft-compose discipline `DigestSummary.inbox` already keeps) — the caller then omits its
- * cache-hit output entirely rather than printing an all-UNKNOWN table for a window that simply
- * predates this feature.
+ * Group `lines` into per-run and per-class {@link CacheHitGrain} totals — the one traversal both
+ * `summarize` and status-board.ts's `buildStatusBoard` walk, so the two can never disagree.
+ * `undefined` when nothing in `lines` carries usable cache data, so the caller omits the output
+ * rather than printing an all-UNKNOWN table (the soft-compose rule {@link DigestSummary.inbox}
+ * documents).
  */
 export function aggregateCacheHitTotals(lines: LedgerLine[]): CacheHitTotals | undefined {
   const taskClassByRun = new Map<string, string>();
@@ -179,10 +149,9 @@ export function aggregateCacheHitTotals(lines: LedgerLine[]): CacheHitTotals | u
 }
 
 /**
- * Format ONE {@link CacheHitGrain} as `NN.N% (coverage NN%)`, or `UNKNOWN (coverage NN%)` when
- * {@link cacheHitRatio} returns `undefined` (design note (iii)) — the ONE formatting rule both
- * this module's {@link renderCacheHitLine} and status-board.ts's own per-grain render share, so
- * "UNKNOWN" vs a real percentage never reads differently across the two surfaces.
+ * Format one {@link CacheHitGrain} as `NN.N% (coverage NN%)`, or `UNKNOWN (coverage NN%)` when
+ * {@link cacheHitRatio} returns `undefined` — the one formatting rule {@link renderCacheHitLine}
+ * and status-board.ts's own per-grain render share, so the two surfaces never disagree.
  */
 export function formatCacheHitFigure(g: CacheHitGrain): string {
   const ratio = cacheHitRatio(g);
@@ -200,47 +169,31 @@ export function renderCacheHitLine(label: string, grains: Record<string, CacheHi
   return `${label}: ${parts.join(", ")}`;
 }
 
-// ── W1-T940: LEARNINGS INJECTION DROP PRESSURE ──────────────────────────────────────────────
-//
-// run-task.ts's promptsmith block already logs a `learnings.injected` row on every spawn —
-// `matched`, `matched_ids`, `dropped` (ids), `budget_chars`, and `global_refused_reason` — but
-// nothing read it (measured: zero occurrences of "learnings" in status-board.ts before this
-// task). This is the ONE aggregation (mirrors `aggregateCacheHitTotals` above, W1-T929's same
-// seam): it walks the SAME ledger lines the board already read and totals `matched`/`dropped`
-// across the window, the DISTINCT `budget_chars` values seen (a mid-window constant change stays
-// visible rather than getting averaged away), and the DISTINCT `global_refused_reason` strings
-// with their counts — a refusal is a diagnosis, never folded into the drop count (design note
-// (iii): a `global_refused_reason` is a layer contributing ZERO entries; a budget drop is a
-// ranked entry losing a tie).
+// ── W1-T940: learnings-injection drop pressure. run-task.ts's promptsmith block already logs a
+// `learnings.injected` row on every spawn; this is the one aggregation over it, mirroring
+// aggregateCacheHitTotals's seam. A `global_refused_reason` is kept separate from `dropped`: a
+// refusal is a diagnosis, never folded into the drop count. Why: docs/forensics/digest.md
 
 /**
- * One window's totals over every `learnings.injected` ledger row (W1-T940). `budgetChars` is
- * every DISTINCT `budget_chars` value seen (sorted ascending), not one summary number, so a
- * mid-window constant change is visible instead of averaged away. `globalRefusedReasons` keys
- * the verbatim reason string to how many rows carried it — deduped, and deliberately kept off
- * `dropped` (design note (iii)).
+ * One window's totals over every `learnings.injected` ledger row. `budgetChars` lists every
+ * distinct `budget_chars` value seen, ascending, rather than one summary number, so a
+ * mid-window constant change stays visible instead of averaging away. `globalRefusedReasons`
+ * keys the verbatim reason string to how many rows carried it, deduped and kept off `dropped`.
  */
 export interface LearningsInjectionTotals {
-  /** Count of `learnings.injected` ledger rows in the window. */
   rows: number;
-  /** Sum of each row's `matched` count. */
   matched: number;
-  /** Sum of each row's `dropped` array length. */
   dropped: number;
-  /** Every distinct `budget_chars` value seen, ascending. */
   budgetChars: number[];
-  /** Verbatim `global_refused_reason` string → how many rows carried it. */
   globalRefusedReasons: Record<string, number>;
 }
 
 /**
- * Group `lines` (any ledger window) into {@link LearningsInjectionTotals} — the ONE traversal
- * status-board.ts's `buildStatusBoard` walks too (grep-provable: `aggregateLearningsInjection(`
- * in src/lib/status-board.ts), so the two surfaces can never disagree on which rows count.
+ * Group `lines` into {@link LearningsInjectionTotals} — the one traversal status-board.ts's
+ * `buildStatusBoard` walks too, so the two surfaces can never disagree on which rows count.
  *
- * `undefined` when `lines` carries NO `learnings.injected` rows at all (design note (iv), the
- * same soft-compose discipline {@link aggregateCacheHitTotals} keeps above) — the caller then
- * renders explicit absence rather than a fabricated `dropped: 0` for a window that saw no spawns.
+ * `undefined` when `lines` carries no `learnings.injected` rows — the caller then renders
+ * explicit absence rather than a fabricated `dropped: 0` for a window that saw no spawns.
  */
 export function aggregateLearningsInjection(lines: LedgerLine[]): LearningsInjectionTotals | undefined {
   let rows = 0;
@@ -268,30 +221,19 @@ export function aggregateLearningsInjection(lines: LedgerLine[]): LearningsInjec
   };
 }
 
-// ── W1-T941: THE KNOWLEDGE BUDGET IS A DERIVED CAP, NOT A PICKED NUMBER ─────────────────────
-//
-// DEFAULT_KNOWLEDGE_BUDGET_CHARS (src/lib/learnings.ts) carried no derivation: 1800 was a
-// literal with no measurement behind it, while the observed effect was large (an
-// operator-reported spawn matched 16 entries and injected 3). The feedback that filed this
-// task said "measure, don't assume" — both halves already exist as machinery: PRESSURE is the
-// same `learnings.injected` ledger rows {@link aggregateLearningsInjection} above reads (not a
-// second traversal), joined against the corpus's own per-entry weight (a dropped COUNT alone,
-// which is all that aggregate totals, cannot size a char cap — the WEIGHT of what was refused
-// is the figure that matters); COST is the SAME cache arithmetic this file already exports
-// ({@link cacheHitRatio}) — §8A's stable-first/volatile-last ordering means only the Tier-1
-// block's own bytes are re-charged, so a marginal cap increase prices as `delta chars` at the
-// measured cache mix, never a whole-prompt re-render.
+// ── W1-T941: the knowledge budget is a derived cap, not a picked number. Pressure is the same
+// `learnings.injected` rows {@link aggregateLearningsInjection} reads, weighted per entry rather
+// than just counted; cost is the same cache arithmetic this file already exports
+// ({@link cacheHitRatio}), since only the Tier-1 block's own bytes are re-charged on a marginal
+// increase. Why: docs/forensics/digest.md
 
-/**
- * One window's per-spawn DROPPED-FACT WEIGHT pressure (design note i): p50/p90 chars of
- * matched-but-dropped fact the budget refused, per spawn — not a count, a WEIGHT.
- */
+/** One window's per-spawn dropped-fact weight pressure: p50/p90 chars of matched-but-dropped
+ *  fact the budget refused, per spawn — a weight, not a count. */
 export interface KnowledgeBudgetPressure {
-  /** `learnings.injected` rows carrying at least one `dropped` id resolvable to a weight. */
+  /** Rows carrying at least one `dropped` id resolvable to a weight. */
   spawnsMeasured: number;
-  /** Median per-spawn dropped-fact weight, in chars. */
   droppedWeightP50: number;
-  /** 90th-percentile per-spawn dropped-fact weight, in chars — the figure {@link deriveKnowledgeBudgetCap} prices. */
+  /** The figure {@link deriveKnowledgeBudgetCap} prices. */
   droppedWeightP90: number;
 }
 
@@ -305,16 +247,10 @@ function percentile(values: number[], p: number): number {
 }
 
 /**
- * PRESSURE SIDE (design note i): walks the SAME `learnings.injected` ledger rows {@link
- * aggregateLearningsInjection} reads — not a second traversal shape — and for each row's
- * `dropped` id array sums the matching chars out of `entryWeights` (an id -> weight lookup,
- * e.g. src/lib/learnings.ts's `buildEntryWeightIndex` over the live corpus). An id absent from
- * `entryWeights` (an entry since deleted/superseded/renamed) contributes zero — this is the
- * best-available signal off the CURRENT corpus, not a perfect historical replay.
- *
- * `undefined` when no row has at least one resolvable dropped id — the same soft-compose
- * convention {@link aggregateLearningsInjection}/{@link aggregateCacheHitTotals} keep above: no
- * measurable pressure is a fact this function reports explicitly, never a fabricated zero.
+ * The pressure side: walks the same rows {@link aggregateLearningsInjection} reads, and for each
+ * row's `dropped` ids sums the matching chars out of `entryWeights`; an absent id contributes
+ * zero. `undefined` when no row has a resolvable id, the same soft-compose convention
+ * {@link aggregateCacheHitTotals} keeps.
  */
 export function measureKnowledgeBudgetPressure(
   lines: LedgerLine[],
@@ -337,52 +273,36 @@ export function measureKnowledgeBudgetPressure(
   };
 }
 
-/** English-text heuristic for pricing the marginal cap increase (design note ii): ~4 characters
- *  per token. A deliberately coarse approximation — not a model-specific tokenizer count — same
- *  as every other "roughly N tokens" figure this plan already estimates in. */
+/** English-text heuristic for pricing the marginal cap increase: ~4 characters per token. A
+ *  deliberately coarse approximation, not a model-specific tokenizer count. */
 export const CHARS_PER_TOKEN = 4;
 
-/**
- * Below this many p90 dropped chars, the pressure is TRIVIAL (design note iv) — less than one
- * typical dropped fact line (`entryBudgetWeight`'s rendered `- <fact> [src: learnings#<id>]`
- * line is almost never under 40 chars even for the shortest real entry), so it is not worth
- * pricing a raise over.
- */
+/** Below this many p90 dropped chars, the pressure is trivial — less than one typical dropped
+ *  fact line — so it is not worth pricing a raise over. */
 export const TRIVIAL_DROPPED_WEIGHT_CHARS = 40;
 
-/**
- * A derived recommendation for the knowledge-budget cap (design notes i-iv), carrying the
- * INPUTS that produced it so the recommendation is auditable, not just the number.
- */
+/** A derived recommendation for the knowledge-budget cap, carrying the inputs that produced it
+ *  so the recommendation is auditable, not just the number. */
 export interface KnowledgeBudgetDerivation {
   currentCapChars: number;
   pressure: KnowledgeBudgetPressure | undefined;
-  /** Proposed increase over `currentCapChars`, in chars — 0 unless `changed`. */
+  /** 0 unless `changed`. */
   deltaChars: number;
-  /** `deltaChars` priced on the {@link CHARS_PER_TOKEN} heuristic. */
   deltaTokens: number;
-  /** The {@link cacheHitRatio} the delta was priced at, or `undefined` when no cache-mix data was available to price it. */
+  /** The {@link cacheHitRatio} the delta was priced at, or `undefined` when unpriceable. */
   cacheHitRatioUsed: number | undefined;
-  /** The cap this derivation recommends — equals `currentCapChars` unless `changed`. */
+  /** Equals `currentCapChars` unless `changed`. */
   recommendedCapChars: number;
-  /** Whether this derivation recommends moving off `currentCapChars` at all. */
   changed: boolean;
-  /** Human-readable justification — WHY changed is true/false, for the baseline file's record. */
+  /** Human-readable justification, for the baseline file's record. */
   reason: string;
 }
 
 /**
- * THE derivation (design notes i-iv): combines {@link measureKnowledgeBudgetPressure}'s
- * dropped-weight percentiles with `cacheMix` (any {@link CacheHitTokens} grain, e.g. a
- * {@link CacheHitTotals} class/run total) to recommend a cap.
- *
- * "NO CHANGE" is explicitly legal and is the DEFAULT (design note iv) — this function only
- * recommends raising the cap when BOTH: (a) p90 dropped weight is non-trivial (>=
- * {@link TRIVIAL_DROPPED_WEIGHT_CHARS}), AND (b) there is cache-mix data to price the delta
- * against (`cacheMix` is provided) — a non-trivial pressure with no cache data to price is left
- * UNCHANGED too, because a raise that cannot be priced cannot be argued. When it does
- * recommend raising, the new cap is `currentCapChars + droppedWeightP90` exactly (no headroom
- * padding), so the baseline can be re-derived byte for byte from the same inputs.
+ * Combines {@link measureKnowledgeBudgetPressure}'s percentiles with `cacheMix` to recommend a
+ * cap. "No change" is the default: raises only when p90 dropped weight is non-trivial (>=
+ * {@link TRIVIAL_DROPPED_WEIGHT_CHARS}) and cache-mix data can price it. The new cap, when raised,
+ * is `currentCapChars + droppedWeightP90` exactly, re-derivable byte for byte.
  */
 export function deriveKnowledgeBudgetCap(
   pressure: KnowledgeBudgetPressure | undefined,
@@ -443,10 +363,9 @@ export function deriveKnowledgeBudgetCap(
   };
 }
 
-/** The `board_review.ran` fields {@link DigestSummary.boardReview} carries, read straight off the row
- *  the daemon tick writes (daemon.ts's `log("board_review.ran", …)`). Every field is optional: this
- *  reads a row written by another module, so a row from an older or newer writer degrades to a
- *  partial line rather than a throw. */
+/** The `board_review.ran` fields {@link DigestSummary.boardReview} carries, read straight off the
+ *  row the daemon tick writes. Every field is optional: a row from an older or newer writer
+ *  degrades to a partial line rather than a throw. */
 export interface BoardReviewDigestSnapshot {
   oldestOpenAgeHours?: number;
   redCount?: number;
@@ -455,21 +374,17 @@ export interface BoardReviewDigestSnapshot {
   proposals?: number;
 }
 
-/** One `sweep.repeat_escalated` trip {@link DigestSummary.repeatEscalations} carries, read straight
- *  off the row the sweep writes (sweep.ts's W1-T2345 counter). Every field optional: this reads a row
- *  written by another module, so a row from an older or newer writer degrades to a partial line
- *  rather than a throw. */
+/** One `sweep.repeat_escalated` trip {@link DigestSummary.repeatEscalations} carries (sweep.ts's
+ *  W1-T2345 counter). Every field optional, for the same reason as {@link BoardReviewDigestSnapshot}. */
 export interface RepeatEscalationDigestEntry {
   prNumber?: number;
   disposition?: string;
   streak?: number;
 }
 
-/** One `sweep.repair_filing_suppressed` trip {@link DigestSummary.repairFilingsSuppressed}
- *  carries, read straight off the row {@link "../run-task.js".captureRepairFeedbackWithPriorVerdict}
- *  writes (W1-T2416) when a due surface's most recent prior verdict for its own `repair#<surface>`
- *  origin is `rejected`. Every field optional: this reads a row written by another module, so a
- *  row from an older or newer writer degrades to a partial line rather than a throw. */
+/** One `sweep.repair_filing_suppressed` trip {@link DigestSummary.repairFilingsSuppressed} carries
+ *  (W1-T2416, fired when a due surface's most recent verdict for its own `repair#<surface>` origin
+ *  is `rejected`). Every field optional, for the same reason as {@link BoardReviewDigestSnapshot}. */
 export interface RepairFilingSuppressedDigestEntry {
   id?: string;
   surface?: string;
@@ -477,118 +392,40 @@ export interface RepairFilingSuppressedDigestEntry {
   rejectedEntryId?: string;
 }
 
+/**
+ * A window's digest counts. A *snapshot* field (`alerts`, `issues`, `inbox`, `boardReview`) is
+ * latest-wins, never summed; an *events* field (`repeatEscalations`, `repairFilingsSuppressed`)
+ * is additive, deduped by its own key since the ledger union can replay a row across rotations.
+ * Every field from `inbox` on is soft-composed by {@link renderDigest}: its line is omitted,
+ * never a placeholder, so a digest predating the field renders unchanged. Why: docs/forensics/digest.md
+ */
 export interface DigestSummary {
   sinceIso: string;
-  /** W1-T2388: what the windowed union actually reached. OPTIONAL, so every existing caller of
-   *  {@link summarize}/{@link renderDigest} (and every fixture) type-checks and renders unchanged;
-   *  {@link buildDigest} always sets it. Read ONLY to say so when the read was incomplete — never
-   *  to decide anything. */
+  /** What the windowed union actually reached (W1-T2388); read only to say an incomplete read,
+   *  never to decide anything. {@link buildDigest} always sets it. */
   read?: DigestWindowRead;
   merged: string[];
   blocked: Array<{ taskId: string; verdict: string; prUrl?: string }>;
   escalations: Array<{ taskId: string; class: string; issueUrl: string }>;
   costUsd: number;
-  /**
-   * The LATEST `ops.alerts_polled` snapshot inside the window (W1-T55, lib/ops.ts)
-   * — a snapshot of OPEN alert counts+ages, not an additive event count like
-   * `merged`/`blocked`, so "latest wins" rather than summing repeated polls.
-   * Undefined when `rmd ops` never polled inside this window.
-   */
+  /** The latest `ops.alerts_polled` snapshot inside the window. */
   alerts?: AlertsPollSummary;
-  /**
-   * The LATEST `issues.polled` snapshot inside the window (W1-T57, lib/issues-intake.ts) — the
-   * issues-reviewed count so "issues reviewed regularly" is a ledgered fact, not an intention.
-   * Same "latest wins" rule as `alerts`. Undefined when `rmd issues` never polled inside this window.
-   */
+  /** The latest `issues.polled` snapshot inside the window. */
   issues?: IssuesPollSummary;
-  /**
-   * The LATEST `inbox.polled` snapshot inside the window (W1-T112, lib/inbox.ts) — the
-   * ready-proposal count so the morning pulse answers "what needs me" without a separate
-   * `rmd inbox` check. Same "latest wins" rule as `alerts`/`issues`. Undefined when `rmd
-   * inbox` never polled inside this window — {@link renderDigest} SOFT-COMPOSES this one:
-   * it OMITS the "inbox: N ready" line entirely rather than falling back to a "(no poll
-   * this window)" placeholder, so a digest predating `rmd inbox` (or one where it simply
-   * hasn't run yet) renders byte-identical to before this field existed.
-   */
+  /** The latest `inbox.polled` snapshot inside the window. */
   inbox?: InboxPollSummary;
-  /**
-   * W1-T929: cache-hit ratio totals for this window, per run and per task class (design note
-   * (ii)) — `undefined` when NOTHING in the window carries usable cache-token data, so
-   * {@link renderDigest} SOFT-COMPOSES this one exactly like `inbox` above: it OMITS the
-   * "cache hit by …" lines entirely rather than printing an all-UNKNOWN table for a window
-   * that simply predates this feature (design note (iv)). See {@link aggregateCacheHitTotals}.
-   */
+  /** Cache-hit ratio totals for this window. See {@link aggregateCacheHitTotals}. */
   cacheHit?: CacheHitTotals;
-  /**
-   * The LATEST `board_review.ran` snapshot inside the window (the board-review rung, daemon.ts) —
-   * what the last board read SAW: the oldest open item's age, the red count, the unhandled
-   * escalation count, how many items it considered and how many proposals it drafted.
-   *
-   * `.ran` ALONE, of the rung's three steps, and the choice is the point. `.fired` is 1:1 with
-   * `.ran` and carries only the trigger reason, so sweeping both double-counts one event and adds
-   * nothing a reader can act on. `.skipped` fires when a REAL depth trigger is held off by the
-   * cadence — that is the cadence WORKING, and five "would have run, but only 92 minutes since the
-   * last one" lines a day is exactly the correct-behaviour noise a digest must not carry.
-   *
-   * LATEST WINS, not additive — the same rule as `alerts`/`issues`/`inbox` above and for the same
-   * reason: these are snapshot counts of a board's current state, never an event tally.
-   *
-   * SOFT-COMPOSED by {@link renderDigest} exactly like `inbox`: a window with no `board_review.ran`
-   * omits the line ENTIRELY rather than printing a "(no run this window)" placeholder, so a digest
-   * over a window predating the rung renders byte-identical to before this field existed. A QUIET
-   * BOARD THEREFORE SHOWS NOTHING HERE — the rung only runs when a depth trigger fires, so silence
-   * is the honest reading rather than an absence dressed up as a measurement.
-   */
+  /** The latest `board_review.ran` snapshot. Reads `.ran` alone of the rung's three steps —
+   *  `.fired` duplicates it and `.skipped` is the cadence working as intended. */
   boardReview?: BoardReviewDigestSnapshot;
-  /**
-   * Every `sweep.repeat_escalated` trip inside the window — the W1-T2345 counter firing on a PR whose
-   * verdict has not moved on an unchanged head for `repeatDispositionBound` consecutive derivations.
-   *
-   * ADDITIVE, NOT LATEST-WINS, and the difference from `boardReview` above is the point. A board read
-   * is a SNAPSHOT of one board's current state, so the newest row supersedes the older ones. A repeat
-   * trip is an EVENT about one particular PR, fires at most once per PR per unchanged head by
-   * construction (`repeatAlreadyEscalated`, sweep.ts), and two trips are two DIFFERENT PRs stuck —
-   * collapsing them to "latest" would report one and hide the rest.
-   *
-   * DEDUPED BY PR NUMBER anyway, because the ledger union can carry the same row twice across
-   * overlapping rotations, and a digest counting a rotation artefact as a second stuck PR would be
-   * wrong in the direction that costs an operator a look.
-   *
-   * SOFT-COMPOSED by {@link renderDigest} exactly like `boardReview`: a window with no trip omits the
-   * line ENTIRELY rather than printing a "(none this window)" placeholder, so a digest over a quiet
-   * board — or one predating the counter — renders byte-identical to before this field existed. A
-   * QUIET BOARD SHOWS NOTHING HERE, which is the honest reading: the counter only fires when a PR is
-   * demonstrably stuck.
-   */
+  /** Every `sweep.repeat_escalated` trip — a PR whose verdict hasn't moved for
+   *  `repeatDispositionBound` consecutive derivations on an unchanged head. */
   repeatEscalations?: RepeatEscalationDigestEntry[];
-  /**
-   * Every `sweep.repair_filing_suppressed` trip inside the window — W1-T2416's verdict read
-   * refusing to re-file a `repair#<surface>` recurrence whose most recent prior entry for that
-   * SAME origin is already `rejected` (design ii/iii of that task). ADDITIVE, not latest-wins,
-   * mirroring `repeatEscalations` immediately above and for the same reason: two trips name two
-   * DIFFERENT surfaces stood down in the same window, and collapsing to "latest" would report
-   * one and hide the rest.
-   *
-   * DEDUPED BY THE FILING'S OWN `id`, mirroring `repeatEscalations`'s PR-number dedup: the ledger
-   * union can carry the same row twice across overlapping rotations, and a digest counting a
-   * rotation artefact as a second suppression would be wrong in the direction that costs an
-   * operator a look.
-   *
-   * SOFT-COMPOSED by {@link renderDigest} exactly like `repeatEscalations`: a window with no trip
-   * omits the line ENTIRELY rather than printing a "(none this window)" placeholder, so a digest
-   * over a quiet board — or one predating this reader — renders byte-identical to before this
-   * field existed. This IS the reader design (iii) requires: the row the filer already writes had
-   * no consumer until this field, and a ledger row nothing reads is not an answer.
-   */
+  /** Every `sweep.repair_filing_suppressed` trip (W1-T2416). */
   repairFilingsSuppressed?: RepairFilingSuppressedDigestEntry[];
-  /**
-   * W1-T178 (verdict stability): count of `review.downgrade_suppressed` ledger
-   * lines inside the window — a semantic-lane downgrade suppressed because the
-   * deterministic floor still passed on an unchanged head. This is the signal
-   * that tells whether the semantic lane is getting noisier or quieter over
-   * time; a suppression is never silent (see run-task.ts's `runReview`), but
-   * this is where the COUNT is visible without reading the raw ledger.
-   */
+  /** Count of `review.downgrade_suppressed` lines (W1-T178): a semantic-lane downgrade
+   *  suppressed because the deterministic floor still passed on an unchanged head. */
   verdictDowngradesSuppressed: number;
 }
 
@@ -625,8 +462,7 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
     if (l.step === "inbox.polled" && l.inbox && typeof l.inbox === "object") {
       summary.inbox = l.inbox as InboxPollSummary;
     }
-    // The rung's own row, latest-wins like the three above. Reading the ROW rather than calling the
-    // rung's module keeps this file a pure ledger reader: no new import, no new seam, no write path.
+    // The rung's own row, latest-wins like the three above — read here, never re-derived.
     if (l.step === "board_review.ran") {
       summary.boardReview = {
         oldestOpenAgeHours: typeof l.oldestOpenAgeHours === "number" ? l.oldestOpenAgeHours : undefined,
@@ -636,14 +472,11 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
         proposals: typeof l.proposals === "number" ? l.proposals : undefined,
       };
     }
-    // W1-T2345's counter trip. The sweep ALREADY writes this row; what was missing is a READER.
-    // The shard's own design says so in terms — "the escalation surface is THE DIGEST … a second
-    // queue nobody drains is not an answer" — and `digest.ts` referenced the step ZERO times.
+    // W1-T2345's counter trip, read here. Why: docs/forensics/digest.md
     if (l.step === "sweep.repeat_escalated") {
       const prNumber = typeof l.pr_number === "number" ? l.pr_number : undefined;
       const list = (summary.repeatEscalations ??= []);
-      // Dedup on PR number: the union can replay one row across overlapping rotations, and a
-      // rotation artefact must never read as a second stuck PR.
+      // Dedup on PR number: a rotation artefact must never read as a second stuck PR.
       if (prNumber === undefined || !list.some((e) => e.prNumber === prNumber)) {
         list.push({
           prNumber,
@@ -652,14 +485,11 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
         });
       }
     }
-    // W1-T2416's suppression row. The filer already writes this row (run-task.ts's
-    // `captureRepairFeedbackWithPriorVerdict`); what was missing is a READER — the same gap
-    // W1-T2345's `sweep.repeat_escalated` closed above, and the same precedent this task follows.
+    // W1-T2416's suppression row, read the same shape as `sweep.repeat_escalated` above.
     if (l.step === "sweep.repair_filing_suppressed") {
       const id = typeof l.id === "string" ? l.id : undefined;
       const list = (summary.repairFilingsSuppressed ??= []);
-      // Dedup on the filing's own id: the union can replay one row across overlapping rotations,
-      // and a rotation artefact must never read as a second suppression.
+      // Dedup on the filing's own id: a rotation artefact must never read as a second suppression.
       if (id === undefined || !list.some((e) => e.id === id)) {
         list.push({
           id,
@@ -675,29 +505,22 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
 }
 
 /**
- * Deep-link a task id to its console card (W1-T144, MASTER-PLAN §7B). A HASH route —
- * `#task=<id>` — so the link never leaves the client: no bearer token rides along in
- * message-app history, and it layers cleanly on top of whatever base URL (and its own
- * `?token=`, per apps/dashboard's `readConfig`) the operator already has bookmarked.
- * `consoleBaseUrl` is a full origin (e.g. `http://100.x.x.x:4317`, config.ts's
- * `consoleUrl`); a trailing slash is tolerated. `taskId` is percent-encoded so a link
- * for task X can never be mistaken for — or collide with — a link for a different id.
+ * Deep-link a task id to its console card (W1-T144). A hash route (`#task=<id>`) so the link
+ * never leaves the client and layers on top of whatever base URL the operator has bookmarked.
+ * `consoleBaseUrl` is a full origin; a trailing slash is tolerated. `taskId` is percent-encoded.
  */
 export function consoleCardUrl(consoleBaseUrl: string, taskId: string): string {
   return `${consoleBaseUrl.replace(/\/+$/, "")}/#task=${encodeURIComponent(taskId)}`;
 }
 
 /**
- * Render a {@link DigestSummary} as the digest text — what a human reads, once a day.
- * `consoleBaseUrl`, when given, appends a W1-T144 console deep link to each escalation
- * line so a needs-human item read off the message channel jumps straight to its task
- * card. Omitted (the default), the escalations line renders EXACTLY as before this
- * field existed — no caller that predates W1-T144 sees any change.
+ * Render a {@link DigestSummary} as the digest text a human reads once a day. `consoleBaseUrl`,
+ * when given, appends a console deep link to each escalation line; omitted, the escalations line
+ * renders exactly as before that field existed.
  */
 export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string {
-  // W1-T2388: AN INCOMPLETE READ MUST NEVER LOOK LIKE A QUIET BOARD — that is the failure this
-  // task exists to remove, so it is stated on its own line rather than inferred from short output.
-  // A COMPLETE read adds nothing: a clean board renders byte-identically to before this task.
+  // W1-T2388: an incomplete read must never look like a quiet board — stated on its own line,
+  // never inferred from short output. A complete read renders exactly as before this existed.
   const incomplete: string[] = [];
   if (s.read && s.read.unread.length > 0) incomplete.push(`${s.read.unread.length} rotation(s) unreadable`);
   if (s.read && s.read.archivesTruncated > 0) {
@@ -747,10 +570,8 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
   return lines.join("\n");
 }
 
-/** One line for {@link DigestSummary.repeatEscalations} — every PR that tripped the repeat bound in
- *  this window, each naming the verdict that would not move and how many consecutive derivations it
- *  survived. Every field optional, so a row missing one omits that clause rather than printing
- *  `undefined`. Mirrors `renderBoardReviewSnapshot`'s shape. */
+/** One line for {@link DigestSummary.repeatEscalations}, naming the verdict that would not move
+ *  and how many consecutive derivations it survived. Every field optional. */
 function renderRepeatEscalations(entries: RepeatEscalationDigestEntry[]): string {
   return entries
     .map((e) => {
@@ -762,10 +583,8 @@ function renderRepeatEscalations(entries: RepeatEscalationDigestEntry[]): string
     .join(", ");
 }
 
-/** One line for {@link DigestSummary.repairFilingsSuppressed} — every due surface whose recurrence
- *  filing was suppressed because its own most recent verdict is already `rejected` (W1-T2416),
- *  each naming the surface, how many distinct PRs its own evidence carried, and the rejected
- *  entry that suppressed it. Mirrors `renderRepeatEscalations`'s shape. */
+/** One line for {@link DigestSummary.repairFilingsSuppressed} (W1-T2416), naming the surface, its
+ *  distinct-PR count, and the rejected entry that suppressed it. */
 function renderRepairFilingsSuppressed(entries: RepairFilingSuppressedDigestEntry[]): string {
   return entries
     .map((e) => {
@@ -777,8 +596,7 @@ function renderRepairFilingsSuppressed(entries: RepairFilingSuppressedDigestEntr
     .join(", ");
 }
 
-/** One line for {@link DigestSummary.boardReview} — every field optional, so a row missing one omits
- *  that clause rather than printing `undefined`. Mirrors `renderAlertsSummary`'s shape. */
+/** One line for {@link DigestSummary.boardReview}. Every field optional. */
 function renderBoardReviewSnapshot(b: BoardReviewDigestSnapshot): string {
   const parts: string[] = [];
   if (typeof b.oldestOpenAgeHours === "number") parts.push(`oldest open ${b.oldestOpenAgeHours.toFixed(1)}h`);
@@ -789,13 +607,8 @@ function renderBoardReviewSnapshot(b: BoardReviewDigestSnapshot): string {
   return parts.length ? parts.join(", ") : "(ran, no counts recorded)";
 }
 
-/**
- * Build the digest text straight from a ledger file, as of `sinceIso`. `consoleBaseUrl`
- * threads through to {@link renderDigest} — see its doc for the W1-T144 deep-link contract.
- */
-/** The real fs behind {@link readDigestWindow} — the SAME four operations `ledger-grep.ts`'s own
- *  {@link LedgerGrepFsDeps} names, reused rather than a fifth shape, so a test drives this reader
- *  with the fixtures that module's callers already use. */
+/** The real fs behind {@link readDigestWindow} — the same shape {@link LedgerGrepFsDeps} names,
+ *  so a test drives this reader with the fixtures that module's callers already use. */
 const realDigestFs: LedgerGrepFsDeps = {
   readdirSync: (dir) => nodeReaddirSync(dir),
   existsSync: () => true,
@@ -803,89 +616,42 @@ const realDigestFs: LedgerGrepFsDeps = {
   gunzipSync: (buf) => nodeGunzipSync(buf),
 };
 
-/**
- * W1-T2388 — A BACKSTOP, NOT A POLICY. The bound that matters is the WINDOW (every archive stamped
- * before `sinceIso` is skipped unopened); this cap exists only so an unbounded corpus cannot make a
- * reporter unbounded. It sits ABOVE the whole measured corpus (672 rotations, 118.1 MiB) and above
- * the worst 24-hour window in it (649 rotations, 89.4 MiB), so it does not bite on today's data —
- * and when it does bite, {@link renderDigest} SAYS SO rather than rendering a shorter board.
- */
+/** A BACKSTOP, not a policy — the window is the real bound. Exists only so an unbounded corpus
+ *  can't make a reporter unbounded; when it bites, {@link renderDigest} says so.
+ *  Why: docs/forensics/digest.md */
 export const DIGEST_MAX_ARCHIVES = 1024;
 
-/**
- * W1-T2388 — THE PRIMARY CONTROL, AND IT BINDS ON MEMORY RATHER THAN WALL CLOCK. MEASURED, and
- * the measurement is why this exists at all: the busiest real 24-hour window in this corpus holds
- * 649 of its 672 rotations, and a reader that retained every in-window row from them DIED with a
- * V8 heap OOM at 4.1 GB — twice, once before the window filter was added and again after it, because
- * in a busy window the rows ARE in window. Wall clock was never the binding constraint (the digest's
- * own cadence floor is `minIntervalMinutes` >= 15, i.e. 900,000 ms, against a ~3 s union), so
- * bounding seconds would have bounded the wrong thing.
- *
- * ROWS, NOT ARCHIVES, and NEWEST FIRST: archives are read newest-first, so the rows kept are the
- * most recent ones — which is what a digest of a window wants — and the count dropped is RENDERED
- * rather than silently shortening the board. 250,000 is ~14x the live file's own 17,509 lines and
- * comfortably inside heap on this host; it is a ceiling on the pathological case, not a target.
- *
- * KIND: PRIMARY CONTROL, and the pairing is the point — {@link DIGEST_MAX_ARCHIVES} above is the
- * BACKSTOP. This is the bound the measurement says actually binds (the OOM was rows retained, not
- * archives opened), so it is the one a reader must reason about first; the archive cap exists to
- * stop a pathological directory before this one is even reached. Declared in the vocabulary
- * `test/bound-kind-declared.test.ts` reads rather than grandfathered: grandfathering is for bounds
- * that predate the property, and this one was added by the same change.
- */
+/** THE PRIMARY CONTROL — binds on memory, not wall clock, since retaining every in-window row
+ *  from the busiest measured window died with a heap OOM. {@link DIGEST_MAX_ARCHIVES} is the
+ *  backstop; this is the bound that actually binds. Why: docs/forensics/digest.md */
 export const DIGEST_MAX_ROWS = 250_000;
 
 /** What one windowed union read actually reached — carried so the render can refuse to look quiet
- *  when it was merely incomplete (W1-T444's coverage-not-readability rule, applied to a reporter). */
+ *  when it was merely incomplete. */
 export interface DigestWindowRead {
   lines: LedgerLine[];
-  /** Rotations the enumerator classified under `<ledgerPath>`'s own directory. */
   archivesConsidered: number;
-  /** In-window rows dropped because the row cap bit — always rendered, never silent. */
+  /** Rows dropped because the row cap bit — always rendered, never silent. */
   rowsTruncated: number;
-  /** The caps ACTUALLY applied. Carried rather than re-read from the constants, so a render can
-   *  never name a bound the read did not use — the first draft printed {@link DIGEST_MAX_ROWS}
-   *  beside a truncation produced by an injected cap, and its own test caught it. */
+  /** Carried rather than re-read from the constants, so a render never names a bound the read
+   *  did not use. */
   capsApplied: { maxArchives: number; maxRows: number };
-  /** Skipped UNOPENED because their own filename stamp precedes `sinceIso`. */
+  /** Skipped unopened because their filename stamp precedes `sinceIso`. */
   archivesSkippedByStamp: number;
-  /** Actually opened and parsed. */
   archivesRead: number;
-  /** Found, in-window, and NOT opened because {@link DIGEST_MAX_ARCHIVES} bit. */
+  /** In-window, but not opened because {@link DIGEST_MAX_ARCHIVES} bit. */
   archivesTruncated: number;
-  /** In-window rotations that were opened and threw — partial coverage, never silence. */
+  /** Opened and threw — partial coverage, never silence. */
   unread: string[];
 }
 
 /**
- * W1-T2388 — THE DIGEST'S OWN WINDOWED UNION READ.
- *
- * THE DEFECT. `buildDigest` read ONE live path. `rotateLedger` fires on `statSize(path) > 4 MiB` —
- * a BYTE ceiling, not a clock — measured at 6.1 rotation events a day, with a rotation landing
- * inside the digest's cadence in 96.7% of windows and roughly 16% of a day's rows surviving to a
- * daily digest. Only 3 of the 10 steps the digest sweeps are in `DECISION_RELEVANT_LEDGER_STEPS`,
- * and they are there because some DECIDER elsewhere consults them, not for the digest's sake — so
- * the other seven (`board_review.ran`, `inbox.polled`, `issues.polled`, `learnings.injected`,
- * `ops.alerts_polled`, `review.downgrade_suppressed`, `sweep.repeat_escalated`) simply vanished.
- *
- * THE WINDOW IS THE BOUND, AND IT IS FREE. `rotationStampIso`'s own doc establishes the property
- * this rests on — "every line in a rotation is at or before the instant in its name", verified on
- * this host over an 18-archive sample — so an archive stamped before `sinceIso` can hold only older
- * rows and is provably irrelevant WITHOUT BEING OPENED. An UNPARSEABLE name is read, never skipped:
- * that same doc says a caller must treat "cannot decide" as "read it", and skipping would drop a
- * real corpus file.
- *
- * ONE ENUMERATOR. `ledgerRotationEntries` is THE definition of the corpus (W1-T444: two
- * hand-maintained filters once disagreed and each read a different half). This adds no second
- * suffix matcher.
- *
- * NOT `readLedgerUnionBounded`, AND ITS OWN DOC IS WHY: "every rung this serves reads the NEWEST
- * row of a step, never a count, so stopping early cannot under-count anything." The digest COUNTS —
- * it sums `cost_usd`, tallies `verdictDowngradesSuppressed`, and pushes arrays — so that reader's
- * early exit would under-report silently, which is this defect wearing a different hat.
- *
- * DEDUPED BY EXACT LINE TEXT, because rotations overlap heavily: `run.start` reads 257,438 RAW
- * lines across the `.gz` half and 779 DISTINCT over the union.
+ * The digest's own windowed union read (W1-T2388), replacing an earlier read of the live ledger
+ * path alone that missed every already-rotated row. An archive stamped before `sinceIso` is
+ * skipped unopened; an unparseable stamp is read, never skipped. Deliberately not
+ * `readLedgerUnionBounded` — that reader's early exit is sound only for callers reading a step's
+ * newest row, never a count, and the digest sums and tallies. Deduped by exact line text.
+ * Why: docs/forensics/digest.md
  */
 export function readDigestWindow(
   ledgerPath: string,
@@ -900,8 +666,8 @@ export function readDigestWindow(
   try {
     names = fs.readdirSync(dir);
   } catch {
-    // An unreadable directory is "no archives" — the live read below still answers, exactly as it
-    // did before this function existed. Never a throw in a reporter.
+    // An unreadable directory reads as "no archives" — the live read below still answers. Never
+    // a throw in a reporter.
   }
   const rotations = ledgerRotationEntries(names, dir);
   const inWindow = rotations.filter((e) => {
@@ -909,22 +675,16 @@ export function readDigestWindow(
     return stamp === undefined || stamp >= sinceIso;
   });
   const skipped = rotations.length - inWindow.length;
-  // Newest first, so a cap that bites drops the OLDEST in-window archives rather than an arbitrary
-  // set — and `archivesTruncated` says how many.
+  // Newest first, so a cap that bites drops the oldest in-window archives, and
+  // `archivesTruncated` says how many.
   const ordered = [...inWindow].sort((a, b) => (a.path < b.path ? 1 : a.path > b.path ? -1 : 0));
   const opened = ordered.slice(0, cap);
   const seen = new Set<string>();
   const lines: LedgerLine[] = [];
-  // FILTER BEFORE RETAINING, WHICH IS A MEMORY BOUND AND NOT AN OPTIMISATION — MEASURED: an
-  // earlier draft parsed and deduped every line first and DIED with a V8 heap OOM at 4.1 GB on
-  // this corpus's 4,356,624 lines. An in-window archive is mostly OLD rows (rotations overlap
-  // heavily), so the window predicate is what keeps the retained set proportional to the WINDOW
-  // rather than to the archives' total size. The dedup `Set` is likewise fed only by retained
-  // rows, so it cannot grow past the window either.
-  //
-  // The predicate is `collectSince`'s own, applied one step earlier — a row with no string `ts`
-  // is dropped there today and is dropped here, so `summarize`'s later `collectSince` call is a
-  // no-op over this input rather than a second, different opinion.
+  // Filtering before retaining is a memory bound, not an optimisation — an earlier draft parsed
+  // and deduped every line first and died with a heap OOM. This predicate is `collectSince`'s
+  // own, applied one step earlier, so `summarize`'s later call is a no-op over this input.
+  // Why: the OOM measurement — docs/forensics/digest.md
   const addText = (text: string): void => {
     for (const raw of text.split("\n")) {
       const line = raw.trim();
@@ -949,11 +709,8 @@ export function readDigestWindow(
       const buf = fs.readFileSync(entry.path);
       addText((entry.form === "gzip" ? fs.gunzipSync(buf) : buf).toString("utf8"));
     } catch {
-      // An archive that cannot be read or gunzipped is RECORDED as unread, never skipped silently:
-      // `DigestWindowRead.unreadArchives` is what lets the render state an incomplete read on its
-      // own line instead of looking quiet (W1-T444's coverage-not-readability rule). Swallowing
-      // here is deliberate — one corrupt rotation must not cost the whole digest — and the caller
-      // still learns it happened.
+      // Recorded as unread, never skipped silently, so the render can state an incomplete read
+      // instead of looking quiet — one corrupt rotation must not cost the whole digest.
       unread.push(entry.path);
     }
   }
@@ -974,9 +731,12 @@ export function readDigestWindow(
   };
 }
 
+/**
+ * Build the digest text straight from a ledger file, as of `sinceIso` — reading the windowed
+ * union (W1-T2388), not the live file alone. `consoleBaseUrl` threads through to
+ * {@link renderDigest}'s deep-link contract.
+ */
 export function buildDigest(ledgerPath: string, sinceIso: string, consoleBaseUrl?: string): string {
-  // W1-T2388: the WINDOWED union, not the live file alone. `readLedgerLines` stays imported and in
-  // use elsewhere in this module; only the digest's own read moves.
   const read = readDigestWindow(ledgerPath, sinceIso);
   const summary = summarize(read.lines, sinceIso);
   return renderDigest({ ...summary, read }, consoleBaseUrl);
@@ -990,13 +750,9 @@ export function sendDigest(ledgerPath: string, sinceIso: string, deps: NotifyDep
 }
 
 /**
- * Render a post-drain {@link RundownLine} array as ONE digest-channel message (W1-T144):
- * the PUSH counterpart to `drain.ts`'s own `renderRundown` (a pull-view printed to the
- * terminal that kicked the drain off). Every non-merged line — `blocked`/`escalated`,
- * the outcomes an operator who stepped away actually needs to see — carries a
- * {@link consoleCardUrl} deep link to that task's card; a `merged` line stays a bare
- * confirmation, since there is nothing to act on. Mirrors `renderRundown`'s own
- * "(no tasks attempted)" empty-state text so the two views never disagree on shape.
+ * Render a post-drain {@link RundownLine} array as one digest-channel message (W1-T144), the
+ * push counterpart to `drain.ts`'s pull-view `renderRundown`. Every non-merged line carries a
+ * {@link consoleCardUrl} deep link; a `merged` line stays a bare confirmation.
  */
 export function renderRundownPush(lines: RundownLine[], consoleBaseUrl: string): string {
   const body =
@@ -1011,42 +767,31 @@ export function renderRundownPush(lines: RundownLine[], consoleBaseUrl: string):
   return ["Remudero drain rundown", ...body].join("\n");
 }
 
-/**
- * Deliver a post-drain rundown over the SAME notify channel as {@link sendDigest} and
- * `run-task.ts`'s MANUAL/HARD_STOP escalation pings (grep-provable: this is the ONE call
- * to `notify()` a drain's push runs through, not a second/parallel sender — W1-T144
- * acceptance "a drain rundown emits through the SAME channel, not a second transport").
- */
+/** Deliver a post-drain rundown over the same notify channel as {@link sendDigest} and
+ *  `run-task.ts`'s MANUAL/HARD_STOP escalation pings — never a second, parallel sender. */
 export function sendRundown(lines: RundownLine[], consoleBaseUrl: string, deps: NotifyDeps): string {
   const text = renderRundownPush(lines, consoleBaseUrl);
   notify(text, deps);
   return text;
 }
 
-// ── W1-T163: the digest becomes MARKER-AWARE, sharing lib/last-seen.ts's per-token marker with
-// the console recap (lib/recap.ts) — so a pushed digest and a pulled recap, read off the SAME
-// token's SAME marker, cover the identical window: "push and pull tell ONE story." ────────────
+// ── W1-T163: the digest is marker-aware, sharing lib/last-seen.ts's per-token marker with the
+// console recap, so a pushed digest and a pulled recap cover the identical window.
 
-/** The digest's pre-marker default lookback (unchanged from before this feature existed) — used
- *  ONLY the very first time a token is seen, so a first-ever digest for a token still reports
- *  the last day rather than the entire ledger's history. Every later call reads that token's
- *  OWN previously-advanced marker instead. */
+/** The digest's pre-marker default lookback, used only the first time a token is seen so it
+ *  reports the last day rather than the entire ledger's history. */
 export function defaultDigestSinceIso(nowIso: string): string {
   return new Date(Date.parse(nowIso) - 24 * 60 * 60 * 1000).toISOString();
 }
 
-/** The `sinceIso` a marker-aware digest for `tokenId` would use RIGHT NOW, without advancing
- *  anything — the same value {@link buildMarkerAwareDigest}/{@link sendMarkerAwareDigest} resolve
- *  internally, exposed so a caller (e.g. a `--dry-run` preview) can show it explicitly. */
+/** The `sinceIso` a marker-aware digest for `tokenId` would use right now, without advancing
+ *  anything — exposed so a `--dry-run` preview can show it explicitly. */
 export function resolveMarkerAwareSince(store: LastSeenStore, tokenId: string, nowIso: string): string {
   return store.get(tokenId) ?? defaultDigestSinceIso(nowIso);
 }
 
-/**
- * Build (never send, never advance the marker) the digest text for `tokenId` off its CURRENT
- * marker — a read-only preview, exactly like `buildDigest` but marker-aware instead of taking an
- * explicit `sinceIso`. Used by `rmd digest --dry-run` so a preview never mutates state.
- */
+/** Build (never send, never advance the marker) the digest text for `tokenId` off its current
+ *  marker — a read-only preview used by `rmd digest --dry-run`. */
 export function buildMarkerAwareDigest(
   ledgerPath: string,
   store: LastSeenStore,
@@ -1058,14 +803,9 @@ export function buildMarkerAwareDigest(
   return { text: buildDigest(ledgerPath, sinceIso, consoleBaseUrl), sinceIso };
 }
 
-/**
- * Send a marker-aware digest for `tokenId`: read its CURRENT marker (or the pre-marker 24h
- * default on a first-ever send), deliver exactly like {@link sendDigest}, then advance the SAME
- * {@link LastSeenStore} `tokenId` to `nowIso` — the identical store `lib/board.ts`'s `GET
- * /v1/status` advances on a board view (see lib/last-seen.ts's module header). Whichever of the
- * two — a digest send or a board view — happens first moves the marker forward; the other then
- * only ever reports what's left, so the two never double-report or silently skip a window.
- */
+/** Send a marker-aware digest for `tokenId`: deliver like {@link sendDigest}, then advance the
+ *  same {@link LastSeenStore} `lib/board.ts`'s board view advances, so whichever happens first
+ *  moves the marker and the other reports what's left. */
 export function sendMarkerAwareDigest(
   ledgerPath: string,
   store: LastSeenStore,
@@ -1080,42 +820,27 @@ export function sendMarkerAwareDigest(
   return text;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-// W1-T2277 — THE DIGEST'S OWN CADENCE, INTERVAL, ITEM-MARKING AND DELIVERY SEAM
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-//
-// This section closes the three gaps this module's own header used to name (no clock, no
-// configurable window, no delivery adapter that runs on this fleet). It fits the EXISTING
-// cadence machinery rather than inventing a second one: `decideMeasurementCadence`
-// (measurement-cadence.ts) is reused VERBATIM — the same pure two-bound (minIntervalMinutes +
-// maxPerDay) decision function `rule-efficacy`/`verdict-calibration`/`autonomy-rate` already
-// share — but against the digest's OWN marker file and OWN `plan/policy.yaml` row, so a short
-// digest interval can never drag those three verbs to it (and a change to their cadence can
-// never drag the digest), and no new decision function had to be written at all.
+// ── W1-T2277: the digest's own cadence, interval, item-marking and delivery seam, reusing
+// decideMeasurementCadence verbatim against the digest's own marker file and policy row.
+// Why: docs/forensics/digest.md
 
-// ── The cadence: its OWN row, its OWN marker (claim: "fires on its own cadence ... existing
-//    three cadence verbs keep their own row and are not dragged to the digest interval") ──────
-
-/** The digest cadence's policy shape — deliberately a SUBSET of
- *  {@link "./measurement-cadence.js".MeasurementCadencePolicy} (no `escalate`: the digest never
- *  drafts a proposal, it only reads and sends) so `plan/policy.yaml`'s `digestCadence` row can
- *  never be mistaken for `measurementCadence`'s. */
+/** The digest cadence's policy shape — a subset of
+ *  {@link "./measurement-cadence.js".MeasurementCadencePolicy} with no `escalate`, since the
+ *  digest only reads and sends, never drafts a proposal. */
 export interface DigestCadencePolicy {
   enabled: boolean;
   minIntervalMinutes: number;
   maxPerDay: number;
 }
 
-/** `<root>/state/last-digest-cadence.json` — the digest's OWN fire marker, distinct from
- *  `measurementCadenceMarkerPath`'s `last-measurement-cadence.json` (design above): the two
- *  cadences never read or write each other's file, so they can never throttle one another. */
+/** The digest's own fire marker, distinct from `measurementCadenceMarkerPath`'s file, so the
+ *  two cadences can never throttle one another. */
 export function digestCadenceMarkerPath(root: string): string {
   return join(root, "state", "last-digest-cadence.json");
 }
 
-/** The digest cadence's real decision, assembled from live state — mirrors
- *  `measurement-cadence.ts`'s own `measurementCadenceCheck` shape exactly, reusing
- *  {@link decideMeasurementCadence} (the SAME pure function) rather than a second one. */
+/** The digest cadence's real decision, reusing {@link decideMeasurementCadence} rather than a
+ *  second decision function. */
 export function digestCadenceCheck(opts: { root: string; policy: DigestCadencePolicy; now?: Date }): MeasurementCadenceDecision {
   const marker = readMeasurementCadenceMarker(digestCadenceMarkerPath(opts.root));
   return decideMeasurementCadence({
@@ -1125,25 +850,19 @@ export function digestCadenceCheck(opts: { root: string; policy: DigestCadencePo
   });
 }
 
-/** Record a digest fire on the digest's OWN marker file — the SAME rolling-24h window
- *  {@link recordMeasurementCadenceFire} already implements, just pointed at
- *  {@link digestCadenceMarkerPath} instead of the measurement-cadence family's file. */
+/** Record a digest fire, reusing {@link recordMeasurementCadenceFire}'s rolling-24h window. */
 export function recordDigestCadenceFire(root: string, at: Date): void {
   const path = digestCadenceMarkerPath(root);
   mkdirSync(dirname(path), { recursive: true });
   recordMeasurementCadenceFire(path, at, 24 * 60 * 60 * 1000);
 }
 
-// ── The interval: read from policy, every console-offered value checked against the declared
-//    bound (claim: "the interval is read from policy and every value the console offers is
-//    inside the declared bounds") ──────────────────────────────────────────────────────────────
+// ── The interval: read from policy, every console-offered value checked against the declared bound.
 
-/** The console's offered digest-interval choices, in HOURS — {1, 2, 4, 8, 12, 24}. Exported so
- *  a caller (a console route, or this file's own bound check below) never hand-copies the set. */
+/** The console's offered digest-interval choices, in hours. Exported so no caller hand-copies. */
 export const DIGEST_INTERVAL_OPTIONS_HOURS: readonly number[] = [1, 2, 4, 8, 12, 24];
 
-/** {@link DIGEST_INTERVAL_OPTIONS_HOURS}, converted to the minutes unit
- *  `digestCadence.minIntervalMinutes` is stored in. */
+/** {@link DIGEST_INTERVAL_OPTIONS_HOURS} converted to minutes. */
 export function digestIntervalOptionsMinutes(): number[] {
   return DIGEST_INTERVAL_OPTIONS_HOURS.map((h) => h * 60);
 }
@@ -1155,16 +874,9 @@ export interface DigestIntervalBoundViolation {
   reason: string;
 }
 
-/**
- * Every console-offered interval value that falls outside `bounds` — CHECKED, never assumed
- * (mirrors this task's own rationale: "the requested window set fits the declared bounds —
- * checked, not assumed"). Empty when every offered value is inside `bounds`; a future console
- * change that widens the option set without widening `plan/policy.yaml`'s declared
- * `digestCadence.minIntervalMinutes` bound is caught here rather than silently clamped.
- * `bounds` is the caller's own read of `Policy.bounds["digestCadence.minIntervalMinutes"]`
- * (policy.ts) — this function never reads `plan/policy.yaml` itself, so it stays a pure
- * unit-testable predicate.
- */
+/** Every console-offered interval value outside `bounds` — checked, never assumed, so a future
+ *  console change that widens the option set without widening the declared bound is caught here
+ *  rather than silently clamped. */
 export function digestIntervalOptionsOutOfBounds(bounds: { min: number; max: number }): DigestIntervalBoundViolation[] {
   const out: DigestIntervalBoundViolation[] = [];
   for (const hours of DIGEST_INTERVAL_OPTIONS_HOURS) {
@@ -1176,13 +888,11 @@ export function digestIntervalOptionsOutOfBounds(bounds: { min: number; max: num
   return out;
 }
 
-// ── The two halves, marked per item (claims: "every deterministic figure carries the query
-//    that reproduces it, and an item without one fails the render" / "a generated item is
-//    marked per item rather than only by its section") ────────────────────────────────────────
+// ── The two halves, marked per item: every deterministic figure carries the re-runnable query
+// that reproduces it, and a generated item is marked per item, never only by its section.
 
-/** A RE-RUNNABLE, checkable figure — merged/blocked/cost/etc. `query` is the literal
- *  instruction a reader re-runs to reproduce `value` byte-for-byte (a ledger predicate, a grep,
- *  a command) — never prose describing the number, an actual re-runnable step. */
+/** A re-runnable, checkable figure. `query` is the literal instruction a reader re-runs to
+ *  reproduce `value`, never prose describing the number. */
 export interface DeterministicDigestItem {
   kind: "deterministic";
   label: string;
@@ -1190,11 +900,7 @@ export interface DeterministicDigestItem {
   query: string;
 }
 
-/** Text somebody (or something) WROTE — a suggestion, never a measurement. Marked per item
- *  (`kind: "generative"`) rather than only by a section heading, so a single line quoted out of
- *  the digest still identifies itself. This module never GENERATES this text (Law 5's "the
- *  digest never spawns a worker to judge a task" — see {@link runDigestCadenceReport}'s doc):
- *  it only renders whatever a caller already produced. */
+/** Text somebody wrote — a suggestion, never a measurement (Law 5: never generated here). */
 export interface GenerativeDigestItem {
   kind: "generative";
   text: string;
@@ -1202,12 +908,8 @@ export interface GenerativeDigestItem {
 
 export type DigestCadenceItem = DeterministicDigestItem | GenerativeDigestItem;
 
-/**
- * Render ONE {@link DigestCadenceItem}. THE MECHANICAL TEST (design note (iv) of this task's
- * rationale): a deterministic item with no re-runnable `query` is a BUG and FAILS THE RENDER —
- * thrown, never silently printed unattributed; a generative item is always marked
- * `[SUGGESTED]`, per item, never relying on a section heading alone.
- */
+/** Render one {@link DigestCadenceItem}. A deterministic item with no re-runnable `query` is a
+ *  bug and fails the render, thrown rather than silently printed unattributed. */
 export function renderDigestCadenceItem(item: DigestCadenceItem): string {
   if (item.kind === "deterministic") {
     if (!item.query || item.query.trim().length === 0) {
@@ -1220,15 +922,12 @@ export function renderDigestCadenceItem(item: DigestCadenceItem): string {
   return `[SUGGESTED] ${item.text}`;
 }
 
-/** Render every item — see {@link renderDigestCadenceItem}'s doc; throws on the FIRST
- *  unattributed deterministic item, same fail-loud contract. */
+/** Render every item, same fail-loud contract as {@link renderDigestCadenceItem}. */
 export function renderDigestCadenceItems(items: DigestCadenceItem[]): string[] {
   return items.map(renderDigestCadenceItem);
 }
 
-/** The re-runnable query strings for the four counting figures {@link summarize} reduces —
- *  the SAME reduction, described rather than re-derived, so {@link runDigestCadenceReport} can
- *  mark each one deterministic with its own query (claim 4) without a second traversal. */
+/** The re-runnable query strings for the four counting figures {@link summarize} reduces. */
 function digestSummaryToDeterministicItems(s: DigestSummary, sinceIso: string): DeterministicDigestItem[] {
   return [
     {
@@ -1258,22 +957,17 @@ function digestSummaryToDeterministicItems(s: DigestSummary, sinceIso: string): 
   ];
 }
 
-// ── The retro is cited, never re-derived (claim: "a retro that landed inside the window is
-//    cited rather than re-derived") ─────────────────────────────────────────────────────────
+// ── The retro is cited, never re-derived.
 
-/** One retro PR that landed (merged) inside the digest window — a CITATION, not a
- *  re-computation: this reads the SAME `verdict` lines {@link summarize} already reduces
- *  (`task_id === "RETRO"`, the id every retro run ledgers under — `src/run-task.ts`'s
- *  `retroCommand`/`buildGather`), and names the PR. It never imports rule-efficacy.ts /
- *  verdict-calibration.ts / autonomy.ts, so it is structurally incapable of re-deriving a
- *  retro's own findings — the only thing it can ever do is point at the PR that already has them. */
+/** One retro PR merged inside the digest window — a citation: reads the same `verdict` lines
+ *  {@link summarize} reduces and names the PR, importing none of rule-efficacy.ts /
+ *  verdict-calibration.ts / autonomy.ts, so it cannot re-derive a retro's own findings. */
 export interface RetroCitation {
   taskId: "RETRO";
   prUrl?: string;
 }
 
-/** Every retro that merged inside `[sinceIso, now]` — see {@link RetroCitation}'s doc for why
- *  this is a citation and not a re-derivation. */
+/** Every retro that merged inside `[sinceIso, now]`. */
 export function citeRetrosInWindow(lines: LedgerLine[], sinceIso: string): RetroCitation[] {
   const since = collectSince(lines, sinceIso);
   const out: RetroCitation[] = [];
@@ -1285,17 +979,12 @@ export function citeRetrosInWindow(lines: LedgerLine[], sinceIso: string): Retro
   return out;
 }
 
-// ── The delivery seam: the digest depends on NotifyChannel, never a concrete target (claim:
-//    "the digest depends on the notify channel interface and never on a concrete delivery
-//    target") — an INBOX adapter, because notify.ts's only shipped adapter (imessageChannel) is
-//    Darwin-only and this fleet runs on Linux (this module's own header). Kept HERE, not in
-//    notify.ts, precisely because an inbox adapter is an IMPLEMENTATION of NotifyChannel and
-//    requires no change to that interface at all. ─────────────────────────────────────────────
+// ── The delivery seam: the digest depends on NotifyChannel, never a concrete target. An inbox
+// adapter lives here (not in notify.ts) since notify.ts's only shipped adapter is Darwin-only
+// and this fleet runs on Linux; an adapter is an implementation of NotifyChannel, not a change
+// to it.
 
-/** `<root>/state/inbox-digests.json` — the console inbox's digest feed, mirroring
- *  `lib/inbox.ts`'s own `inbox-proposals.json`/`inbox-drafts.json` convention (both live under
- *  `config.root`, served by `GET /v1/inbox`). A plain JSON array of `{ts, text}` entries,
- *  newest last. */
+/** The console inbox's digest feed. A plain JSON array of `{ts, text}`, newest last. */
 export function inboxDigestsPath(root: string): string {
   return join(root, "state", "inbox-digests.json");
 }
@@ -1315,15 +1004,8 @@ function readInboxDigests(path: string): InboxDigestEntry[] {
   }
 }
 
-/**
- * A {@link NotifyChannel} implementation over the console inbox — the digest's ON-THIS-FLEET
- * delivery target: a plain file write has no platform gate, unlike `notify.ts`'s
- * `imessageChannel`, whose `unavailable()` refuses on every non-Darwin host. The digest's own
- * producer ({@link runDigestCadenceReport}) never imports this by name in a way that couples it
- * to the digest's logic — it only ever depends on the {@link NotifyChannel} TYPE, and this is
- * ONE implementation of it, freely swappable (a test fake today, an email adapter later) with
- * zero change to {@link sendDigest}/{@link runDigestCadenceReport} themselves.
- */
+/** A {@link NotifyChannel} implementation over the console inbox — a plain file write has no
+ *  platform gate, unlike `notify.ts`'s Darwin-only `imessageChannel`. */
 export function inboxNotifyChannel(root: string): NotifyChannel {
   return {
     send(message: string) {
@@ -1339,13 +1021,12 @@ export function inboxNotifyChannel(root: string): NotifyChannel {
   };
 }
 
-// ── The producer: Law 5, unconditionally (claim: "the digest files nothing, mints nothing, and
-//    spawns no worker to judge a task") ─────────────────────────────────────────────────────────
+// ── The producer: Law 5, unconditionally — the digest files nothing, mints nothing, and spawns
+// no worker to judge a task.
 
-/** {@link runDigestCadenceReport}'s return: the text actually sent, which channel name it went
- *  out under, and whether the channel reported itself deliverable (mirrors `notify()`'s own
- *  `delivered` ledger field, surfaced here for a caller/test that wants it without re-parsing
- *  the ledger line `notify()` already writes). */
+/** {@link runDigestCadenceReport}'s return: the text actually sent, which channel it went out
+ *  under, and whether the channel reported itself deliverable (mirrors `notify()`'s own
+ *  `delivered` ledger field). */
 export interface DigestCadenceRunResult {
   text: string;
   channelName: string;
@@ -1353,27 +1034,17 @@ export interface DigestCadenceRunResult {
 }
 
 /**
- * THE PRODUCER'S BODY for the digest cadence rung — mirrors `measurement-cadence.ts`'s
- * `runMeasurementCadenceReport` role exactly. Builds the SAME digest text this module always
- * shipped ({@link renderDigest} over {@link summarize}) — no rebuild of what already exists —
- * plus this section's deterministic-figure queries, the retro citation, and any already-written
- * `suggestions` (generative items — see {@link GenerativeDigestItem}'s doc: this function never
- * GENERATES that text itself), then delivers over `opts.deps.channel`.
- *
- * LAW 5, UNCONDITIONALLY (claim 7): every parameter below is data, a {@link NotifyChannel} or a
- * ledger path — there is no `spawn`/`gh`/task-filing/id-minting dependency anywhere in this
- * function's signature for a caller to even wire one in, and its body opens no file other than
- * the ledger it already reads and the channel's own `send`. It NEVER spawns a worker to decide
- * what to say about a task (it reports on work already done); if a caller wants a generative
- * half, it must have already produced that text itself and hands it in via `suggestions`.
+ * The producer for the digest cadence rung: builds the digest text plus the deterministic-figure
+ * queries, the retro citation and any `suggestions`, then delivers over `opts.deps.channel`. Law
+ * 5, unconditionally: every parameter is data or a {@link NotifyChannel} — no spawn/gh/task-filing
+ * dependency anywhere in the signature.
  */
 export function runDigestCadenceReport(opts: {
   ledgerPath: string;
   sinceIso: string;
   deps: NotifyDeps;
   consoleBaseUrl?: string;
-  /** Already-written generative items (never generated inside this function) — see
-   *  {@link GenerativeDigestItem}'s doc. Defaults to none: a purely deterministic digest. */
+  /** Already-written generative items, never generated inside this function. Defaults to none. */
   suggestions?: GenerativeDigestItem[];
 }): DigestCadenceRunResult {
   const lines = readLedgerLines(opts.ledgerPath);

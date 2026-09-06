@@ -194,6 +194,12 @@
       "grepHint": "diff-coverage.mjs forensics"
     },
     {
+      "path": "docs/forensics/digest.md",
+      "title": "digest.ts comment forensics",
+      "summary": "The measured forensics, incidents and design arguments that were removed from",
+      "grepHint": "digest.ts comment forensics"
+    },
+    {
       "path": "docs/forensics/dispatch-overlap.md",
       "title": "dispatch-overlap.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
