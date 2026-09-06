@@ -1,89 +1,30 @@
 name: Mutation Nightly
 
-# W1-T133 (MASTER-PLAN §5, D-10): the PR-time mutation-ratchet job (ci.yml) is deliberately
-# scoped to src/lib/classify.ts only (W1-T108's diff-scope + incremental fixes keep it near-
-# instant) -- that leaves the other ~15k lines of src/** with ZERO mutation coverage forever,
-# since mutating the FULL tree with Stryker's command test runner (which reruns the whole suite
-# per mutant -- no per-mutant test filtering exists yet for Node's built-in test runner) was
-# measured at ~4 hours, far past ci-gate.yml's 15-minute required-check wait ceiling. This
-# workflow moves that cost OFF the PR critical path entirely: scheduled nightly, full src/**
-# scope, OWNS the global mutation score.
+# Mutation Nightly (W1-T133, MASTER-PLAN §5, D-10) — the full-tree Stryker run the PR-time
+# mutation-ratchet job (ci.yml) cannot afford at its own scope: that job stays fast by mutating
+# only src/lib/classify.ts, which leaves the rest of src/** with no mutation coverage. This
+# workflow runs nightly, full scope, and OWNS the global mutation score — NOT a required check,
+# ever, and not listed in ci-gate.yml; D-10 makes that narrow PR scope defensible only because this
+# workflow is the falsifier of record for everything else.
 #
-# NOT a required check, ever -- that is the entire point (D-10: the PR gate's narrow scope is
-# only defensible because this workflow is the falsifier of record for everything else). It has
-# no `pull_request` trigger and is not listed in ci-gate.yml. stryker.conf.json's `mutate` scope
-# (still exactly `["src/lib/classify.ts"]`, W1-T108's shape) is untouched by this task -- the ONLY
-# stryker.conf.json edit this task makes is scoping the PR gate's `commandRunner.command` to the
-# two test files that actually exercise classify.ts (test/classify.test.ts,
-# test/block-reason.test.ts) instead of the full suite -- see ci.yml's mutation-ratchet job
-# comment for the measured latency incident that made that necessary. The PR gate's WHAT (mutate
-# target, diff-scope trigger, ratchet comparison) keeps W1-T108's exact shape; only the per-mutant
-# HOW got faster.
+# INVARIANT — test/** is never a mutation target: the nightly scope glob
+# (scripts/mutation-nightly-scope.json) excludes it structurally, and
+# scripts/mutation-ratchet.mjs's resolveMutateScope() hard-excludes it regardless of that config.
 #
-# TEST FILES ARE NEVER A MUTATION TARGET, enforced twice: scripts/mutation-nightly-scope.json's
-# own `mutate` glob never targets test/** (it lives outside src/** entirely), AND
-# scripts/mutation-ratchet.mjs's resolveMutateScope() hard-excludes `test/**` unconditionally
-# regardless of what that config says.
+# SAMPLING — a full-tree run was measured at ~4 hours, so `--nightly-plan` deterministically
+# samples a day-of-year-keyed subset each night and rotates through the whole tree over N nights,
+# one Stryker run per sampled file using that file's own direct test importers as the command (no
+# per-mutant test filter exists). A file with no importer, one over the per-run budget, or one
+# failing on unmutated source is excluded and named, never silently skipped — the reported score is
+# a LOWER BOUND. Full scope-resolution design: docs/forensics/mutation-ratchet.md.
 #
-# BOUNDED, not exhaustive, per run: mutating every one of src/**'s files with the command runner
-# would reproduce the same ~4-hour cost this workflow exists to avoid off the PR path (a nightly
-# run still shouldn't run forever). scripts/mutation-ratchet.mjs's `--nightly-plan` mode
-# deterministically samples a `fileCap`-sized subset (scripts/mutation-nightly-scope.json) keyed
-# on the day-of-year, so a bounded, reproducible sample runs each night and the sample ROTATES --
-# the whole matched tree is visited once every N nights (N = ceil(matched-file-count / fileCap)).
-# Same night-index always yields the same sample: deterministic, auditable, never flaky.
-#
-# ONE STRYKER RUN PER MUTATED FILE, which is the shape this job has to have. Stryker's
-# `commandRunner.command` is ONE command for a whole run and there is no per-file hook, so a single
-# invocation physically cannot run a different test set per mutated file. This workflow previously
-# overrode `--mutate` while leaving that command alone, and therefore mutated files no test in its
-# own command imports: nothing could kill those mutants by construction, and nine scheduled runs
-# reported `success` at a mutation score of 0.50%. `--nightly-plan` now derives each sampled file's
-# DIRECT test importers from the import graph and emits one Stryker config per file.
-#
-# WHAT THIS JOB NOW HONESTLY CLAIMS, which is less than its name suggests and is stated rather than
-# implied. It measures the files it can measure and NAMES the ones it cannot, every night, in this
-# job's log and in the failure issue:
-#   * A file no test imports directly is EXCLUDED -- nothing could kill a mutant in it.
-#   * A file whose direct importers exceed the per-file command budget is EXCLUDED. Every mutant
-#     pays that command again, so the hot modules (plan.ts, run-task.ts, status.ts and the rest of
-#     the ~45-to-116-importer set) do not fit in a night and are not pretended over. MEASURED
-#     across all 109 modules at the shipped budget: 67 (61%) are eligible, 2 have no direct test
-#     importer at all, and the remainder overrun.
-#   * A file whose own importers do not pass on UNMUTATED source is EXCLUDED -- no mutant verdict
-#     drawn from a red suite would mean anything.
-#   * The reported score is a LOWER BOUND, not the true score: the mapping follows DIRECT imports
-#     only, so a mutant killed by a test that reaches the module indirectly registers as surviving.
-#     Following transitive edges was measured and rejected -- the median module is transitively
-#     reachable from 166 of 358 test files, which is the full suite by another name.
-#
-# LOUD FAILURE, never a silent pass: `--nightly-ratchet` (run after the Stryker runs) blocks this
-# workflow on a VACUOUS run, an INVALID run, a below-baseline sampled score, an unreadable/corrupt
-# report, or a missing "nightly" baseline section -- there is no code path that reaches a green run
-# without a real, valid, at-or-above-baseline comparison (the W1-T130 degrade-loudly polarity).
-#
-# INVALID RUN is a VALIDITY check, NOT a quality floor: it refuses a report in which a mutated file
-# caught nothing at all, naming each such file. VACUOUS RUN refuses a report that judged no file at
-# all -- a score over an empty set is not a smaller measurement. Passing either means the runner
-# reached the mutated files and means NOTHING about test quality: neither is evidence for raising
-# scripts/mutation-baseline.json's `nightly.scorePct`, which remains a bootstrap zero and must be
-# set from runs of the FIXED job.
-#
-# This workflow intentionally does NOT auto-commit an updated scripts/mutation-baseline.json --
-# ratcheting the nightly floor up is a deliberate, reviewed change, the same convention every
-# other baseline in this repo already follows, not something a cron job should do unattended. The
-# uploaded report artifact is what a human uses to make that call.
-#
-# DELIVERY (the "loud" in LOUD FAILURE has to reach a human). Blocking the workflow only produces a
-# red badge on a page nobody opens: every other failing check in this repo rides a PR, so a human
-# sees it while doing normal work, but a cron job has no such carrier. That made this workflow --
-# the falsifier of record for the ~15k lines of src/** the PR gate deliberately does not mutate --
-# silent in practice exactly when it had something to say. The `notify` step below closes that with
-# scripts/needs-human-issue.mjs, which COMMENTS on an existing open needs-human issue rather than
-# opening a new one per night (365 issues a year would train the reader to ignore the label, which
-# would rebuild the same gap one level up). The four scheduled security scanners do not need this:
-# each uploads SARIF, so its findings already land as code-scanning alerts the alert-intake lane
-# reads. This workflow raises no alert and uploads no SARIF, which is what made it the outlier.
+# LOUD FAILURE — `--nightly-ratchet` blocks on a vacuous run, an invalid run (a mutated file caught
+# nothing — a validity check, not a quality floor), a below-baseline score, or a missing/corrupt
+# report; nothing reaches green without a real comparison. The baseline is never auto-committed —
+# ratcheting it up is a reviewed human call from the uploaded report artifact. DELIVERY: a cron job
+# has no PR to carry a red result, so `notify` comments on an open needs-human issue instead.
+# Why: measurements, incidents and design arguments compacted out of this file are archived
+# verbatim in docs/forensics/mutation-nightly-yml.md, per docs/comment-standard.md.
 on:
   schedule:
     # Nightly, off-peak (03:31 UTC -- staggered from CodeQL 04:43/Scorecard 02:23's own slots).
@@ -98,21 +39,13 @@ jobs:
   mutation-nightly:
     name: mutation-nightly (full src/** scope, sampled + rotated)
     runs-on: ubuntu-latest
-    # R-50: MEASURED, not the audit's flat "20m elsewhere" default -- that would have killed
-    # healthy runs. Over the 8 most recent scheduled runs (2026-08-27 to 2026-09-05), completed
-    # durations ranged ~17.5 to ~49 minutes, and one real (non-timeout) `failure` conclusion on
-    # 2026-08-31 (run 33380226631) legitimately ran 124 minutes -- confirmed via its own job
-    # steps: "Stryker mutation runs" started 09:59:17Z and completed 12:02:00Z, then the ratchet
-    # step correctly read that report and failed on its own merits, not on a hang. A 20m (or even
-    # 60m) cap would have truncated that run before it ever reached its real verdict -- exactly
-    # the "a bound that fires on a healthy condition" defect CLAUDE.md's Investigation-discipline
-    # section names. 240m (4h) ties the cap to this file's own header, which already measures
-    # full-tree Stryker at "~4 hours" -- comfortable headroom over the observed 124m worst case
-    # while still bounding a genuine hang.
+    # R-50: 240m/4h — measured across recent scheduled runs (17.5-124 minutes, including one
+    # legitimate non-timeout failure at 124m) and matched to this file's own ~4-hour full-tree
+    # estimate above, with headroom so a real run is never truncated before its own verdict.
+    # Why: the full measurement — docs/forensics/mutation-nightly-yml.md.
     timeout-minutes: 240
-    # Job-level permissions REPLACE the top-level block, so `contents: read` is restated rather
-    # than inherited. `issues: write` is the minimum the delivery step needs and is scoped to this
-    # job alone (Scorecard TokenPermissions -- W1-T66).
+    # Job-level permissions REPLACE the top-level block, so `contents: read` is restated; `issues:
+    # write` is the delivery step's minimum, scoped to this job alone (Scorecard TokenPermissions).
     permissions:
       contents: read
       issues: write
@@ -131,11 +64,9 @@ jobs:
         run: find src -type f \( -name '*.ts' -o -name '*.tsx' \) | sort > nightly-candidates.txt
       - name: List the test files the per-file mapping is derived from
         run: find test -maxdepth 1 -type f -name '*.test.ts' | sort > nightly-test-files.txt
-      # PLAN, not just scope. Stryker's `commandRunner.command` is ONE command for a whole run with
-      # no per-file hook, so a single invocation cannot run a different test set per mutated file --
-      # which is exactly why the old shape mutated files nothing in its command imported. This step
-      # derives each sampled file's DIRECT test importers, drops the ones this run cannot honestly
-      # measure (naming each and why), and writes one Stryker config per surviving file.
+      # PLAN, not just scope: Stryker's `commandRunner.command` is one command for the whole run,
+      # so mutating a wide, sampled scope with it needs one command PER FILE, derived from each
+      # file's own direct test importers — never a single command spanning the whole sample.
       - name: Plan tonight's per-file runs (direct test importers, budget-bounded, exclusions named)
         id: plan
         run: |
@@ -146,22 +77,16 @@ jobs:
             --night-index "$(date -u +%j)" \
             --plan-dir .stryker-plan \
             --report-dir reports/mutation/nightly 2>&1 | tee -a nightly-failure.log
-      # One `npx stryker run` per mutated file, each with its own command. A file that errors does
-      # NOT abort the loop -- the remaining files still produce reports.
+      # One `npx stryker run` per mutated file; an erroring config does not abort the loop, so the
+      # files that DID complete still produce reports.
       #
-      # W1-T2514: the failure is carried but deliberately NOT re-raised at this STEP boundary
-      # (`continue-on-error: true`). A step-boundary `exit 1` here would leave the `ratchet` step
-      # below `skipped` by its default `if: success()` -- confirmed verbatim on runs #26 and #31
-      # (`stryker=failure ratchet=skipped`), which means the one night an errored config makes the
-      # measurement matter most is exactly the night nothing judges the files that DID complete.
-      # `continue-on-error` overrides this step's `conclusion` to `success` (so `ratchet` still
-      # runs) while leaving its real `outcome` as `failure` -- the "Fail the workflow" step after
-      # `ratchet` reads that `outcome` and turns the job red once `ratchet` has had its turn. The
-      # polarity from the old comment survives unchanged: one bad file still cannot silently shrink
-      # the night into a smaller, passing measurement -- it now ALSO cannot silently skip judging
-      # the files that did complete. Every run tees into the same log the failure issue carries, and
-      # each failing config's identity is captured into `failed_configs` (previously printed to the
-      # log and then thrown away -- the diagnostic below named only the STEP, never the config).
+      # `continue-on-error: true` is what makes that true across the STEP boundary too — W1-T2514:
+      # without it, an error here left the `ratchet` step below `skipped` under its default
+      # `if: success()`, so the one night a config errors is exactly the night nothing judges the
+      # files that finished (confirmed on two real failing runs). It overrides this step's
+      # `conclusion` to `success`, never its `outcome`; the `stryker-guard` step below reads the
+      # real `outcome` and reddens the job once `ratchet` has had its turn.
+      # Why: the two-run measurement — docs/forensics/mutation-nightly-yml.md.
       - name: Stryker mutation runs (one per file -- see the `plan` step above)
         id: stryker
         continue-on-error: true
@@ -182,13 +107,10 @@ jobs:
           fi
           echo "failed_configs=$failed" >> "$GITHUB_OUTPUT"
           exit "$rc"
-      # `--report-dir` merges the per-file reports as a disjoint union; `--mutate-scope` carries the
-      # files the plan actually INCLUDED, so the run-validity guard judges what was really run
-      # rather than failing on files the plan already declined to measure and named.
-      #
-      # No `if:` needed -- the default `if: success()` now reads TRUE even when `stryker` errored,
-      # because `continue-on-error: true` above overrides that step's `conclusion`, not its
-      # `outcome`. This is the fix's whole point: the files that DID complete get judged.
+      # `--report-dir` merges the per-file reports as a disjoint union; `--mutate-scope` is what the
+      # plan actually included, so the run-validity guard judges what really ran. No `if:` needed:
+      # `continue-on-error` above overrides `stryker`'s conclusion, not its outcome, so this step's
+      # default `if: success()` still runs even when a config errored.
       - name: Nightly mutation ratchet (blocks LOUDLY on a vacuous or invalid run, a below-baseline sample, or a missing/broken report)
         id: ratchet
         run: |
@@ -198,14 +120,10 @@ jobs:
             --baseline scripts/mutation-baseline.json \
             --mutate-scope "${{ steps.plan.outputs.mutate }}" 2>&1 | tee -a nightly-failure.log
 
-      # W1-T2514: `ratchet` above runs regardless of `stryker`'s real outcome (that is the fix), so
-      # something after it has to turn a swallowed `stryker` failure back into a real job failure --
-      # otherwise `continue-on-error` would silently launder "a config errored" into a green run,
-      # which is exactly the degrade-LOUDLY polarity (W1-T130) this task is barred from relaxing.
-      # `always()` so this still runs (and still fails the job) even when `ratchet` itself also
-      # failed or got skipped because an earlier real failure (install/plan) already reddened the
-      # job -- this step's only job is to never let a `stryker` failure go unreported, never to
-      # swallow one itself.
+      # `ratchet` above runs regardless of `stryker`'s real outcome, so this step turns a swallowed
+      # `stryker` failure back into a job failure — otherwise `continue-on-error` would silently
+      # launder "a config errored" into green (the W1-T130 degrade-loudly polarity). `always()` so
+      # it still runs, and still fails the job, even if `ratchet` itself failed or was skipped.
       - name: Fail the workflow if any nightly Stryker config errored (ratchet already had its turn)
         id: stryker-guard
         if: always() && steps.stryker.outcome == 'failure'

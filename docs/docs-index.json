@@ -398,6 +398,12 @@
       "grepHint": "mount-headroom-sweep.mjs comment forensics"
     },
     {
+      "path": "docs/forensics/mutation-nightly-yml.md",
+      "title": "mutation-nightly.yml forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "mutation-nightly.yml forensics"
+    },
+    {
       "path": "docs/forensics/mutation-ratchet.md",
       "title": "mutation-ratchet.mjs forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
