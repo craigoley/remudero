@@ -186,6 +186,10 @@ test("buildStatusBoard: LATCHES — every marker class in the table renders with
   for (const row of model.latches.rows) {
     assert.ok(row.consequence.length > 0, `${row.name} must carry a stated consequence`);
   }
+  const quietHours = model.latches.rows.find((r) => r.name === "QUIET_HOURS");
+  assert.ok(quietHours);
+  assert.match(quietHours!.consequence, /new daemon dispatch is deferred/);
+  assert.match(quietHours!.consequence, /drainage and in-flight work continue/);
   // STOP outranks PAUSE for the LATCHES next action, but DEPLOY_FAILED (absent here) would win
   // over both — see the DEPLOY_FAILED test above for that ordering.
   assert.match(model.latches.nextAction ?? "", /STOP is set/);

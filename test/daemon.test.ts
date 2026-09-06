@@ -647,6 +647,45 @@ test("PAUSE clears via rmd resume and the SAME process resumes dispatching on it
   assert.ok(s.ticks >= 2, "the paused ticks and the dispatching ticks share one summary — one process throughout");
 });
 
+test("W1-T2655: quiet hours never routes through pause, and an in-flight run reaches its verdict", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let quietHours = false;
+  let stop = false;
+
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        ran.push(id);
+        quietHours = true;
+        merged.add(id);
+        return okResult(id);
+      },
+      checkQuietHours: () =>
+        quietHours
+          ? { deferred: true, detail: "QUIET_HOURS file present — new dispatch deferred; drainage unaffected" }
+          : undefined,
+      checkStop: () => (stop ? "test done" : undefined),
+      checkPause: () => undefined,
+      sleep: async () => {
+        stop = true;
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 2 },
+  );
+
+  assert.equal(s.stopReason, "stopped");
+  assert.deepEqual(ran, ["A"], "A reaches its merged verdict after quiet hours is toggled mid-run");
+  assert.deepEqual(s.merged, ["A"]);
+  assert.ok(lines.some((l) => l.step === "daemon.quiet_hours"), "the next dispatch is deferred by quiet hours");
+  assert.equal(lines.some((l) => l.step === "daemon.pause"), false, "quiet hours never uses the pause heartbeat");
+});
+
 // ── headroom (W1-T4) ─────────────────────────────────────────────────────────
 
 // A `now` far from any weekday-name ambiguity: fixed, injected, never the

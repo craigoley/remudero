@@ -21,12 +21,11 @@ import { repoScopedTaskKey } from "./ledger.js";
  *
  * **Quiet hours** is a THIRD, independent flag (W3-T5): "is now an OPTIONAL
  * wizard toggle, default OFF" (§9) — unlike STOP/PAUSE it does not gate the
- * drain loop by itself (the scheduler that reads it to throttle spawns is
- * later work, same "mechanism now, consumer later" split as lib/board.ts);
- * `setQuietHours` only flips the flag a future consumer reads. `rmd resume`
- * deliberately does NOT touch it — quiet hours is a schedule preference, not
- * an emergency hold, so an operator resuming from a STOP/PAUSE should not
- * silently lose their quiet-hours setting.
+ * drain loop. `dispatch-governor.ts` reads it for the daemon's dispatch-only
+ * deferral, so new daemon spawns wait while drainage and in-flight work keep
+ * completing. `rmd resume` deliberately does NOT touch it — quiet hours is a
+ * schedule preference, not an emergency hold, so an operator resuming from a
+ * STOP/PAUSE should not silently lose their quiet-hours setting.
  *
  * Plain flag files (not a lock — no liveness/staleness semantics like
  * drain-lock.ts/inflight-lock.ts): existence alone gates the loop, so a

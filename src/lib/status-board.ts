@@ -877,7 +877,7 @@ const STATIC_LATCHES: readonly StaticLatchDef[] = [
   {
     name: "QUIET_HOURS",
     path: quietHoursFilePath,
-    consequence: () => "quiet-hours preference is set (an optional throttle a future scheduler consumer reads)",
+    consequence: () => "new daemon dispatch is deferred; drainage and in-flight work continue",
   },
   {
     name: "DEPLOY_AUTO",

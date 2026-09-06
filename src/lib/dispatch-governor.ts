@@ -105,6 +105,15 @@ export function checkDispatchGovernors(
   }
   if (memoryGoverned) return { kind: "memory", result: memoryGoverned };
 
+  let quietHours: QuietHoursHoldResult | undefined;
+  try {
+    quietHours = deps.checkQuietHours?.();
+  } catch {
+    // FAIL OPEN, matching the memory governor's polarity rather than cost/queue: an unreadable
+    // preference flag must never silently turn into a fleet-wide dispatch hold.
+  }
+  if (quietHours) return { kind: "quiet_hours", result: quietHours };
+
   return undefined;
 }
 
@@ -129,6 +138,8 @@ export interface DispatchGovernorDeps {
   /** W1-T1038 — see this module's own FAIL-OPEN note (above `checkDispatchGovernors`) for why a
    *  throw from this one dep is handled differently from the two above it. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** A defined result means the operator's quiet-hours preference defers new dispatch only. */
+  checkQuietHours?: () => QuietHoursHoldResult | undefined;
 }
 
 /** W1-T342: discriminates which governor (if either) is deferring THIS dispatch, and why. */
@@ -136,7 +147,13 @@ export type DispatchGovernorVerdict =
   | { kind: "cost"; result: CostGovernorResult }
   | { kind: "queue"; result: QueueGovernorResult }
   | { kind: "memory"; result: MemoryGovernorResult }
+  | { kind: "quiet_hours"; result: QuietHoursHoldResult }
   | { kind: "unreadable"; source: "cost" | "queue"; error: string };
+
+export interface QuietHoursHoldResult {
+  deferred: true;
+  detail?: string;
+}
 
 /**
  * The ledger FIELDS a deferral verdict renders to — a pure projection of {@link
@@ -161,6 +178,12 @@ export function governorDeferPayload(verdict: DispatchGovernorVerdict): Record<s
   }
   if (verdict.kind === "memory") {
     return { observed_available_mib: verdict.result.observedAvailableMib, memory_floor_mib: verdict.result.floorMib };
+  }
+  if (verdict.kind === "quiet_hours") {
+    return {
+      quiet_hours: true,
+      ...(verdict.result.detail ? { detail: verdict.result.detail } : {}),
+    };
   }
   return {
     source: verdict.source,

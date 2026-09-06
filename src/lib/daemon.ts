@@ -576,6 +576,8 @@ export interface DaemonDeps {
    *  sweep hooks (W1-T321, the W1-T121 23-open-PR incident). Wrapped by the same governor seam,
    *  consulted again before dispatch, failing closed on a throw (W1-T342). Forensics: docs/forensics/daemon.md. */
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
+  /** Quiet hours defers new dispatch through the governor seam only; drainage and PAUSE stay separate. */
+  checkQuietHours?: () => { deferred: true; detail?: string } | undefined;
   /** True when a task's own read is indeterminate — a genuine read failure rather than a clean
    *  absence of evidence — re-derived from the same projection. Optional (W1-T119). */
   isIndeterminate?: (taskId: string) => boolean;
@@ -1492,6 +1494,13 @@ export async function runDaemon(
         tick,
         observed_available_mib: verdict.result.observedAvailableMib,
         memory_floor_mib: verdict.result.floorMib,
+        poll_interval_ms: pollIntervalMs,
+      });
+    } else if (verdict.kind === "quiet_hours") {
+      log("daemon.quiet_hours", {
+        tick,
+        quiet_hours: true,
+        ...(verdict.result.detail ? { detail: verdict.result.detail } : {}),
         poll_interval_ms: pollIntervalMs,
       });
     } else {
