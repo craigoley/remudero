@@ -152,6 +152,18 @@
       "grepHint": "account-usage.ts comment forensics"
     },
     {
+      "path": "docs/forensics/assertion-discrimination-check.md",
+      "title": "assertion-discrimination-check.mjs forensics",
+      "summary": "The measured forensics, incident narrative and design arguments removed from",
+      "grepHint": "assertion-discrimination-check.mjs forensics"
+    },
+    {
+      "path": "docs/forensics/auto-triage.md",
+      "title": "Forensics: src/lib/auto-triage.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/auto-triage.ts` used",
+      "grepHint": "Forensics: src/lib/auto-triage.ts"
+    },
+    {
       "path": "docs/forensics/autonomy.md",
       "title": "autonomy.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
@@ -176,6 +188,24 @@
       "grepHint": "ci.yml forensics"
     },
     {
+      "path": "docs/forensics/citation-anchor-census.md",
+      "title": "citation-anchor-census.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and sourcing detail that were removed from",
+      "grepHint": "citation-anchor-census.mjs comment forensics"
+    },
+    {
+      "path": "docs/forensics/claude-md-budget-ratchet.md",
+      "title": "claude-md-budget-ratchet.mjs forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "claude-md-budget-ratchet.mjs forensics"
+    },
+    {
+      "path": "docs/forensics/clock-shift.md",
+      "title": "Forensics: scripts/clock-shift.mjs",
+      "summary": "Every measured fact, incident and design argument the comments in `scripts/clock-shift.mjs` used",
+      "grepHint": "Forensics: scripts/clock-shift.mjs"
+    },
+    {
       "path": "docs/forensics/commit-message.md",
       "title": "Forensics: src/lib/commit-message.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/commit-message.ts`",
@@ -192,6 +222,18 @@
       "title": "Forensics: src/lib/containment.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/containment.ts` used to",
       "grepHint": "Forensics: src/lib/containment.ts"
+    },
+    {
+      "path": "docs/forensics/coverage-session-blanking-check.md",
+      "title": "coverage-session-blanking-check.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "coverage-session-blanking-check.mjs comment forensics"
+    },
+    {
+      "path": "docs/forensics/credit-surface-gate.md",
+      "title": "credit-surface-gate.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "credit-surface-gate.mjs comment forensics"
     },
     {
       "path": "docs/forensics/daemon.md",
@@ -222,6 +264,12 @@
       "title": "digest.ts comment forensics",
       "summary": "The measured forensics, incidents and design arguments that were removed from",
       "grepHint": "digest.ts comment forensics"
+    },
+    {
+      "path": "docs/forensics/dispatch-claim.md",
+      "title": "dispatch-claim.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "dispatch-claim.ts forensics"
     },
     {
       "path": "docs/forensics/dispatch-overlap.md",
@@ -278,6 +326,24 @@
       "grepHint": "fs-race-safe.ts forensics"
     },
     {
+      "path": "docs/forensics/generate-docs-index.md",
+      "title": "generate-docs-index.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "generate-docs-index.mjs comment forensics"
+    },
+    {
+      "path": "docs/forensics/github-app.md",
+      "title": "Forensics: src/lib/github-app.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/github-app.ts` used to",
+      "grepHint": "Forensics: src/lib/github-app.ts"
+    },
+    {
+      "path": "docs/forensics/github-event-wake.md",
+      "title": "Forensics: src/lib/github-event-wake.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/github-event-wake.ts`",
+      "grepHint": "Forensics: src/lib/github-event-wake.ts"
+    },
+    {
       "path": "docs/forensics/inbox.md",
       "title": "Forensics — `src/lib/inbox.ts`",
       "summary": "`src/lib/inbox.ts` is the ratification inbox (MASTER-PLAN §7B): it tiers open proposals, drafts a",
@@ -314,6 +380,12 @@
       "grepHint": "measurement-cadence.ts forensics"
     },
     {
+      "path": "docs/forensics/mkdtemp-callsite-check.md",
+      "title": "mkdtemp-callsite-check.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and citations that were removed from",
+      "grepHint": "mkdtemp-callsite-check.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/mount-headroom-sweep.md",
       "title": "mount-headroom-sweep.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
@@ -348,6 +420,12 @@
       "title": "Forensics — `src/lib/plan-pr-emitter.ts`",
       "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/plan-pr-emitter.ts` when its",
       "grepHint": "Forensics — `src/lib/plan-pr-emitter.ts`"
+    },
+    {
+      "path": "docs/forensics/plan-state-claims.md",
+      "title": "plan-state-claims.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "plan-state-claims.mjs comment forensics"
     },
     {
       "path": "docs/forensics/plan.md",
@@ -410,6 +488,12 @@
       "grepHint": "source-size-ratchet.mjs forensics"
     },
     {
+      "path": "docs/forensics/state-citation-check.md",
+      "title": "state-citation-check.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "state-citation-check.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/status-board.md",
       "title": "status-board.ts comment forensics",
       "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/status-board.ts` when its comments were compacted to the plain-language…",
@@ -462,6 +546,12 @@
       "title": "unwired-gate-check.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
       "grepHint": "unwired-gate-check.mjs comment forensics"
+    },
+    {
+      "path": "docs/forensics/wipe-test.md",
+      "title": "wipe-test.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "wipe-test.ts forensics"
     },
     {
       "path": "docs/forensics/worker-branch-shape.md",

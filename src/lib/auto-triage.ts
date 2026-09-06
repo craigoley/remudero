@@ -4,92 +4,43 @@ import { dirname, join } from "node:path";
 import { classifyPushFailure } from "./task-id-reservation.js";
 
 /**
- * lib/auto-triage.ts — the daemon's SECOND work-generating rung (recon-DC #2).
+ * The daemon's second work-generating rung (recon-DC #2): claims and fires at most one feedback
+ * entry per poll, so the backlog does not grow unbounded while the retro rung is the only other
+ * thing that creates work.
  *
- * THE GAP THIS CLOSES. The daemon has exactly one rung that CREATES work — the retro, wired by
- * W1-T160 at daemon.ts's poll loop. Everything else consumes a queue something else filled. So
- * ~68 feedback entries sit at `status: new` while the daemon idles: `triageCommand`'s only caller
- * is the CLI (run-task.ts), and nothing turns a feedback entry into a task unattended.
+ * PURE decision half; the daemon's poll loop (daemon.ts) is the effecting half that reads the
+ * marker and lock, calls the functions below, and performs the fire. Three independent bounds
+ * must all pass: `enabled` (default false), the floor between fires (`minIntervalMinutes`), and
+ * a rolling 24h cap (`maxPerDay`). A missing or corrupt marker fails closed (readAutoTriageMarker).
  *
- * WHAT IT DOES, AND EMPHATICALLY WHAT IT DOES NOT. At most ONE entry per fire window. recon-DC
- * rejected draining the backlog in as many words — "the whole backlog is ~$64 unsupervised and 68
- * approvals — worse than idle".
+ * The cross-host claim below (triageClaimRef) exists because the task id is minted before the
+ * claim is taken, so two lanes can otherwise both start triaging the same entry — mirroring
+ * task-id-reservation.ts's reserveTaskIdRemote, except a losing lane must refuse rather than
+ * retry, since a second verdict on one entry can never merge.
  *
- * THE PER-RUN COST IS ~$1.09 MEAN, NOT THE ~$2.00 THIS COMMENT USED TO CARRY. That figure was
- * extrapolated from a SINGLE $2.03 run, and a single observation of a skewed quantity is a
- * worst-case sample, not a mean — it inflated the projected daily spend by ~2x. RE-DERIVED over 70
- * runs: mean $1.09, median $1.03, p90 $1.77, max $2.86, with only 5 of 70 at or above $2.00. The
- * restraint below is still the point; it is simply bounded against a real distribution now.
- * Three independent bounds apply, and ALL must pass:
- *   1. `enabled` — policy data, DEFAULT FALSE. A rung that ships on is a surprise, not a rung.
- *   2. `minIntervalMinutes` — the floor between two fires. This is what makes "one per idle
- *      PERIOD" enforceable rather than aspirational: the daemon polls every 60s and idled ~390
- *      times in ten hours, so a per-POLL rung would have spent ~$780 in one night.
- *   3. `maxPerDay` — a hard ceiling on a rolling 24h window, so a pathological idle/dispatch
- *      flap cannot outrun bound 2.
- *
- * FAIL-SOFT AND FAIL-CLOSED, matching the retro: an unreadable marker REFUSES to fire (never
- * replays a torn state), and every error is the caller's to log — this module throws only on
- * programmer error, never on I/O.
- *
- * ★ THE LOCK IS NOT OPTIONAL, AND IT IS WHY THIS RUNG COULD NOT BE BUILT BEFORE. The task id is
- * minted from a SNAPSHOT before the worker runs (lib/triage.ts). Two triage runs that start before
- * either pushes mint the SAME id, and since PR #1060 each writes its own
- * `plan/tasks.d/<id>-<slug>.yaml` — DIFFERENT filenames, so both merge CLEANLY and `loadPlan`
- * throws duplicate-task-id ON MAIN. Before #1060 that collision was a loud EOF conflict; now it is
- * a poisoned plan. The daemon loop being single-threaded protects daemon-vs-daemon only; NOTHING
- * stopped a hand-run racing it, and this rung makes that far likelier because the operator cannot
- * see that the daemon is about to fire. {@link triageLockPath} is therefore acquired by BOTH the
- * rung and the CLI path, through the same `drain-lock.ts` primitive (atomic `O_EXCL` create, dead
- * pid reclaimed), so `rmd triage` typed by hand during a fire REFUSES loudly.
+ * Why: the cost figures and collision incidents — docs/forensics/auto-triage.md#module-header.
  */
 
-/** The lock BOTH the daemon rung and the `rmd triage` CLI path acquire. One writer, ever. */
+/** The lock both the daemon rung and the `rmd triage` CLI path acquire, so a hand-run during a
+ *  fire is refused loudly rather than racing it. */
 export function triageLockPath(root: string): string {
   return join(root, "state", "triage.lock");
 }
 
-// ── THE CROSS-HOST TRIAGE CLAIM (W1-T1132) ───────────────────────────────────────────────────
-//
-// WHAT THE LOCK ABOVE CANNOT DO, AND WHY THIS IS NOT A SECOND SPELLING OF IT. `triageLockPath` is
-// a file under `<root>/state` reclaimed by PID liveness (`drain-lock.ts`), so it protects ONE
-// host. W1-T300's in-flight guard IS cross-host — it reads an OPEN triage PR on GitHub, which
-// every host shares — and W1-T1019's wiring landed 2026-08-20. The collisions this closes are
-// 2026-08-22, TWO DAYS LATER: #2452 and #2462 wrote mirror-image verdicts for entries the other
-// had already decided, and neither could merge because resolving them means PICKING A TRIAGE
-// VERDICT, which no merge strategy can do.
-//
-// THE DEFECT IS THE SIGNAL'S TIMING, NOT ITS REACH. A triage PR does not exist until the triage
-// FINISHES. The entry is read, grounded, researched and only then written, with an Architect call
-// in the middle, so the window between "lane starts" and "lane publishes" is MINUTES. Two lanes
-// starting anywhere inside it both ask "is there an open PR for this entry", both are correctly
-// told NO, and both spend. A guard that reads PUBLISHED work cannot see work in flight — so this
-// claim is taken BEFORE the Architect call, which is the one thing an open-PR read can never be.
-// It ADDS to W1-T300's guard; that guard still correctly refuses an entry whose PR is already open.
-//
-// MIRRORS `reserveTaskIdRemote` (W1-T509) RATHER THAN INVENTING A PRIMITIVE. Same substrate (a
-// ref on origin, created only if absent, so the winner is decided by git's own atomic ref update),
-// same anchor shape (an orphan commit whose payload is unrelated to every other writer's), and the
-// SAME `classifyPushFailure` — imported, not re-derived, because two copies of "is this contention
-// or an unreachable remote" is two places for it to drift. A PID is deliberately NOT used: a
-// second host cannot ask whether a pid on the first is alive, which is exactly why the file lock
-// could never have been widened into this.
-//
-// THE LOSER REFUSES; IT DOES NOT ADVANCE. `reserveTaskIdRemote` advances on contention because for
-// a MINT the next id serves the caller equally well. A triage has no substitute: the second lane's
-// output is either a contradicting verdict that cannot merge, or a rediscovery of a verdict already
-// reached. Both are waste, so the loser refuses THIS entry and is free to take a different one.
+// The cross-host triage claim (W1-T1132): triageLockPath above protects one host; this claim
+// races a create-if-absent git ref on origin (same substrate as reserveTaskIdRemote in
+// task-id-reservation.ts), taken BEFORE the Architect call since an open-PR check alone cannot
+// see a triage still in flight.
+// Why: the collision incident — docs/forensics/auto-triage.md#the-cross-host-triage-claim.
 
-/** The ref one feedback id's triage claim occupies. The id is the whole token, so two entries can
- *  never fold onto one ref. Under `refs/rmd-triage/`, a namespace `git clone`/`git fetch` does not
- *  replicate by default and `git ls-remote --heads` (which `reapBranchesCommand` enumerates) cannot
- *  see — the same two properties that made `refs/rmd-id/` safe to introduce. */
+/** The ref one feedback id's triage claim occupies — under `refs/rmd-triage/`, invisible to a
+ *  plain `git clone`/`fetch` and to `git ls-remote --heads`, matching `refs/rmd-id/`'s reasoning. */
 export function triageClaimRef(feedbackId: string): string {
   return `refs/rmd-triage/${feedbackId}`;
 }
 
-/** One claim attempt's outcome. `taken` is contention; `unreachable` is a failed READ of the world
- *  and must never be read as "free" — see {@link decideTriageClaim}'s fail-closed arm. */
+/** One claim attempt's outcome. `taken` is contention; `unreachable` is a failed READ of the
+ *  world and must never be read as "free" — see {@link decideTriageClaim}'s fail-closed arm. */
 export type TriageClaimOutcome = "created" | "taken" | "unreachable";
 
 /** Whether this lane may proceed, and the sentence a human or a ledger row gets either way. */
@@ -99,19 +50,15 @@ export interface TriageClaimDecision {
 }
 
 /**
- * PURE. Turn one attempt outcome into the proceed/refuse verdict and its wording.
- *
- * AN UNREACHABLE ORIGIN REFUSES, matching `reserveTaskIdRemote`'s own fail-closed choice for the
- * same reason: proceeding optimistically is precisely today's behaviour, and today's behaviour
- * spent two Architect calls on unmergeable mirror-image verdicts. Refusing is loud and costs
- * nothing — the caller has not yet spent when this fires.
+ * PURE. Turns one claim attempt's outcome into the proceed/refuse verdict and its wording. An
+ * unreachable origin refuses rather than proceeding optimistically — proceeding once produced
+ * two unmergeable verdicts for the same entry.
+ * Why: docs/forensics/auto-triage.md#decidetriageclaim (#2452/#2462).
  */
 export function decideTriageClaim(outcome: TriageClaimOutcome, ctx: { feedbackId: string; holder?: string }): TriageClaimDecision {
   if (outcome === "created") return { proceed: true, reason: `claimed ${triageClaimRef(ctx.feedbackId)} for this run` };
   if (outcome === "taken") {
-    // NAMED, NOT ANONYMOUS: the ref AND the anchor a live holder wrote. "Someone else is doing it"
-    // is unactionable; a ref an operator can `git ls-remote` and an anchor they can `git show` is
-    // the difference between a refusal and a mystery.
+    // Name the holder, not just "someone else": a ref and an anchor an operator can inspect.
     const held = ctx.holder ? ` (held by ${ctx.holder})` : "";
     return {
       proceed: false,
@@ -130,14 +77,8 @@ export function decideTriageClaim(outcome: TriageClaimOutcome, ctx: { feedbackId
 }
 
 /**
- * PURE. Does any merged commit subject name this feedback entry?
- *
- * THE EVIDENCE THAT ALREADY EXISTS — the same shape W1-T1110 established, and the reason arm two
- * of the release below needs no new record: this repo's triage merges carry the entry in their
- * subject (`chore(triage): feedback#<id> — already decided, no task`, `chore(plan): triage
- * feedback#<id> — add W1-T…`). Matched as a plain substring, never a regex: a feedback id is
- * caller-supplied and carries `-` freely, and a pattern built from one would be a metacharacter
- * bug waiting for the first id that contains one.
+ * PURE. Does any merged commit subject name this feedback entry? Matched as a plain substring,
+ * never a regex — a feedback id may contain characters a pattern would need to escape.
  */
 export function feedbackOutcomeObserved(subjects: readonly string[], feedbackId: string): boolean {
   return subjects.some((s) => s.includes(feedbackId));
@@ -153,22 +94,11 @@ export interface TriageClaimReleaseDecision {
 }
 
 /**
- * PURE. The three-arm release, in order, with NO TIME-BASED EXPIRY.
- *
- *  1. HOLDER — the lane that took the claim drops it on completion, in a `finally`, success or not.
- *  2. EVIDENCE — a claim whose entry has an OBSERVABLE triage outcome is releasable by ANY host.
- *     The entry is demonstrably done, so the claim is demonstrably stale; no liveness question is
- *     asked because none can be answered.
- *  3. OPERATOR — anything else. Cross-host liveness is NOT decidable (that is the whole reason a
- *     pid lock could not be widened), so the honest answer is a person, not a guess.
- *
- * WHY NOT A TIMER, BY NAME. W1-T1067's stranded `drain.lock` is the precedent for what a
- * time-or-restart-shaped release does when the releasing signal never arrives. And the failure
- * runs the other way too: a triage is MINUTES long with an Architect call in the middle, so any
- * expiry short enough to clear a stuck claim promptly is short enough to fire on healthy work —
- * this repo's own recurring "a bound that fires on a HEALTHY condition" defect. A claim that
- * outlives its lane is a visible ref an operator can drop; a claim that expires under a running
- * lane re-opens the exact race this exists to close.
+ * PURE. Exactly three release arms, checked in order, with NO time-based expiry: the lane that
+ * took the claim releases it on completion (`holder`); any host may release a claim whose entry
+ * already has a merged outcome (`evidence`), since the entry is then demonstrably done; anything
+ * else needs an operator, because cross-host liveness cannot be decided the way a pid lock decides it.
+ * Why: why a timer was rejected — docs/forensics/auto-triage.md#decidetriageclaimrelease.
  */
 export function decideTriageClaimRelease(i: { heldByThisRun: boolean; outcomeObserved: boolean; feedbackId: string }): TriageClaimReleaseDecision {
   if (i.heldByThisRun) return { arm: "holder", release: true, reason: `this run holds ${triageClaimRef(i.feedbackId)} and is done with it` };
@@ -188,7 +118,7 @@ export function decideTriageClaimRelease(i: { heldByThisRun: boolean; outcomeObs
   };
 }
 
-/** The one I/O seam. Every method is a git round trip; every DECISION above is pure and tested
+/** The one I/O seam. Every method is a git round trip; every decision above is pure and tested
  *  without one. */
 export interface TriageClaimReserver {
   /** A payload unique to THIS writer — two writers must never produce the same value, or the
@@ -212,13 +142,9 @@ export interface TriageClaimGitDeps {
 }
 
 /**
- * The real reserver: an orphan commit over the empty tree, pushed to the entry's own ref.
- *
- * `commit-tree` with NO `-p` is what makes this writer's payload unrelated to every other's —
- * the same argument `gitRemoteRefReserver` makes, and the reason this mirrors it rather than
- * inventing a second scheme. The message carries pid+host+time so an operator inspecting a stuck
- * claim can see who took it, and it doubles as the uniqueness source: two writers on one host in
- * the same millisecond still differ by pid.
+ * The real reserver: an orphan commit over the empty tree pushed to the entry's own ref (no
+ * `-p`, mirroring `gitRemoteRefReserver`) so this writer's payload is unrelated to every other's.
+ * The commit message carries pid+host+time for an operator inspecting a stuck claim.
  */
 export function gitTriageClaimReserver(deps: TriageClaimGitDeps): TriageClaimReserver {
   return {
@@ -258,14 +184,9 @@ export interface TriageClaimResult extends TriageClaimDecision {
 }
 
 /**
- * Take the claim for `feedbackId`, or refuse.
- *
- * ON CONTENTION THIS ALSO RUNS THE RELEASE'S EVIDENCE ARM, which is what makes that arm reachable
- * in production rather than only in a test: the lane that LOSES is exactly the lane holding fresh
- * proof of whether the entry is already done. If a merged subject names the entry, the claim is
- * stale and this drops it so the next lane is not refused by a dead ref. The refusal stands either
- * way — an entry with a merged outcome does not want re-triaging, which is the duplicate this
- * whole task exists to stop.
+ * Takes the claim for `feedbackId`, or refuses. On contention this also runs the release's
+ * evidence arm, since the losing lane holds fresh proof of whether the entry is already done —
+ * a stale claim is dropped for the next lane instead of blocking it either way.
  */
 export function claimTriage(
   feedbackId: string,
@@ -288,10 +209,9 @@ export interface TriageClaimReleaseResult extends TriageClaimReleaseDecision {
 }
 
 /**
- * Apply the three-arm release. `anchor` present ⇒ this run is the holder (arm 1); absent, the
- * decision falls to the evidence arm and then to the operator. The DECISION is
- * {@link decideTriageClaimRelease}'s alone — this function only performs the I/O it authorises,
- * which is why the operator arm can be asserted without a git remote existing at all.
+ * Applies the three-arm release. An `anchor` means this run is the holder (arm 1); otherwise the
+ * decision falls to the evidence arm then the operator. {@link decideTriageClaimRelease} owns
+ * the decision; this performs only the I/O it authorises.
  */
 export function releaseTriageClaim(
   feedbackId: string,
@@ -307,13 +227,8 @@ export function releaseTriageClaim(
   return { ...decision, dropped: reserver.drop(feedbackId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
 }
 
-/**
- * {@link claimTriage} plus the ONE durable ledger row every caller needs — the same shape, and for
- * the same measured reason, as `withIdReservationLogging` (W1-T949 design (iv)): the policy lives
- * in one function with every arm reachable from a unit test, and the lane body in `run-task.ts`
- * carries the call and nothing else. A `log(...)` written inline in that lane body can only be
- * executed by driving a whole triage run into contention against a real remote.
- */
+/** {@link claimTriage} plus the one durable ledger row every caller needs, so every arm stays
+ *  reachable from a unit test while the `run-task.ts` lane body only carries the call. */
 export function claimTriageWithLogging(
   log: (step: string, extra?: Record<string, unknown>) => void,
   feedbackId: string,
@@ -332,13 +247,9 @@ export function claimTriageWithLogging(
 }
 
 /**
- * {@link releaseTriageClaim} for the HOLDER arm, plus its ledger row.
- *
- * BEST-EFFORT BY CONSTRUCTION: this runs in a `finally`, so a throw here would replace whatever
- * outcome the lane actually reached — including a legitimate error — with a release failure. The
- * cost of swallowing is one ref an operator drops by hand, and the row says so; the cost of
- * throwing is a lost verdict. `arm` is always `holder` here (the caller supplies an anchor), and
- * it is recorded anyway so a later sweep can count the arms without inferring one from silence.
+ * {@link releaseTriageClaim} for the HOLDER arm, plus its ledger row. Runs in a `finally`, so a
+ * throw here must never replace the lane's real outcome with a release failure — the cost of
+ * swallowing is one ref an operator drops by hand.
  */
 export function releaseTriageClaimWithLogging(
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -383,9 +294,9 @@ export type MarkerResolution =
   | { kind: "corrupt" };
 
 /**
- * Read the marker. A malformed file resolves `corrupt`, NOT `absent` — the caller must FAIL CLOSED
- * on it, exactly as `resolveMarkerForGather` does for the retro. Treating corruption as "never
- * fired" would let a truncated write re-authorise an unbounded run of spends.
+ * Reads the marker. A malformed file resolves `corrupt`, NOT `absent` — the caller must fail
+ * closed on it, matching the retro's marker handling, so a truncated write can never read as
+ * "never fired" and re-authorise an unbounded run of spends.
  */
 export function readAutoTriageMarker(path: string): MarkerResolution {
   if (!existsSync(path)) return { kind: "absent" };
@@ -400,7 +311,7 @@ export function readAutoTriageMarker(path: string): MarkerResolution {
   }
 }
 
-/** Append a fire and trim to the rolling window. Best-effort: a write failure is the caller's. */
+/** Appends a fire and trims to the rolling window. Best-effort: a write failure is the caller's. */
 export function recordAutoTriageFire(path: string, at: Date, windowMs: number): AutoTriageMarker {
   const prior = readAutoTriageMarker(path);
   const kept =
@@ -408,20 +319,9 @@ export function recordAutoTriageFire(path: string, at: Date, windowMs: number): 
       ? prior.marker.fires.filter((f) => at.getTime() - Date.parse(f) < windowMs && !Number.isNaN(Date.parse(f)))
       : [];
   const marker: AutoTriageMarker = { fires: [...kept, at.toISOString()] };
-  // W1: THE DIRECTORY IS CREATED, NOT ASSUMED — and the failure mode this closes is the expensive
-  // one. A bare write into an absent `state/` throws ENOENT BEFORE the marker lands, and an absent
-  // marker correctly resolves to NO PRIOR FIRE, so the cadence check reads `fire: true` on every
-  // tick forever and each fire pays for a whole re-read. MEASURED on a root without `state/`:
-  // three consecutive ticks, all `fire: true`, no marker on disk, every run throwing.
-  //
-  // FOUR OF THE SEVEN `last-*.json` WRITERS ALREADY DO THIS (`last-seen.ts`, `digest.ts`,
-  // `feedback-docket.ts`'s `writeFeedbackDocketMarker`, `retro.ts`) — one of them,
-  // `recordDigestCadenceFire`, mkdirs and then delegates HERE, which is a caller working around
-  // this very gap. This makes the writer carry the guarantee instead of its callers.
-  //
-  // IT CHANGES NOTHING ELSE. Same path, same contents, same rolling-window argument, and the
-  // read side is untouched: a marker that EXISTS and cannot be parsed still fails closed, while an
-  // ABSENT marker still means no prior fire. That distinction is the point and survives.
+  // The directory is created, not assumed, or an absent marker reads as "no prior fire" forever
+  // and every tick pays for a re-read.
+  // Why: the incident this fixed — docs/forensics/auto-triage.md#recordautotriagefire.
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(marker, null, 2));
   return marker;
@@ -429,59 +329,28 @@ export function recordAutoTriageFire(path: string, at: Date, windowMs: number): 
 
 export interface AutoTriagePolicy {
   enabled: boolean;
-  /**
-   * THE FIXED FLOOR BETWEEN TWO FIRES — the only interval bound there is (W1-T475 ruling).
-   *
-   * THIS IS LOAD-BEARING ON ITS OWN AND MUST NOT BE FOLDED AWAY. Before this change it reached
-   * the decision ONLY through the adaptive curve's `depth <= depthFloor` arm, so deleting that
-   * curve would have deleted the floor with it and left a rung that could fire on every idle
-   * tick. It is now read directly by `decideAutoTriage`.
-   */
+  /** Floor between two fires — this repo's operator-ruled bound, and the only interval bound
+   *  there is. Read directly, not gated behind a curve or any other mechanism. */
   minIntervalMinutes: number;
-  /**
-   * The hard ceiling on a rolling 24h window. WITH THE CURVE GONE THIS IS THE ONLY SPEND BOUND
-   * LEFT, and is load-bearing for the first time: the interval used to stop the rung long before
-   * the cap could, so the cap has bound only 12 times ever. At the measured ~$1.07 mean per
-   * triage, 24/day is about $26 against a `dailyCostCeilingUsd` of 500.
-   */
+  /** Hard ceiling on a rolling 24h window — the only spend cap besides the floor above.
+   *  Why: how this figure was sized — docs/forensics/auto-triage.md#autotriagepolicy-maxperday. */
   maxPerDay: number;
 }
 
 export interface AutoTriageInputs {
   policy: AutoTriagePolicy;
   /**
-   * W1-T469 — THE PARTITIONER DEFERRED AT LEAST ONE PAIRING THIS TICK, i.e. capacity AND runnable
-   * work both existed and `partitionByFileOverlap` refused to pair them. This REPLACES the former
-   * `idle` conjunct on the operator's ruling.
-   *
-   * WHY NOT `idle`. The pre-W1-T469 field was set only inside `daemon.ts`'s idle branch, so its
-   * guard was UNREACHABLE from the daemon and a BUSY TICK LOGGED NOTHING AT ALL — measured: 0 of
-   * 1,214 `auto_triage.skipped` rows carried its reason, against 666 carrying the daily-cap reason
-   * on the same corpus.
-   *
-   * THIS IS NO LONGER THE ONLY TRIGGER — see {@link AutoTriageInputs.dispatchCount}. W1-T469 shipped
-   * it as the sole conjunct and that was CIRCULAR: a deferral requires TWO eligible tasks to collide,
-   * so with zero eligible tasks there is nothing to defer, and the rung that CREATES work could only
-   * fire when work already existed. MEASURED on a starved daemon: `auto_triage.skipped — "no deferral
-   * this pass"` beside `dispatch.starvation.escalated — blocked: 5, unmet_deps: 3`, with ~87 feedback
-   * entries unread while the fleet starved for thirteen hours.
+   * True when the partitioner deferred at least one pairing this tick — capacity and runnable
+   * work both existed but were not paired. One of three trigger signals below; none requires the
+   * daemon to be idle.
+   * Why: why "idle" was replaced — docs/forensics/auto-triage.md#autotriageinputs-deferralpending.
    */
   deferralPending: boolean;
   /**
-   * How many tasks this tick ACTUALLY dispatched, and the lane budget it had to fill. Together they
-   * carry the second trigger: `dispatchCount < laneBudget` means THE QUEUE COULD NOT FILL THE
-   * AVAILABLE CAPACITY, which is precisely the state that most needs more tasks.
-   *
-   * NUMBERS, NOT A PRECOMPUTED BOOLEAN, so this module owns the predicate and can name WHICH state
-   * refused it — a caller passing `capacityUnfilled: false` could not tell "the governor left no
-   * lanes" apart from "the queue filled every lane", and those are opposite conditions.
-   *
-   * ★ THIS DOES NOT FIRE ON A FULL FLEET, and that is arithmetic rather than a promise.
-   * `laneDispatchBudget` (`src/lib/drain.ts`) returns `Math.min(lanes, headroom)` over two
-   * `Math.max(0, …)` terms, so the budget is never negative; when the governor holds every lane it
-   * is exactly 0, `runnableCandidates` returns `[]` at `limit <= 0`, and `0 < 0` is FALSE. The four
-   * states, enumerated: lanes full ⇒ 0/0, silent. Starved ⇒ 0/N, FIRES. Partial fill ⇒ 1/N, FIRES
-   * (the queue ran out below capacity — still "send more work"). Full fill ⇒ N/N, silent.
+   * How many tasks this tick actually dispatched, against the lane budget available — the second
+   * trigger: `dispatchCount < laneBudget` means the queue could not fill capacity. Numbers, not a
+   * precomputed boolean, so this module can name which state applies.
+   * Why: the four-state table — docs/forensics/auto-triage.md#autotriageinputs-dispatchcount-and-lanebudget.
    */
   dispatchCount: number;
   laneBudget: number;
@@ -492,15 +361,9 @@ export interface AutoTriageInputs {
   /** Feedback ids at `status: new`, oldest first. Empty ⇒ nothing to do. */
   candidates: string[];
   /**
-   * W1-T2289 — THE AGE OF THE OLDEST CANDIDATE, in ms, kept DELIBERATELY SEPARATE from
-   * `candidates.length`. A count answers "how much is piling up"; an age answers "has the head
-   * of the queue been passed over by every fire since it arrived," which no amount of
-   * throughput fixes if the ordering itself is broken (note (ii) on this task's own record). It
-   * is surfaced in the fire reason for observability but is NOT itself a trigger here — only
-   * `candidates.length > 0` (below) is; an age-admitted trigger is a build a later task may
-   * still choose to add. Conflating the two into one number is exactly what keeping this field
-   * separate refuses to do. Optional, defaulting to 0, so every caller that does not care about
-   * age (nearly every existing test) is unaffected.
+   * Age of the oldest candidate, in ms — kept separate from `candidates.length`: a count says
+   * the backlog is growing, an age says the head of the queue is being passed over.
+   * Observability only; not itself a trigger. Optional, defaulting to 0.
    */
   oldestCandidateAgeMs?: number;
 }
@@ -512,32 +375,19 @@ export type AutoTriageDecision =
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Decide whether to fire, and on WHAT. Pure — no I/O, no clock, no filesystem — so every bound
- * below is unit-testable without spending anything.
- *
- * ORDER IS DELIBERATE: the cheapest and most consequential refusals come first, so a disabled or
- * locked fleet never even reads a candidate list. `enabled` is checked before everything because
- * an operator who has not opted in must see NO behaviour change whatsoever.
+ * Decides whether to fire, and on WHAT. PURE. Cheapest and most consequential refusals run
+ * first, so a disabled or locked fleet never even reads the candidate list.
  */
 export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
   if (!i.policy.enabled) return { fire: false, reason: "auto-triage disabled (policy.autoTriage.enabled=false)" };
-  // ── THE TRIGGER: ANY ONE OF THREE SIGNALS (W1-T2289 widens the W1-T469/operator-ruling OR) ───
-  // Two shapes of "the fleet could use more work" already existed here, and BOTH describe THIS
-  // TICK's dispatch rather than the queue this rung exists to drain — a fleet that is busy AND
-  // fully dispatching (3 lanes full for 33h, 2026-08-25) can hold both false forever while
-  // `candidates` grows without bound, because neither predicate can be made false by a backlog
-  // growing or true by one. `backlogPresent` is the THIRD signal that closes that gap, and it is
-  // read off the SAME `candidates` this function already received — a reordering of an existing
-  // read (rationale (9): "already paid for"), never a new one.
+  // Any one of three signals means "the fleet could use more work": a deferred pairing, unfilled
+  // capacity, or a non-empty backlog.
+  // Why: docs/forensics/auto-triage.md#the-decideautotriage-trigger (W1-T2289).
   const capacityUnfilled = i.dispatchCount < i.laneBudget;
   const backlogPresent = i.candidates.length > 0;
   if (!i.deferralPending && !capacityUnfilled && !backlogPresent) {
-    // THE REFUSAL NAMES WHICH BRANCH DECLINED, because one undifferentiated string would rebuild
-    // the exact blindness W1-T469 existed to fix, one layer further in. The two lane-signal false
-    // cases are OPPOSITE conditions and must never read the same in the ledger; the depth signal
-    // is a THIRD, independently named way to decline (note (vii)) — appended, never merged into
-    // either lane phrase, so a later investigation can tell "the lanes disagreed" from "the queue
-    // itself was empty" without cross-referencing candidates.length by hand.
+    // Name which branch declined: the lane signals are opposite conditions, and the backlog
+    // signal is a third, independent way to decline (docs/forensics/auto-triage.md#naming-the-declined-branch).
     return {
       fire: false,
       reason:
@@ -553,23 +403,16 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
   const fires = i.marker.kind === "ok" ? i.marker.marker.fires : [];
   const parsed = fires.map((f) => Date.parse(f)).filter((n) => !Number.isNaN(n));
 
-  // THE FLOOR, READ DIRECTLY (W1-T475 ruling). The adaptive curve that used to sit here was a
-  // SECOND, WEAKER GOVERNOR on the same quantity `maxPerDay` already bounds exactly, and it was
-  // keyed to a proxy that is uncorrelated with capacity in BOTH directions: `depth` counted the
-  // recoverable backlog of tasks that CANNOT run, so a queue of purely colliding-but-eligible
-  // work read 0 and triaged at the FAST end while lanes sat empty, and a dependency-blocked
-  // queue read high and throttled to 60m with no capacity problem at all. Deleting it leaves the
-  // cap as the single bound and this floor as the only thing stopping a per-tick fire.
+  // The floor, read directly (operator ruling) — the only thing now stopping a per-tick fire.
+  // Why: why the curve was removed — docs/forensics/auto-triage.md#the-interval-floor.
   const intervalMinutes = i.policy.minIntervalMinutes;
 
   const lastFire = parsed.length ? Math.max(...parsed) : undefined;
   if (lastFire !== undefined) {
     const sinceMin = (i.now.getTime() - lastFire) / 60_000;
     if (sinceMin < intervalMinutes) {
-      // STILL LOGGED, STILL NAMED. This reason string is how the rung is measured at all; a
-      // branch that stopped emitting would leave the next investigation blind (this repo already
-      // has one rung whose "daemon is not idle" reason is unreachable and appears 0 times in
-      // 1,214 skip rows). One wording now, because there is one interval.
+      // Named, not bare, so this refusal reason is measurable.
+      // Why: docs/forensics/auto-triage.md#the-named-refusal-reason.
       return {
         fire: false,
         reason: `only ${sinceMin.toFixed(1)}m since the last fire (minInterval ${intervalMinutes}m)`,
@@ -584,19 +427,9 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
 
   if (i.candidates.length === 0) return { fire: false, reason: "no feedback at status: new" };
 
-  // OLDEST FIRST. Two reasons, and the second is the load-bearing one. (a) An entry that has waited
-  // longest has, by construction, been declined by every prior fire — newest-first would starve the
-  // tail forever, which is exactly the state the backlog is in now. (b) It is STABLE: the same
-  // input yields the same pick, so a fire that fails and retries next period does not skip ahead.
-  // THE REASON NAMES THE GATE THAT ACTUALLY HELD. It read "idle, under both bounds, …" until
-  // W1-T469, which is the wording of a conjunct that no longer exists — a fired row asserting
-  // idleness while the rung fires precisely on a BUSY tick would send the next investigation
-  // looking for an idle period that never happened.
-  // AND THE FIRED ROW NAMES ITS TRIGGER TOO. A fire that said only "under both bounds" would leave
-  // the next investigation unable to tell a collision-driven fire from a starvation-driven one —
-  // the same question the refusal above answers, asked from the other side. W1-T2289 adds the
-  // THIRD name: a depth-admitted fire says so explicitly, carrying the count AND the age of the
-  // oldest entry as two SEPARATE numbers (note (ii)) rather than folding one into the other.
+  // Oldest first: stable, and never starves the tail. The fire reason names its trigger
+  // explicitly.
+  // Why: the wording history — docs/forensics/auto-triage.md#oldest-first (W1-T469, W1-T2289).
   const trigger = i.deferralPending
     ? "a pairing deferred"
     : capacityUnfilled
@@ -611,16 +444,10 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
 }
 
 /**
- * THE ONE READ of `<root>/plan/feedback/*.yaml` — both {@link newFeedbackIdsOldestFirst} (the
- * COUNT) and {@link oldestFeedbackAgeMs} (the AGE) build on this, so there is exactly one place
- * that walks the directory and exactly one root-passing convention for a caller to get right
- * (W1-T2289 note (ix): a caller that passes `config.root` here instead of `repoRoot` finds no
- * directory at all and answers empty/zero without erroring — a false "healthy" reading a second
- * copy of this walk could silently reintroduce).
- *
- * Deliberately reads only each entry's OWN state. recon-CQ/recon-CS classified a large subset
- * (17 ANSWERED, 14 CLEARLY LIVE, 38 UNCERTAIN) but those verdicts live in report files, not in the
- * entries — consuming them would couple this rung to a markdown artifact nobody maintains.
+ * The one read of `<root>/plan/feedback/*.yaml` — both {@link newFeedbackIdsOldestFirst} (count)
+ * and {@link oldestFeedbackAgeMs} (age) build on this single walk. Reads only each entry's own
+ * `status:`, never a classification report.
+ * Why: docs/forensics/auto-triage.md#feedbackentriesoldestfirst.
  */
 function feedbackEntriesOldestFirst(root: string): Array<{ id: string; ts: string }> {
   const dir = join(root, "plan", "feedback");
@@ -644,25 +471,16 @@ function feedbackEntriesOldestFirst(root: string): Array<{ id: string; ts: strin
   return out;
 }
 
-/** Feedback ids at `status: new`, OLDEST FIRST — the COUNT half of {@link feedbackEntriesOldestFirst}'s
- *  one read; see {@link oldestFeedbackAgeMs} for the AGE half. */
+/** Feedback ids at `status: new`, oldest first — the count half of
+ *  {@link feedbackEntriesOldestFirst}'s one read; see {@link oldestFeedbackAgeMs} for the age half. */
 export function newFeedbackIdsOldestFirst(root: string): string[] {
   return feedbackEntriesOldestFirst(root).map((e) => e.id);
 }
 
 /**
- * W1-T2289 — THE AGE OF THE OLDEST `status: new` FEEDBACK ENTRY, in ms. A quantity kept
- * DELIBERATELY SEPARATE from {@link newFeedbackIdsOldestFirst}'s count (see
- * {@link AutoTriageInputs.oldestCandidateAgeMs}'s own doc for why): a count says the pile is
- * growing, an age says the head of the queue is being passed over, and a build must not treat
- * the two as the same signal even though both are read off the same directory.
- *
- * Reads through the SAME {@link feedbackEntriesOldestFirst} this file's count reader uses —
- * never a second directory walk with its own root-passing convention to get wrong. Zero when
- * the queue is empty, or when the oldest entry's `ts` fails to parse (fail-soft, matching the
- * unreadable-entry skip above: one dud timestamp must not crash the read, and NOTHING here ever
- * drops or expires an entry — a bad `ts` still leaves the entry in `candidates`, it is simply
- * read as age 0 rather than aged out).
+ * Age of the oldest `status: new` feedback entry, in ms — kept separate from
+ * {@link newFeedbackIdsOldestFirst}'s count. Zero when the queue is empty, or when the oldest
+ * entry's `ts` fails to parse — fail-soft: a bad timestamp never drops the entry.
  */
 export function oldestFeedbackAgeMs(root: string, now: Date): number {
   const entries = feedbackEntriesOldestFirst(root);

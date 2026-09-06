@@ -1,0 +1,86 @@
+- id: W1-T2953
+  title: "THE TRACKED HOST INSTALLER WOULD DOWNGRADE THE LIVE WATCHDOG — six of seven generated artifacts drift from Azure, including stronger mount ordering, Docker ordering, persistent timer recovery and the current heap ceiling"
+  repo: remudero
+  depends_on: [W1-T2877, W1-T2932]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files:
+    - deploy/install-host-units.sh
+    - docs/operator-guide.md
+    - test/host-units-install.test.ts
+  origin: "fleet-lifeguard#tracked-host-unit-drift-2026-09-06"
+  plan_refs: ["W1-T2856", "W1-T2877", "W1-T2932"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED READ-ONLY ON AZURE AT 2026-09-06T10:06Z. Running the tracked
+    `deploy/install-host-units.sh` in its default check mode reported six of seven artifacts
+    DRIFTED; only `rmd-fleet-watchdog.timer` matched. The installed fleet service, watchdog service
+    and both timers are enabled, both timers are active, and the watchdog last fired within five
+    minutes, so this is a live recovery surface rather than unused debris.
+
+    THE DIFFERENCES INCLUDE LOAD-BEARING SAFETY, NOT ONLY COMMENTS. Against a renderer supplied the
+    live host's 8192 MiB heap value, the installed fleet and watchdog units additionally require
+    `/var/lib/containerd`; the installed stray-reaper service orders after Docker and requires
+    `/mnt/rmd`; and its timer is persistent across downtime. The installed launcher carries
+    `NODE_OPTIONS=--max-old-space-size=8192`, while the repository default still renders 4096. The
+    reaper binary's remaining drift is comment-only, but the installer's byte comparison makes all
+    six artifacts one red check.
+
+    THIS SUPERSEDES THE DEPLOYABLE CONTENT OF W1-T2877, NOT ITS ARCHITECTURE. That task correctly
+    put the hand-installed watchdog under source control, made check mode read-only and kept
+    lifecycle installation explicit. Later incident hardening changed the live units without
+    returning those changes to the renderer. W1-T2932 independently made `NODE_OPTIONS` a declared
+    runtime variable, but did not update this installer's current-host default. W1-T2856 established
+    that containerd and Docker data-root mount ordering are part of the host safety boundary.
+
+    APPLYING `--install` NOW IS UNSAFE: it would make the files match by removing several live
+    protections. This task repairs the source of truth only. Commissioning the reviewed result on
+    Azure remains an explicit operator-approved operational step.
+  design: |
+    Reconcile the renderer with the stronger installed semantics: preserve containerd mount
+    ordering on the fleet and watchdog units, Docker and `/mnt/rmd` ordering on the stray reaper,
+    and persistent missed-run recovery on the reaper timer. Retain the STOP, state-volume,
+    idempotence and revival-record guards byte-for-byte in effect.
+
+    Make heap sizing one explicit host input across check and install. Keep the current Azure
+    default at 8192 MiB only if the implementation re-verifies the VM memory class; otherwise
+    require `RMD_NODE_MAX_OLD_SPACE_MB` and make omission a named refusal rather than silently
+    rendering 4096. Do not derive a desired value from the currently installed launcher, because
+    that would make drift self-ratifying. Continue to render the value through the declared
+    `NODE_OPTIONS` path W1-T2932 protects.
+
+    Add captured installed-unit fixtures that prove check mode recognizes the reconciled host and
+    flags deletion of each mount/order/persistence/heap guard. Preserve the existing temp-root
+    install tests and the default no-write check mode. Update the operator guide with the exact
+    read-only check and explicit install preconditions, but do not run install, daemon-reload,
+    enable, start, stop, restart, recycle or deploy from this task.
+  acceptance:
+    - claim: "check mode accepts a captured Azure host whose launcher and units retain the current heap, containerd mount, Docker ordering, state-volume and persistent-timer guards"
+      proof: "unit test: test/host-units-install.test.ts"
+    - claim: "removing any one load-bearing mount, ordering, persistence or heap guard makes check mode report the exact artifact drifted"
+      proof: "unit test: test/host-units-install.test.ts"
+    - claim: "heap sizing is an explicit validated input and never inferred from an already-installed launcher or silently downgraded to 4096 on the current 32 GiB host"
+      proof: "unit test: test/host-units-install.test.ts"
+    - claim: "STOP refusal, unmounted-state refusal, live-daemon idempotence and revival recording remain present in the rendered launcher"
+      proof: "unit test: test/host-units-install.test.ts"
+    - claim: "default check mode writes nothing and a temp-root install remains atomic without invoking systemctl"
+      proof: "unit test: test/host-units-install.test.ts"
+    - claim: "the operator guide requires a green check and explicit operator approval before any live install, and this change performs no host lifecycle action"
+      proof: "grep: explicit operator approval in docs/operator-guide.md"
+    - claim: "restoring the pre-W1-T2953 renderer makes the captured-live-host fixture fail on at least the fleet service, watchdog service, reaper service and reaper timer"
+      proof: "mutation test: test/host-units-install.test.ts"
+  falsifier: |
+    Close without implementation if a read-only check using the current 8192 MiB host input already
+    reports all seven installed artifacts matching, or if the installed extra guards are proven
+    harmful and deliberately scheduled for removal. The six drift reports and semantic diffs
+    falsify the first; no reviewed removal decision exists for the second.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2953`; the held id
+    is authoritative. OPERATIONAL BOUNDARY: this filing and its implementation change repository
+    files only. They do not authorize `--install`, `systemctl daemon-reload`, service enablement or
+    any daemon/Serve lifecycle action.

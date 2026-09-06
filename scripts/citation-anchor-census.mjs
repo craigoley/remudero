@@ -1,60 +1,22 @@
 #!/usr/bin/env node
 // scripts/citation-anchor-census.mjs
 //
-// CITATION-ANCHOR CENSUS (W1-T2649, origin: followup#W1-T2481-1788113218856).
+// Citation-anchor census (W1-T2649). One repaired citation (#3305, W1-T2648) says nothing about
+// the rest, so this script counts: it scans MASTER-PLAN.md and every plan/tasks.d/ shard's
+// rationale/design/note prose for `#NNNN` PR citations and classifies each ANCHORED -- a git sha
+// of >=7 hex characters, or a merge/closed word paired with an ISO date, either within
+// ANCHOR_WINDOW characters -- or ANCHORLESS. The forms are a DATA table (ANCHOR_SHAPES), the
+// same discipline src/lib/task-linter.ts's lexicon tables use: a heuristic over prose earns its
+// table only by publishing a measured precision. Precision against hand-labelled FIXTURES prints
+// above every count; an unproven classifier has not earned the right to report a total. The
+// merge-state-plus-date shape is proximity-based, not semantic, so it carries a named residual --
+// see the forensics page below for the measured case and why the census reports rather than
+// chases it to zero.
 //
-// ONE REPAIRED CITATION ANSWERS NOTHING ABOUT THE REST. W1-T2648 re-anchors ONE citation --
-// W1-T2481's rationale names PR #3305 with no sha, no merge state and no date, so a later reader
-// can neither re-derive nor falsify the "13 failing" figure it motivates. That single repair
-// cannot say whether #3305 was a lapse or the visible edge of a habit. This script counts, so
-// the plan does not have to guess: it walks the plan's task records (the monolith,
-// MASTER-PLAN.md, and every plan/tasks.d/ shard), finds every `#NNNN` PR-number citation in
-// rationale/design/note prose, and classifies each ANCHORED or ANCHORLESS.
-//
-// ANCHORED means the citation is accompanied, within a bounded prose window, by something
-// IMMUTABLE: a git sha of >=7 hex characters, or an explicit merge-state word paired with a
-// date. Both forms live in the ANCHOR_SHAPES table below, one row per shape -- mirroring the
-// DATA-table discipline SUBSYSTEM_LEXICON / DATA_ARTIFACT_CLASSES / PROOF_PAYLOAD_SHAPES /
-// ADVISORY_ROUTING_LEXICON already use in src/lib/task-linter.ts (see that file's module
-// comment on ADVISORY_ROUTING_LEXICON for the precedent this design cites by name: a heuristic
-// over prose earns its table only by publishing a MEASURED precision, never by assertion).
-//
-// PRECISION IS DECLARED BEFORE THE COUNT IS TRUSTED. FIXTURES below is a small, hand-labelled
-// set lifted VERBATIM from this checkout's own live corpus, in both directions: two known-
-// anchored quotes (plan/tasks.d/W1-T2648-*.yaml's rationale, itself illustrating the habit) and
-// one known-anchorless quote -- #3305's ORIGINAL citation in plan/tasks.d/W1-T2481-*.yaml's
-// rationale, the exact case this whole task exists to measure. measurePrecision() runs every
-// fixture through the SAME classify path the census uses and the CLI prints the result ABOVE
-// the count, every run -- a count printed without that line would be a feeling, not a
-// measurement.
-//
-// THE WINDOW IS BOUNDED AND THE BOUND IS MEASURED, NOT GUESSED. ANCHOR_WINDOW=60 characters on
-// each side of a `#NNNN` match was chosen against this checkout: the two known-anchored fixture
-// distances are 4 and 46 characters, comfortably inside; MASTER-PLAN.md's own followup-log entry
-// for #3305 carries a "RATIFIED 2026-08-31" trailer 296 characters away (would falsely anchor a
-// citation whose OWN TEXT says "no sha, no merge state and no date" if the window reached that
-// far) and an unrelated 13-digit followup-id timestamp 139 characters away (would falsely read
-// as a sha under a naive hex scan -- see the ANCHOR_SHAPES sha row's own comment on why it
-// requires a mixed digit+letter token, not a bare hex-alphabet run).
-//
-// A NAMED RESIDUAL, NOT A CLAIMED ZERO. The merge-state-plus-date shape is proximity-based, not
-// semantic: a passage citing several PR numbers within one clause can attach a neighbour's
-// merge word to the wrong number. Measured example: plan/tasks.d/W1-T1103-*.yaml reads
-// "`#2032` IS STILL OPEN. `#2438` and `#2360` were closed by hand on 2026-08-23; `#2032` was
-// not" -- the FIRST `#2032` sits close enough to "closed ... 2026-08-23" (which names #2438 and
-// #2360, not #2032) to read ANCHORED despite the sentence explicitly saying #2032 is NOT closed.
-// This is the same class of imprecision ADVISORY_ROUTING_LEXICON accepted and published (0.9%
-// residual against a naive scan's 63%) rather than chasing to zero -- a census is a starting
-// point an operator reviews, not a certified-perfect classification, and IT REPORTS, IT NEVER
-// GATES (below), so a residual misclassification costs a reader's attention, never a CI run.
-//
-// IT REPORTS AND IT DOES NOT GATE. `main()` exits 0 whenever it completes a census, however many
-// citations are anchorless -- that restraint is a criterion this task's design states plainly,
-// not a footnote: no lint check is added here, no check name is registered anywhere, and no
-// existing check's behaviour changes. The ONLY non-zero exit is an operational failure to find
-// the corpus at all (e.g. a bad --plan-tasks-dir), matching the "refuse rather than report
-// success on an empty scan" discipline scripts/state-citation-check.mjs already keeps -- that
-// is a failure to SCAN, never a verdict on what was found.
+// This is a report, not a gate: main() exits 0 for any anchored/anchorless split; the only
+// failure is operational -- the corpus could not be read, or zero shards were found to scan.
+// Why: the measured false-positive shapes, the window's derivation, and the accepted residual are
+// archived in docs/forensics/citation-anchor-census.md (W1-T2649).
 //
 // Usage:
 //   node scripts/citation-anchor-census.mjs [--cwd <repo-root>] [--plan-tasks-dir plan/tasks.d]
@@ -71,10 +33,9 @@ import { parse as parseYaml } from "yaml";
 export const ANCHOR_WINDOW = 60;
 
 /**
- * DATA table -- one row per IMMUTABLE anchor SHAPE. A new shape is a new row; {@link isAnchored}
- * never changes (the falsifier proof for this task's DATA-table acceptance criterion is exactly
- * that: pass a caller-supplied table carrying one extra row and a previously-anchorless window
- * reclassifies, with zero edits to isAnchored itself).
+ * Data table of immutable anchor shapes -- add a row for a new shape; {@link isAnchored} itself
+ * never changes. Falsifier: test/citation-anchor-census.test.ts adds a row and asserts a window
+ * reclassifies with no edit to isAnchored.
  */
 export const ANCHOR_SHAPES = [
   {
@@ -127,8 +88,7 @@ export function findCitations(text) {
   return citations;
 }
 
-/** Every citation `findCitations` finds in `text`, classified against `shapes` and tagged with
- *  `recordId` for the report. */
+/** Every citation `findCitations` finds in `text`, classified against `shapes` and tagged with `recordId` for the report. */
 export function classifyRecord(recordId, text, shapes = ANCHOR_SHAPES) {
   return findCitations(text).map((citation) => ({
     recordId,
@@ -138,14 +98,10 @@ export function classifyRecord(recordId, text, shapes = ANCHOR_SHAPES) {
   }));
 }
 
-/**
- * The corpus this census reads: the monolith (MASTER-PLAN.md, its whole body -- it has no
- * rationale:/design:/note: field structure of its own, it IS narrative prose end to end) plus
- * every plan/tasks.d/ shard's rationale, design and note fields (the fields this task's design
- * names, and the only free-text fields a filer actually writes into -- the same field scoping
- * ADVISORY_ROUTING_LEXICON's own module comment documents for {@link Task}, since `design:` is
- * dropped before parsing there and is read directly here instead, off the raw YAML).
- */
+/** The corpus: MASTER-PLAN.md's whole body (narrative prose, no field structure of its own) plus
+ *  every plan/tasks.d/ shard's rationale, design and note fields -- the only free-text fields a
+ *  filer actually writes into. See docs/forensics/citation-anchor-census.md for the field-scoping
+ *  precedent this mirrors. */
 export function loadCorpus(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const planTasksDir = opts.planTasksDir ?? "plan/tasks.d";
@@ -186,16 +142,9 @@ export function census(units, shapes = ANCHOR_SHAPES) {
   return { total: citations.length, anchoredCount, anchorlessCount: anchorless.length, anchorless };
 }
 
-/**
- * Hand-labelled fixtures, lifted VERBATIM from this checkout's live corpus, in BOTH directions.
- * A classifier that cannot separate these has not earned the right to report a total (this
- * task's design, stated plainly). Sources, so a reader can re-verify by hand without running
- * anything:
- *   - both ANCHORED quotes: plan/tasks.d/W1-T2648-*.yaml's rationale (itself illustrating the
- *     habit the plan already keeps).
- *   - the ANCHORLESS quote: plan/tasks.d/W1-T2481-*.yaml's rationale -- #3305's ORIGINAL
- *     citation, the exact case this task's title asks whether is an outlier or a class.
- */
+/** Hand-labelled fixtures lifted verbatim from the live corpus, in both directions: two anchored
+ *  quotes from W1-T2648's rationale, and the anchorless quote that is #3305's original citation --
+ *  the exact case this census exists to measure. Full sourcing: docs/forensics/citation-anchor-census.md. */
 export const FIXTURES = [
   {
     label: "#591 sha-window (W1-T2648 rationale, verbatim)",

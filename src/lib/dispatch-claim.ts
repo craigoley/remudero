@@ -3,44 +3,19 @@ import { hostname } from "node:os";
 import { classifyPushFailure } from "./task-id-reservation.js";
 
 /**
- * lib/dispatch-claim.ts — the SAME cross-host git-ref-CAS family (W1-T509's `refs/rmd-id/`,
- * W1-T1132's `refs/rmd-triage/`) pointed at a second rung (W1-T1268).
+ * Cross-host git-ref CAS closing the dispatch-time race, in the same family as `refs/rmd-id/`
+ * (W1-T509) and `refs/rmd-triage/` (W1-T1132), now at the dispatch rung (W1-T1268).
  *
- * THE GAP. `isDispatchEligible` (src/lib/drain.ts) decides in-flight from ten probes; the two
- * concurrency-bearing ones (`isOpenPr`, `hasPushedRunBranch`) both read a PUBLISHED artifact — an
- * open PR or a pushed `run-<id>-<epoch>` branch. Neither exists at the moment a lane, OR AN
- * OPERATOR dispatching beside the fleet, decides to start a task. Two starts inside that window
- * both read nothing published and both spend a run — MEASURED 2026-08-23:
- * TWO LANES — #2625 and #2626 — branched 53.776 SECONDS apart, both having correctly found no
- * open PR, no pushed branch, and no inflight lock (the same-host guard, `inflight-lock.ts`,
- * cannot see a foreign host's pid — that is the strictly cross-host, strictly pre-artifact gap
- * this closes).
+ * INVARIANT: `isDispatchEligible`'s (drain.ts) two concurrency probes see only PUBLISHED work — an
+ * open PR or a pushed run branch — so two lanes starting in the same window both see nothing
+ * published and both spend. This claim is taken before any spend; it replaces none of drain.ts's
+ * probes and does not widen same-host `inflight-lock.ts` (W1-T396).
  *
- * WHAT THIS ADDS, AND WHAT IT DOES NOT. A claim is taken BEFORE any spend — see `run-task.ts`'s
- * dispatch-claim seam — the same position `decideTriageClaim` occupies ahead of the Architect
- * call, and for the identical reason: a probe that reads PUBLISHED work cannot see work (or an
- * operator's own dispatch) that has published nothing yet. It REPLACES none of the ten probes
- * (`isMerged` is terminality; `isOpenPr`/`hasPushedRunBranch` keep their own stale-credit and
- * closed-unmerged duties, unchanged) and it does NOT widen `inflight-lock.ts`, which is
- * same-host by design (`isHolderStale` puts host first, W1-T396) and stays that way — a second
- * host cannot ask whether a pid on the first is alive, which is exactly why that lock could
- * never have been widened into this.
- *
- * MIRRORS `auto-triage.ts`'s triage claim STRUCTURALLY, not by import: same substrate (an orphan
- * `commit-tree` over the empty tree, pushed with a PLAIN refspec so a second writer is
- * structurally a non-fast-forward), same `classifyPushFailure` (imported, not re-derived — two
- * copies of "is this contention or an unreachable remote" is two places for it to drift), same
- * three-outcome attempt / three-arm release shape, and NO TIME-BASED EXPIRY of any kind. A
- * SEPARATE ref namespace (`refs/rmd-dispatch/`, not `refs/rmd-triage/`) because the obvious noun
- * is already taken twice over: "claim" belongs to `plan/claims.yaml`'s falsifiable assertions
- * (a red claim means the plan is lying), and "reconcile" belongs to the escalation-issue
- * lifecycle. The rung-qualified compound — `dispatchClaimRef`, never a bare "claim" — is the
- * repo's own existing disambiguator, the same one `triageClaimRef` already uses.
+ * FALSIFIER: test/dispatch-claim.test.ts. Why: docs/forensics/dispatch-claim.md#module-header.
  */
 
-/** The ref one task's dispatch claim occupies. `refs/rmd-dispatch/` — a namespace `git
- *  clone`/`git fetch` does not replicate by default and `git ls-remote --heads` cannot see, the
- *  same two properties that made `refs/rmd-id/` and `refs/rmd-triage/` safe to introduce. */
+/** The ref namespace for one task's dispatch claim — invisible to `git clone`/`fetch` by
+ *  default and to `git ls-remote --heads`, like `refs/rmd-id/` and `refs/rmd-triage/`. */
 export function dispatchClaimRef(taskId: string): string {
   return `refs/rmd-dispatch/${taskId}`;
 }
@@ -56,13 +31,10 @@ export interface DispatchClaimDecision {
 }
 
 /**
- * PURE. Turn one attempt outcome into the proceed/refuse verdict and its wording.
+ * PURE. Turns one attempt's outcome into the proceed/refuse verdict and its wording.
  *
- * AN UNREACHABLE ORIGIN REFUSES, matching `decideTriageClaim`'s own fail-closed choice for the
- * same reason: dispatching optimistically on an unreadable remote is precisely the behaviour
- * that let two hosts each read "no open PR, no pushed branch" and each spend a run. Refusing is
- * loud and costs nothing — this fires before the inflight lock, before the worktree, before any
- * spawn.
+ * INVARIANT: an unreachable origin refuses — proceeding on an unreadable remote is the exact
+ * behavior that let two hosts each see nothing published and each spend (see the module header).
  */
 export function decideDispatchClaim(
   outcome: DispatchClaimOutcome,
@@ -70,8 +42,7 @@ export function decideDispatchClaim(
 ): DispatchClaimDecision {
   if (outcome === "created") return { proceed: true, reason: `claimed ${dispatchClaimRef(ctx.taskId)} for this run` };
   if (outcome === "taken") {
-    // NAMED, NOT ANONYMOUS: the ref AND the anchor a live holder wrote — the difference between
-    // a refusal an operator can act on and a mystery (same argument `decideTriageClaim` makes).
+    // Names the ref and the holder's own anchor, not just "taken" — an operator can act on this.
     const held = ctx.holder ? ` (held by ${ctx.holder})` : "";
     return {
       proceed: false,
@@ -82,12 +53,9 @@ export function decideDispatchClaim(
         `W1-T1265 branches 53.776 seconds apart, neither able to see the other's unpublished start.`,
     };
   }
-  // W1-T2552: NAME THE CAUSE, NOT JUST THE CATEGORY. `classifyPushFailure` collapses auth, DNS,
-  // proxy and timeout into one word, so "cannot reach origin" is the WIDEST true statement rather
-  // than a diagnosis — and the git stderr that would have distinguished them was discarded here.
-  // A single line of it is the difference between an operator reading the answer and bisecting for
-  // it (MEASURED 2026-08-30: the cause was a missing credential helper, and the stderr said so).
-  // Collapsed to one line and bounded, because this string lands in a ledger row and a console.
+  // W1-T2552: git's own stderr, not just "unreachable" — classifyPushFailure collapses auth, DNS,
+  // proxy and timeout into one word.
+  // Why: docs/forensics/dispatch-claim.md#lastattemptstderr.
   const detail = (ctx.stderr ?? "").replace(/\s+/g, " ").trim();
   const named = detail ? ` git said: ${detail.slice(0, 300)}` : "";
   return {
@@ -99,31 +67,26 @@ export function decideDispatchClaim(
   };
 }
 
-/** Which of the four release arms applies. Still deliberately NO TIMER — see
- *  {@link decideDispatchClaimRelease}. The fourth (`dead-claimant`, W1-T2784) is not a timer:
- *  it fires on a PROOF that the claimant cannot exist, never on elapsed time. */
+/** Which of the four release arms applies — see {@link decideDispatchClaimRelease}. Arm 4,
+ *  `dead-claimant` (W1-T2784), fires on proof the claimant cannot exist, never on elapsed time. */
 export type DispatchClaimReleaseArm = "holder" | "evidence" | "dead-claimant" | "operator";
 
-/** The identity a claim anchor's commit message carries — `mintAnchor` writes exactly
- *  `rmd-dispatch claim <pid>@<host> <iso>` (see {@link gitDispatchClaimReserver}). */
+/** The identity a claim anchor's commit message carries — `<pid>@<host> <iso>`, written by
+ *  {@link gitDispatchClaimReserver}'s `mintAnchor`. */
 export interface ClaimAnchorIdentity {
   readonly pid: number;
   readonly host: string;
   readonly mintedAtMs: number;
-  /** The anchor's timestamp VERBATIM, carried alongside the parsed ms so the decision below can
-   *  render it without constructing a `Date`. Two reasons, and the second is the load-bearing
-   *  one: (1) `decideDispatchClaimRelease` stays provably clock-free — W1-T2446's guard forbids
-   *  `Date.now`/`new Date(`/timers inside it, and that guard is protecting a real property, not
-   *  a style; (2) a forensic line should quote what the anchor ACTUALLY says, not a value
-   *  round-tripped through a parser that could normalise it. */
+  /** The timestamp verbatim, next to the parsed ms — keeps the release decision clock-free
+   *  (W1-T2446) and lets a forensic line quote the anchor exactly.
+   *  Why: docs/forensics/dispatch-claim.md#claimanchoridentity. */
   readonly mintedAtIso: string;
 }
 
 /**
- * Parse a claim anchor's commit message back into its three fields. `undefined` on ANYTHING
- * that does not match the exact shape `mintAnchor` writes — a malformed or absent message must
- * never be read as "no claimant", because the W1-T2784 arm below releases a real lock on it.
- * Fail-closed by construction: no parse ⇒ no identity ⇒ no release.
+ * Parses a claim anchor's message into its three fields, `undefined` on anything not matching
+ * the exact shape `mintAnchor` writes — fail-closed: no parse means no identity means no release,
+ * since the W1-T2784 arm below releases a real lock on a decoded identity.
  */
 export function parseClaimAnchorMessage(message: string | undefined): ClaimAnchorIdentity | undefined {
   const m = /^rmd-dispatch claim (\d+)@(\S+) (\S+)$/m.exec((message ?? "").trim());
@@ -135,29 +98,19 @@ export function parseClaimAnchorMessage(message: string | undefined): ClaimAncho
 }
 
 /**
- * This process's own PID-namespace identity, as {@link decideDispatchClaimRelease}'s
- * `dead-claimant` arm needs it. Every field is supplied by the caller's seam so the decision
- * stays pure and both negative cases below are testable without a second container.
+ * This process's own PID-namespace identity, for {@link decideDispatchClaimRelease}'s
+ * `dead-claimant` arm. Every field comes from the caller's seam, so the decision stays pure.
  *
- * ⚠ `namespaceBootMs` IS THE PID NAMESPACE'S OWN INIT START, NOT `/proc/uptime` — MEASURED
- * 2026-09-03 and this is the trap the design note warned about: `/proc/uptime` is NOT
- * namespaced. Read inside the daemon container it returned 27884.08s against the host's
- * 27884.02s — the HOST's boot (10:52:57Z), not the container's start (11:37:56Z). A predicate
- * built on it would compare a claim against the wrong epoch entirely. `stat -c %y /proc/1` is
- * wrong too (it read 17:27:50Z for a container started at 11:37:56Z — proc-entry access time,
- * not process start). The correct reading is `/proc/stat`'s `btime` plus `/proc/1/stat` field
- * 22 (starttime, in CLK_TCK ticks), which reconstructs docker's own `StartedAt` to within the
- * one-second rounding of integer ticks — see {@link readNamespaceBootMs}.
+ * TRAP: `namespaceBootMs` must be the namespace's own init start — not `/proc/uptime` (the HOST's
+ * boot) and not `stat -c %y /proc/1` (an access time, not a start time). Read `/proc/stat`'s
+ * `btime` plus `/proc/1/stat` field 22 instead — see {@link readNamespaceBootMs}.
+ * Why: docs/forensics/dispatch-claim.md#claimantlivenessprobe.
  */
 export interface ClaimantLivenessProbe {
-  /** `hostname()` as THIS process sees it — the same value `mintAnchor` writes into an anchor. */
   readonly localHost: string;
-  /** Epoch ms at which THIS PID namespace's init (pid 1) started. */
   readonly namespaceBootMs: number;
-  /** The same instant, preformatted AT THE SEAM so the pure decision never constructs a
-   *  `Date` — see {@link ClaimAnchorIdentity.mintedAtIso} for why that matters. */
+  /** Preformatted at the seam — kept clock-free like {@link ClaimAnchorIdentity.mintedAtIso}. */
   readonly namespaceBootIso: string;
-  /** Does the anchor's pid currently exist in THIS namespace? */
   readonly pidPresent: boolean;
 }
 
@@ -168,54 +121,17 @@ export interface DispatchClaimReleaseDecision {
 }
 
 /**
- * PURE. The three-arm release, in order, with NO TIME-BASED EXPIRY — mirrors
- * `decideTriageClaimRelease` exactly; see that function's own doc for why a timer is refused
- * ("a claim that outlives its lane is a visible ref an operator can drop; a claim that expires
- * under a running lane re-opens the exact race this exists to close").
+ * PURE. The four-arm release, tried in order, no time-based expiry — an expiring claim under a
+ * running lane would re-open the race this module closes (mirrors `decideTriageClaimRelease`).
  *
- *  1. HOLDER — the run that took the claim drops it when done, in a `finally`, success or not.
- *  2. EVIDENCE — `evidenceObserved` is the CALLER's own predicate, exactly what `isMerged`,
- *     `readLiveState`/`isLiveMergeCredited` and `closedUnmergedRunBranches` already read at the
- *     dispatch rung (`isDispatchEligible`, src/lib/drain.ts) — this module supplies no new
- *     probe, it re-uses theirs. A claim whose task is demonstrably done is demonstrably stale,
- *     so any host may drop it; no liveness question is asked because none can be answered.
- *  3. DEAD-CLAIMANT (W1-T2784) — the ONE cross-host-shaped case that IS decidable, and the case
- *     that was producing permanent claims. See below.
- *  4. OPERATOR — anything else. Cross-host liveness is NOT decidable in general (the reason
- *     `isHolderStale` refuses to widen into a cross-host question at all, W1-T396), so the
- *     honest answer is a person, not a guess.
+ *  1. HOLDER — the run that took the claim drops it in a `finally`, success or not.
+ *  2. EVIDENCE — the caller's own proof the task is already done; any host may drop it.
+ *  3. DEAD-CLAIMANT (W1-T2784) — the anchor names THIS host and predates its PID namespace's
+ *     init, so the pid can't be a survivor; `pidPresent` must also read absent (guards reuse).
+ *  4. OPERATOR — everything else; cross-host liveness is not decidable (W1-T396).
  *
- * ── WHY ARM 3 EXISTS, AND WHY IT IS NOT A WEAKENING OF ARM 4 ────────────────────────────────
- * MEASURED 2026-09-03: `refs/rmd-dispatch/W1-T2631` was minted `490780@5670f73af4f4` at
- * 03:52:05.691Z. Its run reached recon, built a prompt, spawned an implement worker (worker.state
- * rows to 04:02:47Z) and then stopped — no verdict row, no release. The container it named was
- * still running under the SAME id, so every later lane read the ref as held by a live peer and
- * refused. Four refusals cost $2.3421 in preflight alone (the probes run BEFORE this check), and
- * W1-T2631/W1-T2636 together burned $37.6891 across 122 blocked verdicts and zero completions.
- * The operator had to clear four refs by hand.
- *
- * ARM 4'S REASONING IS CORRECT AND UNCHANGED FOR EVERY OTHER SHAPE. "Cross-host liveness is not
- * decidable" is true when the anchor names a host this process is not. What arm 3 adds is the
- * narrow case where the question is not cross-host at all: the anchor names THIS host, and the
- * claim predates THIS PID namespace's own init. A process cannot outlive the namespace that
- * contains it, so a claimant minted before pid 1 started is provably gone — no liveness guess,
- * no timer, no elapsed-time threshold.
- *
- * WHY BOOT TIME IS PRIMARY AND PID ABSENCE ONLY CONFIRMS. Pid liveness alone has a reuse hazard:
- * a recycled pid reads ALIVE and errs safe, but reading a pid as ABSENT is only sound if it could
- * not have been reused, which is exactly what a namespace restart guarantees and nothing else
- * does. So the boot comparison carries the proof and `pidPresent` is required to AGREE — both
- * must hold. A pid that reappeared under a recycled number after the restart therefore blocks the
- * release, leaving the operator arm to handle it: a false negative (the stuck claim persists,
- * today's behaviour) is the safe direction, a false positive is the duplicate dispatch W1-T1265
- * measured at 53.776 seconds apart.
- *
- * THE HOST EQUALITY IS THE LOAD-BEARING GUARD. Without it, a claim minted on the Mac mini would be
- * compared against the Azure container's boot clock — two unrelated epochs — and a mini claim older
- * than the container's last restart would be released out from under a live lane. `localHost` is
- * the same `hostname()` value `mintAnchor` writes, so the comparison is like-for-like or it does
- * not happen at all. It also keeps the pid comparison meaningful: same host ⇒ same PID namespace
- * ⇒ `/proc/<pid>` is answering about the pid the anchor actually named.
+ * FALSIFIER: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts. Why:
+ * docs/forensics/dispatch-claim.md#decidedispatchclaimrelease.
  */
 export function decideDispatchClaimRelease(i: {
   heldByThisRun: boolean;
@@ -261,45 +177,24 @@ export function decideDispatchClaimRelease(i: {
   };
 }
 
-/** The one I/O seam. Every method is a git round trip; every DECISION above is pure and tested
- *  without one — the risk-high band this task ships under (a pure decision module plus its one
- *  I/O seam), mirroring `TriageClaimReserver` exactly. */
+/** The one I/O seam — every method is a git round trip; every decision above is pure and tested
+ *  without one, mirroring `TriageClaimReserver`. */
 export interface DispatchClaimReserver {
-  /** A payload unique to THIS writer — two writers must never produce the same value, or the
-   *  create-if-absent stops discriminating and the claim silently stops claiming. */
+  /** A payload unique to THIS writer — two writers must never produce the same value. */
   mintAnchor(): string;
-  /** Create-if-absent of {@link dispatchClaimRef}. Never throws: an unreachable remote is an
-   *  OUTCOME, because a throw at this seam reads identically to contention at the caller. */
+  /** Create-if-absent of {@link dispatchClaimRef}. Never throws — unreachable is an outcome. */
   attempt(taskId: string, anchor: string): DispatchClaimOutcome;
   /** The anchor currently at the claim ref, or `undefined` when absent or unreadable. */
   holder(taskId: string): string | undefined;
-  /** Delete the claim ref. `expect` makes the delete conditional on the ref still carrying THAT
-   *  anchor, so the holder arm can never delete a claim that has since become someone else's. */
+  /** Delete the claim ref, conditional on `expect` matching the ref's current anchor if given. */
   drop(taskId: string, opts?: { expect?: string }): boolean;
-  /**
-   * W1-T2552: git's OWN stderr from the most recent {@link attempt}, or `undefined` when the last
-   * attempt succeeded or none has run. OPTIONAL so every existing fake still satisfies this
-   * interface unchanged — a reserver that does not implement it simply yields a refusal worded
-   * exactly as it is today.
-   *
-   * WHY THIS EXISTS. {@link classifyPushFailure} collapses every non-contention failure to the
-   * single word "unreachable", and the refusal below then said "cannot reach origin" and threw the
-   * message away. MEASURED 2026-08-30: the real stderr was `fatal: could not read Username for
-   * 'https://github.com': No such device or address` — a MISSING CREDENTIAL HELPER, not an
-   * unreachable remote — and recovering that one line took an hour of bisection precisely because
-   * the gate had already discarded it. A refusal that names its own cause is the whole fix.
-   */
+  /** W1-T2552: git's own stderr from the most recent {@link attempt}, or `undefined` when it
+   *  succeeded or none has run yet. Optional, so every existing fake stays valid.
+   *  Why: docs/forensics/dispatch-claim.md#lastattemptstderr (the missing-credential incident). */
   lastAttemptStderr?(): string | undefined;
-  /**
-   * W1-T2784: the COMMIT MESSAGE of the anchor currently at the claim ref, for
-   * {@link parseClaimAnchorMessage} to decode into `<pid>@<host> <iso>`. `undefined` when the ref
-   * is absent, the object is unfetched, or the read fails — every one of which declines the
-   * `dead-claimant` arm rather than releasing on a guess.
-   *
-   * OPTIONAL AND LAST, the same discipline `lastAttemptStderr` above already establishes: a fake
-   * that does not implement it yields exactly today's three-arm behaviour, so no existing test
-   * needs an edit to keep asserting what it asserts.
-   */
+  /** W1-T2784: the claim ref's current commit MESSAGE, for {@link parseClaimAnchorMessage} to
+   *  decode. `undefined` when absent, unfetched, or unreadable — each declines the
+   *  `dead-claimant` arm rather than releasing on a guess. Optional and last. */
   anchorMessage?(taskId: string): string | undefined;
 }
 
@@ -310,19 +205,11 @@ export interface DispatchClaimGitDeps {
   anchor?: () => string;
 }
 
-/**
- * The real reserver: an orphan commit over the empty tree, pushed to the task's own ref.
- *
- * `commit-tree` with NO `-p` is what makes this writer's payload unrelated to every other
- * writer's — the same argument `gitTriageClaimReserver` makes, and the reason this mirrors it
- * rather than inventing a second scheme. The message carries pid+host+time so an operator
- * inspecting a stuck claim can see who took it, and it doubles as the uniqueness source: two
- * writers on one host in the same millisecond still differ by pid.
- */
+/** The real reserver: an orphan commit over the empty tree, pushed to the task's own ref — the
+ *  same scheme `gitTriageClaimReserver` uses, so two writers' payloads stay unrelated. The
+ *  message carries pid+host+time, legible to an operator and doubling as the uniqueness source. */
 export function gitDispatchClaimReserver(deps: DispatchClaimGitDeps): DispatchClaimReserver {
-  // W1-T2552: the last failing attempt's git stderr, held for the refusal to name. Closure-scoped
-  // to ONE reserver, cleared on every success, so it can never describe an older attempt than the
-  // outcome it is rendered beside.
+  // Closure-scoped to one reserver, cleared on success, so a refusal never echoes an older attempt.
   let lastStderr: string | undefined;
   return {
     lastAttemptStderr() {
@@ -359,10 +246,8 @@ export function gitDispatchClaimReserver(deps: DispatchClaimGitDeps): DispatchCl
     anchorMessage(taskId) {
       const sha = this.holder(taskId);
       if (!sha) return undefined;
-      // FETCH FIRST — the anchor is a parentless commit on a ref no clone tracks, so a local
-      // `cat-file` on a fresh checkout misses it and would read as "no identity", declining the
-      // arm on a claim that is genuinely dead. `--quiet`, and a failure falls through to the
-      // cat-file below, which then declines honestly rather than throwing.
+      // Fetch first: this is a parentless commit on a ref no clone tracks, so a bare cat-file on
+      // a fresh checkout would miss it and read as "no identity" on a claim that's genuinely dead.
       deps.run(["fetch", "--quiet", "origin", `${dispatchClaimRef(taskId)}:${dispatchClaimRef(taskId)}`]);
       const res = deps.run(["cat-file", "-p", sha]);
       if (res.status !== 0) return undefined;
@@ -374,19 +259,13 @@ export function gitDispatchClaimReserver(deps: DispatchClaimGitDeps): DispatchCl
 }
 
 /**
- * W1-T2784: epoch ms at which THIS PID namespace's init started — `undefined` on any unreadable
- * or unparseable input, which declines arm 3 rather than guessing an epoch.
+ * W1-T2784: epoch ms this PID namespace's init started, or `undefined` on bad input — declines
+ * arm 3 rather than guessing. `/proc/stat`'s `btime` plus `/proc/1/stat` field 22 (start ticks)
+ * sums to the namespace's own start.
  *
- * `btime` (`/proc/stat`) is the boot of the machine clock both readings share; `/proc/1/stat`
- * field 22 is pid 1's start in CLK_TCK ticks since that boot. Adding them yields the namespace's
- * own start: on a host that is the machine boot, inside a container it is the container's start,
- * because `/proc/1` resolves to whatever init THIS namespace has.
- *
- * ⚠ FIELD 22 IS COUNTED FROM THE END, NOT THE START. `/proc/<pid>/stat`'s field 2 is `comm`,
- * wrapped in parentheses and free to contain spaces AND parentheses (`(tini)`, but also
- * `(my prog (v2))`), so splitting the whole line on whitespace mis-indexes every field after it.
- * Everything from field 3 on is fixed-width, so this slices after the LAST `)` and indexes from
- * there — the standard-and-only-correct parse.
+ * TRAP: field 22 counts from the END of the line — `comm` (field 2) is parenthesized and can
+ * contain spaces, so splitting on whitespace mis-indexes everything after it; slice after the
+ * LAST `)` instead.
  */
 export function readNamespaceBootMs(deps: { readFile?: (p: string) => string; clockTicks?: () => number } = {}): number | undefined {
   const read = deps.readFile ?? ((p: string) => readFileSync(p, "utf8"));
@@ -402,21 +281,18 @@ export function readNamespaceBootMs(deps: { readFile?: (p: string) => string; cl
     if (!Number.isFinite(btimeSec) || !Number.isFinite(startTicks) || !Number.isFinite(hz) || hz <= 0) return undefined;
     return Math.round((btimeSec + startTicks / hz) * 1000);
   } catch {
-    // Unreadable /proc (a non-Linux host, a locked-down sandbox) declines arm 3 — see its own
-    // doc: an absent input must fall to the operator arm, never manufacture a release.
+    // Unreadable /proc (non-Linux, a locked-down sandbox) declines arm 3 rather than guessing.
     return undefined;
   }
 }
 
-/** W1-T2784: does `pid` exist in THIS namespace? `true` on any doubt — an unreadable answer must
- *  never read as "absent", because absence is half the proof arm 3 releases on. */
+/** W1-T2784: does `pid` exist here? `true` on doubt — absence is half of arm 3's proof. */
 export function pidIsPresent(pid: number, deps: { exists?: (p: string) => boolean } = {}): boolean {
   const exists = deps.exists ?? ((p: string) => existsSync(p));
   try {
     return exists(`/proc/${pid}`);
   } catch {
-    // Cannot tell ⇒ report PRESENT, which blocks the release. Fail-closed, same direction as
-    // every other absent input on this path.
+    // Cannot tell ⇒ report PRESENT (fail-closed, same direction as every other absent input here).
     return true;
   }
 }
@@ -427,11 +303,9 @@ export interface DispatchClaimReleaseResult extends DispatchClaimReleaseDecision
 }
 
 /**
- * Apply the three-arm release. `anchor` present ⇒ this run is the holder (arm 1); absent, the
- * decision falls to the evidence arm and then to the operator. The DECISION is
- * {@link decideDispatchClaimRelease}'s alone — this function only performs the I/O it
- * authorises, mirroring `releaseTriageClaim` exactly (which is why the operator arm can be
- * asserted without a git remote existing at all).
+ * Applies the four-arm release. An `anchor` means this run is the holder (arm 1); otherwise the
+ * decision falls to evidence, then dead-claimant, then operator. {@link decideDispatchClaimRelease}
+ * makes the call; this function only performs the I/O it authorizes — mirroring `releaseTriageClaim`.
  */
 export function releaseDispatchClaim(
   taskId: string,
@@ -439,17 +313,12 @@ export function releaseDispatchClaim(
   i: {
     anchor?: string;
     evidenceObserved?: boolean;
-    /**
-     * W1-T2784: probe seams for the `dead-claimant` arm. OPTIONAL AND LAST, so every existing
-     * caller and every pre-existing test fake keeps today's three-arm behaviour byte-for-byte:
-     * with no probes supplied there is no anchor identity and no liveness, and the arm declines
-     * to `operator` exactly as before.
-     */
+    /** W1-T2784: probe seam for the dead-claimant arm. Optional and last, so every existing
+     *  caller and test fake keeps today's three-arm behavior unchanged when it's omitted. */
     livenessProbe?: () => ClaimantLivenessProbe | undefined;
   } = {},
 ): DispatchClaimReleaseResult {
-  // Only ever asked on the NOT-held-by-this-run path — a run releasing its OWN claim takes arm 1
-  // and must not spend a git round trip or a /proc read to do it.
+  // Only asked off the this-run path — releasing your own claim (arm 1) skips this I/O entirely.
   let anchorIdentity: ClaimAnchorIdentity | undefined;
   let liveness: ClaimantLivenessProbe | undefined;
   if (i.anchor === undefined && i.evidenceObserved !== true && i.livenessProbe) {
@@ -465,9 +334,7 @@ export function releaseDispatchClaim(
     liveness,
   });
   if (!decision.release) return { ...decision, dropped: false };
-  // The dead-claimant arm drops with `--force-with-lease` pinned to the sha it JUDGED, so a claim
-  // re-minted between the read and this push (a live lane taking it legitimately) fails the lease
-  // and survives — the one race a proof-of-death cannot see, closed by git rather than by a guess.
+  // Pinned via `--force-with-lease` to the sha just judged, so a claim re-minted since survives.
   if (decision.arm === "dead-claimant") {
     const judged = reserver.holder(taskId);
     return { ...decision, dropped: judged ? reserver.drop(taskId, { expect: judged }) : false };
@@ -477,9 +344,8 @@ export function releaseDispatchClaim(
 
 // ── PR REPAIR CLAIMS (W1-T2677) ─────────────────────────────────────────────────────────────
 
-/** One advisory claim on an open PR repair. Unlike a task-dispatch claim, this record expires:
- * repairers already have an exact-head push guard, so the claim prevents duplicate diagnosis
- * work but is never authority to block a later branch push. */
+/** One advisory claim on an open PR repair. Unlike a task-dispatch claim it expires: repairers
+ *  already have an exact-head push guard, so this only prevents duplicate diagnosis work. */
 export interface RepairClaim {
   readonly anchor: string;
   readonly prNumber: number;
@@ -502,7 +368,6 @@ export interface RepairClaimReserver {
   mintAnchor(input: Omit<RepairClaim, "anchor">): string;
   /** Create the PR's ref if absent. The non-fast-forward rejection is the atomic contention. */
   attempt(prNumber: number, anchor: string): DispatchClaimOutcome;
-  /** Read the current remote anchor and its embedded claim metadata. */
   read(prNumber: number): RepairClaimRead;
   /** Replace exactly one expired anchor. A changed lease means another reclaimer won. */
   replace(prNumber: number, anchor: string, expectedAnchor: string): "replaced" | "lost" | "unreachable";
@@ -521,12 +386,9 @@ export interface RepairClaimDecision {
 }
 
 /**
- * Atomically claim the diagnosis phase for one open PR.
- *
- * The first push is create-if-absent. A live claim returns its holder and measured age. An
- * expired claim may be replaced only with a force-with-lease against the anchor just read, so
- * two reclaimers cannot both leave believing they won. Unreadable metadata fails closed: age is
- * not guessed and malformed evidence is never laundered into expiry.
+ * Atomically claims the diagnosis phase for one open PR: create-if-absent, or read the live
+ * claim's holder/age, or (if expired) replace it via force-with-lease against the anchor just
+ * read, so two reclaimers cannot both believe they won. Unreadable metadata fails closed.
  */
 export function claimRepair(
   reserver: RepairClaimReserver,
@@ -571,9 +433,8 @@ export function claimRepair(
       reason: `cannot read the holder of ${repairClaimRef(input.prNumber)}${detail}; repair diagnosis withheld`,
     };
   }
-  // The holder may have released between the rejected create and this read. Refuse this round;
-  // the next caller retries the ordinary create path. This preserves one remote mutation per arm
-  // and cannot strand the PR because an absent ref has no holder.
+  // The holder may have released between the rejected create and this read; refuse this round
+  // and let the next caller retry the plain create path — an absent ref can't strand the PR.
   if (current.state === "absent") {
     return {
       claimed: false,
@@ -642,8 +503,7 @@ function parseRepairClaim(anchor: string, message: string): RepairClaim | undefi
     ) return undefined;
     return { anchor, prNumber: Number(parsed.prNumber), holder: parsed.holder, claimedAtIso: parsed.claimedAtIso };
   } catch (error) {
-    // Malformed JSON and a structurally-invalid payload have the same public result, but keep
-    // the caught failure explicit so this parser never becomes a bare catch-erasure site.
+    // Malformed JSON and an invalid payload share this result; the catch stays explicit.
     void error;
     return undefined;
   }
@@ -673,8 +533,7 @@ export function gitRepairClaimReserver(deps: DispatchClaimGitDeps): RepairClaimR
       if (listed.status !== 0) return { state: "unreachable", reason: listed.stderr.replace(/\s+/g, " ").trim().slice(0, 300) };
       const anchor = listed.stdout.trim().split(/\s+/)[0];
       if (!anchor) return { state: "absent" };
-      // A second checkout does not have the orphan object merely because ls-remote named it.
-      // Fetch only this private ref, then inspect the exact advertised anchor.
+      // ls-remote naming the anchor doesn't mean this checkout has the object — fetch this ref first.
       const fetched = deps.run(["fetch", "--quiet", "origin", ref]);
       if (fetched.status !== 0) return { state: "unreachable", reason: fetched.stderr.replace(/\s+/g, " ").trim().slice(0, 300) };
       const shown = deps.run(["show", "-s", "--format=%B", anchor]);

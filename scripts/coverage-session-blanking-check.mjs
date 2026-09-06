@@ -1,86 +1,45 @@
 #!/usr/bin/env node
-// scripts/coverage-session-blanking-check.mjs
+// scripts/coverage-session-blanking-check.mjs — the coverage-session-blanking guard (W1-T2292).
 //
-// COVERAGE-SESSION-BLANKING GUARD (W1-T2292).
+// A parent running under --experimental-test-coverage sets NODE_V8_COVERAGE on itself, and node's
+// own child_process force-injects that variable into every spawned child regardless of the env
+// option. A nested `node --test` runner therefore inherits the parent's coverage session, and its
+// function/line table merges into the parent's report under the same absolute-path SF: key,
+// corrupting lcov for whatever source file both processes import.
+// Why: measured on src/lib/ledger.ts, where the merge made a genuinely-covered range read
+// uncovered. docs/forensics/coverage-session-blanking-check.md#the-file-header
 //
-// THE PROPERTY. A parent running under `--experimental-test-coverage` sets `NODE_V8_COVERAGE` on
-// itself, and node's OWN `child_process` module force-injects that variable into every spawned
-// child regardless of the `env` option handed to `spawnSync`/`execFileSync` -- even a hand-built
-// `{ PATH, HOME }` still carries it. An enrolled Node child collects coverage on whatever source
-// IT imports and writes its own function/line table into the PARENT's coverage directory. The
-// lcov merge key is the ABSOLUTE PATH, so a child that imports the same file the parent's test
-// suite already covers merges its own (often much sparser, or import-time-only) hit counts into
-// that ONE `SF:` block -- duplicate `FN:` records, split hit counts, and (measured on
-// src/lib/ledger.ts) `diff-coverage` naming a genuinely-covered range as uncovered because the
-// merged block's evidence no longer agrees with itself.
+// `delete env.NODE_V8_COVERAGE` reads as an opt-out and is not one: node re-injects the key before
+// the child ever sees it. The two forms that work are `env.NODE_V8_COVERAGE = undefined` and
+// `= ""` (or the same as an inline object-literal property) — both accepted, with no preference.
 //
-// `delete env.NODE_V8_COVERAGE` READS as an opt-out and IS NOT ONE -- it deletes the key from the
-// object handed to `env`, but node re-injects it before the child ever sees that object. The two
-// forms that actually work are naming the key with a value node will not override:
-// `env.NODE_V8_COVERAGE = undefined` or `env.NODE_V8_COVERAGE = ""` (equivalently, the same two
-// values written inline as an object-literal property). `src/lib/review.ts`'s proof executor
-// already uses `NODE_V8_COVERAGE: undefined` and documents the force-injection in its own comment
-// -- this check accepts both forms, and flags only `delete`, never a preference between them.
+// This scans every tracked test/**/*.ts file for two things: (a) that delete, a definite defect
+// wherever it appears, and (b) a child env that strips NODE_TEST_CONTEXT (this repo's marker for
+// "spawning a nested node --test runner") without also blanking NODE_V8_COVERAGE — a strong
+// suspicion, not a proof. What this cannot see is stated in BLIND_SPOTS below and echoed in the
+// CLI's own output on every run, so a clean run is never mistaken for a clearance.
 //
-// TWO THINGS THIS SCANS FOR, DIFFERENT IN KIND:
-//
-//   (a) A DEFINITE DEFECT, decidable from source text alone: `delete <expr>.NODE_V8_COVERAGE`
-//       (or the bracket form) ANYWHERE in a tracked test/**/*.ts file. This form is always wrong
-//       -- there is no context in which it does what its own name suggests -- so every occurrence
-//       is reported, unconditionally.
-//   (b) A STRONG SUSPICION, not a proof: a local env object (`const childEnv = { ...process.env
-//       ... }`-shaped -- i.e. NOT `process.env` itself, mutating the real process environment is
-//       a different, rarer hazard this check does not adjudicate) that deletes `NODE_TEST_CONTEXT`
-//       -- this repo's own marker for "I am spawning a nested `node --test` runner" -- without
-//       ALSO blanking `NODE_V8_COVERAGE` (by either accepted form, anywhere against that same
-//       identifier) in the same file. Stripping the nested-runner marker and blanking the
-//       coverage session are two halves of the same hygiene; ten test files do the first today
-//       and this is the check that says the second went missing.
-//
-// WHAT THIS SCAN CANNOT SEE -- STATED HERE, AND ECHOED IN THE CLI'S OWN OUTPUT ON EVERY RUN
-// (clean or not), so a clean run is never mistaken for a clearance:
-//
-//   - a spawn with NO `env` option at all -- the COMMONEST shape, which inherits the parent's
-//     environment (including `NODE_V8_COVERAGE`) by default. A text scan cannot tell a spawned
-//     Node child (which collects coverage) from a `git`/`gh`/shell child (which does not) among
-//     the 200+ test files that call `spawnSync`/`execFileSync`, so this shape is UNREACHABLE by
-//     this scan and is never reported, positive or negative.
-//   - an env object assembled at runtime, or spread out of a shared helper, where no
-//     `NODE_TEST_CONTEXT`/`NODE_V8_COVERAGE` literal appears at the call site itself.
-//   - a spawn routed through a wrapper, where the env is built one layer away from the call.
-//   - anything outside `test/` (this check's own subject, matching this repo's `*-check.mjs`
-//     family, is the same tracked-`test/**/*.ts` corpus scripts/tracked-source-write-check.mjs
-//     scans -- see that file for why `git ls-files`, never a raw directory walk).
-//
-// So this scan PROVES PRESENCE of a defect, and (b) only ever a suspicion; it never proves
-// ABSENCE of one. It does not edit any caller -- naming the rule and making a violation visible
-// is the whole deliverable; fixing the sites this run flags is separate, one-concern work.
-//
-// Usage:
-//   node scripts/coverage-session-blanking-check.mjs
-// Exits 1 and names every file:line/finding it found; exits 0 ("clean") otherwise -- and prints
-// the blind-spot statement above either way.
+// Usage: node scripts/coverage-session-blanking-check.mjs. Exits 1 and names every finding; 0
+// ("clean") otherwise.
 
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-/** The variable node re-injects into every spawned child -- deleting it from a child `env` is
+/** The variable node re-injects into every spawned child — deleting it from a child env is
  *  always a no-op. */
 export const COVERAGE_VAR = "NODE_V8_COVERAGE";
 
 /** This repo's own marker for "I am spawning a nested `node --test` runner". */
 export const NESTED_RUNNER_MARKER = "NODE_TEST_CONTEXT";
 
-// ── tiny hand-rolled comment/string stripping -- same discipline, same reason, as
-// scripts/tracked-source-write-check.mjs's own `blankNonCode`: locate real CODE tokens only, so a
-// call name or variable that merely appears inside a string or a comment (this file's own module
-// doc above quotes `delete env.NODE_V8_COVERAGE` in prose; test/ledger-rotation.test.ts quotes the
-// identical shape in a comment recording the same lesson) is never mistaken for a real one. ─────
+// ── Hand-rolled comment/string stripping, same discipline as tracked-source-write-check.mjs's own
+// blankNonCode: locate real code tokens only, so a name that merely appears in a string or
+// comment is never mistaken for a real one. ─────────────────────────────────────────────────────
 
-/** From `i` (pointing at the opening quote/backtick of a string), return the index of the
- *  matching CLOSING quote, honoring `\`-escapes and (for backticks) `${...}` interpolation. */
+/** From `i` (pointing at the opening quote/backtick of a string), returns the index of the
+ *  matching closing quote, honoring `\`-escapes and (for backticks) `${...}` interpolation. */
 function skipString(text, i, quote) {
   i++;
   while (i < text.length) {
@@ -105,13 +64,10 @@ function skipString(text, i, quote) {
   return i;
 }
 
-/**
- * `source` with every string/template literal and `//`/`/* *​/` comment blanked out (non-newline
- * characters replaced with a space, newlines preserved) -- SAME LENGTH, so an index found in the
- * result is the identical index in `source`. `split("")`, not `Array.from`, for the exact reason
- * `tracked-source-write-check.mjs`'s own copy of this function documents: UTF-16 code-unit
- * indexing must stay aligned with every other index-based scan in this file.
- */
+/** `source` with every string/template literal and comment blanked to spaces (newlines kept), so
+ *  an index found in the result is the same index in `source`. Uses `split("")`, not
+ *  `Array.from`, to keep UTF-16 code-unit indexing aligned with every other scan in this file —
+ *  same reason as tracked-source-write-check.mjs's own copy of this function. */
 function blankNonCode(source) {
   const buf = source.split("");
   let i = 0;
@@ -119,12 +75,9 @@ function blankNonCode(source) {
     const c = buf[i];
     if (c === '"' || c === "'" || c === "`") {
       const end = skipString(source, i, c);
-      // An EMPTY string literal (`""`/`''`, opening quote immediately followed by its own
-      // closing quote) is left VISIBLE rather than blanked -- unlike every other string, its two
-      // characters ARE the whole meaningful token this scan needs to see: the accepted
-      // `NODE_V8_COVERAGE = ""` blanking form (rationale §0) is indistinguishable from any other
-      // string content once blanked, and this is the one shape where "a string literal" and "a
-      // piece of code this check must read" are the same three characters.
+      // An empty string literal ("" or '') is left visible, not blanked: it is itself the
+      // NODE_V8_COVERAGE = "" blanking form this scan must read, so blanking it would hide the
+      // one shape where the string IS the meaningful token.
       if (end !== i + 1) {
         for (let j = i; j <= end && j < buf.length; j++) if (buf[j] !== "\n") buf[j] = " ";
       }
@@ -155,9 +108,8 @@ function lineOf(source, index) {
   return source.slice(0, index).split("\n").length;
 }
 
-/** From `openIdx` (pointing at the `{` of an object literal), the index of its matching `}` --
- *  brace-only, run over the CODE-ONLY view so a `{`/`}` inside a blanked-out string or comment can
- *  never desync the count (see `blankNonCode`). Returns -1 if unbalanced. */
+/** From `openIdx` (the `{` of an object literal), returns the index of its matching `}` — over
+ *  the code-only view so a blanked-out brace can't desync the count. -1 if unbalanced. */
 function matchBraceClose(codeOnly, openIdx) {
   let depth = 0;
   for (let i = openIdx; i < codeOnly.length; i++) {
@@ -171,13 +123,10 @@ function matchBraceClose(codeOnly, openIdx) {
   return -1;
 }
 
-/**
- * Every identifier this file blanks `NODE_V8_COVERAGE` for, by either accepted form:
- *   - an assignment against the identifier: `ident.NODE_V8_COVERAGE = undefined` / `= ""` / `= ''`
- *   - an inline object-literal property inside that identifier's OWN `const`/`let` declaration:
- *     `const ident = { ...process.env, NODE_V8_COVERAGE: undefined }`
- * Both forms are accepted with no preference between them (rationale §0) -- only `delete` is not.
- */
+/** Identifiers that blank NODE_V8_COVERAGE, by either accepted form: an assignment
+ *  (`ident.NODE_V8_COVERAGE = undefined` / `= ""` / `= ''`), or an inline property in that
+ *  identifier's own declaration (`const ident = { ...process.env, NODE_V8_COVERAGE: undefined }`).
+ *  Both are accepted with no preference — only `delete` is not. */
 function blankedIdentifiers(source, codeOnly) {
   const blanked = new Set();
 
@@ -197,13 +146,10 @@ function blankedIdentifiers(source, codeOnly) {
   return blanked;
 }
 
-/**
- * Scan one already-read source file's TEXT for both findings. Pure -- no fs access -- so tests
- * can feed synthetic fixtures directly. `relPath` is used only to label findings.
- * Returns `{ defects, suspects }`:
- *   - `defects`: `{ file, line, expr }[]` -- rule (a), a `delete <expr>.NODE_V8_COVERAGE`.
- *   - `suspects`: `{ file, line, ident }[]` -- rule (b), an unblanked `NODE_TEST_CONTEXT` strip.
- */
+/** Scans one already-read source file's text for both findings. Pure — no fs access — so tests
+ *  can feed synthetic fixtures. `relPath` labels findings only. Returns `{ defects, suspects }`:
+ *  `defects` is rule (a), a `delete <expr>.NODE_V8_COVERAGE` no-op; `suspects` is rule (b), an
+ *  unblanked `NODE_TEST_CONTEXT` strip. */
 export function scanSource(source, relPath) {
   const codeOnly = blankNonCode(source);
   const defects = [];
@@ -219,10 +165,8 @@ export function scanSource(source, relPath) {
   const deleteTestCtxRe = /\bdelete\s+([A-Za-z_$][\w$]*)\s*\.\s*NODE_TEST_CONTEXT\b/g;
   while ((m = deleteTestCtxRe.exec(codeOnly))) {
     const ident = m[1];
-    // `delete process.env.NODE_TEST_CONTEXT` mutates the REAL process environment, not a "child
-    // env object" -- test/check-proof-executor-parity.test.ts does exactly this (and restores it
-    // in a `finally`) around a call whose spawn inherits `process.env` BY DESIGN, never a copy.
-    // That is a different hazard in a different shape; this rule does not adjudicate it.
+    // `delete process.env.NODE_TEST_CONTEXT` mutates the real environment, not a child env object —
+    // test/check-proof-executor-parity.test.ts does this by design; not adjudicated here.
     if (ident === "process") continue;
     if (blanked.has(ident)) continue;
     suspects.push({ file: relPath, line: lineOf(source, m.index), ident });
@@ -231,10 +175,9 @@ export function scanSource(source, relPath) {
   return { defects, suspects };
 }
 
-/** Every file `git ls-files` reports as TRACKED under `test/` (resolved against `repoRoot`),
- *  filtered to `.ts` -- same predicate, same reason, as tracked-source-write-check.mjs's own
- *  `listTrackedTestFiles`: the guard's subject is a TRACKED file, so `git ls-files` is both the
- *  more faithful read and the one that keeps untracked scratch out of scope for free. */
+/** Every `git ls-files`-tracked file under `test/`, filtered to `.ts` — same predicate as
+ *  tracked-source-write-check.mjs's own listTrackedTestFiles, so untracked scratch stays out of
+ *  scope for free. */
 export function listTrackedTestFiles(repoRoot) {
   const result = spawnSync("git", ["-C", repoRoot, "ls-files", "-z", "--", "test"], { encoding: "utf8" });
   if (result.error || result.status !== 0) {
@@ -249,7 +192,7 @@ export function listTrackedTestFiles(repoRoot) {
     .filter((f) => f.endsWith(".ts"));
 }
 
-/** Scan every tracked `test/**​/*.ts` file under `repoRoot`. Returns `{ defects, suspects,
+/** Scans every tracked `test/**​/*.ts` file under `repoRoot`. Returns `{ defects, suspects,
  *  filesScanned }`. */
 export function scanRepo(repoRoot) {
   const files = listTrackedTestFiles(repoRoot);
@@ -264,9 +207,8 @@ export function scanRepo(repoRoot) {
   return { defects, suspects, filesScanned: files.length };
 }
 
-/** The statement of this scan's own blind spots -- printed on EVERY run, clean or not (rationale
- *  §2: "this must be stated in the check's own output rather than discovered later"), so a clean
- *  run is never read as proof the corpus is free of the shape this check cannot see. */
+/** This scan's own blind spots, printed on every run (clean or not) so a clean run is never read
+ *  as proof the corpus is free of the shape this check cannot see. */
 export const BLIND_SPOTS = [
   "coverage-session-blanking-check proves PRESENCE of a defect; it never proves ABSENCE of one.",
   "Unreachable by this scan, reported neither clean nor violated:",
@@ -280,12 +222,9 @@ export const BLIND_SPOTS = [
   "  - anything outside test/.",
 ].join("\n");
 
-/**
- * The CLI's whole behaviour, injectable exactly like scripts/tracked-source-write-check.mjs's own
- * `main` (same shape, same reason): every collaborator carries a real default, so the actual CLI
- * entry point stays a bare `main()` call while a test can drive both the clean and the
- * finding-found path in-process.
- */
+/** The CLI's whole behaviour, injectable like tracked-source-write-check.mjs's own `main`: every
+ *  collaborator carries a real default, so a bare `main()` call is the real entry point while a
+ *  test can drive both the clean and finding-found paths in-process. */
 export function main({
   repoRoot = join(dirname(fileURLToPath(import.meta.url)), ".."),
   scan = scanRepo,

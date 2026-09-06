@@ -1,0 +1,69 @@
+- id: W1-T2951
+  title: "ANY LEDGER FILE IS TREATED AS PROOF THE FLEET RAN — the emissions full-suite test reads mutable default state and asserts daemon and sweep are live when unrelated concurrent tests have written only review events"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files:
+    - test/emissions.test.ts
+  origin: "operator-session#emissions-host-state-full-suite-race-2026-09-06"
+  plan_refs: ["W1-T444", "W1-T2479"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN DURING FULL LOCAL PREFLIGHT AT 2026-09-06T08:28Z. The test named
+    `emissionsCommand renders the real report over the real corpus` reads the process's default
+    state directory, parses only `corpus: N ledger file(s)`, and treats any `N > 0` as proof that
+    the host actually ran daemon and sweep. On the normal host it saw one ledger file with 4,666
+    lines containing review activity but no daemon or sweep events, then failed the assertion that
+    those verbs cannot be unreachable. A clean-HOME control still failed after concurrent tests
+    created seventeen unrelated ledger lines in that default root before this test ran. The same
+    main revision passes sharded CI, so order and mutable host state determine the verdict.
+
+    THIS IS NOT W1-T444. That task repaired which live and rotated ledger files belong to the
+    corpus; the enumerator correctly reports the unrelated file here. W1-T2479 made the command
+    report declared and scanned verb counts separately. Neither says that the existence of one
+    ledger file proves any particular verb emitted an event. The production report is not the
+    defect: a test converts a weak filesystem fact into a stronger fleet-history assertion.
+  design: |
+    Separate the two contracts currently mixed in the host-dependent test. Keep a read-only smoke
+    test that drives `emissionsCommand` against the default state location and asserts only stable
+    report structure and a zero exit code; mutable host contents must not decide its verdict.
+
+    Move the daemon-and-sweep false-positive lock to a deterministic explicit state-directory
+    fixture containing recent, valid daemon and sweep ledger events plus at least one unrelated
+    event. Assert from that fixture that both hot verbs carry positive counts and neither is
+    classified unreachable. Add the opposite fixture: a non-empty corpus containing only unrelated
+    review events must not be mistaken for evidence that daemon or sweep ran.
+
+    Change no production emissions logic, corpus enumeration, default state-root resolution,
+    ledger writer or allowlist. Prove the new test is load-bearing by restoring the old
+    `corpusFiles > 0` inference and observing the unrelated-event fixture or isolated full-suite
+    control fail.
+  acceptance:
+    - claim: "a non-empty explicit corpus containing only unrelated review events does not become test evidence that daemon or sweep ran"
+      proof: "unit test: test/emissions.test.ts"
+    - claim: "a deterministic explicit corpus with recent daemon and sweep events renders positive counts for both and never classifies either verb as unreachable"
+      proof: "unit test: test/emissions.test.ts"
+    - claim: "the default-state smoke test still executes the complete emissions command and validates its exit code, heading, corpus line, verb census and unauditable section without deriving semantic liveness from mutable host contents"
+      proof: "unit test: test/emissions.test.ts"
+    - claim: "the focused suite passes with an empty default state root and with unrelated ledger rows written there before the real-corpus smoke test"
+      proof: "isolated test run: test/emissions.test.ts"
+    - claim: "production emissions logic, corpus enumeration, state-root selection, ledger contents and allowlist are unchanged"
+      proof: "diff assertion and unit test: test/emissions.test.ts is the only changed implementation file"
+    - claim: "restoring the old any-corpus-implies-fleet inference makes the unrelated-event regression fail while the repaired suite passes"
+      proof: "recorded strict-TDD falsifier: test/emissions.test.ts"
+  falsifier: |
+    Close without implementation if current main's host-dependent smoke test already limits itself
+    to report structure and a separate deterministic fixture proves daemon and sweep liveness from
+    their own positive event counts. A green sharded CI run, an empty state directory or forcing
+    test order so fleet events happen to appear first does not falsify the state-dependent defect.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2951`; the held id
+    is authoritative. CONTROL: main's GitHub CI run 34021878875 passed while two full local runs
+    failed with different non-empty default-state populations, proving that corpus existence is not
+    a stable proxy for actual fleet history.

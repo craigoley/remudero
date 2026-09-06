@@ -1,0 +1,65 @@
+- id: W1-T2948
+  title: "A DETERMINISTIC PR-BODY REPAIR FALLS THROUGH TO A MODEL WORKER WHEN GH PR EDIT QUERIES DEPRECATED PROJECTS CLASSIC METADATA — #4228's acceptance-author repair had the complete replacement body in hand, but updatePrBodyViaGh failed on repository.pullRequest.projectCards and the rung spent a Codex worker plus a new commit to perform the same mechanical edit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/run-task.ts, test/pr-body-rest-write.test.ts]
+  origin: "fleet-lifeguard#4228-projectcards-body-repair-2026-09-06"
+  plan_refs: ["W1-T2541", "W1-T307", "W1-T2542"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT THE PRODUCTION EFFECT, NOT INFERRED FROM SOURCE. PR #4228 first failed
+    acceptance-author-gate because its body lacked a judgeable Acceptance block. The fix rung
+    derived the complete repaired body, called updatePrBodyViaGh, and ledgered
+    fix.body_gate_repair_error. The captured stderr names GraphQL field
+    repository.pullRequest.projectCards and GitHub's Projects Classic deprecation. The rung then
+    fell through exactly as coded to an ordinary model worker. That Codex worker pushed commit
+    a8fc5358 and repaired the body; acceptance-author-gate passed on the new head. The queue
+    recovered, but a deterministic zero-model edit became a full worker dispatch, one commit, and
+    one extra CI cycle.
+
+    THE FALSIFIER WAS CHECKED. If the body remained unrepaired, the incident would instead prove a
+    broader recovery failure. GitHub now shows the complete Acceptance block and a SUCCESS gate on
+    a8fc5358, so the narrow finding is the wasted fallback. If no source path used gh pr edit, the
+    error could be environmental only; current main has three body-write sites in src/run-task.ts,
+    including updatePrBodyViaGh at the exact W1-T2541 fix-rung dependency. All invoke gh pr edit
+    --body, whose command failed before the supplied edit reached the pull request.
+
+    THE FIX IS TRANSPORT ONLY. Parse the already-required pull-request URL with the existing
+    prUrlTarget helper and update the body through the pull-request REST resource:
+    PATCH repos/{owner}/{repo}/pulls/{number}. Route every production PR-body writer in this module
+    through one injectable argv builder/effect so the acceptance repair, trailer stamp, and retro
+    repair do not retain separate copies of the failing transport. Preserve their current
+    fail-soft/fail-open contracts and ledger rows; this task changes no diagnosis, authored body,
+    strike accounting, review identity, provider selection, commit, merge, or lifecycle rule.
+
+    SAFETY BOUNDS. A URL that does not resolve to an owner, repository and numeric PR must fail
+    before spawning gh; never guess from the current checkout. The body remains one argv value,
+    never shell text. The method is PATCH against the single pull request, never an issue-wide,
+    project, GraphQL, merge, or branch endpoint. Reads are out of scope: gh pr view --json body did
+    not fail in this incident, and broad transport consolidation belongs to the existing gateway
+    backlog rather than this recovery defect.
+  acceptance:
+    - claim: "the acceptance-gate body repair updates one pull request through the REST pulls endpoint and never invokes gh pr edit"
+      proof: "unit test: test/pr-body-rest-write.test.ts"
+    - claim: "the trailer stamp and retro body repair reuse the same REST writer rather than retaining independent gh pr edit call sites"
+      proof: "unit test: test/pr-body-rest-write.test.ts"
+    - claim: "the REST argv carries PATCH, the exact owner repository and PR number, and the complete body as one argument"
+      proof: "unit test: test/pr-body-rest-write.test.ts"
+    - claim: "a malformed or non-pull-request URL fails before gh is invoked, so no repository or PR target is guessed"
+      proof: "unit test: test/pr-body-rest-write.test.ts"
+    - claim: "a write failure preserves each caller's existing error or fallback behavior and remains ledgered with its existing reason"
+      proof: "unit test: test/pr-body-rest-write.test.ts"
+    - claim: "the change adds no worker dispatch, commit, merge, provider-selection, timer, polling, or lifecycle action"
+      proof: "unit test: test/pr-body-rest-write.test.ts"
+  note: |
+    ID provenance: minted by `rmd next-task-id --reserve` from a detached worktree at verified
+    origin/main 760950bd. The command reported W1-T2948 as max+1 and created
+    refs/rmd-id/W1-T2948. This is separate from W1-T2947, which owns terminal-run pinned-job
+    requeueing, and from W1-T2541, whose body-repair mechanism is working but whose selected write
+    transport failed here. No Azure checkout or container lifecycle state is edited by this task.
