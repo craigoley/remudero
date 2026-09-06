@@ -164,6 +164,12 @@
       "grepHint": "Forensics — `src/lib/drain.ts`"
     },
     {
+      "path": "docs/forensics/entrypoint.md",
+      "title": "entrypoint.sh comment forensics",
+      "summary": "The measured incidents, rejected alternatives and design arguments that were removed from",
+      "grepHint": "entrypoint.sh comment forensics"
+    },
+    {
       "path": "docs/forensics/inbox.md",
       "title": "Forensics — `src/lib/inbox.ts`",
       "summary": "`src/lib/inbox.ts` is the ratification inbox (MASTER-PLAN §7B): it tiers open proposals, drafts a",
