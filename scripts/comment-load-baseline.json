@@ -114,7 +114,7 @@
   "src/lib/commit-message.ts": 397,
   "src/lib/compaction.ts": 225,
   "src/lib/companion-paths.ts": 50,
-  "src/lib/config.ts": 451,
+  "src/lib/config.ts": 195,
   "src/lib/console-freshness.ts": 48,
   "src/lib/console-shell-script.ts": 103,
   "src/lib/console-url.ts": 88,
