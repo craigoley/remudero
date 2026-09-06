@@ -148,7 +148,7 @@
   "src/lib/fs-race-safe.ts": 179,
   "src/lib/git-push.ts": 121,
   "src/lib/github-app.ts": 145,
-  "src/lib/github-event-wake.ts": 256,
+  "src/lib/github-event-wake.ts": 120,
   "src/lib/github-posture.ts": 143,
   "src/lib/glance.ts": 56,
   "src/lib/grep-zero-cause.ts": 95,
