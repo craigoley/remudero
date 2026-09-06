@@ -308,6 +308,12 @@
       "grepHint": "fs-race-safe.ts forensics"
     },
     {
+      "path": "docs/forensics/generate-docs-index.md",
+      "title": "generate-docs-index.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "generate-docs-index.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/github-app.md",
       "title": "Forensics: src/lib/github-app.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/github-app.ts` used to",
