@@ -17391,9 +17391,15 @@ export function commitChangedFiles(
 ): string[] | undefined {
   try {
     const c = fetch(["api", `repos/${owner}/${repo}/commits/${sha}`]) as { files?: Array<{ filename?: string }> } | undefined;
-    if (!c?.files) return undefined;
+    // TWO DISTINCT ABSENCES, kept apart rather than conflated by one negated optional chain: the
+    // read returned no payload at all, versus a payload carrying no file list. Both are unreadable
+    // here, but collapsing them is the shape that makes a failure indistinguishable from an absence.
+    if (c === undefined) return undefined;
+    if (!Array.isArray(c.files)) return undefined;
     return c.files.map((f) => f.filename ?? "").filter((x) => x.length > 0);
   } catch {
+    // UNREADABLE, not empty: a commit whose file list could not be fetched is not a commit that
+    // changed nothing, and `[]` here would make a repair delta look genuinely empty.
     return undefined;
   }
 }
