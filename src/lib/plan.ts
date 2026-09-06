@@ -72,8 +72,8 @@ export interface ContextClaim {
   src: string;
 }
 
-/** Who CONCLUDED a plan record, as Law 5's "author class" — distinct from `origin:`, which names
- *  who commissioned it. Absent is not a third class: it reads `"operator"`, the pre-field default. */
+/** Who CONCLUDED a plan record (Law 5's "author class"), as distinct from `origin:`, which names
+ *  who commissioned it. Absent reads `"operator"`, the pre-field default. */
 export type TaskAuthorClass = "machine" | "operator";
 
 export interface Task {
@@ -111,12 +111,10 @@ export interface Task {
   /** Provenance (Rules 16/17): where this task came from — `architect`, `feedback#…`, `alert#…`,
    *  `issue#…`. Never defaulted — its absence is itself what the §5C linter's provenance check reports. */
   origin?: string;
-  /** W1-T2959 — LAW 5's author-class mark, which `origin:` explicitly does NOT satisfy: that law
-   *  reads "origin tags carry commission, not intent", so a record commissioned by an operator and
-   *  CONCLUDED by a machine is indistinguishable under `origin:` alone. Absent ⇒ a person's shard,
-   *  which is every record that predates this field, so nothing already in the plan changes meaning.
-   *  `"machine"` is refused at `verify: auto` by {@link "./task-linter.js".machineAuthorVerifyViolation}
-   *  so `isDispatchEligible` parks it — a machine may propose into the plan, only an operator releases. */
+  /** W1-T2959 — LAW 5's author-class mark, which `origin:` does NOT satisfy ("origin tags carry
+   *  commission, not intent"): a record commissioned by an operator and CONCLUDED by a machine is
+   *  indistinguishable under `origin:` alone. Absent ⇒ a person's shard, so nothing already in the
+   *  plan changes meaning. `"machine"` is refused at `verify: auto`, parking it for an operator. */
   author_class?: TaskAuthorClass;
   /** Pre-authored worker instruction (the "what to do"). */
   prompt?: string;

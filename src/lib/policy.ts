@@ -139,12 +139,10 @@ export interface PolicyValues {
     minIntervalMinutes: number;
     maxPerDay: number;
   };
-  /** W1-T2959's daily CI-failure learning rung — its own row, separate from every cadence above so
-   *  none drags another. DEFAULTS OFF, and it is the ONLY cadence row here that does: every sibling
-   *  justifies its safe-on default by being READ-ONLY ("does not push, merge, mint or file"), and
-   *  this rung FILES machine-authored plan records. Those records are marked and park at
-   *  `verify: human`, so they can never dispatch themselves — but they are still records appearing
-   *  in an operator's plan, which is an opt-in and not a default.
+  /** W1-T2959's daily CI-failure learning rung — its own row so none drags another. DEFAULTS OFF,
+   *  the ONLY cadence row here that does: every sibling justifies safe-on by being READ-ONLY ("does
+   *  not push, merge, mint or file") and this rung DRAFTS records. They are marked and park at
+   *  `verify: human`, but records appearing in an operator's plan are an opt-in, not a default.
    *  Why: docs/forensics/policy.md#cilearningcadence. */
   ciLearningCadence: {
     enabled: boolean;
@@ -572,9 +570,8 @@ export function validatePolicy(raw: unknown): Policy {
         maxPerDay: numberField("boardReview.maxPerDay", boardReviewRaw.maxPerDay, origin),
       }
     : { enabled: true, minIntervalMinutes: 120, maxPerDay: 6 };
-  // W1-T2959's CI-learning row — same optional, absent-means-default shape as the three cadences
-  // above, with ONE difference that is the whole point: the absent default is DISABLED, because
-  // this rung files records rather than only reading. See PolicyValues.ciLearningCadence.
+  // W1-T2959's CI-learning row — the three cadences' absent-means-default shape, with the one
+  // difference that is the point: the absent default is DISABLED. See PolicyValues.
   const ciLearningRaw = raw.ciLearningCadence as Record<string, unknown> | undefined;
   const ciLearningCadence = ciLearningRaw
     ? {

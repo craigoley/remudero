@@ -1268,15 +1268,14 @@ export interface CiLearningCadencePolicy {
   maxPerDay: number;
 }
 
-/** This rung's OWN fire marker. Distinct from `measurementCadenceMarkerPath` and
- *  `digestCadenceMarkerPath` for the reason `digestCadenceCheck`'s own comment states: a short
- *  interval on one rung must never throttle another. */
+/** This rung's OWN fire marker, distinct from the measurement and digest markers for the reason
+ *  `digestCadenceCheck` states: a short interval on one rung must never throttle another. */
 export function ciLearningCadenceMarkerPath(root: string): string {
   return join(root, "state", "last-ci-learning-cadence.json");
 }
 
-/** The decision, reusing {@link decideMeasurementCadence} rather than a second decision function —
- *  so the disabled / corrupt-marker / interval / daily-cap arms stay one implementation. */
+/** Reuses {@link decideMeasurementCadence} rather than a second decision function, so the
+ *  disabled / corrupt-marker / interval / daily-cap arms stay one implementation. */
 export function ciLearningCadenceCheck(opts: {
   root: string;
   policy: CiLearningCadencePolicy;
@@ -1297,27 +1296,24 @@ export function recordCiLearningCadenceFire(root: string, at: Date): void {
   recordMeasurementCadenceFire(path, at, 24 * 60 * 60 * 1000);
 }
 
-/** A PRIMARY control, never a backstop — the same standing {@link ADOPTION_MINT_CEILING} holds, and
- *  the same number, so one fire can never flood the plan with machine-authored records. */
+/** A PRIMARY control, never a backstop: {@link ADOPTION_MINT_CEILING}'s own number, so one fire
+ *  can never flood the plan with machine-authored records. */
 export const CI_LEARNING_MINT_CEILING = ADOPTION_MINT_CEILING;
 
-/** The primary key: the PR the failure happened on plus the gate that went red, never a similarity
- *  score. Deterministic, so a rerun over an unchanged corpus recognises what it already filed —
- *  the discipline {@link adoptionProposalId} already holds. */
+/** The primary key: PR plus gate, never a similarity score — deterministic, so a rerun over an
+ *  unchanged corpus recognises what it already filed ({@link adoptionProposalId}'s discipline). */
 export function ciLearningShardId(finding: Pick<CiFailurePair, "pr" | "gate">): string {
   return `ci-learning:${finding.pr}:${finding.gate}`;
 }
 
 /** THE SURFACE A REMEDY MUST NAME. `spawnWorker` passes `settingSources: []` (src/lib/worker.ts),
- *  the SDK's isolation mode, so a DISPATCHED WORKER NEVER READS CLAUDE.md — measured, not assumed.
- *  Workers are reached by matched `learnings/*.yaml` entries injected into `renderImplementPrompt`,
- *  so a draft whose remedy named CLAUDE.md would improve interactive sessions and change nothing
- *  about the fleet's own pull requests: the loop would look like it worked and fix nothing. */
+ *  so a DISPATCHED WORKER NEVER READS CLAUDE.md — measured, not assumed. Workers are reached by
+ *  matched `learnings/*.yaml` in `renderImplementPrompt`, so a remedy naming CLAUDE.md would fix
+ *  interactive sessions and change nothing about the fleet's own PRs. */
 export const CI_LEARNING_REMEDY_SURFACE = "learnings/*.yaml";
 
-/** One drafted shard, MARKED and PARKED. Not a `Task`: this rung mints no plan id — assigning one
- *  is the caller's, through the reservation path — so a draft carries the finding's own
- *  deterministic key instead and cannot be mistaken for a filed record. */
+/** One drafted shard, MARKED and PARKED. Not a `Task`: this rung mints no plan id, so a draft
+ *  carries the finding's own key and cannot be mistaken for a filed record. */
 export interface CiLearningShardDraft {
   /** {@link ciLearningShardId} — the idempotency key, not a plan id. */
   findingId: string;
@@ -1336,10 +1332,9 @@ export interface CiLearningShardDraft {
 
 /** One firing's outcome. */
 export interface CiLearningMintResult {
-  /** `"unreadable"`: at least one rollup in the window was never seen, so absence proves nothing —
-   *  reported even when pairs WERE found, because a partial read must never read as complete.
-   *  `"clear"`: the window was seen and yielded nothing new. `"backlog"`: at least one draft.
-   *  A measured absence, never a bare zero (P48's no-naked-zero clause). */
+  /** `"unreadable"`: a rollup was never seen, so absence proves nothing — reported even when pairs
+   *  WERE found, because a partial read must never render as complete. `"clear"`: seen, nothing new.
+   *  `"backlog"`: at least one draft. A measured absence, never a bare zero (P48). */
   status: "clear" | "backlog" | "unreadable";
   drafts: CiLearningShardDraft[];
   /** Every finding the ceiling excluded, NAMED rather than dropped. */
@@ -1351,12 +1346,9 @@ export interface CiLearningMintResult {
 /**
  * Draft one bounded, exactly-deduped, MARKED shard per repaired CI failure.
  *
- * ONLY A REPAIRED PAIR IS MINTABLE. An open failure has no fix attached, and this loop exists to
- * learn from the DELTA — a bare failure count teaches nothing, which is the invariant
- * `collectCiFailureCorpus` is built on.
- *
- * THE TARGET IS ZERO REPEAT FAILURES, NOT ZERO RED. A first-time red is how a convention gets
- * discovered; a rung chasing zero red would be chasing the signal that teaches.
+ * ONLY A REPAIRED PAIR IS MINTABLE: the lesson is in the DELTA, and a bare failure count teaches
+ * nothing — the invariant `collectCiFailureCorpus` is built on. And THE TARGET IS ZERO REPEAT
+ * FAILURES, NOT ZERO RED: a first-time red is how a convention gets discovered.
  */
 export function mintCiLearningShards(
   corpus: CiFailureCorpus,

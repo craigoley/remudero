@@ -1612,24 +1612,16 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
 }
 
 /**
- * W1-T2959 — LAW 5's enforcement arm: a MACHINE-CONCLUDED shard may not sit at `verify: auto`.
+ * W1-T2959 — LAW 5's arm: a MACHINE-CONCLUDED shard may not sit at `verify: auto`. THE PROHIBITION
+ * IS ON AN UNMARKED RECORD, NOT ON FILING — a marked record that cannot dispatch itself can neither
+ * present itself as ratified nor act on its own conclusion.
  *
- * Law 5 reads "RECORDS LAUNDER AUTHORITY UNLESS THE AUTHOR CLASS RIDES THE RECORD — unmarked
- * records read as ratified; origin tags carry commission, not intent", and predicts that any new
- * record channel without a mandatory author-class mark will carry a machine conclusion a later
- * reader treats as an operator ruling. THE PROHIBITION IS ON AN UNMARKED RECORD, NOT ON FILING:
- * a marked record that cannot dispatch itself launders nothing, because it can neither present
- * itself as ratified nor act on its own conclusion.
+ * SAME TRIGGER SHAPE AS {@link rulingVerifyViolation}, for its stated reason: `isDispatchEligible`
+ * refuses `verify !== "auto"`, so refusing at auto PARKS the shard until the operator looks.
  *
- * SAME TRIGGER SHAPE AS {@link rulingVerifyViolation}, for the same stated reason:
- * `isDispatchEligible` already refuses any task whose `verify !== "auto"`, so refusing the marked
- * shard at auto PARKS it until the operator looks. The operator's approval is then one flip rather
- * than authoring a shard from scratch.
- *
- * ABSENT `author_class` PASSES, and that is load-bearing rather than lenient: every record filed
- * before this field exists is a person's, so a blanket refusal would block the entire plan and make
- * this arm's green meaningless. Falsifier:
- * test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts.
+ * ABSENT `author_class` PASSES, load-bearing rather than lenient: every record predating this field
+ * is a person's, so a blanket refusal would block the plan and make this green meaningless.
+ * Falsifier: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts.
  */
 export function machineAuthorVerifyViolation(task: Task): LintViolation | undefined {
   if (task.author_class !== "machine") return undefined;
