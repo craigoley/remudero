@@ -37,6 +37,8 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { validateMounts, type Mounts } from "../src/lib/mounts.js";
 import { updateProposalRegistry } from "../src/lib/inbox.js";
+import { harnessRunnerOver } from "../src/lib/replay-harness.js";
+import type { GoldenTask } from "../src/lib/replay.js";
 import {
   DEFAULT_MIN_SAMPLE_N,
   mountRecommendationProposalCandidate,
@@ -381,6 +383,60 @@ test("the emitted proposal states that its evidence is observational while no go
   assert.equal(rec.note.includes(OBSERVATIONAL_EVIDENCE_NOTICE), true);
   assert.equal(candidate.summary.includes(OBSERVATIONAL_EVIDENCE_NOTICE), true);
 });
+
+// The notice above explains ITSELF, and the explanation is what went stale. It used to say the
+// replay suite had no `HarnessRunner` wired; W1-T2689 wired one, and the sentence kept shipping
+// inside proposals a human ratifies. The caveat was still true, so nothing reddened — a false
+// clause riding a true conclusion is invisible to every gate this repo has. This test pins the
+// clause to the world it describes by DRIVING the runner the retired reason denied, then
+// requiring that reason to be absent while the caveat it justified is still present.
+//
+// A second guard — slicing RecommendMountsOptions out of source to fail the day a replay input is
+// wired — was written and REMOVED: it is exactly the snapshot-of-source shape W1-T2905's census
+// refuses (it breaks on a rename that changed no behaviour, and passes on a differently-named
+// field that changed plenty). Pinning the surviving reason needs a mechanism that is not a source
+// read; that is follow-up work, not a thing to smuggle in here.
+
+test("the observational notice does not carry the retired no-HarnessRunner reason, because the runner it denied is real and runs", async () => {
+  // The retired reason, falsified against the shipped source rather than against memory of it.
+  //
+  // DRIVEN, NOT MERELY IMPORTED. `typeof harnessRunnerOver === "function"` would pass against a
+  // stub export that throws on first use, and "a runner exists" is exactly the claim the retired
+  // reason denied — so prove the seam actually adapts a dispatch into a HarnessRunner and returns
+  // what that dispatch produced.
+  assert.equal(typeof harnessRunnerOver, "function", "lib/replay-harness.ts must export the runner the notice once said did not exist");
+  const golden: GoldenTask = {
+    id: "G-notice-probe",
+    class: "src-fix",
+    title: "a probe golden, never dispatched anywhere real",
+    task: { id: "W1-T0", type: "implement", verify: "auto", files: [] },
+    expected: { verdict: "merged", filesTouched: [], prTrailerTaskId: "W1-T0" },
+  };
+  let dispatched = 0;
+  const runner = harnessRunnerOver({ dispatch: () => { dispatched++; return { verdict: "merged", filesTouched: [] }; } });
+  assert.equal(typeof runner, "function", "harnessRunnerOver must return a callable HarnessRunner");
+  const outcome = await runner(golden);
+  assert.equal(dispatched, 1, "the runner must actually reach its dispatch, not short-circuit");
+  assert.equal(outcome.verdict, "merged", "the runner must return what the dispatch produced");
+
+  // So the notice must not still be claiming it.
+  assert.doesNotMatch(
+    OBSERVATIONAL_EVIDENCE_NOTICE,
+    /HarnessRunner/,
+    "the notice must not explain itself with a reason the two assertions above just falsified",
+  );
+
+  // ...while the caveat the retired reason used to justify is untouched. Deleting the caveat is
+  // not a way to pass the assertion above.
+  assert.match(OBSERVATIONAL_EVIDENCE_NOTICE, /OBSERVATIONAL ONLY/);
+  assert.match(OBSERVATIONAL_EVIDENCE_NOTICE, /no golden-suite run backs/i);
+  assert.match(
+    OBSERVATIONAL_EVIDENCE_NOTICE,
+    /not an input to recommendMounts/,
+    "the notice must name the reason that IS still true, not merely drop the one that is not",
+  );
+});
+
 
 // ── Extra gates, beyond the seven acceptance claims, that back "refuse more often than
 // recommend" (this task's own rationale) ───────────────────────────────────────────────────
