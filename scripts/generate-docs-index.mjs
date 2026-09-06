@@ -1,46 +1,21 @@
 #!/usr/bin/env node
 // scripts/generate-docs-index.mjs
 //
-// Docs INDEX generator (W1-T2282, MASTER-PLAN §8A).
+// Docs index generator (W1-T2282, MASTER-PLAN §8A). docs/ had no retrieved-not-injected index
+// like plan/plan-index.json or learnings/index.json, so a doc was reachable only if something
+// else happened to cite it. Builds docs/docs-index.json: every markdown file under docs/, with a
+// path, a title (first `# ` heading, or the filename), a one-line summary (the first body line
+// after it) and a grepHint (the title). Excludes its own output path, so it never self-regenerates.
 //
-// docs/ was the one knowledge corpus that never got this repo's own RETRIEVED-not-INJECTED
-// treatment: MASTER-PLAN.md has plan/plan-index.json + `plan-index:check` (W1-T37),
-// learnings/ has learnings/index.json + `learnings-index:check` + a budget ratchet + per-task
-// matching (W1-T33), and CLAUDE.md is injected up front by a recorded decision
-// (src/lib/plan-index.ts). docs/ had none of the three: a doc was reachable only if some OTHER
-// file happened to cite its path, so several files carried no incoming citation from outside
-// docs/ and were unreachable by construction, not by neglect.
+// Also exposes findUnresolvedMermaidCitations(), which refuses a doc whose fenced ```mermaid
+// block cites a repo-relative path that does not resolve -- scoped to mermaid blocks only, since
+// docs routinely shorten an established path to accepted shorthand in prose, which a corpus-wide
+// scan would false-positive on. No existing doc is ever rewritten, only reported.
+// Why: docs/system-diagrams.md once cited an unresolved path; see docs/forensics/generate-docs-index.md.
 //
-// This script builds the missing index: for every markdown file under docs/, its path, title
-// (the first `# ` heading, or the filename if none), a one-line summary (the first non-blank
-// body line after that heading) and a grep hint (the title itself -- the string a worker would
-// grep docs/ for to land on this file). An entry gives every doc a retrieval key, so "reachable"
-// stops depending on whether some other file happened to name it. The index EXCLUDES its own
-// output path, so generating it never creates an entry that would regenerate on every run.
-//
-// It also exposes findUnresolvedMermaidCitations(), which refuses (names the offending doc and
-// path) a doc that cites a repo-relative path inside a fenced ```mermaid code block that does not
-// resolve against the real checkout -- the shape of the one live defect this task found
-// (docs/system-diagrams.md's mermaid label names `lib/status.ts`, which does not exist; the real
-// file is `src/lib/status.ts`). This scope -- mermaid node-label citations, not every path-shaped
-// substring in prose -- is deliberate: this corpus's prose routinely shortens an already-
-// established `src/lib/foo.ts` mention to bare `lib/foo.ts` as accepted shorthand
-// (docs/cli-reference.md, docs/operator-guide.md, docs/dep-review.md, docs/alert-lane.md and
-// docs/review-gate.md all do this repeatedly), and a check that flagged every one of those would
-// be a false-positive firehose, not a gate on a real defect. A mermaid diagram node label is
-// different: MASTER-PLAN §"System diagrams" (docs/system-diagrams.md's own header) states every
-// edge is "derived from a named symbol", i.e. it is a literal citation of a source location, not
-// shorthand for one already established in surrounding prose, so precision there is enforceable.
-// Existing docs are NEVER rewritten by this generator or its checks -- an unresolved path is
-// reported and named, never silently corrected; the repair is its own, later change.
-//
-// The generated index is content-only (no timestamp) so it is byte-stable across runs when
-// docs/**/*.md hasn't changed -- that is what makes `--check` a meaningful staleness gate, the
-// same convention scripts/generate-plan-index.mjs (W1-T37) and scripts/generate-learnings-index.mjs
-// (W1-T33) already use. Mermaid-path resolution is a SEPARATE gate (`--check-paths`), kept out of
-// `--check` on purpose: staleness must track this corpus's own committed shape 1:1 with its
-// siblings, and today's real corpus carries one known, tracked, unrepaired defect (see above) that
-// would otherwise make `--check` permanently red for a reason unrelated to staleness.
+// Content-only output (no timestamp), so it is byte-stable when docs/**/*.md hasn't changed --
+// what makes `--check` a meaningful staleness gate. `--check-paths` is a separate gate, so
+// mermaid-path drift and index staleness fail independently.
 //
 // Usage:
 //   node scripts/generate-docs-index.mjs [--dir docs] [--out docs/docs-index.json]
@@ -83,38 +58,19 @@ function listMarkdownFiles(dir) {
   return out.sort();
 }
 
-/** A leading CALLOUT: a line wholly wrapped in emphasis, which markdown uses for a maintenance or
- *  provenance banner rather than for the doc's first sentence. Matched on the RAW line, before
- *  {@link stripEmphasis} removes the markers that identify it. */
+/** A line wholly wrapped in emphasis (a maintenance/provenance banner, not prose). Matched raw,
+ *  before {@link stripEmphasis} strips the markers that identify it. */
 const WHOLLY_EMPHASISED_RE = /^(\*\*|__|\*|_)(?!\s).*\1\s*$/;
 
 /**
- * Parse one doc's markdown text into a {title, summary} pair: title is the first `# ` (H1)
- * heading with emphasis stripped, or null if the doc has none; summary is the first non-blank,
- * non-heading, NON-CALLOUT body line found after the title (truncated), or "" if the doc has no
- * such prose before its next heading / EOF.
+ * Parse one doc's markdown text into a {title, summary} pair. title is the first `# ` heading
+ * with emphasis stripped, or null if none; summary is the first non-blank, non-heading body line
+ * after it, truncated -- but a line wholly wrapped in emphasis is skipped as a maintenance banner.
  *
- * WHY CALLOUTS ARE SKIPPED, AND WHY THAT IS NOT A SPECIAL CASE FOR ONE DOC. A summary exists so a
- * reader scanning the index can tell what a doc is ABOUT. A banner saying who maintains the file
- * and that hand edits are overwritten answers a different question, so it was never a summary --
- * it was the heuristic picking up machinery because machinery happened to come first.
- *
- * IT IS ALSO WHY THE INDEX WENT STALE ON EVERY RETRO. `rmd retro` writes
- * `_MAINTAINED BY \`rmd retro\` -- regenerated <ISO>._` into docs/ORIENTATION.md on every run
- * (src/lib/retro.ts), and a first-prose-line heuristic copied that timestamp into the index --
- * so a generator the retro knows nothing about summarised a line the retro rewrites. Skipping the
- * callout takes the line BELOW it, which for that doc is a constant string literal in retro.ts
- * ("A fresh Architect session should be able to orient from THIS doc alone...") and therefore
- * survives a retro unchanged. Fixing the INPUT is what makes a freshness guard safe to add later;
- * adding the guard first would have reddened the retro's own PR for a defect it did not cause.
- *
- * MEASURED over docs/ at f5ac7cb5: 26 docs, 25 whose first prose line is ordinary prose and
- * exactly 1 that is a wholly-emphasised callout -- the same 1 whose line carries a timestamp. The
- * rule selects it without naming it, and would select any future doc that opens the same way.
- *
- * KNOWN LIMIT, stated rather than hidden: a genuine one-line summary written entirely in emphasis
- * would be skipped too. None exists today, and the fallback is the next prose line or "" -- never
- * machinery.
+ * TRAP: without that skip, `rmd retro`'s own banner in docs/ORIENTATION.md read as the summary,
+ * so the index went stale on every retro run. KNOWN LIMIT: a genuine one-line summary written
+ * entirely in emphasis is skipped too; none exists today.
+ * FALSIFIER: test/docs-index.test.ts. Why: docs/forensics/generate-docs-index.md#parsedocentry.
  */
 export function parseDocEntry(text) {
   const lines = text.split("\n");
@@ -142,11 +98,9 @@ export function parseDocEntry(text) {
 }
 
 /**
- * Build the docs index: every `*.md` file under `dir`, excluding `outPath` (the generated index's
- * OWN destination) so generating the index never creates a self-entry that would regenerate on
- * every run -- even in the hypothetical case `outPath` sits under `dir` with a `.md` extension.
- * `title` falls back to the filename (no extension) when a doc has no `# ` heading. `grepHint` is
- * the title -- the string a worker greps docs/ for to land on this file.
+ * Build the docs index: every `*.md` file under `dir`, excluding `outPath` itself so the index
+ * never regenerates on every run. `title` falls back to the filename with no `# ` heading;
+ * `grepHint` is the title, the string a worker greps docs/ for to land on this file.
  */
 export function buildDocsIndex(dir, outPath) {
   const outRelToDir = relative(dir, outPath);
@@ -167,12 +121,9 @@ export function serializeDocsIndex(entries, dirLabel) {
   return JSON.stringify({ dir: dirLabel, entries }, null, 2) + "\n";
 }
 
-/**
- * Extract every parenthesized, path-shaped citation `(a/b.ext)` found inside fenced ```mermaid
- * code blocks in `text` (e.g. a diagram node label's trailing `(src/lib/foo.ts)` source
- * annotation). Deliberately scoped to mermaid blocks only -- see the module doc above for why a
- * corpus-wide scan over every backtick/prose mention would be a false-positive firehose.
- */
+/** Extract every parenthesized, path-shaped citation `(a/b.ext)` inside fenced ```mermaid blocks
+ *  in `text`. Scoped to mermaid blocks only -- see the file header for why a prose-wide scan
+ *  would false-positive. */
 export function extractMermaidPathCitations(text) {
   const citations = [];
   const blockRe = /```mermaid\n([\s\S]*?)```/g;
@@ -189,11 +140,8 @@ export function extractMermaidPathCitations(text) {
   return citations;
 }
 
-/**
- * For one doc's text, return every mermaid-cited path (see extractMermaidPathCitations) that does
- * NOT resolve to a real file under `repoRoot`. Never touches the filesystem beyond `existsSync`/
- * `statSync` reads -- no doc is ever written or corrected here.
- */
+/** Every mermaid-cited path in a doc's text that does not resolve to a real file under `repoRoot`.
+ *  Read-only -- never writes to a doc. */
 export function findUnresolvedPathsInText(text, repoRoot) {
   const unresolved = [];
   for (const citation of extractMermaidPathCitations(text)) {
@@ -205,10 +153,8 @@ export function findUnresolvedPathsInText(text, repoRoot) {
   return unresolved;
 }
 
-/**
- * Walk every markdown file under `dir` and report each doc/path pair whose mermaid citation does
- * not resolve, in file order. Returns `[]` when the corpus is clean.
- */
+/** Walk every markdown file under `dir` and report each doc/path pair whose mermaid citation does
+ *  not resolve, in file order. Returns `[]` when the corpus is clean. */
 export function findUnresolvedMermaidCitations(dir, repoRoot) {
   const findings = [];
   for (const relFile of listMarkdownFiles(dir)) {
@@ -221,14 +167,8 @@ export function findUnresolvedMermaidCitations(dir, repoRoot) {
   return findings;
 }
 
-/**
- * Exported (not merely local, like the sibling generators' own `main`) so a test can drive its
- * error path -- the outer try/catch around corpus generation -- IN-PROCESS. A `spawnSync`'d child
- * process runs under its own, unobserved V8 instance, so a subprocess-only CLI test can never
- * move THIS process's `--experimental-test-coverage` report; calling `main()` directly (a
- * bad `--dir`) is what lets that catch block show up as covered in this file's own diff
- * (W1-T2282 round 1).
- */
+/** Exported, unlike the sibling generators' own local `main`, so a test can drive its outer
+ *  try/catch IN-PROCESS: only a direct call moves this file's own coverage record (W1-T2282). */
 export function main(argv) {
   const { values } = parseArgs({
     args: argv,

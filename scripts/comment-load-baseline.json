@@ -62,7 +62,7 @@
   "scripts/generate-api-client.mjs": 42,
   "scripts/generate-capability-snapshot.mjs": 57,
   "scripts/generate-cli-reference.mjs": 34,
-  "scripts/generate-docs-index.mjs": 113,
+  "scripts/generate-docs-index.mjs": 53,
   "scripts/generate-learnings-index.mjs": 31,
   "scripts/generate-macro-skills.mjs": 45,
   "scripts/generate-plan-index.mjs": 30,
