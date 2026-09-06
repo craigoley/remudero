@@ -11,12 +11,11 @@
 // SAME pull request that turned that SAME gate green.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { collectCiFailureCorpus, type CorpusPr } from "../src/lib/ci-failure-corpus.js";
-
-const RUN_TASK_SRC = "src/run-task.ts";
 
 /** A check-run rollup entry, as `rollupFromRest` maps one. */
 const run = (name: string, conclusion: string, startedAt = "2026-09-06T10:00:00Z") => ({ name, status: "COMPLETED", conclusion, startedAt });
@@ -122,18 +121,27 @@ test("W1-T2957 a superseded red attempt does not outvote its own successor on on
   assert.equal(corpus.pairs.length, 0);
 });
 
-test("W1-T2957 the collector is reachable from the command surface and writes nothing", () => {
-  const src = readFileSync(RUN_TASK_SRC, "utf8");
-  assert.ok(
-    /collectCiFailureCorpus\(/.test(src),
-    "an unwired collector is the shipped-detector class W1-T2732 counted four of",
+test("W1-T2957 the collector is reachable from the command surface, and writes nothing", () => {
+  // BEHAVIOUR, NOT SOURCE TEXT (W1-T2905): reading run-task.ts as prose would pass on a comment and
+  // break on a refactor that moved one. Instead CALL the shipped verb with a known window and read
+  // its output — rendering a pair the collector alone can produce IS the proof it is wired.
+  const wired = captured(() =>
+    ciFailuresCommand([], {
+      loadWindow: () => ({ prs: [pr(77, [{ sha: "wiredredsha", rollup: [run("ci-gate", "FAILURE")] }])] }),
+    }),
   );
-  // Law 5: a report that files or mints could present a machine conclusion as a ratified one. This
-  // module is pure — it takes rollups and returns records — so the property is structural.
-  const mod = readFileSync("src/lib/ci-failure-corpus.ts", "utf8");
-  for (const forbidden of ["writeFileSync", "reserveTaskId", "updateProposalRegistry", "execFile", "spawn"]) {
-    assert.ok(!mod.includes(forbidden), `the corpus module must not ${forbidden} — it reports, it does not act`);
-  }
+  assert.equal(wired.code, 0);
+  assert.match(wired.out, /OPEN\s+#77 ci-gate\s+red=wiredred/, "an unwired collector renders no pair at all");
+
+  // Law 5, also behavioural: the plan and the working tree are byte-identical after a full run, so a
+  // report cannot file, mint, or present a machine reading as a ratified one.
+  const planBefore = readFileSync("plan/tasks.yaml");
+  const treeBefore = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
+  ciFailuresCommand([], {
+    loadWindow: () => ({ prs: [pr(78, [{ sha: "s", rollup: [run("ci-gate", "FAILURE")] }])] }),
+  });
+  assert.ok(planBefore.equals(readFileSync("plan/tasks.yaml")), "the collector must not touch the plan");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }), treeBefore, "and must leave no file behind");
 });
 
 // ── The command surface and the real loader, both over an INJECTED fetcher ──────────────────────
