@@ -1,0 +1,110 @@
+- id: W1-T2956
+  title: "A CODEX REVIEWER'S TEST SCRATCH IS INSIDE CODEX'S OWN GIT ROOT — W1-T2750 isolates provider startup metadata and W1-T2946 grants that same root to tools, so safe fixture worker homes are rejected as tracked-tree placements"
+  repo: remudero
+  depends_on: [W1-T2750, W1-T2946]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 24.00
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/review.ts
+    - test/codex-disposable-review-sandbox.test.ts
+    - test/review-engine-revision-rearm.test.ts
+  origin: "fleet-lifeguard#pr-4236-codex-review-tool-tmp-git-ancestor-2026-09-06"
+  plan_refs: ["W1-T2750", "W1-T2946", "W1-T2868", "W1-T1077"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET FOR PR #4236 AT HEAD
+    `44be8c03dd7702cc962674ca18382c3711d4d0cd`. The Codex semantic reviewer first ran the exact
+    `test/worker-provider.test.ts` file and got 42/47 pass. All five failures were
+    `WorkerHomePlacementError`: each fixture home was created below
+    `/tmp/rmd-codex-worker-P8tdX7`, and that root already contained `.git`. The reviewer reran the
+    identical command with `TMPDIR=/dev/shm` and got 47/47 pass. A read-only container check after
+    the review proved `/tmp/.git` absent, so the discriminator is the per-worker Codex root, not
+    the container-wide temporary directory or the PR's code.
+
+    TWO CORRECT FIXES COMPOSE INTO A FALSE RED. W1-T2750 gives every Codex process a unique
+    Remudero-owned `TMPDIR` because Codex 0.152.0 creates `.git` there during initialization. That
+    keeps the shared `/tmp` safe. W1-T2946 makes a disposable review test-capable and grants its
+    private `TMPDIR` as the only temporary writable root. `codexExecArgs` also configures
+    `shell_environment_policy.inherit="core"`; `TMPDIR` is a core variable, so every model-reachable
+    shell command inherits the provider runtime root that Codex has already made a Git tree.
+    Tests using `os.tmpdir()` therefore create otherwise-safe fixture worker homes under a `.git`
+    ancestor, and W1-T2633's placement guard correctly refuses them.
+
+    THE PINNED PROVIDER HAS A NARROW SEPARATION MECHANISM. The official Codex configuration
+    reference says `shell_environment_policy.set` injects explicit child-process values after
+    exclusions. OpenAI Codex tag `rust-v0.152.0` at `7f6bee13af649d0da23ac0c2bf5c83f571fcd611`
+    confirms the same contract in `codex-rs/protocol/src/shell_environment.rs`: `populate_env`
+    applies the policy's `set` map after inherited and excluded values. The provider can therefore
+    retain one private runtime root for Codex itself and supply a distinct private tool root only
+    to model-reachable commands. No placement guard, sandbox boundary or test needs weakening.
+
+    THIS TASK DOES NOT OWN #4236'S DETERMINISTIC PROOF STATUS. In a disposable Azure clone at the
+    same head, the proof runner's declared `PATH`/`HOME` environment passed 47/47 with zero stderr
+    while `/tmp/.git` was absent. That falsifies a currently reproducible deterministic failure.
+    The earlier `executed_fail` row persists no TAP discriminator; W1-T1077 already owns bounded
+    proof-failure classification and diagnostics. This task fixes only the captured semantic
+    reviewer environment and bumps review identity so affected unchanged heads can be judged again.
+  design: |
+    Preserve W1-T2750's unique provider runtime `TMPDIR`, but for `sandboxIntent:
+    "disposable-review"` allocate a second unique temporary directory as the model-tool scratch
+    root. The two roots must be siblings or otherwise have no ancestor/descendant relationship;
+    putting the tool root below the provider root leaves Codex's `.git` ancestor in force and does
+    not fix the defect.
+
+    Pass the provider root only in the contained Codex process environment. Add a
+    `shell_environment_policy.set.TMPDIR` config override naming the tool root, using the pinned
+    CLI's structured config override rather than prompt instructions or a shell wrapper. Replace
+    the disposable profile's symbolic `:tmpdir` write grant with an explicit grant for the tool
+    root, retain the `/tmp` deny, and grant no model tool access to the provider runtime root.
+    Keep dependency read roots, network policy, exact-head disposable checkout, Git metadata
+    exclusions, argv ordering and Claude execution unchanged.
+
+    Both roots must exist before spawn, survive until the contained process group has completed its
+    existing teardown, and be removed on success, provider error, synchronous spawn error and clock
+    timeout. Non-review Codex workers retain their current single-root contract unless a separate
+    captured failure proves they need the split.
+
+    Drive the real adapter through the containment spawn recorder. Make the fake Codex startup
+    create `.git` in the process `TMPDIR`; assert the recorded shell-policy override and filesystem
+    permission identify a distinct root with no `.git` ancestor; then create a fixture worker home
+    from that tool root and drive the real placement guard. Bump `REVIEW_ENGINE_REVISION` and prove
+    both review-input and decision identities change for an unchanged head and body.
+  acceptance:
+    - claim: "a disposable Codex reviewer receives distinct existing provider-runtime and model-tool temporary roots, with neither root inside the other"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "Codex 0.152.0 receives the provider root through process TMPDIR and the tool root through shell_environment_policy.set.TMPDIR for both fresh and resumed reviews"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "the disposable permission profile denies the general temporary tree, grants the tool root explicitly, and grants no model-tool write path to the provider root or Git metadata"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "a fake Codex startup may create .git in its provider root while a fixture worker home created from the tool root still passes the real tracked-tree placement guard"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "both private roots survive through process-group teardown and are removed afterward on success, provider error, synchronous spawn error and clock timeout"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "Claude reviewers and non-review Codex workers retain their existing environment, sandbox, network, Git-root and cleanup contracts"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "the reviewer execution-contract revision rearms unchanged PR heads and bodies through both review identity digests"
+      proof: "unit test: test/review-engine-revision-rearm.test.ts"
+  falsifier: |
+    Close without implementation if a captured Codex 0.152.0 semantic-review transcript shows its
+    model shell commands already receive a temporary root outside the provider process `TMPDIR`, or
+    if the five #4236 failures reproduce with no `.git` ancestor and still pass only under
+    `/dev/shm`. Both alternatives are refuted by the captured paths and the 42/47 versus 47/47
+    control. For the implementation falsifier, collapse the two roots or remove only the
+    `shell_environment_policy.set.TMPDIR` override; require the focused suite to move from zero
+    failures to at least one placement refusal, then restore it and require zero failures.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2956`; read-back
+    resolves it to `262958e206247c31c9b6ab7f1ac47826ba760aa3`. Open and merged-PR collision checks
+    found no W1-T2956 implementation branch or trailer before this filing.
+
+    SCOPE BOUNDARY: this task does not alter `PROOF_ENV_ALLOWLIST`, soften
+    `WorkerHomePlacementError`, delete `.git`, add a global temporary cleanup, modify the
+    deterministic proof floor, or change provider/model selection. The exact #4236 proof now
+    passes in a separate Azure environment; treating that historical red as the same causal chain
+    would violate one-concern-per-PR and erase the evidence needed to diagnose it.
