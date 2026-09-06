@@ -15,7 +15,7 @@
  * Forensics for this file: docs/forensics/daemon.md. */
 
 import type { AutoTriageDecision } from "./auto-triage.js";
-import type { MeasurementCadenceDecision, MeasurementCadenceRunResult } from "./measurement-cadence.js";
+import type { CiLearningCadenceRunResult, MeasurementCadenceDecision, MeasurementCadenceRunResult } from "./measurement-cadence.js";
 import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
@@ -723,6 +723,16 @@ export interface DaemonDeps {
    *  registry proposals, and nothing else — it does not push, merge, mint or file, and Rule 15
    *  stands. Best-effort, and a fired review never gates dispatch or changes a verdict. */
   runBoardReview?: () => Promise<BoardReviewReport>;
+  /** W1-T2971 — the daily CI-failure learning rung. Its own policy row and marker file, the same
+   *  two-bound decision function every cadence above shares, so none can drag another. Optional,
+   *  exactly like its siblings: a daemon passing neither behaves as it did before this rung
+   *  existed. WITHOUT THE PRODUCER LINE IN run-task.ts these are undefined and the whole rung is
+   *  dead code — the shape #1066 and #2952 each shipped, and W1-T2959 made three. */
+  checkCiLearningCadence?: () => MeasurementCadenceDecision;
+  /** Run one ci-learning tick, returning counts this loop logs. Report-only: it drafts MARKED,
+   *  PARKED shards and files nothing (Law 5). Best-effort — a throw is logged and the tick
+   *  continues. */
+  runCiLearningCadence?: () => Promise<CiLearningCadenceRunResult>;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
    * degraded read — and the loop only acts on an explicit fire. Optional (W1-T160). */
@@ -1927,6 +1937,38 @@ export async function runDaemon(
         }
       } else if (digestDecision) {
         log("digest_cadence.skipped", { reason: digestDecision.reason });
+      }
+    }
+
+    // W1-T2971: the CI-failure learning rung. Same tick discipline and same best-effort contract as
+    // the two cadences above, on its own policy row and marker file. The rung DRAFTS marked, parked
+    // shards and files nothing, so a fire spends no budget and changes no plan record.
+    if (deps.checkCiLearningCadence) {
+      let ciLearningDecision: MeasurementCadenceDecision | undefined;
+      try {
+        ciLearningDecision = deps.checkCiLearningCadence();
+      } catch (e) {
+        log("ci_learning_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (ciLearningDecision?.fire) {
+        log("ci_learning_cadence.fired", { reason: ciLearningDecision.reason });
+        if (deps.runCiLearningCadence) {
+          try {
+            const result = await deps.runCiLearningCadence();
+            // The UNREADABLE count rides the row: a fire that saw a partial window must never be
+            // read later as one that saw a clean, empty one (P48).
+            log("ci_learning_cadence.ran", {
+              status: result.status,
+              drafts: result.draftCount,
+              excluded: result.excludedCount,
+              unreadable: result.unreadableCount,
+            });
+          } catch (e) {
+            log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (ciLearningDecision) {
+        log("ci_learning_cadence.skipped", { reason: ciLearningDecision.reason });
       }
     }
 
