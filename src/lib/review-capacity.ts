@@ -53,6 +53,8 @@ export interface ReviewCapacityObservation {
   activeWorkers: number;
   memAvailableMib?: number;
   cpuPsiSomeAvg10Pct?: number;
+  /** W1-T2985 — PSI `full`: the starvation signal the CPU shed decides on. */
+  cpuPsiFullAvg10Pct?: number;
   memoryPsiSomeAvg10Pct?: number;
   provider: ReviewProviderCapacityObservation;
   settlements: ReviewSettlementObservation;
@@ -96,6 +98,8 @@ export interface ReviewCapacityEvidence {
   healthySamples: number;
   memAvailableMib?: number;
   cpuPsiSomeAvg10Pct?: number;
+  /** W1-T2985 — PSI `full`: the starvation signal the CPU shed decides on. */
+  cpuPsiFullAvg10Pct?: number;
   memoryPsiSomeAvg10Pct?: number;
   providerFresh: boolean;
   providerReadable: boolean;
@@ -154,7 +158,15 @@ export function selectAdaptiveReviewWidth(
     observation.settlements.baselineLatencyMs > 0 &&
     observation.settlements.recentLatencyMs / observation.settlements.baselineLatencyMs >= policy.latencyExpansionRatio;
 
-  if (finite(observation.cpuPsiSomeAvg10Pct) && observation.cpuPsiSomeAvg10Pct >= policy.cpuPsiHighPct) {
+  // W1-T2985 — DECIDE ON `full`, REPORT `some`. This read `cpuPsiSomeAvg10Pct >= cpuPsiHighPct`.
+  // MEASURED on the fleet 2026-09-06, two builds and a retro running healthily: cpu `some
+  // avg10=80.57` against a shed threshold of 20 and a recovery threshold of 5. Review width was
+  // therefore pinned at the floor of 1 permanently and `healthySamples` reset to 0 on every sample,
+  // so it could never recover — while cpu `full avg10` was 0.00, 23 GiB was free and
+  // `active_workers` was 0. A bound that fires on a healthy condition is this repo's recurring
+  // defect (W1-T312, W1-T380, W1-T382); here the number was not mis-sized, the SIGNAL was wrong.
+  // `some` still rides along in the decision row below, where it is diagnosis rather than input.
+  if (finite(observation.cpuPsiFullAvg10Pct) && observation.cpuPsiFullAvg10Pct >= policy.cpuPsiHighPct) {
     directPressure("cpu-pressure");
   } else if (
     finite(observation.memoryPsiSomeAvg10Pct) &&
@@ -177,7 +189,7 @@ export function selectAdaptiveReviewWidth(
   } else {
     const telemetryAvailable =
       finite(observation.memAvailableMib) &&
-      finite(observation.cpuPsiSomeAvg10Pct) &&
+      finite(observation.cpuPsiFullAvg10Pct) &&
       finite(observation.memoryPsiSomeAvg10Pct) &&
       observation.provider.fresh &&
       observation.provider.readable &&
@@ -199,7 +211,7 @@ export function selectAdaptiveReviewWidth(
       lastHealthySampleAtMs = undefined;
       reason = "host-worker-budget";
     } else if (
-      observation.cpuPsiSomeAvg10Pct! > policy.cpuPsiLowPct ||
+      observation.cpuPsiFullAvg10Pct! > policy.cpuPsiLowPct ||
       observation.memoryPsiSomeAvg10Pct! > policy.memoryPsiLowPct
     ) {
       healthySamples = 0;
@@ -239,6 +251,7 @@ export function selectAdaptiveReviewWidth(
     healthySamples,
     ...(finite(observation.memAvailableMib) ? { memAvailableMib: observation.memAvailableMib } : {}),
     ...(finite(observation.cpuPsiSomeAvg10Pct) ? { cpuPsiSomeAvg10Pct: observation.cpuPsiSomeAvg10Pct } : {}),
+    ...(finite(observation.cpuPsiFullAvg10Pct) ? { cpuPsiFullAvg10Pct: observation.cpuPsiFullAvg10Pct } : {}),
     ...(finite(observation.memoryPsiSomeAvg10Pct) ? { memoryPsiSomeAvg10Pct: observation.memoryPsiSomeAvg10Pct } : {}),
     providerFresh: observation.provider.fresh,
     providerReadable: observation.provider.readable,
@@ -280,9 +293,22 @@ function parsePsiSomeAvg10(raw: string): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
+/** W1-T2985 — the FULL line. PSI `some` means "at least one task waited"; PSI `full` means "every
+ *  non-idle task was stalled". On a box with more runnable threads than cores `some` is high by
+ *  construction and says nothing about whether throughput is impaired, which is why it cannot
+ *  decide admission. `full` is the starvation signal. MEASURED on the fleet 2026-09-06 while two
+ *  builds and a retro ran healthily: cpu `some avg10=80.57`, cpu `full avg10=0.00`. */
+function parsePsiFullAvg10(raw: string): number | undefined {
+  const match = /^full\s+[^\n]*\bavg10=(\d+(?:\.\d+)?)\b/m.exec(raw);
+  return match ? Number(match[1]) : undefined;
+}
+
 export function readReviewHostObservation(
   read: (path: string, encoding: BufferEncoding) => string = readFileSync,
-): Pick<ReviewCapacityObservation, "memAvailableMib" | "cpuPsiSomeAvg10Pct" | "memoryPsiSomeAvg10Pct"> {
+): Pick<
+  ReviewCapacityObservation,
+  "memAvailableMib" | "cpuPsiSomeAvg10Pct" | "cpuPsiFullAvg10Pct" | "memoryPsiSomeAvg10Pct"
+> {
   const safeRead = (path: string): string | undefined => {
     try {
       return read(path, "utf8");
@@ -297,6 +323,7 @@ export function readReviewHostObservation(
   return {
     ...(mem ? { memAvailableMib: parseMemAvailableMib(mem) } : {}),
     ...(cpuPressure ? { cpuPsiSomeAvg10Pct: parsePsiSomeAvg10(cpuPressure) } : {}),
+    ...(cpuPressure ? { cpuPsiFullAvg10Pct: parsePsiFullAvg10(cpuPressure) } : {}),
     ...(memoryPressure ? { memoryPsiSomeAvg10Pct: parsePsiSomeAvg10(memoryPressure) } : {}),
   };
 }
