@@ -2335,10 +2335,25 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   return { ok: violations.every((v) => v.severity !== "block"), violations };
 }
 
-/** Lint every task in a loaded plan. Deterministic order (plan declaration order). */
+/** Lint every task in a loaded plan. Deterministic order (plan declaration order).
+ *
+ *  `duplicateSurfaceViolations` is silent absent `opts.openTaskSurfaces`, and no `optsFor` in this
+ *  repo supplies one (W1-T2676): `lintPlan` derives it FOR FREE from `plan.tasks` -- the one
+ *  thing every caller already holds -- unless `optsFor` sets one itself, including `[]` to opt
+ *  out. So `lintPlan(merged, () => ({}))` (inbox.ts) and `lintPlan(plan)` (onboard/synthesize.ts)
+ *  both see a real duplicate-surface finding today, no call-site change needed. */
 export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => ({})): Map<string, LintResult> {
+  const surfaceCorpus: DuplicateSurfaceCorpusEntry[] = plan.tasks.map((t) => ({
+    id: t.id,
+    files: t.files,
+    status: t.status,
+  }));
   const out = new Map<string, LintResult>();
-  for (const task of plan.tasks) out.set(task.id, lintTask(task, optsFor(task)));
+  for (const task of plan.tasks) {
+    const opts = optsFor(task);
+    const withSurfaces = opts.openTaskSurfaces !== undefined ? opts : { ...opts, openTaskSurfaces: surfaceCorpus };
+    out.set(task.id, lintTask(task, withSurfaces));
+  }
   return out;
 }
 

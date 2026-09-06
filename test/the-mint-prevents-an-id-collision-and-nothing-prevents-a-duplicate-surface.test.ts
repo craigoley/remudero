@@ -4,9 +4,10 @@ import {
   DUPLICATE_SURFACE_MIN_FILES,
   duplicateSurfaceViolations,
   lintTask,
+  lintPlan,
   type DuplicateSurfaceCorpusEntry,
 } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import type { Plan, Task } from "../src/lib/plan.js";
 
 // ── W1-T2676 ─────────────────────────────────────────────────────────────────────────────────
 //
@@ -106,6 +107,47 @@ test("the finding is a WARNING, not a refusal, so a legitimate overlap is never 
   const blocking = (r: { violations: { severity: string; check: string }[] }) =>
     r.violations.filter((x) => x.severity === "block").map((x) => x.check).sort();
   assert.deepEqual(blocking(withCorpus), blocking(without), "the duplicate surface adds no blocking violation");
+});
+
+// ── wired for real, not only in a test's own hand-built opts ───────────────────────────────────
+//
+// `openTaskSurfaces` is a caller-supplied field, and nothing in this repo's real `--base` gate
+// (`lintPlanCommand`, run-task.ts) populates it — that wiring needs a git-scoped read only that
+// call site can supply, and touching it is out of this task's declared `files:`. But `lintPlan`
+// itself (task-linter.ts) needs no such read: every real caller already holds the WHOLE plan, the
+// one thing the check compares against. These two tests model the repo's actual two callers —
+// `lintPlan(merged, () => ({}))` (inbox.ts's merge-plan gate) and `lintPlan(plan)` (onboard/
+// synthesize.ts) — passing NEITHER an explicit corpus, to prove the finding is produced by the
+// real function these files already call, not only by a fixture built for this suite.
+
+function planOf(tasks: Task[]): Plan {
+  return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+}
+
+test("lintPlan(plan) alone — no optsFor, no explicit corpus — still reports the pair (models onboard/synthesize.ts's own call)", () => {
+  const plan = planOf([task({ id: "W1-T2581", files: [...SEVEN] }), task({ id: "W1-T2589", files: [...FOUR_SUBSET] })]);
+  const results = lintPlan(plan);
+  const v2589 = results.get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.equal(v2589.length, 1, "lintPlan derives the corpus from the plan it already holds — no caller wiring needed");
+  assert.match(v2589[0]!.message, /a subset of W1-T2581/);
+  assert.equal(v2589[0]!.severity, "warn", "still advisory through the real call shape, not only through hand-built opts");
+});
+
+test("lintPlan(plan, () => ({})) — an optsFor that sets nothing — still reports the pair (models inbox.ts's blockingLintMessages)", () => {
+  const plan = planOf([task({ id: "W1-T2581", files: [...SEVEN] }), task({ id: "W1-T2589", files: [...FOUR_SUBSET] })]);
+  const results = lintPlan(plan, () => ({}));
+  const v2589 = results.get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.equal(v2589.length, 1, "an optsFor returning {} must not erase the plan-derived corpus");
+});
+
+test("an optsFor that explicitly sets openTaskSurfaces (even []) overrides the plan-derived default", () => {
+  const plan = planOf([task({ id: "W1-T2581", files: [...SEVEN] }), task({ id: "W1-T2589", files: [...FOUR_SUBSET] })]);
+  const results = lintPlan(plan, () => ({ openTaskSurfaces: [] }));
+  assert.deepEqual(
+    results.get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface"),
+    [],
+    "an explicit corpus, including an empty one, is the caller's own ruling and is never silently replaced",
+  );
 });
 
 // ── the legitimate overlaps: the half that is hard ────────────────────────────────────────────
