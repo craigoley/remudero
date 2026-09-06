@@ -1,0 +1,125 @@
+- id: W1-T2957
+  title: "THE ONE FAILURE CORPUS THAT COMES WITH ITS OWN FIX IS CONSUMED TRANSACTIONALLY AND DISCARDED — every CI gate failure is read once by the fix rung to repair that PR and never again; `ruleEfficacyReport`'s only corpus is the ledger, so it measures 1 of the 56 rule bullets CLAUDE.md ships, and the single entry in its table that names a CI GATE is marked `measurable: false`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - src/lib/ci-failure-corpus.ts
+    - src/run-task.ts
+    - test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts
+  origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
+  plan_refs: ["W1-T418", "W1-T2595", "W1-T2599", "W1-T1282"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AT 903b5a6, NOT REASONED ABOUT.
+
+    `RULE_SIGNATURES` (`src/lib/rule-efficacy.ts`) is the table that decides whether one of this
+    repo's own rules is WORKING. Counted at head: it holds THREE entries, of which exactly ONE is
+    `measurable: true`. CLAUDE.md ships 56 top-level rule bullets across 8 sections. So the
+    mechanism built to tell a live rule from a dead one covers under 2% of the rules in force.
+
+    THE CAUSE IS THE CORPUS, NOT THE LOOP. `ruleEfficacyReport` resolves the LEDGER union and
+    matches `step`-field patterns; a rule earns `measurable: true` only by having a hand-written
+    ledger step pattern its failures land under. The module's own interface doc says so: a
+    measurable signature is "a rule whose recurrence IS visible in the ledger". Everything else is
+    listed UNMEASURABLE with a stated reason.
+
+    AND THE TELL IS WHICH ENTRY IS EXCLUDED. The one table row naming a CI gate —
+    `CLAUDE.md#before-you-push:diff-coverage-gate` — is `measurable: false`. A rule ABOUT a gate
+    cannot be measured, because the gate's failures are not ledger rows. `rule-efficacy.ts`'s own
+    header states the boundary in terms: "HOST-SIDE, NOT A CI GATE: the ledger lives on the daemon
+    host; nothing in CI can read it."
+
+    WHAT IS BEING THROWN AWAY. A red check is the richest failure signal this repo produces, and
+    the only one that arrives WITH ITS OWN FIX: the same PR later carries a commit that turns that
+    same check green. The failure names the convention violated; the delta between the two shas
+    names the repair. `fetchCiFailures` (`src/run-task.ts`) already reads red checks — per PR, at
+    fix time, to repair that PR — and nothing retains the pair. W1-T2595 measured the cost from the
+    other side: three PRs in one evening reddened the census family and "every one of the seven
+    causes was a convention the author had no way to discover".
+
+    WHY A COLLECTOR IS THE FIRST STAGE AND NOT THE LAST. Rule attribution (W1-T2958) and any
+    proposal or filing rung (W1-T2959) are both blocked on a corpus that does not exist. This task
+    builds ONLY the corpus and a report over it; it decides nothing and changes no guidance.
+  design: |
+    (i) TWO ENDPOINTS, BECAUSE ONE IS STRUCTURALLY BLIND. `remudero-review` is a COMMIT STATUS, not
+    a check run — `rollupFromRest` (`src/lib/open-prs-rest.ts`) says reading only `/check-runs`
+    "would drop `remudero-review` entirely and make every reviewed PR look unreviewed". Read the
+    combined-status endpoint or GraphQL's `statusCheckRollup` ALONGSIDE check runs, never
+    `/check-runs` alone. A corpus missing the review verdict would be blind to the gate that most
+    often refuses a PR.
+
+    (ii) THE PAIR IS THE UNIT, NOT THE FAILURE. One record is (check name, red sha, red evidence,
+    green sha, the diff between them) — a failure with no observed repair is retained as an OPEN
+    pair, never dropped and never silently completed. The repair delta is what a later stage learns
+    from; a bare failure count teaches nothing.
+
+    (iii) REPORT-ONLY, AND THAT IS LAW 5, NOT TIMIDITY. This module files nothing, mints no id and
+    writes no guidance — the same posture `digest.ts` and the adoption report already hold. Law 5
+    is "records launder authority unless the author class rides the record"; a collector that only
+    reports cannot launder anything. The filing question belongs to W1-T2959 and is settled there.
+
+    (iv) A WINDOW, NOT A SNAPSHOT. Take the window as a parameter with a stated default rather than
+    hard-coding "yesterday", so the daily rung and an operator asking about last week share one
+    implementation.
+
+    (v) NOT IN SCOPE, EACH WITH A REASON: rule attribution (W1-T2958 — it needs this corpus first);
+    any cadence row or auto-file (W1-T2959); `fetchCiFailures` itself, which is correct for the
+    transactional job it does and must keep doing it.
+  acceptance:
+    - claim: "a window of merged and open pull requests yields one record per red gate, and the review commit status is present alongside check runs rather than dropped"
+      proof: "unit test: test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts"
+    - claim: "each red gate is paired with the later commit on the same pull request that turned that same gate green, and the delta between the two is retained"
+      proof: "unit test: test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts"
+    - claim: "a red gate with no observed repair is kept as an open pair rather than dropped or reported as repaired"
+      proof: "unit test: test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts"
+    - claim: "the collector is reachable from the command surface rather than shipping as an unwired module"
+      proof: "grep: collectCiFailureCorpus( in src/run-task.ts"
+    - claim: "the collector writes no plan record and reserves no identifier, so a report can never read as a ratified decision"
+      proof: "unit test: test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts"
+  falsifier: |
+    AN EMPTY CORPUS MUST BE DISTINGUISHABLE FROM A BROKEN READER. A window with no red gate and a
+    window the reader could not fetch must not both render as zero — the no-naked-zero clause the
+    adoption rung already holds (`status: "clear" | "backlog"`, a measured absence). Assert BOTH
+    arms; a collector that returns an empty array on an HTTP failure is the defect, not the fix.
+
+    THE PAIRING MUST BE FALSIFIED IN BOTH DIRECTIONS. A green check on a DIFFERENT pull request, or
+    an EARLIER sha, is not a repair for this failure. Seed a fixture where both appear and assert
+    neither is paired.
+
+    THE REVIEW STATUS ARM NEEDS ITS OWN CASE. A fixture whose only red signal is `remudero-review`
+    must produce a record; a collector reading `/check-runs` alone returns zero on it and would
+    otherwise pass every other test in this suite.
+
+    AND PROVE IT LOAD-BEARING: delete the pairing and re-run. `# fail` non-zero with it removed,
+    `# fail 0` restored.
+  note: |
+    FILED 2026-09-06 from an operator request for a daily loop that learns from CI failures and
+    their fixes. This is stage 1 of three; W1-T2958 attributes a failure to a rule, W1-T2959 paces
+    and files.
+
+    MEASURED IN THIS CHECKOUT AT 903b5a6, so the build inherits rather than re-derives:
+      - `RULE_SIGNATURES` holds 3 entries; 1 is `measurable: true`.
+      - CLAUDE.md ships 56 lines matching `^- \*\*` across 8 `^## ` sections.
+      - `CLAUDE.md#before-you-push:diff-coverage-gate` is `measurable: false`.
+      - `rule-efficacy.ts`'s header: "HOST-SIDE, NOT A CI GATE ... nothing in CI can read it."
+
+    NOT ESTABLISHED, AND DELIBERATELY NOT CLAIMED: how far back GitHub's API will serve check runs
+    for this repo's older pull requests. The window default should be chosen by the build after
+    measuring it, not asserted here.
+
+    THE ID RESERVATION COULD NOT BE MINTED FROM THE FILING ENVIRONMENT. This container's git
+    gateway answers HTTP 403 to any ref outside `refs/heads/*` (positive control: the same orphan
+    commit pushed successfully to a `refs/heads/*` name, rc=0 `[new branch]`). All three readable
+    surfaces were checked instead: the plan's own max is W1-T2953, `refs/rmd-id/` holds up to
+    W1-T2956 (1021 refs enumerated, a non-zero control), and no open pull request names any id in
+    W1-T2957..W1-T2970 (3 open PRs scanned, 7 ids extracted overall — both non-zero controls).
+
+    risk:high / band_meaning:span is RULE 19 SIZING, not blast radius: the declared set spans a new
+    module and its one call site in the command surface. The change is small and additive.

@@ -1,0 +1,167 @@
+- id: W1-T2959
+  title: "NOTHING PACES THE LEARNING LOOP DAILY AND NOTHING MARKS WHAT IT WOULD FILE — the measurement cadence already runs rule-efficacy on its own policy row, but no rung reads the CI failure corpus, and a shard filed by a rung would enter the plan carrying only `origin:`, which Law 5 states 'carries commission, not intent', so a machine conclusion reads to a later reader as an operator ruling"
+  repo: remudero
+  depends_on: [W1-T2957, W1-T2958]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 22.00
+  files:
+    - src/lib/measurement-cadence.ts
+    - src/lib/task-linter.ts
+    - src/run-task.ts
+    - plan/policy.yaml
+    - test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts
+  origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
+  plan_refs: ["W1-T326", "W1-T353", "W1-T418", "W1-T2957", "W1-T2958", "W1-T20c", "W1-T120"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE OPERATOR ASKED FOR A DAILY LOOP THAT FILES ITS OWN FINDINGS. Both halves are open, and the
+    second is the one with a law attached.
+
+    THE PACING HALF IS SMALL. `decideMeasurementCadence` (`src/lib/measurement-cadence.ts`) is a
+    shared two-bound decision function, and the established convention is that each rung gets its
+    OWN policy row and its OWN marker file so cadences never drag one another — `digestCadence`'s
+    comment says exactly that about not folding into `measurementCadence`. A daily rung is one row
+    plus one marker, not new infrastructure.
+
+    THE FILING HALF IS WHERE THE LAW IS. `rule-efficacy.ts` states that auto-filing a task from a
+    metric "would be the laundering shape Law 5 forbids", and the same posture is pinned across the
+    tree: the daemon rung "NEVER files a task or mints an id (Law 5)"; the policy doc says
+    "promote-to-instrument proposal, never a filed task — Law 5"; the digest "files nothing, mints
+    nothing".
+
+    BUT LAW 5 IS NARROWER THAN THAT SHORTHAND, AND READING IT SETTLES THE DESIGN. Its text
+    (`docs/research/research-laws-and-gaps-2026-08-05.md`, Part 1) is "RECORDS LAUNDER AUTHORITY
+    UNLESS THE AUTHOR CLASS RIDES THE RECORD — unmarked records read as ratified; origin tags carry
+    commission, not intent". The prohibition is on an UNMARKED record, not on filing. Its own
+    prediction names the failure mode: "any new record channel added without a mandatory
+    author-class mark will, within weeks, carry a machine conclusion a later reader treats as an
+    operator ruling."
+
+    AND THIS REPO ALREADY HAS THE COMPLIANT SHAPE, BUILT FOR EXACTLY THIS. `rulingVerifyViolation`
+    (`src/lib/task-linter.ts`, W1-T326/W1-T353) refuses a ruling-shaped task at `verify: auto` and
+    says why in its own comment: "isDispatchEligible already refuses any task whose `verify !==
+    "auto"`, so a ruling-shaped task at verify:human simply PARKS until the operator looks." A
+    machine-authored shard that is MARKED and PARKS is not laundering: it cannot present itself as
+    ratified and it cannot dispatch itself. The operator's approval becomes one flip rather than
+    authoring a shard from scratch.
+
+    THE DECLARED SURFACE OVERLAPS TWO LIVE SHARDS, AND THIS IS THE RULING RATHER THAN A NARROWED
+    `files:`. `lint-plan`'s duplicate-surface arm names W1-T20c and W1-T120, both sharing
+    `src/lib/task-linter.ts` + `src/run-task.ts`. Neither is superseded and neither supersedes this.
+    W1-T20c is the linter's ORIGINAL deterministic-guard build (§5C Layer A) — the framework this
+    task adds one arm to, not a competing edit of the same arm. W1-T120 is about a gate PROVING it
+    read the file under test, a claim over how any arm reports its evidence, orthogonal to which
+    arms exist. This task adds exactly one new refusal (a marked shard may not sit at
+    `verify: auto`) plus a cadence row and its wiring. The overlap is the legitimate
+    wiring-task/module shape the arm's own message names, so it is ruled on here and left visible
+    rather than hidden by trimming the declaration.
+
+    WHAT THE LOOP IS ACTUALLY FOR, AND WHY THE TARGET IS NOT ZERO RED. A first-time red is how a
+    convention gets discovered — W1-T2595 measured seven causes in one evening that no author could
+    have known. The tractable target is zero REPEAT failures, which is what `ruleEfficacyReport`
+    already computes. A rung that chased zero red would be chasing the signal that teaches.
+  design: |
+    (i) ONE ROW, ONE MARKER, THE SHARED DECISION FUNCTION. Add a cadence row beside
+    `measurementCadence`/`digestCadence`/the adoption row, with its own marker path, and call
+    `decideMeasurementCadence` — never a second decision function, and never folded into an
+    existing row (that comment's stated reason: a short interval on one rung must not drag another).
+
+    (ii) THE MINT CEILING IS A PRIMARY CONTROL, NOT A BACKSTOP. Mirror `ADOPTION_MINT_CEILING`
+    verbatim in shape: cap what one fire may file, name every finding the ceiling EXCLUDED rather
+    than dropping it, and key idempotency on a deterministic id derived from the failure signature —
+    the discipline `adoptionProposalId` already holds, so reruns never duplicate.
+
+    (iii) THE AUTHOR-CLASS MARK IS A FIELD AND A LINT, NOT A CONVENTION. `origin:` is explicitly
+    insufficient by Law 5's own words. Add a machine-author mark to the shard schema and a
+    task-linter arm that REFUSES a marked shard at `verify: auto` — the same trigger shape
+    `rulingVerifyViolation` uses, for the same reason. Prose here would be unenforced, which is the
+    thing CLAUDE.md's own header says makes a rule violable "silently and repeatedly".
+
+    (iv) THE FILED SHARD PARKS. `verify: human` is what makes `isDispatchEligible` refuse it. That
+    is the whole safety argument: the loop may propose work into the plan, and only the operator can
+    release it. Do not add a bypass.
+
+    (v) THE OUTPUT MUST REACH THE LANE THAT OPENS THE PRs. `spawnWorker` passes `settingSources: []`
+    (`src/lib/worker.ts`), so a DISPATCHED WORKER NEVER READS CLAUDE.md — measured, not assumed.
+    Workers are reached by matched `learnings/*.yaml` entries injected into `renderImplementPrompt`.
+    A filed shard whose remedy is "add a CLAUDE.md bullet" would therefore improve interactive
+    sessions and change nothing about the fleet's own pull requests; the shard this rung files must
+    name the surface that reaches the lane the failure came from.
+
+    (vi) THE FILING PR MUST NOT CARRY A `Remudero-Task:` TRAILER, AND THIS WAS HIT WHILE FILING THIS
+    ARC. W1-T413: "a MERGED PLAN-ONLY PR carrying a `Remudero-Task:` trailer is credited by
+    `deriveStatus` as that task's implementation, so the task reads merged forever and can never be
+    dispatched again." A rung that opens a filing pull request and copies the trailer convention
+    visible on merged filing PRs (#3617, #3748 both carry one) would credit every shard it files as
+    already built, and the fleet would never build any of them — the rung would silently defeat
+    itself while every gate stayed green. `acceptance-author-gate` accepts a bare `## Acceptance`
+    header OR a trailer, so the header alone is sufficient and is the form to emit.
+
+    MEASURED 2026-09-06 OVER 3367 MERGED PULL REQUESTS, so the rung inherits a population rather
+    than a worry. Reading the two credit paths `deriveStatus` actually uses — the `Remudero-Task:`
+    trailer in the PR BODY and the `run-<id>-<epoch>` head ref, never the squashed commit message,
+    which drops the trailer — 150 ids are credited by a plan-only pull request, 47 ONLY that way,
+    and 33 of those declare `src/`, `scripts/`, `test/`, `deploy/` or `.github/` files and so read
+    merged while never having been built. The consequence was proved with the real selector rather
+    than inferred: `runnableCandidates` offers 64 tasks and NONE of those 33, so 33 of 33 are
+    permanently invisible to dispatch. In 24 of them the crediting pull request was the FILING of
+    that very task, which is exactly the shape this rung would emit. Every one still reads
+    `status: queued`, the field the filing wrote and nothing updates on merge.
+
+    A CONTROL IS WHAT MADE THAT NUMBER TRUSTWORTHY, and the first attempt was wrong: a sweep of
+    COMMIT MESSAGES reported a real, merged build of W1-T2669 as never-built, because that pull
+    request's squashed message carries no trailer at all — the build is credited by its head ref.
+    Any re-measure must union both paths and carry a known-built id as its positive control.
+
+    (vii) NOT IN SCOPE: editing `learnings/*.yaml` or CLAUDE.md directly from the rung — the filed,
+    parked shard is the output, and that is the whole Law 5 argument; and the corpus and attribution
+    stages, which are W1-T2957 and W1-T2958.
+  acceptance:
+    - claim: "the rung decides whether to fire through the shared two bound cadence function against its own policy row and its own marker file, never a second decision function"
+      proof: "unit test: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts"
+    - claim: "one firing files at most the ceiling many records, names every finding the ceiling excluded, and a rerun over the same findings files nothing new"
+      proof: "unit test: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts"
+    - claim: "a shard carrying the machine author mark is refused by the linter unless it is set to await a person, so a machine conclusion can never dispatch itself"
+      proof: "unit test: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts"
+    - claim: "a shard written by a person is graded exactly as before this change, so the new arm narrows nothing that already worked"
+      proof: "unit test: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts"
+    - claim: "a firing that finds nothing renders a measured absence rather than a bare zero, and a corpus that could not be read is distinguishable from one that was empty"
+      proof: "unit test: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts"
+  falsifier: |
+    THE LAW 5 ARM IS THE ONE THAT MATTERS, AND IT MUST FAIL CLOSED. Construct a marked shard at
+    `verify: auto` and assert the linter BLOCKS it. Then construct the same shard at
+    `verify: human` and assert it passes. A change that lets a marked shard dispatch has recreated
+    the laundering shape with extra steps.
+
+    AND PROVE THE MARK IS LOAD-BEARING, NOT DECORATIVE: an UNMARKED shard at `verify: auto` must
+    still pass, or the arm is refusing every task in the plan and its green is meaningless.
+
+    THE CEILING NEEDS A BACKLOG CASE. Supply more findings than the ceiling and assert the excess is
+    NAMED in the result, not silently dropped — the adoption rung's `excludedMechanisms` shape.
+
+    IDEMPOTENCY IS FALSIFIED BY RUNNING TWICE. Two fires over an unchanged corpus must file on the
+    first and nothing on the second.
+
+    DO NOT RESOLVE ANY OF THIS BY WIDENING WHAT THE RUNG MAY WRITE. If the parked shard proves
+    awkward in practice, that is an operator decision to re-take, not a licence for the rung to edit
+    guidance directly.
+  note: |
+    FILED 2026-09-06, stage 3 of three, from an operator request for a daily loop that learns from
+    CI failures and their fixes and files what it finds. The operator chose auto-filing over
+    proposal-only after being shown the trade; this shard is that choice built in the shape Law 5
+    permits, and the parking requirement is not a substitute for the choice but the condition on it.
+
+    READ AT 903b5a6, so the build inherits rather than re-derives:
+      - Law 5's text is in `docs/research/research-laws-and-gaps-2026-08-05.md` Part 1, not in
+        MASTER-PLAN; MASTER-PLAN cites it at the W1-T2694 ratification entry.
+      - `rulingVerifyViolation` blocks `files:` containing `DECISIONS.md` at `verify != human`.
+      - `ADOPTION_MINT_CEILING = 3`, documented as a PRIMARY control, never a backstop.
+      - `spawnWorker` passes `settingSources: []` at `src/lib/worker.ts`.
+
+    risk:high / band_meaning:span is RULE 19 SIZING: the declared set spans the cadence module, the
+    linter, the command surface and a policy row. Each edit is small; the SPAN is what sets the band.
