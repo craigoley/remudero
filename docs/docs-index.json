@@ -332,6 +332,12 @@
       "grepHint": "Forensics: src/lib/task-linter.ts"
     },
     {
+      "path": "docs/forensics/unwired-gate-check.md",
+      "title": "unwired-gate-check.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "unwired-gate-check.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/worker-branch-shape.md",
       "title": "worker-branch-shape.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
