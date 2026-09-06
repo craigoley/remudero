@@ -5095,19 +5095,13 @@ function materializeReviewerSnapshot(
     );
   }
 
-  // The clone's own exclude file may be changed before the reviewer starts; the source checkout
-  // and common Git metadata remain untouched. This makes a linked dependency tree invisible to
+  // The clone's exclude may change; the source and common Git metadata remain untouched. This makes a linked dependency tree invisible to
   // the post-review cleanliness proof even for repositories whose committed .gitignore omits it.
   excludeNodeModulesFromGit(cwd);
   const nodeModules = linkWorktreeNodeModules(sourceDir, cwd);
-  let dependencyReadRoots: string[] = [];
-  try {
-    const target = realpathSync(join(cwd, "node_modules"));
-    const rel = relative(cwd, target);
-    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) dependencyReadRoots = [target];
-  } catch {
-    dependencyReadRoots = [];
-  }
+  const dependencyRoot = (() => { try { return realpathSync(join(cwd, "node_modules")); } catch { return undefined; } })();
+  const dependencyRelative = dependencyRoot ? relative(cwd, dependencyRoot) : "";
+  const dependencyReadRoots = dependencyRoot && (dependencyRelative === ".." || dependencyRelative.startsWith(`..${sep}`) || isAbsolute(dependencyRelative)) ? [dependencyRoot] : [];
   return { cwd, nodeModules, dependencyReadRoots };
 }
 
@@ -5419,12 +5413,8 @@ async function runReview(args: {
             maxBudgetUsd: args.budgetUsd,
             config: args.config,
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
-            // W1-T2829/W1-T2946: keep the existing read-only tool contract structural at this
-            // production call site, while marking the exact-head disposable reviewer for Codex's
-            // narrow TMPDIR write and external dependency read grants. The shared list excludes every write tool.
-            tools: SPECIALIST_TOOLS,
-            sandboxIntent: "disposable-review",
-            sandboxReadRoots: snapshot.dependencyReadRoots,
+            // W1-T2829/W1-T2946: preserve read-only tools while granting Codex narrow TMPDIR writes and dependency reads.
+            tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review", sandboxReadRoots: snapshot.dependencyReadRoots,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );
