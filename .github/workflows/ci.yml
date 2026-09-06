@@ -1260,6 +1260,43 @@ jobs:
       - name: Task-id existence check (every cited id resolves; no declared id collides with main)
         run: npm run --silent task-id-existence:check
 
+  source-size:
+    # SOURCE-SIZE ratchet — a per-file LINE ceiling, the same shape as the `comment-load-ratchet`
+    # and `learnings-budget-ratchet` jobs below/above and for the same reason: something grew
+    # unnoticed. W1-T2488 built the ceiling; nothing ever ran it. Measured on a clean main at
+    # 6e31c5d2: `npm run source-size-ratchet` read BLOCKED on SEVEN files, up to +478 lines over
+    # (review.ts 9,978 vs 9,500; run-task.ts 37,861 vs 37,500). A recorded ceiling that nothing
+    # enforces is dead configuration that drifts, which is exactly what it had done.
+    #
+    # This runs the ENFORCING `--baseline` mode. The `source-size-signal` script is a different
+    # thing and stays as it is: it reports growth of changed files and never fails.
+    #
+    # The gate refuses ONE thing: a baselined file whose line count grew past its ceiling. A
+    # DECREASE is always accepted, and a PR that shrinks a file re-captures the ceiling downward in
+    # the same diff (the coverage-ratchet convention) — which is what makes this usable as the
+    # run-task.ts decomposition chain lands. See test/source-size-baseline-is-enforced.test.ts for
+    # the falsifier proof it is ACTIVE, driving the real CLI as a subprocess.
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:` beyond the PR-only trigger) —
+    # the same fail-closed shape as the jobs around it: a path-filtered REQUIRED check that can go
+    # silently absent is the #102 deadlock class ci-gate.yml exists to avoid.
+    name: source-size
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Source-size ratchet (no baselined file grows past its recorded ceiling)
+        run: npm run --silent source-size-ratchet
+
   comment-load-ratchet:
     # COMMENT-LOAD ratchet — a CEILING on comment volume, the same shape as the
     # `learnings-budget-ratchet` and `jscpd-gate` jobs above and for the same reason: something grew

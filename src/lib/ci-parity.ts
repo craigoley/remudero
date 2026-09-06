@@ -1218,6 +1218,20 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   // W1-T1048: the task-id existence gate is exactly the shared npm-script shape — deterministic,
   // unconditional on every PR, and measured at ~1.1s, so it is mirrored rather than excluded.
   npmScriptEntry("task-id-existence", "task-id-existence:check"),
+  // W1-T2883: the source-size ceiling, mirrored. Written in the EXPLICIT object form rather than
+  // through npmScriptEntry because Standing rule 25's introducing-commit carve-out
+  // (isIntroducingCiYmlJob, review.ts) keys on an ADDED line carrying `job: "<name>"` beside the
+  // added ci.yml job key — the helper's shorthand emits no such line, so the same PR would read
+  // instrument-entangled and be refused.
+  {
+    job: "source-size",
+    mirrored: true,
+    run: (repoRoot, spawn) => [
+      runStep("source-size", () =>
+        shellOut(spawn, "npm run --silent source-size-ratchet", "npm", ["run", "--silent", "source-size-ratchet"], { cwd: repoRoot }),
+      ),
+    ],
+  },
 ];
 export interface CiParityDeps {
   spawn?: PreflightSpawn;
