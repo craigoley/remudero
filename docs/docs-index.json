@@ -218,6 +218,12 @@
       "grepHint": "coverage-session-blanking-check.mjs comment forensics"
     },
     {
+      "path": "docs/forensics/credit-surface-gate.md",
+      "title": "credit-surface-gate.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "credit-surface-gate.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/daemon.md",
       "title": "daemon.ts forensics",
       "summary": "Measured forensics, incidents and design arguments removed from `src/lib/daemon.ts` when its comments were compacted to the plain-language standard. The code k…",
