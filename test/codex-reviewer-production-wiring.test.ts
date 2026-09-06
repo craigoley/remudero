@@ -107,7 +107,7 @@ esac
       task: {
         id: "W1-T2829",
         files: ["src/example.ts"],
-        acceptance: [{ claim: "the production reviewer has only read-only inspection tools", proof: "grep: fixed in src/example.ts" }],
+        acceptance: [{ claim: "the production reviewer keeps read-only inspection tools and disposable test scratch", proof: "grep: fixed in src/example.ts" }],
       },
       report: "The production reviewer has only read-only inspection tools.",
       settingsFile,
@@ -154,5 +154,53 @@ esac
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
     rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2946 mutation: omitting the disposable review intent restores read-only reviewer argv", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-review-intent-mutation-"));
+  const workerHome = mkdtempSync(join(tmpdir(), "rmd-codex-review-intent-home-"));
+  try {
+    execFileSync("git", ["init", "-q", root]);
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+    let codexArgs: string[] = [];
+    stdin.on("finish", () => {
+      stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "codex-review-missing-intent" })}\n`);
+      stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
+      stdout.write(`${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "done" } })}\n`);
+      stdout.write(`${JSON.stringify({ type: "turn.completed", usage: {} })}\n`);
+      stdout.end();
+      queueMicrotask(() => proc.emit("exit", 0));
+    });
+
+    await spawnCodexWorker(
+      {
+        workerHome,
+        cwd: root,
+        prompt: "exercise reviewer argv without its explicit intent",
+        tools: ["Read", "Grep", "Glob", "Bash"],
+        containment: {
+          spawn: (options) => {
+            codexArgs = options.args;
+            return { process: proc as never, pid: 29_461 };
+          },
+          teardown: () => {},
+        },
+      },
+      { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    );
+
+    assert.deepEqual(
+      codexArgs.slice(codexArgs.indexOf("--sandbox"), codexArgs.indexOf("--sandbox") + 2),
+      ["--sandbox", "read-only"],
+      "deleting runReview's sandboxIntent would restore the old read-only reviewer argv",
+    );
+    assert.equal(codexArgs.includes("--add-dir"), false, "without the intent the private TMPDIR is not writable");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(workerHome, { recursive: true, force: true });
   }
 });

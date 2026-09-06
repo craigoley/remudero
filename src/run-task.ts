@@ -5140,10 +5140,11 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
  * never be missing (a required status that is never posted deadlocks every merge
  * on the repo — the exact failure this task fixes).
  *
- * A FRESH read-only reviewer worker (NEVER resumeSessionId, NEVER forkSession) is
- * spawned as an ADVISORY semantic layer, in a throwaway cwd so it cannot mutate the
- * diff it judges. Its per-criterion verdicts may only DOWNGRADE a criterion to
- * failure ({@link parseReviewerVerdicts} → semantic), never rescue an unpasted
+ * A FRESH reviewer worker with read-only inspection tools (NEVER resumeSessionId,
+ * NEVER forkSession) is spawned as an ADVISORY semantic layer, in a throwaway cwd
+ * so it cannot mutate the diff it judges. Its per-criterion verdicts may only
+ * DOWNGRADE a criterion to failure ({@link parseReviewerVerdicts} → semantic),
+ * never rescue an unpasted
  * proof. Its spawn is best-effort: a reviewer that fails to spawn (e.g. the
  * FIELD FINDING 12 self-updater race) never blocks the gate — the deterministic
  * floor still posts, fail-closed.
@@ -5410,10 +5411,9 @@ async function runReview(args: {
             maxBudgetUsd: args.budgetUsd,
             config: args.config,
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
-            // W1-T2829: make the existing read-only contract structural at this production call
-            // site. The reviewer still needs inspection tools to fetch the diff and run proofs;
-            // the shared list excludes every write tool, which also lets the Codex adapter use its
-            // narrowly gated non-repository trust bypass for this throwaway cwd.
+            // W1-T2829/W1-T2946: keep the existing read-only tool contract structural at this
+            // production call site, while marking the exact-head disposable reviewer for Codex's
+            // narrow test-capable TMPDIR grant. The shared list excludes every write tool.
             tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review",
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
