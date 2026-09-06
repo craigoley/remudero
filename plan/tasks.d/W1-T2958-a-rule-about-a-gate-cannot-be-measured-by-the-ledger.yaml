@@ -1,0 +1,89 @@
+- id: W1-T2958
+  title: "A RULE ABOUT A GATE CANNOT BE MEASURED BY THE LEDGER, SO THE ONE CI-GATE ROW IN THE EFFICACY TABLE IS MARKED UNMEASURABLE AND STAYS THERE — `MeasurableRuleSignature` offers exactly one recurrence channel, `stepPatterns` over the ledger union, and `rule-efficacy.ts`'s own header states nothing in CI can reach that corpus; give the table a SECOND signature kind keyed on a CI failure so `diff-coverage-gate` becomes measurable without a ledger row that will never exist"
+  repo: remudero
+  depends_on: [W1-T2957]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files:
+    - src/lib/rule-efficacy.ts
+    - test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts
+  origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
+  plan_refs: ["W1-T418", "W1-T2957", "W1-T2595"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AT 903b5a6. `RULE_SIGNATURES` holds three entries. Exactly one is `measurable: true`.
+    The row that names a CI gate — `CLAUDE.md#before-you-push:diff-coverage-gate` — is
+    `measurable: false`, and it is not an oversight: `MeasurableRuleSignature` exposes ONE
+    recurrence channel, `stepPatterns`, matched against the ledger union, and the module header
+    says "HOST-SIDE, NOT A CI GATE: the ledger lives on the daemon host; nothing in CI can read
+    it." A diff-coverage failure is a red check on a pull request. It never becomes a ledger row,
+    so no pattern anyone writes will ever make that row measurable.
+
+    THIS IS A SHAPE, NOT ONE ROW. The rules most worth measuring are the ones a GATE already
+    refuses, because those failures are objective, dated and attributable. Under today's single
+    channel every one of them is structurally unmeasurable, and the table's honest response is to
+    list them UNMEASURABLE — which is correct behaviour producing a useless answer.
+
+    WHY THIS IS SEPARABLE FROM W1-T2957. That task builds the corpus and decides nothing. This one
+    changes only how a rule DECLARES its recurrence channel and how the report counts it. Neither
+    files anything; the filing question is W1-T2959's.
+  design: |
+    (i) A SECOND SIGNATURE KIND, NOT A SECOND TABLE. `RULE_SIGNATURES` stays the one reviewed-like-
+    policy table. Widen the signature union so an entry declares EITHER ledger `stepPatterns` OR a
+    CI-failure signature (a check name plus a matcher over that check's failure evidence), and let
+    `ruleEfficacyReport` count recurrences from whichever channel the entry declares. A second
+    parallel table would drift from the first, which is the defect W1-T2790 ranks against.
+
+    (ii) THE UNMEASURABLE ARM IS PRESERVED, NOT EMPTIED. A rule with no channel at all still renders
+    UNMEASURABLE with its stated reason — P48's no-naked-zero clause is explicit that an
+    all-unmeasurable table must render a refusal, never a false "0% repeat-incident rate". Adding a
+    channel must not let a rule with neither channel quietly read as 0% instead.
+
+    (iii) THE RECURRENCE DATE RULE CARRIES OVER UNCHANGED. A ledger signature counts a match as a
+    RECURRENCE only strictly after the date parsed from the rule's own earning citation. A CI
+    signature must use the same boundary, so a failure predating the rule is not counted against it.
+
+    (iv) NOT IN SCOPE: `escalateRepeatingRules`' proposal drafting, which already works on whatever
+    the report returns and needs no change to consume a new channel; and the corpus reader itself,
+    which is W1-T2957's.
+  acceptance:
+    - claim: "a rule may declare its recurrence channel as a continuous integration failure rather than a ledger step pattern, and the report counts recurrences from it"
+      proof: "unit test: test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts"
+    - claim: "the diff coverage rule reads as measured rather than unmeasurable once it declares that channel"
+      proof: "unit test: test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts"
+    - claim: "a rule declaring no channel at all still renders as unmeasurable with its stated reason and never as a zero rate"
+      proof: "unit test: test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts"
+    - claim: "a failure dated before the rule earned its citation is not counted as a recurrence, matching the boundary the ledger channel already applies"
+      proof: "unit test: test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts"
+    - claim: "an entry declaring a ledger step pattern is graded exactly as before this change"
+      proof: "unit test: test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts"
+  falsifier: |
+    BOTH DIRECTIONS. A widening that makes every rule measurable has deleted the honest
+    UNMEASURABLE arm rather than extended the table: assert a no-channel entry still refuses.
+
+    AND THE LEDGER ARM MUST BE PROVED UNTOUCHED, not assumed. Grade a ledger-signature entry
+    before and after and require the same verdict; this task extends one union and must change
+    nothing about the channel that already works.
+
+    THE DATE BOUNDARY IS THE SUBTLE ONE. Seed a failure dated BEFORE the citation date and assert
+    it is excluded. Without that case a new channel silently counts a repo's whole history against
+    a rule written last week, and every rule reads as failing.
+
+    PROVE IT LOAD-BEARING: remove the new channel and re-run — `# fail` non-zero without it,
+    `# fail 0` restored.
+  note: |
+    FILED 2026-09-06, stage 2 of three, from the same operator request as W1-T2957.
+
+    MEASURED AT 903b5a6: `RULE_SIGNATURES` = 3 entries, 1 measurable; the CI-gate row is
+    `measurable: false`; `MeasurableRuleSignature` declares `stepPatterns` as its only channel.
+
+    DEPENDS ON W1-T2957 because a CI signature has nothing to match until the corpus exists. The
+    dependency is real, not ordering preference: without it this task's own tests would have to
+    invent a corpus shape that W1-T2957 then contradicts.
+
+    risk:medium, RULE 19 SIZING CHECKED: one source module plus this task's own falsifier, whose
+    basename matches this shard's slug, so the companion discount applies and the tally is one.
