@@ -262,7 +262,7 @@
   "src/lib/worker-home.ts": 446,
   "src/lib/worker-provider.ts": 193,
   "src/lib/worker-scratch.ts": 96,
-  "src/lib/worker.ts": 1112,
+  "src/lib/worker.ts": 1134,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
   "src/run-task.ts": 16150,
