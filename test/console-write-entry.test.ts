@@ -13,6 +13,7 @@
 // browser actually sees, not a unit stub of the handler.
 
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -269,6 +270,6 @@ test("twenty back-to-back grant requests resolve immediately, with no added late
       await res.arrayBuffer();
     }
     const elapsedMs = Date.now() - startedAt;
-    assert.ok(elapsedMs < 2000, `20 sequential requests took ${elapsedMs}ms -- a paced/throttled route would be far slower`);
+    assertWallClockBound(elapsedMs, 2000, `20 sequential requests took ${elapsedMs}ms -- a paced/throttled route would be far slower`);
   });
 });

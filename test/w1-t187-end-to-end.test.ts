@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,7 +65,7 @@ test("W1-T187 criterion 5: GET / and GET /v1/status each answer in UNDER 2000ms 
     await shellRes.text();
     const shellMs = performance.now() - shellStart;
     assert.equal(shellRes.status, 200);
-    assert.ok(shellMs < 2000, `GET / took ${shellMs.toFixed(1)}ms -- must be < 2000ms (pre-fix measured 49.0s cold / 42.6s warm)`);
+    assertWallClockBound(shellMs, 2000, `GET / took ${shellMs.toFixed(1)}ms -- must be < 2000ms (pre-fix measured 49.0s cold / 42.6s warm)`);
 
     const statusStart = performance.now();
     const statusRes = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
@@ -84,7 +85,7 @@ test("W1-T187 criterion 5: GET / and GET /v1/status each answer in UNDER 2000ms 
     await secondRes.text();
     const secondMs = performance.now() - secondStart;
     assert.equal(secondRes.status, 200);
-    assert.ok(secondMs < 2000, `second GET /v1/status took ${secondMs.toFixed(1)}ms -- must be < 2000ms`);
+    assertWallClockBound(secondMs, 2000, `second GET /v1/status took ${secondMs.toFixed(1)}ms -- must be < 2000ms`);
   } finally {
     server.close();
   }

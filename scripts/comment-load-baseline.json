@@ -214,6 +214,7 @@
   "src/lib/receipt.ts": 135,
   "src/lib/relay-client.ts": 101,
   "src/lib/relint.ts": 97,
+  "src/lib/replay-harness.ts": 76,
   "src/lib/replay.ts": 82,
   "src/lib/reply-interpreter.ts": 104,
   "src/lib/repo-location.ts": 50,
@@ -246,7 +247,7 @@
   "src/lib/task-class.ts": 37,
   "src/lib/task-id-reservation.ts": 341,
   "src/lib/task-id.ts": 243,
-  "src/lib/task-linter.ts": 804,
+  "src/lib/task-linter.ts": 797,
   "src/lib/tier.ts": 67,
   "src/lib/tmp.ts": 83,
   "src/lib/trace.ts": 115,
@@ -262,6 +263,6 @@
   "src/lib/worker.ts": 1104,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16092,
+  "src/run-task.ts": 16120,
   "src/spike.ts": 18
 }

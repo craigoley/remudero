@@ -7,6 +7,7 @@
 // test kills every leader pgid it spawned as a cleanup backstop, independent
 // of whatever the test body itself already tore down.
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { test } from "node:test";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
@@ -577,7 +578,7 @@ test("waitUntilMarkersVisible returns as soon as ps publishes the markers — a 
     assert.deepEqual(defaultReadMarkers(p.pid), { runId: "run-poll-shape", taskId: "T-poll-shape" });
     // THE DISCRIMINATOR AGAINST "just sleep longer": a fixed beat always costs its full duration.
     // This returns on the condition, so on an idle host it beats the 100 ms it replaced outright.
-    assert.ok(elapsed < 100, `a condition poll returns when the condition holds, not after a duration (took ${elapsed}ms)`);
+    assertWallClockBound(elapsed, 100, `a condition poll returns when the condition holds, not after a duration (took ${elapsed}ms)`);
   } finally {
     safeKillGroup(p.pid);
   }
