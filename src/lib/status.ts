@@ -17,6 +17,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./escalate.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { isTestRunner } from "./live-write-guard.js";
+import type { BoardSnapshotCache } from "./board-snapshot-cache.js";
 import type { WorkerState } from "./worker.js";
 import {
   type BoardIssueRest,
@@ -298,6 +299,7 @@ export interface GitHub {
    *  serve boot sequence can warm it before the first request and never pay a cold fetch on the
    *  request path. Omitted ⇒ a no-op. */
   warm?(): void;
+  seedBoardSnapshot?(cache: BoardSnapshotCache): void;
   /** True if a read this gateway attempted actually FAILED, as opposed to succeeding with a genuinely empty
    *  result, so a failed read defers rather than reading as a confirmed not-merged (W1-T119). NEVER FORCES A
    *  FETCH (W1-T2219): the STICKY verdict of the most recently COMPLETED attempt. Why: this accessor used to
@@ -3564,6 +3566,7 @@ export function buildBatchedGithub(
      *  point a REAL `Worker` at a deliberately throwing script and observe the genuine error handling run
      *  against an ACTUAL crashed thread — the "prefer a real, fake seam over a mock" shape. */
     workerUrl?: string | URL;
+    snapshotCache?: BoardSnapshotCache;
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
@@ -3648,10 +3651,11 @@ export function buildBatchedGithub(
   // pairing) — reusing that as the delta base would turn one transient failure into a permanent cold re-walk.
   // W1-T2323: IN SPLIT MODE THIS HOLDS CLOSED ROWS ONLY, since the open pass is a COMPLETE read given no delta
   // base, so the stop test compares like with like.
-  let knownBoardPrs: Map<number, BoardPrRest> | undefined;
+  let snapshotCache = opts.snapshotCache;
+  let knownBoardPrs: Map<number, BoardPrRest> | undefined = snapshotCache?.closedSeed();
   // W1-T2222: the issue fetch's OWN cross-refresh cache, same reasoning and same untouched-on-a-throw
   // discipline — an independent map, because the two deltas have independent row shapes and failure modes.
-  let knownIssues: Map<number, BoardIssueRest> | undefined;
+  let knownIssues: Map<number, BoardIssueRest> | undefined = snapshotCache?.issueSeed();
   /** W1-T413: per-URL changed-file memo for {@link GitHub.changedFiles}. `null` records a read
    *  that FAILED, so one unreachable PR is read once per gateway rather than once per task. */
   const changedFilesByUrl = new Map<string, string[] | null>();
@@ -3687,7 +3691,10 @@ export function buildBatchedGithub(
       // to overwrite a just-merged row's open state, and here there is no closed pass.
       const known = half === "open" ? undefined : knownBoardPrs;
       const fetched = fetchBoardPrsRest(owner, repo, fetchJson, known, half);
-      if (half !== "open") knownBoardPrs = new Map(fetched.rows.map((r) => [r.number, r]));
+      if (half !== "open") {
+        knownBoardPrs = new Map(fetched.rows.map((r) => [r.number, r]));
+        if (!fetched.truncated) snapshotCache?.commitClosed(fetched.rows);
+      }
       // W1-T415: ledgered on every successful fetch and now RETAINED so `readTruncated()` can surface it — a
       // truncated view is a SUCCESS that still hit the page ceiling, distinct from a failure, which the catch
       // sets only on a THROW. W1-T2323: recorded against the half that produced it, so the OR keeps a live
@@ -3740,6 +3747,7 @@ export function buildBatchedGithub(
       // so a transient failure leaves the previous complete snapshot intact and the NEXT successful call is
       // still a cheap delta.
       knownIssues = new Map(fetched.rows.map((r) => [r.number, r]));
+      if (!fetched.truncated) snapshotCache?.commitIssues(fetched.rows);
       log("board_gateway.issue_fetch_bytes", {
         bytes,
         restCalls: fetched.calls,
@@ -4102,6 +4110,7 @@ export function buildBatchedGithub(
     mergedEpoch += 1;
     lastClosedTruncated = outcome.truncated;
     knownBoardPrs = new Map(outcome.rows.map((r) => [r.number, r]));
+    if (!outcome.truncated) snapshotCache?.commitClosed(outcome.rows);
     log("board_gateway.fetch_ok", { prCount: outcome.rows.length, channel: "merged" });
     log("board_gateway.fetch_bytes", { bytes: outcome.bytes, restCalls: outcome.calls, mode: outcome.mode, truncated: outcome.truncated, half: "closed" });
   };
@@ -4114,6 +4123,7 @@ export function buildBatchedGithub(
       return;
     }
     knownIssues = new Map(outcome.rows.map((r) => [r.number, r]));
+    if (!outcome.truncated) snapshotCache?.commitIssues(outcome.rows);
     const all: BatchedIssue[] = outcome.rows.map((r) => ({ number: r.number, url: r.url, state: r.state, title: r.title }));
     issueCache = { at: now(), byUrl: new Map(all.map((i) => [i.url, i])), byNum: new Map(all.map((i) => [String(i.number), i])) };
     lastIssueFetchFailed = false;
@@ -4366,6 +4376,11 @@ export function buildBatchedGithub(
         return;
       }
       runPrewarmWorker();
+    },
+    seedBoardSnapshot(cache) {
+      snapshotCache = cache;
+      knownBoardPrs ??= cache.closedSeed();
+      knownIssues ??= cache.issueSeed();
     },
     // W1-T2219: these accessors no longer force a fetch. Pre-fix, EITHER alone did, so asking "did the read
     // fail" PERFORMED the read and blocked the caller while reporting the PREVIOUS attempt's verdict

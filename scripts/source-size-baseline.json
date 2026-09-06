@@ -6,6 +6,7 @@
   "src/lib/autonomy.ts": 500,
   "src/lib/block-reason.ts": 146,
   "src/lib/board-review.ts": 590,
+  "src/lib/board-snapshot-cache.ts": 500,
   "src/lib/board.ts": 1500,
   "src/lib/body-repair.ts": 196,
   "src/lib/branch-reaper.ts": 196,
