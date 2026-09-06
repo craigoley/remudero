@@ -907,7 +907,7 @@ import {
   workerTranscript,
   uniqueRunBranch,
   excludeNodeModulesFromGit,
-  linkWorktreeNodeModules,
+  linkWorktreeNodeModules, resolveNodeModulesSource,
   worktreeAdd,
   worktreeLockIsPidAlive,
   worktreeRemove,
@@ -5098,8 +5098,8 @@ function materializeReviewerSnapshot(
   // The clone's exclude may change; the source and common Git metadata remain untouched. This makes a linked dependency tree invisible to
   // the post-review cleanliness proof even for repositories whose committed .gitignore omits it.
   excludeNodeModulesFromGit(cwd);
-  const nodeModules = linkWorktreeNodeModules(sourceDir, cwd);
-  const dependencyRoot = (() => { try { return realpathSync(join(cwd, "node_modules")); } catch { /* No link earns no grant. */ return undefined; } })();
+  const dependencyRoot = (() => { try { const source = resolveNodeModulesSource(sourceDir); return source ? realpathSync(source) : undefined; } catch { /* No source earns no grant. */ return undefined; } })();
+  const nodeModules = linkWorktreeNodeModules(sourceDir, cwd, dependencyRoot ? { resolveSource: () => dependencyRoot } : {});
   const dependencyRelative = dependencyRoot ? relative(cwd, dependencyRoot) : "";
   const dependencyReadRoots = dependencyRoot && (dependencyRelative === ".." || dependencyRelative.startsWith(`..${sep}`) || isAbsolute(dependencyRelative)) ? [dependencyRoot] : [];
   return { cwd, nodeModules, dependencyReadRoots };

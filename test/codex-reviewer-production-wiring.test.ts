@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -17,7 +17,12 @@ test("W1-T2946: runReview gives Codex a test-capable disposable review sandbox",
   try {
     const sourceDir = join(root, "source");
     mkdirSync(join(sourceDir, "src"), { recursive: true });
+    const dependencyRoot = join(root, "dependencies");
+    mkdirSync(dependencyRoot);
+    const physicalDependencyRoot = realpathSync(dependencyRoot);
+    symlinkSync(physicalDependencyRoot, join(sourceDir, "node_modules"), "dir");
     execFileSync("git", ["init", "-q", sourceDir]);
+    writeFileSync(join(sourceDir, ".git", "info", "exclude"), "/node_modules\n");
     execFileSync("git", ["-C", sourceDir, "config", "user.name", "RMD Test"]);
     execFileSync("git", ["-C", sourceDir, "config", "user.email", "rmd-test@example.invalid"]);
     writeFileSync(join(sourceDir, "src", "example.ts"), "export const fixed = true;\n", "utf8");
@@ -50,6 +55,7 @@ esac
     let observedSpawn: SpawnWorkerArgs | undefined;
     let reviewerCwdWasGit: boolean | undefined;
     let reviewerHead: string | undefined;
+    let reviewerNodeModulesLink: string | undefined;
     let codexArgs: string[] = [];
     let codexTmpDir: string | undefined;
     let reviewerError: string | undefined;
@@ -66,6 +72,7 @@ esac
           cwd: spawnArgs.cwd,
           encoding: "utf8",
         }).trim();
+        reviewerNodeModulesLink = readlinkSync(join(spawnArgs.cwd, "node_modules"));
       } catch {
         reviewerCwdWasGit = false;
       }
@@ -136,7 +143,8 @@ esac
     assert.equal(reviewerHead, headSha, "the reviewer must inspect the exact PR head");
     assert.deepEqual(observedTools, ["Read", "Grep", "Glob", "Bash"], "the production call site must preserve inspection while excluding write tools");
     assert.equal(observedSpawn?.sandboxIntent, "disposable-review");
-    assert.deepEqual(observedSpawn?.sandboxReadRoots, [realpathSync(join(process.cwd(), "node_modules"))]);
+    assert.deepEqual(observedSpawn?.sandboxReadRoots, [physicalDependencyRoot]);
+    assert.equal(reviewerNodeModulesLink, physicalDependencyRoot, "the reviewer link must not traverse a denied intermediate checkout");
     assert.equal(observedSpawn?.model, "gpt-5.5");
     assert.equal(observedSpawn?.effort, "high");
     assert.equal(observedSpawn?.maxTurns, 10);
@@ -150,7 +158,7 @@ esac
     assert.ok(codexArgs.includes('default_permissions="rmd_review"'));
     assert.ok(codexArgs.includes('permissions.rmd_review.extends=":workspace"'));
     assert.ok(codexArgs.includes(
-      `permissions.rmd_review.filesystem={":slash_tmp"="deny",":tmpdir"="write",${JSON.stringify(realpathSync(join(process.cwd(), "node_modules")))}="read"}`,
+      `permissions.rmd_review.filesystem={":slash_tmp"="deny",":tmpdir"="write",${JSON.stringify(physicalDependencyRoot)}="read"}`,
     ));
     assert.ok(codexArgs.includes("permissions.rmd_review.network.enabled=true"));
     assert.equal(codexArgs.some((arg) => arg.includes("permissions.rmd_review.network.domains")), false,
