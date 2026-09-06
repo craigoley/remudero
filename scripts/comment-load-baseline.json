@@ -138,7 +138,7 @@
   "src/lib/escalate.ts": 400,
   "src/lib/feedback-docket.ts": 102,
   "src/lib/feedback-landing.ts": 317,
-  "src/lib/feedback.ts": 521,
+  "src/lib/feedback.ts": 225,
   "src/lib/fix-fence.ts": 42,
   "src/lib/fleet-control.ts": 229,
   "src/lib/flight-judge.ts": 170,
