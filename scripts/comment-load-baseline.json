@@ -8,7 +8,7 @@
   ".github/workflows/codeql.yml": 15,
   ".github/workflows/dependency-review.yml": 76,
   ".github/workflows/docs-index-check.yml": 44,
-  ".github/workflows/fleet-heartbeat-watch.yml": 196,
+  ".github/workflows/fleet-heartbeat-watch.yml": 118,
   ".github/workflows/main-plan-guard.yml": 44,
   ".github/workflows/mutation-nightly.yml": 71,
   ".github/workflows/osv-scanner-pr.yml": 23,
