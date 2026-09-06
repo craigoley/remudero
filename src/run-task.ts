@@ -5095,8 +5095,11 @@ function materializeReviewerSnapshot(
     );
   }
 
-  // The clone's exclude may change; the source and common Git metadata remain untouched. This makes a linked dependency tree invisible to
-  // the post-review cleanliness proof even for repositories whose committed .gitignore omits it.
+  // The clone's exclude may change; source/common Git metadata remain untouched.
+  // This keeps a linked dependency tree invisible to the post-review cleanliness proof.
+  // Dependency roots outside the disposable checkout are passed to Codex as read-only.
+  // The source checkout still does not receive a broader writable sandbox grant.
+  // Repositories whose committed .gitignore omits node_modules still get a clean review checkout.
   excludeNodeModulesFromGit(cwd);
   const dependencyRoot = (() => { try { const source = resolveNodeModulesSource(sourceDir); return source ? realpathSync(source) : undefined; } catch { /* No source earns no grant. */ return undefined; } })();
   const nodeModules = linkWorktreeNodeModules(sourceDir, cwd, dependencyRoot ? { resolveSource: () => dependencyRoot } : {});
@@ -5144,9 +5147,9 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
  *
  * A FRESH reviewer worker with read-only inspection tools (NEVER resumeSessionId,
  * NEVER forkSession) is spawned as an ADVISORY semantic layer, in a throwaway cwd
- * so it cannot mutate the diff it judges. Its per-criterion verdicts may only
- * DOWNGRADE a criterion to failure ({@link parseReviewerVerdicts} → semantic),
- * never rescue an unpasted
+ * so it cannot mutate the diff it judges. It may run tests from private scratch,
+ * but its per-criterion verdicts may only DOWNGRADE a criterion to failure
+ * ({@link parseReviewerVerdicts} → semantic), never rescue an unpasted
  * proof. Its spawn is best-effort: a reviewer that fails to spawn (e.g. the
  * FIELD FINDING 12 self-updater race) never blocks the gate — the deterministic
  * floor still posts, fail-closed.

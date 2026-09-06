@@ -761,7 +761,8 @@ export interface SpawnWorkerArgs {
     now?: () => number;
   };
   /** Restrict built-in tools; `sandboxIntent` marks the exact-head disposable reviewer, and
-   * `sandboxReadRoots` is ignored outside that intent. Claude interprets only `tools`. */
+   * `sandboxReadRoots` is ignored outside that intent. Claude interprets only `tools`;
+   * Codex also uses the intent to choose its sandbox permission profile. */
   tools?: string[];
   sandboxIntent?: "disposable-review";
   sandboxReadRoots?: string[];
