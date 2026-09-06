@@ -283,12 +283,14 @@ import {
 } from "./lib/feedback.js";
 import { findPendingLandingPr, recordDecision, sweepFeedbackLanding } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
-import { defaultPreflightSpawn, runPreflight, type PreflightDeps } from "./lib/commit-message.js";
+import { defaultPreflightSpawn, runPreflight, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
+  censusSuiteMembershipFor,
   detectRunContext,
   runContextLine,
   FAST_GATE_STEPS,
+  KNOWN_CENSUS_SUITES,
   preflightFailureNotice,
   preflightSummaryPath,
   runCiParity,
@@ -17457,6 +17459,69 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
     const green = pair.greenSha ? ` green=${pair.greenSha.slice(0, 8)}` : "";
     const files = pair.repairFiles?.length ? `  repair=${pair.repairFiles.join(",")}` : "";
     console.log(`  ${pair.state === "repaired" ? "REPAIRED" : "OPEN    "} #${pair.pr} ${pair.gate}  red=${pair.redSha.slice(0, 8)}${green}${files}`);
+  }
+  return 0;
+}
+
+/**
+ * `rmd census-membership [--base <ref>]` — W1-T2969: which population-walking suites does this diff
+ * enter? `censusSuiteMembership` has answered that since W1-T2523 and nothing could ask it.
+ * MEASURED 2026-09-06: four census-baseline CI failures across #4283/#4290, none naming a symbol
+ * either diff touched, so the mandated caller sweep was blind to all four with the rule in context
+ * throughout — CLAUDE.md's own header says prose-only rules are "violated silently and repeatedly".
+ * REPORT-ONLY: names suites, runs none, gates nothing, exits 0 whatever it finds.
+ */
+export function censusMembershipCommand(
+  rest: string[],
+  deps: { repoRoot?: string; spawn?: PreflightSpawn; changedPaths?: readonly string[] } = {},
+): number {
+  const badArg = unknownArgError("census-membership", rest, ["--base"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const at = rest.indexOf("--base");
+  const base = at >= 0 ? rest[at + 1] : "origin/main";
+  if (at >= 0 && (!base || base.startsWith("--"))) {
+    console.error("rmd census-membership: --base needs a ref");
+    return 2;
+  }
+
+  const root = deps.repoRoot ?? repoRoot;
+  let changed: readonly string[];
+  if (deps.changedPaths) {
+    changed = deps.changedPaths;
+  } else {
+    try {
+      changed = execFileSync("git", ["-C", root, "diff", "--name-only", `${base}...HEAD`], { encoding: "utf8" })
+        .split("\n")
+        .filter(Boolean);
+    } catch (e) {
+      // A diff that could not be READ is not a diff with no files — the naked zero forbidden.
+      console.error(
+        `rmd census-membership: could not read the diff against ${base} (${(e as Error).message}) — ` +
+          "reporting nothing rather than an empty changeset, which would read as 'this diff joins no census'",
+      );
+      return 1;
+    }
+  }
+
+  const report = censusSuiteMembershipFor(changed, root, deps.spawn ?? defaultPreflightSpawn);
+  console.log(`rmd census-membership — ${changed.length} changed path(s) against ${base}`);
+  const joining = report.entries.filter((e) => e.suites.length > 0);
+  if (joining.length === 0) {
+    // A MEASURED ABSENCE, not a bare zero: say which corpus was read (P48).
+    console.log(`  joins no known census (${KNOWN_CENSUS_SUITES.length} modelled)`);
+  }
+  for (const e of joining) {
+    console.log(`  ${e.path}`);
+    for (const s of e.suites) console.log(`    -> ${s}`);
+  }
+  if (report.unknownCoverage.length > 0) {
+    // NAMED, never dropped: a suite the model cannot place is the difference between "joins
+    // nothing" and "the model does not know".
+    console.log("  UNMODELLED census suite(s), which this cannot place and will not guess:");
+    for (const u of report.unknownCoverage) console.log(`    ? ${u}`);
   }
   return 0;
 }
@@ -37150,6 +37215,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2957: the one failure corpus that arrives with its own fix. For every pull request touched in the window, reads the gate rollup at each commit as the UNION of check runs and commit STATUSES (never /check-runs alone, which cannot see remudero-review) and pairs each red gate with the LATER commit on the SAME pull request that turned that SAME gate green, retaining the repair delta. A red with no observed repair is kept OPEN, never dropped and never reported repaired; a rollup that could not be read is named UNREADABLE, never counted as green, so an empty window and a blind one are distinguishable. Deduped per sha by latest attempt, so a superseded CANCELLED entry never outvotes its own SUCCESS successor. REPORT-ONLY: files nothing, mints no id, writes no guidance (Law 5).",
   },
   {
+    name: "census-membership",
+    syntax: "rmd census-membership [--base <ref>]",
+    summary: "Name the population-walking census suites this diff enters.",
+    detail: "W1-T2969: the answer censusSuiteMembership (W1-T2523) has always been able to give and nothing could ask for. A census suite WALKS a population and asserts a property of the whole set, so it names none of a caller's symbols and `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is structurally blind to it. MEASURED 2026-09-06: four CI failures across #4283 and #4290 were census baselines, and a correctly-run symbol sweep found none of them. Models both halves: the fast-gate census members, DERIVED from CENSUS_ADMITTED_MEMBERS, and the registry-shaped suites (the COMMANDS name list, the policy key set, the source-text-read ratchet) that are not fast-gate members and must not become them. A suite the model cannot place is NAMED as unmodelled rather than dropped, so 'joins nothing' is never confused with 'the model does not know'. REPORT-ONLY: runs no suite, gates nothing, exits 0 whatever it finds.",
+  },
+  {
     name: "ci-learning",
     syntax: "rmd ci-learning [--days N] [--force]",
     summary: "Draft a marked, parked shard for each repaired CI failure in the window.",
@@ -38063,6 +38134,10 @@ export async function main(
     process.exit(ciFailuresCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ciLearningCommand(rest)) cannot carry a DA hit without forking the process; ciLearningCommand's own logic — arg validation, the --days bound, the cadence refusal, the window-load failure and every draft/excluded render — is unit-tested in test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts (same irreducible-glue shape as the sibling ci-failures/rule-efficacy/check-proof dispatch cases).
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(censusMembershipCommand(rest)) cannot carry a DA hit without forking the process; censusMembershipCommand's own logic — arg validation, the --base bound, the unreadable-diff arm, and every render path (joining, none, unmodelled) — is unit-tested in test/the-census-map-names-four-suites-and-no-verb-reads-it.test.ts (same irreducible-glue shape as the sibling ci-learning/ci-failures/rule-efficacy dispatch cases).
+  if (cmd === "census-membership") {
+    process.exit(censusMembershipCommand(rest));
+  }
   if (cmd === "ci-learning") {
     process.exit(ciLearningCommand(rest));
   }
