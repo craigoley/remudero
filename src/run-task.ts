@@ -1009,6 +1009,7 @@ import {
   wireSweepWakeToDaemon,
 } from "./lib/github-event-wake.js";
 import {
+  refreshInstallationToken,
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
 import {
@@ -24997,16 +24998,11 @@ function memoiseBoardSnapshotByRepo(
 
 /**
  * W1-T2972: the CI-failure learning rung's PRODUCER, mirroring {@link buildDigestCadenceDaemonHooks}.
- *
- * THE HALF W1-T2959 DID NOT SHIP: it built the row, marker, decision and minter, all tested and
- * green, but nothing called `ciLearningCadenceCheck` except the CLI verb — so the "daily" loop ran
- * only by hand. This pair puts it on the daemon's tick.
- *
- * RECORD THE FIRE FIRST, {@link buildMeasurementCadenceDaemonHooks}'s stated crash-safety
- * discipline: a body that throws costs one skipped period, not a re-fire on every poll forever.
- *
- * REPORT-ONLY: drafts MARKED, PARKED shards and writes no plan record. Whether the rung files is
- * W1-T2968's question, not reopened here.
+ * THE HALF W1-T2959 DID NOT SHIP — it built the row, marker, decision and minter, all green, but
+ * only the CLI verb called them, so the "daily" loop ran by hand. RECORD THE FIRE FIRST, per
+ * {@link buildMeasurementCadenceDaemonHooks}'s crash-safety discipline: a throwing body costs one
+ * skipped period, never a re-fire on every poll forever. REPORT-ONLY — drafts MARKED, PARKED shards
+ * and writes no plan record; whether the rung FILES is W1-T2968's question, not reopened here.
  */
 export function buildCiLearningDaemonHooks(deps: {
   config?: Config;
@@ -25662,10 +25658,9 @@ export async function daemonCommand(
   // dead code, which is not a hypothetical here: that is precisely what shipped in #2952 and
   // stayed dead for the eight hours between its merge and this fix.
   const boardReviewHooks = target.isSelf ? buildBoardReviewDaemonHooks({ config }) : undefined;
-  // W1-T2972: the CI-failure learning rung. SELF-TARGET ONLY, same reason as the rungs above — the
-  // marker it advances and the pull-request window it joins against both belong to THIS process's
-  // own config.root, never a drained target's. WITHOUT THIS LINE `deps.checkCiLearningCadence` is
-  // undefined and the whole rung is dead code, which is not hypothetical: it is what W1-T2959
+  // W1-T2972: the CI-failure learning rung. SELF-TARGET ONLY, same reason as the rungs above — its
+  // marker and pull-request window both belong to THIS process's config.root, never a drained
+  // target's. WITHOUT THIS LINE the hooks are undefined and the rung is dead code — what W1-T2959
   // shipped, after #1066 and #2952 each shipped it before that.
   const ciLearningHooks = target.isSelf ? buildCiLearningDaemonHooks({ config }) : undefined;
   try {
@@ -37948,6 +37943,22 @@ export async function main(
   // See {@link installUnhandledRejectionGuard} — it is idempotent, so the in-process `main()`
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
+  // THE GITHUB APP IS THE FLEET HOST'S ONLY CREDENTIAL, and until now only `daemonCommand` and
+  // `serveCommand` minted from it. `gh auth login` is never run there and the boot env deliberately
+  // carries NO `GH_TOKEN` (deploy/recycle-container.sh, see github-app.ts's header), so every OTHER
+  // verb that shells to `gh` — 32 call sites — failed on the one host the fleet actually runs on.
+  // MEASURED 2026-09-06: `rmd review <pr>` inside the daemon container died in `ghJson`, which is
+  // how a CAPPED verdict's own documented remedy, `--override-capped-by`, became unrunnable there.
+  // Absent `GH_APP_*` — any dev machine — this is NOT AN ATTEMPT: it mints nothing, logs nothing and
+  // leaves `GH_TOKEN` alone, so behaviour off the fleet host is byte-identical. Guarded on an absent
+  // token so an operator's own exported `GH_TOKEN` is never clobbered, and unawaited failure is
+  // reported rather than swallowed, because falling through to a bare `gh` error is what cost the
+  // diagnosis above.
+  if (!process.env.GH_TOKEN) {
+    await refreshInstallationToken({
+      log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
+    });
+  }
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
   const arg = rest[0];
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
