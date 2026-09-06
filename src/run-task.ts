@@ -510,6 +510,12 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
+import {
+  collectCiFailureCorpus,
+  rollupAtSha,
+  type CiFailureCorpusInput,
+  type CorpusPr,
+} from "./lib/ci-failure-corpus.js";
 import { injectCoverageImprovementTask } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
@@ -17338,6 +17344,116 @@ export function ledgerGrepCommand(rest: string[], opts: { stateDir?: string } = 
  * instrument proposal into the ACTIVE-proposal registry via updateProposalRegistry, idempotent
  * by rule id — `--no-escalate` runs the report only, with zero writes.
  */
+/**
+ * W1-T2957 — read one window of pull requests into {@link CiFailureCorpusInput}.
+ *
+ * `fetch` is INJECTED (defaults to {@link ghJson}) so every arm is provable with zero network; real
+ * callers omit it. A read that throws yields a commit with NO rollup, which
+ * {@link collectCiFailureCorpus} reports as UNREADABLE rather than green — the distinction the
+ * corpus's own `status` member exists for.
+ */
+export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson): CiFailureCorpusInput {
+  const self = resolveOwnerRepo();
+  const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+  const rows = (fetch([
+    "api",
+    `repos/${self.owner}/${self.repo}/pulls?state=all&sort=updated&direction=desc&per_page=100`,
+  ]) ?? []) as Array<{ number?: number; updated_at?: string }>;
+  const prs: CorpusPr[] = [];
+  for (const row of rows) {
+    if (row.number === undefined) continue;
+    if (row.updated_at && Date.parse(row.updated_at) < sinceMs) continue;
+    let shas: string[] = [];
+    try {
+      const commits = (fetch(["api", `repos/${self.owner}/${self.repo}/pulls/${row.number}/commits?per_page=100`]) ??
+        []) as Array<{ sha?: string }>;
+      shas = commits.map((c) => c.sha ?? "").filter((x) => x.length > 0);
+    } catch {
+      continue; // a pull request whose commit list is unreadable contributes nothing, silently to nobody
+    }
+    prs.push({
+      number: row.number,
+      commits: shas.map((sha) => {
+        const rollup = rollupAtSha(self.owner, self.repo, sha, (args) => fetch(args));
+        const commit: CorpusPr["commits"][number] = { sha };
+        if (rollup !== undefined) commit.rollup = rollup;
+        const files = commitChangedFiles(self.owner, self.repo, sha, fetch);
+        if (files !== undefined) commit.changedFiles = files;
+        return commit;
+      }),
+    });
+  }
+  return { prs };
+}
+
+/** The paths one commit changed, or `undefined` when the read fails — never an empty list, which
+ *  would read as "this commit changed nothing" and make a repair delta look empty. */
+export function commitChangedFiles(
+  owner: string,
+  repo: string,
+  sha: string,
+  fetch: GhApiFetcher = ghJson,
+): string[] | undefined {
+  try {
+    const c = fetch(["api", `repos/${owner}/${repo}/commits/${sha}`]) as { files?: Array<{ filename?: string }> } | undefined;
+    if (!c?.files) return undefined;
+    return c.files.map((f) => f.filename ?? "").filter((x) => x.length > 0);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Injectable seam for {@link ciFailuresCommand} — real callers pass none of it. */
+export interface CiFailuresCommandDeps {
+  loadWindow?: (days: number) => CiFailureCorpusInput;
+}
+
+/**
+ * `rmd ci-failures [--days N]` — W1-T2957: the window's red gates, each paired with the later commit
+ * on the SAME pull request that turned that SAME gate green.
+ *
+ * REPORT-ONLY, and that is Law 5 rather than timidity: it files nothing, mints no id and writes no
+ * guidance, so a machine reading can never present itself as a ratified one.
+ */
+export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = {}): number {
+  const badArg = unknownArgError("ci-failures", rest, ["--days"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const at = rest.indexOf("--days");
+  const days = at >= 0 ? Number(rest[at + 1]) : 1;
+  if (!Number.isFinite(days) || days <= 0) {
+    console.error("rmd ci-failures: --days must be a positive number of days");
+    return 2;
+  }
+  let input: CiFailureCorpusInput;
+  try {
+    input = deps.loadWindow ? deps.loadWindow(days) : loadCiFailureWindow(days);
+  } catch (e) {
+    // A window that could not be READ is not a window with no red gate. Rendering an empty corpus
+    // here would report "nothing went wrong" about a period never observed — the naked zero this
+    // task's own falsifier forbids.
+    console.error(
+      `rmd ci-failures: the pull-request window could not be read (${(e as Error).message}) — ` +
+        "reporting nothing rather than an empty window, which would read as 'no gate was red'",
+    );
+    return 1;
+  }
+  const corpus = collectCiFailureCorpus(input);
+  console.log(`rmd ci-failures — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
+  console.log(`  status: ${corpus.status}`);
+  if (corpus.unreadableShas.length > 0) {
+    console.log(`  UNREADABLE rollups (never counted as green): ${corpus.unreadableShas.length}`);
+  }
+  for (const pair of corpus.pairs) {
+    const green = pair.greenSha ? ` green=${pair.greenSha.slice(0, 8)}` : "";
+    const files = pair.repairFiles?.length ? `  repair=${pair.repairFiles.join(",")}` : "";
+    console.log(`  ${pair.state === "repaired" ? "REPAIRED" : "OPEN    "} #${pair.pr} ${pair.gate}  red=${pair.redSha.slice(0, 8)}${green}${files}`);
+  }
+  return 0;
+}
+
 export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } = {}): number {
   const badArg = unknownArgError("rule-efficacy", rest, [], ["--no-escalate"]);
   if (badArg) {
@@ -36937,6 +37053,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
   },
   {
+    name: "ci-failures",
+    syntax: "rmd ci-failures [--days N]",
+    summary: "Report the window's red CI gates, each paired with the commit that repaired it.",
+    detail: "W1-T2957: the one failure corpus that arrives with its own fix. For every pull request touched in the window, reads the gate rollup at each commit as the UNION of check runs and commit STATUSES (never /check-runs alone, which cannot see remudero-review) and pairs each red gate with the LATER commit on the SAME pull request that turned that SAME gate green, retaining the repair delta. A red with no observed repair is kept OPEN, never dropped and never reported repaired; a rollup that could not be read is named UNREADABLE, never counted as green, so an empty window and a blind one are distinguishable. Deduped per sha by latest attempt, so a superseded CANCELLED entry never outvotes its own SUCCESS successor. REPORT-ONLY: files nothing, mints no id, writes no guidance (Law 5).",
+  },
+  {
     name: "rule-efficacy",
     syntax: "rmd rule-efficacy [--no-escalate]",
     summary: "Report each rule's post-citation repeat-incident rate over the ledger union.",
@@ -37838,6 +37960,10 @@ export async function main(
   }
   if (cmd === "ledger-grep") {
     process.exit(ledgerGrepCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ciFailuresCommand(rest)) cannot carry a DA hit without forking the process; ciFailuresCommand's own logic — arg validation, the --days bound, the window load and every corpus status render — is unit-tested in test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts (same irreducible-glue shape as the sibling rule-efficacy/check-proof/emissions dispatch cases).
+  if (cmd === "ci-failures") {
+    process.exit(ciFailuresCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ruleEfficacyCommand(rest)) cannot carry a DA hit without forking the process; ruleEfficacyCommand's own logic — arg validation, the signature-table walk, the PREVENTING/REPEATING/UNMEASURABLE render, and the escalation write — is unit-tested in test/rule-efficacy.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
   if (cmd === "rule-efficacy") {
