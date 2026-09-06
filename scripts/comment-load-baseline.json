@@ -190,7 +190,7 @@
   "src/lib/operator-sync.ts": 98,
   "src/lib/ops.ts": 176,
   "src/lib/orientation.ts": 38,
-  "src/lib/panel-actions.ts": 463,
+  "src/lib/panel-actions.ts": 210,
   "src/lib/panel-graph.ts": 319,
   "src/lib/panel-skill-run.ts": 127,
   "src/lib/panel-skills.ts": 44,
