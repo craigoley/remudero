@@ -1587,10 +1587,19 @@ export async function runDaemon(
     if (detachedAtFreshness > 0) {
       const drainStartedAtMs = now().getTime();
       log("daemon.freshness_drain.started", { detached_sweep_actions: detachedAtFreshness });
-      await drainDetachedSweepActions();
+      const abandoned = await drainDetachedSweepActions({ boundMs: sweepWallClockBoundMs });
+      for (const action of abandoned) {
+        log("daemon.detached_action_abandoned", {
+          action_kind: action.actionKind,
+          task_id: action.taskId,
+          age_ms: action.ageMs,
+          bound_ms: sweepWallClockBoundMs,
+        });
+      }
       log("daemon.freshness_drain.completed", {
         detached_sweep_actions: detachedAtFreshness,
         remaining_detached_sweep_actions: detachedSweepActionCount(),
+        abandoned_detached_sweep_actions: abandoned.length,
         duration_ms: Math.max(0, now().getTime() - drainStartedAtMs),
       });
     }

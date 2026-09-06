@@ -338,6 +338,12 @@
       "grepHint": "panel-graph.ts comment forensics"
     },
     {
+      "path": "docs/forensics/plan-pr-emitter.md",
+      "title": "Forensics — `src/lib/plan-pr-emitter.ts`",
+      "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/plan-pr-emitter.ts` when its",
+      "grepHint": "Forensics — `src/lib/plan-pr-emitter.ts`"
+    },
+    {
       "path": "docs/forensics/plan.md",
       "title": "Forensics: src/lib/plan.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/plan.ts` used to",
