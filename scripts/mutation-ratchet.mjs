@@ -111,6 +111,7 @@
 
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import { parseArgs } from 'node:util';
 import { dirname, join, posix, resolve as resolvePath } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -754,6 +755,89 @@ export function readCommandRunnerTestFiles(strykerConfigPath) {
   }
 }
 
+// ── W1-T2707: the verdict emission (MASTER-PLAN D-10) ─────────────────────────────────────
+//
+// Every reader of `mutation.ratchet_verdict` is built and wired (retro.ts's builder and lifetime
+// rung, replay.ts, cost-anomaly.ts) and NOTHING wrote one, so D-10 read "N=0 verdicts, NO POSITIVE
+// CONTROL" for six retro cycles -- not "zero escapes", but no population to count. This script is
+// the only process holding a parsed Stryker report, so the emission happens here or is
+// reconstructed later as a different claim.
+//
+// ONE LINE PER REAL PR-GATE RUN. `--changed-files` emits NOTHING in either verdict: it reads no
+// report, so a line from it would manufacture a verdict from a run that scored nothing. NIGHTLY
+// emits nothing either -- different scope, different baseline, and D-10 asks about the PR gate
+// (W1-T133 owns the nightly split).
+//
+// THE LINE SHAPE IS retro.ts's. `mutationGateVerdictLine` cannot be imported -- CI runs this file
+// as plain `node` -- so the shape is rebuilt and PINNED: the falsifier deep-equals the two, which
+// reds if either drifts.
+
+/** The ledger step, duplicated from retro.ts's `MUTATION_GATE_VERDICT_STEP` for the reason above.
+ *  The falsifier pins the two together. */
+export const RATCHET_VERDICT_STEP = 'mutation.ratchet_verdict';
+
+/**
+ * Where to record the verdict: `--ledger <path>`, else `RMD_ROOT` (the env fleet-heartbeat.sh
+ * already uses for this), else NOWHERE.
+ *
+ * NO AMBIENT DEFAULT, and that is the point. The first draft also read ~/.config/remudero and fell
+ * back to ~/Remudero. MEASURED: this repo's suite spawns this CLI dozens of times per run, so on
+ * any host with a config every spawn appended to the operator's REAL ledger -- 35 junk lines
+ * before the sweep caught it. The write is opt-in; silence is correct when nobody opted in.
+ */
+export function resolveLedgerPath(env, opts = {}) {
+  if (opts.ledger) return { path: opts.ledger, source: 'flag' };
+  if (env.RMD_ROOT) return { path: join(env.RMD_ROOT, 'state', 'ledger.ndjson'), source: 'env' };
+  return { path: undefined, source: 'unconfigured' };
+}
+
+/** Build (never write) the verdict line. Field-for-field `mutationGateVerdictLine`'s shape. */
+export function ratchetVerdictLine(input) {
+  return {
+    run_id: input.runId,
+    task_id: input.taskId ?? 'mutation-ratchet',
+    step: RATCHET_VERDICT_STEP,
+    ...(input.prUrl ? { pr_url: input.prUrl } : {}),
+    conclusion: input.conclusion,
+    killed: input.killed,
+    survived: input.survived,
+    timeout: input.timeout,
+    no_coverage: input.noCoverage,
+  };
+}
+
+/** This run's identity. The gate has no Remudero run_id -- it is a required check on every PR, not
+ *  an `rmd`-dispatched run -- so an Actions run id, then the head sha, then git's own HEAD. */
+export function resolveVerdictRunId(env, spawn = spawnSync) {
+  if (env.GITHUB_RUN_ID) return env.GITHUB_RUN_ID;
+  if (env.GITHUB_SHA) return env.GITHUB_SHA;
+  const res = spawn('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' });
+  return ((res.stdout ?? '').trim()) || 'unknown';
+}
+
+/** `<server>/<owner>/<repo>/pull/<n>` when this is a pull_request run, else undefined. */
+export function resolveVerdictPrUrl(env) {
+  const m = /^refs\/pull\/(\d+)\//.exec(env.GITHUB_REF ?? '');
+  if (!m || !env.GITHUB_REPOSITORY) return undefined;
+  return `${env.GITHUB_SERVER_URL ?? 'https://github.com'}/${env.GITHUB_REPOSITORY}/pull/${m[1]}`;
+}
+
+/** Append exactly one verdict line in appendLedger's record shape (`ts` and `host` first, then the
+ *  line). A ledger that cannot be written is a LOST MEASUREMENT, not a failed build -- so the
+ *  failure is returned and printed with its reason, never thrown and never swallowed. */
+export function emitRatchetVerdict(input, deps) {
+  const line = ratchetVerdictLine(input);
+  const record = { ts: deps.now(), host: deps.host(), ...line };
+  try {
+    deps.mkdir(dirname(deps.ledgerPath), { recursive: true });
+    deps.append(deps.ledgerPath, JSON.stringify(record) + '\n');
+    return { emitted: true, line: record };
+  } catch (err) {
+    deps.log(`mutation-ratchet: verdict NOT recorded (${deps.ledgerPath}): ${err.message}`);
+    return { emitted: false, reason: err.message };
+  }
+}
+
 function main(argv) {
   const { values } = parseArgs({
     args: argv,
@@ -762,6 +846,7 @@ function main(argv) {
       baseline: { type: 'string', default: 'scripts/mutation-baseline.json' },
       'stryker-config': { type: 'string', default: 'stryker.conf.json' },
       'changed-files': { type: 'string' },
+      ledger: { type: 'string' },
       'relevant-paths': { type: 'string' },
       'nightly-scope': { type: 'boolean', default: false },
       'nightly-plan': { type: 'boolean', default: false },
@@ -1147,6 +1232,46 @@ function main(argv) {
     return;
   }
 
+  // W1-T2707: one line per REAL PR-gate run, on BOTH conclusions. Defined after the totals are
+  // known and used at both exits, so neither can take a path that skips it.
+  const recordVerdict = (conclusion) => {
+    try {
+      const { path: ledgerPath, source } = resolveLedgerPath(process.env, { ledger: values.ledger });
+      // Nobody asked for a ledger: there is nothing to record to, and saying so on every PR would
+      // be noise on a gate whose stdout is pinned byte-for-byte by its own suite.
+      if (!ledgerPath) return;
+      const res = emitRatchetVerdict(
+        {
+          runId: resolveVerdictRunId(process.env),
+          prUrl: resolveVerdictPrUrl(process.env),
+          conclusion,
+          killed: actual.killed,
+          survived: actual.survived,
+          timeout: actual.timeout,
+          noCoverage: actual.noCoverage,
+        },
+        {
+          ledgerPath,
+          now: () => new Date().toISOString(),
+          host: () => hostname(),
+          mkdir: mkdirSync,
+          append: appendFileSync,
+          log: (m) => console.error(m),
+        },
+      );
+      if (res.emitted) {
+        // stderr, never stdout: this gate's stdout is pinned byte-for-byte by
+        // test/a-test-outside-strykers-command-is-invisible.test.ts (W1-T2524 criteria 3 and 4),
+        // and a verdict record is not part of the score it reports.
+        console.error(`mutation-ratchet: verdict ${conclusion} recorded to ${ledgerPath} (via ${source})`);
+      }
+    } catch (err) {
+      // A LOST MEASUREMENT IS NOT A FAILED BUILD, so the WHOLE emission is contained -- measured, a
+      // missing import crashed the gate here AFTER it had printed its verdict.
+      console.error(`mutation-ratchet: verdict NOT recorded: ${err.message}`);
+    }
+  };
+
   console.log(
     `mutation-ratchet: score ${actual.scorePct.toFixed(2)}% (baseline ${(baseline.scorePct ?? 0).toFixed(2)}%) -- ` +
       `${actual.killed} killed, ${actual.timeout} timeout, ${actual.survived} survived, ${actual.noCoverage} no-coverage`,
@@ -1181,10 +1306,12 @@ function main(argv) {
       );
     }
 
+    recordVerdict('failure');
     process.exitCode = 1;
     return;
   }
 
+  recordVerdict('success');
   console.log('mutation-ratchet: OK -- at or above baseline.');
   process.exitCode = 0;
 }
