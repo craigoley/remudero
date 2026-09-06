@@ -290,7 +290,7 @@ import {
   detectRunContext,
   runContextLine,
   FAST_GATE_STEPS,
-  KNOWN_CENSUS_SUITES,
+  CENSUS_MEMBERSHIP_SUITES,
   preflightFailureNotice,
   preflightSummaryPath,
   runCiParity,
@@ -17511,7 +17511,7 @@ export function censusMembershipCommand(
   const joining = report.entries.filter((e) => e.suites.length > 0);
   if (joining.length === 0) {
     // A MEASURED ABSENCE, not a bare zero: say which corpus was read (P48).
-    console.log(`  joins no known census (${KNOWN_CENSUS_SUITES.length} modelled)`);
+    console.log(`  joins no known census (${CENSUS_MEMBERSHIP_SUITES.length} modelled)`);
   }
   for (const e of joining) {
     console.log(`  ${e.path}`);

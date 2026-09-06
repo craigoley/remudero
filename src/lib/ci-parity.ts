@@ -1601,14 +1601,11 @@ interface KnownCensusSuite {
 }
 
 /**
- * W1-T2969 — THE REGISTRY-SHAPED CENSUSES, a SECOND source, not a copy of the first: nothing below
- * appears in {@link CENSUS_ADMITTED_MEMBERS}, so the fast-gate half stays DERIVED as its own doc
- * requires. These walk a population as those four do but are NOT fast-gate members and must not
- * become them — admission there is a measured COST decision, and this map's question is broader.
- *
- * MEASURED 2026-09-06: of four census-baseline CI failures across #4283 and #4290, the derived half
- * named ONE. The other three each pin a REGISTRY (command names, policy keys, source-text reads)
- * and reference no symbol either diff touched, so the mandated caller sweep was blind to all three.
+ * W1-T2969 — THE REGISTRY-SHAPED CENSUSES. MEASURED 2026-09-06: of four census-baseline CI failures
+ * across #4283 and #4290, the derived half named ONE. The other three each pin a REGISTRY (command
+ * names, policy keys, source-text reads) and reference no symbol either diff touched, so the
+ * mandated caller sweep was blind to all three. Each walks a population as the derived four do, but
+ * none is a fast-gate member and none may become one: that admission is a measured COST decision.
  */
 const REGISTRY_CENSUS_SUITES: readonly KnownCensusSuite[] = [
   {
@@ -1642,12 +1639,21 @@ const REGISTRY_CENSUS_SUITES: readonly KnownCensusSuite[] = [
   },
 ];
 
-export const KNOWN_CENSUS_SUITES: readonly KnownCensusSuite[] = [
-  ...CENSUS_ADMITTED_MEMBERS.map((m) => ({
-    job: m.job,
-    testFile: m.testFile,
-    walks: m.walks ?? [],
-  })),
+export const KNOWN_CENSUS_SUITES: readonly KnownCensusSuite[] = CENSUS_ADMITTED_MEMBERS.map((m) => ({
+  job: m.job,
+  testFile: m.testFile,
+  walks: m.walks ?? [],
+}));
+
+/**
+ * THE MEMBERSHIP SET — WIDER THAN {@link KNOWN_CENSUS_SUITES} AND A SEPARATE SYMBOL, because the two
+ * answer different questions: "which suites does this path join" reads THIS, "does this suite carry
+ * a verdict row" reads the ADMITTED projection, and `unknownCoverage` comes from THAT. Union them
+ * and test/config-reader-seams.test.ts leaves the unknown report holding no verdict row — refused
+ * BY NAME by W1-T2809's suite, and by W1-T2523's demanding the exact opposite of anything KNOWN.
+ */
+export const CENSUS_MEMBERSHIP_SUITES: readonly KnownCensusSuite[] = [
+  ...KNOWN_CENSUS_SUITES,
   ...REGISTRY_CENSUS_SUITES,
 ];
 
@@ -1658,23 +1664,24 @@ export interface CensusMembershipEntry {
 }
 
 /** Pure, non-blocking output: no `ok`, no verdict — a report a caller prints, never a gate.
- *  `unknownCoverage` names every re-derived caller {@link KNOWN_CENSUS_SUITES} does not model,
+ *  `unknownCoverage` names every re-derived caller {@link KNOWN_CENSUS_SUITES} does not carry,
  *  because this cannot say which prefixes an unrecognised suite walks and will not guess. */
 export interface CensusMembershipReport {
   readonly entries: readonly CensusMembershipEntry[];
   readonly unknownCoverage: readonly string[];
 }
 
-/** PURE core: membership by prefix match against {@link KNOWN_CENSUS_SUITES}. No git, filesystem or spawn. */
+/** PURE core: membership by prefix match against {@link CENSUS_MEMBERSHIP_SUITES}. No git, filesystem or spawn. */
 export function censusSuiteMembership(
   changedPaths: readonly string[],
   srcFilteredCallers: readonly string[],
 ): CensusMembershipReport {
+  // TWO QUESTIONS, TWO SETS (W1-T2969) — see CENSUS_MEMBERSHIP_SUITES for why they cannot be one.
   const knownTestFiles = new Set(KNOWN_CENSUS_SUITES.map((s) => s.testFile));
   const unknownCoverage = [...new Set(srcFilteredCallers.filter((f) => !knownTestFiles.has(f)))].sort();
   const entries = changedPaths.map((path) => ({
     path,
-    suites: KNOWN_CENSUS_SUITES.filter((s) => s.walks.some((prefix) => path.startsWith(prefix))).map((s) => s.job),
+    suites: CENSUS_MEMBERSHIP_SUITES.filter((s) => s.walks.some((prefix) => path.startsWith(prefix))).map((s) => s.job),
   }));
   return { entries, unknownCoverage };
 }

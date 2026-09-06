@@ -23,7 +23,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { censusSuiteMembership, KNOWN_CENSUS_SUITES } from "../src/lib/ci-parity.js";
+import { censusSuiteMembership, CENSUS_MEMBERSHIP_SUITES, KNOWN_CENSUS_SUITES } from "../src/lib/ci-parity.js";
 
 /** The suites a diff joins, as job names. */
 const suitesFor = (path: string): readonly string[] =>
@@ -81,9 +81,9 @@ test("W1-T2969 the fast-gate half is still DERIVED, not hand-copied", () => {
   // `CensusPopulationMember`'s doc: the step table and KNOWN_CENSUS_SUITES are "DERIVED from,
   // never hand-duplicated onto". Every fast-gate job must still appear exactly once — a
   // hand-written duplicate of a derived entry would show up as two.
-  const jobs = KNOWN_CENSUS_SUITES.map((s) => s.job);
+  const jobs = CENSUS_MEMBERSHIP_SUITES.map((s) => s.job);
   assert.equal(new Set(jobs).size, jobs.length, `no job may appear twice; got ${jobs.join(", ")}`);
-  const testFiles = KNOWN_CENSUS_SUITES.map((s) => s.testFile);
+  const testFiles = CENSUS_MEMBERSHIP_SUITES.map((s) => s.testFile);
   assert.equal(new Set(testFiles).size, testFiles.length, "and no test file may be modelled twice");
 });
 
@@ -100,6 +100,31 @@ test("W1-T2969 a suite the model cannot place is NAMED, so a zero is never mista
   // the table must not silence it.
   const report = censusSuiteMembership(["src/lib/x.ts"], ["test/some-unmodelled-census.test.ts"]);
   assert.deepEqual(report.unknownCoverage, ["test/some-unmodelled-census.test.ts"]);
+});
+
+test("W1-T2969 a REGISTRY-modelled suite is STILL named unadmitted — membership is not admission", () => {
+  // THE COLLAPSE THIS PINS, measured on this PR's own first CI run: pouring the registry into
+  // KNOWN_CENSUS_SUITES drops test/config-reader-seams.test.ts out of `unknownCoverage` while
+  // giving it no verdict row — a visible unknown silently converted into an omission. W1-T2809's
+  // suite refused it by name on three assertions, and W1-T2523's on a fourth demanding the exact
+  // opposite for anything in KNOWN_CENSUS_SUITES. The two cannot both hold on ONE set, which is
+  // why there are two: membership widens, admission does not.
+  const registryTestFile = "test/config-reader-seams.test.ts";
+  assert.ok(
+    CENSUS_MEMBERSHIP_SUITES.some((s) => s.testFile === registryTestFile),
+    "control: it really is modelled for membership, so the unadmitted assertion below is not vacuous",
+  );
+  assert.ok(
+    !KNOWN_CENSUS_SUITES.some((s) => s.testFile === registryTestFile),
+    "and it carries no verdict row — admission is a separate, measured decision",
+  );
+
+  const report = censusSuiteMembership(["src/lib/x.ts"], [registryTestFile]);
+  assert.deepEqual(report.unknownCoverage, [registryTestFile], "modelled, and still reported unadmitted");
+  assert.ok(
+    report.entries[0].suites.includes("config-reader-seams-census"),
+    "while the membership half answers for it — the whole point of modelling it",
+  );
 });
 
 // ── (v) THE DERIVATION IS REACHABLE FROM A TERMINAL, AND REPORTS RATHER THAN GATING ──────────
@@ -142,7 +167,7 @@ test("W1-T2969 a diff joining nothing renders a MEASURED ABSENCE naming the corp
   );
   assert.equal(r.code, 0);
   assert.match(r.out, /joins no known census/, "the zero says so in words");
-  assert.match(r.out, new RegExp(`${KNOWN_CENSUS_SUITES.length} modelled`), "and names how many it compared against");
+  assert.match(r.out, new RegExp(`${CENSUS_MEMBERSHIP_SUITES.length} modelled`), "and names how many it compared against");
 });
 
 test("W1-T2969 the verb GATES NOTHING — it exits 0 even on a diff that joins several censuses", () => {
