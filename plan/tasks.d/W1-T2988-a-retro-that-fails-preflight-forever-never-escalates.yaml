@@ -1,0 +1,47 @@
+- id: W1-T2988
+  title: "A RETRO THAT FAILS PREFLIGHT RETRIES FOREVER AND ESCALATES NOTHING — the marker has been frozen since 2026-09-03T02:24:39 and the trigger has re-fired 60 times in one day, spending a full LLM run and a 15-minute suite each time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: architect
+  plan_refs: ["W1-T2875", "W1-T2981", "W1-T312"]
+  files: [src/lib/retro.ts, test/a-retro-that-cannot-publish-escalates-instead-of-retrying.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE MARKER IS FROZEN AND THE TRIGGER CANNOT SEE IT. `state/last-retro.json` reads
+    `ts: 2026-09-03T02:24:39.835Z` and its mtime agrees. Today's `retro_triggered` rows carry
+    `merges_since_marker` pinned at 446 across eight consecutive fires while `days_since_marker`
+    only creeps up with wall-clock (3.72 -> 3.77). SIXTY fires on 2026-09-06 alone.
+
+    THE MARKER IS WITHHELD ON PURPOSE, AND THAT PART IS CORRECT. The retro's own stdout says
+    `prepublish validation failed after 2 attempt(s) — marker unchanged`, and on the retro lane
+    today there are 44 `retro.start` rows, 30 `retro.preflight_failed` and ZERO `pr.opened` — the
+    newest `pr.opened` anywhere on that lane is 2026-09-03T02:24:39, the frozen marker's own
+    timestamp. Withholding the marker when publication fails is right; RETRYING THE SAME FAILURE
+    INDEFINITELY WITH NO ESCALATION IS NOT.
+
+    THE FAILURE IS NOT AN OOM AND NOT A DEPENDENCY DRIFT, both of which were checked and excluded.
+    Exit classes across the union: 66 x `exit 1` with no class, 20 x `exit 1` `nonzero_exit`
+    (`heap_limit_mb 1792`), 8 x SIGTERM — no 134, no SIGKILL, so the 1792 MiB heap is context in
+    the row rather than cause. The `canonical checkout drift: 49 commits behind` warning is benign:
+    `package.json` and the lockfile are unchanged across that span, as the warning itself states.
+    WHY THE SUITE EXITS 1 IN THE RETRO WORKTREE WHILE CI IS GREEN IS STILL UNKNOWN and is the first
+    thing the build must establish — the escalation below is what makes the next occurrence
+    diagnosable instead of silent.
+
+    WHAT TO BUILD, AND WHAT NOT TO. A repeated, identical publication failure must escalate to the
+    operator with its own reason and stand down, exactly as `dispatch.starvation` and the sweep's
+    fix rung do after their strike caps. DO NOT add a plain retry cap that silently gives up: the
+    retro would then stop running with nothing said, which is the same invisibility in a new place.
+    And do NOT advance the marker on failure to break the loop — that discards the runs the retro
+    was meant to read, permanently.
+  acceptance:
+    - claim: "a retro whose publication fails repeatedly escalates with its own named reason"
+      proof: "unit test: W1-T2988: a repeated prepublish failure escalates rather than retrying silently"
+    - claim: "the marker is still never advanced by a failed retro"
+      proof: "unit test: W1-T2988: a failed retro leaves the marker unchanged"
