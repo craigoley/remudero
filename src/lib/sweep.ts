@@ -3381,12 +3381,16 @@ function freshFixDispatchCount(
  *  NOT FIRE-AND-FORGET, WHICH IS THE WHOLE DIFFICULTY: the dispatch is STARTED and its `acted: true`
  *  row WRITTEN synchronously inside the pass, because that row seeds the dedup. A DETACHED REJECTION
  *  IS SWALLOWED ON PURPOSE. */
+/** W1-T2981 widened this from the single `"fix-dispatch"` literal: the registry was always a
+ *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
+export type DetachedActionKind = "fix-dispatch" | "retro";
+
 interface DetachedSweepActionRegistration {
-  actionKind: "fix-dispatch"; taskId: string; startedAtMs: number;
+  actionKind: DetachedActionKind; taskId: string; startedAtMs: number;
 }
 
 export interface DetachedSweepActionDescriptor {
-  actionKind: "fix-dispatch"; taskId: string; ageMs: number;
+  actionKind: DetachedActionKind; taskId: string; ageMs: number;
 }
 
 const detachedSweepActions = new Map<Promise<void>, DetachedSweepActionRegistration>();
@@ -3394,7 +3398,7 @@ const detachedSweepActions = new Map<Promise<void>, DetachedSweepActionRegistrat
 /** W1-T2379: hand a started action to {@link detachedSweepActions} so the caller need not await it.
  *  The stored promise is already settled-safe — its rejection is caught here — so a drain can never
  *  itself reject. */
-function detachSweepAction(
+export function detachSweepAction(
   work: Promise<unknown>,
   action: Omit<DetachedSweepActionRegistration, "startedAtMs">,
 ): void {
@@ -3443,6 +3447,14 @@ export async function drainDetachedSweepActions(
  *  this bounded count for observability; no production reader branches on it. */
 export function detachedSweepActionCount(): number {
   return detachedSweepActions.size;
+}
+
+/** W1-T2981 — is an action of this kind already detached? A second concurrent retro would race the
+ *  same marker file, so the rung refuses rather than stacking. A KIND query, not a separate boolean,
+ *  so the registry stays the one source of truth about what is in flight. */
+export function detachedActionInFlight(kind: DetachedActionKind): boolean {
+  for (const action of detachedSweepActions.values()) if (action.actionKind === kind) return true;
+  return false;
 }
 
 /**
