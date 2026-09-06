@@ -266,6 +266,12 @@
       "grepHint": "Forensics — `src/lib/escalate.ts`"
     },
     {
+      "path": "docs/forensics/feedback-landing.md",
+      "title": "Forensics: src/lib/feedback-landing.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/feedback-landing.ts`",
+      "grepHint": "Forensics: src/lib/feedback-landing.ts"
+    },
+    {
       "path": "docs/forensics/feedback.md",
       "title": "Forensics: src/lib/feedback.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/feedback.ts` used to",
@@ -432,6 +438,12 @@
       "title": "task-id-existence-check.mjs forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
       "grepHint": "task-id-existence-check.mjs forensics"
+    },
+    {
+      "path": "docs/forensics/task-id-reservation.md",
+      "title": "task-id-reservation.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "task-id-reservation.ts forensics"
     },
     {
       "path": "docs/forensics/task-linter.md",
