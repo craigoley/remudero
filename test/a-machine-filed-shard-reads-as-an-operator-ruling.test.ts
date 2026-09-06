@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -257,4 +258,137 @@ test("W1-T2959 a draft names a surface a DISPATCHED WORKER can actually read", (
   const d = r.drafts[0];
   assert.match(d.remedySurface, /learnings\//, "the remedy must name the surface that reaches the fleet");
   assert.doesNotMatch(d.remedySurface, /CLAUDE\.md/, "and never CLAUDE.md, which no dispatched worker reads");
+});
+
+// ── THE COMMAND SURFACE, over an INJECTED window — zero network ──────────────────────────────
+// The defaults these functions carry (`ghJson`, the real config root) are the one line each a unit
+// test cannot reach; the dispatch case names that boundary explicitly.
+
+import { ciLearningCommand } from "../src/run-task.js";
+import { loadPolicy } from "../src/lib/policy.js";
+
+/** Capture console.log/error for one call — mirrors the sibling corpus suite's own helper. */
+function captured(fn: () => number): { code: number; out: string } {
+  const lines: string[] = [];
+  const log = console.log;
+  const err = console.error;
+  console.log = (...a: unknown[]) => void lines.push(a.join(" "));
+  console.error = (...a: unknown[]) => void lines.push(a.join(" "));
+  try {
+    return { code: fn(), out: lines.join("\n") };
+  } finally {
+    console.log = log;
+    console.error = err;
+  }
+}
+
+/** A window shaped like `loadCiFailureWindow`'s output: one PR whose gate goes red then green. */
+const repairedWindow = () => ({
+  prs: [
+    {
+      number: 42,
+      commits: [
+        { sha: "redsha01", rollup: [{ name: "coverage-ratchet", conclusion: "FAILURE" as const }] },
+        { sha: "greensha1", rollup: [{ name: "coverage-ratchet", conclusion: "SUCCESS" as const }], files: ["src/lib/x.ts"] },
+      ],
+    },
+  ],
+});
+
+test("W1-T2959 the rung is REACHABLE from the command surface and renders a MARKED, PARKED draft", () => {
+  // BEHAVIOUR, NOT SOURCE TEXT (W1-T2905): rendering a draft only the minter can produce IS the
+  // proof it is wired. An unwired minter renders no draft at all.
+  const r = captured(() =>
+    ciLearningCommand(["--force"], { root: tmpRoot(), loadWindow: () => repairedWindow() as never }),
+  );
+  assert.equal(r.code, 0);
+  assert.match(r.out, /DRAFT ci-learning:42:coverage-ratchet/);
+  assert.match(r.out, /author_class=machine verify=human/, "Law 5's mark must reach the operator's screen");
+  assert.match(r.out, /learnings\//, "and the remedy surface a dispatched worker can actually read");
+});
+
+test("W1-T2959 the command WRITES NOTHING — no plan record, no working-tree file (Law 5)", () => {
+  const planBefore = readFileSync("plan/tasks.yaml");
+  const treeBefore = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
+  ciLearningCommand(["--force"], { root: tmpRoot(), loadWindow: () => repairedWindow() as never });
+  assert.ok(planBefore.equals(readFileSync("plan/tasks.yaml")), "the rung must not touch the plan");
+  assert.equal(
+    execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }),
+    treeBefore,
+    "and must leave no file behind — filing is a separate operator step",
+  );
+});
+
+test("W1-T2959 the cadence bound HOLDS the command, and --force runs past it without recording", () => {
+  const root = tmpRoot();
+  // A fire is recorded on a non-forced run, so the next non-forced run is refused by the bound.
+  recordCiLearningCadenceFire(root, new Date());
+  const ON = { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1 };
+  const held = captured(() =>
+    ciLearningCommand([], { root, policy: ON, loadWindow: () => repairedWindow() as never }),
+  );
+  assert.equal(held.code, 0, "being held by the cadence is not an error");
+  assert.match(held.out, /not firing/);
+  assert.doesNotMatch(held.out, /DRAFT /, "and it drafts nothing while held");
+
+  // --force runs past the same bound.
+  const forced = captured(() =>
+    ciLearningCommand(["--force"], { root, loadWindow: () => repairedWindow() as never }),
+  );
+  assert.match(forced.out, /DRAFT ci-learning:42/);
+});
+
+test("W1-T2959 an unreadable window exits non-zero rather than rendering as 'nothing to learn'", () => {
+  const r = captured(() =>
+    ciLearningCommand(["--force"], {
+      root: tmpRoot(),
+      loadWindow: () => {
+        throw new Error("rate limited");
+      },
+    }),
+  );
+  assert.equal(r.code, 1, "a window that could not be READ is not a window with nothing in it");
+  assert.match(r.out, /could not be read/);
+});
+
+test("W1-T2959 bad arguments are refused with exit 2, never a silent default", () => {
+  const root = tmpRoot();
+  const w = () => repairedWindow() as never;
+  assert.equal(captured(() => ciLearningCommand(["--bogus"], { root, loadWindow: w })).code, 2);
+  for (const bad of [["--days", "0"], ["--days", "-1"], ["--days", "abc"]]) {
+    assert.equal(captured(() => ciLearningCommand([...bad, "--force"], { root, loadWindow: w })).code, 2, bad.join(" "));
+  }
+});
+
+// ── THE POLICY ROW: present is read, ABSENT defaults OFF ─────────────────────────────────────
+
+test("W1-T2959 an ABSENT ciLearningCadence row defaults DISABLED — the only cadence row that does", () => {
+  // Every sibling cadence defaults enabled by being read-only; this rung drafts records, so
+  // inheriting a safe-on default would set it without anyone deciding it.
+  const shipped = loadPolicy("plan/policy.yaml").values.ciLearningCadence;
+  assert.equal(shipped.enabled, false, "the SHIPPED row is off");
+  assert.equal(shipped.minIntervalMinutes, 1440, "daily, the operator's own word");
+  assert.equal(shipped.maxPerDay, 1);
+
+  // And the absent-row default agrees with the shipped row, so removing it changes nothing.
+  const dir = tmpRoot();
+  const stripped = readFileSync("plan/policy.yaml", "utf8").replace(
+    /\nciLearningCadence:\n(?:[ \t].*\n|\n)*/,
+    "\n",
+  );
+  assert.doesNotMatch(stripped, /ciLearningCadence:/, "the control: the row really is gone");
+  const p = join(dir, "policy.yaml");
+  writeFileSync(p, stripped);
+  const absent = loadPolicy(p).values.ciLearningCadence;
+  assert.deepEqual(absent, { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 });
+});
+
+test("W1-T2959 an UNREADABLE policy fails CLOSED — a rung that drafts never fires on an unread bound", () => {
+  const r = captured(() =>
+    // A root with no plan/policy.yaml: loadPolicy throws, and the rung must refuse rather than
+    // treat an unreadable bound as an absent one.
+    ciLearningCommand([], { root: tmpRoot(), loadWindow: () => repairedWindow() as never }),
+  );
+  assert.equal(r.code, 1);
+  assert.match(r.out, /failing closed/);
 });

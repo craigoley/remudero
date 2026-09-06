@@ -523,6 +523,7 @@ import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from 
 import {
   measurementCadenceCheck,
   ciLearningCadenceCheck,
+  type CiLearningCadencePolicy,
   measurementCadenceMarkerPath,
   mintCiLearningShards,
   recordCiLearningCadenceFire,
@@ -17468,7 +17469,10 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
  *  propose work into the plan, and only an operator releases it (Law 5). Filing is deliberately a
  *  separate operator step: the safety argument is that a machine conclusion cannot act on itself,
  *  and a rung that both concluded and committed would be that argument's only weak point. */
-export function ciLearningCommand(rest: string[], deps: CiFailuresCommandDeps & { root?: string } = {}): number {
+export function ciLearningCommand(
+  rest: string[],
+  deps: CiFailuresCommandDeps & { root?: string; policy?: CiLearningCadencePolicy } = {},
+): number {
   const badArg = unknownArgError("ci-learning", rest, ["--days"], ["--force"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -17491,10 +17495,12 @@ export function ciLearningCommand(rest: string[], deps: CiFailuresCommandDeps & 
 
   // The cadence bound, unless the operator overrides it for this one run.
   if (!rest.includes("--force")) {
-    let policy;
+    let policy: CiLearningCadencePolicy;
     try {
-      policy = loadPolicy(join(root, "plan", "policy.yaml")).values.ciLearningCadence;
+      policy = deps.policy ?? loadPolicy(join(root, "plan", "policy.yaml")).values.ciLearningCadence;
     } catch (e) {
+      // An unreadable policy is not a permissive one: a rung that DRAFTS must never fire because
+      // its own bound could not be read.
       console.error(`rmd ci-learning: policy unreadable (${(e as Error).message}) — failing closed`);
       return 1;
     }
