@@ -1,0 +1,108 @@
+- id: W1-T2977
+  title: "LAW 5 REFUSES EVERY MACHINE-AUTHORED RECORD WHERE IT SHOULD JUDGE ONE — machineAuthorVerifyViolation blocks author_class:machine at verify:auto unconditionally, so a benign drafted shard is parked exactly as hard as a dangerous one; gate it on a RECORDED risk-judge ruling pinned to the record it judged, fail-closed when no ruling exists"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 40.00
+  files:
+    - src/lib/task-linter.ts
+    - src/lib/plan.ts
+    - test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts
+    - test/law-5-is-judged-never-assumed.test.ts
+  origin: "operator-ruling#law-5-should-enforce-only-where-a-judge-finds-risk-2026-09-06"
+  plan_refs: ["W1-T2959", "W1-T2967", "W1-T2968", "W1-T2694", "W1-T130", "W1-T178", "W1-T186"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR RULING, 2026-09-06, RECORDED AS THE ORIGIN OF THIS TASK. Law 5's arm is to stay, and
+    to become conditional: enforcement applies where an LLM judge finds a change risky or bad, and
+    a machine-authored record the judge clears may dispatch. This shard exists because the
+    alternative first named — deleting the gate — would have retired the doctrine rather than
+    sharpening it, and the doctrine is load-bearing in six modules that cite Law 5 as the reason
+    they are read-only (ci-failure-corpus, daemon ×2, digest ×2, rule-efficacy).
+
+    THE GATE IS BINARY AND THE POPULATION IS NOT. `machineAuthorVerifyViolation`
+    (src/lib/task-linter.ts) returns a `block` for every `author_class: "machine"` record whose
+    `verify` is not `human`. A drafted shard repairing a typo in a comment and a drafted shard
+    rewriting a merge gate are refused identically. That is the shape CLAUDE.md's investigation
+    section calls this repo's recurring defect from the other side: a bound that fires on a healthy
+    condition, here firing on the entire population because no instrument separated it.
+
+    THE JUDGE ALREADY EXISTS AND SAYS IT IS FOR THIS. `src/lib/risk-judge.ts` ships `assessRisk`,
+    `buildRiskJudgePrompt`, `parseRiskJudgeVerdict`, `planRiskJudgeAction`, a verdict cache keyed
+    on `canonicalRiskJudgeInputKey`, a spend collector and `risk_judge.*` ledger rows. Its own
+    header names this use: "REUSABLE (for P28's future auto-ratification): assessRisk takes
+    {change, gatesState, planContext} and returns {verdict, reasons, confidence} with no
+    dispatch-only coupling". Building a second judge here would be the duplicate-rebuild failure.
+
+    FAIL-CLOSED IS INHERITED, NOT INVENTED. risk-judge.ts already states "JUDGE-UNAVAILABLE (spawn
+    error, timeout, unparseable response) always falls back to ESCALATE, never silent-proceeds
+    (W1-T130) — enforced inside assessRisk itself." So the absent-ruling case needs no new policy:
+    it is today's behaviour, and today's behaviour becomes the default rather than the only path.
+
+    THIS IS THE GATE W1-T2968's FILING PATH WILL MEET. W1-T2968 gives `mintCiLearningShards`'
+    drafts a way onto disk; every one carries `author_class: machine`, so under today's
+    unconditional arm every filed record parks forever. Ordering is not safety-critical in either
+    direction — parked is the safe default — but W1-T2968 delivers little until this lands.
+  design: |
+    (i) THE LINTER STAYS PURE AND SYNCHRONOUS. `machineAuthorVerifyViolation` must not make an LLM
+    call — it is called per task in a hot loop, it has no budget, and an async gate would make
+    lint-plan's verdict depend on a network. The judge runs at FILING time; the linter reads what
+    the filer recorded. That split is the whole design.
+
+    (ii) THE RULING IS A FIELD ON THE RECORD, PINNED TO WHAT IT JUDGED. A new optional
+    `risk_ruling` on Task carries the verdict label, `planRiskJudgeAction`'s kind, the judge's own
+    confidence, the time, and — load-bearing — the `canonicalRiskJudgeInputKey` of the change that
+    was judged. The linter recomputes that key from the record and refuses a ruling whose key does
+    not match. WITHOUT THE PIN THE GATE IS DEFEATED BY EDITING: a machine could file something
+    benign, earn a pass, then rewrite the record under a ruling that judged different text. This is
+    W1-T2694's ratification-pin doctrine — "refusing to fire on drift" — applied to one record.
+
+    (iii) THE REFUSAL LADDER, EXPLICITLY, WITH THE DEFAULT AT TODAY'S BEHAVIOUR:
+      - no `author_class` at all  -> pass (unchanged; every pre-field record is a person's)
+      - `author_class: operator`  -> pass (unchanged)
+      - `machine` + `verify: human` -> pass (unchanged)
+      - `machine` + `auto` + NO ruling -> BLOCK, today's message (this is the common case)
+      - `machine` + `auto` + ruling whose pin does not match the record -> BLOCK, naming drift
+      - `machine` + `auto` + ruling with action `escalate` -> BLOCK, quoting the judge's reasons
+      - `machine` + `auto` + ruling with action `proceed` and a matching pin -> PASS
+    Only the last row is new. Every other row is the gate as it stands, which is what makes this a
+    narrowing rather than a removal.
+
+    (iv) THE EXISTING FALSIFIER SUITE IS EXTENDED, NEVER RELAXED.
+    test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts keeps every assertion it has —
+    an unruled machine record at auto must still block — and the new suite adds the judged rows.
+    A green run where the old assertions were edited to accommodate the new path is the failure
+    mode this criterion exists to refuse.
+
+    (v) THE JUDGE'S REASONS REACH THE OPERATOR VERBATIM. A blocked ruling quotes `reasons` as the
+    judge wrote them (W1-T186: observed reasons, never an inferred symptom), so a refusal is
+    diagnosable without opening the ledger.
+
+    (vi) MEASUREMENT-CADENCE IS OPENED ON THE SAME TERMS, DELIBERATELY.
+    src/lib/measurement-cadence.ts also mints `author_class: machine` records, so this gate governs
+    two producers, not one. That is stated here rather than discovered later: a ruling-gated arm
+    applies to every machine author the linter sees.
+  acceptance:
+    - claim: "a machine-authored record at verify auto with no risk ruling is blocked exactly as it is today, so the default is unchanged and absence is never read as a pass"
+      proof: "unit test: test/law-5-is-judged-never-assumed.test.ts"
+    - claim: "a machine-authored record at verify auto carrying a proceed ruling whose pin matches the record passes the gate"
+      proof: "unit test: test/law-5-is-judged-never-assumed.test.ts"
+    - claim: "a ruling whose pin does not match the record it rides on is refused as drift, so a record cannot be edited after earning its pass"
+      proof: "unit test: test/law-5-is-judged-never-assumed.test.ts"
+    - claim: "an escalate ruling blocks and the message quotes the judge's own reasons verbatim rather than a re-derived summary"
+      proof: "unit test: test/law-5-is-judged-never-assumed.test.ts"
+    - claim: "the linter performs no LLM call and no network access, remaining pure and synchronous under a dependency that would throw if invoked"
+      proof: "unit test: test/law-5-is-judged-never-assumed.test.ts"
+    - claim: "every pre-existing assertion in the Law 5 falsifier suite still passes unedited, so this narrows the gate rather than relaxing it"
+      proof: "unit test: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts"
+  falsifier: |
+    Close without implementation if machineAuthorVerifyViolation already consults a recorded
+    ruling, or if the operator withdraws the 2026-09-06 ruling and Law 5 is to stay unconditional.
+    A change that deletes the gate, deletes any assertion in the existing falsifier suite, or lets
+    an unruled machine record dispatch does NOT satisfy this task — it is the outcome the task
+    exists to avoid.

@@ -27,6 +27,9 @@ import { configPath } from "../src/lib/config.js";
 import { resolveRepoRoot, retroCommand } from "../src/run-task.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { runDaemon } from "../src/lib/daemon.js";
+// W1-T2981 — the retro is DETACHED, so `runDaemon` returns while it is still in flight. A test
+// asserting on what the retro DID must drain that action first; the assertions are unchanged.
+import { drainDetachedSweepActions } from "../src/lib/sweep.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { offlineGithub } from "./setup/offline-github.js";
@@ -1018,7 +1021,8 @@ test(
         log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
       });
 
-      assert.equal(summary.stopReason, "stopped");
+      await drainDetachedSweepActions({ boundMs: 20000 });
+  assert.equal(summary.stopReason, "stopped");
       assert.equal(retroRuns, 1, "the REAL retroCommand ran exactly once across the two evaluated ticks");
 
       const fired = lines.filter((l) => l.step === "retro_triggered");

@@ -125,7 +125,7 @@
   "src/lib/cost-anomaly.ts": 97,
   "src/lib/coverage-improvement.ts": 143,
   "src/lib/daemon-health.ts": 187,
-  "src/lib/daemon.ts": 1014,
+  "src/lib/daemon.ts": 1034,
   "src/lib/dep-review.ts": 149,
   "src/lib/deployer.ts": 324,
   "src/lib/digest.ts": 280,
@@ -244,7 +244,7 @@
   "src/lib/status-board.ts": 520,
   "src/lib/status.ts": 1298,
   "src/lib/supersession.ts": 50,
-  "src/lib/sweep.ts": 1900,
+  "src/lib/sweep.ts": 1905,
   "src/lib/task-card.ts": 54,
   "src/lib/task-class.ts": 37,
   "src/lib/task-id-reservation.ts": 160,
@@ -265,6 +265,6 @@
   "src/lib/worker.ts": 1136,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16184,
+  "src/run-task.ts": 16195,
   "src/spike.ts": 18
 }

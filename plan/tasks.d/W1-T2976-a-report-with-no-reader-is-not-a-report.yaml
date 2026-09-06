@@ -1,0 +1,76 @@
+- id: W1-T2976
+  title: "A REPORT WITH NO READER IS NOT A REPORT — digestCadence fires daily into inboxNotifyChannel, the console mailbox W1-T2497 has not built, while notify.ts's only adapter is osascript and reports itself unavailable on every non-darwin host; add an email NotifyChannel so a report the fleet already writes reaches a person"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files:
+    - src/lib/notify.ts
+    - test/a-report-with-no-reader-is-not-a-report.test.ts
+  origin: "operator-session#email-the-daemon-report-while-the-console-is-unbuilt-2026-09-06"
+  plan_refs: ["W1-T2497", "W1-T2277", "W1-T915", "W1-T8"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE REPORT IS BUILT, SCHEDULED, AND UNDELIVERABLE. `digestCadence` in plan/policy.yaml reads
+    `enabled: true`, `minIntervalMinutes: 1440`, so `runDigestCadenceReport` renders a digest once
+    a day. run-task.ts routes it to `inboxNotifyChannel` and says why in its own comment: "THE
+    INBOX CHANNEL, NOT IMESSAGE". That inbox is the console mailbox W1-T2497 is filed to build and
+    has not built — so the daily digest accumulates in a surface with no reader.
+
+    THE OTHER ADAPTER CANNOT COVER FOR IT. `notify.ts` ships exactly one channel,
+    `imessageChannel`, driving Messages.app through `osascript`. Its own `unavailable()` returns
+    "no real-time channel on ${platform} — osascript/Messages.app is macOS-only", so on the Linux
+    fleet host it is dark by construction, not by misconfiguration. A second adapter is the only
+    thing that makes a daily report reach a human before the console lands.
+
+    THE CONFIG SEAM ALREADY EXPECTS AN EMAIL ADDRESS. `notifyRecipient` (src/lib/config.ts) is
+    documented "email; override via `notifyRecipient` in config.json" and defaults to an address.
+    The recipient half of this task is therefore already designed; only the transport is missing.
+
+    THIS IS ADDITIVE, NEVER A REROUTE. `rmd digest` keeps defaulting to `imessageChannel` and the
+    cadence keeps its inbox write; email is a second delivery, so a console built later inherits a
+    channel rather than reclaiming one.
+  design: |
+    (i) ONE MORE `NotifyChannel`, NO NEW INTERFACE. `emailChannel(recipient, deps)` implements the
+    existing `send(message)` plus the optional `unavailable()`, exactly as `imessageChannel` does.
+    Its `unavailable()` names the missing half concretely — no recipient configured, or no
+    transport credential in the environment — so an undeliverable channel reports a reason rather
+    than throwing or silently dropping.
+
+    (ii) THE TRANSPORT IS INJECTED, NEVER CONSTRUCTED INLINE. The send seam takes a sender
+    function so every test drives a recorder and no suite opens a socket. The default
+    implementation is the only code path a test cannot fake, so it gets one test that exercises it
+    against a local sink rather than a real server (the W1-T977/W1-T978 all-fakes lesson).
+
+    (iii) CREDENTIALS COME FROM `process.env`, READ AT SEND TIME, NEVER FROM A PARAMETER — the
+    #2248 lesson, and the same seam `GH_TOKEN` already uses. Nothing in this task writes, logs, or
+    echoes a credential; the ledger line records the channel NAME and the outcome, never the
+    address's authentication.
+
+    (iv) `channelName: "email"` RIDES THE LEDGER LINE. `notify` already ledgers `channel:
+    deps.channelName ?? "imessage"`, so an email send is distinguishable from an iMessage send in
+    the ledger with no schema change.
+
+    (v) DEGRADE, NEVER THROW, AND NEVER LIE ABOUT IT — notify.ts's existing doctrine, inherited
+    verbatim: a transport failure is ledgered as a failure, and no caller's cadence is broken by an
+    undeliverable message.
+  acceptance:
+    - claim: "an email channel implements the existing NotifyChannel contract and sends the rendered digest to the configured recipient"
+      proof: "unit test: test/a-report-with-no-reader-is-not-a-report.test.ts"
+    - claim: "a channel with no recipient or no transport credential reports a named unavailable reason and sends nothing, rather than throwing or dropping silently"
+      proof: "unit test: test/a-report-with-no-reader-is-not-a-report.test.ts"
+    - claim: "the send is ledgered with channel email, so an email delivery is distinguishable from an iMessage one without a schema change"
+      proof: "unit test: test/a-report-with-no-reader-is-not-a-report.test.ts"
+    - claim: "no credential is logged, ledgered or included in any rendered message"
+      proof: "unit test: test/a-report-with-no-reader-is-not-a-report.test.ts"
+    - claim: "the existing iMessage adapter and rmd digest's default channel are unchanged, so this is additive delivery rather than a reroute"
+      proof: "unit test: test/a-report-with-no-reader-is-not-a-report.test.ts"
+  falsifier: |
+    Close without implementation if notify.ts already ships a non-iMessage adapter that delivers
+    off macOS, or if the console mailbox (W1-T2497) has shipped and the operator can read the daily
+    digest there. A change that reroutes the cadence away from the inbox instead of adding a second
+    delivery does not satisfy this task.

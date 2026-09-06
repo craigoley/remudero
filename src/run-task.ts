@@ -1010,6 +1010,7 @@ import {
   wireSweepWakeToDaemon,
 } from "./lib/github-event-wake.js";
 import {
+  refreshInstallationToken,
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
 import {
@@ -37957,6 +37958,22 @@ export async function main(
   // See {@link installUnhandledRejectionGuard} — it is idempotent, so the in-process `main()`
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
+  // THE GITHUB APP IS THE FLEET HOST'S ONLY CREDENTIAL, and until now only `daemonCommand` and
+  // `serveCommand` minted from it. `gh auth login` is never run there and the boot env deliberately
+  // carries NO `GH_TOKEN` (deploy/recycle-container.sh, see github-app.ts's header), so every OTHER
+  // verb that shells to `gh` — 32 call sites — failed on the one host the fleet actually runs on.
+  // MEASURED 2026-09-06: `rmd review <pr>` inside the daemon container died in `ghJson`, which is
+  // how a CAPPED verdict's own documented remedy, `--override-capped-by`, became unrunnable there.
+  // Absent `GH_APP_*` — any dev machine — this is NOT AN ATTEMPT: it mints nothing, logs nothing and
+  // leaves `GH_TOKEN` alone, so behaviour off the fleet host is byte-identical. Guarded on an absent
+  // token so an operator's own exported `GH_TOKEN` is never clobbered, and unawaited failure is
+  // reported rather than swallowed, because falling through to a bare `gh` error is what cost the
+  // diagnosis above.
+  if (!process.env.GH_TOKEN) {
+    await refreshInstallationToken({
+      log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
+    });
+  }
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
   const arg = rest[0];
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
