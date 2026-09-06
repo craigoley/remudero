@@ -218,6 +218,12 @@
       "grepHint": "ledger.ts forensics"
     },
     {
+      "path": "docs/forensics/mount-headroom-sweep.md",
+      "title": "mount-headroom-sweep.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "mount-headroom-sweep.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/mutation-ratchet.md",
       "title": "mutation-ratchet.mjs forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
