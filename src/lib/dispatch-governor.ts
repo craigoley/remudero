@@ -109,8 +109,7 @@ export function checkDispatchGovernors(
   try {
     quietHours = deps.checkQuietHours?.();
   } catch {
-    // FAIL OPEN, matching the memory governor's polarity rather than cost/queue: an unreadable
-    // preference flag must never silently turn into a fleet-wide dispatch hold.
+    quietHours = undefined;
   }
   if (quietHours) return { kind: "quiet_hours", result: quietHours };
 
@@ -138,7 +137,6 @@ export interface DispatchGovernorDeps {
   /** W1-T1038 — see this module's own FAIL-OPEN note (above `checkDispatchGovernors`) for why a
    *  throw from this one dep is handled differently from the two above it. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
-  /** A defined result means the operator's quiet-hours preference defers new dispatch only. */
   checkQuietHours?: () => QuietHoursHoldResult | undefined;
 }
 
