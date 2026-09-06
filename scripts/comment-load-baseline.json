@@ -106,6 +106,7 @@
   "src/lib/body-repair.ts": 79,
   "src/lib/branch-reaper.ts": 108,
   "src/lib/bundle.ts": 100,
+  "src/lib/ci-failure-corpus.ts": 65,
   "src/lib/ci-gate-required.ts": 2,
   "src/lib/ci-parity.ts": 476,
   "src/lib/classify.ts": 201,
@@ -264,6 +265,6 @@
   "src/lib/worker.ts": 1112,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16135,
+  "src/run-task.ts": 16145,
   "src/spike.ts": 18
 }

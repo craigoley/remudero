@@ -17344,14 +17344,9 @@ export function ledgerGrepCommand(rest: string[], opts: { stateDir?: string } = 
  * instrument proposal into the ACTIVE-proposal registry via updateProposalRegistry, idempotent
  * by rule id — `--no-escalate` runs the report only, with zero writes.
  */
-/**
- * W1-T2957 — read one window of pull requests into {@link CiFailureCorpusInput}.
- *
- * `fetch` is INJECTED (defaults to {@link ghJson}) so every arm is provable with zero network; real
- * callers omit it. A read that throws yields a commit with NO rollup, which
- * {@link collectCiFailureCorpus} reports as UNREADABLE rather than green — the distinction the
- * corpus's own `status` member exists for.
- */
+/** W1-T2957 — one window of pull requests as {@link CiFailureCorpusInput}. `fetch` is injected so
+ *  every arm is provable with zero network; a throwing read yields NO rollup, which the corpus
+ *  reports UNREADABLE rather than green (see `ci-failure-corpus.ts` for why that matters). */
 export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson): CiFailureCorpusInput {
   const self = resolveOwnerRepo();
   const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
@@ -17386,8 +17381,8 @@ export function loadCiFailureWindow(days: number, fetch: GhApiFetcher = ghJson):
   return { prs };
 }
 
-/** The paths one commit changed, or `undefined` when the read fails — never an empty list, which
- *  would read as "this commit changed nothing" and make a repair delta look empty. */
+/** Paths one commit changed; `undefined` on a failed read — never `[]`, which would read as "this
+ *  commit changed nothing" and make a repair delta look empty. */
 export function commitChangedFiles(
   owner: string,
   repo: string,
@@ -17408,13 +17403,8 @@ export interface CiFailuresCommandDeps {
   loadWindow?: (days: number) => CiFailureCorpusInput;
 }
 
-/**
- * `rmd ci-failures [--days N]` — W1-T2957: the window's red gates, each paired with the later commit
- * on the SAME pull request that turned that SAME gate green.
- *
- * REPORT-ONLY, and that is Law 5 rather than timidity: it files nothing, mints no id and writes no
- * guidance, so a machine reading can never present itself as a ratified one.
- */
+/** `rmd ci-failures [--days N]` — W1-T2957: each red gate paired with the later commit on the SAME
+ *  pull request that turned that SAME gate green. REPORT-ONLY (Law 5): files nothing, mints no id. */
 export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = {}): number {
   const badArg = unknownArgError("ci-failures", rest, ["--days"], []);
   if (badArg) {
@@ -17431,9 +17421,7 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
   try {
     input = deps.loadWindow ? deps.loadWindow(days) : loadCiFailureWindow(days);
   } catch (e) {
-    // A window that could not be READ is not a window with no red gate. Rendering an empty corpus
-    // here would report "nothing went wrong" about a period never observed — the naked zero this
-    // task's own falsifier forbids.
+    // A window that could not be READ is not a window with no red gate — the naked zero forbidden.
     console.error(
       `rmd ci-failures: the pull-request window could not be read (${(e as Error).message}) — ` +
         "reporting nothing rather than an empty window, which would read as 'no gate was red'",
