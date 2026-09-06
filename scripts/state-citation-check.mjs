@@ -1,85 +1,26 @@
 #!/usr/bin/env node
-// scripts/state-citation-check.mjs
+// scripts/state-citation-check.mjs — the state-citation gate (W1-T1263).
 //
-// STATE-CITATION gate (W1-T1263).
+// A durable record — a census, a governing document, a numbered constraint set — belongs in a
+// tracked file, never in gitignored state/: that tree is swept by design (sweepStaleTempDirs,
+// scratchReap, reapStaleWorktrees, container recreation), so a tracked file citing a state/*.md
+// path by reference eventually points at nothing. This scans every git-tracked file for a
+// state/*.md-shaped citation and refuses one that is neither pre-existing (recorded with a reason
+// in scripts/state-citation-baseline.json) nor marked, in its own citing block, as recording that
+// the path is unrecoverable (see UNRECOVERABLE_MARKER_RE).
+// Why: CLAUDE.md's own convention against this went unenforced twice, twelve days apart
+// (#1587/710b18b5, then the Law 4/5 loss). docs/forensics/state-citation-check.md#the-file-header
 //
-// THE DEFECT IS PLACEMENT, NOT SCRATCH. `state/` is gitignored runtime exhaust and is SUPPOSED
-// to be swept -- `sweepStaleTempDirs` (src/lib/tmp.ts), `scratchReap` (src/lib/policy.ts),
-// `reapStaleWorktrees` (src/lib/worker.ts) and container recreation all reap it, correctly, by
-// design. The failure this gate exists to catch is different: a document meant to be DURABLE --
-// a census, a research report, a numbered set of governing constraints -- gets written into that
-// swept tree anyway, and a TRACKED file then cites it BY PATH as the source of record. The
-// tracked file survives every sweep; the thing it points at does not. CLAUDE.md already states
-// the convention ("a report written to state/ is SCRATCH, not a record"), and that sentence is
-// exactly why this gate exists: it was UNENFORCED PROSE, and the citations kept accruing after it
-// was written -- repaired twice, twelve days apart (#1587 / 710b18b5, then the Law 4/5 loss),
-// with the writing path untouched both times.
-//
-// THE PREDICATE IS THE FILE EXTENSION, NOT INTENT. Nothing in this repo WRITES a `state/*.md`
-// file -- every hit under src/ or scripts/ for that shape is a prose comment CITING a recon
-// document, against a control of over a hundred legitimate runtime `state/` path references
-// (`state/ledger.ndjson`, `state/PAUSE`, `state/service-tokens.json`, `state/drain.lock`,
-// `state/logs/...`) that this gate must never touch and never does -- the regex below requires a
-// literal `.md` suffix, so an ordinary runtime path simply cannot match it. `.md` under `state/`
-// is a human-authored document by construction; this gate guards ONLY that narrow class. It does
-// NOT guard `state/` generally -- a broad form would have to adjudicate every real runtime
-// reference by intent, which is a check nobody could keep correct.
-//
-// A SMALL, WRITTEN-REASON BASELINE CARRIES THE PRE-EXISTING CITERS, mirroring
-// scripts/task-id-existence-check.mjs's idiom exactly: every `state/*.md` path already cited from
-// a tracked file at filing time is seeded into scripts/state-citation-baseline.json with a
-// written reason, so day one is not universally red. The gate only refuses a citation of a path
-// ABSENT from that baseline -- this cannot recover what is already lost, and does not pretend to.
-// An entry with no reason is REJECTED, so the exemption list cannot grow silently.
-//
-// THE ESCAPE HATCH IS KEYED ON CONTENT SHAPE, NEVER A PATH OR FILE ALLOWLIST (both rot). A
-// citation is permitted, independent of the baseline, when the citing line or the few lines
-// around it (its "block") also carries an unrecoverability marker -- the word "unrecoverable" (or
-// "unrecoverably"). This is the design's hardest case, worked out against MASTER-PLAN.md's own
-// real citations of a lost research census: it cites that path TWICE, once as ground-truth
-// evidence (must FAIL if the path were ever new) and once in the very sentence recording that the
-// path is unrecoverable (must PASS). The falsifier test drives exactly that shape.
-//
-// THE CHECK REFUSES RATHER THAN REPORTING SUCCESS WHEN IT SCANS NOTHING. A run that walks its
-// target directories and finds zero eligible files is the same "empty because my query was
-// malformed, not because there was nothing to find" defect class MASTER-PLAN.md's P48 entry
-// names for boundary reads generally -- so an empty scan is a hard failure here too, never a
-// silent, vacuous pass.
-//
-// SCOPE: unlike scripts/task-id-existence-check.mjs (which deliberately excludes test/ -- most of
-// its population there is synthetic fixture ids), the durable-citation population is genuinely
-// spread across plan/tasks.d/, plan/feedback/, test/, src/, deploy/Dockerfile, MASTER-PLAN.md,
-// DECISIONS.md and CLAUDE.md itself, so the default scan root is the whole repository (`.`). The
-// file list itself comes from `git ls-files` (a READ, exactly like task-id-existence's `git
-// ls-remote`) rather than a raw directory walk: the guard's own subject is "a TRACKED file" --
-// scanning by git's own notion of tracked content is both the more faithful predicate and the one
-// that automatically keeps untracked scratch, `node_modules`, build output and `state/` itself
-// (gitignored runtime exhaust -- the thing being cited, never the citer) out of scope, with no
-// separate exclusion list to keep in sync. The baseline file is excluded from its own scan by
-// construction: it exists to ENUMERATE the paths this gate already knows about, not to cite one
-// as authority.
-//
-// NOT YET WIRED INTO .github/workflows/ci.yml, DELIBERATELY, THIS PR. Doing so requires
-// registering this file on `INSTRUMENT_SURFACE` (src/lib/review.ts) so
-// test/instrument-surface-completeness.test.ts stays green once a workflow/package.json
-// references it -- but that registration is a `src/` product-path edit, and landing it beside
-// `.github/workflows/ci.yml` and scripts/state-citation-baseline.json (both already on
-// `INSTRUMENT_SURFACE`) in the SAME diff trips `detectInstrumentEntanglement`, remudero-review's
-// own merge-blocking logic (docs/operator-guide.md documents the identical conflict for every
-// prior gate of this shape and prescribes landing the pieces as separate PRs). This script is
-// complete and proven correct against the real repository (test/state-citation-check.test.ts);
-// wiring it into ci.yml/package.json plus the INSTRUMENT_SURFACE registration is the tracked
-// follow-up, unblocked once this file exists on `main`.
+// The predicate is the .md extension, not intent — nothing writes a state/*.md file, so every
+// match is a prose citation, and ordinary runtime state/ paths (ledger.ndjson, PAUSE,
+// service-tokens.json, drain.lock) simply lack that suffix. A scan reading zero tracked files
+// refuses rather than reporting success, the same query-shape hazard MASTER-PLAN.md's P48 entry
+// names generally. Not yet wired into ci.yml — see scripts/unwired-gate-check.mjs's ALLOWANCE
+// entry for why.
 //
 // Usage:
-//   node scripts/state-citation-check.mjs
-//     [--dir <path>]...            (default: . -- the whole repo, relative to --cwd)
-//     [--baseline <path>]         (default: scripts/state-citation-baseline.json)
-//     [--cwd <path>]              (default: process.cwd())
-//
-// The pure pieces (listTrackedFiles, scanCitations, loadBaseline, evaluateCitations) are exported
-// so the falsifier fixture test can drive each surface independently, plus the CLI directly
-// (spawn + exit code) for the end-to-end proof.
+//   node scripts/state-citation-check.mjs [--dir <path>]... [--baseline <path>] [--cwd <path>]
+//   (dir default: . ; baseline default: scripts/state-citation-baseline.json)
 
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -87,22 +28,18 @@ import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { join, relative, resolve } from "node:path";
 
-// A citation is a literal `state/` followed by one or more path characters ending in `.md`. This
-// is the SAME predicate the shard's own rationale re-derived and measured against: it separates
-// durable documents (`.md`) from the ~166 ordinary runtime paths under `state/` mechanically,
-// never by judgement.
+// A citation is a literal `state/` path ending in `.md` — the predicate separating durable
+// documents from ~166 ordinary runtime state/ paths, mechanically, never by judgement.
+// docs/forensics/state-citation-check.md#citation_re-and-path_re
 const CITATION_RE = /state\/[A-Za-z0-9._@/-]+\.md/g;
 const PATH_RE = /^state\/[A-Za-z0-9._@/-]+\.md$/;
 
-// The content-shape escape hatch (design note iv) -- see the file header for the derivation.
+// The content-shape escape hatch — see the file header for the derivation.
 const UNRECOVERABLE_MARKER_RE = /\bunrecoverabl[ey]\b/i;
 
-// How many lines before/after the citing line count as its "block" when looking for the marker.
-// MASTER-PLAN.md hard-wraps prose at ~100 chars, so a marker word can land on the line AFTER the
-// one carrying the path (measured: the real tombstone citation's own "unrecoverable" sits exactly
-// one line below the path) -- this window is sized to catch that with room to spare, while
-// staying far short of an entire multi-paragraph bullet block (which would wrongly pass BOTH of
-// MASTER-PLAN.md's citations of the same path instead of separating them).
+// Lines before/after the citing line searched for the marker, sized to the measured gap in
+// MASTER-PLAN.md's real citation while staying short of a whole bullet block.
+// docs/forensics/state-citation-check.md#context_window
 const CONTEXT_WINDOW = 3;
 
 const BINARY_EXTENSIONS = new Set([
@@ -111,11 +48,9 @@ const BINARY_EXTENSIONS = new Set([
 ]);
 
 /**
- * Every file `git ls-files` reports as TRACKED under `dirs` (resolved against `cwd`), as paths
- * relative to `cwd`. THROWS if the read itself fails (not a git repo, `git` unavailable, etc.) --
- * distinct from a git repo that legitimately tracks nothing under `dirs`, which returns an empty
- * array and is for the caller to decide what to do with (main() below treats it identically to
- * "scanned zero files", which is exactly the silent-zero shape this gate refuses to pass on).
+ * Every file `git ls-files` reports as tracked under `dirs` (resolved against `cwd`), as paths
+ * relative to `cwd`. Throws if the read itself fails; returns `[]` for a repo that legitimately
+ * tracks nothing, which main() below treats the same as "scanned zero files".
  */
 export function listTrackedFiles(dirs, cwd) {
   const result = spawnSync("git", ["-C", cwd, "ls-files", "-z", "--", ...dirs], { encoding: "utf8" });
@@ -129,14 +64,11 @@ export function listTrackedFiles(dirs, cwd) {
 }
 
 /**
- * Scan every TRACKED file under `dirs` (resolved against `cwd`, via {@link listTrackedFiles}) for
- * every `state/*.md`-shaped citation, returning the flat list of occurrences -- `{ path, file,
- * line, marked }`, `file` relative to `cwd`, `marked` true when the citing line's block (±
- * CONTEXT_WINDOW lines) carries the unrecoverability marker -- plus `filesScanned`, the count of
- * files actually read, so a caller can refuse a run that read nothing rather than silently
- * reporting success on an empty scan. `skipAbs` (an ABSOLUTE path, typically the baseline file) is
- * never scanned, if given -- the baseline exists to ENUMERATE citations, not to make one.
- * Read-only: nothing is ever written, and `git ls-files` never mutates the tree it reads.
+ * Scans every tracked file under `dirs` for state/*.md-shaped citations, returning
+ * `{ occurrences, filesScanned }`. Each occurrence is `{ path, file, line, marked }`, `marked`
+ * true when the citing line's ± CONTEXT_WINDOW block carries the unrecoverability marker.
+ * `skipAbs` (the baseline file's absolute path) is never scanned — it enumerates citations, it
+ * does not make one. Read-only.
  */
 export function scanCitations(dirs, cwd, skipAbs) {
   const occurrences = [];
@@ -150,7 +82,7 @@ export function scanCitations(dirs, cwd, skipAbs) {
     try {
       text = readFileSync(join(cwd, rel), "utf8");
     } catch (err) {
-      if (err.code === "ENOENT") continue; // tracked in the index but absent on disk -- nothing to read.
+      if (err.code === "ENOENT") continue; // tracked but absent on disk — nothing to read.
       throw err;
     }
     filesScanned++;
@@ -175,11 +107,9 @@ export function scanCitations(dirs, cwd, skipAbs) {
 }
 
 /**
- * Parse+validate scripts/state-citation-baseline.json into a Map from `state/*.md` path to its
- * written reason. THROWS on a structurally invalid file, on an entry whose `path` does not match
- * the citation shape, on any entry missing a non-empty `reason`, or on a duplicate path -- an
- * exemption with no recorded reason would let the baseline grow silently, which is exactly the
- * failure this gate exists to prevent for itself (same discipline as task-id-existence's).
+ * Parses and validates scripts/state-citation-baseline.json into a Map from path to its written
+ * reason. Throws on invalid JSON, a malformed path, a missing reason, or a duplicate — an entry
+ * with no reason would let the exemption list grow silently.
  */
 export function loadBaseline(path) {
   let text;
@@ -219,13 +149,10 @@ export function loadBaseline(path) {
 }
 
 /**
- * Pure decision layer: classify every occurrence as "marked" (its block carries the
- * unrecoverability marker -- passes regardless of the baseline), "baselined" (unmarked, but its
- * path has a written baseline exemption -- passes) or "failed" (neither -- a genuine new,
- * unrecorded durable-record citation). Evaluated PER OCCURRENCE, not per path, because the same
- * path can legitimately land on both sides in the same file (MASTER-PLAN.md's own hardest case:
- * one citation records the path as unrecoverable, a different citation of the SAME path asserts
- * it as live evidence).
+ * Classifies each occurrence as "marked" (passes regardless of baseline), "baselined" (unmarked
+ * but exempted) or "failed". Evaluated per occurrence, not per path, because the same path can
+ * legitimately land on both sides in one file — MASTER-PLAN.md's own citation of a path as both
+ * live evidence and a recorded loss.
  */
 export function evaluateCitations(occurrences, baseline) {
   return occurrences.map((occ) => {
@@ -258,9 +185,8 @@ function main(argv) {
     return;
   }
 
-  // Resolved against the REAL process cwd, matching loadBaseline's own readFileSync(baselinePath)
-  // above -- --cwd only retargets where the scan looks for tracked files, never where the
-  // baseline itself is read from (same split task-id-existence-check.mjs's --baseline makes).
+  // --cwd only retargets where files are scanned; the baseline path is always read relative to
+  // the real process cwd.
   const skipAbs = resolve(baselinePath);
 
   let occurrences, filesScanned;
