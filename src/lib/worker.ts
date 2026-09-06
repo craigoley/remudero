@@ -2560,13 +2560,27 @@ export function recordCanonicalCheckoutDrift(
   deps: {
     measure?: (repoDir: string, ref: string) => CanonicalCheckoutDriftResult;
     warn?: (message: string) => void;
+    /** Where a fresh worktree's `node_modules` ACTUALLY resolves from — {@link resolveNodeModulesSource}, the same
+     * primitive {@link linkWorktreeNodeModules} links with, so the two can never disagree about provenance. */
+    resolveSource?: (repoDir: string) => string | undefined;
   } = {},
 ): CanonicalCheckoutDriftResult {
   const result = (deps.measure ?? measureCanonicalCheckoutDrift)(repoDir, ref);
   if (result.status === "behind") {
+    // NAME THE SOURCE, NEVER ASSUME IT IS THIS CLONE. `resolveNodeModulesSource` PREFERS `repoDir/node_modules` and
+    // falls back to the install root — and on the fleet host the fallback is the only one that exists, because the
+    // canonical clone carries no `node_modules` at all (its own doc comment records that measurement). The old wording
+    // asserted the stale tree was the deps source unconditionally, so on the very host this detector exists to serve it
+    // fired on EVERY worktree creation stating something false, and read as a live dependency fault rather than an inert
+    // distance. Worktrees are cut from `origin/<ref>` after a fetch, so the drift never reaches their CODE either.
+    const source = (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
+    const inThisClone = source !== undefined && source === join(repoDir, "node_modules");
     (deps.warn ?? ((m: string) => console.error(m)))(
       `canonical checkout drift: ${repoDir} is ${result.commits} commit(s) behind origin/${ref} — ` +
-        "the node_modules just symlinked into this worktree comes from that stale tree; " +
+        (inThisClone
+          ? "the node_modules just symlinked into this worktree comes from that stale tree; "
+          : `this worktree's node_modules comes from ${source ?? "no resolvable source"}, not from that stale tree, ` +
+            "so the distance does not reach its dependencies; ") +
         "proceeding anyway (best-effort — see linkWorktreeNodeModules)",
     );
   }

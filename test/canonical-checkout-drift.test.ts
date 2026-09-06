@@ -279,3 +279,48 @@ test("worktreeAdd stays silent about drift when repoDir is already current -- no
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── the warning must name the REAL deps source, not assume it is this clone ───────────────────
+
+test("recordCanonicalCheckoutDrift: when node_modules resolves to THIS clone, the stale-tree wording stands", () => {
+  const warnings: string[] = [];
+  recordCanonicalCheckoutDrift("/repo", "main", {
+    measure: () => ({ status: "behind", commits: 7 }),
+    resolveSource: (repoDir) => join(repoDir, "node_modules"),
+    warn: (m) => warnings.push(m),
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /7 commit\(s\) behind origin\/main/);
+  assert.match(warnings[0]!, /comes from that stale tree/);
+});
+
+test("recordCanonicalCheckoutDrift: when node_modules resolves ELSEWHERE, the warning names that source and says the drift does not reach the deps", () => {
+  // The fleet-host shape, measured 2026-09-06: /home/node/Remudero/repos/remudero carries no
+  // node_modules, so resolveNodeModulesSource falls back to the install root and the worktree's
+  // symlink points there. The old wording claimed the stale clone was the source on every single
+  // worktree creation — false on the one host this detector exists to serve.
+  const warnings: string[] = [];
+  recordCanonicalCheckoutDrift("/repo", "main", {
+    measure: () => ({ status: "behind", commits: 421 }),
+    resolveSource: () => "/install/node_modules",
+    warn: (m) => warnings.push(m),
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /421 commit\(s\) behind origin\/main/, "the distance is still reported");
+  assert.match(warnings[0]!, /node_modules comes from \/install\/node_modules, not from that stale tree/);
+  assert.doesNotMatch(
+    warnings[0]!,
+    /the node_modules just symlinked into this worktree comes from that stale tree/,
+    "the false provenance claim must be gone, not merely accompanied by a truer one",
+  );
+});
+
+test("recordCanonicalCheckoutDrift: no resolvable node_modules source is said so, never silently attributed to the clone", () => {
+  const warnings: string[] = [];
+  recordCanonicalCheckoutDrift("/repo", "main", {
+    measure: () => ({ status: "behind", commits: 3 }),
+    resolveSource: () => undefined,
+    warn: (m) => warnings.push(m),
+  });
+  assert.match(warnings[0]!, /no resolvable source/);
+});
