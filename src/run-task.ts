@@ -530,12 +530,17 @@ import {
   mintCiLearningShards,
   recordCiLearningCadenceFire,
   recordMeasurementCadenceFire,
+  recordWipeTestCadenceFire,
   renderVerbCensusDigestLine,
   runMeasurementCadenceReport,
   runVerbCensus,
+  wipeTestCadenceCheck,
   type MeasurementCadenceDecision,
   type MeasurementCadenceReportOpts,
   type MeasurementCadenceRunResult,
+  type WipeTestCadenceDecision,
+  type WipeTestCadencePolicy,
+  type WipeTestCadenceRunResult,
 } from "./lib/measurement-cadence.js";
 import {
   boardReviewMarkerPath,
@@ -636,6 +641,7 @@ import {
   buildHeadlineIndex,
   buildPromotionJudgePrompt,
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+  loadLearningsIndex,
   loadLearningsCorpus,
   parsePromotionJudgeVerdict,
   parseRuleHeadlines,
@@ -646,18 +652,22 @@ import {
   runPromotionPass,
   verifyBundlePin,
 } from "./lib/learnings.js";
-import type { LearningEntry, PromotionJudgeDeps, RuleHeadline } from "./lib/learnings.js";
+import type { LearningEntry, LearningsIndex, PromotionJudgeDeps, RuleHeadline } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { loadOperatorNotesForTask, renderOperatorNotes } from "./lib/operator-notes.js";
 import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
 import {
   computeMatchedLearningsForArm,
+  generateSandboxTask,
   resolveWipeTestArmPermission,
   resolveWipeTestFactor,
   resolveWipeTestTarget,
   runWipeTestPair,
+  WIPE_TEST_PAIR_STEP,
   WIPE_TEST_SANDBOX_DEFAULT,
+  type WipeTestFactor,
   type WipeTestMergedState,
+  type WipeTestPairSubject,
 } from "./lib/wipe-test.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
@@ -21097,6 +21107,122 @@ export function buildBoardReviewDaemonHooks(deps: {
   return { checkBoardReview: check, runBoardReview: run };
 }
 
+const WIPE_TEST_PAIR_ROW_PATTERN = /"step":"wipetest\.pair"/;
+
+function priorWipeTestPairCount(stateDir: string, ledgerUnion: (stateDir: string, pattern: RegExp) => ReturnType<typeof resolveLedgerUnion>): {
+  ok: true;
+  count: number;
+} | { ok: false; reason: string } {
+  const union = ledgerUnion(stateDir, WIPE_TEST_PAIR_ROW_PATTERN);
+  if (!union.ok) {
+    const reason =
+      union.archiveCount === 0
+        ? `wipe-test cadence ledger union unreadable under ${union.stateDir}: no rotation corpus`
+        : `wipe-test cadence ledger union unreadable under ${union.stateDir}: ${union.unread.length} unreadable file(s)`;
+    return { ok: false, reason };
+  }
+  let count = 0;
+  for (const line of union.matches) {
+    try {
+      const row = JSON.parse(line) as { step?: unknown };
+      if (row.step === WIPE_TEST_PAIR_STEP) count++;
+    } catch {
+      // Torn or foreign line: the pre-filter found the step text, but an unparseable row is not a
+      // measured pair and must not advance the subject/factor rotation.
+    }
+  }
+  return { ok: true, count };
+}
+
+function chooseWipeTestFactor(seq: number): WipeTestFactor {
+  return seq % 2 === 1 ? "learnings" : "recon";
+}
+
+export function buildWipeTestCadenceDaemonHooks(deps: {
+  check?: () => WipeTestCadenceDecision;
+  run?: (decision: Extract<WipeTestCadenceDecision, { fire: true }>) => Promise<WipeTestCadenceRunResult>;
+  config?: Config;
+  now?: () => Date;
+  policy?: Policy;
+  learningsIndex?: () => LearningsIndex | null;
+  ledgerUnion?: typeof resolveLedgerUnion;
+  runTaskFn?: typeof runTask;
+  execFileSyncFn?: typeof execFileSync;
+  targetArgs?: string[];
+  resolveMergedState?: (taskId: string, planPath: string, config: Config) => WipeTestMergedState;
+} = {}): {
+  checkWipeTestCadence: () => WipeTestCadenceDecision;
+  runWipeTestCadence: (decision: Extract<WipeTestCadenceDecision, { fire: true }>) => Promise<WipeTestCadenceRunResult>;
+} {
+  const configFor = () => deps.config ?? loadConfig();
+  const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
+  const ledgerUnion = deps.ledgerUnion ?? resolveLedgerUnion;
+  const learningsIndexFor =
+    deps.learningsIndex ?? (() => loadLearningsIndex(join(projectLearningsHome(repoRoot), "index.json")));
+  const check =
+    deps.check ??
+    (() => {
+      const config = configFor();
+      const policy: WipeTestCadencePolicy = policyFor().values.wipeTestCadence;
+      const paced = wipeTestCadenceCheck({ root: config.root, policy, now: deps.now?.() });
+      if (!paced.fire) return paced;
+
+      const prior = priorWipeTestPairCount(join(config.root, "state"), ledgerUnion);
+      if (!prior.ok) return { fire: false, reason: prior.reason };
+
+      const index = learningsIndexFor();
+      if (!index) return { fire: false, reason: "wipe-test cadence learnings index unavailable" };
+      const shards = Object.keys(index.files).sort();
+      if (shards.length === 0) return { fire: false, reason: "wipe-test cadence learnings index has no shards" };
+
+      const seq = prior.count + 1;
+      const shard = shards[(seq - 1) % shards.length]!;
+      let subject: WipeTestPairSubject;
+      try {
+        subject = generateSandboxTask(index, [shard], seq);
+      } catch (e) {
+        return { fire: false, reason: String((e as Error)?.message ?? e) };
+      }
+      return {
+        fire: true,
+        reason: paced.reason,
+        seq,
+        subject,
+        factor: chooseWipeTestFactor(seq),
+      };
+    });
+  const run =
+    deps.run ??
+    (async (decision) => {
+      const config = configFor();
+      const now = deps.now?.() ?? new Date();
+      recordWipeTestCadenceFire(config.root, now);
+      const self = resolveOwnerRepo();
+      const result = await runWipeTestPair(decision.subject, decision.factor, {
+        config,
+        repoRoot,
+        owner: self.owner,
+        selfRepo: self.repo,
+        targetArgs: deps.targetArgs ?? [],
+        runTaskFn: deps.runTaskFn ?? runTask,
+        execFileSyncFn: deps.execFileSyncFn ?? execFileSync,
+        ledgerPath: ledgerPathFor(config),
+        pairIndex: decision.seq - 1,
+        resolveMergedState:
+          deps.resolveMergedState ?? ((taskId, planPath, cfg) => defaultWipeTestMergedState(taskId, planPath, cfg, self.owner)),
+        now: () => now,
+      });
+      return {
+        status: result.status,
+        reason: result.status === "refused" ? result.reason : undefined,
+        seq: decision.seq,
+        subject: decision.subject,
+        factor: decision.factor,
+      };
+    });
+  return { checkWipeTestCadence: check, runWipeTestCadence: run };
+}
+
 /**
  * W1-T322 (design (iii)): the RETRO-TIME consumer of the SAME reachability scan the review path
  * uses — MASTER-PLAN's own NET STATE section, re-checked against the CURRENT mainline checkout
@@ -25669,6 +25795,10 @@ export async function daemonCommand(
   // dead code, which is not a hypothetical here: that is precisely what shipped in #2952 and
   // stayed dead for the eight hours between its merge and this fix.
   const boardReviewHooks = target.isSelf ? buildBoardReviewDaemonHooks({ config }) : undefined;
+  // W1-T2659: the wipe-test cadence rung. SELF-TARGET ONLY, same reason as measurement-cadence:
+  // its marker and ledger live under this harness checkout. The pair itself still targets the
+  // sandbox by default through runWipeTestPair/resolveWipeTestTarget.
+  const wipeTestCadenceHooks = target.isSelf ? buildWipeTestCadenceDaemonHooks({ config }) : undefined;
   try {
     const summary = await runDaemonFn(
       plan,
@@ -25944,6 +26074,8 @@ export async function daemonCommand(
             // cited "(Rule 15)" for a doctrine that rule does not carry; see §12 rule 27.
         checkBoardReview: boardReviewHooks?.checkBoardReview,
         runBoardReview: boardReviewHooks?.runBoardReview,
+        checkWipeTestCadence: wipeTestCadenceHooks?.checkWipeTestCadence,
+        runWipeTestCadence: wipeTestCadenceHooks?.runWipeTestCadence,
         // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
         // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
         // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once

@@ -235,7 +235,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
     "keychainProvisionLockWaitMs",
-    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "ciLearningCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "githubEventWake",
+    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "ciLearningCadence", "wipeTestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "githubEventWake",
     "armCalibrationBands",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
@@ -531,6 +531,11 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "ciLearningCadence.enabled",
     "ciLearningCadence.minIntervalMinutes",
     "ciLearningCadence.maxPerDay",
+    // W1-T2659: wipe-test cadence is net-new too, and its disabled default is its own ruling:
+    // one fire spends two sandbox worker dispatches, unlike the read-only cadence siblings.
+    "wipeTestCadence.enabled",
+    "wipeTestCadence.minIntervalMinutes",
+    "wipeTestCadence.maxPerDay",
     // W1-T943: `workerStall` joins them too — no prior literal ever measured a worker-quiet
     // threshold before this task's own filing verified plan/policy.yaml carried zero rows for it.
     "workerStall",

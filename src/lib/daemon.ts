@@ -15,7 +15,12 @@
  * Forensics for this file: docs/forensics/daemon.md. */
 
 import type { AutoTriageDecision } from "./auto-triage.js";
-import type { MeasurementCadenceDecision, MeasurementCadenceRunResult } from "./measurement-cadence.js";
+import type {
+  MeasurementCadenceDecision,
+  MeasurementCadenceRunResult,
+  WipeTestCadenceDecision,
+  WipeTestCadenceRunResult,
+} from "./measurement-cadence.js";
 import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
@@ -728,6 +733,14 @@ export interface DaemonDeps {
    *  registry proposals, and nothing else — it does not push, merge, mint or file, and Rule 15
    *  stands. Best-effort, and a fired review never gates dispatch or changes a verdict. */
   runBoardReview?: () => Promise<BoardReviewReport>;
+  /** W1-T2659's wipe-test cadence rung. It spends by dispatching one generated sandbox subject
+   *  through both arms, so the loop checks it after dispatch governors and paces it independently. */
+  checkWipeTestCadence?: () => WipeTestCadenceDecision;
+  /** Runs the selected wipe-test pair. A preflight or target refusal is a `wipetest.cadence.refused`
+   *  row, not a skipped tick and not a synthetic pair. */
+  runWipeTestCadence?: (
+    decision: Extract<WipeTestCadenceDecision, { fire: true }>,
+  ) => Promise<WipeTestCadenceRunResult>;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
    * degraded read — and the loop only acts on an explicit fire. Optional (W1-T160). */
@@ -2245,6 +2258,50 @@ export async function runDaemon(
             log("daemon.retro_trigger.detached", { reason: decision.reason });
           }
         }
+      }
+    }
+
+    // Wipe-test cadence: a policy-gated falsifier pulse. It spends like retro/auto-triage, so it
+    // sits after the tick-wide dispatch governors; it has its own marker, so no sibling cadence can
+    // throttle it. The pair core writes `wipetest.pair` on measurement; this block writes the rung's
+    // fired/skipped/refused clock evidence (W1-T2659).
+    if (deps.checkWipeTestCadence) {
+      let decision: WipeTestCadenceDecision | undefined;
+      try {
+        decision = deps.checkWipeTestCadence();
+      } catch (e) {
+        log("wipetest.cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (decision?.fire) {
+        log("wipetest.cadence.fired", {
+          reason: decision.reason,
+          seq: decision.seq,
+          subject: decision.subject.id,
+          selected_shards: decision.subject.selectedShards ?? [],
+          factor: decision.factor,
+        });
+        if (deps.runWipeTestCadence) {
+          try {
+            const result = await deps.runWipeTestCadence(decision);
+            if (result.status === "refused") {
+              log("wipetest.cadence.refused", {
+                reason: result.reason ?? "wipe-test cadence refused",
+                seq: result.seq,
+                subject: result.subject.id,
+                factor: result.factor,
+              });
+            }
+          } catch (e) {
+            log("wipetest.cadence.refused", {
+              reason: String((e as Error)?.message ?? e),
+              seq: decision.seq,
+              subject: decision.subject.id,
+              factor: decision.factor,
+            });
+          }
+        }
+      } else if (decision) {
+        log("wipetest.cadence.skipped", { reason: decision.reason });
       }
     }
 

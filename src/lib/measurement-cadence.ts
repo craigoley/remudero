@@ -15,6 +15,17 @@ import {
 import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { proofQueueAudit, type ProofQueueAuditOffender, type ProofQueueAuditOpts, type ProofQueueAuditReport } from "./proof-queue-audit.js";
 import { attributeVerbs, deriveCliVerbs, deriveStepPrefixes, EMISSIONS_ALLOWLIST } from "./emissions.js";
+import {
+  aggregateWipeTestPairs,
+  WIPE_TEST_PAIRING_FLOOR,
+  WIPE_TEST_PAIR_STEP,
+  wipeTestPairFactor,
+  type WipeTestAggregate,
+  type WipeTestFactor,
+  type WipeTestPair,
+  type WipeTestPairSubject,
+  type WipeTestRunResult,
+} from "./wipe-test.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
 import type { Task } from "./plan.js";
 
@@ -176,6 +187,69 @@ export interface VerdictCalibrationCadenceResult extends MeasurementCadenceVerbS
 export interface AutonomyRateCadenceResult extends MeasurementCadenceVerbStatus {
   totalMerges: number;
   zeroTouchRate: number | null;
+}
+
+/** W1-T2659's wipe-test cadence row — same cadence bound shape as CI-learning, without
+ *  measurementCadence's `escalate` flag because this rung runs workers, it never files report
+ *  proposals. */
+export interface WipeTestCadencePolicy {
+  enabled: boolean;
+  minIntervalMinutes: number;
+  maxPerDay: number;
+}
+
+/** Wipe-test's OWN fire marker. A short interval here must never throttle measurement, digest,
+ *  board-review, or CI-learning rungs. */
+export function wipeTestCadenceMarkerPath(root: string): string {
+  return join(root, "state", "last-wipe-test-cadence.json");
+}
+
+/** Reuses {@link decideMeasurementCadence}; only the marker path and policy row are distinct. */
+export function wipeTestCadenceCheck(opts: {
+  root: string;
+  policy: WipeTestCadencePolicy;
+  now?: Date;
+}): MeasurementCadenceDecision {
+  const marker = readMeasurementCadenceMarker(wipeTestCadenceMarkerPath(opts.root));
+  return decideMeasurementCadence({
+    policy: { ...opts.policy, escalate: false },
+    marker,
+    now: opts.now ?? new Date(),
+  });
+}
+
+/** Record a wipe-test cadence fire on its independent rolling-24h marker. */
+export function recordWipeTestCadenceFire(root: string, at: Date): void {
+  recordMeasurementCadenceFire(wipeTestCadenceMarkerPath(root), at, DAY_MS);
+}
+
+export interface WipeTestFactorCadenceResult extends MeasurementCadenceVerbStatus {
+  factor: WipeTestFactor;
+  pairCount: number;
+  pairingFloor: number;
+  aggregate: WipeTestAggregate | null;
+}
+
+export interface WipeTestCadenceReportResult {
+  factors: WipeTestFactorCadenceResult[];
+}
+
+export type WipeTestCadenceDecision =
+  | { fire: false; reason: string }
+  | {
+      fire: true;
+      reason: string;
+      seq: number;
+      subject: WipeTestPairSubject;
+      factor: WipeTestFactor;
+    };
+
+export interface WipeTestCadenceRunResult {
+  status: "measured" | "refused";
+  reason?: string;
+  seq: number;
+  subject: WipeTestPairSubject;
+  factor: WipeTestFactor;
 }
 
 // ── The adoption report: a fourth verb (W1-T2266) ──────────────────────────────────────────────
@@ -928,6 +1002,8 @@ export interface MeasurementCadenceRunResult {
   proofDebtMint?: ProofDebtMintCadenceResult;
   /** The verb census, run unconditionally needing no opt-in beyond `stateDir`/`checkoutDir`. */
   verbCensus?: VerbCensusCadenceResult;
+  /** The wipe-test aggregate seat, refusing below the per-factor pairing floor. */
+  wipeTest?: WipeTestCadenceReportResult;
 }
 
 /** The verdict-calibration/autonomy-rate git join's only I/O — same shallow-clone refusal as
@@ -986,6 +1062,106 @@ export interface MeasurementCadenceReportOpts {
     /** Resolves a task id to its own plan record path, mirroring `lib/plan.ts`'s
      *  `taskRecordPath`. An id this can't resolve is simply never minted. */
     shardPathFor: (taskId: string) => string | undefined;
+  };
+}
+
+const WIPE_TEST_PAIR_PATTERN = /"step":"wipetest\.pair"/;
+
+function numberFieldOrZero(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function proofExecPasses(value: unknown): "executed_pass"[] {
+  const count = Math.max(0, Math.trunc(numberFieldOrZero(value)));
+  return Array.from({ length: count }, () => "executed_pass" as const);
+}
+
+function wipeTestVerdictOrRefused(value: unknown): WipeTestRunResult["verdict"] {
+  return typeof value === "string" ? (value as WipeTestRunResult["verdict"]) : "blocked";
+}
+
+function wipeTestFactorFromRow(value: unknown): WipeTestFactor {
+  return value === "recon" ? "recon" : "learnings";
+}
+
+function wipeTestPairFromLedgerRow(line: string): WipeTestPair | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  const row = parsed as Record<string, unknown>;
+  if (row.step !== WIPE_TEST_PAIR_STEP || typeof row.task_id !== "string") return undefined;
+  const factor = wipeTestFactorFromRow(row.factor);
+  return {
+    taskId: row.task_id,
+    factor,
+    armA: {
+      taskId: row.task_id,
+      runId: typeof row.arm_a_run_id === "string" ? row.arm_a_run_id : "",
+      verdict: wipeTestVerdictOrRefused(row.verdict_a),
+      numTurns: 0,
+      costUsd: 0,
+      strikes: 0,
+      proofExec: proofExecPasses(row.proof_exec_pass_a),
+    },
+    armB: {
+      taskId: row.task_id,
+      runId: typeof row.arm_b_run_id === "string" ? row.arm_b_run_id : "",
+      verdict: wipeTestVerdictOrRefused(row.verdict_b),
+      numTurns: numberFieldOrZero(row.turns_delta),
+      costUsd: numberFieldOrZero(row.cost_delta),
+      strikes: numberFieldOrZero(row.strikes_delta),
+      proofExec: proofExecPasses(row.proof_exec_pass_b),
+    },
+  };
+}
+
+export function runWipeTestCadenceReport(opts: {
+  stateDir: string;
+  ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult;
+}): WipeTestCadenceReportResult {
+  const union = (opts.ledgerUnion ?? resolveLedgerUnion)(opts.stateDir, WIPE_TEST_PAIR_PATTERN);
+  const pairs = union.ok ? union.matches.map(wipeTestPairFromLedgerRow).filter((p): p is WipeTestPair => p !== undefined) : [];
+  const factors: WipeTestFactor[] = ["learnings", "recon"];
+  return {
+    factors: factors.map((factor) => {
+      const sameFactor = pairs.filter((pair) => wipeTestPairFactor(pair) === factor);
+      const pairCount = sameFactor.length;
+      if (!union.ok) {
+        const reason =
+          union.archiveCount === 0
+            ? `wipe-test ledger union unreadable under ${union.stateDir}: no rotation corpus`
+            : `wipe-test ledger union unreadable under ${union.stateDir}: ${union.unread.length} unreadable file(s)`;
+        return {
+          status: "refused",
+          refusedReason: reason,
+          factor,
+          pairCount,
+          pairingFloor: WIPE_TEST_PAIRING_FLOOR,
+          aggregate: null,
+        };
+      }
+      if (pairCount < WIPE_TEST_PAIRING_FLOOR) {
+        return {
+          status: "refused",
+          refusedReason: `wipe-test ${factor} pairs below pairing floor (${pairCount}/${WIPE_TEST_PAIRING_FLOOR})`,
+          factor,
+          pairCount,
+          pairingFloor: WIPE_TEST_PAIRING_FLOOR,
+          aggregate: null,
+        };
+      }
+      return {
+        status: "measured",
+        factor,
+        pairCount,
+        pairingFloor: WIPE_TEST_PAIRING_FLOOR,
+        aggregate: aggregateWipeTestPairs(sameFactor),
+      };
+    }),
   };
 }
 
@@ -1085,6 +1261,12 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
   });
 
+  // ── wipe-test's report seat (W1-T2659): per-factor aggregates only above the pairing floor ──
+  const wipeTest = runWipeTestCadenceReport({
+    stateDir: opts.stateDir,
+    ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
+  });
+
   // ── the adoption report's mint — gated on `opts.escalate` like rule-efficacy's write above;
   // off, it reports the measured status without touching the registry.
   const adoptionMint: AdoptionMintCadenceResult = opts.escalate
@@ -1138,6 +1320,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     proofDebtReport,
     proofDebtMint,
     verbCensus,
+    wipeTest,
   };
 }
 
