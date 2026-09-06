@@ -1,0 +1,61 @@
+- id: W1-T2961
+  title: "EVERY HEALTH SIGNAL MEASURES LIVENESS AND NONE MEASURES BUILDING — the beat publishes daemon_verdict from the daemon.* prefix, so a daemon that polls, sweeps, reviews and merges forever while admitting NOTHING reads as perfectly live, and the fleet dispatched zero tasks for two days under a fully green watcher"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "W1-T2349", "W1-T2876", "W1-T2960"]
+  files: [scripts/fleet-heartbeat.sh, .github/workflows/fleet-heartbeat-watch.yml, test/the-beat-reports-whether-the-fleet-builds.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2960 measured a daemon that dispatched NOTHING for two days — zero `run.start` rows on
+    2026-09-05 and 09-06 against thousands per day before — while every instrument reported health:
+      `daemon_verdict` ............ live   (the `daemon.` prefix ticked every cycle)
+      heartbeat branch ............ fresh  (the cron beat every five minutes)
+      fleet-heartbeat-watch ....... success
+      restarts / OOMs / load ...... normal
+    NONE OF THOSE WERE WRONG. The daemon really was alive: polling, sweeping, reviewing, merging and
+    restarting cleanly. EVERY SIGNAL WE HAVE IS A LIVENESS SIGNAL, AND LIVENESS WAS NEVER THE
+    QUESTION. The one row that showed it — `attempted : (none)`, 28 of 28 summaries in one container —
+    is printed to the container log and read by nothing.
+
+    THE SAME GAP MISLED A HUMAN OPERATOR AND AN AGENT ON THE SAME DAY. Asked directly whether the
+    fleet was building, an agent cited a `run-DAEMON` worktree and `sweep.fix` rows as evidence and
+    reported healthy dispatch. Both are sweep-lane activity. Reading a liveness signal as a
+    throughput signal is the DEFAULT mistake here because throughput is not published anywhere.
+
+    THE BEAT ALREADY HAS THE RIGHT SHAPE AND THE WATCHER ALREADY HAS THE RIGHT ARM.
+    `scripts/fleet-heartbeat.sh` derives `daemon_verdict` as `live`/`STALE` from the max ts over the
+    `daemon.` prefix, and W1-T2876 taught `fleet-heartbeat-watch.yml` to escalate on it, gated by
+    `DAEMON_EXPECTED_BRANCHES` so a host that runs no daemon stays silent. A dispatch probe is that
+    same probe over a different prefix, and a dispatch arm is that same arm behind the same gate.
+
+    A BARE "NO DISPATCH" IS NOT A DEFECT AND MUST NOT ALARM ON ITS OWN. An empty runnable queue is a
+    legitimate quiet fleet. What distinguishes the two is the REASON the last tick gave, which the
+    ledger already records: `daemon_selfrestart_for_freshness` (the W1-T2960 livelock),
+    `daemon.pause`, a `dispatch.skipped` reason, or a governor deferral. The beat must publish that
+    reason alongside the verdict so the alert says WHY, not merely THAT — an alert that only says
+    "not building" sends an operator to read container logs, which is where this hid for two days.
+
+    THE THRESHOLD IS SIZED FROM THE OBSERVED POPULATION, not chosen. Normal is thousands of
+    dispatches a day; the incident ran 48h. Anything from a few hours up would have caught it, and a
+    generous bound keeps a genuinely quiet queue silent. Do NOT reuse the daemon probe's 600s: that
+    is sized against a poll interval, and dispatch legitimately idles far longer than a poll.
+
+    KEEP THE BEAT IN PLAIN BASH. `fleet-heartbeat.sh`'s own header is explicit that it must never
+    become an `rmd` verb or need node: an emptied `node_modules` kills every verb while the resident
+    daemon keeps serving, and a beat written as a verb dies in exactly the state it exists to report.
+  acceptance:
+    - claim: "the beat publishes a dispatch verdict derived from the run-task lane, not the daemon prefix"
+      proof: "unit test: W1-T2961: the beat publishes a dispatch verdict"
+    - claim: "a fleet that polls but never admits reads as stalled rather than live"
+      proof: "unit test: W1-T2961: a polling daemon that admits nothing reads as stalled"
+    - claim: "the verdict carries the reason the last tick gave, so the alert says why and not only that"
+      proof: "unit test: W1-T2961: the stalled verdict names the blocking reason"
+    - claim: "a host not expected to dispatch stays silent, the same gate the daemon arm already uses"
+      proof: "grep: DISPATCH_STALLED_AFTER_S in scripts/fleet-heartbeat.sh"
