@@ -332,6 +332,12 @@
       "grepHint": "panel-graph.ts comment forensics"
     },
     {
+      "path": "docs/forensics/plan.md",
+      "title": "Forensics: src/lib/plan.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/plan.ts` used to",
+      "grepHint": "Forensics: src/lib/plan.ts"
+    },
+    {
       "path": "docs/forensics/policy.md",
       "title": "policy.ts comment forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
