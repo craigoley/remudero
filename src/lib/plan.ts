@@ -3,14 +3,8 @@ import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
-/**
- * plan/tasks.yaml loader + validator (schema v1, MASTER-PLAN §2).
- *
- * The control plane flips `status`; humans and the Architect edit narrative.
- * This module only READS and VALIDATES — it never writes the plan (the runner
- * owns status writes separately). A task may carry a pre-authored `prompt` and
- * cited `context` entries (G-2: v0 prompts are pre-authored per task).
- */
+/** The plan/tasks.yaml loader and validator (schema v1, MASTER-PLAN §2), read-only — the control
+ *  plane flips `status`; every task's `prompt` is pre-authored (G-2). */
 
 export const TASK_STATUSES = [
   "queued",
@@ -33,16 +27,9 @@ export type TaskRisk = (typeof TASK_RISKS)[number];
 export const DEFAULT_RISK: TaskRisk = "medium";
 
 /**
- * W1-T2503: which of two things a `risk: high` band ASSERTS for THIS task — Rule 19's
- * SPAN measure (`"span"`, ≥2 subsystems/concerns) or genuine BLAST RADIUS unrelated to
- * span (`"blast-radius"`: a boot script, an auth path, a merge arm). Before this field
- * the two facts — different review implications each — shared one value with nothing
- * recording which; fifteen shards filed in a single session wrote the distinction by
- * hand as prose their linter never read. See task-linter.ts's `sizingViolation` for
- * where this is enforced: computed and REPORTED for `"span"`, exempt for
- * `"blast-radius"`, and required only on a task the diff newly files or promotes to
- * `risk: high` — the standing backlog authored before this field existed is read as
- * `undefined` and is reported, never refused.
+ * Which of two things a `risk: high` band asserts (W1-T2503): Rule 19's span measure (`"span"`) or
+ * a blast radius unrelated to span (`"blast-radius"`). task-linter.ts's `sizingViolation` enforces
+ * it. Why: docs/forensics/plan.md#band_meanings.
  */
 export const BAND_MEANINGS = ["span", "blast-radius"] as const;
 export type BandMeaning = (typeof BAND_MEANINGS)[number];
@@ -51,14 +38,8 @@ export type BandMeaning = (typeof BAND_MEANINGS)[number];
 const MERGED_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 
 /**
- * Retirement taxonomy (W1-T1287) — the sibling field that replaces the `RETIRED (…)` /
- * `CLOSED UNBUILT (…)` title-prefix convention (carried by 2 of 790 tasks, read by nothing in
- * `src/` or `test/`) with something a reader can actually filter on. Mirrors `learnings.ts`'s
- * `lifecycle` shape: a small closed vocabulary, validated at load, fail-closed on anything else
- * — the SAME three words (W1-T1287's rationale (2)) already found in use as candidate
- * `TASK_STATUSES` members before that task's Q1 ruled a new status-enum member out precisely
- * because it would re-litigate `blocked`'s exclusion semantics at four independent sites. A
- * sibling field on an already-excluded record cannot perturb that exclusion BY CONSTRUCTION.
+ * Why a `blocked` task will never be built (W1-T1287) — an operator's closed ruling, distinct from
+ * the ordinary dependency-stalled case. Never auto-written. Why: docs/forensics/plan.md#retirement_reasons.
  */
 export const RETIREMENT_REASONS = ["retired", "closed", "withdrawn"] as const;
 export type RetirementReason = (typeof RETIREMENT_REASONS)[number];
@@ -66,43 +47,20 @@ export type RetirementReason = (typeof RETIREMENT_REASONS)[number];
 export interface AcceptanceCriterion {
   claim: string;
   proof: string;
-  /**
-   * ARCHITECT-ONLY. A PR (url or `#N`) that ALREADY satisfied this criterion in an
-   * EARLIER merge. The deterministic judge treats such a criterion as MET, citing
-   * that PR as the proof — the reviewer judges diff+report and never repo state, so
-   * a criterion satisfied by an earlier PR is otherwise permanently unsatisfiable
-   * by a later one. **May ONLY be set by a human/Architect in a plan PR.** A worker
-   * adding `satisfied_by` to its own blocking criterion is "editing the criteria to
-   * match the diff" (Standing rule 15) — a failed task. (W1-T3F makes the reviewer
-   * OBSERVE repo state, which is the real fix; `satisfied_by` is the manual patch.)
-   */
+  /** Architect-only: a PR that already satisfied this criterion earlier; the judge treats it as met
+   *  and cites the PR (a worker setting this itself fails Standing rule 15).
+   *  Why: docs/forensics/plan.md#acceptancecriterionsatisfied_by. */
   satisfied_by?: string;
-  /**
-   * W1-T166 (the SpecBench reward-hacking finding): a criterion a worker that can
-   * optimize TO the visible test suite would otherwise game. `holdout: true` marks
-   * it REVIEWER-VISIBLE but WORKER-HIDDEN — every prompt assembled for a worker
-   * (recon, implement, the fix rung's unmet-criteria block, the post-compaction
-   * ANCHOR) filters it out via {@link visibleCriteria}; `buildReviewPrompt`
-   * (lib/review.ts) deliberately does NOT filter through it, since the reviewer
-   * must judge visible AND holdout criteria both — a diff that passes visible-only
-   * still yields an overall FAIL (`judgeReview`). The visible-pass vs holdout-pass
-   * gap is the reward-hacking measurement, ledgered per run as `reward_hacking_gap`
-   * (see `ReviewVerdict.rewardHackingGap`). Absent/false is the default: an
-   * ordinary criterion, shown to the worker like any other.
-   */
+  /** Reviewer-visible, worker-hidden (W1-T166's reward-hacking guard): {@link visibleCriteria}
+   *  filters it out of worker prompts, but `judgeReview` still judges it. Why:
+   *  docs/forensics/plan.md#acceptancecriterionholdout. */
   holdout?: boolean;
 }
 
 /**
- * Criteria a WORKER may be shown (W1-T166): every criterion EXCEPT `holdout:
- * true` ones. The single filter every worker-facing prompt assembler routes
- * through — `renderAnchorBlock` (lib/compaction.ts) and the fix rung's
- * unmet-criteria block (run-task.ts) both call this rather than each
- * hand-rolling its own `!c.holdout` predicate, so "never shown to a worker"
- * has exactly ONE implementation to audit. Generic over anything carrying an
- * optional `holdout` flag — both {@link AcceptanceCriterion} (the task's
- * authored list) and `CriterionVerdict` (lib/review.ts's judged list, which
- * copies `holdout` from the criterion it judged) satisfy it.
+ * Criteria a worker may be shown: every criterion except `holdout: true` ones (W1-T166). Every
+ * worker-facing prompt assembler calls this rather than re-implementing the filter, so "never
+ * shown to a worker" has exactly one implementation to audit. Why: docs/forensics/plan.md#visiblecriteria.
  */
 export function visibleCriteria<T extends { holdout?: boolean }>(criteria: T[]): T[] {
   return criteria.filter((c) => !c.holdout);
@@ -121,87 +79,43 @@ export interface Task {
   depends_on: string[];
   type: "recon" | "implement" | "diagnose" | "review" | "manual";
   verify: "auto" | "human";
-  /**
-   * Risk band (second mount-routing axis, §9) → resolves the run's mount
-   * (model/effort/max_turns) via resolveMount(type, risk). Absent ⇒ {@link
-   * DEFAULT_RISK} (medium). Schema/CI/telemetry-touching tasks run `high`.
-   */
+  /** Risk band (second mount-routing axis, §9): resolves the run's mount via `resolveMount(type,
+   *  risk)`. Absent ⇒ {@link DEFAULT_RISK}. Schema/CI/telemetry-touching tasks run `high`. */
   risk: TaskRisk;
-  /**
-   * W1-T2503: which of two things THIS task's `risk: high` band means — Rule 19's SPAN
-   * (`"span"`) or genuine BLAST RADIUS unrelated to span (`"blast-radius"`). See {@link
-   * BandMeaning}'s own doc comment for the full rationale. Optional on every task,
-   * including `risk: high` ones — required-ness is enforced by the §5C linter's
-   * `sizingViolation` (task-linter.ts), never by this loader, and ONLY for a task the
-   * diff newly files or promotes to high; a task already high before that is read as
-   * `undefined` and reported, never refused.
-   */
+  /** Which {@link BandMeaning} this task's `risk: high` asserts — see that type's own doc. Optional
+   *  even when high; required only for a newly-filed or promoted task (§5C linter). */
   band_meaning?: BandMeaning;
-  /**
-   * OPTIONAL dispatch priority (lower dispatches sooner; absent ⇒ the default tier,
-   * ordered after every task that carries one). The honest successor to file
-   * placement in `plan/tasks.yaml`, which `dispatchOrder` (lib/drain.ts) deliberately
-   * stopped reading — see that function's impl-DQ comment for the full history. Read
-   * ONLY by `compareDispatch`; parsing tolerates absence everywhere, so every task
-   * filed before this field existed is unaffected. The §5C linter's `dispatch-priority`
-   * check (lib/task-linter.ts) WARNS on a value outside [0, 99] or set on a non-open
-   * task, so a stray value degrades to odd ordering rather than rotting silently.
-   */
+  /** Dispatch priority — lower dispatches sooner; absent ⇒ the default tier. Read only by
+   *  `compareDispatch` (lib/drain.ts); the §5C linter warns on a value outside [0, 99].
+   *  Why: docs/forensics/plan.md#taskpriority. */
   priority?: number;
-  /**
-   * DECORATIVE / initial-state only. Real merge-state is DERIVED FROM GITHUB
-   * (see lib/status.ts deriveStatus) and never written back here. Kept so the
-   * schema is stable and a fresh plan reads sensibly.
-   */
+  /** Decorative/initial-state only — real merge state is derived from GitHub (`deriveStatus` in
+   *  lib/status.ts) and never written back here; see CLAUDE.md on why this is not a completion signal. */
   status: TaskStatus;
   attempts: number;
-  /**
-   * Explicit PR number for a task executed by hand before it had a ledger entry
-   * (precedence source (b) in deriveStatus). Never written by the machine.
-   */
+  /** Explicit PR number for a task executed by hand before it had a ledger entry (precedence
+   *  source (b) in `deriveStatus`). Never written by the machine. */
   pr?: number;
   principles?: Record<string, unknown>;
   budget_usd?: number;
   acceptance?: AcceptanceCriterion[];
   hand_built?: boolean;
   note?: string;
-  /**
-   * WHY this task exists (the operator-facing prose every task in plan/tasks.yaml already
-   * carries — tasks.yaml's own header calls `origin:`/`plan_refs:` "DECLARATIVE metadata";
-   * `rationale:` is the same kind of field, just not previously typed here). Read-only,
-   * same as every other narrative field on this interface — lib/task-card.ts (W1-T158) is
-   * the first real consumer, rendering it on the row-click task card.
-   */
+  /** Why this task exists, in operator-facing prose. Read-only, like every other narrative field;
+   *  rendered on the row-click task card (lib/task-card.ts). */
   rationale?: string;
-  /** Provenance (Rules 16/17): where this task came from — `architect`, `feedback#…`,
-   *  `alert#…`, `issue#…`. Never defaulted (unlike `risk`) — its absence is itself
-   *  the fact the §5C linter's provenance check reports. */
+  /** Provenance (Rules 16/17): where this task came from — `architect`, `feedback#…`, `alert#…`,
+   *  `issue#…`. Never defaulted — its absence is itself what the §5C linter's provenance check reports. */
   origin?: string;
   /** Pre-authored worker instruction (the "what to do"). */
   prompt?: string;
   /** Pre-cited context claims folded into the rendered prompt's CONTEXT block. */
   context?: ContextClaim[];
-  /**
-   * Repo-relative globs naming the files this task touches. Promptsmith matches
-   * these against the `learnings/` corpus (subsystem shards + generated index,
-   * W1-T33; originally one flat `plan/learnings.yaml`, W1-T19) to inject only
-   * the RELEVANT, non-superseded learnings. Absent → the task is treated as
-   * repo-wide (all entries candidate, still budget-bounded).
-   */
+  /** Repo-relative globs this task touches, matched against `learnings/` (W1-T33) to inject only
+   *  relevant entries. Absent ⇒ treated as repo-wide (still budget-bounded). */
   files?: string[];
-  /**
-   * OPERATOR-ONLY retirement category (W1-T1287) — records WHY a `status: "blocked"` task will
-   * never be built, so a closed operator ruling (W1-T1261, W1-T1273 — both closed by ruling on
-   * 2026-08-23) is no longer indistinguishable from the 41 other `blocked` records that are
-   * merely dependency-stalled. NEVER auto-written: nothing in `src/` sets this field, the same
-   * way `status` itself is machine-derived-elsewhere but this sibling is not (see W1-T1287 Q3
-   * (x) — a retirement is a judgement call, not a re-verifiable assertion, so unlike
-   * `learnings.ts`'s `quarantined` arm there is deliberately no auto-flip writer to copy).
-   * Absent on every non-retired task, including every other `blocked` one. `blocked`'s own
-   * exclusion semantics at `isDispatchEligible` (lib/drain.ts), `assertRunnable` (this file),
-   * and `isOpenLintTask` (run-task.ts) read `status` alone and never this field — a task with
-   * and without `retirement` filters identically at all three.
-   */
+  /** Operator-only retirement category (W1-T1287): why a `blocked` task will never be built. Never
+   *  auto-written; see CLAUDE.md's plan-hygiene section, {@link RETIREMENT_REASONS} and Why: docs/forensics/plan.md#taskretirement. */
   retirement?: RetirementReason;
 }
 
@@ -222,9 +136,8 @@ function req<T>(v: T | undefined, field: string, id: string): T {
   return v;
 }
 
-/** The YAML type of a value as an author would recognise it — `null`, `array`, `object`, or the
- *  `typeof`. A message that says "got null" or "got number" tells an author which line to look at;
- *  "got object" for a null does not. */
+/** The YAML type of a value as an author would recognise it — `null`, `array`, `object`, or
+ *  `typeof` — so an error message names the line's actual problem instead of "got object" for a null. */
 function yamlTypeOf(v: unknown): string {
   if (v === null) return "null";
   if (Array.isArray(v)) return "array";
@@ -290,17 +203,10 @@ export function validateAcceptanceShape(raw: unknown, sourceLabel: string, taskI
 }
 
 /**
- * Parse + field-validate a YAML task-list BLOB into {@link Task}s (schema v1) — WITHOUT
- * checking that every `depends_on` id actually resolves. Split out of {@link
- * loadPlanFromYaml} so a caller validating a PARTIAL blob (a drafted `plan/tasks.yaml`
- * FRAGMENT that legitimately depends on ids from the rest of the plan it isn't itself
- * carrying — lib/inbox.ts's ratification-candidate drafts, W1-T110) can get real
- * per-task schema validation without a false "unknown task" failure on a dep that is
- * merely OUTSIDE this blob. {@link loadPlanFromYaml} is this function plus the
- * whole-blob dependency-existence check; a caller checking a fragment's deps against
- * a wider, already-merged plan (e.g. {@link "./inbox.js".classifyProposal}) gets a
- * STRONGER check for free — an unresolvable dep there is also necessarily unmerged,
- * so it is reported as unmet rather than as a separate parse failure.
+ * Parse and field-validate a YAML task-list blob into {@link Task}s (schema v1), without checking
+ * that every `depends_on` id resolves. Split out of {@link loadPlanFromYaml} so a caller validating
+ * a partial blob that legitimately depends on ids outside it (lib/inbox.ts's ratification-candidate
+ * drafts, W1-T110) gets real per-task validation without a false "unknown task" failure.
  */
 export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
   let raw: unknown;
@@ -363,20 +269,14 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
   });
 }
 
-/**
- * Parse and validate an already-read plan/tasks.yaml BLOB (schema v1). Split out
- * of {@link loadPlan} so a caller that already has the text some other way (the
- * §5C linter's CI check reads a PAST revision via `git show <ref>:plan/tasks.yaml`,
- * never a second file on disk) can validate it identically — one schema, one
- * source of truth, whether the bytes came from a file or a git ref. Throws
- * {@link PlanError} on any problem; `sourceLabel` names the blob in error text.
- */
+/** Parse and validate an already-read plan/tasks.yaml blob (schema v1) — split out of {@link
+ *  loadPlan} so the §5C linter's CI check (which reads a past revision via `git show`) validates
+ *  through the same schema as a file on disk. */
 export function loadPlanFromYaml(text: string, sourceLabel: string): Plan {
   const tasks = parseTasksFromYaml(text, sourceLabel);
   const byId = new Map(tasks.map((t) => [t.id, t]));
 
-  // Every declared dependency must reference a real task WITHIN THIS BLOB — the
-  // whole-plan-load contract {@link parseTasksFromYaml}'s own callers do not need.
+  // Every dependency must resolve within this blob — stricter than {@link parseTasksFromYaml}'s own contract.
   for (const t of tasks) {
     for (const dep of t.depends_on) {
       if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
@@ -385,12 +285,8 @@ export function loadPlanFromYaml(text: string, sourceLabel: string): Plan {
   return { tasks, byId };
 }
 
-/**
- * List the shard files under `plan/tasks.d/` (sorted, deterministic order) next to
- * `planPath`. Returns `[]` when the directory does not exist — the back-compat case
- * for every plan that has not migrated to sharding yet (W1-T122 design note (iv):
- * migrating the existing single-file entries is a separate, later codemod).
- */
+/** The shard files under `plan/tasks.d/`, sorted. Returns `[]` when the directory does not exist —
+ *  the back-compat case for a plan that has not migrated to sharding yet (W1-T122). */
 function listShardFiles(shardDir: string): string[] {
   let entries: string[];
   try {
@@ -401,38 +297,10 @@ function listShardFiles(shardDir: string): string[] {
   return entries.filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort();
 }
 
-/**
- * Load plan/tasks.yaml from disk AND merge in any shards under the sibling
- * `plan/tasks.d/*.yaml` directory (W1-T122: PLAN SHARDING). One task per shard
- * file means two concurrent filings each add a DIFFERENT file — they no longer
- * share an EOF to textually conflict on, which is the whole point (the
- * nine-PR appender train #271 was 437 lines of pure appends to one shared EOF).
- *
- * Every consumer of {@link loadPlan} sees the MERGED view — sharding is invisible
- * above this function. Duplicate ids across `tasks.yaml` and any shard (or across
- * two shards) FAIL LOUD: the uniqueness guarantee the single-file format gave for
- * free must not be lost in the split. When `plan/tasks.d/` does not exist (every
- * plan that has not migrated yet), this is byte-for-byte the old single-file
- * behavior — back-compat is load-bearing so migration can be staged separately.
- *
- * Throws {@link PlanError} on any problem.
- */
-/**
- * Which FILE holds `taskId`'s record — the monolith or one of the shards — or `undefined`.
- *
- * WHY THIS IS DERIVED RATHER THAN CONSTRUCTED. `plan/tasks.d/<id>-<slug>.yaml` is the convention,
- * but it is only a convention: the slug is not recoverable from the id, and tasks still live in
- * `plan/tasks.yaml` (measured: 4 of them). A constructed string would be wrong for both cases and
- * wrong SILENTLY — it would name a path that does not exist and send a worker looking for it.
- *
- * IT REUSES `parseTasksFromYaml`, NOT A REGEX, so the answer is the one {@link loadPlan} would
- * resolve. A text scan for `- id: <taskId>` would also match a commented-out line, a `depends_on`
- * entry, or a mention in prose; the parser matches on the record the loader actually builds.
- *
- * FAIL-SOFT BY CONSTRUCTION: every read is guarded and an unreadable or unparseable file is simply
- * not the answer. The only caller renders an advisory prompt line, so a throw here would turn a
- * missing plan file into a failed RUN — strictly worse than the omission it is fixing.
- */
+/** Which file holds `taskId`'s record — the monolith or a shard — or `undefined`. Reuses {@link
+ *  parseTasksFromYaml} rather than a text scan, so the answer matches {@link loadPlan}'s own. Every
+ *  read is guarded: an unreadable file is simply not the answer, never a failed run.
+ *  Why: docs/forensics/plan.md#taskrecordpath. */
 export function taskRecordPath(planPath: string, taskId: string): string | undefined {
   const holdsTask = (p: string): boolean => {
     try {
@@ -441,8 +309,7 @@ export function taskRecordPath(planPath: string, taskId: string): string | undef
       return false;
     }
   };
-  // Monolith first, then shards — the same order `loadPlan` merges in. Ids are unique across the
-  // merged view (it throws on a duplicate), so the order cannot change which file is returned.
+  // Monolith first, then shards, same order `loadPlan` merges in — ids are unique so order cannot change the answer.
   if (holdsTask(planPath)) return planPath;
   const shardDir = join(dirname(planPath), "tasks.d");
   for (const file of listShardFiles(shardDir)) {
@@ -452,13 +319,8 @@ export function taskRecordPath(planPath: string, taskId: string): string | undef
   return undefined;
 }
 
-/**
- * W1-T2220: the file-read primitives {@link loadPlan} uses, injectable so a torn/short-read
- * race (a concurrent `git checkout --detach` truncating a shard IN PLACE while a request reads
- * it) can be exercised deterministically in a test instead of only in an 80-cycle live rig. The
- * real default just shells out to `node:fs`; nothing about the merge/dedup/depends_on logic
- * below changes.
- */
+/** The file-read primitives {@link loadPlan} uses (W1-T2220), injectable so a torn/short read
+ *  during a concurrent checkout can be exercised in a test rather than only a live rig. */
 export interface FileIntegrityIO {
   statSize: (path: string) => number;
   readFile: (path: string) => string;
@@ -470,18 +332,9 @@ const defaultIntegrityIO: FileIntegrityIO = {
 };
 
 /**
- * Read a WHOLE file, refusing a torn/partial read rather than silently handing back a prefix.
- * `loadPlan` cannot tell "the whole file" from "a prefix of it" from `readFileSync` alone — YAML
- * that stops early is still valid YAML, and every field after the cut DEFAULTS instead of
- * failing (measured: 83.1% of truncated shard cuts still parse). The only honest signal
- * `loadPlan` has, with no expected length of its own, is a stat/read/stat size disagreement: if
- * the byte size on disk before the read, the bytes actually read, and the byte size on disk
- * after the read do not all agree, a writer touched this file DURING the read and the bytes are
- * not trustworthy — retried a few times (the torn window measured ~0.8% of reads and is brief;
- * a request-scoped retry loop costs nothing when no checkout is landing, per this task's design
- * note (iv)), then refused outright rather than ever being handed to the YAML parser. This is
- * remedy (a) of that design note: cheap, and "usually not partial" — see {@link loadPlanAtRef}
- * for the write-gate's stronger "cannot be partial" guarantee.
+ * Read a whole file, refusing a torn/partial read rather than a silently-truncated prefix — YAML
+ * that stops early still often parses. Retries on a stat/read/stat size mismatch, then refuses.
+ * Why: docs/forensics/plan.md#readwholefile.
  */
 export function readWholeFile(path: string, io: FileIntegrityIO = defaultIntegrityIO, maxAttempts = 3): string {
   let lastMismatch = "";
@@ -496,6 +349,12 @@ export function readWholeFile(path: string, io: FileIntegrityIO = defaultIntegri
   throw new Error(`short/torn read after ${maxAttempts} attempt(s) (${lastMismatch})`);
 }
 
+/**
+ * Load plan/tasks.yaml and merge in shards under the sibling `plan/tasks.d/*.yaml` (W1-T122): one
+ * task per shard file so two concurrent filings add different files instead of racing to append to
+ * one shared end-of-file. A duplicate id across the monolith and any shard fails loud.
+ * Why: docs/forensics/plan.md#loadplan.
+ */
 export function loadPlan(path: string, io: FileIntegrityIO = defaultIntegrityIO): Plan {
   let text: string;
   try {
@@ -513,15 +372,9 @@ export function loadPlan(path: string, io: FileIntegrityIO = defaultIntegrityIO)
     try {
       shardText = readWholeFile(shardPath, io);
     } catch (err) {
-      // A shard that VANISHED BETWEEN THE LISTING AND THIS READ is a race, not corruption, and
-      // skipping it is the only correct answer — it is not in the plan any more. Throwing here
-      // made `loadPlan` fail whenever anything removed a shard concurrently: measured in CI as a
-      // FILE-LEVEL crash of whichever suite happened to be reading the plan while
-      // `test/task-linter-wiring.test.ts` cleaned up its probe shard, since `node --test`
-      // parallelises across files and 39 suites name this directory. It is reachable in
-      // production too — a filing or a `git checkout` can remove a shard mid-read.
-      // ENOENT ONLY: every other errno (EACCES, EIO, EISDIR) still throws, because those mean the
-      // shard is there and unreadable, which is exactly the corruption this guard must not hide.
+      // Vanished between the listing and this read is a race, not corruption — skip it (ENOENT
+      // only; any other errno means the shard exists and is unreadable, and must still throw).
+      // Why: docs/forensics/plan.md#loadplan-shard-enoent-skip.
       if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
       throw new PlanError(`cannot read plan shard (${shardPath}): ${String(err)}`);
     }
@@ -534,8 +387,7 @@ export function loadPlan(path: string, io: FileIntegrityIO = defaultIntegrityIO)
     }
   }
 
-  // Every declared dependency must resolve WITHIN THE MERGED VIEW (tasks.yaml + all
-  // shards) — same contract loadPlanFromYaml enforces for a single blob.
+  // Every dependency must resolve within the merged view (monolith + shards).
   for (const t of tasks) {
     for (const dep of t.depends_on) {
       if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
@@ -545,29 +397,10 @@ export function loadPlan(path: string, io: FileIntegrityIO = defaultIntegrityIO)
 }
 
 /**
- * W1-T2220 remedy (c): load the plan from committed git objects — `git show <ref>:<path>` —
- * rather than the working tree, for the ONE caller that cannot afford {@link loadPlan}'s
- * stat/read/stat retry (remedy (a), "usually not partial"): `POST /v1/inbox/approve`, a
- * write-scoped, tier-HIGH gate (W1-T404) that hands off to a detached `rmd approve` spawn and
- * so is irreversible in the direction that matters. Git objects are immutable and
- * content-addressed, so a blob at a fixed `ref` CANNOT be torn by a concurrent `git checkout
- * --detach` truncating the working copy in place — this is atomic by construction, not merely
- * unlikely to race, the stronger guarantee a gate needs over a render.
- *
- * `ref` defaults to `"HEAD"` — the commit the shared working tree is already checked out to
- * (`checkout_target`'s `git checkout --detach "$TARGET"`), so this reads exactly what a quiet
- * working tree would show, no network fetch and no second checkout (design note (v): the
- * console/panel gets no checkout of its own). `repoRoot` is `deps.root`, the same repo root
- * every other git-backed helper in this module already runs `-C` against.
- *
- * NAMED COST, NEVER SILENT (design note (iii)(c), acceptance criterion 5): this reads the
- * COMMITTED plan at `ref` — an UNCOMMITTED working-tree edit to `plan/tasks.yaml` or a shard is
- * INVISIBLE here. That is a real behavior difference from {@link loadPlan}, stated here and
- * exercised by `test/main-plan-load-guard.test.ts`, never a silent divergence discovered later.
- *
- * Mirrors {@link loadPlan}'s own merge semantics (duplicate id across monolith/shard fails
- * loud, every `depends_on` must resolve within the merged view) so the two loaders agree on
- * every plan that is not mid-write — only the SOURCE of the bytes differs.
+ * Load the plan from committed git objects (`git show <ref>:<path>`), for the one caller
+ * (`POST /v1/inbox/approve`, W1-T404) that cannot afford {@link loadPlan}'s stat/read/stat retry —
+ * a git blob at a fixed ref cannot be torn by a concurrent checkout. `ref` defaults to `"HEAD"`; an
+ * uncommitted working-tree edit is invisible here. Why: docs/forensics/plan.md#loadplanatref.
  */
 export function loadPlanAtRef(
   repoRoot: string,
@@ -584,10 +417,7 @@ export function loadPlanAtRef(
   }
   const blobs: Array<{ label: string; text: string }> = [{ label: `${ref}:${planRelPath}`, text: monolithBlob }];
 
-  // List `tasks.d/` AT THE REF via `git ls-tree`, never `readdirSync` on the working tree — the
-  // working tree is exactly what this function exists to not trust. No `tasks.d/` at `ref` (the
-  // pre-sharding back-compat case `loadPlan` also honors) reads as an empty listing, same as
-  // `listShardFiles`'s ENOENT tolerance.
+  // List `tasks.d/` at `ref` via `git ls-tree`, never `readdirSync` on the untrusted working tree.
   const shardRelDir = join(dirname(planRelPath), "tasks.d");
   let shardListing = "";
   try {
@@ -679,14 +509,8 @@ export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: str
   return texts;
 }
 
-/**
- * Merge already-read plan blobs into one {@link Plan} under {@link loadPlan}'s OWN contract —
- * duplicate ids across blobs fail loud, every `depends_on` must resolve within the merged view.
- * Split out so a caller holding the bytes (from git objects, never the working tree) gets a Plan
- * that is deep-equal to what `loadPlan` builds over the same content on disk, without writing
- * those bytes to a temp directory first just to have a directory to point `loadPlan` at.
- * `label` names each blob in error text and is the ONLY thing that differs from the disk path.
- */
+/** Merge already-read plan blobs into one {@link Plan} under {@link loadPlan}'s own contract.
+ *  `label` names each blob in error text — the only thing that differs from a disk path. */
 export function mergePlanBlobs(blobs: Array<{ label: string; text: string }>): Plan {
   const tasks: Task[] = [];
   const byId = new Map<string, Task>();
@@ -714,20 +538,14 @@ export function selectTask(plan: Plan, id: string): Task {
   return t;
 }
 
-/**
- * Predicate for "has this dependency landed?". The default reads the DECORATIVE
- * yaml `status:` field (used by pure unit tests over fixtures); the runner passes
- * a GitHub-DERIVED resolver (lib/status.ts) so the real gate never trusts yaml.
- */
+/** Predicate for "has this dependency landed?" The default reads the decorative yaml `status:`
+ *  field (fixtures only); the runner passes a GitHub-derived resolver so the gate never trusts yaml. */
 export type MergedResolver = (task: Task) => boolean;
 
 const yamlStatusMerged: MergedResolver = (t) => MERGED_STATUSES.has(t.status);
 
-/**
- * Refuse to run a task whose dependencies have not merged (§12 rule 3: branch
- * from a landed base). Returns the list of unmet dependency ids; empty = clear.
- * `isMerged` decides landed-ness — DERIVED FROM GITHUB in the real runner.
- */
+/** Refuse to run a task whose dependencies have not merged (§12 rule 3). Returns the unmet
+ *  dependency ids; empty means clear. `isMerged` decides landed-ness. */
 export function unmetDependencies(
   plan: Plan,
   task: Task,
@@ -740,21 +558,12 @@ export function unmetDependencies(
 }
 
 /**
- * Every task that transitively depends on `taskId` (directly, or through a
- * chain of `depends_on`) — computed over the WHOLE plan, never scoped to
- * `isMerged`, since this answers a structural DAG question ("does anything
- * need this task to exist at all"), not a runnability one.
- *
- * Backs W1-T46's block-reasoning (drain/daemon v2): a blocked task with an
- * EMPTY result here is self-contained — nothing in the plan needs it, so its
- * failure is only that task's problem and can be skipped without leaving any
- * dependent to "continue into the gap". A NON-EMPTY result means real
- * downstream work genuinely needs it merged, and the block must never be
- * silently skipped.
+ * Every task that transitively depends on `taskId`, over the whole plan (a structural DAG
+ * question, never scoped to `isMerged`). Backs W1-T46: an empty result means a blocked task is
+ * self-contained and safe to skip; non-empty means downstream work needs it and it must not be.
  */
 export function transitiveDependents(plan: Plan, taskId: string): Set<string> {
-  // Build the reverse edge map once: task id -> the task ids that declare it
-  // as a dependency.
+  // Reverse edge map: task id -> the task ids that declare it as a dependency.
   const reverse = new Map<string, string[]>();
   for (const t of plan.tasks) {
     for (const dep of t.depends_on) {
