@@ -7374,3 +7374,4358 @@ Base revision: origin/main at b586cc7d6ebb7bc824469eb50df05c7b7c36d668; every li
  * its staleness clock from.
  */
 ```
+
+
+## Second pass (2026-09-06)
+
+Prose removed from `src/lib/review.ts` by the second compaction pass (PR title `docs(review): second-pass comment compaction to the plain-language standard`), archived verbatim. Base commit `58e6c840`; every line
+number below is that base's numbering. The first pass's archive is the sections above this heading.
+
+### REVIEW_CONTEXT
+
+Removed from `src/lib/review.ts:27-29` (base 58e6c840), verbatim:
+
+```
+ * status. INVARIANTS: {@link judgeReview} is PURE, so its falsifier is a unit fixture; the pure layer is the
+ * mechanical FLOOR; a semantic verdict may only DOWNGRADE, never rescue an unpasted proof — proof must be pasted, not
+ * vibed; and this module never edits code and exposes no write path (acceptance #3). */
+```
+
+### PostableReviewState
+
+Removed from `src/lib/review.ts:37-40` (base 58e6c840), verbatim:
+
+```
+/** The wider range {@link postReviewStatus} may POST: {@link ReviewState} plus `pending`, kept a
+ *  SEPARATE type because `ReviewState` is a JUDGED verdict and must never admit "in progress". A
+ *  detection-time pending post is a fact about timing, so it gets its own type rather than widening
+ *  the one every exhaustive switch over a judged verdict already reads (W1-T913). */
+```
+
+### REVIEW_ENGINE_REVISION
+
+Removed from `src/lib/review.ts:45-46` (base 58e6c840), verbatim:
+
+```
+ *  not. The revision rearms the same evidence only after a material reviewer-contract change, deliberately
+ *  independent of boot commits, provider choice and model sampling. */
+```
+
+### ProofSkipReason
+
+Removed from `src/lib/review.ts:160-167` (base 58e6c840), verbatim:
+
+```
+/** WHY a criterion produced no executed outcome (W1-T305). Diagnostic only: it never affects `met`,
+ * `state`, the keyword floor or capping. It exists so a CAPPED `0/N` says WHICH KIND of nothing it is. `no-dialect`
+ * no house prefix (expected for a non-mechanical claim); `dialect-parse-error` an AUTHORING error; `prose-no-match`
+ * zero candidates but the body reads as prose (W1-T161/#349); `exec-error` threw, timed out, or its named PATH is
+ * absent; `runtime-broken` the only `not ok` names the FILE ITSELF (W1-T1077); `incomplete-run` results then no `#
+ * duration_ms` summary (W1-T2740); `no-exec-context` no PR-head checkout; `forward-reference` absent on the head but
+ * declared by this diff's own shard, the DIFF being the source of truth because a filing PR carries no
+ * `Remudero-Task:` trailer (W1-T456, #1527) — see {@link shardDeclaredFilesInDiff}. */
+```
+
+### ProofExecOutcome
+
+Removed from `src/lib/review.ts:178-200` (base 58e6c840), verbatim:
+
+```
+// Why: `workerKeychainPaths` matched two unrelated hits on the pre-work commit and was scored substantiated anyway
+// (W1-T267's fifth criterion) — docs/forensics/review.md.
+/** Observed outcome of executing a criterion's proof against the PR head (W1-T65, ratifies P15).
+ * Recorded per criterion on {@link CriterionVerdict} and surfaced on the `review.posted` ledger line and console
+ * summary, so an OBSERVED verdict reads apart from a KEYWORD one. `executed_pass` ran and passed, meeting the
+ * criterion whatever the report says; `executed_fail` ran and failed or matched nothing, and OVERRIDES keyword
+ * coverage; `not_executable` is prose or no head checkout, leaving the keyword floor unchanged; `exec_error` threw or
+ * timed out and degrades to that floor verbatim, since an environment hiccup must never hard-fail the fleet. THE
+ * DEGRADES THAT ARE NOT FAILURES: `executed_stale` (W1-T273, extended to `unit test:` proofs by W1-T362) also passes
+ * on the MERGE-BASE, so it discriminates nothing, while a `unit test:` proof ABSENT or failing at base is the healthy
+ * forward-referencing TDD case and stays `executed_pass`; `base_unreadable` (W1-T460) is THIS proof's base blob
+ * unreadable, distinct from the whole-base gap `base_unknown`, which keeps `executed_pass` because there no tree
+ * exists at all; `not_yet_built` (W1-T456) is an exact-path `unit test:` proof naming a file absent on the head that
+ * this same diff declares in a plan shard's `files:`, NEVER a path merely absent and undeclared, which stays
+ * `executed_fail` (W1-T72's test-theater guard), and (W1-T2737) a house `grep:` proof on the same terms plus a
+ * MEASURED executor failure and a source-free diff, because `callSiteViolations` (task-linter.ts) mandates that proof
+ * shape and grading the mandated remedy `executed_fail` made two gates unsatisfiable at once. `stale_self_path`
+ * (W1-T1071) is THE ONE OUTCOME HERE THAT REFUSES — `met` is forced false, never degraded — for a `grep:` proof gone
+ * stale whose target is BOTH a plan-shard path ({@link SHARD_PATH_RE}) and a path this diff's task declares something
+ * else beside: the filing-time proof shape, read on the PR that BUILDS the task. Reachable only when {@link
+ * ProofExecContext.forwardReferenceFiles} names a path other than the proof's own target, so a shard whose `files:`
+ * is nothing but its own plan path is exempt by construction, not by an id allowlist; an
+ * ordinary code grep gone stale keeps degrading to `executed_stale`. */
+```
+
+### floorMet
+
+Removed from `src/lib/review.ts:222-225` (base 58e6c840), verbatim:
+
+```
+  /** `met` as computed by the mechanical floor, BEFORE any semantic downgrade — the deterministic
+   *  half of this verdict (W1-T178). Optional so every other `CriterionVerdict` literal
+   *  (ledger-reconstructed placeholders in run-task.ts/sweep.ts, which carry no semantic layer)
+   *  needs no update; {@link applyVerdictStability} falls back to `met`. */
+```
+
+Removed from `src/lib/review.ts:1987-1989` (base 58e6c840), verbatim:
+
+```
+  // W1-T178 (verdict stability): capture the DETERMINISTIC floor's own verdict
+  // — mechanical keyword coverage, overridden by whitelisted execution where
+  // applicable — BEFORE the semantic layer below gets a chance to downgrade it.
+```
+
+### holdout
+
+Removed from `src/lib/review.ts:227-229` (base 58e6c840), verbatim:
+
+```
+  /** Copied verbatim from {@link AcceptanceCriterion.holdout} (W1-T166). The verdict folds a
+   *  holdout criterion in like any other; this flag exists only so {@link visibleCriteria} can keep
+   *  its claim and proof text off every worker-facing surface. */
+```
+
+### ReportSubstituteCause
+
+Removed from `src/lib/review.ts:233-235` (base 58e6c840), verbatim:
+
+```
+/** The two reasons a report can fail to be the PR body, which are NOT the same fact and have
+ *  different remedies: `never-fetched` means this path never asked (the common case, nothing wrong),
+ *  `fetch-failed` means it asked and the read failed — never once observed here. */
+```
+
+### diff
+
+Removed from `src/lib/review.ts:246-246` (base 58e6c840), verbatim:
+
+```
+  /** The unified PR diff (as `gh pr diff` / `git diff` would produce). */
+```
+
+### reportIsSubstitute
+
+Removed from `src/lib/review.ts:252-253` (base 58e6c840), verbatim:
+
+```
+   *  // Why: unmarked, a substitute failed two OPPOSITE ways on #2395 — {@link bodyContradictsDiff} manufactured a
+   *  // contradiction, while the keyword floor scored the narrative HIGHER than an honest body. */
+```
+
+### reportSubstituteCause
+
+Removed from `src/lib/review.ts:255-261` (base 58e6c840), verbatim:
+
+```
+  /** WHY `report` is not the body. The boolean above keeps its one meaning — THIS IS NOT THE PR BODY — and this
+   *  names which of two very different facts the REFUSAL TEXT rests on; absent leaves the message silent rather than
+   *  guessing.
+   *  // Why: the refusal claimed a failed body fetch on rows where none had failed and
+   *  // `review.body_fetch_error`/`fix.body_fetch_error` read ZERO across the ledger, the real cause being that the
+   *  // fix rung fetches the body only in `body-coverage` mode, so `ci-log`, `reviewer-unmet` and
+   *  // `merge-conflict` never attempt one (2026-08-25). */
+```
+
+### semantic
+
+Removed from `src/lib/review.ts:263-265` (base 58e6c840), verbatim:
+
+```
+  /** Optional per-criterion semantic verdicts from the fresh LLM reviewer, index-aligned to the
+   *  criteria list. `false` FORCES that criterion to fail; `true`/`undefined` defer to the
+   *  mechanical floor. Semantic can only downgrade, never upgrade an unpasted proof to a pass. */
+```
+
+### semanticClauses
+
+Removed from `src/lib/review.ts:267-270` (base 58e6c840), verbatim:
+
+```
+  /** Optional per-criterion bounded clause the reviewer attached to a FAIL line (W1-T2263) — see
+   *  {@link parseReviewerVerdictClauses}. Index-aligned to `criteria`/`semantic`, read ONLY where
+   *  `semantic[i] === false`, and never a second reviewer call: it is captured off the SAME
+   *  transcript {@link parseReviewerVerdicts} already parses. */
+```
+
+### headCheckoutDir
+
+Removed from `src/lib/review.ts:272-274` (base 58e6c840), verbatim:
+
+```
+  /** The checkout whitelisted proofs execute in — MUST be the PR HEAD sha, NEVER the operator's
+   *  working checkout (HEAD DISCIPLINE, W1-T65). Absent ⇒ execution is skipped for every criterion
+   *  and the keyword floor is byte-identical to pre-W1-T65 behaviour. */
+```
+
+### baseCheckoutDir
+
+Removed from `src/lib/review.ts:276-279` (base 58e6c840), verbatim:
+
+```
+  /** A checkout of the PR's MERGE-BASE (W1-T273), independent of `headCheckoutDir`: the caller
+   *  reaches it with one `git merge-base` over a checkout the review already has, so no new gateway
+   *  and no network call. Consulted only to test a proof for non-discrimination; absent ⇒ that
+   *  check never runs and a proof passing on the head stays `executed_pass`. */
+```
+
+### baseUnreadablePaths
+
+Removed from `src/lib/review.ts:281-284` (base 58e6c840), verbatim:
+
+```
+  /** Repo-relative paths whose base blob could NOT be read while `baseCheckoutDir` was built
+   *  (W1-T460) — a GENUINE read failure, never the healthy "absent at the base" forward reference.
+   *  Distinct from `baseCheckoutDir` being absent, a global gap: each path here names a proof
+   *  exempted while its siblings were checked against the very same tree. */
+```
+
+Removed from `src/lib/review.ts:1541-1544` (base 58e6c840), verbatim:
+
+```
+  /** (W1-T460) mirrors {@link ReviewEvidence.baseUnreadablePaths} — the repo-relative paths whose
+   *  base blob could NOT be read while `baseCwd` was built. A proof naming one was never actually
+   *  checked against the base, however healthy `baseCwd` looks, so it is graded `base_unreadable`
+   *  rather than credited with a discrimination nobody measured. */
+```
+
+### baseIsCheckout
+
+Removed from `src/lib/review.ts:286-291` (base 58e6c840), verbatim:
+
+```
+  /** True when `baseCheckoutDir` is a REAL CHECKOUT of the merge-base — a detached worktree `buildBaseProofDir`
+   *  (run-task.ts) added — rather than the blob-only fallback (R-11), the one tree a `unit test:` proof can be re-run
+   *  in honestly. FAILS CLOSED: absent ⇒ `base_unknown`, never `discriminates`; `grep:` proofs are unaffected, since
+   *  a blob IS the file grep reads.
+   *  // Why: in a blob-only directory `node --test` finds no file and exits 1 with empty stdout, read as "did not
+   *  // pass at base ⇒ discriminates" and certifying a test that passes at both commits. */
+```
+
+Removed from `src/lib/review.ts:1546-1549` (base 58e6c840), verbatim:
+
+```
+  /** (R-11) mirrors {@link ReviewEvidence.baseIsCheckout} — `true` only when `baseCwd` is a real
+   * checkout of the merge-base (a worktree), the one tree a `unit test:` proof can be re-run in.
+   * Absent/false ⇒ every `unit test:` proof's base outcome is `base_unknown` (fail closed), and
+   * `grep:` proofs behave exactly as before. */
+```
+
+### execProof
+
+Removed from `src/lib/review.ts:293-296` (base 58e6c840), verbatim:
+
+```
+  /** Injected proof executor; real callers omit it and get {@link execWhitelistedProof}. Tests
+   *  inject a fake so override and degrade semantics are proven without a filesystem or a shell. It
+   *  is also the executor {@link preexistingProofHits} reuses against `baseCheckoutDir` — the same
+   *  function at a different `cwd`, so one fake covers both sides. */
+```
+
+### taskDeclaredFiles
+
+Removed from `src/lib/review.ts:298-301` (base 58e6c840), verbatim:
+
+```
+  /** The task's DECLARED `files:` scope (W1-T322) — read ONLY for the INVERSE-SCOPE advisory, the
+   *  direction {@link "../run-task.js".scopeGuardOutOfScopeFiles} cannot see: that guard flags a
+   *  diff touching an UNDECLARED file, this flags a declared file the diff never touched. Advisory
+   *  only, never affects `state`. Absent ⇒ it never fires. */
+```
+
+### openTaskIds
+
+Removed from `src/lib/review.ts:303-305` (base 58e6c840), verbatim:
+
+```
+  /** Task ids currently OPEN in the loaded plan (W1-T322), consulted only to check that a report's
+   *  `SHIPS-UNWIRED: <id>` marker names a real, still-open task before it is honoured. FAIL-CLOSED:
+   *  absent ⇒ no marker can be honoured, because every claimed id reads as unverifiable. */
+```
+
+### openTaskDeclaredFiles
+
+Removed from `src/lib/review.ts:309-310` (base 58e6c840), verbatim:
+
+```
+   *  `Remudero-Task:` trailer appears; absent ⇒ never fires.
+   *  // Why: keyed on the trailer it would misfire on test/fixtures/golden-verdicts/scope-creep (#1731). */
+```
+
+### symbols
+
+Removed from `src/lib/review.ts:326-328` (base 58e6c840), verbatim:
+
+```
+  /** The offending symbol(s)/path(s), rendered `file::symbol` for `unwired_export`, bare repo paths
+   *  for `inverse_scope`/`scope_violation` — never a bare "flagged" with nothing named (W1-T186
+   *  emitter discipline, the same {@link ReviewVerdict.instrumentEntanglementPaths} follows). */
+```
+
+### floorDegraded
+
+Removed from `src/lib/review.ts:343-345` (base 58e6c840), verbatim:
+
+```
+   *  house dialect ({@link isDialectPrefixed}) — a proof authored to be mechanically checked never got checked, and
+   *  the verdict fell back to the blind keyword floor everywhere. LEGIBILITY ONLY (W1-T72): `state`/`met` are
+   *  unchanged, and whether a degraded floor should HOLD a risk:high PR is the operator's call, out of scope here. */
+```
+
+### proofUniqueRuns
+
+Removed from `src/lib/review.ts:348-350` (base 58e6c840), verbatim:
+
+```
+   *  `proofReuses` counts calls answered from an earlier observation in the SAME review (W1-T2743). Counts only, so
+   *  the row gains two integers rather than an unbounded payload. `undefined`, never `0`, when no head checkout was
+   *  supplied. #3744 reads 2 unique runs and 10 reuses, where `proof_exec: 6/6` had hidden twelve child spawns. */
+```
+
+### floorState
+
+Removed from `src/lib/review.ts:353-356` (base 58e6c840), verbatim:
+
+```
+  /** The rolled-up `state` as if NO semantic verdict had been supplied: every criterion judged on
+   *  `floorMet`, plus the same structural rules `state` uses (W1-T178). The deterministic anchor
+   *  {@link applyVerdictStability} consults, since a semantic-only downgrade is noise a re-review of
+   *  an unchanged, previously-passing head may not act on alone. */
+```
+
+Removed from `src/lib/review.ts:2928-2930` (base 58e6c840), verbatim:
+
+```
+  // `testTheater`/`noCriteria`/`criteriaTampered`/`changesetContradictions` are all structural, so they bind the
+  // floor exactly as they bind `state`: a tampering or contradiction failure can never be suppressed by verdict
+  // stability, which only ever forgives a SEMANTIC downgrade. The anchor a re-review of an unchanged head checks.
+```
+
+### capped
+
+Removed from `src/lib/review.ts:362-363` (base 58e6c840), verbatim:
+
+```
+   *  ledgered {@link CappedOverride}.
+   *  // Why: an earlier gate exempted every non-`{tdd: strict}` task, making prose the DEFAULT merge floor. */
+```
+
+Removed from `src/lib/review.ts:3111-3116` (base 58e6c840), verbatim:
+
+```
+  /** W1-T229's `capped` as RECORDED on the `review.posted` line — read back rather than recomputed, so the arming
+   *  path judges the same fact the review posted. It was always written; nothing read it, so a CAPPED verdict —
+   *  which posts `state: "success"` because CAPPED IS NOT FAIL — armed on the strength of that success alone. ABSENT
+   *  MEANS NOT CAPPED (operator ruling, binding): lines older than the field carry no key, and failing closed would
+   *  refuse to arm across the entire pre-field history. {@link cappedFieldAbsent} keeps that fail-open choice
+   *  legible. */
+```
+
+### keywordOnly
+
+Removed from `src/lib/review.ts:365-369` (base 58e6c840), verbatim:
+
+```
+  /** True when this verdict was judged with NO `headCheckoutDir`, so execution was never attempted
+   *  and `state` rests entirely on the keyword floor (W1-T185) — today `rmd review`'s manual-PR
+   *  escape hatch, since the operator's working checkout is never a PR-head substitute (HEAD
+   *  DISCIPLINE, W1-T65). Purely LEGIBILITY, surfaced on the status, ledger and console so a
+   *  keyword-only PASS is never mistaken for an observed one. */
+```
+
+Removed from `src/lib/review.ts:2971-2972` (base 58e6c840), verbatim:
+
+```
+  // working checkout is never substituted (HEAD DISCIPLINE, W1-T65). Purely legibility — `state` is unaffected — but
+  // the status, ledger and console must say so rather than let a keyword-only PASS read as an observed one.
+```
+
+### planOnly
+
+Removed from `src/lib/review.ts:371-376` (base 58e6c840), verbatim:
+
+```
+  /** True when the diff touches ONLY plan-scope files ({@link isInPlanScope}) and at least one file (W1-T205): such
+   *  a PR carries no code and so no executable proof, making it STRUCTURALLY capped rather than degraded. FAILS
+   *  CLOSED — one src/test file mixed in is NOT plan-only, because the dangerous shape is code smuggled into a plan
+   *  PR for the exemption. {@link decideAutoMergeArm} arms such a verdict without an override, an exemption from
+   *  PROOF EXECUTION and (since W1-T2221) the SEMANTIC downgrade, never from `state`.
+   *  // Why: a filing whose proof path named a test already on `main` RAN and the carve-out was never reached. */
+```
+
+### criteriaTampered
+
+Removed from `src/lib/review.ts:381-383` (base 58e6c840), verbatim:
+
+```
+   *  `testTheater`, never suppressible; an ordinary task filing never trips it, because filing is plan-only.
+   *  // Why: #1295 appended a criterion its own diff already satisfied, and a pure append deleted nothing and grew
+   *  // no existing field, so it tripped neither disjunct (W1-T400). */
+```
+
+Removed from `src/lib/review.ts:2861-2863` (base 58e6c840), verbatim:
+
+```
+  // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s
+  // doc for the full design. `!planOnly` is the exemption — a genuine Architect
+  // plan-only correction is never this function's business to fail.
+```
+
+### changesetContradictions
+
+Removed from `src/lib/review.ts:388-390` (base 58e6c840), verbatim:
+
+```
+   *  to `"failure"`, because a body contradicting its own diff is a false statement the gate is asked to merge on,
+   *  and the contradiction is NAMED ({@link failSummary}) since an unexplained red is the shape that gets
+   *  overridden. */
+```
+
+### changesetClaimsRecognised
+
+Removed from `src/lib/review.ts:392-396` (base 58e6c840), verbatim:
+
+```
+  /** How many changeset claims {@link recognizeChangesetClaims} RECOGNISED (W1-T1264) — THE FIELD
+   *  THAT MAKES A SILENT `changesetContradictions: []` LEGIBLE, since that array reads identically
+   *  whether the body made no claim or made one that agreed. `0` is the former, `> 0` beside an
+   *  empty array is "checked, and it agrees", and `undefined` (never `0`) means the check was
+   *  withheld on a substitute report. Legibility only. */
+```
+
+### changesetFenceUnbalancedAtEof
+
+Removed from `src/lib/review.ts:398-400` (base 58e6c840), verbatim:
+
+```
+  /** True when {@link recognizeChangesetClaims}'s quote-stripping pass reached end-of-body still
+   *  inside an open fence (W1-T1264 design (iv)) — see {@link
+   *  ChangesetClaimRecognition.fenceUnbalancedAtEof} for why that silently starves
+```
+
+### instrumentEntangled
+
+Removed from `src/lib/review.ts:405-409` (base 58e6c840), verbatim:
+
+```
+   *  (W1-T297) — because a diff shipping both proves neither: the code's falsifiers were graded by the very version
+   *  of the instrument beside them. FORCES `state` to `"failure"`, never suppressible; an instrument-only PR is the
+   *  SANCTIONED shape.
+   *  // Why: a coverage flag, a diff-coverage carve-out and a re-captured baseline all rode inside ordinary fix-rung
+   *  // strikes (#585/#586; docs/forensics/review.md). */
+```
+
+### instrumentEntanglementPaths
+
+Removed from `src/lib/review.ts:411-413` (base 58e6c840), verbatim:
+
+```
+  /** The observed evidence behind a `true` {@link instrumentEntangled} — the instrument paths found
+   *  and the `src/` product paths beside them (W1-T186 emitter discipline: never a bare "entangled"
+   *  with nothing named). `undefined` whenever `instrumentEntangled` is `false`/absent. */
+```
+
+### unwiredAdvisories
+
+Removed from `src/lib/review.ts:415-423` (base 58e6c840), verbatim:
+
+```
+  /** The SHIPS-UNWIRED advisory floor (W1-T322). ADVISORY ONLY: never folds into
+   * `state`/`floorState`/`capped`; W1-T323 flips severity once a measured false-positive rate clears a threshold.
+   * `unwired_export` — an added `export function` {@link scanUnreachedExports} finds no caller for, with no
+   * `WIRED-AT: <file>::<symbol>` or `SHIPS-UNWIRED: <task-id>` naming a real open task ({@link
+   * ReviewEvidence.openTaskIds}). `inverse_scope` — the declared scope ({@link ReviewEvidence.taskDeclaredFiles})
+   * names a file the diff never touched; `scope_violation` (W1-T401) is its MIRROR, run on every review;
+   * `unresolved_task_scope` (W1-T458) is phrased as a QUESTION because AN INTERSECTION IS EVIDENCE, NOT PROOF. All
+   * four FAIL CLOSED and ledger `review.unwired_advisory`.
+   * // Why: a blocking check that false-positives on ~50 PRs/day gets routed around within a week. */
+```
+
+### reachabilityScanned
+
+Removed from `src/lib/review.ts:425-428` (base 58e6c840), verbatim:
+
+```
+  /** The reachability scan's EXAMINED count, riding this verdict so `review.posted` carries it
+   *  without a second ledger line (W1-T1118). A NUMBER means {@link scanUnreachedExports} ran (`0` is
+   *  honest, the diff added none); `null` means it did NOT run, the same `checkoutDir` skip
+   *  `unwired_export` degrades on. OBSERVABILITY ONLY: it never changes which advisories fire. */
+```
+
+### unprovenancedDecisionsEntries
+
+Removed from `src/lib/review.ts:430-435` (base 58e6c840), verbatim:
+
+```
+  /** The header text of every entry this diff ADDS to DECISIONS.md carrying neither the machine
+   *  auto-choose stamp nor an operator-attribution line among that entry's own added lines (W1-T352;
+   *  {@link decisionsEntryProvenanceViolations} holds the closed vocabulary). Only ADDED lines are read,
+   *  so historical unmarked entries never fire. Non-empty FORCES `state` to `"failure"`, never
+   *  suppressible, and UNLIKE {@link unwiredAdvisories} it BLOCKS from day one.
+   *  // Why: #1302 appended a bare `## … RULING:` header in neither genre (#1303). */
+```
+
+Removed from `src/lib/review.ts:2879-2881` (base 58e6c840), verbatim:
+
+```
+  // W1-T352 (DECISIONS.md entry provenance floor): see {@link
+  // ReviewVerdict.unprovenancedDecisionsEntries}'s doc for the full design — BLOCKING, unlike the
+  // W1-T322 advisory floor computed right below it.
+```
+
+### rewardHackingGap
+
+Removed from `src/lib/review.ts:437-441` (base 58e6c840), verbatim:
+
+```
+  /** Visible-pass-rate minus holdout-pass-rate over this verdict's criteria (W1-T166). A worker that
+   *  can see, and so optimise toward, only the visible criteria is expected to pass them at a higher
+   *  rate than the holdout ones it never saw, so a large positive gap is the signal SpecBench names.
+   *  `null` when not MEASURABLE, and never forces `state`: a measurement ledgered as
+   *  `reward_hacking_gap`. Treat absent as `null`. */
+```
+
+### unexecutableCount
+
+Removed from `src/lib/review.ts:443-445` (base 58e6c840), verbatim:
+
+```
+  /** How many criteria carry a {@link CriterionVerdict.proof_skip} — every
+   *  `not_executable`/`exec_error` one, over the SAME set `capped`/`floorDegraded` count (W1-T305).
+   *  Holdout criteria are counted: the AGGREGATE NUMBER is never secret, only holdout TEXT is. */
+```
+
+Removed from `src/lib/review.ts:2963-2965` (base 58e6c840), verbatim:
+
+```
+  // W1-T305 (design (1)/(2)): the unexecutable class, made countable. `unexecutableCount` folds
+  // holdout criteria in (an aggregate NUMBER, never secret — matches `capped`'s own scope);
+  // `unexecutableProofs` is VISIBLE-only text (holdout proof text stays worker-invisible, W1-T166).
+```
+
+### unexecutableProofs
+
+Removed from `src/lib/review.ts:447-449` (base 58e6c840), verbatim:
+
+```
+  /** The OFFENDING PROOF TEXT for every unexecutable criterion counted above — `criterion.proof`,
+   *  never a paraphrase (W1-T305). VISIBLE criteria only ({@link visibleCriteria}), so
+   *  `unexecutableCount` may exceed this array's length when a holdout criterion is among them. */
+```
+
+### partiallyExecuted
+
+Removed from `src/lib/review.ts:451-454` (base 58e6c840), verbatim:
+
+```
+  /** True when SOME but not ALL executable criteria actually executed (W1-T305 design (4)) — the
+   *  same "was anything OBSERVED" set `capped`'s count reads. Distinct from `capped` (all zero) and
+   *  from a fully observed review. Never forces `state`; surfaced on {@link passSummary} so a
+   *  partially certified PASS is never rendered identically to a fully certified one. */
+```
+
+Removed from `src/lib/review.ts:2959-2960` (base 58e6c840), verbatim:
+
+```
+  // W1-T305 (design (4)): SOME but not ALL executable criteria were observed — the 52-partial-head
+  // shape the rationale measured, distinct from `capped` (zero observed anywhere).
+```
+
+Removed from `src/lib/review.ts:3125-3128` (base 58e6c840), verbatim:
+
+```
+  /** Recorded `partially_executed`, read back the way `capped`/`planOnly` are (W1-T1020), so {@link
+   *  decideAutoMergeArm} judges the fact the review posted rather than the always-false default it
+   *  silently took. Written unconditionally, so ABSENT MEANS NOT PARTIAL. Optional purely so
+   *  fixtures predating the field keep compiling; a missing value is `false`, never "unknown". */
+```
+
+### executableProofCount
+
+Removed from `src/lib/review.ts:459-461` (base 58e6c840), verbatim:
+
+```
+  /** W1-T305: how many criteria COULD have executed (every criterion except `satisfied_by`) —
+   *  the SAME set `capped` already counts against, exposed here so `passSummary`'s partial
+   *  annotation and any later consumer read it rather than re-deriving it. */
+```
+
+### tokenize
+
+Removed from `src/lib/review.ts:498-501` (base 58e6c840), verbatim:
+
+```
+/** Tokenise for keyword matching, normalising identifier casing and separators so `maxTurns` ≡
+ *  `max_turns` ≡ `max-turns`. camelCase splits BEFORE lowercasing, or `maxTurns`→`maxturns` never
+ *  matches `max_turns` — a real reviewer weakness that false-blocked PR #42 (W1-T5). A FLOOR
+ *  hardening; the deeper fix is observing repo state (W1-T3F), not keywords. */
+```
+
+### MIN_COVERAGE
+
+Removed from `src/lib/review.ts:520-523` (base 58e6c840), verbatim:
+
+```
+/** Fraction of a proof's distinctive keywords the report must echo before the proof counts as
+ *  responsively addressed. A FLOOR, not a semantic judge.
+ *  // Why: at 0.34, echoing barely a THIRD of a proof's tokens read as responsive, which a report
+ *  // can hit by accident through shared vocabulary with the claim (W1-T219, recon R-13(i)). */
+```
+
+### TEST_DECLARATION_RE
+
+Removed from `src/lib/review.ts:534-537` (base 58e6c840), verbatim:
+
+```
+/** A NEW TEST CASE declared among a diff's added lines — `test(`, `it(`, `describe(`, including
+ *  `.only`/`.skip`/`.each`. This is what makes "added tests" something to judge at all; see
+ *  {@link detectTestTheater} for why its absence must not fire the no-assertion arm. Matches the
+ *  CALL, never a bare token, so a variable named `test` cannot smuggle a case past the gate. */
+```
+
+### isFixtureDataPath
+
+Removed from `src/lib/review.ts:544-548` (base 58e6c840), verbatim:
+
+```
+ * violations necessarily CONTAINS the patterns this detector hunts, and `isTestPath` matches everything under
+ * `test/`. It does not blunt the detector, because nothing there runs as this repository's own suite; test code
+ * proper, `test/golden-verdicts.test.ts` included, is still scanned.
+ * // Why: #1613 failed as theater on its own fixtures — a `diff.patch` whose payload is `assert.ok(true)`, and a
+ * // `golden.yaml` quoting `assert(true), assert.equal(true, true), expect(true)`. */
+```
+
+### detectTestTheater
+
+Removed from `src/lib/review.ts:553-555` (base 58e6c840), verbatim:
+
+```
+/** Detect test theater: added test code that asserts nothing, or asserts a tautology. Scans only
+ *  ADDED lines inside test files, EXCLUDING fixture data ({@link isFixtureDataPath}). False when the
+ *  diff touches no test file, or when a real assertion is added. */
+```
+
+### if
+
+Removed from `src/lib/review.ts:576-576` (base 58e6c840), verbatim:
+
+```
+  // THE PLANTED-TAUTOLOGY ARM IS UNCONDITIONAL, AND STAYS ABOVE THE GUARD BELOW. `assert(true)` is a deliberate act,
+```
+
+Removed from `src/lib/review.ts:581-585` (base 58e6c840), verbatim:
+
+```
+  // `-`/`+` pair and the loop above reads only the `+` half, so an in-place rewrite of existing test code was
+  // indistinguishable from newly added code and, carrying no assertion, was refused as theater. ITS COST, STATED
+  // RATHER THAN BURIED: lines appended INSIDE an existing test case, with no assertion in the added set, no longer
+  // trip the arm — the operator ruled for the declaration gate over an unreliable pairing (2026-09-04).
+  // // Why: #3922 measured 52 added test lines, zero test-case declarations, `testTheater = true`, 36 green checks.
+```
+
+Removed from `src/lib/review.ts:764-765` (base 58e6c840), verbatim:
+
+```
+  // shell, so `; & \` $ < >` are inert here, and refusing prose for carrying one was the defect that task fixed. `--`
+  // below already stops a pattern being read as a flag.
+```
+
+Removed from `src/lib/review.ts:770-770` (base 58e6c840), verbatim:
+
+```
+  // untrustworthy (W1-T65/#100), so the target is required instead and an unscoped proof stays on the keyword floor.
+```
+
+Removed from `src/lib/review.ts:773-778` (base 58e6c840), verbatim:
+
+```
+  // `grep -arn -- <pattern> <path>` with cwd pinned to the PR-head CHECKOUT, so a target naming a file the review
+  // host can read but the checkout does not contain turns a proof into a match/no-match ORACLE over that host
+  // filesystem, repeatable because a body edit re-earns review on the same head. WHAT THIS LINE REFUSES, STATED
+  // HONESTLY (R-18): the two escapes VISIBLE IN THE PROOF TEXT, a `..` segment and an ABSOLUTE path. A target
+  // resolving out through a SYMLINK is invisible here — nothing distinguishes `escape/secret.txt` from an in-tree
+  // path — and is refused against the real filesystem in {@link assertGrepTargetsInsideCheckout}.
+```
+
+Removed from `src/lib/review.ts:781-783` (base 58e6c840), verbatim:
+
+```
+  // No shell here (execFile) ⇒ no glob expansion — a literal '*' target can
+  // never resolve to a real file and would always exit non-zero, silently
+  // manufacturing a spurious executed_fail. Refuse rather than run it.
+```
+
+Removed from `src/lib/review.ts:785-787` (base 58e6c840), verbatim:
+
+```
+  // (R-12) A DIRECTORY-SHAPED target is refused — see {@link grepProofTargetNamesNoFile}. This parse has no cwd, so
+  // it can only see the SHAPE; a real directory whose name carries a dot (`plan/tasks.d`) is refused against the
+  // checkout, in {@link assertGrepTargetIsFile}.
+```
+
+Removed from `src/lib/review.ts:914-917` (base 58e6c840), verbatim:
+
+```
+  // `demonstration:` is never executable by construction (W1-T277) — it names an operator action, not an artifact
+  // this process can observe. Refuse rather than falling through to a legacy shape; task-linter.ts decides whether
+  // that null is a defect (verify:auto) or the whole point (verify:human), since review.ts has no `verify` field to
+  // consult.
+```
+
+Removed from `src/lib/review.ts:1236-1238` (base 58e6c840), verbatim:
+
+```
+  // We could look, and did. Rule out the one thing a fixed-string search is
+  // structurally blind to (TRAP 2): a title built from a template literal, which
+  // never appears verbatim in the source that declares it.
+```
+
+Removed from `src/lib/review.ts:1349-1350` (base 58e6c840), verbatim:
+
+```
+    // files, hanging on the browser-driving ones until the timeout kills them, leaking a chrome-headless-shell, and
+    // reporting `exec_error`. `unresolvable` is NOT evidence and never lands here; it falls through to the full glob.
+```
+
+Removed from `src/lib/review.ts:1354-1356` (base 58e6c840), verbatim:
+
+```
+  // AFTER the fast path on purpose: priming a checkout's node_modules is only
+  // worth 120s of `npm ci` if we are actually going to run node. `ensureDeps` is
+  // memoised per cwd, so a later proof in the same checkout still primes it.
+```
+
+Removed from `src/lib/review.ts:1364-1365` (base 58e6c840), verbatim:
+
+```
+  // R-18: BEFORE the spawn, and outside the try on purpose — a target outside the checkout is not
+  // an execution outcome to be classified below, it is a refusal to run the proof at all.
+```
+
+Removed from `src/lib/review.ts:1382-1384` (base 58e6c840), verbatim:
+
+```
+    // A clean nonzero exit. For a name-filtered proof this does NOT necessarily
+    // mean OUR named test failed (see the doc comment above) — read the TAP
+    // stream node still attaches to the error rather than trusting the code.
+```
+
+Removed from `src/lib/review.ts:1390-1391` (base 58e6c840), verbatim:
+
+```
+    // "looked, found nothing" (W1-T219, recon R-13(iv)). Only the latter is evidence of absence; the former degrades
+    // to exec_error rather than false-blocking on an environment or authoring problem.
+```
+
+Removed from `src/lib/review.ts:1393-1396` (base 58e6c840), verbatim:
+
+```
+    // A PURE-PATH `unit test:` proof's clean nonzero exit is not automatically a genuine fail either (W1-T1077) — see
+    // this function's doc for the measured TAP shapes. Read the SAME stdout the name-filtered branch reads; only when
+    // every `not ok` line is the file's own wrapper name does the run count as never-executed. An absent file reports
+    // no TAP lines at all, so this finds no wrapper name and falls through to the unchanged `"fail"`.
+```
+
+Removed from `src/lib/review.ts:1596-1597` (base 58e6c840), verbatim:
+
+```
+      // ABSENT AT BASE (forward reference) — the healthy case: leave it out, grep then finds
+      // nothing, and the proof correctly reads as discriminating.
+```
+
+Removed from `src/lib/review.ts:1673-1674` (base 58e6c840), verbatim:
+
+```
+  // would grade `discriminates`, certifying a test that passes identically at both commits. That run answered nothing
+  // about the base, so it is `base_unknown`. Fails closed on an absent flag.
+```
+
+Removed from `src/lib/review.ts:1763-1765` (base 58e6c840), verbatim:
+
+```
+    // R-15: this rule is no longer gated on the arm. Both arms now score against the report, so a
+    // report that is NOT the body cannot substantiate either of them — the W1-T1100 refusal below
+    // applies to a claim-keyword floor for exactly the reason it applies to a proof-keyword one.
+```
+
+Removed from `src/lib/review.ts:1886-1888` (base 58e6c840), verbatim:
+
+```
+              // W1-T362: record the base-run outcome on the verdict for a `unit test:`
+              // proof specifically (grep's reason text stays byte-identical to its
+              // shipped W1-T273 shape — that check is not in this task's scope).
+```
+
+Removed from `src/lib/review.ts:1994-1994` (base 58e6c840), verbatim:
+
+```
+  // never replace it — a bare overwrite threw away everything earlier branches built in the one branch where an
+```
+
+Removed from `src/lib/review.ts:1998-2004` (base 58e6c840), verbatim:
+
+```
+    // An UNEXPLAINED downgrade cannot outweigh a proof this run watched execute and pass.
+    // `reviewerVerdictContract` calls the fold advisory and promises a reviewer "that emits
+    // nothing parseable simply leaves the floor untouched — never a stall, never a deadlock";
+    // a bare FAIL is that stall, and it is unactionable by construction — the author is told
+    // the proof is non-responsive and nothing about what would answer it. Narrow BY DESIGN to
+    // `executed_pass`: where the floor rests on keyword coverage the reviewer's judgement is
+    // the only real signal and still binds, unexplained or not (W1-T2263 acceptance 3).
+```
+
+Removed from `src/lib/review.ts:2183-2185` (base 58e6c840), verbatim:
+
+```
+  // W1-T2534: a claim inside an inline quoted span is a MENTION of someone else's claim, never
+  // this body's own — the inline sibling of W1-T308's block-level rule. Checked FIRST, because no
+  // amount of surrounding changeset context turns a quotation into an assertion.
+```
+
+Removed from `src/lib/review.ts:2292-2298` (base 58e6c840), verbatim:
+
+```
+  // THE LABEL FORM IS A CLAIM, and the one the house style writes: `data-only: no code.` (#1025's own body) and
+  // `**Plan-only**: one file added`. A colon immediately after the shorthand, through any markdown emphasis, makes it
+  // the SUBJECT of the line, and a path never continues with a colon, so `test/trailer-credit-plan-only.test.ts`
+  // stays silent. W1-T2549 NARROWED W1-T395's SCOPE, IT DID NOT REVERSE IT: a CLOSING DELIMITER ends a SPAN, not a
+  // sentence, so `**Plan-only**:` still reads as a label (test/review-absence-anchor-delimiter.test.ts), but a QUOTE
+  // character leaving the span open is caught by `isInsideInlineQuote` first. See
+  // test/changeset-shorthand-anchor.test.ts.
+```
+
+Removed from `src/lib/review.ts:2300-2301` (base 58e6c840), verbatim:
+
+```
+    // W1-T2679: ...and unless the shorthand is a sibling in a parenthesised enumeration of state
+    // names, where the closing bracket belongs to the list rather than to a label span.
+```
+
+Removed from `src/lib/review.ts:2307-2310` (base 58e6c840), verbatim:
+
+```
+  // THE COPULAR FORM IS A CLAIM: "This is plan-only.", "The diff is data-only." A linking verb immediately before the
+  // shorthand makes it the PREDICATE of what the sentence is about, and in a PR body that subject is the change.
+  // Deliberately IMMEDIATE rather than anywhere-in-sentence, which is what separates it from "makes a triage PR
+  // plan-only by construction" (about the LANE) and "described its revert as data-only" (about ANOTHER PR).
+```
+
+Removed from `src/lib/review.ts:3380-3382` (base 58e6c840), verbatim:
+
+```
+  // Checked BEFORE `state`, `capped` and `override` — irreversibility is a hard refusal an
+  // operator override can never buy back (the CAPPED override two branches down answers "was
+  // enough proof executed", a different question from "can this diff's effect be undone").
+```
+
+Removed from `src/lib/review.ts:3448-3450` (base 58e6c840), verbatim:
+
+```
+  // W1-T205: excludes `planOnly` — decideAutoMergeArm checks the carve-out BEFORE the
+  // override branch, so a planOnly arm never actually consulted `override` even when one
+  // happens to be present; logging "override used" here would misattribute the decision.
+```
+
+Removed from `src/lib/review.ts:3658-3659` (base 58e6c840), verbatim:
+
+```
+  // forged, missing or failing. Arming stays withheld either way, but the REASON must stay honest — "never read as a
+  // verdict in either direction".
+```
+
+Removed from `src/lib/review.ts:3825-3827` (base 58e6c840), verbatim:
+
+```
+  // Neither structural fact above fired and no VISIBLE criterion is unmet, yet
+  // `judgeReview` still folded this verdict to failure — the only two triggers
+  // left in its OR-chain are a holdout-only miss or test theater.
+```
+
+Removed from `src/lib/review.ts:4271-4273` (base 58e6c840), verbatim:
+
+```
+    // An indented, non-bullet "proof:" line right under a "- claim: ..." bullet is a
+    // CONTINUATION of that criterion, not a terminator — attach it and keep scanning
+    // for further bullets instead of dropping every criterion after the first.
+```
+
+Removed from `src/lib/review.ts:4292-4293` (base 58e6c840), verbatim:
+
+```
+    // A blank line before any bullet is tolerated (header, then a gap, then bullets);
+    // once bullets have begun, any blank or unrecognized line ends the block.
+```
+
+Removed from `src/lib/review.ts:4414-4416` (base 58e6c840), verbatim:
+
+```
+  // THE EXEMPTION MUST BE TRUE, NOT MERELY CLAIMED (W1-T2297). This arm's whole warrant is that criteria come from
+  // the plan record rather than the body, and that fails when the trailer names nothing the plan declares: the
+  // reviewer falls back to the body, and a body this gate never looked at ships with whatever its block parses to.
+```
+
+Removed from `src/lib/review.ts:4418-4420` (base 58e6c840), verbatim:
+
+```
+  // reading; falling through re-uses the diagnostics arms below rather than adding a second spelling of "this block
+  // is unreadable".
+  // // Why: on #2908 a trailer resolved to ZERO ids and the body's block gave `bullets written: 5, criteria parsed: 1` — four criteria unseen.
+```
+
+Removed from `src/lib/review.ts:4593-4595` (base 58e6c840), verbatim:
+
+```
+  // CLAIM 4: no anchored trailer ⇒ unchanged — nothing to resolve, and no git object is ever
+  // touched to find that out. The caller's existing PR-body `## Acceptance` fallback (unchanged
+  // by this function) is what recovers criteria here, exactly as it does today.
+```
+
+Removed from `src/lib/review.ts:5422-5424` (base 58e6c840), verbatim:
+
+```
+  // W1-T2738: ci.yml registers JOBS, not files, so its introducing-commit test is a different
+  // question — asked in full by the helper above rather than folded into the file-newness check
+  // below, which it would always fail.
+```
+
+Removed from `src/lib/review.ts:5716-5718` (base 58e6c840), verbatim:
+
+```
+    // Still inside a previously-opened block scalar's continuation — classify by its OWNER and
+    // never reinterpret this line as a fresh field header, however "key:"-shaped its content
+    // looks (a `grep:` proof-dialect content line is exactly this shape).
+```
+
+### WhitelistedProof
+
+Removed from `src/lib/review.ts:593-599` (base 58e6c840), verbatim:
+
+```
+// not_executable and the keyword floor stands: a named TEST FILE path run through `node --test --import tsx <path>`;
+// a literal, BACKTICK-FENCED `grep ...`; `grep: <pattern> in <path>`, whose `in <path>` clause is REQUIRED (W1-T219,
+// recon R-13(iii)) because a repo-wide search would let one incidental match certify a criterion while
+// `executed_pass` OVERRIDES keyword coverage; and `unit test: <file-or-test-name>`. INVARIANT: all four run through
+// execFile, never a shell, so proof TEXT cannot inject shell metacharacters; the legacy shapes still refuse `; & \ $
+// < >`, the house shapes deliberately do not and are refused only for `..` traversal or a glob in a grep target.
+// // Why: a semicolon in ordinary prose refused 158 of 269 dialect proofs (W1-T128; docs/forensics/review.md).
+```
+
+### nameFiltered
+
+Removed from `src/lib/review.ts:610-614` (base 58e6c840), verbatim:
+
+```
+  /** True when `kind==="test"` was compiled from a bare TEST NAME rather than a file path (house
+   *  dialect `unit test: <name>`), so `args` includes `--test-name-pattern` (W1-T72). TRAP {@link
+   *  execWhitelistedProof} guards with it: that flag with ZERO matches still exits 0, because every
+   *  file's own wrapper passes trivially, and a named test absent from the head must count as FAIL —
+   *  exactly the "grep with no match" class — never a silent pass. */
+```
+
+### authorSelectedArgv
+
+Removed from `src/lib/review.ts:616-619` (base 58e6c840), verbatim:
+
+```
+  /** True only for a `kind==="grep"` compiled by the LEGACY fenced `` `grep ...` `` shape rather than the house
+   *  dialect (W1-T2294). The dialect form always compiles to the fixed `["-arn", "--", pattern, path]` argv — BRE,
+   *  author-unselectable — while the legacy shape passes an author's own flags, `-E` among them, through unexamined.
+   *  This is how task-linter.ts's engine-divergence check tells the two apart; `args` alone cannot. */
+```
+
+### DIALECT_GREP_RE
+
+Removed from `src/lib/review.ts:627-629` (base 58e6c840), verbatim:
+
+```
+/** The house-dialect PREFIXES a proof is WRITTEN in when it is meant to be mechanically checked
+ *  (W1-T72). Matched against the proof's leading text only: a dialect label is how a proof STARTS,
+ *  never something incidentally mentioned mid-sentence. */
+```
+
+### DIALECT_DEMO_RE
+
+Removed from `src/lib/review.ts:632-636` (base 58e6c840), verbatim:
+
+```
+/** The third house dialect (W1-T277) — `demonstration: <what the operator must do>` — is the honest
+ *  OPPOSITE of `grep:`/`unit test:`: it names a proof the harness DECLINES to check, on the record.
+ *  {@link parseWhitelistedProof} always refuses it, there being nothing to execute; its
+ *  `verify:human`-only legality is enforced by task-linter.ts, since review.ts has no opinion on a
+ *  task's `verify` field. */
+```
+
+### WRAPPING_CODE_SPAN_RE
+
+Removed from `src/lib/review.ts:639-642` (base 58e6c840), verbatim:
+
+```
+/** A markdown code span WRAPPING the whole string: N backticks, the body, the SAME N backticks. The
+ *  `\1` backreference is what makes it safe — only a matched pair at the two ENDS is removed, so an
+ *  interior backtick is never touched. `[\s\S]` rather than `.` handles a multi-line span; the
+ *  inner `\s*` absorbs the padding CommonMark allows. */
+```
+
+### TMP_HYGIENE_IMPORT
+
+Removed from `src/lib/review.ts:659-663` (base 58e6c840), verbatim:
+
+```
+ *  Relative like every reference site, because node resolves `--import` from the spawn's cwd, which {@link
+ *  execWhitelistedProof} pins to the PR-head checkout; must sort AFTER `--import tsx`, whose loader lets node parse
+ *  the `.ts` setup file at all.
+ *  // Why: the proof executor omitted it and leaked one OS-tmpdir dir per fixture — 53,310 `rmd-*` dirs growing
+ *  // ~200/min ENOSPC-crash-looped the daemon (2026-08-03, plan/feedback/fb-1785807201821-e4c9dc.yaml). */
+```
+
+### isDialectPrefixed
+
+Removed from `src/lib/review.ts:666-669` (base 58e6c840), verbatim:
+
+```
+/** True when a proof's TEXT is written in a recognised house dialect — meant to be executed
+ *  (`grep:`/`unit test:`, W1-T72) or an on-the-record declaration that no execution will occur
+ *  (`demonstration:`, W1-T277). Independent of whether {@link parseWhitelistedProof} accepted it.
+ *  Used ONLY for the `floorDegraded` legibility signal; it never affects execution. */
+```
+
+### isDemonstrationProof
+
+Removed from `src/lib/review.ts:675-677` (base 58e6c840), verbatim:
+
+```
+/** True when a proof's TEXT is written in the `demonstration:` dialect (W1-T277) — the single source
+ *  of truth task-linter.ts imports rather than redeclaring {@link DIALECT_DEMO_RE}, so the
+ *  verify:human-only legality it enforces cannot drift from what review.ts recognises. */
+```
+
+### isMalformedDialectProof
+
+Removed from `src/lib/review.ts:682-685` (base 58e6c840), verbatim:
+
+```
+/** True when a proof's text carries a `grep:`/`unit test:` LABEL, under the same code-span
+ *  normalisation {@link parseWhitelistedProof} applies. ONLY meaningful for a proof that function
+ *  already refused: it is what makes THAT refusal an AUTHORING ERROR (`dialect-parse-error`,
+ *  W1-T305) rather than ordinary prose. Excludes `demonstration:`, whose refusal is intended. */
+```
+
+### PROSE_PUNCTUATION_RE
+
+Removed from `src/lib/review.ts:693-695` (base 58e6c840), verbatim:
+
+```
+/** Sentence-level punctuation a bare test-name title would not carry: a
+ * comma, colon, semicolon, parenthetical aside, an em/en dash, or an
+ * ellipsis. Any one of these marks a body as PROSE, not a plain title. */
+```
+
+### looksLikeProseDescription
+
+Removed from `src/lib/review.ts:701-706` (base 58e6c840), verbatim:
+
+```
+/** Does a name-filtered `unit test:` proof BODY read as a long PROSE DESCRIPTION of behaviour — the house convention
+ *  — rather than a short, bare TEST-NAME-shaped string (W1-T161, #349/W1-T149)? {@link judgeCriterion} uses it ONLY
+ *  to interpret a ZERO-MATCH outcome: prose degrades to `not_executable`, a bare name stays `executed_fail`
+ *  (W1-T72's guard, preserved). A pure length and punctuation check, no model call.
+ *  // Why: #349's own proof paraphrased a REAL, PASSING test in different words, matched zero tests, and minted an
+ *  // `executed_fail` that hard-blocked a green PR (W1-T149). */
+```
+
+### DIALECT_GREP_PATH_RE
+
+Removed from `src/lib/review.ts:713-716` (base 58e6c840), verbatim:
+
+```
+/** Split a `grep:` body into pattern and optional path. The path is the trailing token after the
+ *  LAST `\s+in\s+` boundary that itself looks like a path or glob, which keeps a multi-word pattern
+ *  intact while still splitting "... in src/lib/config.ts". No such boundary means the body carries
+ *  no TARGET and {@link parseDialectGrep} refuses it (W1-T219). */
+```
+
+### GREP_PROOF_FILE_TARGET_REQUIREMENT
+
+Removed from `src/lib/review.ts:719-722` (base 58e6c840), verbatim:
+
+```
+/** (R-12) The one-line statement of what a `grep:` proof may target, quoted verbatim by every
+ *  surface that refuses a directory-shaped target — the parser, `rmd check-proof`'s refusal line,
+ *  and the filing-time linter's `proof-grep-safety` violation — so an author reads the same
+ *  sentence wherever the refusal lands. */
+```
+
+### grepProofTargetNamesNoFile
+
+Removed from `src/lib/review.ts:727-732` (base 58e6c840), verbatim:
+
+```
+/** Does a `grep:` target NAME NO FILE — is it directory-shaped (R-12)? A directory is not proof of anything
+ * SPECIFIC: `grep: foo in src` is W1-T219's refused whole-repo search wearing a path. THE RULE IS TEXTUAL BECAUSE THE
+ * PARSE IS PURE — the final segment must carry an extension — so an extensionless FILE (`bin/rmd`) is refused too and
+ * a dotted DIRECTORY (`plan/tasks.d`) is caught by {@link assertGrepTargetIsFile} instead.
+ * // Why: `-r` made a directory target work at head while the base check materialised a TREE LISTING as a FILE,
+ * // grading `discriminates` even where the pattern existed at base (docs/forensics/review.md). */
+```
+
+### explainGrepProofRefusal
+
+Removed from `src/lib/review.ts:739-742` (base 58e6c840), verbatim:
+
+```
+/** WHY a `grep:` proof body failed to parse, as one sentence for a human (R-12) — `undefined` when
+ *  it parses or is not a `grep:` proof. `rmd check-proof` prints it beside its `parse: REFUSED`
+ *  line, which used to name no cause. The parser still returns `null` and its callers still grade
+ *  that as prose/`dialect-parse-error`: that contract is unchanged. */
+```
+
+### return { kind: "grep", command: "grep", args: ["
+
+Removed from `src/lib/review.ts:791-794` (base 58e6c840), verbatim:
+
+```
+  // INDEPENDENT OF THE HOST'S GREP: without it a NUL byte makes BSD grep exit 0 with "Binary file … matches" where
+  // ugrep exits 1, and it can only widen.
+  // // Why: `grep: export function callSiteViolations in src/lib/task-linter.ts` (#1071) hit exactly
+  // // that, and task-linter.ts is one of the two source files carrying a NUL byte.
+```
+
+### dialectGrepTargetPath
+
+Removed from `src/lib/review.ts:798-802` (base 58e6c840), verbatim:
+
+```
+/** The TARGET PATH of a HOUSE-dialect `grep:` proof, or `undefined` for any other shape (W1-T2737).
+ *  {@link parseDialectGrep} compiles to a fixed `["-arn", "--", pattern, path]` argv, so the path is
+ *  the last element and nothing else can occupy it; the LEGACY fenced form passes the author's own
+ *  argv through, which {@link proofEngineDivergenceViolations} already reports as engine-ambiguous,
+ *  so this declines rather than guessing. */
+```
+
+### return {
+
+Removed from `src/lib/review.ts:824-826` (base 58e6c840), verbatim:
+
+```
+  // execFile and this branch names no file, so there is no traversal or glob surface; refusing prose for a semicolon
+  // was the biggest single cause of the dead proof floor. TRAP (W1-T112 round 3): that flag compiles its argument as
+  // a REGEX, so a title echoing real syntax becomes an unescaped CHARACTER CLASS and manufactures a FAIL.
+```
+
+Removed from `src/lib/review.ts:3340-3342` (base 58e6c840), verbatim:
+
+```
+  // Malformed: a row matched this class but its `verdict` is neither "hold" nor "notify" — only
+  // reachable when a caller hands decideAutoMergeArm a `bands` array that bypassed policy.ts's
+  // own loader (which refuses this shape at load, per ArmCalibrationBandRow's own doc).
+```
+
+Removed from `src/lib/review.ts:3726-3727` (base 58e6c840), verbatim:
+
+```
+  // The fail-open default is legible in the decision's own reason — which every caller already
+  // records — instead of a new ledger step a polling lane would re-emit every tick.
+```
+
+Removed from `src/lib/review.ts:4628-4629` (base 58e6c840), verbatim:
+
+```
+    // was, because git will not, so one extra `cat-file -e` separates the two causes that matter and the next reader
+    // need not re-run probes.
+```
+
+### cappedReason
+
+Removed from `src/lib/review.ts:855-856` (base 58e6c840), verbatim:
+
+```
+/** Parse a proof for a whitelisted, mechanically-executable shape. `null` for free prose or an unsafe shape — the
+ *  caller then defers entirely to the keyword floor. */
+```
+
+Removed from `src/lib/review.ts:858-861` (base 58e6c840), verbatim:
+
+```
+ *  situations wearing one face: proofs that never parsed, proofs that parsed and named nothing, proofs whose
+ *  execution errored, and a run with no checkout. PURE and DIAGNOSTIC.
+ *  // Why: telling those four apart from outside cost a full recon once — the markdown code-span defect behind
+ *  // #1037's 0/4 and #1057's 0/6 (docs/forensics/review.md). */
+```
+
+### wrappedGrepPattern
+
+Removed from `src/lib/review.ts:877-883` (base 58e6c840), verbatim:
+
+```
+/** A `grep:` pattern WHOLLY enclosed in a matching pair of delimiters (W1-T2544) — a Markdown artifact, never what
+ *  the author meant, since `grep -arn --` runs with no `-F` and a delimiter is then a character that must appear in
+ *  the file. DISTINCT FROM {@link parseWhitelistedProof}'s code-span strip, which unwraps the WHOLE proof: this is
+ *  the pattern INSIDE an otherwise well-formed proof, which parses perfectly and then matches nothing. EXACT, NEVER
+ *  A HEURISTIC.
+ *  // Why: two retro cycles six hours apart wrapped patterns in double quotes (#3356) and backticks (#3413); every
+ *  // wrapped pattern read 0 and every bare one read 1. */
+```
+
+### trimmed
+
+Removed from `src/lib/review.ts:898-902` (base 58e6c840), verbatim:
+
+```
+  // House dialect (W1-T72) checked FIRST and EXCLUSIVELY: a proof with a dialect label is handled ONLY by its own
+  // parser and never falls through to a legacy shape. Falling through would let a dialect body that fails its own
+  // safety check — or names a pattern containing a `test/*.test.ts`-shaped substring — be reinterpreted by an
+  // unrelated legacy match: `grep: TODO in test/foo.test.ts` must run the GREP, not "run that whole test file
+  // instead".
+```
+
+### dialectSource
+
+Removed from `src/lib/review.ts:906-908` (base 58e6c840), verbatim:
+
+```
+  // `not_executable` — a CAPPED 0/N verdict on perfect proofs. THE STRIP IS A FALLBACK, NOT AN ENTRY-POINT
+  // NORMALISATION, because `GREP_FENCE_RE` REQUIRES its backticks: bare text is tried first.
+  // // Why: #1037 parsed 0/4 and #1057 0/6 that way while #1038's unwrapped proofs parsed 8/8.
+```
+
+### testMatch
+
+Removed from `src/lib/review.ts:920-921` (base 58e6c840), verbatim:
+
+```
+  // Legacy strict shapes (W1-T65) — only reached when the proof carries no
+  // dialect label at all.
+```
+
+### ProofExecutor
+
+Removed from `src/lib/review.ts:945-948` (base 58e6c840), verbatim:
+
+```
+/** Executes a {@link WhitelistedProof}'s argv and reports the outcome — injectable so unit tests
+ *  fake pass/fail/no-match/throw without touching the filesystem. `"no-match"` (name-filtered proofs
+ *  only) means the run completed but ZERO tests matched: NOT a failing test, so the caller degrades
+ *  it to `not_executable` rather than a false `executed_fail`. */
+```
+
+### defaultProofTimeoutMs
+
+Removed from `src/lib/review.ts:952-956` (base 58e6c840), verbatim:
+
+```
+// CONSUMERS), floored at load by policy.ts's `numberField`, so a retune is a reviewed plan PR rather than a code
+// edit, and `loadDefaultPolicy` self-locates the file from this module's install location. Drift against a source
+// literal is structurally unreachable once the code reads the policy, so test/policy.test.ts drops its one drift
+// assertion and test/policy-consumers.test.ts asserts the stronger property.
+// // Why: 30s was observed truncating a name-filtered proof's whole-suite run (W1-T112 round 4).
+```
+
+### ProofSpawner
+
+Removed from `src/lib/review.ts:965-967` (base 58e6c840), verbatim:
+
+```
+/** The ONE process spawn a proof execution performs — the test/grep run itself.
+ * Injectable so a test can prove, by COUNTING, that a fast-failed proof never
+ * spawns the runner at all; timing that would only prove it was quick. */
+```
+
+### PROOF_ENV_ALLOWLIST
+
+Removed from `src/lib/review.ts:972-973` (base 58e6c840), verbatim:
+
+```
+ * Everything else is EXCLUDED BY DEFAULT — every `RMD_*` var a daemon carries, `RMD_RESTART_THROTTLE_S` the example
+ * that measured it — so the reviewer and CI cannot disagree on one sha for a reason unrelated to the diff. */
+```
+
+### GIT_CONFIG_TRIPLE
+
+Removed from `src/lib/review.ts:986-987` (base 58e6c840), verbatim:
+
+```
+ *  reads the count first, then demands every `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` it names, so forwarding a
+ *  count without its pairs makes git exit 128 before doing any work: strictly worse than forwarding no count. */
+```
+
+### buildProofEnv
+
+Removed from `src/lib/review.ts:991-993` (base 58e6c840), verbatim:
+
+```
+ *  PROOF_ENV_ALLOWLIST} keys present on `parent`, never `parent` wholesale. Exported so a test can compare the env
+ *  two differently-shaped orchestrator environments produce. INVARIANT: the {@link GIT_CONFIG_TRIPLE} crosses only as
+ *  a consistent unit (W1-T1096) — never a partial forward. */
+```
+
+### defaultProofSpawner
+
+Removed from `src/lib/review.ts:1008-1013` (base 58e6c840), verbatim:
+
+```
+/** Production {@link ProofSpawner}: no shell, stdout captured, hard timeout, and a DECLARED env ({@link
+ *  buildProofEnv}) rather than an implicit inherit of `process.env` (W1-T499). Exported (W1-T387) so
+ *  `checkProofCommand` can wrap it for diagnostics, never for the verdict. TRAP: `NODE_V8_COVERAGE: undefined`
+ *  closes a side channel the allowlist cannot, because Node force-injects that var into every child even when given
+ *  an `env` that omits the key.
+ *  // Why: passing no `env` key let a proof inherit the orchestrator's whole environment (W1-T499). */
+```
+
+### ensureDeps
+
+Removed from `src/lib/review.ts:1023-1025` (base 58e6c840), verbatim:
+
+```
+/** `npm ci` a fresh checkout ONCE before its first test proof, since fresh worktrees have no
+ *  node_modules. Best-effort: a failed or skipped install is never a silent hard-fail here, because
+ *  the test command will itself fail to run and surface as exec_error, never a false pass. */
+```
+
+### requiredChromiumDirs
+
+Removed from `src/lib/review.ts:1039-1043` (base 58e6c840), verbatim:
+
+```
+ * browser this repo's suites launch; the `-` → `_` rewrite is Playwright's on-disk convention, so
+ * `chromium-headless-shell` rev 1234 lives in `chromium_headless_shell-1234` and `chromium` rev 1234 in
+ * `chromium-1234`.
+ * // Why: `ci` installs before every test job and the review host never did, so #863's bump made every
+ * // `chromium.launch()` die and post `executed_fail` on code `ci` was passing (#892). */
+```
+
+### BrowserPreflightDeps
+
+Removed from `src/lib/review.ts:1056-1058` (base 58e6c840), verbatim:
+
+```
+/** Everything {@link ensureBrowsers} touches outside itself, injected so the
+ * decision logic is provable without a filesystem, a network fetch, or a 180MB
+ * download. */
+```
+
+### isInstalled
+
+Removed from `src/lib/review.ts:1063-1065` (base 58e6c840), verbatim:
+
+```
+  /** True when `<cacheRoot>/<dir>` holds a COMPLETE install. Playwright writes an
+   * `INSTALLATION_COMPLETE` marker last, so a half-extracted directory that would
+   * fail to launch reads as absent here rather than as present. */
+```
+
+### ensureBrowsers
+
+Removed from `src/lib/review.ts:1073-1075` (base 58e6c840), verbatim:
+
+```
+ *  {@link requiredChromiumDirs} for the incident this closes. Best-effort by the same doctrine as {@link ensureDeps}:
+ *  it never throws and never decides a verdict, because a preflight that could fail a criterion would relocate the
+ *  false-FAIL problem it removes. Returns a FACT: `"ok"`, `"installed"`, `"failed"`, or `"unreadable"`. */
+```
+
+### ensureBrowsersOnce
+
+Removed from `src/lib/review.ts:1096-1098` (base 58e6c840), verbatim:
+
+```
+/** Production {@link ensureBrowsers} wiring, memoised per process — the browser
+ * cache is HOST-global (not per-checkout like `node_modules`), so one check per
+ * review process covers every proof it goes on to run. */
+```
+
+Removed from `src/lib/review.ts:1359-1361` (base 58e6c840), verbatim:
+
+```
+    // Same "only when we are actually going to run node" placement as ensureDeps,
+    // and for the same reason: a `grep` proof never launches a browser. See
+    // requiredChromiumDirs for the false-FAIL incident this closes (PR #892).
+```
+
+### pinnedPlaywrightCli
+
+Removed from `src/lib/review.ts:1111-1114` (base 58e6c840), verbatim:
+
+```
+/** The checkout's OWN Playwright CLI entry. Deliberately not `npx playwright`: `npx` resolves a
+ *  name and on a cache miss will happily FETCH a different Playwright than the one pinned here,
+ *  installing a browser revision the tests do not want — the exact drift this preflight exists to
+ *  end. Running the pinned CLI with the already-running `node` binary pins both halves. */
+```
+
+### playwrightCacheRoot
+
+Removed from `src/lib/review.ts:1130-1133` (base 58e6c840), verbatim:
+
+```
+/** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real
+ *  path, which is how CI images relocate the cache; the literal `"0"` means "inside node_modules"
+ *  and is NOT a directory, so it falls through to the platform default exactly as Playwright's own
+ *  resolution does. */
+```
+
+### NameFilterResolution
+
+Removed from `src/lib/review.ts:1147-1150` (base 58e6c840), verbatim:
+
+```
+ * kept distinct because two used to collapse into one empty array — acting on that ambiguity is how a reviewer
+ * accuses an author of naming a test that does not exist when the truth is that WE COULD NOT LOOK. `resolved`: narrow
+ * the run. `absent`: a readable, non-empty corpus was searched (control probe) and the name is in no file, so
+ * `no-match` is safe. `unresolvable`: NOT evidence; fall back. */
+```
+
+### INTERPOLATED_TITLE_RE
+
+Removed from `src/lib/review.ts:1156-1158` (base 58e6c840), verbatim:
+
+```
+/** ERE matching a test declaration whose title is a TEMPLATE LITERAL carrying at least one
+ *  interpolation — the shape a fixed-string search structurally cannot find, because the title that
+ *  reaches the TAP stream never appears verbatim in the source. */
+```
+
+### MIN_STATIC_CHUNK_LEN
+
+Removed from `src/lib/review.ts:1161-1163` (base 58e6c840), verbatim:
+
+```
+/** Shortest static run of a template title we will treat as identifying. Short
+ * fragments (`" "`, `"'s "`, `": "`) appear in almost any prose and would make
+ * every absent test look ambiguous, which would disable the fast path entirely. */
+```
+
+### interpolatedTitleStaticChunks
+
+Removed from `src/lib/review.ts:1166-1169` (base 58e6c840), verbatim:
+
+```
+/** The literal (non-interpolated) runs of a template-literal test title on one line of source:
+ *  everything between the line's first and last backtick, split on `${…}` holes. These are the ONLY
+ *  substrings of the rendered title a `grep -F` could have matched, so they are what a proof's raw
+ *  name is compared against when deciding whether an interpolated title might be its home. */
+```
+
+### couldBeInterpolatedTitle
+
+Removed from `src/lib/review.ts:1181-1185` (base 58e6c840), verbatim:
+
+```
+/** Could `rawName` be the RENDERED title of a test declared with an interpolated template literal?
+ *  {@link resolveNameFilteredCandidates}'s `grep -F` cannot see one — the source holds `${…}`, the
+ *  TAP stream the substituted value — so zero candidates over a repo that declares them is not
+ *  automatically evidence of absence. Answers "maybe" only on positive evidence: some interpolated
+ *  declaration has a static chunk of real length that the name contains. */
+```
+
+### grepFilesContaining
+
+Removed from `src/lib/review.ts:1202-1206` (base 58e6c840), verbatim:
+
+```
+/** `grep -rl -F` over the checkout's test files as a plain list, or `null` when grep produced none.
+ *  Deliberately does NOT interpret the exit code: BSD grep exits 1 with EMPTY stderr both for
+ *  "searched, found nothing" and for "the directory does not exist" (measured 2026-07-29), so the
+ *  exit code cannot carry that distinction — {@link resolveNameFilteredCandidates} draws it with a
+ *  control probe instead. */
+```
+
+### resolveNameFilteredCandidates
+
+Removed from `src/lib/review.ts:1223-1227` (base 58e6c840), verbatim:
+
+```
+/** Resolve the CANDIDATE test file(s) a name-filtered proof's raw name could live in (W1-T227), so
+ * {@link execWhitelistedProof} can scope its `node --test` run rather than compiling `--test-name-pattern` across the
+ * whole {@link TEST_GLOB}, which node LOADS entirely before filtering. Fixed-string (`grep -F`), never a regex.
+ * INVARIANT: "found nothing" and "could not look" are different claims and only the first licenses the caller's fast
+ * path, so this returns a {@link NameFilterResolution}; the line is drawn by a CONTROL PROBE, never grep's exit code.
+```
+
+### narrowNameFilteredArgs
+
+Removed from `src/lib/review.ts:1246-1249` (base 58e6c840), verbatim:
+
+```
+ *  `unresolvable` resolution, where the slower run is honest.
+ *  // Why: an earlier comment claimed zero candidates changes nothing; both halves were false — zero real matches on
+ *  // a COMPLETED run returns `no-match`, not `fail`, and the wider search does NOT finish, because the full glob
+ *  // loads files that drive a real headless browser and hang (2026-07-29). */
+```
+
+### ProofTargetOutsideCheckoutError
+
+Removed from `src/lib/review.ts:1255-1263` (base 58e6c840), verbatim:
+
+```
+/** The REAL proof executor: run a {@link WhitelistedProof}'s argv, no shell, in `cwd`, under a hard per-proof
+ * timeout, so a hanging test can never stall the required check into the absent-check deadlock class. `"pass"` on a
+ * clean exit 0; `"fail"` on a genuine clean nonzero exit. IT THROWS, so the caller surfaces `exec_error` and the
+ * keyword floor, whenever the process never reached a clean verdict: a timeout kill or spawn error; a `grep` exit 2,
+ * "could not look at all" as opposed to exit 1's "looked and found nothing" (W1-T219, recon R-13(iv)); or a PURE-PATH
+ * `unit test:` proof's nonzero exit that is NOT a named-test failure (W1-T1077) — a failing test's `not ok` names the
+ * TEST'S OWN TITLE, a broken runtime's names the FILE ITSELF, and BOTH exit 1. An ABSENT file stays `"fail"`.
+ * NAME-FILTERED PROOFS NEVER USE THE EXIT CODE (W1-T178 round 2); the verdict comes from {@link nameFilteredOutcome}.
+ * // Why: `test/serve.find.test.ts` runs its file-scope `after` when the pattern matched none of its tests. */
+```
+
+### assertGrepTargetsInsideCheckout
+
+Removed from `src/lib/review.ts:1285-1287` (base 58e6c840), verbatim:
+
+```
+ * PR-body edit re-earns review on the same head sha (CLAUDE.md, "A BODY REPAIR IS A NEW REVIEW INPUT"). EVERY
+ * NON-FLAG TOKEN IS CHECKED, since the legacy argv is whatever the author typed; a token absent from disk is
+ * SKIPPED, because a missing target is already grep's exit 2. `realpathSync`, not `resolve`, sees through it. */
+```
+
+### ProofTargetIsDirectoryError
+
+Removed from `src/lib/review.ts:1308-1312` (base 58e6c840), verbatim:
+
+```
+/** (R-12) Thrown for a house-dialect `grep:` proof whose target IS A DIRECTORY in the checkout.
+ *  {@link grepProofTargetNamesNoFile} refuses the directory SHAPE at parse; a dotted name
+ *  (`plan/tasks.d`) passes that check and is refused here against the real filesystem — the same
+ *  two-layer split R-18 uses. A throw, never a verdict, so a directory proof is never certified
+ *  `executed_pass` on `-r` finding one incidental line beneath it. */
+```
+
+### assertGrepTargetIsFile
+
+Removed from `src/lib/review.ts:1319-1322` (base 58e6c840), verbatim:
+
+```
+/** (R-12) Refuse a house-dialect `grep:` proof whose target resolves to a directory under `cwd`.
+ *  Restricted to that shape on purpose: the legacy fenced argv is the author's own and its operands
+ *  are not reliably recoverable. An ABSENT target is skipped — that is grep's own exit 2 ⇒
+ *  `exec_error` (W1-T219), and pre-empting it here would change nothing. */
+```
+
+### args
+
+Removed from `src/lib/review.ts:1342-1343` (base 58e6c840), verbatim:
+
+```
+  // real PR-head checkout, and narrow before spawning node (W1-T227). Not folded into parseWhitelistedProof: that is
+  // a pure parse with no `cwd`, and the candidate set can only be known against a real checkout.
+```
+
+### completedResults
+
+Removed from `src/lib/review.ts:1399-1404` (base 58e6c840), verbatim:
+
+```
+      // AN INCOMPLETE RUN IS NOT A FAILING ONE (W1-T2740), read BEFORE the wrapper-name classifier on purpose: the
+      // two discriminators are orthogonal and this one is stronger. `runtime-broken` describes a run that COMPLETED
+      // and whose only `not ok` names the file itself; a stream with NO summary did not finish at all. NOT a request
+      // to raise `proofTimeoutMs`: a larger bound only moves the same false verdict onto a slower file.
+      // // Why: on #3719 `unit test: test/retro-marker-atomic.test.ts` posted `executed_fail` while the same
+      // // checkout passed all 33 tests in 127s unrestricted — killed at 60s, no `not ok`, no `# duration_ms`.
+```
+
+### PureProofNeverExecutedError
+
+Removed from `src/lib/review.ts:1416-1417` (base 58e6c840), verbatim:
+
+```
+ *  `proof_skip: "runtime-broken"` plus the wrapper name parsed here: design (iv)'s "record the discriminator, not the
+ *  stream", so the ledger carries a bounded fact rather than an unbounded TAP capture. */
+```
+
+### PureProofIncompleteRunError
+
+Removed from `src/lib/review.ts:1429-1432` (base 58e6c840), verbatim:
+
+```
+/** (W1-T2740) Thrown for a pure-path `unit test:` proof whose run emitted real subtest results and
+ *  then stopped before node's trailing summary — an INCOMPLETE execution, not a verdict.
+ *  {@link judgeCriterion} records `proof_skip: "incomplete-run"` plus the bounded discriminator,
+ *  the same rule {@link PureProofNeverExecutedError} follows, for the same reason. */
+```
+
+### pureTestIncompleteRunResultCount
+
+Removed from `src/lib/review.ts:1444-1445` (base 58e6c840), verbatim:
+
+```
+/** (W1-T2740) How many REAL (non-file-wrapper) subtest results a pure-path proof's TAP stdout carried when the run
+ * is INCOMPLETE — at least one real result, NONE `not ok`, no trailing summary ({@link hasFinalSummary}). The three
+```
+
+Removed from `src/lib/review.ts:1447-1448` (base 58e6c840), verbatim:
+
+```
+ * either way; and NO real result means nothing was observed — an ABSENT path reports empty stdout, which would
+ * otherwise read as a timeout. */
+```
+
+### pureTestNeverExecutedWrapperName
+
+Removed from `src/lib/review.ts:1461-1465` (base 58e6c840), verbatim:
+
+```
+/** (W1-T1077) A pure-path proof's own file wrapper name when EVERY `not ok` line in its TAP stdout
+ *  names the file itself ({@link isFileWrapperResultName}, the same predicate {@link
+ *  nameFilteredOutcome} uses) and no real subtest reported `not ok`. `undefined` otherwise: either a
+ *  real subtest failed, or the stream carries no `not ok` at all (an absent file's measured empty
+ *  stdout), so absence keeps falling through to the caller's ordinary `"fail"`. */
+```
+
+### isFileWrapperResultName
+
+Removed from `src/lib/review.ts:1477-1479` (base 58e6c840), verbatim:
+
+```
+/** A file's own trivial TAP wrapper line (`ok N - test/foo.test.ts`) reporting
+ * itself when NONE of its internal tests matched `--test-name-pattern` — not a
+ * real match, whichever way it reports. */
+```
+
+### TAP_RESULT_LINE_RE
+
+Removed from `src/lib/review.ts:1484-1485` (base 58e6c840), verbatim:
+
+```
+/** `(not )?ok <n> - <name>` — a node TAP result line, possibly indented for a
+ * nested subtest. Captures the pass/fail marker and the reported name. */
+```
+
+### hasFinalSummary
+
+Removed from `src/lib/review.ts:1488-1491` (base 58e6c840), verbatim:
+
+```
+/** The node test runner's trailing summary block (`# tests N`, `# pass N`, …, `# duration_ms N`) is
+ *  written ONCE, after every file in the glob finishes. It is the one reliable signal that a
+ *  `--test-name-pattern` run over {@link TEST_GLOB} ran to genuine completion rather than being cut
+ *  off mid-suite by {@link execWhitelistedProof}'s own timeout kill. */
+```
+
+### nameFilteredOutcome
+
+Removed from `src/lib/review.ts:1501-1503` (base 58e6c840), verbatim:
+
+```
+ * wrapper names.
+ * // Why: on the old rule truncation read identically to "test not found", so a criterion whose test sat late in
+ * // discovery order flapped fail → pass → fail on this PR's own head commit, unchanged code. */
+```
+
+### return "no-match";
+
+Removed from `src/lib/review.ts:1522-1524` (base 58e6c840), verbatim:
+
+```
+    // test does not exist — a proof-authoring mismatch, NOT a failing test.
+    // // Why: returning "fail" here minted a false `executed_fail` that hard-blocked PRs whose real
+    // // tests pass under a different name; #466/W1-T183 sat blocked a day or more on it.
+```
+
+### baseCwd
+
+Removed from `src/lib/review.ts:1536-1539` (base 58e6c840), verbatim:
+
+```
+  /** (W1-T273) mirrors {@link ReviewEvidence.baseCheckoutDir} — the merge-base
+   * checkout a `grep:` proof's pattern is re-run against to test for
+   * non-discrimination. Absent ⇒ {@link preexistingProofHits} always reports
+   * `false` and every grep proof that passes on `cwd` stays `executed_pass`. */
+```
+
+### planOnlyDiff
+
+Removed from `src/lib/review.ts:1556-1560` (base 58e6c840), verbatim:
+
+```
+   *  judgeReview} computes, never re-derived. WHY THE GREP CARVE-OUT NEEDS IT AND THE `unit test:` ONE DOES NOT: on
+   *  the BUILD PR the same paths are declared either way, but the `unit test:` arm is filing-scoped by its
+   *  `!existsSync` half, while a call-site grep has no equivalent tell — the CONSUMER file exists in both worlds and
+   *  only the CALL is missing. Without this flag the grep carve-out would excuse a build PR that shipped the module
+   *  unwired, the class W1-T2732 counted four of. */
+```
+
+Removed from `src/lib/review.ts:2748-2750` (base 58e6c840), verbatim:
+
+```
+/** {@link planOnlyFromFiles} over a raw unified diff — the form run-task.ts's spawn gate needs,
+ *  since it holds the diff text and not judgeReview's intermediates. Same predicate, one definition:
+ *  a change to plan-only classification lands in both callers or in neither. */
+```
+
+### materialiseBaseProofBlobs
+
+Removed from `src/lib/review.ts:1564-1569` (base 58e6c840), verbatim:
+
+```
+/** (W1-T273, extended to `unit test:` proofs by W1-T362) Does a proof that just PASSED on the PR head ALSO pass on
+ * the MERGE-BASE? INVARIANT: a proof must discriminate done from not-done, and one that also passes at base
+ * discriminates nothing while `executed_pass` POSITIVELY OVERRIDES the keyword floor — strictly worse than a prose
+ * proof. `kind: "test"` needs one distinction `grep` does not: a `unit test:` proof legitimately names a file absent
+ * at base (that is TDD), so {@link classifyBaseProofOutcome} treats "the base run did not pass" as `"discriminates"`.
+ * // Why: W1-T267's fifth criterion grepped a symbol that already returned two hits before #1026. */
+```
+
+Removed from `src/lib/review.ts:1574-1575` (base 58e6c840), verbatim:
+
+```
+ * failure is RETURNED per path while absence keeps its carve-out ({@link baseBlobErrorIsAbsence}).
+ * // Why: a blob directory is a tree `node --test` cannot run in, so 599 unit-test proofs graded "discriminates". */
+```
+
+### grepProofTargetPath
+
+Removed from `src/lib/review.ts:1615-1618` (base 58e6c840), verbatim:
+
+```
+/** (W1-T460) A `grep:` proof's compiled argv is `["-arn", "--", <pattern>, <path>]`, so the path is the LAST element
+ *  — taken from the COMPILER rather than re-parsed from the proof text, so the two can never disagree. Shared by
+ *  {@link materialiseBaseProofBlobs}, which keys the unreadable set by it, and {@link classifyBaseProofOutcome},
+ *  which looks a proof up in that set, so blob and proof are matched BY CONSTRUCTION. */
+```
+
+### staleProofIsSelfPath
+
+Removed from `src/lib/review.ts:1626-1629` (base 58e6c840), verbatim:
+
+```
+ * the shard's OWN rationale back out of its own `plan/tasks.d/<id>-<slug>.yaml`, honest on the FILING PR and
+ * permanently stale afterwards. TWO conditions, both required: the target is shaped like a plan-shard path ({@link
+ * SHARD_PATH_RE}), and `declaredFiles` names something OTHER than it — the BY-CONSTRUCTION exemption for shards whose
+ * entire deliverable IS their plan text, with no id ever hardcoded. */
+```
+
+### baseBlobErrorIsAbsence
+
+Removed from `src/lib/review.ts:1640-1647` (base 58e6c840), verbatim:
+
+```
+/** (W1-T460) Did `git show <rev>:<path>` fail because the path is NOT IN THAT REV, or because the read
+ * itself broke? Measured against the installed git and locked by test/base-blob-read-failure.test.ts Group 0, so a
+ * git upgrade that moves these shapes turns red: path absent at the rev → `code` undefined, `status` **128** (git ran
+ * and answered "not there"); maxBuffer overflow → `code` **"ENOBUFS"**, `status` null. Git emits two absence MESSAGES
+ * — one saying the path " does not exist in " '<rev>' at all, one saying it exists on disk but not in '<rev>' — but
+ * both carry `status: 128`, so this never reads the text. FAILS CLOSED: anything unrecognised is a READ FAILURE,
+ * because mis-classifying one as
+ * absence re-creates the silent credit this task fixes. */
+```
+
+### classifyBaseProofOutcome
+
+Removed from `src/lib/review.ts:1659-1661` (base 58e6c840), verbatim:
+
+```
+ * every `unit test:` proof whose `baseCwd` is not a real checkout, because "no file here" is not "did not pass before
+ * the work". `"base_unreadable"` — (W1-T460) a base tree EXISTS but {@link materialiseBaseProofBlobs} could not read
+ * this proof's blob. THAT LAST IS NOT `base_unknown`: that is a GLOBAL gap, this a PER-PROOF one. */
+```
+
+### return exec(whitelisted, baseCwd) === "pass" ? "
+
+Removed from `src/lib/review.ts:1679-1680` (base 58e6c840), verbatim:
+
+```
+    // subtest (a base worktree whose `npm ci` priming failed lands here: `--import tsx` cannot resolve, and the
+    // file's own TAP wrapper is the only `not ok`) — THROWS out of `exec` and is caught below as `base_unknown`.
+```
+
+### return classifyBaseProofOutcome(whitelisted, exe
+
+Removed from `src/lib/review.ts:1695-1697` (base 58e6c840), verbatim:
+
+```
+  // Only `"stale"` is a hit, so an unreadable base blob answers `false` here exactly like every
+  // other non-stale outcome — this guard never manufactures a false positive (W1-T460 changes
+  // WHICH outcome is reported, never this function's never-a-false-positive contract).
+```
+
+### reportSubstituted
+
+Removed from `src/lib/review.ts:1707-1710` (base 58e6c840), verbatim:
+
+```
+  /** True when `reportTokens` came from a SUBSTITUTE — the worker's own chat text, not the PR body
+   *  (W1-T1100). A worker echoes a proof's vocabulary while describing the change it just made, so
+   *  coverage over a substitute is evidence the worker can read its own diff, not that the BODY
+   *  substantiates anything. Whitelisted proof EXECUTION is unaffected: it observes repo state. */
+```
+
+### semanticClause
+
+Removed from `src/lib/review.ts:1712-1714` (base 58e6c840), verbatim:
+
+```
+  /** A bounded trailing clause the reviewer attached to a FAIL line naming what would answer the
+   * claim (W1-T2263). Consulted ONLY where `semantic === false && met`: it never rescues a proof
+   * and never annotates a PASS. `undefined` leaves today's constant reason text as the whole note. */
+```
+
+### floorKeywords
+
+Removed from `src/lib/review.ts:1720-1724` (base 58e6c840), verbatim:
+
+```
+   * text the author writes independently of the criterion. INVARIANT: the floor may never read the text it is
+   * judging. So the arm changes only WHICH keywords it scores: the CLAIM's, a fair pair of author-written prose,
+   * where the proof's filename is the accident measured on #3665.
+   * // Why: W1-T2713 shipped `floorTokens = tokenize(claim + proof)`, so coverage was 1.0 by construction and every
+   * // resolved-shard criterion read `met` against any body, an empty one included (recon-2026-09-05 R-15). */
+```
+
+Removed from `src/lib/review.ts:2819-2823` (base 58e6c840), verbatim:
+
+```
+  // `taskDeclaredFiles` is the resolved-task signal throughout this module. On the only arm changed here — a
+  // plan-only diff — it means the criteria were loaded from the task shard rather than parsed from the PR body, so
+  // the proof arrived with the criteria and its filename cannot be evidence about the body (W1-T2713). BOTH arms
+  // score against the report; see judgeCriterion's `floorKeywords` doc for why no arm may read the criterion itself
+  // (R-15).
+```
+
+### kws
+
+Removed from `src/lib/review.ts:1742-1744` (base 58e6c840), verbatim:
+
+```
+  // R-15: `floorTokens` is ALWAYS `reportTokens`. There is no arm that lets the floor read the
+  // criterion it is judging — that is what made coverage 1.0 by construction. Only the KEYWORD
+  // side varies, and both alternatives are text the criterion supplies, scored against the body.
+```
+
+### met = false;
+
+Removed from `src/lib/review.ts:1754-1755` (base 58e6c840), verbatim:
+
+```
+    // cannot observe anything for such a proof, so it resolves to UNMET, the same cannot-observe-implies-do-not-act
+    // move W1-T119's `indeterminate` makes. `semantic` cannot rescue it; only real WHITELISTED execution below can.
+```
+
+Removed from `src/lib/review.ts:1769-1770` (base 58e6c840), verbatim:
+
+```
+      // the proof's own words. Rest on what proofs actually EXECUTED and name the missing body as the reason the
+      // floor cannot say more.
+```
+
+### withheld
+
+Removed from `src/lib/review.ts:1772-1774` (base 58e6c840), verbatim:
+
+```
+      // THE VERDICT IS UNCHANGED — `met` is false in every branch below and coverage stays withheld in either
+      // direction. Only the WORDING branches, and it must not imply a fetch failed: on the measured population the
+      // fetch has never failed once, while "this mode never reads the body" is the common case.
+```
+
+### proofExec
+
+Removed from `src/lib/review.ts:1795-1796` (base 58e6c840), verbatim:
+
+```
+  // WHITELISTED PROOF EXECUTION (W1-T65, lifting W1-T3F's observation into the FLOOR): given a PR-head checkout and
+  // an executable proof, RUN it and let the OBSERVED result override the keyword floor in BOTH directions —
+```
+
+Removed from `src/lib/review.ts:1798-1799` (base 58e6c840), verbatim:
+
+```
+  // the report keyword-claimed it (kills W1-T51). `exec_error` degrades to the keyword floor: never a silent
+  // hard-fail.
+```
+
+### proofSkip
+
+Removed from `src/lib/review.ts:1801-1803` (base 58e6c840), verbatim:
+
+```
+  // W1-DH: WHY a criterion did not execute. `proof_exec: "not_executable"` alone conflates a proof
+  // that never PARSED with one that parsed and named nothing — and a CAPPED 0/N verdict looked
+  // identical either way, which is what made the code-span defect above cost a whole recon to find.
+```
+
+### forwardReference
+
+Removed from `src/lib/review.ts:1810-1812` (base 58e6c840), verbatim:
+
+```
+      // on the head but DECLARED by this diff's own plan shard is a forward reference, not a failure. Spawning
+      // `node --test` on it exits nonzero, which the branch below reads as a genuine `executed_fail` — the hard block
+      // that made a filing PR unrepairable. Gated on `!nameFiltered`: a bare test-NAME proof has no target path.
+```
+
+### grepTarget
+
+Removed from `src/lib/review.ts:1819-1821` (base 58e6c840), verbatim:
+
+```
+      // beside its `unit test:` sibling so the two conditions read together, but CONSUMED only in the post-execution
+      // failure branch below. `planOnlyDiff` is the filing-scope half; an UNDECLARED path yields `undefined` and
+      // keeps blocking, verbatim.
+```
+
+### baseOutcome
+
+Removed from `src/lib/review.ts:1839-1841` (base 58e6c840), verbatim:
+
+```
+            // W1-T273 (grep) / W1-T362 (extended to `unit test:`): re-run the SAME
+            // whitelisted check against the PR's merge-base — one execution answers
+            // both "is this stale" and, if not, why not (see classifyBaseProofOutcome).
+```
+
+### proofExec = "base_unreadable";
+
+Removed from `src/lib/review.ts:1847-1851` (base 58e6c840), verbatim:
+
+```
+              // The base tree exists and siblings were checked against it, but THIS proof's base
+              // blob never arrived, so its head-side pass proves nothing about discrimination
+              // (W1-T460). Withdraw the positive override and fall back to the keyword floor
+              // verbatim, exactly as `executed_stale` degrades. NOT a failure: we did not learn
+              // the proof is bad, we learned we never asked.
+```
+
+### proofExec = "stale_self_path";
+
+Removed from `src/lib/review.ts:1859-1861` (base 58e6c840), verbatim:
+
+```
+              // (W1-T1071) The stale match is not an ordinary non-discriminating grep: its target is a plan-shard
+              // path and this diff's own task declares a REAL path besides it, so the task has an implementing diff.
+              // A self-path grep only ever discriminated by proving the shard's own filing text was present —
+```
+
+### proofExec = "executed_stale";
+
+Removed from `src/lib/review.ts:1873-1876` (base 58e6c840), verbatim:
+
+```
+              // The same check also passes on the MERGE-BASE, so its exit 0 here discriminates
+              // nothing — see {@link classifyBaseProofOutcome}. `met`/`reason` are LEFT UNTOUCHED
+              // and the keyword floor stands verbatim: the positive override is withdrawn, never
+              // converted into a failure.
+```
+
+### proofExec = "not_executable";
+
+Removed from `src/lib/review.ts:1909-1912` (base 58e6c840), verbatim:
+
+```
+              // A prose paraphrase, not a bare name: NOT a failing test. Degrade to
+              // `not_executable`, the keyword floor standing as computed, and ANNOTATE why, so an
+              // author sees "names no matching test" rather than a misleading "executed and
+              // FAILED" — a false block on green, test-passing code.
+```
+
+### proofExec = "executed_fail";
+
+Removed from `src/lib/review.ts:1917-1919` (base 58e6c840), verbatim:
+
+```
+              // W1-T72's test-theater guard, PRESERVED: the body reads as a bare, concrete test
+              // NAME rather than prose, and matches nothing on the head. A fabricated test name is
+              // theater and must FAIL, never silently degrade to the keyword floor.
+```
+
+### proofExec = "not_yet_built";
+
+Removed from `src/lib/review.ts:1925-1931` (base 58e6c840), verbatim:
+
+```
+            // The grep half of W1-T456's carve-out (W1-T2737). `callSiteViolations` (task-linter.ts)
+            // REQUIRES a task creating a src/ module to carry `grep: <symbol>( in <the file that calls
+            // it>` — the only dialect that can express "a DIFFERENT file calls this symbol" — and on the
+            // filing that symbol cannot exist, so the branch above graded the prescribed remedy
+            // `executed_fail`. REACHED ONLY AFTER EXECUTION, which makes "the symbol is absent from that
+            // path on the head" the EXECUTOR's answer rather than a second implementation of the match.
+            // // Why: on W1-T2716 that proof failed the PR alone and the author dropped the criterion.
+```
+
+### proofSkip = "runtime-broken";
+
+Removed from `src/lib/review.ts:1946-1949` (base 58e6c840), verbatim:
+
+```
+            // W1-T1077 design (iv): record the DISCRIMINATOR, not the stream — the classification
+            // plus the wrapper name the executor already parsed, so a `review.posted` row can say
+            // which of "real failure" or "broken runtime" a failed pure-path proof was, never the
+            // raw TAP capture, which is unbounded and would carry the run's environment into a durable row.
+```
+
+### proofSkip = "incomplete-run";
+
+Removed from `src/lib/review.ts:1957-1959` (base 58e6c840), verbatim:
+
+```
+            // W1-T2740, the same rule as the sibling arm: record the DISCRIMINATOR, never the
+            // stream. The bounded fact is that node's completion signal is absent after N real
+            // results — enough to say WHY a pure-path proof reached no conclusion.
+```
+
+### proofSkip = "dialect-parse-error";
+
+Removed from `src/lib/review.ts:1972-1974` (base 58e6c840), verbatim:
+
+```
+      // W1-T305: a proof declaring a dialect label (`grep:`/`unit test:`) that still failed to
+      // parse is an AUTHORING ERROR, never silently the same bucket as a proof that read as
+      // ordinary prose from the start — see isMalformedDialectProof's doc.
+```
+
+### AuditableMergedTask
+
+Removed from `src/lib/review.ts:2016-2018` (base 58e6c840), verbatim:
+
+```
+/** The slice of {@link Task} the merged-claim audit needs — just enough to name a
+ *  finding without importing all of `plan.js`'s Task surface. Any object with these
+ *  two fields (a real {@link Task}, or a test fixture) satisfies it. */
+```
+
+### MergedClaimFinding
+
+Removed from `src/lib/review.ts:2024-2026` (base 58e6c840), verbatim:
+
+```
+/** One acceptance criterion of a MERGED task whose proof is in an executable dialect but did NOT
+ *  resolve to a runnable check, or resolved and did not pass. Merge credit is given per TASK, so
+ *  this is the gap {@link judgeReview} cannot see once the task is off its desk. */
+```
+
+### reason
+
+Removed from `src/lib/review.ts:2032-2034` (base 58e6c840), verbatim:
+
+```
+  /** Plain-language cause, independent of {@link CriterionVerdict.reason}'s keyword-floor
+   *  phrasing — there is no PR report to score keyword coverage against here, only the
+   *  proof's own execution outcome. */
+```
+
+Removed from `src/lib/review.ts:3558-3559` (base 58e6c840), verbatim:
+
+```
+  /** Human-readable justification. Always names {@link REVIEWER_TOKEN_ENV} when the verdict is
+   *  `"unsafe"` on identity grounds (acceptance criterion 3) — never the credential's value. */
+```
+
+Removed from `src/lib/review.ts:3871-3873` (base 58e6c840), verbatim:
+
+```
+  // `capped_reason` rides alongside `capped` rather than in its own line, so the ONE record that
+  // says a verdict was capped also says why. Absent (never null/"") on an uncapped verdict, so the
+  // existing ledger shape is byte-identical for every healthy review.
+```
+
+Removed from `src/lib/review.ts:6569-6571` (base 58e6c840), verbatim:
+
+```
+  /** Present only when `posted` is false — either {@link decideReviewStatusPost}
+   * refused the write (see `review.post_refused`), or the post itself failed
+   * after retries/as a permanent error (see `review.post_failed`, W1-T135). */
+```
+
+### MergedClaimUncheckable
+
+Removed from `src/lib/review.ts:2038-2041` (base 58e6c840), verbatim:
+
+```
+/** One acceptance criterion of a merged task whose proof carries NO whitelisted dialect at all —
+ *  prose, and so structurally unauditable by any mechanical check. Reported in its OWN bucket so
+ *  its size is legible: folding it into {@link MergedClaimFinding} would misreport "unauditable" as
+ *  "broken", and treating it as passing would misreport it as "verified" (design (4)). */
+```
+
+### describeUnresolvedOrFailing
+
+Removed from `src/lib/review.ts:2061-2062` (base 58e6c840), verbatim:
+
+```
+ *  `"executed_stale"` and `"base_unreadable"` are structurally unreachable here, since {@link auditMergedTaskClaims}
+ *  supplies no `baseCwd`, so they fold into the generic `default` wording rather than untestable cases. */
+```
+
+### auditMergedTaskClaims
+
+Removed from `src/lib/review.ts:2080-2087` (base 58e6c840), verbatim:
+
+```
+/** A CLAIM-LEVEL audit over MERGED tasks (W1-T302). Merge credit is derived per TASK
+ * (deriveStatus/{@link projectPlan}), never per CRITERION, so a multi-claim task whose PR satisfied only SOME of its
+ * criteria reads identically to one that satisfied all — the gap W1-T64 fell into. REUSES the reviewer's OWN parser
+ * and executor via {@link judgeCriterion} rather than a second matcher that could disagree, with an empty
+ * report-token set and no semantic verdict: only `proof_exec`/`proof_skip` are read, and an Architect-set
+ * `satisfied_by` criterion is skipped. REPORT ONLY: callers FILE follow-up tasks from this list, never mechanically
+ * close or reopen the merged task, because an unresolved proof
+ * is frequently a stale proof. */
+```
+
+### looksLikePath
+
+Removed from `src/lib/review.ts:2152-2154` (base 58e6c840), verbatim:
+
+```
+/** A path-SHAPED token: it contains a `/` or a `.`, never a bare English word. This guard keeps
+ * `bodyContradictsDiff` silent on "no bugs"/"no issues"/"no regressions", which give it nothing to
+ * check a diff against, while still catching "no src/"/"no docs/ORIENTATION.md". */
+```
+
+### CHANGESET_CONTEXT_RE
+
+Removed from `src/lib/review.ts:2159-2160` (base 58e6c840), verbatim:
+
+```
+/** Words that mark a sentence as being ABOUT THE CHANGESET rather than about anything else a body
+ *  might count files for. Kept as DATA so widening it is a one-line review, not a regex rewrite. */
+```
+
+### isInsideInlineQuote
+
+Removed from `src/lib/review.ts:2164-2171` (base 58e6c840), verbatim:
+
+```
+/** Is the "exactly N files" match at `index` in a sentence ABOUT THE CHANGESET? Looks BACKWARD only,
+ *  and only to the start of the current sentence, because scanning the whole body would re-create the
+ *  unanchored match this prevents. */
+/** (W1-T2534) IS THE MATCH INSIDE AN INLINE QUOTED SPAN? A quotation is not an assertion, which
+ * W1-T308 established for BLOCK-level quotation, but {@link stripQuotedRegions} does not touch an INLINE span. COUNTS
+ * DELIMITERS ON THE MATCH'S OWN LINE, never across lines, and backtick and double quote only, since an apostrophe is
+ * ordinary punctuation. W1-T2549 made this the ONE predicate every arm of {@link bodyContradictsDiff} shares.
+ * // Why: three PR bodies in one session were refused on this sentence (#3388, #3408). */
+```
+
+### NEXT_WORD_RE
+
+Removed from `src/lib/review.ts:2209-2212` (base 58e6c840), verbatim:
+
+```
+// Enumerated, not "skip all punctuation": a blanket skip would swallow the sentence-end case the "punctuation ends
+// it" branch still needs, turning a true positive into silence. Each character here CLOSES A SPAN rather than a
+// sentence, so what follows can be the same claim continuing. Left out: `]` and `}`, unmeasured — add them when a
+// real fixture turns up rather than guessing.
+```
+
+### return !NEED_CLAUSE_RE.test(rest.slice(next[0].l
+
+Removed from `src/lib/review.ts:2219-2220` (base 58e6c840), verbatim:
+
+```
+  // The head noun alone says "about the changeset" — but see whether it is itself the subject of a
+  // NEED-clause naming something else (the W1-T328 fixture above) before trusting that.
+```
+
+### SELF_REFERENTIAL_CLAIM_RE
+
+Removed from `src/lib/review.ts:2224-2227` (base 58e6c840), verbatim:
+
+```
+/** A SELF-REFERENTIAL SUBJECT immediately followed by a linking verb — "This PR is …", "The diff
+ *  was …". The optional noun separates a claim from an explanation: "a merged PR is plan-only"
+ *  carries a linking verb too, but its subject is a GENERIC PR, so no determiner from this set
+ *  precedes it. Anchored at `$` by its one caller, so the verb must be IMMEDIATELY before it. */
+```
+
+### SHORTHAND_HEAD_NOUN_RE
+
+Removed from `src/lib/review.ts:2231-2233` (base 58e6c840), verbatim:
+
+```
+/** The word a shorthand MODIFIES, if it modifies one: `[ \t]+` and never `\s+`, because a word on
+ *  the NEXT line belongs to another sentence (the rule `noClaimIsAboutChangeset`'s own scan already
+ *  follows), and a leading `[*_`]*` so markdown emphasis does not hide the noun. */
+```
+
+### DENIED_LABEL_ANSWER_RE
+
+Removed from `src/lib/review.ts:2236-2247` (base 58e6c840), verbatim:
+
+```
+/** Is a house-shorthand claim (`plan-only` / `data-only`) at `index` ABOUT THE CHANGESET? THREE GRAMMATICAL
+ * RELATIONS, none of them "a changeset word appears nearby". LABEL: `data-only: no code.` (#1025's own body), where
+ * the colon makes it the subject of the line. COPULAR: `This PR is plan-only.` ({@link SELF_REFERENTIAL_CLAIM_RE}).
+ * ATTRIBUTIVE: `plan-only change`, where the head noun it modifies IS the changeset. NOT {@link
+ * noClaimIsAboutChangeset}, whose contract treats "no next word at all" as "the token IS the claim": a path like
+ * `test/trailer-credit-plan-only.test.ts` continues with `.test.ts`, so requiring real whitespace before the head
+ * noun keeps a path silent.
+ * // Why: the SENTENCE-SCOPED arms this replaced read #1562's own quoted criterion as claiming exemption — THE CORRECT WORDING IS THE ONE THAT TRIPPED IT (W1-T413). */
+/** (W1-T2533) A DENIED CLAIM IS NOT A CLAIM. The label arm decides on the COLON alone, so a body answering the scope
+ *  question HONESTLY IN THE NEGATIVE was refused for the claim it just denied — #3373's body said `Plan-only: no.`
+ *  THE DISCRIMINATOR IS EXACT: `Plan-only: no code, only the shard.` is an ASSERTION whose elaboration merely begins
+ *  with a negative word, so `no`/`nope` counts as a denial only when nothing but punctuation follows, `not` always. */
+```
+
+### DENIED_ATTRIBUTIVE_RE
+
+Removed from `src/lib/review.ts:2250-2253` (base 58e6c840), verbatim:
+
+```
+/** (W1-T2533) The ATTRIBUTIVE form of the same denial: "this is NOT a plan-only change". That arm
+ *  reads only the noun the shorthand modifies, so it cannot see a negator in front of the whole noun
+ *  phrase. Bounded to the words IMMEDIATELY before the shorthand, like the copular arm: a negator
+ *  anywhere-in-sentence would silence a genuine claim sharing a sentence with an unrelated one. */
+```
+
+### module
+
+Removed from `src/lib/review.ts:2255-2262` (base 58e6c840), verbatim:
+
+```
+/** (W1-T2549) THE SAME GUARD, HOISTED, NOT REIMPLEMENTED. W1-T2534 gave the count arm an inline-quoted-span check
+ * ({@link isInsideInlineQuote}) and left this function's three arms uncovered, so a body that QUOTED a scope label
+ * was still read as its own claim. Checked FIRST, and THE ONE CALL, not a second copy — a second implementation is
+ * how the arms drifted apart the first time.
+ * // Why: #3422's second body quoted the LABEL form and was refused; #3421's measurement table only passed once
+ * // moved into a FENCED block, the literals byte-identical (2026-08-31). */
+/**
+ * Is the shorthand a member of a parenthesised enumeration rather than a label?
+```
+
+Removed from `src/lib/review.ts:3351-3352` (base 58e6c840), verbatim:
+
+```
+/** Decide whether the auto-merge arming path may proceed, given a freshly computed verdict, whether the task
+ * declares `principles: {tdd: strict}`, and an optional operator override. Pure.
+```
+
+### shorthandIsInsideEnumeration
+
+Removed from `src/lib/review.ts:2264-2267` (base 58e6c840), verbatim:
+
+```
+ * TRAP (W1-T2679, measured on #3569): `(capped+override, capped+plan-only):` reaches the label arm
+ * because a closing bracket then a colon is exactly the shape W1-T395 ruled a label. But there the
+ * shorthand names a VERDICT STATE being discussed, not the diff. Every PR touching the arm gate,
+ * the calibration bands or the acceptance parser has cause to write these names in prose.
+```
+
+Removed from `src/lib/review.ts:2269-2271` (base 58e6c840), verbatim:
+
+```
+ * The signal is available without guessing: an enumeration opens a bracket and separates siblings
+ * with a comma. `(Plan-only): no source touched.` opens a bracket and has no comma, so it stays a
+ * label. Only a comma INSIDE the still-open bracket, on this line, makes it a list.
+```
+
+Removed from `src/lib/review.ts:2273-2274` (base 58e6c840), verbatim:
+
+```
+ * FALSIFIER: test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts.
+ */
+```
+
+### return !DENIED_LABEL_ANSWER_RE.test(rest);
+
+Removed from `src/lib/review.ts:2303-2304` (base 58e6c840), verbatim:
+
+```
+    // W1-T2533: ...unless the body ANSWERED the question negatively. See DENIED_LABEL_ANSWER_RE
+    // for why `no <noun>` is still an assertion while `no.` and `not …` are denials.
+```
+
+### head
+
+Removed from `src/lib/review.ts:2313-2315` (base 58e6c840), verbatim:
+
+```
+  // "plan-only change", "a data-only diff". The old forward scan could not draw that line because it read the whole
+  // rest of the sentence: in "the plan-only CARVE-OUT exempts a plan-scope DIFF" the modified noun is `carve-out` and
+  // `diff` is an object three words later.
+```
+
+### stripQuotedRegions
+
+Removed from `src/lib/review.ts:2330-2334` (base 58e6c840), verbatim:
+
+```
+ * blockquote or fenced block quoting ANOTHER PR's body read identically to its own assertion. Blanks blockquote lines
+ * and fenced-block contents, preserving every other character's position so match indices still line up. DELIBERATELY
+ * NARROW: widening to inline code spans would let a real contradiction hide behind a single backtick. ALSO REPORTS
+ * `fenceUnbalancedAtEof` (W1-T1264 (iv)), since an unbalanced fence blanks the REMAINDER of the body.
+ * // Why: #1194 quoted #1192's failing fixture and was failed over a two-file diff; #1206 did the same (#1202). */
+```
+
+### enumeratedTokenMatchesChangeset
+
+Removed from `src/lib/review.ts:2351-2357` (base 58e6c840), verbatim:
+
+```
+/** Does an enumeration TOKEN correspond to a member of `diffFiles` (W1-T2224)? Replaces a shape guess with a
+ * contract check against `diffFiles` itself. THREE WAYS A TOKEN NAMES A REAL FILE: (a) EXACT; (b) SUFFIX/BASENAME,
+ * the final segment or trailing suffix of EXACTLY ONE member ("review.ts" for "src/lib/review.ts"); (c) EMBEDDED,
+ * EXACTLY ONE member appearing INTACT inside it ("src/lib/review.ts|12+++++"). "Exactly one" is load-bearing: an
+ * AMBIGUOUS match is no match.
+ * // Why: THE THIRD FALSE POSITIVE ON THE SAME LINE — `includes` already needed patches for backticks (#1192) and a
+ * // trailing paren (#1209), both REAL paths whose TEXT stopped matching once something was pasted around them. */
+```
+
+### recognisedCount
+
+Removed from `src/lib/review.ts:2377-2378` (base 58e6c840), verbatim:
+
+```
+  // WITHOUT reaching `out`, the one fact `bodyContradictsDiff`'s `[]` could never distinguish from "never read a
+  // claim at all". Incremented where each arm decides a match is a genuine claim, never where it decides it false.
+```
+
+Removed from `src/lib/review.ts:2467-2469` (base 58e6c840), verbatim:
+
+```
+  /** How many claim-shaped tokens were RECOGNISED — matched an arm's shape AND passed its subject anchor — whether
+   *  or not the claim then agreed with `diffFiles`. `contradictions.length` is always <= this: a recognised claim
+   *  that AGREES is counted here and never appears there, which is "checked, and it agrees". A `0` beside an empty
+```
+
+### const { scan, fenceUnbalancedAtEof } = stripQuot
+
+Removed from `src/lib/review.ts:2381-2382` (base 58e6c840), verbatim:
+
+```
+  // every index below lines up with the original body. `fenceUnbalancedAtEof` rides along unused until the return:
+  // the arms never branch on it, only the caller reports it.
+```
+
+### named
+
+Removed from `src/lib/review.ts:2399-2403` (base 58e6c840), verbatim:
+
+```
+      // `diffFiles` holds bare paths, so `includes` fails on every correctly enumerated file. WRAPPING PUNCTUATION
+      // COMES OFF FROM BOTH ENDS, AS A CLASS, which makes it robust to the next wrapper; `looksLikePath` still
+      // requires a `.` or `/`, so an over-strip cannot invent a match. MEMBERSHIP ITSELF IS A CONTRACT CHECK, NOT A
+      // THIRD WRAPPER (W1-T2224) — see {@link enumeratedTokenMatchesChangeset}.
+      // // Why: #1192 enumerated three backticked paths and reported one contradiction; with backticks stripped, zero. #1209 then parenthesised its enumeration.
+```
+
+### for
+
+Removed from `src/lib/review.ts:2442-2443` (base 58e6c840), verbatim:
+
+```
+  // // Why: W1-T413's own criteria name `test/trailer-credit-plan-only.test.ts`, and `\b` matches around
+  // // `plan-only` between the `-` and the `.`, so quoting the required proof forced failure.
+```
+
+### ChangesetClaimRecognition
+
+Removed from `src/lib/review.ts:2462-2465` (base 58e6c840), verbatim:
+
+```
+/** Everything {@link bodyContradictsDiff} decides, plus the two facts (W1-T1264) that make its
+ *  silence legible: how many claim-shaped tokens were RECOGNISED at all, and whether the
+ *  quote-stripping pass reached end-of-body still inside an open fence. Nothing here changes WHEN a
+ *  claim is recognised or when it disagrees, only what is counted alongside it. */
+```
+
+### fenceUnbalancedAtEof
+
+Removed from `src/lib/review.ts:2474-2477` (base 58e6c840), verbatim:
+
+```
+  /** True when {@link stripQuotedRegions}'s fence toggle was still OPEN after every line was walked
+   *  (W1-T1264 design (iv)). An unbalanced ``` delimiter blanks the body to EOF, so every later
+   *  claim goes unread and `recognisedCount` under-counts without saying why. NAMED here, never
+   *  auto-repaired: guessing the author's intent by closing the fence is what design (iv) forbids. */
+```
+
+### bodyContradictsDiff
+
+Removed from `src/lib/review.ts:2493-2496` (base 58e6c840), verbatim:
+
+```
+/** The FALSE-claim subset of {@link recognizeChangesetClaims}, unchanged from before W1-T1264.
+ *  Prefer {@link recognizeChangesetClaims} at any NEW call site that can use `recognisedCount` —
+ *  `judgeReview` and `deriveChangesetClaimUpdate` (run-task.ts) both do, so the same count reaches
+ *  both surfaces an author reads. This wrapper exists only so a caller wanting just the
+```
+
+### diffEmptyAgainstScope
+
+Removed from `src/lib/review.ts:2504-2508` (base 58e6c840), verbatim:
+
+```
+ * ordinary PR. `bodyContradictsDiff` answers a DIFFERENT question and is vacuously satisfied by an empty diff; this
+ * is the complement — purely structural, no prose — generalising `nonPlanFilesInDiff`/`diffCitesFeedback`
+ * (lib/triage.js) from "touches something outside plan/" to "touches none of its own declared paths", the
+ * complementary structural gap those two leave open.
+ * // Why: #2075/#2077/#2078 merged and passed review despite changing nothing. */
+```
+
+### wiredAtPairs
+
+Removed from `src/lib/review.ts:2520-2523` (base 58e6c840), verbatim:
+
+```
+/** Every `file::symbol` pair the report claims is wired — scanned over the WHOLE report (a
+ *  marker can sit anywhere in the body, unlike {@link bodyContradictsDiff}'s quoted-region
+ *  concern, which is about a CLAIM being mistaken for an assertion; a marker line is never
+ *  something a body would legitimately quote from another PR). */
+```
+
+### shipsUnwiredIds
+
+Removed from `src/lib/review.ts:2530-2531` (base 58e6c840), verbatim:
+
+```
+/** Every task id a `SHIPS-UNWIRED:` marker names, trailing punctuation stripped (the same
+ *  wrapping-punctuation class {@link bodyContradictsDiff}'s enumeration cleanup strips). */
+```
+
+### SCOPE_EXEMPT_GENERATED_ARTIFACTS
+
+Removed from `src/lib/review.ts:2539-2542` (base 58e6c840), verbatim:
+
+```
+ * of either guard's fail-closed direction.
+ * // Why: `scripts/source-size-ratchet.mjs` prints the exact edit that clears a breach — `edit
+ * // scripts/source-size-baseline.json and set: "<path>": <bucket>,` — but the push-side guard flagged that edit as
+ * // out-of-scope and the fix rung stood down rather than dispatch it. */
+```
+
+### inverseScopeUntouchedFiles
+
+Removed from `src/lib/review.ts:2550-2554` (base 58e6c840), verbatim:
+
+```
+/** INVERSE-SCOPE (design (ii)(b), the #839 class): the mirror of {@link
+ *  "../run-task.js".scopeGuardOutOfScopeFiles}, which runs diff → declared only on the
+ *  orchestrator's fallback push path. This runs declared → diff: a file the task's `files:` NAMES
+ *  that the diff never touched, visible from EVERY review. FAIL-CLOSED — an absent or empty declared
+ *  scope has nothing to compare, and that case belongs to `scopeGuardOutOfScopeFiles`. */
+```
+
+### scopeViolationFiles
+
+Removed from `src/lib/review.ts:2563-2565` (base 58e6c840), verbatim:
+
+```
+ * push site that guard sits behind. ADVISORY, not a refusal. DELIBERATELY DIFFERENT ON ONE POINT: that guard treats
+ * an absent declared scope as "everything is out of scope" and this does not. W1-T2650: also subtracts {@link
+ * SCOPE_EXEMPT_GENERATED_ARTIFACTS}, the SAME set it subtracts. */
+```
+
+### isImplementationPath
+
+Removed from `src/lib/review.ts:2572-2575` (base 58e6c840), verbatim:
+
+```
+/** IMPLEMENTATION-SHAPED (W1-T458 design (ii)): `src/` or `test/` only. Narrowing to these two
+ *  prefixes is what turns the raw "touches ANY declared path" false-positive rate — 52%, inflated by
+ *  plan filings and docs PRs that legitimately touch a declared path and should earn no task credit
+ *  — into the honest ~11% the advisory-not-refusal call rests on. */
+```
+
+### unresolvedTaskScopeOverlaps
+
+Removed from `src/lib/review.ts:2582-2585` (base 58e6c840), verbatim:
+
+```
+ *  non-empty, the signal its siblings fail-close on, never a literal scan for a `Remudero-Task:` trailer. Counts an
+ *  overlap only through an {@link isImplementationPath}; FAIL-CLOSED like its siblings.
+ *  // Why: `test/fixtures/golden-verdicts/scope-creep` injects `taskDeclaredFiles` directly and carries no trailer,
+ *  // so a trigger keyed on the trailer would misfire and shift its `golden.yaml` (design (iii)). */
+```
+
+### unwiredAdvisoriesFor
+
+Removed from `src/lib/review.ts:2606-2608` (base 58e6c840), verbatim:
+
+```
+ *  mirrors {@link ReviewEvidence.headCheckoutDir}'s "absent ⇒ skip" contract, since `unwired_export` needs real files
+ *  to read and a false "nothing to advise" would be worse; the three scope reasons are pure file-list comparisons and
+ *  always run. Also returns `reachabilityScanned` (W1-T1118), read off {@link scanUnreachedExports}. */
+```
+
+### DECISIONS_ENTRY_HEADER_RE
+
+Removed from `src/lib/review.ts:2684-2686` (base 58e6c840), verbatim:
+
+```
+/** An added entry header: DECISIONS.md's own convention is a level-2 ATX header
+ *  (`## <date> — <title>`) per entry; a deeper header (`### …`) is prose inside
+ *  one entry, not the start of a new one. */
+```
+
+### DECISIONS_PROVENANCE_MARKERS
+
+Removed from `src/lib/review.ts:2690-2693` (base 58e6c840), verbatim:
+
+```
+ *  case-insensitively as a plain substring over an entry's OWN added lines: the machine auto-choose
+ *  stamp, the hand-record line's surface forms already in use, and an explicit operator-attribution
+ *  sentence in the #1303 amendment's own words. Pinned by test/review.test.ts, so an edit here is a
+ *  deliberate, reviewed change rather than a silent narrowing. */
+```
+
+### decisionsEntryProvenanceViolations
+
+Removed from `src/lib/review.ts:2712-2713` (base 58e6c840), verbatim:
+
+```
+ * span runs to the next added header or the end of the hunk. NO SEMANTIC CLASSIFICATION (design (iii)): requiring the
+ * mark on every new entry makes "is this a binding ruling?" moot. */
+```
+
+### planOnlyFromFiles
+
+Removed from `src/lib/review.ts:2742-2743` (base 58e6c840), verbatim:
+
+```
+ *  both already-computed inputs rather than a diff, because judgeReview holds them and re-deriving would walk the
+ *  diff a second time. */
+```
+
+### ProofExecutionMemo
+
+Removed from `src/lib/review.ts:2756-2762` (base 58e6c840), verbatim:
+
+```
+/** W1-T2743 — ONE REVIEW, ONE EXECUTION PER UNIQUE PROOF. TRAP: `judgeReview` maps every criterion
+ * through {@link judgeCriterion} with one shared {@link ProofExecContext} that carried the RAW executor, so each
+ * criterion spawned its proof again, and a passing proof is re-run against the merge base for staleness — N criteria
+ * citing one path could cost 2N child processes. INVARIANT: the key is checkout path plus executable plus exact argv,
+ * and `cwd` IS in the key, so a head and a merge-base observation can never alias; the memo dies with the call, so
+ * this is NOT A CROSS-REVIEW CACHE, and a THROW IS AN OBSERVATION TOO, replayed rather than re-run.
+ * // Why: all six criteria of #3744 named the byte-identical proof and posted six samples of ONE fact. */
+```
+
+### returned
+
+Removed from `src/lib/review.ts:2773-2774` (base 58e6c840), verbatim:
+
+```
+  // Two maps rather than one sentinel-bearing map: a cached THROW and a cached "no-match" must not
+  // be distinguishable only by a value that could itself be a legitimate result.
+```
+
+### diffFiles
+
+Removed from `src/lib/review.ts:2813-2815` (base 58e6c840), verbatim:
+
+```
+  // W1-T205/W1-T427/W1-T2472: compute plan-only before grading so W1-T2713 can choose which of
+  // the criterion's texts supplies the floor's keywords. The predicate and inputs are unchanged;
+  // this is only a move ahead of the consumer that now needs them.
+```
+
+### proofMemo
+
+Removed from `src/lib/review.ts:2830-2832` (base 58e6c840), verbatim:
+
+```
+  // byte-identical to pre-W1-T65. W1-T2743: ONE memo per judgeReview call, wrapping whichever executor this review
+  // would have used. Built here rather than inside judgeCriterion so that function stays byte-compatible for its
+  // audit callers, which must keep spawning per call.
+```
+
+### instrumentEntanglement
+
+Removed from `src/lib/review.ts:2873-2875` (base 58e6c840), verbatim:
+
+```
+  // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s
+  // doc. Reuses the SAME `diffFiles` every other structural check above
+  // already computed — no new diff walk.
+```
+
+### const { advisories: unwiredAdvisories, reachabil
+
+Removed from `src/lib/review.ts:2884-2886` (base 58e6c840), verbatim:
+
+```
+  // W1-T322 (SHIPS-UNWIRED advisory floor): computed alongside the structural checks above but
+  // folded into NEITHER `state` NOR `floorState` below — see {@link ReviewVerdict.unwiredAdvisories}'s
+  // doc for why (ADVISORY ONLY, by design, until W1-T323's measured flip).
+```
+
+### floorUnmet
+
+Removed from `src/lib/review.ts:2899-2900` (base 58e6c840), verbatim:
+
+```
+  // W1-T2221: hoisted ahead of `state` (was previously computed only for `floorState`,
+  // below) so `state` itself can consult it on a plan-only diff — see `unmetForState`.
+```
+
+### unmetForState
+
+Removed from `src/lib/review.ts:2902-2905` (base 58e6c840), verbatim:
+
+```
+  // On a plan-only diff, `state` is decided on the FLOOR: a semantic downgrade alone must never fail a filing that
+  // has no code for the semantic lane to judge (W1-T2221 design (ii)). `planOnly` is the exemption, never "a proof
+  // happened not to execute" — the same shape `criteriaTampered` uses, and the one rationale (6) says must not be
+  // re-derived from execution facts. A code diff is byte-identical to today: `unmetForState === unmet`.
+```
+
+### visibleVerdicts
+
+Removed from `src/lib/review.ts:2919-2920` (base 58e6c840), verbatim:
+
+```
+  // above, and this is a SEPARATE per-run measurement of the gap between them, never a gate. `null` when either side
+  // has nothing to measure.
+```
+
+### executedCount
+
+Removed from `src/lib/review.ts:2943-2945` (base 58e6c840), verbatim:
+
+```
+  // (W1-T72): the binding verdict fell back to the blind keyword floor on EVERY criterion, not because the proofs
+  // were legitimately prose. A `satisfied_by` criterion is excluded — an Architect override never attempts execution
+  // BY DESIGN.
+```
+
+### executableCriteria
+
+Removed from `src/lib/review.ts:2952-2955` (base 58e6c840), verbatim:
+
+```
+  // CAPPED is a FACT about what ran, computed UNCONDITIONALLY — never gated on `state` and never forcing it (CAPPED
+  // IS NOT FAIL; see {@link ReviewVerdict.capped}). W1-T185 closes a W1-T128 gap, MASTER-PLAN rule 22 fixture (iii).
+  // `satisfied_by`-only criteria are excluded from the "could have executed" set, and a review with no executable
+  // criteria at all is never capped.
+```
+
+### summary
+
+Removed from `src/lib/review.ts:2975-2978` (base 58e6c840), verbatim:
+
+```
+  // PLAN-ONLY CLASSIFICATION (W1-T205), computed ahead of `state` so the W1-T58 guard can consult it. Reuses the
+  // review path's OWN diff-walker and plan-architect's own {@link isInPlanScope} — the same guard `rmd plan`'s
+  // PROPOSED-outcome check and the W1-T136 filing-PR emitter use — rather than a third, divergent notion. FAILS
+  // CLOSED: an empty diff, or one touching a single file outside `plan/**`/`MASTER-PLAN.md`, is NOT plan-only.
+```
+
+### partiallyExecuted ? { executed: executedCount, e
+
+Removed from `src/lib/review.ts:2993-2994` (base 58e6c840), verbatim:
+
+```
+              // W1-T305 (design (4)): a partially-observed PASS never renders identically to a fully-
+              // observed one — the fraction actually executed rides on the same commit-status text.
+```
+
+### visibleCriteria
+
+Removed from `src/lib/review.ts:2998-3002` (base 58e6c840), verbatim:
+
+```
+          // Only VISIBLE unmet claims name themselves in the posted summary (W1-T166); a holdout
+          // claim never reaches this text, which becomes both the commit-status description and the
+          // ledger's failure text, each worker-readable. W1-T2221 uses `unmetForState`, not `unmet`,
+          // so a plan-only diff's failure text names only genuine FLOOR failures — a no-op on a code
+          // diff, where the two are equal.
+```
+
+### passSummary
+
+Removed from `src/lib/review.ts:3050-3052` (base 58e6c840), verbatim:
+
+```
+ *  not mistaken for an OBSERVED one; `partial` (W1-T305 design (4)) appends "(PARTIAL: X/Y)" when SOME but not all
+ *  executable criteria were observed — never alongside `keywordOnly`, which implies zero executed and routes through
+ *  {@link cappedSummary}. */
+```
+
+### cappedSummary
+
+Removed from `src/lib/review.ts:3064-3066` (base 58e6c840), verbatim:
+
+```
+ *  same tag {@link passSummary} does.
+ *  // Why: criterion 1's falsifier is #411, which posted PASS text at `proof_exec: 0/5` directly beneath its own
+ *  // FLOOR DEGRADED banner. */
+```
+
+### planOnlySummary
+
+Removed from `src/lib/review.ts:3086-3087` (base 58e6c840), verbatim:
+
+```
+ *  wrong, and nothing did — filing a task has no code to run a proof against, so "0 proofs executed" is its
+ *  permanent, correct shape. Names what actually gated the PR, so an operator is told the truth (standing rule 22). */
+```
+
+### PriorReviewVerdict
+
+Removed from `src/lib/review.ts:3106-3107` (base 58e6c840), verbatim:
+
+```
+/** The most recent `review.posted` verdict recovered from the ledger for a PR
+ * — {@link applyVerdictStability}'s `prior` argument. */
+```
+
+### cappedFieldAbsent
+
+Removed from `src/lib/review.ts:3121-3123` (base 58e6c840), verbatim:
+
+```
+  /** True when the ledger line carried no `capped` key at all, so {@link capped} above is the
+   *  fail-open DEFAULT rather than a recorded fact. Surfaced in the arm decision's own reason
+   *  string — no new ledger step, so a polling lane cannot amplify it into per-tick noise. */
+```
+
+### priorReviewVerdictFromLedger
+
+Removed from `src/lib/review.ts:3140-3142` (base 58e6c840), verbatim:
+
+```
+/** Recover the most recent `review.posted` verdict for `taskId` from ledger lines, last one wins —
+ * the same scanning idiom `unmetFromLedger` (run-task.ts) and every other precedence helper here
+ * already use, over the same line that carries `head_sha` and `state`. No new storage. */
+```
+
+### applyVerdictStability
+
+Removed from `src/lib/review.ts:3171-3172` (base 58e6c840), verbatim:
+
+```
+/** Apply the W1-T178 verdict-stability rule (see the block comment above) to a freshly computed
+ * verdict. Pure — the falsifier this exists to prove is a unit fixture, like `judgeReview` itself. */
+```
+
+### criteria
+
+Removed from `src/lib/review.ts:3188-3189` (base 58e6c840), verbatim:
+
+```
+  // posted verdict stays internally consistent — never a "success" state sitting beside a criteria array that still
+  // shows a semantic "unmet".
+```
+
+Removed from `src/lib/review.ts:4608-4610` (base 58e6c840), verbatim:
+
+```
+    // CLAIM 3: a task that resolves but declares no (or empty) acceptance — or a trailer whose
+    // id resolves nowhere in the plan at this head — both read as `criteria: []`, same fail-closed
+    // shape `judgeReview` already refuses to pass (claim 3 is proven at that composition, not here).
+```
+
+### floorDegradedAnnotation
+
+Removed from `src/lib/review.ts:3222-3224` (base 58e6c840), verbatim:
+
+```
+/** The LOUD console annotation for a degraded floor (W1-T72 design (i)), printed once per review.
+ * `criteriaCount` is the "N" in "0/N". Pure and exported so the exact text is a unit-testable
+ * falsifier, independent of the console call site in run-task.ts. */
+```
+
+### isTddStrict
+
+Removed from `src/lib/review.ts:3233-3235` (base 58e6c840), verbatim:
+
+```
+/** True when a task's `principles: {tdd: strict}` is declared. The ONLY input {@link judgeReview}
+ * consults to decide whether a zero-executed verdict is CAPPED (W1-T185): a task that never
+ * declared tdd:strict is never capped, because it never claimed executed proof was mandatory. */
+```
+
+### cappedAnnotation
+
+Removed from `src/lib/review.ts:3240-3246` (base 58e6c840), verbatim:
+
+```
+/** The LOUD console annotation for a CAPPED verdict (W1-T185), printed once per review. Mirrors
+ * {@link floorDegradedAnnotation}: pure and exported so the exact text is a unit-testable falsifier. W1-T1085
+ * appended `planOnly` LAST and defaulted, so no caller shifts. Every clause of the capped wording is FALSE for a
+ * plan-only PR: it IS certified by the gates the status names, it does NOT refuse to arm, and the override it points
+ * at is never reached, because {@link decideAutoMergeArm} returns above that branch. THE CAPPED WORDING IS UNCHANGED
+ * where proof was expected and did not run.
+ * // Why: the posted STATUS has been three-way since W1-T205 while this annotation stayed two-way. */
+```
+
+### return
+
+Removed from `src/lib/review.ts:3249-3250` (base 58e6c840), verbatim:
+
+```
+    // Mirrors {@link planOnlySummary}'s own ruling — never "CAPPED", never "not certified":
+    // those words read as something going wrong, and for a plan-only PR nothing did.
+```
+
+### cappedWordingApplies
+
+Removed from `src/lib/review.ts:3269-3270` (base 58e6c840), verbatim:
+
+```
+ *  from override-ledgering. A pure predicate rather than an inline condition, so both arms are falsifiable on their
+ *  own; both sites are unchanged for a capped CODE PR. */
+```
+
+### CappedOverride
+
+Removed from `src/lib/review.ts:3278-3278` (base 58e6c840), verbatim:
+
+```
+// right before the caller would call `armAutoMerge`, and never folded into `state`/`floorState`.
+```
+
+Removed from `src/lib/review.ts:3280-3281` (base 58e6c840), verbatim:
+
+```
+/** An explicit, human-granted exception to "a CAPPED verdict cannot arm auto-merge". Never inferred,
+ * never anonymous — `by` names WHO. Granted through `rmd review <pr> --override-capped-by` and recovered by {@link
+```
+
+Removed from `src/lib/review.ts:3283-3286` (base 58e6c840), verbatim:
+
+```
+ * recon R-14). Before it existed the override was an unauthenticated free string matched on `task_id` alone over an
+ * append-only, unlocked ledger, so one appended line armed auto-merge on a CAPPED verdict for ANY later head of that
+ * task. Optional on this TYPE only, so a caller
+ * holding a hand-attributed override need not fabricate one; the binding is ENFORCED at recovery time. */
+```
+
+### bandWarning
+
+Removed from `src/lib/review.ts:3300-3300` (base 58e6c840), verbatim:
+
+```
+   *  "named" half of "a malformed band row is inert and NAMED", carried out-of-band. */
+```
+
+### BandEligibleVerdictClass
+
+Removed from `src/lib/review.ts:3306-3307` (base 58e6c840), verbatim:
+
+```
+ *  independent so this arming seam takes no dependency on the measurement module it is downstream of. The third
+ *  class, `"degraded-arm"`, is never returned — design (iii) refuses it band eligibility BY CONSTRUCTION. */
+```
+
+### applyCalibrationBand
+
+Removed from `src/lib/review.ts:3310-3317` (base 58e6c840), verbatim:
+
+```
+/** Apply an operator-ratified {@link PolicyValues.armCalibrationBands} table to an ALREADY-ARMING
+ * decision (W1-T2579). Pure, and defensive about `bands`, because a caller may hand it a row policy.ts's loader would
+ * have refused. No row names `verdictClass` → `base` returns UNCHANGED, byte for byte. `verdict === "hold"` →
+ * refuses, naming the class (`calibration-band:<class>`), because an operator-ratified hold is a REFUSAL, not a note.
+ * `"notify"` → `base.arm` untouched, since it only narrows an already-true `arm` to "true, annotated". Anything else
+ * is a MALFORMED row: `base` returns unchanged, matching the absent case exactly, but `bandWarning` names which
+ * class's row was ignored —
+ * inert, never silent. */
+```
+
+### decideAutoMergeArm
+
+Removed from `src/lib/review.ts:3357-3358` (base 58e6c840), verbatim:
+
+```
+ *   reason names the carve-out. Such PRs are STRUCTURALLY capped, so the rule would otherwise block every retro,
+ *   approve and filing PR forever; an exemption from PROOF EXECUTION only, never from `state`.
+```
+
+Removed from `src/lib/review.ts:3360-3364` (base 58e6c840), verbatim:
+
+```
+ * - An UNCAPPED verdict that observed only SOME executable criteria still arms, but its reason NAMES the partial
+ *   shape (W1-T1020); absent `partiallyExecuted` keeps today's wording, since unknown must never regress.
+ * - AFTER that, and only on the already-arming uncapped path, the resolved class is looked up in `bands` via {@link
+ *   applyCalibrationBand}, defaulting to the committed `plan/policy.yaml` table — it ships empty, so every call site
+ *   omitting it keeps today's behaviour byte-for-byte (test/arm-calibration-bands.test.ts). */
+```
+
+### irreversible
+
+Removed from `src/lib/review.ts:3371-3373` (base 58e6c840), verbatim:
+
+```
+  // outwardness (W1-T947; DECISIONS.md 2026-08-16, W1-T919). That non-consultation is a standing ruling this
+  // preserves. Appended LAST, so no positional caller shifts and every existing call site keeps today's behaviour
+  // byte-for-byte.
+```
+
+### bands
+
+Removed from `src/lib/review.ts:3375-3377` (base 58e6c840), verbatim:
+
+```
+  // THE RATIFIED BAND TABLE (W1-T2579). Appended LAST, like `irreversible` above, so no positional caller shifts.
+  // `undefined` resolves to the committed `plan/policy.yaml` row, which ships `[]`, so omitting this parameter keeps
+  // today's behaviour byte-for-byte. A caller wanting a specific table injects one directly, never touching disk.
+```
+
+### resolveAutoMergeArm
+
+Removed from `src/lib/review.ts:3432-3435` (base 58e6c840), verbatim:
+
+```
+ *  `automerge.capped_override_used` naming who. `log` is injected so the whole contract is a single unit fixture;
+ *  run-task.ts is the real caller.
+ *  // Why: an override that arms silently is the #411 hazard this task closes — auto-merge armed unattended, with
+ *  // no human reading the diff. */
+```
+
+### REVIEWER_IDENTITY_ENV
+
+Removed from `src/lib/review.ts:3458-3459` (base 58e6c840), verbatim:
+
+```
+// `gh` runs OUTSIDE the sandbox with the operator's own ambient credential (recon R-3/R-6), and that credential is
+// the only thing on the machine that can post a commit status — so any identity that can shell out to `gh`, a worker
+```
+
+Removed from `src/lib/review.ts:3465-3465` (base 58e6c840), verbatim:
+
+```
+// ────────────────────────────────────────────────────────────────────────────
+```
+
+Removed from `src/lib/review.ts:3469-3470` (base 58e6c840), verbatim:
+
+```
+ *  shipped to a worker's environment, the same containment `~/.config/remudero/**` gets in `settings/worker.json`'s
+ *  deny-list. {@link resolveReviewProvenance}'s caller supplies it explicitly, so that pure function stays pure. */
+```
+
+### REVIEWER_TOKEN_ENV
+
+Removed from `src/lib/review.ts:3476-3476` (base 58e6c840), verbatim:
+
+```
+ *  pre-W1-T203: the bootstrap-ordering doctrine `docs/review-gate.md` documents for `ci-gate`. This ships DARK. */
+```
+
+### RequiredStatusCheckEntry
+
+Removed from `src/lib/review.ts:3486-3486` (base 58e6c840), verbatim:
+
+```
+// ────────────────────────────────────────────────────────────────────────────
+```
+
+Removed from `src/lib/review.ts:3488-3489` (base 58e6c840), verbatim:
+
+```
+/** One entry off GitHub's `required_status_checks.checks[]` — the array that actually carries
+ *  the pin (`contexts[]` is the deprecated name-only mirror and carries no `app_id` at all). */
+```
+
+### app_id
+
+Removed from `src/lib/review.ts:3492-3494` (base 58e6c840), verbatim:
+
+```
+  /** `null` ⇒ NOT pinned — satisfied by whichever actor posts the context, regardless of
+   *  identity. A real pin is the GitHub App's numeric `app_id` (never the bot user id — see this
+   *  task's own rationale Q2 on why `.creator.id`/`.actor_id` are a different, invalid number). */
+```
+
+### RequiredStatusChecksSnapshot
+
+Removed from `src/lib/review.ts:3498-3500` (base 58e6c840), verbatim:
+
+```
+/** The shape {@link unpinnedRequiredContexts} and {@link reviewGatePinPrecondition} read off a
+ *  branch protection `required_status_checks` payload. `contexts` is carried for fidelity with
+ *  the live API shape but never consulted — only `checks[]` carries the pin. */
+```
+
+### unpinnedRequiredContexts
+
+Removed from `src/lib/review.ts:3506-3508` (base 58e6c840), verbatim:
+
+```
+/** Acceptance criterion 1: names every required context whose `app_id` is `null` — unpinned,
+ * satisfied by any repo-scoped token — and omits any context already carrying a real `app_id`.
+ * Pure; reads only `checks[]`. */
+```
+
+### reviewerIdentityPosture
+
+Removed from `src/lib/review.ts:3513-3518` (base 58e6c840), verbatim:
+
+```
+/** Acceptance criterion 2: the reviewer identity's posture, in EXACTLY three states, never collapsed to a boolean
+ * and never allowed to guess "provisioned" from a read it could not perform. `"dark"` — neither env var is set, the
+ * documented default, a successful read that found none. `"unknown"` — the read itself failed, OR only ONE var is
+ * set, an inconsistent half-configured state; degrading rather than guessing is the point, so it can NEVER render as
+ * `"provisioned"` off an unconfirmed environment. `"provisioned"` — both set, the only state {@link
+ * reviewGatePinPrecondition} treats as safe. Pure — `readEnvVar` is supplied, so this never reaches `process.env`. */
+```
+
+### return "unknown";
+
+Removed from `src/lib/review.ts:3528-3529` (base 58e6c840), verbatim:
+
+```
+    // successful empty read is `"dark"`. Nothing is erased — `"unknown"` can never be mistaken for `"provisioned"`,
+    // which is the whole point of the three-state split.
+```
+
+### ReviewerCredentialPresence
+
+Removed from `src/lib/review.ts:3541-3543` (base 58e6c840), verbatim:
+
+```
+/** Whether {@link reviewGatePinPrecondition} could confirm the reviewer credential is present —
+ *  presence only, NEVER the value (the value is never even an input to this reader). Mirrors
+ *  {@link ReviewerIdentityPosture} 1:1 so the two can never disagree about which arm produced them. */
+```
+
+### ReviewGatePinVerdict
+
+Removed from `src/lib/review.ts:3546-3548` (base 58e6c840), verbatim:
+
+```
+/** `"safe"` ⇒ pinning the currently-unpinned context(s) would not fail the gate closed.
+ *  `"unsafe"` ⇒ pinning now risks exactly the no-signal failure Q2 of this task's rationale
+ *  records: every fleet-posted status silently rejected for a mismatched app. */
+```
+
+### reviewGatePinPrecondition
+
+Removed from `src/lib/review.ts:3564-3566` (base 58e6c840), verbatim:
+
+```
+ *  `app_id` is safe to apply YET — never the pin itself, never a credential. Identity `"dark"` or `"unknown"` ⇒
+ *  ALWAYS `"unsafe"`, naming {@link REVIEWER_TOKEN_ENV}; `"provisioned"` ⇒ `"safe"`, including criterion 5's
+ *  falsifier where the context is ALREADY app-pinned. `reviewerCredentialPresent` derives from the posture alone. */
+```
+
+### ReviewStatusEntry
+
+Removed from `src/lib/review.ts:3605-3608` (base 58e6c840), verbatim:
+
+```
+/** One fetched `remudero-review` commit-status entry — the two fields {@link
+ * resolveReviewProvenance} needs off GitHub's combined-status response, already deduped to the latest post per
+ * context by GitHub itself. `undefined` means no status has ever been posted under
+ * this context for the sha. */
+```
+
+### state
+
+Removed from `src/lib/review.ts:3610-3612` (base 58e6c840), verbatim:
+
+```
+  /** Widened to {@link PostableReviewState} (W1-T913): a LIVE read off GitHub can genuinely be
+   * `pending` now that {@link postReviewPending} posts one. {@link decideAutoMergeArmAtSha} covers
+   * why a pending is never armed and never confused with the untrusted-poster or absent case. */
+```
+
+### posterLogin
+
+Removed from `src/lib/review.ts:3614-3616` (base 58e6c840), verbatim:
+
+```
+  /** GitHub's `creator.login` for this status — the one field a poster cannot spoof, since it is
+   * server-attributed from the authenticating credential rather than the request body. `undefined`
+   * only if GitHub's response is malformed, and treated the same as a mismatched login. */
+```
+
+### resolveReviewProvenance
+
+Removed from `src/lib/review.ts:3620-3627` (base 58e6c840), verbatim:
+
+```
+/** THE PROVENANCE GATE (acceptance criteria 1-3). Resolve what a fetched `remudero-review` status
+ * ACTUALLY proves, gated on WHO posted it. No status at all → `"absent"`. A status posted by anyone OTHER than
+ * `trustedLogin` → `"absent"`, REGARDLESS of its `state`, which covers both forge directions: an untrusted `success`
+ * must not rescue a merge a genuine review would have failed, and an untrusted `failure` must not BLOCK one it would
+ * have passed, since that converts a forge vector into a denial-of-service vector. A status posted by `trustedLogin`
+ * → its own `state`, unchanged; W1-T913: a trusted `pending` passes straight through, and {@link
+ * decideAutoMergeArmAtSha} keeps it from being read
+ * as a verdict. Case-insensitive on the login compare, since GitHub logins are case-insensitive. */
+```
+
+### decideAutoMergeArmAtSha
+
+Removed from `src/lib/review.ts:3639-3644` (base 58e6c840), verbatim:
+
+```
+/** The "at arm time" half of the property: whatever a caller computed in-process, THIS decides whether the LIVE
+ *  status on GitHub — read back and filtered by who posted it — still says a genuine reviewer passed. Deliberately
+ *  narrow and orthogonal to {@link decideAutoMergeArm}'s capped/override layer, which reasons about a verdict
+ *  computed before anything could have been posted, so a caller arms only when BOTH say yes. An absent or untrusted
+ *  resolution refuses with a reason that never says "failure": that wording is reserved for a GENUINE failing
+ *  review, so a forged or missing status is never confused with one in a log line or an escalation. */
+```
+
+### decideArmFromLedgerVerdict
+
+Removed from `src/lib/review.ts:3680-3686` (base 58e6c840), verbatim:
+
+```
+// provenance gate above is DARK in production, so the channel is exactly as trusted as before it shipped. House
+// doctrine already answers this in the other direction — task status derives from GitHub rather than tasks.yaml
+// because the yaml field proved decorative. Here it runs the other way: the arm decision derives from the
+// orchestrator's OWN ledgered verdict. The status stays posted for branch protection and display, but is never an
+// INPUT to this decision.
+// // Why: #449 took SEVEN contradictory writes on one sha, one of them 85 seconds AFTER the PR merged.
+// ────────────────────────────────────────────────────────────────────────────
+```
+
+Removed from `src/lib/review.ts:3688-3693` (base 58e6c840), verbatim:
+
+```
+/** THE ARM DECISION (W1-T230). Given the most recent `review.posted` verdict this orchestrator ledgered for a task
+ * and the CURRENT live head sha, decide whether to arm auto-merge. Pure, so a fresh process re-derives it identically
+ * from nothing but the ledger and the live head. No record at all → refuse, FAIL CLOSED, because a forged live-only
+ * success with no ledger backing must arm nothing. A record for a DIFFERENT sha → refuse: the sha binding that makes
+ * push-invalidates-review real at the decision layer, not only at display. A record for THIS sha arms only on
+ * "success", regardless of what the live status channel currently says. */
+```
+
+### override
+
+Removed from `src/lib/review.ts:3697-3698` (base 58e6c840), verbatim:
+
+```
+  // Appended LAST so no positional caller shifts. Without it, delegating below would silently
+  // drop the operator's `rmd review --override-capped-by` escape hatch on this path.
+```
+
+### decision
+
+Removed from `src/lib/review.ts:3716-3717` (base 58e6c840), verbatim:
+
+```
+  // The two checks above are W1-T230's and stay here: they decide WHICH verdict may be trusted, not whether it is
+  // good enough to merge on. This function used to answer that itself with `state === "success"` and nothing else — a
+```
+
+### cappedOverrideFromLedger
+
+Removed from `src/lib/review.ts:3734-3740` (base 58e6c840), verbatim:
+
+```
+/** Recover the most recent `automerge.capped_override_granted` line for `taskId`, last one wins — the
+ * same scanning idiom its siblings use. Written by `rmd review <pr> --override-capped-by`, consulted by {@link
+ * decideAutoMergeArm} before refusing a CAPPED verdict. HEAD-BOUND (W1-T219, recon R-14): the current verdict's head
+ * must match the granted line's own `head_sha` exactly, or the line is skipped as if it were never there. Scoped to
+ * `taskId` alone, anything able to append one line to an unauthenticated ledger armed auto-merge on a CAPPED verdict
+ * for every later head of that task. A line
+ * missing `head_sha` is likewise never matched: a binding that cannot be verified is absent. */
+```
+
+### AutomergeHold
+
+Removed from `src/lib/review.ts:3756-3757` (base 58e6c840), verbatim:
+
+```
+/** AN OPERATOR MERGE HOLD (W1-T1000002) — the ledgered shape {@link CappedOverride} is with the sign flipped: that
+ * is a human's permission to arm anyway, this a human's REFUSAL to let anything arm, "who" and "why" named the same.
+```
+
+### automergeHoldFromLedger
+
+Removed from `src/lib/review.ts:3767-3774` (base 58e6c840), verbatim:
+
+```
+/** Recover the current auto-merge hold for `prNumber`, last one wins, over the WHOLE ledger rather than
+ * a sha-bound window (see {@link AutomergeHold}). Written by an operator verb as
+ * `automerge.hold_engaged`/`automerge.hold_released`, each carrying `by`/`reason`; a hold missing either is refused
+ * at write time, because the row is the only notification anyone gets. PR-SCOPED OR FLEET-SCOPED: a row with no
+ * `pr_number` is FLEET-WIDE, one with a number applies only to that PR, and both fold into the SAME chronological
+ * scan. Consulted by sweep.ts's `alreadyDone` for `disposition: "mergeable"` — a held PR is refused, never armed,
+ * never a dedup key — and by run-task.ts's
+ * `attemptArm`, the ONE completion both arm paths reach, which closes the at-open race. */
+```
+
+### keywordOnlyAnnotation
+
+Removed from `src/lib/review.ts:3796-3798` (base 58e6c840), verbatim:
+
+```
+/** The LOUD console annotation for a keyword-only verdict (W1-T185), printed once per review when
+ * {@link ReviewVerdict.keywordOnly} is true and the verdict was NOT already capped — a capped
+ * verdict's own annotation already says nothing executed. Mirrors {@link floorDegradedAnnotation}. */
+```
+
+### reviewFailureClass
+
+Removed from `src/lib/review.ts:3809-3812` (base 58e6c840), verbatim:
+
+```
+ * `unmet_criteria`. `undefined` on a passing verdict. Mirrors {@link failSummary}'s precedence exactly — both read
+ * the SAME facts off the SAME verdict — so the class always matches the prose failSummary would render.
+ * // Why: `review.posted` carried `state: "failure"` with `reasons: []` whenever the failing path was not an unmet
+ * // named criterion, so a ledger grep for that class returned ZERO — measured on #1193. */
+```
+
+### reviewLedgerLegibilityFields
+
+Removed from `src/lib/review.ts:3835-3836` (base 58e6c840), verbatim:
+
+```
+ * projection. `plan_only` joined the line so the LEDGER carries every input {@link decideAutoMergeArm} needs, since
+ * `capped` alone cannot distinguish the permanently-capped plan-only shape (which ARMS) from a proof-failure capped
+```
+
+Removed from `src/lib/review.ts:3838-3839` (base 58e6c840), verbatim:
+
+```
+ * for audit. W1-T305: `unexecutable_count`/`unexecutable_proofs`/`partially_executed` ride alongside unconditionally.
+ * // Why: 418 of 821 code-review heads executed ZERO proofs and posted `success` on the keyword floor. */
+```
+
+### reviewLedgerReasons
+
+Removed from `src/lib/review.ts:3907-3915` (base 58e6c840), verbatim:
+
+```
+/** The `reasons` array the `review.posted` line carries (W1-T1016): one per VISIBLE unmet criterion,
+ * plus a test-theater entry when {@link ReviewVerdict.testTheater} fires — the rule run-task.ts used to compute
+ * inline, now pure and exported so a unit test reads the exact fields the ledger writes. THE ROUTING GAP THIS CLOSES:
+ * the changeset-contradiction path fails the verdict WITHOUT unmet-ing any NAMED criterion, so the per-criterion rule
+ * alone returns `[]`, and `actionableGateFailuresFromReasons` (lib/sweep.ts) only qualifies a row at
+ * `reasons.length === 1` — so that shape could never route to the `blocked-fixable` row that exists for it and fell
+ * to `blocked-ambiguous`. The fallback fires ONLY when nothing else claimed the array AND a contradiction is present,
+ * since a genuine multi-cause failure must
+ * stay unrouted. */
+```
+
+### PostedArmFacts
+
+Removed from `src/lib/review.ts:3938-3939` (base 58e6c840), verbatim:
+
+```
+ * an unattended merge with zero executed proof is irreversible while refusing only costs a PR sitting open. At the
+ * time this landed zero open PRs carried a legacy capped line for their current head. */
+```
+
+### failSummary
+
+Removed from `src/lib/review.ts:3966-3969` (base 58e6c840), verbatim:
+
+```
+/** Build a failure summary that TEACHES: it NAMES the first unmet criterion rather than a bare count, truncating
+ * with an ellipsis and `(+N more)` inside the status-description limit, with the full list in the `review.posted`
+ * line and the PR review comment.
+ * // Why: the W1-T2/#18 refusal said "1 criterion/criteria unmet" and cost a human round-trip.
+```
+
+Removed from `src/lib/review.ts:3971-3977` (base 58e6c840), verbatim:
+
+```
+ * specifics, because an unexplained red is the shape that gets overridden: `criteriaTampered` (Standing rule 15)
+ * comes first, ahead of the empty-unmet test-theater fallback, since a diff can trip the rule-15 guard alone with
+ * every named criterion still met; `changesetContradictions` names which claim was contradicted and which files
+ * refute it; `instrumentEntanglement` (Standing rule 25) names the instrument and src paths AND STATES THE
+ * RESOLUTION; `unprovenancedDecisionsEntries` names the unmarked header and the two accepted genres. `unmetClaims` is
+ * caller-filtered to VISIBLE criteria only (W1-T166), and `hiddenUnmetCount` surfaces unmet HOLDOUT criteria as a
+ * bare count, because this text is readable by the very worker a holdout criterion must stay hidden from. */
+```
+
+### return ${FAIL_PREFIX}Standing rule 15: a criter
+
+Removed from `src/lib/review.ts:3993-3994` (base 58e6c840), verbatim:
+
+```
+    // `checkSatisfiedByGuard`'s uncapped advisory `reason`. MEASURED: 133 characters. Five suites pin `Standing rule
+    // 15`.
+```
+
+### buildReviewPrompt
+
+Removed from `src/lib/review.ts:4048-4053` (base 58e6c840), verbatim:
+
+```
+ * the diff, the criteria and the implement REPORT, and verdicts each criterion against its proof. It does NOT post
+ * the status — the deny-floor (W1-T203) refuses any status POST from a worker — so it emits `REVIEW_VERDICT` lines
+ * and the ORCHESTRATOR posts the authoritative one. INVARIANT: the reviewer verifies against REPO STATE, not diff
+ * plus report alone; when a proof names an executable check it receives an already-materialised disposable PR-head
+ * checkout and RUNS it, verdicting on the OBSERVED result. Read-only in spirit: it never edits the PR's code and
+ * never changes the head sha it judges. */
+```
+
+### reviewerVerdictContract
+
+Removed from `src/lib/review.ts:4106-4110` (base 58e6c840), verbatim:
+
+```
+/** Machine-readable verdict contract appended to the reviewer's prompt so its per-criterion judgment
+ *  folds into the deterministic verdict as a SEMANTIC downgrade, never an upgrade. The reviewer emits
+ *  one `REVIEW_VERDICT <n>: PASS|FAIL` line per criterion. Advisory: the mechanical floor is the
+ *  binding gate (Standing rules 2/4/12), so a reviewer that emits nothing parseable leaves the floor
+ *  untouched — never a stall, never a deadlock. */
+```
+
+### REVIEW_VERDICT_LINE_RE
+
+Removed from `src/lib/review.ts:4134-4136` (base 58e6c840), verbatim:
+
+```
+ *  reviewer wrote after the token, SAME LINE ONLY — the character class excludes `\r`/`\n`, so a clause can never
+ *  span lines by construction. {@link parseReviewerVerdicts} still reads only groups 1 and 2, so its return is
+ *  byte-identical; {@link parseReviewerVerdictClauses} reads group 3. One regex, two readers, so they cannot disagree. */
+```
+
+### parseReviewerVerdicts
+
+Removed from `src/lib/review.ts:4139-4142` (base 58e6c840), verbatim:
+
+```
+/** Parse the reviewer's `REVIEW_VERDICT <n>: PASS|FAIL` lines into a semantic array index-aligned to
+ *  the criteria. `FAIL` ⇒ `false`, forcing that criterion to fail; `PASS` or absent ⇒ `undefined`,
+ *  deferring to the mechanical floor. Advisory and downgrade-only, so unparseable output yields an
+ *  all-`undefined` array and the floor stands alone, fail-closed. */
+```
+
+### REVIEWER_CLAUSE_MAX_CHARS
+
+Removed from `src/lib/review.ts:4154-4156` (base 58e6c840), verbatim:
+
+```
+/** Longest clause {@link parseReviewerVerdictClauses} carries into a criterion's reason — long
+ *  enough to name a remedy, short enough that an overlong or runaway line can't reach the
+ *  ledger whole (W1-T2263 acceptance: "bounded ... rather than carried whole"). */
+```
+
+### extractBoundedClause
+
+Removed from `src/lib/review.ts:4159-4163` (base 58e6c840), verbatim:
+
+```
+/** Pull the bounded clause off a FAIL line's trailing text, already confined to one line by
+ *  {@link REVIEW_VERDICT_LINE_RE}. {@link reviewerVerdictContract}'s own example shows a
+ *  parenthetical after the token — `FAIL   (proof missing, unpasted, or non-responsive)` — so a
+ *  leading `(...)` is unwrapped when present and freeform trailing prose is accepted as-is.
+ *  `undefined` for whitespace-only text: a plain `FAIL` with nothing after it. */
+```
+
+### parseReviewerVerdictClauses
+
+Removed from `src/lib/review.ts:4174-4176` (base 58e6c840), verbatim:
+
+```
+ *  bounded clause a FAIL line may carry — no second question, no second spawn. Index-aligned to `count` like its
+ *  sibling. `undefined` at an index whose line was PASS, absent, or a FAIL with no clause: a PASS line is never
+ *  annotated. Two independent readers of one regex pass. */
+```
+
+### ACCEPTANCE_HEADER_RE
+
+Removed from `src/lib/review.ts:4197-4203` (base 58e6c840), verbatim:
+
+```
+/** Parse an `Acceptance:` block out of a PR body, for manual plan or doc PRs carrying no task id. TWO bullet shapes
+ * parse, both index-aligned one per criterion: single-line `- <claim> | <proof>`, where {@link acceptanceSeparator}
+ * decides which `|` separates them and no `|` keeps the whole line as the claim with an empty proof; and multi-line
+ * `- claim: "<claim>"` followed by an INDENTED, non-bullet `proof: "<proof>"` continuation, which attaches to that
+ * criterion rather than ending the block, so a body with N such pairs yields N criteria and not just the first (the
+ * house format, #277/#280). Parsing stops at the first line, after the bullets begin, that is neither a new bullet
+ * nor a recognised continuation. FAILS CLOSED: `[]` when there is no block, and empty criteria never pass. */
+```
+
+### ACCEPTANCE_BULLET_RE
+
+Removed from `src/lib/review.ts:4208-4209` (base 58e6c840), verbatim:
+
+```
+/** A criterion BULLET. Shared with {@link acceptanceBlockDiagnostics} for the same reason as
+ *  {@link ACCEPTANCE_HEADER_RE}. Unchanged from the parser's previous inline literal. */
+```
+
+### acceptanceSeparator
+
+Removed from `src/lib/review.ts:4212-4220` (base 58e6c840), verbatim:
+
+```
+/** Where a single-line bullet's claim ends and its proof begins — index plus separator width, or null
+ * when the bullet carries no `|`. THE SEPARATOR IS THE ONE THAT YIELDS AN EXECUTABLE PROOF. NOT SIMPLY THE LAST ` |
+ * `, which repairs a pipe in the CLAIM and breaks one in the PROOF, since a `grep:` pattern is one argv element and
+ * may hold a ` | ` of its own: both readings guess at which pipe an author meant, and the dialect prefix is the one
+ * piece of evidence that is not a guess. So the historical first-bare-`|` split is tried FIRST and kept whenever it
+ * already yields a dialect proof, then each ` | ` right-to-left, and only if NO split yields an executable proof does
+ * it fall back as before.
+ * // Why: splitting at the FIRST bare `|` truncated any claim carrying a pipe of its own, so the
+ * // criterion fell SILENTLY to the keyword floor; `plan/tasks.d/W1-T2781-*.yaml` carries such a claim. */
+```
+
+### unsplitLabelledClaims
+
+Removed from `src/lib/review.ts:4241-4244` (base 58e6c840), verbatim:
+
+```
+  /** Index-aligned with `criteria`: for a `claim:`-labelled bullet nonetheless split at a
+   *  separator, the claim text as written BEFORE that split. An indented `proof:` continuation
+   *  below such a bullet proves the split was a false positive — the proof lives on that line, so
+   *  the pipe belonged to the claim — and restores this. Undefined for every other bullet. */
+```
+
+### unsplit
+
+Removed from `src/lib/review.ts:4283-4283` (base 58e6c840), verbatim:
+
+```
+      // SECOND `proof:` line under the same bullet is still unrecognised and still ends the block, exactly as before.
+```
+
+### acceptanceBlockDiagnostics
+
+Removed from `src/lib/review.ts:4316-4320` (base 58e6c840), verbatim:
+
+```
+/** Compare what an author WROTE in an Acceptance block against what {@link parseAcceptanceBlock} resolves, and
+ * report the difference. TRAP: the parser treats any indented line that is not `proof:` as the END of the block, so a
+ * claim WRAPPED onto a second line silently truncates, and the review judges a PR against a criterion the author
+ * never meant to stand alone. Reproduced: written 3, parsed 1, emptyProofs 1, against a no-wrap control of written 3,
+ * parsed 3, emptyProofs 0 — the same overloaded-zero shape as the `grep:` traps this repo has paid for twice, where
+```
+
+### extractTaskTrailerId
+
+Removed from `src/lib/review.ts:4362-4364` (base 58e6c840), verbatim:
+
+```
+ *  anchored-but-first-wins match, disagreeing with run-task.ts's last-wins `reviewTaskIdFromBody` on any body
+ *  carrying two anchored trailers. review.ts is the leaf and run-task.ts imports FROM it, so this lives here and
+ *  `reviewTaskIdFromBody` becomes a thin re-export rather than a second drifting regex. */
+```
+
+### AcceptanceAuthorTimeDefect
+
+Removed from `src/lib/review.ts:4370-4371` (base 58e6c840), verbatim:
+
+```
+/** The four defects {@link acceptanceAuthorTimeCheck} names — design item (iii), W1-T952:
+ *  "the diagnostic must say WHICH of the four it is", never a generic refusal. */
+```
+
+### acceptanceAuthorTimeCheck
+
+Removed from `src/lib/review.ts:4384-4391` (base 58e6c840), verbatim:
+
+```
+/** THE AUTHOR-TIME ENTRY POINT (W1-T952 design item ii) onto {@link acceptanceBlockDiagnostics} — the same
+ * diagnostic `rmd check-acceptance` prints, callable BEFORE a PR pays for a CI cycle and review's generic
+ * "no acceptance criteria to judge (fail closed)" to discover the same thing. See {@link PR_AUTHORING_PATHS} for
+ * which authoring paths it can actually run on. TWO CALL SHAPES, matching how `reviewCommand` resolves criteria. With
+ * `expectedTaskId` GIVEN, the `Remudero-Task:` trailer is checked FIRST and independently of the body's block: a
+ * healthy block with the WRONG trailer is still a defect, because `findMergedByTrailer` credits merge-done off that
+ * trailer, so a silent mismatch is permanent non-credit and gets its own `no-trailer` category. OMITTED, ANY
+ * resolvable trailer is accepted at face value. Priority: no-header, no-trailer, unparseable, empty-proofs. */
+```
+
+### classifyHeadShaAvailability
+
+Removed from `src/lib/review.ts:4487-4488` (base 58e6c840), verbatim:
+
+```
+// reachable from the very PR head being judged — and review then posts
+// "no acceptance criteria to judge (fail closed)" on evidence that was never absent, only unread (measured on #3168).
+```
+
+Removed from `src/lib/review.ts:4490-4499` (base 58e6c840), verbatim:
+
+```
+/** A DIVERGENCE between the trailer this body carries and the plan {@link loadPlanAtRef} could load
+ *  AT THE PR's HEAD — the head-resolved sibling of run-task.ts's own `ResolverDivergence`. Set ONLY
+ *  when `loadPlanAtRef` itself throws, never merely because `taskId` is absent from a plan that
+ *  loaded fine, the same distinction `resolvePlanCriteriaForReview` draws. */
+/** WHICH cause made a head sha unreadable, decided by one probe rather than inferred from git's
+ *  message, which cannot tell them apart (W1-T2511). `git show <sha>:<path>` emits the same "exists on
+ *  disk, but not in '<sha>'" for an object never fetched and for a commit present but genuinely lacking
+ *  the path — MEASURED byte-identical. `git cat-file -e <sha>^{commit}` asks exactly that; a probe that
+ *  cannot run yields `"undetermined"`, never a guess, because a wrong cause sends the next reader at the
+ *  wrong defect entirely. */
+```
+
+### status
+
+Removed from `src/lib/review.ts:4513-4514` (base 58e6c840), verbatim:
+
+```
+    // which is an answer; anything preventing it running at all is not. The discriminator is whether the error
+    // carries a numeric exit status, which a real non-zero exit does and a spawn failure does not.
+```
+
+### cause
+
+Removed from `src/lib/review.ts:4524-4525` (base 58e6c840), verbatim:
+
+```
+   *  object is absent from local storage or present with the path genuinely missing from its tree. `absent-object`
+   *  is the W1-T2511 ordering defect, resolved once the hoisted fetch runs; `readable-object` is a different problem;
+```
+
+### PlanCriteriaAtHeadResult
+
+Removed from `src/lib/review.ts:4531-4533` (base 58e6c840), verbatim:
+
+```
+ *  four of its five declared fields, so swapping one call for the other is like-for-like. The fifth, `openTaskIds`,
+ *  is NOT produced here: W1-T2623 locks that omission as behaviourally identical to the replaced resolver's own
+ *  empty-set value at its one consumer. See test/resolver-swap-field-parity.test.ts for the guard over ALL five. */
+```
+
+### formatPlanReadIdentityAtHead
+
+Removed from `src/lib/review.ts:4547-4552` (base 58e6c840), verbatim:
+
+```
+/** THE FIX (W1-T2432, remedy (a)). Resolve a trailered PR body's judging criteria from the plan AS IT STANDS AT THE
+ * PR's OWN HEAD SHA, via {@link loadPlanAtRef}, instead of the container's checked-out working tree. No second
+ * network fetch: `runGit` shells out to LOCAL git objects. NAMED COST: this reads the sha's COMMITTED objects, so a
+ * shard merging after `headSha` is still invisible — a strictly smaller window than the boot-to-boot one, never zero.
+ * The trailer comes from {@link extractTaskTrailerId}, the SAME anchored, last-wins extractor its siblings use. NEVER
+ * WIRED HERE, on purpose: one concern per PR. SYNCHRONOUS, and each blob is read exactly once. */
+```
+
+Removed from `src/lib/review.ts:4556-4557` (base 58e6c840), verbatim:
+
+```
+ * the plan is content-addressed, so identity is the git OID from one LOCAL `git rev-parse <sha>:<path>`; the shard
+ * set is ONE tree oid rather than a blob oid per shard. NEVER THROWS — a probe failure degrades to `undefined`. */
+```
+
+### return undefined;
+
+Removed from `src/lib/review.ts:4567-4568` (base 58e6c840), verbatim:
+
+```
+    // Identity is optional legibility: the criteria bytes already resolved, so preserve the
+    // pre-W1-T2623 source string instead of turning a failed local OID probe into review failure.
+```
+
+### gitRunner
+
+Removed from `src/lib/review.ts:4598-4599` (base 58e6c840), verbatim:
+
+```
+  // Mirrors loadPlanAtRef's OWN default (plan.ts) exactly, including its `maxBuffer` — never a
+  // second, differently-configured git runner for the read-identity probes below.
+```
+
+### identity
+
+Removed from `src/lib/review.ts:4612-4613` (base 58e6c840), verbatim:
+
+```
+    // W1-T2623: the read-identity probes only run when there is a `source` line to append them
+    // to — no extra git calls spent naming bytes nobody is about to be told were read.
+```
+
+### PrAuthoringPathCoverage
+
+Removed from `src/lib/review.ts:4642-4644` (base 58e6c840), verbatim:
+
+```
+/** One PR-authoring path's coverage — design item (i), W1-T952: "write down which the fix COVERS
+ *  and which it CANNOT... A fix that silently covers only the in-repo path and claims the defect
+ *  closed is the failure this item exists to prevent." */
+```
+
+### RubricKey
+
+Removed from `src/lib/review.ts:4728-4731` (base 58e6c840), verbatim:
+
+```
+ * unit fixture, never an LLM call, and each is exported separately. COARSE, diff-scoped heuristics by design. The
+ * four §5 items: ONE CONCERN per PR; ALL CALLERS AUDITED (a change that fixes one call site and orphans the rest);
+ * TEST THEATER; REFACTOR-PHASE HONESTY. Plus DOCS AWARENESS (§12A, W1-T30): a diff changing user-visible behaviour
+ * must update `docs/` or state why not in the REPORT. Plus TROUBLESHOOTING COVERAGE (§12A, W1-T50): a diff ADDING an
+```
+
+Removed from `src/lib/review.ts:4734-4734` (base 58e6c840), verbatim:
+
+```
+ * human-authored, because that field is Architect-only (rule 15). */
+```
+
+### humanAuthored
+
+Removed from `src/lib/review.ts:4760-4764` (base 58e6c840), verbatim:
+
+```
+   *  {@link "../run-task.js".isDispatchedRunBranch}, because a dispatched run always pushes to
+   *  `run-<taskId>-<epochMs>` and no hand-opened branch takes that shape. ABSENT ⇒ FALSE, never
+   *  "unknown-so-allow": the one call site that cannot supply a head ref is `runFixRung`'s, BY
+   *  CONSTRUCTION a dispatched run amending its own branch, the exact case the exemption must not cover.
+   *  // Why: until W1-T385 nothing set this field, so the exemption could never fire. */
+```
+
+### plus
+
+Removed from `src/lib/review.ts:4800-4804` (base 58e6c840), verbatim:
+
+```
+      // `/dev/null`, which `changedFiles` then filtered out — so a pure deletion contributed NOTHING to the
+      // reviewer's changed-file list (W1-T389). The `diff --git` header one branch above already set the real path,
+      // so KEEP IT. Fixed here in the walker rather than at each of the four consumers, which is how the next one
+      // inherits the bug. The `---` direction needs no equivalent, since an ADDED file's `--- /dev/null` is skipped
+      // rather than assigned — asserted, not assumed, by test/review-deletion-blind.test.ts.
+```
+
+### SHARD_FILES_LINE_RE
+
+Removed from `src/lib/review.ts:4817-4819` (base 58e6c840), verbatim:
+
+```
+/** A plan-shard's own `files:` line, house convention: a single flow-style YAML array,
+ *  `  files: [a/b.ts, c/d.ts]` — verified against every shard under `plan/tasks.d/` at
+ *  W1-T456's own commit (grep `^  files:`): all single-line, none block-style. */
+```
+
+### SHARD_PATH_RE
+
+Removed from `src/lib/review.ts:4821-4822` (base 58e6c840), verbatim:
+
+```
+/** A diff-touched path this repo's task shards live at — `plan/tasks.yaml` (the
+ *  monolith some flows still write) or `plan/tasks.d/<id>.yaml` (the sharded form). */
+```
+
+### shardDeclaredFilesInDiff
+
+Removed from `src/lib/review.ts:4825-4826` (base 58e6c840), verbatim:
+
+```
+/** (W1-T456, DEFECT A) Repo-relative paths a plan-shard ADDS to its own `files:` scope, read straight
+ * off the ADDED lines of THIS diff, never off a resolved task id — because a plan-FILING PR deliberately carries no
+```
+
+Removed from `src/lib/review.ts:4830-4832` (base 58e6c840), verbatim:
+
+```
+ * DELETED line. Deliberately narrow: only a bare, single-line `files: [...]` ({@link SHARD_FILES_LINE_RE}) counts,
+ * and under-matching only means a real forward
+ * reference falls back to `executed_fail`, today's behaviour. */
+```
+
+### concernStem
+
+Removed from `src/lib/review.ts:4849-4850` (base 58e6c840), verbatim:
+
+```
+/** The concern a changed file belongs to, keyed by its source STEM: `src/lib/foo.ts` and its
+ *  co-located `test/foo.test.ts` are the SAME concern (`foo`). Non-source files carry none. */
+```
+
+### checkOneConcern
+
+Removed from `src/lib/review.ts:4868-4875` (base 58e6c840), verbatim:
+
+```
+ * the partial-fix-drift smell of a multi-concern PR. TRAP (W1-T2823): {@link concernStem} keys a concern to a
+ * BASENAME and its collapse rule assumes a `src/lib/foo.ts` + `test/foo.test.ts` pairing, but this repo names a
+ * falsifier after the CLAIM it proves — so a PR's own suite contributed a second stem and the arm fired on 36 of 43
+ * judged commits in an 80-commit sample of origin/main (83.7%). An advisory the fix rung CONSUMES that is wrong five
+ * times in six is worse than no input. THE COMPANION DISCOUNT IS {@link COMPANION_PATH_CLASSES} — the shared table
+ * W1-T2547 extracted so both task-linter.ts and review.ts read it. TWO PASSES, mirroring {@link
+ * "./task-linter.js".subsystemsOf}: companions fold in only if nothing else survives.
+ * // Why: W1-T2525's `ownFalsifierSlug` narrowing scored 33 of the same 43 against this rule's 19. */
+```
+
+### checkCallersAudited
+
+Removed from `src/lib/review.ts:4949-4953` (base 58e6c840), verbatim:
+
+```
+/**
+ * ALL CALLERS AUDITED: when a function's definition GAINS a parameter in the diff,
+ * every call site must be updated too. A call left on an UNCHANGED (context) line
+ * with the old (too-few) arity is an orphaned sibling — partial-fix drift.
+ */
+```
+
+### checkRefactorHonesty
+
+Removed from `src/lib/review.ts:5013-5013` (base 58e6c840), verbatim:
+
+```
+ * REMOVED ones. A behavior line that is added with no matching removal is net-new logic: dishonest for a refactor. */
+```
+
+### INSTRUMENT_SURFACE
+
+Removed from `src/lib/review.ts:5038-5039` (base 58e6c840), verbatim:
+
+```
+ *  diff-scoped path heuristic, coarse by design like {@link concernStem}.
+ *  // Why: before W1-T212 (recon R-15) a PR lowering a coverage floor cleared docs-awareness silently. */
+```
+
+### ENFORCEMENT_DATA
+
+Removed from `src/lib/review.ts:5166-5168` (base 58e6c840), verbatim:
+
+```
+/** ENFORCEMENT DATA (W1-T427): the files under `plan/**` the fleet's own gates OBEY, as opposed to the plan
+ * paperwork those gates are applied TO — each mapped to WHAT IT ENFORCES, because a reviewer reads reasons, not
+ * lists. WHY THE CATEGORY EXISTS: {@link isInPlanScope} is `MASTER-PLAN.md || ORIENTATION || plan/**`, and {@link
+```
+
+Removed from `src/lib/review.ts:5170-5174` (base 58e6c840), verbatim:
+
+```
+ * and wrong for these four, because a PR that blunts an assertion in `plan/claims.yaml` RIDES the carve-out that
+ * skips the floor which would catch it. Of the mapped guard gaps this is the only one that QUIETS ITS OWN ALARM, so
+ * it is closed BEFORE an incident; FILED ASSUMED. THE SCOPE PREDICATE IS DELIBERATELY UNTOUCHED. ONE FILE IS IN BOTH
+ * MAPS AND THAT IS NOT A CONTRADICTION: `plan/claims.yaml` sits in {@link INSTRUMENT_SURFACE_EXCLUSIONS} as claim
+ * DATA, not the checker's rule logic. EXACT PATHS, never prefixes; new arrivals are caught by
+```
+
+### ENFORCEMENT_DATA_EXCLUSIONS
+
+Removed from `src/lib/review.ts:5193-5198` (base 58e6c840), verbatim:
+
+```
+ * the reason it earns a pass. Exactly the {@link INSTRUMENT_SURFACE_EXCLUSIONS} contract — a blank reason is refused
+ * — and NEVER READ BY {@link enforcementDataInDiff}. A key ending in `/` excuses a whole RECORD STORE, a directory
+ * the fleet reads by globbing rather than by naming a member: those three hold 331 of the 337 tracked data files
+ * under `plan/`, and per-file entries would hide the four real ones. They are candidates at all only because src/
+ * PROSE cites individual members as
+ * examples, which is DERIVED rather than assumed — a citation is not a read. */
+```
+
+### enforcementDataInDiff
+
+Removed from `src/lib/review.ts:5212-5215` (base 58e6c840), verbatim:
+
+```
+/** The enforcement-data paths a changed-file list touches, in diff order (W1-T427) — the OBSERVED
+ * EVIDENCE named on the posted status by {@link cappedSummary}, not just a boolean (W1-T186 emitter discipline: an
+ * operator must be told WHICH file cost the carve-out). EXACT membership via
+ * `Object.hasOwn`, so an inherited prototype key can never make a path look like enforcement data. */
+```
+
+### isProductPath
+
+Removed from `src/lib/review.ts:5232-5235` (base 58e6c840), verbatim:
+
+```
+/** A "product" path for entanglement purposes (W1-T297): under `src/` and NOT itself a test file.
+ * `test/` files must NOT count as the product half — the design's own carve-out — or an instrument-only PR could
+ * never carry the fixture that proves it, which is exactly what
+ * `test/diff-coverage.test.ts` was shipped for. */
+```
+
+### GRADING_POWER_DECLARATIONS
+
+Removed from `src/lib/review.ts:5270-5280` (base 58e6c840), verbatim:
+
+```
+/** INSTRUMENT ISOLATION (W1-T297, Standing rule 25): true when `diffFiles` holds at least one {@link
+ *  INSTRUMENT_SURFACE} path AND at least one {@link isProductPath} src/ path — the ENTANGLEMENT predicate, not mere
+ *  instrument-touching. An instrument-only diff, optionally with its own `test/` falsifier or a `docs/` update, is
+ *  the sanctioned shape and returns `false`, as does a src-only, plan-only or docs-only diff.
+ *  `instrumentPaths`/`srcPaths` are the OBSERVED EVIDENCE named in the failure text (W1-T186 emitter discipline), and
+ *  {@link ENTANGLEMENT_EXEMPT_INSTRUMENTS} is subtracted FIRST, before either array is built. */
+/** DECLARATIONS WHOSE DATA HAS GRADING POWER OVER OTHER PRs. A changed line inside one counts as EXECUTABLE even
+ *  when it is a bare string literal, because adding a path here decides what {@link detectInstrumentEntanglement}
+ *  treats as an instrument and what it exempts. Without this carve-out the literal-only rule below would let a diff
+ *  register or exempt its own instrument in the same breath as editing it, precisely the risk Standing rule 25 stops.
+ *  Matched against the enclosing declaration git names in the hunk header, never the line's own text. */
+```
+
+### changedLineIsExecutable
+
+Removed from `src/lib/review.ts:5291-5293` (base 58e6c840), verbatim:
+
+```
+ *  anything it cannot confidently classify keeps an identifier after the strip and is therefore EXECUTABLE.
+ *  TYPE-ONLY DECLARATIONS ARE DELIBERATELY NOT EXEMPTED — a type member (`x?: T;`) and a value in an object literal
+ *  (`x: t,`) are the same bytes, separating them needs a parser rather than a regex, and guessing wrong fails OPEN. */
+```
+
+### out
+
+Removed from `src/lib/review.ts:5299-5301` (base 58e6c840), verbatim:
+
+```
+  // Strip literal CONTENTS (keeping the quotes as punctuation) so a usage sentence cannot look
+  // like code, then strip a trailing line comment. Escapes are honoured so an embedded quote
+  // cannot end the literal early and leak its tail into the executable residue.
+```
+
+### srcChangeIsExecutable
+
+Removed from `src/lib/review.ts:5320-5323` (base 58e6c840), verbatim:
+
+```
+/** Does this file's half of the patch change executable code, or only prose? Reads the hunk headers
+ *  git already emits, so a bare string added to a {@link GRADING_POWER_DECLARATIONS} table is never
+ *  mistaken for a usage line. `true` when the patch cannot be read for this file at all — an absent
+ *  or unparseable diff must never quietly exempt a path. */
+```
+
+### CENSUS_REGISTRATION_PATH
+
+Removed from `src/lib/review.ts:5361-5365` (base 58e6c840), verbatim:
+
+```
+// diff has no prior version to be mis-graded against. THE CARVE-OUT IS NARROW BY CONSTRUCTION: both halves must be
+// NEW in the SAME diff, either half missing gets NO carve-out, and the predicate never inspects the matched pattern
+// or reads {@link INSTRUMENT_SURFACE_EXCLUSIONS}. NOT SUBTRACTED FROM THE RETURNED EVIDENCE, unlike {@link
+// ENTANGLEMENT_EXEMPT_INSTRUMENTS}: only the `entangled` verdict is affected, which leaves the raw evidence readable
+// as the negative control. PATH-ONLY CALLERS GET NO CARVE-OUT, `srcChangeIsExecutable`'s fail-closed default.
+```
+
+### fileIsNewInDiff
+
+Removed from `src/lib/review.ts:5370-5372` (base 58e6c840), verbatim:
+
+```
+/** True when `file` is a brand-new addition in this diff — a `diff --git` block carrying git's own
+ * `new file mode` marker, or, equivalently and just as authoritatively, a `--- /dev/null` source
+ * side. Neither a rename (git emits `rename from`/`rename to`) nor an ordinary edit qualifies. */
+```
+
+### scriptStem
+
+Removed from `src/lib/review.ts:5382-5384` (base 58e6c840), verbatim:
+
+```
+/** The bare stem a `scripts/<stem>.mjs` (or `.ts`/`.sh`/`.json`) path reduces to — the shape a
+ *  `src/lib/ci-parity.ts` registration entry actually cites (e.g. `script: "source-size-ratchet"`
+ *  for `scripts/source-size-ratchet.mjs`), never the full path with its directory and extension. */
+```
+
+### CI_WORKFLOW_PATH
+
+Removed from `src/lib/review.ts:5390-5393` (base 58e6c840), verbatim:
+
+```
+/** True when `scriptFile`, already known to be on {@link INSTRUMENT_SURFACE}, is a newly introduced census gate in
+ *  `diff` — see the section doc above. Requires the script to be brand-new ({@link fileIsNewInDiff}) AND
+ *  `src/lib/ci-parity.ts` to carry a newly ADDED line naming its stem; a pre-existing registration mentioned in a
+ *  comment or context line does not count. */
+```
+
+### isIntroducingCiYmlJob
+
+Removed from `src/lib/review.ts:5398-5407` (base 58e6c840), verbatim:
+
+```
+/** A ci.yml JOB introduced by this diff, keyed on the REGISTERED UNIT rather than the instrument FILE
+ * (W1-T2738). `.github/workflows/ci.yml` has existed since the repo did, so {@link fileIsNewInDiff} is false for it
+ * however new the job is — the single fact that put a new ci.yml job outside W1-T2521's carve-out. A JOB IS
+ * INTRODUCED WHEN TWO ADDS AGREE ON ONE NAME: ci.yml gains a job key, and `src/lib/ci-parity.ts` gains a line
+ * registering THAT name. The pair is the discrimination, not belt-and-braces — `on:`'s own children are
+ * indented exactly like a job key — and co-presence is not enough, since a diff adding one job while registering
+ * another would carve out the wrong unit.
+ * // Why: test/preflight-ci-parity.test.ts refuses both halves alone and fails on `main` rather than
+ * // only on a PR, so with entanglement closing the third ordering a new ci.yml job had no
+ * // admissible sequence at all. */
+```
+
+### introducedGates
+
+Removed from `src/lib/review.ts:5449-5451` (base 58e6c840), verbatim:
+
+```
+  // W1-T2521: subtract a newly introduced census gate (script + its own first registration,
+  // both new in THIS diff — see the section doc above `CENSUS_REGISTRATION_PATH`) from the
+  // ENTANGLEMENT VERDICT only; `instrumentPaths`/`srcPaths` stay the raw, unedited evidence.
+```
+
+### STATED_REASON_RE
+
+Removed from `src/lib/review.ts:5467-5469` (base 58e6c840), verbatim:
+
+```
+/** A reason the report STATES for why no doc update accompanies a surface change — the report's own
+ * words, not inferred. Requires the "no doc(s) change/update" phrase to be followed by an actual
+ * reason, so a bare "no docs update" with nothing after it has not stated why and does not count. */
+```
+
+### ledgerTouched
+
+Removed from `src/lib/review.ts:5479-5480` (base 58e6c840), verbatim:
+
+```
+  // document (W1-T2547; see task-linter.ts's GENERATED_LEDGER_CLASSES for the shared table). Subtracted HERE ONLY: a
+  // diff that also touches a REAL surface still reports on that surface below.
+```
+
+### newOperatorImpactfulFailureIds
+
+Removed from `src/lib/review.ts:5518-5522` (base 58e6c840), verbatim:
+
+```
+/** The ids of entries NEWLY ADDED, not merely edited, to `learnings/failures.yaml` carrying
+ *  `operator_impact: true`. "Newly added" is diff-scoped exactly like {@link
+ *  checkCallersAudited}'s add/del pairing: a `- id: <id>` line appearing only on an ADD line starts
+ *  a brand-new entry, while a field added to an EXISTING entry leaves that line on a context line.
+ *  Each entry's span runs to the next `- id:` add-line or the end of the file's lines. */
+```
+
+### TROUBLESHOOTING_STATED_REASON_RE
+
+Removed from `src/lib/review.ts:5547-5549` (base 58e6c840), verbatim:
+
+```
+/** A reason the report STATES for why a new operator-impacting failure has no troubleshooting entry
+ * — the same shape as {@link STATED_REASON_RE}, scoped to this item's own excuse phrase so the two
+ * items' excuses cannot be confused for each other. */
+```
+
+### checkTroubleshootingCoverage
+
+Removed from `src/lib/review.ts:5553-5556` (base 58e6c840), verbatim:
+
+```
+/** TROUBLESHOOTING COVERAGE: a diff adding a new `operator_impact: true` entry to
+ * `learnings/failures.yaml` must also touch `docs/troubleshooting.md` naming that entry's id, or the report must
+ * state why not. Mirrors DOCS AWARENESS one level narrower — the failures corpus
+ * specifically — so an operator-visible incident always gets a symptom, cause and fix write-up. */
+```
+
+### newDrillObligatingFailureIds
+
+Removed from `src/lib/review.ts:5594-5597` (base 58e6c840), verbatim:
+
+```
+/** The ids of entries NEWLY ADDED to `learnings/failures.yaml` carrying `drill_obligating: true`.
+ * Same diff-scoped rule as {@link newOperatorImpactfulFailureIds}: a `- id: <id>` line present only on an ADD line
+ * starts a brand-new entry, while a field added to an existing entry leaves that
+ * line on a context line and is a modification. */
+```
+
+### checkDrillCoverage
+
+Removed from `src/lib/review.ts:5626-5629` (base 58e6c840), verbatim:
+
+```
+/** DRILL COVERAGE: a diff adding a new `drill_obligating: true` entry to `learnings/failures.yaml`
+ *  must also touch `scripts/recovery-drill.mjs` (the `RECOVERY_PATHS` table W1-T366/W1-T938 built),
+ *  or the report must state why not. Mirrors TROUBLESHOOTING COVERAGE one field over — the
+ *  postmortem's last step becomes "add it to the drill" — with the same derivation and escape hatch. */
+```
+
+### isTaskRecordPath
+
+Removed from `src/lib/review.ts:5665-5673` (base 58e6c840), verbatim:
+
+```
+/** True for `plan/tasks.yaml` itself OR a `plan/tasks.d/<id>-<slug>.yaml` (or `.yml`) shard (W1-T399).
+ * Every task record lives in one of the two, `loadPlan` merges both into one view, and the monolith has been frozen
+ * to new filings since #1060 — of the last twenty merged implementation PRs, nineteen worked a shard task, so a
+ * predicate keyed on the monolith alone is blind to nearly the whole population Standing rule 15 protects. Matched
+ * STRUCTURALLY rather than by a loose glob, so it admits no `plan/tasks.d/README.md` or nested path `listShardFiles`
+ * never recurses into. Mirrors `SHARD_PATH_RE` and `TASKS_SHARD_PATH_RE`.
+ * // Why: `listShardFiles` (plan.ts) loads `.yaml` OR `.yml` while this accepted only `.yaml`, so an
+ * // identical criterion-editing diff tripped Rule 15 on one and passed silently on the other (R-14,
+ * // docs/audits/recon-2026-09-05.md). */
+```
+
+### fieldLineRe
+
+Removed from `src/lib/review.ts:5688-5691` (base 58e6c840), verbatim:
+
+```
+  // Function-local, never module-scope: a YAML mapping-key line however indented, matched once so that a computed
+  // indent and the key/rest are never derived two different ways. Requires `key` to be followed IMMEDIATELY by `:`,
+  // which is what keeps a `unit test: <title>` or `grep: <pattern> in <path>` proof-dialect CONTENT line, whose colon
+  // has a space before it, from ever being misread as a fresh field header.
+```
+
+### criterionFieldTampered
+
+Removed from `src/lib/review.ts:5748-5755` (base 58e6c840), verbatim:
+
+```
+/** RULE 15's shared diff-derived predicate (W1-T58, ratifies P3 via P8/RETRO-1784058021334): true
+ * when a diff either ADDS a `claim:`/`proof:`/`satisfied_by:` line or REMOVES an existing one, in `plan/tasks.yaml`
+ * or a `plan/tasks.d/*.yaml` shard (W1-T399). A removed field line is present whether the TEXT changed or the whole
+ * criterion was deleted; an added one is present whether an EXISTING criterion gained a field or a WHOLE NEW
+ * criterion was APPENDED. Both read as "the criteria no longer say what the Architect wrote". Diff-derived ONLY:
+ * callers apply their OWN exemption on top — {@link checkSatisfiedByGuard} uses `planOnly && humanAuthored`, {@link
+ * judgeReview} `planOnly` alone.
+ * // Why: a pure append tripped neither disjunct before W1-T400 widened the ADD side (#1295). */
+```
+
+### checkSatisfiedByGuard
+
+Removed from `src/lib/review.ts:5767-5768` (base 58e6c840), verbatim:
+
+```
+ *  A worker doing any of these to its own blocking criteria is editing the criteria to match the diff: a failed task,
+ *  not a merge. */
+```
+
+### edit
+
+Removed from `src/lib/review.ts:5787-5788` (base 58e6c840), verbatim:
+
+```
+  // hand-opened PR — naming an author the review path could not know AND denying a property it had just computed
+  // true.
+```
+
+### remedy
+
+Removed from `src/lib/review.ts:5793-5799` (base 58e6c840), verbatim:
+
+```
+  // THE FULL REMEDY LIVES HERE, deliberately not in `failSummary`: that string is the commit-status description and
+  // is cut at 140 characters, while this `reason` has no cap. IT HAS TWO HALVES BECAUSE ONE IS NOT ENOUGH, and that
+  // is measured: telling an author only to SPLIT the filing converts one refusal into another. The floor was RIGHT in
+  // every one of those cases and must not be relaxed — a claim about the ACT of filing has no support in a diff that
+  // IS the shard — so what the author needs is the second sentence, substantiate each criterion by NAMING the proof
+  // that will carry it.
+  // // Why: #3626, #3631, #3636 and #3669 each split correctly and were refused anyway; #3669 scored 2 of 5 proof keywords against MIN_COVERAGE 0.6 and all seven criteria read UNMET.
+```
+
+### judgeRubric
+
+Removed from `src/lib/review.ts:5815-5818` (base 58e6c840), verbatim:
+
+```
+/** Run the full rubric — the four §5 layer-2 judgment items plus DOCS AWARENESS, TROUBLESHOOTING
+ * COVERAGE, DRILL COVERAGE and the satisfied_by guard — over a diff, a report and PR-level facts. ADVISORY: `pass`
+ * rolls up all items, but the binding gate is layer 1. `failures` names exactly
+ * which items tripped. */
+```
+
+### rubricAdvisorySection
+
+Removed from `src/lib/review.ts:5834-5837` (base 58e6c840), verbatim:
+
+```
+/** Render {@link judgeRubric}'s failing items as a clearly-labelled ADVISORY section for the posted review
+ *  (W1-T359) — `undefined` when the rubric has no failures. The header spells out, in the text itself, that this
+ *  section never changes `remudero-review`'s verdict (Standing rules 2/12: an LLM or heuristic may RECOMMEND, only
+ *  code ENFORCES). The falsifier checks that independence at the call site; this note checks it in the text. */
+```
+
+### scopeAdvisorySection
+
+Removed from `src/lib/review.ts:5850-5857` (base 58e6c840), verbatim:
+
+```
+/** Render this review's `scope_violation` advisory — the one {@link scopeViolationFiles} already
+ * computed — as a PR-comment section, so a declared-scope overrun reaches the human gate instead of only the ledger
+ * (W1-T434). READS THE ADVISORY, NEVER RECOMPUTES IT: the comparison has exactly one home, and a second walk could
+ * drift, leaving the PR comment and the ledger disagreeing about the same PR. ADVISORY, because a measured majority
+ * of declared-scope widenings are legitimate (W1-T401).
+ * // Why: until W1-T434 the push-site guard answered an overrun by REFUSING the push, so the branch
+ * // died with the reaped worktree — the evidence needed to tell a phantom revert from an
+ * // under-declared `files:` was destroyed by the same action that reported it. */
+```
+
+### unwiredExportAdvisorySection
+
+Removed from `src/lib/review.ts:5873-5882` (base 58e6c840), verbatim:
+
+```
+/** Render this review's `unwired_export` advisory — the one {@link unwiredAdvisoriesFor} already
+ * computed — as a PR-comment section, so an export added with nothing reaching it lands at the human gate instead of
+ * only the ledger. THE SIBLING OF {@link scopeAdvisorySection}, BUILT THE SAME WAY: of the four {@link
+ * UnwiredAdvisory} reason codes only `scope_violation` reached the gate. READS THE ADVISORY, NEVER RECOMPUTES IT.
+ * ADVISORY AND NON-BLOCKING, DELIBERATELY: an unreached export is not by itself a fault, since a symbol shipped one
+ * PR ahead of its caller is a normal split — which is why the `WIRED-AT` and `SHIPS-UNWIRED` markers exist — and
+ * whether it should ever BLOCK is W1-T323's open adjudication, so this adds no row to
+ * `DECISION_RELEVANT_LEDGER_STEPS`.
+ * // Why: over the 60 most recently merged PRs, 14 added an exported symbol and #2952 carried an
+ * // `unwired_export` nobody saw. */
+```
+
+### inverseScopeAdvisorySection
+
+Removed from `src/lib/review.ts:5901-5908` (base 58e6c840), verbatim:
+
+```
+/** Render this review's `inverse_scope` advisory — the one {@link inverseScopeUntouchedFiles} already
+ * computed — as a PR-comment section, so a declared path the diff never touched reaches the human gate instead of
+ * only the ledger. THE THIRD OF THE THREE, BUILT EXACTLY LIKE ITS SIBLINGS, and invisible on identical grounds:
+ * measured over the 60 most recently merged PRs, `scope_violation` 5 (8%), `inverse_scope` 2 (3%), `unwired_export` 1
+ * (2%). THE FOURTH CODE IS DELIBERATELY NOT RENDERED: `unresolved_task_scope` measured 0, and not because it is rare
+ * — {@link unresolvedTaskScopeOverlaps} returns empty unless {@link ReviewEvidence.openTaskDeclaredFiles} is
+ * populated, and that field has NO
+ * producer anywhere in `src/`. A renderer behind an unpopulated field would be dead code. ADVISORY. */
+```
+
+### reviewerOutcome
+
+Removed from `src/lib/review.ts:5930-5933` (base 58e6c840), verbatim:
+
+```
+ *  console summary. `judgeReview`'s binding verdict is unaffected either way (Standing rules 2/4/12); this is purely
+ *  a LEGIBILITY signal (P10-a).
+ *  // Why: a floor-only PASS — the LLM reviewer walling `error_max_turns`, or never being spawned — was
+ *  // byte-identical in the ledger to a review the reviewer actually COMPLETED. */
+```
+
+### POST_REVIEW_STATUS_MAX_ATTEMPTS
+
+Removed from `src/lib/review.ts:5960-5968` (base 58e6c840), verbatim:
+
+```
+/** Post the `remudero-review` commit status to a PR head sha. A thin wrapper over the `gh api` call from the design,
+ * mirroring the other gh helpers in lib/worker.ts. WRITE-scoped to a commit STATUS only; it can never edit code.
+ * W1-T203 (i): when {@link REVIEWER_TOKEN_ENV} is set this authenticates as the dedicated reviewer identity,
+ * `GH_TOKEN` overriding ambient auth — the one thing that makes {@link resolveReviewProvenance}'s login compare
+ * meaningful at arm time. Unset falls back to ambient auth, byte-identical to before that task. The token never
+ * reaches this function as an argument, only via the orchestrator's OWN process env. */
+/** Total attempts, first try plus retries, before a TRANSIENT gh-status-post error gives up (W1-T135) — the same
+ *  bound classify.ts's {@link "./classify.js".MAX_TRANSIENT_RETRIES} uses for the unrelated fix-rung loop:
+ *  independent counters, one policy so the two do not drift. */
+```
+
+### PostReviewStatusRetryOpts
+
+Removed from `src/lib/review.ts:5975-5977` (base 58e6c840), verbatim:
+
+```
+/** Injectable dependencies for {@link postReviewStatus}'s retry-with-backoff — the same DI shape
+ * classify.ts's `DiagnoseThenRetryDeps` uses: optional, with real defaults, so tests override to
+ * avoid a real `gh` spawn or real waiting. */
+```
+
+### execGhStatusPost
+
+Removed from `src/lib/review.ts:5989-5992` (base 58e6c840), verbatim:
+
+```
+/** Exported, not just internal, so a unit test can PATH-stub `gh` and drive this exact real
+ *  invocation directly — the same temp-dir fake-gh pattern `realArmDeps` tests use — rather than
+ *  only exercising it through {@link postReviewStatus}'s injectable `exec`, which would leave this
+ *  one-line real wrapper permanently uncovered by the diff-coverage ratchet. */
+```
+
+### ghErrorText
+
+Removed from `src/lib/review.ts:5997-5999` (base 58e6c840), verbatim:
+
+```
+/** The text a thrown `gh`/execFileSync error carries — stderr first, where `gh api`'s own
+ *  "gh: <message> (HTTP <code>)" lands, falling back to stdout and then the Error's own message.
+ *  Mirrors the extraction {@link execWhitelistedProof} already does for the same error shape. */
+```
+
+### postReviewStatus
+
+Removed from `src/lib/review.ts:6007-6013` (base 58e6c840), verbatim:
+
+```
+/** Post the status with bounded retry. A TRANSIENT error — GitHub 5xx, a network blip, rate-limit
+ * backpressure, classified by {@link classifyFailure} over the `gh` error text, the SAME classifier the fix-rung
+ * retry loop uses so "is this transient" never drifts — is retried with exponential backoff up to {@link
+ * POST_REVIEW_STATUS_MAX_ATTEMPTS}. A PERMANENT error, or any text the classifier does not recognise as transient,
+ * throws on the first attempt: fail-closed. Once attempts are exhausted this THROWS the last error; it has no ledger
+ * access, so ledger-and-continue is {@link postReviewStatusGuarded}'s job.
+ * // Why: a bare `execFileSync` here let a single transient 503 crash a run mid-fix-rung (#283, W1-T135). */
+```
+
+### ReviewEvidenceStrength
+
+Removed from `src/lib/review.ts:6057-6067` (base 58e6c840), verbatim:
+
+```
+// because the posted status is what branch protection reads and what an operator sees. ONE POST SITE enforces FIVE
+// RULES, and {@link postReviewStatusGuarded} is the only call path run-task.ts uses from here on. (i) PRECEDENCE — a
+// keyword-only or CAPPED verdict never overwrites an executed-evidence verdict for the SAME sha ({@link
+// decideReviewStatusPost}). (ii) LIFECYCLE — no status writes to a merged or closed PR; refused, and
+// the refusal is ledgered. (iii) SERIALIZATION — per task, via the SAME O_EXCL create-or-fail primitive drain-lock.ts
+// and inflight-lock.ts use ({@link acquireReviewStatusLock}), adapted from a SINGLETON GUARD to a MUTEX: those guard
+// a whole RUN, this one short read-decide-write critical section. (iv) RESILIENCE (W1-T135) — a throw is caught,
+// ledgered `review.post_failed`, `{posted:false}` returned. (v) SUBJECT FRESHNESS (W1-T2793) — a verdict whose head
+// and body no longer match the lifecycle read's is refused. READ BEFORE WRITE: precedence needs the CURRENT posted
+// state, so the site reads ledger and lifecycle AFTER the lock — a read before it is the TOCTOU gap.
+// // Why: PR 449 head 833561d took SEVEN writes in one day, one ~85s AFTER the PR merged.
+```
+
+Removed from `src/lib/review.ts:6069-6071` (base 58e6c840), verbatim:
+
+```
+/** Whether ANY criterion's proof actually EXECUTED on this sha, or the verdict rests entirely on the
+ * ABSENCE of that evidence — keyword-only and CAPPED are both `no_evidence`, since neither observed
+ * repo state. Evidence outranks its absence, one-directionally; see {@link decideReviewStatusPost}. */
+```
+
+### PostedReviewStatusRecord
+
+Removed from `src/lib/review.ts:6081-6085` (base 58e6c840), verbatim:
+
+```
+/** The most recent `review.posted` line's sha, state and evidence for `taskId` — {@link
+ *  decideReviewStatusPost}'s `prior` argument. Deliberately separate from {@link
+ *  PriorReviewVerdict}, whose consumers never needed evidence strength, so their contracts stay
+ *  untouched. Same last-one-wins scan as its siblings, with `evidence` derived from the SAME
+ *  `proof_exec` array run-task.ts already ledgers — no new ledger field. */
+```
+
+### PendingReviewStatusRecord
+
+Removed from `src/lib/review.ts:6138-6140` (base 58e6c840), verbatim:
+
+```
+ *  `state`, so a pending can never be mistaken for a terminal verdict by that precedence read. `runId`/`postedAt`
+ *  are what sweep.ts's stuck-pending remedy needs: a pending whose owner is long gone must stay re-drivable rather
+ *  than read as "already attended to" forever. */
+```
+
+### assessPendingReviewOwner
+
+Removed from `src/lib/review.ts:6189-6192` (base 58e6c840), verbatim:
+
+```
+/** Classify a pending review's durable owner identity without inventing certainty. The shared {@link
+ * isHolderStale} predicate owns PID reuse, container replacement and boot-time semantics; this adapter only rejects
+ * incomplete records and distinguishes a same-host non-stale result from a
+ * foreign holder this process cannot prove active or dead. */
+```
+
+### prLifecycleUrlTarget
+
+Removed from `src/lib/review.ts:6221-6223` (base 58e6c840), verbatim:
+
+```
+/** ANCHORED ON `/pull/<n>`, mirroring run-task.ts's own `prUrlTarget` — duplicated locally rather
+ * than imported, because run-task.ts imports FROM this module and an import the other way would be
+ * circular. Returns `undefined`, never a guess, on anything that is not a PR URL. */
+```
+
+### fetchPrLifecycle
+
+Removed from `src/lib/review.ts:6229-6235` (base 58e6c840), verbatim:
+
+```
+/** W1-T522: the real fetcher, now REST (`GET /repos/{o}/{r}/pulls/{n}`) rather than `gh pr view --json
+ * state` (GraphQL) — {@link postReviewStatusGuarded}'s default. Tests inject a fake `fetch` instead of a fake
+ * closure, mirroring `ghLiveState`'s shape. Reuses {@link prStateFromRest}, the SAME fold `liveStateFromRest`
+ * composes. THE FOLD IS BENIGN HERE: a naive `.state`-only read would mislabel a MERGED PR as merely `closed`, but
+ * {@link decideReviewStatusPost} refuses posting on merged OR closed alike — unlike at `terminalStateReason`
+ * (sweep.ts), which this function does not touch.
+ * // Why: this was the one call observed failing with `GraphQL: API rate limit already exceeded`. */
+```
+
+### PrCommentRecord
+
+Removed from `src/lib/review.ts:6266-6271` (base 58e6c840), verbatim:
+
+```
+// untouched. A `gh pr comment` APPENDS. The fix is ONE comparison at the single site that writes the comment ({@link
+// postReviewCommentGuarded}): refuse to append when the body is BYTE-IDENTICAL to the newest comment already
+// standing. NO ledger, NO timer, pacing or backoff — the polling-lockout class this task's rationale explicitly
+// refuses — because the discriminator is the verdict's own bytes against a FRESH read of GitHub's live state.
+// // Why: #3140 accumulated TEN byte-identical failure comments on one unmoved head, because
+// // `reviewPostRefusedFor` (run-task.ts) keys only on `review.post_refused`.
+```
+
+### fetchNewestPrComment
+
+Removed from `src/lib/review.ts:6280-6283` (base 58e6c840), verbatim:
+
+```
+/** The NEWEST comment on `prUrl` by `created_at`, or `undefined` when the PR has none or its owner/repo/number
+ * cannot be parsed (defensive — not reachable from a real PR URL). REST only (`GET
+ * repos/{o}/{r}/issues/{number}/comments`), never GraphQL — the same reasoning as {@link fetchPrLifecycle}, reusing
+ * its {@link prLifecycleUrlTarget} parse. `per_page=100`, the single-page simplification its siblings make. */
+```
+
+### isDuplicateReviewComment
+
+Removed from `src/lib/review.ts:6300-6303` (base 58e6c840), verbatim:
+
+```
+/** THE comparison this task's rationale found nowhere in `src/`: nothing compared the new verdict against the
+ * standing one. This is that comparison, and its only home. Byte-exact, never fuzzy, trimmed or hashed — a verdict
+ * that changed by one byte is a DIFFERENT verdict and must still post, the distinction the shard's ledger drew
+ * between #3140 (ten posts, exit unchanged: a real repeat) and #2434 (18 posts, exits `[0, 1]`: correctly excluded). */
+```
+
+### execGhPrComment
+
+Removed from `src/lib/review.ts:6317-6319` (base 58e6c840), verbatim:
+
+```
+/** Exported so a unit test can PATH-stub `gh` and drive this exact real invocation directly,
+ * mirroring {@link execGhStatusPost}'s own reasoning: it keeps this one-line real wrapper from
+ * being permanently uncovered by the diff-coverage ratchet. */
+```
+
+### postReviewCommentGuarded
+
+Removed from `src/lib/review.ts:6327-6327` (base 58e6c840), verbatim:
+
+```
+ * best-effort failure contract included: a `gh` error is swallowed, since status and ledger already carry the verdict. */
+```
+
+### decideReviewStatusPost
+
+Removed from `src/lib/review.ts:6361-6363` (base 58e6c840), verbatim:
+
+```
+/** THE PURE W1-T228 GATE — the falsifier this task exists to prove is a unit fixture, exactly like
+ * {@link judgeReview}. Order matters: LIFECYCLE is checked FIRST, because arguing about which
+ * verdict is stronger on a PR nobody can act on any more is moot. */
+```
+
+### __beforeReclaimDelete
+
+Removed from `src/lib/review.ts:6453-6455` (base 58e6c840), verbatim:
+
+```
+  /** TEST-ONLY seam forwarded to {@link reclaimStaleLock}'s `beforeDelete` — lets a test
+   *  force a second reclaimer's whole acquire to complete inside this call's reclaim
+   *  window. Never set outside tests. */
+```
+
+### acquireReviewStatusLock
+
+Removed from `src/lib/review.ts:6465-6467` (base 58e6c840), verbatim:
+
+```
+/** Acquire the per-task review-status MUTEX — the SAME O_EXCL create-or-fail primitive
+ * {@link import("./drain-lock.js").acquireDrainLock} and {@link import("./inflight-lock.js").acquireInflightLock}
+ * use. Creation is atomic, so two racing acquirers cannot both win it, and a stale lock (holder pid dead, or the file
+```
+
+Removed from `src/lib/review.ts:6470-6471` (base 58e6c840), verbatim:
+
+```
+ * to a MUTEX: where those THROW on finding a live holder, this WAITS (bounded by `timeoutMs`) and retries, because
+ * the callers here are N uncoordinated posters that must all eventually run their own read-decide-write. */
+```
+
+### taskId
+
+Removed from `src/lib/review.ts:6534-6536` (base 58e6c840), verbatim:
+
+```
+  /** The PR the lock/ledger key off — every real caller already keys its
+   * `review.posted` ledger lines by this same id (the task id, or the
+   * `dep-review-PR<n>`/`PR-<n>` synthetic ids `run-task.ts` falls back to). */
+```
+
+### post
+
+Removed from `src/lib/review.ts:6551-6553` (base 58e6c840), verbatim:
+
+```
+  /** Injected raw poster for tests. Defaults to {@link postReviewStatus}, which already retries a
+   *  TRANSIENT gh error internally (rule (iv) above). May return a Promise, as the default does, or
+   *  `void`, so existing sync test fakes keep working. */
+```
+
+### postReviewStatusGuarded
+
+Removed from `src/lib/review.ts:6575-6582` (base 58e6c840), verbatim:
+
+```
+/** THE single call path for posting `remudero-review` from here on (W1-T228). Acquires the per-task
+ * lock, reads the ledger and live PR lifecycle FRESH inside it, decides via the pure {@link decideReviewStatusPost},
+ * and either posts or refuses. EVERY attempt is ledgered, refusals included (`review.post_refused`), so a refused
+ * write leaves a trace instead of silent blindness. W1-T135: a post that still THROWS — transient retries exhausted
+ * inside {@link postReviewStatus}, or a permanent error it never retried — is caught HERE, ledgered as
+ * `review.post_failed` carrying the verdict that could not be posted, and returned as `{posted:false}` like an
+ * ordinary refusal, so every caller's existing
+ * handling degrades gracefully instead of the run crashing. */
+```
+
+### postReviewPending
+
+Removed from `src/lib/review.ts:6708-6717` (base 58e6c840), verbatim:
+
+```
+ * start, and transitively the sweep's post-review dispatch — calls this ONCE, at DETECTION, before the worktree,
+ * proof and reviewer-spawn work a review's latency is spent on. It goes through {@link postReviewStatusGuarded}, so
+ * the W1-T135 retry, the W1-T228 lifecycle refusal and the W1-T203 reviewer identity all apply. TWO REFUSALS, BOTH
+ * DECIDED HERE before touching the lock or network. (1) NEVER REGRESS A TERMINAL VERDICT FOR THE SAME REVIEW INPUT TO
+ * PENDING: {@link decideReviewStatusPost}'s precedence only refuses `executed -> no_evidence`, and a pending attempt
+ * is always `no_evidence`, so a prior `no_evidence` TERMINAL verdict for this head would sail through; a changed body
+ * is a fresh input and may post again. (2) IDEMPOTENT PER INPUT: a `review.pending_posted` line for this exact
+ * head+body digest is a no-op, and a dead owner's stuck pending is re-driven by the sweep recognising staleness
+ * rather than by racing. The posted status carries the posting `run_id`, which is what sweep.ts's
+ * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
+```
