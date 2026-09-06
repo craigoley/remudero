@@ -7,6 +7,8 @@ import {
   DEFERRED_FOLLOW_UP_LEXICON,
   FILED_TASK_ID_IN_TEXT_RE,
   lintTask,
+  NEAR_MISS_PREFIX_RE,
+  proofDialectViolations,
   sentenceAround,
 } from "../src/lib/task-linter.js";
 import { loadPlan, type Task } from "../src/lib/plan.js";
@@ -211,4 +213,53 @@ test("sentenceAround: bounds on sentence-final punctuation and collapses wrapped
   const text = "First sentence here.\nSecond sentence\nwraps across two lines. Third sentence.";
   const idx = text.indexOf("Second");
   assert.equal(sentenceAround(text, idx), "Second sentence wraps across two lines.");
+});
+
+// ── NEAR_MISS_PREFIX_RE's own fixture ──────────────────────────────────────────────────────
+//
+// `NEAR_MISS_PREFIX_RE` is a fixture-less `_RE` surface without this: it decides the difference
+// between "near-miss dialect prefix" and "free prose" on the proof-dialect refusal path, and
+// nothing drove that arm. The negative-reachability ratchet counts exactly that — a validator whose
+// UNHEALTHY arm no test reaches — and it has no allowlist to add a file to, deliberately, because
+// recording the count would bank the debt rather than pay it.
+
+test("NEAR_MISS_PREFIX_RE: a near-miss dialect prefix is refused as a near miss, not as free prose", () => {
+  for (const prefix of ["unit tests: the thing happens", "unit test over the thing", "integration test: the thing"]) {
+    const t = task({ id: "T-NEAR-MISS", acceptance: [{ claim: "does the thing", proof: prefix }] });
+    const vs = proofDialectViolations(t, { proofDialect: "warn" });
+    assert.equal(vs.length, 1, `expected exactly one proof-dialect violation for ${JSON.stringify(prefix)}`);
+    assert.match(
+      vs[0].message,
+      /near-miss dialect prefix/,
+      `NEAR_MISS_PREFIX_RE must claim ${JSON.stringify(prefix)}; falling through to "free prose" is the ` +
+        "defect this arm exists to prevent — the author is told their proof is prose when it is a typo",
+    );
+  }
+});
+
+test("NEAR_MISS_PREFIX_RE: ordinary free prose is still free prose, so the near-miss arm is not over-eager", () => {
+  const t = task({ id: "T-PROSE", acceptance: [{ claim: "does the thing", proof: "the thing demonstrably happens" }] });
+  const vs = proofDialectViolations(t, { proofDialect: "warn" });
+  assert.equal(vs.length, 1);
+  assert.match(
+    vs[0].message,
+    /free prose/,
+    "a proof with no dialect-shaped prefix at all must NOT be reported as a near miss — that would " +
+      "tell the author to fix a typo they never made",
+  );
+});
+
+// The negative-reachability ratchet credits a `_RE` surface only on a DIRECT `SYMBOL.test(...)`
+// call asserting each arm separately — it is a text-proximity heuristic over the test corpus and
+// cannot see the behavioural fixtures above, which reach the same arms through the owning function.
+// Both forms are kept: these two make the gate creditable, those two prove the refusal a caller
+// actually receives.
+test("NEAR_MISS_PREFIX_RE: the unhealthy arm — ordinary prose is not claimed as a near miss", () => {
+  assert.equal(NEAR_MISS_PREFIX_RE.test("the thing demonstrably happens"), false);
+  assert.equal(NEAR_MISS_PREFIX_RE.test("unit test: a real title"), false, "the CORRECT dialect is not a near miss");
+});
+
+test("NEAR_MISS_PREFIX_RE: the healthy arm — each near-miss spelling is claimed", () => {
+  assert.equal(NEAR_MISS_PREFIX_RE.test("unit tests: the thing happens"), true);
+  assert.equal(NEAR_MISS_PREFIX_RE.test("integration test: the thing"), true);
 });

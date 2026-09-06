@@ -503,7 +503,7 @@ export function proofShapeViolations(task: Task): LintViolation[] {
  *  authoring typo rather than deliberate prose. None of these match {@link parseWhitelistedProof},
  *  so the proof still falls through to free prose. Checked at the START of the trimmed proof only,
  *  because a dialect label is how a proof begins (mirrors review.ts's `isDialectPrefixed`). */
-const NEAR_MISS_PREFIX_RE = /^(?:unit tests\s*:|unit test over\b|integration test\s*:)/i;
+export const NEAR_MISS_PREFIX_RE = /^(?:unit tests\s*:|unit test over\b|integration test\s*:)/i;
 
 /** True iff a `unit test:` body reads as a runtime narrative rather than a literal test-title
  *  substring. `--test-name-pattern` is a substring match against a real title, so a compound,
