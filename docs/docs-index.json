@@ -188,6 +188,12 @@
       "grepHint": "env.ts forensics"
     },
     {
+      "path": "docs/forensics/fs-race-safe.md",
+      "title": "fs-race-safe.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "fs-race-safe.ts forensics"
+    },
+    {
       "path": "docs/forensics/inbox.md",
       "title": "Forensics — `src/lib/inbox.ts`",
       "summary": "`src/lib/inbox.ts` is the ratification inbox (MASTER-PLAN §7B): it tiers open proposals, drafts a",
