@@ -96,7 +96,11 @@ test("REMOTE, not the local checkout: a commit pushed to origin alone flips the 
   );
 
   // Advance ONLY the remote. Nothing touches localDir: no fetch, no checkout, no merge.
-  writeFileSync(join(originDir, "f.txt"), "two\n");
+  // W1-T2964 — the advance must touch a MATERIAL path (`src/`), or the adapter correctly declines
+  // to restart for it and this test measures materiality instead of its own subject, which is that
+  // a REMOTE-only advance is seen at all. `f.txt` at the root was arbitrary; `src/` is the point.
+  mkdirSync(join(originDir, "src"), { recursive: true });
+  writeFileSync(join(originDir, "src", "f.ts"), "export const two = 2;\n");
   execFileSync("git", ["add", "."], { cwd: originDir });
   execFileSync("git", ["commit", "--quiet", "-m", "second"], { cwd: originDir });
   const originAfter = headSha(originDir);

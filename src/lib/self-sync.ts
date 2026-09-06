@@ -336,7 +336,42 @@ function defaultReexec(env: NodeJS.ProcessEnv | Record<string, string | undefine
 export type ServiceFreshness =
   | { status: "guarded" }
   | { status: "degraded"; reason: string }
-  | { status: "assessed"; dirty: boolean; behind: { oldSha: string; newSha: string } | null };
+  | {
+      status: "assessed";
+      dirty: boolean;
+      // What the advance touched; `undefined` means unreadable, which reads as material (W1-T2964).
+      behind: { oldSha: string; newSha: string; changedPaths?: string[]; diffUnreadable?: string } | null;
+    };
+
+/**
+ * The paths whose content can change what a RUNNING daemon does: what it loads into its resident
+ * module graph (W1-T126's three clocks), plus what decides how that resolves. Everything else is
+ * excluded on a stated ground — `plan/` is re-read from origin/main at dispatch and every worker is
+ * cut a fresh worktree, `test/`/`docs/`/`learnings/`/`.github/` are never loaded, and `scripts/`
+ * and `deploy/` are read fresh per invocation from the bind-mounted checkout (the entrypoint and
+ * Dockerfile need an IMAGE REBUILD, which no restart substitutes for).
+ */
+export const MATERIAL_ADVANCE_PATHS = ["src/", "bin/", "package.json", "package-lock.json", "tsconfig.json"] as const;
+
+/**
+ * Does an advance change anything this process would load? MEASURED 2026-09-06 over the last 60
+ * commits on origin/main: 35 immaterial, 25 material — most restarts replace the process with a
+ * byte-identical module graph, each costing a boot during which main can advance again (W1-T2965).
+ *
+ * FAILS TOWARD RESTARTING: an empty list, a blank entry and an unreadable diff are all material.
+ * A needless restart costs a boot; a skipped one leaves the daemon reasoning with code it cannot
+ * account for, indefinitely. The costs are not symmetric, so the uncertain case takes the cheap side.
+ */
+export function advanceIsMaterial(changedPaths: readonly string[] | undefined): boolean {
+  if (!changedPaths || changedPaths.length === 0) return true;
+  return changedPaths.some((raw) => {
+    const path = raw.trim();
+    if (path.length === 0) return true;
+    return MATERIAL_ADVANCE_PATHS.some((prefix) =>
+      prefix.endsWith("/") ? path.startsWith(prefix) : path === prefix,
+    );
+  });
+}
 
 export function checkServiceFreshness(
   repoDir: string,
@@ -368,8 +403,28 @@ export function checkServiceFreshness(
   // reason, W1-T446) can only ever PERMIT a restart the entrypoint can complete, never one it
   // would refuse. Why: docs/forensics/self-sync.md#checkservicefreshness-the--uno-alignment.
   const dirty = git(["status", "--porcelain", "-uno"]).trim().length > 0;
-  const behind = headSha !== originSha ? { oldSha: headSha, newSha: originSha } : null;
-  return { status: "assessed", dirty, behind };
+  if (headSha === originSha) return { status: "assessed", dirty, behind: null };
+  // WHAT the advance touched, not merely THAT it happened (W1-T2964): `undefined` when unreadable,
+  // which `advanceIsMaterial` treats as material, so a degraded read never suppresses a restart.
+  let changedPaths: string[] | undefined;
+  let diffUnreadable: string | undefined;
+  try {
+    changedPaths = git(["diff", "--name-only", `${headSha}..${originSha}`])
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  } catch (err) {
+    // An UNREADABLE diff and an EMPTY one must not arrive as the same value — the first restarts,
+    // the second would not — so the reason is carried rather than erased.
+    const unreadable = err instanceof Error ? err.message : String(err);
+    changedPaths = undefined;
+    diffUnreadable = unreadable;
+  }
+  return {
+    status: "assessed",
+    dirty,
+    behind: { oldSha: headSha, newSha: originSha, changedPaths, diffUnreadable },
+  };
 }
 
 /**
@@ -387,5 +442,7 @@ export function daemonFreshnessFromService(svc: ServiceFreshness): DaemonFreshne
   if (svc.status !== "assessed") return { stale: false };
   if (svc.dirty) return { stale: false };
   if (!svc.behind) return { stale: false };
+  // An advance that cannot change this process's module graph is no reason to replace it (W1-T2964).
+  if (!advanceIsMaterial(svc.behind.changedPaths)) return { stale: false };
   return { stale: true, oldSha: svc.behind.oldSha, newSha: svc.behind.newSha };
 }
