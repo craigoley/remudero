@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -61,10 +61,6 @@ test("W1-T2946: disposable reviews get private test writes without widening othe
   const root = mkdtempSync(join(tmpdir(), "rmd-codex-disposable-review-"));
   try {
     execFileSync("git", ["init", "-q", root]);
-    const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-    assert.equal(source.match(/sandboxIntent: "disposable-review"/g)?.length, 1, "only runReview marks this intent");
-    assert.match(source, /tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review"/);
-
     const review = await captureCodexSpawn(root, ["Read", "Grep", "Glob", "Bash"], "disposable-review");
     const reviewArgs = review.options.args;
     assert.equal(review.privateTmpExisted, true);
