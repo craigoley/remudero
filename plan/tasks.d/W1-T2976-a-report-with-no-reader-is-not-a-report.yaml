@@ -70,6 +70,11 @@
     - claim: "the existing iMessage adapter and rmd digest's default channel are unchanged, so this is additive delivery rather than a reroute"
       proof: "unit test: test/a-report-with-no-reader-is-not-a-report.test.ts"
   falsifier: |
+    THIS TASK FILES THE EMAIL CHANNEL AS AN ADDITIONAL DELIVERY, NEVER A REROUTE of the existing
+    console-inbox write — the shard says so here, in its own falsifier: a change that reroutes the
+    cadence away from the inbox is listed below as a failure to satisfy this task, not as an
+    acceptable outcome of it.
+
     Close without implementation if notify.ts already ships a non-iMessage adapter that delivers
     off macOS, or if the console mailbox (W1-T2497) has shipped and the operator can read the daily
     digest there. A change that reroutes the cadence away from the inbox instead of adding a second

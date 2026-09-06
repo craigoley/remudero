@@ -101,6 +101,15 @@
     - claim: "every pre-existing assertion in the Law 5 falsifier suite still passes unedited, so this narrows the gate rather than relaxing it"
       proof: "unit test: test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts"
   falsifier: |
+    THIS TASK FILES LAW 5 AS CONDITIONAL ON A RECORDED JUDGE RULING, NEVER AS A REMOVAL of the
+    gate that enforces it — the shard says so here, in its own falsifier, not only in prose
+    elsewhere: deleting the gate is listed below as a failure to satisfy this task, not as an
+    acceptable outcome of it.
+
+    THE RULING IS PINNED TO THE RECORD IT JUDGED, so a shard cannot be edited after earning its
+    pass: a ruling whose pin does not match the record it rides on must be refused as drift, not
+    honoured, or this task is not satisfied either.
+
     Close without implementation if machineAuthorVerifyViolation already consults a recorded
     ruling, or if the operator withdraws the 2026-09-06 ruling and Law 5 is to stay unconditional.
     A change that deletes the gate, deletes any assertion in the existing falsifier suite, or lets
