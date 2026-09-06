@@ -1,0 +1,76 @@
+- id: W1-T2947
+  title: "A TERMINAL RUN PINNING A JOB NON-TERMINAL ESCALATES TO A HUMAN EVEN THOUGH THE SWEEP ALREADY HAS A SAFE, BOUNDED SINGLE-JOB REQUEUE — PR #4226's CI run 34019507513 concluded success while leak-grep job 101449352638 remained in_progress, W1-T2340 correctly detected the impossible state, but the disposition opened #4227 instead of using the W1-T1223 job endpoint; an operator POST to that exact job returned 201 and attempt 2 completed success in eight seconds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/lib/workflow-run.ts, src/lib/open-prs-rest.ts, src/lib/sweep.ts, test/terminal-run-pinned-job-requeue.test.ts]
+  origin: "fleet-lifeguard#4226-terminal-run-pinned-job-2026-09-06"
+  plan_refs: ["W1-T2340", "W1-T1223", "W1-T2431"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED INCIDENT, NOT A DECLARATIVE INFERENCE. On PR #4226 head
+    91cd0678481ab442963cd7d5280bb9ecd3078164, GitHub Actions run 34019507513 reported
+    status=completed and conclusion=success while its leak-grep job 101449352638 simultaneously
+    reported status=in_progress, conclusion=success and a populated completed_at. W1-T2340's
+    joined run/job detector fired immediately and the daemon opened escalation #4227. The operator
+    then called POST /repos/craigoley/remudero/actions/jobs/101449352638/rerun with the fleet-capable
+    credential. GitHub returned HTTP 201; run_attempt 2 minted job 101451254692, which started at
+    07:50:07Z and completed SUCCESS at 07:50:15Z. CI gate then completed SUCCESS at 07:50:29Z.
+
+    THE FALSIFIER WAS CHECKED. If the single-job endpoint had refused, or if attempt 2 had not
+    reached a terminal success, W1-T2340's human escalation would remain the correct fail-closed
+    behavior. Neither happened. The old task's evidence proved only that GitHub refuses the
+    whole-RUN rerun endpoint for this class. W1-T1223 already ships the narrower job endpoint,
+    records its bound before mutation, and reuses GitHub run_attempt as durable surface truth.
+
+    THE GAP IS ROUTING PLUS IDENTITY, NOT A NEW CLIENT. WorkflowRunObservation carries only job
+    status today, so stalledRunReason can name the condition but cannot hand the existing
+    requeueCheck dependency the job name and id it needs. Extend the existing concluded-run jobs
+    read to retain those two fields, expose the one pinned job as a structured observation, and in
+    runSweep route exactly that observation through the existing single-job requeue effect before
+    the generic blocked-ambiguous escalation. Record the existing CHECK_REQUEUE_STEP before the
+    POST and apply the same head+check bound. A second observation of the same pinned job on the
+    same head escalates naming the job; it never loops and never spends a worker strike.
+
+    SCOPE GUARDS. A run still queued or in progress is ordinary motion and is never requeued. A
+    terminal run whose jobs are all terminal is unchanged. An unreadable jobs response, missing
+    job id, or missing job name cannot authorize a guessed mutation and keeps the existing
+    fail-closed escalation. The endpoint remains actions/jobs/{job_id}/rerun, never any run-level
+    rerun. No worker, model, timer, polling loop, provider-selection rule, merge rule, or lifecycle
+    action changes in this task.
+
+    WHY THESE FILES. workflow-run.ts owns the leaf observation contract; open-prs-rest.ts is the
+    only real producer and already reads the job payload; sweep.ts owns the detector, disposition,
+    ledger bound and effect routing. The production requeueCheck closure in run-task.ts already
+    accepts the required structural {name, jobId} shape and already calls the proven endpoint, so
+    it is deliberately not edited. The new test drives the real runSweep path and the real REST
+    mapper with recorded arguments; no live mutation occurs in the test.
+  acceptance:
+    - claim: "a non-terminal job inside a terminal run is requeued through the existing single-job effect instead of opening an immediate clarification issue"
+      proof: "unit test: test/terminal-run-pinned-job-requeue.test.ts"
+    - claim: "the REST producer preserves the exact pinned job name and job id from the concluded run's jobs response"
+      proof: "unit test: test/terminal-run-pinned-job-requeue.test.ts"
+    - claim: "the requeue record is written before the effect and bounds the same head and check to one unattended attempt"
+      proof: "unit test: test/terminal-run-pinned-job-requeue.test.ts"
+    - claim: "a second pinned observation on the same head escalates naming the job rather than requeueing again"
+      proof: "unit test: test/terminal-run-pinned-job-requeue.test.ts"
+    - claim: "a run still in progress and a terminal run whose jobs are all terminal retain their existing dispositions and trigger no requeue"
+      proof: "unit test: test/terminal-run-pinned-job-requeue.test.ts"
+    - claim: "an unreadable jobs response or a pinned job without an id triggers no guessed mutation and retains the fail-closed escalation"
+      proof: "unit test: test/terminal-run-pinned-job-requeue.test.ts"
+    - claim: "the action targets actions/jobs/{job_id}/rerun through the existing dependency and never a workflow-run endpoint"
+      proof: "unit test: test/terminal-run-pinned-job-requeue.test.ts"
+    - claim: "the recovery spends no worker strike and adds no timer, polling loop, sleep, merge, or lifecycle action"
+      proof: "unit test: test/terminal-run-pinned-job-requeue.test.ts"
+  note: |
+    ID provenance: refs/rmd-id/W1-T2947 existed before this file; anchored searches found zero
+    shard filenames, declarations, open or closed PR titles/bodies/head refs, local branches,
+    worktrees, and fleet ledger rows for W1-T2947. PR #3203/W1-T2403 is not this implementation:
+    it accounts for a worker's retrigger-shaped commit after dispatch and explicitly leaves the
+    cheaper single-job mechanism to a separate task. This task performs no container lifecycle
+    action and does not edit the Azure live checkout.
