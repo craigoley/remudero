@@ -200,6 +200,12 @@
       "grepHint": "claude-md-budget-ratchet.mjs forensics"
     },
     {
+      "path": "docs/forensics/clock-shift.md",
+      "title": "Forensics: scripts/clock-shift.mjs",
+      "summary": "Every measured fact, incident and design argument the comments in `scripts/clock-shift.mjs` used",
+      "grepHint": "Forensics: scripts/clock-shift.mjs"
+    },
+    {
       "path": "docs/forensics/commit-message.md",
       "title": "Forensics: src/lib/commit-message.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/commit-message.ts`",

@@ -43,7 +43,7 @@
   "scripts/claims-check.mjs": 71,
   "scripts/claude-md-budget-baseline.json": 0,
   "scripts/claude-md-budget-ratchet.mjs": 69,
-  "scripts/clock-shift.mjs": 45,
+  "scripts/clock-shift.mjs": 19,
   "scripts/clock-sweep-baseline.json": 0,
   "scripts/clock-sweep.mjs": 136,
   "scripts/comment-load-baseline.json": 0,
