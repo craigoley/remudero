@@ -53,6 +53,7 @@ import {
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
+import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
@@ -23939,7 +23940,8 @@ async function drainCommand(
   // `GitHub.resetFailureFlags()` drops those verdicts (and only those) at the top of each pass,
   // which is the same guarantee at none of the cost — a fresh instance ALSO starts with an empty
   // `knownBoardPrs`, so every pass re-walked the closed half cold.
-  const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log }));
+  const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
+  const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log, snapshotCache: boardSnapshotFor(o, r) }));
 
   // W1-T2513 — ONE COALESCER FOR THIS WHOLE `rmd drain` INVOCATION (never per tick, never per
   // lane), handed to every dispatch lane's `runTask` call below (`runOne`) via its
@@ -24623,6 +24625,21 @@ export function memoiseGatewayByRepo(build: (owner: string, repo: string) => Git
   };
 }
 
+function memoiseBoardSnapshotByRepo(
+  root: string,
+  log: (event: string, extra?: Record<string, unknown>) => void,
+): (owner: string, repo: string) => BoardSnapshotCache {
+  const cache = new Map<string, BoardSnapshotCache>();
+  return (owner, repo) => {
+    const key = `${owner}/${repo}`;
+    const hit = cache.get(key);
+    if (hit) return hit;
+    const built = createBoardSnapshotCache(root, owner, repo, { log });
+    cache.set(key, built);
+    return built;
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -24814,7 +24831,8 @@ export async function daemonCommand(
   // guard) — the SAME projection `refreshMerged` just derived, never a second
   // GitHub read path.
   let lastProj: Map<string, StatusProjection> | undefined;
-  const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log }));
+  const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
+  const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log, snapshotCache: boardSnapshotFor(o, r) }));
 
   // W1-T2509 — ONE GATEWAY PER owner/repo FOR THE WHOLE DAEMON, handed to every dispatch lane.
   // STILL SEPARATE FROM `githubFactory` ABOVE, but no longer because the projection gateway is
@@ -24830,7 +24848,7 @@ export async function daemonCommand(
   // gateway still refetches every poll — warming changes a fetch's SHAPE, never whether one
   // happens (`buildInboxDraftHook`'s doc makes the identical argument, with measurements).
   const laneGithubFor = memoiseGatewayByRepo((o, r) =>
-    deps.githubFactory ? deps.githubFactory(o, r) : buildBatchedGithub(o, r, { log }),
+    deps.githubFactory ? deps.githubFactory(o, r) : buildBatchedGithub(o, r, { log, snapshotCache: boardSnapshotFor(o, r) }),
   );
   // W1-T2513 — ONE COALESCER FOR THIS WHOLE DAEMON PROCESS (never per tick, never per lane),
   // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
@@ -25458,6 +25476,7 @@ export async function daemonCommand(
           // headroom rationale.
           policy.values.workerStall,
           mainHealthRung,
+          boardSnapshotFor(target.owner, target.repo),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -27141,10 +27160,12 @@ export async function serveCommand(
   // `boardGithubRefreshMs` below so the cache's own staleness bound and the background prewarm
   // cadence never drift apart.
   const boardPacer = deps.boardPacer ?? createGhCallPacer();
+  const serveBoardSnapshot = createBoardSnapshotCache(config.root, self.owner, self.repo, { log });
   const boardGithub = (deps.buildBatchedGithub ?? buildBatchedGithub)(self.owner, self.repo, {
     log,
     pacer: boardPacer,
     ttlMs: DEFAULT_BOARD_POLL_TTL_MS,
+    snapshotCache: serveBoardSnapshot,
   });
   // W1-T2303: resolve the feedback-expansion rung ONCE at boot (never per request) — the SAME
   // shape `resolveDecisionSummaryMount`/`realDecisionSummarizer` already wire for the sibling
@@ -31408,6 +31429,7 @@ export function buildSweepHook(
   // optional so offline callers gain no network I/O. Its own boundary below preserves PR sweep
   // liveness even when a test injection or future implementation accidentally throws.
   mainHealthRung?: () => Promise<void>,
+  snapshotCache?: BoardSnapshotCache,
 ): (continueReviewAdmissions?: () => boolean) => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
@@ -31446,6 +31468,7 @@ export function buildSweepHook(
   // no seam to receive it) and into `buildOpenPrViews` below, so both burst call sites share the
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
+  if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   return async (continueReviewAdmissions = () => true) => {
