@@ -230,7 +230,7 @@
   "src/lib/rule-efficacy.ts": 121,
   "src/lib/run-result.ts": 27,
   "src/lib/runbook-coverage.ts": 48,
-  "src/lib/self-sync.ts": 386,
+  "src/lib/self-sync.ts": 170,
   "src/lib/serve.ts": 2359,
   "src/lib/service.ts": 591,
   "src/lib/settings.ts": 50,
