@@ -95,7 +95,7 @@ page under `docs/`, with a one-line pointer left in the code.
 Two limits refuse a PR, both via the `comment-load-ratchet` CI job
 (`scripts/comment-load-ratchet.mjs`): no measured file may carry more comment lines than
 `scripts/comment-load-baseline.json` records for it, and no diff may add a comment block longer than
-40 lines. If growth is right, record it in the baseline in the same PR so a reviewer reads the
+25 lines. If growth is right, record it in the baseline in the same PR so a reviewer reads the
 decision.
 
 **A compaction PR migrates or keeps every phrase a test pins.** 206 assertions across 138 test files
