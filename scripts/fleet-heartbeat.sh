@@ -307,34 +307,6 @@ else
   SUPERVISOR_VERDICT="STALE — last deploy cycle $(human_age "$SUPERVISOR_AGE_S") ago"
 fi
 
-# ── probe: DISPATCH throughput, the max ts over run.start in the run-task lane (W1-T2961) ────────
-# THE GAP THIS CLOSES, AND IT IS NOT A LIVENESS GAP. The two probes above answer "is the daemon
-# alive" and "is the thing that advances its code alive". Both answered YES throughout 2026-09-05
-# and 09-06 while the fleet dispatched ZERO tasks — thousands per day before, none for two days —
-# because the daemon really was alive: polling, sweeping, reviewing, merging and restarting cleanly
-# (W1-T2960's livelock). EVERY SIGNAL WE HAD MEASURED LIVENESS, AND LIVENESS WAS NEVER THE QUESTION.
-# The one row that showed it, `attempted : (none)` on 28 of 28 summaries, is printed to the container
-# log and read by nothing.
-#
-# WHY `run.start` FILTERED TO THE `run-task` LANE, AND NOT THE BARE STEP. `run.start` is emitted by
-# every lane — `retro`, `triage`, and the build lane — so the bare step stays fresh on a fleet that
-# only retros, which is exactly the false-negative this probe exists to refuse. During the outage the
-# ONLY run.start rows were `lane=retro`. The lane field is on the row already; no new signal is
-# needed, only the discrimination.
-#
-# A QUIET QUEUE IS NOT A DEFECT, SO THE VERDICT CARRIES A REASON. An empty runnable queue is a
-# legitimately idle fleet, and an alert that fires on quiet alone is one an operator learns to
-# ignore. The ledger already records WHY the last tick admitted nothing —
-# `daemon_selfrestart_for_freshness` (the W1-T2960 livelock), `daemon.pause` (an operator hold), or a
-# `dispatch.skipped` reason — so the beat publishes the newest of those beside the verdict. "Not
-# building" sends someone to read container logs; "not building, last tick self-restarted for
-# freshness" names the defect.
-#
-# THE THRESHOLD IS SIZED FROM THE OBSERVED POPULATION. Normal here is thousands of dispatches a day;
-# the incident ran 48h. This deliberately does NOT reuse `DAEMON_STALE_AFTER_S` (600s), which is
-# sized against a poll interval — dispatch legitimately idles far longer than a poll while a long
-# lane runs or the queue drains. 6h is generous enough that a genuinely quiet fleet stays silent and
-# still catches a 48h outage eight times over.
 DISPATCH_LAST_TS=""
 DISPATCH_BLOCK_REASON="none"
 if [ -f "$LEDGER" ]; then
@@ -342,8 +314,6 @@ if [ -f "$LEDGER" ]; then
   if [ -n "$DISPATCH_LINE" ]; then
     DISPATCH_LAST_TS="$(printf '%s' "$DISPATCH_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
   fi
-  # The newest blocking signal, whichever kind it is: one grep over the three step names, then the
-  # last line wins because the ledger is append-ordered.
   BLOCK_LINE="$(grep -E '"step":"(daemon_selfrestart_for_freshness|daemon\.pause|dispatch\.skipped)"' "$LEDGER" 2>/dev/null | tail -n 1)"
   if [ -n "$BLOCK_LINE" ]; then
     BLOCK_STEP="$(printf '%s' "$BLOCK_LINE" | grep -o '"step":"[^"]*"' | head -n 1 | cut -d'"' -f4)"

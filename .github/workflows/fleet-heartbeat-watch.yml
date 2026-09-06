@@ -110,9 +110,6 @@ jobs:
           ! daemon_expected heartbeat-mini              || fail "a host that runs no daemon is armed on the daemon arm"
           echo "self-check: daemon arm discriminates on verdict AND on branch membership"
 
-          # (i-c) W1-T2961: the build arm, both directions. "building" must NOT alarm — a fleet that
-          # dispatched recently is healthy however quiet — and an unreadable verdict must stay silent
-          # rather than alarm, the same never-present-is-silent posture the deploy arm already takes.
           is_dispatch_stalled() { case "$1" in STALLED*) return 0 ;; *) return 1 ;; esac; }
           is_dispatch_stalled "STALLED — last build dispatch 2d ago; last block: daemon_selfrestart_for_freshness" || fail "a STALLED dispatch verdict did not read as stalled"
           ! is_dispatch_stalled "building" || fail "a building fleet must never raise the build arm"
@@ -234,12 +231,6 @@ jobs:
           # `[ "$stale" -eq 0 ]` check it has always been.
           is_daemon_stale() { case "$1" in STALE*) return 0 ;; *) return 1 ;; esac; }
           daemon_expected() { case " ${DAEMON_EXPECTED_BRANCHES} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
-          # W1-T2961 — THE BUILD ARM. Its sibling above asks "is the daemon alive"; this asks whether
-          # it is doing the one thing it exists for. Those answered differently for two days: the
-          # daemon polled, swept, reviewed and merged throughout 2026-09-05/06 while dispatching
-          # NOTHING, and every gate in this file stayed green because every gate measured liveness.
-          # Same `stale` total, same DAEMON_EXPECTED_BRANCHES gate — a host that runs no daemon
-          # cannot be failing to build.
           is_dispatch_stalled() { case "$1" in STALLED*) return 0 ;; *) return 1 ;; esac; }
 
           # THE LOOP NEVER EXITS EARLY, IN EITHER DIRECTION, AND THAT IS THE FIX. A `break` or an
