@@ -7640,3 +7640,3942 @@ Archived from `src/lib/sweep.ts` lines 9528-9531 at the merge base.
       // retries on the very next sweep rather than being silently dropped.
 ```
 
+
+## Second pass (2026-09-06)
+
+The second compaction pass on `src/lib/sweep.ts`, following PR #4129's first pass. Comment
+lines went from 2,938 to 1,900 against 3,748 code lines, measured with the ratchet's own
+tokenizer (`grep -cE '^\s*(//|/\*|\*)' src/lib/sweep.ts`). The pass was comment-only: the
+esbuild-stripped output of the file is byte-identical to the merge base.
+
+Every block the pass shortened by two or more lines is archived below, verbatim as it stood at
+the merge base, under a sub-heading naming the symbol it explained. The source file keeps the
+invariant, the trap, the falsifier pointer and the citation from each; where a pointer had to
+stay it cites this section by its anchor, `docs/forensics/sweep.md#second-pass-2026-09-06`.
+
+### module header — lib/sweep.ts
+
+Archived from `src/lib/sweep.ts` lines 46-68 at the merge base.
+
+```text
+// Why: the pipeline was edge-triggered, so a verdict fired once and a missing consumer stranded
+// the PR open-and-orphaned (#111/#113/#123) — docs/forensics/sweep.md.
+/**
+ * lib/sweep.ts — the level-triggered PR-pipeline reconciler (W1-T77, ratifies P22 core).
+ *
+ * Every daemon poll and every `rmd sweep` re-derives each open PR's disposition fresh from
+ * observed state, then takes the one gated action. The predicate is a pure function of observed
+ * state and the exported {@link SweepPolicy} table (rule 2) — never an LLM judgment, never a
+ * literal in a branch. Each PR gets exactly one {@link Disposition}; {@link DISPOSITION_RULES}
+ * carries the rows and each row's own doc states its trap.
+ *
+ * HUNG WORKERS ARE OUT OF SCOPE: worker liveness is run-state, not PR-state.
+ *
+ * Invariants:
+ *   - {@link deriveDisposition} is TOTAL — no open PR ends a sweep with disposition=none.
+ *   - Idempotence: dispositions re-derive every pass, but actions dedup against the shared
+ *     ledger, so an unchanged pass dispatches nothing. Fix dispatch is also keyed on the head
+ *     sha, so a new push re-earns a strike up to the cap.
+ *   - Every disposition writes one `sweep.disposed` ledger line.
+ *   - Repetition is signalled, never cached: a repeated (disposition, head_sha) pair escalates
+ *     ONCE at {@link SweepPolicy.repeatDispositionBound} (W1-T2345).
+ *   - Every external effect is injected; this module never calls gh, git or the network.
+ */
+```
+
+### SupersessionStatus
+
+Archived from `src/lib/sweep.ts` lines 81-88 at the merge base.
+
+```text
+/**
+ * W1-T920 — a THREE-VALUED finding: "unreadable" is never collapsed into "unique".
+ *   - `"superseded"` — evidence REQUIRED ({@link SupersessionEvidence}); the bare label is
+ *     unauditable. The ONLY value that may gate a CLOSE.
+ *   - `"unique"` — a POSITIVE "checked, none found", not a default. W1-T932 lets a row read it
+ *     to make a bare-number `supersededBy` match YIELD, never to close anything.
+ *   - `"indeterminate"` — the read failed. NEVER acts on any disposition.
+ */
+```
+
+### SupersessionDiffFinding
+
+Archived from `src/lib/sweep.ts` lines 90-95 at the merge base.
+
+```text
+/**
+ * W1-T920 — the diff finding carries its OWN corpus control. A zero-hunk read is
+ * indistinguishable from a broken read on the hunk count alone, so `rawLineCount` is the
+ * control: a verdict built from a zero-length raw read must never claim `"superseded"`.
+ * // Why: the #1955 hand-diagnosis measured that shape — docs/forensics/sweep.md.
+ */
+```
+
+### SupersessionEvidence and SupersessionVerdict
+
+Archived from `src/lib/sweep.ts` lines 97-107 at the merge base.
+
+```text
+/**
+ * W1-T920 (design note v) — the evidence a `"superseded"` verdict NAMES, never a bare label.
+ * This is what made the #1955 diagnosis checkable in one read: the superseding PR number, the
+ * shared task id, and the diff finding with its own control, together in one place.
+ */
+
+/**
+ * W1-T920 — one open PR's supersession finding, READ and never computed by the disposition.
+ * Scope note: the DETECTOR that populates this is a separate, out-of-scope shard. This type and
+ * the row reading it are the full wired mechanism, but nothing in the real gateway sets one yet.
+ */
+```
+
+### CiFailure
+
+Archived from `src/lib/sweep.ts` lines 109-114 at the merge base.
+
+```text
+/**
+ * One failing required CI check's name + the tail of its log — the W1-T94
+ * ci-log fix mode's ONLY input. Defined HERE (not in run-task.ts, which
+ * imports it) because {@link OpenPrView} carries it and run-task.ts already
+ * imports OpenPrView from this module — the reverse import would be circular.
+ */
+```
+
+### CiFailure.sha
+
+Archived from `src/lib/sweep.ts` lines 118-123 at the merge base.
+
+```text
+  /**
+   * The commit sha this failure is attributable to, when the read can identify one (W1-T186).
+   * `undefined` in the ordinary case, where the check failed against the PR's own head.
+   * // Why: commitlint lints the whole base..head RANGE, so a required check can be tripped by a
+   * // commit that is not the PR's own (#420) — docs/forensics/sweep.md.
+   */
+```
+
+### CiFailure.outsidePrRange
+
+Archived from `src/lib/sweep.ts` lines 125-130 at the merge base.
+
+```text
+  /**
+   * `true` when `sha` is OBSERVED to be outside this PR's own commit range — the #420 shape.
+   * `undefined`/`false` otherwise, including when it is simply unknown: NEVER asserted without
+   * positive evidence (fail toward "assume it's the PR's own", never invent an exoneration the
+   * read cannot support).
+   */
+```
+
+### CiFailure.logUnavailable
+
+Archived from `src/lib/sweep.ts` lines 132-137 at the merge base.
+
+```text
+  /**
+   * WHY {@link logTail} is empty, when it is. Present ONLY when it is empty and a cause was
+   * observed, ABSENT whenever a tail was captured — so `logUnavailable !== undefined` is a sound
+   * test for "the log could not be read" and never fires on a real tail.
+   * // Why: every way of failing used to collapse into one empty tail (W1-T2291).
+   */
+```
+
+### CiFailure.tailSource
+
+Archived from `src/lib/sweep.ts` lines 139-144 at the merge base.
+
+```text
+  /**
+   * WHICH SOURCE filled {@link logTail}. `"annotations"` is the fallback, used ONLY when the log
+   * read came back empty or failed, so a readable log can never be displaced by it. ABSENT
+   * whenever `logTail` is empty — the exact condition under which {@link logUnavailable} is
+   * present. The two are complements, never both meaningful at once.
+   */
+```
+
+### CiFailure.annotationFallback
+
+Archived from `src/lib/sweep.ts` lines 146-150 at the merge base.
+
+```text
+  /**
+   * WHAT THE ANNOTATION FALLBACK DID, when reached — absent entirely when the log answered.
+   * // Why: kept separate from {@link logUnavailable} on purpose, because a fallback that
+   * // overwrote the named cause would take back the answer W1-T2291 gave.
+   */
+```
+
+### RedBaseRefreshFacts
+
+Archived from `src/lib/sweep.ts` lines 154-157 at the merge base.
+
+```text
+/**
+ * W1-T2671/W1-T2789 — the two independently-observed facts required before a red branch may be
+ * refreshed from its base. Optional fields are an honest unreadable result, never zero/empty.
+ */
+```
+
+### decideRedBaseRefresh
+
+Archived from `src/lib/sweep.ts` lines 205-208 at the merge base.
+
+```text
+/**
+ * W1-T2671/W1-T2789 — the ONE pure exact-path decision shared by the fix rung and sweep-level
+ * pre-exhaustion release. Neither caller may reinterpret a weak behind/path signal differently.
+ */
+```
+
+### CiLogUnavailableCause and MAX_CI_LOG_FAILURE_DETAIL
+
+Archived from `src/lib/sweep.ts` lines 242-251 at the merge base.
+
+```text
+/**
+ * The closed set of reasons a log tail came back empty — a NAMED outcome, never an absence.
+ * `no-job-id`: no Actions job id, so no read was attempted. `fetch-failed`: a read was attempted
+ * and failed, `detail` carrying the error as observed. `empty-log`: the read SUCCEEDED and the
+ * job printed nothing.
+ */
+/**
+ * BACKSTOP on a `fetch-failed` detail's length, not a primary control — what the fix prompt
+ * renders is. Set far above any observed message, so truncating is evidence of something unusual.
+ */
+```
+
+### describeCiLogUnavailable
+
+Archived from `src/lib/sweep.ts` lines 259-264 at the merge base.
+
+```text
+/**
+ * One sentence naming why a log tail is missing, for BOTH consumers — the fix prompt in
+ * run-task.ts and this module's own escalation text — so the two can never drift into describing
+ * the same cause differently. No branch can be mistaken for a check that simply printed nothing,
+ * except the one branch that means exactly that.
+ */
+```
+
+### isPureConcurrentAddition
+
+Archived from `src/lib/sweep.ts` lines 276-281 at the merge base.
+
+```text
+/**
+ * PURE, DETERMINISTIC classification (rule 2) of whether a conflict is safe to auto-resolve
+ * toward the union of both sides: every conflicting file must show ZERO deletions on BOTH sides
+ * since the merge-base. A single deletion on either side — or no file evidence at all — fails
+ * CLOSED to `false`. A wrong auto-resolution is worse than a strand (design note iii).
+ */
+```
+
+### REGENERABLE_ARTIFACT_GENERATORS
+
+Archived from `src/lib/sweep.ts` lines 286-292 at the merge base.
+
+```text
+/**
+ * W1-T2548 — THE DECLARED GENERATOR REGISTRY. For a path this table names, re-running the
+ * generator on the MERGED tree is correct by construction, so the resolution is not a merge at
+ * all. A path absent from the table stays refused: admission is bounded by a list a human wrote,
+ * never an inference. Each value is the `package.json` script name — DATA (rule 2).
+ * // Why: every conflict this repo has produced is a same-key VALUE change — docs/forensics/sweep.md.
+ */
+```
+
+### isRegenerableArtifactConflict
+
+Archived from `src/lib/sweep.ts` lines 303-308 at the merge base.
+
+```text
+/**
+ * W1-T2548 — PURE, DETERMINISTIC classification (rule 2) of whether EVERY conflicting path carries
+ * a declared generator, admitted alongside and never instead of {@link isPureConcurrentAddition}.
+ * Requires ALL files registered: a conflict straddling a hand-written path is refused WHOLE.
+ * Deletions are irrelevant here — the generator re-run supersedes both recorded values regardless.
+ */
+```
+
+### conflictRefusalCause
+
+Archived from `src/lib/sweep.ts` lines 326-332 at the merge base.
+
+```text
+/**
+ * W1-T2536/W1-T2548 — WHICH refusal disjunct actually fired, as a phrase for the row's `reason`:
+ * a deletion, no captured evidence, admission disabled, or the MIXED case whose paths straddle
+ * {@link REGENERABLE_ARTIFACT_GENERATORS}. The disabled arm is unreachable at the shipped default
+ * and written anyway, because the flag is policy DATA an operator may set false.
+ * // Why: the row once said "involves a deletion" unconditionally — docs/forensics/sweep.md.
+ */
+```
+
+### ClarifyPolicy
+
+Archived from `src/lib/sweep.ts` lines 355-359 at the merge base.
+
+```text
+/**
+ * W1-T78 policy (rule 2) — how many strikes a fix-rung RE-DISPATCH gets once an operator answers
+ * a clarification question. Nested inside {@link SweepPolicy}, the same config object every
+ * `runSweep` caller already threads, rather than a second separately-sourced policy object.
+ */
+```
+
+### SweepPolicy
+
+Archived from `src/lib/sweep.ts` lines 368-372 at the merge base.
+
+```text
+/**
+ * Tunable thresholds as DATA (rule 2) — never inlined constants in the predicate.
+ * A test overrides these to prove policy is data (acceptance 3): tightening
+ * `staleDays` flips a fixture PR's disposition with zero sweep-code changes.
+ */
+```
+
+### wipLimit
+
+Archived from `src/lib/sweep.ts` lines 380-385 at the merge base.
+
+```text
+  /**
+   * W1-T121 QUEUE GOVERNOR — a WIP limit on DISPATCH ONLY: at or above this many open PRs, new
+   * dispatch is deferred. Drainage (sweep/heal/arm/merge, at any depth) is never gated.
+   * See {@link checkQueueGovernor}, this row's consumer.
+   * // Why: the 23-open-PR incident. Detail in docs/forensics/sweep.md.
+   */
+```
+
+### SweepPolicy.dispatchLanes
+
+Archived from `src/lib/sweep.ts` lines 387-393 at the merge base.
+
+```text
+  /**
+   * W1-T172 (P19) — concurrent dispatch LANES a drain pass may fill, bounded by {@link wipLimit}:
+   * the governor is the CEILING, lanes only raise the rate it fills. Sourced from
+   * `plan/policy.yaml`, so retuning is a data edit.
+   * // Why: this also bounded the REVIEW lane until W1-T1049 split it out, which pinned drainage
+   * // to a dispatch-only ruling and let two ceilings add — docs/forensics/sweep.md.
+   */
+```
+
+### SweepPolicy.reviewLanes
+
+Archived from `src/lib/sweep.ts` lines 395-401 at the merge base.
+
+```text
+  /**
+   * W1-T1049 — THE REVIEW LANE'S OWN CONCURRENCY BUDGET. Floored at 1 in `runSweep`, so a
+   * misconfigured 0 can never mean "review nothing". A CEILING, NEVER A TARGET: it bounds only
+   * the reviews a pass already found eligible. Read directly off `plan/policy.yaml`.
+   * // Why: this used to be a second read of {@link dispatchLanes}, and the two ceilings added to
+   * // 6 workers on a host that fits about 4 — docs/forensics/sweep.md.
+   */
+```
+
+### SweepPolicy.dailyCostCeilingUsd
+
+Archived from `src/lib/sweep.ts` lines 407-412 at the merge base.
+
+```text
+  /**
+   * W1-T148 COST GOVERNOR — a DAILY spend ceiling on DISPATCH ONLY. Drainage is never gated by it:
+   * stranding in-flight work to save money is a worse failure than the spend. Distinct from the
+   * PER-RUN cap — this is the cross-run daily total that cap cannot see.
+   * // Why: the $206/60-run spin loop, 60 runs each under their own per-run cap.
+   */
+```
+
+### memoryFloorMib
+
+Archived from `src/lib/sweep.ts` lines 414-418 at the merge base.
+
+```text
+  /**
+   * W1-T1038 — a DAILY-GOVERNOR TWIN of {@link dailyCostCeilingUsd}: same dispatch-only shape, but
+   * the OPPOSITE fail direction on an unreadable observation, enforced at the composition point.
+   * SHIPS AT 0 — inert until an operator raises it against a measured figure that does not exist yet.
+   */
+```
+
+### SweepPolicy.pendingCeilingMinutes
+
+Archived from `src/lib/sweep.ts` lines 420-425 at the merge base.
+
+```text
+  /**
+   * W1-T114 — the STALENESS CEILING for the WAIT disposition: pending inside it means wait, at or
+   * beyond it the escalate path. A fixture proves this is data by lowering it and flipping a wait
+   * with zero code changes. Generous enough for the slowest required check to settle; a check
+   * still pending past that IS ambiguity, not merely in-flight.
+   */
+```
+
+### absentCeilingMinutes
+
+Archived from `src/lib/sweep.ts` lines 427-431 at the merge base.
+
+```text
+  /**
+   * How long an otherwise-mergeable PR may sit with a COMPLETELY EMPTY check rollup before the
+   * ABSENT-check-suite remedy fires. This is the ABSENT-vs-PENDING discriminator's time half —
+   * see {@link absentChecksRepushDecision} for why a time bound is required at all.
+   */
+```
+
+### SweepPolicy.reviewOrphanCap
+
+Archived from `src/lib/sweep.ts` lines 433-439 at the merge base.
+
+```text
+  /**
+   * Retry threshold for ONE UNCHANGED review input — not a lifetime budget over historical heads.
+   * Only completed judgments for the exact PR URL + head + body digest count; a new commit or body
+   * edit resets it to zero, and refusals never consume it.
+   * // Why: W1-T1018 — reaching the cap no longer stops re-dispatch, because a bound firing on a
+   * // HEALTHY condition walled good PRs off forever. See {@link reviewOrphanBackoffMinutes}.
+   */
+```
+
+### SweepPolicy.reviewOrphanBackoffMinutes
+
+Archived from `src/lib/sweep.ts` lines 441-446 at the merge base.
+
+```text
+  /**
+   * W1-T1018 — THE ELAPSED-TIME BACKOFF that replaced permanent cessation: once an unchanged input
+   * reaches the cap the sweep still escalates, but the lane resumes after this long. KEYED TO
+   * ELAPSED TIME, NEVER ATTEMPT COUNT — a delay keyed to attempts is a budget with pauses, which
+   * exhausts monotonically and still ends in permanent silence.
+   */
+```
+
+### repairFilingThreshold
+
+Archived from `src/lib/sweep.ts` lines 448-453 at the merge base.
+
+```text
+  /**
+   * W1-T905 — "repair the instance, FILE THE CLASS". A classified surface that at least this many
+   * DISTINCT PRs have been repaired for inside {@link repairFilingWindowDays} is due for exactly
+   * one `repair#<surface>` §7B entry. One occurrence is a repair, a recurrence is a defect — so
+   * the row's own `plan/policy.yaml` bound (min 2) forecloses filing on the first repair.
+   */
+```
+
+### supersessionDisposalEnabled
+
+Archived from `src/lib/sweep.ts` lines 458-463 at the merge base.
+
+```text
+  /**
+   * W1-T920 — gates the SUPERSESSION row in {@link DISPOSITION_RULES}. `false` (the default)
+   * means `supersessionVerdict` is never consulted and the row never matches, byte-for-byte
+   * today's behaviour. `true` lets a `"superseded"` verdict — never a bare "unique" or
+   * "indeterminate", never the PR's own resemblance to another — close the PR.
+   */
+```
+
+### SweepPolicy.conceptCoexistenceEnabled
+
+Archived from `src/lib/sweep.ts` lines 465-470 at the merge base.
+
+```text
+  /**
+   * W1-T932 — gates whether a `"unique"` verdict lets the BARE-NUMBER `stale` row YIELD, so a
+   * concept PR is not disposed stale merely because a higher-numbered sibling is open. Reads ONLY
+   * `status === "unique"` and FAILS CLOSED; `false` preserves today's behaviour byte-for-byte.
+   * // Why: a SEPARATE flag from {@link supersessionDisposalEnabled} — the blast radii differ.
+   */
+```
+
+### SweepPolicy.mergeConflictAdmissionEnabled
+
+Archived from `src/lib/sweep.ts` lines 472-481 at the merge base.
+
+```text
+  /**
+   * W1-T984/W1-T2536 — GATES THE `conflicted` ROW. Shipped OFF awaiting a semantic predicate;
+   * turned ON because that predicate cannot live here — GitHub's COMPARE API never carries a
+   * HUNK, so only the dispatched fix worker, which merges in a worktree, can decide disjointness.
+   *
+   * WHAT MAKES ADMITTING SAFE IS THE FENCE DOWNSTREAM, NOT THE PREDICATE UPSTREAM: a wrong
+   * resolution mints a NEW HEAD, and `remudero-review` is a required per-sha status, so the worst
+   * case is a red PR that escalates. "A wrong auto-resolution is worse than a strand" stays
+   * enforced — by the gate, which can SEE the resolution. // Why: docs/forensics/sweep.md.
+   */
+```
+
+### SweepPolicy.repeatDispositionBound
+
+Archived from `src/lib/sweep.ts` lines 483-493 at the merge base.
+
+```text
+  /**
+   * W1-T2345 — THE UNBOUNDED-IDENTICAL-DISPOSITION BOUND: a repeated (disposition, head_sha) pair
+   * escalates once at this many consecutive rows. See {@link repeatDispositionStreaksFromLedger}
+   * for why the key excludes the rendered `reason`.
+   *
+   * ONCE PER HEAD PER ROTATION WINDOW, NOT ONCE PER HEAD (W1-T2382): rotation prefers the last
+   * `acted: true` row while the marker rides an `acted: false` one, so the evidence is SELECTED
+   * AGAINST and the bound re-arms. The window is BYTE-DRIVEN, so it is shortest when the fleet is
+   * busiest. NEVER PRE-EMPTS {@link pendingCeilingMinutes}.
+   * // Why: 50 is derived against the merge-time population — docs/forensics/sweep.md.
+   */
+```
+
+### SweepPolicy.planFilingAdmissionBound
+
+Archived from `src/lib/sweep.ts` lines 495-502 at the merge base.
+
+```text
+  /**
+   * W1-T2439 — HOW MANY PLAN-FILING PRs THE NON-SPAWNING REVIEW LANE MAY ADMIT PER LIGHT PASS.
+   * The spawning lane is bounded by {@link reviewLanes} instead.
+   *
+   * THE NUMBER IS DERIVED, NOT PICKED, from three measured quantities: a deterministic review
+   * costs five GitHub calls, a pass runs about 60 times an hour, and the queue is two deep at the
+   * median. // Why: the daemon hit "API rate limit already exceeded" — docs/forensics/sweep.md.
+   */
+```
+
+### DEFAULT_SWEEP_POLICY
+
+Archived from `src/lib/sweep.ts` lines 506-517 at the merge base.
+
+```text
+/**
+ * The shipped default policy. A BOUNDED FAIL-SAFE (rule 2): an absent value falls back to a
+ * bounded default, never to unbounded spend.
+ *
+ * THE COST CEILING'S TRADE-OFF MUST NOT BE MISREAD: it bounds RUNAWAY spend, not a budget, and
+ * would not by itself have caught the incident the original figure was chosen against. The
+ * per-run cap and the headroom governor are the other two limits.
+ *
+ * Several rows are COLLECTED from `plan/policy.yaml` rather than written as source literals, so a
+ * plan-reviewed edit retunes them with no code change. Each was a RELOCATION, never a retune.
+ * // Why: this object is FROZEN AT IMPORT (W1-T331) — docs/forensics/sweep.md.
+ */
+```
+
+### validateReviewLanesRow
+
+Archived from `src/lib/sweep.ts` lines 520-525 at the merge base.
+
+```text
+/**
+ * W1-T1049 — reads `plan/policy.yaml`'s `sweep.reviewLanes` row DIRECTLY, never through
+ * `policy.ts`'s schema, which is deliberately outside this task's declared files. Validated the
+ * same way every other bounded numeric row is, so a malformed row fails LOUD at load rather than
+ * falling back silently and masking a bad edit (rule 2).
+ */
+```
+
+### ActionableGateFailure
+
+Archived from `src/lib/sweep.ts` lines 674-679 at the merge base.
+
+```text
+/**
+ * W1-T923 — one GATE failure whose remedy is a SINGLE, unambiguous form, so the fix rung can act
+ * on it directly. Never an unmet acceptance criterion — see {@link OpenPrView.actionableGateFailures}.
+ * `reason` is carried VERBATIM from the ledger's structured `reasons` array, never parsed out of
+ * `failure_reason` prose: structured, or honestly absent, never a regex over free text.
+ */
+```
+
+### OpenPrView
+
+Archived from `src/lib/sweep.ts` lines 684-688 at the merge base.
+
+```text
+/**
+ * One open PR's OBSERVED state, as the sweep sees it — the input to the pure
+ * predicate. The real gateway builds this from `gh pr list --state open --json …`
+ * + the review/CI derivation status.ts already does; tests inject fixtures.
+ */
+```
+
+### checksPendingSince
+
+Archived from `src/lib/sweep.ts` lines 698-703 at the merge base.
+
+```text
+  /**
+   * W1-T114 — ISO-8601 start of the NEWEST required check on this head, the WAIT disposition's
+   * only time input. Populated when `checksState === "pending"`, undefined otherwise. Absent
+   * means the WAIT and stale-pending rows never match, failing toward the catch-all escalate
+   * rather than an indefinite silent wait on state we cannot date.
+   */
+```
+
+### OpenPrView.reviewPendingSince
+
+Archived from `src/lib/sweep.ts` lines 705-711 at the merge base.
+
+```text
+  /**
+   * W1-T913 — when the current head's pending was posted, the staleness clock the post-review row
+   * needs. `undefined` reads as STALE rather than fresh: re-driving a finished review is
+   * idempotent, stranding one whose state we cannot date is not.
+   * // Why: a naive pending post makes `reviewState` read "pending" forever, so a row keyed on
+   * // "none" alone would never offer the head again — docs/forensics/sweep.md.
+   */
+```
+
+### reviewPendingOwnerDead
+
+Archived from `src/lib/sweep.ts` lines 713-718 at the merge base.
+
+```text
+  /**
+   * W1-T2844 — positive local-process evidence that the CURRENT head's pending review owner no
+   * longer exists. `undefined` covers live owners as well as legacy, incomplete and foreign-host
+   * identities that cannot be proved dead; those retain {@link reviewPendingIsStale}'s existing
+   * timeout behavior. Only the real gateway sets this, from the durable pending ledger row.
+   */
+```
+
+### OpenPrView.reviewVerdictPostedAt
+
+Archived from `src/lib/sweep.ts` lines 720-727 at the merge base.
+
+```text
+  /**
+   * W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
+   * already scanned, at no extra request.
+   *
+   * NOT A BODY-EDIT TIMESTAMP, AND MUST NEVER BE DOCUMENTED AS ONE: GitHub exposes no
+   * body-specific time field, so this detects ACTIVITY AFTER A VERDICT. A gaming edit buys a
+   * re-judgement, not a pass. `undefined` fails closed, treated as NOT superseded.
+   */
+```
+
+### unmetCriteria
+
+Archived from `src/lib/sweep.ts` lines 729-734 at the merge base.
+
+```text
+  /**
+   * The unmet acceptance criteria from a failing review, `[]` otherwise. For a task-id-less PR,
+   * `buildOpenPrViews` populates this from the ledger under the same synthetic `PR-<n>` id
+   * `reviewCommand` already uses. A non-empty list routes to `blocked-fixable`; it does not make
+   * the PR attributable to a plan task or widen {@link criteriaRecoverable} below.
+   */
+```
+
+### OpenPrView.criteriaRecoverable
+
+Archived from `src/lib/sweep.ts` lines 736-742 at the merge base.
+
+```text
+  /**
+   * W1-T440 — true when a trailer resolved a task id, so {@link unmetCriteria} is attributable to
+   * a plan task. Row 7 reads it only after both fixable lists are empty, to say WHICH empty a
+   * failing review is. `undefined` is treated as `true`, so this is additive.
+   * // Why: deliberately NOT widened by the synthetic-key read — widening would read as crediting
+   * // an unattributed PR, which #1527 forbids and a test locks.
+   */
+```
+
+### OpenPrView.actionableGateFailures
+
+Archived from `src/lib/sweep.ts` lines 744-750 at the merge base.
+
+```text
+  /**
+   * W1-T923 — a SIBLING list to {@link unmetCriteria}, never a widening of it: what a GATE
+   * failure's own structured remedy populates. ONE ENTRY PER SINGLE-FORM REMEDY ONLY — a remedy
+   * offering a CHOICE is EXCLUDED entirely, never included-but-flagged, because a worker picking
+   * the wrong option misattributes a ratified ruling. NEVER KEYED ON `failure_class`.
+   * // Why: #1991 passed every criterion yet named its exact remedy — docs/forensics/sweep.md.
+   */
+```
+
+### OpenPrView.supersessionVerdict
+
+Archived from `src/lib/sweep.ts` lines 756-763 at the merge base.
+
+```text
+  /**
+   * W1-T920 — a {@link SupersessionVerdict} for this PR, gated and default OFF. Distinct from
+   * {@link supersededBy}: that is a bare NUMBER matched on a shared trailer, the IDENTITY match
+   * design note (ii) forbids relying on alone. This carries a REASON, and the rows reading it read
+   * ONLY `status`, never the PR's own fields. Three consumer rows: close on `"superseded"`, yield
+   * on `"unique"` behind its own flag, and W1-T2779's unconditional yield on `"complementary"`.
+   * SCOPE (honest): fully wired but unpopulated, so neither flag changes production today.
+   */
+```
+
+### OpenPrView.createdAt
+
+Archived from `src/lib/sweep.ts` lines 767-771 at the merge base.
+
+```text
+  /**
+   * W1-T1201 — read ONLY by {@link deriveDisposition}'s age clamp: A PR CANNOT BE IDLE LONGER THAN
+   * IT HAS EXISTED. Absent or unparseable reads as NO bound, never as "just created".
+   * // Why: eleven live PRs, hours old, were closed "no activity in 400d" by a shifted clock.
+   */
+```
+
+### OpenPrView.isDraft
+
+Archived from `src/lib/sweep.ts` lines 785-791 at the merge base.
+
+```text
+  /**
+   * W1-T528 — the operator's hold, and once auto-merge is armed the ONLY veto
+   * {@link selectUpdateBranchTarget} still checks for itself. The check is `=== true`, so an
+   * absent field leaves a PR eligible. That fail-open direction is narrow and deliberate: GitHub
+   * refuses to arm a draft and only ARMED PRs reach here, so the exposure is an operator drafting
+   * an already-armed PR. Unlike {@link RestPullRow.merged}, `draft` IS in GitHub's list schema.
+   */
+```
+
+### OpenPrView.isPlanFiling
+
+Archived from `src/lib/sweep.ts` lines 793-800 at the merge base.
+
+```text
+  /**
+   * W1-T196 — true when this PR files new tasks and so deliberately carries NO trailer; crediting
+   * a filing PR's own trailer would mark the task DONE on merge, before it is built. MUST be a
+   * POSITIVE signal from the emitter's own output — never inferred from the absent trailer, which
+   * would swallow a genuinely broken one, and never from the diff touching only `plan/**`.
+   * SCOPE (honest): wired and tested, but no producer sets it, so every unattributable PR keeps
+   * escalating — fail-open toward surfacing.
+   */
+```
+
+### ciFailures
+
+Archived from `src/lib/sweep.ts` lines 804-809 at the merge base.
+
+```text
+  /**
+   * Failing required-check name and log-tail evidence — the W1-T94 ci-log fix mode's input
+   * (W1-T100, the #170 fix). Populated when `checksState === "red"`, or when a child named by
+   * ci-gate's checked-in REQUIRED contract concluded red while the aggregate is still pending.
+   * `[]`/undefined degrades the fix prompt to "no detail captured", never a crash.
+   */
+```
+
+### cancelledRequiredChecks
+
+Archived from `src/lib/sweep.ts` lines 811-816 at the merge base.
+
+```text
+  /**
+   * W1-T1223 — required checks whose LATEST attempt is CANCELLED with no later attempt on this
+   * head, distinct from a genuine failure ({@link ciFailures} names both; this names only the
+   * cancellations). Populated alongside `ciFailures` when `checksState === "red"`. Never makes
+   * `checksState` anything but "red" — see {@link CancelledRequiredCheck}.
+   */
+```
+
+### workflowRuns
+
+Archived from `src/lib/sweep.ts` lines 820-825 at the merge base.
+
+```text
+  /**
+   * W1-T2340 — this head's own workflow runs, the raw input {@link stalledRunReason} reads.
+   * `undefined` when the listing could not be fetched, never degrading to `[]`, which would read
+   * as "GitHub scheduled nothing" instead of "we could not check". NOT YET POPULATED by the real
+   * gateway, so the new disposition row never fires for existing callers.
+   */
+```
+
+### mergeState
+
+Archived from `src/lib/sweep.ts` lines 827-831 at the merge base.
+
+```text
+  /**
+   * GitHub's own merge-conflict state, simplified (W1-T106, the #170 DIRTY
+   * strand) — see {@link MergeState}'s own doc. `undefined`/`"unknown"` never
+   * disposition CONFLICTED (fail-closed): only an OBSERVED `"dirty"` does.
+   */
+```
+
+### mergeable
+
+Archived from `src/lib/sweep.ts` lines 833-839 at the merge base.
+
+```text
+  /**
+   * GitHub's OWN raw `mergeable`, observed verbatim (W1-T186), carried ALONGSIDE the simplified
+   * {@link mergeState} rather than replacing it — so the escalation can name the exact fact
+   * GitHub reported rather than the bucket it was sorted into. `undefined` when unread.
+   * // Why: a dirty PR registers ZERO check runs, so an escalation reading only checks and review
+   * // had to misdescribe it (#412/#413).
+   */
+```
+
+### mergeableState
+
+Archived from `src/lib/sweep.ts` lines 841-846 at the merge base.
+
+```text
+  /**
+   * GitHub's OWN raw `mergeable_state` string ("clean" | "dirty" | "blocked" | "behind" |
+   * "unstable" | "unknown" | ...), observed verbatim (W1-T186, alongside {@link mergeable}
+   * above) — the escalation names THIS exact reported value, never just the simplified
+   * {@link MergeState} bucket it was derived into.
+   */
+```
+
+### mergeConflict
+
+Archived from `src/lib/sweep.ts` lines 848-853 at the merge base.
+
+```text
+  /**
+   * The merge-conflict fix mode's input — the conflicting file list + both
+   * sides' log since merge-base (W1-T94's new mode, design note iii).
+   * Populated when `mergeState === "dirty"`; `undefined` otherwise (mirrors
+   * how `ciFailures` is populated only when `checksState === "red"`).
+   */
+```
+
+### strikeHistory
+
+Archived from `src/lib/sweep.ts` lines 855-860 at the merge base.
+
+```text
+  /**
+   * What each recorded fix-rung strike TRIED for this PR's task, ledger
+   * ground truth only (W1-T78) — the clarification-question rung's "what the
+   * fix worker tried per strike" input. `[]`/undefined when no strike is
+   * recorded (e.g. the terminal catch-all, which never dispatched a fix).
+   */
+```
+
+### OpenPrView.pendingAnswer
+
+Archived from `src/lib/sweep.ts` lines 862-868 at the merge base.
+
+```text
+  /**
+   * An operator's answer to a prior clarification question (W1-T78). Its `constraint` feeds the
+   * next fix dispatch VERBATIM, never a silent guess, and routes the PR to `blocked-fixable` even
+   * at cap, so the answer re-arms the rung rather than immediately re-exhausting it.
+   * SCOPE (honest): wired end-to-end and tested, but nothing populates it, so every
+   * blocked-ambiguous PR keeps asking and never silently re-arms itself.
+   */
+```
+
+### OpenPrView.reviewPostRefused
+
+Archived from `src/lib/sweep.ts` lines 870-877 at the merge base.
+
+```text
+  /**
+   * W1-T176 — true when the ledger already carries a refusal for this exact task/PR/head/body
+   * input. This separates a FIRST-SEEN zero-runs required check, which still routes to
+   * post-review because an absent required check is mechanically decidable, from a SECOND absence
+   * for the unchanged input, which escalates rather than retrying a lane that already declined.
+   * A transient `gh` error deliberately does NOT set this — a network hiccup must keep retrying.
+   * A new commit or body edit re-earns one attempt; `undefined` never escalates by omission.
+   */
+```
+
+### OpenPrView.requiredContextsUnreadable
+
+Archived from `src/lib/sweep.ts` lines 879-885 at the merge base.
+
+```text
+  /**
+   * W1-T176 — true when THIS pass could not read branch protection's required-contexts list.
+   * Gates the zero-runs discriminator rows OFF: without that list we cannot POSITIVELY confirm
+   * the review is required here, and calling its absence a decidable "post it" would assume
+   * permissive on missing information. `true` routes the PR to the catch-all, which still
+   * classifies it blocked-ambiguous, never mergeable.
+   */
+```
+
+### requiredContextsReadFailure
+
+Archived from `src/lib/sweep.ts` lines 887-892 at the merge base.
+
+```text
+  /**
+   * W1-T2399 — WHY the required-contexts read was unreadable, captured where the read happens and
+   * carried here so the escalation can name it without a second GitHub call. Present only on a
+   * genuine read failure; protection that readably declares NO required contexts leaves this
+   * undefined, which is the point of the split.
+   */
+```
+
+### reviewOrphanedByPush
+
+Archived from `src/lib/sweep.ts` lines 894-899 at the merge base.
+
+```text
+  /**
+   * W1-T225 — true when the ledger carries a review outcome for this task at an EARLIER head: the
+   * PR has been reviewed, just not on the head being looked at now. Changes only the REASON the
+   * post-review row states, never the dispatch — either way the remedy is a FRESH verdict for
+   * this head, and a verdict from a superseded head is never copied forward.
+   */
+```
+
+### priorReviewAttemptsForInput
+
+Archived from `src/lib/sweep.ts` lines 901-907 at the merge base.
+
+```text
+  /**
+   * Completed judgments for the exact current input: task key, PR URL, head sha and body digest.
+   * A new commit or body edit resets this to zero; refusals and legacy rows never count.
+   * Recovering from a GitHub FAILURE with no matching judgment additionally requires an explicit
+   * zero and {@link reviewInputDigest}, so an unwired caller can never be mistaken for evidence
+   * that the ledger is missing a run.
+   */
+```
+
+### reviewInputLastAttemptAt
+
+Archived from `src/lib/sweep.ts` lines 909-913 at the merge base.
+
+```text
+  /**
+   * Most recent completed `review.posted` timestamp for the same exact input counted above.
+   * Refusals do not move this clock because they never judged the content. Undefined means no
+   * completed attempt is known; {@link reviewInputBackoffElapsed} then fails toward escalation.
+   */
+```
+
+### RollupCheckEntry
+
+Archived from `src/lib/sweep.ts` lines 926-931 at the merge base.
+
+```text
+/**
+ * One PR status-check-rollup entry, structurally — a CheckRun or StatusContext as
+ * `gh pr list/view --json statusCheckRollup` reports it. Names ONLY the fields
+ * {@link checksStateFromRollup} reads, so this deterministic core never depends on run-task.ts's
+ * richer `RollupCheck` shape, which stays structurally assignable here without an import.
+ */
+```
+
+### RollupCheckEntry.startedAt
+
+Archived from `src/lib/sweep.ts` lines 938-943 at the merge base.
+
+```text
+  /**
+   * When this attempt started (W1-T457). gh's own JSON exporter (cli/cli's `export_pr.go`)
+   * populates this for BOTH rollup node shapes — a CheckRun's own `startedAt`, and a
+   * StatusContext's mapped from `createdAt` — so it is present on every entry the real gateway
+   * reports, and is what {@link dedupeRollupByLatestAttempt} sorts on.
+   */
+```
+
+### REQUIRED_CHECK_OK
+
+Archived from `src/lib/sweep.ts` lines 947-952 at the merge base.
+
+```text
+/**
+ * Conclusions GitHub's OWN merge-eligibility treats as SATISFYING a required check (W1-T103):
+ * SKIPPED and NEUTRAL count as green, so only a genuinely unresolved check holds "pending".
+ * EXPORTED so the poll loops read the SAME ok-set this file's predicate reads, rather than a
+ * narrower private test that read a cleanly-concluded NEUTRAL as still pending.
+ */
+```
+
+### REQUIRED_CHECK_FAIL
+
+Archived from `src/lib/sweep.ts` lines 955-960 at the merge base.
+
+```text
+/**
+ * Conclusions that veto a required check outright. EXPORTED (W1-T457) so the failing-list PRODUCER
+ * filters on the exact same set this file's PREDICATE vetoes on and the two cannot drift. STALE is
+ * folded in here rather than given a fifth `checksState` member, exactly as CANCELLED is: it means
+ * "this reading is void". // Why: the drift and STALE's years unclassified — docs/forensics/sweep.md.
+ */
+```
+
+### dedupeRollupByLatestAttempt
+
+Archived from `src/lib/sweep.ts` lines 971-978 at the merge base.
+
+```text
+/**
+ * Group rollup entries by check name or status context and keep ONLY the latest
+ * {@link RollupCheckEntry.startedAt} — the SAME rule ci-gate's own dedupe applies one surface
+ * over, copied rather than reinvented. An entry with no `startedAt` sorts OLDER, and a tie keeps
+ * the LAST encountered: the contract is only that duplicates collapse to one row per key.
+ * // Why: a sha accumulates one entry PER ATTEMPT, so a superseded CANCELLED entry read "red"
+ * // forever and could never be outvoted by its own successor — docs/forensics/sweep.md.
+ */
+```
+
+### checksStateFromRollup
+
+Archived from `src/lib/sweep.ts` lines 989-999 at the merge base.
+
+```text
+/**
+ * Aggregate ONLY the REQUIRED contexts into `checksState` (W1-T103). `requiredContexts` is branch
+ * protection's OWN list, threaded in rather than hardcoded (rule 2); non-required contexts stay in
+ * the raw rollup for other consumers but never vote here.
+ *
+ * UNREADABLE PROTECTION FAILS CLOSED — every reported context counts, because an unreadable rule
+ * must never manufacture a false green. `remudero-review` IS EXCLUDED UNCONDITIONALLY (W1-T394),
+ * even in that fallback: it is a commit status carrying the REVIEW verdict, and counting it here
+ * made a red review indistinguishable from red CI. DEDUPED before judging, so only the latest
+ * attempt votes. // Why: the #170 and #1441 incidents — docs/forensics/sweep.md.
+ */
+```
+
+### checksStateFromRollup ok-set
+
+Archived from `src/lib/sweep.ts` lines 1017-1022 at the merge base.
+
+```text
+  // ONE OK-SET, KNOWN CONTEXTS OR NOT. This used to narrow to SUCCESS alone whenever the required
+  // list was unreadable, but REQUIRED_CHECK_OK's doc is a claim about GITHUB'S merge-eligibility
+  // semantics, which do not change because OUR token could not read branch protection.
+  // NOT WIDENED TO A NEW `unknown` state, deliberately: a fifth member every existing row silently
+  // fails to match is the false-predicate-falls-through shape that produced the issue storm.
+  // Why: the measured cost of the asymmetry is in docs/forensics/sweep.md.
+```
+
+### CancelledRequiredCheck
+
+Archived from `src/lib/sweep.ts` lines 1033-1039 at the merge base.
+
+```text
+/**
+ * W1-T1223 — one required check whose LATEST attempt is CANCELLED. `checksState` stays "red"
+ * exactly as for a genuine failure; a fifth member is refused for the reason
+ * {@link checksStateFromRollup} gives. This is the SEPARATE observable naming which red check is
+ * an ABSENT verdict rather than a bad one, so the job can be re-queued instead of a worker
+ * dispatched against a diff with no defect.
+ */
+```
+
+### CancelledRequiredCheck.jobId
+
+Archived from `src/lib/sweep.ts` lines 1042-1047 at the merge base.
+
+```text
+  /**
+   * GitHub Actions job id, parsed by the real gateway (run-task.ts) from the rollup's own
+   * `detailsUrl` — the re-queue target is the JOB (design iv), never the workflow run.
+   * `undefined` when no job id could be read; the real `requeueCheck` wiring then degrades to a
+   * named no-op rather than guessing a target.
+   */
+```
+
+### CancelledRequiredCheck.runAttempt
+
+Archived from `src/lib/sweep.ts` lines 1049-1054 at the merge base.
+
+```text
+  /**
+   * W1-T2431 — GitHub's OWN `run_attempt`, read off the SAME rollup {@link jobId} is parsed from:
+   * no new gateway, no new credential. This is a SURFACE the fleet does not write, so it counts an
+   * operator's own re-run too. SCOPE: no producer sets it, so it is always `undefined` today —
+   * a WIDENING of the `true` case, never a replacement that could narrow it.
+   */
+```
+
+### cancelledCheckAlreadyRequeuedFromSurface
+
+Archived from `src/lib/sweep.ts` lines 1058-1064 at the merge base.
+
+```text
+/**
+ * W1-T2431 — whether this check's run has already been re-run, read off GitHub's own
+ * `runAttempt` rather than a ledger row the fleet wrote about its own action. Being ground truth
+ * it reads true for ANY actor, the distinction a fleet-keyed ledger cannot make, and it survives
+ * rotation because it is not a ledger row at all. `undefined` or `<= 1` reads as "not yet re-run":
+ * an unread value must never MANUFACTURE a prior re-queue. Callers OR this with the ledger set.
+ */
+```
+
+### cancelledRequiredCheckNames
+
+Archived from `src/lib/sweep.ts` lines 1069-1076 at the merge base.
+
+```text
+/**
+ * W1-T1223 — which check has a LATEST (deduped) attempt that is CANCELLED. A genuinely FAILING
+ * check is never named: only the literal CANCELLED conclusion separates "nobody reached a verdict"
+ * from "a verdict came back bad". An unreadable `requiredContexts` names nothing, since a live CI
+ * mutation must never be attempted from an unreadable gate. W1-T2283: a named check no longer has
+ * to be a member of `required`, bringing the arm that ACTS into agreement with the miner that
+ * already SEES. // Why: the old filter-then-test order could never reach a positive result.
+ */
+```
+
+### stalledRunReason
+
+Archived from `src/lib/sweep.ts` lines 1095-1103 at the merge base.
+
+```text
+/**
+ * W1-T2340 — names the reason a head's workflow runs read as STALLED rather than pending.
+ *
+ * THE DISCRIMINATOR: a job whose STATUS is non-terminal inside a run whose CONCLUSION is terminal
+ * — pinned by a run that will schedule nothing further. NOT an absence of jobs, the reading
+ * measurement falsified. NEEDS NO THRESHOLD, so this takes no `policy` or `now` parameter at all.
+ * A run still in progress is untouched, and every unreadable input FAILS TOWARD "NOT STALLED".
+ * PURE and SYNCHRONOUS: nothing here fetches, waits or schedules a second look.
+ */
+```
+
+### stillRedRequiredNames
+
+Archived from `src/lib/sweep.ts` lines 1120-1127 at the merge base.
+
+```text
+/**
+ * W1-T1278 — of the checks a fix rung believes are red, possibly stale, which are STILL red on a
+ * FRESH rollup read. A name is dropped ONLY for an observed `startedAt` with a currently
+ * NON-TERMINAL status — a later attempt executing RIGHT NOW. That is deliberately narrower than
+ * "no longer red", because one notch wider is "never fix a red PR", and inferring in-flight from a
+ * name or a retry count would be GUESSING. A name absent from the fresh rollup is NEVER dropped:
+ * an unreadable rollup must never manufacture a stand-down.
+ */
+```
+
+### cancelledCheckRequeueDecision
+
+Archived from `src/lib/sweep.ts` lines 1149-1154 at the merge base.
+
+```text
+/**
+ * W1-T1223 — BOUNDED BY A LEDGERED RECORD, NEVER A CLOCK OR AN IN-MEMORY COUNTER. Zero priors
+ * re-queues once; a SECOND observation of the same pair escalates instead of repeating. No timer
+ * and no retry budget: one re-queue is either sufficient, for a preempted runner, or diagnostic,
+ * for a fault re-queueing cannot reach.
+ */
+```
+
+### requeuedCheckKeysFromLedger
+
+Archived from `src/lib/sweep.ts` lines 1173-1178 at the merge base.
+
+```text
+/**
+ * W1-T1223 — every `${headSha}@${checkName}` pair the ledger already records a
+ * {@link CHECK_REQUEUE_STEP} row for. `runSweep` writes the row BEFORE calling
+ * `deps.requeueCheck`, so a pass crashing between the write and the GitHub call still bounds the
+ * next pass toward escalating — the safer direction for an action that mutates CI state unattended.
+ */
+```
+
+### the main-health section
+
+Archived from `src/lib/sweep.ts` lines 1189-1198 at the merge base.
+
+```text
+// ── W1-T2204 — MAIN'S OWN CHECK ROLLUP HAS NO READER ─────────────────────────────────────────
+//
+// Every predicate above reads a PR's rollup; nothing reads the DEFAULT BRANCH's own. This section
+// is that reader — a pure transform to a NAMED observation of main's health — plus two decisions
+// kept separate: whether to escalate, and whether that escalation may by itself stand down
+// dispatch of unrelated tasks (it may not).
+//
+// WHY "pending" ISN'T ENOUGH: SKIPPED counts as green for a PR but is a DIFFERENT question for
+// main, where a push can register a job SKIPPED because the workflow never asked. Skipped and
+// known-vacuous names are collected as non-evidence and can never make the verdict green.
+```
+
+### PUSH_VACUOUS_SUCCESS_CHECK_NAMES
+
+Archived from `src/lib/sweep.ts` lines 1200-1205 at the merge base.
+
+```text
+/**
+ * Check names KNOWN, from the workflow's own guard, to conclude SUCCESS on a push having executed
+ * no real work. The check-runs API carries no field for "did this job do anything", so this is a
+ * NAMED, CITED allowlist (policy-as-data, rule 2), never a general detector. A future
+ * vacuous-on-push job is added here BY NAME, never by inventing detection logic.
+ */
+```
+
+### MainHealthState
+
+Archived from `src/lib/sweep.ts` lines 1208-1214 at the merge base.
+
+```text
+/**
+ * Main's health read off its own rollup — the default-branch sibling of `checksState`. Three
+ * members only: "green" (a required check GENUINELY concluded passing, none failed, none
+ * outstanding), "red" (never auto-acted on beyond an escalation; a revert is forbidden outright),
+ * and "undetermined" (still running, or every concluded check skipped or known-vacuous). The last
+ * is NEVER collapsed into "green" — that collapse is the vacuous pass this reader exists to refuse.
+ */
+```
+
+### mainHealthFromRollup
+
+Archived from `src/lib/sweep.ts` lines 1232-1238 at the merge base.
+
+```text
+/**
+ * Read main's rollup into a {@link MainHealthObservation}, reusing the exact dedupe and
+ * required-contexts filter {@link checksStateFromRollup} applies so the two can never disagree
+ * about which entries are in play — but judging them against a STRICTER question: skipped and
+ * known-vacuous members never count as evidence, and an outstanding check reads "undetermined".
+ * An unreadable protection rule degrades toward the narrower gate, never a false positive.
+ */
+```
+
+### mainHealthEscalationClass
+
+Archived from `src/lib/sweep.ts` lines 1328-1333 at the merge base.
+
+```text
+/**
+ * Which existing escalation class carries a red-trunk finding. MANUAL is the fit, not a fourth
+ * class: it already covers something genuinely off that only a human can rule on. BLOCKED is the
+ * wrong shape (a specific PR's rung exhausted) and so is HARD_STOP (destructive ops, spend,
+ * secrets) — this call site never takes an action, it only reports.
+ */
+```
+
+### mainHealthEscalationDecision
+
+Archived from `src/lib/sweep.ts` lines 1345-1349 at the merge base.
+
+```text
+/**
+ * A red trunk produces an escalation inside the existing taxonomy and NOTHING else: never a merge,
+ * never a revert, just a decision object. Anything short of "red", including "undetermined", does
+ * not escalate — an in-flight or vacuous rollup is evidence of an incomplete read, not a problem.
+ */
+```
+
+### mainHealthShouldStandDownDispatch
+
+Archived from `src/lib/sweep.ts` lines 1364-1371 at the merge base.
+
+```text
+/**
+ * The asymmetry, held as its own boolean rather than folded into
+ * {@link mainHealthEscalationDecision}: a red trunk escalates, but that escalation must NEVER by
+ * itself stop dispatch of unrelated tasks — a watcher that halts the queue on any red trunk
+ * converts one broken test into a full stop, which is worse. `operatorRuling` is the ledgered
+ * decision an operator actually recorded; omitting it is exactly "no ruling recorded yet", so
+ * without an explicit `true` this always returns `false`, red trunk or not.
+ */
+```
+
+### withoutDownstreamGateFailure
+
+Archived from `src/lib/sweep.ts` lines 1386-1396 at the merge base.
+
+```text
+/**
+ * #2918 — `ci-gate` REPORTED AS A FAILURE IT CANNOT BE. It is a DOWNSTREAM AGGREGATOR: red
+ * BECAUSE a sibling is red, green when its inputs are. A list naming both it and the sibling that
+ * caused it reports two failures where there is one, and a worker handed the second can only chase
+ * a symptom.
+ *
+ * THE ONE CASE THAT IS KEPT is `ci-gate` failing ALONE — the stale-verdict shape
+ * {@link staleCiGateTransition} names — so this never empties a non-empty list. PURE, and not a
+ * change to what a check REPORTS: it narrows what the fleet is TOLD failed, never what CI decided.
+ * // Why: attributed to the PR, not a task, deliberately — docs/forensics/sweep.md.
+ */
+```
+
+### StaleCiGateTransition
+
+Archived from `src/lib/sweep.ts` lines 1404-1410 at the merge base.
+
+```text
+/**
+ * W1-T1275 — the ONE (head, sibling-transition) shape that makes `ci-gate`'s concluded verdict
+ * stale: its own latest deduped attempt concluded a NON-SUCCESS terminal state, and a required
+ * sibling's latest attempt is a terminal SUCCESS that STARTED AFTER ci-gate's did — proof the
+ * sibling flipped on this same head after the gate had already read. `jobId` is ci-gate's OWN,
+ * never the sibling's: the AGGREGATOR is re-driven, since the sibling already succeeded.
+ */
+```
+
+### staleCiGateTransition
+
+Archived from `src/lib/sweep.ts` lines 1420-1426 at the merge base.
+
+```text
+/**
+ * W1-T1275 — detect the ONE shape design note iii pins, and NOTHING wider. `ci-gate` must have a
+ * CONCLUDED failing attempt, since a still-pending gate has no verdict to be stale, and only a
+ * literal SUCCESS started STRICTLY LATER qualifies as the sibling. A genuinely failing suite is
+ * never re-run by this path. Read-only over the shared dedupe: the gate's own attempt resolution
+ * is unchanged.
+ */
+```
+
+### ciGateReaggregateDecision
+
+Archived from `src/lib/sweep.ts` lines 1461-1466 at the merge base.
+
+```text
+/**
+ * W1-T1275 — BOUNDED BY A LEDGERED RECORD, never a clock or an in-memory counter, mirroring
+ * {@link cancelledCheckRequeueDecision}. Zero priors for this exact (head, sibling-transition)
+ * pair re-drives the gate's job once; a repeat observation never repeats the Actions call. At
+ * most once per head and transition — which makes a re-run storm impossible by construction.
+ */
+```
+
+### reaggregatedCiGateKeysFromLedger
+
+Archived from `src/lib/sweep.ts` lines 1483-1488 at the merge base.
+
+```text
+/**
+ * W1-T1275 — every transition key the ledger already records a {@link CI_GATE_REAGGREGATE_STEP}
+ * row for. `runSweep` writes the row BEFORE calling `deps.reaggregateCiGate`, the same ordering
+ * {@link requeuedCheckKeysFromLedger} uses for the same reason: a pass crashing between the write
+ * and the GitHub call still bounds the next pass toward standing down.
+ */
+```
+
+### isBlockedCi
+
+Archived from `src/lib/sweep.ts` lines 1506-1516 at the merge base.
+
+```text
+/**
+ * The blocked_ci shape (W1-T100, broadened by W1-T138): a required check is red. The failing
+ * signal IS the CI log, and it takes PRECEDENCE over any review verdict beside it, because GitHub
+ * will not merge past a red required check whatever the review says. The original also required
+ * `reviewState === "none"`, which is too narrow: a slower check can settle red after review ran.
+ *
+ * `checksState` is red ONLY for a required CHECK RUN failure — the review status is excluded
+ * (W1-T394) — so a red review can never make this true. EXPORTED so every caller imports this ONE
+ * definition rather than a hand-copy that would drift on the next refinement.
+ * // Why: strikes were burnt re-litigating a review while the blocking check sat untouched.
+ */
+```
+
+### fixRungRepeatsIdenticalFailure
+
+Archived from `src/lib/sweep.ts` lines 1521-1529 at the merge base.
+
+```text
+/**
+ * W1-T1269 — does the CURRENT unmet-criteria set repeat, claim-for-claim, what the most recent
+ * strike was already dispatched to resolve? THE EARLIER STOP, never a longer leash: a dispatch
+ * that could only reproduce a strike already proven to add nothing is preempted before the cap.
+ *
+ * KEYED ON IDENTITY, NEVER ON COUNT, and STOPS ONLY ON AN EXACT MATCH — the stronger
+ * inclusion-descent rule is REFUSED, because it would also stop a strike that swapped which
+ * criteria are unmet, which is lateral progress. FAILS CLOSED on an empty or absent claim set.
+ */
+```
+
+### actionableGateFailuresFromReasons
+
+Archived from `src/lib/sweep.ts` lines 1540-1546 at the merge base.
+
+```text
+/**
+ * W1-T923 — given the STRUCTURED `reasons` a gate failure carried, decide whether it names a
+ * SINGLE, unambiguous remedy. Exactly one is copied through VERBATIM; zero, or two or more, are
+ * excluded ENTIRELY rather than flagged, because a worker acting on the wrong one of several named
+ * options misattributes a ratified ruling. Reads NOTHING about `failure_class`, so a
+ * judgement-classed row qualifies exactly like any other, by construction.
+ */
+```
+
+### RedCause
+
+Archived from `src/lib/sweep.ts` lines 1551-1565 at the merge base.
+
+```text
+/**
+ * W1-T527 — WHY a PR is red, which {@link isBlockedCi} deliberately does not ask. Four causes
+ * reached the identical dispatch, and only ONE is the fix rung's territory:
+ *
+ *   - `base-caused`   — the same check failing on EVERY open PR this pass; a property of main,
+ *                       not of any diff, so no edit to those diffs would help.
+ *   - `gate-conflict` — an unsatisfiable condition (Standing rule 25), NON-SUPPRESSIBLE, so no
+ *                       re-review softens it and no patch satisfies both gates.
+ *   - `environment`   — a near-total failure ratio inside ONE check repeating a single message.
+ *   - `in-diff`       — the residue, and the fix rung's existing territory, unchanged.
+ *
+ * PRECEDENCE IS THE SHARD'S, NOT AN OPTIMISATION: base-caused is asked FIRST because it exonerates
+ * every diff at once. PURE FOLD, NO I/O — a classifier costing a network read per PR is not worth
+ * having.
+ */
+```
+
+### UNSATISFIABLE_GATE_MARKER
+
+Archived from `src/lib/sweep.ts` lines 1568-1572 at the merge base.
+
+```text
+/**
+ * The Standing rule 25 refusal text `renderReviewSummary` emits. Matched as TEXT because the
+ * structured `ReviewVerdict.instrumentEntangled` boolean is not carried on {@link OpenPrView} —
+ * see {@link namesUnsatisfiableGate} for what that costs and why it is still safe.
+ */
+```
+
+### baseCausedCheckName
+
+Archived from `src/lib/sweep.ts` lines 1580-1587 at the merge base.
+
+```text
+/**
+ * The required check failing on EVERY open PR in this pass, or `undefined`.
+ *
+ * THE VACUITY GUARD IS THE LOAD-BEARING PART: with a single open PR the claim is trivially true of
+ * its own failure, so a lone broken diff would exonerate itself. Fewer than two returns
+ * `undefined`. Any PR NOT failing this check also yields `undefined` — a base outage reddens all
+ * of them, so a survivor is evidence AGAINST the base, and that fails toward dispatching.
+ */
+```
+
+### namesUnsatisfiableGate
+
+Archived from `src/lib/sweep.ts` lines 1601-1609 at the merge base.
+
+```text
+/**
+ * True when the review named a condition no patch can satisfy (Standing rule 25 entanglement).
+ * READS BOTH CARRIERS BECAUSE ONE IS CURRENTLY INERT, worth stating rather than hiding.
+ *
+ * THE SAFETY PROPERTY IS STRUCTURAL, NOT DETECTIVE: a rule-25 refusal fails the review COMMIT
+ * STATUS, which `checksState` excludes, so such a PR is review-red and never checks-red. The
+ * stand-down fires only on `ciFailures`, so a gate conflict cannot be stood down even if this
+ * returns false. Detection changes the ledger's reason text, not whether the escalation survives.
+ */
+```
+
+### environmentFaultCheckName
+
+Archived from `src/lib/sweep.ts` lines 1615-1621 at the merge base.
+
+```text
+/**
+ * The check whose log tail is one message repeated near-totally, or `undefined`.
+ * `findSiblingDisagreements` is the other half of this discriminator and is DELIBERATELY NOT
+ * CALLED: it needs BOTH poles, and {@link OpenPrView} carries failures only. Reimplementing its
+ * fold here is what its own doc forbids, so the ratio arm carries this class alone and the sibling
+ * arm is named as available work rather than faked.
+ */
+```
+
+### classifyRedCause
+
+Archived from `src/lib/sweep.ts` lines 1638-1640 at the merge base.
+
+```text
+/**
+ * The pure fold itself — see {@link RedCause} for the four classes and why this order.
+ */
+```
+
+### redCauseStandsDown
+
+Archived from `src/lib/sweep.ts` lines 1648-1653 at the merge base.
+
+```text
+/**
+ * The two classes the fix rung cannot reach, and therefore the only two that change behaviour.
+ * `in-diff` dispatches exactly as before; `gate-conflict` refuses and escalates byte-identically.
+ * A stand-down leaves `acted:false`, and `priorActionsFromLedger` skips those rows — so no strike
+ * is spent and the PR is re-derived fresh next pass.
+ */
+```
+
+### describeRedCause
+
+Archived from `src/lib/sweep.ts` lines 1658-1662 at the merge base.
+
+```text
+/**
+ * The stand-down reason carried on the EXISTING `sweep.disposed` line, not a new ledger step.
+ * This class is READ by the dispatch decision itself, which is what makes it an actor rather than
+ * a fourth dead signal beside `daemon.tree_dirty` and `CiFailure.outsidePrRange`.
+ */
+```
+
+### lastBaseCausedTipFromLedger
+
+Archived from `src/lib/sweep.ts` lines 1672-1678 at the merge base.
+
+```text
+/**
+ * W1-T2620 — per PR, the `main_tip_sha` most recently recorded on a base-caused `sweep.disposed`
+ * row: the marker this task rides on the EXISTING step, never a fourth ledger signal.
+ * `undefined` for a PR never observed base-caused, since nothing has advanced without a baseline.
+ * Reads `main_tip_sha` alone, never prose: that field is written only from the base-caused branch,
+ * so no text match is needed to tell those rows apart.
+ */
+```
+
+### selectBaseCausedRelease
+
+Archived from `src/lib/sweep.ts` lines 1691-1697 at the merge base.
+
+```text
+/**
+ * W1-T2620 — AT MOST ONE base-caused PR released per pass, oldest activity first. THE RELEASE
+ * CONDITION IS "main has moved since this PR last stood down", never "the cause is known". A PR
+ * with no prior record is NOT eligible: with no baseline nothing has advanced, so it stands down
+ * and gets its first tip recorded. Ordered by the SAME comparator the other selectors use, so a
+ * loser is strictly older next pass and cannot starve.
+ */
+```
+
+### selectStaleBaseRelease
+
+Archived from `src/lib/sweep.ts` lines 1733-1737 at the merge base.
+
+```text
+/**
+ * W1-T2789 — choose at most one strike-exhausted, checks-red PR whose exact failing path changed
+ * on a positively newer base. Candidates are inspected oldest-first, and only a successful prior
+ * release of this exact `(PR, head, main tip)` suppresses it. An unreadable comparison abstains.
+ */
+```
+
+### ObservedBlockerState
+
+Archived from `src/lib/sweep.ts` lines 1769-1783 at the merge base.
+
+```text
+/**
+ * The named "why is this actually blocked" states an escalation must distinguish (W1-T186), never
+ * a single overloaded `checksState`/`reviewState` pair. Exactly one applies, or none for an
+ * ordinary review-failure block:
+ *   - CONFLICTED: observed dirty. Zero check runs is EXPECTED — GitHub does not start checks on an
+ *     unmergeable ref. Action: merge main into the branch.
+ *   - FAILING: a required check ran and CONCLUDED failure. Action: name it.
+ *   - ABSENT: a required context has ZERO observed runs on an otherwise-mergeable PR. Action: post it.
+ *   - PENDING: checks exist and are still running. Action: wait, then escalate past the ceiling.
+ *   - GATE_UNREADABLE (W1-T2399): the repo-wide protection read failed — a fact about the REPO,
+ *     not this PR's checks, and reported as ABSENT before, contradicting its own green checks.
+ *
+ * CHECKED IN THIS ORDER, CONFLICTED FIRST: reading "none" before "dirty" mis-sorts a conflicted PR
+ * as ABSENT and posts a check that can never run until the conflict resolves (#412/#413).
+ */
+```
+
+### observedBlockerState GATE_UNREADABLE arm
+
+Archived from `src/lib/sweep.ts` lines 1798-1802 at the merge base.
+
+```text
+  // W1-T2399 — CHECKED BEFORE THE W1-T176 SHAPE BELOW, because when the repo-wide read failed we
+  // do not KNOW that any context is absent: `checksState` is green, so the PR's own checks plainly
+  // ran. Reporting ABSENT here asserts zero observed check runs on a head that has them, which is
+  // the false sentence this task exists to remove. The DISPOSITION is untouched — a PR reaching
+  // here still falls to the same terminal catch-all and still escalates (W1-T176 boundary (ii)).
+```
+
+### the absent-check-suite remedy and absentAgeMinutes
+
+Archived from `src/lib/sweep.ts` lines 1823-1841 at the merge base.
+
+```text
+/**
+ * THE ABSENT-CHECK-SUITE REMEDY'S DECISION (W1-T186 follow-up). PURE: every inch of evidence is a
+ * parameter, so the real cases are fixtures rather than a live experiment. GitHub sometimes creates
+ * NO check-suite for a pushed sha, and pushing a fresh sha created them immediately every time.
+ *
+ * THE DISCRIMINATOR IS ABSENT vs PENDING, and BOTH halves are required, because re-pushing a PR
+ * whose checks merely have not STARTED cancels in-flight runs and resets the review. STRUCTURE
+ * reuses {@link checksStateFromRollup}: only a COMPLETELY EMPTY rollup reads "none". TIME bounds
+ * the seconds before the first context registers, clocked on `lastActivityAt` — anything else
+ * advancing it only makes the PR look YOUNGER, so the error direction is toward doing nothing.
+ *
+ * The W1-T176 sub-shape and a PASSING REVIEW are both DELIBERATELY EXCLUDED: the review is posted
+ * per head sha, so minting a new sha discards the expensive artifact in this system.
+ * // Why: #921 escalated 244 times over 7h45m with no remedy — docs/forensics/sweep.md.
+ */
+/**
+ * W1-T1103 — minutes since this head was last pushed. Factored out so the NOT-YET-SCHEDULED row
+ * reads the IDENTICAL clock: "re-push yet?" and "escalate yet?" are one question about one input.
+ */
+```
+
+### describeCiFailures
+
+Archived from `src/lib/sweep.ts` lines 1903-1908 at the merge base.
+
+```text
+/**
+ * Name the FAILING check(s) + the sha each ran against (W1-T186) — "checks red" is not
+ * actionable, "commitlint failed on 0e63429" is. Falls back to a generic sentence when no
+ * per-check detail was captured (never silent, never a crash), and — the #420 fixture — says so
+ * explicitly when a check's own sha is OBSERVED to sit outside this PR's own commit range.
+ */
+```
+
+### renderObservedFacts
+
+Archived from `src/lib/sweep.ts` lines 1936-1943 at the merge base.
+
+```text
+/**
+ * Render the named observed-blocker facts (W1-T186) prepended to every clarification question, so
+ * the operator sees WHICH state fired and the facts supporting it. "" when none was named.
+ *
+ * FALSIFIER-SHAPED CONSTRAINT: the CONFLICTED branch must never contain the word "CI" or the token
+ * "blocked_ci" — both are FALSE for a conflicted PR, and #412/#413 is exactly an escalation that
+ * said so for a PR that was neither.
+ */
+```
+
+### DispositionRule
+
+Archived from `src/lib/sweep.ts` lines 1983-1988 at the merge base.
+
+```text
+/**
+ * One row of the POLICY-AS-DATA table (rule 2): an observed-state predicate, the disposition it
+ * produces, and the stated reason. Selection lives in {@link DISPOSITION_RULES} — a data
+ * structure, never imperative branches — the same shape the dep and alert lanes use. Adding,
+ * removing or reordering a disposition is a TABLE edit, never a code branch.
+ */
+```
+
+### DispositionRule.when
+
+Archived from `src/lib/sweep.ts` lines 1991-1995 at the merge base.
+
+```text
+  /**
+   * Observed-state predicate over the PR and the tunable {@link SweepPolicy} thresholds. `now` is
+   * the same sweep-pass clock {@link ageDays} came from, threaded so the WAIT and stale-pending
+   * rows derive the pending age without a second, independently-sourced clock.
+   */
+```
+
+### pendingAgeMinutes
+
+Archived from `src/lib/sweep.ts` lines 2000-2010 at the merge base.
+
+```text
+/**
+ * W1-T114 — minutes checks have been pending on this head, or `undefined` when there is nothing to
+ * date. PURE and fail-toward-undefined: never guesses an age observed state cannot support.
+ *
+ * THE FALLBACK IS THE WHOLE FIX: `checksPendingSince` was never wired by any producer, so both
+ * rows required a value that was always `undefined` and every pending PR escalated.
+ * `lastActivityAt` IS populated, so the bound goes live with no gateway change. It is A CEILING ON
+ * WAITING, NOT A LICENCE TO IGNORE — past the ceiling the stale-pending row still escalates, and
+ * the precise field wins when present so wiring it later is a pure upgrade.
+ * // Why: the dead bound produced 57 needs-human issues in one day — docs/forensics/sweep.md.
+ */
+```
+
+### reviewPendingAgeMinutes
+
+Archived from `src/lib/sweep.ts` lines 2019-2024 at the merge base.
+
+```text
+/**
+ * W1-T913 — minutes `remudero-review` has read PENDING on this head, posted by this system
+ * itself, or `undefined` when there is nothing to date. Mirrors {@link pendingAgeMinutes}'s
+ * fallback discipline exactly: the precise field wins when present, `lastActivityAt` stands in
+ * otherwise, so a pending PR is never stranded because a producer lagged or a rotation ate its row.
+ */
+```
+
+### reviewPendingIsStale
+
+Archived from `src/lib/sweep.ts` lines 2033-2041 at the merge base.
+
+```text
+/**
+ * W1-T913 — is a currently-PENDING review old enough that the sweep should stop trusting it and
+ * offer this head to the post-review lane again? Reuses `policy.pendingCeilingMinutes` rather than
+ * a second threshold that could drift from it.
+ *
+ * UNDATED READS STALE — the OPPOSITE direction from the re-push remedy's caution, which exists
+ * because a wrong re-push discards a real in-flight run. Re-offering this head risks no such loss:
+ * a redundant pending post is a no-op. A pending that no path can re-drive does not ship.
+ */
+```
+
+### reviewInputBackoffElapsed
+
+Archived from `src/lib/sweep.ts` lines 2047-2055 at the merge base.
+
+```text
+/**
+ * W1-T1018 — the ELAPSED-TIME BACKOFF replacing permanent cessation. Has enough wall-clock time
+ * passed since this input's last completed judgment for the cap row to YIELD?
+ *
+ * ESCALATE AND KEEP GOING, NEVER ESCALATE INSTEAD OF GOING: the cap still fires the first time,
+ * then the lane resumes once the backoff elapses — never a permanent wall, only a paced one. The
+ * reset is structural, since a new head or body creates another digest. FAILS TOWARD ESCALATING,
+ * never toward silent retrying, which is the dangerous direction.
+ */
+```
+
+### reviewVerdictOvertakenByActivity
+
+Archived from `src/lib/sweep.ts` lines 2063-2069 at the merge base.
+
+```text
+/**
+ * W1-T2299 — THE SUPERSEDED-INPUT DETECTOR: has anything happened to this PR AFTER its current
+ * verdict was posted? NAMED FOR WHAT IT DETECTS — "activity", never "a body edit", since GitHub
+ * carries no body-specific timestamp. That coarseness is tolerable because the consumer ALSO
+ * requires zero judgments for the current digest, which only a real correction resets.
+ * FAILS CLOSED: a missing timestamp reads `false`, so "cannot tell" is never treated as "it did".
+ */
+```
+
+### DISPOSITION_RULES index
+
+Archived from `src/lib/sweep.ts` lines 2079-2113 at the merge base.
+
+```text
+/**
+ * THE POLICY TABLE — ordered rules mapping observed PR-state to a disposition. Precedence is TABLE
+ * ORDER, first match wins, and the terminal row matches unconditionally, so the "no disposition is
+ * ever none" invariant is STRUCTURAL rather than a branch. Because the mapping is DATA, a test or
+ * a policy edit flips a disposition with no change to {@link deriveDisposition}. Each row's own
+ * comment states its trap and citation; this is the index.
+ *
+ *   0.   VERDICT-SUPERSEDED (W1-T920) — a `"superseded"` verdict closes. Reads ONLY `status`.
+ *   1.   SUPERSEDED — a newer PR credits the same task; close. YIELDS on `"unique"` (W1-T932).
+ *   2.   STALE — no activity in >= `policy.staleDays`; close.
+ *   3.   ANSWERED (W1-T78) — an operator's answer re-arms the rung past the original cap.
+ *   3.5. VERDICT OVERTAKEN BY ACTIVITY (W1-T2299) — activity since the verdict, zero judgments
+ *        for the current digest; re-run the lane.
+ *   3.6. UNOWNED FAILURE RECOVERY — a failure the ledger has no judgment for; re-run once.
+ *   4.   FAILING + strikes exhausted -> escalate. Covers blocked_ci: one counter, one route.
+ *   5.   blocked_ci — a required check is red, strikes left -> ci-log fix mode. ORDERED BEFORE the
+ *        review rows, because a verdict beside a red required check may be STALE.
+ *   5.5. Unmet criteria repeat claim-for-claim (W1-T1269) -> escalate BEFORE the cap.
+ *   6.   FAILING + actionable unmet criteria -> fix rung. Also a GATE failure naming a
+ *        single-form remedy (W1-T923) — a third disjunct, never a separate row.
+ *   7.   FAILING + no actionable criteria (contradictory) -> escalate.
+ *   7.5. CONFLICTED (W1-T106) — ABOVE mergeable, so a conflicting PR is NEVER armed however green.
+ *        Only a pure-addition or declared-generator conflict auto-resolves; the rest escalate.
+ *   8.   CI GREEN + REVIEW SUCCESS, POSITIVELY matched only -> mergeable (arm).
+ *   8.5. ZERO-RUNS REQUIRED CHECK (W1-T176) — first sighting posts the review; a SECOND absence
+ *        after a refusal escalates, checked first so a refused head never loops.
+ *   8.6. REVIEW ORPHANED BY A PUSH (W1-T225) — same dispatch, a reason naming the orphaning. At
+ *        cap it escalates only while {@link reviewInputBackoffElapsed} reads false.
+ *   8.7. STALLED-BY-A-TERMINAL-RUN (W1-T2340) — the run that pinned the job has concluded, so
+ *        nothing is left to wait for. Ordered before WAIT for that reason.
+ *   9.   WAIT (W1-T114) — pending with a datable, in-window start; no action, ledgered.
+ *  10.   STALE-PENDING — the same predicate past the ceiling; escalate naming the elapsed minutes.
+ *  11.   TERMINAL catch-all (W1-T93) — the LEAST permissive disposition, never the most.
+ *        `mergeable` is only ever positively matched at row 8, never reached as a fallback.
+ */
+```
+
+### deriveDisposition
+
+Archived from `src/lib/sweep.ts` lines 2554-2563 at the merge base.
+
+```text
+/**
+ * Derive ONE open PR's disposition from observed state and policy — PURE, TOTAL, deterministic.
+ * Holds NO disposition branches: it computes the one derived scalar the table needs and returns
+ * the first matching {@link DISPOSITION_RULES} row.
+ *
+ * W1-T1201 — AGE IS CLAMPED TO THE PR'S OWN LIFETIME, HERE, ONCE, BEFORE ANY ROW READS IT, so
+ * every row inherits the bound. An absent `createdAt` clamps to `+Infinity`, today's arithmetic.
+ * THE CLAMP DOES NOT SILENTLY RESCUE: when it changes the outcome the `reason` says so, because a
+ * rescue nobody can see is how a shifted clock stays invisible until it closes eleven PRs.
+ */
+```
+
+### isCappedReviewOrphanEscalation
+
+Archived from `src/lib/sweep.ts` lines 2598-2607 at the merge base.
+
+```text
+/**
+ * W1-T983 — is this PR's disposition the CAPPED-GREEN-REVIEW-ORPHAN shape: the ONE
+ * blocked-ambiguous disposition reclassified to a reaching escalation tier, while every other
+ * keeps the class it has today. PURE, with no spawn and no GitHub call, and mirrored EXACTLY off
+ * the conditions the cap row already reads, so the two cannot drift apart.
+ *
+ * W1-T1018: DELIBERATELY still four conditions, no fifth backoff check — a PR only reaches this
+ * predicate when the cap row already matched at the same pass, so backoff read un-elapsed a moment
+ * earlier. // Why: the cap fires rarely, which is what keeps this inside the measured ping rate.
+ */
+```
+
+### decideSweepArm
+
+Archived from `src/lib/sweep.ts` lines 2618-2631 at the merge base.
+
+```text
+/**
+ * ARMING PARITY WITH THE RUN FLOW — a PR the run flow refused stayed open and unarmed, but a later
+ * sweep poll could still arm it through this separate path.
+ *
+ * NOT A SECOND IMPLEMENTATION, which is exactly how the two paths drifted apart: this delegates to
+ * {@link decideAutoMergeArm}, the SAME predicate the run flow calls, so the W1-T205 carve-out
+ * travels with it and a `planOnly` CAPPED verdict still arms. The one shape this takes away is the
+ * one the run flow already refuses.
+ *
+ * FAIL-OPEN ON ABSENT EVIDENCE: refusal requires positively observing `capped: true,
+ * plan_only: false` for THIS head. W1-T1028 keys recovery on the same synthetic id the review lane
+ * ledgers under, so a hand-filed PR is judged on the verdict the run flow would find.
+ * // Why: #800 armed at proof_exec 0/5 and merged 35 seconds later — docs/forensics/sweep.md.
+ */
+```
+
+### UpdateBranchOutcome
+
+Archived from `src/lib/sweep.ts` lines 2666-2673 at the merge base.
+
+```text
+/**
+ * W1-T528 — the terminal outcome of ONE `gh pr update-branch` request. Only these three are
+ * established without a live call against a real PR.
+ *  - `"updated"`: GitHub ACCEPTED the request; the update itself completes asynchronously.
+ *  - `"conflict"`: GitHub refused — a real conflict, or a diverged-not-merely-behind head.
+ *    Reported on the ledger and never retried by this same call.
+ *  - `"error"`: any other failure. Informational; a later pass may re-select, this call does not.
+ */
+```
+
+### armedButStalled
+
+Archived from `src/lib/sweep.ts` lines 2676-2684 at the merge base.
+
+```text
+/**
+ * W1-T520 — ARMED AND BEHIND, THE TWO FACTS NOTHING JOINED. Separately unremarkable; together they
+ * describe a PR that has done everything it can and stopped, indistinguishable from one still
+ * waiting for CI.
+ *
+ * WHY THE DETECTOR AND NOT THE FIX: acting mints a NEW HEAD, and a verdict is input-pinned, so
+ * every update discards the verdict it was waiting on. PURE AND FAIL-QUIET — an unread
+ * `mergeState` yields nothing, because an unread fact is not a stall.
+ */
+```
+
+### selectUpdateBranchTarget
+
+Archived from `src/lib/sweep.ts` lines 2700-2711 at the merge base.
+
+```text
+/**
+ * W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
+ * set, never a second predicate recomputing the same two facts.
+ *
+ * ONE PER PASS, OLDEST HEAD FIRST — updating mints a NEW head and a verdict is input-pinned, so
+ * updating the whole stalled set each pass costs N+(N-1)+…+1 reviews. The comparator is shared with
+ * the review admission, so a loser is strictly older next pass and cannot starve.
+ *
+ * TWO EXCLUSIONS on top of the detector's facts, since a red or already-current PR is already
+ * excluded by `armedButStalled`: a DRAFT, the operator's hold, is never touched; and an IN-FLIGHT
+ * HEAD, where a live worker is still pushing. A head that is not a run-branch can never match.
+ */
+```
+
+### StaleGatePr
+
+Archived from `src/lib/sweep.ts` lines 2743-2747 at the merge base.
+
+```text
+/**
+ * One PR {@link redPrWithStaleGate} selected — sibling to {@link ArmedStalledPr}, carrying the ONE
+ * extra fact the caller needs: which failing check's workflow moved on main, so the pair can be
+ * remembered and never re-selected for the same workflow.
+ */
+```
+
+### redPrWithStaleGate
+
+Archived from `src/lib/sweep.ts` lines 2753-2763 at the merge base.
+
+```text
+/**
+ * W1-T1212 — A RED PR RUNS A FROZEN COPY OF THE VERY GATE THAT BLOCKS IT: the merge ref's base
+ * parent is pinned at the last `synchronize`, so a gate fixed on main never reaches an older merge
+ * ref and the PR fails a check main would now pass. `armedButStalled` cannot reach this
+ * population, since a red PR is never armed.
+ *
+ * SIBLING TO THAT PREDICATE, NEVER A WIDENING. THE DISCRIMINATOR IS EXACT, never "behind main"
+ * alone, which would fire on essentially every open PR and pay a rebase storm for nothing.
+ * REFUSED BY NAME: a CONFLICTED PR, and one whose stale names are ALL already spent. The draft and
+ * in-flight vetoes are {@link selectUpdateBranchTarget}'s job, applied to the union exactly once.
+ */
+```
+
+### StrikeAttempt
+
+Archived from `src/lib/sweep.ts` lines 2794-2798 at the merge base.
+
+```text
+/**
+ * One recorded fix-rung strike's outcome for a task — "what the fix worker tried", ledger ground
+ * truth ONLY, never inferred. Derived from `fix.dispatch`/`fix.review` rows by
+ * run-task.ts's `deriveStrikeHistory`.
+ */
+```
+
+### StrikeAttempt.unmetClaims
+
+Archived from `src/lib/sweep.ts` lines 2804-2810 at the merge base.
+
+```text
+  /**
+   * W1-T1269 — the unmet criteria CLAIM SET going into this strike. This is the identity
+   * {@link fixRungRepeatsIdenticalFailure} compares, telling a strike that failed IDENTICALLY from
+   * one that fixed half or fixed one thing while breaking another — {@link unmetCount} cannot
+   * separate those. SCOPE (honest): no producer populates it, and the predicate fails CLOSED, so
+   * row 5.5 stays inert in production.
+   */
+```
+
+### ClarificationQuestion
+
+Archived from `src/lib/sweep.ts` lines 2824-2827 at the merge base.
+
+```text
+/**
+ * The rendered output of the clarification rung for ONE blocked-ambiguous PR: the exact decision,
+ * both candidate resolutions, and the run and PR context — never a generic needs-human.
+ */
+```
+
+### ClarificationQuestion.observedState
+
+Archived from `src/lib/sweep.ts` lines 2844-2847 at the merge base.
+
+```text
+  /**
+   * W1-T186: which named {@link ObservedBlockerState} this escalation observed, or `undefined`
+   * for an ordinary review-failure block where the criterion fields already say everything.
+   */
+```
+
+### renderClarificationQuestion
+
+Archived from `src/lib/sweep.ts` lines 2851-2857 at the merge base.
+
+```text
+/**
+ * Render ONE blocked-ambiguous PR's clarification question deterministically, from ledger ground
+ * truth ONLY: the task id, the unmet criterion (claim vs the reviewer's requirement vs the spec's
+ * own proof text), and what the fix worker tried per strike. PURE, no guessing — with no single
+ * criterion to point at, the question names the observed disposition `reason` instead of
+ * inventing one, but it is NEVER silent either way.
+ */
+```
+
+### toQuestionEntry
+
+Archived from `src/lib/sweep.ts` lines 2929-2933 at the merge base.
+
+```text
+/**
+ * Render a {@link ClarificationQuestion} into the §2 QUESTION contract's shape for the durable
+ * backlog. `current_assumption` names what stays true while the PR is unanswered: it never
+ * proceeds on a guess, it stays blocked.
+ */
+```
+
+### repeatDispositionStreaksFromLedger
+
+Archived from `src/lib/sweep.ts` lines 2964-2973 at the merge base.
+
+```text
+/**
+ * Fold every `sweep.disposed` row into each PR's trailing identical-verdict run.
+ *
+ * KEYED ON `(disposition, head_sha)`, NEVER ON THE RENDERED `reason`, which carries a live counter
+ * that renders differently every tick though the verdict has not moved. EVERY ROW COUNTS
+ * REGARDLESS OF `acted` — gating on it would exempt exactly the shapes this bound exists for. A
+ * differing row breaks the run, which is the head-move reset. `escalated` carries forward only for
+ * as long as THE ROWS IT READS SURVIVE: rotation selects against the marker, so post-rotation this
+ * legitimately reports a fresh run and the defect is not in this function (W1-T2382).
+ */
+```
+
+### renderRepeatEscalationQuestion
+
+Archived from `src/lib/sweep.ts` lines 2994-3000 at the merge base.
+
+```text
+/**
+ * Render the repeat-bound trip as a {@link ClarificationQuestion}: with no single unmet criterion
+ * to point at, the two resolutions name the honest outcomes of a verdict that is not disputed,
+ * only stuck repeating. W1-T2381: NO PRODUCTION CALLER — the call it was written for is gone.
+ * RETAINED because it is exported and pinned by a test, so deleting it would delete a passing test
+ * for behaviour nobody has ruled on.
+ */
+```
+
+### strikeCapForAnswer
+
+Archived from `src/lib/sweep.ts` lines 3040-3045 at the merge base.
+
+```text
+/**
+ * The ADDITIONAL strikes an operator's clarification answer grants — PURE and table-free (a second
+ * lever is a field on {@link ClarifyPolicy}, never a branch here). Two uses, ONE number: it IS the
+ * fresh `strikeCap` the re-dispatch passes to `runFixRung`, and the answered row adds it to
+ * `policy.strikeCap` for the cumulative ceiling — never an unconditional bypass of the count.
+ */
+```
+
+### fixCeilingInForce
+
+Archived from `src/lib/sweep.ts` lines 3050-3056 at the merge base.
+
+```text
+/**
+ * W1-T2452 — THE CUMULATIVE STRIKE CEILING ACTUALLY IN FORCE: `strikeCap` ordinarily, or the
+ * EXTENDED ceiling once an operator's answer is live — the SAME number the answered
+ * {@link DISPOSITION_RULES} row checks, never a second computation that could diverge from the
+ * routing decision. Every rendered strike ratio and the real dispatch budget read THIS function,
+ * so neither can drift from the other; that drift was the defect this closes.
+ */
+```
+
+### fixDispatchBudget
+
+Archived from `src/lib/sweep.ts` lines 3069-3075 at the merge base.
+
+```text
+/**
+ * W1-T2452 — THE STRIKE BUDGET TO DISPATCH: the REMAINDER against {@link fixCeilingInForce}, NEVER
+ * a fresh full cap, because `runFixRung` counts each new call from 0 and a fresh cap let the
+ * cumulative ledger count exceed the ceiling. Returns `null` when the remainder is non-positive,
+ * and THIS IS THE LOAD-BEARING HALF: a silent zero-budget dispatch converts an overspend into a
+ * no-op that strands an otherwise-fixable PR forever, so the caller must escalate instead.
+ */
+```
+
+### operatorVerdictEvidence
+
+Archived from `src/lib/sweep.ts` lines 3090-3097 at the merge base.
+
+```text
+/**
+ * W1-T435 — the fix rung's OPERATOR-STEERED re-arm, producing the SAME
+ * {@link OpenPrView.pendingAnswer} shape W1-T78 wired but never had a producer for, routed through
+ * the identical row and ceiling rather than a second mechanism. ONE pass over TWO local sources:
+ * a one-tap verdict carrying a STEERING NOTE, quoted VERBATIM with attribution, and an ANSWERED
+ * clarification. A `good` verdict NEVER contributes — re-arming on praise would spin the rung
+ * forever on a PR nobody objected to. Both key on `taskId` alone, since the rung dispatches per TASK.
+ */
+```
+
+### FixDispatchEvidence
+
+Archived from `src/lib/sweep.ts` lines 3120-3126 at the merge base.
+
+```text
+/**
+ * The block evidence `dispatchFix` carries, GENERALIZED (W1-T100) from a bare unmet array to the
+ * mode-evidence shape, so a checks-red PR carries ci-log input instead of an always-empty list.
+ * Exactly one field is meaningful per disposition. W1-T2236: `actionableGateFailures` rides
+ * ALONGSIDE `unmetCriteria` on a review-mode dispatch — before it, that structured remedy was
+ * computed, named in the reason, then discarded at exactly this boundary.
+ */
+```
+
+### terminalStateReason
+
+Archived from `src/lib/sweep.ts` lines 3136-3142 at the merge base.
+
+```text
+/**
+ * TERMINAL-STATE PREDICATE (W1-T177) — the ONE definition every spending site and the operator verb
+ * share, so a merged or closed PR is refused IDENTICALLY everywhere rather than through hardcoded
+ * copies that drift. Only `"OPEN"` carries a live block. Classifies a SUCCESSFULLY-READ state
+ * ONLY: each call site owns its own fail-open direction, and an unreadable state must never be
+ * treated as terminal.
+ */
+```
+
+### LiveStateResult
+
+Archived from `src/lib/sweep.ts` lines 3148-3152 at the merge base.
+
+```text
+/**
+ * One fresh, live read of a PR's GitHub state (W1-T177). `ok:false` marks a genuinely FAILED or
+ * INDETERMINATE read, which the caller must treat exactly as if no check ran, never as terminal.
+ * `state` is present only when `ok`.
+ */
+```
+
+### ArmOutcomeName
+
+Archived from `src/lib/sweep.ts` lines 3160-3164 at the merge base.
+
+```text
+/**
+ * The outcome names `armAutoMerge` returns. Mirrored rather than imported to keep lib/sweep.ts
+ * free of a run-task.ts dependency; {@link armOutcomeArmed} is the single place deciding which of
+ * them count as having actually armed.
+ */
+```
+
+### ArmFailureClass
+
+Archived from `src/lib/sweep.ts` lines 3183-3187 at the merge base.
+
+```text
+/**
+ * W1-T1117: `armFailureAction`'s return, mirrored here for the same reason
+ * {@link ArmOutcomeName} is. `"direct-merge"` is deliberately absent: that class never reaches an
+ * `"arm-error-ignored"` outcome, so it can never be the `failureClass` a caller attaches below.
+ */
+```
+
+### ArmAttemptOutcome
+
+Archived from `src/lib/sweep.ts` lines 3190-3195 at the merge base.
+
+```text
+/**
+ * W1-T1117: the richer shape `SweepDeps.arm` may return instead of the bare
+ * {@link ArmOutcomeName} — the same widening run-task.ts already established, reused rather than
+ * reinvented. `failureClass` is populated ONLY alongside `"arm-error-ignored"`; every other
+ * outcome either never attempted a merge or resolved to an already-distinct outcome.
+ */
+```
+
+### armOutcomeArmed
+
+Archived from `src/lib/sweep.ts` lines 3201-3212 at the merge base.
+
+```text
+/**
+ * TRUE only for outcomes that genuinely armed or merged.
+ *
+ *   armed          — auto-merge is registered.
+ *   direct-merged  — GitHub refused `--auto` on an already-clean PR and the fallback merged it.
+ *                    A success though not an arm: the PR leaves `openPrs` next pass.
+ *
+ * Every other outcome armed NOTHING: no-task-id, head-unavailable and ledger-refused returned
+ * before any attempt; direct-merge-failed and arm-error-ignored attempted and did not stick;
+ * irreversible-refused is a deliberate refusal, never a failure. Whether a non-armed outcome is
+ * RETRIED is a separate question the mergeable arm's dedup logic answers.
+ */
+```
+
+### dispatchFixSpent
+
+Archived from `src/lib/sweep.ts` lines 3220-3225 at the merge base.
+
+```text
+/**
+ * W1-T2231 — the SAME "undefined means the pre-existing assumption" idiom {@link armOutcomeArmed}
+ * establishes for `deps.arm`, applied to `deps.dispatchFix`. A `false` return is the ONLY signal
+ * that stands a dispatch's `spent` field down; `undefined` and `true` both read as spent, which
+ * is why the count on every pre-existing ledger row is unchanged.
+ */
+```
+
+### SweepDeps.arm
+
+Archived from `src/lib/sweep.ts` lines 3233-3240 at the merge base.
+
+```text
+  /**
+   * Arm GitHub auto-merge. Idempotent at the GitHub level.
+   *
+   * RETURNS ITS OUTCOME: `armAutoMerge` does not throw, and most outcomes mean it armed NOTHING.
+   * The effect used to discard that value while the sweep recorded `acted: true` regardless, which
+   * hid the refusal and made it PERMANENT, because that seeds the dedup. `void` stays valid and
+   * reads as "armed", the pre-existing assumption. // Why: observed live on PR #960.
+   */
+```
+
+### SweepDeps.disarmAutoMerge
+
+Archived from `src/lib/sweep.ts` lines 3244-3251 at the merge base.
+
+```text
+  /**
+   * W1-T1000002 — WITHDRAW AN ARM THIS LANE DID NOT PLACE, called only when an operator hold
+   * stands over a PR already reporting armed. A disarm alone is undone by the next pass, whose
+   * dedup reads GitHub's live armed bit, so this fires EVERY pass the hold stands and the PR reads
+   * armed — as often as it takes, and zero times once that bit reads false. SAFE WHEN NOT ARMED,
+   * so no extra probe is needed. Omitted, the PR is still never re-armed by this lane, but nothing
+   * withdraws a STANDING arm — never a silent regression for an older fixture.
+   */
+```
+
+### SweepDeps.depReview
+
+Archived from `src/lib/sweep.ts` lines 3255-3260 at the merge base.
+
+```text
+  /**
+   * Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
+   * line records the outcome and dedup can tell TERMINAL outcomes (never re-run for the same head,
+   * or a major would open a fresh issue every poll) from "hold", which re-runs next sweep because
+   * a red check can go green on the SAME sha. Omitted, the disposition is ledgered and nothing runs.
+   */
+```
+
+### SweepDeps.postReview
+
+Archived from `src/lib/sweep.ts` lines 3262-3268 at the merge base.
+
+```text
+  /**
+   * Invoke the review lane on a checks-green PR whose review was never posted. Verdicts are
+   * per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
+   * W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
+   * with each review-input key claimed synchronously before scheduling — so this is never asked to
+   * run twice for the same input at once.
+   */
+```
+
+### selectAdaptiveReviewWidth
+
+Archived from `src/lib/sweep.ts` lines 3270-3273 at the merge base.
+
+```text
+  /**
+   * W1-T2853 — choose this pass's review width from one already-derived queue and ledger snapshot.
+   * Omission preserves the committed `reviewLanes` behaviour for CLI and test callers.
+   */
+```
+
+### SweepDeps.continueReviewAdmissions
+
+Archived from `src/lib/sweep.ts` lines 3279-3286 at the merge base.
+
+```text
+  /**
+   * W1-T2584 — MAY THE BOUNDED REVIEW POOL ADMIT ANOTHER HEAD from this pass's already-derived
+   * pending set? Consulted synchronously before each worker pulls its next job; optional means
+   * `true`. The daemon's callback turns false when the wall-clock bound abandons the pass or a
+   * STOP/PAUSE gate becomes active. It never interrupts a running reviewer — only later
+   * admissions, whose keys are released and whose heads re-derive next pass, so a timer expiry
+   * never becomes cancellation at an arbitrary GitHub-write boundary.
+   */
+```
+
+### SweepDeps.dispatchFix
+
+Archived from `src/lib/sweep.ts` lines 3288-3294 at the merge base.
+
+```text
+  /**
+   * Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at once — the FULL unmet
+   * set for a review dispatch, or ci-log evidence for a blocked_ci one.
+   * W1-T2231: MAY return whether this call demonstrably SPENT a strike. `undefined` reads as spent,
+   * the pre-existing assumption, so this widening regresses no lane and `acted` is never touched
+   * by it — a second field, never a redefinition of the first.
+   */
+```
+
+### SweepDeps.escalate
+
+Archived from `src/lib/sweep.ts` lines 3299-3303 at the merge base.
+
+```text
+  /**
+   * Escalate a BLOCKED-AMBIGUOUS PR. `question` is the rung's rendered
+   * {@link ClarificationQuestion}: the real wiring logs it to the §2 backlog AND uses
+   * `escalate()` as the notification transport, carrying the same two resolutions as its options.
+   */
+```
+
+### SweepDeps.requeueCheck
+
+Archived from `src/lib/sweep.ts` lines 3305-3313 at the merge base.
+
+```text
+  /**
+   * W1-T1223 — re-queue ONE cancelled required check's JOB
+   * (`POST .../actions/jobs/{job_id}/rerun`), NEVER the workflow run
+   * (`.../runs/{run_id}/rerun-failed-jobs`): a whole-run re-run would re-spend an already-green
+   * sibling sharing that run. Called AT MOST ONCE per `${headSha}@${checkName}` pair. Omitted, the
+   * sweep still names the cancelled check on its disposed line but takes no action — never a
+   * silent no-op, the stand-down is legible.
+   * // Why: learnings/ci.yaml#rerun-the-job-not-the-run pins this endpoint literal.
+   */
+```
+
+### SweepDeps.escalateCancelledCheck
+
+Archived from `src/lib/sweep.ts` lines 3315-3320 at the merge base.
+
+```text
+  /**
+   * W1-T1223 — a SECOND cancellation of the SAME check on the SAME head, after this lane already
+   * spent its one re-queue. Distinct from `escalate`, which asks an operator to pick between two
+   * candidate diffs: here there is no diff to choose, only a CI-side fault re-queueing cannot
+   * reach. Omitted, the sweep still names the second cancellation on its disposed line.
+   */
+```
+
+### SweepDeps.readCiGateRollup
+
+Archived from `src/lib/sweep.ts` lines 3322-3329 at the merge base.
+
+```text
+  /**
+   * W1-T1275 — an OPTIONAL fresh read of ONE PR's live rollup, consulted immediately before a
+   * blocked-fixable disposition acts. Never the snapshot this pass started from, for the same
+   * reason {@link readLiveState} takes that shape: {@link staleCiGateTransition} must compare
+   * against a sibling's CURRENT latest attempt. Deliberately NOT a field on `OpenPrView`, which
+   * would need a producer literal merely to satisfy producer-completeness for a value only ever
+   * correct freshly read. Omitted, the lane never fires — the pre-existing behaviour byte for byte.
+   */
+```
+
+### SweepDeps.reaggregateCiGate
+
+Archived from `src/lib/sweep.ts` lines 3331-3336 at the merge base.
+
+```text
+  /**
+   * W1-T1275 — re-drive `ci-gate`'s OWN job through the same per-job Actions route
+   * {@link requeueCheck} uses, when {@link staleCiGateTransition} names a sibling that reached a
+   * terminal success LATER than the gate's own verdict. Called AT MOST ONCE per (head,
+   * sibling-transition). Omitted, the sweep still ledgers the transition and stands down.
+   */
+```
+
+### SweepDeps.readLiveState
+
+Archived from `src/lib/sweep.ts` lines 3338-3344 at the merge base.
+
+```text
+  /**
+   * W1-T177 — an OPTIONAL fresh re-read of ONE PR's live state, consulted immediately before a
+   * blocked-fixable disposition SPENDS a strike. Never the snapshot this pass started from, which
+   * may already be stale by the time a later PR is reached (#388: merged mid-sweep, dispatched
+   * anyway). Omitted, or a failed read, behaves exactly as before this check existed — standing
+   * down fires ONLY on a positive, freshly observed terminal reading.
+   */
+```
+
+### SweepDeps.readRedBaseRefreshFacts
+
+Archived from `src/lib/sweep.ts` lines 3346-3350 at the merge base.
+
+```text
+  /**
+   * W1-T2789 — fresh reversed-compare evidence for a checks-red PR that the strike table would
+   * otherwise make terminal. Optional/unreadable means the ordinary disposition is preserved.
+   * The decision itself is {@link decideRedBaseRefresh}, shared verbatim with the fix rung.
+   */
+```
+
+### SweepDeps.actionable
+
+Archived from `src/lib/sweep.ts` lines 3352-3358 at the merge base.
+
+```text
+  /**
+   * W1-T254 — when supplied, gates which disposition may actually act THIS pass; one that fails
+   * the predicate stands down, still ledgered, never silently skipped. The light-sweep ticker
+   * admits only `post-review`, the deterministic sha-pinned re-post safe alongside a running task,
+   * so every other lane waits for the next full sweep. Those calls now run concurrently with each
+   * other, so this lane is no longer "serialized" — it is the one safe to run alongside `runOne`.
+   */
+```
+
+### SweepDeps.standDownReasonFor
+
+Archived from `src/lib/sweep.ts` lines 3360-3366 at the merge base.
+
+```text
+  /**
+   * W1-T2426 — WHY {@link SweepDeps.actionable} REFUSED, when the caller can say. That predicate is
+   * bare, so every disposition it gates recorded one generic sentence — legible for a lane the
+   * light pass never runs, NOT legible for a `post-review` that was eligible and merely lost this
+   * pass's admission. Consulted ONLY after a refusal, so it can never admit anything.
+   * // Why: 289 such rows across 18 PRs, none naming the mechanism.
+   */
+```
+
+### SweepDeps.detachFixWait
+
+Archived from `src/lib/sweep.ts` lines 3369-3375 at the merge base.
+
+```text
+  /**
+   * W1-T2379 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set ONLY by {@link runSweepLightPass}.
+   * WHAT IT CHANGES, PRECISELY: the dispatch is still CALLED and still writes its `acted: true` row
+   * before returning, so the dedup seed is untouched — only the `await` moves into
+   * {@link drainDetachedSweepActions}. NOT AN ADMISSION CHANGE: this decides only how long the
+   * caller blocks, never whether a fix may be dispatched.
+   */
+```
+
+### SweepDeps.repushAbsent
+
+Archived from `src/lib/sweep.ts` lines 3377-3381 at the merge base.
+
+```text
+  /**
+   * THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Pushes an EMPTY commit to the PR's own
+   * branch, minting a fresh head sha, and returns it. Omitted, the lane stands down and the
+   * ordinary escalation runs — never a silent no-op, the stand-down is named on the disposed line.
+   */
+```
+
+### SweepDeps.updateBranch
+
+Archived from `src/lib/sweep.ts` lines 3383-3388 at the merge base.
+
+```text
+  /**
+   * W1-T528 — press the update-branch button. Invoked AT MOST ONCE per pass, on the single PR
+   * {@link selectUpdateBranchTarget} chose: never a loop, never a second attempt this pass.
+   * Omitted, the pass reports the stalled set and requests nothing. A `"conflict"` outcome is
+   * REPORTED and never retried by this call; a later pass makes its own fresh selection.
+   */
+```
+
+### SweepDeps.inFlightTaskIds
+
+Archived from `src/lib/sweep.ts` lines 3390-3394 at the merge base.
+
+```text
+  /**
+   * W1-T528: task ids with a LIVE in-flight run right now. Consulted by
+   * {@link selectUpdateBranchTarget} to skip a head a live worker is still pushing to. Omitted
+   * means an empty set, exactly as if every PR's worker had already finished.
+   */
+```
+
+### SweepDeps.staleGateWorkflowsByPr
+
+Archived from `src/lib/sweep.ts` lines 3396-3401 at the merge base.
+
+```text
+  /**
+   * W1-T1212 — per red PR, the failing check names whose defining workflow blob differs between
+   * this PR's OWN merge ref and main RIGHT NOW: the ONLY population {@link redPrWithStaleGate}
+   * draws from. Cheap and exact, never re-derived from `checksState` alone, which is what let a
+   * red PR spin forever behind a gate that had already moved on main. Omitted means an empty map.
+   */
+```
+
+### SweepDeps.updatedForWorkflow
+
+Archived from `src/lib/sweep.ts` lines 3403-3408 at the merge base.
+
+```text
+  /**
+   * W1-T1212 — every `${prNumber}:${workflowName}` pair this lane has ALREADY requested an update
+   * for. An update mints a new head and a second request for the same pair is a no-op that still
+   * spends one, so a fired pair must be remembered and skipped. Read from prior ledger rows, the
+   * SAME durable sink every other dedup here uses, never a second store. Omitted means empty.
+   */
+```
+
+### SweepDeps.readMainTip
+
+Archived from `src/lib/sweep.ts` lines 3410-3416 at the merge base.
+
+```text
+  /**
+   * W1-T2620 — an OPTIONAL, per-PASS read of `origin/main`'s CURRENT tip, consulted ONCE before
+   * the per-PR walk, never per PR. This module never calls gh or git, so the read is the caller's.
+   * Feeds {@link selectBaseCausedRelease}'s "main has moved" condition — never the `behind`
+   * GitHub reports, since a base-caused PR is red by construction and cannot read `"behind"`.
+   * Omitted, the release lane never fires and the pass is BYTE-IDENTICAL to before this task.
+   */
+```
+
+### SweepDeps.releaseBaseCausedStandDown
+
+Archived from `src/lib/sweep.ts` lines 3418-3424 at the merge base.
+
+```text
+  /**
+   * W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
+   * AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS — the same
+   * push leaf already wired elsewhere, never a second outward path. Omitted, the target still
+   * stands down with the ordinary sentence; a THROW is caught and treated identically, FAIL QUIET,
+   * never a false "released" ledger line.
+   */
+```
+
+### SweepDeps.dryRun
+
+Archived from `src/lib/sweep.ts` lines 3438-3441 at the merge base.
+
+```text
+  /**
+   * Preview only: derive dispositions, take NO effects, write NO ledger lines.
+   * Returns the same summary shape so `rmd sweep --dry-run` can print the plan.
+   */
+```
+
+### SweepDeps.captureRepairFeedback
+
+Archived from `src/lib/sweep.ts` lines 3443-3449 at the merge base.
+
+```text
+  /**
+   * W1-T905 — best-effort capture of a §7B entry for ONE surface found due this pass.
+   * NEVER ALLOWED TO FAIL THE PASS that produced the repairs it reports on: every call is wrapped
+   * in the SAME throw containment the action switch has. This pure module never touches the
+   * filesystem — the fold recomputes fresh with no memory of what was filed, and the injected
+   * dep's own idempotent write is the entire "no second store" guarantee.
+   */
+```
+
+### SweepDeps.costAnomalyPolicy
+
+Archived from `src/lib/sweep.ts` lines 3451-3456 at the merge base.
+
+```text
+  /**
+   * W1-T931 COST-ANOMALY SENTINEL — the `plan/policy.yaml` policy this pass consults; see
+   * `cost-anomaly.ts`'s header for the rationale. Omitted, `runSweep` resolves the default,
+   * memoized for the process lifetime. A test wanting different thresholds without touching
+   * `plan/policy.yaml` on disk passes its own policy here.
+   */
+```
+
+### SweepAction.actionError
+
+Archived from `src/lib/sweep.ts` lines 3471-3475 at the merge base.
+
+```text
+  /**
+   * W1-T254: set when this PR's gated action THREW. `acted` is false, but this is distinct from
+   * dedup, dry-run and stand-down: the action was attempted and failed, and is named here rather
+   * than propagating out of `runSweep` and aborting the rest of the pass.
+   */
+```
+
+### SweepAction.spent
+
+Archived from `src/lib/sweep.ts` lines 3477-3482 at the merge base.
+
+```text
+  /**
+   * W1-T2231 — set ONLY for the two dispatch-based repair surfaces whose dispatch returned a
+   * concrete verdict. `undefined` everywhere else, including today's real wiring, and deliberately
+   * NEVER read as "no repair" — only an EXPLICIT `false` is. THIS IS NEVER `acted`, AND NEVER
+   * CHANGES IT: `acted` still means "the lane was invoked" and stays the dedup seed.
+   */
+```
+
+### SweepSummary.actionsFailed
+
+Archived from `src/lib/sweep.ts` lines 3494-3498 at the merge base.
+
+```text
+  /**
+   * W1-T99: how many gated effects were ATTEMPTED and THREW — distinct from `actionsTaken` and
+   * from PRs that never attempted. Each also has its own `sweep.action_failed` ledger line; this
+   * is the pass-level count a caller reads without re-deriving it from `actions`.
+   */
+```
+
+### PriorActions.escalated
+
+Archived from `src/lib/sweep.ts` lines 3514-3520 at the merge base.
+
+```text
+  /**
+   * `pr@head` keys, exactly like the sibling sets (W1-T514). PR-number-only until then, which let
+   * one `acted:true` line at head A dedup the SAME PR forever, including a genuinely NEW block at
+   * head B — where `escalate()`'s own composite key already knows to open a fresh issue. That
+   * transport-side fix was unreachable while this gate never let a second head through. A new head
+   * re-earns the attempt; the SAME head still dedupes, so there is no per-push storm.
+   */
+```
+
+### PriorActions.reviewDelivered
+
+Archived from `src/lib/sweep.ts` lines 3524-3529 at the merge base.
+
+```text
+  /**
+   * Exact-input keys with a DELIVERED verdict. NOT keyed off `sweep.disposed acted:true` like the
+   * other sets: that proves only the LANE WAS INVOKED, never that it reached a verdict, and keying
+   * on the attempt suppressed the same input forever after one no-op invocation. W1-T1213 split off
+   * {@link reviewRefused} — a DELIVERED VERDICT and a REFUSED ATTEMPT are not the same fact.
+   */
+```
+
+### PriorActions.reviewRefused
+
+Archived from `src/lib/sweep.ts` lines 3531-3538 at the merge base.
+
+```text
+  /**
+   * Exact-input keys with an explicit refusal that still suppresses this input — every refusal
+   * EXCEPT the class {@link isReopenedClosedLifecycleRefusal} names as provably stale. A refusal
+   * leaves GitHub's status untouched, so without a key the lane would re-invoke the same input
+   * every pass. W1-T1213: the "already closed" refusal is never admitted, because its own condition
+   * is FALSIFIED BY CONSTRUCTION. That re-arms the head WITHOUT deciding anything — the lifecycle
+   * gate is re-tested fresh. Every OTHER refusal, "already merged" included, suppresses forever.
+   */
+```
+
+### PriorActions.reviewRetryableThrows
+
+Archived from `src/lib/sweep.ts` lines 3540-3545 at the merge base.
+
+```text
+  /**
+   * Exact-input keys whose sweep-owned review attempt THREW before it delivered a verdict.
+   * The value is the latest parseable ledger timestamp in milliseconds, or `undefined` when
+   * every matching row is undated. Unlike {@link reviewRefused}, this is a bounded retry clock,
+   * not a semantic or lifecycle decision about the PR (W1-T2753).
+   */
+```
+
+### PriorActions.riskRefused
+
+Archived from `src/lib/sweep.ts` lines 3547-3554 at the merge base.
+
+```text
+  /**
+   * W1-T970 — keys built off the risk judge's OWN step, never from `sweep.disposed`.
+   * PR-NUMBER-KEYED, deliberately unlike the review sets: the sweep has the number in hand and the
+   * producer emits it, so there is no `??` fallback anywhere on this path and the
+   * matching-nothing collapse that shipped in #1931 has no equivalent here. A refusal expires on a
+   * NEW head sha or an explicit override, never by time. A MAP since W1-T1116, so a refused hold
+   * can name the SAME issue rather than making a reader find that row.
+   */
+```
+
+### PriorActions.absentRepushes
+
+Archived from `src/lib/sweep.ts` lines 3556-3561 at the merge base.
+
+```text
+  /**
+   * ABSENT-check-suite re-push history, read from this module's OWN `sweep.absent_repush` step.
+   * TWO keys because one is not enough: `shas` gives same-head idempotence, and `count` per PR is
+   * the BOUND — a re-push mints a NEW sha, so a sha key alone would license an unbounded chain of
+   * empty commits on a PR GitHub never schedules.
+   */
+```
+
+### BUDGET_FLOOR_LANE_COST
+
+Archived from `src/lib/sweep.ts` lines 3584-3589 at the merge base.
+
+```text
+/**
+ * W1-T529 — WHAT EACH LANE'S STAND-DOWN COSTS, NAMED SO THE COST IS CHOSEN RATHER THAN DISCOVERED,
+ * and carried verbatim into the PR's own reason so a declined pass reads as declined, not idle.
+ * THIS TABLE NAMES A COST; IT DECIDES NOTHING — by the time it is read the guarded call has ALREADY
+ * been refused. A disposition missing from it still stands down under the generic reason.
+ */
+```
+
+### budgetFloorStandDown
+
+Archived from `src/lib/sweep.ts` lines 3610-3619 at the merge base.
+
+```text
+/**
+ * W1-T529 — IS THIS THROW THE BUDGET FLOOR, AND WHAT DOES DECLINING THIS LANE COST? Returns the
+ * stand-down reason when it is, `undefined` for every other throw.
+ *
+ * WHY THE TWO CLASSES MUST NOT SHARE A PATH: a stand-down is not a failed action — the call never
+ * ran. Routing it through `actionError` would write a `review.post_refused` row, and that row is
+ * not a diagnostic but a VERDICT, so a PR merely unaffordable for one tick would be deduped
+ * permanently and then escalated. AND NO SECOND NO-STRIKE MECHANISM: every caller sets
+ * `acted = false`, which alone is the guarantee.
+ */
+```
+
+### isReopenedClosedLifecycleRefusal
+
+Archived from `src/lib/sweep.ts` lines 3626-3633 at the merge base.
+
+```text
+/**
+ * W1-T1213 — is `reason` the SPECIFIC "PR is already closed" half of `decideReviewStatusPost`'s
+ * lifecycle refusal? Matched on that function's own literal, verbatim, so this is the intended
+ * read rather than a guess at prose that could drift.
+ *
+ * DELIBERATELY NOT the "already merged" sibling: a merged PR has no transition back to
+ * `state=open`, so that refusal has no falsifier and must keep suppressing forever.
+ */
+```
+
+### fixRungStalledWithoutNewHead
+
+Archived from `src/lib/sweep.ts` lines 3778-3793 at the merge base.
+
+```text
+/**
+ * W1-T1110 — HAS THE MOST RECENT `fix.dispatch` FOR THIS TASK ALREADY CONCLUDED WITHOUT LANDING A
+ * NEW HEAD? `prior.fixed` records only that a fix was DISPATCHED, never an outcome, and clears
+ * only on a new head — so a dispatch that ran and ENDED without pushing leaves the key set and the
+ * head unmoved, and every later pass stands down FOREVER.
+ *
+ * Reads the two steps that answer "concluded, and did NOT succeed". `fix.resolved` is read but
+ * never counted as stalled, since re-arming on a landed push risks a redundant dispatch. TASK-ID
+ * KEYED, safe because every caller already guards on the PR's CURRENT head being the dispatched
+ * one, and scoped to the MOST RECENT dispatch so an earlier conclusion never re-arms a live strike.
+ *
+ * W1-T1210 — A TASKID WITH NO `fix.dispatch` ROW IS THE SAME SHAPE ONE STEP EARLIER: the caller
+ * can throw before the rung starts while the seeding row is still written `acted: true`. Such a
+ * seed owns no fix row, so nothing can mark it stalled and it reads as healthily in flight when
+ * nothing started. The ABSENCE of the row is the falsifier. // Why: docs/forensics/sweep.md.
+ */
+```
+
+### REPAIR_SURFACE_DISPOSITIONS
+
+Archived from `src/lib/sweep.ts` lines 3822-3826 at the merge base.
+
+```text
+/** The dispositions {@link priorActionsFromLedger}'s switch treats as an actual REPAIR verb having
+ *  fired. `mergeable` is the HEALTHY outcome, not a defect, and the routing states have no repair
+ *  verb of their own. Scoped to exactly these four so a PR arming fifteen times — ordinary, healthy
+ *  throughput — never floods the §7B inbox, the wrong-recurrence-key failure this task's risk note
+ *  names explicitly. */
+```
+
+### dueRepairFilings
+
+Archived from `src/lib/sweep.ts` lines 3858-3868 at the merge base.
+
+```text
+/**
+ * PURE fold over already-written `sweep.disposed` rows — no new ledger row, nothing new to read.
+ * Counts the DISTINCT PRs repaired for each surface inside the current epoch-anchored window, so
+ * the same window yields the same filing id. Fifteen PRs repaired for one surface must produce ONE
+ * entry, never fifteen, and a single repair must produce NONE.
+ *
+ * DISTINCT PRs rather than raw rows is deliberate: one PR stuck across many passes must never
+ * inflate the count alone. No I/O and no dedup memory — it recomputes fresh every call.
+ * W1-T2231: `acted: true` proves only that the LANE WAS INVOKED, so a row whose `spent` reads
+ * EXPLICITLY `false` is excluded. A NARROWING, never a rejoin against a different key.
+ */
+```
+
+### renderRepairFilingRaw
+
+Archived from `src/lib/sweep.ts` lines 3935-3940 at the merge base.
+
+```text
+/**
+ * Render ONE due surface's evidence body: the classified surface, the window and threshold that
+ * triggered filing, and per repaired PR the number, url, head sha and the disposition `reason`
+ * already ledgered for it. NEVER invents a cause — root cause is explicitly stated as unobserved,
+ * since this fold only ever reports RECURRENCE.
+ */
+```
+
+### inFlightReviewKeys
+
+Archived from `src/lib/sweep.ts` lines 3968-3974 at the merge base.
+
+```text
+/**
+ * W1-T513 — THE CROSS-CALL REVIEW-KEY MUTEX. The claim set used to be declared FRESH INSIDE every
+ * `runSweep` call, so it arbitrated only between PRs in that ONE call and gave no protection at
+ * all between two SEPARATE invocations racing. MODULE-SCOPED so every caller in the process shares
+ * it without new wiring. NOT PROCESS-GLOBAL-FOREVER: a key is added when a worker is ready to
+ * START, not while the walk discovers it, and removed the instant the attempt settles.
+ */
+```
+
+### inFlightFixKeys
+
+Archived from `src/lib/sweep.ts` lines 3977-3988 at the merge base.
+
+```text
+/**
+ * W1-T2520 — THE FIX-DISPATCH MUTEX, {@link inFlightReviewKeys}'s SIBLING for the other lane.
+ * `priorStrikes` is derived by COUNTING dispatch rows at view-build time, with no exclusion
+ * between that count and the dispatch it gates, so two calls in one process can both read the same
+ * pre-dispatch state and both see strikes under the cap.
+ *
+ * A CLAIM ALONE IS NOT ENOUGH: a later, non-concurrent call would still carry the first call's
+ * stale count, so {@link claimFixDispatch} RE-READS the ledger the instant the claim is taken.
+ * KEYED IDENTICALLY to the review mutex so there is one spelling of "this PR is being worked", but
+ * a SEPARATE Set — the two lanes are different budgets and must never block each other.
+ * // Why: observed live as 13 dispatches across two PRs against a cap of 2.
+ */
+```
+
+### fixLedgerRowsForHead
+
+Archived from `src/lib/sweep.ts` lines 3991-3997 at the merge base.
+
+```text
+/**
+ * W1-T2788 — select the fix-rung ledger generation attributable to `currentHeadSha`. New rows name
+ * the head they targeted and require exact equality; legacy rows carry no head and reset only at a
+ * trustworthy observation for this task at the current head, so an incomplete history fails closed
+ * rather than manufacturing strike budget. `fix.review` also carries no head, so associate it only
+ * with the most recent selected dispatch sharing its strike number.
+ */
+```
+
+### freshFixDispatchCount
+
+Archived from `src/lib/sweep.ts` lines 4044-4050 at the merge base.
+
+```text
+/**
+ * W1-T2520 — the fresh under-claim counterpart to `priorStrikesFor`. What it adds is FRESHNESS: it
+ * reads the ledger AFTER taking the claim, so two callers cannot act on the same stale count.
+ * COUNTS DISTINCT `strike` NUMBERS, NOT RAW ROWS — two GENUINE strikes can never share a number, so
+ * a duplicate value is always the SAME attempt re-described. Rows with no numeric `strike` are each
+ * counted on their own, the ledger giving this fold nothing to dedupe them by.
+ */
+```
+
+### DetachedSweepActionRegistration
+
+Archived from `src/lib/sweep.ts` lines 4070-4081 at the merge base.
+
+```text
+/**
+ * W1-T2379 — THE DETACHED-WAIT REGISTRY, module-scoped for the reason {@link inFlightReviewKeys}
+ * is. WHY IT EXISTS: the ticker awaits the light pass, which awaits every open PR, and
+ * `dispatchFix` waits on CI — so the tick's period was the interval plus the longest action, a
+ * term bounded by GitHub Actions rather than anything this repo sets.
+ *
+ * NOT FIRE-AND-FORGET, WHICH IS THE WHOLE DIFFICULTY: the dispatch is STARTED and its `acted: true`
+ * row WRITTEN synchronously inside the pass, because that row seeds the dedup and is what
+ * {@link fixRungStalledWithoutNewHead} re-arms from. Only the CI wait moves out of the await. A
+ * DETACHED REJECTION IS SWALLOWED ON PURPOSE — rethrowing would surface long after the pass
+ * returned, attributable to nothing.
+ */
+```
+
+### detachSweepAction
+
+Archived from `src/lib/sweep.ts` lines 4092-4096 at the merge base.
+
+```text
+/**
+ * W1-T2379: hand a started action to {@link detachedSweepActions} so the caller need not await it.
+ * The stored promise is already settled-safe — its rejection is caught here — so a drain can never
+ * itself reject. Returns nothing: a caller wanting the outcome must await the original.
+ */
+```
+
+### drainDetachedSweepActions
+
+Archived from `src/lib/sweep.ts` lines 4109-4113 at the merge base.
+
+```text
+/**
+ * W1-T2379 — LET WORK ALREADY IN FLIGHT FINISH RATHER THAN ABORTING IT. Awaits every detached
+ * action and settles once they all have. W1-T2744: an explicit daemon-lifetime seam, never part of
+ * a phase-local ticker's stop. W1-T2913: a bounded drain reports stragglers; cleanup stays unbounded.
+ */
+```
+
+### runSweep and oldestByCreation
+
+Archived from `src/lib/sweep.ts` lines 4150-4173 at the merge base.
+
+```text
+/**
+ * THE SHARED ENTRY POINT: BOTH `rmd sweep` and the daemon poll loop call this ONE function. It
+ * re-derives every open PR's disposition fresh, takes the ONE gated action per PR, writes one
+ * `sweep.disposed` line per PR, and returns a summary both callers log.
+ *
+ * W1-T473 — REVIEW CONCURRENCY: every disposition EXCEPT `post-review` runs as before, one PR at a
+ * time in `openPrs` order. `post-review` PRs run in a SECOND, bounded phase, each against a
+ * DISTINCT key claimed synchronously during the walk — the real mutual exclusion the
+ * single-threaded walk used to supply for free. The lane count is a CEILING, never a target, and
+ * `summary.actions` still returns in `openPrs` order whichever phase finalized each PR.
+ */
+/**
+ * W1-T1218 — THE REVIEW LANE'S ORDER, AS A PURE FUNCTION: a NEW array ordered OLDEST-FIRST, so
+ * bounded workers pull the entries that have waited longest.
+ *
+ * WHY: insertion order is enumeration order and GitHub answers the unsorted listing newest-first,
+ * so cutting by position puts the OLDEST entries below the cut and re-deriving reproduces the same
+ * order — a PR below the cut is deferred indefinitely. THE KEY IS `createdAt`, with `prNumber` as
+ * both tiebreak and substitute, which keeps the comparator TOTAL.
+ *
+ * THE COST, NAMED RATHER THAN SOLD: creation time is not waiting time, so a long-lived PR pushed
+ * moments ago can take a lane ahead of a younger one waiting hours. That is a fairness
+ * imperfection, not a starvation one, and it is INERT when every entry gets a lane.
+ */
+```
+
+### the cost-anomaly sentinel
+
+Archived from `src/lib/sweep.ts` lines 4279-4285 at the merge base.
+
+```text
+  // ── W1-T931 COST-ANOMALY SENTINEL ───────────────────────────────────────────────────────────
+  // Hung off THIS pass rather than a new call site: `runSweep` already read the whole ledger and
+  // already runs on the daemon's cadence — the cost-governance path the ceiling already lives on.
+  // Independent of `openPrs` (a zero-PR pass still checks for a class median outlier), guarded by
+  // `!deps.dryRun` like every other write here, and wrapped in the SAME throw containment: a
+  // detector failure must never fail the reconciliation pass it shares a ledger read with.
+  // `recordCostAnomalies` is idempotent per run id and performs no effect beyond one append.
+```
+
+### the review concurrency budget
+
+Archived from `src/lib/sweep.ts` lines 4315-4321 at the merge base.
+
+```text
+  // ── W1-T473/W1-T513 — REVIEW CONCURRENCY BUDGET STATE ──────────────────────
+  // `claimedReviewKeys` is the REAL mutual exclusion concurrency needs. A worker consults and
+  // updates it synchronously immediately before its `postReview` attempt, so two workers sharing
+  // a key can never run that effect concurrently. Discovery alone does not claim: the pass-level
+  // snapshot may be stale by worker start, so `claimReview` re-reads the durable outcomes under
+  // the claim. W1-T513 made it the module-level set, closing the gap a fresh per-call Set left
+  // between two genuinely concurrent `runSweep` calls, with no change to the exclusion boundary.
+```
+
+### claimReview
+
+Archived from `src/lib/sweep.ts` lines 4324-4330 at the merge base.
+
+```text
+  /**
+   * W1-T2771 — CLAIM AT ACTION TIME, THEN RE-READ THE OUTCOME UNDER THE CLAIM. The old placement
+   * claimed during the sequential walk, so a later fix action could hold a review candidate's key
+   * for minutes with no review in flight while that candidate monopolised a scarce admission. The
+   * fresh read is the other half: reading synchronously after `add` makes the mutex and the durable
+   * outcome one atomic decision boundary.
+   */
+```
+
+### claimFixDispatch
+
+Archived from `src/lib/sweep.ts` lines 4370-4377 at the merge base.
+
+```text
+  /**
+   * W1-T2520 — CLAIM THIS PR'S FIX-DISPATCH KEY, or refuse: the fix-rung twin of the review claim
+   * above, for the OTHER lane that spends a worker. Refuses in exactly two shapes, both
+   * SYNCHRONOUS — no `await` ever separates the check from the claim: a genuinely concurrent
+   * second claim, or a strike count RE-READ off the ledger the instant the claim is taken (never
+   * trusted off this pass's snapshot) that has already reached {@link fixCeilingInForce}.
+   * Only a successful claim releases, in a `finally`, once the guarded call SETTLES either way.
+   */
+```
+
+### finalizeDisposition
+
+Archived from `src/lib/sweep.ts` lines 4428-4436 at the merge base.
+
+```text
+  /**
+   * The tail every disposition shares once `acted`, `actionError` and `standDownReason` are known
+   * — factored out so the synchronous walk and the concurrent review batch ledger and log
+   * IDENTICALLY. Unconditional counting matches the original inline placement exactly: a deduped
+   * PR reaches here with `acted:false` and no error, so neither counter moves.
+   *
+   * W1-T1061: `armOutcome` rides alongside `standDownReason` rather than only inside it, so a
+   * caller counting outcomes need not split that sentence on a colon.
+   */
+```
+
+### the per-pass heartbeat
+
+Archived from `src/lib/sweep.ts` lines 4543-4555 at the merge base.
+
+```text
+  // ── PER-PASS HEARTBEAT, WRITTEN BEFORE THE LOOP ────────────────────────────────────────────
+  // A BLIND SWEEP AND A QUIET FLEET ARE INDISTINGUISHABLE without this. `sweep.disposed` writes a
+  // decision per PR per tick, so its ABSENCE is the only other signal — and absence is exactly
+  // what a healthy quiet period looks like, which is why no threshold over that step can work.
+  //
+  // `sweep.summary` is not already this: it sits AFTER the loop, so a pass that dies mid-way
+  // writes nothing at all. POSITION IS THE WHOLE POINT — written here, a pass that throws mid-loop
+  // still leaves this row, so "started but never summarised" becomes a legible state.
+  //
+  // `enumerated` is deliberately the ONLY count: how many were dispositioned cannot be known
+  // before the loop runs. The pair — this row present, a summary absent — is the mid-pass-death
+  // signal `judgeSweepLiveness` reads. Registered RENDER_RELEVANT, not DECISION_RELEVANT, so it
+  // rotates on the recency window rather than being kept forever (W1-T1237).
+```
+
+### sweep.repeat_escalated
+
+Archived from `src/lib/sweep.ts` lines 4579-4584 at the merge base.
+
+```text
+        // W1-T2381: THE LEDGER ROW IS THE WHOLE OUTPUT — no `deps.escalate()` call. W1-T2345's own
+        // rationale refused the issue surface in terms ("the escalation surface is THE DIGEST")
+        // and its build routed the trip there anyway; the dedup key is task+head+cause and never
+        // the repeat condition, so the comments landed on issues titled for a different cause.
+        // THE SURFACE IS `digest.ts`, which reads this row directly and consumes exactly the three
+        // fields written below. // Why: measured over eight trips — docs/forensics/sweep.md.
+```
+
+### mergeable arm dedup
+
+Archived from `src/lib/sweep.ts` lines 4624-4632 at the merge base.
+
+```text
+        // PREFER OBSERVED STATE: GitHub's own `autoMergeArmed` is the authority for "already
+        // armed"; the sweep's memory is a fallback, now sha-keyed so a new head re-earns the
+        // attempt rather than being deduped on a stale success.
+        //
+        // W1-T970: a head the risk judge escalated is refused HERE, in `alreadyDone`, never in the
+        // rule's `when` and never in the merge path. That gives it the SAME non-action shape every
+        // other dedup has: no escalation, no strike, re-derived whole next pass. It clears on a NEW
+        // head sha or an explicit operator override, reusing the existing verb — not a second
+        // override vocabulary.
+```
+
+### re-arm a stalled dispatch
+
+Archived from `src/lib/sweep.ts` lines 4672-4677 at the merge base.
+
+```text
+        // W1-T1110 — RE-ARM A STALLED DISPATCH: `dispatchedThisHead` records only that a fix was
+        // DISPATCHED, never that it succeeded. If the ledger shows that rung already ENDED without
+        // landing a new head, treating it as "already done" would dedup this PR against a head
+        // nothing will ever move again — so it does NOT suppress this pass, and the strike cap
+        // still bounds whatever follows. A dispatch that RESOLVED is never read as stalled, so it
+        // keeps suppressing a second attempt on this same, now-stale head.
+```
+
+### post-review dedup key
+
+Archived from `src/lib/sweep.ts` lines 4723-4729 at the merge base.
+
+```text
+        // W1-T254: OUTCOME-keyed, by taskId rather than prNumber — the review rows carry no PR
+        // number, only the taskId the lane resolved.
+        //
+        // W1-T1213: a DELIVERED verdict suppresses this head forever, as before. A REFUSED attempt
+        // also suppresses UNLESS it was the stale "PR is already closed" refusal, in which case
+        // reaching this check already proves the PR is open again. That clears the dedup; it does
+        // not post a verdict or arm anything.
+```
+
+### post-review dedup naming
+
+Archived from `src/lib/sweep.ts` lines 4735-4739 at the merge base.
+
+```text
+        // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT OTHERWISE LOOK IDENTICAL: this
+        // dedup firing, `deps.postReview` never being wired, the light-pass admission being lost
+        // to another PR, or a dry run. Only the first is this arm, and only this arm can say so;
+        // the other three name themselves elsewhere. Naming the KEY and WHICH set matched is what
+        // was missing when an earlier task could confirm the mechanism but not the instance.
+```
+
+### arm-error-ignored classification
+
+Archived from `src/lib/sweep.ts` lines 4850-4855 at the merge base.
+
+```text
+                // W1-T1117: an `arm-error-ignored` outcome classified `"unknown"` is the ONE
+                // non-armed outcome that must NOT retry — the classifier could not decode the
+                // failure at all, so nothing says the SAME attempt will ever succeed. A
+                // `"transient"` or `"retryable"` one stays on the `acted:false` line just set,
+                // exactly as every arm-error-ignored outcome already behaved. This reinstates the
+                // terminal, dedup-seeding shape intended for a genuinely non-retryable refusal.
+```
+
+### indeterminate live read
+
+Archived from `src/lib/sweep.ts` lines 4875-4878 at the merge base.
+
+```text
+                  // FAIL OPEN, ledgered: an indeterminate read must never be treated as terminal,
+                  // which would silently halt every blocked-fixable dispatch on a gh outage.
+                  // Proceed exactly as before this check existed; the failed read stays legible
+                  // on the ledger.
+```
+
+### base-caused stand-down exit condition
+
+Archived from `src/lib/sweep.ts` lines 4895-4900 at the merge base.
+
+```text
+                // W1-T2620 — THE BASE-CAUSED STAND-DOWN'S EXIT CONDITION. Nothing else about this
+                // branch moves: the classifier, its text and the strike accounting are untouched.
+                //
+                // `main_tip_sha` rides THIS PR's own line whenever this pass classified it
+                // base-caused and a tip was read — recorded on the ORDINARY stand-down path too,
+                // not only a release, so the next pass's fold has a baseline to compare against.
+```
+
+### stale ci-gate re-drive
+
+Archived from `src/lib/sweep.ts` lines 4930-4937 at the merge base.
+
+```text
+              // W1-T1275 — CI-GATE'S OWN CONCLUDED VERDICT CAN GO STALE: a required sibling's
+              // success can land AFTER the gate's run has concluded and posted a terminal FAILURE.
+              // Fires BEFORE `dispatchFix` so a stale verdict never spends a strike on a diff that
+              // carries no defect — gate reconciliation is the sweep's own lane, never the fix
+              // rung's. Bounded to AT MOST ONCE per (head, sibling-transition) via the ledger.
+              // This pass never marks the gate green itself; it only asks GitHub to re-evaluate.
+              // The rollup is a FRESH read, never a field cached on `pr` — comparing against a
+              // captured frame is exactly what this cannot do.
+```
+
+### all-cancellations stand-down
+
+Archived from `src/lib/sweep.ts` lines 5010-5015 at the merge base.
+
+```text
+                // A cancelled check carries no diff defect — when EVERY red required check named
+                // this pass is a cancellation, stand down here rather than falling through to
+                // `dispatchFix` and burning a strike on nothing. `acted` stays FALSE regardless:
+                // claiming true would seed `prior.fixed` for this head, dedupe the whole
+                // blocked-fixable disposition away next pass, and stop this logic ever running
+                // again to observe the second cancellation that must escalate.
+```
+
+### fix evidence shape
+
+Archived from `src/lib/sweep.ts` lines 5023-5032 at the merge base.
+
+```text
+              // W1-T100: the evidence shape follows the SAME `isBlockedCi` predicate the table
+              // routed on, never a second hardcoded check — a failing review carries the unmet set,
+              // a blocked_ci PR carries ci-log evidence, never a mix. W1-T2236: the review branch
+              // also carries `actionableGateFailures`, the same structured remedy this row already
+              // required to route the PR here at all, so the fix rung can select on it rather than
+              // discarding it at this boundary.
+              //
+              // W1-T2231: capture whatever verdict `dispatchFix` returns. `acted` is untouched —
+              // the dedup gate reads `acted`, never `spent`. A `void` return writes no `spent`
+              // field at all, so no existing ledger row's shape changes.
+```
+
+### the review concurrency budget section
+
+Archived from `src/lib/sweep.ts` lines 5351-5362 at the merge base.
+
+```text
+  // ── W1-T1049 — REVIEW CONCURRENCY BUDGET, NOW ITS OWN ───────────────────────
+  // Reviews get their OWN ceiling (`policy.reviewLanes`), no longer a SECOND consultation of
+  // `policy.dispatchLanes`. That coupling pinned drainage's budget to a dispatch-only ruling and
+  // let the two ceilings ADD with nothing naming their sum. `dispatchLanes` keeps its EXACT
+  // meaning; this is a SIBLING row, never a retune of it. Floored at 1, so a misconfigured 0 can
+  // never silently mean "review nothing".
+  //
+  // A CEILING, NOT A TARGET: it bounds only the calls live at once. Workers keep pulling from the
+  // set THIS PASS already found eligible until it drains or an admission stop fires; it never goes
+  // looking for work. W1-T1218/W1-T2584: ORDER BEFORE THE PULL — the pending set's order is
+  // enumeration order and GitHub answers newest-first, so slicing by position gave lanes to the
+  // NEWEST entries and deferred the same oldest tail every pass.
+```
+
+### closeAdmissions catch
+
+Archived from `src/lib/sweep.ts` lines 5382-5388 at the merge base.
+
+```text
+        // NOT AN ERASING CATCH, and the reason is stated here because the ratchet cannot see it
+        // otherwise: the failure text is carried INTO `closeAdmissions` inside a TEMPLATE STRING,
+        // which `test/catch-erasure-ratchet.test.ts` has no route to recognise — its routes are a
+        // rethrow, a logger call, a `reason:` key in the return shape, or a comment like this one.
+        // The error is preserved verbatim in the stop reason an operator reads, and the gate FAILS
+        // CLOSED: an unreadable continuation signal stops admitting rather than admitting on an
+        // unknown, which is the whole reason it is consulted.
+```
+
+### the one throw that must not leave a dedup key
+
+Archived from `src/lib/sweep.ts` lines 5432-5444 at the merge base.
+
+```text
+            // W1-T529 — THE ONE THROW THAT MUST NOT LEAVE A DEDUP KEY. Design (v), the
+            // `review.post_refused` arm below, is right about every ORDINARY throw: without a key
+            // the attempt repeats every pass, unbounded. It is exactly wrong about this one.
+            //
+            // A floor stand-down says nothing about this PR — the guarded call never ran — while
+            // `review.post_refused` is read as a VERDICT that ESCALATES unchanged input rather than
+            // retrying it. Writing it here converts "unaffordable for one tick" into "permanently
+            // refused, then escalated", for a PR nothing ever looked at. The precedent is already
+            // here: `review.post_failed` deliberately does not set that flag either.
+            //
+            // AND THE REPEAT IS STILL BOUNDED, just not by a key: the pacer CONSUMES its trip on the
+            // call it refuses, so the next guarded call re-derives against a live reading. What
+            // design (v) bounds is a throw that RECURS ON ITS OWN; this one cannot.
+```
+
+### the bounded retry key
+
+Archived from `src/lib/sweep.ts` lines 5463-5468 at the merge base.
+
+```text
+              // W1-T529/W1-T2753 — THE BOUNDED RETRY KEY. `sweep.action_failed` alone leaves no
+              // exact-input outcome key and would retry this throw every pass. The row below keeps
+              // the established material-input shape, but this prefix is classified into
+              // `reviewRetryableThrows`, not the durable `reviewRefused` set: the latest dated
+              // throw suppresses only through the pending ceiling, then re-admits the unchanged
+              // input. `acted` stays false, so this never touches the fix lane's dedup.
+```
+
+### release the review claim
+
+Archived from `src/lib/sweep.ts` lines 5489-5494 at the merge base.
+
+```text
+        // W1-T513: release the key from the module-level mutex the instant this attempt SETTLES,
+        // success or failure alike, and BEFORE `finalizeDisposition`, which only ledgers and never
+        // gates a future pass. On success `postReview` has already durably written the reviewed
+        // state a later pass will see; on failure the row just above establishes a bounded retry
+        // clock. Releasing here is safe because that ledger guard blocks another attempt until the
+        // clock expires, and holding it longer would only hide the timing evidence.
+```
+
+### runSweepLightPass
+
+Archived from `src/lib/sweep.ts` lines 5652-5665 at the merge base.
+
+```text
+/**
+ * W1-T463 — THE DIAGNOSIS FOR "a light sweep ticks every 60s and a PR still sat green and
+ * unreviewed for ~15 minutes". `runSweep`'s loop is SEQUENTIAL: every gated effect is awaited
+ * before the next PR is dispositioned. The light sweep handed its WHOLE snapshot to `runSweep` as
+ * ONE call, and `postReview` is not a cheap status flip — it materializes a worktree and executes
+ * every whitelisted proof — so one slow PR blocked every eligible PR behind it.
+ *
+ * THE FIX IS SCOPED TO THIS ONE CALLER, never `runSweep` itself: every open PR gets its OWN call,
+ * fired CONCURRENTLY. NOT a second review lane and no new per-PR mutex — each call goes through the
+ * same dedup and ledger path, and no PR is handed to two of them. AN EMPTY PASS STILL GETS EXACTLY
+ * ONE CALL, or the per-pass heartbeat would vanish on a quiet tick and a healthy quiet pass would
+ * stop being distinguishable from a dead one. The cross-call case is
+ * {@link inFlightReviewKeys}'s job.
+ */
+```
+
+### light-pass admission fold
+
+Archived from `src/lib/sweep.ts` lines 5676-5682 at the merge base.
+
+```text
+  // W1-T2439/W1-T2792: the light pass admits from BOTH lanes — the spawning one at the policy
+  // review width, and the non-spawning plan-filing one at its own smaller derived bound. The
+  // admitted SET is what each PR's scoped deps are decided against; nothing else moves.
+  // W1-T2583: READ THE LEDGER ONCE FOR SELECTION, BEFORE RANKING. `runSweep` still performs its own
+  // fresh read for every scoped action; this pass-level fold is only the liveness filter that keeps
+  // a head the action-time guard will dedup from spending a scarce admission.
+  // ledger-read-intent: live — this fold reads the live file only, never rotations.
+```
+
+### selectReviewAdmission
+
+Archived from `src/lib/sweep.ts` lines 5772-5782 at the merge base.
+
+```text
+/**
+ * W1-T526 — WHICH OPEN PRS the light pass admits into `post-review`. Branch protection's `strict`
+ * setting means only ONE open PR can merge before every other reads `behind`, and that PR's next
+ * push mints a NEW head, throwing away the sha-pinned verdict this lane just posted — so unbounded
+ * fan-out cost N + (N-1) + … + 1 reviews to land N merges.
+ *
+ * PURE, over the whole snapshot, using the SAME classifier `runSweep` uses: a red, conflicted or
+ * exhausted PR never derives `post-review`, so it can never hold the queue. OLDEST-HEAD-FIRST
+ * BECAUSE IT CANNOT STARVE — head age is monotone, so a loser is strictly older next pass. An
+ * unreadable age never outranks a readable one, and ties break on PR number for determinism.
+ */
+```
+
+### selectReviewAdmissions
+
+Archived from `src/lib/sweep.ts` lines 5791-5802 at the merge base.
+
+```text
+/**
+ * W1-T2439 — THE SPLIT ADMISSION, AND WHY THE PREDICATE IS `isPlanFiling` AND NOT THE REVIEW'S
+ * OUTCOME: the outcome is written AFTER the review runs, so this function cannot see it.
+ *
+ * TWO LANES, AND ONLY ONE CAN SPAWN: the spawning lane is every PR not flagged a plan filing,
+ * bounded at the configured review width; the non-spawning lane is plan filings, bounded by
+ * {@link SweepPolicy.planFilingAdmissionBound}.
+ *
+ * FAIL-OPEN ON AN UNPOPULATED SIGNAL — `undefined` is treated as SPAWNING, so the split can only
+ * ADD throughput on a positive signal. The few filings that DO reach the judge are charged to the
+ * spawning side BY CONSTRUCTION, since detecting the outcome beforehand is unbuildable.
+ */
+```
+
+### reviewAdmissionKey
+
+Archived from `src/lib/sweep.ts` lines 5852-5862 at the merge base.
+
+```text
+/**
+ * W1-T2426 — THE ADMISSION KEY, AND WHY IT IS NOT {@link OpenPrView.lastActivityAt}.
+ * {@link selectReviewAdmission} argues oldest-first cannot starve because nothing un-ages a head.
+ * THAT PREMISE IS FALSE FOR THE WINNER: POSTING A VERDICT IS ITSELF AN UPDATE, so reviewing resets
+ * the key of the PR it reviewed and a PR whose review FAILED is thrown behind PRs that waited less.
+ *
+ * THE ANSWER IS ALREADY IN THIS FILE — {@link orderPendingReviews} ranks on the IMMUTABLE
+ * `createdAt`. THE FALLBACK CAN ONLY UNDER-RANK, NEVER OVER-RANK: since `updatedAt >= createdAt`,
+ * a fallback candidate is scored YOUNGER than its true age and can only be passed over.
+ * // Why: measured across seven PRs — docs/forensics/sweep.md.
+ */
+```
+
+### oldestActivityFirst
+
+Archived from `src/lib/sweep.ts` lines 5869-5875 at the merge base.
+
+```text
+/**
+ * THE OLDEST-HEAD-FIRST COMPARATOR ITSELF, lifted out of {@link selectReviewAdmission} so
+ * W1-T528's disjoint `update-branch` selection CONSUMES it rather than shipping a second ordering
+ * that could silently disagree. Byte-identical logic to what that function always ran — see its
+ * doc for the starvation argument, which applies unchanged to any `{prNumber, lastActivityAt}`
+ * population, not only the post-review one.
+ */
+```
+
+### oldestByKey
+
+Archived from `src/lib/sweep.ts` lines 5883-5895 at the merge base.
+
+```text
+/**
+ * W1-T2426 — THE RANKING ITSELF, with the key supplied by the caller.
+ *
+ * ONE IMPLEMENTATION, TWO KEYS, DELIBERATELY NOT TWO COMPARATORS: extracting the key rather than
+ * forking the comparator keeps the shared-ordering guarantee, so the tie-break, the `-Infinity`
+ * treatment of an unparseable date, and the strict `>` that makes the FIRST maximal candidate win
+ * are each defined exactly once and cannot drift.
+ *
+ * {@link oldestActivityFirst} is UNCHANGED and remains what `update-branch` consumes. That is not
+ * an oversight: for `update-branch`, `updatedAt` advancing is the CORRECT ranking, because a
+ * just-updated branch should not be re-selected ahead of one that has waited. For `post-review`
+ * the same advance is pathological — reviewing is the work being attempted, not finishing.
+ */
+```
+
+### the queue governor section
+
+Archived from `src/lib/sweep.ts` lines 5926-5936 at the merge base.
+
+```text
+// ── W1-T121 — THE QUEUE GOVERNOR (the 23-open-PR incident) ───────────────────────────────────
+//
+// No backpressure existed anywhere in the pipeline, so authoring rate converted DIRECTLY into
+// queue depth with nothing to arrest it. Little's law is the argument: throughput comes from
+// BOUNDING WIP, not from pushing harder on intake.
+//
+// ASYMMETRY IS THE WHOLE DESIGN: {@link checkQueueGovernor} is a pure predicate consulted ONLY on
+// the NEW-task dispatch path. It is NEVER consulted by `runSweep`, which arms, fixes, closes and
+// escalates already-open PRs at ANY depth, ungated — a governor that also throttled drainage would
+// deepen the very queue it exists to bound.
+// Why: the drain-with-dispatch-down corroboration is in docs/forensics/sweep.md.
+```
+
+### checkQueueGovernor
+
+Archived from `src/lib/sweep.ts` lines 5948-5953 at the merge base.
+
+```text
+/**
+ * The queue governor's pure predicate: at or above `policy.wipLimit` open PRs, NEW dispatch is
+ * deferred; below it, dispatch proceeds. THRESHOLDS ARE POLICY DATA (rule 2) — that field is the
+ * ONLY thing that moves this decision, and there is no second ad-hoc constant near a dispatch call
+ * site. Never call this from `runSweep` or any of its deps; see the asymmetry note above.
+ */
+```
+
+### logQueueGovernorDeferral
+
+Archived from `src/lib/sweep.ts` lines 5965-5969 at the merge base.
+
+```text
+/**
+ * A throttled pass is NOT silent: the dispatch path calls this exactly when
+ * {@link checkQueueGovernor} defers, writing one ledger line carrying the observed open count — so
+ * a quiet daemon with nothing runnable stays distinguishable from a THROTTLED one.
+ */
+```
+
+### the cost governor section
+
+Archived from `src/lib/sweep.ts` lines 5985-5994 at the merge base.
+
+```text
+// ── W1-T148 — THE COST GOVERNOR (the $206/60-run spin-loop incident) ─────────────────────────
+//
+// A spin loop burned roughly $206 over 60 runs with no DAILY ceiling anywhere: every individual
+// run stayed safely under its own per-run cap, so that backstop never fired and nothing was
+// watching the CROSS-RUN total. The architectural TWIN of the queue governor above — a WIP limit
+// bounds intake by COUNT, this bounds it by DOLLARS.
+//
+// Same asymmetry, same reason: {@link checkCostGovernor} is consulted ONLY on the dispatch path,
+// NEVER by `runSweep`, which drains already-open PRs at any day-cost. Throttling drainage would
+// strand in-flight work to save money — a worse failure than the spend itself.
+```
+
+### deriveWindowCostUsd
+
+Archived from `src/lib/sweep.ts` lines 5996-6007 at the merge base.
+
+```text
+/**
+ * Sums ONE ledgered dollar figure per RUN, for every run with at least one line inside the window,
+ * then totals them. {@link deriveDayCostUsd} and {@link deriveWeekCostUsd} are both this ONE
+ * reduction over a different window, never a separately reimplemented scan.
+ *
+ * PER-RUN, NOT PER-LINE, WHICH AVOIDS DOUBLE-COUNTING: a run's `verdict` line — or, absent one,
+ * its first cost-bearing line — already carries that run's RUNNING TOTAL. Summing every
+ * cost-bearing line for a run would count its spend twice over.
+ *
+ * A line with no `ts`, an unparseable one, or one outside the window is excluded; a run whose only
+ * in-window lines carry no cost contributes 0.
+ */
+```
+
+### deriveDayCostUsd
+
+Archived from `src/lib/sweep.ts` lines 6052-6056 at the merge base.
+
+```text
+/**
+ * The day's ledgered cost — `now`'s UTC calendar day, per-run (see {@link deriveWindowCostUsd}).
+ * BEHAVIOR UNCHANGED from this function's pre-W1-T159 form: same window, same verdict-preferred
+ * per-run reduction, so {@link checkCostGovernor}'s call site sees byte-identical results.
+ */
+```
+
+### deriveWeekCostUsd
+
+Archived from `src/lib/sweep.ts` lines 6062-6067 at the merge base.
+
+```text
+/**
+ * The WEEK-TO-DATE ledgered cost (W1-T159): the current UTC ISO week, same per-run reduction as
+ * {@link deriveDayCostUsd}. The GLANCE strip's own falsifier is why this exists beside the day
+ * figure — a daily-only figure cannot answer whether today is normal, since a modest post-merge
+ * burn looks unremarkable in isolation and is only legible against a weekly baseline.
+ */
+```
+
+### checkCostGovernor
+
+Archived from `src/lib/sweep.ts` lines 6083-6092 at the merge base.
+
+```text
+/**
+ * The cost governor's pure predicate: at or over `policy.dailyCostCeilingUsd` ledgered dollars
+ * spent today, NEW dispatch is deferred. THRESHOLDS ARE POLICY DATA (rule 2) — that field is the
+ * ONLY thing that moves this decision. Never call this from `runSweep` or any of its deps.
+ *
+ * W1-T331: THIS FUNCTION WAS NEVER THE FROZEN PART — `policy` is already a per-call argument, so
+ * any caller building its own policy per consultation gets a live decision. The bug was that every
+ * real caller omitted it and silently took the default parameter, which resolves to the const
+ * captured once at import. The fix builds an explicit policy from a per-consultation ceiling.
+ */
+```
+
+### logCostGovernorDeferral
+
+Archived from `src/lib/sweep.ts` lines 6104-6108 at the merge base.
+
+```text
+/**
+ * A throttled pass is NOT silent: the dispatch path calls this exactly when
+ * {@link checkCostGovernor} defers, writing one ledger line naming the day-cost and ceiling — so a
+ * quiet daemon stays distinguishable from a BUDGET-THROTTLED one.
+ */
+```
+
+### the memory governor section
+
+Archived from `src/lib/sweep.ts` lines 6124-6136 at the merge base.
+
+```text
+// ── W1-T1038 — THE MEMORY GOVERNOR (the 2026-08-19 host stall) ───────────────────────────────
+//
+// Dispatch has priced every draw in dollars and in turns since the ledger began, and never once in
+// bytes. The host went unreachable with three workers live. NOTHING WAS KILLED — a measured
+// absence of every OOM signature, not a lost log: with no swap the kernel could not page out
+// anonymous memory, so it evicted and re-faulted executable pages under reclaim livelock, which
+// never arms the OOM killer.
+//
+// THE ONE DELIBERATE ASYMMETRY WITH ITS TWO SIBLINGS: those are composed under a FAIL-CLOSED rule,
+// where an unreadable reading counts as over ceiling. THIS GOVERNOR'S UNREADABLE CASE MUST NOT
+// JOIN THAT ARM — a guard refusing dispatch on every `/proc/meminfo` hiccup would convert a
+// once-in-six-days event into a total outage. FAIL OPEN, enforced one layer up at the composition
+// point; this predicate never sees a probe failure at all.
+```
+
+### checkMemoryGovernor
+
+Archived from `src/lib/sweep.ts` lines 6150-6161 at the merge base.
+
+```text
+/**
+ * The memory governor's pure predicate: STRICTLY BELOW `policy.memoryFloorMib` available, NEW
+ * dispatch is deferred; at or above it, dispatch proceeds. Same shape and the SAME dispatch-only
+ * asymmetry as its two siblings — never call it from `runSweep` or any of its deps.
+ *
+ * SHIPS INERT: the floor defaults to 0 and the observation can never be negative, so this never
+ * defers until an operator raises the floor against a measured figure — one this task's rationale
+ * says is NOT YET KNOWN and must not be guessed. Measuring it is {@link logMemoryObservation}'s job.
+ *
+ * DEFER, NEVER KILL: this only gates the NEXT dispatch. It takes a plain number and returns a
+ * plain object, so there is no parameter through which it could reach a running process.
+ */
+```
+
+### logMemoryObservation
+
+Archived from `src/lib/sweep.ts` lines 6173-6184 at the merge base.
+
+```text
+/**
+ * THE OBSERVATION IS LEDGERED ON EVERY CONSULTATION — unlike the two deferral loggers above, which
+ * fire only when their governor defers, this ledgers unconditionally, admitted readings included.
+ * A deferral-only row would sample exactly the population that never happens while the floor ships
+ * disabled; the evidence this exists to gather is the ADMITTED reading.
+ *
+ * NOT registered in `ledger.ts`'s decision-relevant set: nothing reads this step back yet — THE
+ * READER IS THE OPERATOR. Membership is required only once a future predicate reads it back, and
+ * that predicate's own PR is the one that adds it. Written WITHOUT the literal comparison
+ * expression on purpose: test/ledger-rotation.test.ts derives that set by scanning this file's
+ * TEXT, comments included, so spelling it out here manufactures a consumer that does not exist.
+ */
+```
+
+### POST_REVIEW_STALL_THRESHOLD
+
+Archived from `src/lib/sweep.ts` lines 6201-6208 at the merge base.
+
+```text
+/**
+ * How many CONSECUTIVE `sweep.post_review.failed` lines — with no intervening `.done` — mean the
+ * post-review path has STALLED rather than hiccupped.
+ *
+ * DERIVED FROM THE LEDGER, NOT PICKED. The observed transient maximum is 5 and the observed stall
+ * is 77, with NO observation between, so 8 sits inside an empty gap with real margin over the
+ * worst transient and far below the stall. Raise this only against new data.
+ */
+```
+
+### PostReviewStallVerdict.normalisedError
+
+Archived from `src/lib/sweep.ts` lines 6221-6226 at the merge base.
+
+```text
+  /**
+   * The run's error text with digit runs replaced by `<N>`. NORMALISATION IS LOAD-BEARING: the
+   * observed failures carried ten distinct raw strings and exactly ONE normalised string, because
+   * the text embeds the PR number. Grouping on the RAW text would split one systematic stall into
+   * ten unrelated-looking groups and defeat the whole point of noticing that a failure repeats.
+   */
+```
+
+### PostReviewStallVerdict.rateLimited
+
+Archived from `src/lib/sweep.ts` lines 6228-6233 at the merge base.
+
+```text
+  /**
+   * true when every failure in the run is an API quota exhaustion. Carried so the escalation can
+   * say so — a quota failure is fleet-stopping but self-clearing at a known reset, which asks
+   * something different of an operator than a persistent bug. It deliberately does NOT gate
+   * `stalled`: gating on a recognised error string would blind the detector to every other one.
+   */
+```
+
+### detectPostReviewStall
+
+Archived from `src/lib/sweep.ts` lines 6242-6252 at the merge base.
+
+```text
+/**
+ * Is the sweep's post-review path stalled? Pure over ledger lines, oldest-first.
+ *
+ * THE DEFECT THIS EXISTS FOR: `sweep.post_review.failed` had fired dozens of times across a week
+ * — every one a rate limit — and NOTHING SURFACED IT. Green PRs sat unreviewed while the sweep
+ * retried each tick and logged another identical line, until an operator found it by hand. A
+ * transport fix removes THIS cause; it does not remove the class.
+ *
+ * COUNTS THE CURRENT RUN ONLY, and any `.done` resets it — the question is "is it stalled NOW",
+ * not "has it ever failed a lot". A lifetime count would latch permanently after the first bad day.
+ */
+```
+
+### the credit-backfill section
+
+Archived from `src/lib/sweep.ts` lines 6276-6283 at the merge base.
+
+```text
+// ── W1-T150 — THE LEVEL-TRIGGERED CREDIT BACKFILL rung (ratifies P30) ────────────────────────
+//
+// The same P22 argument applied to the MERGE EVENT rather than open-PR pipeline state. A run's
+// terminal `verdict` line is EDGE-TRIGGERED at run-end, so a run that ends before its OWNED PR
+// merges never revisits the question and the ledger's per-task credit can sit wrong forever even
+// though GitHub's state has moved on. Every consumer reading `verdict` directly rather than the
+// GitHub-derived union inherits the stale answer. This rung closes that gap the SAME way
+// `runSweep` closes the open-PR one: re-derive fresh every poll, act once, no-op on a repeat.
+```
+
+### CreditCandidate
+
+Archived from `src/lib/sweep.ts` lines 6285-6292 at the merge base.
+
+```text
+/**
+ * One task's observed merge-credit candidacy. `merged` is the CALLER's ownership-asserted,
+ * trailer-anchored verdict — this module never talks to GitHub directly, exactly like
+ * {@link OpenPrView}: true only when a MERGED PR is owned by this task's own `run-<taskId>-*`
+ * branch and carries its anchored trailer, for any run of the task (sibling credit). `false`
+ * covers every other observed state, because the backfill must NEVER fire on anything short of an
+ * observed merge — that is the falsifier.
+ */
+```
+
+### the removed hasMergeCredit helper
+
+Archived from `src/lib/sweep.ts` lines 6318-6329 at the merge base.
+
+```text
+/*
+ * `hasMergeCredit` USED TO LIVE HERE and was removed 2026-08-13, not merely bypassed. It answered
+ * "has this task's merge already been credited" over an array read with `readLedgerLines`, WHICH
+ * OPENS EXACTLY ONE FILE — and that single-file read was the defect: rotation caps a step, so older
+ * credit left the live file and the same tasks were re-credited forever.
+ *
+ * `readMergeCreditedTaskIds` (status.ts) now answers the same question across all three ledger
+ * forms. Its semantics are preserved where they were right: still keyed on `task_id` ALONE and
+ * never `run_id`, because sibling credit means ANY run of this task recording a merge counts. The
+ * line-shape test is imported rather than restated — two hand-maintained copies of "what a merge
+ * credit looks like" is what once let a back-credited task stay circuit-broken.
+ */
+```
+
+### runCreditBackfill
+
+Archived from `src/lib/sweep.ts` lines 6331-6342 at the merge base.
+
+```text
+/**
+ * THE CREDIT-BACKFILL RUNG (W1-T150). For every candidate whose OWNED PR is `merged` but whose
+ * ledger carries no credit yet, append EXACTLY ONE `verdict.merged` correction naming the PR. A
+ * candidate whose PR is not merged is always a no-op. A repeat pass appends nothing further:
+ * `alreadyCredited` is recomputed per candidate against the snapshot PLUS every correction this
+ * same pass appended, so two candidates naming one task still credit exactly once.
+ *
+ * Mirrors {@link runSweep}'s shape deliberately — same injected reader and appender, same
+ * leaves-no-trace `dryRun` contract — but is a SEPARATE entry point: its input domain is one
+ * candidate per TASK, disjoint from `runSweep`'s one view per OPEN PR, since a merged PR is no
+ * longer open and would never appear there.
+ */
+```
+
+### the escalation-lifecycle reconciler section
+
+Archived from `src/lib/sweep.ts` lines 6409-6420 at the merge base.
+
+```text
+// ── ESCALATION-LIFECYCLE RECONCILER (fb-1784756088300-6a481e) ────────────────────────────────
+//
+// The sweep RAISES needs-human issues but nothing ever CLOSED them when the blocker resolved, so
+// the large majority of open ones were stale. This is the missing third leg of the lifecycle —
+// creation, dedup-at-creation, CLOSURE here — and it rides the SAME sweep seam and level-triggered
+// doctrine as the credit backfill above: the CALLER re-derives each open issue's referenced task
+// and hands the derivation here.
+//
+// A referent is TERMINAL, and the escalation auto-closes naming the resolution, when it MERGED or
+// when its PR CLOSED WITHOUT MERGING. A still-LIVE referent is left untouched, and so is an
+// INDETERMINATE derivation — never closed on a read this pass could not trust. Bounded per cycle
+// so a large backlog drains gradually, and every close is ledgered.
+```
+
+### RETIRABLE_ESCALATION_LABELS
+
+Archived from `src/lib/sweep.ts` lines 6426-6433 at the merge base.
+
+```text
+/**
+ * QUEUE LABELS this reconciler retires issues from (W1-T349): `needs-human` plus `fleet-notice`.
+ * A residual-escalation-judge demotion leaves the NEEDS ME board, which keys on `needs-human`, but
+ * the design's promise — "recovery is relabelling, nothing is deleted" — only holds if THIS
+ * reconciler can still find and retire it once its referent resolves.
+ * {@link EscalationReconcileCandidate} carries no label field, so a fleet-notice-sourced candidate
+ * is already treated identically to a needs-human one by construction, not by an added branch.
+ */
+```
+
+### listRetirableEscalationIssues
+
+Archived from `src/lib/sweep.ts` lines 6436-6443 at the merge base.
+
+```text
+/**
+ * List every OPEN issue across {@link RETIRABLE_ESCALATION_LABELS}, deduped by issue number. An
+ * issue cannot carry both queue labels by construction, but the dedup costs nothing and protects
+ * against a future producer that double-labels.
+ *
+ * Same fail-soft contract as a single listing: a read failure on ANY label aborts the WHOLE list,
+ * never a partial result a caller could mistake for "nothing else is open".
+ */
+```
+
+### askType
+
+Archived from `src/lib/sweep.ts` lines 6459-6464 at the merge base.
+
+```text
+  /**
+   * W1-T347: the ask-type classification for this issue, when the caller can supply it from the
+   * issue's own label. `"question"` routes a terminal-referent close through
+   * {@link renderMootedCloseComment}. `"action"` OR omitted — the untyped legacy corpus — keeps
+   * today's close path byte-identical, and MUST NOT change behaviour.
+   */
+```
+
+### intake
+
+Archived from `src/lib/sweep.ts` lines 6506-6510 at the merge base.
+
+```text
+  /**
+   * What the candidate BUILDER saw on intake, so the summary can distinguish "nothing was open"
+   * from "everything open was dropped". Optional and defaulted: a caller that omits it gets
+   * exactly the line it got before, never a crash and never a fabricated zero.
+   */
+```
+
+### renderReconcileCloseComment
+
+Archived from `src/lib/sweep.ts` lines 6514-6518 at the merge base.
+
+```text
+/**
+ * The closing citation posted on a reconciled issue — NAMES THE RESOLUTION, the merged PR or the
+ * closed-without-merging one that superseded it, so the closure is legible rather than a silent
+ * disappearance. Pure and exported for a direct assertion.
+ */
+```
+
+### renderMootedCloseComment
+
+Archived from `src/lib/sweep.ts` lines 6535-6544 at the merge base.
+
+```text
+/**
+ * W1-T347 — the guard {@link renderReconcileCloseComment} does NOT apply to: a `needs-question`
+ * issue whose referent went terminal is MOOTED, not resolved, and closing it in that function's
+ * voice claims an answer nobody gave.
+ *
+ * This names the mooting event but states PLAINLY that the question was never answered, and says
+ * where to re-raise it. Starts with a FIXED, DISTINCT prefix so a later census can tell a mooted
+ * close from a resolved one by exact string match, never by parsing prose.
+ * // Why: a third of reconciler auto-closes carried question-form titles — docs/forensics/sweep.md.
+ */
+```
+
+### runEscalationReconcile
+
+Archived from `src/lib/sweep.ts` lines 6564-6569 at the merge base.
+
+```text
+/**
+ * Reconcile OPEN needs-human issues against their referent's CURRENT derived state. A separate
+ * entry point mirroring {@link runCreditBackfill}: its input domain is one OPEN issue per
+ * candidate, disjoint from `runSweep`'s open PRs. Best-effort and per-issue throw-contained, so
+ * one failed close never strands the rest — the W1-T99 lesson.
+ */
+```
+
+### intake reporting
+
+Archived from `src/lib/sweep.ts` lines 6649-6653 at the merge base.
+
+```text
+  // `total: 0` USED TO BE AMBIGUOUS. `issues_seen` is always emitted — one integer, negligible on a
+  // line that fires often — so the healthy case is positively identifiable rather than merely
+  // un-alarming. The per-reason tally rides ONLY on the abnormal path: on a healthy pass the line
+  // is one field wider than before, and the detail appears exactly when there is something to
+  // explain, which is also when an operator is reading it.
+```
+
+### the post-fix re-verification section
+
+Archived from `src/lib/sweep.ts` lines 6669-6683 at the merge base.
+
+```text
+// ── POST-FIX RE-VERIFICATION RECONCILER (W1-T124) ────────────────────────────────────────────
+//
+// The DRAINAGE-side complement to the queue governor above: the governor stops the queue GROWING,
+// this rung stops it ROTTING. A red caused by infrastructure whose cause is now merged should not
+// need a human to notice it — but nothing re-examined the PRs an already-fixed cause had poisoned,
+// and each needed a hand-pushed fresh head to clear.
+//
+// DESIGN (i): the failure-pattern-to-fix-PR mapping is held as DATA ({@link DEFAULT_FIX_CLASSES}),
+// so covering a new systemic fix is a ROW, never a branch — exactly how {@link DISPOSITION_RULES}
+// keeps disposition out of `deriveDisposition`'s control flow.
+//
+// DESIGN (iii): the re-drive must work against REAL ci-gate semantics, which is why W1-T123's
+// dedupe-by-name is a hard dependency — before it, a re-run in place could never clear a stale red.
+// This module never talks to GitHub directly, so HOW to re-drive is the caller's own wiring.
+// Why: the measured incidents are in docs/forensics/sweep.md.
+```
+
+### FixClass
+
+Archived from `src/lib/sweep.ts` lines 6685-6690 at the merge base.
+
+```text
+/**
+ * One failure-pattern to fix-PR class mapping ROW: DATA, not code. `matchesFailure` is a PURE
+ * predicate over the SAME {@link OpenPrView} shape every other rung reads, never an LLM
+ * classification (rule 2) — so covering a new systemic fix appends a row here and never touches
+ * {@link runPostFixReverification}'s control flow.
+ */
+```
+
+### CI_GATE_TIMEOUT_FIX_CLASS
+
+Archived from `src/lib/sweep.ts` lines 6702-6707 at the merge base.
+
+```text
+/**
+ * The 2026-07-19 regression fixture's own class: `ci-gate` times out waiting for a required check
+ * that had, or shortly would have, succeeded on the SAME head. Matches on the failing check's
+ * recorded name AND its log tail, never on `checksState` alone — a genuinely red mutation-ratchet
+ * must never match this class.
+ */
+```
+
+### COVERAGE_TIER_FIX_CLASS
+
+Archived from `src/lib/sweep.ts` lines 6720-6725 at the merge base.
+
+```text
+/**
+ * W1-T474 row 1 — the coverage-tier fix. The ratchet reads its baseline from the PR's OWN checked
+ * out tree, so a PR merged before the fix still fails against the file that fix already corrected,
+ * though its diff never touched coverage. Matches on the check name AND the ratchet's own
+ * "BLOCKED" wording, never on `checksState` alone: a PR that genuinely lowered coverage must not match.
+ */
+```
+
+### CAPABILITY_SNAPSHOT_FIX_CLASS
+
+Archived from `src/lib/sweep.ts` lines 6738-6743 at the merge base.
+
+```text
+/**
+ * W1-T474 row 2 — the capability-snapshot regeneration. The check fails whenever the checked-out
+ * `MASTER-PLAN.md` does not match a fresh regeneration, and the default checkout is the merge ref
+ * against the OLD base, so every PR merged before the fix reads the stale block. Matches on the
+ * check's own STALE wording, never on `checksState` alone.
+ */
+```
+
+### DEFAULT_FIX_CLASSES and DIFF_COVERAGE_BLOCK_RE
+
+Archived from `src/lib/sweep.ts` lines 6756-6762 at the merge base.
+
+```text
+/** The live class table this reconciler consults by default — a new systemic fix is a row appended
+ *  here, never a change to {@link runPostFixReverification}. */
+/**
+ * The DIFF-SCOPED coverage failure's own wording, NOT the aggregate ratchet's.
+ * {@link COVERAGE_TIER_FIX_CLASS} keys on the floor sentence; the per-diff gate that actually
+ * blocks most PRs prints a different one and therefore matched nothing at all.
+ */
+```
+
+### diffCoverageReport
+
+Archived from `src/lib/sweep.ts` lines 6774-6782 at the merge base.
+
+```text
+/**
+ * REPORTS a diff-scoped coverage block and the lines it names. A REPORTER, NEVER A REPAIRER, AND
+ * THE DISTINCTION IS STRUCTURAL: {@link FixClass} requires a `fixPrNumber` meaning the merged PR
+ * whose fix resolves the class, and every existing row is that shape. A diff-coverage block is
+ * not — its remedy is a test for a specific line, different for every PR, and no merged PR
+ * resolves it. A fourth row would invent a number that does not mean what the field says, and a
+ * match would redrive the same gate to fail identically. So this names the check and the uncovered
+ * lines on a surface someone already reads, and dispatches nothing.
+ */
+```
+
+### RedriveResult
+
+Archived from `src/lib/sweep.ts` lines 6802-6808 at the merge base.
+
+```text
+/**
+ * The injected redrive effect's outcome. `fresh`, when present, is a brand new {@link OpenPrView}
+ * read AFTER the redrive settled — this reconciler never invents one and never re-uses the STALE
+ * pre-redrive view, which would just re-observe the red it set out to clear. Absent `fresh` means
+ * the redrive was dispatched with no settled read yet: this pass records it so it is never
+ * repeated, and the NEXT ordinary sweep re-derives once GitHub's state has caught up.
+ */
+```
+
+### PostFixReverificationDeps.redrive
+
+Archived from `src/lib/sweep.ts` lines 6817-6821 at the merge base.
+
+```text
+  /**
+   * Re-drive the PR's matched required check for the given class. Whether that means re-requesting
+   * the check-run in place or pushing a refresh commit is entirely the effect's own decision; this
+   * module never calls gh or git directly.
+   */
+```
+
+### readCiFailures
+
+Archived from `src/lib/sweep.ts` lines 6830-6838 at the merge base.
+
+```text
+  /**
+   * OPTIONAL reader for a PR's currently-failing checks (W1-T977), consulted ONLY when this pass's
+   * snapshot carries `ciFailures: undefined` AND `checksState === "pending"` — the one state
+   * {@link CI_GATE_TIMEOUT_FIX_CLASS} exists to match and the one state the producer never
+   * populates, because a gate timeout is BY DEFINITION observed while a sibling is still running.
+   * The class was structurally unable to see its own trigger. Never consulted when green, none, or
+   * already red, so this is narrowly scoped and never a blanket re-fetch. OMITTED, behaviour is
+   * BYTE-IDENTICAL to before this dep existed.
+   */
+```
+
+### runPostFixReverification
+
+Archived from `src/lib/sweep.ts` lines 6862-6871 at the merge base.
+
+```text
+/**
+ * THE POST-FIX RE-VERIFICATION RUNG (W1-T124). For every open PR whose CURRENTLY-recorded failure
+ * matches a {@link FixClass} row whose `fixPrNumber` the caller reports merged — this module never
+ * talks to GitHub — re-drive its matched check EXACTLY ONCE, deduped on the ledger by
+ * `pr@headSha@class` so a NEW push legitimately re-earns one, mirroring fix-dispatch dedup. When
+ * the redrive returns a settled fresh view, re-derive the disposition with strikes credited back.
+ *
+ * A PR matching no merged class is entirely untouched — no redrive, no ledger line — which is the
+ * falsifier proving the mapping does real work rather than blanket-rerunning every open PR.
+ */
+```
+
+### re-dispose on the fresh result
+
+Archived from `src/lib/sweep.ts` lines 6966-6970 at the merge base.
+
+```text
+      // Re-dispose on the fresh, settled result (design note ii) — with
+      // strikes credited to zero (design note iv): the ONLY defect this rung
+      // ever matches against is the now-fixed class (acceptance 2 proves an
+      // unmatched PR is never touched at all), so every strike a MATCHED PR
+      // carried in was spent chasing that same infrastructure artifact.
+```
