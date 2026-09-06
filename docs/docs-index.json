@@ -146,6 +146,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/autonomy.md",
+      "title": "autonomy.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "autonomy.ts forensics"
+    },
+    {
       "path": "docs/forensics/containment.md",
       "title": "Forensics: src/lib/containment.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/containment.ts` used to",
@@ -158,6 +164,12 @@
       "grepHint": "daemon.ts forensics"
     },
     {
+      "path": "docs/forensics/dispatch-overlap.md",
+      "title": "dispatch-overlap.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "dispatch-overlap.ts forensics"
+    },
+    {
       "path": "docs/forensics/drain.md",
       "title": "Forensics — `src/lib/drain.ts`",
       "summary": "A verbatim archive of comment blocks compacted out of `src/lib/drain.ts`. Each heading names",
@@ -168,6 +180,12 @@
       "title": "entrypoint.sh comment forensics",
       "summary": "The measured incidents, rejected alternatives and design arguments that were removed from",
       "grepHint": "entrypoint.sh comment forensics"
+    },
+    {
+      "path": "docs/forensics/env.md",
+      "title": "env.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from `src/lib/env.ts`",
+      "grepHint": "env.ts forensics"
     },
     {
       "path": "docs/forensics/inbox.md",
@@ -194,6 +212,12 @@
       "grepHint": "Forensics — `src/lib/open-prs-rest.ts`"
     },
     {
+      "path": "docs/forensics/proof-queue-audit.md",
+      "title": "proof-queue-audit.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "proof-queue-audit.ts forensics"
+    },
+    {
       "path": "docs/forensics/retro.md",
       "title": "retro.ts forensics",
       "summary": "The measured facts, incidents and design arguments that used to live as comment prose inside",
@@ -204,6 +228,12 @@
       "title": "Forensics — `src/lib/review.ts`",
       "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/review.ts` when its",
       "grepHint": "Forensics — `src/lib/review.ts`"
+    },
+    {
+      "path": "docs/forensics/self-sync.md",
+      "title": "self-sync.ts forensics",
+      "summary": "Measured forensics, incidents and design arguments removed from `src/lib/self-sync.ts` when its",
+      "grepHint": "self-sync.ts forensics"
     },
     {
       "path": "docs/forensics/status-board.md",

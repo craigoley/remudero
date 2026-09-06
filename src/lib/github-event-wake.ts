@@ -60,10 +60,10 @@ import {
   renameSync,
   unlinkSync,
   watch as fsWatch,
-  writeFileSync,
 } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join } from "node:path";
+import { writeAtomic } from "./fs-race-safe.js";
 import { RawBodyTooLargeError, readBoundedRawBody, type Route } from "./service.js";
 
 // ── (i) THE ALLOWLIST — design (ii), "do not subscribe to or accept `*`" ───────────────────
@@ -223,19 +223,8 @@ export function createPersistentDeliveryDedupStore(path: string, capacity: numbe
     record(deliveryId) {
       if (known.has(deliveryId)) return;
       const nextOrder = [...order, deliveryId].slice(-capacity);
-      const tmpPath = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
-      mkdirSync(dirname(path), { recursive: true });
-      try {
-        writeFileSync(tmpPath, JSON.stringify({ deliveryIds: nextOrder }), { mode: 0o600 });
-        renameSync(tmpPath, path);
-      } catch (error) {
-        try {
-          unlinkSync(tmpPath);
-        } catch {
-          // The temp may never have been created; preserve the original persistence error.
-        }
-        throw error;
-      }
+      // W1-T2899: the shared primitive; `mode` lands on the stage, never briefly at the real path.
+      writeAtomic(path, JSON.stringify({ deliveryIds: nextOrder }), { mode: 0o600 });
       order = nextOrder;
       known = new Set(order);
     },
@@ -268,19 +257,8 @@ export function sweepWakeMarkerPath(root: string): string {
  * pending wake, never a queue of markers).
  */
 export function writeSweepWakeMarkerAtomic(path: string, record: SweepWakeMarker): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
-  try {
-    writeFileSync(tmpPath, JSON.stringify(record));
-    renameSync(tmpPath, path);
-  } catch (error) {
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      // The temp may never have been created; preserve the original write/rename error.
-    }
-    throw error;
-  }
+  // W1-T2899: the shared primitive, whose cleanup-on-failure arm was lifted from here.
+  writeAtomic(path, JSON.stringify(record));
 }
 
 /** `undefined` on any read/parse failure (absent, mid-write elsewhere, corrupt) — never throws;

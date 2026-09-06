@@ -1,126 +1,48 @@
+// Why: the overflow valve's two-factor design and the launchd-vs-dev-shell split —
+// docs/forensics/env.md#module-header (W1-T258).
 /**
- * THE BILLING BOUNDARY (FIELD FINDING 1, MASTER-PLAN §9).
- *
- * Worker environments are CONSTRUCTED, never inherited. `ANTHROPIC_API_KEY` is
- * exported from this operator's login shell and TAKES PRECEDENCE over the
- * claude.ai OAuth login — any child that inherits it silently bills API rates
- * instead of the Max subscription. By building each child env from an explicit
- * allowlist and asserting no `ANTHROPIC_*` key survives, Claude Code falls back
- * to subscription OAuth. `billing_mode` becomes a decision the harness makes and
- * records, never an accident it inherits.
- *
- * launchd happens to be clean (it never sources `.zshrc`), but a daemon started
- * from a dev shell inherits the key — this function is what makes BOTH paths
- * safe by DEFAULT (absent key ⇒ subscription, exactly as before).
- *
- * THE OVERFLOW VALVE (opt-in, W1-T258). Engaging it is TWO-FACTOR, so the key
- * merely being present in a shell can never silently bill the fleet to API:
- *   1. INTENT — `config.overflow: "api_key"` (config.ts §9), which `validateConfig`
- *      refuses unless it is paired with a `dailyCapUsd` (no uncapped api run can
- *      even be configured). The caller passes this through as `opts.allowApiKey`.
- *   2. KEY — `ANTHROPIC_API_KEY` present in the parent env.
- * With BOTH, that one key — and only that one — is passed BY VALUE into each
- * worker's env so the run bills to API credits instead of an exhausted
- * subscription window. It travels env→env only: never written to a file, never
- * logged as a value (only its NAME appears in `childEnvKeys`). Absent EITHER
- * factor ⇒ subscription, exactly as before. Every OTHER `ANTHROPIC_*` key
- * (BASE_URL/MODEL/AUTH_TOKEN/…) still fails loud below — those redirect billing
- * or behaviour and are contamination, not a valve. `billing_mode` is then
- * DERIVED from the child's actual key set ({@link billingMode}), never guessed.
+ * The billing boundary (Field finding 1, MASTER-PLAN §9). Worker environments are constructed
+ * here, never inherited — an operator's login shell can export `ANTHROPIC_API_KEY`, which takes
+ * precedence over the claude.ai OAuth login and would silently bill API rates instead of the Max
+ * subscription. `buildWorkerEnv` builds each child env from an explicit allowlist and asserts no
+ * stray `ANTHROPIC_*` key survives, so `billing_mode` is a decision this harness makes, never an
+ * accident it inherits — safe by default on a clean launchd boot and a dev shell alike.
+ * The overflow valve (opt-in, W1-T258) is two-factor — `config.overflow: "api_key"` (as
+ * `opts.allowApiKey`) plus the key's presence — so the key alone in a shell never silently bills
+ * the fleet to API; engaged, it travels env-to-env only, never written to a file or logged by value.
+ * FALSIFIER: test/env.test.ts, test/gh-token-worker-env.test.ts.
  */
 
 import { join } from "node:path";
 
+// Why: why USER/CLAUDE_CODE_OAUTH_TOKEN/GH_TOKEN are each safe to copy, and the container-parity
+// incident behind GH_TOKEN — docs/forensics/env.md#allowlist (W1-T236, W1-T258).
 /**
- * Base variables a worker legitimately needs, copied from the parent by name.
- *
- * `USER` is load-bearing on macOS: the subscription OAuth token is stored in the
- * login Keychain (not a file), and the CLI resolves the keychain identity from
- * `USER`. With PATH/HOME/TMPDIR/LANG but no USER, a headless run returns
- * "Not logged in · Please run /login" (verified: SDK 0.3.209 / CLI 2.1.209).
- * `LOGNAME` alone is NOT sufficient. None of these carry secrets.
+ * Base variables a worker legitimately needs, copied from the parent by name. `USER` is
+ * load-bearing on macOS: subscription auth resolves from the login Keychain via `USER`. The
+ * OAuth token and `GH_TOKEN` are ambient container identity — the only credentials a
+ * container-based worker can hold — on the allowlist rather than threaded per-call, since a
+ * missed opt-in call site would silently produce an unauthenticated worker. Neither matches
+ * {@link ANTHROPIC_KEY} nor flips {@link billingMode}, so neither weakens the boundary below.
+ * FALSIFIER: test/token-authenticated-worker.test.ts, test/gh-token-worker-env.test.ts.
  */
-// `CLAUDE_CODE_OAUTH_TOKEN` (impl-ED) is AMBIENT CONTAINER IDENTITY, the same class as the five
-// above, and it is the ONLY credential a container can hold: `claude setup-token` writes nothing to
-// disk — it prints a year-long string to the terminal and the vendor documentation says to set it as
-// this variable wherever you want to authenticate. Before this line the codebase had no awareness of
-// it at all and a token-authenticated worker was impossible.
-//
-// WHY THE ALLOWLIST AND NOT AN OPT-IN, since `ANTHROPIC_API_KEY` sets the opposite precedent. That
-// key is opt-in (`opts.allowApiKey`) because it FLIPS BILLING MODE: {@link billingMode} returns
-// `"api"` when and only when it survives. This token does not — it authenticates the same
-// subscription the `/login` credential does, so `billingMode` still reads `"subscription"` and the
-// reason the valve is gated does not apply here. It also does not match {@link ANTHROPIC_KEY}
-// (verified, not assumed), so the leak assertion below is unweakened.
-//
-// AND THE FAILURE DIRECTIONS ARE NOT SYMMETRIC. Threading it through `extra` would need every one of
-// the three spawn paths to opt in; a missed one yields a silently UNAUTHENTICATED worker, which is
-// the failure this fleet is worst at seeing. On the allowlist it cannot be missed.
-// `GH_TOKEN` is PARITY RESTORATION, not a widening — and that distinction is the whole
-// justification, so it is worth stating precisely.
-//
-// THE WORKER IS DESIGNED TO PUSH AND OPEN ITS OWN PR. Three independent places say so: the
-// implement prompt instructs it to `git push origin HEAD` and `gh pr create --fill --base main`;
-// `settings/worker.json` carries `excludedCommands: ["gh *"]`, an exclusion that exists ONLY so a
-// worker's `gh` runs outside Seatbelt (it fails TLS verification under it); and the orchestrator's
-// own push is commented as "the ONE orchestrator-initiated push in this file (the worker itself
-// normally pushes from inside its own sandbox)" — a FALLBACK, not the route.
-//
-// AND THE WORKER ALREADY HOLDS THIS CREDENTIAL ON MACOS. `WORKER_HOME_SYMLINKS` (worker-home.ts)
-// grants `.config/gh` into every per-run worker HOME, with the reason recorded verbatim as "gh CLI
-// auth token, so a worker can open/merge PRs". A container simply stores the same secret in a
-// VARIABLE instead of a FILE — and the isolation boundary treats those two forms oppositely: the
-// file is symlinked in, the variable is stripped out. Measured with a fake token, `GH_TOKEN`
-// reaches the child env as `false`. So the container worker is the ONLY configuration in which the
-// fleet's own stated intent does not hold.
-//
-// WHY THE ALLOWLIST AND NOT THREADING, the same argument `CLAUDE_CODE_OAUTH_TOKEN` records
-// directly above: threading needs all three spawn paths to opt in, and a missed one yields a
-// silently UNAUTHENTICATED worker — the failure this fleet is worst at seeing. Here that failure
-// is not hypothetical, it is the observed one: the container's workers fail their push, the
-// orchestrator's fallback quietly recovers it, and the only trace is a `fallback:` line.
-//
-// IT DOES NOT WEAKEN THE BILLING BOUNDARY. `GH_TOKEN` does not match {@link ANTHROPIC_KEY}
-// (VERIFIED by running the pattern, not by reading it), so the leak assertion below is unchanged,
-// and {@link billingMode} keys off `SANCTIONED_KEY` alone so a GitHub token cannot flip a run to
-// `api`. `GITHUB_TOKEN` is deliberately NOT added: `gh` prefers `GH_TOKEN`, and the container's git
-// credential helper expands `$GH_TOKEN` specifically, so a second name would be scope creep on a
-// credential surface for no reachable caller.
 const ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "USER", "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"] as const;
 
-/** Any key matching this is a billing-boundary violation and must not survive… */
+/** Any key matching this is a billing-boundary violation and must not survive into a child env. */
 const ANTHROPIC_KEY = /^ANTHROPIC_/i;
 
-/** …EXCEPT this one: the sole ANTHROPIC_* key the overflow valve may pass through
- * (see file header). Opt-in by presence in the parent env; absent ⇒ subscription. */
+/** The one exception: the sole ANTHROPIC_* key the overflow valve may pass through (see the file
+ * header). Opt-in by presence in the parent env; absent means subscription billing. */
 const SANCTIONED_KEY = "ANTHROPIC_API_KEY";
 
 /**
- * Build a child environment from an explicit allowlist plus caller-supplied
- * vars. Never inherits `process.env` wholesale. Throws if any `ANTHROPIC_*`
- * key OTHER than the sanctioned `ANTHROPIC_API_KEY` overflow valve survives
- * (including one a caller passed in), so a leak fails loud at the boundary
- * rather than silently on the invoice. The valve itself is opt-in: the parent's
- * `ANTHROPIC_API_KEY` is copied through ONLY when present (see file header).
- *
- * Shell isolation is the SAME contamination class as the ANTHROPIC_* denial,
- * mirrored: where ANTHROPIC_* is DENIED, the vars below are GRANTED, so a
- * worker's shell sources Remudero's own (empty) rc, never the operator's.
- * Workers inherit NOTHING they aren't explicitly given; none of these is
- * copied from the parent (an operator HOME/ZDOTDIR/CLAUDE_CODE_SHELL is
- * ignored), only set to the granted value.
- *  - `opts.home` → **HOME** (W1-T18 general isolation mechanism). When set,
- *    OVERRIDES whatever the allowlist copied from the parent's real HOME with
- *    a Remudero-controlled scratch dir (`worker-home.ts`) holding only empty
- *    rc files — this is what makes isolation hold on ANY host, not just one
- *    whose `~/.bashrc` happens to be absent. See config.workerHomeDir.
- *  - `opts.shell` → **CLAUDE_CODE_SHELL** (default `/bin/bash`). Claude Code's
- *    Bash-tool snapshot sources `os.homedir()/.<shell>rc`, resolved off HOME —
- *    combined with `opts.home` above, that path is the redirected scratch
- *    HOME's empty rc, never the operator's `~/.zshrc` (and its interactive
- *    `compinit` prompt that stalled W1-T1C). See config.workerShell.
- *  - `opts.zdotdir` → **ZDOTDIR** (default derived from HOME). Defense-in-depth
- *    for any direct `zsh` a worker spawns. See config.workerZdotdir.
+ * Build a child environment from an explicit allowlist plus caller-supplied vars — never
+ * `process.env` wholesale. Throws if any `ANTHROPIC_*` key other than the sanctioned
+ * `ANTHROPIC_API_KEY` overflow valve survives, so a leak fails loud here rather than on the invoice.
+ * INVARIANT: shell isolation mirrors that denial — `opts.home`/`shell`/`zdotdir` grant
+ * HOME/CLAUDE_CODE_SHELL/ZDOTDIR so a worker's shell sources Remudero's own empty rc, never the
+ * operator's `~/.zshrc`; see config.workerHomeDir/workerShell/workerZdotdir.
+ * FALSIFIER: test/env.test.ts, test/codex-worker-home-redirection.test.ts.
  */
 export function buildWorkerEnv(
   extra: Record<string, string> = {},
@@ -138,62 +60,46 @@ export function buildWorkerEnv(
     child[key] = val;
   }
 
-  // Grant the HOME redirection (unless the caller set HOME explicitly via
-  // `extra` — test/override escape hatch), OVERRIDING whatever the allowlist
-  // above copied from the parent's real HOME. This is the W1-T18 mechanism:
-  // isolation no longer depends on the operator's real `~/.bashrc` being
-  // absent, because the worker's HOME is never the operator's real HOME.
+  // Grants the HOME redirection (unless the caller set HOME via `extra`), overriding whatever the
+  // allowlist copied from the parent's real HOME — the W1-T18 mechanism that makes isolation hold
+  // on any host, not only one whose `~/.bashrc` happens to be absent.
   if (opts.home && !("HOME" in extra)) {
     child.HOME = opts.home;
   }
 
-  // Grant CLAUDE_CODE_SHELL (unless the caller set one via `extra`). This is the
-  // var that actually isolates the worker's Bash-tool snapshot from ~/.zshrc.
+  // Grants CLAUDE_CODE_SHELL (unless the caller set one via `extra`) — the var that isolates the
+  // worker's Bash-tool snapshot from `~/.zshrc`.
   if (!("CLAUDE_CODE_SHELL" in child)) {
     const shell = opts.shell ?? "/bin/bash";
     child.CLAUDE_CODE_SHELL = shell;
   }
 
-  // Grant ZDOTDIR (unless the caller set one via `extra`). Prefer the path the
-  // caller resolved from config; otherwise derive the default from HOME
-  // (`<HOME>/.config/remudero/zdotdir`, i.e. `<root>/../.config/remudero/zdotdir`).
+  // Grants ZDOTDIR (unless the caller set one via `extra`), preferring the caller's resolved path
+  // and otherwise deriving one from HOME (`<HOME>/.config/remudero/zdotdir`).
   if (!("ZDOTDIR" in child)) {
     const home = child.HOME ?? parent.HOME;
     const zdotdir = opts.zdotdir ?? (home ? join(home, ".config", "remudero", "zdotdir") : undefined);
     if (zdotdir) child.ZDOTDIR = zdotdir;
   }
 
-  // Grant DISABLE_AUTOUPDATER=1 (unless the caller set one via `extra`) — W1-T236:
-  // the shared `claude` binary a worker execs is a symlink into an
-  // auto-updating install (npm-global or the native installer), and its
-  // content can be rewritten mid-run out from under the resolved path — a
-  // same-day 2.1.216→2.1.217 bump was observed rewriting it 2026-07-21
-  // mid-incident. Unlike every OTHER grant above, this is not copied from the
-  // parent (autoupdates are not something a worker's env legitimately carries
-  // in) — it is an explicit ADD, the same discipline the ALLOWLIST enforces
-  // for copies: nothing reaches `child` that is not named. This makes it
-  // impossible for a running worker to trigger or race an update of the
-  // binary it and every sibling worker are executing; the operator can still
-  // update the CLI deliberately outside a run.
+  // Grants DISABLE_AUTOUPDATER=1 (unless the caller set one via `extra`) — the shared `claude`
+  // binary a worker execs can be rewritten mid-run by an autoupdate (W1-T236).
+  // Why: the observed mid-run binary rewrite and why this is an explicit add, not a copy —
+  // docs/forensics/env.md#disable_autoupdater (W1-T236).
   if (!("DISABLE_AUTOUPDATER" in child)) {
     child.DISABLE_AUTOUPDATER = "1";
   }
 
-  // Overflow valve — engaged ONLY when the caller passes `opts.allowApiKey`
-  // (config.overflow === "api_key", §9 conditional-cap guard). When engaged and
-  // the operator has exported ANTHROPIC_API_KEY into the PARENT env, pass that
-  // one key BY VALUE into the child so this run bills to API credits instead of
-  // the subscription window. env→env only — the value is never written to a file
-  // or logged (childEnvKeys records the NAME, not the value). Absent the flag OR
-  // the key ⇒ nothing copied ⇒ subscription, exactly as before.
+  // Overflow valve — engaged only when the caller passes `opts.allowApiKey` (the config.overflow
+  // conditional-cap guard, §9). Passes the parent's ANTHROPIC_API_KEY through by value; absent the
+  // flag or the key, nothing is copied and billing stays subscription.
   if (opts.allowApiKey && !(SANCTIONED_KEY in child)) {
     const apiKey = parent[SANCTIONED_KEY];
     if (typeof apiKey === "string" && apiKey.length > 0) child[SANCTIONED_KEY] = apiKey;
   }
 
-  // Every ANTHROPIC_* key is a hard violation — EXCEPT the sanctioned valve, and
-  // only while it is engaged (an ANTHROPIC_API_KEY reaching `child` WITHOUT the
-  // flag — e.g. injected via `extra` — is still a leak and still throws).
+  // Every ANTHROPIC_* key is a hard violation except the sanctioned valve, and only while engaged
+  // (one reaching `child` without the flag — e.g. injected via `extra` — is still a leak).
   const survivors = Object.keys(child).filter(
     (k) => ANTHROPIC_KEY.test(k) && !(opts.allowApiKey === true && k === SANCTIONED_KEY),
   );
@@ -210,11 +116,9 @@ export function buildWorkerEnv(
 export type BillingMode = "api" | "subscription";
 
 /**
- * The billing mode a run bills at, DERIVED from the child env's actual key NAMES
- * (never guessed, never a standing constant): `api` iff the sanctioned
- * `ANTHROPIC_API_KEY` valve is engaged, else `subscription`. Takes key names (not
- * values) so it reads straight off `WorkerResult.childEnvKeys` — the same
- * secret-free proof surface the ledger already records.
+ * The billing mode a run bills at, derived from the child env's actual key names (never guessed):
+ * `api` iff the sanctioned `ANTHROPIC_API_KEY` valve is engaged, else `subscription`. Takes key
+ * names, not values, so it reads straight off `WorkerResult.childEnvKeys`.
  */
 export function billingMode(envKeys: readonly string[]): BillingMode {
   return envKeys.includes(SANCTIONED_KEY) ? "api" : "subscription";
@@ -225,55 +129,40 @@ export function isBillingClean(env: Record<string, string | undefined>): boolean
   return !Object.keys(env).some((k) => ANTHROPIC_KEY.test(k));
 }
 
+// Why: why env_clean is a canary rather than a hard gate — docs/forensics/env.md#bootassertion
+// (W1-T991).
 /** Result of {@link assertCleanBoot} — one ledger-ready boot-time reading. */
 export interface BootAssertion {
-  /** True iff the DAEMON'S OWN process env (not a worker's — see below) is ANTHROPIC_*-free. */
+  /** True iff the daemon's own process env (not a worker's — see below) is ANTHROPIC_*-free. */
   env_clean: boolean;
-  /** `api` iff the daemon booted with the sanctioned `ANTHROPIC_API_KEY` valve engaged
-   * (overnight-on-credits, W1-T258), else `subscription` — the default this repo expects. */
+  /** `api` iff the daemon booted with the sanctioned overflow valve engaged, else `subscription`. */
   billing_mode: BillingMode;
-  /** Absolute path of the node runtime executing THIS process (`process.execPath`) —
-   * W1-T991: the reading that answers "which node does the fleet execute" without
-   * reading a live process listing. Always present (unlike `node_drift` below), so the
-   * ledger records the running interpreter on every boot, drifting or not. */
+  /** Absolute path of the node runtime executing this process (`process.execPath`, W1-T991). */
   node_path: string;
   /** `process.version` of the running runtime, e.g. `"v22.22.3"`. */
   node_version: string;
-  /** Named drift reason — present ONLY when `node_path` falls outside the daemon
-   * account's own roots (its HOME plus the system/homebrew prefixes), or `node_version`
-   * disagrees with the repo's declared `.nvmrc` pin. Advisory: its presence never blocks
-   * boot (W1-T991 design part 2 — same ruling as {@link checkBinaryPin}'s drift). */
+  /** Named drift reason — present only when the runtime is outside the daemon's own roots or
+   * disagrees with `.nvmrc`. Advisory: never blocks boot. */
   node_drift?: string;
 }
 
+// Why: why a contaminated-shell boot is a canary, not a hard gate, and how it differs from a
+// worker leak — docs/forensics/env.md#assertcleanboot (W1-T12b).
 /**
- * The daemon's boot-time billing assertion (W1-T12b). This checks the DAEMON
- * PROCESS'S OWN env — what launchd (or a dev shell) handed it at exec — which
- * is a DIFFERENT env from a worker's: every worker's env is already built fresh
- * from `buildWorkerEnv`'s allowlist above and can never inherit an ANTHROPIC_*
- * key regardless of what the daemon process itself carries. So `env_clean:
- * false` here does not mean a leak reached a worker — it means the daemon was
- * booted from a contaminated shell rather than launchd's clean one (launchd
- * never sources `.zshrc` — see file header), which is a canary worth logging
- * loudly, not a hard gate: {@link isBillingClean} does the read, this just
- * shapes it into the ledger fields `daemon.boot` (wired in lib/daemon.ts)
- * records: `env_clean=true / billing_mode=subscription` on the clean path this
- * repo always expects in production.
+ * The daemon's boot-time billing assertion (W1-T12b), read from the daemon process's own env —
+ * a different env from a worker's, which `buildWorkerEnv` already builds clean regardless. A
+ * `false` `env_clean` means the daemon booted from a contaminated shell, not that a leak reached
+ * a worker; it is a canary worth logging loudly, not a hard gate. Wired into the ledger's
+ * `daemon.boot` field by lib/daemon.ts.
  */
 export function assertCleanBoot(
   env: NodeJS.ProcessEnv = process.env,
   allowApiKey = false,
-  /**
-   * The runtime reading (W1-T991) — defaults to THIS process's own execPath/version so a
-   * real boot needs no caller change; a test overrides to prove drift without a real
-   * foreign-account install. See {@link checkNodeRuntimeProvenance} for the drift logic.
-   */
+  /** The runtime reading (W1-T991); defaults to this process's own so a real boot needs no
+   * caller change. A test overrides to prove drift without a real foreign install. */
   runtime: { execPath: string; version: string } = { execPath: process.execPath, version: process.version },
-  /**
-   * The repo's declared node pin (`.nvmrc` content, trimmed) — read by the CALLER before
-   * calling this (this module never touches the filesystem, see file header). Omitted ⇒
-   * no version-pin comparison; the own-roots check below still runs.
-   */
+  /** The repo's declared node pin (`.nvmrc`, trimmed), read by the caller. Omitted means no
+   * version-pin comparison; the own-roots check below still runs. */
   declaredNodeVersion?: string,
 ): BootAssertion {
   // The valve is engaged only under BOTH factors (config intent + the key), so a
@@ -290,25 +179,14 @@ export function assertCleanBoot(
   };
 }
 
-// ── Node runtime provenance (W1-T991) ───────────────────────────────────────
-//
-// THE SIBLING READING assertCleanBoot's own doc names above: env_clean catches a daemon
-// booted from a contaminated SHELL; this catches a daemon EXECUTING a foreign RUNTIME —
-// same canary, same advisory posture, over process.execPath/version instead of
-// ANTHROPIC_* keys. bin/rmd's last line execs node_modules/.bin/tsx, a shebang script, so
-// the daemon's own node is whatever PATH resolved at exec time, never a path anyone
-// chose; nothing before this read it, pinned it, or recorded it (see the task's rationale
-// — a live worker was observed running a DIFFERENT account's nvm-installed node, invisible
-// until that install is eventually pruned or upgraded out from under every spawn at once).
+// Why: the incident this reading exists to catch — a foreign account's node running
+// undetected — docs/forensics/env.md#node-runtime-provenance-section (W1-T991).
+// ── Node runtime provenance (W1-T991) — the sibling reading to env_clean above: this catches a
+// daemon executing a foreign runtime, same canary posture, over execPath/version instead of keys.
 
-/**
- * System/package-manager roots node commonly installs under, independent of any ONE
- * user's home — combined with the daemon's OWN homedir (`env.HOME`) below to decide
- * whether a resolved runtime is inside "this account's own roots". Never a single
- * hardcoded host path: the container lane runs as a different user under a different
- * prefix entirely (`deploy/`), so a check keyed to one literal `/Users/...` path would
- * fire on every non-macOS boot and get muted, then ignored (design part 3).
- */
+// Why: why these roots and not one hardcoded host path — docs/forensics/env.md#system_node_roots.
+/** System/package-manager roots node commonly installs under, combined below with the daemon's
+ * own homedir to decide whether a resolved runtime is inside this account's own roots. */
 const SYSTEM_NODE_ROOTS = ["/usr/local", "/opt/homebrew", "/usr", "/bin", "/opt"] as const;
 
 function isUnderRoot(path: string, root: string): boolean {
@@ -316,16 +194,10 @@ function isUnderRoot(path: string, root: string): boolean {
 }
 
 /**
- * Read the running node runtime's provenance against the daemon's own roots and the
- * repo's declared version pin. Pure — takes every reading as an argument rather than
- * touching `process`/the filesystem itself (same discipline as {@link checkBinaryPin}),
- * so it is unit-testable with a fake execPath/home/pin and no real foreign install.
- *
- * Returns `{drift: false}` (no `reason`) when the runtime sits under the daemon's own
- * home or a system prefix AND (no declared pin, or the version matches it) — the common
- * case, which passes silently. Otherwise returns a NAMED reason: an out-of-roots path is
- * reported before a version mismatch (design part 2) — it is the stronger claim, and a
- * foreign-account runtime is rarely also coincidentally version-pinned right.
+ * Read the running node runtime's provenance against the daemon's own roots and its declared
+ * version pin. Pure, so it is unit-testable with a fake execPath/home/pin.
+ * Returns `{drift: false}` when the runtime sits under the daemon's own home or a system prefix
+ * AND (no declared pin, or the version matches it); otherwise a named reason, out-of-roots first.
  */
 export function checkNodeRuntimeProvenance(
   execPath: string,
@@ -358,20 +230,11 @@ export function checkNodeRuntimeProvenance(
   return { drift: false };
 }
 
-// ── Binary content pin (W1-T236) ────────────────────────────────────────
-//
-// DISABLE_AUTOUPDATER above stops a WORKER from triggering or racing an
-// update while it runs. It does not, by itself, make a swap the OPERATOR
-// caused between runs visible: `config.claudeBin` (config.ts's
-// `resolveClaudeBin`) records a path once, and a path is not content — the
-// same path can resolve to a rewritten binary after a deliberate `npm i -g`
-// or an autoupdate that landed between runs. `checkBinaryPin` is the smaller
-// of the two content-pin designs (MASTER-PLAN's harness-owned-copy is the
-// stronger, deferred guarantee): compare the version recorded at config time
-// against the version observed at THIS preflight (`claude --version`, e.g.
-// via `resolveClaudeExecutable`'s caller). A caller wires this at the actual
-// preflight call site; this module only supplies the pure comparison so it is
-// unit-testable without a real binary.
+// Why: why this is the smaller of two content-pin designs and what the deferred stronger one is —
+// docs/forensics/env.md#binary-content-pin-section (W1-T236).
+// ── Binary content pin (W1-T236) — DISABLE_AUTOUPDATER stops a worker racing an update in flight;
+// this instead compares the version recorded at config time against the one observed at preflight,
+// since a recorded path is not recorded content.
 
 /** One version-pin reading — returned, never thrown (see {@link checkBinaryPin}). */
 export interface BinaryPinCheck {
@@ -385,17 +248,13 @@ export interface BinaryPinCheck {
   reason?: string;
 }
 
+// Why: why a mismatch is ledgered and continued rather than hard-failed —
+// docs/forensics/env.md#checkbinarypin (W1-T236).
 /**
- * Compare the `claude` binary version recorded at config time against the
- * version observed at preflight (W1-T236). A MATCH returns `{drift: false}`
- * with no `reason` — the common case passes silently, exactly as before this
- * pin existed (acceptance: "a matching binary passes preflight silently").
- * A MISMATCH — the shared binary's content changed underneath the recorded
- * path (a deliberate operator update, or an autoupdate race) — returns
- * `{drift: true, reason}` naming both versions, so a caller can LEDGER the
- * drift and CONTINUE rather than hard-fail: the operator still updates the
- * CLI deliberately, so this makes a swap VISIBLE and INTENTIONAL, never
- * impossible (acceptance: "ledgered with a named drift reason").
+ * Compare the `claude` binary version recorded at config time against the one observed at
+ * preflight (W1-T236). A match returns `{drift: false}`, no `reason` — the common case passes
+ * silently. A mismatch returns `{drift: true, reason}` naming both versions, so a caller can
+ * ledger the drift and continue rather than hard-fail — a deliberate operator update stays visible.
  */
 export function checkBinaryPin(recordedVersion: string, actualVersion: string): BinaryPinCheck {
   if (recordedVersion === actualVersion) {
@@ -409,29 +268,10 @@ export function checkBinaryPin(recordedVersion: string, actualVersion: string): 
   };
 }
 
-// ── The DECLARED pin, and the reading that finally consumes checkBinaryPin ──
-//
-// WHY THIS EXISTS: {@link checkBinaryPin} shipped with NO PRODUCTION CALLER (src/lib/reachability.ts
-// lists it by name among the zero-consumer organs), and the reason is not that someone forgot the
-// call — it is that its `recordedVersion` argument HAD NO PRODUCER ANYWHERE IN THE TREE. `Config`
-// carries `claudeBin`, a PATH, and no version; `resolveClaudeExecutable` runs `--version` with
-// `stdio: "ignore"` and discards the output. Wiring it therefore required deciding what "recorded"
-// means, which is the whole of the design below.
-//
-// THE SOURCE OF TRUTH IS THE ONE DECLARATION THIS REPO ALREADY MAKES: `ARG CLAUDE_CODE_VERSION` in
-// deploy/Dockerfile. Two reasons, and the second is why nothing else was chosen:
-//   1. It is the version this repo SAYS its workers run — the Dockerfile argues it at length (the
-//      `stable` dist-tag, and lockstep with the `@anthropic-ai/claude-agent-sdk` version in
-//      package-lock.json). A host that disagrees with it is exactly the condition worth reporting.
-//   2. deploy/verify-image.sh reads THE SAME LINE. One declaration, two consumers, no second copy
-//      to drift — and no inference. Deriving the expected CLI from the SDK version instead would
-//      have meant trusting the 2.1.N-alongside-0.3.N convention, which upstream documents but does
-//      not guarantee; that would put an unenforced assumption inside a gate.
-//
-// THREE STATES, NEVER TWO. `unknown` is not padding: this fleet's standing law is that a READ
-// FAILURE DEGRADES TO UNKNOWN, NEVER TO A NUMBER — and the recon that produced this task found that
-// law broken three times in one function elsewhere (deployer.ts's `probeIdle`). An unreadable
-// Dockerfile or a `claude --version` that will not run must not be able to render as `match`.
+// Why: why the Dockerfile ARG is the source of truth and why "unknown" is a required third state
+// — docs/forensics/env.md#declared_cli_pin_arg-section.
+// ── The declared pin: deploy/Dockerfile's `ARG CLAUDE_CODE_VERSION` is the one declaration both
+// this reading and deploy/verify-image.sh read. A read failure degrades to `unknown`, never `match`.
 
 /** The Dockerfile ARG that declares which CLI this repo intends its workers to run. */
 export const DECLARED_CLI_PIN_ARG = "CLAUDE_CODE_VERSION";
@@ -456,7 +296,7 @@ export function parseClaudeVersionOutput(raw: string): string | undefined {
   return m ? m[1] : undefined;
 }
 
-/** A three-state binary-pin reading. `unknown` means A READ FAILED, never "no drift". */
+/** A three-state binary-pin reading. `unknown` means a read failed, never "no drift". */
 export interface BinaryPinReading {
   status: "match" | "drift" | "unknown";
   declaredVersion?: string;
@@ -468,7 +308,7 @@ export interface BinaryPinReading {
 /**
  * Read the declared pin and the installed binary and compare them through {@link checkBinaryPin}.
  *
- * BOTH READS ARE INJECTED and BOTH may throw — a missing Dockerfile, a binary that will not run.
+ * Both reads are injected and both may throw — a missing Dockerfile, a binary that will not run.
  * Each failure yields `status: "unknown"` with the cause named, so a caller can ledger "we could
  * not tell" as its own outcome rather than reporting a match it never observed.
  */
