@@ -1,0 +1,94 @@
+- id: W1-T2966
+  title: "W1-T2544's AUTHOR-TIME DIAGNOSIS IS EMITTED ON A CHECK THAT PASSES, SO NOBODY READS IT — `acceptance-author-gate` prints `OK — judgeable — but 1 of 1 proof(s) cannot execute` and exits 0, which renders as a GREEN check whose log nobody opens; two unexecutable proofs shipped in one session from an author who had that exact sentence sitting in CI. Escalate the diagnosis it already computes from a warning to a refusal"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: operator-session
+  plan_refs: ["W1-T2544", "W1-T305", "W1-T369", "§12"]
+  files: [scripts/acceptance-author-gate.mjs, test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2544 SHIPPED THE DETECTION AND STOPPED SHORT OF THE REFUSAL ITS OWN TITLE ASKS FOR. That
+    title says "refuse a wrapped pattern and a non-dialect proof where the author can still act";
+    the build (#3416) is `feat(review): warn at author time when a proof cannot execute`. The
+    predicate is correct and already running. Only the consequence is missing.
+
+    MEASURED 2026-09-06, running scripts/acceptance-author-gate.mjs against a synthetic event
+    payload per proof shape, with a well-formed positive control:
+
+      wrapped pattern   -> exit 0  "OK — judgeable — but 1 grep proof(s) wrap their pattern"
+      pathless grep     -> exit 0  "OK — judgeable — but 1 of 1 proof(s) cannot execute"
+      non-dialect prose -> exit 0  "OK — judgeable — but 1 of 1 proof(s) cannot execute"
+      well-formed       -> exit 0  "OK — Acceptance block is judgeable"        (no `but` clause)
+
+    THE DIAGNOSIS IS EXACT AND THE EXIT CODE DISCARDS IT. A green check's log is not read. The
+    author who produced this task had `1 of 1 proof(s) cannot execute` printed on his own PR and
+    did not see it, because the check said success — Standing rule 4, "green checks are not
+    evidence", demonstrated against the gate whose whole job is to be evidence.
+
+    WHY WARNING IS NOT ENOUGH, AS AN ASYMMETRY RATHER THAN AN OPINION. A shard's proofs pass
+    through `proof-dialect`, which BLOCKS at dispatch. A PR BODY's proofs pass through this gate,
+    which warns. Census over the in-repo corpus, 5,674 proofs across 1,141 shards:
+
+      pathless grep : 0        wrapped: 3        non-dialect: 51 (all legacy `unit test over ...`)
+
+    Zero pathless proofs in the blocked surface; TWO in one session's PR bodies on the warned
+    surface (#4278 merged with both criteria unexecutable, #4279 caught only because its author
+    ran the second verb by hand). The gated surface is clean and the warned surface is not, which
+    is what a warning being insufficient looks like when it is measured rather than argued.
+
+    THE COST OF THE CURRENT STATE IS A MERGED PR CERTIFYING WORK IT DID NOT VERIFY. W1-T305 records
+    322 code PRs certified `success` with zero proofs executed; W1-T369 records 39 open tasks
+    carrying proofs that cannot execute. This is the author-time end of that same family, and it is
+    the only end where the sha is not yet spent.
+  design: |
+    REFUSE (exit 1) WHERE THE GATE TODAY WARNS, ON THE THREE SHAPES IT ALREADY NAMES: a wrapped
+    grep pattern, a `grep:` with no path target, and a proof carrying no dialect prefix. The
+    predicate is not new work — `evaluateGate` already computes it and already writes the sentence.
+
+    WHAT MUST NOT BECOME REFUSABLE, AND IT IS ALREADY CORRECT. A pure-path `unit test:` proof whose
+    file DOES NOT EXIST YET is the forward-referencing TDD shape every plan filing depends on.
+    MEASURED against the same harness: it reads `OK — Acceptance block is judgeable` with no `but`
+    clause, identical to the control. So the gate already separates "cannot execute BY
+    CONSTRUCTION" from "does not exist YET", and this task must not disturb that boundary. The
+    falsifier has to drive that case deliberately and assert it still passes; a test that only
+    drives the three bad shapes would let a later refactor collapse the distinction silently.
+
+    THE MIGRATION IS SMALL AND IT IS NAMED RATHER THAN DISCOVERED. Three wrapped patterns and 51
+    legacy non-dialect proofs sit in existing shards. They block only when their task is next
+    touched, and each is a criterion that proves nothing today. Fix them in bulk (§12's own advice
+    for a refused-and-reselected class) rather than one PR at a time.
+
+    ALTERNATIVE WEIGHED AND REJECTED: leave it warning and make the warning louder — a PR comment,
+    say. That reproduces the defect one surface out: a comment on a green PR is read exactly as
+    often as a log line on a green check, and it adds a channel without adding a consequence. The
+    exit code is the only part of a check anyone reads.
+  acceptance:
+    - claim: "the author-time gate exits non-zero on a grep proof with no path target, so a proof the reviewer would refuse cannot reach a green check"
+      proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
+    - claim: "it exits non-zero on a wrapped grep pattern and on a proof with no dialect prefix, the two shapes W1-T2544 already detects and does not act on"
+      proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
+    - claim: "a pure-path unit test proof naming a file that does not exist yet still PASSES, so the forward-referencing TDD shape every plan filing depends on is untouched by the escalation"
+      proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
+    - claim: "the refusal names which proof and which shape, so an author can act on it without re-deriving the diagnosis the gate already computed"
+      proof: "unit test: test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts"
+  note: |
+    FILED 2026-09-06 from an operator session that produced two of these itself. The evidence is
+    not a report of someone else's mistake: #4278 merged with both acceptance proofs unexecutable
+    and #4279 nearly did, and the gate had diagnosed both correctly and in advance.
+
+    THE FALSIFIER MUST INCLUDE THE PASSING CASE. Three of the four criteria assert a refusal; the
+    third asserts a NON-refusal, and it is the one that stops this task from breaking every plan
+    filing in the repo. A suite that only proves the gate got stricter is not evidence it got
+    stricter in the right place.
+
+    THE RESERVATION COULD NOT BE MINTED FROM THE FILING SESSION: `rmd next-task-id --reserve`
+    refuses when it cannot enumerate open PRs (no `gh` binary there), and a direct push to
+    `refs/rmd-id/*` returns 403 for that session's credentials. All four open PRs were enumerated
+    by another instrument and none claims this id. If a concurrent lane took W1-T2966 first, this
+    filing renumbers — the loser of a reservation race renumbers, and an unfiled id is never free.
