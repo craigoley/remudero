@@ -1,0 +1,75 @@
+- id: W1-T2950
+  title: "WORKTREE PATH ALIASES BYPASS LIVE-BRANCH PROTECTION — Git canonicalizes a linked worktree path while the reaper compares it byte-for-byte with its non-canonical directory entry, so an old live PR lane can be classified as unregistered and destroyed"
+  repo: remudero
+  depends_on: [W1-T2847]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files:
+    - src/lib/worker.ts
+    - test/adhoc-lane-reap.test.ts
+  origin: "operator-session#macos-worktree-path-alias-live-branch-reap-2026-09-06"
+  plan_refs: ["W1-T2847", "W1-T378", "W1-T381"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT 50e10545 AND REPRODUCED ON MACOS 26.0.1. The W1-T2847 real-git
+    live-branch test fails under the default macOS temporary root: its lane path begins with
+    `/var/folders/...`, while `git worktree list --porcelain` reports the same worktree beneath
+    `/private/var/folders/...`. `resolveWorktreeRegistration` compares those strings with
+    `entry.path === entryPath`, misses the registration, skips the `branchIsLiveUpstream` probe and
+    lets the armed reaper classify the aged lane as terminal. The test observed `reaped: ["alloc"]`
+    where the live-branch contract requires an empty list. Running the same focused test with
+    `TMPDIR=/private/tmp` passed all eleven cases, isolating path identity rather than branch or age
+    logic as the discriminator.
+
+    THIS IS A SAFETY DEFECT IN W1-T2847'S IMPLEMENTATION, NOT A TEST-ONLY PORTABILITY ISSUE. Git is
+    allowed to expose a canonical path that differs from the spelling used to reach the same inode.
+    A byte-string mismatch must not erase a registered branch's liveness evidence. W1-T378 and
+    W1-T381 established that ambiguous activity or process evidence keeps rather than destroys;
+    this task extends the same fail-closed doctrine to path identity without weakening any age,
+    pid, upstream-branch, dry-run or parent-removal gate.
+  design: |
+    Compare the candidate directory and each registered worktree by canonical filesystem identity,
+    using a bounded synchronous resolver appropriate to this already-synchronous reaper. Preserve
+    the original candidate and Git-reported paths for all removal and telemetry operations; the
+    canonical form is only an equality key.
+
+    A canonicalization failure is not evidence that the candidate is unregistered. Represent that
+    outcome separately from a proven no-match and make the destructive path fail closed with a
+    named keep reason. Do not fall back to the current raw-string comparison after one side fails,
+    and do not delete, prune, rewrite Git metadata or resolve symlinks outside the registration
+    decision.
+
+    Add a deterministic real-Git test built on an explicit symlink alias so Linux CI exercises the
+    same identity mismatch as macOS `/var` versus `/private/var`. Keep the existing macOS-default
+    fixture load-bearing as a platform regression when it runs there. Prove the test fails by
+    deleting only the canonical-identity fix, and retain the existing assertion that a live branch
+    is never reaped however old.
+  acceptance:
+    - claim: "a linked worktree reached through a symlink or platform path alias still resolves to its Git registration and a live upstream branch is kept however old"
+      proof: "real-git unit test: test/adhoc-lane-reap.test.ts"
+    - claim: "the regression is deterministic on Linux CI through an explicit symlink alias and also covers macOS's default /var versus /private/var spelling when available"
+      proof: "unit test: test/adhoc-lane-reap.test.ts"
+    - claim: "if either side of the registration identity comparison cannot be canonicalized, the reaper records a named undecidable keep and performs no remove or prune"
+      proof: "unit test with injected filesystem failure: test/adhoc-lane-reap.test.ts"
+    - claim: "a successfully canonicalized candidate with no matching Git registration preserves the existing terminal-debris removal behavior"
+      proof: "unit test: test/adhoc-lane-reap.test.ts"
+    - claim: "canonical paths are used only as comparison keys; removal, ledger fields and Git commands retain their existing original paths and parent-repository contract"
+      proof: "unit test: test/adhoc-lane-reap.test.ts"
+    - claim: "the new alias regression fails by reaping the live lane when the production canonical-identity fix is removed, while the repaired suite passes"
+      proof: "recorded strict-TDD falsifier: test/adhoc-lane-reap.test.ts"
+  falsifier: |
+    Close without implementation if current main already compares worktree registrations by
+    canonical filesystem identity and an armed, aged real-Git lane reached through a symlink alias
+    is kept because its live upstream branch is consulted. A test that passes only after forcing
+    `TMPDIR` to a canonical spelling, or a change that disables armed reaping, does not falsify the
+    defect.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2950`; the held id
+    is authoritative. LOAD-BEARING OBSERVATION: the default-environment focused suite failed 10/11
+    with the live lane in `reaped`, while the canonical `TMPDIR=/private/tmp` control passed 11/11.
+    The implementation must preserve the fail-closed posture of every existing reaper guard.
