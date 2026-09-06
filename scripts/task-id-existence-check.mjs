@@ -1,58 +1,28 @@
 #!/usr/bin/env node
 // scripts/task-id-existence-check.mjs
 //
-// TASK-ID EXISTENCE gate (W1-T1048).
+// TASK-ID EXISTENCE gate (W1-T1048). Every `W1-T<n>` cited under `src/` or `deploy/` must resolve
+// to a reservation ref (`refs/rmd-id/W1-T<n>` on the remote) or a declared plan record (`- id:` in
+// plan/tasks.yaml or plan/tasks.d/*.yaml). Either alone is a valid claim.
 //
-// #2251 cited an id as its OWN task id in shipped code -- two comments in
-// deploy/recycle-container.sh and five references in test/recycle-container.test.ts -- and named
-// it three times in its PR body, yet no plan record ever declared it and no reservation ref ever
-// held it. It was orphaned because the hand lane's only id source, `rmd next-task-id`, prints an
-// id and reserves NOTHING (its own comment: "a process that exits microseconds later reserves
-// nothing anyway"), so a later `rmd plan`/`rmd triage` mint handed the same number out as free.
-// Nothing noticed until an open PR had to be renumbered.
+// INVARIANT: this checks EXISTENCE, never ownership -- citing an id in shipped source is normal
+// and never itself forbidden, only citing one that resolves nowhere is. `test/` is excluded by
+// construction (scan roots default to `src`, `deploy`): its fixture ids are synthetic, never real.
+// Why: #2251 shipped an id neither reserved nor declared; nothing caught it until an open PR
+// needed renumbering. docs/forensics/task-id-existence-check.md#module-header.
 //
-// THE PREDICATE IS EXISTENCE, NEVER OWNERSHIP. Ids legitimately appear in shipped source -- a
-// task that ships code routinely names itself in comments and test titles -- so a lint forbidding
-// ids in source would break the house convention within a day. The rule this script enforces
-// instead: every `W1-T<n>` cited under `src/` or `deploy/` must resolve to EITHER a reservation
-// ref (`refs/rmd-id/W1-T<n>` on the remote) OR a declared plan record (`- id: W1-T<n>` in
-// plan/tasks.yaml or plan/tasks.d/*.yaml). Either alone is a valid claim (W1-T509's reservation
-// allocator predates most declared ids, and a freshly reserved id has no plan record yet).
+// A written baseline (scripts/task-id-existence-baseline.json) exempts ids that predate the
+// reservation allocator or the plan schema; an entry with no reason is REJECTED. READ-ONLY: shells
+// `git ls-remote`/`gh api` and reads files, never writes a ref or mints an id; an unreachable
+// remote degrades an unresolved id to a stated UNKNOWN, never a hard failure.
 //
-// `test/` IS EXCLUDED BY CONSTRUCTION, NOT BY EXEMPTION -- the default scan roots are simply
-// `src` and `deploy`; the fixture corpus test/ carries (~25 of the 31 ids that fail across all
-// three trees, measured 2026-08-20) is synthetic test data, invented as fixture ids, and is never
-// a claim. Widening the scan to test/ would turn a real gate into a permanent, growing exemption
-// list instead.
+// Usage: node scripts/task-id-existence-check.mjs [--dir <path>]... [--plan-tasks-file <path>]
+//   [--plan-tasks-dir <path>] [--baseline <path>] [--remote <name>] [--base <ref>] [--cwd <path>]
+//   [--owner <name>] [--repo <name>] [--head-ref <ref>]. Defaults: src,deploy; plan/tasks.yaml;
+//   plan/tasks.d; origin.
 //
-// A SMALL, WRITTEN BASELINE IS UNAVOIDABLE AND SAID PLAINLY. A handful of ids predate the
-// reservation allocator (W1-T509) or the plan schema itself, were filed/retired before either
-// existed, and never got a plan record (the same phenomenon plan/tasks.d/W1-T278-*.yaml
-// documents for its low-numbered siblings: completed/retired ids "absent from every source the
-// minter consults"), so they resolve to neither surface today and never will. Each is exempted
-// only with a written reason (scripts/task-id-existence-baseline.json) -- an entry with no reason
-// is REJECTED, so the exemption list cannot grow silently. (The count is deliberately not quoted
-// here -- re-run this script to see it live rather than trust a number that can drift.)
-//
-// THIS SCRIPT IS READ-ONLY. It shells out to `git ls-remote` (a read) to resolve reservation
-// refs and reads files from disk; it never writes a ref, never mints an id, and never invokes any
-// verb that would. An unreachable remote is a DEGRADED READ, not a failure: an id that would
-// otherwise fail is reported as a STATED UNKNOWN rather than failing the whole gate closed on a
-// network blip (the remote is the same origin the CI checkout already authenticated to, but a
-// transient failure there says nothing about whether the id is real).
-//
-// Usage:
-//   node scripts/task-id-existence-check.mjs
-//     [--dir <path>]...            (default: src, deploy -- relative to --cwd)
-//     [--plan-tasks-file <path>]   (default: plan/tasks.yaml)
-//     [--plan-tasks-dir <path>]    (default: plan/tasks.d)
-//     [--baseline <path>]         (default: scripts/task-id-existence-baseline.json)
-//     [--remote <name-or-path>]   (default: origin)
-//     [--cwd <path>]              (default: process.cwd())
-//
-// The pure pieces (scanCitedIds, scanDeclaredPlanIds, resolveReservedIds, loadBaseline,
-// evaluateIds) are exported so the falsifier fixture test can drive each surface independently,
-// plus the CLI directly (spawn + exit code) for the end-to-end proof.
+// Exported pure pieces let the fixture test drive each surface independently; main is exported so
+// the CLI itself (spawn + exit code) can be proved too.
 
 import { readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -61,21 +31,10 @@ import { pathToFileURL } from "node:url";
 import { join, relative } from "node:path";
 
 const TASK_ID_RE = /\bW1-T[0-9]+\b/g;
-// THE ID GRAMMAR, DERIVED FROM WHAT THE PLAN ACTUALLY DECLARES, not from the `W1-T<n>` shorthand
-// every brief uses. Measured 2026-08-26 over plan/tasks.yaml + plan/tasks.d/: 901 declared ids, of
-// which 21 carry a single-letter suffix (W1-T1B, W1-T9a, W1-T12e, W1-T3F, ...) and 14 sit in another
-// workstream (W2-T1, W3-T3, W12-T1). The previous `W1-T[0-9]+` form saw 866 of them and DROPPED 35.
-//
-// DROPPED, NEVER TRUNCATED, and the difference decides what kind of defect this was. The `$` anchor
-// means `- id: W1-T1B` matches NOTHING; it does not read as `W1-T1`. So there was no false collision
-// between lettered siblings — there was a HOLE: a re-issued lettered or non-W1 id was invisible to
-// the collision check, which is the worse direction for a gate. Driven directly: the old regex
-// returns NO MATCH for `W1-T1B`, `W1-T9a` and `W3-T3`, and `W1-T1` only for `- id: W1-T1`.
-//
-// THE BOUNDARY IS THE LINE ANCHOR, NOT A CHARACTER CLASS. This repo's other id matches use
-// `W1-T<n>([^0-9]|$)`, which is right for finding an id inside prose and WRONG here for the same
-// reason the old form was: it would accept `W1-T1` as a prefix of `W1-T1B`. A declared id is the
-// WHOLE line after `- id:`, so `^...$` is the exact boundary and needs no class.
+// DECLARED_ID_LINE_RE matches the WHOLE line after `- id:` (`^...$`, not a character class), so a
+// lettered suffix (W1-T1B) or another workstream (W3-T3) is captured, never mismatched to W1-T1.
+// Why: the old numeric-only form silently DROPPED such ids from the collision check.
+// docs/forensics/task-id-existence-check.md#declared_id_line_re.
 const DECLARED_ID_LINE_RE = /^\s*-\s*id:\s*(W[0-9]+-T[0-9]+[A-Za-z]?)\s*$/;
 const EXCLUDED_DIR_NAMES = new Set(["node_modules", "dist", "build", ".git", "coverage"]);
 const BINARY_EXTENSIONS = new Set([
@@ -106,9 +65,9 @@ function walkFiles(dir, files) {
 }
 
 /**
- * Scan `dirs` (resolved against `cwd`) for every `W1-T<n>` token, returning a Map from id to the
- * list of `{ file, line }` occurrences (file relative to `cwd`) -- so a failure can be reported
- * with a concrete pointer, not just a bare id. Read-only: no file is ever written.
+ * Scan `dirs` (resolved against `cwd`) for every `W1-T<n>` token, returning id -> the list of
+ * `{ file, line }` occurrences (file relative to `cwd`), so a failure reports a concrete pointer.
+ * Read-only.
  */
 export function scanCitedIds(dirs, cwd) {
   const hits = new Map();
@@ -134,9 +93,8 @@ export function scanCitedIds(dirs, cwd) {
 }
 
 /**
- * Every id declared via `- id: W1-T<n>` in `planTasksFile` and every `*.yaml`/`*.yml` under
- * `planTasksDir` (both resolved against `cwd`). A declared id is a valid claim on its own,
- * independent of whether it also holds a reservation ref.
+ * Every id declared via `- id: W1-T<n>` in `planTasksFile` and any `*.yaml`/`*.yml` under
+ * `planTasksDir` (both resolved against `cwd`). A declared id is a valid claim on its own.
  */
 export function scanDeclaredPlanIds(cwd, opts = {}) {
   const planTasksFile = opts.planTasksFile ?? "plan/tasks.yaml";
@@ -176,16 +134,9 @@ export function scanDeclaredPlanIds(cwd, opts = {}) {
   return ids;
 }
 
-/**
- * Every id holding a `refs/rmd-id/W1-T*` reservation ref on `remote`, read via `git ls-remote`
- * (a READ, never a write). `remote` may be a remote name (e.g. "origin") or a local/bare path --
- * the latter is how the falsifier tests drive this without any network access.
- *
- * `reachable: false` means the read itself failed (network blip, unresolvable remote, etc.) --
- * distinct from `reachable: true, ids: (empty set)`, which means the read SUCCEEDED and found no
- * reservations. Callers must treat an unreachable read as a STATED UNKNOWN, never as "nothing is
- * reserved" (the fail-closed direction task-id-reservation.ts's own remote reads already take).
- */
+/** Every id holding a `refs/rmd-id/W1-T*` reservation ref on `remote`, via `git ls-remote` (a
+ *  READ). `reachable: false` means the read failed -- treat as a STATED UNKNOWN, never "nothing
+ *  reserved". `remote` may be a local/bare path, for offline fixture tests. */
 export function resolveReservedIds(remote, cwd) {
   const result = spawnSync("git", ["ls-remote", remote, "refs/rmd-id/W1-T*"], {
     cwd,
@@ -206,10 +157,8 @@ export function resolveReservedIds(remote, cwd) {
   return { reachable: true, ids };
 }
 
-/**
- * Every plan file that DECLARES each id in the working tree, keyed by id — the multiplicity
- * {@link scanDeclaredPlanIds}'s Set discards, and the whole signal this gate needs.
- */
+/** Every plan file that DECLARES each id, keyed by id -- the multiplicity {@link scanDeclaredPlanIds}'s
+ *  Set discards, and the whole signal this gate needs. */
 export function scanDeclaredPlanIdOccurrences(cwd, opts = {}) {
   const planTasksFile = opts.planTasksFile ?? "plan/tasks.yaml";
   const planTasksDir = opts.planTasksDir ?? "plan/tasks.d";
@@ -245,28 +194,10 @@ export function scanDeclaredPlanIdOccurrences(cwd, opts = {}) {
   return byId;
 }
 
-/**
- * Ids DECLARED in the plan at `baseRef`, used to attribute which side of a collision this PR added.
- *
- * `origin/main` AT CHECK TIME, NOT the PR's merge-base, and the difference is the defect itself: a
- * merge-base answers "what did main look like when this branch was cut", and main landed a PR about
- * every twenty minutes on 2026-08-26. W1-T2316 merged at 14:59:02Z, AFTER the branch that reissued
- * it was cut, so a merge-base read would have found nothing. What this read cannot see is an id
- * added by another still-open PR (open-vs-open) — those ids sit on no ref it can reach; getting
- * them needs the mint's open-PR surface (W1-T2324's Q1: REST, never GraphQL — `openPrMintTexts`,
- * src/run-task.ts). That half is {@link evaluateOpenPrIdCollisions} below, cross-referencing
- * {@link addedIdsAtHead}'s output (this function's own "added" shape, generalized to every added
- * id rather than only ones that already collide with THIS base) against {@link fetchOpenPrRows}'s
- * REST read of every other open PR's title/body/head-ref text.
- *
- * `readable: false` is the read FAILING (shallow clone with no `origin/main`, unresolvable ref).
- * It is never "the base declares nothing" — reading an unreadable surface as an empty one is the
- * false zero that produced all three 2026-08-26 collisions, so the caller REFUSES on it.
- *
- * Returns id -> the plan files declaring it AT THE BASE. The files, not just the ids: an id whose
- * declaring file is the SAME on both sides is a shard this change merely carries along, while the
- * SAME id declared from a DIFFERENT file is a re-issue. `-l` with the ref prefix gives both.
- */
+/** Ids DECLARED in the plan at `baseRef` (`origin/main` AT CHECK TIME, never the merge-base, which
+ *  can miss an id landed after the branch was cut), keyed to the declaring files -- same file both
+ *  sides is a carried-along shard, different a re-issue. `readable: false` is the read FAILING,
+ *  never "declares nothing" (W1-T2316). docs/forensics/task-id-existence-check.md#resolvebasedeclaredids. */
 export function resolveBaseDeclaredIds(baseRef, cwd) {
   const result = spawnSync(
     "git",
@@ -292,16 +223,9 @@ export function resolveBaseDeclaredIds(baseRef, cwd) {
   return { readable: true, byId };
 }
 
-/**
- * owner/repo, parsed from `remote`'s url at `cwd` — no hardcoded slug in the tree, mirroring
- * src/lib/repo-location.ts's `resolveOwnerRepo`. DELIBERATELY DUPLICATED rather than imported:
- * this script is a plain `.mjs` outside `tsconfig.json`'s `include` (this file's own header),
- * with no build step between it and `src/`'s TypeScript — the same reason {@link TASK_ID_RE}
- * above duplicates `lib/task-id.ts`'s id grammar instead of importing it.
- *
- * `undefined` on an unparsable/unreadable url — never a guessed owner/repo, which would send the
- * open-PR REST read below to a repo that is not this one.
- */
+/** owner/repo, parsed from `remote`'s url at `cwd`, mirroring src/lib/repo-location.ts. Duplicated,
+ *  not imported: a plain `.mjs` outside tsconfig's build. `undefined` on an unparsable/unreadable
+ *  url -- never guessed, which would send the open-PR read below to the wrong repo. */
 export function resolveOwnerRepoFromGit(remote, cwd) {
   const result = spawnSync("git", ["config", "--get", `remote.${remote}.url`], { cwd, encoding: "utf8" });
   if (result.error || result.status !== 0) return undefined;
@@ -309,9 +233,8 @@ export function resolveOwnerRepoFromGit(remote, cwd) {
   return m ? { owner: m[1], repo: m[2] } : undefined;
 }
 
-/** The checked-out branch at `cwd`, or `undefined` on a DETACHED HEAD (a PR checkout in CI,
- *  which is exactly why {@link main}'s `--head-ref` flag / `GITHUB_HEAD_REF` env both take
- *  priority over this — see the call site). Never guessed from anything else. */
+/** The checked-out branch at `cwd`, or `undefined` on a detached HEAD (a PR checkout in CI) --
+ *  callers prefer `--head-ref`/`GITHUB_HEAD_REF` first for exactly that reason. */
 export function currentBranch(cwd) {
   const result = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, encoding: "utf8" });
   if (result.error || result.status !== 0) return undefined;
@@ -319,19 +242,10 @@ export function currentBranch(cwd) {
   return branch === "" || branch === "HEAD" ? undefined : branch;
 }
 
-/**
- * Every OPEN pull request's number, url, head ref and mention-scannable text, read over REST —
- * `GET /repos/<owner>/<repo>/pulls?state=open&per_page=100`, never `gh pr list --json`
- * (GraphQL) — the SAME discriminator W1-T2324's Q1 fixed in the mint itself
- * (`openPrMintTexts`, src/run-task.ts): the field set decides the transport, not the subcommand.
- *
- * `reachable: false` covers a `gh` that cannot run AT ALL (no network, no credentials — MEASURED:
- * CI's `task-id-existence` job carries no `GH_TOKEN` today, so `gh api` fails fast with "gh: To
- * use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable") as well as
- * a response this could not parse. The caller treats it exactly like {@link resolveReservedIds}'s
- * own `reachable: false` — read-only, degrade to a STATED SKIP, never fail the whole gate closed
- * on a blip, and never read it as "no other open PR claims this id".
- */
+/** Every OPEN PR's number, url, head ref and mentionable text, via REST (never `gh pr list --json`
+ *  / GraphQL) -- same discriminator as the mint's own `openPrMintTexts`. `reachable: false` covers
+ *  `gh` failing or an unparsable response; degrades to a STATED SKIP, never a silent pass.
+ *  Why: CI's job carries no `GH_TOKEN`. docs/forensics/task-id-existence-check.md#fetchopenprrows. */
 export function fetchOpenPrRows(owner, repo, cwd) {
   const result = spawnSync("gh", ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`], {
     cwd,
@@ -349,10 +263,8 @@ export function fetchOpenPrRows(owner, repo, cwd) {
   return { reachable: true, rows };
 }
 
-/** Any `W1-T<n>` MENTION in free text — deliberately loose, mirroring `lib/task-id.ts`'s
- *  `mentionedTaskIds` (the mint's own open-PR reader): over-counting here only ever refuses a PR
- *  that turns out to be innocent (fixable by renumbering, or by the id genuinely being free once
- *  re-checked), while under-counting would let a real open-vs-open collision merge silently. */
+/** Any `W1-T<n>` mention in free text, mirroring `lib/task-id.ts`'s `mentionedTaskIds`. Loose by
+ *  design: over-counting only refuses an innocent PR; under-counting could merge a real collision. */
 const MENTION_RE = /\bW1-T[0-9]+\b/g;
 function mentionedIds(text) {
   const ids = new Set();
@@ -362,15 +274,9 @@ function mentionedIds(text) {
   return ids;
 }
 
-/**
- * Ids THIS branch ADDS relative to `base` — {@link evaluateAddedIdCollisions}'s per-id "reissued"
- * shape, generalized to every declared id (not only ones that already collide with `base`), so
- * the open-vs-open check below has a complete claim set to cross-reference. An id whose declaring
- * file at HEAD is the SAME as at `base` is a shard this change merely carries along, not an add.
- *
- * `base.readable === false` propagates as `{ readable: false, ids: [] }` rather than guessing an
- * empty add set — the same false-zero {@link resolveBaseDeclaredIds} itself refuses on.
- */
+/** Ids THIS branch ADDS relative to `base`, for the open-vs-open check's claim set -- a file
+ *  unchanged from `base` is a carried-along shard, not an add. `base.readable === false` propagates
+ *  as `{ readable: false, ids: [] }` rather than guessing an empty set. */
 export function addedIdsAtHead(occurrencesById, base) {
   if (!base.readable) return { readable: false, ids: [] };
   const ids = [];
@@ -384,20 +290,10 @@ export function addedIdsAtHead(occurrencesById, base) {
 }
 
 /**
- * Cross-reference ids THIS PR adds ({@link addedIdsAtHead}) against every OTHER open PR's mention
- * surface (title + body + head ref) — the OTHER half of Q3 {@link resolveBaseDeclaredIds}'s own
- * doc names as out of its reach: not just "does main already declare this id" but "has another
- * still-open PR already claimed it". MEASURED at filing (W1-T2324's rationale): of 4 open PRs
- * adding a plan id, exactly one collided with main and ZERO collided with another open PR — so
- * this check is expected to stay silent on a healthy board and fire only on the genuine defect
- * class it exists for.
- *
- * `ownHeadRef` EXCLUDES this PR's own row — otherwise every added id would trivially "collide"
- * with itself, since this branch's own title/body/branch name is exactly what mentions the id it
- * is adding. An `ownHeadRef` this cannot resolve (`undefined`) excludes nothing, which is the
- * FAIL-OPEN direction for the exclusion (a missed self-exclusion could only ever flag a PR's own
- * id against itself, which {@link main} would report as a false collision an author notices
- * immediately — never a silent miss of a REAL cross-PR collision).
+ * Cross-reference ids THIS PR adds against every OTHER open PR's mention surface (title+body+head
+ * ref) -- the open-vs-open half {@link resolveBaseDeclaredIds} cannot see. `ownHeadRef` excludes
+ * this PR's own row (unresolvable = excludes nothing, fail-open: a missed exclusion only self-flags).
+ * Why: W1-T2324 (Q3). docs/forensics/task-id-existence-check.md#evaluateopenpridcollisions.
  */
 export function evaluateOpenPrIdCollisions(addedIds, openPrRows, ownHeadRef) {
   const others = openPrRows.filter((r) => (r.head && r.head.ref) !== ownHeadRef);
@@ -411,29 +307,19 @@ export function evaluateOpenPrIdCollisions(addedIds, openPrRows, ownHeadRef) {
 }
 
 /**
- * Ids the working tree declares MORE THAN ONCE — two differently-named shards carrying one id, the
- * shape git merges cleanly and `loadPlan` then refuses on `origin/main`, taking every plan-reading
- * verb with it.
- *
- * DETECTION IS A DUPLICATE AT HEAD AND NEEDS NO BASE READ. `base` only ATTRIBUTES: an id the base
- * already declares is one this PR re-issued, which is the sentence an author needs. An unreadable
- * base therefore costs the attribution and never the refusal — deliberately, because the alternative
- * (treat an unreadable base as empty) is the exact false zero this gate exists to stop.
- *
- * ADDED IS A SET DIFFERENCE, NEVER A PER-FILE SCAN. Measured while retrofitting: reading every
- * `- id:` out of each plan file a PR merely TOUCHED reports 232 "added" ids for an open PR that
- * edits the monolith and adds none — every one a false collision. A PR that only CITES an existing
- * id declares nothing new and stays silent, which is what this gate already did and must keep doing.
+ * Ids the working tree declares MORE THAN ONCE -- two differently-named shards carrying one id,
+ * which git merges cleanly and `loadPlan` then refuses on. Detection is a duplicate at HEAD alone;
+ * `base` only attributes (a re-issue), so an unreadable base costs that, never the refusal. ADDED
+ * is a SET DIFFERENCE, never a per-file scan: citing an existing id must stay silent.
+ * Why: a per-file scan reported 232 false collisions. docs/forensics/task-id-existence-check.md#evaluateaddedidcollisions.
  */
 export function evaluateAddedIdCollisions(occurrencesById, base) {
   if (!base.readable) return { refused: true, unreadableBase: true, collisions: [] };
   const collisions = [];
   for (const [id, occurrences] of occurrencesById) {
     const headFiles = [...new Set(occurrences.map((o) => o.file))];
-    // (a) the same id declared from two files IN THIS TREE.
-    // (b) the same id declared from a file the BASE does not declare it in, while the base declares
-    //     it elsewhere — the shape a branch that is BEHIND main produces, and the one every 2026-08-26
-    //     collision took: locally each id appears once, so a head-only duplicate scan sees nothing.
+    // Two files in this tree, or a file the base doesn't have it in while the base has it
+    // elsewhere (a behind-main branch, where each id appears once locally).
     const baseFiles = base.byId.get(id);
     const reissued = baseFiles ? headFiles.filter((f) => !baseFiles.has(f)) : [];
     if (headFiles.length < 2 && reissued.length === 0) continue;
@@ -443,12 +329,9 @@ export function evaluateAddedIdCollisions(occurrencesById, base) {
   return { refused: collisions.length > 0, unreadableBase: false, collisions };
 }
 
-/**
- * Parse+validate scripts/task-id-existence-baseline.json into a Map from id to its written
- * reason. THROWS on a structurally invalid file OR on any entry missing a non-empty `reason` --
- * an exemption with no recorded reason would let the baseline grow silently, which is exactly the
- * failure this gate exists to prevent for itself.
- */
+/** Parse+validate scripts/task-id-existence-baseline.json into a Map from id to its written
+ *  reason. THROWS on a structurally invalid file or any entry missing a non-empty `reason` --
+ *  a silently-growable exemption is exactly what this gate exists to prevent for itself. */
 export function loadBaseline(path) {
   let text;
   try {
@@ -487,11 +370,9 @@ export function loadBaseline(path) {
 }
 
 /**
- * Pure decision layer: given the cited-id occurrences and the three resolution surfaces, classify
- * every cited id as "resolved" (declared or reserved), "baselined" (unresolved but has a written
- * exemption), "unknown" (unresolved, but the reservation read was unreachable so it cannot be
- * told apart from a real reservation) or "failed" (unresolved, no exemption, and the reservation
- * read WAS reachable -- a genuine orphan).
+ * Pure decision layer: classify every cited id as "resolved" (declared or reserved), "baselined"
+ * (a written exemption), "unknown" (unresolved, but the reservation read was unreachable, so it
+ * cannot be told apart from a real reservation) or "failed" (unresolved, no exemption, reachable).
  */
 export function evaluateIds(citedHits, declaredIds, reservation, baseline) {
   const results = [];
@@ -514,16 +395,10 @@ export function evaluateIds(citedHits, declaredIds, reservation, baseline) {
 }
 
 /**
- * EXPORTED for the same reason the thirteen functions above are: this script is a plain `.mjs`
- * and its own suite covers error/degradation arms by importing them, because a subprocess's
- * coverage is not the parent run's (test/task-id-existence-check.test.ts says so in as many
- * words). The open-PR half's wiring below lives HERE rather than in an exported helper, so
- * without this export those lines are reachable only by a subprocess and therefore uncoverable.
- *
- * Behaviour is unchanged: the direct-execution guard at the bottom of this file still decides
- * whether `main` runs on `node scripts/task-id-existence-check.mjs`, and an importing caller must
- * invoke it deliberately. It communicates through `process.exitCode`, so an in-process caller is
- * responsible for saving and restoring that — see the test.
+ * Exported so its own suite can cover error/degradation arms in-process -- a subprocess's coverage
+ * is not the parent run's, and the open-PR wiring lives here so it stays reachable that way.
+ * Unchanged behaviour: the direct-execution guard at file end decides whether `main` runs, and it
+ * communicates via `process.exitCode`, so an in-process caller must save and restore it.
  */
 export function main(argv) {
   const { values } = parseArgs({
@@ -576,27 +451,21 @@ export function main(argv) {
     );
   }
 
-  // W1-T2324 (Q3 half): an ADDED id that already exists is refused BEFORE the merge. git merges two
-  // differently-named shards carrying one id with no conflict, `lint-plan` only notices afterwards at
-  // exit 2, and `loadPlan` then refuses origin/main and takes every plan-reading verb with it.
+  // W1-T2324 (Q3): an added id that already exists is refused BEFORE the merge -- git merges two
+  // differently-named shards with no conflict, and `loadPlan` then refuses origin/main.
   const occurrencesById = scanDeclaredPlanIdOccurrences(cwd, {
     planTasksFile: values["plan-tasks-file"],
     planTasksDir: values["plan-tasks-dir"],
   });
-  // OPT-IN VIA `--base`, AND THE DEFAULT IS ANNOUNCED, NEVER SILENT. Failing closed on an
-  // unreadable base is right when a base was ASKED for and wrong as a default: every existing
-  // invocation drives this CLI against a scratch repo with no `origin/main`, and defaulting the
-  // refusal on regressed three of them. CI passes `--base origin/main` (with `fetch-depth: 0`, or
-  // the ref is absent and this refuses).
+  // Opt-in via --base, announced never silent: most invocations run with no origin/main, so
+  // defaulting to fail-closed regressed them. CI passes --base origin/main with fetch-depth: 0.
   if (values.base === undefined) {
     console.log(
       "task-id-existence: collision check SKIPPED -- no --base given, so no id was compared against " +
         "a base. Pass --base origin/main to enable it.",
     );
   }
-  // Resolved ONCE and reused below by the open-vs-open half — `resolveBaseDeclaredIds` shells
-  // `git grep` + one `git show` per matched file, and the open-vs-open check needs the exact same
-  // base read `evaluateAddedIdCollisions` already took.
+  // Resolved once and reused below by the open-vs-open half, which needs the same base read.
   const base = values.base === undefined ? undefined : resolveBaseDeclaredIds(values.base, cwd);
   const collisionVerdict =
     base === undefined ? { refused: false, unreadableBase: false, collisions: [] } : evaluateAddedIdCollisions(occurrencesById, base);
@@ -625,13 +494,8 @@ export function main(argv) {
     process.exitCode = 1;
   }
 
-  // W1-T2324 (Q3, open-vs-open half) — the collision class `resolveBaseDeclaredIds` cannot see:
-  // an id claimed only by ANOTHER still-open PR, not yet on main. Runs ONLY when the base itself
-  // was readable (an unreadable base already refused above; piling a second, less certain check
-  // on top of that would just be noise) and only when this branch actually adds an id (nothing to
-  // cross-reference otherwise). Every failure mode here is a STATED SKIP, never a silent pass
-  // dressed up as a check that ran — an operator reading the log sees exactly which half of Q3
-  // executed.
+  // W1-T2324 (Q3, open-vs-open): what resolveBaseDeclaredIds cannot see -- another still-open PR
+  // already claiming the id. Runs only when base was readable and this branch adds one.
   if (base !== undefined && base.readable) {
     const added = addedIdsAtHead(occurrencesById, base);
     if (added.ids.length > 0) {
@@ -696,12 +560,8 @@ export function main(argv) {
         `${values.baseline} with a written reason. If it was never reserved or filed, it should not ` +
         "have been written into shipped source -- reserve/file it, or remove the reference.",
     );
-    // THE THIRD EXIT, AND THE ONE THIS GATE USED TO LEAVE UNSAID. The two remedies above both
-    // assume the id was MEANT as a claim. The case that actually cost this repo was neither: a
-    // doc example, written to illustrate a call, which `TASK_ID_MENTION_RE` then read as a real
-    // ceiling. A code span does not help -- the extractor reads `W1-T9999`, "`W1-T9999`" and a
-    // fenced block identically -- so an author who backticked it and moved on had no sanctioned
-    // way to write an example at all. Say the placeholder form here, where the refusal is read.
+    // The third exit: a doc EXAMPLE reads identically to a real claim -- a code span doesn't help.
+    // Why: docs/forensics/task-id-existence-check.md#third-exit-comment-main.
     console.error(
       "\nIf it is an EXAMPLE rather than a claim, use the placeholder form instead: W1-T<n> (also " +
         "W1-T<id>, W1-TNNNN). Backticks and fenced blocks do NOT help -- the id extractor reads a " +
@@ -712,9 +572,8 @@ export function main(argv) {
     return;
   }
 
-  // W1-T2324: never CLEAR a refusal the collision check already set. `process.exitCode = 0` here
-  // silently overwrote it — the existence half and the collision half are independent verdicts and
-  // either one failing is a failure.
+  // Never CLEAR a refusal the collision check already set: existence and collision are
+  // independent verdicts, either failing is a failure.
   if (process.exitCode) return;
   console.log(
     `\ntask-id-existence: OK -- every id cited under ${dirs.join(", ")} resolves to a reservation or a ` +
