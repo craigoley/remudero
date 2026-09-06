@@ -123,4 +123,33 @@
     TRIAGED AND REJECTED (both criteria paths call the same parser on the same input). Only this entry's
     class — a proof that resolves to NOTHING looking identical to one that resolves to something passing —
     is covered here. One instrument does not cover all three, and claiming it would be the same
-    unfalsifiable move this task exists to catch."
+    unfalsifiable move this task exists to catch.
+
+    RE-MEASURED 2026-09-06 AT c51d944e, AND THE RATIONALE ABOVE NOW REASONS FROM STALE NUMBERS.
+    Its counts come from W1-T497 at 0a1179a. The corpus has more than doubled since and the ratio
+    has inverted. Re-derived by importing this repo OWN parseWhitelistedProof and
+    resolveNameFilteredCandidates and walking every acceptance block on main (5714 proofs across
+    1154 shards), never a hand-rolled matcher:
+      name-filtered (unit test: <title>) proofs   719   was 320
+        resolved                                  609   was  68
+        absent                                    110   was 252
+        unresolvable                                0
+      path-form (unit test: test/x.test.ts)      4337
+      grep:                                       639
+      refused by parseWhitelistedProof             19   -- 13 on verify:human, 6 on verify:auto
+    THE ABSENT ONES CONCENTRATE WHERE THE CARVE-OUT CANNOT REACH, which sharpens what the report
+    should say. Of the 110 absent titles, 70 sit on tasks with no merged implementation (expected --
+    the test is not written yet) but judgeCriterion not_yet_built carve-out requires !nameFiltered,
+    so a TITLE gets no carve-out and grades no-match on the filing PR anyway. The other 40 sit on
+    tasks whose implementation ALREADY MERGED: there the proof resolved to nothing at review and the
+    criterion fell back to the keyword floor. Across all dialects, 65 dead proofs on 33 merged tasks.
+    CONTROLS, since a census zero is otherwise unfalsifiable: the resolver returns resolved for a
+    title present in test/ and absent for a nonsense title; a path proof naming an existing file
+    resolves and one naming an absent file does not. AND A WARNING FOR WHOEVER BUILDS THIS: an
+    earlier pass of this same census used a hand-written prefix matcher instead of the repo parser
+    and reported 61 no-dialect proofs and 12 undispatchable tasks. BOTH WERE ARTEFACTS OF THE WRONG
+    INSTRUMENT -- regression test:, mutation test: and isolated test run: all parse OK and pass;
+    only demonstration: is refused, and every task using it is verify: human. Use the repo parser.
+    WHAT THIS DOES NOT CHANGE: the shape. A report that exits 0 is still the deliverable, W1-T229
+    still stands as the witness, and nothing here rules on whether the check should refuse rather
+    than report -- W1-T2966 and W1-T2835 own that question and both remain unbuilt."
