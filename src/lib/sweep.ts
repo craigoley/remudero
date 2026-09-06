@@ -4079,30 +4079,65 @@ function freshFixDispatchCount(
  * DETACHED REJECTION IS SWALLOWED ON PURPOSE — rethrowing would surface long after the pass
  * returned, attributable to nothing.
  */
-const detachedSweepActions = new Set<Promise<void>>();
+interface DetachedSweepActionRegistration {
+  actionKind: "fix-dispatch"; taskId: string; startedAtMs: number;
+}
+
+export interface DetachedSweepActionDescriptor {
+  actionKind: "fix-dispatch"; taskId: string; ageMs: number;
+}
+
+const detachedSweepActions = new Map<Promise<void>, DetachedSweepActionRegistration>();
 
 /**
  * W1-T2379: hand a started action to {@link detachedSweepActions} so the caller need not await it.
  * The stored promise is already settled-safe — its rejection is caught here — so a drain can never
  * itself reject. Returns nothing: a caller wanting the outcome must await the original.
  */
-function detachSweepAction(work: Promise<unknown>): void {
+function detachSweepAction(
+  work: Promise<unknown>,
+  action: Omit<DetachedSweepActionRegistration, "startedAtMs">,
+): void {
   const held: Promise<void> = work.then(
     () => undefined,
     () => undefined,
   );
-  detachedSweepActions.add(held);
+  detachedSweepActions.set(held, { ...action, startedAtMs: Date.now() });
   void held.finally(() => detachedSweepActions.delete(held));
 }
 
 /**
  * W1-T2379 — LET WORK ALREADY IN FLIGHT FINISH RATHER THAN ABORTING IT. Awaits every detached
  * action and settles once they all have. W1-T2744: an explicit daemon-lifetime seam, never part of
- * a phase-local ticker's stop. Safe to call when nothing is detached, and safe to call twice.
+ * a phase-local ticker's stop. W1-T2913: a bounded drain reports stragglers; cleanup stays unbounded.
  */
-export async function drainDetachedSweepActions(): Promise<void> {
-  while (detachedSweepActions.size > 0) {
-    await Promise.all([...detachedSweepActions]);
+export async function drainDetachedSweepActions(
+  opts: { boundMs: number } = { boundMs: Number.POSITIVE_INFINITY },
+): Promise<DetachedSweepActionDescriptor[]> {
+  const detachedDrainBoundMs = Math.max(0, opts.boundMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = Number.isFinite(detachedDrainBoundMs)
+    ? new Promise<"bounded">((resolve) => { timer = setTimeout(() => resolve("bounded"), detachedDrainBoundMs); })
+    : undefined;
+  try {
+    while (detachedSweepActions.size > 0) {
+      const settled = Promise.all([...detachedSweepActions.keys()]).then(() => "settled" as const);
+      if (!bound) {
+        await settled;
+        continue;
+      }
+      if (await Promise.race([settled, bound]) === "bounded") {
+        const observedAtMs = Date.now();
+        return [...detachedSweepActions.values()].map((action) => ({
+          actionKind: action.actionKind,
+          taskId: action.taskId,
+          ageMs: Math.max(0, observedAtMs - action.startedAtMs),
+        }));
+      }
+    }
+    return [];
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -5009,7 +5044,10 @@ export async function runSweep(
               }
               // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
               if (deps.detachFixWait) {
-                detachSweepAction(fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)));
+                detachSweepAction(
+                  fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)),
+                  { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
+                );
                 break;
               }
               const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -5050,7 +5088,10 @@ export async function runSweep(
               }
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                detachSweepAction(conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence)));
+                detachSweepAction(
+                  conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence)),
+                  { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
+                );
                 break;
               }
               const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
