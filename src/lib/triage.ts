@@ -9,75 +9,24 @@ import { envelope } from "./untrusted-envelope.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
 
 /**
- * `rmd triage` — the Architect intake worker (MASTER-PLAN §7B, W1-T41).
+ * `rmd triage` — the Architect intake worker (MASTER-PLAN §7B, W1-T41). Reads one feedback entry,
+ * grounds it against plan/learnings/ledger/DECISIONS, researches with WebSearch only on a genuine
+ * gap, then returns one of three verdicts (below). Write is scoped to plan files only — never
+ * `src/` — and there is no Bash or git: the harness (run-task.ts's `triageCommand`) owns commit,
+ * push, and PR open.
  *
- * "An Architect worker over a feedback entry. Tools: Read/Glob/Grep/WebSearch/WebFetch + Write
- * scoped to plan files ONLY (never src/). Grounds against plan/learnings/ledger/DECISIONS,
- * researches via server-side WebSearch, then (if clear) opens a plan PR naming the §sections
- * changed, tasks added/rewired, rationale, and provenance back to feedback#<id>." [MASTER-PLAN §7B]
+ * INVARIANT: triage must run strictly serially, with itself and any hand-run — two concurrent
+ * runs mint the same task id but write different shard files, so a duplicate-id merge to `main`
+ * can go unnoticed until `loadPlan` throws for everyone. Held by three mechanisms together: the
+ * daemon's single-threaded poll loop, a shared lock (PR #1069), and an atomic id reservation
+ * before the worker spawns. `assertProposedPlanLoads` below is the pre-push backstop either way.
  *
- * ★ TRIAGE MUST RUN STRICTLY SERIALLY — WITH ITSELF AND WITH ANY HAND-RUN. READ THIS BEFORE
- * ADDING A CALLER (a daemon rung, a cron, a second lane).
- *
- * The task id is minted by the HARNESS from a snapshot BEFORE the worker starts (see the ID
- * SELECTION block in `triagePrompt` below). Two runs that start before either opens its PR
- * therefore mint the SAME id. Because each writes its own `plan/tasks.d/<id>-<slug>.yaml` and the
- * slugs differ, the two branches touch DIFFERENT FILES — so git merges both cleanly and `loadPlan`
- * (lib/plan.ts) then throws duplicate-task-id ON MAIN, breaking every plan-loading check for
- * everyone.
- *
- * This is WORSE than it was before proposals were sharded. When both runs appended to the
- * `plan/tasks.yaml` monolith they collided textually at EOF: ugly, but LOUD, PRE-MERGE and
- * unmergeable. Sharding traded a conflict you cannot merge for a merge that poisons the plan.
- * That trade is only safe while something serialises triage.
- *
- * What serialises it TODAY — CORRECTED, this paragraph was stale and said "nothing explicit":
- *   (1) The daemon's poll loop is single-threaded and awaits each dispatch, so daemon-initiated
- *       runs cannot overlap each other.
- *   (2) PR #1069 added a SHARED lock across triage's two paths: `triageCommand` (run-task.ts)
- *       acquires it before doing anything and refuses loudly if held, and `decideAutoTriage`
- *       (lib/auto-triage.ts) refuses on `lockHeld`. The hand-run-versus-daemon race the previous
- *       wording described as open has been closed since 2026-08-01.
- *   (3) The minted id is now RESERVED atomically (lib/task-id-reservation.ts's
- *       `reserveTaskIdFrom`, one `O_EXCL` file per id under `<root>/state/task-id-reservations/`)
- *       BEFORE the worker spawns. That is the "atomic claim at mint time" this comment used to ask
- *       for, and it covers a caller the LOCK cannot: the lock is triage-specific, so it never
- *       excluded `rmd plan --mode=create`, a second machine, or a cross-repo instance filing into
- *       this plan. Contention ADVANCES the id rather than refusing, so no caller waits.
- *
- * `assertProposedPlanLoads` remains the pre-push backstop (it re-loads monolith + shards from the
- * worker's own worktree, so a collision against MAIN is refused before anything is pushed).
- *
- * STILL NOT COVERED, and the reason this comment stays long: `rmd plan --mode=create` does not
- * call the mint AT ALL — `planArchitectPrompt` receives no minted id, so its worker picks one by
- * reading the plan files. Nothing reserves what was never minted. Routing that lane through the
- * mint is the remaining work.
- *
- * THE THREE-WAY VERDICT, deterministic (mirroring lib/dep-review.ts's `decideDepReview` — the
- * judge is CODE, the LLM layer is advisory only, Standing rule 2):
- *   - ALREADY_DECIDED — the ground step found the feedback's answer already settled somewhere in
- *     plan/learnings/DECISIONS. No plan files change. NO redundant task is created — the whole
- *     point of grounding (re-deciding a settled question is a failure mode, not a feature).
- *   - AMBIGUOUS        — the item needs a human's judgment call. No plan files change. Status
- *     parks at `grilling`, and the harness (run-task.ts's `triageCommand`) opens a `needs-human`
- *     GitHub issue reusing §4's escalation machinery (W1-T42) — the ONLY viable grill mechanism.
- *     ★ VERIFIED (LEARNINGS.md "AskUserQuestion neither works headlessly nor stalls"):
- *     AskUserQuestion silently auto-resolves EMPTY with no TTY (~37ms, no error, nothing
- *     collected) rather than hanging, and this worker always runs via spawnWorker — a subprocess
- *     with no TTY BY CONSTRUCTION, regardless of the invoking shell — so the interactive branch
- *     MASTER-PLAN §7B names is structurally unreachable here; `.remudero/skills/feedback.yaml`
- *     no longer lists `AskUserQuestion` in its tools. Because the async issue is the only path,
- *     the AMBIGUOUS verdict below must always carry actionable OPTION:/RECOMMENDATION: lines —
- *     `escalate()` refuses a bare-alert issue with no options.
- *   - PROPOSED         — a plan-only PR naming the §sections/tasks changed, with `origin:
- *     feedback#<id>` provenance on every new/rewired task.
- *
- * THE WORKER NEVER RUNS GIT (`.remudero/skills/feedback.yaml`'s `tools:` carries no `Bash`, unlike
- * `retro.yaml`) — it only GROUNDS/RESEARCHES/EDITS plan files via Read/Grep/Glob/WebSearch/Write.
- * The commit/push/PR-open/gate sequence is HARNESS-OWNED (run-task.ts's `triageCommand`),
- * deterministic, and identical in shape for all three verdicts — the same "the harness eats
- * first" discipline `regenerateOrientation` already established for the retro's docs write.
+ * The three-way verdict is deterministic, not the LLM's call (Standing rule 2): ALREADY_DECIDED
+ * and AMBIGUOUS touch no plan files; PROPOSED opens a plan-only PR with `origin: feedback#<id>`
+ * provenance. AMBIGUOUS opens an async needs-human issue — the only grill mechanism, since
+ * AskUserQuestion auto-resolves empty under this worker's headless spawn.
  */
+// Why: docs/forensics/triage.md#module-header (W1-T236 triple-mint, PR #1069, W1-T42).
 
 // ── Arg parsing (pure — the `rmd triage` CLI arg shape) ─────────────────────
 
@@ -85,12 +34,8 @@ export interface ParsedTriageArgs {
   feedbackId: string;
 }
 
-/**
- * Parse `rmd triage <feedback-id>`. Pure (no I/O) so it is unit-testable without a filesystem.
- * FAILS LOUD (returns `{ error }`, never a silent best-guess) on a missing id, an unrecognized
- * flag, or extra positional arguments — the control-surface discipline every `rmd` subcommand
- * follows (Standing rule: validate flags BEFORE any spawn/write).
- */
+/** Parse `rmd triage <feedback-id>`. Pure. Fails loud (`{ error }`, never a silent best-guess) on
+ *  a missing id, an unrecognized flag, or extra positionals — validate before any spawn/write. */
 export function parseTriageArgs(rest: string[]): ParsedTriageArgs | { error: string } {
   const positionals: string[] = [];
   for (const tok of rest) {
@@ -110,17 +55,9 @@ export function parseTriageArgs(rest: string[]): ParsedTriageArgs | { error: str
 
 // ── The "no such feedback entry" message (W1-T243) ───────────────────────────
 
-/**
- * Build `rmd triage`'s exit-2 message when `feedbackId` is absent from the fresh
- * `origin/main` worktree it reads from. Before W1-T243 this printed the byte-identical
- * "no such feedback entry: <id>" whether the id was a genuine typo OR simply not yet
- * landed by the durable-inbox commit bridge (feedback-landing.ts) — indistinguishable and
- * misleading, since a captured entry can sit locally for a while before its landing PR
- * merges. Pure (no I/O) so the two branches are unit-testable without spawning `gh`;
- * `triageCommand` (run-task.ts) supplies `existsLocally` (a plain `existsSync` check
- * against `repoRoot`) and `landingPrUrl` (best-effort, via
- * {@link "./feedback-landing.js".findPendingLandingPr}).
- */
+/** Build `rmd triage`'s exit-2 message when `feedbackId` is absent from the fresh `origin/main`
+ *  worktree — a genuine typo vs. an entry not yet landed (W1-T243). Pure; the caller supplies
+ *  `existsLocally` and the best-effort `landingPrUrl`. */
 export function missingFeedbackMessage(
   feedbackId: string,
   opts: { existsLocally: boolean; landingPrUrl?: string },
@@ -138,27 +75,6 @@ export function missingFeedbackMessage(
 // ── The Architect prompt ─────────────────────────────────────────────────────
 
 /**
- * The triage Architect prompt — fed one feedback entry, told to GROUND -> RESEARCH ->
- * GRILL-OR-PROPOSE, and required to end with exactly one of the three verdict markers this
- * module's {@link parseTriageVerdict} anchors on. The worker has NO Bash/git — it only edits
- * files; the caller (run-task.ts) owns commit/push/PR.
- *
- * `mintedId` (W1-T263): the id the HARNESS derived — the worker has no Bash tool, so the
- * old "run this grep and pick the next integer" instruction was an instruction it could not
- * execute, leaving id selection to eyeballing the files it happened to read. When present,
- * the prompt HANDS the id over instead of describing how to compute one.
- *
- * `additionalReservedIds` (W1-T949 design (ii)): the REST of a reserved block, beyond
- * `mintedId` itself — the harness now reserves a block up front (`reserveTaskIdBlock` +
- * `reserveTaskIdBlockRemote`) exactly as `rmd plan` already does, so a multi-task filing has
- * every id it might use ALREADY held on the shared remote, not merely `mintedId`. As long as
- * this prompt told the worker to "number them upward" instead of naming the reserved set, a
- * reserved block and a filed set could diverge by construction — the harness could hold five
- * ids while the worker invented a sixth. Defaults to empty so every existing caller that passes
- * only `mintedId` (a single reservation, or none at all) is BYTE-IDENTICAL to before this
- * parameter existed; only a caller that actually reserved more states the fuller instruction.
- */
-/**
  * W1-T2700: the enveloped feedback block, built ONCE per dispatch. The envelope's boundary is
  * drawn fresh PER CALL, so calling this twice yields two different strings — a caller that wants
  * to both render the prompt AND fingerprint what the worker saw must build the block once and pass
@@ -168,6 +84,13 @@ export function feedbackEntryBlock(entry: FeedbackEntry): string {
   return envelope(entry.raw, "feedback-entry");
 }
 
+/**
+ * The triage Architect prompt — fed one feedback entry, told to GROUND -> RESEARCH ->
+ * GRILL-OR-PROPOSE, ending in one of the three verdict markers {@link parseTriageVerdict}
+ * anchors on. `mintedId` (W1-T263) hands the worker its id directly, since it has no Bash tool to
+ * compute one. `additionalReservedIds` (W1-T949 (ii)) names the rest of a reserved id block, so a
+ * multi-task filing can't invent an id the harness never reserved; defaults to empty.
+ */
 export function triagePrompt(
   entry: FeedbackEntry,
   runId: string,
@@ -292,16 +215,8 @@ export type TriageVerdict =
 
 /**
  * `OPTION: <label>|<detail>` lines anywhere in the worker's output — the grill's actionable
- * choices (escalate.ts's `EscalationOption[]` shape), mirroring `rmd escalate --option`'s CLI
- * parsing (run-task.ts's `parseOptionFlags`). Only meaningful when the verdict resolves to
- * AMBIGUOUS (decideTriage validates count/shape there); harmless if unused otherwise.
- *
- * W1-T2205: IDEMPOTENT on the `(label, detail)` pair — belt AND braces alongside
- * {@link "./worker.js".workerTranscript}'s join fix, because not every duplicate-OPTION source
- * is transcript-shaped (a model restating its own choices, or quoting the prompt's own OPTION
- * examples back, doubles a line with no join involved). Order is preserved and the FIRST
- * occurrence of a pair wins; a genuinely single choice repeated verbatim still collapses to one
- * option, so {@link decideTriage}'s `< 2` guard still fires for it exactly as it must.
+ * choices, meaningful only for an AMBIGUOUS verdict. Idempotent on the `(label, detail)` pair
+ * (W1-T2205), since a model can restate or quote its own options back; first occurrence wins.
  */
 function parseGrillOptions(text: string): EscalationOption[] {
   const seen = new Set<string>();
@@ -326,11 +241,9 @@ function parseGrillRecommendation(text: string): string {
 }
 
 /**
- * Extract the worker's terminal verdict off its concatenated output text. Anchored to a line
- * start (like {@link "./worker.js".parseReport}'s `PR_URL:` anchoring) so a marker mentioned in
- * passing prose (e.g. quoting this very prompt back) never counts — only a line that STARTS with
- * one of the three keywords does. When more than one marker line appears, the LAST one wins
- * (mirrors the "last line of the REPORT" convention).
+ * Extract the worker's terminal verdict from its output. Anchored to a line start, like {@link
+ * "./worker.js".parseReport}'s `PR_URL:`, so a marker only mentioned in passing prose never
+ * counts. The LAST marker line wins when more than one appears.
  */
 export function parseTriageVerdict(text: string): TriageVerdict | null {
   const already = [...text.matchAll(/^[ \t]*ALREADY_DECIDED[ \t]*:[ \t]*(.+)$/gim)];
@@ -363,15 +276,11 @@ export function parseTriageVerdict(text: string): TriageVerdict | null {
   return hits[hits.length - 1].verdict;
 }
 
-// ── THE THIRD STATE (W1-T2212), AS A TYPE ────────────────────────────────────
-//
-// `parseTriageVerdict` already refused to fabricate a verdict on unparseable output (`null`,
-// never a fake `TriageVerdict`) — the defect this task removes was one layer down, in
-// `decideTriage`, which folded that `null` into `action: "error"`, the SAME action a worker that
-// physically misbehaved (touched a non-plan file) also produces. `TriageOutcome` below is the
-// discriminated union that makes "unparseable" a state distinct from "produced a verdict" BEFORE
-// either ever reaches `decideTriage` — {@link runTriageWithRetry}'s retry branch (design (i)) is
-// reachable ONLY from `kind: "unparseable"`, never from `kind: "verdict"` (adverse or not).
+// THE THIRD STATE (W1-T2212): `TriageOutcome` below distinguishes "unparseable" from "produced a
+// verdict" before either reaches `decideTriage`, which used to fold a `null` verdict into the
+// SAME `action: "error"` a worker that physically misbehaved also produces. `runTriageWithRetry`'s
+// retry branch is reachable only from `kind: "unparseable"`, never from a parsed verdict.
+// Why: docs/forensics/triage.md#the-third-state (W1-T2212).
 
 export type TriageOutcome = { kind: "verdict"; verdict: TriageVerdict } | { kind: "unparseable" };
 
@@ -390,12 +299,8 @@ export interface DecideTriageInput {
   /** Repo-relative paths the worker itself touched (`git diff --name-only` before the harness's
    * own status write), e.g. from `git -C <worktree> diff --name-only origin/main`. */
   changedFiles: string[];
-  /** How many attempts {@link runTriageWithRetry} spent before reaching this call, when driven
-   *  through the retry loop (W1-T2212). OPTIONAL and undefined by default — `decideTriage`'s
-   *  existing direct caller (run-task.ts's `triageCommand`, still a single call with no retry
-   *  loop wired in) passes none, so its `no ALREADY_DECIDED:/...` message stays byte-identical
-   *  to before this field existed. When present alongside a null `verdict`, it is folded into
-   *  the message so the operator sees HOW MANY attempts the malformed response survived. */
+  /** How many attempts {@link runTriageWithRetry} spent before this call (W1-T2212). Undefined for
+   *  a caller with no retry loop; otherwise folded into the error message alongside `verdict: null`. */
   attempts?: number;
 }
 
@@ -416,42 +321,22 @@ export type TriageDecision =
   | {
       action: "error";
       reason: string;
-      /**
-       * THE CAUSE AS DATA, NOT PROSE ALONE (W1-T2212 acceptance criterion 7): three shapes share
-       * `action: "error"` for the sole reason that none may ever produce a plan PR, but they are
-       * NOT the same failure. `non_plan_files` is a worker that physically misbehaved.
-       * `unparseable_verdict` is a worker whose output {@link runTriageWithRetry} could not read
-       * after exhausting its bounded retries (never retried further past that bound — the SAME
-       * escalation fires as before, design (iii)). `inconsistent_verdict` is a worker that DID
-       * answer parseably but contradicted itself against the files it touched (or, for AMBIGUOUS,
-       * against its own OPTION/RECOMMENDATION contract). A reader (or a future caller) can now
-       * branch on this field instead of pattern-matching `reason`'s prose.
-       *
-       * OPTIONAL, not required on every `error`: the AMBIGUOUS-with-fewer-than-2-OPTION-lines
-       * branch below deliberately omits it — main's pre-existing
-       * `decideTriage: a verdict genuinely offering ONE choice twice ... still fails the < 2
-       * guard` test (test/triage.test.ts, outside this task's declared scope) asserts that
-       * exact shape with `assert.deepEqual`, which fails closed on any extra key. Widening
-       * `cause` to that branch too is a genuine follow-up, not a regression — see this PR's
-       * Follow-ups.
-       */
+      /** The cause AS DATA (W1-T2212): `non_plan_files` (physical misbehavior), `unparseable_verdict`
+       *  (output {@link runTriageWithRetry} could not read), or `inconsistent_verdict` (a parseable
+       *  verdict that contradicted its own files or OPTION/RECOMMENDATION contract). Optional: the
+       *  AMBIGUOUS-with-fewer-than-2-options branch below omits it (pinned in test/triage.test.ts). */
       cause?: "non_plan_files" | "unparseable_verdict" | "inconsistent_verdict";
     };
 
 /**
- * The three-way verdict as a PURE function (mirrors {@link "./dep-review.js".decideDepReview}):
- * ground truth is what FILES the worker actually touched, cross-checked against its declared
- * verdict — an inconsistency (e.g. claiming ALREADY_DECIDED while also editing plan/tasks.yaml)
- * fails loud rather than silently trusting either signal alone.
+ * The three-way verdict as a pure function (mirrors {@link "./dep-review.js".decideDepReview}):
+ * cross-checks the declared verdict against what files the worker actually touched, failing loud
+ * on any inconsistency rather than trusting either signal alone.
  */
 export function decideTriage(input: DecideTriageInput): TriageDecision {
-  // MASTER-PLAN.md is a plan file BY THE PROMPT'S OWN CONTRACT (the PROPOSED
-  // instruction above names "plan/tasks.yaml and/or MASTER-PLAN.md") but lives
-  // at the repo root, so a bare `plan/`-prefix filter classified it non-plan
-  // and fail-closed every proposal that touched it — first reachable 2026-07-22
-  // once #550 let the worker actually edit (feedback 728bc1: "triage worker
-  // touched non-plan file(s): MASTER-PLAN.md; leaving no PR"). The guard and
-  // the prompt must agree on what "plan file" means.
+  // MASTER-PLAN.md is a plan file by the prompt's own contract despite living at the repo root:
+  // a bare `plan/`-prefix filter once fail-closed every proposal that touched it (#550, feedback
+  // 728bc1). This guard and the prompt must keep agreeing on what "plan file" means.
   const nonPlan = input.changedFiles.filter((f) => !f.startsWith("plan/") && f !== "MASTER-PLAN.md");
   if (nonPlan.length > 0) {
     return {
@@ -461,13 +346,8 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
     };
   }
   if (!input.verdict) {
-    // THE THIRD STATE'S TERMINAL SHAPE (W1-T2212): reached either directly (a caller with no
-    // retry loop, `attempts` undefined — the message stays BYTE-IDENTICAL to before this field
-    // existed) or via runTriageWithRetry once its bound is exhausted (`attempts` present) — "at
-    // the bound the SAME escalation fires as today, with the same class and the same blocking
-    // effect" (design iii). `cause: "unparseable_verdict"` distinguishes this from a worker that
-    // physically misbehaved (`non_plan_files`, above) as DATA (acceptance criterion 7), never
-    // only as prose a reader has to pattern-match.
+    // The third state's terminal shape (W1-T2212), reached directly or via runTriageWithRetry's
+    // exhausted bound — the same escalation either way.
     return {
       action: "error",
       reason:
@@ -497,11 +377,8 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
         cause: "inconsistent_verdict",
       };
     }
-    // The async needs-human issue is the ONLY grill mechanism (W1-T42, LEARNINGS.md
-    // "AskUserQuestion neither works headlessly nor stalls") — an AMBIGUOUS verdict with fewer
-    // than 2 OPTION: lines, or a RECOMMENDATION: that doesn't name one of them, is not an
-    // actionable escalation; fail loud rather than let escalate() throw deeper in the pipeline
-    // (or worse, silently drop the recommendation).
+    // The async needs-human issue is the only grill mechanism (W1-T42) — fewer than 2 OPTION:
+    // lines is not an actionable escalation; fail loud here, not deeper in escalate().
     if (verdict.options.length < 2) {
       // `cause` deliberately omitted here — see the DecideTriageInput.cause doc comment above.
       return {
@@ -531,59 +408,43 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
   return { action: "propose", status: "proposed", detail: input.verdict.summary, files: input.changedFiles };
 }
 
-// ── W1-T2212: THE BOUNDED, BYTE-IDENTICAL RETRY (design ii/iii) ──────────────────────────────
-//
-// "The retry RE-REQUESTS, it never RE-ASKS." `runTriageWithRetry` calls `deps.spawnAttempt` with
-// the SAME `prompt` value on every attempt — nothing about the request may vary between them.
-// This is deliberately NOT the relint loop (run-task.ts's `runRelintLoop`, which re-prompts the
-// worker WITH the prior round's violations folded in — a genuine RE-ASK): that loop exists to
-// correct a worker's PLAN LINT violations, a completely different failure mode from "the worker's
-// output could not be parsed at all". Reusing it here would smuggle a re-ask in under a retry's
-// name — exactly the laundering hazard design (v) warns splitting this task in two would risk.
+// W1-T2212: the retry RE-REQUESTS `deps.spawnAttempt` with the SAME `prompt` every time, never
+// RE-ASKS with new information — unlike the relint loop (run-task.ts's `runRelintLoop`), which
+// folds the prior round's violations into a new prompt to fix plan-lint errors.
+// Why: docs/forensics/triage.md#the-bounded-retry (design ii/iii/v).
 
-/** BACKSTOP (W1-T1266): the healthy path — a PARSED verdict, adverse or not — returns on attempt
- *  1, always; this bound fires only once something else has already failed (the worker
- *  repeatedly producing unparseable output), never as the thing that normally stops the loop.
- *  The small, hard bound on unparseable-response retries — mirrors risk-judge.ts's
- *  `RISK_JUDGE_MAX_ATTEMPTS` exactly (design v: the retry contract must be IDENTICAL in both
- *  rungs). Never applies to a PARSED verdict, adverse or not. */
+/** BACKSTOP (W1-T1266): a parsed verdict, adverse or not, always returns on attempt 1 — this
+ *  bound fires only once the worker has repeatedly produced unparseable output, mirroring
+ *  risk-judge.ts's `RISK_JUDGE_MAX_ATTEMPTS` (the retry contract must match both rungs). */
 export const TRIAGE_VERDICT_MAX_ATTEMPTS = 3;
 
-/** One triage worker attempt's raw result — the caller's own spawn, never this module's
- *  concern (mirrors risk-judge.ts's injected `spawn`). */
+/** One triage worker attempt's raw result — the caller's own spawn, never this module's concern. */
 export interface TriageAttemptResult {
   /** The worker's raw concatenated output text, fed to {@link classifyTriageOutcome}. */
   text: string;
-  /** Ground truth: what the worker actually touched THIS attempt (fresh per attempt — a retried
-   *  worker starts from the same worktree state, so this is re-read, never carried over). */
+  /** What the worker touched THIS attempt — re-read fresh per attempt, never carried over. */
   changedFiles: string[];
 }
 
 export interface TriageRetryDeps {
-  /** Spawn ONE triage attempt with the given prompt and return its raw result. Called with the
-   *  IDENTICAL `prompt` value on every attempt — see this section's own doc above. */
+  /** Spawn ONE triage attempt and return its raw result. Called with the IDENTICAL `prompt`
+   *  every time. */
   spawnAttempt: (prompt: string) => Promise<TriageAttemptResult>;
-  /** One ledger-shaped line per attempt (design iii: "each attempt writes its own ledger row so
-   *  the count is auditable after the fact rather than inferred"). No-op default. */
+  /** One ledger-shaped line per attempt, so the count is auditable, not inferred. No-op default. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
 export interface TriageRetryResult {
   decision: TriageDecision;
   changedFiles: string[];
-  /** How many attempts were actually spent — 1 when the first attempt parsed, up to
-   *  `maxAttempts` when every attempt was unparseable. */
+  /** 1 when the first attempt parsed, up to `maxAttempts` when every attempt was unparseable. */
   attempts: number;
 }
 
 /**
- * Spawn up to `maxAttempts` triage attempts with the SAME `prompt`, retrying ONLY while
- * {@link classifyTriageOutcome} reports `unparseable` (design i: the retry branch is reachable
- * ONLY from that arm — never from a parsed verdict, adverse or not, which returns on its very
- * first attempt). At the bound, falls through to {@link decideTriage} with `verdict: null` —
- * the SAME `action: "error"`/`cause: "unparseable_verdict"` outcome a single unparseable
- * response has always produced (design iii: "the SAME escalation fires as today"). An unreadable
- * verdict therefore still blocks and nothing proceeds on it at any point in this loop.
+ * Spawn up to `maxAttempts` attempts with the SAME `prompt`, retrying only while {@link
+ * classifyTriageOutcome} reports `unparseable`. At the bound, falls through to {@link
+ * decideTriage} with `verdict: null` — the same error a single unparseable response produces.
  */
 export async function runTriageWithRetry(
   prompt: string,
@@ -612,33 +473,18 @@ export async function runTriageWithRetry(
 
 // ── Post-hoc deterministic guards (pure, mirroring lib/retro.ts's codeFilesInDiff) ─────────────
 
-/**
- * ID-COLLISION GUARD (the 2026-07-22 W1-T236 triple-mint): the triage worker picks new task ids
- * by reading plan/tasks.yaml, which misses the plan/tasks.d/ shards (W1-T122) — three PRs in one
- * batch each minted W1-T236 while plan/tasks.d/W1-T236-*.yaml already owned it on main, and every
- * plan-loading CI check went red AFTER the PR opened. Load the FULL merged plan (monolith +
- * shards) from the worker's own worktree BEFORE anything is pushed: `loadPlan` throws PlanError
- * naming the duplicate, so a doomed proposal is refused pre-push with the collision named instead
- * of opening a PR that every plan-loading check rejects. (A collision between two OPEN PRs'
- * fragments is still possible — that needs id reservation, tracked separately in feedback.)
- */
+/** ID-COLLISION GUARD (W1-T236): loads the FULL merged plan (monolith + shards) from the
+ *  worker's own worktree before anything is pushed, so a duplicate id `loadPlan` would reject is
+ *  refused pre-push instead of shipping a PR every plan-loading CI check would then reject. */
+// Why: docs/forensics/triage.md#assertproposedplanloads (the 2026-07-22 triple-mint, W1-T236).
 export function assertProposedPlanLoads(worktreeRoot: string): void {
   loadPlan(join(worktreeRoot, "plan", "tasks.yaml"));
 }
 
-
-
-/**
- * Files OUTSIDE `plan/` touched by a unified diff. A triage PR is PLAN-ONLY by construction
- * (`.remudero/skills/feedback.yaml`'s Write-scoped-to-plan design) — this is the same deterministic
- * fail-closed guard `lib/retro.ts`'s `codeFilesInDiff` gives the retro, generalized from
- * "never src/test/" to "never outside plan/" (a triage may legitimately touch MASTER-PLAN.md,
- * which a retro's narrower guard already covers, plus plan/tasks.yaml and plan/feedback/*).
- */
+/** Files OUTSIDE `plan/` touched by a unified diff — the same fail-closed guard `lib/retro.ts`'s
+ *  `codeFilesInDiff` gives the retro, generalized to allow `MASTER-PLAN.md` alongside plan/*. */
 export function nonPlanFilesInDiff(diff: string): string[] {
-  // Same "plan file" definition as decideTriage's guard above: this function's
-  // own doc already said "a triage may legitimately touch MASTER-PLAN.md" while
-  // the filter contradicted it (the 728bc1 fail-close, 2026-07-22).
+  // Same "plan file" definition as decideTriage's guard above — keep them in sync (728bc1).
   return [...diff.matchAll(/^\+\+\+ b\/(\S+)/gm)]
     .map((m) => m[1])
     .filter((f) => !f.startsWith("plan/") && f !== "MASTER-PLAN.md");
@@ -649,42 +495,27 @@ export function diffCitesFeedback(diff: string, feedbackId: string): boolean {
   return diff.includes(`feedback#${feedbackId}`);
 }
 
-// ── W1-T963: the empty-diff-triage-merge incident (#2075/#2077/#2078) ───────────────────────────
-//
-// Three triage PRs for the SAME feedback entry merged and PASSED REVIEW despite changing nothing:
-// `gh pr diff`/`nonPlanFilesInDiff` above compare a triage branch against its OWN (frozen,
-// fork-point) merge-base, so they stay non-empty even once a SIBLING triage PR for the identical
-// entry has already landed the SAME change on `origin/main` — the branch's own history never
-// shows that, only a diff against the LIVE default branch tip does. See `diffEmptyAgainstScope`'s
-// own doc (lib/review.js) for the structural check; this is the triage-specific SCOPE + DISPOSITION
-// wired around it.
+// W1-T963: `nonPlanFilesInDiff` compares against a frozen fork-point, so it stays non-empty even
+// once a sibling triage PR for the same entry already landed the same change on `origin/main`.
+// `triageDeclaredScope`/`triageEmptyScopeDisposition` below check the LIVE diff instead.
+// Why: docs/forensics/triage.md#the-empty-diff-triage-merge-incident (#2075/#2077/#2078).
 
-/**
- * The declared SCOPE of a `no_task`/`grill` triage decision — the ONE path its entire
- * contribution is: the feedback entry's own status flip. Deliberately NOT used for `propose`
- * (its contribution also includes a NEW plan/tasks.d/ shard, so an empty diff against this
- * narrower scope would never discriminate a genuinely-new proposal from a duplicate one).
- */
+/** The declared scope of a `no_task`/`grill` decision: only the feedback entry's status flip.
+ *  Not used for `propose`, whose new plan/tasks.d/ shard needs the wider check. */
 export function triageDeclaredScope(feedbackId: string): string[] {
   return [feedbackEntryRepoPath(feedbackId)];
 }
 
-/** The terminal outcome a triage merge gate takes once it knows whether the LIVE diff against
- *  {@link triageDeclaredScope} is empty — CLOSE (never merge; design (v): a refusal that leaves
- *  the PR open forever is not the outcome either), or PROCEED to the ordinary review/arm gate. */
+/** What a triage merge gate does once it knows whether the live diff against {@link
+ *  triageDeclaredScope} is empty: `close` (a sibling already shipped it) or `proceed`. */
 export interface TriageEmptyScopeDisposition {
   action: "close" | "proceed";
-  /** Present only for `action: "close"` — the `gh pr close --comment` text naming WHY. */
+  /** Present only for `action: "close"` — the `gh pr close --comment` text naming why. */
   comment?: string;
 }
 
-/**
- * Decide whether to CLOSE this triage PR (its declared scope is empty against the LIVE default
- * branch — a sibling already did the work) or let it PROCEED to the ordinary review/arm gate.
- * Pure: `liveDiffFiles` is the caller's OWN fresh `git diff --name-only origin/main HEAD -- <scope>`
- * read (never this function's concern — a live git read cannot be pure), so this is trivially
- * testable without spawning git at all.
- */
+/** Decide close-vs-proceed. Pure: `liveDiffFiles` is the caller's own fresh `git diff
+ *  --name-only origin/main HEAD -- <scope>` read. */
 export function triageEmptyScopeDisposition(
   liveDiffFiles: readonly string[],
   scopeFiles: readonly string[],
@@ -702,15 +533,11 @@ export function triageEmptyScopeDisposition(
 // ── Commit message / PR body authorship (harness-owned, deterministic) ──────────────────────
 
 
-// ── Commit-BODY line budget (the 2026-07-22 triage-lane commitlint outage) ──────────────────
-// `shapeCommitMessage` protects the HEADER (W1-T136), but commitlint also enforces
-// body-max-line-length (100) over every body line, and the templates below interpolate LLM
-// free text (`decision.detail`) plus 23-char feedback ids — six triage PRs in one batch went
-// ci-gate-red on exactly this. Two shapes, two tools: free-standing PROSE lines word-wrap
-// across lines; an `Acceptance:` BULLET must stay ONE line (parseAcceptanceBlock ends the
-// block at the first non-bullet line, so a wrapped bullet would orphan every later criterion)
-// and is therefore truncated with an ellipsis instead. Truncation only trims keyword-floor
-// prose — the full detail always appears (wrapped) in the body above the block.
+// Commit-body line budget: `shapeCommitMessage` protects the header (W1-T136), but commitlint
+// also caps body lines at 100 chars, and the templates below interpolate LLM free text. Prose
+// word-wraps; an `Acceptance:` bullet must stay one line (a wrap would orphan later criteria) so
+// it is truncated with an ellipsis instead, never the full detail above it.
+// Why: docs/forensics/triage.md#commit-body-line-budget (the 2026-07-22 commitlint outage).
 
 /** commitlint's body-max-line-length bound, mirrored from commitlint.config.mjs. */
 export const COMMIT_BODY_MAX_LINE = 100;
@@ -737,61 +564,29 @@ export function fitAcceptanceBullet(bullet: string, max: number = COMMIT_BODY_MA
   return bullet.length <= max ? bullet : bullet.slice(0, max - 1) + "\u2026";
 }
 
-/**
- * The EXECUTABLE proof for a triage outcome: the feedback entry's own status flip, in the house
- * `grep: <pattern> in <path>` dialect {@link "./review.js".parseWhitelistedProof} accepts.
- *
- * WHY THIS EXISTS. Every triage PR used to carry a FIXED ENGLISH PHRASE here \u2014 "feedback yaml flips
- * to rejected", "in-diff provenance; status proposed", "needs-human issue; grilling". They named a
- * true, checkable fact and no parser could read any of them, so EVERY triage PR posted
- * `CAPPED \u2014 0/1 proofs executed`: 25 of the 28 capped verdicts in the two days after the
- * `capped_reason` field was added were this, one per triage fire, now firing every 15 minutes
- * (state/recon-GY-no-dialect-caps.md). It was never an authoring failure \u2014 no model writes this
- * string \u2014 so no prompt could have fixed it.
- *
- * DERIVED FROM `decision.status`, never re-typed: the proof asserts exactly the status
- * `run-task.ts`'s `setFeedbackStatus(worktreePath, feedbackId, decision.status)` writes into the
- * same diff, so the two cannot drift into a proof that greps for a status the harness never wrote.
- *
- * IT DISCRIMINATES. The entry reads `status: new` on the merge base and the flipped value on the
- * head, so the grep MISSES the base \u2014 a pattern matching both is downgraded to `executed_stale`
- * (W1-T273) and would leave the verdict capped exactly as before.
- */
+/** The executable proof for a triage outcome, in the house `grep: <pattern> in <path>` dialect
+ *  {@link "./review.js".parseWhitelistedProof} accepts \u2014 a fixed English phrase here used to cap
+ *  every triage PR at 0 proofs executed. Derived from `decision.status`, never re-typed, so it
+ *  can't drift from the status `setFeedbackStatus` writes into the same diff; it discriminates
+ *  because the entry reads `status: new` at the merge base. */
+// Why: docs/forensics/triage.md#triageacceptanceproof (the fixed-phrase capped-verdict incident).
 export function triageAcceptanceProof(feedbackId: string, status: FeedbackStatus): string {
   return `grep: status: ${status} in ${feedbackEntryRepoPath(feedbackId)}`;
 }
 
-/**
- * One Acceptance criterion as the LABELLED TWO-LINE form (`- claim: \u2026` + an indented `proof: \u2026`),
- * which {@link "./review.js".parseAcceptanceBlock} recognises alongside the single-line
- * `- claim | proof` shape.
- *
- * WHY TWO LINES AND NOT THE ONE-LINER. commitlint's `body-max-line-length` is 100 and is a REQUIRED
- * check ({@link COMMIT_BODY_MAX_LINE}), while a real proof for a long feedback id is already ~90
- * characters on its own \u2014 `grep: status: rejected in plan/feedback/fb-alert-craigoley-remudero-code-scanning-17.yaml`
- * is 89. A single-line bullet carrying both would be ~170 and {@link fitAcceptanceBullet} would
- * elide it \u2014 which is how four of the shipped bodies ended up with a `\u2026` mid-phrase. Splitting the
- * criterion gives the proof a line of its own with room to spare.
- *
- * THE CLAIM IS ELIDED, THE PROOF NEVER IS. Truncating prose costs legibility; truncating a proof
- * costs execution, which is the whole defect this function exists to end. If a feedback id is ever
- * long enough that the PROOF line alone exceeds the budget, that is returned UNTRUNCATED and
- * commitlint will say so loudly \u2014 a caught red beats a silent cap. `test/triage-proof-dialect.test.ts`
- * pins the worst id length that still fits.
- */
+/** One Acceptance criterion as the labelled two-line form (`- claim: \u2026` + indented `proof: \u2026`),
+ *  which {@link "./review.js".parseAcceptanceBlock} also recognises \u2014 split from the one-line
+ *  `- claim | proof` shape because a long feedback id's proof alone runs ~90 chars and the
+ *  combined bullet used to exceed the 100-char body budget and get elided mid-phrase. The claim
+ *  may be elided; the proof line never is. */
+// Why: docs/forensics/triage.md#acceptancecriterionlines (the mid-phrase-ellipsis incident).
 export function acceptanceCriterionLines(claim: string, proof: string, max: number = COMMIT_BODY_MAX_LINE): string[] {
   return [fitAcceptanceBullet(`- claim: ${claim}`, max), ` proof: ${proof}`];
 }
 
-/**
- * The commit message (and, via `gh pr create --fill`, the PR title+body) the HARNESS authors for
- * a triage outcome — never the LLM, so the `Acceptance:`/`Remudero-Task:` contract can never be
- * skipped or malformed the way a free-text worker report could be. Title line first (conventional
- * commit style, matching this repo's `chore(plan): ...` convention), blank line, then an
- * `Acceptance:` block `rmd review`'s PR-body fallback path parses ({@link
- * "./review.js".parseAcceptanceBlock}) since a synthetic `TRIAGE-<id>` task carries no
- * plan/tasks.yaml entry of its own, then the provenance trailer.
- */
+/** The commit message (and PR title+body) the HARNESS authors for a triage outcome — never the
+ *  LLM, so the `Acceptance:`/`Remudero-Task:` contract can never be malformed: title, blank line,
+ *  an `Acceptance:` block {@link "./review.js".parseAcceptanceBlock} parses, then provenance. */
 export function triageCommitMessage(opts: {
   decision: Exclude<TriageDecision, { action: "error" }>;
   feedbackId: string;
@@ -835,9 +630,7 @@ export function triageCommitMessage(opts: {
       `Remudero-Task: ${taskId}`,
     ].join("\n");
   }
-  // propose
-  // W1-T136 class — see plan-architect.ts: `decision.detail` is LLM free text and can
-  // blow commitlint's header-max-length, which reds a REQUIRED check post-push.
+  // propose — `decision.detail` is LLM free text that can blow the header limit, so it's shaped.
   const shapedHeader = shapeCommitMessage(`chore(plan)`, `triage feedback#${feedbackId} — ${decision.detail}`).header;
   return [
     shapedHeader,
@@ -856,15 +649,9 @@ export function triageCommitMessage(opts: {
 
 // ── THE GRILL: the needs-human escalation payload (W1-T42) ──────────────────────────────────
 
-/**
- * Build the `Escalation` (lib/escalate.ts) for an AMBIGUOUS feedback item — the async
- * needs-human GitHub issue that IS the grill (★ VERIFIED the only viable mechanism: see this
- * module's header doc and LEARNINGS.md "AskUserQuestion neither works headlessly nor stalls").
- * Pure — `run-task.ts`'s `triageCommand` is the only caller that hands this to the real
- * `escalate()`/`ghIssueGateway()` I/O, mirroring how `triageCommitMessage` stays pure while the
- * caller owns git/gh. `class: "GRILL"` reuses escalate.ts's SAME machinery (labels, ledger line,
- * digest-only — no real-time ping) rather than inventing a second one, per this task's directive.
- */
+/** Build the `Escalation` (lib/escalate.ts) for an AMBIGUOUS feedback item — the async
+ *  needs-human GitHub issue that is the grill, the only viable mechanism (see the module header).
+ *  Pure, like {@link triageCommitMessage}; the caller owns the real `escalate()`/git I/O. */
 export function buildGrillEscalation(opts: {
   entry: FeedbackEntry;
   decision: Extract<TriageDecision, { action: "grill" }>;

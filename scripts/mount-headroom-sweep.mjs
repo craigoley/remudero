@@ -1,79 +1,25 @@
 #!/usr/bin/env node
 // scripts/mount-headroom-sweep.mjs
 //
-// MOUNT HEADROOM SWEEP (W1-T2560, extended W1-T2574).
+// Mount headroom sweep (W1-T2560, extended W1-T2574/W1-T2668/W1-T2708): reads the ledger and
+// reports turn/cost distributions per task_class, per synthesis rung, and per (type, risk, class)
+// cell, so a mount change is a measurement instead of a guess. It writes nothing, spawns nothing,
+// and recommends no model — see docs/forensics/mount-headroom-sweep.md for the incident record and
+// CLAUDE.md's "Ledger and evidence discipline" for the corpus controls shared with every other
+// ledger reader (rotation forms, dedup, a zero-runs refusal).
 //
-// W1-T2574 — A MOUNT COMPARISON ACROSS UNMATCHED POPULATIONS IS NOT A MEASUREMENT. The per-class
-// census below (W1-T2560) reports turn/cost distributions per `task_class`, and that is correct
-// for what it answers, but every run of a class rode the SAME mount for as long as
-// `.remudero/mounts.yaml` was static — a corpus with no variation on the variable of interest
-// supports no counterfactual about a DIFFERENT mount, however large it grows. A second provider
-// (W1-T2572/W1-T2573) supplies that variation for free: `selectWorkerProvider` picks the
-// subscription with the most headroom in its tightest window, a function of WINDOW STATE rather
-// than task difficulty, so provider assignment is plausibly exogenous — but ONLY WITHIN a
-// (type, risk, class) cell. High-risk work rides a higher mount BY POLICY, so aggregating across
-// cells reports "expensive mounts fail more" when difficulty, not model, is talking.
+// INVARIANT: a comparison across (type, risk, class) cells is not a measurement — provider
+// assignment is only quasi-random WITHIN a cell, so `compareArms` refuses
+// (`MountHeadroomSweepError`, naming both cells) instead. FALSIFIER:
+// test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts.
 //
-// `computeArmSweep`/`compareArms` below are the fix: runs are grouped into CELLS
-// (type x risk x class) and, WITHIN each cell only, into ARMS (provider x served_model x effort —
-// `served_model` is `workerLedgerFields`'s own field, W1-T2572; `provider`/`effort` ride the same
-// line). Every arm reports its own `n`. `compareArms` REFUSES — throwing `MountHeadroomSweepError`
-// and naming BOTH cells — the moment it is asked to compare two arms that do not share a cell; the
-// per-cell `comparisons` array below never attempts one (comparisons are built pairwise WITHIN one
-// cell's own arm list), so the refusal is structural, not merely a check someone could skip.
-// Every comparison also carries the corpus's own `newestTs` (see below), and reports whether the
-// cheaper-looking arm's advantage HOLDS or DISAPPEARS once a re-dispatch's cost is charged to the
-// one completed task it belongs to (`costPerCompletedTaskUsd`, not the naive per-run `costP50`).
+// INVARIANT: every distribution is a percentile, never a mean, and cost is charged PER COMPLETED
+// TASK so a re-dispatch cannot hide behind a per-run average; any mount edit is a human ruling (or
+// W1-T2559). FALSIFIER: test/mount-headroom-sweep.test.ts,
+// test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts.
 //
-// NOTHING MEASURES WHICH TASK CLASSES COULD TAKE A CHEAPER MOUNT. Every row in
-// `.remudero/mounts.yaml` was chosen BY ARGUMENT, never by an observed distribution, so a model or
-// effort change today is a guess in either direction. The ledger already carries turn counts,
-// costs and outcomes for every retained run (`implement.done`/`recon.done`'s `num_turns`, the
-// terminal `verdict` line's `cost_usd`/`verdict`) — this script is the ONE verb that reads them
-// together, per `task_class`, so "sonnet would do here" becomes a measurement instead of an
-// opinion. It REPORTS; it changes no mount, dispatches no worker, and recommends no model — that
-// ruling belongs to a human (or W1-T2559, which owns any mount edit and depends on this task).
-//
-// PERCENTILES, NEVER A MEAN (see src/lib/cost-anomaly.ts's own identical rule): the mean is
-// dragged by exactly the outlier a headroom sweep exists to find. Every distribution below is
-// p50/p90/max.
-//
-// OUTCOME BEFORE COST. A class that is cheap because it fails early is not a cheaper-mount
-// candidate — the cost column alone argues the opposite of the truth. Every class row below
-// carries how many of its settled runs reached a passing verdict, how many ended `blocked_ci`,
-// and how many were themselves a RE-DISPATCH (a later attempt at a task that already had one) —
-// visible as such rather than folded into a bare average.
-//
-// COST PER COMPLETED TASK, NEVER PER REQUEST. `costPerCompletedTaskUsd` divides a class's total
-// settled cost by its DISTINCT settled task_id count — not its run count — so a task needing two
-// attempts (a fix strike, a re-dispatch) shows its real price instead of hiding it behind a
-// per-run average that a second attempt would otherwise dilute.
-//
-// THIS SCRIPT CARRIES ITS OWN CONTROLS, because every prior census in this repo that did not has
-// been wrong (this session alone produced a $1,279 figure and an $80,118 figure for the SAME
-// corpus, both wrong, from queries that looked fine):
-//   - ALL THREE ROTATION FORMS are read (`ledger.*.ndjson.gz`, plain `ledger.*.ndjson`, and the
-//     live `ledger.ndjson`) via `ledgerRotationEntries` (src/lib/ledger-grep.ts) — the ONE shared
-//     definition of "which files are ledger rotations", not a second glob that silently answers
-//     from a subset. `corpus.formsOpened` NAMES which of the three this run actually saw.
-//   - ROWS ARE DEDUPED BY run_id (via `gatherRuns`, src/lib/retro.ts, over exact-line-deduped
-//     records — rotations duplicate heavily, so a raw row is not a run), and `corpus.rowToRunRatio`
-//     prints how much a raw count would have overstated by, so archive duplication cannot inflate
-//     a figure silently.
-//   - `corpus.newestTs` is the corpus's own newest row, printed beside every number — a sweep
-//     answering about a stale window is visible as such rather than looking current.
-//   - A CORPUS THAT RESOLVES ZERO DISTINCT RUNS REFUSES (`MountHeadroomSweepError`) rather than
-//     printing a report whose every class reads zero — a zero is not a measurement until a
-//     positive control (the forms/archives/rows above) proves the query could see its corpus at
-//     all; see this repo's own $1,279/$80,118 near-misses for why that distinction is load-bearing.
-//
-// NOT IN SCOPE, DELIBERATELY: changing `.remudero/mounts.yaml` (W1-T2559), spawning any worker,
-// and recommending a model — this script makes no `child_process` call and writes nothing.
-//
-// Usage: node --import tsx scripts/mount-headroom-sweep.mjs [--root <repo-root>]
-//          [--state-dir <dir>] [--json]
-//   Defaults: --root process.cwd(), --state-dir <root>/state (the same "state/ledger.ndjson,
-//   siblings rotate beside it" layout src/lib/log-rotation.ts's own header documents).
+// Usage: node --import tsx scripts/mount-headroom-sweep.mjs [--root <repo-root>] [--state-dir <dir>] [--json]
+//   Defaults: --root process.cwd(), --state-dir <root>/state.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
@@ -93,10 +39,8 @@ export class MountHeadroomSweepError extends Error {
   }
 }
 
-/** The live ledger's own filename — NEVER a rotation (see log-rotation.ts's
- *  `NEVER_ROTATE_FILENAME`, the same constant `ledgerRotationEntries` excludes by). Named as a
- *  literal here (not imported) so this script's ONLY dependency on log-rotation.ts stays inside
- *  `ledgerRotationEntries` itself — one shared corpus definition, not two. */
+/** The live ledger's own filename — NEVER a rotation (log-rotation.ts's `NEVER_ROTATE_FILENAME`).
+ *  Named as a literal so this script's only dependency on log-rotation.ts stays inside `ledgerRotationEntries`. */
 export const LIVE_LEDGER_FILENAME = "ledger.ndjson";
 
 /** The minimal fs surface this script needs — injectable so a test drives a synthetic state dir
@@ -109,10 +53,8 @@ export const realMountHeadroomFs = {
 };
 
 /**
- * Read every ledger rotation under `stateDir` (both forms, via `ledgerRotationEntries`) plus the
- * live file, and return every non-blank raw line seen, IN READ ORDER, alongside which forms were
- * actually opened and which rotations (found on disk) could not be. Never throws: an unreadable
- * `stateDir` reads as "zero archives", the same discipline `resolveLedgerUnion` already uses.
+ * Read every ledger rotation under `stateDir` (both forms) plus the live file, IN READ ORDER, with
+ * which forms were opened and which rotations could not be read. Never throws.
  */
 export function readLedgerCorpus(stateDir, fsDeps = realMountHeadroomFs) {
   let names = [];
@@ -167,13 +109,9 @@ export function readLedgerCorpus(stateDir, fsDeps = realMountHeadroomFs) {
 }
 
 /**
- * Parse every raw line as JSON, DEDUPED BY EXACT LINE TEXT before a single record is retained —
- * the same mechanism src/lib/digest.ts's `readDigestWindow` uses, because rotations duplicate
- * whole overlapping windows verbatim: feeding a duplicate `implement.done` line to `gatherRuns`
- * twice would double-count that run's own turns, not merely inflate a display count. A torn line
- * is skipped, never thrown on. `rawRowsWithRunId` counts every PRE-DEDUP line carrying a string
- * `run_id` — the numerator {@link buildMountHeadroomSweep}'s `rowToRunRatio` needs to show how
- * much a raw count would have overstated by.
+ * Parse every raw line as JSON, DEDUPED BY EXACT LINE TEXT before a record is retained — rotations
+ * duplicate whole windows verbatim. A torn line is skipped, never thrown on. `rawRowsWithRunId`
+ * counts every pre-dedup line carrying a string `run_id`, the numerator `rowToRunRatio` needs.
  */
 export function parseAndDedupeLedgerLines(rawLines) {
   const seen = new Set();
@@ -198,10 +136,8 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
-/**
- * The p-th percentile of `values` (nearest-rank), NEVER a mean — see this script's own header.
- * `null` for an empty input (never a fabricated 0).
- */
+/** The p-th percentile of `values` (nearest-rank), NEVER a mean — see this script's own header.
+ *  `null` for an empty input (never a fabricated 0). */
 export function percentile(values, p) {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -212,19 +148,16 @@ export function percentile(values, p) {
 const PASSING_VERDICT = "merged";
 const BLOCKED_CI_VERDICT = "blocked_ci";
 
-/** SETTLED, in the exact sense src/lib/cost-anomaly.ts already defines it: `verdict !==
- *  "incomplete"`. An in-flight run's partial turns/cost neither anchor a class's distribution nor
- *  are themselves part of an outcome split — the same reasoning that module states for its own
- *  median, applied here to every figure this script reports. */
+/** SETTLED, in the sense src/lib/cost-anomaly.ts defines it: `verdict !== "incomplete"`. An
+ *  in-flight run's partial turns/cost anchor no distribution here. */
 function isSettled(run) {
   return run.verdict !== "incomplete";
 }
 
 /**
- * Every run_id that is NOT the earliest (by `startTs`, then `runId`) run of its own `taskId` — a
- * RE-DISPATCH: this task already had at least one prior attempt. Computed over the WHOLE retained
- * corpus, never scoped to one class first, because a task's later attempt can resolve to a
- * different `task_class` than its first one did.
+ * Every run_id that is NOT the earliest (`startTs`, then `runId`) run of its own `taskId` — a
+ * RE-DISPATCH. Computed over the WHOLE corpus, since a later attempt can resolve to a different
+ * `task_class` than its first one did.
  */
 export function redispatchedRunIds(allRuns) {
   const byTask = new Map();
@@ -245,12 +178,8 @@ export function redispatchedRunIds(allRuns) {
 }
 
 /**
- * Group SETTLED runs by `task_class` (`"unknown"` for a run with none, mirroring
- * src/lib/retro.ts's `aggregateByClass`) and compute, per class: the turn and cost p50/p90/max
- * (never a mean), the outcome split (passing / blocked_ci / re-dispatched), and the
- * cost-per-completed-task figure (total settled cost divided by DISTINCT settled task_id count,
- * never by run count — see this script's own header for why per-run hides a re-dispatch's real
- * price).
+ * Group SETTLED runs by `task_class` (`"unknown"` for none) and compute per class: turn/cost
+ * p50/p90/max, the outcome split, and cost PER COMPLETED TASK (never per run — see this file's header).
  */
 export function computeClassSweep(runs) {
   const redispatched = redispatchedRunIds(runs);
@@ -291,36 +220,15 @@ export function computeClassSweep(runs) {
   return out;
 }
 
-// ── W1-T2668: THE THREE ROWS THIS INSTRUMENT WAS BLIND TO ────────────────────────────────────
-//
-// `computeClassSweep` above groups by `task_class` over `gatherRuns`, which requires a `run.start`
-// and sums turns from implement/recon done-steps. retro, triage and inbox_draft are not task runs:
-// they carry no `task_class`, so they landed in "unknown" or nowhere at all. The one verb built to
-// turn "sonnet would do here" into a measurement could not see the three rows an operator would
-// act on — and `.remudero/mounts.yaml`'s own "$827 across 219 invocations" came from a hand query
-// that nothing re-derives.
-//
-// NEITHER THE POPULATION NOR THE STEP NAMES ARE A NEW LIST. The rungs come from `SYNTHESIS_ROLES`
-// (src/lib/mounts.ts) — the same constant `loadMounts` validates the `synthesis:` block against —
-// so a fourth synthesis row added tomorrow is priced tomorrow. The step each writes comes from
-// `ARCHITECT_LANE_STEPS` (src/lib/retro.ts), the ONE map that already identifies these lanes by
-// "the ONE ledger `step` name each writes". A second copy of either would drift; the export is
-// this task's only edit outside its own two files, and it is one line.
-//
-// THE DIVISOR IS NAMED, NOT REUSED. `computeClassSweep` divides by DISTINCT settled `task_id` —
-// cost per completed TASK. A synthesis rung has no `task_id` and completes no task, so dividing by
-// anything and calling it the same thing would be a category error. These rows report cost per
-// INVOCATION and say so in the field name (`costPerInvocationUsd`), which is what the shard
-// requires: "a stated equivalent (per invocation, named as such) rather than a silent reuse".
+// W1-T2668: retro, triage and inbox_draft carry no `task_class`, so `computeClassSweep` above
+// cannot see them. Rungs come from `SYNTHESIS_ROLES` (mounts.ts); rows price PER INVOCATION
+// (`costPerInvocationUsd`), never per completed task, since a rung completes no task. FALSIFIER:
+// test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts.
+// Why: docs/forensics/mount-headroom-sweep.md#computesynthesissweep-the-three-rows-this-instrument-was-blind-to.
 
 /**
- * One row per synthesis rung, from that rung's own terminal ledger step. Deduped by `run_id` the
- * same way `parseAndDedupeLedgerLines` dedupes the corpus — a rung that ledgers its terminal line
- * twice (a resumed retro, a rotation overlap) must count as ONE invocation, or the percentiles
- * describe the ledger's shape rather than the rung's.
- *
- * Percentiles, never means — the same discipline `computeClassSweep` carries, for the same reason:
- * one $40 outlier moves a mean and moves no percentile.
+ * One row per synthesis rung, from its own terminal ledger step, deduped by `run_id` — a rung that
+ * ledgers its terminal line twice (a resumed retro, a rotation overlap) counts as ONE invocation.
  */
 export function computeSynthesisSweep(records) {
   const out = [];
@@ -360,45 +268,27 @@ export function computeSynthesisSweep(records) {
   return out;
 }
 
-/** `cost_usd`, falling back to `total_cost_usd` — the SAME precedence `gatherRuns`'s `costLine`
- *  and retro.ts's own lane-spend reader use, so a synthesis row is priced by the identical rule as
- *  every other row in this report. */
+/** `cost_usd`, falling back to `total_cost_usd` — the same precedence `gatherRuns`'s `costLine` uses. */
 function costOf(r) {
   if (typeof r.cost_usd === "number") return r.cost_usd;
   if (typeof r.total_cost_usd === "number") return r.total_cost_usd;
   return 0;
 }
 
-// ── W1-T2574: CELLS (type x risk x class) and, WITHIN each, ARMS (provider x served_model x
-// effort) — never the reverse, and never compared across cells. ────────────────────────────────
+// W1-T2574: CELLS (type x risk x class), and WITHIN each cell, ARMS (provider x served_model x effort).
 
-/** The SAME three worker-call steps src/lib/retro.ts's own (unexported) `DONE_STEPS` sums turns
- *  from. Duplicated here, deliberately, rather than imported: this task's own file scope is
- *  [this script, its test] — retro.ts's `RunSummary` carries no provider/served_model/effort
- *  field (nothing in this task adds one), so this script reads those three fields itself, off
- *  the same lines, rather than widening retro.ts to carry them. */
+/** The same three worker-call steps retro.ts's `DONE_STEPS` sums turns from, duplicated here since
+ *  `RunSummary` carries no provider/served_model/effort field. */
 const ARM_DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
 const IMPLEMENTATION_DONE_STEPS = new Set(["implement.done", "implement.resumed"]);
 const WINDOW_REASON_CAP = 8;
 const WINDOW_REASON_LENGTH_CAP = 96;
 
 /**
- * provider / served_model / effort per run_id, read directly off the raw (pre-`gatherRuns`)
- * ledger records. `workerLedgerFields` (src/lib/worker.ts, W1-T2572) writes `served_model` and
- * `effort` UNCONDITIONALLY on every {@link ARM_DONE_STEPS} line (`served_model` defaults to the
- * literal `null`, never an omitted key) and `provider` only when `WorkerResult.provider` was set.
- * So:
- *   - `servedModel` reads `"unreported"` for an explicit `served_model: null` (checked — the
- *     provider named nothing, W1-T2572's own honest-unknown) and `"unknown"` only when the key is
- *     absent altogether (a ledger line predating W1-T2572).
- *   - `provider` reads `"unknown"` when absent (a line predating provider ledgering).
- * The FIRST IMPLEMENTATION line for a run_id wins, regardless of where any `recon.done` row
- * appears in the ledger. `recon.done` is only a fallback for a recon-only run. The mount being
- * measured routes the implementation worker, so allowing a recon row to win would label the
- * implementation outcome with the recon model. Within implementation resumes, first still wins:
- * the retained production corpus has no run whose implementation resumes disagree on
- * provider/model/effort, and silently switching attribution on a later resume would be no more
- * honest than silently taking a recon row.
+ * provider / served_model / effort per run_id, off the raw ledger records. `servedModel` reads
+ * `"unreported"` for an explicit `served_model: null`, `"unknown"` only when absent; `provider`
+ * reads `"unknown"` when absent. FIRST IMPLEMENTATION line wins over `recon.done`. Why:
+ * docs/forensics/mount-headroom-sweep.md#armfieldsbyrunid-resume-precedence.
  */
 export function armFieldsByRunId(records) {
   const out = new Map();
@@ -433,11 +323,9 @@ function boundedWindowReason(value, fallback) {
 }
 
 /**
- * Reduce the material per-call `window_consumption` sensor into one record per run, but only for
- * implementation calls — the worker a mounts-table change controls. Each call stays attached to
- * the provider/model/effort on its OWN done row and must match the run's selected implementation
- * arm. A mixed resume or cross-provider window is unreadable, never silently charged to the
- * first row. Subtotals remain visible, but a caller may use them only when `unreadableCalls == 0`.
+ * Reduce the per-call `window_consumption` sensor into one record per run, for implementation
+ * calls only. A mixed resume or cross-provider window is unreadable, never silently charged to the
+ * first row; a caller may use the subtotals only when `unreadableCalls == 0`.
  */
 export function windowEvidenceByRunId(records, armFields) {
   const out = new Map();
@@ -510,20 +398,11 @@ function cheaperArmKey(keyA, valA, keyB, valB) {
 }
 
 /**
- * Compare TWO ARMS and REFUSE — loudly, naming BOTH cells — when they do not share the SAME
- * (type, risk, class) cell: provider assignment is only quasi-random WITHIN a cell
- * (`selectWorkerProvider` picks off window headroom, not task difficulty); across cells it tracks
- * POLICY (high-risk work rides a higher mount on purpose), so a cross-cell comparison reports
- * difficulty talking, not model — see this script's own header. This is the ONE function that
- * compares two arms, so it is the ONE place the refusal has to hold.
- *
- * OUTCOME BEFORE COST, restated for a pair: `cheaperByCostP50` is the NAIVE per-settled-run
- * figure (a re-dispatch's second run reads as just another row, same as any other run's).
- * `cheaperByCostPerCompletedTask` is the CHARGED figure ({@link computeArmSweep}'s
- * `costPerCompletedTaskUsd`, which already sums BOTH of a re-dispatched task's attempts over its
- * ONE completion). When the two disagree, the arm that looked cheaper per run is NOT actually
- * cheaper once its re-dispatches are charged to it: `advantageHoldsUnderRedispatch: false`, and
- * `note` names which arm's advantage disappeared.
+ * Compare TWO ARMS and REFUSE — naming BOTH cells — when they do not share the SAME (type, risk,
+ * class) cell (see this file's header). `cheaperByCostP50` (naive per-run) can disagree with
+ * `cheaperByCostPerCompletedTask` once re-dispatch cost is charged —
+ * `advantageHoldsUnderRedispatch: false` then names which arm's advantage disappeared. Why:
+ * docs/forensics/mount-headroom-sweep.md#comparearms-outcome-before-cost-restated-for-a-pair.
  */
 export function compareArms(armA, armB) {
   if (armA.cellKey !== armB.cellKey) {
@@ -574,14 +453,8 @@ export function compareArms(armA, armB) {
 }
 
 /**
- * Group runs into (type, risk, class) CELLS and, WITHIN each cell, into (provider, served_model,
- * effort) ARMS. `redispatchedRunIds` runs over the WHOLE corpus first (a re-dispatch can resolve
- * to a different class than its first attempt — see that function's own doc), so an arm's
- * re-dispatch count is correct even though the grouping below is scoped per cell/arm. Every arm
- * carries its own `n` (settled run count) beside every figure — a comparison resting on a handful
- * of runs is visible as such. Every cell with two or more arms gets EVERY pairwise
- * {@link compareArms} comparison, scoped structurally to that one cell's own arm list, so a
- * cross-cell comparison is never even attempted.
+ * Group runs into (type, risk, class) CELLS and, WITHIN each, (provider, served_model, effort)
+ * ARMS; every cell with two or more arms gets every pairwise {@link compareArms} comparison.
  */
 export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new Map()) {
   const redispatched = redispatchedRunIds(runs);
@@ -692,12 +565,8 @@ export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new 
 }
 
 /**
- * THE ONE ENTRY POINT: read the union corpus, dedup, reduce into per-run summaries
- * (`gatherRuns`), and build the per-class sweep. Throws {@link MountHeadroomSweepError} when the
- * corpus resolves to ZERO distinct runs — never a report whose every class reads zero, which
- * would be indistinguishable from a real (if boring) finding. Spawns nothing, writes nothing,
- * mutates no mount — a pure read-and-reduce over the ledger, exactly like
- * src/lib/cost-anomaly.ts's own detector.
+ * THE ONE ENTRY POINT: read the union corpus, dedup, reduce into per-run summaries, and build the
+ * per-class sweep. Throws on ZERO distinct runs; spawns and writes nothing.
  */
 export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) {
   const corpus = readLedgerCorpus(stateDir, fsDeps);
@@ -744,32 +613,10 @@ export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) 
 }
 
 /**
- * W1-T2708 — THE LANE-RESTORE BASELINE, RECORDED IN THIS INSTRUMENT'S OWN VOCABULARY.
- *
- * `dispatchLanes`' comment in plan/policy.yaml holds the fleet at 2 and states the release:
- * "Restore to 3 once burn per run is down, and record the measurement that justifies it rather
- * than restoring on optimism." That posture is right. What it lacked was a comparable left-hand
- * side: the only per-run figures in the table sat one block over, in `reviewLanes` prose — "a
- * review lane is cheap ($0.63/run measured, against implement at $5.28)", 2026-09-01 — naming no
- * STATISTIC, no CORPUS WINDOW and no COMMAND.
- *
- * THAT AMBIGUITY FLIPS THE ANSWER, WHICH IS WHY IT IS NOT PEDANTRY. Measured 2026-09-02 over 67
- * archives, all three rotation forms, 801,987 raw rows deduped to 749 distinct runs: class `src`
- * read cost p50 4.94 / p90 11.34 / max 38.46. If `$5.28` was a MEDIAN, today's p50 is a 6.4%
- * improvement and the condition is MET. If it was a MEAN, today's mean is necessarily ABOVE 4.94
- * (a p90 of 11.34 and a max of 38.46 guarantee it) and burn may be UP. The same two numbers
- * support opposite rulings, and nothing recorded decides between them — an operator session
- * already came within a step of comparing 5.28 against a p50 as though the statistics matched.
- *
- * SO THE 2026-09-01 FIGURE IS NOT RESTATED, IT IS SUPERSEDED. Its statistic is unrecoverable, and
- * a figure that can be read two ways is worse than none. The baseline below is the 2026-09-02
- * reading, which names all four fields BECAUSE IT CAME FROM THIS SCRIPT — the one instrument that
- * commits to "PERCENTILES, NEVER A MEAN" (see this file's header).
- *
- * A CONSTANT, NOT PROSE, BECAUSE THE DELIVERABLE IS A COMPUTED CONDITION. "A prose figure
- * re-copied into the right row is the same defect one row over" — so the comparison is READ OFF
- * THE TOOL rather than argued, and a test pins plan/policy.yaml's own comment to this object so
- * the two cannot drift.
+ * W1-T2708 — THE LANE-RESTORE BASELINE: `dispatchLanes` (plan/policy.yaml) holds the fleet at 2
+ * until burn per run measures down; this constant is that measurement, read off this script, and
+ * plan/policy.yaml's own comment is pinned to it. Why:
+ * docs/forensics/mount-headroom-sweep.md#lane_restore_baseline-the-2026-09-01-vs-09-02-figure.
  */
 export const LANE_RESTORE_BASELINE = Object.freeze({
   /** The statistic, named. Both sides of the comparison must be this same percentile. */
@@ -785,27 +632,17 @@ export const LANE_RESTORE_BASELINE = Object.freeze({
   command: "node --import tsx scripts/mount-headroom-sweep.mjs --state-dir <state-dir>",
 });
 
-/** The four fields a baseline MUST name before anything may be compared against it — the exact
- *  list W1-T2708's rationale says the 2026-09-01 figure was missing. */
+/** The four fields a baseline MUST name before anything may be compared against it. */
 export const REQUIRED_BASELINE_FIELDS = Object.freeze(["statistic", "taskClass", "costUsd", "command"]);
 
-/** Percentile names this comparison will accept on EITHER side. A mean is refused by name: this
- *  script's own header states why ("the mean is dragged by exactly the outlier a headroom sweep
- *  exists to find"), and the whole defect being fixed is a figure whose statistic was unknown and
- *  might have been one. */
+/** Percentile names this comparison accepts on EITHER side — a mean is refused by name (this
+ *  file's header: never a mean). */
 export const ACCEPTED_STATISTICS = Object.freeze(["p50", "p90"]);
 
 /**
- * W1-T2708 — compare the current sweep's reading against {@link LANE_RESTORE_BASELINE}, in the
- * SAME statistic, and REFUSE loudly rather than compare anyway when that is not possible.
- *
- * REPORTS, RULES ON NOTHING. The returned object says whether the recorded condition reads met on
- * this corpus; it changes no lane count, edits no policy row and recommends no restore. Whether to
- * take the third lane is an operator ruling with its own evidence — the memory ceiling bears on it
- * too — and this task deliberately does not reopen it.
- *
- * Returns `null` when the corpus carries no row for the baseline's class: an absent class is not a
- * reading of zero, and reporting one would be the vacuous-pass shape this repo keeps paying for.
+ * W1-T2708 — compare the current reading against {@link LANE_RESTORE_BASELINE} in the SAME
+ * statistic; REFUSE rather than compare when that is not possible. Returns `null` when the corpus
+ * has no row for the baseline's class — absent, not zero.
  */
 export function compareToLaneRestoreBaseline(report, baseline = LANE_RESTORE_BASELINE) {
   for (const field of REQUIRED_BASELINE_FIELDS) {
@@ -864,8 +701,7 @@ export function renderLaneRestoreComparison(comparison) {
 }
 
 /** Render {@link buildMountHeadroomSweep}'s report as plain text — every control this script
- *  carries (forms opened, row:run ratio, newest ts) printed BESIDE the per-class table, never on
- *  a separate page a reader could skip past. */
+ *  carries printed BESIDE the per-class table, never on a separate page a reader could skip past. */
 export function renderMountHeadroomReport(report) {
   const c = report.corpus;
   const lines = [];
@@ -897,10 +733,7 @@ export function renderMountHeadroomReport(report) {
     );
   }
 
-  // W1-T2668: the synthesis rungs, in their OWN table immediately under the per-task_class one —
-  // never appended as extra rows to it. They are priced on a DIFFERENT divisor (per invocation,
-  // not per completed task) and carry no outcome split, so a shared table would put two different
-  // units in one column, which is how a reader ends up comparing them.
+  // W1-T2668: the synthesis rungs get their OWN table — a different divisor (per invocation, not per completed task).
   lines.push("");
   lines.push(
     "synthesis rung | invocations | turns p50/p90/max | cost p50/p90/max ($) | total $ | $/INVOCATION " +
@@ -920,15 +753,11 @@ export function renderMountHeadroomReport(report) {
       "belongs to a human, exactly as the per-task_class table above)",
   );
 
-  // W1-T2708: the lane-restore condition, READ OFF THE TOOL, immediately under the table whose
-  // row it is drawn from — so "is burn per run down" is a reading rather than an argument, and a
-  // reader cannot see the figure without also seeing which statistic and which window it is.
+  // W1-T2708: the lane-restore condition, read off the tool, under the table it is drawn from.
   lines.push("");
   lines.push(renderLaneRestoreComparison(compareToLaneRestoreBaseline(report)));
 
-  // W1-T2574: cells (type x risk x class), each carrying its own provider x served_model x
-  // effort arms and every WITHIN-cell comparison — NEVER a cross-cell one (see this script's own
-  // header, and compareArms's own refusal).
+  // W1-T2574: cells, each with its own arms — compared only WITHIN a cell (see compareArms's refusal).
   lines.push("");
   lines.push(
     "cells (type x risk x class) — arms keyed by provider x served_model x effort, compared ONLY within their own cell",

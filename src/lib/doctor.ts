@@ -4,44 +4,20 @@ import { join } from "node:path";
 import { readDiskFreeBytes, deriveLastPoll } from "./daemon-health.js";
 import { pauseFilePath } from "./fleet-control.js";
 
+// Why: the day-long outage and ninety-minute API lockout behind these constraints — docs/forensics/doctor.md#module-header.
 /**
- * W1-T1047 — `rmd doctor`: ONE local, read-only command that answers "is the fleet healthy" and
- * returns an exit code that means something.
- *
- * THREE CONSTRAINTS, EACH FROM A MEASURED FAILURE, EACH A REFUSAL RATHER THAN A PREFERENCE:
- *  - CLI-SIDE, NOT CONSOLE. `remudero-serve` was `Exited (137)` for over a day by operator
- *    decision. A check living behind `buildDaemonHealthRoute` is useless when the web service is
- *    the thing that broke.
- *  - NO NETWORK. The shared API budget was exhausted ten times in two days and the operator was
- *    locked out of his own repository for ninety minutes. A check that calls GitHub fails on
- *    exactly the condition it exists to report. Every reader below touches the ledger, `state/`,
- *    `plan/`, `/proc` or `ps` — nothing calls `gh`.
- *  - NO HEALTHY DAEMON REQUIRED. Nothing here awaits a tick, takes a lock, or writes a byte. A
- *    DOWN DAEMON IS NOT AN ERROR CONDITION, IT IS THE DIAGNOSIS: no process, no recent ledger row
- *    and no lock is a complete, printable answer, and the exit code says FAIL without the command
- *    itself failing.
- *
- * READ-ONLY, AND `--fix` IS REFUSED RATHER THAN UNIMPLEMENTED. Every repair path already has an
- * owner — #2251 for the container recycle, W1-T1036 for the git lock, W1-T978 for `drain.lock` —
- * and a SECOND ACTOR MUTATING STATE A LIVE DAEMON DEPENDS ON is the hazard this repo has already
- * measured. {@link doctorCommand} rejects the flag by name and says who owns the repair.
- *
- * WHY THE DECIDERS ARE PURE AND SEPARATE FROM THE READERS. Every `judge*` function below takes
- * already-measured numbers and returns a verdict; every reader does I/O and no judging. That split
- * is not tidiness — a refusal arm reachable only through a real `/proc` read or a real `ps` call is
- * a line no test can cover, and `diff-coverage` blocks a diff whose added lines have no covering
- * test. Each arm is therefore reachable by calling one pure function with one set of numbers, and
- * each has a paired positive control in `test/doctor.test.ts`.
+ * `rmd doctor` (W1-T1047): one local, read-only command answering whether the fleet is healthy,
+ * with an exit code that means something. Three refusals, each earned by a measured failure:
+ * CLI-side, not console; no network (every reader touches the ledger, `state/`, `plan/`, `/proc`
+ * or `ps`, never `gh`); and no healthy daemon required. `--fix` is refused by name: every repair
+ * path already has an owner (#2251, W1-T1036, W1-T978). Every `judge*` function is pure.
+ * FALSIFIER: test/doctor.test.ts, test/doctor-node-pin.test.ts.
  */
 
 export type Verdict = "OK" | "WARN" | "FAIL";
 
-/**
- * One check's result. `measured` and `threshold` are BOTH required and both human-readable,
- * because the output contract is that no check ever prints a bare verdict — the same discipline
- * `boundDerivation` already applies to the queue-head stall bound. A verdict with no number beside
- * it is what makes a health command cry wolf.
- */
+/** One check's result. `measured` and `threshold` are both required — no check may ever print a
+ *  bare verdict, which is what makes a health command cry wolf. */
 export interface Check {
   name: string;
   verdict: Verdict;
@@ -60,11 +36,8 @@ export function worstVerdict(checks: readonly Check[]): Verdict {
   return worst;
 }
 
-/**
- * 0 / 1 / 2 by worst verdict. DELIBERATELY DISTINCT FROM `statusCommand`'s bad-argument 2: a
- * doctor arg error exits 64 (`EX_USAGE`), so a cron reading exit 2 always means "a check FAILED"
- * and never "you typed the flag wrong".
- */
+/** Doctor's own bad-argument exit code, distinct from `statusCommand`'s 2: exit 2 then always
+ *  means "a check FAILED", never "you typed the flag wrong". */
 export const DOCTOR_USAGE_EXIT = 64;
 
 export function exitCodeFor(worst: Verdict): number {
@@ -94,22 +67,15 @@ export function humanMs(ms: number): string {
   return `${(m / 60).toFixed(1)}h`;
 }
 
+// Why: the W1-T1274 measurement behind this check's corpus — docs/forensics/doctor.md#judgeledgerfreshness.
 /**
- * LEDGER FRESHNESS — the single best liveness signal, and the reason is structural: `docker logs`
- * narrates ACTIONS and goes silent between them, so a quiet log is ambiguous. FAIL past the bound
- * rather than WARN, because a stale ledger is the daemon being gone.
- *
- * W1-T1274 — "`daemon.`-prefixed rows do not stop while the daemon lives" WAS ASSERTED HERE AND
- * WAS FALSE: MEASURED, the prefix went silent for 102.5 minutes on 2026-08-23 while the daemon
- * stayed alive and productive across the gap, because the only RECURRING `daemon.`-prefixed
- * emitter (`daemon.alive`, a ticker) only runs inside three windows (retro, full sweep, dispatch
- * settling) — every stretch of the loop outside those three wrote nothing with this prefix at
- * all. What makes the sentence true now is `daemon.ts`'s `runDaemon` loop: it writes an
- * UNCONDITIONAL `daemon.tick` row as the literal first statement of every iteration, on every
- * path (idle, paused, dispatching, sweeping, or returning early at this very check) — so the
- * corpus below (still every `daemon.`-prefixed row, never narrowed to `daemon.tick` alone or to a
- * `run_id`, per rationale (7)/(8)) is never silent for longer than about one poll interval while
- * the loop is turning, regardless of which ticker window happens to be open.
+ * Ledger freshness — the single best liveness signal, because `docker logs` narrates actions and
+ * goes silent between them. FAILs past the bound rather than WARNs, since a stale ledger means
+ * the daemon is gone.
+ * INVARIANT: the corpus is every `daemon.`-prefixed row, never narrowed to `daemon.tick` alone or
+ * one `run_id` (W1-T1274 rationale (7)/(8)) — `daemon.ts`'s loop writes `daemon.tick` on every
+ * iteration, so this is never silent for longer than one poll interval while the loop turns.
+ * FALSIFIER: test/doctor.test.ts.
  */
 export function judgeLedgerFreshness(ageMs: number | undefined, boundMs: number): Check {
   const threshold = `<= ${humanMs(boundMs)}`;
@@ -133,12 +99,10 @@ export function judgeLedgerFreshness(ageMs: number | undefined, boundMs: number)
   };
 }
 
-/**
- * DISK HEADROOM. The thresholds are the measured incident, not round numbers: this host reached
- * 55MiB free with a live daemon on it, and at that point ordinary commands failed to write their
- * own stdout. FAIL is set an order of magnitude above where that happened so the warning arrives
- * with time to act, and WARN above that again.
- */
+// Why: the 55MiB incident these thresholds are sized against — docs/forensics/doctor.md#judgediskheadroom.
+/** Disk headroom thresholds, sized off a measured incident rather than round numbers: this host
+ *  once reached 55MiB free with a live daemon on it and ordinary commands failed to write their
+ *  own stdout. FAIL sits an order of magnitude above that point, WARN an order above FAIL. */
 export const DISK_FAIL_BYTES = 512 * 1024 * 1024;
 export const DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024;
 
@@ -151,14 +115,11 @@ export function judgeDiskHeadroom(freeBytes: number | undefined): Check {
   return { name: "disk-headroom", verdict, measured: humanBytes(freeBytes), threshold };
 }
 
-/**
- * MEMORY AND SWAP — the one genuinely new reader in the list, and it reads `/proc/meminfo`,
- * NEVER THE CGROUP LIMIT. This container is unlimited, so `memory.max` reads the literal string
- * `max` and would report unbounded headroom on a host that had already frozen. The measured freeze
- * was ~4% available with ZERO swap, and because a reclaim livelock never arms the OOM killer,
- * nothing was logged and no other signal existed — which is why swap being absent is part of the
- * judgement rather than a footnote.
- */
+// Why: the measured ~4%-available freeze with no OOM signal — docs/forensics/doctor.md#judgememory.
+/** Memory and swap, read from `/proc/meminfo` rather than the cgroup limit (this container's
+ *  `memory.max` reads the literal string `max`). A measured freeze at ~4% available with zero
+ *  swap logged nothing — a reclaim livelock never arms the OOM killer — so absent swap is part of
+ *  the judgement, not a footnote. FALSIFIER: test/doctor.test.ts. */
 export const MEM_FAIL_FRACTION = 0.1;
 export const MEM_WARN_FRACTION = 0.2;
 
@@ -180,12 +141,11 @@ export function judgeMemory(availableBytes: number | undefined, totalBytes: numb
   };
 }
 
-/**
- * ELIGIBLE POOL VERSUS DISPATCH AGE. The bound is NOT a guessed round figure — it comes from this
- * host's own observed dispatch cadence, and the caller passes both it and the derivation string so
- * the printed threshold explains itself. A non-empty eligible pool sitting past that bound is the
- * shape that renders identically to a healthy queue in `rmd status`, which is the defect.
- */
+// Why: why the bound is caller-derived rather than a constant — docs/forensics/doctor.md#judgedispatchstall.
+/** Eligible pool versus dispatch age. The bound is never a guessed round figure — the caller
+ *  passes this host's own observed dispatch cadence plus a derivation string, so the printed
+ *  threshold explains itself. A non-empty pool sitting past that bound renders identically to a
+ *  healthy queue in `rmd status`, which is the defect this catches. */
 export function judgeDispatchStall(candidateCount: number, sinceMs: number | undefined, boundMs: number | undefined, boundDerivation?: string): Check {
   const threshold = boundMs === undefined ? "no observed cadence yet" : `<= ${humanMs(boundMs)}${boundDerivation ? ` (${boundDerivation})` : ""}`;
   if (candidateCount === 0) {
@@ -202,27 +162,12 @@ export function judgeDispatchStall(candidateCount: number, sinceMs: number | und
   };
 }
 
-/**
- * W1-T1209 — REPAIR-RUNG STALL. `fix.dispatch` read ZERO for twenty-one hours on 2026-08-22 while
- * the sweep kept disposing open pull requests `blocked-fixable` every pass — ten dispatches threw,
- * `dispatchFix` swallowed its own throw and recorded `acted: true`, and that seeded the fix-rung
- * dedup gate that then stood down every retry. Nothing anywhere said the repair rung was down; a
- * human found it by reading the board.
- *
- * THE FAULT IS A CONJUNCTION, EXACTLY LIKE {@link judgeDispatchStall}, AND FOR THE SAME REASON: a
- * gap in `fix.dispatch` only means something when the sweep chose `blocked-fixable` in the SAME
- * window. An empty repair queue is the healthy state, and an arm that cries wolf on a quiet board
- * trains the operator to ignore the one instrument that would have caught the real outage.
- *
- * THE BOUND IS A CALLER-SUPPLIED, DERIVED NUMBER — NEVER A CONSTANT HERE. Exactly like
- * `judgeDispatchStall`, this function never guesses a ceiling; it prints whatever bound and
- * derivation string the caller measured from this host's own `fix.dispatch` cadence, which is the
- * constraint design note (ii) of this task states as a refusal, not a preference (see W1-T1099's
- * sibling arm, whose printed threshold once disagreed with its own predicate).
- *
- * REPORT ONLY. This arm dispatches nothing, clears no gate and escalates nothing — the contention
- * (W1-T1129), the swallow (W1-T1127) and the light-hook suppression are each separately owned.
- */
+// Why: the twenty-one-hour W1-T1209 outage this arm exists to surface — docs/forensics/doctor.md#judgerepairstall.
+/** Repair-rung stall (W1-T1209): `fix.dispatch` can go quiet while the sweep keeps disposing
+ *  `blocked-fixable`, with nothing else saying so. INVARIANT: a conjunction, like
+ *  {@link judgeDispatchStall} — an empty repair queue must stay healthy, and the bound is
+ *  caller-derived. Report only — dispatches, clears, or escalates nothing.
+ *  FALSIFIER: test/doctor.test.ts. */
 export function judgeRepairStall(disposedBlockedFixableCount: number, sinceMs: number | undefined, boundMs: number | undefined, boundDerivation?: string): Check {
   const threshold = boundMs === undefined ? "no observed cadence yet" : `<= ${humanMs(boundMs)}${boundDerivation ? ` (${boundDerivation})` : ""}`;
   if (disposedBlockedFixableCount === 0) {
@@ -247,20 +192,11 @@ export function judgeRepairStall(disposedBlockedFixableCount: number, sinceMs: n
   };
 }
 
-/**
- * DISPATCH LIVENESS — a READER for a field that is emitted and read by nothing. `daemon.alive`
- * carries `phase`, and a window with no `dispatch` phase among it — WHATEVER the other phases
- * are, not only a hardcoded `sweep` — is a daemon that is awake but never dispatching. WARN, not
- * FAIL: a genuinely empty queue produces the same shape, so this is a prompt to look, not a
- * verdict on its own. CALLERS MUST PASS ONLY THE CURRENT RUN'S PHASES (see
- * {@link readCurrentRunAlivePhases}) — this function trusts its input and does not itself filter
- * by `run_id` (W1-T1099).
- *
- * ZERO ROWS IS NOT THE SAME AS "TOO FEW TO JUDGE": a live daemon that has entered no rung this
- * run writes no `daemon.alive` row at all (the ticker wraps a rung's body, not the tick), so an
- * empty window means the arm has no evidence either way and must say so — OK would be a
- * false-green one level below the run-boundary defect this task also fixes (W1-T1099 design iii).
- */
+// Why: why zero rows and "too few to judge" must not collapse to one verdict — docs/forensics/doctor.md#judgedispatchstarvation.
+/** Dispatch liveness, from `daemon.alive`'s `phase` field: a recent window with no `dispatch`
+ *  phase is a daemon awake but never dispatching, WARN never FAIL. INVARIANT: callers pass only
+ *  the current run's phases ({@link readCurrentRunAlivePhases}, W1-T1099); zero rows is WARN
+ *  "liveness UNKNOWN", never OK. FALSIFIER: test/doctor.test.ts. */
 export const STARVATION_MIN_ROWS = 3;
 
 export function judgeDispatchStarvation(phases: readonly string[]): Check {
@@ -288,53 +224,25 @@ export function judgeDispatchStarvation(phases: readonly string[]): Check {
   };
 }
 
-/**
- * W1-T1236 — SWEEP LIVENESS. `sweep.pass` (`src/lib/sweep.ts`, "PER-PASS HEARTBEAT, WRITTEN
- * BEFORE THE LOOP") is written before `runSweep`'s per-PR loop runs, exactly so a pass that throws
- * mid-loop still leaves a row — and nothing read it. `sweep.pass` appeared nowhere in this file,
- * `ledger.ts`, `status.ts`, `status-board.ts` or `ops.ts` before this arm; every plan reference to
- * it is a human reading the ledger by hand, which is precisely the discovery latency this closes.
- * The measured incident is `sweep.ts`'s own doc comment: a 23.5-minute gap in `sweep.summary` on
- * 2026-08-05 that CONTAINS four `sweep.disposed` rows — passes were starting and dying mid-loop,
- * and PR #1348 opened and closed entirely inside the blind window.
- *
- * TWO FAULTS, ONE ARM, BOTH DERIVED OFF ROWS THAT ALREADY EXIST — never a new emit, a pass id, or
- * a correlation between rows (that would drag in `sweep.ts`, which is W1-T1238's file):
- *  (a) PASSES NOT STARTING — the newest `sweep.pass` is older than a bound DERIVED from this
- *      host's own observed `sweep.pass` cadence, exactly like {@link judgeDispatchStall}'s
- *      `boundDerivation`: never a guessed round figure.
- *  (b) PASSES STARTING AND NOT FINISHING, the case the row was positioned for — the newest
- *      `sweep.pass` has no `sweep.summary` AT OR AFTER its own timestamp, paired BY TIME ORDER.
- *
- * ZERO ROWS IS WARN, NEVER OK AND NEVER FAIL — {@link judgeDispatchStarvation}'s own precedent
- * verbatim: a fleet that has never swept, a freshly-rotated ledger, and a sweep blind for longer
- * than the retention window all present as zero `sweep.pass` rows, and a false-green OK here
- * reproduces the exact 2026-08-05 window nobody noticed. THE STALE-BOUND AND NO-SUMMARY FAULTS ARE
- * ALSO WARN, NEVER FAIL, on W1-T1209's own reasoning: doctor OBSERVES, and any automatic
- * remediation of a blind sweep is a separate decision this arm does not make.
- *
- * THE BOUNDARY MARKER IS WHAT MAKES W1-T1237 POSSIBLE. {@link SWEEP_LIVENESS_STEPS} names every
- * ledger step this arm reads in ONE exported Set, read through `.has(step)` in {@link
- * readSweepPassSummaryTimestamps} rather than two loose string comparisons — mirroring `board.ts`'s
- * `OPERATOR_ACTION_STEPS` for the identical reason `test/ledger-render-retention.test.ts` records:
- * a blanket `.step ===` scan of this file would sweep up every unrelated step it already compares
- * (`daemon.alive`, `fix.dispatch`, ...) and demand retention for all of them.
- */
+// Why: the 2026-08-05 blind-sweep incident this arm exists to surface — docs/forensics/doctor.md#sweep_liveness_steps.
+/** Sweep liveness (W1-T1236): `sweep.pass` is written before `runSweep`'s per-PR loop so a pass
+ *  that throws mid-loop still leaves a row — a measured 23.5-minute blind window on 2026-08-05
+ *  held four dispositions and a whole PR lifecycle unseen. INVARIANT: two faults off rows that
+ *  already exist — passes not starting (past a caller-derived bound, like
+ *  {@link judgeDispatchStall}) and passes not finishing (no `sweep.summary` at or after the
+ *  newest pass). Zero rows is WARN, never OK or FAIL, on {@link judgeDispatchStarvation}'s
+ *  precedent. This Set names every step read, so no blanket `.step ===` scan elsewhere sweeps in
+ *  unrelated ones. FALSIFIER: test/ledger-render-retention.test.ts. */
 export const SWEEP_LIVENESS_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "sweep.summary"]);
 
-/** How much this arm multiplies the longest OBSERVED gap between `sweep.pass` rows by to derive
- *  its staleness bound — the identical multiplier and reasoning `status-board.ts`'s
- *  `QUEUE_HEAD_STALL_MULTIPLIER` already applies to `run.start` dispatch cadence. Re-derived here
- *  rather than imported: that constant keys on a different step, and this task's design confines
- *  every new input to a fold over `doctor.ts`'s own already-injected `ledgerLines`. */
+/** Multiplier on the longest observed gap between `sweep.pass` rows, deriving the staleness
+ *  bound — re-derived rather than imported from `status-board.ts`'s `QUEUE_HEAD_STALL_MULTIPLIER`
+ *  because this file folds only over its own `ledgerLines`. */
 export const SWEEP_STALL_MULTIPLIER = 3;
 
-/**
- * `sweep.pass`/`sweep.summary` timestamps (parsed ms, oldest-order not required), read through
- * {@link SWEEP_LIVENESS_STEPS} — the ONLY place in this file either string literal appears. A line
- * with no parseable `ts` is skipped rather than corrupting the derived cadence, the same
- * discipline `status-board.ts`'s `deriveDispatchCadence` already applies to `run.start`.
- */
+/** `sweep.pass`/`sweep.summary` timestamps (parsed ms, oldest-order not required), read through
+ *  {@link SWEEP_LIVENESS_STEPS}. A line with no parseable `ts` is skipped rather than corrupting
+ *  the derived cadence. */
 export function readSweepPassSummaryTimestamps(lines: ReadonlyArray<Record<string, unknown>>): { passesMs: number[]; summariesMs: number[] } {
   const passesMs: number[] = [];
   const summariesMs: number[] = [];
@@ -349,12 +257,9 @@ export function readSweepPassSummaryTimestamps(lines: ReadonlyArray<Record<strin
   return { passesMs, summariesMs };
 }
 
-/**
- * REPORT ONLY, exactly like every sibling arm above: this function returns a {@link Check} and
- * nothing else — no dispatch, no gate clear, no restart. Calling it twice with the same inputs
- * yields a byte-identical result, the same purity-as-proof-of-no-action shape {@link
- * judgeRepairStall}'s own test relies on.
- */
+/** REPORT ONLY, like every sibling arm above: returns a {@link Check} and nothing else — no
+ *  dispatch, no gate clear, no restart. Pure, so calling it twice with the same inputs is
+ *  byte-identical, the same proof-of-no-action shape {@link judgeRepairStall}'s test relies on. */
 export function judgeSweepLiveness(passesMs: readonly number[], summariesMs: readonly number[], nowMs: number): Check {
   const name = "sweep-liveness";
   if (passesMs.length === 0) {
@@ -378,8 +283,8 @@ export function judgeSweepLiveness(passesMs: readonly number[], summariesMs: rea
   if (sorted.length >= 2) {
     let maxGapMs = 0;
     for (let i = 1; i < sorted.length; i++) maxGapMs = Math.max(maxGapMs, sorted[i]! - sorted[i - 1]!);
-    // every sweep.pass at the same instant leaves no gap to learn a cadence from — fall through
-    // with boundMs left undefined rather than fabricate a zero bound.
+    // Same-instant rows leave no gap to learn a cadence from: leave boundMs undefined rather
+    // than fabricate a zero bound.
     if (maxGapMs > 0) {
       boundMs = maxGapMs * SWEEP_STALL_MULTIPLIER;
       boundDerivation = `${SWEEP_STALL_MULTIPLIER}x the longest observed gap between sweep.pass rows on this host (${humanMs(maxGapMs)} over ${sorted.length} rows)`;
@@ -397,9 +302,8 @@ export function judgeSweepLiveness(passesMs: readonly number[], summariesMs: rea
     };
   }
 
-  // PAIRED BY TIME ORDER, NOT A CORRELATION ID (design note (2b)): the newest pass is "finished"
-  // once ANY sweep.summary lands at or after it — adding a pass id would change sweep.ts's own
-  // emit, which is W1-T1238's file and a different concern.
+  // Paired by time order, not a correlation id: the newest pass is "finished" once any
+  // sweep.summary lands at or after it — a pass id would change sweep.ts's own emit (W1-T1238).
   const finishedByOwnSummary = summariesMs.some((s) => s >= newestPass);
   if (!finishedByOwnSummary) {
     return {
@@ -419,16 +323,11 @@ export function judgeSweepLiveness(passesMs: readonly number[], summariesMs: rea
   };
 }
 
-/**
- * LOCK VERSUS PROCESS DIVERGENCE. An inflight lock whose pid is gone is a run that died without
- * releasing. WARN and report only — W1-T978 owns `drain.lock` reclamation and #2251 owns the
- * recycle; doctor names the divergence and stops.
- */
+/** Lock versus process divergence: an inflight lock whose pid is gone is a run that died without
+ *  releasing. WARN and report only — W1-T978 owns `drain.lock` reclamation, #2251 the recycle. */
 export function judgeLockDivergence(totalLocks: number, deadLocks: readonly string[], unreadableReason?: string): Check {
-  // AN UNREADABLE DIR IS NOT AN EMPTY ONE, and conflating them is a FAIL-OPEN in a health check:
-  // a permissions fault that HIDES every lock would otherwise read as "0 locks, all healthy". An
-  // absent dir genuinely is zero locks (a fleet that has never dispatched), so only that case is
-  // silently fine; anything else reports that lock state is UNKNOWN.
+  // An unreadable dir is not an empty one — conflating them is a fail-open, so only a genuinely
+  // absent dir is zero locks; anything else reports lock state as UNKNOWN.
   if (unreadableReason !== undefined) {
     return {
       name: "lock-vs-process",
@@ -447,26 +346,16 @@ export function judgeLockDivergence(totalLocks: number, deadLocks: readonly stri
   };
 }
 
-/**
- * Classify a filesystem read failure into "genuinely absent" versus "could not be read".
- *
- * EXTRACTED AND PURE so both arms are reachable from a test without arranging a real EACCES. This
- * is the same class of defect a sibling task found today: `spawnSync` returns `status: null` on a
- * signalled child and the classifier read it as success. The shape here is a `catch` that cannot
- * tell ENOENT from EPERM and answers "nothing there" to both.
- */
+/** Classify a filesystem read failure into "genuinely absent" versus "could not be read" —
+ *  extracted and pure so both arms are reachable from a test without a real EACCES. */
 export function classifyReadFailure(e: unknown): { absent: boolean; reason: string } {
   const code = typeof (e as { code?: unknown })?.code === "string" ? (e as { code: string }).code : "";
   if (code === "ENOENT") return { absent: true, reason: "ENOENT" };
   return { absent: false, reason: code || String((e as Error)?.message ?? e) };
 }
 
-/**
- * LANE-LESS WORKERS. The threshold is #2251's `HUNG_WORKER_AGE_S`, REUSED rather than re-derived
- * and deliberately NOT lowered — that PR states its own derivation and this task must not
- * second-guess it. Reuse here means reusing the number and its reasoning; the matcher itself lives
- * in shell, which is a cost named up front rather than discovered.
- */
+/** Lane-less workers, against #2251's `HUNG_WORKER_AGE_S` reused rather than re-derived — that
+ *  PR states its own derivation. */
 export const HUNG_WORKER_AGE_S = 7200;
 
 export function judgeLaneLessWorkers(oldestEtimeS: number | undefined, count: number): Check {
@@ -482,10 +371,8 @@ export function judgeLaneLessWorkers(oldestEtimeS: number | undefined, count: nu
   };
 }
 
-/**
- * STALE GIT LOCKS — REPORT ONLY. W1-T1036 (#2235) owns the reclamation entirely; this prints the
- * lock and its age and stops there, which is the whole of its mandate.
- */
+/** Stale git locks, report only — W1-T1036 (#2235) owns reclamation; this prints the lock and
+ *  its age and stops there. */
 export function judgeStaleGitLocks(locks: ReadonlyArray<{ path: string; ageMs: number }>): Check {
   return {
     name: "git-locks",
@@ -496,27 +383,14 @@ export function judgeStaleGitLocks(locks: ReadonlyArray<{ path: string; ageMs: n
   };
 }
 
+// Why: the docs/operator-guide.md measurement behind this arm — docs/forensics/doctor.md#judgecheckoutdepth.
 /**
- * CHECKOUT DEPTH (W1-T2332). A shallow canonical checkout breaks every history read SILENTLY —
- * `git log -S`, `--follow`, merge-base checks all stay plausible while computed over a fraction
- * of the corpus (`docs/operator-guide.md`'s own measurement: a 120-commit clone answered ZERO
- * deletions for a file deleted before its horizon, with the "does this query return rows" control
- * passing loudly). The only prior detector in the fleet was `defaultMergeEvidenceLog` /
- * `defaultVerdictCalibrationGitLog` REFUSING BY NAME — an earned, correct guard that only speaks
- * when a linter that happens to need history runs. This arm asks the question when nobody needed
- * an answer.
- *
- * REPORT ONLY, LIKE `git-locks` ABOVE. `git fetch --unshallow` is the remedy this arm NAMES,
- * never runs — an automatic unshallow at boot is exactly the second-actor-mutating-state hazard
- * `rmd doctor --fix` is refused by name over.
- *
- * shallow ⇒ FAIL, naming the reachable commit count and the remedy command. FAIL rather than WARN
- * is deliberate: the fault is invisible by construction and the remedy is one command.
- * unreadable (no git, not a repository, a throw — the caller passes `undefined`) ⇒ WARN
- * "unreadable", NEVER OK: a read that FAILED reporting as a read that SAID NO is the class
- * W1-T472 design (v) names and this repo has now measured eight times.
- * full ⇒ OK, still naming the commit count so the horizon is legible even when it is fine — the
- * operator-guide's own prescription, applied where a reader already looks.
+ * Checkout depth (W1-T2332): a shallow clone breaks every history read silently — `git log -S`,
+ * `--follow` and merge-base checks stay plausible over a fraction of the corpus. Report only,
+ * like `git-locks` above — `git fetch --unshallow` is the remedy this arm names, never runs.
+ * INVARIANT: shallow is FAIL (invisible by construction, one-command remedy); unreadable is WARN
+ * "unreadable", never OK (W1-T472 design (v)); full is OK, still naming the commit count.
+ * FALSIFIER: test/doctor.test.ts.
  */
 export function judgeCheckoutDepth(depth: { shallow: boolean; commitCount: number } | undefined): Check {
   const threshold = "full history (not a shallow clone)";
@@ -546,35 +420,21 @@ export function judgeCheckoutDepth(depth: { shallow: boolean; commitCount: numbe
   };
 }
 
+// Why: the incident that named this record — docs/forensics/doctor.md#worktreebasestate.
 /**
- * W1-T2627 — THE WORKTREE BASE RECORD, READ FOR THE FIRST TIME. `recordWorktreeBase` (worker.ts)
- * writes `<worktree>.base` on every `worktreeAdd`, `removeWorktreeBase` deletes it on teardown,
- * and until this arm `readWorktreeBase` had ZERO production callers — the one fact that answers
- * "is this worktree's HEAD the commit it was cut from" was written and discarded, never consulted.
- * The incident that named this task: a follow-up run asked that exact question from first
- * principles because there was nowhere to read the answer.
- *
- * FOUR STATES, NOT A BOOLEAN, and only ONE is a finding:
- *   - `at-base`      — HEAD equals the recorded base. Ordinary: a fresh worktree before its own
- *                       first commit sits here, and this is the state that produced the incident —
- *                       it must render as unremarkable.
- *   - `own-commits`  — HEAD descends from the recorded base. Ordinary: the run's own work.
- *   - `unrelated`    — HEAD does NOT descend from its recorded base. The ONLY state worth a look.
- *   - `base-unknown` — no record, an unreadable HEAD, or a failed ancestry read. NEVER promoted to
- *                       `unrelated` — the fail-safe direction this repo has already fixed twice on
- *                       the read path (W1-T119 throttled-is-not-absent, W1-T130
- *                       cannot-observe-means-wait): "I could not look" must not render as
- *                       "this worktree is contaminated".
+ * W1-T2627: `recordWorktreeBase` (worker.ts) writes `<worktree>.base` on every `worktreeAdd` and
+ * had zero readers until this arm.
+ * INVARIANT: four states, only one a finding — `at-base`/`own-commits` are ordinary; `unrelated`
+ * (HEAD does not descend from its base) is the only one worth a look; `base-unknown` (no record,
+ * an unreadable HEAD, or a failed ancestry read) must never promote to `unrelated` — the fail-safe
+ * direction this repo has fixed twice already (W1-T119, W1-T130).
+ * FALSIFIER: test/doctor.test.ts.
  */
 export type WorktreeBaseState = "at-base" | "own-commits" | "unrelated" | "base-unknown";
 
-/**
- * PURE. The ancestry read is an INJECTED SEAM (`isAncestor`) exactly so this classifier is
- * testable without a real git repository — the same no-I/O contract every other `judge*` function
- * in this file already keeps. `isAncestor` returning `undefined` (the read itself failed, e.g. no
- * git or an unreadable object) resolves to `base-unknown`, on the identical fail-safe direction as
- * an absent `base` or unreadable `head`.
- */
+/** Pure: the ancestry read is an injected seam (`isAncestor`) so this classifier is testable
+ *  without a real git repository. `isAncestor` returning `undefined` resolves to `base-unknown`,
+ *  the same fail-safe direction as an absent `base` or unreadable `head`. */
 export function classifyWorktreeBase(
   base: string | null,
   head: string | undefined,
@@ -587,29 +447,19 @@ export function classifyWorktreeBase(
   return ancestor ? "own-commits" : "unrelated";
 }
 
-/**
- * One live run's already-classified worktree-base reading. `taskId` is the id the run's BRANCH
- * claims — read via {@link taskIdFromRunBranch} (status.ts) by the I/O shell, reused rather than a
- * fourth inline `run-<taskId>-<epochMs>` regex — never the lock-file task id, so a mismatch between
- * what a branch claims and what a lock file says is legible instead of silently reconciled.
- */
+/** One live run's already-classified worktree-base reading. `taskId` is the id the run's branch
+ *  claims (via {@link taskIdFromRunBranch}, never the lock-file task id), so a mismatch is
+ *  legible instead of silently reconciled. */
 export interface WorktreeBaseRow {
   runId: string;
   taskId: string | undefined;
   state: WorktreeBaseState;
 }
 
-/**
- * ONE LINE PER LIVE RUN, carrying the branch-claimed task id beside the head classification — the
- * whole remedy the incident needed: "the branch says W1-T2461 and HEAD is at-base" legible at a
- * glance instead of reconstructed from first principles.
- *
- * REPORT ONLY, like every sibling arm in this file: nothing here reaps, moves or refuses a
- * worktree on the strength of this classification. `at-base`, `own-commits` and `base-unknown`
- * are NOT findings and never move the verdict above OK; `unrelated` is the only state that does
- * (WARN, never FAIL — this arm observes, it does not escalate to the daemon-is-down severity of
- * e.g. {@link judgeLedgerFreshness}).
- */
+/** One line per live run, naming the branch-claimed task id beside its head classification.
+ *  Report only — nothing here reaps, moves or refuses a worktree. `unrelated` is the only state
+ *  that moves the verdict, WARN never FAIL (this observes; it does not escalate to
+ *  {@link judgeLedgerFreshness}'s daemon-is-down severity). FALSIFIER: test/doctor.test.ts. */
 export function judgeWorktreeBases(rows: readonly WorktreeBaseRow[]): Check {
   const name = "worktree-base";
   const threshold = "HEAD is at-base or descends from its recorded base (own-commits)";
@@ -631,21 +481,16 @@ export function judgeWorktreeBases(rows: readonly WorktreeBaseRow[]): Check {
   };
 }
 
-/**
- * PAUSE HELD WHILE DISPATCH CONTINUES. Earned on 2026-08-20: the operator held a pause for
- * fourteen minutes with no acknowledgement and reasonably concluded the control was dead. The
- * underlying tick defect is filed as W1-T1065 (#2298) and is CITED, NOT FIXED here — doctor
- * reports "PAUSED, N minutes, last dispatch M minutes ago" and nothing more, because a health
- * command that repairs the control it is diagnosing is the second-actor hazard again.
- */
+// Why: the fourteen-minute unacknowledged pause this arm was earned by — docs/forensics/doctor.md#judgepausehonoured.
+/** Pause held while dispatch continues. The tick defect is filed as W1-T1065 (#2298) and cited,
+ *  not fixed, here — a health command repairing the control it diagnoses is the hazard again. */
 export function judgePauseHonoured(pauseAgeMs: number | undefined, lastDispatchAgeMs: number | undefined): Check {
   const threshold = "no dispatch newer than the pause";
   if (pauseAgeMs === undefined) {
     return { name: "pause-honoured", verdict: "OK", measured: "not paused", threshold };
   }
   const measured = `PAUSED ${humanMs(pauseAgeMs)}, last dispatch ${lastDispatchAgeMs === undefined ? "never" : `${humanMs(lastDispatchAgeMs)} ago`}`;
-  // A dispatch NEWER than the pause means the pause was not honoured: its age exceeds the
-  // dispatch's, so the dispatch happened after the flag went down.
+  // A dispatch newer than the pause means the pause was not honoured.
   const ignored = lastDispatchAgeMs !== undefined && lastDispatchAgeMs < pauseAgeMs;
   return {
     name: "pause-honoured",
@@ -656,26 +501,13 @@ export function judgePauseHonoured(pauseAgeMs: number | undefined, lastDispatchA
   };
 }
 
+// Why: the f7ceb86 measurement behind this arm — docs/forensics/doctor.md#judgenodeversionpin.
 /**
- * R-49 (docs/audits/recon-2026-09-05.md) — NODE VERSION PIN. `.nvmrc`, `package.json#engines`
- * (`>=22.22.3`) and `deploy/Dockerfile` all pin an exact Node version, but `npm ci` only WARNS
- * (EBADENGINE) on a mismatch and lets a stale install through — MEASURED at f7ceb86: this
- * container runs 22.22.2 against a 22.22.3 pin and `npm ci` succeeds. The only thing that actually
- * REFUSES on the drift is `assertPinnedNodeVersion` (`scripts/coverage-merge-ratchet.mjs`)
- * throwing inside `test/merge-lcov.test.ts` — a random test failure, nowhere near where an
- * operator could act on it. The operator explicitly ruled against `engine-strict` in `.npmrc`: it
- * would refuse `npm ci` on every machine not on the exact patch version, agent containers
- * included. This arm is the surface that reports the drift where an operator actually looks.
- *
- * WARN, NEVER FAIL — a running node one patch off the declared pin is not the "daemon is down"
- * severity {@link judgeLedgerFreshness}/{@link judgeCheckoutDepth} reserve FAIL for; it is a drift
- * worth a look, the same tier {@link judgeMemory}'s WARN band already uses. An unreadable `.nvmrc`
- * is WARN "unreadable", NEVER OK — the same fail-safe direction {@link judgeCheckoutDepth} already
- * applies to its own unreadable case: a read that FAILED must never render as a read that SAID
- * "matches" (W1-T472 design (v), measured eight times in this file's own history).
- *
- * PURE — takes both versions already measured, exactly like every sibling judge* function above;
- * the reader below does the one filesystem touch.
+ * Node version pin (R-49, docs/audits/recon-2026-09-05.md): `.nvmrc` pins an exact version, but
+ * `npm ci` only warns (EBADENGINE) on a mismatch and lets a stale install through.
+ * INVARIANT: WARN, never FAIL — a one-patch drift is not {@link judgeLedgerFreshness}'s
+ * daemon-is-down severity. An unreadable `.nvmrc` is WARN "unreadable", never OK.
+ * FALSIFIER: test/doctor-node-pin.test.ts.
  */
 export function judgeNodeVersionPin(runningVersion: string, pinnedVersion: string | undefined): Check {
   const name = "node-version-pin";
@@ -751,12 +583,9 @@ export function readNvmrcVersion(pkgRoot: string, readText: (p: string) => strin
   }
 }
 
-/**
- * Newest `daemon.`-prefixed row age, via the already-exported {@link deriveLastPoll}. Since
- * W1-T1274, `runDaemon`'s loop (`daemon.ts`) writes an unconditional `daemon.tick` row into this
- * SAME prefix on every iteration, so the age this returns no longer depends on which of the three
- * `daemon.alive` ticker windows (retro/full-sweep/dispatch-settling) happens to be open.
- */
+/** Newest `daemon.`-prefixed row age, via {@link deriveLastPoll}. Since W1-T1274, `runDaemon`'s
+ *  loop writes `daemon.tick` into this prefix every iteration, so the age no longer depends on
+ *  which ticker window happens to be open. */
 export function readLedgerAgeMs(lines: ReadonlyArray<Record<string, unknown>>, nowMs: number): { ageMs?: number; boundMs: number } {
   const poll = deriveLastPoll(lines);
   const parsed = poll.lastPollTs ? Date.parse(poll.lastPollTs) : NaN;
@@ -774,16 +603,9 @@ export function readAlivePhases(lines: ReadonlyArray<Record<string, unknown>>): 
   return out;
 }
 
-/**
- * The `run_id` of the newest `daemon.`-prefixed ledger line, by parsed `ts` — the SAME
- * winning-row rule {@link deriveLastPoll} already applies for ledger freshness, re-applied here
- * only to read that row's `run_id` rather than its `ts`. Every `daemon.`-prefixed line already
- * carries `run_id`, so no new ledger FIELD is needed here — but W1-T1274 DOES add a new emitter
- * (`daemon.tick`, into this same `daemon.`-prefixed corpus, `daemon.ts`), and deliberately moves
- * this function's predicate in lockstep with {@link readLedgerAgeMs}'s: both stay keyed on the
- * full `daemon.`-prefix (never narrowed to `daemon.tick` alone, never widened to a bare `run_id` —
- * W1-T1274 rationale (7)/(8)), so the two checks can never disagree about which run is current.
- */
+/** The `run_id` of the newest `daemon.`-prefixed ledger line — the same winning-row rule
+ *  {@link deriveLastPoll} applies for ledger freshness, kept on the full prefix so this and
+ *  {@link readLedgerAgeMs} can never disagree on the current run. */
 function newestDaemonRunId(lines: ReadonlyArray<Record<string, unknown>>): string | undefined {
   let bestId: string | undefined;
   let bestParsed = -Infinity;
@@ -799,13 +621,8 @@ function newestDaemonRunId(lines: ReadonlyArray<Record<string, unknown>>): strin
   return bestId;
 }
 
-/**
- * `daemon.alive` phases belonging ONLY to the current daemon run, oldest→newest —
- * {@link readAlivePhases}'s rows filtered to {@link newestDaemonRunId}. A replaced run's rows
- * (a daemon that stopped cleanly and was superseded) are never read as if they belonged to the
- * run that is live now — that was the second defect W1-T1099 fixes: judging a dead run's phases
- * as the fleet's current liveness.
- */
+/** `daemon.alive` phases belonging only to the current daemon run, oldest→newest — filtered so a
+ *  replaced run's rows (W1-T1099) are never read as the fleet's current liveness. */
 export function readCurrentRunAlivePhases(lines: ReadonlyArray<Record<string, unknown>>): string[] {
   const currentRunId = newestDaemonRunId(lines);
   const out: string[] = [];
@@ -852,11 +669,8 @@ export interface DoctorReport {
   text: string;
 }
 
-/**
- * ONE SUMMARY LINE FIRST, short enough for a cron subject or a phone screen — the operator's most
- * common question all day was simply whether it was running, and a wall of sections does not
- * answer that on a phone. Every check line then prints its measured value BESIDE its threshold.
- */
+/** One summary line first, short enough for a cron subject or a phone screen, then every check
+ *  line prints its measured value beside its threshold. */
 export function renderDoctor(checks: readonly Check[]): string {
   const worst = worstVerdict(checks);
   const fails = checks.filter((c) => c.verdict === "FAIL");
@@ -880,10 +694,7 @@ export interface DoctorInputs {
   dispatchSinceMs?: number;
   dispatchBoundMs?: number;
   dispatchBoundDerivation?: string;
-  /** W1-T1209 — repair-rung stall. Candidates disposed `blocked-fixable` in the derived window;
-   *  defaults to 0 (no evidence of a fault) for callers that do not yet supply a real count, which
-   *  is the fail-closed-toward-quiet direction design note (iii) requires: an arm that cannot see
-   *  the disposals must never invent a FAIL. */
+  /** W1-T1209 — candidates disposed `blocked-fixable` in the derived window; defaults to 0. */
   repairDisposedCount?: number;
   repairDispatchSinceMs?: number;
   repairDispatchBoundMs?: number;
@@ -897,28 +708,21 @@ export interface DoctorInputs {
   gitLocks: ReadonlyArray<{ path: string; ageMs: number }>;
   workerCount: number;
   oldestWorkerEtimeS?: number;
-  /** W1-T2332 — the canonical checkout's history horizon, measured by the caller (this module
-   *  never touches the filesystem, per the file header). `undefined` means the read failed —
-   *  `judgeCheckoutDepth` reports that as unreadable, never as a healthy full checkout. */
+  /** W1-T2332 — the checkout's history horizon, measured by the caller. `undefined` means the
+   *  read failed; `judgeCheckoutDepth` reports that as unreadable, never a healthy full checkout. */
   checkoutDepth?: { shallow: boolean; commitCount: number };
-  /** W1-T2627 — one entry per LIVE in-flight run, already read and classified by the caller (this
-   *  module never touches the filesystem or git, per the file header). Defaults to `[]`, which
-   *  {@link judgeWorktreeBases} reads as "0 live worktree(s)" — never a finding. */
+  /** W1-T2627 — one entry per live in-flight run, already classified by the caller. Defaults to
+   *  `[]`, which {@link judgeWorktreeBases} reads as "0 live worktree(s)" — never a finding. */
   worktreeBases?: readonly WorktreeBaseRow[];
-  /** R-49 — the running interpreter's own version (`process.versions.node`), measured by the
-   *  caller exactly like `nowMs` above: this module reads no ambient global state itself. */
+  /** R-49 — the running interpreter's own version, measured by the caller like `nowMs` above. */
   runningNodeVersion: string;
-  /** R-49 — `.nvmrc`'s declared pin, already read by the caller via {@link readNvmrcVersion}.
-   *  `undefined` means the read failed — {@link judgeNodeVersionPin} reports that as unreadable,
-   *  never as a healthy match. */
+  /** R-49 — `.nvmrc`'s declared pin, via {@link readNvmrcVersion}. `undefined` means the read
+   *  failed; {@link judgeNodeVersionPin} reports that as unreadable, never a healthy match. */
   nvmrcVersion?: string;
 }
 
-/**
- * Assemble every check from already-measured inputs. PURE — no I/O — so the whole check list,
- * every verdict combination and the exit-code mapping are testable without a filesystem, a
- * `/proc`, a `ps`, or a daemon.
- */
+/** Assemble every check from already-measured inputs. Pure — no I/O — so the whole check list,
+ *  every verdict combination and the exit-code mapping are testable with no filesystem or daemon. */
 export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
   const ledger = readLedgerAgeMs(inputs.ledgerLines, inputs.nowMs);
   const lastDispatchAgeMs = inputs.dispatchSinceMs;
@@ -943,11 +747,8 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
   return { checks, worst, exitCode: exitCodeFor(worst), text: renderDoctor(checks) };
 }
 
-/**
- * `--fix` IS REFUSED BY NAME, not silently unrecognised, and the refusal says WHO owns each repair
- * so the operator is pointed somewhere rather than stopped. Returns the message, or undefined when
- * the args are acceptable.
- */
+/** `--fix` is refused by name, not silently unrecognised, and the message says who owns each
+ *  repair. Returns the message, or undefined when the args are acceptable. */
 export function refuseUnsupportedArgs(rest: readonly string[]): string | undefined {
   if (rest.includes("--fix")) {
     return [
