@@ -10,6 +10,7 @@ import {
   ruleEfficacyReport,
   RULE_EFFICACY_ESCALATION_THRESHOLD,
   RULE_SIGNATURES,
+  declaredChannel,
   type MeasurableRuleSignature,
   type RuleSignature,
 } from "../src/lib/rule-efficacy.js";
@@ -146,18 +147,33 @@ test("an unrelated step name in the union never counts as a recurrence", () => {
 
 // ── The real signature table ────────────────────────────────────────────────────────────────
 
-test("RULE_SIGNATURES starts with the three rules named in the rationale, one measurable", () => {
+test("RULE_SIGNATURES holds the three rules named in the rationale, two measurable across both channels", () => {
   assert.equal(RULE_SIGNATURES.length, 3);
   const measurable = RULE_SIGNATURES.filter((s) => s.measurable);
   const unmeasurable = RULE_SIGNATURES.filter((s) => !s.measurable);
-  assert.equal(measurable.length, 1, "only bound-fires-on-healthy-condition is ledger-visible without a GitHub read");
-  assert.equal(unmeasurable.length, 2);
+  // W1-T2958 moved diff-coverage-gate from UNMEASURABLE onto the CI channel, so this is 2/1 where
+  // it was 1/2. The count is not the claim; the two loops below are.
+  assert.equal(measurable.length, 2);
+  assert.equal(unmeasurable.length, 1);
   for (const u of unmeasurable) {
     assert.ok(u.why && u.why.length > 0, `${u.ruleId} must state WHY it is unmeasurable — never a naked omission`);
   }
-  const m = measurable[0] as MeasurableRuleSignature;
-  assert.ok(m.stepPatterns.length > 0);
-  assert.ok(!Number.isNaN(new Date(m.effectiveDate).getTime()), "effectiveDate must be a parseable date");
+  // STRONGER THAN THE LINE THIS REPLACES, which checked `stepPatterns` on the single measurable
+  // row: every measurable row must declare EXACTLY ONE channel. An entry declaring neither, or
+  // both, is an authoring error that grades UNMEASURABLE at runtime — this catches it in the table.
+  for (const s of measurable) {
+    const m = s as MeasurableRuleSignature;
+    const channel = declaredChannel(m);
+    assert.notEqual(channel, "none", `${m.ruleId} must declare exactly one recurrence channel`);
+    const patterns = channel === "ledger" ? m.stepPatterns : m.ciGatePatterns;
+    assert.ok((patterns ?? []).length > 0, `${m.ruleId}'s ${channel} channel must carry a pattern`);
+    assert.ok(!Number.isNaN(new Date(m.effectiveDate).getTime()), "effectiveDate must be a parseable date");
+  }
+  // And BOTH channels are actually represented, so neither arm is dead in production.
+  assert.deepEqual(
+    measurable.map((s) => declaredChannel(s as MeasurableRuleSignature)).sort(),
+    ["ci", "ledger"],
+  );
 });
 
 // ── escalateRepeatingRules: the escalation ─────────────────────────────────────────────────
