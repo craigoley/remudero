@@ -104,13 +104,21 @@ export interface StatfsLike {
  * (`undefined`, never a fake `0`) on any read error — a caller renders "unknown", not "0 bytes
  * free" as fact, mirroring this codebase's `readFailed`/`indeterminate` discipline elsewhere.
  */
-export function readDiskFreeBytes(path: string, statfs: (path: string) => StatfsLike = statfsSync): number | undefined {
+/** ONE statfs read, and the ONE place it can fail. Both readers below share it, so adding a second
+ *  reader adds no second erasure site: `readDiskTotalBytes` was written with its own try/catch first
+ *  and the catch-erasure ratchet counted it (4 > baseline 3), correctly — two catches is one more
+ *  place for "unreadable" to become indistinguishable from "zero". */
+function readStatfs(path: string, statfs: (path: string) => StatfsLike): StatfsLike | undefined {
   try {
-    const stat = statfs(path);
-    return stat.bavail * stat.bsize;
+    return statfs(path);
   } catch {
     return undefined;
   }
+}
+
+export function readDiskFreeBytes(path: string, statfs: (path: string) => StatfsLike = statfsSync): number | undefined {
+  const stat = readStatfs(path, statfs);
+  return stat === undefined ? undefined : stat.bavail * stat.bsize;
 }
 
 /** Total volume size — `blocks * bsize` — the denominator a PROPORTIONAL headroom threshold needs.
@@ -118,12 +126,8 @@ export function readDiskFreeBytes(path: string, statfs: (path: string) => Statfs
  *  when unreadable or when the shape carries no `blocks`, never a fabricated size, because a wrong
  *  denominator would move a threshold rather than skip one. */
 export function readDiskTotalBytes(path: string, statfs: (path: string) => StatfsLike = statfsSync): number | undefined {
-  try {
-    const stat = statfs(path);
-    return stat.blocks === undefined ? undefined : stat.blocks * stat.bsize;
-  } catch {
-    return undefined;
-  }
+  const stat = readStatfs(path, statfs);
+  return stat === undefined || stat.blocks === undefined ? undefined : stat.blocks * stat.bsize;
 }
 
 /**
