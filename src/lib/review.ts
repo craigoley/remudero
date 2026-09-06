@@ -1994,9 +1994,20 @@ export function judgeCriterion(
   // never replace it — a bare overwrite threw away everything earlier branches built in the one branch where an
   // author most needs to know what was weighed. A bounded `semanticClause` rides after the downgrade note.
   if (semantic === false && met) {
-    met = false;
     const downgradeNote = "reviewer judged the proof non-responsive (semantic downgrade)";
-    reason = semanticClause ? `${reason} — NOTE: ${downgradeNote}: ${semanticClause}` : `${reason} — NOTE: ${downgradeNote}`;
+    // An UNEXPLAINED downgrade cannot outweigh a proof this run watched execute and pass.
+    // `reviewerVerdictContract` calls the fold advisory and promises a reviewer "that emits
+    // nothing parseable simply leaves the floor untouched — never a stall, never a deadlock";
+    // a bare FAIL is that stall, and it is unactionable by construction — the author is told
+    // the proof is non-responsive and nothing about what would answer it. Narrow BY DESIGN to
+    // `executed_pass`: where the floor rests on keyword coverage the reviewer's judgement is
+    // the only real signal and still binds, unexplained or not (W1-T2263 acceptance 3).
+    if (semanticClause === undefined && proofExec === "executed_pass") {
+      reason = `${reason} — NOTE: ${downgradeNote} REFUSED: the FAIL line named no reason, and an unexplained non-responsive cannot outweigh an observed executed_pass`;
+    } else {
+      met = false;
+      reason = semanticClause ? `${reason} — NOTE: ${downgradeNote}: ${semanticClause}` : `${reason} — NOTE: ${downgradeNote}`;
+    }
   }
 
   return { ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, floorMet, holdout: !!criterion.holdout };

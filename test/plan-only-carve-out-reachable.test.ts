@@ -103,6 +103,10 @@ test("acceptance 2 — a semantic downgrade alone does not fail a diff that touc
     // The #2707 shape exactly: mechanically executed and passing, but the semantic lane judges
     // the proof "non-responsive" against a specification of work not yet done.
     semantic: [false],
+    // W1-T2811: an UNEXPLAINED downgrade no longer bites an executed_pass proof, and this
+    // file's subject is plan-only-vs-code aggregation, not clause presence — so the reviewer
+    // states a reason and the downgrade this test measures still applies.
+    semanticClauses: ["proof pastes a grep; needs an executed unit test against the new path"],
   });
   assert.equal(verdict.planOnly, true);
   assert.equal(verdict.criteria[0].floorMet, true, "the deterministic floor passed");
@@ -124,6 +128,10 @@ test("acceptance 3 — a diff touching one path outside plan scope keeps the ful
     headCheckoutDir: dir,
     execProof: () => "pass",
     semantic: [false],
+    // W1-T2811: an UNEXPLAINED downgrade no longer bites an executed_pass proof, and this
+    // file's subject is plan-only-vs-code aggregation, not clause presence — so the reviewer
+    // states a reason and the downgrade this test measures still applies.
+    semanticClauses: ["proof pastes a grep; needs an executed unit test against the new path"],
   });
   assert.equal(verdict.planOnly, false, "one file outside plan/** disqualifies the whole diff — FAILS CLOSED");
   assert.equal(verdict.criteria[0].floorMet, true);
@@ -175,6 +183,10 @@ test("acceptance 5 — a code diff is judged exactly as it is today", () => {
     headCheckoutDir: dir,
     execProof: () => "pass",
     semantic: [false],
+    // W1-T2811: an UNEXPLAINED downgrade no longer bites an executed_pass proof, and this
+    // file's subject is plan-only-vs-code aggregation, not clause presence — so the reviewer
+    // states a reason and the downgrade this test measures still applies.
+    semanticClauses: ["proof pastes a grep; needs an executed unit test against the new path"],
   });
   assert.equal(verdict.planOnly, false);
   assert.equal(verdict.criteria[0].floorMet, true);

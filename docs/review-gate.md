@@ -45,7 +45,14 @@ was built and unit-tested by W1-T1C but **nothing called it** until now. In
      This layer is **advisory**: its per-criterion verdicts can only **downgrade**
      a criterion to failure (`parseReviewerVerdicts` → `judgeReview` semantic),
      never rescue an unpasted proof, and a reviewer that fails to spawn never
-     blocks the gate;
+     blocks the gate. A `FAIL` line that names **no reason** cannot downgrade a
+     criterion whose proof this run watched **execute and pass** (`executed_pass`):
+     the contract already promises that a reviewer emitting nothing parseable
+     "leaves the floor untouched — never a stall, never a deadlock", and a bare
+     `REVIEW_VERDICT n: FAIL` blocks while naming nothing an author can act on.
+     The refusal is annotated on the row, never silent, and is narrow — where the
+     floor rests on keyword coverage the reviewer's judgement is the only real
+     signal and still binds, explained or not;
    - computes the **binding** verdict with the **deterministic** `judgeReview`
      (Standing rules 2/4/12: a merge gate is a deterministic predicate, never an
      LLM decision) and **always** posts the authoritative `remudero-review` status
