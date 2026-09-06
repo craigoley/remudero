@@ -3381,11 +3381,16 @@ type WorktreeRegistrationLookup =
 /** Canonical filesystem identity for one path, or `undefined` when it cannot be resolved. `realpathSync` because git reports
  * a CANONICAL worktree path while a caller may hold any spelling that reaches the same inode. Bounded and synchronous, to
  * match this already-synchronous reaper. */
-function canonicalIdentity(path: string, realpath: (p: string) => string = realpathSync): string | undefined {
+function canonicalIdentity(
+  path: string,
+  realpath: (p: string) => string = realpathSync,
+): { kind: "resolved"; identity: string } | { kind: "unresolvable" } {
   try {
-    return realpath(path);
+    return { kind: "resolved", identity: realpath(path) };
   } catch {
-    return undefined;
+    // The distinction is CARRIED, not erased: "could not resolve" is a different answer from "does
+    // not match", and folding them into one bare `undefined` is how a live lane gets destroyed.
+    return { kind: "unresolvable" };
   }
 }
 
@@ -3408,11 +3413,11 @@ function resolveWorktreeRegistration(
   const repoDir = resolveWorktreeRepoDir(entryPath);
   if (!repoDir) return { kind: "unregistered" };
   const candidate = canonicalIdentity(entryPath, realpath);
-  if (candidate === undefined) return { kind: "undecidable" };
+  if (candidate.kind === "unresolvable") return { kind: "undecidable" };
   for (const entry of listRegisteredWorktrees(repoDir)) {
     const registered = canonicalIdentity(entry.path, realpath);
-    if (registered === undefined) return { kind: "undecidable" };
-    if (registered === candidate) return { kind: "registered", repoDir, branch: entry.branch };
+    if (registered.kind === "unresolvable") return { kind: "undecidable" };
+    if (registered.identity === candidate.identity) return { kind: "registered", repoDir, branch: entry.branch };
   }
   return { kind: "unregistered" };
 }
