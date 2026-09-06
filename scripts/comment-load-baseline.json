@@ -134,7 +134,7 @@
   "src/lib/drain-lock.ts": 40,
   "src/lib/drain.ts": 591,
   "src/lib/emissions.ts": 113,
-  "src/lib/env.ts": 300,
+  "src/lib/env.ts": 140,
   "src/lib/escalate.ts": 857,
   "src/lib/feedback-docket.ts": 102,
   "src/lib/feedback-landing.ts": 317,

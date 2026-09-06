@@ -170,6 +170,12 @@
       "grepHint": "Forensics — `src/lib/drain.ts`"
     },
     {
+      "path": "docs/forensics/env.md",
+      "title": "env.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from `src/lib/env.ts`",
+      "grepHint": "env.ts forensics"
+    },
+    {
       "path": "docs/forensics/inbox.md",
       "title": "Forensics — `src/lib/inbox.ts`",
       "summary": "`src/lib/inbox.ts` is the ratification inbox (MASTER-PLAN §7B): it tiers open proposals, drafts a",
