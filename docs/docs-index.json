@@ -176,6 +176,12 @@
       "grepHint": "ci.yml forensics"
     },
     {
+      "path": "docs/forensics/commit-message.md",
+      "title": "Forensics: src/lib/commit-message.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/commit-message.ts`",
+      "grepHint": "Forensics: src/lib/commit-message.ts"
+    },
+    {
       "path": "docs/forensics/config.md",
       "title": "config.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from `src/lib/config.ts`",
