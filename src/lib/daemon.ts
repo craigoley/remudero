@@ -2533,12 +2533,42 @@ export async function runDaemon(
     // Re-read at the same safe boundary the hold re-check established, after both operator controls so
     // their priority stays exact, and before anything is admitted (W1-T2845).
     const refetchedFreshness = deps.checkFreshness?.();
-    if (refetchedFreshness?.stale) {
+    // W1-T2960 — THIS EXIT IS CONDITIONAL ON HAVING NOTHING TO LOSE, AND THAT CONDITION IS THE WHOLE
+    // FIX. As written it fired unconditionally, and on a busy repo it fires EVERY tick: the
+    // reconciliation rungs above this line include AUTO-MERGE, so the tick advances `origin/main`
+    // itself and then reads its own merge as staleness. MEASURED over one container's lifetime:
+    // 28 summaries, 28 `attempted : (none)`, 28 freshness restarts, ZERO admissions — and across the
+    // whole ledger union, zero `run.start` rows on 09-05 and 09-06 after thousands per day before.
+    // The daemon became a review-and-merge service that could never build.
+    //
+    // WHY DEFERRING IS SAFE, WHICH IS NOT OBVIOUS. `worktreeAdd` cuts every worker a fresh worktree
+    // from `origin/main` HEAD and `syncPlanFromOrigin` re-reads the plan blob there, so a lane
+    // admitted by a stale daemon still builds CURRENT code against the CURRENT plan. What staleness
+    // actually spoils is this process's own resident module graph — judge, linter, drain — which is
+    // W1-T126's three-clocks problem, and the TOP-OF-TICK read at the same call site already covers
+    // it. Deferring costs one tick of judging on slightly older code; firing unconditionally costs
+    // every build, forever.
+    //
+    // W1-T2845's INVARIANT IS KEPT, NOT DELETED. "A long tick must not admit against code the daemon
+    // can no longer reason about" still holds wherever there is nothing already selected — the
+    // common case, and the one it was filed for. When a batch IS selected, the loop dispatches it and
+    // returns to the top, where the unconditional freshness read stops the daemon on the very next
+    // tick. Staleness is honoured one tick later instead of starving dispatch outright.
+    if (refetchedFreshness?.stale && dispatchSet.length === 0) {
       // This is the only freshness boundary reached while the interphase review clock exists. Close
       // admission before the shared final-pass and drain path; do not move the drain into the clock itself,
       // where W1-T2744 proved it can freeze ordinary phase transitions (W1-T2865).
       await stopInterphaseReviewClock();
       return stopForFreshness(refetchedFreshness);
+    }
+    if (refetchedFreshness?.stale) {
+      // Deferred, and SAID SO. Without this row the only evidence of the choice is the absence of a
+      // stop, which is exactly the shape that let the livelock run for two days unnoticed.
+      log("daemon.freshness_deferred", {
+        old_sha: refetchedFreshness.oldSha,
+        new_sha: refetchedFreshness.newSha,
+        admitting: dispatchSet.length,
+      });
     }
 
     // The per-lane governor gate, adopted verbatim from `runDrainLanes`. A sequential loop taking its own
