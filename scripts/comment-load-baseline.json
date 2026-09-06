@@ -42,7 +42,7 @@
   "scripts/citation-anchor-census.mjs": 101,
   "scripts/claims-check.mjs": 71,
   "scripts/claude-md-budget-baseline.json": 0,
-  "scripts/claude-md-budget-ratchet.mjs": 138,
+  "scripts/claude-md-budget-ratchet.mjs": 69,
   "scripts/clock-shift.mjs": 45,
   "scripts/clock-sweep-baseline.json": 0,
   "scripts/clock-sweep.mjs": 136,
