@@ -152,6 +152,12 @@
       "grepHint": "account-usage.ts comment forensics"
     },
     {
+      "path": "docs/forensics/auto-triage.md",
+      "title": "Forensics: src/lib/auto-triage.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/auto-triage.ts` used",
+      "grepHint": "Forensics: src/lib/auto-triage.ts"
+    },
+    {
       "path": "docs/forensics/autonomy.md",
       "title": "autonomy.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
