@@ -143,9 +143,15 @@ esac
     assert.match(observedSpawn?.prompt ?? "", /REVIEW_VERDICT <n>:/);
     assert.equal(existsSync(observedSpawn?.cwd ?? root), false, "the semantic review scratch cwd must be removed after the spawn");
     assert.equal(codexArgs.includes("--skip-git-repo-check"), false, "a materialized repository must not need the non-repository bypass");
-    assert.deepEqual(codexArgs.slice(codexArgs.indexOf("--sandbox"), codexArgs.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
-    assert.equal(codexArgs[codexArgs.indexOf("--add-dir") + 1], codexTmpDir, "the private test scratch must be writable");
-    assert.equal(codexArgs.filter((arg) => arg === "--add-dir").length, 1, "a review must not gain writable Git metadata roots");
+    assert.equal(codexArgs.includes("--sandbox"), false, "the explicit permission profile replaces legacy sandbox flags");
+    assert.equal(codexArgs.includes("--add-dir"), false, "a review must not gain writable Git metadata roots");
+    assert.ok(codexArgs.includes("network_proxy"), "review commands must stay behind the deny-by-default proxy");
+    assert.ok(codexArgs.includes('default_permissions="rmd_review"'));
+    assert.ok(codexArgs.includes('permissions.rmd_review.extends=":workspace"'));
+    assert.ok(codexArgs.includes('permissions.rmd_review.filesystem={":slash_tmp"="deny",":tmpdir"="write"}'));
+    assert.ok(codexArgs.includes("permissions.rmd_review.network.enabled=true"));
+    assert.equal(codexArgs.some((arg) => arg.includes("permissions.rmd_review.network.domains")), false,
+      "reviews must not allow any external command destination");
     assert.equal(codexArgs.includes("sandbox_workspace_write.network_access=true"), false, "reviews do not gain network access");
     assert.equal(existsSync(codexTmpDir ?? root), false, "the private writable test scratch is reaped after review");
     assert.equal(execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headSha);

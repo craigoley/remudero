@@ -64,9 +64,15 @@ test("W1-T2946: disposable reviews get private test writes without widening othe
     const review = await captureCodexSpawn(root, ["Read", "Grep", "Glob", "Bash"], "disposable-review");
     const reviewArgs = review.options.args;
     assert.equal(review.privateTmpExisted, true);
-    assert.equal(reviewArgs[reviewArgs.indexOf("--sandbox") + 1], "workspace-write");
-    assert.equal(reviewArgs[reviewArgs.indexOf("--add-dir") + 1], review.options.env.TMPDIR);
-    assert.equal(reviewArgs.filter((arg) => arg === "--add-dir").length, 1, "Git metadata gains no write grant");
+    assert.equal(reviewArgs.includes("--sandbox"), false, "the explicit permission profile replaces legacy sandbox flags");
+    assert.equal(reviewArgs.includes("--add-dir"), false, "the profile grants neither broad temp nor Git metadata writes");
+    assert.ok(reviewArgs.includes("network_proxy"), "the command network must stay behind Codex's enforcing proxy");
+    assert.ok(reviewArgs.includes('default_permissions="rmd_review"'));
+    assert.ok(reviewArgs.includes('permissions.rmd_review.extends=":workspace"'));
+    assert.ok(reviewArgs.includes('permissions.rmd_review.filesystem={":slash_tmp"="deny",":tmpdir"="write"}'));
+    assert.ok(reviewArgs.includes("permissions.rmd_review.network.enabled=true"));
+    assert.equal(reviewArgs.some((arg) => arg.includes("permissions.rmd_review.network.domains")), false,
+      "an active proxy with no allow entries blocks every external destination");
     assert.equal(reviewArgs.includes("sandbox_workspace_write.network_access=true"), false);
 
     const specialist = await captureCodexSpawn(root, ["Read", "Bash"]);
