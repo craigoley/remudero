@@ -1,0 +1,87 @@
+- id: W1-T2949
+  title: "SHORT-WINDOW PRESSURE MASKS CLAUDE WEEKLY HEADROOM — automatic cross-provider allocation compares Claude's five-hour burst window with Codex's weekly subscription window, so Codex receives most work while Claude has materially more weekly allowance"
+  repo: remudero
+  depends_on: [W1-T2871]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 24.00
+  files:
+    - src/lib/worker-provider.ts
+    - test/worker-provider.test.ts
+  origin: "operator-session#claude-weekly-headroom-must-outweigh-short-window-pressure-2026-09-06"
+  plan_refs: ["W1-T2711", "W1-T2748", "W1-T2859", "W1-T2871"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON MAIN AT 547790d6 AND ON THE AZURE FLEET AT 2026-09-06T08:17Z.
+    `claudeCapacityFromUsage` exposes the five-hour session window and both weekly windows only in
+    `ProviderCapacity.windows`. `providerAllocationWindows` therefore falls back to that complete
+    set, and `tightestRemaining` uses the minimum remaining percentage even though the windows have
+    different horizons. In the captured fleet decision, Claude was 54% used in its five-hour
+    window, 7% used weekly across all models and 5% used in the scoped weekly bucket; Codex was 29%
+    used in its weekly allocation window. The selector compared Claude's 46% five-hour remainder
+    with Codex's 71% weekly remainder and assigned Codex a 72.155% automatic share. The operator's
+    long-horizon subscription posture was the reverse: Claude had at least 93% weekly remaining and
+    Codex had 71%.
+
+    THIS IS NOT W1-T2871. That task correctly separates an independent Codex model bucket from the
+    standard Codex provider-pressure bucket, but it explicitly leaves Claude's allocation projection
+    as its existing session-plus-weekly set. Once W1-T2871 lands, the cross-provider comparison would
+    still place a five-hour Claude window and a weekly Codex window on the same scale. W1-T2859 owns
+    the deterministic weighted sequence, which this task preserves. The other live surface overlaps
+    answer unrelated questions: W1-T2711 publishes and controls the account-visible Codex model
+    inventory, while W1-T2748 makes a read-only Codex reviewer start outside a Git repository. Neither
+    changes Claude's capacity projection or the horizons compared by automatic provider allocation.
+
+    BURST SAFETY AND ALLOCATION ARE DIFFERENT DECISIONS. Every live window must remain readable,
+    valid and above the reserve before Claude is eligible; a pressured or exhausted five-hour window
+    must still stop new Claude admissions. Among providers that passed those hard gates, however,
+    the long-running daemon should distribute work using comparable subscription-horizon headroom.
+    Otherwise an ordinary five-hour burn cycle can divert most of the fleet away from a newly reset
+    weekly Claude allowance and consume the scarcer Codex subscription first.
+  design: |
+    Give Claude an explicit `allocationWindows` projection without changing its existing `windows`.
+    When at least one readable weekly window exists, the allocation projection contains the bounded
+    weekly windows and excludes the five-hour session window. When no weekly window is reported,
+    omit the projection so the existing `providerAllocationWindows` fallback uses the session window
+    rather than inventing headroom or making Claude unreadable.
+
+    Keep eligibility and reserve enforcement on the complete existing `windows` array. Keep the
+    deterministic W1-T2859 squared weighting, explicit provider preferences, model-health routing,
+    account labels, capacity reads and provider-consumption attribution unchanged. W1-T2871 remains
+    responsible for the corresponding Codex model-versus-provider projection and console labels;
+    this task changes only which already-read Claude windows feed cross-provider allocation.
+
+    Emit the bounded Claude allocation-window projection through the already-existing provider
+    telemetry and durable routing snapshot path. Add no probe, timer, worker, retry or lifecycle
+    action. The captured 54/7/5 Claude versus 29 Codex shape must become Claude-majority while both
+    providers remain sampled by the deterministic weighted sequence.
+  acceptance:
+    - claim: "with Claude session usage 54%, Claude weekly usage 7% and Codex weekly usage 29%, automatic allocation uses the comparable weekly projections and assigns Claude a majority share rather than Codex's observed 72.155% share"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "Claude's five-hour session window remains in the eligibility windows, so an unreadable, invalid or reserve-bound session still excludes Claude before any allocation weight is computed"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "when Claude reports no weekly window, allocation falls back to the existing session window without inventing zero or full headroom and without making a readable provider unreadable"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "the Claude allocation projection contains only bounded names, percentages and reset timestamps already returned by the single capacity read, with no credential or raw response data"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "deterministic squared weighting, explicit provider preference, model-health routing and provider-consumption attribution remain unchanged outside the Claude allocation-window projection"
+      proof: "unit test: test/worker-provider.test.ts"
+    - claim: "the implementation adds no capacity probe, worker dispatch, retry, timer, polling, merge, build, deploy, restart or lifecycle action"
+      proof: "unit test: test/worker-provider.test.ts"
+  falsifier: |
+    Close without implementation if current main already keeps Claude's five-hour window as a hard
+    eligibility guard while weighting Claude-versus-Codex automatic allocation from comparable
+    weekly subscription windows, and the captured 54/7/5 versus 29 shape produces a Claude-majority
+    deterministic sequence. A selector that removes the five-hour hard gate, compares the five-hour
+    percentage directly with a weekly percentage, or waits for that short window to reach the reserve
+    boundary does not falsify this task.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2949`; the held id
+    is authoritative. LIVE EVIDENCE: the fleet's `worker.provider.selected` event recorded Claude
+    session/weekly/scoped usage 54/7/5, Codex weekly usage 29, and Codex allocation share
+    72.15504389597483 at 2026-09-06T08:17Z. W1-T2871 is a declared dependency because both tasks own
+    the same selector surface and its design currently preserves the Claude behavior corrected here.
