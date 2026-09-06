@@ -1,0 +1,59 @@
+- id: W1-T2981
+  title: "A FIRED RETRO HOLDS THE WHOLE TICK — the retro rung sits above the dispatch pick and awaits an unbounded run, so a marker 3.7 days and 446 merges behind produces ~11 consecutive retro-only ticks during which the fleet reviews, merges and builds NOTHING while every liveness signal stays green"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "W1-T276", "W1-T2265", "W1-T2379", "W1-T2744", "W1-T2875", "W1-T2960", "W1-T2965"]
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, test/a-fired-retro-must-not-hold-the-dispatch-rung.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE THIRD BLOCKER IN ONE OUTAGE, AND THE ONE STILL STANDING. W1-T2960 fixed the pre-admission
+    freshness re-check; W1-T2965 fixed the top-of-tick exit that made it unreachable. Both merged and
+    both are live in the running daemon (verified by ancestry against its boot sha). Every gate that
+    could refuse a dispatch is measurably OPEN: headroom `enforced: false` at 23% of a 95% limit,
+    quota core 15000 / graphql 10000 remaining, WIP budget 2 against 1 open PR, and the file-overlap
+    partition serialises NOTHING (16 candidates pairwise disjoint). The fleet still builds nothing.
+
+    THE TICK STOPS AT THE RETRO RUNG. Measured 2026-09-06 on a daemon booted 19:35:55Z:
+      19:38:13  daemon.headroom      (phase sweep)
+      19:46:43  daemon.headroom + daemon.quota   <- past the sweep, into the pre-dispatch rungs
+      19:47:39  retro_triggered      reason=merges merges_since_marker=446 days_since_marker=3.72
+      ...       NOTHING FURTHER. No `daemon.idle`, no `dispatch.*`, no `run.start`.
+    `daemon.idle` is written whenever the dispatch set comes back empty, so its ABSENCE is the proof
+    the loop never reached the dispatch branch at all — this is not an empty queue, it is a rung that
+    never returns. A `claude --effort high` retro worker was still running eight minutes later.
+
+    THE AWAIT IS UNBOUNDED AND THE CODE SAYS SO: "The retro's own await is unbounded, like the
+    dispatch below". It is wrapped in `sweepLightDuringRetro`, which keeps a light sweep
+    dispositioning PRs throughout — WHICH IS EXACTLY WHY THIS HID. Reviews post, PRs merge,
+    `daemon.alive` keeps writing, and every liveness reader stays green while the one rung that
+    builds is never reached. Same shape as W1-T2965's `stopForFreshness` sweep-on-exit: the healthy
+    half masks the dead one.
+
+    AND IT REPEATS UNTIL THE BACKLOG DRAINS. The marker is at 2026-09-03T02:24 with 446 merges
+    behind it; `RETRO_MAX_RUNS_PER_PASS` is 40 (W1-T2875), so catching up takes ~11 passes. At the
+    measured run-task p50 of 31 minutes that is several hours of retro-only ticks.
+
+    A RETRO GATES NOTHING. It SPENDS, which is why it belongs below the headroom rung that refuses
+    spend — but no rung downstream reads its result, so the loop has no reason to wait on it. The
+    registry for exactly this already exists: `detachSweepAction` (W1-T2379), which the sweep's own
+    fix dispatches use, and which `stopForFreshness` already drains (W1-T2744) so a restart lets a
+    running retro finish rather than abandoning it. It was always a daemon-lifetime seam; only its
+    `actionKind` literal was sweep-shaped.
+
+    TWO THINGS THE BUILD MUST NOT GET WRONG. A second concurrent retro would race the same marker
+    file, so the rung must refuse while one is in flight and NAME the refusal rather than skipping
+    silently. And the detached path must NOT keep the `sweepLightDuringRetro` wrapper: that starts a
+    second "retro"-labelled in-flight ticker while the tick proceeds into dispatch, which starts its
+    own — the precise overlap the interphase-clock handoff exists to prevent.
+  acceptance:
+    - claim: "a fired retro no longer holds the tick, so the dispatch rung still runs while it is in flight"
+      proof: "unit test: W1-T2981: a fired retro does not hold the tick"
+    - claim: "a second retro is refused while one is detached, and the refusal is named in the ledger"
+      proof: "unit test: W1-T2981: a second retro is refused while one is still detached"
