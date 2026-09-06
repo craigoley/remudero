@@ -434,7 +434,23 @@ test("W1-T936: clearing PAUSE lets the freshness exit fire", async () => {
 
 // ── W1-T2845: re-check freshness at the pre-admission boundary ───────────────
 
-test("W1-T2845: origin/main advancing during the awaited full sweep admits no stale-code task", async () => {
+// W1-T2960 NARROWED THIS INVARIANT, AND THE NARROWING IS THE POINT. As written it closed the
+// admission boundary UNCONDITIONALLY, and on a busy repo that fires every tick: the awaited sweep
+// this test stands in for performs AUTO-MERGE, so the tick advances origin/main ITSELF and then
+// reads its own merge as staleness. MEASURED on the live fleet: 28 daemon summaries in one
+// container, 28 `attempted : (none)`, 28 freshness restarts, ZERO admissions — and fleet-wide, zero
+// `run.start` rows on 2026-09-05 and 09-06 after thousands per day before. The guarantee cost every
+// build, for two days, while every health signal read green.
+//
+// THE INVARIANT WAS ALREADY PARTIAL, WHICH IS WHY NARROWING IT IS COHERENT RATHER THAN A RETREAT.
+// `sweeps === 2` below asserts the ordinary sweep RAN after main advanced: the tick already reviews,
+// merges and dispatches fix workers on "stale" code. Only `runOne` was closed. And a lane admitted
+// here does not build stale code anyway — `worktreeAdd` cuts every worker from origin/main HEAD and
+// `syncPlanFromOrigin` re-reads the plan there.
+//
+// WHAT STILL HOLDS: with NOTHING selected, the exit is unchanged — that is this test, and it is the
+// case W1-T2845 was filed for. Its sibling below covers the case that now differs.
+test("W1-T2845/W1-T2960: main advancing during the awaited sweep admits the selected batch, then stops", async () => {
   const plan = fixturePlan();
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let sweeps = 0;
@@ -463,8 +479,17 @@ test("W1-T2845: origin/main advancing during the awaited full sweep admits no st
   });
 
   assert.equal(s.stopReason, "stale");
-  assert.deepEqual(s.attempted, [], "nothing from the stale tick crossed the admission boundary");
-  assert.equal(runOneCalls, 0, "stale code never reached runOne");
+  // CHANGED BY W1-T2960, DELIBERATELY. This fixture makes every task runnable (`refreshMerged`
+  // reports nothing merged), so a batch IS selected before the pre-admission read — and that is
+  // exactly the shape that livelocked the live fleet: the awaited sweep above auto-merges, main
+  // advances, and the tick then refuses to admit the batch it had already chosen. Two days, zero
+  // builds, 28 of 28 ticks.
+  //
+  // The batch now goes out and the daemon stops for freshness on the NEXT tick — staleness honoured
+  // one tick later instead of never dispatching. The admitted lane does not build stale code:
+  // `worktreeAdd` cuts it from origin/main HEAD.
+  assert.deepEqual(s.attempted, ["A"], "the already-selected batch is admitted rather than abandoned");
+  assert.equal(runOneCalls, 1, "and it actually runs — the tick's own merge must not starve its dispatch");
   assert.equal(installs, 1, "the shared stale-exit path performs the required install exactly once");
   assert.equal(sweeps, 2, "the ordinary sweep ran, then the W1-T1272 stale-exit sweep ran once");
   assert.equal(

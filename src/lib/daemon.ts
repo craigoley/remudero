@@ -2529,16 +2529,23 @@ export async function runDaemon(
       continue;
     }
 
-    // Awaited reconciliation rungs can make the top-of-tick freshness result obsolete before admission.
-    // Re-read at the same safe boundary the hold re-check established, after both operator controls so
-    // their priority stays exact, and before anything is admitted (W1-T2845).
+    // Awaited reconciliation rungs (incl. auto-merge) can make the top-of-tick freshness result stale
+    // before admission; re-read here, after both operator controls. Exit only if nothing was selected —
+    // an unconditional exit fires on the tick's own auto-merge and starves dispatch (W1-T2960).
     const refetchedFreshness = deps.checkFreshness?.();
-    if (refetchedFreshness?.stale) {
+    if (refetchedFreshness?.stale && dispatchSet.length === 0) {
       // This is the only freshness boundary reached while the interphase review clock exists. Close
       // admission before the shared final-pass and drain path; do not move the drain into the clock itself,
       // where W1-T2744 proved it can freeze ordinary phase transitions (W1-T2865).
       await stopInterphaseReviewClock();
       return stopForFreshness(refetchedFreshness);
+    }
+    if (refetchedFreshness?.stale) {
+      log("daemon.freshness_deferred", {
+        old_sha: refetchedFreshness.oldSha,
+        new_sha: refetchedFreshness.newSha,
+        admitting: dispatchSet.length,
+      });
     }
 
     // The per-lane governor gate, adopted verbatim from `runDrainLanes`. A sequential loop taking its own
