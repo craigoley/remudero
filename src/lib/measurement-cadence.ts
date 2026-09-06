@@ -1296,8 +1296,8 @@ export function recordCiLearningCadenceFire(root: string, at: Date): void {
   recordMeasurementCadenceFire(path, at, 24 * 60 * 60 * 1000);
 }
 
-/** A PRIMARY control, never a backstop: {@link ADOPTION_MINT_CEILING}'s own number, so one fire
- *  can never flood the plan with machine-authored records. */
+/** PRIMARY CONTROL, never a BACKSTOP: nothing upstream bounds a window's repaired pairs, so this is
+ *  what stops one fire flooding the plan. {@link ADOPTION_MINT_CEILING}'s number, for its reason. */
 export const CI_LEARNING_MINT_CEILING = ADOPTION_MINT_CEILING;
 
 /** The primary key: PR plus gate, never a similarity score — deterministic, so a rerun over an
