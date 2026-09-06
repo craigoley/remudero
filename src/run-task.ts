@@ -575,6 +575,7 @@ import {
   shardSlugFromPath,
   TaskLintError,
   type LintOpts,
+  type DuplicateSurfaceCorpusEntry,
 } from "./lib/task-linter.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn } from "./lib/replay-harness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
@@ -19319,6 +19320,32 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
   return 0;
 }
 
+/** The `files:` surface of every task in a loaded plan — the corpus `duplicateSurfaceViolations`
+ *  compares a task against. A pure read over `plan.tasks`, which every caller already holds, so
+ *  supplying it costs no resolution, no git read and no network. Exported to be driven directly:
+ *  a corpus builder that only ever ran inside a CLI is a corpus builder no test can falsify. */
+export function surfaceCorpusFrom(plan: Plan): DuplicateSurfaceCorpusEntry[] {
+  return plan.tasks.map((t) => ({ id: t.id, files: t.files, status: t.status }));
+}
+
+/** The ids CREDITED as merged, from `projectPlan`'s batched projection — the GitHub-derived
+ *  signal, NOT a `status:` field read. A shard that shipped keeps `status: queued` (nothing updates
+ *  it on merge), so `status:` alone reports landed work as a live duplicate.
+ *
+ *  `undefined` when no projection was resolved, which is NOT the same as an empty set: absent means
+ *  "credit is unknown here, read `status:` alone" (the offline whole-plan pass W1-T367 ruled must
+ *  stay network-free and deterministic), while empty means "resolved, and nothing is credited".
+ *  Both narrow rather than widen, so neither can make the check fire on something it would
+ *  otherwise have passed.
+ *
+ *  An INDETERMINATE projection is excluded deliberately: a mid-batch rate-limit or auth failure
+ *  must not read as "not merged" and resurrect a landed shard as live work -- the same per-task
+ *  fail-open `postMergeAmendment` already applies to this projection. */
+export function creditedMergedIdsFrom(statusByTaskId: Map<string, StatusProjection> | undefined): ReadonlySet<string> | undefined {
+  if (!statusByTaskId) return undefined;
+  return new Set([...statusByTaskId].filter(([, proj]) => proj.merged && !proj.indeterminate).map(([id]) => id));
+}
+
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
   const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], ["--all"]);
   if (badArg) {
@@ -19516,6 +19543,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let warned = 0;
   let checked = 0;
   const failingTaskIds: string[] = [];
+  // Derived ONCE for the whole pass rather than per task: both are pure reads over objects
+  // already resolved above (`plan.tasks`, and `projectPlan`'s batched `statusByTaskId`).
+  const surfaceCorpus = surfaceCorpusFrom(plan);
+  const creditedMergedIds = creditedMergedIdsFrom(statusByTaskId);
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -19556,6 +19587,18 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // (the changed-tasks/`--base` pass), so `blockedDispositionViolations` stays silent on
         // the whole-plan pass, exactly as this task's rationale scopes the refusal.
         blockedDisposition: { baseTask: oldTask },
+        // W1-T2676: `duplicateSurfaceViolations` is silent absent a corpus, and this `--base`
+        // pass never built one, so the check that exists to catch two live shards declaring
+        // one surface never ran on the CLI path an operator actually invokes. `plan.tasks` is
+        // already in hand; nothing new is resolved to derive it.
+        openTaskSurfaces: surfaceCorpus,
+        // ...and CREDIT, not `status:`, is what says a shard already shipped — a merged shard
+        // keeps `status: queued`, so without this the check reports landed work as live.
+        // `statusByTaskId` is the SAME projection already resolved above for
+        // `postMergeAmendment.merged`: no new network call, no new git read. It exists only on
+        // this branch, which is exactly the scope W1-T367 ruled for — the offline whole-plan
+        // linter stays network-free and `status:`-only.
+        mergedTaskIds: creditedMergedIds,
         // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
         newMonolithIds,
         // W1-T1076: `scope` is populated iff `--base` was given, so this branch IS the

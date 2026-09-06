@@ -68,6 +68,7 @@ export type LintCheck =
   | "ruling-verify"
   | "rule15-filing"
   | "duplicate-title"
+  | "duplicate-surface"
   | "duplicate-learning"
   | "dispatch-priority"
   | "declared-scope"
@@ -1947,6 +1948,110 @@ export function duplicateTitleViolations(task: Task, opts: LintOpts = {}): LintV
   ];
 }
 
+// ── DUPLICATE SURFACE (W1-T2676) ─────────────────────────────────────────────
+//
+// The mint answers "is this NUMBER free". Nothing answered "is this WORK already filed". MEASURED
+// 2026-09-01 in this repo's plan tree: W1-T2589 was filed for work W1-T2581 already covered, its
+// four declared files a STRICT SUBSET of W1-T2581's seven, both queued and both dispatch-eligible,
+// and `lint-plan` said nothing.
+//
+// `duplicate-title` is the near neighbour and it keys on the wrong thing: two shards describing
+// one surface rarely share a title -- these did not. What collides is `files:`, which is also what
+// makes the overlap expensive: two workers editing one surface produce CONFLICTING PRs.
+
+/** A candidate this task's `files:` is compared against; `merged` is external credit from status.ts. */
+export interface DuplicateSurfaceCorpusEntry {
+  id: string;
+  files?: readonly string[];
+  status?: string;
+  merged?: boolean;
+}
+
+/** Statuses that are NOT live work; reporting history as a duplicate would flag follow-ups. */
+const DUPLICATE_SURFACE_INERT_STATUSES: ReadonlySet<string> = new Set(["merged", "done", "blocked"]);
+
+function duplicateSurfaceEntryIsInert(
+  entry: { id: string; status?: string; merged?: boolean },
+  mergedTaskIds: ReadonlySet<string> | undefined,
+): boolean {
+  return (
+    entry.merged === true ||
+    mergedTaskIds?.has(entry.id) === true ||
+    (entry.status !== undefined && DUPLICATE_SURFACE_INERT_STATUSES.has(entry.status))
+  );
+}
+
+/** The smallest OVERLAP this check will call a duplicate.
+ *
+ *  A SUBSET ALONE IS NOT ENOUGH, and the shard's own falsifier is why: "a pair whose overlap is a
+ *  single shared module with different concerns is not reported". A one-file task is a subset of
+ *  every task that happens to touch that file -- a wiring task and the module it wires, a filing
+ *  and its amendment -- so keying on subset alone would fire on exactly the legitimate overlaps
+ *  this check must leave alone. The observed pair was 4-of-7 and clears this comfortably.
+ *
+ *  MEASURED ON THE OVERLAP, NOT ON THIS TASK'S OWN SIZE. A first draft guarded `task.files.length`
+ *  as well; that guard is unreachable, because when this task is the subset the overlap IS its
+ *  file list, and when it is the SUPERSET the small side is the other shard's -- which
+ *  `task.files.length` cannot see at all. The falsifier matrix caught it: mutating either guard
+ *  alone reddened nothing, because each was covering for the other. */
+export const DUPLICATE_SURFACE_MIN_FILES = 2;
+
+/** Normalised, de-duplicated `files:` set. Paths are compared as written after trimming, because
+ *  `files:` is repo-relative by construction everywhere the linter reads it. */
+function surfaceOf(files: readonly string[] | undefined): string[] {
+  return [...new Set((files ?? []).map((f) => f.trim()).filter(Boolean))].sort();
+}
+
+/**
+ * ADVISORY, never blocking: this task's `files:` is a subset of (or identical to) another live
+ * shard's, so both declare one surface and both sit dispatch-eligible.
+ *
+ * WARN AND NOT BLOCK, DELIBERATELY: legitimate overlaps exist (a wiring task and the module it
+ * wires, a filing and its amendment), so this names the pair and leaves the ruling to a human --
+ * the disposition `scope_violation` already takes for review-ratified widenings. Silent absent
+ * `opts.openTaskSurfaces`, and for a task that is not itself live.
+ */
+export function duplicateSurfaceViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const corpus = opts.openTaskSurfaces;
+  if (!corpus || corpus.length === 0) return [];
+  if (duplicateSurfaceEntryIsInert(task, opts.mergedTaskIds)) return [];
+
+  const mine = surfaceOf(task.files);
+  if (mine.length === 0) return [];
+  const mineSet = new Set(mine);
+
+  const out: LintViolation[] = [];
+  for (const other of corpus) {
+    if (other.id === task.id) continue;
+    if (duplicateSurfaceEntryIsInert(other, opts.mergedTaskIds)) continue;
+    const theirs = surfaceOf(other.files);
+    if (theirs.length === 0) continue;
+    const theirSet = new Set(theirs);
+    // Subset in EITHER direction: the observed case was the smaller shard filed second, but
+    // nothing makes that the only order, and a check that only looked one way would miss it.
+    const mineInTheirs = mine.every((f) => theirSet.has(f));
+    const theirsInMine = theirs.every((f) => mineSet.has(f));
+    if (!mineInTheirs && !theirsInMine) continue;
+    const shared = mine.filter((f) => theirSet.has(f));
+    if (shared.length < DUPLICATE_SURFACE_MIN_FILES) continue;
+    const relation = mine.length === theirs.length ? "the same files as" : mineInTheirs ? "a subset of" : "a superset of";
+    out.push({
+      check: "duplicate-surface",
+      severity: "warn",
+      message:
+        `task ${task.id} declares ${relation} ${other.id}: ${shared.length} shared file(s) — ` +
+        `${shared.join(", ")}. Both are live, so both are dispatch-eligible and the fleet can build ` +
+        `this surface twice; two workers editing the same files produce CONFLICTING PRs, not merely ` +
+        `redundant ones. This is ADVISORY, never blocking, because legitimate overlaps exist (a ` +
+        `wiring task and the module it wires, a filing and its amendment). TO CLEAR IT: retire ` +
+        `whichever shard the other supersedes, or cite ${other.id} in plan_refs and say in the ` +
+        `rationale what this task does that ${other.id} does not. Never by narrowing files: — that ` +
+        `hides the overlap instead of ruling on it, and leaves the dispatcher just as blind.`,
+    });
+  }
+  return out;
+}
+
 /** The near-identity cutoff for {@link unansweredDuplicateTitleViolations}'s BLOCKING arm. It sits
  *  far above {@link DEFAULT_DUPLICATE_CUTOFF}, above that constant's measured sibling ceiling, and
  *  above its reworded-near-duplicate band, so this arm catches only a near-VERBATIM restatement —
@@ -2177,6 +2282,16 @@ export interface LintOpts {
   /** Shingle width for {@link duplicateTitleViolations}. The live caller passes {@link
    *  DUPLICATE_SLUG_SHINGLE_K}; absent ⇒ {@link DEFAULT_SHINGLE_K}. */
   duplicateShingleK?: number;
+  /** Other shards' declared surfaces, for {@link duplicateSurfaceViolations}. Absent ⇒ silent. */
+  openTaskSurfaces?: readonly DuplicateSurfaceCorpusEntry[];
+  /** Task ids CREDITED as merged — the GitHub-derived projection (`projectPlan`), NOT a `status:`
+   *  field read. A shard that shipped keeps `status: queued` (nothing updates it on merge), so
+   *  `status:` alone reports landed work as a live duplicate. Supplied ONLY by
+   *  `lintPlanCommand`'s `--base` pass, which already resolves that projection for
+   *  `postMergeAmendment.merged` — no new network call, no new git read. Absent everywhere else,
+   *  which is deliberate: W1-T367 ruled `rmd lint-plan` stays an OFFLINE, DETERMINISTIC linter,
+   *  so the network-free default keeps reading `status:` alone and this only ever narrows. */
+  mergedTaskIds?: ReadonlySet<string>;
   /** The richer corpus {@link unansweredDuplicateTitleViolations}'s BLOCKING arm scores against:
    *  each entry carries its own `planRefs`/`rationale`, so the check can tell whether the OTHER
    *  shard already answered. Absent or empty ⇒ silent. */
@@ -2218,6 +2333,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...monolithFilingViolations(task, opts));
   violations.push(...duplicateTitleViolations(task, opts));
   violations.push(...unansweredDuplicateTitleViolations(task, opts));
+  violations.push(...duplicateSurfaceViolations(task, opts));
   const prov = provenanceViolation(task);
   if (prov) violations.push(prov);
   const ruling = rulingVerifyViolation(task);
@@ -2235,10 +2351,25 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   return { ok: violations.every((v) => v.severity !== "block"), violations };
 }
 
-/** Lint every task in a loaded plan. Deterministic order (plan declaration order). */
+/** Lint every task in a loaded plan. Deterministic order (plan declaration order).
+ *
+ *  `duplicateSurfaceViolations` is silent absent `opts.openTaskSurfaces`, and no `optsFor` in this
+ *  repo supplies one (W1-T2676): `lintPlan` derives it FOR FREE from `plan.tasks` -- the one
+ *  thing every caller already holds -- unless `optsFor` sets one itself, including `[]` to opt
+ *  out. So `lintPlan(merged, () => ({}))` (inbox.ts) and `lintPlan(plan)` (onboard/synthesize.ts)
+ *  both see a real duplicate-surface finding today, no call-site change needed. */
 export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => ({})): Map<string, LintResult> {
+  const surfaceCorpus: DuplicateSurfaceCorpusEntry[] = plan.tasks.map((t) => ({
+    id: t.id,
+    files: t.files,
+    status: t.status,
+  }));
   const out = new Map<string, LintResult>();
-  for (const task of plan.tasks) out.set(task.id, lintTask(task, optsFor(task)));
+  for (const task of plan.tasks) {
+    const opts = optsFor(task);
+    const withSurfaces = opts.openTaskSurfaces !== undefined ? opts : { ...opts, openTaskSurfaces: surfaceCorpus };
+    out.set(task.id, lintTask(task, withSurfaces));
+  }
   return out;
 }
 
