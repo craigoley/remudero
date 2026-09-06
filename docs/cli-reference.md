@@ -33,6 +33,7 @@ usage:
   rmd coverage-improve [--lcov <path>]   # File one feedback entry ranking src/ files by uncovered branches (85-90% band).
   rmd verdict-calibration   # Join armed-merge review verdicts to post-merge revert/follow-up-fix rates.
   rmd autonomy-rate   # Report the zero-touch merge rate over every Remudero-Task-trailer merge.
+  rmd replay-goldens --confirm-spend --ledger <path> [--limit N]   # Replay the seeded goldens and record what the retro's Self-Harness leg reads.
   rmd check-acceptance <body-file>   # Report what the reviewer's own parser actually resolves from a PR body file.
   rmd retro [--dry-run]   # Sync the plan from the ledger (Architect retro).
   rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # Drain the task DAG through run-task, dispatching from the plan blob.
@@ -272,6 +273,16 @@ rmd autonomy-rate
 ```
 
 W1-T437: the QUANTITY figure beside W1-T424's correctness join — the zero-touch merge rate over every Remudero-Task-trailer-bearing merge on the read git history (lib/autonomy.ts's zeroTouchMergeRate, over the ledger UNION, never the live file alone), classifying each merge zero-touch (auto-armed, zero fix-rung strikes, no reframe, no operator note, no capped override, no fix-rung human evidence) or human-touched, NAMING every touch that fired — split by verdict class (full PASS / keyword floor / degraded arm / unclassified) so the class split shows where the next ratchet notch is safe. Prints the current decideAutoMergeArm arming posture beside the measured rate — proposes no policy change. Zero archive files matched under the state dir reports the whole window UNMEASURED, naming the reason, never a rate computed from the live ledger file alone. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. READ-ONLY: files nothing, proposes nothing.
+
+### `rmd replay-goldens`
+
+Replay the seeded goldens and record what the retro's Self-Harness leg reads.
+
+```
+rmd replay-goldens --confirm-spend --ledger <path> [--limit N]
+```
+
+W1-T2689: the golden-replay leg shipped with a corpus, a seam, a driver, an emitter and a retro consumer, and NO production caller — so replayGoldens had zero callers outside tests and the Self-Harness leg has reported `no replay run recorded` since the day it shipped, by construction rather than by failure. This is that caller. UNLIKE EVERY OTHER RETRO RUNG IT SPENDS REAL MONEY: it dispatches workers against the sandbox, so it is opt-in per invocation (--confirm-spend, deliberately not an env var or config default, so a retro tick / CI job / test spawn cannot inherit it) and BOUNDED (REPLAY_CORPUS_BOUND, a declared ceiling boundedCorpus clamps to even against a larger --limit). --ledger is REQUIRED: a spend that records nothing is worse than one that never ran, and this verb refuses rather than guessing at a shared path. --limit 0 dispatches nothing and writes NOTHING, on purpose — retro.ts must still be able to render `no run recorded`, never a fabricated 0%. Exit 0 when every replayed golden matched its expectation, 1 when any regressed, 2 on any refusal.
 
 ### `rmd check-acceptance`
 

@@ -119,6 +119,7 @@
   "src/lib/receipt.ts": 339,
   "src/lib/relay-client.ts": 312,
   "src/lib/relint.ts": 240,
+  "src/lib/replay-harness.ts": 500,
   "src/lib/replay.ts": 240,
   "src/lib/reply-interpreter.ts": 198,
   "src/lib/repo-location.ts": 84,
