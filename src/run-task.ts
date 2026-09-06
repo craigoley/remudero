@@ -24,7 +24,7 @@ import {
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -5032,7 +5032,7 @@ function materializeReviewerSnapshot(
   reviewRoot: string,
   sourceDir: string | undefined,
   expectedHeadSha: string,
-): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules> } {
+): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules>; dependencyReadRoots: string[] } {
   if (!sourceDir || !existsSync(sourceDir)) {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -5100,7 +5100,15 @@ function materializeReviewerSnapshot(
   // the post-review cleanliness proof even for repositories whose committed .gitignore omits it.
   excludeNodeModulesFromGit(cwd);
   const nodeModules = linkWorktreeNodeModules(sourceDir, cwd);
-  return { cwd, nodeModules };
+  let dependencyReadRoots: string[] = [];
+  try {
+    const target = realpathSync(join(cwd, "node_modules"));
+    const rel = relative(cwd, target);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) dependencyReadRoots = [target];
+  } catch {
+    dependencyReadRoots = [];
+  }
+  return { cwd, nodeModules, dependencyReadRoots };
 }
 
 /** A semantic result is usable only while the disposable checkout remains exact and clean. */
@@ -5413,8 +5421,10 @@ async function runReview(args: {
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
             // W1-T2829/W1-T2946: keep the existing read-only tool contract structural at this
             // production call site, while marking the exact-head disposable reviewer for Codex's
-            // narrow test-capable TMPDIR grant. The shared list excludes every write tool.
-            tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review",
+            // narrow TMPDIR write and external dependency read grants. The shared list excludes every write tool.
+            tools: SPECIALIST_TOOLS,
+            sandboxIntent: "disposable-review",
+            sandboxReadRoots: snapshot.dependencyReadRoots,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );

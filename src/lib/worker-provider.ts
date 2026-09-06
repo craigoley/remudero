@@ -41,6 +41,7 @@ interface CodexSpawnArgs {
   maxTurns?: number;
   tools?: string[];
   sandboxIntent?: "disposable-review";
+  sandboxReadRoots?: string[];
   runId?: string;
   taskId?: string;
   containment?: {
@@ -1242,12 +1243,20 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   const disposableReview = args.sandboxIntent === "disposable-review";
   const readOnly = !disposableReview && Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
   const skipGitRepoCheck = readOnly && !isGitWorktree(args.cwd);
+  const disposableReadRoots = disposableReview
+    ? [...new Set((args.sandboxReadRoots ?? []).filter(isAbsolute).map(physicalPath))]
+    : [];
+  const disposableFilesystem = [
+    [":slash_tmp", "deny"],
+    [":tmpdir", "write"],
+    ...disposableReadRoots.map((root) => [root, "read"]),
+  ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(",");
   const disposableReviewProfile = disposableReview
     ? [
         "--enable", "network_proxy",
         "-c", 'default_permissions="rmd_review"',
         "-c", 'permissions.rmd_review.extends=":workspace"',
-        "-c", 'permissions.rmd_review.filesystem={":slash_tmp"="deny",":tmpdir"="write"}',
+        "-c", `permissions.rmd_review.filesystem={${disposableFilesystem}}`,
         "-c", "permissions.rmd_review.network.enabled=true",
       ]
     : [];
