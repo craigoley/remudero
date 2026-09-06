@@ -287,6 +287,36 @@ export function sweepClaudeConfigBackups(
   return { removed, kept };
 }
 
+/** `lstat`, not `stat`: a SYMLINK named `.git` must be judged as itself, never followed. Unreadable
+ *  degrades to "not a directory", which {@link isRepositoryShaped} then treats as a worktree pointer
+ *  — the fail-closed direction. */
+function defaultIsDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Is this `.git` entry actually a repository? A linked worktree's `.git` is a FILE carrying a
+ *  `gitdir:` pointer, so anything that is not a directory disqualifies (fail-closed). A clone's
+ *  `.git` DIRECTORY always carries `HEAD`.
+ *
+ *  AN EMPTY DIRECTORY NAMED `.git` IS NOT A REPOSITORY, and git itself agrees — `git -C /tmp
+ *  rev-parse` on such a tree exits "not a repository". MEASURED 2026-09-06: an empty `/tmp/.git` on
+ *  the fleet host made ALL of `/tmp` read as a work tree, so every worker home under it was refused
+ *  with WorkerHomePlacementError. CI was green and the reviewer red, because only the fleet host
+ *  carried the stray directory — a host-wide outage of worker-home materialization, invisible except
+ *  as unexplained proof failures. */
+function isRepositoryShaped(
+  gitEntry: string,
+  exists: (path: string) => boolean,
+  isDirectory: (path: string) => boolean,
+): boolean {
+  if (!isDirectory(gitEntry)) return true;
+  return exists(join(gitEntry, "HEAD"));
+}
+
 /** W1-T2633: PURE — walks `homePath`'s own ancestors, from `homePath` to the filesystem root, and
  *  returns the first `.git` entry found or `undefined`. INVARIANT: a `.git` entry is either a
  *  DIRECTORY (a clone) or a FILE (a linked worktree's `gitdir:` pointer) and both disqualify the home
@@ -294,11 +324,12 @@ export function sweepClaudeConfigBackups(
 export function gitWorkTreeAncestor(
   homePath: string,
   exists: (path: string) => boolean = existsSync,
+  isDirectory: (path: string) => boolean = defaultIsDirectory,
 ): string | undefined {
   let dir = resolve(homePath);
   for (;;) {
     const gitEntry = join(dir, ".git");
-    if (exists(gitEntry)) return gitEntry;
+    if (exists(gitEntry) && isRepositoryShaped(gitEntry, exists, isDirectory)) return gitEntry;
     const parent = dirname(dir);
     if (parent === dir) return undefined; // reached the filesystem root — no work tree found
     dir = parent;
