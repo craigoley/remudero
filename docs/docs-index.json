@@ -446,6 +446,12 @@
       "grepHint": "unwired-gate-check.mjs comment forensics"
     },
     {
+      "path": "docs/forensics/wipe-test.md",
+      "title": "wipe-test.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "wipe-test.ts forensics"
+    },
+    {
       "path": "docs/forensics/worker-branch-shape.md",
       "title": "worker-branch-shape.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
