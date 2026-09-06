@@ -182,6 +182,12 @@
       "grepHint": "ci.yml forensics"
     },
     {
+      "path": "docs/forensics/claude-md-budget-ratchet.md",
+      "title": "claude-md-budget-ratchet.mjs forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "claude-md-budget-ratchet.mjs forensics"
+    },
+    {
       "path": "docs/forensics/commit-message.md",
       "title": "Forensics: src/lib/commit-message.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/commit-message.ts`",
