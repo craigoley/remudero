@@ -1,3 +1,4 @@
+import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
 import { execFileSync } from "node:child_process";
 // Imported ADDITIONALLY as the module's DEFAULT export (a plain, mutable object) for the
 // SAME reason inventory.ts's header comment gives: ESM named bindings off `node:fs` are
@@ -5,7 +6,7 @@ import { execFileSync } from "node:child_process";
 // plan/onboarding/" by spying on the REAL module needs every call site below to be a live
 // `fs.<method>(...)` property lookup, never a destructured local const.
 import fs from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { GhExec, Known } from "./inventory.js";
 import { isReadOnlyToolset, SPECIALIST_TOOLS, type SpecialistName } from "../specialist-panel.js";
 import type { Mount } from "../mounts.js";
@@ -501,13 +502,10 @@ export function renderFindings(candidates: readonly Candidate[]): string {
 
 // ── The runner: mine + consult the four lenses + write both artifacts ──────────────────
 
-/** Atomic temp-file + `renameSync` write — the SAME idiom as inventory.ts's
- *  `writeInventoryAtomic` / ledger.ts's `writeFileAtomic`. */
+/** Atomic write of a recon artifact through the shared primitive (W1-T2899). The INJECTED
+ *  seam is kept for the reason inventory.ts's `writeInventoryAtomic` gives. */
 function writeReconArtifactAtomic(fsDeps: ReconFsDeps, path: string, content: string): void {
-  fsDeps.mkdirSync(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-  fsDeps.writeFileSync(tmpPath, content);
-  fsDeps.renameSync(tmpPath, path);
+  writeAtomic(path, content, { io: writeAtomicIoFrom(fsDeps) });
 }
 
 export interface OnboardReconDeps {

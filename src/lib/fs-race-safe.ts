@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { dirname } from "node:path";
 import { hostname } from "node:os";
 
 /**
@@ -605,4 +606,150 @@ const defaultContainerProbeSyscalls: ContainerProbeSyscalls = { existsSync };
  */
 export function defaultInContainer(sysImpl: ContainerProbeSyscalls = defaultContainerProbeSyscalls): boolean {
   return sysImpl.existsSync("/.dockerenv");
+}
+
+// ── W1-T2899: one atomic write ───────────────────────────────────────────────
+//
+// MEASURED at 5c5e21aa: six private copies of this (ledger.ts, four under onboard/,
+// github-event-wake.ts) and no export from the module that owns the lock primitives. The
+// deployer's markers used none of them — a bare writeFileSync, so a marker torn by a crash
+// mid-write is read by the next boot as corrupt or empty deploy state.
+//
+// FALSIFIER: test/write-atomic.test.ts.
+
+/**
+ * The syscalls {@link writeAtomic} makes. Injectable so a caller with its own fs seam — the
+ * onboard phases' FsDeps — keeps the spy its own tests assert on.
+ *
+ * ONLY THE DEFAULT IO FSYNCS, and that is a real difference rather than a detail: flushing needs
+ * a descriptor, which a `writeFileSync`-shaped seam does not have. An injected seam is atomic BY
+ * RENAME but not durable across a power loss. Callers needing durability take the default.
+ */
+export interface WriteAtomicIo {
+  mkdirSync: (path: string, opts: { recursive: true }) => void;
+  /** `mode` is the stage's creation mode; only the default io can honour one. */
+  writeFileSync: (path: string, content: string | Buffer, mode?: number) => void;
+  renameSync: (from: string, to: string) => void;
+  /**
+   * Removes a stage that will not be renamed. OPTIONAL, and its absence is stated rather than
+   * faked: a three-syscall seam cannot remove anything, and a `() => {}` would type as a cleanup
+   * that runs while doing nothing. Absent, the stage is left behind exactly as the private copies
+   * this replaced left it.
+   */
+  rmSync?: (path: string, opts: { force: true }) => void;
+}
+
+/** The three syscalls every injected fs seam in this repo already has — the onboard phases'
+ *  `OnboardFsDeps`/`ReconFsDeps`/`SessionFsDeps`/`SynthesizeFsDeps` are each a superset. */
+export interface WriteAtomicSeam {
+  mkdirSync: (path: string, opts: { recursive: true }) => void;
+  writeFileSync: (path: string, content: string) => void;
+  renameSync: (from: string, to: string) => void;
+}
+
+/** Adapts an injected seam to {@link WriteAtomicIo} so a caller that must keep its own spy still
+ *  writes through the one primitive — otherwise each such caller open-codes the adapter, which is
+ *  the duplication this task removes. Buffer content is encoded utf8 because a string-only seam
+ *  has nowhere to put bytes; every caller of this adapter writes text. No `rmSync`: see above. */
+export function writeAtomicIoFrom(seam: WriteAtomicSeam): WriteAtomicIo {
+  return {
+    mkdirSync: (path, opts) => seam.mkdirSync(path, opts),
+    writeFileSync: (path, content, mode) => {
+      // REFUSED, never silently dropped: a mode is a security property (github-event-wake's
+      // replay state is 0o600) and a seam that cannot set one must say so, not write 0o644.
+      if (mode !== undefined) throw new Error("writeAtomicIoFrom: an injected seam cannot set a file mode");
+      seam.writeFileSync(path, typeof content === "string" ? content : content.toString("utf8"));
+    },
+    renameSync: (from, to) => seam.renameSync(from, to),
+  };
+}
+
+/** The syscalls the default io makes, injectable for the same reason {@link FsRaceSyscalls} is: a
+ *  SHORT `writeSync` cannot be provoked through the real syscall on a regular file, so the arm that
+ *  catches one is unreachable — and therefore untested — unless something can stand in for it. */
+export interface WriteAtomicSyscalls {
+  mkdirSync: typeof mkdirSync;
+  openSync: typeof openSync;
+  writeSync: typeof writeSync;
+  fsyncSync: typeof fsyncSync;
+  closeSync: typeof closeSync;
+  renameSync: typeof renameSync;
+  rmSync: typeof rmSync;
+}
+
+/** The default io over `sys`: open the stage, write it whole, flush, close. A short write THROWS
+ *  rather than logging — the copy this replaces only `console.error`d one, which leaves a truncated
+ *  stage to be renamed over the real file, the exact tear the primitive exists to prevent. */
+export function realWriteAtomicIoOver(sys: WriteAtomicSyscalls): WriteAtomicIo {
+  return {
+    mkdirSync: (path, opts) => sys.mkdirSync(path, opts),
+    writeFileSync: (path, content, mode) => {
+      const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8");
+      const fd = mode === undefined ? sys.openSync(path, "w") : sys.openSync(path, "w", mode);
+      try {
+        const written = sys.writeSync(fd, buf, 0, buf.length);
+        if (written !== buf.length) {
+          throw new Error(`writeAtomic: short write staging ${path} (${written}/${buf.length} bytes)`);
+        }
+        sys.fsyncSync(fd);
+      } finally {
+        sys.closeSync(fd); // the fd is released even on the short-write throw
+      }
+    },
+    renameSync: (from, to) => sys.renameSync(from, to),
+    rmSync: (path, opts) => sys.rmSync(path, opts),
+  };
+}
+
+/** The real syscalls, flushing before rename. */
+export const realWriteAtomicIo: WriteAtomicIo = realWriteAtomicIoOver({
+  mkdirSync,
+  openSync,
+  writeSync,
+  fsyncSync,
+  closeSync,
+  renameSync,
+  rmSync,
+});
+
+/**
+ * Write `content` to `path` atomically: stage in the SAME directory, then rename. Same directory
+ * because rename is only atomic within one filesystem — every copy this replaces assumed that
+ * without saying it.
+ *
+ * `beforeRename` is the ledger rotation's check-then-act window (it re-stats the live file and
+ * withdraws if the path no longer holds the snapshot it staged from). Returning false removes the
+ * stage, leaves the original untouched, and returns false.
+ *
+ * `mode` is applied to the STAGE, which the rename then carries onto the destination — the only
+ * order that never leaves a secret readable, even briefly, at the final path.
+ */
+export function writeAtomic(
+  path: string,
+  content: string | Buffer,
+  opts: { io?: WriteAtomicIo; beforeRename?: () => boolean; tmpTag?: string; mode?: number } = {},
+): boolean {
+  const io = opts.io ?? realWriteAtomicIo;
+  io.mkdirSync(dirname(path), { recursive: true });
+  const tag = opts.tmpTag ?? "tmp";
+  const tmpPath = `${path}.${tag}-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try {
+    io.writeFileSync(tmpPath, content, opts.mode);
+    if (opts.beforeRename && !opts.beforeRename()) {
+      io.rmSync?.(tmpPath, { force: true }); // withdraw the stage; leave nothing behind
+      return false;
+    }
+    io.renameSync(tmpPath, path);
+    return true;
+  } catch (error) {
+    // Lifted from writeSweepWakeMarkerAtomic, the one copy that had it. The cleanup's own
+    // failure is swallowed (the temp may never have been created) so the ORIGINAL error is
+    // what propagates; losing that would be a regression for that caller.
+    try {
+      io.rmSync?.(tmpPath, { force: true });
+    } catch {
+      // preserve the original error
+    }
+    throw error;
+  }
 }

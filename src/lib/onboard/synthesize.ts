@@ -1,3 +1,4 @@
+import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
 import { execFileSync } from "node:child_process";
 // Imported as the module's DEFAULT export (a plain, mutable object), never as named
 // bindings — the SAME W1-T115 "assert via injected fs" discipline inventory.ts/recon.ts/
@@ -7,7 +8,7 @@ import { execFileSync } from "node:child_process";
 // the REAL module needs every call site below to be a live `fs.<method>(...)` property
 // lookup, never a destructured local.
 import fs from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { Candidate } from "./recon.js";
 import type { GhExec, Inventory } from "./inventory.js";
 import { generateOnboardQuestions, type OnboardAnswer, type OnboardQuestion } from "./session.js";
@@ -344,14 +345,10 @@ export interface OnboardSynthesizeResult {
   attempts: number;
 }
 
-/** Sibling-temp-file + `renameSync` atomic write — the SAME idiom inventory.ts's
- *  `writeInventoryAtomic`/recon.ts's `writeReconArtifactAtomic`/session.ts's
- *  `writeJsonAtomic` already use. */
+/** Atomic write of a synthesis artifact through the shared primitive (W1-T2899). The INJECTED
+ *  seam is kept for the reason inventory.ts's `writeInventoryAtomic` gives. */
 function writeSynthesisArtifactAtomic(fsDeps: SynthesizeFsDeps, path: string, content: string): void {
-  fsDeps.mkdirSync(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-  fsDeps.writeFileSync(tmpPath, content);
-  fsDeps.renameSync(tmpPath, path);
+  writeAtomic(path, content, { io: writeAtomicIoFrom(fsDeps) });
 }
 
 /**
