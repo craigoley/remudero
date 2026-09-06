@@ -164,6 +164,12 @@
       "grepHint": "daemon.ts forensics"
     },
     {
+      "path": "docs/forensics/diff-coverage.md",
+      "title": "diff-coverage.mjs forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "diff-coverage.mjs forensics"
+    },
+    {
       "path": "docs/forensics/dispatch-overlap.md",
       "title": "dispatch-overlap.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",

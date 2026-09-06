@@ -57,7 +57,7 @@
   "scripts/cycle-baseline.json": 0,
   "scripts/cycle-ratchet.mjs": 44,
   "scripts/diff-class.mjs": 211,
-  "scripts/diff-coverage.mjs": 326,
+  "scripts/diff-coverage.mjs": 147,
   "scripts/fleet-heartbeat.sh": 298,
   "scripts/generate-api-client.mjs": 42,
   "scripts/generate-capability-snapshot.mjs": 57,
