@@ -218,6 +218,12 @@
       "grepHint": "ledger.ts forensics"
     },
     {
+      "path": "docs/forensics/mutation-ratchet.md",
+      "title": "mutation-ratchet.mjs forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "mutation-ratchet.mjs forensics"
+    },
+    {
       "path": "docs/forensics/open-prs-rest.md",
       "title": "Forensics — `src/lib/open-prs-rest.ts`",
       "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/open-prs-rest.ts`. Each",
