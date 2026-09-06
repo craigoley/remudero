@@ -190,3 +190,15 @@ test("W1-T2969 an UNMODELLED census suite is NAMED on the verb's output, never s
   assert.match(r.out, /UNMODELLED census suite\(s\)/);
   assert.match(r.out, /test\/rule-efficacy\.test\.ts/, "and the suite is named, not counted");
 });
+
+test("W1-T2969 a src/ change is told it joins the config-reader-seams census", () => {
+  // THE FIFTH MEASURED MISS, found the same day by this very task's sibling PR: W1-T2971's fourth
+  // cadence hook builder added one seamed policy read and took that suite's exact count 25 -> 26.
+  // It is also CLAUDE.md's own worked example for investigation-discipline item (j), which makes it
+  // the least excusable omission of the five — the rule names the file.
+  const suites = suitesFor("src/run-task.ts");
+  assert.ok(
+    suites.some((s) => /config-reader-seams/i.test(s)),
+    `a src/ change must name the config-reader-seams census; got: ${suites.join(", ") || "(none)"}`,
+  );
+});
