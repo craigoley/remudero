@@ -12129,6 +12129,10 @@ async function runTask(
     /** W1-T1045: override the resolved clock bound (ms) — the SAME injection convention as
      *  every other opt-in seam above. Default: `policy.values.workerAbandon`, read below. */
     workerAbandonMs?: number;
+    /** W1-T2847: overrides `plan/policy.yaml`'s `sweep.armAdhocLaneReap` for the ad-hoc lane reap
+     *  rung — the same `?? loadDefaultPolicy()` seam `workerAbandonMs` above uses, so a test can
+     *  drive both arms without editing the shipped policy file. */
+    armAdhocLaneReap?: boolean;
     /**
      * W1-T1044: override for the fix rung's worker-spawn wall-clock bound (see
      * `runFixRung`'s own `deps.spawnWallClockBoundMs` doc). Optional — omitted reads
@@ -12794,7 +12798,11 @@ async function runTask(
   // test). Recorded here and in the PR body because the linter refuses the shard edit that would
   // record it in `files:`; the reviewer's `scope_violation` is advisory and names review-ratified
   // widenings legitimate.
-  runAdhocLaneReapRung(config, log, { repoDir });
+  // W1-T2847: ARMED from policy, not from a hardcoded default. The rung's own doc calls arming "a
+  // separate operator decision"; until this row existed the call site passed no `enabled` at all,
+  // so the decision had nowhere to live and the pass was permanently survey-only. Every refusal
+  // underneath is unchanged — live pid, live upstream branch, incomplete probe, 14-day ceiling.
+  runAdhocLaneReapRung(config, log, { repoDir, enabled: () => opts.armAdhocLaneReap ?? loadDefaultPolicy().values.sweep.armAdhocLaneReap });
   // W1-T411: three MORE sweeps with call sites only inside daemonCommand — stale rmd temp
   // dirs, abandoned review clones, and per-spawn worker homes — get the SAME start-of-run
   // reclaim rung pruneStaleRuns and logWorktreeReapBootSurvey already occupy. Unlike the

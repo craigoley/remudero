@@ -263,3 +263,22 @@
     ~/Library/LaunchAgents/com.remudero.daemon.plist; commission with `launchctl load <path>`.
   src: chore/t12d-commissioning-record (W1-T12d, 2026-07-15)
   cited: "2026-07-15"
+- id: proc-environ-is-an-exec-time-snapshot
+  subsystem: containment
+  lifecycle: active
+  files: [ src/lib/worker.ts, src/lib/worker-provider.ts, src/lib/env.ts, src/lib/containment.ts ]
+  fact: >-
+    /proc/<pid>/environ is the environment block copied onto the process stack at
+    EXEC, not a live view: a process that mutates its own environment after start
+    (process.env.X = ..., or a shell export) leaves that file unchanged, while a
+    CHILD it spawns inherits the new value. So reading it answers "what was this
+    process launched with", never "what is it using now" — an investigation that
+    reads it to find a credential a long-running daemon rotated in-process gets a
+    confident, wrong, and entirely stale answer. Read the mutation at its own
+    seam instead. LINUX ONLY: macOS has no /proc at all, so on the mini the file
+    is not stale, it is absent — a probe written against it there fails to open
+    rather than answering wrongly, which is the louder of the two failures.
+  assertion: '[ -r /proc/$$/environ ] || exit 0; RMD_ENVIRON_PROBE=1; export RMD_ENVIRON_PROBE;
+    grep -qa RMD_ENVIRON_PROBE /proc/$$/environ && exit 1 || exit 0'
+  src: operator-session token investigation withdrawn 2026-09-04; probe re-derived 2026-09-06
+  cited: "2026-09-06"

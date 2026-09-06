@@ -174,6 +174,36 @@ revisiting this decision, never quote them forward.
    `blocked_review`/`blocked_illformed` verdict naming a real gap, or an
    escalation issue. Idle time on your end is fine — the fleet keeps grooming.
 
+## Where to cut a worktree, and why it matters
+
+Cut ad-hoc lanes under **`<config.root>/lanes/`**. Nowhere else under `config.root`, and never
+under `$HOME`.
+
+```
+git -C <config.root>/remudero worktree add <config.root>/lanes/<name> <ref>
+```
+
+`runAdhocLaneReapRung` reaps exactly that root (`adhocLaneRoot` = `join(config.root, "lanes")`) on a
+14-day ceiling, and `sweep.armAdhocLaneReap` in `plan/policy.yaml` arms it. Every refusal still
+applies underneath — a live pid, a branch still live upstream, an incomplete activity probe — and
+removal routes through the parent with `git worktree remove`, never a bare `rm`.
+
+**Why not just point the reaper at `config.root`?** Because `config.root` also holds `repos/`,
+`state/`, `logs/` and `worker-home/`, and a reaper that walks that directory treats non-worktree
+entries the same as worktrees. That is the 2026-07-31 destruction, and it is why the managed root is
+a dedicated subdirectory rather than the parent.
+
+**What happens if you cut one somewhere else.** Nothing reclaims it. `unmanagedWorktreeLanes` will
+name it in the `adhoc_lane.unmanaged` ledger row on every pass — it REPORTS, never reaps — and it
+accumulates. MEASURED 2026-09-06: 173 worktrees had collected directly under `config.root` while
+`lanes/` did not exist at all and the reaper's survey had never once fired; clearing the 132 that
+were dead and clean returned 3.7GiB on a volume that was 96% full and had filled to 100% four times
+in four months.
+
+Dispose of a lane the same way it was made — `git worktree remove <path>`, which refuses on a dirty
+tree and leaves the branch ref intact, so nothing is lost and `git worktree list --porcelain` reports
+no `prunable` record afterwards.
+
 ## Pausing vs. stopping
 
 Use **`rmd pause`** for planned maintenance (you want in-flight work to land

@@ -1,0 +1,99 @@
+- id: W1-T2962
+  title: "UNMANAGED LANES ARE REPORTED FOREVER AND REAPED NEVER — unmanagedWorktreeLanes already names every registered worktree outside both managed roots, and that census is the one population nothing can ever reclaim, so the report grows without bound while the disk fills"
+  repo: remudero
+  depends_on: [W1-T2847]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files:
+    - src/lib/worker.ts
+    - test/adhoc-lane-reap.test.ts
+  origin: "operator-session#registration-driven-lane-reap-2026-09-06"
+  plan_refs: ["W1-T2847", "W1-T2950", "W1-T175"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-06 on the Mac host, and the numbers are the whole argument.
+
+    (1) THE PREDICATE ALREADY EXISTS AND IS ALREADY RIGHT. `reapStaleWorktrees` fails closed on a
+    live pid, on an incomplete liveness probe, on an age ceiling, and — via `branchIsLiveUpstream`,
+    default an `origin` ls-remote — on a branch still live upstream. An operator pass on 2026-09-06
+    classified 173 worktrees under config.root by hand using EXACTLY that upstream test plus a
+    clean-tree check, removed the 132 it cleared, and lost nothing: 132/132 branch refs still
+    resolved afterwards and 132/132 HEAD commits were still in the object store, because
+    `git worktree remove` deletes the checkout and not the ref. Free space went 9.3GiB -> 13GiB.
+    Nothing in that pass needed judgement the reaper does not already encode.
+
+    (2) THE GAP IS REACH, NOT LOGIC. The reaper scans `worktreesDir` (run lanes) and
+    `adhocLaneRoot` = `config.root/lanes`. Everything else is handled by `unmanagedWorktreeLanes`,
+    which is explicitly "REPORTS, NEVER REAPS". So the population that actually accumulates is
+    enumerated on every pass and reclaimed on none. MEASURED: `config.root/lanes` did not exist at
+    all, `rmd ledger-grep adhoc_lane.reap` returned ZERO rows, and 173 worktrees sat one level up.
+
+    (3) WHY POINTING A REAPER AT config.root IS REFUSED, AND WHY THIS IS NOT THAT. `adhocLaneRoot`'s
+    own doc: "never `config.root` itself and never `$HOME`: a reaper pointed at `config.root` would
+    walk live worktrees and non-worktree entries alike (the 2026-07-31 failure)". That refusal is
+    about ENUMERATION BY DIRECTORY WALK. `unmanagedWorktreeLanes` does not walk a directory — it
+    reads `git worktree list --porcelain` for `repoDir`, so it can only ever name a worktree git
+    itself has registered. `repos/`, `state/`, `logs/` and `worker-home/` are
+    structurally unreachable through it: they carry no registration, so they never enter the
+    candidate set. The hazard the 2026-07-31 rule guards is absent from this enumeration by
+    construction, which is the single claim this task turns on and the one a reviewer should
+    attack first.
+
+    (4) THE COST OF NOT DOING IT, MEASURED. 166 of the 173 lanes were created in a single month;
+    at ~26MB each that is ~140MB/day, and 13GiB of headroom is roughly three months. The host has
+    filled to 100% four times in four months. Those two figures agreeing is why this is filed rather
+    than left to the `lanes/` convention alone: a convention that any agent can forget reclaims
+    nothing on the days it is forgotten, and `adhoc_lane.unmanaged` will keep counting them.
+
+    (5) WHAT THIS DOES THAT THE TWO OVERLAPPING SHARDS DO NOT, since all three declare
+    src/lib/worker.ts and test/adhoc-lane-reap.test.ts and lint-plan is right to ask.
+    W1-T2847 gives `config.root/lanes` a reaper and owns the CONVENTION that puts lanes there; it
+    reclaims a population only once someone writes to that root, and on 2026-09-06 that root did not
+    exist. W1-T2950 fixes a path-ALIAS defect inside the live-branch guard — git canonicalizes a
+    worktree path while the reaper compares it byte-for-byte — which is a correctness bug in a
+    predicate both other tasks depend on, and is orthogonal to WHICH roots are scanned. This task
+    changes neither the predicate nor the convention: it adds one candidate SOURCE, git's own
+    registration, for the lanes that sit outside every managed root and that
+    `unmanagedWorktreeLanes` already enumerates and deliberately declines to reclaim. If W1-T2847's
+    convention holds perfectly, this task's population is empty and it should be closed unbuilt —
+    which is the honest reason to build it AFTER that one, not before.
+
+  design: |
+    (i) CANDIDATES COME FROM REGISTRATION, NEVER FROM A DIRECTORY LISTING. Reuse
+    `unmanagedWorktreeLanes` unchanged as the enumerator. If a future change makes it walk a
+    directory instead, this task's safety argument dies with it, so the test must pin the source.
+
+    (ii) THE REMOVAL PATH AND EVERY REFUSAL ARE `reapStaleWorktrees`'s, UNCHANGED. No new predicate,
+    no second removal, no new `fs.rmSync` — the W1-T175 discipline and the parent-aware removal from
+    #3981 are inherited whole rather than restated.
+
+    (iii) SHIP DISARMED, LIKE ITS SIBLING. `runAdhocLaneReapRung` ships with `enabled` defaulting
+    false and survey-first; this rung does the same. Arming is a separate operator decision.
+
+    (iv) A LANE INSIDE ANOTHER MANAGED ROOT IS NOT A CANDIDATE. `unmanagedWorktreeLanes` already
+    subtracts `worktreesDir` and `adhocLaneRoot`; the rung must not re-add them by a different path.
+
+    (v) NOT IN SCOPE: arming, the `lanes/` convention, and CLAUDE.md guidance. W1-T2847 owns those
+    and this task is useless if they land first — say so in the report rather than building both.
+
+  falsifier: |
+    A lane whose upstream branch is STILL LIVE must survive a pass, however far past the ceiling it
+    is. A lane registered under `worktreesDir` or `adhocLaneRoot` must never appear as a candidate.
+    A directory under config.root that git has NOT registered — `repos/`, `state/`, a bare
+    `mkdir` — must be structurally unreachable: plant one and assert the candidate set is empty,
+    which is what separates this from the 2026-07-31 shape.
+
+  acceptance:
+    - claim: "candidates are read from git's own registration, so an unregistered directory can never enter the set"
+      proof: "unit test: an unregistered directory is never a candidate"
+    - claim: "a lane whose upstream branch is still live is kept, however far past the age ceiling"
+      proof: "unit test: a lane with a live upstream branch survives a registration-driven pass"
+    - claim: "the rung ships disarmed and its survey still counts what it would reclaim"
+      proof: "unit test: the registration-driven rung ships DISARMED and still counts"
+    - claim: "removal routes through reapStaleWorktrees, adding no second removal path"
+      proof: "grep: reapStaleWorktrees in src/lib/worker.ts"

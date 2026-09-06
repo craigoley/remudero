@@ -134,3 +134,18 @@
     diagnosis at the wrong layer.
   src: W1-T2754,W1-T2784
   cited: "2026-09-03"
+- id: ls-remote-grep-matches-the-sha-column
+  subsystem: dispatch
+  lifecycle: active
+  files: [ src/lib/status.ts, src/lib/sweep.ts, src/lib/drain.ts, src/run-task.ts ]
+  fact: >-
+    git ls-remote prints TWO columns, sha then ref, so piping it through a bare
+    `grep <task-id>` matches the 40-hex SHA as readily as a branch name and
+    reports work in flight that nobody started. The failure direction is a FALSE
+    "already claimed", which reads as the safe answer and silently stands a lane
+    down. Match on the ref name only — `git ls-remote --heads origin
+    'run-<id>-*'`, or pipe through `awk '{print $2}'` first — and never grep the
+    raw two-column output.
+  assertion: 'git show-ref --head | head -1 | grep -qE "^[0-9a-f]{40} "'
+  src: operator-session sweep false-positive 2026-09-04; format re-derived 2026-09-06
+  cited: "2026-09-06"

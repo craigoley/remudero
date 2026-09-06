@@ -36,6 +36,12 @@ import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type Update
  *  same-class failure would log under, plus the date (parsed from the rule's own earning
  *  citation — see each entry below) after which a match counts as a RECURRENCE rather than
  *  pre-existing history the rule was never meant to have prevented. */
+/**
+ * A rule whose recurrence IS observable, by exactly ONE of two channels — see
+ * {@link declaredChannel}, which enforces that at RUNTIME because this table is DATA, editable
+ * without a compile. Two OPTIONAL fields rather than a union, for compatibility: existing readers
+ * access `stepPatterns` directly, and a union makes that a type error at every one.
+ */
 export interface MeasurableRuleSignature {
   /** CLAUDE.md section anchor or MASTER-PLAN standing-rule id this table entry measures. */
   ruleId: string;
@@ -45,10 +51,33 @@ export interface MeasurableRuleSignature {
   description: string;
   measurable: true;
   /** ISO date the rule became citable — `git blame`'d from the CLAUDE.md line carrying the
-   *  citation above; a ledger row strictly AFTER this date is a POST-RULE recurrence. */
+   *  citation above; an event strictly AFTER this date is a POST-RULE recurrence. */
   effectiveDate: string;
-  /** A ledger row recurs this rule's failure class when its `step` field matches ANY of these. */
-  stepPatterns: RegExp[];
+  /** THE LEDGER CHANNEL (unchanged): a ledger row recurs this rule when its `step` matches ANY. */
+  stepPatterns?: RegExp[];
+  /** THE CI CHANNEL (W1-T2958): a red gate recurs this rule when its NAME matches ANY. The
+   *  diff-coverage row below deferred exactly this, for want of the failing check's name;
+   *  W1-T2957's corpus is the evidence that was missing. */
+  ciGatePatterns?: RegExp[];
+}
+
+/** One observed red CI gate. NOT `CiFailurePair`: that type carries no timestamp and the
+ *  effective-date boundary needs one, so a caller maps its pairs onto this shape. */
+export interface CiFailureObservation {
+  /** The check-run NAME or status CONTEXT that went red. */
+  gate: string;
+  /** ISO timestamp the red was observed. */
+  at: string;
+}
+
+/** Which channel an entry declares — `"none"` when it declares neither or BOTH, which is an
+ *  authoring error the report must refuse rather than silently pick a winner for. */
+export function declaredChannel(sig: MeasurableRuleSignature): "ledger" | "ci" | "none" {
+  const hasLedger = sig.stepPatterns !== undefined;
+  const hasCi = sig.ciGatePatterns !== undefined;
+  if (hasLedger && !hasCi) return "ledger";
+  if (hasCi && !hasLedger) return "ci";
+  return "none";
 }
 
 /** A rule with NO ledger-visible failure class today — never silently omitted (P48). */
@@ -94,16 +123,21 @@ export const RULE_SIGNATURES: readonly RuleSignature[] = [
     effectiveDate: "2026-08-06",
     stepPatterns: [/^ci\.stalled$/, /^deploy\.idle_ceiling_forced$/],
   },
+  // W1-T2958 MOVED THIS ROW FROM UNMEASURABLE TO THE CI CHANNEL. Its `why` deferred exactly this:
+  // a recurrence is WHICH check failed, a name living "only in GitHub's check-run data, never in a
+  // ledger row", marked NOT IN SCOPE pending follow-on. This is that follow-on — W1-T2957 collects
+  // the names. Measurable now because the evidence exists, not because the bar moved.
   {
     ruleId: "CLAUDE.md#before-you-push:diff-coverage-gate",
     citation: "#768, #773, #777",
     description: "Run the diff-coverage gate LOCALLY before pushing any PR that adds source lines.",
-    measurable: false,
-    why:
-      "a recurrence is WHICH ci check failed (coverage-ratchet specifically) — that name lives only in " +
-      "GitHub's check-run data, never in a ledger row; the ledger's own blocked_ci line ('ci <status> " +
-      "before review') carries no failing-check name. Reading GitHub check names is a CI-failure-class " +
-      "signature, explicitly NOT IN SCOPE for this table's first pass (follow-on work per class).",
+    measurable: true,
+    // All three citing PRs merged 2026-07-25; a red strictly after that is a POST-RULE recurrence.
+    effectiveDate: "2026-07-25",
+    // ci.yml's `coverage-ratchet-required` job reports as `coverage-ratchet`; its matrix legs as
+    // `coverage-shard (N/4)`. Both are this rule's failure class — a red leg is the same missed
+    // local run as a red aggregator, and only the leg names which shard.
+    ciGatePatterns: [/^coverage-ratchet$/, /^coverage-shard\b/, /^diff-coverage$/],
   },
   {
     ruleId: "MASTER-PLAN.md#standing-rule-14:wiring-not-proved",
@@ -199,15 +233,18 @@ export function ruleEfficacyReport(
   stateDir: string,
   signatures: readonly RuleSignature[] = RULE_SIGNATURES,
   fsDeps?: LedgerGrepFsDeps,
+  /** W1-T2958 — the CI channel's corpus, APPENDED LAST so no positional caller shifts. Absent means
+   *  NOT SUPPLIED, never "no red found": such a rule renders UNMEASURABLE, not PREVENTING. */
+  ciObservations?: readonly CiFailureObservation[],
 ): RuleEfficacyReport {
-  const measurableSignatures = signatures.filter(isMeasurable);
+  const ledgerSignatures = signatures.filter(isMeasurable).filter((s) => declaredChannel(s) === "ledger");
 
   let ledger: LedgerUnionResult | undefined;
   let parsedMatches: { ts: string; step: string }[] = [];
-  if (measurableSignatures.length > 0) {
+  if (ledgerSignatures.length > 0) {
     // ONE union read for every measurable rule's step patterns, ORed together — the ledger is
     // walked once, not once per rule.
-    const combinedSource = measurableSignatures.flatMap((s) => s.stepPatterns.map((p) => `(?:${stepPatternAsLineSubstring(p)})`)).join("|");
+    const combinedSource = ledgerSignatures.flatMap((s) => (s.stepPatterns ?? []).map((p) => `(?:${stepPatternAsLineSubstring(p)})`)).join("|");
     ledger = resolveLedgerUnion(stateDir, new RegExp(combinedSource), fsDeps);
     if (ledger.ok) {
       parsedMatches = ledger.matches.map(parseLedgerLine).filter((l): l is { ts: string; step: string } => l !== null);
@@ -217,6 +254,57 @@ export function ruleEfficacyReport(
   const rules: RuleVerdict[] = signatures.map((sig) => {
     if (!sig.measurable) {
       return { ruleId: sig.ruleId, citation: sig.citation, description: sig.description, status: "UNMEASURABLE", recurrences: [], why: sig.why };
+    }
+    const channel = declaredChannel(sig);
+    if (channel === "none") {
+      // Picking a winner would report a rate nobody chose; PREVENTING would be a zero over
+      // nothing measured (P48). Refuse by name instead.
+      return {
+        ruleId: sig.ruleId,
+        citation: sig.citation,
+        description: sig.description,
+        status: "UNMEASURABLE",
+        effectiveDate: sig.effectiveDate,
+        recurrences: [],
+        why:
+          "this entry declares measurable: true but names neither exactly one ledger channel " +
+          "(stepPatterns) nor exactly one CI channel (ciGatePatterns) — an authoring error, refused " +
+          "rather than graded on a channel nobody chose.",
+      };
+    }
+    if (channel === "ci") {
+      // NOT SUPPLIED and FOUND NOTHING are different facts (P48): only the second may render
+      // PREVENTING, so an absent corpus is refused by name.
+      if (ciObservations === undefined) {
+        return {
+          ruleId: sig.ruleId,
+          citation: sig.citation,
+          description: sig.description,
+          status: "UNMEASURABLE",
+          effectiveDate: sig.effectiveDate,
+          recurrences: [],
+          why:
+            "no CI failure corpus was supplied to this report, and this rule's failure class is a RED GATE " +
+            "whose name appears in no ledger row — reporting PREVENTING here would be a rate over a window " +
+            "never observed.",
+        };
+      }
+      const ciEffectiveMs = new Date(sig.effectiveDate).getTime();
+      const ciRecurrences: RuleRecurrence[] = ciObservations
+        .filter((o) => (sig.ciGatePatterns ?? []).some((p) => p.test(o.gate)))
+        // The ledger channel's own boundary: a red predating the rule is history it never had a
+        // chance to prevent.
+        .filter((o) => new Date(o.at).getTime() > ciEffectiveMs)
+        .sort((a, b) => a.at.localeCompare(b.at))
+        .map((o) => ({ ts: o.at, step: o.gate }));
+      return {
+        ruleId: sig.ruleId,
+        citation: sig.citation,
+        description: sig.description,
+        status: ciRecurrences.length > 0 ? "REPEATING" : "PREVENTING",
+        effectiveDate: sig.effectiveDate,
+        recurrences: ciRecurrences,
+      };
     }
     if (!ledger || !ledger.ok) {
       return {
@@ -234,7 +322,7 @@ export function ruleEfficacyReport(
     }
     const effectiveMs = new Date(sig.effectiveDate).getTime();
     const recurrences: RuleRecurrence[] = parsedMatches
-      .filter((l) => sig.stepPatterns.some((p) => p.test(l.step)))
+      .filter((l) => (sig.stepPatterns ?? []).some((p) => p.test(l.step)))
       .filter((l) => new Date(l.ts).getTime() > effectiveMs)
       .sort((a, b) => a.ts.localeCompare(b.ts))
       .map((l) => ({ ts: l.ts, step: l.step }));
