@@ -1,0 +1,84 @@
+- id: W1-T2967
+  title: "ONE WHOLE-FILE PROOF CANNOT ANSWER SEVERAL CRITERIA — 830 of 1135 multi-criterion shards point two or more claims at the identical `unit test: <path>`, so the judge is asked different questions with identical evidence and answers non-responsive, and the executor cannot discriminate the proof against the merge base"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 22.00
+  files:
+    - src/lib/task-linter.ts
+    - test/task-linter-wiring.test.ts
+  origin: "operator-session#whole-file-proof-cannot-discriminate-2026-09-06"
+  plan_refs: ["W1-T2263", "W1-T178", "W1-T2676"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON MAIN 2026-09-06: of 1135 shards carrying two or more acceptance criteria, 830 (73%)
+    point two or more of them at the IDENTICAL proof string, almost always a whole-file
+    `unit test: test/<name>.test.ts`. That is not a style complaint. It breaks both halves of the
+    review in ways that are already costing merges.
+
+    (1) THE SEMANTIC HALF READS NON-RESPONSIVE. `buildReviewPrompt` renders each criterion as a
+    CLAIM/PROOF pair and asks, per criterion, whether THAT proof is responsive to THAT claim. When
+    four distinct claims carry one identical file path, the judge sees the same evidence four times.
+    OBSERVED: PR #4174 (4 of 4 criteria downgraded), PR #4175 (8 of 8) — every row reading "proof
+    executed and PASSED ... reviewer judged the proof non-responsive", with an EMPTY reason clause,
+    on two unrelated tasks within an hour. Two independent rebuild attempts on #4174 moved nothing,
+    because there was no stated objection to answer.
+
+    (2) THE DETERMINISTIC HALF CANNOT DISCRIMINATE. A whole-file proof on a file the diff MODIFIES
+    passes at the merge base too — the file exists there and its pre-existing tests pass — so
+    `executed_stale` fires, the positive override is withdrawn and the keyword floor applies.
+    OBSERVED: PR #4236 posted CAPPED ("0/6 proofs executed; not certified") with all six criteria
+    reading `executed_stale`; PR #4282 the same on three. A CAPPED verdict refuses to arm
+    auto-merge, so the task stalls on a proof that cannot in principle discriminate.
+
+    (3) THE COST IS ALREADY PAID AND RECURRING. Four PRs in one session were blocked, capped or
+    downgraded by this and by nothing else. W1-T2263 fixed the REASON a downgrade carries and
+    W1-T178 suppresses an unchanged-head downgrade, but neither can help when the proof itself
+    cannot distinguish the claims or the base — those tasks made the failure legible, not rare.
+
+    NOT A PROPOSAL TO REWRITE 830 SHARDS. The population is the evidence of scale, not the work
+    item. A live shard's criteria are Architect-only under Standing rule 15, so this task may not
+    edit them; it makes the defect VISIBLE AT FILING TIME, where the cost of fixing it is one line.
+
+  design: |
+    (i) DETECT AT LINT TIME, IN `rmd lint-plan`, where a shard is still being written and its author
+    can still choose a per-criterion proof. An ADVISORY warning in the shape of `duplicate-surface`
+    and `proof-name-resolution`, never a refusal: legitimate cases exist (two claims genuinely
+    answered by one falsifier file), and refusing them would push authors into worse proofs.
+
+    (ii) THE WARNING MUST NAME THE REMEDY, not the fault. `unit test:` accepts a TEST TITLE as well
+    as a path (`looksLikeNonTitleBody` already treats any non-path body as a name filter), so the
+    fix is usually to name the specific test per criterion. Say that, with the criterion indices
+    that collide.
+
+    (iii) A WHOLE-FILE PROOF ON A FILE THE SHARD ALSO DECLARES IN `files:` IS THE DISCRIMINATION
+    HALF, and is worth its own note: that proof will run at the merge base too and is very likely to
+    pass there, so it can never carry the positive override. This is derivable at lint time from the
+    shard alone.
+
+    (iv) DO NOT TOUCH THE REVIEWER. The prompt, the fold and the executor are all correct given the
+    proofs they are handed; the defect is upstream of them.
+
+    (v) NOT IN SCOPE: retrofitting existing shards, changing Rule 15, and any change to
+    `reviewerVerdictContract`.
+
+  falsifier: |
+    A shard whose criteria all carry DISTINCT proofs draws no warning. A shard with two criteria
+    sharing one identical whole-file proof draws one that names both indices and the shared string.
+    A shard with two criteria sharing an identical TEST-TITLE proof draws the same warning, because
+    the ambiguity is the shared evidence and not the dialect. Deleting the detector makes the
+    two-criteria case silent again.
+
+  acceptance:
+    - claim: "a shard with two criteria sharing one identical proof draws an advisory warning naming both criterion indices"
+      proof: "unit test: two criteria sharing one identical proof are named with their indices"
+    - claim: "a shard whose criteria all carry distinct proofs draws no such warning"
+      proof: "unit test: distinct proofs per criterion draw no shared-proof warning"
+    - claim: "the warning names the per-criterion test-title remedy rather than only the fault"
+      proof: "unit test: the shared-proof warning names the test-title remedy"
+    - claim: "the check is advisory and never fails lint-plan"
+      proof: "unit test: a shared-proof shard still lints with zero failures"
