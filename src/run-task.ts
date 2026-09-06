@@ -5099,7 +5099,7 @@ function materializeReviewerSnapshot(
   // the post-review cleanliness proof even for repositories whose committed .gitignore omits it.
   excludeNodeModulesFromGit(cwd);
   const nodeModules = linkWorktreeNodeModules(sourceDir, cwd);
-  const dependencyRoot = (() => { try { return realpathSync(join(cwd, "node_modules")); } catch { return undefined; } })();
+  const dependencyRoot = (() => { try { return realpathSync(join(cwd, "node_modules")); } catch { /* No link earns no grant. */ return undefined; } })();
   const dependencyRelative = dependencyRoot ? relative(cwd, dependencyRoot) : "";
   const dependencyReadRoots = dependencyRoot && (dependencyRelative === ".." || dependencyRelative.startsWith(`..${sep}`) || isAbsolute(dependencyRelative)) ? [dependencyRoot] : [];
   return { cwd, nodeModules, dependencyReadRoots };
