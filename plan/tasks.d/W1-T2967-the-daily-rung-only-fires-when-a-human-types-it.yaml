@@ -1,0 +1,88 @@
+- id: W1-T2967
+  title: "THE DAILY CI-LEARNING RUNG ONLY FIRES WHEN A HUMAN TYPES `rmd ci-learning` — its policy row, marker and two-bound decision all ship, but nothing calls `ciLearningCadenceCheck` from the daemon's poll loop, so the loop the operator asked to run DAILY runs never; give it the check/run hook pair every sibling cadence already has"
+  repo: remudero
+  depends_on: [W1-T2959]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - test/the-daily-rung-only-fires-when-a-human-types-it.test.ts
+  origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
+  plan_refs: ["W1-T2957", "W1-T2958", "W1-T2959", "W1-T1259", "W1-T2277", "W1-T2304"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AT d4004806, the merge of W1-T2959. `git grep -c ciLearning -- src/lib/daemon.ts`
+    returns 0. `ciLearningCadenceCheck` has exactly one caller in the tree: `ciLearningCommand`,
+    the CLI verb a person types. Every sibling cadence has TWO — the verb and the daemon.
+
+    SO THE RUNG IS THE CONSUMER-WITHOUT-A-PRODUCER SHAPE THIS REPO HAS SHIPPED TWICE, AND BOTH
+    ARE RECORDED IN THE CODE THAT WOULD FIX IT. `checkBoardReview`'s own doc in daemon.ts: "#2952
+    merged 385 tested lines and the rung never fired once, because nothing called it." The
+    wiring line's own comment at run-task.ts: "exactly how #1066 merged auto-triage's consumer
+    with no producer." W1-T2959 merged 747 lines and reproduced it a third time.
+
+    THIS IS NOT A COVERAGE GAP. Every unit W1-T2959 shipped is tested and green; the cadence
+    decision, the ceiling, the idempotency key and the Law 5 mark all work. What is missing is
+    the one line that makes any of it run without a person. That is precisely the distinction
+    Standing rule 14 draws — "the gate proves a UNIT and never a WIRE" — and it is the third row
+    of the very `RULE_SIGNATURES` table this arc extended.
+  design: |
+    (i) THE HOOK PAIR, MIRRORING THE THREE THAT ALREADY EXIST. Add
+    `checkCiLearningCadence?: () => MeasurementCadenceDecision` and
+    `runCiLearningCadence?: () => Promise<CiLearningCadenceRunResult>` to `DaemonDeps`, a poll-loop
+    block beside the digest/board-review blocks, and `buildCiLearningDaemonHooks({ config })` in
+    run-task.ts. Optional deps, exactly like the siblings: a daemon that passes neither behaves as
+    it does today.
+
+    (ii) SELF-TARGET ONLY, and the wiring line must say so. `target.isSelf ? build… : undefined`,
+    for the reason every sibling states: the marker and the corpus join against THIS process's own
+    config.root, never a drained target's.
+
+    (iii) RECORD THE FIRE FIRST. `buildMeasurementCadenceDaemonHooks`'s stated crash-safety
+    discipline: if the run throws, the marker has already moved, so a crash-looping daemon cannot
+    re-fire the rung every tick.
+
+    (iv) THE RUN HOOK REPORTS; IT STILL FILES NOTHING. W1-T2959's Law 5 argument is unchanged and
+    NOT reopened here: the run produces the same marked, parked DRAFTS the verb produces, and the
+    loop ledgers a summary. Whether the rung writes a plan record is W1-T2968's question, filed
+    separately so the wiring can land without re-litigating the safety argument.
+
+    (v) NOT IN SCOPE: flipping `ciLearningCadence.enabled` to true. The row stays default-off; this
+    task makes the switch MEAN something, and the operator throws it.
+  acceptance:
+    - claim: "the daemon's poll loop consults the ci learning rung through an injected check hook, and runs it only on a tick that decided to fire"
+      proof: "unit test: test/the-daily-rung-only-fires-when-a-human-types-it.test.ts"
+    - claim: "the fire is recorded before the run body executes, so a run that throws cannot re-fire the rung on the next tick"
+      proof: "unit test: test/the-daily-rung-only-fires-when-a-human-types-it.test.ts"
+    - claim: "a daemon given neither hook behaves exactly as it did before this change, so the wiring narrows nothing that already worked"
+      proof: "unit test: test/the-daily-rung-only-fires-when-a-human-types-it.test.ts"
+    - claim: "the producer is built only for a self target, so a drained target never reads this process's own marker and corpus"
+      proof: "unit test: test/the-daily-rung-only-fires-when-a-human-types-it.test.ts"
+    - claim: "a run that throws is best effort and never stops the poll tick that contains it"
+      proof: "unit test: test/the-daily-rung-only-fires-when-a-human-types-it.test.ts"
+  falsifier: |
+    THE WIRE IS THE WHOLE TASK, SO THE FALSIFIER MUST BE THE WIRE. Deleting the producer line
+    (`const ciLearningHooks = target.isSelf ? … : undefined`) must redden a test — that is exactly
+    the line #1066 and #2952 were each missing while every unit test stayed green. A suite that
+    only exercises `buildCiLearningDaemonHooks` in isolation would pass with the rung dead and is
+    therefore NOT sufficient.
+
+    AND PROVE THE GATE ON THE OTHER SIDE: a daemon with the hooks absent must still tick, or the
+    optionality every sibling relies on has been broken.
+
+    THE CRASH-SAFETY CASE IS THE SUBTLE ONE. Make the run hook throw, and assert the marker moved
+    anyway and the tick completed. Without it a daemon that crashes inside the rung re-fires it
+    every poll forever.
+  note: |
+    FILED 2026-09-06 from the operator's approval of recommendation 1 after the W1-T2957/2958/2959
+    arc merged. MEASURED AT d4004806: daemon.ts contains zero occurrences of `ciLearning`;
+    run-task.ts wires three cadence producers at 25602/25608/25614 and no fourth.
+
+    risk:high / band_meaning:span — each edit is small; the SPAN (daemon deps, poll loop, producer,
+    wiring site) is what sets the band.
