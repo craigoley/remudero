@@ -8,6 +8,7 @@
 // secondary endpoints resolve, and the full <2s first-paint-to-data budget at 183-task scale —
 // via Playwright (headless Chromium), same tooling test/serve.shell-ux.test.ts already uses.
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -269,7 +270,7 @@ test("183-task plan, REAL browser client: first-paint-to-data (navigation -> the
     const ms = performance.now() - t0;
     const summary = await page.evaluate(() => document.getElementById("summary")?.textContent ?? "");
     assert.match(summary, new RegExp(`${N} tasks`));
-    assert.ok(ms < 2000, `first-paint-to-data ${ms.toFixed(0)}ms exceeded the 2000ms budget (real browser client, ${N}-task plan)`);
+    assertWallClockBound(ms, 2000, `first-paint-to-data ${ms.toFixed(0)}ms exceeded the 2000ms budget (real browser client, ${N}-task plan)`);
     await context.close();
   });
 });

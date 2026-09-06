@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -10,14 +10,19 @@ import { spawnCodexWorker } from "../src/lib/worker-provider.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { runReview } from "../src/run-task.js";
 
-test("W1-T2829/W1-T2868: runReview gives Codex an exact materialized checkout under the read-only sandbox", async () => {
+test("W1-T2946: runReview gives Codex a test-capable disposable review sandbox", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-codex-review-wiring-"));
   const binDir = mkdtempSync(join(tmpdir(), "rmd-codex-review-gh-"));
   const oldPath = process.env.PATH;
   try {
     const sourceDir = join(root, "source");
     mkdirSync(join(sourceDir, "src"), { recursive: true });
+    const dependencyRoot = join(root, "dependencies");
+    mkdirSync(dependencyRoot);
+    const physicalDependencyRoot = realpathSync(dependencyRoot);
+    symlinkSync(physicalDependencyRoot, join(sourceDir, "node_modules"), "dir");
     execFileSync("git", ["init", "-q", sourceDir]);
+    writeFileSync(join(sourceDir, ".git", "info", "exclude"), "/node_modules\n");
     execFileSync("git", ["-C", sourceDir, "config", "user.name", "RMD Test"]);
     execFileSync("git", ["-C", sourceDir, "config", "user.email", "rmd-test@example.invalid"]);
     writeFileSync(join(sourceDir, "src", "example.ts"), "export const fixed = true;\n", "utf8");
@@ -50,7 +55,9 @@ esac
     let observedSpawn: SpawnWorkerArgs | undefined;
     let reviewerCwdWasGit: boolean | undefined;
     let reviewerHead: string | undefined;
+    let reviewerNodeModulesLink: string | undefined;
     let codexArgs: string[] = [];
+    let codexTmpDir: string | undefined;
     let reviewerError: string | undefined;
     const reviewerSpawnWorker = async (spawnArgs: SpawnWorkerArgs): Promise<WorkerResult> => {
       observedSpawn = spawnArgs;
@@ -65,6 +72,7 @@ esac
           cwd: spawnArgs.cwd,
           encoding: "utf8",
         }).trim();
+        reviewerNodeModulesLink = readlinkSync(join(spawnArgs.cwd, "node_modules"));
       } catch {
         reviewerCwdWasGit = false;
       }
@@ -88,6 +96,7 @@ esac
           containment: {
             spawn: (options) => {
               codexArgs = options.args;
+              codexTmpDir = options.env.TMPDIR;
               return { process: proc as never, pid: 28_290 };
             },
             teardown: () => {},
@@ -105,7 +114,7 @@ esac
       task: {
         id: "W1-T2829",
         files: ["src/example.ts"],
-        acceptance: [{ claim: "the production reviewer has only read-only inspection tools", proof: "grep: fixed in src/example.ts" }],
+        acceptance: [{ claim: "the production reviewer keeps read-only inspection tools and disposable test scratch", proof: "grep: fixed in src/example.ts" }],
       },
       report: "The production reviewer has only read-only inspection tools.",
       settingsFile,
@@ -133,6 +142,9 @@ esac
     assert.equal(reviewerCwdWasGit, true, "the reviewer cwd must be a real Git checkout");
     assert.equal(reviewerHead, headSha, "the reviewer must inspect the exact PR head");
     assert.deepEqual(observedTools, ["Read", "Grep", "Glob", "Bash"], "the production call site must preserve inspection while excluding write tools");
+    assert.equal(observedSpawn?.sandboxIntent, "disposable-review");
+    assert.deepEqual(observedSpawn?.sandboxReadRoots, [physicalDependencyRoot]);
+    assert.equal(reviewerNodeModulesLink, physicalDependencyRoot, "the reviewer link must not traverse a denied intermediate checkout");
     assert.equal(observedSpawn?.model, "gpt-5.5");
     assert.equal(observedSpawn?.effort, "high");
     assert.equal(observedSpawn?.maxTurns, 10);
@@ -140,12 +152,72 @@ esac
     assert.match(observedSpawn?.prompt ?? "", /REVIEW_VERDICT <n>:/);
     assert.equal(existsSync(observedSpawn?.cwd ?? root), false, "the semantic review scratch cwd must be removed after the spawn");
     assert.equal(codexArgs.includes("--skip-git-repo-check"), false, "a materialized repository must not need the non-repository bypass");
-    assert.deepEqual(codexArgs.slice(codexArgs.indexOf("--sandbox"), codexArgs.indexOf("--sandbox") + 2), ["--sandbox", "read-only"]);
+    assert.equal(codexArgs.includes("--sandbox"), false, "the explicit permission profile replaces legacy sandbox flags");
+    assert.equal(codexArgs.includes("--add-dir"), false, "a review must not gain writable Git metadata roots");
+    assert.ok(codexArgs.includes("network_proxy"), "review commands must stay behind the deny-by-default proxy");
+    assert.ok(codexArgs.includes('default_permissions="rmd_review"'));
+    assert.ok(codexArgs.includes('permissions.rmd_review.extends=":workspace"'));
+    assert.ok(codexArgs.includes(
+      `permissions.rmd_review.filesystem={":slash_tmp"="deny",":tmpdir"="write",${JSON.stringify(physicalDependencyRoot)}="read"}`,
+    ));
+    assert.ok(codexArgs.includes("permissions.rmd_review.network.enabled=true"));
+    assert.equal(codexArgs.some((arg) => arg.includes("permissions.rmd_review.network.domains")), false,
+      "reviews must not allow any external command destination");
+    assert.equal(codexArgs.includes("sandbox_workspace_write.network_access=true"), false, "reviews do not gain network access");
+    assert.equal(existsSync(codexTmpDir ?? root), false, "the private writable test scratch is reaped after review");
     assert.equal(execFileSync("git", ["-C", sourceDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headSha);
     assert.equal(execFileSync("git", ["-C", sourceDir, "status", "--porcelain"], { encoding: "utf8" }), "");
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
     rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2946 mutation: omitting the disposable review intent restores read-only reviewer argv", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-review-intent-mutation-"));
+  const workerHome = mkdtempSync(join(tmpdir(), "rmd-codex-review-intent-home-"));
+  try {
+    execFileSync("git", ["init", "-q", root]);
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+    let codexArgs: string[] = [];
+    stdin.on("finish", () => {
+      stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "codex-review-missing-intent" })}\n`);
+      stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
+      stdout.write(`${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "done" } })}\n`);
+      stdout.write(`${JSON.stringify({ type: "turn.completed", usage: {} })}\n`);
+      stdout.end();
+      queueMicrotask(() => proc.emit("exit", 0));
+    });
+
+    await spawnCodexWorker(
+      {
+        workerHome,
+        cwd: root,
+        prompt: "exercise reviewer argv without its explicit intent",
+        tools: ["Read", "Grep", "Glob", "Bash"],
+        containment: {
+          spawn: (options) => {
+            codexArgs = options.args;
+            return { process: proc as never, pid: 29_461 };
+          },
+          teardown: () => {},
+        },
+      },
+      { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    );
+
+    assert.deepEqual(
+      codexArgs.slice(codexArgs.indexOf("--sandbox"), codexArgs.indexOf("--sandbox") + 2),
+      ["--sandbox", "read-only"],
+      "deleting runReview's sandboxIntent would restore the old read-only reviewer argv",
+    );
+    assert.equal(codexArgs.includes("--add-dir"), false, "without the intent the private TMPDIR is not writable");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(workerHome, { recursive: true, force: true });
   }
 });

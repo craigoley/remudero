@@ -146,6 +146,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/account-usage.md",
+      "title": "account-usage.ts comment forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "account-usage.ts comment forensics"
+    },
+    {
       "path": "docs/forensics/autonomy.md",
       "title": "autonomy.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
@@ -170,6 +176,18 @@
       "grepHint": "ci.yml forensics"
     },
     {
+      "path": "docs/forensics/commit-message.md",
+      "title": "Forensics: src/lib/commit-message.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/commit-message.ts`",
+      "grepHint": "Forensics: src/lib/commit-message.ts"
+    },
+    {
+      "path": "docs/forensics/config.md",
+      "title": "config.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from `src/lib/config.ts`",
+      "grepHint": "config.ts forensics"
+    },
+    {
       "path": "docs/forensics/containment.md",
       "title": "Forensics: src/lib/containment.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/containment.ts` used to",
@@ -180,6 +198,12 @@
       "title": "daemon.ts forensics",
       "summary": "Measured forensics, incidents and design arguments removed from `src/lib/daemon.ts` when its comments were compacted to the plain-language standard. The code k…",
       "grepHint": "daemon.ts forensics"
+    },
+    {
+      "path": "docs/forensics/deployer.md",
+      "title": "deployer.ts forensics",
+      "summary": "Measured incidents, design arguments and rejected alternatives removed from `src/lib/deployer.ts`",
+      "grepHint": "deployer.ts forensics"
     },
     {
       "path": "docs/forensics/diff-class.md",
@@ -206,6 +230,12 @@
       "grepHint": "dispatch-overlap.ts forensics"
     },
     {
+      "path": "docs/forensics/doctor.md",
+      "title": "doctor.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from `src/lib/doctor.ts`",
+      "grepHint": "doctor.ts forensics"
+    },
+    {
       "path": "docs/forensics/drain.md",
       "title": "Forensics — `src/lib/drain.ts`",
       "summary": "A verbatim archive of comment blocks compacted out of `src/lib/drain.ts`. Each heading names",
@@ -228,6 +258,12 @@
       "title": "Forensics — `src/lib/escalate.ts`",
       "summary": "`src/lib/escalate.ts` raises escalations as GitHub issues (W1-T8, MASTER-PLAN §4 escalation",
       "grepHint": "Forensics — `src/lib/escalate.ts`"
+    },
+    {
+      "path": "docs/forensics/feedback.md",
+      "title": "Forensics: src/lib/feedback.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/feedback.ts` used to",
+      "grepHint": "Forensics: src/lib/feedback.ts"
     },
     {
       "path": "docs/forensics/fs-race-safe.md",
@@ -284,6 +320,12 @@
       "grepHint": "Forensics — `src/lib/open-prs-rest.ts`"
     },
     {
+      "path": "docs/forensics/panel-actions.md",
+      "title": "panel-actions.ts comment forensics",
+      "summary": "The measured forensics, incidents and design arguments that were removed from",
+      "grepHint": "panel-actions.ts comment forensics"
+    },
+    {
       "path": "docs/forensics/panel-graph.md",
       "title": "panel-graph.ts comment forensics",
       "summary": "The measured forensics, incidents and design arguments that were removed from",
@@ -294,6 +336,18 @@
       "title": "Forensics — `src/lib/plan-pr-emitter.ts`",
       "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/plan-pr-emitter.ts` when its",
       "grepHint": "Forensics — `src/lib/plan-pr-emitter.ts`"
+    },
+    {
+      "path": "docs/forensics/plan.md",
+      "title": "Forensics: src/lib/plan.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/plan.ts` used to",
+      "grepHint": "Forensics: src/lib/plan.ts"
+    },
+    {
+      "path": "docs/forensics/policy.md",
+      "title": "policy.ts comment forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "policy.ts comment forensics"
     },
     {
       "path": "docs/forensics/proof-queue-audit.md",
@@ -318,6 +372,12 @@
       "title": "Forensics — `src/lib/review.ts`",
       "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/review.ts` when its",
       "grepHint": "Forensics — `src/lib/review.ts`"
+    },
+    {
+      "path": "docs/forensics/risk-judge.md",
+      "title": "risk-judge.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "risk-judge.ts forensics"
     },
     {
       "path": "docs/forensics/self-sync.md",
@@ -372,6 +432,12 @@
       "title": "Forensics: src/lib/task-linter.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/task-linter.ts` used to",
       "grepHint": "Forensics: src/lib/task-linter.ts"
+    },
+    {
+      "path": "docs/forensics/triage.md",
+      "title": "Forensics: src/lib/triage.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/triage.ts` used to",
+      "grepHint": "Forensics: src/lib/triage.ts"
     },
     {
       "path": "docs/forensics/unwired-gate-check.md",

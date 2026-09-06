@@ -726,14 +726,16 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // re-derivation has been needed. W1-T2561 then added fourteen lines ahead of both, moving the
   // witnesses to :5959/:6020. The plan-sync batch-read PR then added ONE line ahead of both (an
   // `RMD_TMP_PREFIX` import at :92, so a fixture's temp dir is boot-sweep reapable) and they moved
-  // by exactly one, to :5960/:6021 — the FOURTH re-derivation. That is this note's own point: a
-  // line number is a QUERY over the current tree, and any diff inserting above these witnesses
-  // moves them. The THIRD witness (arm-ordering.test.ts) is untouched by every one of these edits
-  // and unmoved.
+  // by exactly one, to :5960/:6021 — the FOURTH re-derivation. W1-T2811 then added ONE line ahead
+  // of both (an `assertWallClockBound` import, so this file's one wall-clock-bounded assertion
+  // declares itself) and they moved by exactly one again, to :5961/:6022 — the FIFTH. That is this
+  // note's own point: a line number is a QUERY over the current tree, and any diff inserting above
+  // these witnesses moves them. The THIRD witness (arm-ordering.test.ts) is untouched by every one
+  // of these edits and unmoved.
   const expectedKeys = [
     "armIfVerdictPermits:test/arm-ordering.test.ts:63:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:5960:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6021:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:5961:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6022:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(
