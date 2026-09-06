@@ -422,6 +422,12 @@
       "grepHint": "source-size-ratchet.mjs forensics"
     },
     {
+      "path": "docs/forensics/state-citation-check.md",
+      "title": "state-citation-check.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "state-citation-check.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/status-board.md",
       "title": "status-board.ts comment forensics",
       "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/status-board.ts` when its comments were compacted to the plain-language…",

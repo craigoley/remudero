@@ -86,7 +86,7 @@
   "scripts/source-size-ratchet.mjs": 85,
   "scripts/source-text-assertion-baseline.json": 0,
   "scripts/state-citation-baseline.json": 0,
-  "scripts/state-citation-check.mjs": 129,
+  "scripts/state-citation-check.mjs": 55,
   "scripts/strict-probe.ts": 20,
   "scripts/task-id-existence-baseline.json": 0,
   "scripts/task-id-existence-check.mjs": 109,
