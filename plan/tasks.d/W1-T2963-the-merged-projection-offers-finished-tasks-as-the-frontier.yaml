@@ -1,0 +1,48 @@
+- id: W1-T2963
+  title: "THE MERGED PROJECTION UNDER-CREDITS PRE-TRAILER WORK, SO THE FRONTIER OFFERS FINISHED TASKS — the daemon's next four candidates are W1-T121, W1-T122, W1-T123 and W1-T126, every one of which demonstrably shipped, so every dispatch decision starts from a queue whose head is phantom"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "W1-T1657", "W1-T2960"]
+  files: [src/lib/status.ts, test/the-frontier-does-not-offer-finished-work.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-06 against a trailer-built merged set of 796 ids over the whole commit history
+    of origin/main. The selector's top candidates, and what is actually on disk:
+      W1-T122  PLAN SHARDING (plan/tasks.d/) ...... 1141 shards exist ......... UNCREDITED
+      W1-T126  DAEMON SELF-FRESHNESS .............. checkFreshness x3 in daemon.ts . UNCREDITED
+      W1-T121  QUEUE GOVERNOR ..................... queue_governor in daemon.ts .... UNCREDITED
+      W1-T123  ci-gate dedupe-by-name ............. present in ci-gate.yml ......... UNCREDITED
+    All four shipped. All four are what `runnableCandidates` offers next. 586 of 1405 tasks read as
+    uncredited, and the ones at the FRONT are done — so the queue's head is phantom and the fleet
+    will rebuild finished work the moment dispatch resumes (W1-T2960).
+
+    THE CAUSE IS COVERAGE, NOT A BROKEN QUERY. CLAUDE.md already records that the trailer set
+    under-credits and must be unioned with `findMergedByHeadBranch`'s `run-<id>-<digits>` head-ref
+    path — #1657 carries ZERO trailers and is credited only by its head. These four predate the
+    trailer convention AND their branches are long deleted, so neither path reaches them: GitHub
+    deletes a head on merge, which CLAUDE.md's own clause (d) names as a zero that means "completed"
+    rather than "never started".
+
+    A THIRD PATH IS THEREFORE NEEDED AND ITS SHAPE IS ALREADY IN THE REPO. `scripts/task-id-existence-baseline.json`
+    is the precedent: a small, WRITTEN-REASON baseline for ids that resolve to neither surface because
+    they predate the surface. The same shape credits a pre-trailer task once, by hand, with a citation
+    a human can check — never a heuristic that guesses from file contents, which would silently
+    credit unfinished work and is strictly worse than the current under-credit.
+
+    DO NOT "FIX" THIS BY MAKING THE SELECTOR SKIP OLD IDS. Age is not evidence of completion, and a
+    rule that skipped low ids would hide genuinely unbuilt early tasks forever. The remedy must credit
+    what is DONE, not filter what is OLD.
+  acceptance:
+    - claim: "a task credited by the written-reason baseline is excluded from the runnable frontier"
+      proof: "unit test: W1-T2963: a baselined pre-trailer task is not offered as runnable"
+    - claim: "an id absent from every credit path and from the baseline is still offered, so nothing is hidden by age"
+      proof: "unit test: W1-T2963: an uncredited task with no baseline entry stays runnable"
+    - claim: "a baseline entry without a written reason is refused rather than trusted"
+      proof: "unit test: W1-T2963: a baseline entry with no reason is refused"
