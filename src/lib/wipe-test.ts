@@ -9,123 +9,50 @@ import type { LayeredLearningsHomes, LearningsIndex } from "./learnings.js";
 import type { RunResult } from "./run-result.js";
 import type { ProofExecOutcome } from "./review.js";
 
-/**
- * `rmd wipe-test` — the learning-utility A/B harness (ratifies P12, MASTER-PLAN
- * §Self-improvement, W1-T86).
+/** `rmd wipe-test` — paired A/B harness measuring whether learnings injection
+ *  (learnings.ts, W1-T19) changes a task's outcome (ratifies P12, MASTER-PLAN
+ *  §Self-improvement, W1-T86).
  *
- * W1-T19 injects task-matched LEARNINGS into every implement prompt (learnings.ts),
- * but nothing measures whether that injection changes an outcome — the claim "memory
- * helps" was unfalsifiable. The WIPE TEST [research: self-evolving-agents-2026] is the
- * falsifier this module implements: run the SAME task twice —
- *   ARM A (unmasked): normal injection, exactly what `runTaskBody` (run-task.ts) does
- *     today — {@link loadLayeredLearningsForTaskFiles} → {@link selectLearnings} →
- *     {@link renderMatchedLearnings}.
- *   ARM B (masked): injection returns "" — the STORE ITSELF IS NEVER TOUCHED (masking,
- *     not deletion). {@link computeMatchedLearningsForArm} enforces this at the type
- *     level: arm "B" returns before any of `deps`' three functions are ever called, so
- *     a test spying on those deps can prove zero reads reached the corpus.
- * — and report the deltas (turns/cost/verdict/strikes/proof_exec) between the two runs.
+ *  Runs the same task twice: arm A unmasked (the real chain `runTaskBody` uses), arm B
+ *  masked ({@link computeMatchedLearningsForArm} returns empty text without touching the
+ *  learnings store). {@link WipeTestFactor} names which thing arm B masks; {@link
+ *  wipeTestFactorMasksLearnings} / {@link wipeTestFactorMasksRecon} are the pure decisions
+ *  `run-task.ts`'s dispatch reads.
  *
- * PAIRING DISCIPLINE (the design's own words): a single pair is an anecdote. Only the
- * AGGREGATE over many seeded pairs ({@link aggregateWipeTestPairs}) is treated as
- * signal; each pair is ledgered ({@link ledgerWipeTestPair}, step `"wipetest.pair"`)
- * so the aggregate can be recomputed from the ledger at any time, not just from
- * whatever pairs happen to be in memory in one process.
- *
- * SANDBOX-ONLY BY DEFAULT: {@link resolveWipeTestTarget} refuses to target anything
- * but the sandbox unless the operator explicitly opts out — a wipe-test run burns
- * real budget running a task TWICE, and must never silently land on the primary repo.
- *
- * This module is the HARNESS. Running the experiment (scheduling real pairs against
- * the sandbox, reading the aggregate) is an operator action (Rule 18) — see `rmd
- * wipe-test`'s CLI wiring in run-task.ts.
- *
- * SUBJECT SUPPLY (W1-T1253): "many seeded pairs" needs SUBJECTS to seed pairs with, and
- * a hand-written list (the sandbox's original three tasks) runs out — worse, once its
- * work has already merged, re-running it is not a subject at all, just a repeat.
- * {@link generateSandboxTask} is that supply: given the shard filenames
- * (`learnings/index.json`'s keys) a subject should select and an ever-incrementing `seq`,
- * it builds a FRESH `files:` list from the real project-layer corpus, never from a fixed
- * roster. A subject is defined by the shards its `files:` select, not by its prose
- * (injection is task-matched — {@link loadLayeredLearningsForTaskFiles} delegates to
- * `learnings.ts`'s `candidateShardFiles`), and that mapping is many-to-many (one path can
- * select two shards at once), so {@link generateSandboxTask} always reports the shards a
- * subject REALLY selects by re-running the same lookup injection itself uses, never by
- * reasoning about which path was picked.
- * NEVER LEDGER A PAIR NEITHER ARM MEASURED (W1-T1252). Every sandbox subject can end up
- * already-merged, in which case `runTask`'s own W1-T319 guard refuses BOTH arms at zero
- * cost (`task_already_merged`) — a pair of two refusals, not a comparison. Two guards
- * exist because neither alone sees every cause (design note (iii)):
- *   (i) A PRE-FLIGHT, before either arm spawns — {@link resolveWipeTestPreflight}, PURE,
- *       consulted by `wipeTestCommand` once it knows whether the projection already
- *       reports the subject merged. Refuses up front, naming the reason; neither arm is
- *       dispatched and no `wipetest.pair` line is written.
- *   (ii) A LEDGER-TIME BACKSTOP for every OTHER zero-work cause (`blocked_transient`, a
- *        linter refusal, a spawn that never happened) — {@link ledgerWipeTestPair} itself
- *        refuses to write a pair whose two arms both report zero turns AND zero cost.
- * `--rerun` passthrough is deliberately NOT built here (design note (iv)): it would have
- * to reach both arms atomically or it manufactures a result, and this task is scoped to
- * refusing non-measurements, not to un-blocking the harness.
- *
- * A FACTOR NAMES *WHAT* AN ARM VARIES (W1-T2512). `WipeTestArm` ("A"|"B") is only a POSITION;
- * until this task, exactly one thing was ever hard-coded behind position B —
- * {@link computeMatchedLearningsForArm}'s masked injection. `WipeTestFactor` names that
- * choice explicitly ({@link WIPE_TEST_FACTORS}: `"learnings"` | `"recon"`) so a second
- * factor — RECON, the single most expensive per-dispatch cost this harness can reach (a
- * whole worker spawn, `RECON_MAX_TURNS`-capped, routed through `routes.recon`) — has a seam
- * at every site the learnings factor already lives: {@link wipeTestFactorMasksLearnings} /
- * {@link wipeTestFactorMasksRecon} are the pure decision `run-task.ts`'s arm dispatch consults
- * (generalising the old `arm === "B" ? { maskLearnings: true } : {}` one-liner into two
- * independent per-factor checks), {@link WipeTestPair}/{@link WipeTestDelta} carry `factor` so
- * a ledgered pair says WHICH factor it varied, and {@link aggregateWipeTestPairs} REFUSES to
- * average pairs across factors — an aggregate is only ever signal for ONE factor at a time.
- * `factor` is OPTIONAL on {@link WipeTestPair} and read via {@link wipeTestPairFactor}
- * (default `"learnings"`) so every pair ledgered before this task — and every hand-seeded
- * fixture in the existing test suite — still means exactly what it meant: the only factor
- * that existed then. THE RECON FACTOR MASKS, NEVER DELETES, same discipline as learnings: arm
- * B of a recon-factor pair skips the recon spawn entirely (see `run-task.ts`'s `opts.maskRecon`)
- * and never reads or writes the recon artifact store (`loadReconArtifact`/`writeReconArtifact`
- * both sit inside the branch `maskRecon` skips outright) — masking the WORK, not the STORE.
- */
+ *  Invariants: one pair is an anecdote, only {@link aggregateWipeTestPairs} is signal;
+ *  `--repo` defaults to the sandbox ({@link resolveWipeTestTarget}); neither arm may arm
+ *  or merge its own PR ({@link resolveWipeTestArmPermission}); a pair where neither arm
+ *  did work is never ledgered ({@link isWipeTestNullPair}). Running the experiment is an
+ *  operator action (Rule 18); this module is the harness. Why:
+ *  docs/forensics/wipe-test.md#module-header (P12, W1-T86, W1-T1252, W1-T1253, W1-T1256, W1-T2512). */
 
 // ── ARM A/B PROMPT ASSEMBLY ─────────────────────────────────────────────────
 
 export type WipeTestArm = "A" | "B";
 
-/**
- * WHICH FACTOR a wipe-test pair varies (W1-T2512) — the thing arm B masks. `"learnings"` is
- * the original (and, before this task, ONLY) factor: {@link computeMatchedLearningsForArm}
- * masks task-matched learnings injection. `"recon"` is the new one this task adds: masks the
- * recon worker spawn (`run-task.ts`'s `opts.maskRecon`) — the largest per-dispatch cost this
- * harness can now ask about, per this task's own filing (a whole worker spawn vs. text in a
- * prompt).
- */
+/** Which thing arm B masks (W1-T2512): `"learnings"` masks {@link
+ *  computeMatchedLearningsForArm}'s injection; `"recon"` masks the recon worker spawn
+ *  (`run-task.ts`'s `opts.maskRecon`). Why: docs/forensics/wipe-test.md#wipetestfactor. */
 export type WipeTestFactor = "learnings" | "recon";
 
-/** Every factor `rmd wipe-test --factor <name>` accepts — the ONE place the roster lives, so
- *  {@link resolveWipeTestFactor}'s validation and any future listing (`rmd --help`) read the
- *  same set rather than two hand-copies drifting apart. */
+/** Every factor `rmd wipe-test --factor <name>` accepts — the one source {@link
+ *  resolveWipeTestFactor} validates against. Why: docs/forensics/wipe-test.md#wipe_test_factors. */
 export const WIPE_TEST_FACTORS: readonly WipeTestFactor[] = ["learnings", "recon"];
 
-/** Does arm `arm` of a `factor`-factor pair mask LEARNINGS injection? Pure — the single
- *  decision point `run-task.ts`'s arm dispatch consults in place of the old hard-coded
- *  `arm === "B" ? { maskLearnings: true } : {}`. True only for `factor: "learnings"`, arm
- *  `"B"` — a recon-factor pair's arm B never touches learnings, and vice versa: EXACTLY ONE
- *  factor is masked per pair, never both, never neither (on arm B). */
+/** True only for `factor: "learnings"`, arm `"B"` — the pure decision `run-task.ts`'s
+ *  dispatch consults instead of hard-coding it. Why: docs/forensics/wipe-test.md#wipetestfactormaskslearnings. */
 export function wipeTestFactorMasksLearnings(factor: WipeTestFactor, arm: WipeTestArm): boolean {
   return factor === "learnings" && arm === "B";
 }
 
-/** Does arm `arm` of a `factor`-factor pair mask RECON (skip the spawn entirely)? Pure
- *  sibling of {@link wipeTestFactorMasksLearnings} — same shape, opposite factor. True only
- *  for `factor: "recon"`, arm `"B"`. */
+/** Sibling of {@link wipeTestFactorMasksLearnings} for the `"recon"` factor — same shape,
+ *  opposite masked thing. Why: docs/forensics/wipe-test.md#wipetestfactormasksrecon. */
 export function wipeTestFactorMasksRecon(factor: WipeTestFactor, arm: WipeTestArm): boolean {
   return factor === "recon" && arm === "B";
 }
 
-/** The load → select → render chain runTaskBody's real dispatch calls, as an injectable
- *  seam — so a test can spy on each function and prove arm B never calls any of them
- *  (the store is never touched, only the resulting text is forced empty). */
+/** The load → select → render chain `runTaskBody` calls, as an injectable seam so a test
+ *  can spy on each step and prove arm B calls none of them. */
 export interface LearningsInjectionDeps {
   loadLayeredLearningsForTaskFiles: typeof loadLayeredLearningsForTaskFiles;
   selectLearnings: typeof selectLearnings;
@@ -145,9 +72,8 @@ export interface MatchedLearningsInput {
   budgetChars?: number;
 }
 
-/** What one arm's learnings-injection step produced — everything `run-task.ts`'s
- *  `learnings.injected` ledger line already logs, so the real CLI path can keep
- *  logging identically regardless of which arm ran. */
+/** What one arm's learnings-injection step produced — the fields `run-task.ts`'s
+ *  `learnings.injected` ledger line logs, so either arm logs identically. */
 export interface MatchedLearningsResult {
   matchedLearnings: string;
   selectedIds: string[];
@@ -157,13 +83,10 @@ export interface MatchedLearningsResult {
 
 const MASKED_RESULT: MatchedLearningsResult = { matchedLearnings: "", selectedIds: [], droppedIds: [] };
 
-/**
- * Compute the matched-learnings text (and its bookkeeping) for ONE arm of a wipe-test
- * pair. Arm "B" returns {@link MASKED_RESULT} WITHOUT calling any of `deps` — the store
- * (`learnings/*.yaml`, the user-overall home, the global artifact) is never opened, let
- * alone written; only the injected TEXT is forced empty. Arm "A" runs the exact chain
- * `runTaskBody` uses for a normal (non-wipe-test) run.
- */
+/** Compute the matched-learnings text for one arm. Arm "B" returns {@link MASKED_RESULT}
+ *  without calling `deps` — masking the text, never touching the store. Arm "A" runs the
+ *  real chain `runTaskBody` uses for a normal run. Why:
+ *  docs/forensics/wipe-test.md#computematchedlearningsforarm. */
 export function computeMatchedLearningsForArm(
   arm: WipeTestArm,
   input: MatchedLearningsInput,
@@ -182,12 +105,8 @@ export function computeMatchedLearningsForArm(
 
 // ── PAIRED RESULTS + DELTAS ─────────────────────────────────────────────────
 
-/** One arm's outcome — the fields the design calls out ("reports deltas: num_turns,
- *  notional cost, verdict, strike count, proof_exec"). {@link RunResult} itself
- *  carries only verdict/costUsd (see run-result.ts's own doc for why the others live
- *  only on the ledger); this is the richer shape a wipe-test pair needs, built either
- *  by hand (fixtures, tests) or derived from a real run via
- *  {@link deriveWipeTestRunResult}. */
+/** One arm's outcome: turns, cost, verdict, strikes, proof_exec — richer than {@link
+ *  RunResult}. Why: docs/forensics/wipe-test.md#wipetestrunresult. */
 export interface WipeTestRunResult {
   taskId: string;
   runId: string;
@@ -201,28 +120,26 @@ export interface WipeTestRunResult {
 /** One wipe-test pair: the SAME task, arm A (unmasked) vs arm B (masked). */
 export interface WipeTestPair {
   taskId: string;
-  /** W1-T2512: WHICH factor this pair varied. OPTIONAL — every pair ledgered, or hand-seeded
-   *  in a test fixture, before this task never named a factor because only one existed; that
-   *  silence still means "learnings" (see {@link wipeTestPairFactor}), never a new unknown
-   *  default. Set explicitly by `wipeTestCommand`'s `--factor` resolution on every NEW pair. */
+  /** Which factor this pair varied. Optional — absent means "learnings" (see {@link
+   *  wipeTestPairFactor}), the only factor that existed before W1-T2512. Why:
+   *  docs/forensics/wipe-test.md#wipetestpair-factor-field. */
   factor?: WipeTestFactor;
   armA: WipeTestRunResult;
   armB: WipeTestRunResult;
 }
 
-/** {@link WipeTestPair.factor}, defaulted — the ONE place "absent means learnings" is decided,
- *  so every reader (delta computation, ledgering, aggregation) agrees rather than each
- *  re-deriving the same `?? "learnings"`. */
+/** {@link WipeTestPair.factor}, defaulted — the one place every reader (delta, ledger,
+ *  aggregate) resolves "absent means learnings" identically. */
 export function wipeTestPairFactor(pair: WipeTestPair): WipeTestFactor {
   return pair.factor ?? "learnings";
 }
 
-/** The deltas one pair yields — always B minus A, so a POSITIVE turns/cost delta means
- *  masking the pair's factor made the run more expensive (i.e. that factor was HELPING). */
+/** The deltas one pair yields — always B minus A, so a positive turns/cost delta means
+ *  masking the factor made the run more expensive (i.e. that factor was helping). */
 export interface WipeTestDelta {
   taskId: string;
-  /** W1-T2512: carried through from the pair (via {@link wipeTestPairFactor}) so a delta
-   *  taken in isolation — logged, printed, ledgered — still says what it measured. */
+  /** Carried from the pair via {@link wipeTestPairFactor}, so a delta read in isolation
+   *  still says what it measured. */
   factor: WipeTestFactor;
   turnsDelta: number;
   costDelta: number;
@@ -259,40 +176,31 @@ export function computeWipeTestDelta(pair: WipeTestPair): WipeTestDelta {
   };
 }
 
-/** The ledger `step` a pair's deltas are recorded under — accumulated over time so
- *  {@link aggregateWipeTestPairs} can be recomputed from the ledger, not only from
- *  pairs held in one process's memory. */
+/** The ledger `step` a pair's deltas are recorded under, so {@link aggregateWipeTestPairs}
+ *  can be recomputed from the ledger, not only from pairs held in memory. */
 export const WIPE_TEST_PAIR_STEP = "wipetest.pair";
 
-/** Did this one arm do any measurable work at all? Zero turns AND zero cost means no
- *  worker ever ran — whatever the verdict says caused it (`task_already_merged`,
- *  `blocked_transient`, a linter refusal, a spawn that never happened). */
+/** Did this arm do any measurable work? Zero turns and zero cost means no worker ran,
+ *  whatever the verdict names as the cause. Why: docs/forensics/wipe-test.md#armdidnowork. */
 function armDidNoWork(arm: WipeTestRunResult): boolean {
   return arm.numTurns === 0 && arm.costUsd === 0;
 }
 
-/** THE LEDGER-TIME BACKSTOP (design note (ii)): a pair is a non-measurement, whatever
- *  produced it, when NEITHER arm did any work — the pre-flight ({@link
- *  resolveWipeTestPreflight}) catches the one cause it can see (merged-by-id) BEFORE
- *  either arm spawns; this catches every other cause, AFTER both arms have already
- *  returned, so it must run regardless of which guard the pre-flight itself missed. */
+/** True iff neither arm did any work — a non-measurement whatever caused it; the
+ *  ledger-time backstop behind {@link resolveWipeTestPreflight}. Why: docs/forensics/wipe-test.md#iswipetestnullpair. */
 export function isWipeTestNullPair(pair: WipeTestPair): boolean {
   return armDidNoWork(pair.armA) && armDidNoWork(pair.armB);
 }
 
-/** Compute + LEDGER one pair's deltas (one `wipetest.pair` NDJSON line), returning the
- *  same delta the ledger line carries. Pairing discipline (the design's own words):
- *  this is ONE data point — an anecdote — never itself a verdict on whether learnings
- *  help; only {@link aggregateWipeTestPairs} over many ledgered pairs is signal.
- *
- *  NEVER WRITES A NULL PAIR (W1-T1252 design note (ii)): when {@link isWipeTestNullPair}
- *  holds — both arms report zero turns and zero cost — this returns the (still pure,
- *  still computed) delta for the caller's own reporting, but performs NO ledger I/O at
- *  all: the ledger is left byte-for-byte as it was. An aggregate that averaged in
- *  fabricated zeroes would be worse than an aggregate with fewer points (rationale (5)). */
+/** Compute and ledger one pair's deltas (one `wipetest.pair` line). Writes nothing when
+ *  {@link isWipeTestNullPair} holds — the ledger stays byte-for-byte unchanged, since
+ *  averaging in a fabricated zero would be worse than fewer points. Why:
+ *  docs/forensics/wipe-test.md#ledgerwipetestpair. */
 export function ledgerWipeTestPair(ledgerPath: string, runId: string, pair: WipeTestPair): WipeTestDelta {
   const delta = computeWipeTestDelta(pair);
   if (isWipeTestNullPair(pair)) return delta;
+  // Why: docs/forensics/wipe-test.md#ledgerwipetestpair (W1-T2512 — a pre-existing row
+  // carries no `factor` key; wipeTestPairFactor's default still aggregates it correctly).
   appendLedger(ledgerPath, {
     run_id: runId,
     task_id: pair.taskId,
@@ -318,13 +226,11 @@ export function ledgerWipeTestPair(ledgerPath: string, runId: string, pair: Wipe
 
 // ── AGGREGATION ──────────────────────────────────────────────────────────────
 
-/** The aggregate over N pairs — THE publishable learning-utility number (the design's
- *  own framing: "the WS-12 receipts thesis applied to memory"). A single pair is an
- *  anecdote; this is signal. */
+/** The aggregate over N pairs — the publishable learning-utility number. A single pair
+ *  is an anecdote; this is signal. Why: docs/forensics/wipe-test.md#wipetestaggregate. */
 export interface WipeTestAggregate {
-  /** W1-T2512: which factor EVERY pair in this aggregate varied — `null` only for the
-   *  zero-pair empty aggregate, where no factor was observed at all. Never a mix: see
-   *  {@link aggregateWipeTestPairs}'s own doc for the refusal that makes this guarantee hold. */
+  /** Which factor every pair in this aggregate varied — `null` only for the empty
+   *  aggregate. Never a mix: {@link aggregateWipeTestPairs} refuses to average two. */
   factor: WipeTestFactor | null;
   pairs: number;
   avgTurnsDelta: number;
@@ -344,22 +250,11 @@ const EMPTY_AGGREGATE: WipeTestAggregate = {
   verdictChangedRate: 0,
 };
 
-/**
- * Aggregate many seeded pairs into ONE report — mirrors retro.ts's
- * `aggregateByType`/`aggregateByClass` shape (map → reduce → round). Zero pairs is a
- * well-defined, non-throwing empty aggregate, never a NaN.
- *
- * NEVER MIXES TWO FACTORS INTO ONE REPORT (W1-T2512): every pair's factor is read via
- * {@link wipeTestPairFactor} (so a pre-this-task pair with no `factor` field reads as
- * `"learnings"`, unchanged); if the pairs passed in name MORE THAN ONE distinct factor, this
- * throws rather than silently averaging a learnings delta together with a recon delta — two
- * numbers that answer different questions have no shared unit. THE AGGREGATE CAN STILL BE
- * TAKEN PER FACTOR: filter `pairs` to one factor before calling (e.g. `pairs.filter((p) =>
- * wipeTestPairFactor(p) === "recon")`), the same way a caller already filters by `taskId`
- * today. Reading pairs back off the ledger and grouping by `step === WIPE_TEST_PAIR_STEP`
- * carries this straight through: a ledger row's own `factor` cell (or its absence) is what
- * `wipeTestPairFactor` reads.
- */
+/** Aggregate many seeded pairs into one report (map → reduce → round). Zero pairs is a
+ *  well-defined empty aggregate, never NaN. Refuses to average pairs across factors —
+ *  throws if they name more than one {@link wipeTestPairFactor}, since a learnings delta
+ *  and a recon delta share no unit; filter `pairs` to one factor first. Why:
+ *  docs/forensics/wipe-test.md#aggregatewipetestpairs. */
 export function aggregateWipeTestPairs(pairs: WipeTestPair[]): WipeTestAggregate {
   if (pairs.length === 0) return EMPTY_AGGREGATE;
   const deltas = pairs.map(computeWipeTestDelta);
@@ -387,32 +282,30 @@ export function aggregateWipeTestPairs(pairs: WipeTestPair[]): WipeTestAggregate
 
 // ── SANDBOX SUBJECT GENERATION (W1-T1253) ────────────────────────────────────
 
-/** One synthetic wipe-test subject for the SANDBOX target: a `files:` list a generated task
- *  record would carry, plus the shard filenames those files ACTUALLY select. */
+/** One synthetic wipe-test subject for the sandbox target: a `files:` list a generated task
+ *  record would carry, plus the shard filenames those files actually select. Why:
+ *  docs/forensics/wipe-test.md#sandboxsubject. */
 export interface SandboxSubject {
-  /** Ever-distinct id — see {@link generateSandboxTask}'s `seq` param; never drawn from a
-   *  fixed roster, so it never runs out the way the sandbox's original three tasks did. */
+  /** Ever-distinct id (see {@link generateSandboxTask}'s `seq`) — never drawn from a
+   *  fixed roster, so it never runs out. */
   id: string;
   /** The `files:` a task record built from this subject would carry. */
   files: string[];
-  /** The shard filenames `files` ACTUALLY select, per {@link candidateShardFiles} run
-   *  against the real `index` — design (ii): the mapping is many-to-many (one path can
-   *  select two shards at once), so this is always the real lookup's output, never a
-   *  count of the paths that were picked. */
+  /** The shard filenames `files` actually select, per {@link candidateShardFiles} — the
+   *  real lookup's output, since one path can select more than one shard. */
   selectedShards: string[];
 }
 
 /** The literal (glob-free) entries of `index.files[shard].globs` — a glob containing `*` can
- *  match paths this generator never names, so only literal globs are usable AS a path. */
+ *  match paths this generator never names, so only literal globs are usable as a path. */
 function literalGlobsFor(index: LearningsIndex, shard: string): string[] {
   return (index.files[shard]?.globs ?? []).filter((glob) => !glob.includes("*"));
 }
 
-/** One literal path per shard in `index` that selects THAT shard and no other — found by
- *  actually RUNNING {@link candidateShardFiles} over every literal glob the corpus carries
- *  (design ii: never reason about paths, always ask the real lookup), so it stays correct
- *  as the corpus grows or its many-to-many overlaps shift. A shard with no isolating
- *  literal path in the current corpus is simply absent from the returned map. */
+/** One literal path per shard in `index` that selects that shard and no other, found by
+ *  running {@link candidateShardFiles} rather than reasoning about paths. A shard with no
+ *  isolating path in the current corpus is absent from the returned map. Why:
+ *  docs/forensics/wipe-test.md#isolatingpathsbyshard. */
 function isolatingPathsByShard(index: LearningsIndex): Map<string, string> {
   const out = new Map<string, string>();
   for (const shard of Object.keys(index.files)) {
@@ -440,24 +333,11 @@ function exactMultiShardPath(index: LearningsIndex, shards: string[]): string | 
   return undefined;
 }
 
-/**
- * Generate ONE fresh sandbox subject that selects EXACTLY `shards` (design i/ii/iii): a new
- * `files:` list synthesized from the real project-layer corpus (`index`, i.e. a loaded
- * `learnings/index.json`), never a hand-written subject list that runs out. PURE — no I/O
- * beyond the already-loaded `index` — so `seq` (an ever-incrementing counter) is the
- * caller's job; nothing here reads a clock or randomness, so it stays unit-testable against
- * hand-seeded fixtures exactly like this module's other pure functions.
- *
- * Prefers a SINGLE literal path that reaches `shards` exactly in one hop (the corpus's
- * many-to-many globs make this possible — e.g. one path for both `ci.yaml` and
- * `failures.yaml`); falls back to the union of one per-shard ISOLATING path (a path
- * selecting that shard and no other), which the real project-layer corpus provides for
- * every shard today (architecture/ci/failures/platform/testing each have at least one).
- *
- * Throws (never silently returns a wrong subject) if `shards` is empty, names a shard
- * `index` does not carry, or some requested shard has neither an exact multi-shard path
- * nor an isolating one in the current corpus.
- */
+/** Generate one fresh sandbox subject selecting exactly `shards`, synthesized from the
+ *  real project-layer corpus rather than a fixed roster that runs out (W1-T1253). Pure —
+ *  `seq` is the caller's job. Prefers a single literal path reaching `shards` in one hop,
+ *  falling back to one isolating path per shard; throws rather than returning a wrong
+ *  subject. Why: docs/forensics/wipe-test.md#generatesandboxtask. */
 export function generateSandboxTask(index: LearningsIndex, shards: string[], seq: number): SandboxSubject {
   if (shards.length === 0) {
     throw new Error("generateSandboxTask: 'shards' must name at least one shard.");
@@ -494,28 +374,13 @@ export function generateSandboxTask(index: LearningsIndex, shards: string[], seq
 
 // ── NO-MERGE BOUNDARY (design note (iv), (vi), (ix) of W1-T1256) ────────────
 
-/**
- * OPERATOR RULING 2026-08-23 (W1-T1256, design note (iv)): NEITHER WIPE-TEST ARM MAY ARM OR
- * MERGE ITS OWN PR. The chain this closes: arm A succeeds -> arm A's PR merges -> `origin/main`
- * moves -> `projectPlan` reports the subject merged -> arm B's own already-merged read
- * (`runTask`'s W1-T319 guard) refuses arm B at zero cost. A SUCCESSFUL ARM A DESTROYS ITS OWN
- * CONTROL, and no LOCAL reset reaches this: arm A's pushed run branch and open PR are REMOTE
- * objects, `task_already_merged` reads them through `projectPlan`/the ledger, and
- * `worktreeAdd(…, "origin/main")` means a merged arm A moves the very ref arm B's worktree is
- * cut from — a fresh clone or `reset --hard origin/main` both clone/reset TO the contaminated
- * state (design note (iii)). The ruling instead measures the pair AT THE VERDICT: every
- * quantity `wipetest.pair` records — turns, cost, verdict, strikes, proof_exec — is already
- * determined before any merge, so refusing to arm loses no signal.
- *
- * PURE (design note (ix), DECISIONS SPLIT FROM I/O): the ONE bit `run-task.ts`'s deferred
- * arm-at-verdict call site already knows — its own `opts.noMerge` — decides. `run-task.ts`
- * never re-derives this decision or duplicates its wording; it calls this function immediately
- * before it would otherwise call `armAutoMergeAtOpen` and skips that call outright when this
- * refuses. That split is what lets the falsifier (test/wipe-test-arm-isolation.test.ts) drive
- * both directions without a network: boundary present → arm B still dispatches and never
- * observes a merged verdict; boundary REMOVED (the test's own control, `noMerge: false`) →
- * arm B demonstrably refuses, reproducing the exact contamination this task fixes.
- */
+/** Operator ruling (W1-T1256): neither wipe-test arm may arm or merge its own PR — a
+ *  merged arm A moves `origin/main`, flipping arm B's own already-merged read (`runTask`'s
+ *  W1-T319 guard) and refusing arm B at zero cost. The ruling instead measures a pair at
+ *  the verdict (turns, cost, verdict, strikes, proof_exec are all determined before any
+ *  merge), so refusing to arm loses no signal. `run-task.ts` consults this immediately
+ *  before it would otherwise arm auto-merge. Falsifier: test/wipe-test-arm-isolation.test.ts.
+ *  Why: docs/forensics/wipe-test.md#resolvewipetestarmpermission. */
 export interface WipeTestArmDecision {
   armed: boolean;
   reason?: string;
@@ -534,50 +399,36 @@ export function resolveWipeTestArmPermission(noMerge: boolean): WipeTestArmDecis
 
 // ── ARM ORDER ALTERNATION (design note (vii) of W1-T1256) ───────────────────
 
-/**
- * NOT A FIX (design note (vii) says so explicitly, and it survives the no-merge-boundary
- * ruling) — a GUARD against a residual or unknown leak the boundary above does not name. Arm A
- * (learnings ON) dispatching first on every pair, unconditionally, would make any such leak
- * SYSTEMATIC and one-directional; alternating converts a fixed bias into random error — still
- * not clean, but strictly better than a fixed order, and it makes a leak visible as scatter
- * instead of drift.
- *
- * PURE: `pairIndex` is the caller's own count of pairs already ledgered for this task (parity,
- * not identity, decides which arm dispatches first) — this never reads the ledger itself, so a
- * test drives both orders without I/O. The returned tuple is DISPATCH order only; it never
- * changes which arm is semantically "A" (learnings-on) vs "B" (masked) — `wipeTestCommand`
- * still assembles the pair's `armA`/`armB` fields by arm identity, not by call order.
- */
+/** A guard against a residual leak the no-merge boundary above does not name — arm A
+ *  dispatching first on every pair would make such a leak systematic; alternating turns
+ *  a fixed bias into scatter. Pure: `pairIndex` is the caller's own ledgered-pair count
+ *  (parity decides order; it never changes which arm is "A" vs "B"). Why:
+ *  docs/forensics/wipe-test.md#resolvewipetestarmorder. */
 export function resolveWipeTestArmOrder(pairIndex: number): [WipeTestArm, WipeTestArm] {
   return pairIndex % 2 === 0 ? ["A", "B"] : ["B", "A"];
 }
 
 // ── SANDBOX-ONLY GUARD ───────────────────────────────────────────────────────
 
-/** The default (and, without an explicit override, ONLY) repo `rmd wipe-test` targets.
- *  A wipe-test run dispatches a real task TWICE — real budget, real PRs — so it must
- *  never silently land on the primary repo (same fail-loud-control-surface doctrine as
- *  `resolveDaemonTarget`, run-task.ts). */
+/** The default (and, without an override, only) repo `rmd wipe-test` targets — a run
+ *  dispatches a real task twice, so it must never silently land on the primary repo. Why:
+ *  docs/forensics/wipe-test.md#wipe_test_sandbox_default. */
 export const WIPE_TEST_SANDBOX_DEFAULT = "remudero-sandbox";
 
 export interface WipeTestTarget {
   repo: string;
 }
 
-/** `--flag value` lookup over a raw argv tail — same tiny helper `run-task.ts` defines
- *  for its own CLI parsing, duplicated here (not imported) because `src/lib` may never
- *  import the CLI entrypoint (`.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` rule). */
+/** `--flag value` lookup over a raw argv tail, duplicated from `run-task.ts` (not
+ *  imported — `src/lib` may not import the CLI entrypoint). */
 function flagValue(rest: string[], flag: string): string | undefined {
   const i = rest.indexOf(flag);
   return i >= 0 ? rest[i + 1] : undefined;
 }
 
-/**
- * Resolve which repo `rmd wipe-test` targets — PURE (no I/O), so the guard is
- * unit-testable. Defaults to {@link WIPE_TEST_SANDBOX_DEFAULT}; any OTHER `--repo`
- * (explicitly including the primary repo) is REFUSED unless `--allow-non-sandbox` is
- * also passed — experiments never burn a non-sandbox repo unflagged.
- */
+/** Resolve which repo `rmd wipe-test` targets. Pure. Defaults to {@link
+ *  WIPE_TEST_SANDBOX_DEFAULT}; any other `--repo` is refused unless `--allow-non-sandbox`
+ *  is also passed — experiments never burn a non-sandbox repo unflagged. */
 export function resolveWipeTestTarget(
   rest: string[],
   sandboxDefault: string = WIPE_TEST_SANDBOX_DEFAULT,
@@ -597,17 +448,9 @@ export function resolveWipeTestTarget(
   return { target: { repo } };
 }
 
-/**
- * Resolve WHICH FACTOR `rmd wipe-test --factor <name>` varies (W1-T2512) — PURE, same shape
- * as {@link resolveWipeTestTarget} right above (a `--flag` lookup over the raw argv tail,
- * defaulted, validated, refused loud on junk — the fail-loud-control-surface doctrine this
- * module's other CLI-facing resolvers already keep). Omitted `--factor` defaults to
- * `"learnings"` — the ONLY factor that existed before this task — so every existing
- * `wipeTestCommand` invocation with no `--factor` behaves BYTE-IDENTICALLY to before. An
- * unrecognized value is refused (never silently coerced to the default): the same command
- * that fell through to an unattended drain on an unknown subcommand must not fall through to
- * measuring the wrong factor on an unknown `--factor`.
- */
+/** Resolve which factor `rmd wipe-test --factor <name>` varies (W1-T2512); pure, same
+ *  shape as {@link resolveWipeTestTarget}. Omitted defaults to `"learnings"`; unrecognized
+ *  is refused, never silently coerced. Why: docs/forensics/wipe-test.md#resolvewipetestfactor. */
 export function resolveWipeTestFactor(rest: string[]): { factor: WipeTestFactor } | { error: string } {
   const raw = flagValue(rest, "--factor");
   if (raw === undefined) return { factor: "learnings" };
@@ -621,29 +464,20 @@ export function resolveWipeTestFactor(rest: string[]): { factor: WipeTestFactor 
 
 // ── PRE-FLIGHT REFUSAL (design note (i)) ─────────────────────────────────────
 
-/** What the caller already knows about `taskId` from the SAME projection `runTask`'s own
- *  W1-T319 already-merged guard consults — `wipeTestCommand` derives this via `projectPlan`
- *  over a batched GitHub gateway (mirroring `runTaskBody` exactly) BEFORE dispatching either
- *  arm, so this module never re-derives it (and never imports the CLI-only pieces that
- *  derivation needs — `src/lib` may not import the CLI entrypoint). */
+/** What the caller already knows about `taskId` from the same projection `runTask`'s own
+ *  W1-T319 already-merged guard consults, derived before either arm dispatches — this
+ *  module never re-derives it, nor imports the CLI-only pieces that would take
+ *  (`src/lib` may not import the CLI entrypoint). */
 export interface WipeTestMergedState {
   merged: boolean;
   prUrl?: string;
 }
 
-/**
- * PRE-FLIGHT for `rmd wipe-test` (design note (i)): when the projection already reports
- * `taskId` merged, refuse BEFORE either arm is dispatched, naming the reason — instead of
- * paying for two arms that `runTask`'s own W1-T319 guard would refuse anyway at zero cost,
- * and instead of ledgering the resulting non-measurement as a `wipetest.pair` line.
- *
- * PURE (no I/O): takes the already-derived {@link WipeTestMergedState} rather than deriving
- * it itself, so this refusal — and its exact wording — is unit-testable without a live
- * GitHub read or a real plan on disk. `--rerun` passthrough is deliberately NOT built here
- * (design note (iv)): there is no override to consult, so a merged subject is refused
- * unconditionally until the CLI wires one (which must reach BOTH arms atomically, or not
- * at all).
- */
+/** Pre-flight for `rmd wipe-test`: refuse before either arm dispatches when the
+ *  projection already reports `taskId` merged, naming the reason — instead of paying
+ *  for two arms `runTask`'s own W1-T319 guard would refuse anyway. Pure: takes the
+ *  already-derived {@link WipeTestMergedState}. Why:
+ *  docs/forensics/wipe-test.md#resolvewipetestpreflight. */
 export function resolveWipeTestPreflight(taskId: string, state: WipeTestMergedState): { ok: true } | { error: string } {
   if (!state.merged) return { ok: true };
   return {
@@ -659,18 +493,10 @@ export function resolveWipeTestPreflight(taskId: string, state: WipeTestMergedSt
 
 const DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
 
-/**
- * Best-effort derivation of a {@link WipeTestRunResult} from a real {@link RunResult}
- * plus the ledger — turns {@link RunResult}'s verdict/costUsd (all it carries) into the
- * richer shape {@link computeWipeTestDelta} needs. `numTurns` is exact (summed over
- * THIS run's own `run_id`, same `DONE_STEPS` retro.ts's `gatherRuns` sums); `strikes`
- * and `proofExec` are task-scoped best-effort reads (fix/review are separate rungs that
- * ledger under their OWN run ids, not this one) — good enough for the CLI's live report,
- * NOT itself a new decision-relevant ledger reader. Not exercised by this task's
- * REQUIRED unit tests (those work off hand-seeded fixtures, per the design's own
- * acceptance wording) — this is the thin glue "running the experiment is
- * operator-scheduled" (the task's own note) anticipates.
- */
+/** Best-effort derivation of a {@link WipeTestRunResult} from a real {@link RunResult} plus
+ *  the ledger. `numTurns` sums this run's own `DONE_STEPS`; `strikes`/`proofExec` are
+ *  task-scoped best-effort reads. CLI glue only. Why:
+ *  docs/forensics/wipe-test.md#derivewipetestrunresult. */
 export function deriveWipeTestRunResult(
   result: RunResult,
   ledgerLines: Array<Record<string, unknown>>,
