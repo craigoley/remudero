@@ -1,0 +1,33 @@
+- id: W1-T2989
+  title: "THE HOST WORKER BUDGET OF 4 WAS SIZED FOR A SMALLER BOX AND NOW SHEDS REVIEW CAPACITY ON AN 8-CORE HOST WITH 28 GiB FREE — it is the next governor to bind once W1-T2985 removes the cpu-pressure shed"
+  repo: remudero
+  depends_on: [W1-T2987]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  origin: architect
+  plan_refs: ["W1-T2853", "W1-T2985", "W1-T1049", "W1-T312"]
+  files: [plan/policy.yaml]
+  status: queued
+  attempts: 0
+  rationale: |
+    `sweep.reviewCapacity.hostWorkerBudget` is 4. The shed fires when
+    `activeWorkers + effectiveWidth > hostWorkerBudget`, and today's steady state is 2 dispatch
+    lanes plus a detached retro = 3 active, so a review width of 2 already crosses it. MEASURED:
+    22 `host-worker-budget` sheds across the union, newest 2026-09-06T21:23:24.
+
+    THE BOX IT WAS SIZED FOR NO LONGER EXISTS. Measured on the fleet host: 8 cores, 31 GiB total,
+    28 GiB available, memory PSI 0.00 across all windows, cpu PSI `full` 0.00. Worker RSS measured
+    at 0.30-0.47 GiB against the ~1.33 GiB the sizing assumed (W1-T1049).
+
+    THIS IS DELIBERATELY `verify: human` AND SEPARATE FROM W1-T2987. W1-T2985 removes the cpu-pressure
+    shed and W1-T2987 removes the telemetry-unavailable one; until both are live, raising this number
+    changes nothing observable and its effect cannot be measured. Raising it FIRST would also be
+    the repo's own recurring mistake in reverse — moving a bound before the population it separates
+    has been observed under the new regime. Land the other two, re-read the `review.capacity`
+    reason census, and only then decide the number, with that census as the evidence.
+  acceptance:
+    - claim: "the budget is re-decided against a measured reason census taken after W1-T2985 and W1-T2987 are live"
+      proof: "grep: hostWorkerBudget in plan/policy.yaml"
