@@ -188,6 +188,12 @@
       "grepHint": "ci.yml forensics"
     },
     {
+      "path": "docs/forensics/citation-anchor-census.md",
+      "title": "citation-anchor-census.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and sourcing detail that were removed from",
+      "grepHint": "citation-anchor-census.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/claude-md-budget-ratchet.md",
       "title": "claude-md-budget-ratchet.mjs forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
