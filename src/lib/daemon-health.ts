@@ -92,6 +92,9 @@ export function deriveLastPoll(
 export interface StatfsLike {
   bavail: number;
   bsize: number;
+  /** Total blocks. Optional so an existing caller's two-field fixture still satisfies the shape;
+   *  {@link readDiskTotalBytes} returns `undefined` without it rather than inventing a size. */
+  blocks?: number;
 }
 
 /**
@@ -105,6 +108,19 @@ export function readDiskFreeBytes(path: string, statfs: (path: string) => Statfs
   try {
     const stat = statfs(path);
     return stat.bavail * stat.bsize;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Total volume size — `blocks * bsize` — the denominator a PROPORTIONAL headroom threshold needs.
+ *  Same injectable `statfs` and same fail-soft contract as {@link readDiskFreeBytes}: `undefined`
+ *  when unreadable or when the shape carries no `blocks`, never a fabricated size, because a wrong
+ *  denominator would move a threshold rather than skip one. */
+export function readDiskTotalBytes(path: string, statfs: (path: string) => StatfsLike = statfsSync): number | undefined {
+  try {
+    const stat = statfs(path);
+    return stat.blocks === undefined ? undefined : stat.blocks * stat.bsize;
   } catch {
     return undefined;
   }
