@@ -307,6 +307,64 @@ else
   SUPERVISOR_VERDICT="STALE — last deploy cycle $(human_age "$SUPERVISOR_AGE_S") ago"
 fi
 
+# ── probe: DISPATCH throughput, the max ts over run.start in the run-task lane (W1-T2961) ────────
+# THE GAP THIS CLOSES, AND IT IS NOT A LIVENESS GAP. The two probes above answer "is the daemon
+# alive" and "is the thing that advances its code alive". Both answered YES throughout 2026-09-05
+# and 09-06 while the fleet dispatched ZERO tasks — thousands per day before, none for two days —
+# because the daemon really was alive: polling, sweeping, reviewing, merging and restarting cleanly
+# (W1-T2960's livelock). EVERY SIGNAL WE HAD MEASURED LIVENESS, AND LIVENESS WAS NEVER THE QUESTION.
+# The one row that showed it, `attempted : (none)` on 28 of 28 summaries, is printed to the container
+# log and read by nothing.
+#
+# WHY `run.start` FILTERED TO THE `run-task` LANE, AND NOT THE BARE STEP. `run.start` is emitted by
+# every lane — `retro`, `triage`, and the build lane — so the bare step stays fresh on a fleet that
+# only retros, which is exactly the false-negative this probe exists to refuse. During the outage the
+# ONLY run.start rows were `lane=retro`. The lane field is on the row already; no new signal is
+# needed, only the discrimination.
+#
+# A QUIET QUEUE IS NOT A DEFECT, SO THE VERDICT CARRIES A REASON. An empty runnable queue is a
+# legitimately idle fleet, and an alert that fires on quiet alone is one an operator learns to
+# ignore. The ledger already records WHY the last tick admitted nothing —
+# `daemon_selfrestart_for_freshness` (the W1-T2960 livelock), `daemon.pause` (an operator hold), or a
+# `dispatch.skipped` reason — so the beat publishes the newest of those beside the verdict. "Not
+# building" sends someone to read container logs; "not building, last tick self-restarted for
+# freshness" names the defect.
+#
+# THE THRESHOLD IS SIZED FROM THE OBSERVED POPULATION. Normal here is thousands of dispatches a day;
+# the incident ran 48h. This deliberately does NOT reuse `DAEMON_STALE_AFTER_S` (600s), which is
+# sized against a poll interval — dispatch legitimately idles far longer than a poll while a long
+# lane runs or the queue drains. 6h is generous enough that a genuinely quiet fleet stays silent and
+# still catches a 48h outage eight times over.
+DISPATCH_LAST_TS=""
+DISPATCH_BLOCK_REASON="none"
+if [ -f "$LEDGER" ]; then
+  DISPATCH_LINE="$(grep -F '"step":"run.start"' "$LEDGER" 2>/dev/null | grep -F '"lane":"run-task"' | tail -n 1)"
+  if [ -n "$DISPATCH_LINE" ]; then
+    DISPATCH_LAST_TS="$(printf '%s' "$DISPATCH_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+  fi
+  # The newest blocking signal, whichever kind it is: one grep over the three step names, then the
+  # last line wins because the ledger is append-ordered.
+  BLOCK_LINE="$(grep -E '"step":"(daemon_selfrestart_for_freshness|daemon\.pause|dispatch\.skipped)"' "$LEDGER" 2>/dev/null | tail -n 1)"
+  if [ -n "$BLOCK_LINE" ]; then
+    BLOCK_STEP="$(printf '%s' "$BLOCK_LINE" | grep -o '"step":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+    BLOCK_WHY="$(printf '%s' "$BLOCK_LINE" | grep -o '"reason":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+    DISPATCH_BLOCK_REASON="${BLOCK_STEP}${BLOCK_WHY:+:${BLOCK_WHY}}"
+  fi
+fi
+
+DISPATCH_LAST_EPOCH="$(epoch_of "$DISPATCH_LAST_TS")"
+DISPATCH_AGE_S=""
+if [ -n "$DISPATCH_LAST_EPOCH" ]; then DISPATCH_AGE_S="$((NOW_EPOCH - DISPATCH_LAST_EPOCH))"; fi
+
+DISPATCH_STALLED_AFTER_S=21600
+if [ -z "$DISPATCH_AGE_S" ]; then
+  DISPATCH_VERDICT="unknown"
+elif [ "$DISPATCH_AGE_S" -le "$DISPATCH_STALLED_AFTER_S" ]; then
+  DISPATCH_VERDICT="building"
+else
+  DISPATCH_VERDICT="STALLED — last build dispatch $(human_age "$DISPATCH_AGE_S") ago; last block: ${DISPATCH_BLOCK_REASON}"
+fi
+
 # ── probe: cheap diagnostics ──────────────────────────────────────────────────────────────────
 # `df -Pk` is the POSIX-portable form and reports 1K blocks on both macOS and Linux, so this one
 # expression is correct on the mini and on any future host. `readDiskFreeBytes`
@@ -506,6 +564,10 @@ daemon_last_age_s=${DAEMON_AGE_S:-unknown}
 daemon_boot_ts=${DAEMON_BOOT_TS:-none}
 daemon_boot_age_s=${BOOT_AGE_S:-unknown}
 daemon_boot_head_sha=${DAEMON_BOOT_SHA:-none}
+dispatch_verdict=${DISPATCH_VERDICT}
+dispatch_last_ts=${DISPATCH_LAST_TS:-none}
+dispatch_last_age_s=${DISPATCH_AGE_S:-unknown}
+dispatch_block_reason=${DISPATCH_BLOCK_REASON}
 supervisor_verdict=${SUPERVISOR_VERDICT}
 supervisor_last_ts=${SUPERVISOR_LAST_TS:-none}
 supervisor_last_step=${SUPERVISOR_LAST_STEP:-none}
@@ -568,7 +630,7 @@ fi
 # The subject line IS the phone-readable answer — it is what shows on the branch listing without
 # opening anything. Both verdicts ride in it, because the two failures it separates (a dead
 # daemon on a healthy host, a broken install on a healthy host) call for different responses.
-SUBJECT="heartbeat ${NOW_ISO}: daemon ${DAEMON_VERDICT%% *} | rmd ${RMD_VERDICT%%:*}"
+SUBJECT="heartbeat ${NOW_ISO}: daemon ${DAEMON_VERDICT%% *} | build ${DISPATCH_VERDICT%% *} | rmd ${RMD_VERDICT%%:*}"
 
 if [ "${RMD_HEARTBEAT_DRY_RUN:-}" = "1" ]; then
   printf '%s\n' "$SUBJECT"
