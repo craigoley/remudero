@@ -138,16 +138,16 @@ const BASELINE_COMMAND_NAMES = [
   "emissions", "escalate", "feedback", "fix", "inbox", "init", "install-checkout", "issues",
   "learnings", "ledger-grep", "lint-plan", "merge-hold", "next-task-id", "notify", "onboard", "ops", "pause",
   "peek", "plan", "preflight", "project", "proof-queue-audit", "reap-branches", "receipt",
-  "reframe", "relay", "replay", "resume", "retro", "review", "rule-efficacy", "run-task",
+  "reframe", "relay", "replay", "replay-goldens", "resume", "retro", "review", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "up",
   "verdict-calibration", "wipe-test",
 ].sort();
 
 // W1-T2580: `bundle` — the day-one knowledge bundle export verb — joins the registry.
 test("COMMANDS carries the established command names plus the operator merge-hold writer", () => {
-  assert.equal(BASELINE_COMMAND_NAMES.length, 65);
+  assert.equal(BASELINE_COMMAND_NAMES.length, 66);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
-  assert.equal(COMMANDS.length, 65);
+  assert.equal(COMMANDS.length, 66);
 });
 
 // ── Regression control: this test file is where a re-widened top-level listing would show up ──

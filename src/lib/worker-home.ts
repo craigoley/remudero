@@ -28,64 +28,29 @@ import { parseInflightLockInfo } from "./inflight-lock.js";
 import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS, loadDefaultPolicy } from "./policy.js";
 
 /**
- * GENERAL SHELL-ISOLATION MECHANISM (W1-T18 / OSS blocker).
+ * The general shell-isolation mechanism (W1-T18, the OSS blocker). Every worker's HOME is redirected
+ * to a Remudero-controlled scratch directory whose rc files this module writes empty, so a worker
+ * shell can never source the operator's own dotfiles.
  *
- * W1-T17's preflight probe (isolation.ts) PROVES isolation per run but cannot
- * MANUFACTURE it — until now, isolation held only because CLAUDE_CODE_SHELL=
- * /bin/bash sources `$HOME/.bashrc`, and THIS host happens to have none
- * (LEARNINGS.md, PR #8). A stranger's machine with a populated `~/.bashrc`
- * would get ZERO isolation from that config alone (FIELD FINDING 11b) — the
- * probe would catch it and fail the run closed, but every OSS user's first run
- * would trip the gate.
+ * INVARIANT: a worker HOME holds ONLY empty rc files Remudero wrote ({@link WORKER_HOME_RC_FILES})
+ * plus the named grants symlinked back from the real HOME ({@link WORKER_HOME_SYMLINKS}) — never a
+ * wholesale copy. Same allowlist discipline as env.ts's ANTHROPIC_* boundary.
+ * INVARIANT: a worker home is never inside a git work tree. {@link materializeWorkerHome} refuses via
+ * {@link gitWorkTreeAncestor} before writing anything, for a clone's `.git` directory and a linked
+ * worktree's `.git` file alike.
+ * TRAP: W1-T17's probe proves isolation per run but cannot manufacture it. Isolation used to hold
+ * only because this host has no `~/.bashrc`; a populated one gave zero isolation (FIELD FINDING 11b).
+ * TRAP: the macOS login keychain holding the OAuth token is HOME-relative, so the redirect hid it and
+ * Claude Code exited "Not logged in" at $0 before any turn. Only that one keychain DB file is granted
+ * back, never the whole `~/Library` (FIELD FINDING 11c).
  *
- * This module manufactures isolation instead of hoping for an absent file:
- * every worker's HOME is redirected to a Remudero-controlled SCRATCH directory
- * (`<root>/worker-home`) that holds ONLY empty rc files Remudero itself wrote —
- * `$HOME/.bashrc` (and its zsh/bash siblings) can never be populated by the
- * operator, because it is never the operator's `$HOME` in the first place. The
- * things a worker genuinely needs from the real HOME (OAuth session, `gh`
- * auth, git identity) are symlinked back in explicitly, one path at a time —
- * never a wholesale HOME copy, the same allowlist discipline as env.ts's
- * ANTHROPIC_* boundary.
- *
- * WS-0 FIELD FINDING 11c — CORRECTED (W1-T18 live drill, this fix): the earlier
- * belief that "the Keychain OAuth token resolves off `USER`, not `HOME`" was
- * FALSE. USER is necessary but NOT sufficient: the macOS login keychain that
- * holds the `Claude Code-credentials` OAuth item is located HOME-RELATIVELY at
- * `$HOME/Library/Keychains/login.keychain-db`. So the moment HOME was redirected
- * to the scratch dir (which has no `Library/Keychains`), the keychain lookup hit
- * an empty path and Claude Code returned "Not logged in · Please run /login" —
- * exiting at $0 / 0 real turns BEFORE any tool ran, which is exactly why the
- * first post-#100 spawn (the containment probe) produced nothing (inside-write
- * absent, no denial, cost 0). The worker never started. The fix is the SAME
- * defensive symlink-back this module already does for `.claude`/`.config/gh`:
- * add `Library/Keychains/login.keychain-db` to the allowlist so the redirected
- * HOME resolves the real login keychain. This does NOT weaken isolation (the rc
- * files are still empty ⇒ 0 aliases/0 functions) or containment (keychain I/O is
- * mediated by `securityd` over XPC, not a direct file write into the sandbox
- * scope; the outside-cwd write is still OS-denied). Only the single keychain DB
- * file is granted — never the whole `~/Library`. Verified live: a trivial task
- * completes under the redirect, the containment probe passes, isolation stays
- * 0/0. See LEARNINGS.md and the drill (W1-T12e), now a real spawn-under-redirect.
- *
- * WHERE THE HOME MAY LIVE (W1-T2633). Every per-run home this module has ever produced has
- * landed as a SIBLING of the worker-home root (see {@link perRunWorkerHomeDir}) — but until this
- * task that was incidental, not asserted: `workerHomeDir` (config.ts) resolves an
- * OPERATOR-SETTABLE `config.workerHomeRoot` with no guard, so pointing it (or `config.root`) at a
- * path inside a tracked checkout would have written the rc files and symlinks straight into a repo.
- *
- * THE INVARIANT, STATED PLAINLY: a worker home is never inside a git work tree. It is now
- * enforced, not hoped for — {@link materializeWorkerHome} refuses (via
- * {@link gitWorkTreeAncestor}, throwing {@link WorkerHomePlacementError}) before writing anything,
- * whether the offending ancestor is a plain clone's `.git` DIRECTORY or a linked worktree's `.git`
- * FILE.
+ * FALSIFIER: test/worker-home.test.ts, test/worker-home-per-run.test.ts. // Why:
+ * docs/forensics/worker-home.md#module-header (W1-T18, W1-T2633, PR #8, PR #100).
  */
 
-/** Empty-by-construction rc files a worker's HOME must hold — bash AND zsh
- * conventions, so isolation does not depend on which shell a worker's Bash
- * tool (or a direct `zsh` it spawns) happens to source. Remudero writes each
- * of these as a zero-byte file; the operator's real dotfiles are never
- * consulted, so their contents (or absence) cannot matter. */
+/** Empty-by-construction rc files a worker's HOME must hold — bash AND zsh conventions, so isolation
+ *  does not depend on which shell a worker sources. INVARIANT: Remudero writes each as a zero-byte
+ *  file and never consults the operator's real dotfiles. */
 export const WORKER_HOME_RC_FILES: readonly string[] = [
   ".bashrc",
   ".bash_profile",
@@ -97,8 +62,8 @@ export const WORKER_HOME_RC_FILES: readonly string[] = [
   ".zlogin",
 ];
 
-/** One path a worker needs mirrored back from the real HOME into the
- * redirected scratch HOME, symlinked rather than copied (always current). */
+/** One path a worker needs mirrored back from the real HOME into the redirected scratch HOME,
+ *  symlinked rather than copied so it is always current. */
 export interface WorkerHomeSymlink {
   /** Path relative to HOME, e.g. `.claude` or `.config/gh`. */
   relPath: string;
@@ -106,40 +71,19 @@ export interface WorkerHomeSymlink {
   reason: string;
 }
 
-/**
- * W1-T505: the credential-only sibling of the operator's real `.claude` that a worker's
- * `.claude` grant PREFERS. MEASURED at filing: the operator's whole `.claude` is 1.8GB —
- * 10,101 session transcripts, a `settings.json` that can inject env vars into the
- * operator's NEXT session, `history.jsonl`, `skills/`, `plugins/` — against the one thing a
- * worker actually needs, `.credentials.json` (509 bytes). When `<realHome>/.claude-fleet`
- * exists, {@link workerHomePlan} resolves the `.claude` grant to IT instead of the
- * operator's full `.claude`; when it does not exist, the grant falls back to today's
- * wholesale behaviour (see {@link workerHomePlan}) so no host is broken by upgrading before
- * this sibling has been populated (design points (ii)/(iv), W1-T505).
- */
+/** W1-T505: the credential-only sibling of the operator's real `.claude` that a worker's `.claude`
+ *  grant prefers. INVARIANT: {@link workerHomePlan} resolves the grant to `<realHome>/.claude-fleet`
+ *  when it exists and to the wholesale `.claude` when it does not, so upgrading before the sibling is
+ *  populated breaks no host. // Why: docs/forensics/worker-home.md#the-claude-grant. */
 export const WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH = ".claude-fleet";
 
-/**
- * The explicit allowlist of real-HOME paths a worker needs back, symlinked
- * individually. Mirrors env.ts's ALLOWLIST discipline: name each grant and its
- * reason, never inherit the rest of HOME wholesale.
- */
-/**
- * The browser cache's path RELATIVE TO HOME, derived from the SAME resolver the launch path uses
- * ({@link playwrightCacheRoot}, `lib/review.ts`) rather than a second copy of its platform branch —
- * W1-T1063's design point, so the grant and the resolver cannot disagree.
- *
- * PASSING AN EMPTY ENV IS DELIBERATE. The no-override branch is the only one a worker can ever
- * take, because `ALLOWLIST` (`lib/env.ts`) passes PATH, HOME, TMPDIR, LANG, USER and the Claude
- * token and NOTHING ELSE into a spawn, so `PLAYWRIGHT_BROWSERS_PATH` cannot survive to be read.
- * That is the same reason `deploy/Dockerfile` gives for installing at the default path and setting
- * no variable at all, and it is why this grant — not a variable — is the mechanism.
- *
- * A SENTINEL HOME IS USED, NOT A REAL ONE, so the result is a pure relative path independent of
- * whose HOME is asked about: linux yields `.cache/ms-playwright`, darwin
- * `Library/Caches/ms-playwright`. BOTH PLATFORMS ARE COVERED — the fleet runs in the Linux
- * container, and the table already carries a macOS-specific entry beside this one.
- */
+/** The explicit allowlist of real-HOME paths a worker needs back, symlinked individually. Mirrors
+ *  env.ts's ALLOWLIST discipline: name each grant and its reason, never inherit HOME wholesale. */
+/** The browser cache's path relative to HOME, derived from {@link playwrightCacheRoot} (lib/review.ts)
+ *  rather than a second copy of its platform branch, so grant and resolver cannot disagree. INVARIANT:
+ *  the empty env and sentinel HOME are deliberate — `ALLOWLIST` (lib/env.ts) passes no
+ *  `PLAYWRIGHT_BROWSERS_PATH` into a spawn, so only the no-override branch is reachable.
+ *  // Why: docs/forensics/worker-home.md#playwrightcacherelpath. */
 export function playwrightCacheRelPath(platform: string = process.platform): string {
   const sentinel = "/__rmd_home__";
   return relative(sentinel, playwrightCacheRoot({}, platform, sentinel)).split(sep).join("/");
@@ -184,74 +128,44 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
   },
 ];
 
-/**
- * PURE plan of what {@link materializeWorkerHome} will do — extracted so the
- * redirection logic is unit-testable without touching the filesystem. Every
- * `from` is under the redirected `workerHome`; every `to` is under the real
- * `realHome`, one explicit path at a time (never `workerHome === realHome`,
- * or the redirection grants nothing).
- */
+/** PURE plan of what {@link materializeWorkerHome} will do, so the redirection logic is unit-testable
+ *  without touching the filesystem. INVARIANT: every `from` is under the redirected `workerHome` and
+ *  every `to` under the real `realHome`, never `workerHome === realHome`. */
 export interface WorkerHomePlan {
   workerHome: string;
   rcFiles: string[];
   symlinks: Array<{ from: string; to: string; reason: string }>;
-  /**
-   * What ACTUALLY happened to each grant (W1-T442-adjacent, the seventh instance of this
-   * repo's own law: a grant that FAILED is not a grant that was OPTIONAL). Populated by
-   * {@link materializeWorkerHome}; absent on the pure {@link workerHomePlan}, which decides
-   * nothing and touches no filesystem.
-   */
+  /** What ACTUALLY happened to each grant: a FAILED grant is not an OPTIONAL one. Populated by
+   *  {@link materializeWorkerHome}; absent on the pure {@link workerHomePlan}. */
   outcomes?: WorkerHomeGrantOutcome[];
-  /**
-   * W1-T981: whatever the `.claude` grant resolves to for THIS plan — the operator's whole
-   * `.claude`, or W1-T505's narrowed credential-only sibling when populated. This is where the
-   * CLI's own `.claude.json` backups land (see {@link CLAUDE_CONFIG_REL}), so
-   * {@link materializeWorkerHome} sweeps it via {@link sweepClaudeConfigBackups}. Optional only
-   * so a hand-built literal (e.g. a fixture testing {@link lostWorkerHomeGrants} in isolation)
-   * need not carry it — {@link workerHomePlan} and {@link materializeWorkerHome} both always
-   * populate it.
-   */
+  /** W1-T981: whatever the `.claude` grant resolves to for THIS plan. The CLI's own `.claude.json`
+   *  backups land here, so {@link materializeWorkerHome} sweeps it via
+   *  {@link sweepClaudeConfigBackups}. Optional only so a hand-built fixture need not carry it. */
   claudeGrantTarget?: string;
-  /**
-   * W1-T981: the outcome of sweeping `claudeGrantTarget`'s `.claude.json` backups, so that
-   * bound is OBSERVABLE on every materialization rather than a silent background effect.
-   * Populated by {@link materializeWorkerHome}; absent on the pure {@link workerHomePlan}.
-   */
+  /** W1-T981: the outcome of sweeping `claudeGrantTarget`'s `.claude.json` backups, so that bound is
+   *  OBSERVABLE on every materialization. Absent on the pure {@link workerHomePlan}. */
   claudeConfigBackupSweep?: ClaudeConfigBackupSweepSummary;
 }
 
-/**
- * One grant's real outcome. `absent` and `failed` MUST stay distinguishable — the absent
- * skip is a deliberate, correct optional-grant path (the mini legitimately lacks several),
- * while a failure is a silent loss of capability that has already cost real money.
- */
+/** One grant's real outcome. INVARIANT: `absent` and `failed` stay distinguishable — the absent skip
+ *  is a correct optional-grant path, while a failure is a silent loss of capability. */
 export interface WorkerHomeGrantOutcome {
   relFrom: string;
   to: string;
-  /**
-   * - `linked`    — the symlink was created (or re-pointed) and now resolves to `to`.
-   * - `already`   — it already pointed at `to`; nothing done.
-   * - `absent`    — the TARGET does not exist. An optional grant, skipped SILENTLY and
-   *                 correctly: several are legitimately unavailable on the mini.
-   * - `displaced` — a REAL DIRECTORY occupied the slot; it was moved aside (see
-   *                 {@link WorkerHomeGrantOutcome.displacedTo}) and the link created.
-   * - `failed`    — the grant could not be made. The worker runs WITHOUT it.
-   */
+  /** Only the two non-obvious states need saying. `absent` means the TARGET does not exist: an optional
+   *  grant, skipped SILENTLY and correctly, since several are legitimately unavailable. `displaced`
+   *  means a REAL DIRECTORY occupied the slot, was moved aside and the link was then created. */
   state: "linked" | "already" | "absent" | "displaced" | "failed";
-  /** Where a `displaced` directory was moved to — kept, never deleted, so the thing that
-   *  poisoned the slot is still inspectable afterwards. */
+  /** Where a `displaced` directory was moved to — kept, never deleted, so the thing that poisoned
+   *  the slot is still inspectable afterwards. */
   displacedTo?: string;
   /** Why a `failed` grant failed — the error's own message, never a guess. */
   reason?: string;
 }
 
-/**
- * The grants that were LOST or HEALED — everything a caller should surface, and nothing it
- * should not. `absent` and the two healthy states are excluded deliberately: materialisation
- * runs per spawn and per probe tick, so reporting every grant would be four rows a spawn, while
- * `failed`/`displaced` are rare by construction (a displaced slot heals once and then reads
- * `already`). That asymmetry is what lets this be reported at all without becoming noise.
- */
+/** The grants that were LOST or HEALED. INVARIANT: `absent` and the two healthy states are excluded
+ *  deliberately — materialisation runs per spawn and per probe tick, so reporting every grant would be
+ *  four rows a spawn, while `failed`/`displaced` are rare by construction. */
 export function lostWorkerHomeGrants(plan: WorkerHomePlan): WorkerHomeGrantOutcome[] {
   return (plan.outcomes ?? []).filter((o) => o.state === "failed" || o.state === "displaced");
 }
@@ -262,68 +176,27 @@ const LOGIN_KEYCHAIN_REL = join("Library", "Keychains", "login.keychain-db");
 /** The HOME-relative slot the `.claude` grant occupies — the one W1-T505 narrows. */
 const CLAUDE_REL = ".claude";
 
-/**
- * W1-T981: the HOME-relative slot the CLI's OWN config file occupies — the sibling of
- * {@link CLAUDE_REL} that is DELIBERATELY ABSENT from {@link WORKER_HOME_SYMLINKS} and
- * {@link WORKER_HOME_RC_FILES} alike. Disposition (A), "ACCEPT AND DOCUMENT", chosen over
- * seeding (B) or granting it back (C):
- *
- *   - Every per-run redirected HOME (perRunWorkerHomeDir) starts this slot empty, because
- *     nothing in this module writes it and it is not in the allowlist above. The CLI itself
- *     notices, on first use, and creates a fresh `.claude.json` from scratch — the
- *     "Claude configuration file not found at worker-home-<uuid>/.claude.json" notice every
- *     spawn logs IS that creation, not a transiently-lost file and not a race: the slot was
- *     never populated in the first place, on every spawn, by construction. See this task's
- *     filing (feedback#fb-1785775974389-e25033) for the four source citations that refute the
- *     race hypothesis.
- *   - GRANTING it back (option C, symlinking this slot the way {@link CLAUDE_REL} is) is
- *     REJECTED: unlike the credential file `.claude` already narrows toward (W1-T505), a real
- *     operator `.claude.json` carries mutable, per-process state
- *     (`hasAvailableSubscription`, `cachedUsageUtilization`, `modelAccessCache`,
- *     `autoCompactWindowsCache`, `machineID`, `oauthAccount` — FINDINGS.md:263-266) that every
- *     concurrent worker would then read AND WRITE through one shared inode — the same
- *     class of coupling W1-T170 introduced per-run homes to end, in a new slot.
- *   - SEEDING it (option B) is not done here either: nothing measured shows a worker loses
- *     capability running with no `.claude.json` — `resolveActiveAccountId`
- *     (src/lib/worker.ts:657) already defaults to the PARENT's real
- *     `join(homedir(), ".claude.json")`, never the worker's redirected one, so account/identity
- *     resolution is unaffected by this slot being virgin.
- *
- * WHERE THE CLI'S OWN BACKUP OF THE FILE IT REPLACES LANDS: `<claudeGrantTarget>/backups/
- * .claude.json.backup.<epoch>` (see {@link CLAUDE_CONFIG_BACKUP_PREFIX}), where
- * `claudeGrantTarget` is whatever the `.claude` grant currently resolves to — the operator's
- * whole `.claude`, or W1-T505's narrowed sibling once populated. Because that grant is a
- * symlink OUT of the redirected worker home into a directory every concurrent worker shares,
- * the backup write lands there too, not inside the throwaway worker home the per-run reap
- * (`reapWorkerHome`, src/lib/worker.ts:1039) already cleans up. {@link sweepClaudeConfigBackups}
- * is what keeps that shared, otherwise-unbounded write bounded and observable.
- */
+/** W1-T981: the HOME-relative slot the CLI's OWN config file occupies — deliberately absent from
+ *  {@link WORKER_HOME_SYMLINKS} and {@link WORKER_HOME_RC_FILES} alike. INVARIANT: every per-run home
+ *  starts this slot empty and the CLI creates a fresh `.claude.json` itself, on every spawn; the
+ *  "configuration file not found" notice IS that creation, not a race. TRAP: granting it back would
+ *  share one mutable inode across every worker. // Why: docs/forensics/worker-home.md#claude_config_rel. */
 export const CLAUDE_CONFIG_REL = ".claude.json";
 
 export function workerHomePlan(opts: {
   workerHome: string;
   realHome: string;
-  /**
-   * W1-T235 (WS-7 keychain-unlock gate): when set, the redirected HOME's
-   * `Library/Keychains/login.keychain-db` slot resolves to this DEDICATED,
-   * always-unlocked worker keychain instead of the operator's real login
-   * keychain — breaking the single-inode coupling under which a LOCKED login
-   * keychain killed every headless spawn "Not logged in" at $0 (fired live
-   * 2026-07-21). Unset ⇒ the pre-T235 grant to the real login keychain.
-   */
+  /** W1-T235: when set, the redirected HOME's `Library/Keychains/login.keychain-db` slot resolves to
+   *  this dedicated, always-unlocked worker keychain, not the operator's real login keychain. TRAP:
+   *  under the shared inode a LOCKED login keychain killed every headless spawn at $0 (2026-07-21). */
   workerKeychainPath?: string;
-  /**
-   * W1-T505: injectable existence check, so the `.claude` narrowing below is
-   * unit-testable without touching the real filesystem (same discipline as
-   * `EnsureWorkerKeychainOpts.exists`). Defaults to the real `existsSync`.
-   */
+  /** W1-T505: injectable existence check, so the `.claude` narrowing below is unit-testable without
+   *  touching the real filesystem. Defaults to the real `existsSync`. */
   exists?: (path: string) => boolean;
 }): WorkerHomePlan {
   const exists = opts.exists ?? existsSync;
-  // W1-T505: the `.claude` grant PREFERS a credential-only sibling the operator owns
-  // (`<realHome>/.claude-fleet`) over the operator's whole `.claude`. Falls back to
-  // today's wholesale grant when that sibling is absent — design point (ii)/(iv): no
-  // host is broken by upgrading before the sibling has been populated.
+  // W1-T505: the `.claude` grant prefers `<realHome>/.claude-fleet` over the wholesale `.claude`,
+  // falling back to it when that sibling is absent.
   const claudeCredentialDir = join(opts.realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
   const narrowedClaudeTarget = exists(claudeCredentialDir) ? claudeCredentialDir : join(opts.realHome, CLAUDE_REL);
 
@@ -346,23 +219,19 @@ export function workerHomePlan(opts: {
 }
 
 /** Filename prefix the CLI's own backup writer uses when it replaces `.claude.json`:
- *  `<prefix><epoch-ms>` under `<claudeGrantTarget>/backups/` (see {@link CLAUDE_CONFIG_REL}'s
- *  doc for the full mechanism). Named here so {@link sweepClaudeConfigBackups} can recognise
- *  and bound them; this module never WRITES one — only observes and reaps what the CLI leaves
- *  behind. */
+ *  `<prefix><epoch-ms>` under `<claudeGrantTarget>/backups/`. INVARIANT: this module never WRITES one
+ *  — it only observes and reaps what the CLI leaves behind. */
 export const CLAUDE_CONFIG_BACKUP_PREFIX = ".claude.json.backup.";
 
-/** Where the CLI's own `.claude.json` backups land for a given `.claude`-grant target —
- *  `backups/` underneath it, SHARED across every concurrent worker because the grant target
- *  is (today's wholesale operator `.claude`, or W1-T505's narrowed sibling once populated). */
+/** Where the CLI's own `.claude.json` backups land for a `.claude`-grant target: `backups/` under it,
+ *  SHARED across every concurrent worker because the grant target is. */
 export function claudeConfigBackupDir(claudeGrantTarget: string): string {
   return join(claudeGrantTarget, "backups");
 }
 
-/** Default bound for {@link sweepClaudeConfigBackups}: keep the newest 20 backups, reap the
- *  rest. A count cap rather than an age cap (unlike {@link DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS})
- *  on purpose — these are written on every spawn, not once per boot, so an age-only bound would
- *  still grow without limit inside a single busy day. */
+/** Default bound for {@link sweepClaudeConfigBackups}: keep the newest 20 backups, reap the rest. A
+ *  count cap rather than an age cap because these are written on every spawn, so an age-only bound
+ *  would still grow without limit inside one busy day. */
 export const DEFAULT_CLAUDE_CONFIG_BACKUP_MAX_KEEP = 20;
 
 export interface ClaudeConfigBackupSweepSummary {
@@ -373,15 +242,10 @@ export interface ClaudeConfigBackupSweepSummary {
 const claudeConfigBackupFsOps = { readdirSync, rmSync };
 type ClaudeConfigBackupFsOps = typeof claudeConfigBackupFsOps;
 
-/**
- * W1-T981 design point (iv): bound and OBSERVE the CLI's `.claude.json` backups instead of
- * letting them accumulate silently in the shared granted `.claude` directory. Keeps the
- * `maxKeep` NEWEST backups (by the epoch embedded in each filename — the CLI's own ordering,
- * cheaper and more precise than an `mtime` stat per file) and reaps the rest. Best-effort and
- * never throws: an absent `backups/` directory (nothing has spawned against this grant target
- * yet) is a silent, correct no-op — the same discipline {@link sweepStaleWorkerHomes} already
- * applies to its own boot sweep, so this adds no new refusal path (design point (v)).
- */
+/** W1-T981: bound and OBSERVE the CLI's `.claude.json` backups instead of letting them accumulate in
+ *  the shared granted `.claude` directory. Keeps the `maxKeep` newest by the epoch in each filename.
+ *  INVARIANT: best-effort and never throws — an absent `backups/` directory is a silent, correct
+ *  no-op, so this adds no refusal path. */
 export function sweepClaudeConfigBackups(
   claudeGrantTarget: string,
   opts: { maxKeep?: number; fsImpl?: Partial<ClaudeConfigBackupFsOps> } = {},
@@ -423,20 +287,10 @@ export function sweepClaudeConfigBackups(
   return { removed, kept };
 }
 
-/**
- * W1-T2633: PURE — walks `homePath`'s own ancestors (starting at `homePath` itself, ending at
- * the filesystem root) looking for a `.git` entry. Returns the first ancestor `.git` path found,
- * or `undefined` if none exists all the way to `/`. Needs no repo path threaded through it — the
- * whole point of walking ancestors instead of taking one — so every caller of
- * {@link materializeWorkerHome} gets the guard for free regardless of how `workerHome` was
- * derived (the default `<root>/worker-home` shape, or an operator-set `config.workerHomeRoot`
- * alike).
- *
- * A `.git` ENTRY IS EITHER A DIRECTORY (a plain clone) OR A FILE (a linked worktree's `gitdir:`
- * pointer, `git worktree add`'s own shape) — both disqualify the home equally, and `exists`
- * (default `existsSync`) is agnostic to which: it answers only "is something there", which is
- * exactly the question this predicate needs answered.
- */
+/** W1-T2633: PURE — walks `homePath`'s own ancestors, from `homePath` to the filesystem root, and
+ *  returns the first `.git` entry found or `undefined`. INVARIANT: a `.git` entry is either a
+ *  DIRECTORY (a clone) or a FILE (a linked worktree's `gitdir:` pointer) and both disqualify the home
+ *  equally. Walking ancestors needs no repo path threaded through, so every caller gets the guard. */
 export function gitWorkTreeAncestor(
   homePath: string,
   exists: (path: string) => boolean = existsSync,
@@ -451,16 +305,9 @@ export function gitWorkTreeAncestor(
   }
 }
 
-/**
- * W1-T2633: thrown by {@link materializeWorkerHome} BEFORE anything is written, when the
- * resolved worker home would land inside a git work tree (see {@link gitWorkTreeAncestor}).
- * Named after {@link WorkerKeychainError} — this module's own precedent for "throw before any
- * I/O, name the reason class" — except the reason here is a single, unambiguous fact rather than
- * a taxonomy: refusing is the loud failure and writing is the silent one, and a home nested
- * inside a repo is exactly the pollution this guard exists to make impossible. `workerHome` and
- * `gitAncestor` are both carried on the error, not just interpolated into the message, so a
- * caller can log or assert on them directly.
- */
+/** W1-T2633: thrown by {@link materializeWorkerHome} BEFORE anything is written, when the resolved
+ *  worker home would land inside a git work tree. Refusing is the loud failure and writing is the
+ *  silent one. `workerHome` and `gitAncestor` are carried on the error, so a caller can assert. */
 export class WorkerHomePlacementError extends Error {
   override name = "WorkerHomePlacementError";
   constructor(
@@ -475,24 +322,13 @@ export class WorkerHomePlacementError extends Error {
   }
 }
 
-/**
- * Materialize a {@link WorkerHomePlan} on disk: guarantee every rc file exists
- * and is EMPTY (truncating a stale one — this directory is Remudero-owned, so
- * a prior run's leftovers are debris, never operator content to preserve), and
- * symlink each real-HOME path back in.
- *
- * BEST-EFFORT per symlink: a source that does not exist on the real HOME
- * (e.g. no `gh` ever configured on this machine) is skipped rather than
- * thrown — isolation must not depend on every optional tool being installed.
- * An existing symlink already pointing at the right target is left alone
- * (idempotent across repeated spawns in the same run); one pointing anywhere
- * else is replaced (self-healing if the real HOME path moved).
- *
- * W1-T2633: REFUSES before writing anything if `opts.workerHome` resolves inside a git work
- * tree (see {@link gitWorkTreeAncestor}) — throws {@link WorkerHomePlacementError} naming both
- * the offending home path and the `.git` ancestor that disqualified it. A home outside every
- * work tree is unaffected: this check adds a refusal and moves no other behaviour.
- */
+/** Materialize a {@link WorkerHomePlan} on disk: guarantee every rc file exists and is EMPTY, and
+ *  symlink each real-HOME path back in.
+ *  INVARIANT: a stale rc file is truncated, never preserved — this directory is Remudero-owned, so a
+ *  prior run's leftovers are debris and not operator content.
+ *  INVARIANT: best-effort per symlink. An absent source is skipped rather than thrown, because
+ *  isolation must not depend on every optional tool being installed; a correct link is left alone; one
+ *  pointing elsewhere is replaced. W1-T2633: REFUSES when `opts.workerHome` is in a git work tree. */
 export function materializeWorkerHome(opts: {
   workerHome: string;
   realHome: string;
@@ -510,8 +346,8 @@ export function materializeWorkerHome(opts: {
 
   mkdirSync(plan.workerHome, { recursive: true });
   for (const rc of plan.rcFiles) {
-    // Zero-byte by construction, every time — never appended to, never trusted
-    // to have been left empty by something else.
+    // Zero-byte by construction, every time — never appended to, never trusted to have been left
+    // empty by something else.
     writeFileSync(rc, "");
   }
 
@@ -519,9 +355,8 @@ export function materializeWorkerHome(opts: {
   for (const link of plan.symlinks) {
     const relFrom = relative(plan.workerHome, link.from);
     if (!existsSync(link.to)) {
-      // THE OPTIONAL-GRANT SKIP, DELIBERATE AND UNCHANGED. The target genuinely is not on this
-      // host (several are legitimately absent on the mini), so there is nothing to grant. This
-      // is the one silent path, and it must STAY silent — turning it into an error would break
+      // THE OPTIONAL-GRANT SKIP, deliberate and unchanged: the target genuinely is not on this host,
+      // so there is nothing to grant. INVARIANT: this path stays silent — an error here would break
       // every host where a grant is unavailable by design.
       outcomes.push({ relFrom, to: link.to, state: "absent" });
       continue;
@@ -534,35 +369,20 @@ export function materializeWorkerHome(opts: {
         continue; // already correct
       }
       if (st.isDirectory() && !st.isSymbolicLink()) {
-        // A REAL DIRECTORY IN THE SLOT. `unlinkSync` cannot remove one, and the `symlinkSync`
-        // below then throws EEXIST — so before this, the directory won PERMANENTLY and silently.
-        // MEASURED in the Azure container: `worker-home-usage-probe/.claude` was a directory, the
-        // usage probe therefore ran LOGGED OUT, and 33 of 33 probes read `stage: "parse"` against
-        // a 207-byte cost summary instead of the account panel. Re-materialisation did not heal it.
-        //
-        // MOVED ASIDE, NOT DELETED, and the choice is argued rather than assumed:
-        //   - RECURSIVE REMOVAL would work and is defensible — a worker home is machine-owned
-        //     scratch this function creates, so nothing user-authored lives here. It is rejected
-        //     because the directory is written BY THE CLI WE ARE GRANTING TO (it creates `.claude`
-        //     when HOME is redirected and the grant is missing), and it is the only evidence of
-        //     what poisoned the slot. This defect went undiagnosed precisely because there was no
-        //     evidence; deleting it would rebuild that condition.
-        //   - REFUSING LOUDLY is rejected: it converts a recoverable, self-healing state into a
-        //     hard spawn failure on every host that has one, which is strictly worse than the
-        //     silent degradation it replaces.
-        // `rename` is atomic and the suffix is unique, so two workers racing the same shared home
-        // cannot collide.
+        // A REAL DIRECTORY IN THE SLOT. `unlinkSync` cannot remove one and `symlinkSync` then throws
+        // EEXIST, so before this the directory won permanently and silently. MOVED ASIDE, NEVER
+        // DELETED: it is written by the CLI we are granting to and is the only evidence of what
+        // poisoned the slot. // Why: docs/forensics/worker-home.md#a-real-directory-in-the-slot.
         displacedTo = `${link.from}.displaced-${Date.now()}-${randomBytes(3).toString("hex")}`;
         renameSync(link.from, displacedTo);
       } else {
-        // Something occupies the slot but points at the WRONG target (a stale
-        // symlink from a moved real HOME, or leftover debris) — clear it so the
-        // create below can self-heal rather than silently no-op on EEXIST.
+        // Something occupies the slot but points at the WRONG target (a stale symlink from a moved
+        // real HOME, or debris) — clear it so the create below self-heals instead of no-oping EEXIST.
         unlinkSync(link.from);
       }
     } catch {
-      // does not exist yet (or could not be cleared) — fall through to the create
-      // attempt below regardless, which is what reports the real outcome.
+      // Does not exist yet, or could not be cleared — fall through to the create attempt below,
+      // which is what reports the real outcome.
     }
     mkdirSync(dirname(link.from), { recursive: true });
     try {
@@ -573,10 +393,9 @@ export function materializeWorkerHome(opts: {
           : { relFrom, to: link.to, state: "linked" },
       );
     } catch (e) {
-      // Racing another worker materializing the same shared worker-home, or debris that could
-      // not be cleared above — still never fatal to isolation itself (the rc files above are
-      // what actually isolate). But it is NO LONGER SILENT: the target exists and we failed to
-      // reach it, which is a lost capability, not an optional grant declined.
+      // Racing another worker materializing the same shared home, or debris that could not be
+      // cleared — never fatal to isolation itself, since the rc files are what isolate. NO LONGER
+      // SILENT: the target exists and we failed to reach it, which is a lost capability.
       outcomes.push({
         relFrom,
         to: link.to,
@@ -587,74 +406,42 @@ export function materializeWorkerHome(opts: {
     }
   }
 
-  // W1-T981 design point (iv): bound the CLI's own `.claude.json` backups at the SAME
-  // resolved grant target this call just symlinked `.claude` toward, so the sweep tracks
-  // W1-T505's narrowing automatically rather than needing a second update when it lands.
-  // `workerHomePlan` (called just above via `plan = workerHomePlan(opts)`) always sets this.
+  // W1-T981: bound the CLI's own `.claude.json` backups at the SAME resolved grant target this call
+  // just symlinked `.claude` toward, so the sweep tracks W1-T505's narrowing automatically.
   const claudeConfigBackupSweep = sweepClaudeConfigBackups(plan.claudeGrantTarget!);
 
   return { ...plan, outcomes, claudeConfigBackupSweep };
 }
 
 // ── W1-T170: per-run/per-spawn worker HOMES (the singleton does not survive concurrency) ──
-//
-// WS-2 names the failure mode by hand: "the singleton <root>/worker-home (W1-T18/
-// #100/#102) does NOT survive concurrency; every concurrent worker needs its own
-// worker-home-<runId> with its own empty rc + its own login.keychain-db/.claude/
-// .config/gh symlinks. A shared home races on rc materialization and the keychain
-// grant." Two overlapping spawns truncating/symlinking the SAME rc files and
-// keychain slot is exactly the kind of interleaving that turns a deterministic,
-// already-fixed bug (#100's HOME-relative keychain miss) into an intermittent one.
-// NOT IN SCOPE, and unchanged by this section: WHAT is symlinked — the allowlist
-// above, verbatim — only how many homes exist and who owns each.
+// INVARIANT: every concurrent worker gets its own home, with its own empty rc files and its own
+// keychain/.claude/.config/gh symlinks. TRAP: two overlapping spawns truncating and symlinking the
+// SAME rc files and keychain slot turn #100's deterministic, already-fixed HOME-relative keychain miss
+// into an intermittent one. // Why: docs/forensics/worker-home.md#per-run-worker-homes (W1-T170).
 
 const workerHomeFsOps = { existsSync, rmSync, readdirSync, statSync, readFileSync };
 type WorkerHomeFsOps = typeof workerHomeFsOps;
 
-/**
- * W1-T2463: the delimiter between a per-spawn worker home's `runId` component and its
- * per-spawn uniqueness token (see {@link perRunWorkerHomeDir}'s `perSpawn` option and
- * {@link sweepStaleWorkerHomes}, which parses it back out). Chosen because every runId
- * observed in this repo (`grep -n 'const runId = ' src/run-task.ts`) is
- * `${wordOrTaskId}-${Date.now()}` — hyphen/alphanumeric only, never a dot — so a dot can
- * never collide with a runId's own characters and the split below is unambiguous.
- */
+/** W1-T2463: the delimiter between a per-spawn worker home's `runId` component and its per-spawn
+ *  uniqueness token. INVARIANT: a dot can never collide with a runId's own characters — every runId in
+ *  this repo is `${wordOrTaskId}-${Date.now()}` — so {@link stripPerSpawnToken}'s split is
+ *  unambiguous. */
 const PER_SPAWN_TOKEN_SEP = ".";
 
-/**
- * W1-T2463 Q3: the reverse of the encoding {@link perRunWorkerHomeDir} applies under
- * `perSpawn` — strips a trailing `${PER_SPAWN_TOKEN_SEP}<token>` suffix, if present, so a
- * caller matching on `runId` (the inflight-lock/ledger-verdict lookups in
- * {@link sweepStaleWorkerHomes}) compares against the SAME id the spawn was given, never
- * the token-bearing full directory suffix. A suffix with no separator — the pre-W1-T2463
- * shape, and `readUsageSnapshot`'s un-opted-in "usage-probe" shape — round-trips unchanged.
- */
+/** W1-T2463: the reverse of {@link perRunWorkerHomeDir}'s `perSpawn` encoding — strips a trailing
+ *  `${PER_SPAWN_TOKEN_SEP}<token>` so {@link sweepStaleWorkerHomes}'s lookups compare against the SAME
+ *  id the spawn was given. A suffix with no separator round-trips unchanged. */
 function stripPerSpawnToken(suffix: string): string {
   const i = suffix.indexOf(PER_SPAWN_TOKEN_SEP);
   return i === -1 ? suffix : suffix.slice(0, i);
 }
 
-/**
- * The per-spawn worker HOME: `<workerHomeRoot>-<id>`, a SIBLING of the
- * singleton root (never the root itself, never nested under it — see
- * {@link isReapableWorkerHome}, which enforces exactly that shape on reap).
- * `id` prefers the caller's `runId` when supplied (durable and legible in
- * `ps`/logs — the literal `worker-home-<runId>` WS-2 names), but generation
- * never DEPENDS on one being threaded through: the concurrency invariant —
- * no two overlapping spawns ever share a home — must hold even for a caller
- * that has not (yet) wired a runId through, so an absent/empty one falls
- * back to a fresh `randomUUID()` per call.
- *
- * W1-T2463: `opts.perSpawn` OPTS IN to appending a per-spawn uniqueness token after `id`
- * (`<workerHomeRoot>-<id>.<token>`), so two spawns sharing one `runId` inside the same
- * daemon run resolve to DISTINCT homes — the collision `worker.ts:1009` hit, keyed on
- * `args.runId` alone. `runId` stays the FIRST/durable component (Q1: `workerMarkerEnv`
- * still writes the bare `runId`, unaffected — this function's return value is never what
- * reclamation matches on) and the DEFAULT (omitted `opts`) is BYTE-IDENTICAL to before
- * (Q2: `readUsageSnapshot`'s `perRunWorkerHomeDir(root, "usage-probe")` call never opts in,
- * so its stable, non-per-call home is unchanged). See {@link stripPerSpawnToken} for the
- * matching decode {@link sweepStaleWorkerHomes} applies (Q3).
- */
+/** The per-spawn worker HOME: `<workerHomeRoot>-<id>`, a SIBLING of the singleton root — never the
+ *  root itself, never nested under it (see {@link isReapableWorkerHome}, which enforces that on reap).
+ *  INVARIANT: no two overlapping spawns ever share a home. `id` prefers the caller's `runId` because
+ *  it is durable and legible in `ps` and logs, but an absent one falls back to a fresh `randomUUID()`.
+ *  W1-T2463: `opts.perSpawn` appends a token after `id`, so two spawns sharing one runId still get
+ *  distinct homes. // Why: docs/forensics/worker-home.md#perrunworkerhomedir (W1-T170, W1-T2463). */
 export function perRunWorkerHomeDir(
   workerHomeRoot: string,
   runId?: string,
@@ -666,15 +453,9 @@ export function perRunWorkerHomeDir(
   return `${workerHomeRoot}-${id}${PER_SPAWN_TOKEN_SEP}${token}`;
 }
 
-/**
- * `true` IFF `target` is exactly `<root>-<nonempty-suffix>` — a per-spawn
- * SIBLING of the singleton root, one segment, no traversal. Guards
- * {@link reapWorkerHome} so a malformed target can never remove the
- * singleton root itself or anything outside its own sibling — the same
- * one-segment-below/beside-root discipline worker-scratch.ts's
- * `isReapableScratchTarget` already applies to the identical class of
- * mistake (a reap that escapes its own resource).
- */
+/** `true` IFF `target` is exactly `<root>-<nonempty-suffix>` — a per-spawn SIBLING of the singleton
+ *  root, one segment, no traversal. INVARIANT: guards {@link reapWorkerHome} so a malformed target can
+ *  never remove the singleton root or anything outside its own sibling. */
 export function isReapableWorkerHome(root: string, target: string): boolean {
   const rootResolved = resolve(root);
   const t = resolve(target);
@@ -691,14 +472,9 @@ export interface WorkerHomeReapResult {
   reason?: string;
 }
 
-/**
- * Best-effort reap of ONE per-spawn worker home. Called at spawn teardown on
- * EVERY exit path, including a thrown error — the same `withTempDir`
- * discipline (W1-T115/W1-T131) rmd already applies to its other throwaway
- * resources, now covering a resource that must not accumulate across
- * concurrent or serial spawns. Guarded by {@link isReapableWorkerHome};
- * existence-checked; never throws.
- */
+/** Best-effort reap of ONE per-spawn worker home, called at spawn teardown on EVERY exit path
+ *  including a thrown error — the `withTempDir` discipline (W1-T115/W1-T131) applied to a resource
+ *  that must not accumulate. Guarded by {@link isReapableWorkerHome}; never throws. */
 export function reapWorkerHome(
   root: string,
   target: string,
@@ -715,47 +491,29 @@ export function reapWorkerHome(
   }
 }
 
-/** Default age ceiling for {@link sweepStaleWorkerHomes}: 24h — matches the
- * other boot sweeps (lib/tmp.ts's `sweepStaleTempDirs`, lib/worker-scratch.ts's
- * `sweepStaleWorkerScratch`). W1-T1064: this is now the BACKSTOP for a candidate whose
- * run id resolves to nothing, not the primary signal — see {@link sweepStaleWorkerHomes}'s
- * doc for the predicate that runs before it. */
+/** Default age ceiling for {@link sweepStaleWorkerHomes}: 24h — matches the other boot sweeps
+ *  (lib/tmp.ts's `sweepStaleTempDirs`, lib/worker-scratch.ts's `sweepStaleWorkerScratch`). W1-T1064:
+ *  this is the BACKSTOP for a candidate whose run id resolves to nothing, not the primary signal. */
 export const DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface WorkerHomeSweepOpts {
-  /** Reap a worker-home dir older than this, when its run id resolves to nothing (no
-   *  live lock, no terminal ledger verdict). Default 24h. */
+  /** Reap a worker-home dir older than this, when its run id resolves to nothing — no live lock and
+   *  no terminal ledger verdict. Default 24h. */
   maxAgeMs?: number;
   /** Injectable clock (tests). Defaults to Date.now. */
   now?: () => number;
   fsImpl?: Partial<WorkerHomeFsOps>;
-  /**
-   * W1-T1064: where `state/inflight/*.lock` files live — checked for a lock naming a
-   * candidate's run id BEFORE anything is removed (a live lock keeps the home
-   * regardless of age; design bullet 2, plan/tasks.d/W1-T1064). Defaults to
-   * `<dirname(root)>/state/inflight`, mirroring config.ts's own documented relationship
-   * between `workerHomeDir` (`<config.root>/worker-home`, unless a `workerHomeRoot`
-   * override is configured) and `config.root` — every EXISTING caller of
-   * {@link sweepStaleWorkerHomes} passes only `root`, so this default is what makes the
-   * sharpened predicate apply with no call-site change. A caller running a custom
-   * `workerHomeRoot` should pass this explicitly.
-   */
+  /** W1-T1064: where `state/inflight/*.lock` files live — checked for a lock naming a candidate's run
+   *  id BEFORE anything is removed, since a live lock keeps the home regardless of age. Defaults to
+   *  `<dirname(root)>/state/inflight`, so every existing caller gets the predicate unchanged. */
   inflightDir?: string;
-  /**
-   * W1-T1064: the ledger checked for a terminal `verdict` line naming a candidate's run
-   * id — the ONLY thing that authorises removing a home before the age ceiling (design
-   * bullet 3). Defaults to `<dirname(root)>/state/ledger.ndjson`, the same
-   * `workerHomeDir`-relative assumption {@link inflightDir} makes.
-   */
+  /** W1-T1064: the ledger checked for a terminal `verdict` line naming a candidate's run id — the ONLY
+   *  thing that authorises removing a home before the age ceiling. Defaults to
+   *  `<dirname(root)>/state/ledger.ndjson`. */
   ledgerPath?: string;
-  /**
-   * W1-T1064: "PRINT BEFORE CLEARING, ALWAYS" (the task design's own words) — called once
-   * per removal naming the home, its run id and the evidence that judged it dead, and
-   * once more at the end of EVERY pass (including the zero-removed case), so a pass that
-   * ran and found nothing stale is no longer indistinguishable from one that never ran.
-   * Optional and unwired by any existing caller — every current call site is therefore
-   * unaffected by this addition.
-   */
+  /** W1-T1064: print before clearing, always — called once per removal naming the home, its run id and
+   *  the evidence that judged it dead, and once at the end of EVERY pass including the zero-removed
+   *  case, so a pass that found nothing stale never reads the same as one that never ran. */
   log?: (step: string, fields: Record<string, unknown>) => void;
 }
 
@@ -764,16 +522,10 @@ export interface WorkerHomeSweepSummary {
   kept: string[];
 }
 
-/**
- * W1-T1064: `true` iff `inflightDir` holds a `*.lock` file whose `run_id` names `runId`
- * — a POSITIVE liveness signal that is file-based and survives a restart (design bullet
- * 2), unlike a live-pid check (bullet 1), which the moment right after a restart makes
- * unreliable on its own (pids are reassigned right when workers are being respawned).
- * `sweepStaleInflightLocks` (inflight-lock.ts) reaps stale locks on its own schedule, so
- * this function's ABSENT result must never be read as "the run ended" — only a PRESENT
- * result means anything, which is why {@link sweepStaleWorkerHomes} only ever uses this
- * to KEEP, never to authorise a removal.
- */
+/** W1-T1064: `true` iff `inflightDir` holds a `*.lock` whose `run_id` names `runId` — a POSITIVE
+ *  liveness signal that is file-based and survives a restart, unlike a live-pid check. INVARIANT: an
+ *  ABSENT result proves nothing, because `sweepStaleInflightLocks` (inflight-lock.ts) reaps stale
+ *  locks on its own schedule, so {@link sweepStaleWorkerHomes} uses this only to KEEP. */
 function findLiveInflightLockForRun(inflightDir: string, runId: string, f: WorkerHomeFsOps): boolean {
   let entries: string[];
   try {
@@ -795,14 +547,10 @@ function findLiveInflightLockForRun(inflightDir: string, runId: string, f: Worke
   return false;
 }
 
-/**
- * W1-T1064: `true` iff `ledgerPath` holds a `step: "verdict"` line whose `run_id` names
- * `runId` — the POSITIVE statement of death (design bullet 3) that authorises
- * {@link sweepStaleWorkerHomes} to remove a home before the age ceiling. Every
- * `run-task.ts` run's `log` closure stamps this exact `{run_id, step: "verdict"}` shape
- * on every terminal outcome (`log("verdict", ...)`), so this reads the SAME fact the
- * daemon itself already records, never a second notion of "done".
- */
+/** W1-T1064: `true` iff `ledgerPath` holds a `step: "verdict"` line whose `run_id` names `runId` — the
+ *  POSITIVE statement of death that authorises removing a home before the age ceiling. Every
+ *  `run-task.ts` run stamps that exact shape on every terminal outcome, so this reads the SAME fact
+ *  the daemon records, never a second notion of "done". */
 function hasTerminalLedgerVerdict(ledgerPath: string, runId: string, f: WorkerHomeFsOps): boolean {
   let raw: string;
   try {
@@ -825,41 +573,13 @@ function hasTerminalLedgerVerdict(ledgerPath: string, runId: string, f: WorkerHo
   return false;
 }
 
-/**
- * Boot-time backstop (mirrors worker-scratch.ts's `sweepStaleWorkerScratch`
- * and tmp.ts's `sweepStaleTempDirs`): reap `<root>-<id>` worker-home dirs a
- * crashed/killed process could not reach its own {@link reapWorkerHome} call
- * for — the daemon boot sweep this task's design calls for, so a home
- * orphaned by an ended run does not accumulate across boots. Scans `root`'s
- * PARENT directory for siblings matching `<basename(root)>-`.
- *
- * W1-T1064 — THE PREDICATE, SHARPENED. Age alone let a day's worth of ~24h-old homes
- * (mostly a per-run Playwright browser cache) accumulate until the disk hit 100% and
- * tore a ledger write mid-record. Age is now the BACKSTOP, not the primary signal, for a
- * candidate whose run id (the `<id>` in `<root>-<id>`) resolves to nothing:
- *
- *   1. A LIVE `state/inflight/` lock naming this run id (see
- *      {@link findLiveInflightLockForRun}) keeps the home REGARDLESS OF AGE — file-based,
- *      so unlike a pid check it survives a restart. Its ABSENCE proves nothing (the lock
- *      sweep reaps stale locks on its own) and never authorises a removal by itself.
- *   2. Only once no live lock was found: a TERMINAL `verdict` ledger line naming this run
- *      id (see {@link hasTerminalLedgerVerdict}) is a POSITIVE statement that the run
- *      finished, and removes the home NOW, before the age ceiling.
- *   3. Anything else — no lock, no verdict; an orphan from a `kill -9` or a crash before
- *      any verdict was written — falls back to `maxAgeMs`, exactly the pre-existing
- *      mtime-only behavior.
- *
- * `inflightDir`/`ledgerPath` default off `dirname(root)` (see {@link WorkerHomeSweepOpts}),
- * so every EXISTING caller — `run-task.ts`'s boot rung and `logDiskReclaimRung` both call
- * `sweepStaleWorkerHomes(root)` with no other args — gets the sharpened predicate for
- * free, with no call-site change required.
- *
- * Every removal is named via the optional `log` (home, run id, evidence), and the pass
- * reports once more at the end EVEN WHEN NOTHING WAS REMOVED (design: "say so when
- * nothing was eligible"), so silence never again reads the same as "never ran".
- *
- * Best-effort throughout; never throws.
- */
+/** Boot-time backstop, mirroring worker-scratch.ts's `sweepStaleWorkerScratch`: reap `<root>-<id>`
+ *  homes a crashed process could not reach its own {@link reapWorkerHome} call for. Never throws.
+ *  THE PREDICATE (W1-T1064), in order: a live `state/inflight/` lock naming this run id
+ *  ({@link findLiveInflightLockForRun}) keeps the home REGARDLESS OF AGE and its absence proves
+ *  nothing; then a terminal `verdict` line ({@link hasTerminalLedgerVerdict}) removes it NOW; anything
+ *  else falls back to `maxAgeMs`. TRAP: age alone let homes accumulate until the disk hit 100% and
+ *  tore a ledger write mid-record. // Why: docs/forensics/worker-home.md#sweepstaleworkerhomes. */
 export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = {}): WorkerHomeSweepSummary {
   const f = { ...workerHomeFsOps, ...opts.fsImpl };
   const now = opts.now ?? (() => Date.now());
@@ -896,11 +616,9 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
       continue;
     }
 
-    // W1-T2463 Q3: a per-spawn home's suffix is `<runId>${PER_SPAWN_TOKEN_SEP}<token>` when
-    // its call site opted in (worker.ts:1009) — strip the token back out so the lock/verdict
-    // lookups below compare against the SAME runId the spawn was given, never the full,
-    // token-bearing directory suffix. A pre-W1-T2463 (or un-opted-in) suffix has no separator
-    // and round-trips unchanged.
+    // W1-T2463: a per-spawn home's suffix is `<runId>${PER_SPAWN_TOKEN_SEP}<token>` when its call site
+    // opted in — strip the token so the lookups below compare against the SAME runId the spawn was
+    // given. A pre-W1-T2463 suffix has no separator and round-trips unchanged.
     const runId = stripPerSpawnToken(name.slice(prefix.length));
     if (findLiveInflightLockForRun(inflightDir, runId, f)) {
       kept.push(name); // live run: kept however old — no age check at all (claim 2)
@@ -945,37 +663,20 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
 }
 
 // ── W1-T235: the dedicated worker keychain (WS-7 keychain-unlock gate) ──────
-//
-// The login keychain holds the `Claude Code-credentials` OAuth item and locks
-// with the operator's session (cold boot, `security lock-keychain`, screen
-// policy). Under the pre-T235 symlink the redirected HOME resolved the REAL
-// login keychain, so a lock killed every headless spawn "Not logged in" at $0
-// before any turn — and, because a credential-dead worker makes zero writes,
-// the death rendered as the generic "containment UNPROVEN" misdiagnosis
-// (fired live 2026-07-21, two spawns, two days of theory).
-//
-// This section provisions a DEDICATED keychain holding a COPY of the item,
-// configured to never auto-lock and unlocked by the harness itself with a
-// password persisted 0600 under the config state dir. The operator's login
-// keychain is READ exactly once (at provisioning, while it is unlocked) and
-// is NEVER unlocked by the fleet — option (i) of the task's design space,
-// chosen for the smallest blast radius. Every failure path out of this rung
-// throws a {@link WorkerKeychainError} carrying a named reason CLASS, so a
-// credential failure can never again render as a containment finding.
+// TRAP: the login keychain holds the `Claude Code-credentials` OAuth item and locks with the
+// operator's session, so under the pre-T235 symlink a lock killed every headless spawn at $0 before
+// any turn — and, because a credential-dead worker makes zero writes, that death rendered as the
+// generic "containment UNPROVEN" misdiagnosis (fired live 2026-07-21).
+// INVARIANT: the fleet READS the operator's login keychain exactly once, at provisioning, and NEVER
+// unlocks it; every path throws a named class. // Why: docs/forensics/worker-home.md#the-dedicated-worker-keychain.
 
 /** The generic-password service name Claude Code stores its OAuth token under. */
 export const WORKER_KEYCHAIN_SERVICE = "Claude Code-credentials";
 
-/** Named failure classes for the credential rung — queryable, not prose.
- *
- * The first four are the macOS keychain rung's own (W1-T235). The next two are the
- * NON-DARWIN file store's (recon-cloud-workers-spike, stop 6): a keychain either yields a
- * secret or does not, but a file has more ways to be wrong than that, and collapsing them
- * would put this rung back in the position the whole taxonomy exists to avoid. See
- * {@link classifyWorkerCredentialFile} for which observation earns which class. The last
- * is W1-T2398's: the credential IS usable right now but its recorded expiry cannot
- * outlive the caller's own `expectedRunMs` — a distinct fact from all of the above, none
- * of which speak to run length at all. */
+/** Named failure classes for the credential rung — queryable, not prose. The first four are the macOS
+ *  keychain rung's own (W1-T235); the next two are the NON-DARWIN file store's (see
+ *  {@link classifyWorkerCredentialFile}), because a file has more ways to be wrong than a keychain and
+ *  collapsing them would undo the taxonomy. The last is W1-T2398's: usable now, but too short. */
 export type WorkerKeychainReasonClass =
   | "login-keychain-locked"
   | "credential-item-missing"
@@ -991,12 +692,9 @@ export type WorkerKeychainReasonClass =
    *  different operator action from any other member of this union. */
   | "keychain-provision-lock-timeout";
 
-/**
- * A credential-NAMED failure out of the worker-keychain rung. Thrown BEFORE
- * any worker spawns, so a locked/missing credential fails loudly at the spawn
- * boundary instead of spawning a credential-dead worker whose zero-write death
- * reads as "containment UNPROVEN" (the 2026-07-21 misdiagnosis).
- */
+/** A credential-NAMED failure out of the worker-keychain rung. INVARIANT: thrown BEFORE any worker
+ *  spawns, so a locked or missing credential fails loudly at the spawn boundary instead of spawning a
+ *  credential-dead worker whose zero-write death reads as "containment UNPROVEN" (2026-07-21). */
 export class WorkerKeychainError extends Error {
   override name = "WorkerKeychainError";
   constructor(
@@ -1012,37 +710,21 @@ export interface WorkerKeychainPaths {
   keychainPath: string;
   /** The 0600 file persisting the keychain's password across boots. */
   passwordPath: string;
-  /**
-   * The 0600 sidecar recording which account identity (an `EnsureWorkerKeychainOpts.accountId`
-   * NAME — never a secret) this store was last provisioned for. `ensureWorkerKeychain` reads it
-   * to detect an identity change under the unlabelled default path; a caller that never supplies
-   * `accountId` never touches this file, so pre-W1-T265 behavior is unchanged.
-   */
+  /** The 0600 sidecar recording which account identity (an `EnsureWorkerKeychainOpts.accountId` NAME,
+   *  never a secret) this store was last provisioned for. A caller that never supplies `accountId`
+   *  never touches this file. */
   identityPath: string;
-  /**
-   * W1-T293: the 0600 sidecar recording the copied credential's OWN `claudeAiOauth.expiresAt`
-   * (a plain epoch-ms NUMBER — never the secret) as of the last (re-)provision. `ensureWorkerKeychain`
-   * reads it to detect the credential going stale WITHOUT re-reading the login keychain or the
-   * worker store's own secret on every call — see `EnsureWorkerKeychainOpts.now`'s doc. Written on
-   * every (re-)provision regardless of whether `accountId` is supplied (independent of the identity
-   * sidecar above); absent when the credential carried no parseable expiry field, in which case the
-   * expiry gate reports "unknown" rather than inventing one.
-   */
+  /** W1-T293: the 0600 sidecar recording the copied credential's OWN `claudeAiOauth.expiresAt` (a
+   *  plain epoch-ms NUMBER, never the secret), so `ensureWorkerKeychain` detects staleness without
+   *  re-reading the login keychain on every call. Absent when the credential carried no parseable
+   *  expiry, in which case the gate reports "unknown". */
   expiryPath: string;
 }
 
-/**
- * Canonical locations under the config state dir (`<config.root>/state`).
- *
- * `accountLabel` is an OPTIONAL, operator-chosen NAME (never a token, never derived from a
- * credential — see billingMode(childEnvKeys)'s NAME-only discipline, env.ts:173) that partitions
- * the store per Anthropic account: `remudero-worker-<label>.keychain-db` /
- * `worker-keychain-password-<label>` instead of the legacy unlabelled pair. Omitted ⇒ the
- * legacy unlabelled paths, byte-for-byte, so an unconfigured install is unaffected. This is
- * independent of `EnsureWorkerKeychainOpts.accountId` (below): a label picks WHICH FILE a store
- * lives at; `accountId` is the value compared to detect the SAME file's identity drifting out
- * from under it. An operator may use either, both, or neither.
- */
+/** Canonical locations under the config state dir (`<config.root>/state`). `accountLabel` is an
+ *  OPTIONAL, operator-chosen NAME — never a token, never derived from a credential — that partitions
+ *  the store per Anthropic account; omitted ⇒ the legacy unlabelled paths, byte for byte. INVARIANT: a
+ *  label picks WHICH FILE a store lives at, while `accountId` detects that file's identity drifting. */
 export function workerKeychainPaths(stateDir: string, accountLabel?: string): WorkerKeychainPaths {
   const suffix = accountLabel ? `-${accountLabel}` : "";
   return {
@@ -1062,79 +744,37 @@ const defaultSecurityRunner: SecurityRunner = (argv) =>
 export interface EnsureWorkerKeychainOpts extends WorkerKeychainPaths {
   /** The operator's real login keychain (read ONCE, at provisioning only). */
   loginKeychainPath: string;
-  /** Apps granted per-item access to the copied credential (`-T`), e.g. the
-   * claude binary. Never `-A` (any-app). */
+  /** Apps granted per-item access to the copied credential (`-T`), e.g. the claude binary. Never `-A` (any-app). */
   grantApps?: string[];
   runner?: SecurityRunner;
   exists?: (path: string) => boolean;
-  /**
-   * W1-T265: the Anthropic account identity active for THIS call — an
-   * `accountUuid`/`emailAddress` NAME, never a secret, and NEVER the worker keychain
-   * item's own `acct` attribute: account-usage.ts measured that value to be the OS
-   * username, identical across an Anthropic account switch, so it cannot discriminate
-   * accounts. The caller (worker.ts) resolves it fresh from `~/.claude.json` via
-   * account-usage.ts's `readAccountUsageFile` — the same non-keychain source the
-   * console's account panel already trusts for this reason.
-   *
-   * Compared, name-to-name, against `identityPath`'s recorded value: a mismatch (or a
-   * store with no recorded identity at all — e.g. one provisioned before this option
-   * existed) re-provisions rather than silently reusing a stale copy. Omitted ⇒ the
-   * identity check never runs and `identityPath` is never touched — pre-W1-T265
-   * behavior (provision once, never re-checked) is unchanged. Appended LAST — no
-   * positional caller shifts.
-   */
+  /** W1-T265: the Anthropic account identity active for THIS call — an `accountUuid`/`emailAddress`
+   *  NAME, never a secret. TRAP: never the keychain item's own `acct` attribute, which
+   *  account-usage.ts measured to be the OS username, identical across an account switch; the caller
+   *  resolves it fresh from `~/.claude.json`. A mismatch against `identityPath` re-provisions. */
   accountId?: string;
-  /**
-   * W1-T293 arm (2): injectable clock for the credential-expiry sidecar gate below.
-   * Omitted ⇒ `Date.now`. Tests inject a fixed value for deterministic expiry math.
-   * Appended LAST — no positional caller shifts.
-   */
+  /** W1-T293: injectable clock for the credential-expiry sidecar gate below. Omitted ⇒ `Date.now`.
+   *  Appended LAST, like every option below it — no positional caller shifts. */
   now?: () => number;
-  /**
-   * W1-T293 arm (2): a token AT OR WITHIN this window of its recorded `expiresAt` is
-   * treated as already stale, so a spawn never races a token that expires mid-run.
-   * Omitted ⇒ `DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS`. Appended LAST — no positional
-   * caller shifts.
-   */
+  /** W1-T293: a token AT OR WITHIN this window of its recorded `expiresAt` is treated as already
+   *  stale, so a spawn never races a token that expires mid-run. Omitted ⇒
+   *  {@link DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS}. */
   credentialExpirySkewMs?: number;
-  /**
-   * W1-T293 arm (3): set by the caller when the PRIOR spawn died on the containment
-   * preflight's expiry-named reason (W1-T292's `spawn_credential_expired`, once that
-   * task wires it through) — forces THIS call to re-provision even when arm (2)'s own
-   * before-the-fact sidecar read saw nothing wrong (the token expired mid-run, after
-   * the last check). `ensureWorkerKeychain` never sets this itself; it is purely a
-   * caller-supplied hint. Appended LAST — no positional caller shifts.
-   */
+  /** W1-T293 arm (3): set by the caller when the PRIOR spawn died on the containment preflight's
+   *  expiry-named reason — forces THIS call to re-provision even when arm (2)'s sidecar read saw
+   *  nothing wrong, because the token expired mid-run. Purely a caller-supplied hint. */
   priorSpawnCredentialExpired?: boolean;
-  /**
-   * W1-T2398: how long (ms) the caller expects THIS run to take — the dispatcher's own
-   * estimate (e.g. the task's `budget_usd` translated to a turn/time cap), never derived
-   * in here. Omitted ⇒ behavior is BYTE-FOR-BYTE what it was before this option existed:
-   * `DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS` (or `credentialExpirySkewMs`) alone is the margin,
-   * and this function never refuses on run length.
-   *
-   * Supplied, it does two things, both scoped to the ALREADY-RUNNING gate below — no new
-   * fetch, no re-authentication, no pacing/sleep of any kind:
-   *  (1) it WIDENS the effective skew fed to {@link classifyCredentialSidecar} to
-   *      `Math.max(credentialExpirySkewMs ?? DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS,
-   *      expectedRunMs)`, so a credential that would expire mid-run is classified
-   *      `"expired"` and re-provisioned from the login keychain exactly as any other
-   *      expiry is — the fixed constant becomes a FLOOR, not the whole margin;
-   *  (2) AFTER that (re-)provisioning attempt — or immediately, on the steady-state path
-   *      that never needed one — it compares the credential this call is about to hand
-   *      out against `expectedRunMs` one last time and THROWS {@link WorkerKeychainError}
-   *      (`credential-too-short-for-run`) if even the freshest available copy still can't
-   *      outlast the run, refusing the spawn before it starts rather than starting one
-   *      doomed to lose auth partway through. A credential that carries no recorded
-   *      expiry is never invented one for this comparison — {@link extractCredentialExpiryMs}'s
-   *      "never invent a field" contract holds, and the check is simply skipped.
-   * Appended LAST — no positional caller shifts.
-   */
+  /** W1-T2398: how long (ms) the caller expects THIS run to take — the dispatcher's own estimate, never
+   *  derived in here. Omitted ⇒ behavior is byte-for-byte what it was before this option, and this
+   *  function never refuses on run length. Supplied, it does two things inside the already-running gate
+   *  below, with no new fetch and no re-authentication. (1) It WIDENS the skew fed to
+   *  {@link classifyCredentialSidecar} to `Math.max(skew, expectedRunMs)`, so the constant becomes a
+   *  FLOOR. (2) It then THROWS `credential-too-short-for-run` rather than spawning doomed to lose auth. */
   expectedRunMs?: number;
 }
 
-/** Why THIS call did (or didn't) provision — the switch's audit trail (W1-T265),
- * now also naming a same-account copy that went stale on its own clock (W1-T293). */
+/** Why THIS call did (or didn't) provision — the switch's audit trail (W1-T265), now also naming a
+ *  same-account copy that went stale on its own clock (W1-T293). */
 export type WorkerKeychainProvisionReason = "absent" | "identity-changed" | "credential-expired" | "skipped";
 
 export interface WorkerKeychainSummary {
@@ -1142,23 +782,14 @@ export interface WorkerKeychainSummary {
   /** `true` when THIS call created + populated the keychain. */
   provisioned: boolean;
   unlocked: true;
-  /**
-   * The `accountId` this call compared/stamped, mirrored from the opt of the same
-   * name — a NAME, never a credential value. `undefined` when the caller never
-   * supplied one (identity checking is opt-in).
-   */
+  /** The `accountId` this call compared and stamped, mirrored from the opt of the same name — a NAME,
+   *  never a credential value. `undefined` when the caller never supplied one. */
   account_label?: string;
   /** `"absent"` (nothing existed) | `"identity-changed"` (mismatch) | `"skipped"` (matched, or no accountId supplied). */
   reason: WorkerKeychainProvisionReason;
-  /**
-   * W1-T2398: `recordedExpiresAt - now` for the credential THIS call is handing out,
-   * measured at the moment of the check below — independent of whether
-   * `opts.expectedRunMs` was ever supplied, so the rate this shard's own rationale
-   * could not measure from a ledger becomes answerable off-host purely by a caller
-   * logging this field. `undefined` exactly when no numeric expiry is known for this
-   * credential (no sidecar, or a credential that never carried an `expiresAt`) — never
-   * invented.
-   */
+  /** W1-T2398: `recordedExpiresAt - now` for the credential THIS call is handing out, measured at the
+   *  check below and independent of whether `opts.expectedRunMs` was supplied, so a caller logging this
+   *  field makes the rate answerable off-host. `undefined` exactly when no numeric expiry is known. */
   observedHeadroomMs?: number;
 }
 
@@ -1169,27 +800,16 @@ function classifyLoginReadError(err: unknown): WorkerKeychainReasonClass {
   return "provision-failed";
 }
 
-/** Default FLOOR (not the whole margin — see `EnsureWorkerKeychainOpts.expectedRunMs`,
- * W1-T2398) for the arm-2 expiry gate below: a stored token AT OR WITHIN this window of
- * its recorded `expiresAt` is treated as already stale. On its own this constant answers
- * only "is this credential expired NOW", never "will it still be valid when this run
- * ENDS" — a spawn holding six minutes of credential would pass a bare five-minute check
- * and lose it six minutes in. `deriveProvisionGate` widens the effective margin to
- * `Math.max(this, expectedRunMs)` when a caller supplies `expectedRunMs`, so a credential
- * that cannot outlive its own run is caught instead of handed out. */
+/** Default FLOOR, not the whole margin — see `EnsureWorkerKeychainOpts.expectedRunMs` (W1-T2398). A
+ *  stored token AT OR WITHIN this window of its recorded `expiresAt` is treated as already stale.
+ *  TRAP: on its own this answers only "is this credential expired NOW" — a spawn holding six minutes
+ *  of credential passes a bare five-minute check and loses it six minutes in. */
 export const DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS = 5 * 60 * 1000;
 
-/**
- * Pure: pull `claudeAiOauth.expiresAt` (epoch ms) out of the RAW secret the login
- * keychain's `Claude Code-credentials` item carries. VERIFIED FROM SOURCE (a live
- * host's `~/.claude/.credentials.json`, byte-identical shape to what
- * `find-generic-password -w` returns and what `add-generic-password -w` copies
- * verbatim into the worker store): `{"claudeAiOauth":{"accessToken":...,
- * "expiresAt":<epoch-ms>,...}}`. Returns `undefined` for anything that doesn't parse
- * to that shape — callers must never invent a field when this comes back empty;
- * W1-T293's arm (3) (a caller-supplied hint) is the only fallback when a credential
- * genuinely carries no expiry.
- */
+/** Pure: pull `claudeAiOauth.expiresAt` (epoch ms) out of the RAW secret the login keychain's
+ *  `Claude Code-credentials` item carries. VERIFIED FROM SOURCE against a live host's
+ *  `~/.claude/.credentials.json`, byte-identical to what `find-generic-password -w` returns.
+ *  INVARIANT: `undefined` for anything else, and callers must never invent a field for it. */
 export function extractCredentialExpiryMs(secret: string): number | undefined {
   if (!secret || secret.trim() === "") return undefined;
   let parsed: unknown;
@@ -1205,11 +825,9 @@ export function extractCredentialExpiryMs(secret: string): number | undefined {
 /** Verdict of the cheap, sidecar-only arm-2 staleness read, below. */
 export type CredentialSidecarVerdict = "unknown" | "fresh" | "expired" | "broken";
 
-/** Pure: parse a RECORDED expiry-sidecar value into its epoch-ms number, or
- *  `undefined` for anything that isn't one (absent, empty, non-numeric) — the same
- *  three non-answers {@link classifyCredentialSidecar} folds into `"unknown"`/`"broken"`,
- *  factored out so W1-T2398's headroom read (below) shares the exact parse, never a
- *  second hand-rolled copy of it. */
+/** Pure: parse a RECORDED expiry-sidecar value into its epoch-ms number, or `undefined` for anything
+ *  that isn't one. Factored out so {@link classifyCredentialSidecar} and W1-T2398's headroom read
+ *  share the exact parse, never a second hand-rolled copy. */
 function parseSidecarExpiryMs(recorded: string | undefined): number | undefined {
   if (recorded === undefined) return undefined;
   const trimmed = recorded.trim();
@@ -1218,15 +836,10 @@ function parseSidecarExpiryMs(recorded: string | undefined): number | undefined 
   return Number.isFinite(expiresAt) ? expiresAt : undefined;
 }
 
-/**
- * Pure: classify a RECORDED expiry-sidecar value (never the credential itself — see
- * `WorkerKeychainPaths.expiryPath`'s doc) against a clock + skew. `undefined` (no
- * sidecar file — predates this feature, or the credential carried no expiry field at
- * provisioning time) is `"unknown"`: arm (2) has nothing to say, and only arm (3)'s
- * explicit hint can force a re-provision. A present-but-empty/non-numeric value is
- * `"broken"` — the #29896 wipe shape's signature at the sidecar layer — never read
- * as healthy.
- */
+/** Pure: classify a RECORDED expiry-sidecar value (never the credential itself) against a clock and
+ *  skew. `undefined` — no sidecar file — is `"unknown"`: arm (2) has nothing to say and only arm (3)'s
+ *  explicit hint can force a re-provision. INVARIANT: a present-but-empty or non-numeric value is
+ *  `"broken"` — the #29896 wipe shape at the sidecar layer — and never reads as healthy. */
 export function classifyCredentialSidecar(
   recorded: string | undefined,
   opts: { nowMs: number; skewMs: number },
@@ -1238,56 +851,35 @@ export function classifyCredentialSidecar(
   return opts.nowMs + opts.skewMs >= expiresAt ? "expired" : "fresh";
 }
 
-// ── recon-cloud-workers-spike stop 6: the NON-DARWIN credential rung ────────────────────────
-//
-// WHAT THIS CLOSES, stated precisely, because the obvious framing is wrong. A credential-dead
-// worker is NOT silent on Linux today: `probeContainment` (containment.ts) is a once-per-run
-// preflight on EVERY platform, and it already classifies the death as `spawn_credential_expired`
-// or `spawn_credential_failure`. What Linux lacks is the DARWIN rung's timing and its cost —
-// `ensureWorkerKeychain` reads the credential BEFORE anything spawns, so a broken one costs a
-// file read; without it the same fact is bought with a probe worker, on every dispatch attempt,
-// forever, because nothing upstream ever learns.
-//
-// EXPIRY IS DELIBERATELY NOT A FAILURE HERE, and this is the load-bearing decision. On darwin an
-// expired credential TRIGGERS RE-PROVISIONING from the login keychain — it is a repair path, not
-// a refusal. On Linux the file IS the source; there is nothing to re-provision from, and the CLI
-// maintains its own refresh. Throwing on `expiresAt` in the past would therefore be a bound
-// firing on a condition that may be perfectly healthy, which is this repo's most-repeated defect
-// (W1-T312, W1-T380, W1-T382). A genuinely dead token is still caught, loudly and by name, by
-// the containment probe that already runs. This rung refuses only what is UNAMBIGUOUSLY unusable.
+// ── recon-cloud-workers-spike stop 6: the NON-DARWIN credential rung ────────
+// WHAT THIS CLOSES: a credential-dead worker is not silent on Linux — `probeContainment`
+// (containment.ts) already classifies the death. What Linux lacks is the darwin rung's TIMING and
+// COST: reading the credential before anything spawns costs a file read, not a probe worker on every
+// dispatch attempt, forever. INVARIANT: expiry is NOT a failure here. On darwin an expired credential
+// triggers re-provisioning; on Linux the file IS the source and the CLI refreshes it, so throwing on
+// a past `expiresAt` would fire a bound on a healthy condition (W1-T312, W1-T380, W1-T382).
 
-/** Where the non-darwin credential store lives — the path the CLI documents, and the SAME
- *  directory `WORKER_HOME_SYMLINKS` already grants into every per-run worker HOME (measured
- *  at spawn time: the grant materialises and the file is readable from inside the worker). */
+/** Where the non-darwin credential store lives — the path the CLI documents, and the SAME directory
+ *  `WORKER_HOME_SYMLINKS` already grants into every per-run worker HOME (measured at spawn time: the
+ *  grant materialises and the file is readable from inside the worker). */
 export function workerCredentialFilePath(realHome: string): string {
   return join(realHome, ".claude", ".credentials.json");
 }
 
-/** {@link classifyWorkerCredentialFile}'s verdict. `usable` carries the expiry when the file
- *  states one — `undefined` means the file simply does not say, which is NOT a failure (see
- *  {@link extractCredentialExpiryMs}'s own "never invent a field" contract). */
+/** {@link classifyWorkerCredentialFile}'s verdict. `usable` carries the expiry when the file states
+ *  one — `undefined` means the file does not say, which is NOT a failure (see
+ *  {@link extractCredentialExpiryMs}'s "never invent a field" contract). */
 export type WorkerCredentialFileVerdict =
   | { kind: "usable"; expiresAtMs?: number }
   | { kind: "unusable"; reasonClass: WorkerKeychainReasonClass; detail: string };
 
-/**
- * PURE (given a reader): classify the non-darwin credential file. Four observations, four
- * answers, none of them collapsed — the same null/empty discipline `readLedgerLines`' `present`
- * and `GitHub.readFailed` already keep elsewhere in this codebase:
- *
- *  - the reader throws ENOENT      → `credential-item-missing`, the SAME class the darwin rung
- *                                    uses for "no credential item", because it is the same fact.
- *  - the reader throws anything else → `credential-file-unreadable` (EACCES, EISDIR, EIO). A
- *                                    permissions problem is not an absence and must not read as one.
- *  - the bytes are not JSON        → `credential-file-malformed`.
- *  - the JSON parses but carries no `claudeAiOauth` object → `credential-file-malformed`, with a
- *                                    detail naming the missing block. THIS IS NOT HYPOTHETICAL: a
- *                                    real `.credentials.json` was observed carrying only an
- *                                    `mcpOAuth` section and no Claude credential at all, which a
- *                                    file-exists check would wave straight through.
- *
- * Anything else is `usable`. Expiry is reported, never refused — see the note above.
- */
+/** PURE (given a reader): classify the non-darwin credential file. Four observations, four answers,
+ *  none collapsed — the same null/empty discipline `readLedgerLines` and `GitHub.readFailed` keep.
+ *  ENOENT is `credential-item-missing`, the SAME class the darwin rung uses because it is the same
+ *  fact; any other throw is `credential-file-unreadable`, because a permissions problem is not an
+ *  absence; non-JSON bytes are `credential-file-malformed`, as is JSON with no `claudeAiOauth` object.
+ *  TRAP: a file was observed holding only an `mcpOAuth` section, which a file-exists check waves
+ *  through. Anything else is `usable`; expiry is reported, never refused. */
 export function classifyWorkerCredentialFile(read: () => string): WorkerCredentialFileVerdict {
   let raw: string;
   try {
@@ -1312,42 +904,27 @@ export function classifyWorkerCredentialFile(read: () => string): WorkerCredenti
       detail: "file parses but carries no claudeAiOauth section — it holds no Claude credential",
     };
   }
-  // REUSED, never re-derived: the SAME extractor the darwin sidecar path already runs against the
-  // keychain secret, which its own doc records as byte-identical in shape to this file.
+  // REUSED, never re-derived: the SAME extractor the darwin sidecar path runs against the keychain
+  // secret, which its own doc records as byte-identical in shape to this file.
   return { kind: "usable", expiresAtMs: extractCredentialExpiryMs(raw) };
 }
 
-/**
- * The non-darwin analogue of {@link ensureWorkerKeychain}'s refusal half: throw
- * {@link WorkerKeychainError} with a named class BEFORE any worker spawns, so an unusable
- * credential costs a file read rather than a probe worker. Returns the expiry the file states
- * (or `undefined`) so a caller can carry it without re-reading.
- *
- * `read` is injectable for unit tests, but the production default is the real `readFileSync`
- * and the suite drives THAT against real fixture files — a test that only ever supplies its own
- * reader would prove nothing about the path that actually ships.
- */
+/** The non-darwin analogue of {@link ensureWorkerKeychain}'s refusal half: throw
+ *  {@link WorkerKeychainError} with a named class BEFORE any worker spawns, so an unusable credential
+ *  costs a file read rather than a probe worker. INVARIANT: `read` is injectable for tests, but the
+ *  default is the real `readFileSync` and the suite drives THAT against real fixtures. */
 export function assertWorkerCredentialFile(
   path: string,
   read: (p: string) => string = (p) => readFileSync(p, "utf8"),
   envToken: string | undefined = process.env.CLAUDE_CODE_OAUTH_TOKEN,
 ): number | undefined {
   const verdict = classifyWorkerCredentialFile(() => read(path));
-  // A TOKEN IS A CREDENTIAL TOO (impl-ED). This guard exists because a credential-dead worker makes
-  // zero writes and its $0 death reads as containment UNPROVEN rather than as an auth failure — that
-  // reasoning is untouched and the refusal below still fires when NEITHER credential exists. What was
-  // wrong was the guard's REACH, not the guard: it tested only for the `/login` file, so it refused
-  // every container authenticated the one way a container can be. The CLI's own documented precedence
-  // ranks this env var ABOVE the `/login` credential, so a worker holding it is authenticated
-  // whatever the file says.
-  //
-  // EXPIRY IS A KNOWN GAP AND IS DELIBERATELY NOT SOLVED HERE. A bare token carries no
-  // `claudeAiOauth.expiresAt`, so {@link extractCredentialExpiryMs} cannot read one and `undefined`
-  // is the honest answer rather than a guess. The consequence, stated so it is not rediscovered: the
-  // fleet's expiry machinery is BLIND to a token-authenticated worker — it runs for a year and then
-  // every dispatch fails at once, with no advance warning from the sidecar classifier or the
-  // re-provision path. `apiKeyHelper` is the vendor-documented seam if unattended recovery is ever
-  // wanted; building rotation here would be a second concern.
+  // A TOKEN IS A CREDENTIAL TOO (impl-ED). INVARIANT: the refusal below still fires when NEITHER
+  // credential exists — what was wrong was the guard's REACH, not the guard: it tested only for the
+  // `/login` file and so refused every container authenticated the one way a container can be. The
+  // CLI's documented precedence ranks this env var ABOVE the `/login` credential. KNOWN GAP, not
+  // solved here: a bare token carries no `claudeAiOauth.expiresAt`, so the fleet's expiry machinery is
+  // BLIND to it — a worker runs for a year, then every dispatch fails at once, with no warning.
   if (verdict.kind === "unusable" && typeof envToken === "string" && envToken.length > 0) {
     return undefined;
   }
@@ -1360,43 +937,25 @@ export function assertWorkerCredentialFile(
   return verdict.expiresAtMs;
 }
 
-// W1-T293 arm (6): NO HOT LOOP. A daemon whose LOGIN token is itself dead must not
-// re-read it once per spawn forever — module-level (per-boot: resets only on process
-// restart, never persisted to disk) so a permanently dead login token escalates ONCE
-// per keychainPath, and every later credential-expired call in the SAME boot fails
-// fast on the remembered reason class without touching `security` again. Scoped to
-// the credential-expired trigger only: arms (1)/(4)/(5) (absent, identity-changed)
-// keep their pre-existing, unbounded behavior byte-for-byte — this never bounds those.
+// W1-T293 arm (6): NO HOT LOOP. Module-level and per-boot, so a daemon whose LOGIN token is dead
+// escalates ONCE per keychainPath and every later credential-expired call in the same boot fails fast
+// on the remembered reason class without touching `security` again. Scoped to the credential-expired
+// trigger only: the absent and identity-changed arms keep their unbounded behavior.
 const MAX_CREDENTIAL_RECOVERY_ATTEMPTS = 1;
 const credentialRecoveryFailures = new Map<string, { count: number; lastReasonClass: WorkerKeychainReasonClass }>();
 
 // ── W1-T339: serialize ONLY the provisioning branch, not the whole function ────
-//
-// WHAT IS SAFE ALREADY (unaffected by this section): the password write above is
-// atomic (`wx`) and converges losers onto the winner's password; the steady-state
-// read path (present, identity-matching, unexpired store) costs one fs read and two
-// IDEMPOTENT `security` calls (`unlock-keychain`/`set-keychain-settings`) that never
-// touch this lock at all.
-//
-// WHAT IS NOT SAFE: the provisioning branch DELETES and recreates the keychain store
-// (`rmSync` + `create-keychain` + `add-generic-password`). Two concurrent daemon
-// lanes that BOTH decide to (re-)provision the SAME store — a cold-boot racing a
-// spawn, or two lanes hitting an identity/expiry change together — would otherwise
-// have one lane's `rmSync` pull the store out from under the other mid-write, which
-// presents as flaky auth rather than as a lock bug.
-//
-// SAME SHAPE AS `acquireInflightLock`/`acquireDrainLock` (create-or-fail `wx`, no
-// TOCTOU gap, stale-holder reclaim via the shared `reclaimStaleLock` identity check —
-// W1-T289) with ONE deliberate difference: those two THROW when a live holder is
-// found, because "another instance of the same thing is already running" is meant to
-// abort the caller. Here a live holder means "a peer is provisioning THIS keychain
-// right now" — the correct action is to WAIT for it and converge on its result, never
-// throw and never proceed uncoordinated (this task's design point (iv)). So this lock
-// polls instead of failing fast on EEXIST-with-a-live-holder.
+// WHAT IS ALREADY SAFE: the password write is atomic (`wx`) and converges losers onto the winner's
+// password, and the steady-state read path costs one fs read and two idempotent `security` calls.
+// WHAT IS NOT: the provisioning branch DELETES and recreates the store, so two lanes both deciding to
+// (re-)provision would have one lane's `rmSync` pull the store out from under the other mid-write,
+// which presents as flaky auth rather than as a lock bug. INVARIANT: unlike `acquireInflightLock`,
+// a live holder here means "a peer is provisioning THIS keychain right now", so this lock WAITS and
+// converges rather than throwing. // Why: docs/forensics/worker-home.md#the-provisioning-lock.
 
-/** `<keychainPath>.provision.lock` — co-located with the store it guards, so the lock
- *  is scoped per keychain (a labelled per-account store never serializes against an
- *  unrelated one) and is discoverable next to the file it protects. */
+/** `<keychainPath>.provision.lock` — co-located with the store it guards, so the lock is scoped per
+ *  keychain (a labelled per-account store never serializes against an unrelated one) and is
+ *  discoverable next to the file it protects. */
 export function keychainProvisionLockPath(keychainPath: string): string {
   return `${keychainPath}.provision.lock`;
 }
@@ -1422,10 +981,9 @@ function parseKeychainProvisionLockInfo(raw: string): KeychainProvisionLockInfo 
   }
 }
 
-/** Blocking synchronous sleep (`ensureWorkerKeychain` is fully synchronous end to
- *  end, so the wait loop below cannot `await`). `Atomics.wait` on a throwaway
- *  `SharedArrayBuffer` is the standard Node idiom for this — no native dependency,
- *  no busy-spin burning CPU between polls. */
+/** Blocking synchronous sleep (`ensureWorkerKeychain` is synchronous end to end, so the wait loop
+ *  below cannot `await`). `Atomics.wait` on a throwaway `SharedArrayBuffer` is the standard Node idiom
+ *  — no native dependency, no busy-spin burning CPU between polls. */
 function defaultSleepSyncMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -1499,43 +1057,16 @@ export function resolveKeychainProvisionLockWaitMs(opts: AcquireKeychainProvisio
   }
 }
 
-/**
- * Acquire the exclusive provisioning lock for `keychainPath`, WAITING (never letting the caller
- * proceed uncoordinated) while a live peer holds it — but only up to a DEADLINE, past which it
- * throws {@link WorkerKeychainError} naming the holder it waited on.
- *
- * A stale lock — its holder judged dead by the shared {@link isHolderStale} predicate, or its file
- * unreadable/garbage — is reclaimed via the same identity-safe {@link reclaimStaleLock} every
- * other lock in this repo uses, so a crashed provisioner's abandoned lock cannot wedge every later
- * dispatch (W1-T339's design point (v)): the very next call to reach EEXIST on it takes it over.
- *
- * R-3 — TWO DEFECTS, ONE SHAPE: A WAIT WITH NOTHING TO END IT.
- *
- *   (i) STALENESS WAS JUDGED BY `!isPidAlive(held.pid)` ALONE — the pre-W1-T368 predicate every
- *       other lock in this repo has already stopped using. That answers "is SOME process using
- *       this number", never "is it the process that wrote the lock". A provisioner that died
- *       holding the lock, plus a REUSED pid, reads as LIVE forever: the recorded holder can never
- *       become dead again, so nothing here ever reclaims. The lock now runs the SAME
- *       {@link isHolderStale} — host first (rung 1), then pid liveness (rung 2), then the recorded
- *       start time against the live pid's ACTUAL one (rung 3) — as `acquireInflightLock`,
- *       `acquireDrainLock` and `acquireReviewStatusLock`. That is what needed `host` in the lock
- *       payload above, and what makes a reused pid decidable without waiting for a real wrap.
- *
- *  (ii) THE WAIT ITSELF HAD NO BOUND. `ensureWorkerKeychain` is synchronous end to end and is
- *       reached from `daemon.ts`'s boot and from `worker.ts` on every spawn, so this loop's
- *       `Atomics.wait` blocks the daemon's EVENT LOOP, not a task: a lock nothing can reclaim
- *       froze the whole process — no poll ticks, no STOP/PAUSE, and a relaunch queued behind the
- *       same lock on the same path. Rung 1 alone makes the unreclaimable case ORDINARY rather than
- *       exotic (a foreign-host lock is deliberately never reclaimed, and never should be), so the
- *       deadline is not a belt-and-braces addition to (i) — it is what keeps (i)'s correct refusal
- *       to steal a live holder's lock from being a new way to hang. A named throw hands the caller
- *       something it can act on; an unbounded wait hands it nothing at all.
- *
- * THE UNCONTENDED PATH IS UNCHANGED, deliberately: no policy is read, no clock is sampled, and no
- * deadline is computed unless and until this call actually meets a holder judged live. The
- * steady-state majority of calls never even reach this function (see `ensureWorkerKeychain`'s
- * pre-lock gate), and those that do overwhelmingly take the lock on the first `wx`.
- */
+/** Acquire the exclusive provisioning lock for `keychainPath`, WAITING (never letting the caller
+ *  proceed uncoordinated) while a live peer holds it — but only up to a DEADLINE, past which it
+ *  throws {@link WorkerKeychainError} naming the holder it waited on.
+ *  INVARIANT: a stale lock — its holder judged dead by the shared {@link isHolderStale}, or its file
+ *  unreadable — is reclaimed via {@link reclaimStaleLock}, so a crashed provisioner cannot wedge every
+ *  later dispatch. TRAP (R-3): judging staleness by `!isPidAlive(held.pid)` alone let a REUSED pid
+ *  read as live forever, and the wait itself had no bound — `Atomics.wait` blocks the daemon's EVENT
+ *  LOOP, so an unreclaimable lock froze the whole process. The uncontended path is unchanged: no
+ *  policy read, no clock sample, no deadline until this call meets a live holder.
+ *  // Why: docs/forensics/worker-home.md#acquirekeychainprovisionlock (R-3, W1-T339, W1-T368). */
 export function acquireKeychainProvisionLock(
   keychainPath: string,
   opts: AcquireKeychainProvisionLockOpts = {},
@@ -1574,10 +1105,9 @@ export function acquireKeychainProvisionLock(
           }),
       });
       if (result.outcome === "live") {
-        // A live peer is provisioning THIS store right now — WAIT and re-check rather than
-        // proceeding alongside it. Its own release (or, if it crashes, the next pass reclaiming
-        // its now-stale lock) is what ordinarily ends this; the deadline is what ends it when
-        // neither ever happens.
+        // A live peer is provisioning THIS store right now — WAIT and re-check rather than proceeding
+        // alongside it. Its own release, or the next pass reclaiming its now-stale lock, is what
+        // ordinarily ends this; the deadline is what ends it when neither ever happens.
         if (waitDeadlineAt === undefined) waitDeadlineAt = now() + resolveKeychainProvisionLockWaitMs(opts);
         if (now() >= waitDeadlineAt) {
           const held = result.holder;
@@ -1619,26 +1149,17 @@ interface ProvisionGate {
   credentialSidecarBroken: boolean;
   treatAsAbsent: boolean;
   needsProvisioning: boolean;
-  /**
-   * W1-T2398: the sidecar's recorded expiry (epoch ms), parsed independently of the
-   * skew comparison above — present whenever the store exists, identity hasn't
-   * changed, and the sidecar holds a well-formed number, EVEN when the credential is
-   * nowhere near stale. `undefined` when there is nothing to read or nothing
-   * parseable — never invented. Lets a caller measure headroom on the steady-state
-   * path, where nothing else here touches the sidecar at all.
-   */
+  /** W1-T2398: the sidecar's recorded expiry (epoch ms), parsed independently of the skew comparison —
+   *  present whenever the store exists, identity hasn't changed, and the sidecar holds a well-formed
+   *  number, even when the credential is nowhere near stale. `undefined` when there is nothing
+   *  parseable; never invented. Lets a caller measure headroom on the steady-state path. */
   recordedExpiresAtMs?: number;
 }
 
-/**
- * Pure(ish) — reads `identityPath`/`expiryPath` but writes nothing — extraction of
- * the W1-T265 identity gate + W1-T293 expiry gate so it can be evaluated TWICE
- * (W1-T339): once before the provisioning lock (to decide whether this call needs the
- * lock at all — the steady-state majority never does), and again immediately after
- * acquiring it, because a concurrent winner may have already (re-)provisioned while
- * this call was waiting. The second evaluation is what lets a loser CONVERGE on the
- * winner's result instead of redundantly re-provisioning on top of it.
- */
+/** Pure(ish) — reads `identityPath`/`expiryPath` but writes nothing — the W1-T265 identity gate and
+ *  W1-T293 expiry gate, extracted (W1-T339) so they can be evaluated TWICE: before the provisioning
+ *  lock, to decide whether this call needs it at all, and again after acquiring it, because a
+ *  concurrent winner may have re-provisioned meanwhile. That is what lets a loser CONVERGE. */
 function deriveProvisionGate(opts: EnsureWorkerKeychainOpts, storeExists: boolean): ProvisionGate {
   let identityChanged = false;
   if (storeExists && opts.accountId !== undefined) {
@@ -1655,9 +1176,8 @@ function deriveProvisionGate(opts: EnsureWorkerKeychainOpts, storeExists: boolea
   let credentialSidecarBroken = false;
   let recordedExpiresAtMs: number | undefined;
   if (storeExists && !identityChanged) {
-    // Read + parse ONCE, unconditionally — W1-T2398's headroom (below) needs the
-    // parsed value even on the arm-(3)-forced path, which used to skip this read
-    // entirely because it had nothing left to decide with it.
+    // Read + parse ONCE, unconditionally — W1-T2398's headroom below needs the parsed value even on
+    // the arm-(3)-forced path, which used to skip this read.
     let recorded: string | undefined;
     try {
       recorded = readFileSync(opts.expiryPath, "utf8");
@@ -1668,18 +1188,16 @@ function deriveProvisionGate(opts: EnsureWorkerKeychainOpts, storeExists: boolea
     if (opts.priorSpawnCredentialExpired) {
       credentialExpired = true;
     } else {
-      // W1-T2398: DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS (or a caller-supplied override) is
-      // a FLOOR, never the whole margin — widened to the caller's own expected run
-      // length so a credential that would expire mid-run reads "expired" here exactly
-      // like one that is already stale, and takes the same re-provision path below.
+      // W1-T2398: the skew constant (or a caller override) is a FLOOR, never the whole margin —
+      // widened to the caller's expected run length so a credential that would expire mid-run reads
+      // "expired" here exactly like one already stale, and takes the same re-provision path.
       const skewMs = Math.max(opts.credentialExpirySkewMs ?? DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS, opts.expectedRunMs ?? 0);
       const verdict = classifyCredentialSidecar(recorded, { nowMs: (opts.now ?? Date.now)(), skewMs });
       if (verdict === "expired") credentialExpired = true;
       else if (verdict === "broken") credentialSidecarBroken = true; // present-but-empty/unparseable never reads as healthy
     }
   }
-  // A broken sidecar means THIS store cannot be trusted — the same remedy as never
-  // having provisioned it at all.
+  // A broken sidecar means THIS store cannot be trusted — the same remedy as never having provisioned it at all.
   const treatAsAbsent = !storeExists || credentialSidecarBroken;
   return {
     identityChanged,
@@ -1691,32 +1209,20 @@ function deriveProvisionGate(opts: EnsureWorkerKeychainOpts, storeExists: boolea
   };
 }
 
-/**
- * Guarantee the dedicated worker keychain exists, holds the credential item,
- * never auto-locks, and is UNLOCKED — the invariant a headless spawn needs.
- *
- * Provisioning reads the item out of the login keychain, which therefore must
- * be unlocked AT THAT MOMENT (an interactive session, or the explicit operator
- * provisioning step in this task's PR). It runs on the FIRST call ever
- * (`identityPath`/`keychainPath` absent), and — when `opts.accountId` is
- * supplied (W1-T265) — again on any LATER call whose `accountId` no longer
- * matches the value the store was last provisioned for, e.g. the operator
- * logged the fleet user into a second Anthropic subscription. Every other
- * call — including a cold-boot daemon while the login keychain is LOCKED —
- * touches only the worker keychain. Failures throw {@link WorkerKeychainError}
- * with a named class; the password never rides an error message.
- */
+/** Guarantee the dedicated worker keychain exists, holds the credential item, never auto-locks, and
+ *  is UNLOCKED — the invariant a headless spawn needs. INVARIANT: provisioning reads the item out of
+ *  the login keychain, which must therefore be unlocked AT THAT MOMENT. It runs on the first call
+ *  ever, and — when `opts.accountId` is supplied (W1-T265) — on any later call whose `accountId` no
+ *  longer matches what the store was provisioned for. Every other call, including a cold-boot daemon
+ *  while the login keychain is LOCKED, touches only the worker keychain. */
 export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeychainSummary {
   const runner = opts.runner ?? defaultSecurityRunner;
   const exists = opts.exists ?? existsSync;
 
-  // ATOMIC create-or-read (CodeQL alert #71, js/file-system-race): a check-then-act
-  // (existsSync → write) let two concurrent first-provisioners (daemon boot racing a
-  // spawn) each generate a DIFFERENT password — last writer wins the file, and the
-  // keychain ends up keyed to a password the file no longer holds. `flag: "wx"`
-  // (O_CREAT|O_EXCL) makes creation exclusive in ONE syscall, mode 0600 applied at
-  // create: the loser gets EEXIST and reads the winner's password instead of
-  // inventing a second one. No exists() check — there is nothing to go stale.
+  // ATOMIC create-or-read (CodeQL alert #71, js/file-system-race). TRAP: a check-then-act let two
+  // concurrent first-provisioners each generate a DIFFERENT password — last writer wins the file and
+  // the keychain ends up keyed to a password the file no longer holds. `flag: "wx"` makes creation
+  // exclusive in ONE syscall at mode 0600, so the loser gets EEXIST and reads the winner's password.
   let password = randomBytes(32).toString("hex");
   mkdirSync(dirname(opts.passwordPath), { recursive: true });
   try {
@@ -1729,22 +1235,18 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
   let provisioned = false;
   const storeExists = exists(opts.keychainPath);
 
-  // W1-T265 identity gate + W1-T293 expiry gate, both folded into `deriveProvisionGate`
-  // (W1-T339) — see its doc for why this is evaluated TWICE. This FIRST evaluation is
-  // read-only and lock-free: the overwhelming majority of calls (steady state — a
-  // present, identity-matching, unexpired store) find `needsProvisioning: false` right
-  // here and never touch the provisioning lock below at all.
+  // W1-T265 identity gate + W1-T293 expiry gate, folded into `deriveProvisionGate` (W1-T339). This
+  // FIRST evaluation is read-only and lock-free: the steady-state majority find
+  // `needsProvisioning: false` here and never touch the lock below.
   let gate = deriveProvisionGate(opts, storeExists);
-  // W1-T2398: the expiry of the credential THIS call will ultimately hand out —
-  // starts as whatever the (pre-lock) gate above just read, gets refreshed after a
-  // peer-converge re-derive, and gets overwritten with the freshly-copied secret's
-  // OWN expiry when this call is the one that actually (re-)provisions below.
+  // W1-T2398: the expiry of the credential THIS call will hand out — starts as whatever the pre-lock
+  // gate read, is refreshed after a peer-converge re-derive, and is overwritten with the freshly
+  // copied secret's OWN expiry when this call is the one that (re-)provisions.
   let finalExpiresAtMs = gate.recordedExpiresAtMs;
 
-  // Arm (6): fail fast, without touching the login keychain again, once a
-  // credential-expiry recovery has already failed once this boot for this path.
-  // Checked before the lock — a cheap in-memory read — so a permanently-dead login
-  // token throws immediately instead of queueing behind the provisioning lock first.
+  // Arm (6): fail fast, without touching the login keychain again, once a credential-expiry recovery
+  // has already failed once this boot for this path. Checked before the lock, so a permanently dead
+  // login token throws immediately instead of queueing behind the provisioning lock.
   if (gate.credentialExpired) {
     const prior = credentialRecoveryFailures.get(opts.keychainPath);
     if (prior && prior.count >= MAX_CREDENTIAL_RECOVERY_ATTEMPTS) {
@@ -1758,39 +1260,32 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
     }
   }
 
-  // W1-T339: SERIALIZE ONLY THE PROVISIONING BRANCH. A call whose gate above already
-  // says "nothing to do" never acquires this lock — the steady-state path stays
-  // exactly as lock-free as it was before this task.
+  // W1-T339: SERIALIZE ONLY THE PROVISIONING BRANCH. A call whose gate above says "nothing to do"
+  // never acquires this lock — the steady-state path stays as lock-free as it was before.
   if (gate.needsProvisioning) {
     const lock = acquireKeychainProvisionLock(opts.keychainPath);
     try {
-      // RE-DERIVE, now holding the lock: a concurrent winner may have finished
-      // (re-)provisioning this exact store while this call was waiting for it. A
-      // loser that skipped this re-check would redundantly re-provision on top of
-      // what its peer just wrote — the exact hazard this lock exists to prevent.
+      // RE-DERIVE, now holding the lock: a concurrent winner may have finished (re-)provisioning this
+      // exact store while this call was waiting for it. A loser that skipped this re-check would
+      // redundantly re-provision on top of what its peer just wrote — the hazard this lock prevents.
       gate = deriveProvisionGate(opts, exists(opts.keychainPath));
       finalExpiresAtMs = gate.recordedExpiresAtMs;
 
       if (gate.needsProvisioning) {
-        // A mismatch/staleness verdict means a LIVE keychain file may be sitting at
-        // this path already — `create-keychain` refuses to overwrite one, so it
-        // must go first. Nothing to remove when the store was simply absent.
+        // A mismatch or staleness verdict means a LIVE keychain file may already sit at this path, and
+        // `create-keychain` refuses to overwrite one, so it must go first.
         if (exists(opts.keychainPath)) {
           try {
             rmSync(opts.keychainPath, { force: true });
           } catch {
-            // best-effort; a real removal failure surfaces below as provision-failed
-            // when create-keychain hits the file it couldn't clear.
+            // Best-effort; a real removal failure surfaces below as provision-failed when
+            // create-keychain hits the file it could not clear.
           }
         }
-        // Read the item (attributes, then secret) BEFORE creating anything, so a
-        // locked/missing credential leaves no half-provisioned keychain behind. The
-        // `acct` attribute is copied over UNCHANGED, exactly as before W1-T265 —
-        // account-usage.ts measured it to be the OS username, identical across an
-        // Anthropic account switch, so it is preserved here as informational
-        // provenance only. It is NEVER used for the identity comparison above,
-        // which compares `opts.accountId` against `identityPath`'s own sidecar
-        // record instead — a separate, purpose-built value.
+        // Read the item (attributes, then secret) BEFORE creating anything, so a locked or missing
+        // credential leaves no half-provisioned keychain behind. INVARIANT: the `acct` attribute is
+        // copied over unchanged as informational provenance ONLY — account-usage.ts measured it to be
+        // the OS username, identical across an account switch — and is never the identity compared.
         let attrs: string;
         let secret: string;
         try {
@@ -1853,11 +1348,9 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
           mkdirSync(dirname(opts.identityPath), { recursive: true });
           writeFileSync(opts.identityPath, opts.accountId, { mode: 0o600 });
         }
-        // W1-T293: record the freshly-copied secret's OWN expiry (never the secret
-        // itself) for the NEXT call's cheap arm-2 read. No parseable
-        // `claudeAiOauth.expiresAt` on this credential ⇒ clear any stale sidecar from a
-        // PREVIOUS copy rather than misattributing its timestamp to this one — arm (2)
-        // then correctly reports "unknown" (arm (3) remains available).
+        // W1-T293: record the freshly-copied secret's OWN expiry (never the secret itself) for the
+        // next call's cheap arm-2 read. No parseable `claudeAiOauth.expiresAt` ⇒ clear any stale
+        // sidecar rather than misattributing a PREVIOUS copy's timestamp to this one.
         const expiresAtMs = extractCredentialExpiryMs(secret);
         if (expiresAtMs !== undefined) {
           writeFileSync(opts.expiryPath, String(expiresAtMs), { mode: 0o600 });
@@ -1868,27 +1361,22 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
             // already absent — fine
           }
         }
-        // W1-T2398: this IS the freshest copy this call can produce — the value the
-        // headroom check below must reason about, not the (possibly now-stale)
-        // pre-provision reading `finalExpiresAtMs` already held.
+        // W1-T2398: this IS the freshest copy this call can produce — the value the headroom check
+        // below must reason about, not the possibly-stale pre-provision reading.
         finalExpiresAtMs = expiresAtMs;
       }
-      // else: a concurrent peer already (re-)provisioned this exact store while this
-      // call waited for the lock — CONVERGE on its result rather than redoing the
-      // work. `gate` was just re-derived against the now-current store, so the
-      // `reason` computed below correctly reports the peer's outcome (typically
-      // "skipped": present, identity-matching, unexpired).
+      // else: a concurrent peer already (re-)provisioned this exact store while this call waited —
+      // CONVERGE on its result rather than redoing the work. `gate` was just re-derived, so the
+      // `reason` below correctly reports the peer's outcome.
     } finally {
       lock.release();
     }
   }
 
-  // W1-T2398: the LAST gate, after any (re-)provisioning attempt above has had its
-  // chance to fetch a fresher copy — refuse BEFORE this credential is ever unlocked
-  // or handed to a spawn, never after. `finalExpiresAtMs` is `undefined` exactly when
-  // no numeric expiry is known at all (no sidecar, or a credential that never carried
-  // one) — the comparison is skipped rather than inventing a deadline, same discipline
-  // as {@link extractCredentialExpiryMs}'s own contract.
+  // W1-T2398: the LAST gate, after any (re-)provisioning above has had its chance to fetch a fresher
+  // copy — refuse BEFORE this credential is unlocked or handed to a spawn, never after.
+  // `finalExpiresAtMs` is `undefined` exactly when no numeric expiry is known, and the comparison is
+  // then skipped rather than inventing a deadline.
   let observedHeadroomMs: number | undefined;
   if (finalExpiresAtMs !== undefined) {
     observedHeadroomMs = finalExpiresAtMs - (opts.now ?? Date.now)();
@@ -1904,8 +1392,8 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
 
   try {
     runner(["unlock-keychain", "-p", password, opts.keychainPath]);
-    // Re-pin on every call: settings are state, and a drifted auto-lock would
-    // resurrect the exact failure this rung exists to remove.
+    // Re-pin on every call: settings are state, and a drifted auto-lock would resurrect the exact
+    // failure this rung exists to remove.
     runner(["set-keychain-settings", opts.keychainPath]);
   } catch (err) {
     const raw = String((err as Error)?.message ?? err);

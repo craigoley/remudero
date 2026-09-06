@@ -2,68 +2,24 @@
  * lib/account-usage.ts — the console's ACCOUNT strip: which Anthropic account the fleet is
  * spending, and how much of each usage window is gone.
  *
- * The operator's ask, verbatim in substance: "Can't we have something in the console that will
- * show which subscription it's using and how much is used?" The console showed neither. It shows
- * `spend today`/`spend this week` in DOLLARS (glance.ts, ledgered per-run cost) — a notional
- * API-equivalent figure on a subscription, which is explicitly NOT a window signal (headroom.ts's
- * own header says so). The thing that actually runs out is the WINDOW, and nothing rendered it.
+ * READS `~/.claude.json`'s `cachedUsageUtilization`, never `daemon.headroom`. The ledger field
+ * freezes while the daemon is paused and carries no account identity; the cache carries its own
+ * `fetchedAtMs` (an honest as-of) and `accountUuid`, so a reading that belongs to a different
+ * account is refused rather than rendered — see {@link USAGE_CACHE_MAX_AGE_MS}.
  *
- * ─── WHY THE LEDGER IS NOT THE USAGE SOURCE ──────────────────────────────────────────────────
- * The obvious source is `daemon.headroom`, which carries `window`/`percent_used`/`limit_pct`/
- * `resets_at`. It is the wrong one for USAGE, for two measured reasons:
+ * MEASURES COMBINED BURN, not the fleet's share. The fleet's workers and the operator's own
+ * interactive sessions authenticate as the same account and draw down the same five-hour and
+ * weekly windows; neither source attributes usage to a caller — see {@link USAGE_SCOPE_NOTE}.
  *
- *  1. IT IS WRITTEN ONLY WHILE THE DAEMON IS AWAKE. A paused or stopped fleet writes nothing, so
- *     the number freezes at whatever the last tick saw and keeps rendering as if current.
- *  2. IT IS PER-BOOT-ACCOUNT AND CARRIES NO IDENTITY. Measured on this host 2026-07-31: the
- *     newest `daemon.headroom` line anywhere (live ledger ∪ 661 rotations, 1,243 lines) was
- *     `14:59:05.671Z … "percent_used": 77`. The operator switched this host's Anthropic account
- *     the same afternoon, and the account it switched TO reads 2% / 0%. A panel keyed on that
- *     line would have shown "77% of your week is gone" for an account that had spent nothing —
- *     confidently wrong, with no field on the line to detect it by.
+ * IDENTITY IS READ FRESH ON EVERY REQUEST. {@link buildAccountUsageRoute}'s handler calls
+ * {@link readAccountUsageFile} with no cache or memoization, so an account switch is visible on
+ * the next poll rather than the next restart.
  *
- * So usage comes from `~/.claude.json`'s `cachedUsageUtilization`, which carries the two things
- * the ledger cannot: its OWN `fetchedAtMs` (an honest as-of) and its OWN `accountUuid` (so a
- * block belonging to a DIFFERENT account is detectable and refused rather than rendered).
- *
- * WHAT REFRESHES IT, AND HOW STALE IT CAN GET. It is a CACHE written by Claude Code itself —
- * any Claude Code process on this host refreshes it, which includes the fleet's workers AND the
- * operator's own interactive sessions. Nothing in remudero writes it and nothing in remudero can
- * force it. So its worst case is unbounded: a host with no Claude Code activity at all never
- * refreshes it. That is exactly why {@link USAGE_CACHE_MAX_AGE_MS} exists and why the age is
- * rendered even when fresh — a number nobody refreshes, presented as current, is worse than no
- * number, because the operator will act on it.
- *
- * ─── WHAT THIS MEASURES, STATED PLAINLY ──────────────────────────────────────────────────────
- * COMBINED BURN, not fleet burn. The fleet's workers and the operator's own interactive Claude
- * Code sessions authenticate as the SAME account and draw down the SAME five-hour and weekly
- * windows. Neither `cachedUsageUtilization` nor `/usage` attributes consumption to a caller, so
- * this panel CANNOT say "the fleet spent this" versus "you spent this" — it says "this account
- * has spent this". The console's existing dollar figures (glance.ts) are the fleet-only half,
- * because those are ledgered per-run by remudero itself; the percentage here is everything.
- *
- * ─── IDENTITY IS READ FRESH, NEVER CAPTURED AT BOOT ──────────────────────────────────────────
- * {@link buildAccountUsageRoute}'s handler calls {@link readAccountUsageFile} on EVERY request —
- * there is no module-level cache, no boot-time capture, and no memoization. An account switch is
- * therefore visible on the next poll. This is deliberate: the daemon and the console are
- * long-lived processes (the console has been up for days at a time on this host), so anything
- * captured once would outlive the fact it describes.
- *
- * NOT FROM THE KEYCHAIN. `ensureWorkerKeychain` stamps its copied worker keychain with an `acct`
- * attribute scraped from the login keychain, and on this host that value is the macOS username
- * (`craigoleyagent`) — identical before and after an Anthropic account switch. It is not a
- * discriminator, so no keychain-derived value appears anywhere in this module. Nothing here reads
- * a credential: only `oauthAccount.emailAddress`/`accountUuid`/`organizationName` and the
- * `cachedUsageUtilization` block are projected out of that file, and the parsed object is
- * discarded in the same expression — see {@link readAccountUsageFile}.
- *
- * A NOTE ON `readUsageSnapshot` (run-task.ts), the fleet's OWN reading: it shells
- * `claude -p "/usage"` with a worker env but WITHOUT a `home:` option, so it reads the OPERATOR'S
- * login keychain while spawned workers read a copied worker keychain. With one Anthropic account
- * on the host both resolve to the same identity and the reading is the right one. That stops
- * being true the moment a second account exists on this host, at which point the governor would
- * be metering an account the workers are not spending. Flagged here because this panel is where
- * an operator would first see the disagreement.
+ * NEVER FROM THE KEYCHAIN: its `acct` attribute is unchanged by an account switch, so it is not a
+ * discriminator. Only `oauthAccount.*` and `cachedUsageUtilization` are read, and the parsed file
+ * is discarded in the same expression — see {@link readAccountUsageFile}.
  */
+// Why: the operator's ask, the headroom incident, the keychain finding, the governor risk — docs/forensics/account-usage.md
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -83,41 +39,33 @@ import {
 /**
  * How old the usage cache may be before the panel refuses to render it as current.
  *
- * Sized against what actually refreshes it: every Claude Code invocation on this host, and the
- * daemon polls at `DEFAULT_POLL_INTERVAL_MS` (60s) with workers running far more often than that.
- * Half an hour is therefore many missed refresh opportunities — comfortably long enough not to
- * flap on an idle stretch, short enough that a genuinely dead host stops being reported as a live
- * reading. Past it the panel says UNKNOWN; it never shows the old number and it never shows 0%.
+ * Sized against what refreshes it: every Claude Code invocation on this host, well below the
+ * daemon's own 60s poll interval. Past this bound the panel says UNKNOWN — never the old number,
+ * never 0%. FALSIFIER: test/account-identity-is-readable.test.ts pins this value at 30 minutes.
  */
 export const USAGE_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
 
-/** One window's reading, as the panel renders it. `percentUsed` absent ⇒ UNKNOWN, never 0. */
+/** `percentUsed` absent ⇒ UNKNOWN, never 0. */
 export interface UsageWindowReading {
   percentUsed?: number;
   resetsAt?: string;
 }
 
-/**
- * The narrow projection {@link deriveAccountUsage} consumes — deliberately NOT the parsed
- * `~/.claude.json`. Declared between executed functions rather than at the file head: the v8
- * coverage channel stamps `DA:<line>,0` across a module's leading and trailing source-line
- * records, so a type-only declaration parked at either end reads to diff-coverage as uncovered
- * code.
- */
+/** The narrow projection {@link deriveAccountUsage} consumes, not the parsed `~/.claude.json`.
+ *  Declared between executed functions, not at the file's head or tail — v8 stamps a module's
+ *  leading and trailing source lines `DA:<line>,0`, which would read as uncovered code. */
 export interface AccountUsageInput {
-  /** `oauthAccount.emailAddress` — identity, not a credential. */
+  /** `oauthAccount.emailAddress`/`accountUuid`/`organizationName` — identity, never a credential. */
   email?: string;
-  /** `oauthAccount.accountUuid` — identity, not a credential. */
   uuid?: string;
-  /** `oauthAccount.organizationName`. */
   org?: string;
   /** `cachedUsageUtilization.accountUuid` — whose usage the cached block describes. */
   cacheUuid?: string;
-  /** W1-T2688 — the RAW value of whichever {@link CREDIT_STATE_FIELDS} name the block carried, if
-   *  any. Projected as an opaque `unknown` and interpreted separately, so an unrecognised value
-   *  is reported as such rather than read as "subscription". */
+  /** The raw value of whichever {@link CREDIT_STATE_FIELDS} name the block carried, projected as
+   *  an opaque `unknown` and interpreted separately — an unrecognised value is reported as such,
+   *  never read as "subscription". */
   creditStateRaw?: unknown;
-  /** Which field name it came from — evidence, so a later reader can tell WHAT was read. */
+  /** Which field name it came from, so a later reader can tell what was read. */
   creditStateField?: string;
   /** `cachedUsageUtilization.fetchedAtMs` — when Claude Code last wrote the block. */
   cacheFetchedAtMs?: number;
@@ -127,23 +75,12 @@ export interface AccountUsageInput {
   unreadable?: boolean;
 }
 
-/** Why the usage half of the panel is UNKNOWN, when it is. Absent ⇒ the reading is good. */
 /**
- * W1-T2688 — the credit state, read or refused, never inferred.
+ * The credit state, read from the surface or refused — never inferred. A subscription drawing on
+ * usage credits drops the prompt-cache lifetime from an hour to five minutes.
  *
- * A subscription drawing on usage credits drops the prompt-cache lifetime from an hour to five
- * minutes. Every rung here reuses long prefixes, so cost per task moves for a reason no row
- * explains.
- *
- * TRAP: the surface may not expose the state at all. The captured block
- * (test/fixtures/account-usage/claude-json.json) carries the utilization windows and no credit,
- * billing, plan or subscription field. So an absent field reads `not-exposed` — loud, in the shape
- * {@link UsageUnknownReason} already uses — and an unknown value reads `unrecognised-value`. A
- * credit state guessed from window utilisation would move policy on an inference.
- *
- * Policy is out of scope: what to do when credits engage is an operator ruling. Nothing here
- * changes a mount, holds a dispatch, or reads a policy.
- *
+ * An absent field reads `not-exposed`, an unreadable one `unrecognised-value`. Policy itself is
+ * out of scope: this reads and records, it never changes a mount, holds a dispatch, or rules.
  * FALSIFIER: test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts.
  */
 export const CREDIT_STATE_FIELDS = ["creditState", "credit_state", "billingMode", "billing_mode", "usingCredits", "using_credits"] as const;
@@ -156,14 +93,12 @@ export type CreditUnknownReason = "not-exposed" | "unrecognised-value";
 export interface CreditReading {
   state?: CreditState;
   unknownReason?: CreditUnknownReason;
-  /** The field the value came from, present only when one was found — so "unrecognised-value"
-   *  can be traced to what was actually read. */
+  /** The field the value came from, present only when one was found. */
   field?: string;
 }
 
-/** Interpret a raw credit-state value. `true`/`"credits"`/`"credit"`/`"usage_credits"` read as
- *  credits; `false`/`"subscription"`/`"plan"` as subscription; anything else is unrecognised
- *  rather than defaulted — the reason this is separate from the projection. */
+/** Interpret a raw credit-state value: `true`/`"credits"`/`"credit"`/`"usage_credits"` read as
+ *  credits, `false`/`"subscription"`/`"plan"` as subscription, anything else unrecognised. */
 export function interpretCreditState(raw: unknown): CreditState | undefined {
   if (raw === true) return "credits";
   if (raw === false) return "subscription";
@@ -174,8 +109,7 @@ export function interpretCreditState(raw: unknown): CreditState | undefined {
   return undefined;
 }
 
-/** The credit half of a reading — absent field ⇒ `not-exposed`, present-but-unreadable ⇒
- *  `unrecognised-value`. Never infers from window utilisation. */
+/** The credit half of a reading — absent ⇒ `not-exposed`, unreadable ⇒ `unrecognised-value`. */
 export function readCreditState(input: AccountUsageInput): CreditReading {
   if (input.creditStateField === undefined) return { unknownReason: "not-exposed" };
   const state = interpretCreditState(input.creditStateRaw);
@@ -200,11 +134,8 @@ export function lastRecordedCreditState(lines: ReadonlyArray<Record<string, unkn
   return undefined;
 }
 
-/**
- * The edge, not the level: a level sampled every tick is noise. Returns a row when the state
- * changed (including the first time it becomes known), `undefined` when unchanged or unknown —
- * an unknown is not a transition.
- */
+/** The edge, not the level — a row only when the state changed (including becoming known for the
+ *  first time); `undefined` when unchanged or unknown, since an unknown is not a transition. */
 export function creditTransitionRow(
   lines: ReadonlyArray<Record<string, unknown>>,
   reading: CreditReading,
@@ -253,74 +184,52 @@ export function appendCreditStateTransition(
   if (line) writeLedger(ledgerPath, line);
 }
 
+/** Why the usage half of the panel is UNKNOWN, when it is. Absent ⇒ the reading is good. */
 export type UsageUnknownReason = "unreadable" | "no-cache" | "account-mismatch" | "too-old";
 
 /** Whether the headroom governor is enforcing, per the fleet's own newest heartbeat. */
 export type GovernorState = "armed" | "telemetry-only" | "unknown";
 
 /**
- * Whether a DISPATCH-DEFERRING governor (the cost ceiling or the WIP/queue ceiling) is currently
- * holding back NEW dispatch, per the fleet's own newest heartbeat for that governor (W1-T329,
- * OPERATOR COMPLAINT 2026-08-04: the fleet deferred every dispatch for ~40 minutes at $152.28
- * against a $150 ceiling and the console said only "nothing in flight").
- *
- * ONLY TWO STATES, DELIBERATELY — there is no "clear"/"under-ceiling" third state to derive.
- * Unlike `daemon.headroom` (written on EVERY tick, deferring or not, so its `enforced` field is a
- * real tri-state), `daemon.cost_governor`/`daemon.queue_governor` (daemon.ts) are written ONLY
- * while that governor is actively deferring — no line ever states "not deferring". So the only
- * two honest answers are "the newest deferral we've seen" and "we've never seen one", and the
- * second one must NEVER be presented as healthy: `GovernorState`'s own doc already establishes
- * why absent must not collapse into a healthy-looking default ("would report an armed-and-
- * breaching governor as telemetry-only") — the identical hazard here would report a governor
- * that has idled the whole fleet for hours as indistinguishable from one comfortably under
- * ceiling.
+ * Whether a dispatch-deferring governor (the cost ceiling or the WIP/queue ceiling) is holding
+ * back new dispatch, per its own newest heartbeat (W1-T329). Only two states: `daemon.cost_
+ * governor`/`daemon.queue_governor` are written only while actively deferring, so absent must
+ * never read as healthy — it is not the same as "under ceiling".
+ * Why: the $152.28-over-$150 incident that named this gap — docs/forensics/account-usage.md
  */
 export type DispatchGovernorState = "deferred" | "unknown";
 
-/** The cost governor's dispatch-deferral reading — see {@link DispatchGovernorState}. */
+/** Off the newest `daemon.cost_governor` line, present iff "deferred" — see {@link DispatchGovernorState}. */
 export interface CostGovernorDeferral {
   state: DispatchGovernorState;
-  /** `ts` of the newest `daemon.cost_governor` line, present iff `state` is "deferred". */
   asOf?: string;
-  /** `observed_day_cost_usd` off that same line. */
-  observedDayCostUsd?: number;
-  /** `daily_cost_ceiling_usd` off that same line. */
-  ceilingUsd?: number;
+  observedDayCostUsd?: number; // `observed_day_cost_usd`
+  ceilingUsd?: number; // `daily_cost_ceiling_usd`
 }
 
-/** The queue (WIP) governor's dispatch-deferral reading — see {@link DispatchGovernorState}. */
+/** The queue (WIP) governor's reading — same shape as {@link CostGovernorDeferral}. */
 export interface QueueGovernorDeferral {
   state: DispatchGovernorState;
-  /** `ts` of the newest `daemon.queue_governor` line, present iff `state` is "deferred". */
   asOf?: string;
-  /** `observed_open_count` off that same line. */
-  observedOpenCount?: number;
-  /** `wip_limit` off that same line. */
-  wipLimit?: number;
+  observedOpenCount?: number; // `observed_open_count`
+  wipLimit?: number; // `wip_limit`
 }
 
-/**
- * `GET /v1/account-usage`'s body. EVERY value field is optional and absent — never a placeholder
- * and never a zero — when its own source could not be read, exactly the discipline
- * `DaemonHealthSnapshot` already holds itself to.
- */
+/** `GET /v1/account-usage`'s body. Every value field is absent (never a zero) when unreadable. */
 export interface AccountUsageSnapshot {
   accountEmail?: string;
   accountUuid?: string;
   accountOrg?: string;
   fiveHour?: UsageWindowReading;
   sevenDay?: UsageWindowReading;
-  /** ISO-8601 of `cachedUsageUtilization.fetchedAtMs` — the reading's own as-of. */
+  /** ISO-8601 `cachedUsageUtilization.fetchedAtMs` — the reading's own as-of, rendered even when
+   *  fresh. Absent iff `usageUnknownReason` is present — the windows are then absent too. */
   usageAsOf?: string;
-  /** Age of that reading at render time. Rendered even when fresh. */
   usageAgeMs?: number;
-  /** Present iff the usage half is UNKNOWN; the windows are then absent. */
   usageUnknownReason?: UsageUnknownReason;
-  /** W1-T2688 — subscription vs usage credits. A SEPARATE axis from `usageUnknownReason`: the
-   *  windows can be readable while the credit state is not exposed; collapsing the two would
-   *  make a readable panel claim the credit state was unreadable too. */
+  /** Subscription vs usage credits — a separate axis from `usageUnknownReason`. Exactly one of
+   *  `creditState`/`creditUnknownReason` is ever present, never both, never neither. */
   creditState?: CreditState;
-  /** Present iff {@link creditState} is absent — never both, never neither. */
   creditUnknownReason?: CreditUnknownReason;
   /** Which field the state was read from, when one was found. */
   creditStateField?: string;
@@ -328,60 +237,35 @@ export interface AccountUsageSnapshot {
   /** `ts` of the `daemon.headroom` line the posture came from. */
   governorAsOf?: string;
   governorAgeMs?: number;
-  /** W1-T329: the cost ceiling's dispatch-deferral posture — see {@link DispatchGovernorState}. */
+  /** The cost and queue governors' posture — see {@link DispatchGovernorState}. Each `*AsOf`/
+   *  `*AgeMs` is absent iff "unknown"; the observed/ceiling figures are present only while
+   *  "deferred" — render the number, not just the flag. */
   costGovernor: DispatchGovernorState;
-  /** `ts` of the `daemon.cost_governor` line the posture came from; absent iff "unknown". */
   costGovernorAsOf?: string;
   costGovernorAgeMs?: number;
-  /** The day's ledgered cost that produced the deferral, present only while `costGovernor` is
-   *  "deferred" — RENDER THE NUMBER, NOT JUST THE FLAG ("$152.28 of $150" is actionable). */
   costGovernorObservedUsd?: number;
-  /** The ceiling consulted, present only while `costGovernor` is "deferred". */
   costGovernorCeilingUsd?: number;
-  /** W1-T329: the WIP/queue ceiling's dispatch-deferral posture — see {@link DispatchGovernorState}. */
   queueGovernor: DispatchGovernorState;
-  /** `ts` of the `daemon.queue_governor` line the posture came from; absent iff "unknown". */
   queueGovernorAsOf?: string;
   queueGovernorAgeMs?: number;
-  /** The observed open-PR count that produced the deferral, present only while `queueGovernor`
-   *  is "deferred". */
   queueGovernorObservedOpenCount?: number;
-  /** The WIP limit consulted, present only while `queueGovernor` is "deferred". */
   queueGovernorWipLimit?: number;
-  /**
-   * W1-T333: the daily cost ceiling's EFFECTIVE value, never the bare number — see
-   * `policy.ts`'s `resolveDailyCostCeiling` for the precedence rule (a `state/` override wins;
-   * absence means the committed `plan/policy.yaml` default). Present iff a resolver was supplied
-   * (the real route always supplies one; a caller of {@link deriveAccountUsage} that omits it —
-   * every pre-W1-T333 test in this file — simply renders no ceiling, exactly like every other
-   * optional slot here when its own source was never read).
-   */
+  /** The daily cost ceiling's effective value and provenance — see `policy.ts`'s
+   *  `resolveDailyCostCeiling`. `*DefaultUsd` is the committed value it was overridden FROM;
+   *  `*FallbackReason` is present only when a stored override was refused and it fell back. */
   dailyCostCeilingUsd?: number;
-  /** "overridden" or "default" — see {@link dailyCostCeilingUsd}'s doc. */
   dailyCostCeilingProvenance?: DailyCostCeilingProvenance;
-  /** `policy.values.sweep.dailyCostCeilingUsd` — carried alongside `dailyCostCeilingUsd` so an
-   *  overridden reading shows both the effective figure and what it was overridden FROM (design
-   *  note i: "so a reader can see it was changed and from what"). */
   dailyCostCeilingDefaultUsd?: number;
-  /** Present only when a stored override existed but was refused (malformed/out of bound) and
-   *  the reading fell back to the committed default — see
-   *  `policy.ts`'s `EffectiveDailyCostCeiling.fallback`. */
   dailyCostCeilingFallbackReason?: string;
-  /**
-   * W1-T333: the newest console write's audit trail — who/when/from/to and the resulting
-   * effective value, read off the newest `console.ceiling_override_written` ledger line (see
-   * {@link deriveCeilingOverrideAudit}). Absent iff no such line has ever been ledgered, which is
-   * what makes "at default because never overridden" distinguishable from "at default because a
-   * real override just vanished" (the store's own documented DISAPPEARANCE CASE) — the store
-   * ALONE cannot tell those apart, because both read `dailyCostCeilingProvenance: "default"` with
-   * no `dailyCostCeilingFallbackReason`; only the ledger's independent write history can.
-   */
+  /** The newest console write's audit trail, from `console.ceiling_override_written` (see
+   *  {@link deriveCeilingOverrideAudit}). Absent iff never ledgered — distinct from "at default
+   *  because a real override vanished", which the store alone cannot tell apart. */
   dailyCostCeilingAuditAsOf?: string;
   dailyCostCeilingAuditWho?: string;
   dailyCostCeilingAuditFromUsd?: number;
   dailyCostCeilingAuditToUsd?: number;
   dailyCostCeilingAuditEffectiveUsd?: number;
-  /** The scope note, carried in the payload so the render can never drop it. */
+  /** Carried in the payload so the render can never drop the scope note. */
   measures: string;
 }
 
@@ -389,26 +273,14 @@ export interface AccountUsageSnapshot {
 export const USAGE_SCOPE_NOTE = "whole account — fleet workers and interactive sessions share one window";
 
 /**
- * The panel's projection. PURE: no clock of its own, no filesystem, no ledger read — every input
- * is passed in, so the whole staleness/mismatch policy is testable against a captured reading.
+ * The panel's projection. Pure: no clock, no filesystem, no ledger read of its own, so the whole
+ * staleness/mismatch policy is testable against a captured reading.
  *
- * THE THREE WAYS USAGE GOES UNKNOWN, in the order they are checked:
- *   1. `unreadable` — the file was missing or unparseable. Nothing is known.
- *   2. `no-cache` — the file parsed but carries no `fetchedAtMs`, so the reading has no as-of and
- *      cannot be aged. An un-ageable reading is exactly the "value nobody refreshes" hazard.
- *   3. `account-mismatch` — the cached block's `accountUuid` is not the account currently logged
- *      in. THIS IS THE ACCOUNT-SWITCH GUARD: after a switch the cache still holds the previous
- *      account's percentages until some Claude Code process rewrites it, and rendering those
- *      against the new account's name is the precise failure this panel exists to avoid.
- *   4. `too-old` — older than {@link USAGE_CACHE_MAX_AGE_MS}.
- *
- * Identity is returned in every case (it comes from a different part of the file and is fresh),
- * so the panel can always answer "which account" even when it cannot answer "how much".
- *
- * `ceiling` (W1-T333) is OPTIONAL and orthogonal to every check above: it is the daily cost
- * ceiling's effective value + provenance (`policy.ts`'s `resolveDailyCostCeiling`), passed in
- * fresh per request by the real route so a test — or a caller that only cares about usage/
- * governor — can omit it entirely rather than construct one.
+ * The four ways usage goes UNKNOWN, checked in order: `unreadable`, `no-cache` (no `fetchedAtMs`
+ * to age), `account-mismatch` (the cached `accountUuid` isn't the one logged in now — the
+ * account-switch guard), `too-old` (past {@link USAGE_CACHE_MAX_AGE_MS}). Identity still returns
+ * in every case, so the panel always answers "which account" even without "how much". `ceiling`
+ * is optional — a caller that only cares about usage or the governor omits it.
  */
 export function deriveAccountUsage(
   input: AccountUsageInput,
@@ -492,17 +364,15 @@ function usageUnknownReason(input: AccountUsageInput, nowMs: number): UsageUnkno
   return undefined;
 }
 
+// The four `derive*` readers below share one shape: scan for the step's newest line by PARSED
+// `ts` (never ledger order, same reason as daemon-health.ts's `deriveLastPoll`), and carry that
+// line's own `ts` as the reading's `asOf`. One shape, so the four readings cannot drift apart.
+
 /**
- * The governor's posture from the NEWEST `daemon.headroom` ledger line.
- *
- * `enforced` is read as a TRI-STATE, not a boolean: `true` ⇒ armed, `false` ⇒ telemetry-only,
- * and ABSENT ⇒ unknown. The absent case is real history, not a hypothetical — of 1,243
- * `daemon.headroom` lines on this host, 922 carry `enforced: false` and 321 carry no `enforced`
- * key at all (they were written by the pre-symmetry over-ceiling branch, which never set it).
- * Mapping absent to `false` would report an armed-and-breaching governor as telemetry-only.
- *
- * Ordering is by PARSED `ts`, never by ledger order, for the same reason `deriveLastPoll`
- * (daemon-health.ts) does it that way.
+ * The governor's posture from the newest `daemon.headroom` line. `enforced` is a tri-state, not
+ * a boolean: `true` ⇒ armed, `false` ⇒ telemetry-only, absent ⇒ unknown — real history, not a
+ * hypothetical, so mapping absent to `false` would report an armed-and-breaching governor as
+ * telemetry-only. Why: the measured absent-vs-false split — docs/forensics/account-usage.md
  */
 function deriveGovernorPosture(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -525,14 +395,7 @@ function deriveGovernorPosture(
   return { state: "unknown", asOf: bestTs };
 }
 
-/**
- * W1-T329: the cost governor's dispatch-deferral reading from the NEWEST `daemon.cost_governor`
- * ledger line (daemon.ts, written on every tick that governor defers new dispatch). Mirrors
- * {@link deriveGovernorPosture}'s own shape deliberately — "read the newest line, carry its own
- * as-of, age it inline" — rather than inventing a second way to answer "is the fleet allowed to
- * work". No line at all ⇒ `{ state: "unknown" }`; see {@link DispatchGovernorState}'s doc for why
- * that must never be presented as "under ceiling".
- */
+/** From the newest `daemon.cost_governor` line. No line ⇒ `{ state: "unknown" }` — see {@link DispatchGovernorState}. */
 function deriveCostGovernorDeferral(lines: ReadonlyArray<Record<string, unknown>>): CostGovernorDeferral {
   let bestTs: string | undefined;
   let bestParsed = -Infinity;
@@ -555,12 +418,8 @@ function deriveCostGovernorDeferral(lines: ReadonlyArray<Record<string, unknown>
   return out;
 }
 
-/**
- * W1-T329: the queue (WIP) governor's dispatch-deferral reading from the NEWEST
- * `daemon.queue_governor` ledger line (daemon.ts). Same shape as
- * {@link deriveCostGovernorDeferral} immediately above, deliberately — two governors, one
- * derivation shape, so they cannot drift apart.
- */
+/** The queue (WIP) governor's dispatch-deferral reading from the newest `daemon.queue_governor`
+ *  line (daemon.ts). Same shape as {@link deriveCostGovernorDeferral} immediately above. */
 function deriveQueueGovernorDeferral(lines: ReadonlyArray<Record<string, unknown>>): QueueGovernorDeferral {
   let bestTs: string | undefined;
   let bestParsed = -Infinity;
@@ -594,14 +453,10 @@ export interface CeilingOverrideAudit {
   effectiveUsd?: number;
 }
 
-/**
- * W1-T333: the daily-cost-ceiling override's audit trail — who/when/from/to and the resulting
- * effective value, from the NEWEST `console.ceiling_override_written` ledger line
- * (`ledger.ts`'s `appendDailyCostCeilingOverrideAudit`). Mirrors {@link deriveCostGovernorDeferral}'s
- * "read the newest line, carry its own as-of" shape deliberately, rather than inventing a second
- * way to answer "what does the ledger's newest line for this step say". No line ever seen ⇒ every
- * field absent — rendered as "never overridden through the console", never a fabricated blank.
- */
+/** The daily-cost-ceiling override's audit trail — who/when/from/to and the resulting effective
+ *  value, from the newest `console.ceiling_override_written` line (`ledger.ts`'s
+ *  `appendDailyCostCeilingOverrideAudit`). No line ever seen ⇒ every field absent, rendered as
+ *  "never overridden through the console" — never a fabricated blank. */
 function deriveCeilingOverrideAudit(lines: ReadonlyArray<Record<string, unknown>>): CeilingOverrideAudit {
   let bestTs: string | undefined;
   let bestParsed = -Infinity;
@@ -631,53 +486,31 @@ function deriveCeilingOverrideAudit(lines: ReadonlyArray<Record<string, unknown>
 }
 
 /**
- * W1-T2516: THE DEFECT THIS CLOSES. Every worker's HOME is redirected to a Remudero-controlled
- * scratch dir (worker-home.ts), so the `cachedUsageUtilization` a worker's OWN Claude Code
- * invocation refreshes lands inside THAT scratch home — never inside `homedir()/.claude.json`,
- * the file {@link readAccountUsageFile} reads by default. `reapWorkerHome` (worker-home.ts)
- * deletes the scratch home moments after the spawn ends. On a genuinely headless fleet host —
- * where the ONLY Claude Code processes that ever run are the fleet's own workers — nothing ever
- * refreshes `homedir()/.claude.json`, which is exactly the "worst case" this module's own header
- * already named in the abstract ("a host with no Claude Code activity at all never refreshes
- * it"): HOME redirection turns that worst case into the permanent, steady state.
+ * The defect this closes: a worker's HOME is redirected to a scratch dir that `reapWorkerHome`
+ * deletes right after the spawn ends, so on a headless fleet host `homedir()/.claude.json` is
+ * never refreshed at all. The remedy: worker.ts's `captureWorkerUsageProjection` persists a
+ * narrow projection (never `email`/`org`) here before the reap, and
+ * {@link mergeAccountUsageProjection} folds it into the primary reading so it survives.
  *
- * THE REMEDY. worker.ts's `captureWorkerUsageProjection` reads the worker's own
- * `.claude.json` and persists a NARROW projection — percent, resets_at, the cache's OWN
- * `accountUuid`, and `fetchedAtMs`; deliberately never `email`/`org`, see this interface's own
- * field list — to {@link accountUsageProjectionPath} BEFORE `reapWorkerHome` deletes the home
- * that produced it (the reap seam is in worker.ts, not this file — see that module's own doc
- * for why an import here would close an import cycle). {@link mergeAccountUsageProjection}
- * folds that projection into the PRIMARY (`homedir()`) reading, so a reading now SURVIVES the
- * reap of the worker home that produced it.
- *
- * IDENTITY STAYS OUT OF SCOPE, DELIBERATELY. `email`/`uuid`/`org` are never captured into the
- * projection and are always carried through from `primary` untouched by
- * {@link mergeAccountUsageProjection} — this module's "identity is read fresh, never captured
- * at boot" doctrine (see this file's header) applies here too: a projection captured once at a
- * worker's teardown must never stand in for a live identity read, or an account switch since
- * that capture would go undetected. `cacheUuid` IS still carried, precisely so
- * {@link usageUnknownReason}'s existing account-mismatch guard keeps comparing it against that
- * live identity, exactly as it already does for a same-process reading — a projection captured
- * under a since-switched-away-from account is still refused, never rendered.
+ * Identity stays out of scope: `email`/`uuid`/`org` always come from `primary` untouched, so a
+ * projection captured at teardown can never stand in for a live identity read. `cacheUuid` IS
+ * carried, so the account-mismatch guard still refuses a since-switched-away-from capture.
+ * Why: the redirected-HOME measurement — docs/forensics/account-usage.md
  */
 export interface AccountUsageProjection {
-  /** `cachedUsageUtilization.accountUuid` off the capturing worker's OWN `.claude.json`. */
+  /** `cachedUsageUtilization.accountUuid`/`fetchedAtMs` off the capturing worker's OWN
+   *  `.claude.json`. */
   cacheUuid?: string;
-  /** `cachedUsageUtilization.fetchedAtMs` off the capturing worker's OWN `.claude.json`. */
   cacheFetchedAtMs: number;
   fiveHour?: UsageWindowReading;
   sevenDay?: UsageWindowReading;
 }
 
 /**
- * `<root>/state/account-usage-projection.json` — the SAME `state/`-under-root convention every
- * other console write surface already resolves against (W1-T333's daily cost ceiling override,
- * fleet-control's PAUSE flag). Spelled out as a literal in BOTH this file and worker.ts's
- * `captureWorkerUsageProjection` rather than shared via an import: the two modules cannot share
- * one without an import cycle (worker.ts's own `resolveActiveAccountId` doc already explains
- * why: this module depends on panel-actions.ts, which depends on worker.ts).
- * test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts asserts the two
- * literals resolve to the same relative path, so they cannot drift apart silently.
+ * `<root>/state/account-usage-projection.json` — the same `state/`-under-root convention every
+ * other console write surface resolves against. Spelled out as a literal here AND in worker.ts's
+ * `captureWorkerUsageProjection`: sharing one via an import would close a cycle.
+ * FALSIFIER: test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts.
  */
 export const USAGE_PROJECTION_REL = join("state", "account-usage-projection.json");
 
@@ -687,21 +520,16 @@ export function accountUsageProjectionPath(root: string): string {
 }
 
 /**
- * Read the persisted projection, failing soft to `undefined` on a missing file, a parse error,
- * or a payload carrying no usable `cacheFetchedAtMs` — the same fail-soft discipline
- * {@link readAccountUsageFile} applies to the primary file, so an absent or not-yet-written
- * projection (every host before its first worker spawn, or a non-fleet install that never
- * calls `captureWorkerUsageProjection` at all) can never surface as a crash.
+ * Read the persisted projection, failing soft to `undefined` on a missing file, a parse error, or
+ * a payload with no usable `cacheFetchedAtMs` — same discipline as {@link readAccountUsageFile},
+ * so a host that has never spawned a worker never crashes on this read.
  */
 export function readAccountUsageProjection(path: string): AccountUsageProjection | undefined {
   let parsed: Partial<AccountUsageProjection>;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<AccountUsageProjection>;
   } catch {
-    // Missing/unparseable projection file -- fail soft to absent, same discipline as
-    // readAccountUsageFile's own catch below; never a crash for a host that hasn't spawned
-    // a worker yet.
-    return undefined;
+    return undefined; // missing/unparseable -- fail soft to absent, never a crash
   }
   if (typeof parsed.cacheFetchedAtMs !== "number" || !Number.isFinite(parsed.cacheFetchedAtMs)) return undefined;
   const out: AccountUsageProjection = { cacheFetchedAtMs: parsed.cacheFetchedAtMs };
@@ -712,17 +540,11 @@ export function readAccountUsageProjection(path: string): AccountUsageProjection
 }
 
 /**
- * Fold a persisted {@link AccountUsageProjection} into the PRIMARY (`homedir()`) reading,
- * preferring whichever cache is FRESHER — never the projection unconditionally, so a host
- * where an interactive session's own live cache is genuinely fresher is never clobbered by an
- * older worker capture. Returns `primary` UNCHANGED (by reference) whenever there is nothing to
- * gain from the projection, which is what keeps every existing caller/test that never supplies
- * one — the console ACCOUNT strip's pre-existing behaviour — byte-for-byte unaffected.
- *
- * `primary.unreadable` short-circuits to `primary` as-is, deliberately: the defect this closes
- * is a STALE cache on an otherwise-readable file (this module's own stated worst case, see
- * {@link AccountUsageProjection}'s doc), not a wholly missing/unparseable `~/.claude.json` —
- * narrowing the remedy to exactly the documented failure mode.
+ * Fold a persisted {@link AccountUsageProjection} into the primary (`homedir()`) reading,
+ * preferring whichever cache is fresher — a genuinely fresher interactive session's cache is
+ * never clobbered by an older worker capture. Returns `primary` unchanged (by reference) when
+ * there is nothing to gain, so a caller that never supplies a projection is unaffected.
+ * `primary.unreadable` short-circuits as-is: this closes a stale cache, not a missing file.
  */
 export function mergeAccountUsageProjection(
   primary: AccountUsageInput,
@@ -753,8 +575,7 @@ interface ClaudeJsonShape {
   cachedUsageUtilization?: {
     accountUuid?: unknown;
     fetchedAtMs?: unknown;
-    /** W1-T2688: whichever of CREDIT_STATE_FIELDS the surface may carry. Indexed rather than
-     *  named one-by-one so an upstream rename is picked up by editing one list. */
+    /** Whichever of {@link CREDIT_STATE_FIELDS} the surface may carry, indexed not named. */
     [k: string]: unknown;
     utilization?: {
       five_hour?: { utilization?: unknown; resets_at?: unknown } | null;
@@ -773,23 +594,15 @@ function windowOf(w: { utilization?: unknown; resets_at?: unknown } | null | und
   if (typeof w.utilization === "number" && Number.isFinite(w.utilization)) out.percentUsed = w.utilization;
   const resets = str(w.resets_at);
   if (resets) out.resetsAt = resets;
-  // An entry with neither half is nothing — return absent rather than an empty object, so the
-  // render's "is this window known" test stays a simple presence check.
+  // Neither half present is nothing — absent, not an empty object.
   return out.percentUsed === undefined && out.resetsAt === undefined ? undefined : out;
 }
 
 /**
- * Read `~/.claude.json` and PROJECT it, in one expression, down to {@link AccountUsageInput}.
- *
- * THE PARSED OBJECT NEVER ESCAPES THIS FUNCTION. That is the whole reason the projection is a
- * separate function from the route: `~/.claude.json` also holds OAuth material, and a route that
- * handed the parsed object to a serializer would publish it over HTTP. Only the six identity/
- * usage fields named in {@link ClaudeJsonShape} are copied out; every other key — including every
- * credential — is dropped by construction rather than by a denylist that could go stale.
- *
- * Fails soft to `{ unreadable: true }` on a missing file, a parse error, or an unexpected shape,
- * which {@link deriveAccountUsage} renders as UNKNOWN. `path` is injectable so a test drives a
- * captured fixture without touching the operator's real home directory.
+ * Read `~/.claude.json` and project it, in one expression, down to {@link AccountUsageInput}.
+ * The parsed object never escapes this function — it also holds OAuth material, so only the
+ * fields named in {@link ClaudeJsonShape} are copied out, by construction, never a denylist.
+ * Fails soft to `{ unreadable: true }`, which {@link deriveAccountUsage} renders as UNKNOWN.
  */
 export function readAccountUsageFile(path: string = join(homedir(), ".claude.json")): AccountUsageInput {
   let parsed: ClaudeJsonShape;
@@ -811,7 +624,6 @@ export function readAccountUsageFile(path: string = join(homedir(), ".claude.jso
   if (typeof cache?.fetchedAtMs === "number" && Number.isFinite(cache.fetchedAtMs)) {
     out.cacheFetchedAtMs = cache.fetchedAtMs;
   }
-  // One more field copied out by the same rule as every other: named, not spread.
   for (const field of CREDIT_STATE_FIELDS) {
     if (cache !== undefined && Object.prototype.hasOwnProperty.call(cache, field)) {
       out.creditStateField = field;
@@ -826,55 +638,32 @@ export function readAccountUsageFile(path: string = join(homedir(), ".claude.jso
   return out;
 }
 
-/** {@link buildAccountUsageRoute}'s dependencies — every edge injectable, same shape as
- *  {@link import("./daemon-health.js").DaemonHealthDeps}. */
+/**
+ * {@link buildAccountUsageRoute}'s dependencies — every edge injectable, same shape as
+ * {@link import("./daemon-health.js").DaemonHealthDeps}. `root` is the repo/workspace root for
+ * `resolveDailyCostCeiling`'s `state/` override lookup; `policy` is the same `deps.policy ??`
+ * seam run-task.ts's config readers use, locked by test/config-reader-seams.test.ts.
+ * `readUsageProjection` omitted ⇒ the real reader when `root` is set, none when it is unset — a
+ * caller that never supplies `root` renders byte-identical to before this seam existed.
+ */
 export interface AccountUsageDeps {
-  /** `<root>/state/ledger.ndjson` — the SAME ledger every other console reader tails. */
+  /** `<root>/state/ledger.ndjson` — the same ledger every other console reader tails. */
   ledgerPath: string;
   readLedger?: LedgerReader;
   /** `~/.claude.json`, or a captured fixture in a test. */
   accountFilePath?: string;
-  /** Injectable projection — a test supplies a captured reading without any filesystem at all. */
   readAccount?: () => AccountUsageInput;
   now?: () => number;
-  /**
-   * W1-T333: repo/workspace root for `resolveDailyCostCeiling`'s `state/` override lookup — the
-   * SAME root every other console write surface already resolves `state/` against
-   * (fleet-control's PAUSE flag, `policy.ts`'s own `DAILY_COST_CEILING_OVERRIDE`). Defaults to
-   * `deps.fleetControlRoot` when `rmd serve`'s own wiring (serve.ts's `buildServeRoutes`) doesn't
-   * override it.
-   */
   root?: string;
-  /** Injectable, the same `deps.policy ??` seam `run-task.ts`'s `dailyCostCeilingReloader`/
-   *  `retroTriggerCheck`/`autoTriageCheck` already use for the identical reason
-   *  (test/config-reader-seams.test.ts's structural lock) — a test supplies a fixture `Policy`
-   *  without touching the installed `plan/policy.yaml`. */
   policy?: Policy;
-  /**
-   * Injectable resolver — defaults to the real `resolveDailyCostCeiling(root, policy)` so a test
-   * can inject a captured {@link EffectiveDailyCostCeiling} directly, without constructing a
-   * `Policy` or touching `state/` on disk, the same "the assembler wires the real thing, a test
-   * injects a fake" split every other optional field here already follows.
-   */
   resolveCeiling?: () => EffectiveDailyCostCeiling;
-  /**
-   * W1-T2516: injectable reader for the persisted worker-capture projection (see
-   * {@link AccountUsageProjection}) — same "an assembler wires the real thing, a test injects
-   * a fake" seam every other optional field on this type already follows. Omitted ⇒ the real
-   * `readAccountUsageProjection(accountUsageProjectionPath(deps.root))` when `root` is set, or
-   * no projection consulted at all when `root` is unset — an install that never supplies
-   * `root` (every pre-W1-T333 caller of this type) renders BYTE-IDENTICAL to before this task.
-   */
   readUsageProjection?: () => AccountUsageProjection | undefined;
-  /** W1-T2688: ledger appender for the observed credit-state edge; tests inject a spy. */
+  /** Ledger appender for the observed credit-state edge; tests inject a spy. */
   writeLedger?: typeof appendLedger;
 }
 
-/**
- * `GET /v1/account-usage` — read-scoped, computed FRESH PER REQUEST. No cache, no memoization,
- * no boot capture: that is what makes an account switch visible on the next poll rather than on
- * the next daemon restart (see this module's header).
- */
+/** `GET /v1/account-usage` — read-scoped, computed fresh per request, no cache or memoization
+ *  (see this module's header for why). */
 export function buildAccountUsageRoute(deps: AccountUsageDeps): Route {
   return {
     method: "GET",
@@ -884,10 +673,7 @@ export function buildAccountUsageRoute(deps: AccountUsageDeps): Route {
       const now = deps.now ?? Date.now;
       const readLedger = deps.readLedger ?? readLedgerLines;
       const readAccount = deps.readAccount ?? (() => readAccountUsageFile(deps.accountFilePath));
-      // W1-T2516: fold in whatever a worker's own teardown persisted BEFORE its scratch home
-      // was reaped — see AccountUsageProjection's doc for why this survives what the primary
-      // `homedir()` read alone cannot on a headless fleet host. `deps.root` unset (every
-      // pre-W1-T333 caller) ⇒ no projection is even looked for, byte-identical to before.
+      // See AccountUsageProjection's doc. `deps.root` unset ⇒ no projection is looked for.
       const readProjection =
         deps.readUsageProjection ??
         (() => (deps.root ? readAccountUsageProjection(accountUsageProjectionPath(deps.root)) : undefined));

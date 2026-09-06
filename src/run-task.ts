@@ -24,7 +24,7 @@ import {
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -577,6 +577,8 @@ import {
   TaskLintError,
   type LintOpts,
 } from "./lib/task-linter.js";
+import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn } from "./lib/replay-harness.js";
+import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
 import { mountRecommendationProposalCandidate, recommendMounts, type MountHeadroomCell } from "./lib/mount-recommender.js";
@@ -908,7 +910,7 @@ import {
   workerTranscript,
   uniqueRunBranch,
   excludeNodeModulesFromGit,
-  linkWorktreeNodeModules,
+  linkWorktreeNodeModules, resolveNodeModulesSource,
   worktreeAdd,
   worktreeLockIsPidAlive,
   worktreeRemove,
@@ -5033,7 +5035,7 @@ function materializeReviewerSnapshot(
   reviewRoot: string,
   sourceDir: string | undefined,
   expectedHeadSha: string,
-): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules> } {
+): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules>; dependencyReadRoots: string[] } {
   if (!sourceDir || !existsSync(sourceDir)) {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -5096,12 +5098,17 @@ function materializeReviewerSnapshot(
     );
   }
 
-  // The clone's own exclude file may be changed before the reviewer starts; the source checkout
-  // and common Git metadata remain untouched. This makes a linked dependency tree invisible to
-  // the post-review cleanliness proof even for repositories whose committed .gitignore omits it.
+  // The clone's exclude may change; source/common Git metadata remain untouched.
+  // This keeps a linked dependency tree invisible to the post-review cleanliness proof.
+  // Dependency roots outside the disposable checkout are passed to Codex as read-only.
+  // The source checkout still does not receive a broader writable sandbox grant.
+  // Repositories whose committed .gitignore omits node_modules still get a clean review checkout.
   excludeNodeModulesFromGit(cwd);
-  const nodeModules = linkWorktreeNodeModules(sourceDir, cwd);
-  return { cwd, nodeModules };
+  const dependencyRoot = (() => { try { const source = resolveNodeModulesSource(sourceDir); return source ? realpathSync(source) : undefined; } catch { /* No source earns no grant. */ return undefined; } })();
+  const nodeModules = linkWorktreeNodeModules(sourceDir, cwd, dependencyRoot ? { resolveSource: () => dependencyRoot } : {});
+  const dependencyRelative = dependencyRoot ? relative(cwd, dependencyRoot) : "";
+  const dependencyReadRoots = dependencyRoot && (dependencyRelative === ".." || dependencyRelative.startsWith(`..${sep}`) || isAbsolute(dependencyRelative)) ? [dependencyRoot] : [];
+  return { cwd, nodeModules, dependencyReadRoots };
 }
 
 /** A semantic result is usable only while the disposable checkout remains exact and clean. */
@@ -5141,10 +5148,11 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
  * never be missing (a required status that is never posted deadlocks every merge
  * on the repo — the exact failure this task fixes).
  *
- * A FRESH read-only reviewer worker (NEVER resumeSessionId, NEVER forkSession) is
- * spawned as an ADVISORY semantic layer, in a throwaway cwd so it cannot mutate the
- * diff it judges. Its per-criterion verdicts may only DOWNGRADE a criterion to
- * failure ({@link parseReviewerVerdicts} → semantic), never rescue an unpasted
+ * A FRESH reviewer worker with read-only inspection tools (NEVER resumeSessionId,
+ * NEVER forkSession) is spawned as an ADVISORY semantic layer, in a throwaway cwd
+ * so it cannot mutate the diff it judges. It may run tests from private scratch,
+ * but its per-criterion verdicts may only DOWNGRADE a criterion to failure
+ * ({@link parseReviewerVerdicts} → semantic), never rescue an unpasted
  * proof. Its spawn is best-effort: a reviewer that fails to spawn (e.g. the
  * FIELD FINDING 12 self-updater race) never blocks the gate — the deterministic
  * floor still posts, fail-closed.
@@ -5411,11 +5419,8 @@ async function runReview(args: {
             maxBudgetUsd: args.budgetUsd,
             config: args.config,
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
-            // W1-T2829: make the existing read-only contract structural at this production call
-            // site. The reviewer still needs inspection tools to fetch the diff and run proofs;
-            // the shared list excludes every write tool, which also lets the Codex adapter use its
-            // narrowly gated non-repository trust bypass for this throwaway cwd.
-            tools: SPECIALIST_TOOLS,
+            // W1-T2829/W1-T2946: preserve read-only tools while granting Codex narrow TMPDIR writes and dependency reads.
+            tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review", sandboxReadRoots: snapshot.dependencyReadRoots,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );
@@ -16455,6 +16460,86 @@ function checkAcceptanceChangedFiles(): string[] {
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
+}
+
+/** Seam for {@link replayGoldensCommand} (W1-T2689). Every field is injectable so the whole verb --
+ *  including its refusals -- is unit-drivable without dispatching a worker or touching a ledger. */
+export interface ReplayGoldensDeps {
+  /** The spend-bearing seam. Absent means the verb REFUSES rather than falling back to a real
+   *  dispatch: there is no default worth having here, because the wrong default costs money. */
+  dispatch?: ReplayDispatch;
+  goldens?: readonly GoldenTask[];
+  writeLedger?: typeof appendLedger;
+  now?: () => number;
+  log?: (message: string) => void;
+}
+
+/**
+ * `rmd replay-goldens --confirm-spend [--limit N] [--ledger <path>]` -- W1-T2689's PRODUCTION
+ * CALLER, the piece the golden-replay leg was missing.
+ *
+ * This is the only process that drives {@link replayGoldens} outside a test, which is the whole
+ * point of the task: the driver, the seam, the corpus, the emitter and retro.ts's consumer were all
+ * built and correct, and nothing invoked them, so the Self-Harness leg reported "no replay run
+ * recorded" by construction.
+ *
+ * THREE REFUSALS, EACH BEFORE ANY SPEND:
+ *   - no `--confirm-spend` ({@link replayOptIn}): a replay dispatches workers and costs real money,
+ *     unlike every other retro rung. Never inheritable from an env var or a config default.
+ *   - no `--ledger <path>`: an unconfigured run would either write nowhere (a spend that records
+ *     nothing) or guess at a shared path. The mutation gate's ambient default wrote 35 junk lines
+ *     into an operator's real ledger; this verb refuses instead of guessing.
+ *   - no dispatch seam wired: refuse rather than fall back to a real dispatch.
+ *
+ * A run of ZERO goldens (`--limit 0`) is legitimate and writes NOTHING. That silence is load-bearing:
+ * retro.ts's renderer must still be able to print "No replay run recorded this cycle -- NOT a
+ * confirmed 0%", and a producer that emitted an empty-but-present run would turn that honest
+ * degradation into a fabricated zero.
+ */
+export async function replayGoldensCommand(rest: string[], deps: ReplayGoldensDeps = {}): Promise<number> {
+  const log = deps.log ?? ((m: string) => console.error(m));
+
+  const optIn = replayOptIn(rest);
+  if (!optIn.enabled) {
+    log(`replay-goldens: ${optIn.reason}`);
+    return 2;
+  }
+
+  const ledgerIdx = rest.indexOf("--ledger");
+  const ledgerPath = ledgerIdx >= 0 ? rest[ledgerIdx + 1] : undefined;
+  if (!ledgerPath) {
+    log("replay-goldens: --ledger <path> is required — a spend that records nothing is worse than one that never ran, and this verb will not guess at a shared path.");
+    return 2;
+  }
+
+  const limitIdx = rest.indexOf("--limit");
+  let corpus: GoldenTask[];
+  try {
+    const limit = limitIdx >= 0 ? Number(rest[limitIdx + 1]) : REPLAY_CORPUS_BOUND;
+    corpus = boundedCorpus(deps.goldens ?? SEEDED_GOLDENS, limit);
+  } catch (e) {
+    log(`replay-goldens: ${String((e as Error)?.message ?? e)}`);
+    return 2;
+  }
+
+  if (corpus.length === 0) {
+    // Deliberately NOT an error, and deliberately writes nothing — see the doc comment above.
+    log("replay-goldens: 0 goldens selected — nothing dispatched and NO ledger line written, so the retro's no-naked-zero path stays reachable.");
+    return 0;
+  }
+
+  if (!deps.dispatch) {
+    log("replay-goldens: no dispatch seam wired — refusing rather than falling back to a real dispatch.");
+    return 2;
+  }
+
+  const runId = `replay-${(deps.now ?? Date.now)()}`;
+  const results = await replayGoldens(corpus, harnessRunnerOver({ dispatch: deps.dispatch, log: deps.log }));
+  recordReplayResults(runId, "W1-T2689", results, { ledgerPath, writeLedger: deps.writeLedger });
+
+  const rate = replayPassRate(results);
+  log(`replay-goldens: ${rate.passed}/${rate.total} golden(s) passed; ${results.length} line(s) recorded to ${ledgerPath} (run ${runId}).`);
+  return results.every((r) => r.passed) ? 0 : 1;
 }
 
 export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps = {}): number {
@@ -36812,6 +36897,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T437: the QUANTITY figure beside W1-T424's correctness join — the zero-touch merge rate over every Remudero-Task-trailer-bearing merge on the read git history (lib/autonomy.ts's zeroTouchMergeRate, over the ledger UNION, never the live file alone), classifying each merge zero-touch (auto-armed, zero fix-rung strikes, no reframe, no operator note, no capped override, no fix-rung human evidence) or human-touched, NAMING every touch that fired — split by verdict class (full PASS / keyword floor / degraded arm / unclassified) so the class split shows where the next ratchet notch is safe. Prints the current decideAutoMergeArm arming posture beside the measured rate — proposes no policy change. Zero archive files matched under the state dir reports the whole window UNMEASURED, naming the reason, never a rate computed from the live ledger file alone. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. READ-ONLY: files nothing, proposes nothing.",
   },
   {
+    name: "replay-goldens",
+    syntax: "rmd replay-goldens --confirm-spend --ledger <path> [--limit N]",
+    summary: "Replay the seeded goldens and record what the retro's Self-Harness leg reads.",
+    detail: "W1-T2689: the golden-replay leg shipped with a corpus, a seam, a driver, an emitter and a retro consumer, and NO production caller — so replayGoldens had zero callers outside tests and the Self-Harness leg has reported `no replay run recorded` since the day it shipped, by construction rather than by failure. This is that caller. UNLIKE EVERY OTHER RETRO RUNG IT SPENDS REAL MONEY: it dispatches workers against the sandbox, so it is opt-in per invocation (--confirm-spend, deliberately not an env var or config default, so a retro tick / CI job / test spawn cannot inherit it) and BOUNDED (REPLAY_CORPUS_BOUND, a declared ceiling boundedCorpus clamps to even against a larger --limit). --ledger is REQUIRED: a spend that records nothing is worse than one that never ran, and this verb refuses rather than guessing at a shared path. --limit 0 dispatches nothing and writes NOTHING, on purpose — retro.ts must still be able to render `no run recorded`, never a fabricated 0%. Exit 0 when every replayed golden matched its expectation, 1 when any regressed, 2 on any refusal.",
+  },
+  {
     name: "check-acceptance",
     syntax: "rmd check-acceptance <body-file>",
     summary: "Report what the reviewer's own parser actually resolves from a PR body file.",
@@ -37701,6 +37792,10 @@ export async function main(
     process.exit(autonomyRateCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(checkAcceptanceCommand(rest)) cannot carry a DA hit without forking the process; checkAcceptanceCommand's own logic — the usage refusal, the unreadable-file refusal, the truncation report, the missing-header report and the clean pass — is unit-tested in test/acceptance-block-diagnostics.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await replayGoldensCommand(rest)) cannot carry a DA hit without forking the process; replayGoldensCommand's own logic — all three refusals, the zero-golden silence, and the recording happy path — is unit-tested in test/the-golden-suite-has-every-piece-except-a-producer.test.ts (same irreducible-glue shape as the sibling check-acceptance/check-proof dispatch cases).
+  if (cmd === "replay-goldens") {
+    process.exit(await replayGoldensCommand(rest));
+  }
   if (cmd === "check-acceptance") {
     process.exit(checkAcceptanceCommand(rest));
   }

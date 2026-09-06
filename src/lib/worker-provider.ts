@@ -40,6 +40,8 @@ interface CodexSpawnArgs {
   effort?: string;
   maxTurns?: number;
   tools?: string[];
+  sandboxIntent?: "disposable-review";
+  sandboxReadRoots?: string[];
   runId?: string;
   taskId?: string;
   containment?: {
@@ -1238,11 +1240,30 @@ export function codexGitWritableRoots(cwd: string, configRoot: string): string[]
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
-  const readOnly = Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+  const disposableReview = args.sandboxIntent === "disposable-review";
+  const readOnly = !disposableReview && Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
   const skipGitRepoCheck = readOnly && !isGitWorktree(args.cwd);
+  const disposableReadRoots = disposableReview
+    ? [...new Set((args.sandboxReadRoots ?? []).filter(isAbsolute).map(physicalPath))]
+    : [];
+  const disposableFilesystem = [
+    [":slash_tmp", "deny"],
+    [":tmpdir", "write"],
+    ...disposableReadRoots.map((root) => [root, "read"]),
+  ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(",");
+  const disposableReviewProfile = disposableReview
+    ? [
+        "--enable", "network_proxy",
+        "-c", 'default_permissions="rmd_review"',
+        "-c", 'permissions.rmd_review.extends=":workspace"',
+        "-c", `permissions.rmd_review.filesystem={${disposableFilesystem}}`,
+        "-c", "permissions.rmd_review.network.enabled=true",
+      ]
+    : [];
   const shared = [
     "--json",
     "--ignore-user-config",
+    ...disposableReviewProfile,
     // W1-T2754: Codex refuses to start when its `-C` cwd is neither a git repository nor a
     // configured trusted directory — "Not inside a trusted directory and --skip-git-repo-check
     // was not specified." — and it does so by EXITING 0 WITH NO OUTPUT, so the caller sees an
@@ -1265,12 +1286,12 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   if (model) shared.push("--model", model);
   if (effort) shared.push("-c", `model_reasoning_effort=\"${effort}\"`);
   if (args.resumeSessionId) return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
-  const gitWritableRoots = readOnly ? [] : codexGitWritableRoots(args.cwd, config.root);
+  const gitWritableRoots = readOnly || disposableReview ? [] : codexGitWritableRoots(args.cwd, config.root);
   return [
     "exec",
     ...shared,
-    "--sandbox", readOnly ? "read-only" : "workspace-write",
-    ...(readOnly ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
+    ...(disposableReview ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
+    ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
     ...gitWritableRoots.flatMap((root) => ["--add-dir", root]),
     "-C", args.cwd,
     "-",
