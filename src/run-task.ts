@@ -19906,6 +19906,20 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           return undefined;
         }
       };
+      // W1-T2835: the BASE-tree counterpart of `opts.moduleExists` above, wired ONLY here — the
+      // `--base` pass — for the same reason `blockedDisposition` and `newMonolithIds` are: a
+      // whole-plan run has no base to compare against and must not report the standing population,
+      // and the PRE-DISPATCH site must never see it because a queued task's proof legitimately
+      // forward-references the test its own PR will create. One `cat-file -e` per pure-path proof
+      // over the handful of tasks a PR actually changes; no worktree, no network.
+      opts.pathExistsAtBase = (rel: string) => {
+        try {
+          execFileSync("git", ["-C", repoRoot, "cat-file", "-e", `${baseRef}:${rel}`], { stdio: "ignore" });
+          return true;
+        } catch {
+          return false; // absent at base, or ref/path unreadable — either way, no opinion
+        }
+      };
     }
     const { violations: lintViolations } = lintTask(task, opts);
     // W1-T1225: proofGrepUnmatchableViolations( is called HERE, directly, rather than folded into

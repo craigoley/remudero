@@ -74,7 +74,8 @@ export type LintCheck =
   | "dispatch-priority"
   | "declared-scope"
   | "advisory-routing"
-  | "deferred-follow-up";
+  | "deferred-follow-up"
+  | "proof-base-discrimination";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -1087,6 +1088,60 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
         "still absent when this is reviewed, the criterion grades executed_fail instead, which " +
         `overrides keyword coverage and fails the PR. Add "${path}" to files: or rewrite the proof ` +
         "to name a path already in scope.",
+    });
+  });
+  return violations;
+}
+
+// ── PROOF-BASE-DISCRIMINATION (W1-T2835 — the proof that cannot tell head from base) ─────────
+//
+// `proof-dialect` asks whether a proof PARSES, `proof-resolvability` whether it resolves TODAY, and
+// `proof-scope` whether its path is inside `files:`. None consults a BASE ref, so the fourth
+// question — can this proof tell head from base — is answered only at review, weeks later, by
+// `classifyBaseProofOutcome` re-running it at the merge-base. A pure-path `unit test:` proof naming
+// a file that ALREADY EXISTS at base passes on both trees, grades `executed_stale`, and the
+// criterion degrades to the keyword floor SILENTLY: no red check, no message, a green PR.
+//
+// WARN, NEVER BLOCK, and the reason is a false positive this check cannot rule out: "the file exists
+// at base" is a HEURISTIC for "the proof PASSES at base". A task REPAIRING a currently-RED test names
+// a file that exists at base and discriminates perfectly. Refusing that shape would be wrong, so the
+// severity default is "warn" and no call site passes "block".
+//
+// THE HEALTHY MAJORITY MUST STAY SILENT. A proof naming the test its own PR will create is the whole
+// point of the pure-path form and is the common case (measured 2026-09-06 over every filed shard at
+// its own filing base: 3582 forward references against 828 already-present). A check that fired on
+// those would train readers to ignore the row, which is worse than the gap it closes.
+
+/** W1-T2835 — every pure-path `unit test:` proof whose file ALREADY EXISTED at the base ref, and so
+ *  cannot discriminate head from base. Silent without {@link LintOpts.pathExistsAtBase} (the
+ *  whole-plan and pre-dispatch passes have no base), silent on a forward reference, and WARN-only. */
+export function proofBaseDiscriminationViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const pathExistsAtBase = opts.pathExistsAtBase;
+  if (!pathExistsAtBase) return []; // no base fact ⇒ no opinion (see the opt's own doc)
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to parse
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
+    // ONLY the pure-path test form. A name-filtered proof's discrimination turns on whether the
+    // TITLE matches at base, which a path predicate cannot answer, and a `grep:` proof's turns on
+    // the PATTERN — both are outside what this check can see, so both stay silent rather than guess.
+    if (whitelisted.kind !== "test" || whitelisted.nameFiltered) return;
+    const path = whitelisted.label;
+    if (!pathExistsAtBase(path)) return; // forward reference — the healthy TDD case, silent
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    violations.push({
+      check: "proof-base-discrimination",
+      severity: opts.proofBaseDiscrimination ?? "warn",
+      message:
+        `criterion ${i + 1} ("${claimHead}") proof names "${path}", which ALREADY EXISTS at the base ` +
+        "ref. At review time classifyBaseProofOutcome (review.ts) re-runs this proof against the " +
+        "merge-base: a proof that passes on BOTH trees discriminates nothing and grades " +
+        "executed_stale, and the criterion then falls back to the keyword floor SILENTLY — no red " +
+        "check names it and the PR can merge on prose. This is a WARN, not a refusal, because file " +
+        "presence at base is only a HEURISTIC for passing there: a task REPAIRING a currently-failing " +
+        `test legitimately names an existing file. If this criterion is proving NEW behaviour in ` +
+        `"${path}", prove it with a \`grep:\` on the changed line instead, which can miss at base.`,
     });
   });
   return violations;
@@ -2393,6 +2448,16 @@ export interface LintOpts {
   /** Severity for {@link proofScopeViolations}. Default "warn" — see that check's section comment
    *  for the measured retrofit count driving the default. */
   proofScope?: LintSeverity;
+  /** W1-T2835 — did this repo-relative path exist at the BASE ref? The base-tree counterpart of
+   *  {@link LintOpts.moduleExists}, and the only way the base fact reaches this pure module: the
+   *  linter never reads disk and never shells git. ABSENT ⇒ {@link proofBaseDiscriminationViolations}
+   *  is SILENT, the same contract `blockedDisposition` and `newMonolithIds` already follow, and for
+   *  the same reason — a whole-plan run has no base and must not report the standing population. */
+  pathExistsAtBase?: (repoRelPath: string) => boolean;
+  /** Severity for {@link proofBaseDiscriminationViolations}. Default "warn", and NO call site wires
+   *  "block": path-presence at base is a HEURISTIC for "the proof passes at base", so a repair whose
+   *  target test is RED at base discriminates correctly and a blocking arm would refuse it wrongly. */
+  proofBaseDiscrimination?: LintSeverity;
   /** The reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to a real checkout, so
    *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations} is silent. */
   resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
@@ -2453,6 +2518,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofGrepSafetyViolations(task));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofNameResolutionViolations(task, opts));
+  violations.push(...proofBaseDiscriminationViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
