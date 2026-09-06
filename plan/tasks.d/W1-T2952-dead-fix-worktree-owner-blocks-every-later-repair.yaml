@@ -1,0 +1,84 @@
+- id: W1-T2952
+  title: "A DEAD FIX WORKTREE OWNER BLOCKS EVERY LATER REPAIR — W1-T2863 correctly protects a registered branch across freshness restarts, but the shared reaper correctly keeps every live-PR branch, so a clean lockless residue can own the branch forever"
+  repo: remudero
+  depends_on: [W1-T2863]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 24.00
+  files:
+    - src/run-task.ts
+    - test/fix-branch-checkout-serialization.test.ts
+  origin: "fleet-incident#pr-4236-dead-registered-fix-owner-2026-09-06"
+  plan_refs: ["W1-T2863", "W1-T378", "W1-T381", "W1-T2609", "W1-T2950"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET FOR PR #4236. A W1-T2949 fix worker used registered worktree
+    `/home/node/Remudero/worktrees/sweep-W1-T2949-1788684372590`, pushed head 702795c5 and left a
+    clean branch owner behind when the daemon freshness process changed. At 08:59:53Z the next
+    daemon recorded `sweep.fix.checkout_claim_declined` with reason
+    `registered_worktree_owner`, then recorded the comment-load repair as `acted: true`. At
+    09:49Z the worktree remained registered while no W1-T2949 inflight lock, Codex/Claude worker or
+    process naming that worktree existed. No later repair worker had spawned, and the PR remained
+    red until an external agent removed only the fourteen excess comment lines and pushed 9cdd2073.
+
+    TWO CORRECT SAFETY RULES COMPOSE INTO A DEADLOCK. W1-T2863 makes the durable Git registration
+    outrank a dead daemon-parent lock because a detached worker can survive freshness. W1-T378 and
+    W1-T381 make a live upstream branch and ambiguous activity keep rather than destroy. The fix
+    admission therefore stands down on the registered owner, while the general reaper refuses to
+    remove that owner until its PR is no longer live. The PR cannot merge because the owner blocks
+    the repair that would make it green.
+
+    THE REMEDY MUST PROVE ABANDONMENT, NOT RETUNE AGE OR WEAKEN EITHER GUARD. A registered path is
+    reclaimable only when every independent signal agrees: it is a managed `sweep-<task>-<epoch>`
+    path for the exact PR branch; its tree and index are clean; its local HEAD is equal to or an
+    ancestor of the exact remote PR head, so no unpushed commit exists; no live branch-claim holder
+    remains; and a bounded process-cwd census proves no process is executing inside that worktree.
+    An unreadable signal keeps and explains the refusal.
+  design: |
+    Extend the W1-T2863 pre-claim registered-owner check with an injected, pure decision over a
+    bounded owner snapshot. Preserve its current immediate stand-down for a live claim, any process
+    rooted in the worktree, a dirty tree/index, a detached or ahead head, a foreign path, a remote
+    mismatch, or an unreadable probe.
+
+    When and only when the snapshot proves a clean abandoned managed fix owner, remove it through
+    the canonical clone's existing `git worktree remove` path before taking the ordinary W1-T2609
+    branch claim. Re-read the registry after removal; if ownership remains or changes, stand down.
+    On confirmed removal, ledger one bounded `sweep.fix.checkout_owner_reclaimed` row naming PR,
+    task, branch, bounded path, local and remote SHA prefixes, age and the proof flags, then continue
+    through the unchanged one-worktree/one-worker dispatch.
+
+    The process-cwd census is Linux fleet evidence, not an assumption: scan only the current PID
+    namespace's `/proc/<pid>/cwd` links under a fixed wall/entry bound, inject the reader in tests,
+    and treat unsupported, truncated or permission-denied reads as unknown/keep. Add no kill,
+    signal, force-remove, reset, branch deletion, timer or background reaper. The next level-triggered
+    sweep is the retry mechanism.
+  acceptance:
+    - claim: "a clean managed fix worktree with no live claim or process and no local commit beyond the exact remote PR head is removed through git and the same poll proceeds to one repair dispatch"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "a live branch-claim holder or any process whose cwd is the owner or its descendant preserves W1-T2863's stand-down and performs no remove, lock reclaim, checkout or worker spawn"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "a dirty worktree, staged change, untracked file, detached head, local-ahead commit, foreign path or changed remote head is never reclaimed"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "an unreadable, unsupported, permission-denied or bounded-out process/branch/tree probe fails closed with a named checkout-claim decline"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "successful recovery re-reads Git registration, emits one bounded checkout_owner_reclaimed record and then uses the existing exclusive branch claim and checkout guard"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "the recovery never kills a process, force-removes a worktree, resets or deletes a branch, weakens live-upstream reaping, or adds a timer, sleep or background lifecycle"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+    - claim: "removing only the proven-abandoned recovery arm reproduces PR #4236's permanent registered_worktree_owner stand-down and fails the focused suite"
+      proof: "mutation test: test/fix-branch-checkout-serialization.test.ts"
+  falsifier: |
+    Close without implementation if current main already distinguishes a proven-abandoned
+    registered fix owner from a surviving worker before returning `registered_worktree_owner`, or
+    if another existing reaper can remove a clean live-PR fix residue under the same safety proof.
+    The live registry, absent process/lock and hour-long unchanged head refute both alternatives.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2952`; the held id
+    is authoritative. INSTANCE INTERVENTION: external repair changed only comments on the existing
+    W1-T2949 branch after confirming no lock/process and exact remote head, then passed typecheck,
+    all 47 focused provider tests, comment-load-ratchet and `git diff --check`. This task owns the
+    automation class, not that already-pushed PR repair.
