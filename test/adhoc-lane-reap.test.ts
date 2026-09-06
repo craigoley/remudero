@@ -269,9 +269,20 @@ test("W1-T2847 (wiring): the run-task call site supplies repoDir, so the report 
     .split("\n")
     .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*") && !l.trim().startsWith("/*"))
     .join("\n");
+  // The INVARIANT is that repoDir reaches the rung, not the exact argument list — W1-T2847's arming
+  // row added `enabled` beside it, and pinning the literal shape would refuse that without saying
+  // anything about the property this test exists to hold.
   assert.match(
     code,
-    /runAdhocLaneReapRung\(config, log, \{ repoDir \}\)/,
+    /runAdhocLaneReapRung\(config, log, \{[^}]*\brepoDir\b[^}]*\}\)/,
     "without repoDir the unmanaged report never runs and unmanagedWorktreeLanes is dead code",
+  );
+  // And the arming decision must come from POLICY, never a literal. `enabled` defaults false inside
+  // the rung, so a call site that stops passing it silently returns the pass to survey-only — the
+  // same dead-parameter shape the assertion above guards, one argument along.
+  assert.match(
+    code,
+    /runAdhocLaneReapRung\(config, log, \{[^}]*enabled:[^}]*armAdhocLaneReap[^}]*\}\)/,
+    "arming must be read from plan/policy.yaml's sweep.armAdhocLaneReap, not hardcoded at the call site",
   );
 });

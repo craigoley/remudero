@@ -87,6 +87,11 @@ export interface PolicyValues {
     /** W1-T920: gates the supersession disposition (`sweep.ts`'s `DISPOSITION_RULES`). Default
      *  off, same shape as `armSessionPrs`. Why: docs/forensics/policy.md#sweep-block. */
     supersessionDisposal: boolean;
+    /** W1-T2847: ARMS the ad-hoc lane reap rung. `runAdhocLaneReapRung` shipped survey-first with
+     *  `enabled` defaulting false and its doc calling arming "a separate operator decision" — but
+     *  the call site passed no `enabled` at all, so there was nothing an operator could decide.
+     *  This row is that decision, made settable. Same shape as `armSessionPrs`. */
+    armAdhocLaneReap: boolean;
     /** W1-T1038: the dispatch-path `/proc/meminfo` `MemAvailable` floor (MiB); below it, new
      *  dispatch defers. Ships at 0. See {@link checkMemoryGovernor}. Why:
      *  docs/forensics/policy.md#sweepmemoryfloormib. */
@@ -223,6 +228,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.dispatchLanes": "lifted",
   "sweep.dailyCostCeilingUsd": "lifted",
   "sweep.armSessionPrs": "net-new",
+  "sweep.armAdhocLaneReap": "net-new",
   "sweep.repairFilingThreshold": "net-new",
   "sweep.repairFilingWindowDays": "net-new",
   "sweep.supersessionDisposal": "net-new",
@@ -495,6 +501,7 @@ export function validatePolicy(raw: unknown): Policy {
   const dispatchLanes = numberField("sweep.dispatchLanes", sweepRaw.dispatchLanes, origin);
   const dailyCostCeilingUsd = numberField("sweep.dailyCostCeilingUsd", sweepRaw.dailyCostCeilingUsd, origin, bounds);
   const armSessionPrs = booleanField("sweep.armSessionPrs", sweepRaw.armSessionPrs, origin);
+  const armAdhocLaneReap = booleanField("sweep.armAdhocLaneReap", sweepRaw.armAdhocLaneReap, origin);
   const repairFilingThreshold = numberField("sweep.repairFilingThreshold", sweepRaw.repairFilingThreshold, origin);
   const repairFilingWindowDays = numberField("sweep.repairFilingWindowDays", sweepRaw.repairFilingWindowDays, origin);
   const supersessionDisposal = booleanField("sweep.supersessionDisposal", sweepRaw.supersessionDisposal, origin);
@@ -608,6 +615,7 @@ export function validatePolicy(raw: unknown): Policy {
         dispatchLanes,
         dailyCostCeilingUsd,
         armSessionPrs,
+        armAdhocLaneReap,
         repairFilingThreshold,
         repairFilingWindowDays,
         supersessionDisposal,
