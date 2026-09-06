@@ -3199,19 +3199,41 @@ test("W1-T513: a third startInFlightTicker call site now exists (retro, dispatch
 
 test("W1-T1272: a stale freshness verdict still reaches the full sweep before it returns", async () => {
   const plan = fixturePlan();
-  let sweeps = 0;
+  // ORDERING, not a total. The claim is "the stale exit reaches the full sweep BEFORE it returns",
+  // which is a statement about what happens last. The old fixture asserted `sweeps === 1` and
+  // inferred the rest from the loop exiting on its first read, before its own in-cycle sweep could
+  // run. W1-T2965 grants a starved lifetime one cycle first, so that inference no longer holds, and
+  // a bare count never said which call site produced it anyway. Recording the sequence says it.
+  const events: string[] = [];
   const s = await runDaemon(plan, {
     refreshMerged: () => NONE_MERGED,
-    runOne: async () => {
-      throw new Error("FALSIFIER: dispatch must never be reached once freshness is stale");
+    // W1-T2965 — this was a throwing falsifier reading "dispatch must never be reached once
+    // freshness is stale". That absolute form is gone: a lifetime that has completed no cycle is
+    // granted exactly one before the top-of-tick exit applies (33 consecutive container lifetimes
+    // ended `idle ticks: 0`). W1-T2960 had already begun this narrowing at the admission gate.
+    runOne: async (id) => {
+      events.push("dispatch");
+      return { taskId: id, runId: id + "-run", merged: true, costUsd: 0, verdict: "merged" };
     },
-    checkFreshness: () => ({ stale: true, oldSha: "aaaaaaa1111111111111111111111111111111", newSha: "bbbbbbb2222222222222222222222222222222" }),
+    checkFreshness: () => {
+      events.push("freshness");
+      return {
+        stale: true,
+        oldSha: "aaaaaaa1111111111111111111111111111111",
+        newSha: "bbbbbbb2222222222222222222222222222222",
+      };
+    },
     sweep: async () => {
-      sweeps += 1;
+      events.push("sweep");
     },
     sleep: async () => {},
   });
-  assert.equal(sweeps, 1, "the full sweep ran exactly once, reached from the stale branch, before runDaemon returned");
+  assert.equal(events.at(-1), "sweep", "the LAST thing the daemon did before returning was run the full sweep");
+  assert.equal(
+    events.at(-2),
+    "freshness",
+    "and it was reached straight off the stale read — the stale branch, not an in-cycle pass",
+  );
   assert.equal(s.stopReason, "stale", "the stale verdict still ends the boot — running the sweep did not suppress it");
 });
 
@@ -3222,9 +3244,15 @@ test("W1-T1272: a stale freshness verdict still ends the boot rather than being 
   let sweepCompleted = false;
   const s = await runDaemon(plan, {
     refreshMerged: () => NONE_MERGED,
-    runOne: async () => {
-      throw new Error("FALSIFIER: dispatch must never be reached once freshness is stale");
-    },
+    // W1-T2965 — this was a throwing falsifier reading "dispatch must never be reached once
+    // freshness is stale". That absolute form is gone: a lifetime that has completed no cycle is
+    // granted exactly one before the top-of-tick exit applies, because a process that never
+    // completes a cycle makes no progress however fresh the code it would restart onto is (33
+    // consecutive container lifetimes ended `idle ticks: 0`). W1-T2960 had already begun this
+    // narrowing at the admission gate. What W1-T1272 actually pins — that a stale exit still
+    // reaches the full sweep before returning — is unchanged and still asserted below. A clean
+    // success, so the granted cycle does not end in stop-on-block before the verdict under test.
+    runOne: async (id) => ({ taskId: id, runId: id + "-run", merged: true, costUsd: 0, verdict: "merged" }),
     checkFreshness: () => ({ stale: true, oldSha: "aaaaaaa1111111111111111111111111111111", newSha: "bbbbbbb2222222222222222222222222222222" }),
     sweep: async () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -3316,9 +3344,15 @@ test("W1-T1272: an over-running sweep is still abandoned when reached from the s
     fixturePlan(),
     {
       refreshMerged: () => NONE_MERGED,
-      runOne: async () => {
-        throw new Error("FALSIFIER: dispatch must never be reached once freshness is stale");
-      },
+      // W1-T2965 — this was a throwing falsifier reading "dispatch must never be reached once
+      // freshness is stale". That absolute form is gone: a lifetime that has completed no cycle is
+      // granted exactly one before the top-of-tick exit applies, because a process that never
+      // completes a cycle makes no progress however fresh the code it would restart onto is (33
+      // consecutive container lifetimes ended `idle ticks: 0`). W1-T2960 had already begun this
+      // narrowing at the admission gate. What W1-T1272 actually pins — that a stale exit still
+      // reaches the full sweep before returning — is unchanged and still asserted below. A clean
+      // success, so the granted cycle does not end in stop-on-block before the verdict under test.
+      runOne: async (id) => ({ taskId: id, runId: id + "-run", merged: true, costUsd: 0, verdict: "merged" }),
       checkFreshness: () => ({ stale: true, oldSha: "aaaaaaa1111111111111111111111111111111", newSha: "bbbbbbb2222222222222222222222222222222" }),
       // Never resolves — the measured incident's own shape, reused here against the NEW
       // stale-branch call site rather than only the pre-existing once-per-iteration one.
@@ -3348,9 +3382,15 @@ test("W1-T2584: the daemon sweep bound closes the continuation gate handed to th
     fixturePlan(),
     {
       refreshMerged: () => NONE_MERGED,
-      runOne: async () => {
-        throw new Error("FALSIFIER: dispatch must never be reached once freshness is stale");
-      },
+      // W1-T2965 — this was a throwing falsifier reading "dispatch must never be reached once
+      // freshness is stale". That absolute form is gone: a lifetime that has completed no cycle is
+      // granted exactly one before the top-of-tick exit applies, because a process that never
+      // completes a cycle makes no progress however fresh the code it would restart onto is (33
+      // consecutive container lifetimes ended `idle ticks: 0`). W1-T2960 had already begun this
+      // narrowing at the admission gate. What W1-T1272 actually pins — that a stale exit still
+      // reaches the full sweep before returning — is unchanged and still asserted below. A clean
+      // success, so the granted cycle does not end in stop-on-block before the verdict under test.
+      runOne: async (id) => ({ taskId: id, runId: id + "-run", merged: true, costUsd: 0, verdict: "merged" }),
       checkFreshness: () => ({ stale: true, oldSha: "aaaaaaa1111111111111111111111111111111", newSha: "bbbbbbb2222222222222222222222222222222" }),
       sweep: async (continueReviewAdmissions) => {
         continuation = continueReviewAdmissions;
