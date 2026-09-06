@@ -146,6 +146,12 @@
       "grepHint": "Forensics"
     },
     {
+      "path": "docs/forensics/autonomy.md",
+      "title": "autonomy.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "autonomy.ts forensics"
+    },
+    {
       "path": "docs/forensics/containment.md",
       "title": "Forensics: src/lib/containment.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/containment.ts` used to",
