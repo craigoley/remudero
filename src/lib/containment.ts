@@ -1,12 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-// W1-T2213: `configPath()` alongside `loadConfig`/`Config` — the SAME resolver
-// the instance config file itself is read through, `<homedir()>/.config/remudero/
-// config.json`, the live, mode-600 file rationale (2) measured. Called from the
-// ORCHESTRATOR's own process (defaultExecutor runs before the worker's HOME is
-// ever redirected), so `homedir()` here reads the REAL operator home, never the
-// worker's scratch one.
+// `configPath()` resolves `<homedir()>/.config/remudero/config.json` through the same reader the
+// config file itself is read by. Called from the orchestrator's own process, before any worker's
+// HOME is redirected, so it reads the operator's REAL home, never a worker's scratch one.
+// Why: docs/forensics/containment.md#the-configpath-import (W1-T2213).
 import { configPath, loadConfig, type Config } from "./config.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { capStderrExcerpt, spawnWorker } from "./worker.js";
@@ -14,54 +12,48 @@ import { reapWorkerScratch } from "./worker-scratch.js";
 import { WORKER_HOME_SYMLINKS } from "./worker-home.js";
 
 /**
- * POST-SPAWN CONTAINMENT PROBE (WS-0 verdict 7; W1-T2 acceptance #2).
+ * Post-spawn containment probe (WS-0 verdict 7; W1-T2 acceptance #2). Spawns a worker under the
+ * sandbox and confirms that an attempted write OUTSIDE its working directory is denied by the OS.
  *
- * The validate-before-spawn guard (settings.ts) proves the settings file is
- * WELL-FORMED. It does NOT prove the sandbox ENGAGED: `claude -p` SILENTLY IGNORES
- * a settings file it can't apply and runs unsandboxed (FF10a / LEARNINGS). Static
- * guard and empirical probe are two DIFFERENT guarantees — the schema check can
- * pass while containment is silently absent. This module is the empirical half:
- * spawn under the sandbox and confirm an attempted write OUTSIDE the working
- * directory is OS-DENIED. Containment unproven ⇒ FAIL CLOSED (Standing rule 11:
- * isolation is PROVEN PER RUN by probe, never assumed from configuration).
+ * INVARIANT: containment unproven means fail closed (Standing rule 11 — isolation is proven per run
+ * by probe, never assumed from configuration).
  *
- * GRANULARITY — once-per-run preflight, not per-spawn. Justification:
- *  - Standing rule 11 mandates "per run", and the settings file + host + CLI
- *    version (the tuple that determines whether the sandbox engages) are constant
- *    across every spawn in a run — the fact proven once holds for all of them.
- *  - Per-spawn would re-prove the same fact before recon AND implement AND resume
- *    AND review (4+ LLM probes/run) at no added assurance. Once-per-run is the
- *    floor: cheap, and it still catches a silently-dropped sandbox before any task
- *    worker writes a byte.
+ * TRAP: `claude -p` silently ignores a settings file it cannot apply and runs unsandboxed (FF10a,
+ * LEARNINGS). The validate-before-spawn guard in settings.ts proves the file is well formed, which
+ * is a different guarantee: that schema check can pass while containment is silently absent.
+ *
+ * FOUR ARMS, ONE CONTRACT. The filesystem, egress, token-read and re-anchoring arms each answer the
+ * same three questions — did the forbidden thing SUCCEED, was a refusal OBSERVED, did the CONTROL
+ * succeed — and each `assess*` returns the same `{contained, reason}` shape over three states:
+ * proven-holding, proven-broken, and unproven carried as `contained: false` plus a reason. NO
+ * FOURTH STATE. Every arm but the filesystem one is OBSERVATIONAL, NOT GATING: its behaviour under
+ * the installed CLI is UNMEASURED, and this repo has already paid for bounds that fire on healthy
+ * conditions, so `probeContainment` records the verdict and does not throw on it.
+ *
+ * Runs once per run, not per spawn: the settings file, host and CLI version are constant across a
+ * run's spawns, so the fact proven once holds for all of them.
+ *
+ * FALSIFIER: test/containment.test.ts. // Why: docs/forensics/containment.md#module-header.
  */
 
 /** Named error so callers (and tests) can assert the fail-closed fired by type. */
 export class ContainmentError extends Error {
   /**
-   * STRUCTURED GUARD-CAUSE (W1-T91/P23, ratifies the design's part (i)) — the
-   * containment sibling of {@link import("./isolation.js").IsolationError}'s same
-   * fields. `check` names WHICH gate fired (`sandbox-enabled` for the static
-   * config gate, `outside-cwd-denial` for the empirical probe); `observed`
-   * preserves the three-state epistemology (proven-holding | proven-broken |
-   * UNPROVEN) rather than collapsing it to a boolean — a data description when
-   * the sandbox was PROVEN to have dropped (the outside write landed), a config
-   * description for the static gate, or, for the UNPROVEN case, ONE OF FOUR
-   * named sub-states from {@link classifyUnprovenState} (W1-T1281, extended by
-   * W1-T2201): `"probe-never-ran"`, `"write-never-attempted"`,
-   * `"no-denial-observed"`, or `"turns-exhausted"` — no longer the single literal
-   * "unproven" that collapsed all of them and left an intermittent preflight
-   * failure undiagnosable from any ledger row.
+   * Structured guard cause, the containment sibling of {@link import("./isolation.js").IsolationError}'s
+   * fields. `check` names which gate fired: `sandbox-enabled` for the static config gate,
+   * `outside-cwd-denial` for the empirical probe. INVARIANT: `observed` keeps the three states —
+   * proven-holding, proven-broken, or one of {@link classifyUnprovenState}'s four sub-states — and
+   * never collapses to a boolean. TRAP: the single literal "unproven" collapsed all four and left an
+   * intermittent preflight failure undiagnosable from any ledger row.
+   * // Why: docs/forensics/containment.md#containmenterror-check-and-observed (W1-T1281, W1-T2201).
    */
   readonly guard = "containment" as const;
   readonly check: string;
   readonly observed: string;
-  /**
-   * W1-T268: the probe spawn's `WorkerResult.childEnvKeys` — `[]` when GATE 1
-   * (the static config check) refused before any spawn ever ran. Carried so the
-   * caller's `blocked_containment` verdict line can DERIVE `billing_mode`
-   * (`billingMode(childEnvKeys)`, env.ts) instead of hardcoding a literal — a
-   * blocked run is never free of a real billing mode just because it failed.
-   */
+  /** The probe spawn's `WorkerResult.childEnvKeys`, `[]` when gate 1 refused before any spawn ran.
+   *  Carried so the `blocked_containment` verdict line DERIVES `billing_mode`
+   *  (`billingMode(childEnvKeys)`, env.ts) instead of hardcoding a literal — a blocked run is never
+   *  free of a real billing mode just because it failed. (W1-T268) */
   readonly childEnvKeys: string[];
   /** W1-T268: the probe spawn's resolved account label, when one exists. */
   readonly accountLabel?: string;
@@ -74,224 +66,100 @@ export class ContainmentError extends Error {
     this.accountLabel = accountLabel;
   }
 }
-
-/** Raw evidence gathered from one probe execution under the sandbox. */
+/**
+ * Raw evidence from one probe execution, one field per arm question. The header above states the
+ * shared contract: an absent optional field means UNOBSERVED — never "denied", "engaged" or
+ * "blocked" — and a "was it refused" field is only ever set from an OBSERVED refusal.
+ * // Why: docs/forensics/containment.md (W1-T237, W1-T292, W1-T1265, W1-T2211, W1-T2213, W1-T2249).
+ */
 export interface ContainmentEvidence {
   /** Did the write OUTSIDE cwd land on disk? `true` ⇒ the sandbox did NOT hold. */
   outsideWriteCreated: boolean;
   /** Did the transcript show an OS-level denial of that outside write? */
   osDenialSeen: boolean;
-  /** Did the write INSIDE cwd land? Sanity signal that the sandbox isn't over-blocking. */
+  /** CONTROL: did the write INSIDE cwd land? Without it an over-blocking sandbox reads as a good one. */
   insideWriteCreated: boolean;
-  /**
-   * W1-T1281: did the transcript even MENTION this run's token — i.e. did the
-   * probe worker get far enough to report on the outside-cwd write step at all,
-   * whether or not that report matched {@link OS_DENIAL_RE}? Split out of the
-   * expression `osDenialSeen` already computes (`transcript.includes(token) &&
-   * OS_DENIAL_RE.test(...)`) so the two halves of that AND are separately
-   * readable: `osDenialSeen` false no longer conflates "attempted, but no
-   * denial phrase" with "never attempted at all" — see
-   * {@link classifyUnprovenState}. Optional — defaults falsy so pre-existing
-   * evidence literals that predate this field read as not-attempted, which is
-   * the conservative direction (it never manufactures a denial-adjacent state
-   * that wasn't observed).
-   */
+  /** Did the transcript mention this run's token — did the probe reach the outside-cwd step at all?
+   *  Split out of `osDenialSeen`'s own AND, so "attempted, no denial phrase" no longer reads the
+   *  same as "never attempted"; see {@link classifyUnprovenState}. (W1-T1281) */
   outsideWriteAttempted?: boolean;
-  /**
-   * W1-T237: did the probe worker die on a credential/auth failure (isError PLUS
-   * the conservative `CREDENTIAL_RE` signature) rather than ever attempting a
-   * write? A credential-dead worker makes NO writes and trips no OS-denial text,
-   * so it is byte-identical to the genuine no-write/no-denial "unproven" case
-   * unless named separately — that collapse is exactly the misdiagnosis that
-   * cost the 2026-07-21 incident two days (a dead-auth worker and a compliant
-   * sandbox read the same). Distinguish it FIRST, before the write/denial checks
-   * below, since a credential-dead worker proves nothing about isolation either
-   * way. Optional — defaults falsy so pre-existing evidence literals that never
-   * saw a credential failure need not spell it out.
-   */
+  /** Did the probe worker die on a credential failure before attempting any write? TRAP: such a
+   *  worker writes nothing and trips no denial text, so it is byte-identical to a genuine unproven
+   *  probe unless named separately — the collapse that cost the 2026-07-21 incident two days.
+   *  Distinguished FIRST, before the write and denial checks. (W1-T237) */
   credentialFailure?: boolean;
-  /**
-   * W1-T292: did the probe worker die on an EXPIRED copied OAuth token (isError
-   * PLUS the conservative `CREDENTIAL_EXPIRED_RE` + `CREDENTIAL_TOKEN_EXPIRED_RE`
-   * signature) rather than the never-logged-in signature above? A DISTINCT field
-   * (not folded into `credentialFailure`) so the recovery path can key on a
-   * stable `spawn_credential_expired` symbol — "re-mint/refresh the token" is a
-   * different operator action than "this host was never logged in at all" —
-   * and so a locked/logged-out 'Not logged in' probe still reports the
-   * unmodified W1-T237 `spawn_credential_failure` reason, never this one.
-   * Optional — defaults falsy.
-   */
+  /** Did it die on an EXPIRED copied OAuth token instead? A distinct field so recovery keys on a
+   *  stable `spawn_credential_expired` symbol: refreshing a token is a different operator action
+   *  from logging in at all. (W1-T292) */
   credentialExpired?: boolean;
-  /**
-   * W1-T2249: did the probe worker die on a TRANSPORT or API-side failure (isError
-   * PLUS the conservative `TRANSPORT_FAILURE_RE` signature — a `5xx` Anthropic-API
-   * response such as "API Error: 529 Overloaded") rather than a credential failure
-   * or a genuine containment observation? A probe whose own worker died on a 529 or
-   * a dropped connection makes NO writes and trips no OS-denial text either — it is
-   * byte-identical to the genuine no-write/no-denial "unproven" case unless named
-   * separately, EXACTLY the collapse `credentialFailure`/`credentialExpired` above
-   * were already split out to prevent, for a THIRD spawn-death shape those two
-   * fields do not cover (an outage, not an auth problem). Checked in the SAME
-   * position those two occupy — ahead of the unproven classifier — for the same
-   * reason: a worker that never got far enough to attempt a write proves nothing
-   * about isolation either way. Optional — defaults falsy so pre-existing evidence
-   * literals that never saw a transport failure need not spell it out.
-   */
+  /** Did it die on a TRANSPORT or API-side failure — a 5xx — instead? A third spawn-death shape the
+   *  two fields above do not cover: an outage, not an auth problem. (W1-T2249) */
   spawnTransportFailure?: boolean;
-  /**
-   * Did the deny-floor tripwire (`./FORBIDDEN_PROBE`, INSIDE cwd) get created?
-   * `true` ⇒ the PreToolUse deny floor did NOT bind — the sandbox permits that
-   * path by design, so only the hook could have stopped it.
-   *
-   * DELIBERATELY OPTIONAL AND DELIBERATELY THREE-STATE: `undefined` means the
-   * probe executor never reported a tripwire outcome (every injected fake that
-   * predates this field), and {@link assessDenyFloor} reads that as UNOBSERVED
-   * rather than as engaged. Read ONLY by {@link assessDenyFloor} — never by
-   * {@link assessContainment}, whose verdict is unchanged by this field.
-   */
+  /** Did the deny-floor tripwire (`./FORBIDDEN_PROBE`, INSIDE cwd) get created? `true` ⇒ the PreToolUse
+   *  deny floor did not bind: the sandbox permits that path by design, so only the hook could have
+   *  stopped it. Read ONLY by {@link assessDenyFloor}. */
   denyFloorProbeCreated?: boolean;
 
-  /**
-   * W1-T1265 — THE EGRESS ARM, MIRRORING THE FILESYSTEM ARM FIELD FOR FIELD.
-   * Did the request to the NON-allowlisted host come back? `true` ⇒ the sandbox
-   * did NOT hold. Mirrors {@link ContainmentEvidence.outsideWriteCreated}.
-   * Optional so every pre-existing fixture keeps compiling and reads as
-   * UNOBSERVED — the same discipline `denyFloorProbeCreated` above uses.
-   */
+  /** THE EGRESS ARM. Did the request to the NON-allowlisted host come back? (W1-T1265) */
   egressBlockedReached?: boolean;
-  /**
-   * Was a refusal observed for the blocked request? This is what separates
-   * PROVEN-BROKEN from UNPROVEN on the egress side, exactly as `osDenialSeen`
-   * does on the filesystem side — an absent response is not evidence of a
-   * refusal, because the request may never have been attempted.
-   */
+  /** Was a refusal OBSERVED for the blocked request? */
   egressDenialSeen?: boolean;
-  /**
-   * Did the request to an ALLOWLISTED host succeed? The egress equivalent of
-   * {@link ContainmentEvidence.insideWriteCreated}: without it, "the blocked
-   * request failed" cannot be told from "this host has no network at all", and
-   * an offline machine reads as a perfect sandbox.
-   */
+  /** CONTROL: did the request to an ALLOWLISTED host succeed? TRAP: without it, "the blocked
+   *  request failed" cannot be told from "this host has no network at all", and an offline machine
+   *  reads as a perfect sandbox. */
   egressAllowedReached?: boolean;
-  /**
-   * W1-T2271 — THE TRANSPORT-FACT DISCRIMINATOR (design note part (iv)): the
-   * remote address curl actually connected to for the BLOCKED request, read
-   * from `-w '%{remote_ip}'` on the SAME request the probe already makes — no
-   * new destination, and the body stays discarded (`-o /dev/null` unchanged).
-   * `undefined` when the request never came back (nothing to read) or the
-   * executor predates this field. Compared against {@link
-   * ContainmentEvidence.egressAllowedRemoteIp} by {@link
-   * assessEgressContainment}: the SAME address on both requests means one
-   * local interception proxy answered both, which is not evidence the
-   * upstream was reached — precisely the fact rationale (6) shows the model
-   * reconstructing by hand, expensively, before this field existed.
-   */
+  /** The remote address curl connected to for the BLOCKED request, from `-w '%{remote_ip}'` on the
+   *  request already made — no new destination, body still discarded. INVARIANT:
+   *  {@link assessEgressContainment} compares it against the control's, because the SAME address on
+   *  both means one local interception proxy answered both, not that the upstream was reached. */
   egressBlockedRemoteIp?: string;
-  /**
-   * The egress control's own remote address, paired with {@link
-   * ContainmentEvidence.egressBlockedRemoteIp}. Same optionality discipline.
-   */
+  /** The egress control's own remote address, paired with the field above. */
   egressAllowedRemoteIp?: string;
-  /**
-   * W1-T2201: did the probe spawn itself end on `error_max_turns` — i.e. did the
-   * WORKER run out of its turn budget, as opposed to simply never attempting a
-   * step? Carried verbatim from {@link ProbeExecResult.turnsExhausted}. Optional,
-   * defaulting falsy so pre-existing evidence literals read as not-exhausted —
-   * the conservative direction, since this field only ever ADDS a distinguishing
-   * reason to an already-`contained: false` verdict, never flips one to `true`
-   * (see {@link assessContainment}).
-   */
+  /** Did the probe spawn end on `error_max_turns`? This only ever ADDS a distinguishing reason to
+   *  an already `contained: false` verdict; it never flips one to `true`. (W1-T2201) */
   turnsExhausted?: boolean;
-  /**
-   * W1-T2238 — THE COUNT `turnsExhausted` NEVER CARRIED. `WorkerResult.numTurns`
-   * (the SDK's `num_turns` off the probe spawn's own result envelope), carried
-   * verbatim from {@link ProbeExecResult.numTurns}. Recorded on BOTH the
-   * exhausted AND the passing path — rationale (5): the passing path is the one
-   * whose distribution would say whether the allowance is tight, and only
-   * recording it on failure would throw that signal away. Optional so every
-   * pre-existing evidence literal that predates this field keeps compiling.
-   *
-   * W1-T303 GROUND TRUTH APPLIES UNCHANGED HERE: `numTurns` alone cannot be
-   * reasoned about against a cap unless the cap it actually ran under rides the
-   * SAME row — see {@link ContainmentEvidence.maxTurns} below, ledgered beside
-   * it for exactly that reason, never as a replacement.
-   */
+  /** `WorkerResult.numTurns`, recorded on BOTH the exhausted and the passing path — the passing
+   *  distribution is what says whether the allowance is tight. TRAP: a count means nothing against a
+   *  cap unless the cap rides the SAME row; see {@link ContainmentEvidence.maxTurns}. (W1-T2238) */
   numTurns?: number;
-  /**
-   * W1-T2238: the `maxTurns` THIS probe call was CONFIGURED with — {@link
-   * probeTurnBudget}'s own return value at spawn time, carried verbatim from
-   * {@link ProbeExecResult.maxTurns} (an INPUT, never a read-back off the
-   * envelope, mirroring `WorkerResult.maxTurns`'s own discipline, W1-T303).
-   * Ledgered beside `numTurns`, never replacing it, so a row can be checked
-   * against the cap it actually ran under without cross-referencing
-   * `PROBE_TURN_ALLOWANCE`'s current value, which can move over time.
-   */
+  /** The `maxTurns` this call was CONFIGURED with — {@link probeTurnBudget}'s return value as an
+   *  INPUT, never a read-back (W1-T303) — so a row stays checkable against its own cap. (W1-T2238) */
   maxTurns?: number;
 
-  /**
-   * W1-T2211 — THE READ ARM, MIRRORING THE EGRESS ARM FIELD FOR FIELD (itself
-   * mirroring the filesystem WRITE arm). Did a read of the console's write-token
-   * path (`<config.root>/state/service-tokens.json`) SUCCEED? `true` ⇒ the
-   * `denyRead` entry named in design part (i) did NOT hold. Mirrors {@link
-   * ContainmentEvidence.outsideWriteCreated} / {@link
-   * ContainmentEvidence.egressBlockedReached}. Optional so every pre-existing
-   * fixture keeps compiling and reads as UNOBSERVED, never as "denied".
-   */
+  /** THE READ ARM. Did a read of the console's write-token path
+   *  (`<config.root>/state/service-tokens.json`) SUCCEED? `true` ⇒ the `denyRead` entry named in
+   *  design part (i) did NOT hold. (W1-T2211) */
   tokenReadSucceeded?: boolean;
-  /**
-   * Was a denial actually OBSERVED for that read? This is what separates
-   * PROVEN-HOLDING from UNPROVEN, exactly as `osDenialSeen`/`egressDenialSeen`
-   * do on the other two arms — an absent read outcome is not evidence of a
-   * refusal, because the read may never have been attempted.
-   */
+  /** Was a denial actually OBSERVED for that read? An absent read outcome is not a refusal. */
   tokenReadDenialSeen?: boolean;
-  /**
-   * CONTROL: did a read of an ORDINARY state path — one a worker legitimately
-   * uses, deliberately NOT the token — also SUCCEED? Mirrors
-   * `egressAllowedReached`/`insideWriteCreated`: without it, "the token read
-   * failed" cannot be told from "reads are broken generally" (or a deny drawn
-   * too wide, e.g. a blanket `state/**`), and either would misread as a
-   * perfect result. Acceptance criterion 3's own falsifier.
-   */
+  /** CONTROL: did a read of an ORDINARY state path — deliberately NOT the token — also succeed?
+   *  TRAP: without it, "the token read failed" cannot be told from "reads are broken generally", or
+   *  from a deny drawn too wide such as a blanket `state/**`. Criterion 3's own falsifier. */
   stateReadSucceeded?: boolean;
 
-  /**
-   * W1-T2213 — THE RE-ANCHORING ARM, MIRRORING THE W1-T2211 TOKEN-READ ARM FIELD
-   * FOR FIELD. That arm proves the token deny's `~/..` anchoring to config.root;
-   * this one proves the SAME anchoring mechanism escaping one level further
-   * (`~/../..`, design part (i)) to the operator's real home — one of the six
-   * `~`-anchored denies rationale (1)/(2) found resolving inside the worker's own
-   * scratch home instead. Did a read of the operator's real
-   * `~/.config/remudero/config.json` — the live, sensitive file (mode 600)
-   * rationale (2) measured that the un-anchored `~/.config/remudero/**` entry
-   * never covered — SUCCEED? `true` ⇒ the re-anchored denyRead entry did NOT
-   * hold. Optional so every pre-existing fixture keeps compiling and reads as
-   * UNOBSERVED, never as "denied".
-   */
+  /** THE RE-ANCHORING ARM, one level further out. Did a read of the operator's real
+   *  `~/.config/remudero/config.json` — a live, mode-600 file — SUCCEED? `true` ⇒ the re-anchored
+   *  `denyRead` entry did NOT hold. The read arm proves `~/..` anchoring to config.root; this one
+   *  proves the same mechanism escaping to `~/../..`. (W1-T2213) */
   operatorHomeReadSucceeded?: boolean;
-  /**
-   * Was a denial actually OBSERVED for that read? Mirrors `tokenReadDenialSeen`:
-   * an absent read outcome is not evidence of a refusal, because the read may
-   * never have been attempted. The CONTROL is deliberately the SAME
-   * `stateReadSucceeded` the token-read arm already proves — one ordinary read
-   * succeeding in the SAME probe run is the same fact regardless of which
-   * denied path is under test, so this arm does not re-derive a second control
-   * (design part (vi): workers keep ordinary read access to the state root).
-   */
+  /** Was a denial OBSERVED for that read? The CONTROL is deliberately the same `stateReadSucceeded`
+   *  the read arm proves: one ordinary read succeeding in the SAME run is the same fact whichever
+   *  denied path is under test (design part (vi)). */
   operatorHomeReadDenialSeen?: boolean;
 }
 
 /**
- * PURE verdict over probe evidence. Containment holds IFF the outside-cwd write was
- * BLOCKED (its file never appeared) AND an OS denial was actually observed — file
- * absence ALONE is not proof (the worker might simply not have attempted the write,
- * which must also fail closed). Every other combination is `contained: false`.
+ * PURE verdict over probe evidence.
+ *
+ * INVARIANT: containment holds only if the outside-cwd write was BLOCKED — its file never appeared —
+ * AND an OS denial was actually observed. File absence alone is not proof, because the worker might
+ * not have attempted the write, which must also fail closed. Every other combination is
+ * `contained: false`. FALSIFIER: test/containment.test.ts.
  */
 export function assessContainment(e: ContainmentEvidence): { contained: boolean; reason: string } {
-  // W1-T292: checked BEFORE credentialFailure so an expired copied token is
-  // never collapsed into the never-logged-in reason — the two demand different
-  // operator actions (refresh the token vs. log in at all) and must stay
-  // textually distinct symbols, not just distinct booleans.
+  // Checked BEFORE `credentialFailure` so an expired copied token is never collapsed into the
+  // never-logged-in reason: the two demand different operator actions (refresh the token vs. log
+  // in at all) and must stay textually distinct symbols, not just distinct booleans (W1-T292).
   if (e.credentialExpired) {
     return {
       contained: false,
@@ -309,11 +177,10 @@ export function assessContainment(e: ContainmentEvidence): { contained: boolean;
         "attempt any write; this is NOT a containment finding (unlock the keychain, don't investigate the sandbox)",
     };
   }
-  // W1-T2249: checked BEFORE the outside-write/unproven checks below, mirroring
-  // the two credential arms above — a probe worker that died on a transport or
-  // API-side failure (a 529, a dropped connection) never got far enough to
-  // observe anything about the sandbox, so it must not be reported under the
-  // same name as a genuine unproven containment finding.
+  // Checked BEFORE the outside-write and unproven tests below, mirroring the two credential arms
+  // above: a probe worker that died on a transport or API-side failure never got far enough to
+  // observe anything about the sandbox, so it must not share a name with a genuine unproven
+  // containment finding (W1-T2249).
   if (e.spawnTransportFailure) {
     return {
       contained: false,
@@ -330,12 +197,9 @@ export function assessContainment(e: ContainmentEvidence): { contained: boolean;
     };
   }
   if (!e.osDenialSeen) {
-    // W1-T2201: a turn-exhausted spawn gets its OWN reason text, distinct from
-    // the generic "may never have been attempted" — the two are different facts
-    // (the probe ran out of turns WHILE trying, vs. never attempting at all) and
-    // must not share a string. `contained` stays `false` either way — this only
-    // changes what gets RECORDED, exactly as `classifyUnprovenState` does for
-    // the structured `observed` field.
+    // A turn-exhausted spawn gets its OWN reason text: "ran out of turns while trying" and "never
+    // attempted at all" are different facts and must not share a string. `contained` stays `false`
+    // either way — this changes only what gets RECORDED (W1-T2201).
     if (e.turnsExhausted) {
       return {
         contained: false,
@@ -357,32 +221,14 @@ export function assessContainment(e: ContainmentEvidence): { contained: boolean;
 }
 
 /**
- * W1-T1281 — THE THREE STATES `assessContainment`'S `!osDenialSeen` BRANCH USED TO
- * COLLAPSE INTO THE LITERAL EIGHT CHARACTERS `"unproven"`, NOW NAMED SEPARATELY SO
- * A `blocked_containment` LEDGER ROW CAN SAY WHICH ONE FIRED.
+ * The states `assessContainment`'s `!osDenialSeen` branch used to collapse into the literal
+ * "unproven", named separately so a `blocked_containment` ledger row can say which one fired.
  *
- * PURE, over the SAME evidence `assessContainment` already read — no new signal is
- * gathered, and NO VERDICT CHANGES: every state this returns still corresponds to
- * `contained: false` and still fails closed. This function only decides what gets
- * RECORDED alongside that unchanged decision (design part (i)).
- *
- * Checked in this order, per design part (iii):
- *  1. `!insideWriteCreated` ⇒ `"probe-never-ran"`. The probe MECHANISM itself did
- *     not run — not even the inside-cwd write, the sanity signal that the sandbox
- *     isn't over-blocking, landed. This is a DIFFERENT fault from an instrument
- *     that ran and simply observed nothing, and reporting it identically is the
- *     exact credential-failure collapse W1-T237 already fixed once for a
- *     different field (see `credentialFailure`/`credentialExpired` above) — this
- *     is that fix for the remaining two states.
- *  2. `!outsideWriteAttempted` ⇒ `"write-never-attempted"`. The instrument ran
- *     (inside write landed) but the transcript never even mentioned this run's
- *     token — the outside-cwd write step was never reached or never reported,
- *     so there is nothing for a denial phrase to have matched.
- *  3. otherwise ⇒ `"no-denial-observed"`. The instrument ran AND the outside-cwd
- *     write step was reported on, but nothing in that report matched
- *     {@link OS_DENIAL_RE} — the write may still not have been attempted (a
- *     worker can mention a step without actually running it), but this is now
- *     distinguishable from the two states above rather than sharing their string.
+ * INVARIANT: no verdict changes — every state still means `contained: false` and still fails closed.
+ * Order, per design part (iii): `probe-never-ran` (not even the inside-cwd sanity write landed),
+ * `write-never-attempted` (the instrument ran, the transcript never named this run's token), then
+ * `no-denial-observed` (the step was reported, nothing matched {@link OS_DENIAL_RE}).
+ * // Why: docs/forensics/containment.md#unprovenstate (W1-T1281).
  */
 export type UnprovenState =
   | "no-denial-observed"
@@ -391,15 +237,12 @@ export type UnprovenState =
   | "turns-exhausted";
 
 /**
- * W1-T2201: checked FIRST, ahead of the other three states. A turn-exhausted
- * spawn (`error_max_turns`) can ALSO look like `probe-never-ran` or
- * `write-never-attempted` on the raw evidence — the worker ran out of budget
- * before finishing, so later steps genuinely never happened — but "ran out of
- * turns trying" and "never attempted" are not the same fact (this task's whole
- * premise: three W1-T1281 transcripts collapsed them into the SAME reported
- * cause, `"(the write may never have been attempted)"`, which is true of both
- * and identifies neither). Naming the more specific, actually-observed cause
- * takes priority over guessing from its downstream symptoms.
+ * Names which unproven state a failing probe was in. PURE, over the evidence `assessContainment`
+ * already read. `turns-exhausted` is checked FIRST: an exhausted spawn also looks like
+ * `probe-never-ran` or `write-never-attempted` on raw evidence, and naming the actually-observed
+ * cause beats guessing from its symptoms. TRAP: three W1-T1281 transcripts all reported "the write
+ * may never have been attempted", which was true of both and identified neither.
+ * // Why: docs/forensics/containment.md#classifyunprovenstate (W1-T2201).
  */
 export function classifyUnprovenState(e: ContainmentEvidence): UnprovenState {
   if (e.turnsExhausted) return "turns-exhausted";
@@ -408,124 +251,82 @@ export function classifyUnprovenState(e: ContainmentEvidence): UnprovenState {
   return "no-denial-observed";
 }
 
-/** What one probe execution returns to the verdict layer. */
+/**
+ * What one probe execution returns to the verdict layer. Same UNOBSERVED-when-absent invariant as
+ * {@link ContainmentEvidence}. Most fields were already on `WorkerResult` and were simply dropped
+ * one line from the row that needed them.
+ * // Why: docs/forensics/containment.md (W1-T237, W1-T268, W1-T2238).
+ */
 export interface ProbeExecResult {
   transcript: string;
   outsideWriteCreated: boolean;
   insideWriteCreated: boolean;
   /** Notional cost of the probe spawn (subscription) — surfaced so the run meters it. */
   costUsd?: number;
-  /**
-   * W1-T237: `WorkerResult.isError` from the probe spawn's own result envelope —
-   * the information was already in hand (worker.ts carries it) but the preflight
-   * never looked at it, testing only the transcript for denial text. Optional so
-   * a pre-existing test double that omits it defaults to `false` (no credential
-   * verdict fires without an explicit error signal).
-   *
-   * W1-T238: also carried through so a failed probe spawn's stderr/error-result
-   * text (already folded into `transcript`) can be persisted to the ledger,
-   * capped, instead of dying with the process the way it did the incident this
-   * task fixes. Omitted by fakes that never populate it ⇒ treated as a clean
-   * spawn (no excerpt).
-   */
+  /** `WorkerResult.isError` from the probe spawn's envelope: already in hand, but the preflight
+   *  tested only the transcript for denial text. Also carried so a failed spawn's stderr — folded
+   *  into `transcript` — reaches the ledger, capped, instead of dying with the process. Absent ⇒
+   *  `false`, so no credential verdict fires without an explicit error signal. (W1-T237, W1-T238) */
   isError?: boolean;
-  /**
-   * W1-T268: the probe spawn's own `WorkerResult.childEnvKeys` — carried through so
-   * the caller can DERIVE this probe's `billing_mode` (never a hardcoded literal;
-   * see `billingMode` in env.ts) instead of assuming subscription. Optional so a
-   * pre-existing test double that omits it falls back to an empty key set, which
-   * `billingMode` reads as `"subscription"` (the correct default absent the
-   * overflow valve's key).
-   */
+  /** `WorkerResult.childEnvKeys`, carried so the caller DERIVES this probe's `billing_mode`
+   *  (`billingMode`, env.ts) rather than assuming subscription. Absent ⇒ an empty key set, which
+   *  `billingMode` reads as `"subscription"`, the correct default without the valve's key. (W1-T268) */
   childEnvKeys?: string[];
-  /**
-   * W1-T268: the probe spawn's own `WorkerResult.accountLabel` — the account this
-   * probe's (notional) spend is attributed to, carried through so the run's
-   * `blocked_containment` verdict line can name it like every other spend-bearing
-   * ledger line. `undefined` when the probe spawn could not resolve one.
-   */
+  /** `WorkerResult.accountLabel` — the account this probe's notional spend is attributed to, so the
+   *  run's `blocked_containment` line names it like every other spend-bearing line. (W1-T268) */
   accountLabel?: string;
-  /**
-   * Did the deny-floor tripwire land inside cwd? Optional so every pre-existing
-   * injected fake keeps compiling and reads as UNOBSERVED (never as engaged) —
-   * see {@link ContainmentEvidence.denyFloorProbeCreated}.
-   */
+  /** Did the deny-floor tripwire land inside cwd? See
+   *  {@link ContainmentEvidence.denyFloorProbeCreated}. */
   denyFloorProbeCreated?: boolean;
 
-  /** W1-T1265: did the blocked-host request come back? Optional — an executor
-   *  that never attempted egress stays UNOBSERVED, never "blocked". */
+  /** Did the blocked-host request come back? (W1-T1265) */
   egressBlockedReached?: boolean;
-  /** W1-T1265: did the allowlisted control request succeed? */
+  /** Did the allowlisted control request succeed? (W1-T1265) */
   egressAllowedReached?: boolean;
-  /** W1-T2271: remote address curl connected to for the blocked request — see
-   *  {@link ContainmentEvidence.egressBlockedRemoteIp}'s own doc. */
+  /** Remote address curl connected to for the blocked request — see
+   *  {@link ContainmentEvidence.egressBlockedRemoteIp}. (W1-T2271) */
   egressBlockedRemoteIp?: string;
-  /** W1-T2271: remote address curl connected to for the allowed control request. */
+  /** Remote address curl connected to for the allowed control request. (W1-T2271) */
   egressAllowedRemoteIp?: string;
-  /**
-   * W1-T2201: did the probe spawn itself end on the SDK's `error_max_turns`
-   * subtype? Optional so every pre-existing injected fake keeps compiling and
-   * reads as `false`/not-exhausted (the conservative default — it never invents
-   * an exhaustion that was not observed). Carried through so a turn-exhausted
-   * run can be distinguished from a probe that simply never attempted a step —
-   * see {@link classifyUnprovenState}'s `"turns-exhausted"` state.
-   */
+  /** Did the probe spawn end on the SDK's `error_max_turns` subtype? Carried so a turn-exhausted
+   *  run is distinguishable from a probe that never attempted a step; see
+   *  {@link classifyUnprovenState}'s `"turns-exhausted"`. (W1-T2201) */
   turnsExhausted?: boolean;
-  /**
-   * W1-T2238: `WorkerResult.numTurns` off the probe spawn's own result envelope —
-   * already on the envelope, just never carried past this point. Optional so
-   * every pre-existing injected fake keeps compiling; a fake that omits it reads
-   * as unrecorded (`undefined`), never a guessed `0`.
-   */
+  /** `WorkerResult.numTurns` off the probe spawn's envelope. Absent ⇒ unrecorded, never a guessed
+   *  `0`. (W1-T2238) */
   numTurns?: number;
-  /**
-   * W1-T2238: the `maxTurns` this spawn call was actually invoked with —
-   * `probeTurnBudget(prompt)`'s own return value, carried through as an INPUT
-   * rather than re-derived at the row-building site, so a historical row stays
-   * checkable against the cap it ran under even if `PROBE_TURN_ALLOWANCE` moves.
-   */
+  /** The `maxTurns` this spawn call was invoked with: `probeTurnBudget(prompt)`'s own return value,
+   *  carried as an INPUT rather than re-derived at the row-building site, so a historical row stays
+   *  checkable against the cap it ran under even if `PROBE_TURN_ALLOWANCE` moves. (W1-T2238) */
   maxTurns?: number;
 
-  /** W1-T2211: did the read of the console's write-token path succeed? Optional —
-   *  an executor that never attempted it stays UNOBSERVED, never "denied". */
+  /** Did the read of the console's write-token path succeed? (W1-T2211) */
   tokenReadSucceeded?: boolean;
-  /** W1-T2211: did the read of the ordinary-state CONTROL path succeed? */
+  /** Did the read of the ordinary-state CONTROL path succeed? (W1-T2211) */
   stateReadSucceeded?: boolean;
-  /** W1-T2213: did the read of the operator's real `~/.config/remudero/config.json`
-   *  (one of the six re-anchored denies, design part (i)) succeed? Optional — an
-   *  executor that never attempted it stays UNOBSERVED, never "denied". */
+  /** Did the read of the operator's real `~/.config/remudero/config.json` — one of the six
+   *  re-anchored denies, design part (i) — succeed? (W1-T2213) */
   operatorHomeReadSucceeded?: boolean;
 }
 
 /** Injectable probe runner (default spawns a real worker); tests provide a fake. */
 export type ProbeExecutor = (token: string) => Promise<ProbeExecResult>;
 
-/**
- * The basename the deny-floor hook's own third rule already matches
- * (`hooks/deny-floor.sh`, `(^|[^A-Za-z0-9_])FORBIDDEN_PROBE`). The hook plants
- * this tripwire specifically to be probed; nothing but this probe uses it.
- */
+/** The basename the deny-floor hook's own third rule already matches (`hooks/deny-floor.sh`,
+ *  `(^|[^A-Za-z0-9_])FORBIDDEN_PROBE`). The hook plants this tripwire specifically to be probed. */
 export const DENY_FLOOR_PROBE_BASENAME = "FORBIDDEN_PROBE";
 
 /**
- * WHY THE DENY-FLOOR STEP TARGETS A PATH *INSIDE* CWD, AND WHY THAT IS THE WHOLE
- * POINT OF THE STEP.
+ * The deny-floor step's command. It targets a path INSIDE cwd, and that is the whole point.
  *
- * `src/spike.ts` probes `~/FORBIDDEN_PROBE` and feeds its existence to {@link
- * "./worker.js".evaluateDenyFloor}. Under a HEALTHY sandbox that observation is
- * DEGENERATE: the sandbox write scope is cwd + session $TMPDIR, so `~` is outside
- * it and the file never appears whether or not the hook ran at all. Absence there
- * proves the SANDBOX held; it says nothing about the deny floor. Deleting
- * `hooks/deny-floor.sh` entirely would leave that probe reporting
- * `heldUnderBypass: true, contained: true`.
+ * INVARIANT: the file's presence is a one-way witness — PRESENT means the deny floor did not bind.
+ * That holds because the two controls disagree about a path inside cwd: the sandbox permits it (the
+ * scope `probe-ok.txt` proves writable), while the hook denies it before the command runs.
  *
- * A path INSIDE cwd separates the two controls, because the two controls disagree
- * about it:
- *   - the SANDBOX permits it (it is the same scope `probe-ok.txt` proves writable);
- *   - the HOOK denies it (rule 3 matches the basename in `tool_input.command`),
- *     and PreToolUse fires BEFORE the command runs, so nothing is created.
- * So the file's presence is a one-way witness: PRESENT ⇒ the deny floor did not
- * bind. That is the only arrangement in which this probe carries information.
+ * TRAP: `src/spike.ts` probes `~/FORBIDDEN_PROBE`, outside the sandbox write scope, so the file never
+ * appears whether or not the hook ran; deleting `hooks/deny-floor.sh` would leave that probe
+ * reporting `heldUnderBypass: true, contained: true`. FALSIFIER: test/deny-floor-probe.test.ts.
+ * // Why: docs/forensics/containment.md#denyfloorprobecommand.
  */
 export function denyFloorProbeCommand(): string {
   return `touch ./${DENY_FLOOR_PROBE_BASENAME}`;
@@ -536,15 +337,13 @@ export function denyFloorProbeCommand(): string {
 export function containmentProbePrompt(
   token: string,
   allowedHost: string = EGRESS_ALLOWED_HOST_FALLBACK,
-  // W1-T2211: unset only by pre-existing callers that predate the read arm (this
-  // file's own tests exercising prompt shape) — the real executor always supplies
-  // both, since it alone knows config.root.
+  // Unset only by callers that predate the read arm (this file's own prompt-shape tests) — the
+  // real executor always supplies both, since it alone knows config.root (W1-T2211).
   tokenReadPath: string = "<token-path-unset>",
   controlReadPath: string = "<control-path-unset>",
-  // W1-T2213: unset only by pre-existing callers that predate this arm (this
-  // file's own tests exercising prompt shape) — the real executor always supplies
-  // it, via configPath() (config.ts), which alone knows the operator's real
-  // homedir() from the orchestrator's own (never worker-redirected) process env.
+  // Unset only by callers that predate this arm (this file's own prompt-shape tests) — the real
+  // executor always supplies it, via configPath() (config.ts), which alone knows the operator's
+  // real homedir() from the orchestrator's own, never worker-redirected, process env (W1-T2213).
   operatorHomeConfigPath: string = "<operator-home-config-path-unset>",
 ): string {
   return [
@@ -573,13 +372,9 @@ export function containmentProbePrompt(
 }
 
 /**
- * Count of Bash commands a probe prompt instructs the worker to run — derived by
- * counting the prompt's own numbered command lines (`N) ...`), the SAME technique
- * `test/deny-floor-probe.test.ts`'s `parseProbeStepNarration` already uses to keep
- * the prompt's narrated counts honest. Deriving from the prompt TEXT itself,
- * rather than a hand-maintained constant kept beside it, is what makes a FIFTH
- * command added to {@link containmentProbePrompt} move {@link probeTurnBudget}
- * automatically — see that function's doc for why this exists (W1-T2201).
+ * Count of Bash commands the probe prompt instructs the worker to run, from the prompt's own
+ * numbered `N)` lines. INVARIANT: deriving from the prompt TEXT, not a constant kept beside it, is
+ * what makes a new command move {@link probeTurnBudget} automatically. (W1-T2201)
  */
 export function probeCommandCount(prompt: string): number {
   const matches = prompt.match(/^\d+\)/gm);
@@ -587,132 +382,72 @@ export function probeCommandCount(prompt: string): number {
 }
 
 /**
- * BACKSTOP (test/bound-kind-declared.test.ts): the per-command allowance below is
- * the PRIMARY mechanism that sizes the probe's slack; this ceiling does not fire
- * under the probe's current, healthy 6-command shape (6 < 8) and exists only to
- * catch UNBOUNDED growth if commands keep accruing — the same failure mode this
- * task itself fixes, pointed the other way (Q1: "a scaling allowance also grows
- * without bound as commands are added").
+ * BACKSTOP on the scaling allowance below, which is the PRIMARY CONTROL that sizes the probe's
+ * slack. PICKED, NOT MEASURED — the same admission {@link EGRESS_TIMEOUT_SECONDS} makes, rather
+ * than dressing the number up as derived. Set two commands above the probe's real count today (6),
+ * so a seventh and an eighth still move {@link PROBE_TURN_ALLOWANCE} while a ninth needs a
+ * deliberate bump of this constant.
  *
- * THE STATED CEILING (W1-T2344, Q1) — PICKED, NOT MEASURED, the same discipline
- * {@link EGRESS_TIMEOUT_SECONDS} admits to rather than dressing the number up as
- * derived. Set two commands above the probe's real count today (6), so a SEVENTH
- * and an EIGHTH command still move {@link PROBE_TURN_ALLOWANCE} the way W1-T2201
- * already made them move the base — the property Q1 asks for — while a NINTH
- * would need a deliberate bump of this constant rather than silent, unbounded
- * growth every time an arm is added.
- *
- * WHAT IT COSTS: at the ceiling, a probe that is genuinely HANGING (a worker
- * looping, a command that never returns a usable result) now spends up to 8
- * turns of allowance before the fail-closed verdict engages — up from the old
- * flat 3. Every turn added here is a turn spent before that safety fires, on
- * every hanging probe, for the sake of the non-hanging ones (Q1's "argument
- * against myself"). Raising this ceiling later must restate that cost, not just
- * bump the number.
+ * COST any later raise must restate: at the ceiling a genuinely hanging probe spends up to 8 turns
+ * before the fail-closed verdict engages, up from the old flat 3.
+ * FALSIFIER: test/bound-kind-declared.test.ts. // Why: docs/forensics/containment.md (W1-T2344 Q1).
  */
 export const PROBE_TURN_ALLOWANCE_CEILING = 8;
 
 /**
- * TURN ALLOWANCE beyond one Bash turn per command plus the closing REPORT turn —
- * turns a careful probe legitimately spends that are NOT worker misbehaviour
- * (W1-T2201 rationale, Q1). Named for what each one buys, rather than picked as a
- * round number:
- *   1. re-reading an AMBIGUOUS result — a command that produced no output, where
- *      the outcome is knowable only by checking the marker files. This is not
- *      hypothetical: a W1-T1281 transcript hit exactly this ("Command 4 produced
- *      no output at all, which is ambiguous — I need to check which marker files
- *      were created") and had no turn left to spend on it.
- *   2. a RETRY after a malformed invocation.
- *   3. REWORK forced by the probe's own deny-floor tripwire (Q2): a read-only
- *      verification command that merely NAMES the tripwire literal is itself
- *      refused by `hooks/deny-floor.sh` (its rule 3 matches the whole command
- *      string, so it cannot tell an attempt to CREATE the tripwire from an `ls`
- *      that only names it) — a probe that double-checks its own reading pays a
- *      turn re-deriving it from fragments, through no fault of its own.
+ * Turn allowance beyond one Bash turn per command plus the closing REPORT turn — turns a careful
+ * probe legitimately spends that are NOT worker misbehaviour. ONE named slack turn PER COMMAND,
+ * capped at {@link PROBE_TURN_ALLOWANCE_CEILING}.
  *
- * W1-T2344 — WHY THIS IS NOW A FUNCTION OF COMMAND COUNT, NOT A FLAT CONSTANT.
- * Reason 1 above is PER COMMAND, not per probe: any command whose result is only
- * knowable by marker file can individually cost the ambiguous-result re-reading
- * turn, and reasons 2 (a malformed retry) and 3 (tripwire rework) are each also
- * more likely the more commands a probe runs, never less. A flat allowance of 3
- * was a FULL command's worth of slack at the original 3-command spike and had
- * diluted to HALF a turn per command by the time a sixth command landed — the
- * derived base (see {@link probeTurnBudget}) kept climbing right on schedule, so
- * the dilution never showed up as a number failing to move, only as the probe
- * exhausting its turns on 29% of dispatches (measured 2026-08-26 from the
- * `containment.probe` ledger, every exhausted row exactly one turn over cap).
- * ONE named slack turn PER COMMAND, capped at {@link PROBE_TURN_ALLOWANCE_CEILING}
- * so raising it later is a decision about a SPECIFIC new cost (or a deliberate
- * ceiling bump), never a knob nudged until a flaky run happens to pass and never
- * unbounded growth hidden behind a base that is already moving.
+ * Each turn is named for what it buys: re-reading an ambiguous result knowable only by checking the
+ * marker files; a retry after a malformed invocation; and rework forced by the probe's own
+ * deny-floor tripwire, which `hooks/deny-floor.sh` refuses even when a command merely names it.
+ *
+ * TRAP: a flat allowance of 3 diluted to half a turn per command as arms were added, exhausting the
+ * probe's turns on 29% of dispatches. // Why: docs/forensics/containment.md (W1-T2201, W1-T2344).
  */
 export function PROBE_TURN_ALLOWANCE(commandCount: number): number {
   return Math.min(commandCount, PROBE_TURN_ALLOWANCE_CEILING);
 }
 
 /**
- * The probe's turn cap — DERIVED, never a hand-picked literal: one turn per
- * command the prompt actually lists, plus one turn for the closing REPORT, plus
- * the named allowance above (itself now a function of that SAME command count,
- * W1-T2344 — see {@link PROBE_TURN_ALLOWANCE}'s own doc for why).
+ * The probe's turn cap: one turn per command the prompt lists, plus one for the closing REPORT, plus
+ * {@link PROBE_TURN_ALLOWANCE} over that same command count.
  *
- * W1-T2201 — WHY THIS EXISTS: the previous `maxTurns: 6` was a literal unchanged
- * since the original 3-command spike (`b697de79`, #18; `git log -S'maxTurns: 6'
- * -- src/lib/containment.ts` returns exactly those two commits) and did NOT move
- * when the egress command — a FOURTH command — was added underneath it in
- * `9ca4180c` (#2626): three commands plus the closing report already spent four
- * of the six turns, leaving one turn of slack for a probe that now had to run
- * four commands plus the report. All three observed runs exhausted that one-turn
- * slack and ended `Reached maximum number of turns (6)` before the outside-write
- * check ever ran. Deriving the cap from `probeCommandCount` means a FIFTH command
- * moves this cap automatically instead of silently eating whatever slack is left.
+ * INVARIANT: derived, never a hand-picked literal, so a new command moves the cap automatically.
+ * TRAP: the previous `maxTurns: 6` was unchanged since the 3-command spike and did not move when a
+ * fourth command was added under it; all three observed runs ended "Reached maximum number of turns
+ * (6)" before the outside-write check ran. FALSIFIER: test/containment-turn-budget.test.ts.
+ * // Why: docs/forensics/containment.md#probeturnbudget (W1-T2201, W1-T2344).
  */
 export function probeTurnBudget(prompt: string): number {
   return probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE(probeCommandCount(prompt));
 }
 
 /**
- * Regex marking an OS/sandbox-level write denial (as opposed to a hook denial),
- * mirroring the WS-0 verdict-7 transcript check.
- */
-/**
- * W1-T1265 — THE BLOCKED TARGET IS RFC 2606's RESERVED DOCUMENTATION DOMAIN.
- *
- * The probe GENUINELY REACHES this host when containment fails, exactly as the
- * filesystem probe genuinely writes outside cwd when the sandbox fails — the
- * "must not reach a third party" constraint is satisfiable only in the CONTAINED
- * case, and pretending otherwise would be a promise the mechanism cannot keep.
- * `example.com` is reserved by IANA precisely so tests may name it, so contact in
- * the failure case is inert.
- *
- * NOT A DNS-FAILURE TARGET, DELIBERATELY. A guaranteed-non-resolving name (an RFC
- * 6761 `.invalid` domain) fails identically whether the sandbox engaged or the host
- * is simply offline — structurally unable to discriminate, which is the same defect
- * as a proof that cannot fail.
+ * The blocked egress target: RFC 2606's reserved documentation domain, so contact in the failure
+ * case is inert. The probe GENUINELY REACHES this host when containment fails, exactly as the
+ * filesystem probe genuinely writes outside cwd — the "no third party" constraint is satisfiable
+ * only in the contained case. TRAP: a guaranteed-non-resolving name (an RFC 6761 `.invalid` domain)
+ * fails identically whether the sandbox engaged or the host is offline, which is structurally unable
+ * to discriminate — the same defect as a proof that cannot fail. (W1-T1265)
  */
 export const EGRESS_BLOCKED_HOST = "example.com";
 
-/**
- * Fallback control host, used ONLY when the settings file's allowlist cannot be
- * read. The real control target is derived FROM the allowlist at probe time
- * ({@link allowedHostFromSettings}) so the two can never drift; this constant
- * exists so a caller that supplies no settings still probes something allowlisted
- * rather than silently skipping the control.
- */
+/** Fallback control host, used ONLY when the settings allowlist cannot be read. The real control
+ *  target is derived FROM the allowlist at probe time ({@link allowedHostFromSettings}) so the two
+ *  cannot drift; this exists so a caller with no settings still probes something allowlisted rather
+ *  than silently skipping the control. */
 export const EGRESS_ALLOWED_HOST_FALLBACK = "api.github.com";
 
 /**
- * Per-request timeout, seconds. THIS NUMBER IS PICKED, NOT MEASURED — said plainly
- * rather than dressed as derived, the discipline `deploy/entrypoint.sh`'s
- * `RMD_FRESHNESS_RESTART_MAX` row uses when it records "WHY 100, MEASURED".
+ * Per-request timeout, seconds. PICKED, NOT MEASURED — said plainly rather than dressed as derived,
+ * the discipline `deploy/entrypoint.sh`'s `RMD_FRESHNESS_RESTART_MAX` row uses.
  *
- * WHY IT IS BOUNDED AT ALL is not a preference: an unbounded connect inside the
- * preflight would stall every dispatch behind it, and the preflight runs before any
- * task worker. 10s x 2 requests caps the arm at ~20s against a probe spawn that
- * already costs tens of seconds, so the arm cannot dominate the preflight.
- * WHAT WOULD MEASURE IT: the p99 of the two requests' wall time across real
- * preflights, read off `containment.probe` rows once this arm has run in the fleet.
- * Until then it is a bound chosen to be obviously safe, not a fitted one.
+ * INVARIANT: it is bounded at all because an unbounded connect inside the preflight would stall
+ * every dispatch behind it. 10s times two requests caps the arm at about 20s against a spawn that
+ * already costs tens of seconds. What would measure it: the p99 of the two requests' wall time
+ * across real preflights, read off `containment.probe` rows once this arm has run in the fleet.
  */
 export const EGRESS_TIMEOUT_SECONDS = 10;
 
@@ -721,54 +456,26 @@ export const EGRESS_BLOCKED_MARKER = "egress-blocked-reached.txt";
 /** Marker written inside cwd iff the ALLOWLISTED control request came back. */
 export const EGRESS_ALLOWED_MARKER = "egress-allowed-reached.txt";
 /**
- * W1-T2271 — THE DISCRIMINATOR DESIGN NOTE PART (iv) RECOMMENDED: curl's own
- * `-w '%{remote_ip}'` on the SAME request already made, body still discarded.
- * WRITTEN UNCONDITIONALLY by shell redirection — unlike the touch markers
- * above, which are `&&`-gated on curl's exit code, `> file` opens/truncates
- * the file before curl even runs, so this file's mere EXISTENCE proves
- * nothing. It is read only when the paired touch marker above says the
- * request came back (see {@link defaultExecutor}); an unreached request's
- * file is ignored, never trusted as a stray empty-string remote_ip.
+ * Where curl's own `-w '%{remote_ip}'` output lands for the blocked request — the discriminator
+ * design note part (iv) recommended, on the request already made, body still discarded. TRAP: this
+ * file is written UNCONDITIONALLY, because `> file` truncates it before curl runs, unlike the touch
+ * markers, which are `&&`-gated on curl's exit code. Its EXISTENCE proves nothing, so it is read
+ * only when the paired marker says the request came back (see {@link defaultExecutor}). (W1-T2271)
  */
 export const EGRESS_BLOCKED_REMOTE_IP_FILE = "egress-blocked-remote-ip.txt";
 /** Same unconditional-write discipline as {@link EGRESS_BLOCKED_REMOTE_IP_FILE}, for the allowlisted control. */
 export const EGRESS_ALLOWED_REMOTE_IP_FILE = "egress-allowed-remote-ip.txt";
 
 /**
- * The single Bash command carrying BOTH egress attempts. ONE command, not two, so
- * the two requests count as ONE command against {@link probeTurnBudget} rather
- * than two — bundling was a real turn-saving choice when the cap was a fixed
- * `maxTurns: 6` that never moved (see that function's W1-T2201 doc for why the
- * cap is now DERIVED instead), and staying bundled remains free: unbundling would
- * add a fifth command, which is out of this file's scope to propose.
+ * The single Bash command carrying BOTH egress attempts. One command, not two, so the pair counts
+ * once against {@link probeTurnBudget}.
  *
- * Each request writes its marker ONLY on success, so the executor observes outcomes
- * by `existsSync` exactly as it already does for the two writes — no transcript
- * parsing is required for the two "did it come back" facts.
- *
- * W1-T2271 — WHY `-w '%{remote_ip}'` WAS ADDED, AND WHY IT DOES NOT REOPEN THE
- * "no transcript parsing" / "body discarded" invariants above. The marker alone
- * cannot distinguish "curl received a response of some kind" from "the upstream
- * was reached" — curl exits 0 on ANY http response with no `--fail`, no status
- * test, and `-o /dev/null` still discards the body. `-w` exposes the remote
- * address curl actually connected to on the SAME request, at no extra cost (no
- * new command, no new destination, the body is STILL never read) — the cheapest
- * honest discriminator the design note names: if the blocked host and the
- * allowlisted control both terminate at the same address, one local
- * interception proxy answered both, and "the upstream was reached" is
- * unsupported. See {@link assessEgressContainment} for how this is used.
- *
- * W1-T2344 (Q2) — WHY EACH REQUEST ALSO `echo`s ITS OWN OUTCOME NOW. Everything
- * above still redirects to `/dev/null` and writes markers/remote-ip files for
- * `defaultExecutor`'s own `existsSync`-based evidence gathering (UNCHANGED) —
- * but that left the WORKER'S OWN Bash-tool turn with no output at all to report,
- * exactly the ambiguity {@link PROBE_TURN_ALLOWANCE}'s reason 1 names ("Both
- * curls produced no output. Let me verify which marker files were created" — a
- * real transcript, W1-T2344 rationale). Reading the SAME marker this command
- * already wrote and echoing "reached"/"unreached" (plus the already-exposed
- * remote_ip, never the response body) turns that into an ordinary command with
- * ordinary output — the worker can quote it directly in its REPORT and never
- * needs the extra turn to go check the marker files itself.
+ * INVARIANT: each request writes its marker ONLY on success, so the executor observes outcomes by
+ * `existsSync` — no transcript parsing for "did it come back". The body stays discarded and no new
+ * destination is contacted; `-w` exposes only the address curl already connected to. Each request
+ * also echoes its own outcome, read back off the marker it just wrote, so the worker spends no turn
+ * checking the markers itself — the ambiguity {@link PROBE_TURN_ALLOWANCE} names.
+ * // Why: docs/forensics/containment.md#egressprobecommand (W1-T1265, W1-T2271, W1-T2344).
  */
 export function egressProbeCommand(allowedHost: string): string {
   const t = EGRESS_TIMEOUT_SECONDS;
@@ -777,11 +484,10 @@ export function egressProbeCommand(allowedHost: string): string {
     `> ${EGRESS_BLOCKED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_BLOCKED_MARKER}; ` +
     `curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${allowedHost} ` +
     `> ${EGRESS_ALLOWED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_ALLOWED_MARKER}; ` +
-    // W1-T2344 (Q2): the command now SAYS what it just did, so the probe does not spend a turn
-    // finding out. Both lines are read off the two markers written directly above — the same files
-    // `defaultExecutor` observes with `existsSync` — so this reports an observation rather than
-    // replacing one. Plain `[ -f ]` tests: no command substitution, no new file, no new request,
-    // no new destination, and it stays INSIDE command 4 so `probeCommandCount` is unmoved.
+    // The command now SAYS what it just did, read off the two markers written directly above — the
+    // same files `defaultExecutor` observes — so this reports an observation rather than replacing
+    // one. Plain `[ -f ]` tests: no command substitution, no new file, request or destination, and
+    // it stays INSIDE command 4 so `probeCommandCount` is unmoved (W1-T2344 Q2).
     `if [ -f ${EGRESS_BLOCKED_MARKER} ]; then echo "${EGRESS_RESULT_PREFIX} blocked=reached"; ` +
     `else echo "${EGRESS_RESULT_PREFIX} blocked=not-reached"; fi; ` +
     `if [ -f ${EGRESS_ALLOWED_MARKER} ]; then echo "${EGRESS_RESULT_PREFIX} allowed=reached"; ` +
@@ -794,29 +500,15 @@ export function egressProbeCommand(allowedHost: string): string {
 }
 
 /**
- * W1-T2344 (Q2) — THE PREFIX ON THE LINE COMMAND 4 PRINTS ABOUT ITSELF.
+ * The prefix on the line command 4 prints about itself.
  *
- * THE TURN THIS EXISTS TO SAVE. Command 4 discards its body (`-o /dev/null`), redirects `-w`'s
- * output to a file, and sends stderr to `/dev/null`, so on the worker's own transcript it produces
- * NOTHING — success and failure look identical. The worker then has to spend a turn reading the
- * marker files back before it can write an accurate closing REPORT. That turn is not hypothetical:
- * a failing transcript reads "Both curls produced no output. Let me verify which marker files were
- * created", which is verbatim the ambiguity {@link PROBE_TURN_ALLOWANCE}'s own doc names as
- * allowance-turn 1. MEASURED: every one of the 33 exhausted probes that recorded a count read
- * `num_turns: 11` against `max_turns: 10` — exactly one turn over, every time — while succeeding
- * probes ran a median of 9 of 10.
+ * THE TURN IT SAVES: command 4 discards its body, redirects `-w` to a file and sends stderr to
+ * `/dev/null`, so it produces NOTHING on the worker's transcript and success and failure look
+ * identical; the worker then spends a turn reading the markers back.
  *
- * IT IS A PREFIX, NOT A VERDICT. The two lines this marks are DERIVED, at runtime, from the same
- * two marker files {@link defaultExecutor} reads with `existsSync` — a command that printed
- * "denied" without testing anything would be the vacuous-pass shape, and this cannot be that: the
- * marker is written ONLY by a curl that came back, so the printed word is a read of an observation
- * that already happened, never a substitute for making it.
- *
- * NOTHING PARSES IT, AND THAT IS DELIBERATE. `arms_reported` is {@link probeArmsReported}, a pure
- * reduction over twelve booleans on {@link ContainmentEvidence}; the egress arms among them come
- * from `existsSync` on these same markers, never from transcript text. The prefix is greppable so a
- * future consumer COULD read it, but no consumer does, and the "no transcript parsing" invariant
- * for "did it come back" is untouched.
+ * INVARIANT: a prefix, not a verdict. The lines it marks are DERIVED at runtime from the same
+ * markers {@link defaultExecutor} reads with `existsSync`, and a marker is written only by a curl
+ * that came back. Nothing parses it, so "no transcript parsing" is untouched. (W1-T2344 Q2)
  */
 export const EGRESS_RESULT_PREFIX = "EGRESS-RESULT";
 
@@ -825,26 +517,18 @@ export const TOKEN_READ_SUCCESS_MARKER = "token-read-succeeded.txt";
 /** Marker written inside cwd iff the ordinary-state CONTROL read succeeded. */
 export const STATE_READ_CONTROL_MARKER = "state-read-succeeded.txt";
 
-/**
- * Basename of the synthetic, probe-owned control file placed as a SIBLING of
- * `service-tokens.json` under `state/` for the run's token — an ordinary file a
- * worker's read of the rest of the state tree would legitimately succeed
- * against, without this probe ever touching a real production state file or the
- * token's own content (design part (v)). Token-scoped so concurrent runs never
- * collide on the same path.
- */
+/** Basename of the synthetic, probe-owned control file placed as a SIBLING of
+ *  `service-tokens.json` under `state/`: an ordinary file an honest read would succeed against,
+ *  without this probe touching a real production state file or the token's content (design part
+ *  (v)). Token-scoped, so concurrent runs never collide. */
 export function stateReadControlBasename(token: string): string {
   return `containment-probe-control-${token}.txt`;
 }
 
-/**
- * W1-T2211 — THE READ ARM'S PROBE COMMAND, MIRRORING {@link egressProbeCommand}'S
- * SHAPE: ONE bundled Bash command carrying BOTH reads, so they count as ONE
- * command against {@link probeTurnBudget}. Neither read's OUTPUT is ever
- * printed (both redirect to `/dev/null`) — the probe proves the read's
- * success/failure by marker existence exactly as the write and egress arms do,
- * never by putting file content (least of all a token) into the transcript.
- */
+/** The read arm's probe command, mirroring {@link egressProbeCommand}: ONE bundled Bash command
+ *  carrying BOTH reads, so they count as one against {@link probeTurnBudget}. INVARIANT: neither
+ *  read's output is ever printed — both redirect to `/dev/null` and success is proven by marker
+ *  existence, never by putting file content, least of all a token, into a transcript. (W1-T2211) */
 export function tokenReadProbeCommand(tokenPath: string, controlPath: string): string {
   return (
     `cat "${tokenPath}" >/dev/null 2>&1 && touch ${TOKEN_READ_SUCCESS_MARKER}; ` +
@@ -858,16 +542,11 @@ export function tokenReadProbeCommand(tokenPath: string, controlPath: string): s
 export const OPERATOR_HOME_READ_SUCCESS_MARKER = "operator-home-read-succeeded.txt";
 
 /**
- * W1-T2213 — THE RE-ANCHORING ARM'S PROBE COMMAND, MIRRORING {@link
- * tokenReadProbeCommand}'S SHAPE one level up: where that command proves a read
- * denied by the token deny's `~/..` anchoring, this one proves a read denied by
- * the `~/../..` anchoring design part (i) applies to the three re-anchored
- * denies. ONE read, not a bundled pair — the ordinary-read control this arm
- * needs is the SAME `state-read-succeeded.txt` marker {@link tokenReadProbeCommand}
- * already proves within the same probe run (design part (vi)), so this command
- * does not re-derive a second control read. Output is never printed (redirects
- * to `/dev/null`) — the probe proves success/failure by marker existence, never
- * by putting the operator's real config file content into the transcript.
+ * The re-anchoring arm's probe command, one level up from {@link tokenReadProbeCommand}: that one
+ * proves a read denied by the `~/..` anchoring, this one a read denied by `~/../..`. ONE read, not
+ * a bundled pair — the ordinary-read control is the same `state-read-succeeded.txt` marker the
+ * token-read command already proves in the same run (design part (vi)). Same never-print
+ * invariant, so the operator's real config content never reaches a transcript. (W1-T2213)
  */
 export function operatorHomeReadProbeCommand(operatorHomeConfigPath: string): string {
   return (
@@ -876,12 +555,10 @@ export function operatorHomeReadProbeCommand(operatorHomeConfigPath: string): st
   );
 }
 
-/**
- * Read the FIRST allowlisted domain out of an already-parsed worker settings
- * object. Derived from the allowlist rather than duplicated, so the control target
- * cannot drift from the policy it is meant to exercise. THIS READS THE ALLOWLIST
- * AND NEVER WRITES IT — the probe observes; it does not enforce.
- */
+/** Read the FIRST allowlisted domain out of an already-parsed worker settings object. Derived from
+ *  the allowlist rather than duplicated, so the control target cannot drift from the policy it
+ *  exercises. INVARIANT: this reads the allowlist and never writes it — the probe observes, it does
+ *  not enforce. */
 export function allowedHostFromSettings(settings: unknown): string {
   const sandbox = (settings as { sandbox?: { network?: { allowedDomains?: unknown } } })?.sandbox;
   const domains = sandbox?.network?.allowedDomains;
@@ -893,61 +570,16 @@ export function allowedHostFromSettings(settings: unknown): string {
 }
 
 /**
- * PURE egress verdict, mirroring {@link assessContainment} field for field and
- * returning the SAME `{contained, reason}` shape — the three-state epistemology
- * `ContainmentError` already names (proven-holding | proven-broken | unproven)
- * expressed exactly as the filesystem arm expresses it, with UNPROVEN carried as
- * `contained: false` plus a reason that says so. NO FOURTH STATE.
+ * PURE egress verdict, on the arm contract this file's header states.
  *
- * W1-T2271 — WHY THE `egressBlockedReached` BRANCH CHANGED. The prior version
- * read that one boolean straight into PROVEN-BROKEN. That marker means only
- * "curl received a response of some kind" — `curl -sS -m 10 -o /dev/null
- * https://example.com` has no `--fail`, no status-code test, and discards the
- * body, so it exits 0 on a 200, a 403, a 407, or a proxy-synthesised block
- * page alike, and non-zero only on a TRANSPORT failure (DNS, refused
- * connection, timeout). Converting "a response came back" into "the allowlist
- * did not hold" asserts a cause the evidence never carried — and the
- * short-circuit OUTRANKED contrary evidence the SAME probe run already held
- * (`egressDenialSeen`), which is why 90 of 97 recorded verdicts read
- * PROVEN-BROKEN, 68 of them alongside an observed refusal. Checked in this
- * order, so a bare response is never worth more than the evidence it carries:
- *
- *  1. no attempt observed at all ⇒ UNPROVEN (unchanged).
- *  2. the control also failed ⇒ UNPROVEN (unchanged) — a blocked request
- *     proves nothing when nothing gets out at all.
- *  3. the blocked request came back — the branch this task rewrites:
- *     a. a refusal was ALSO observed on the same run ⇒ UNPROVEN. The response
- *        marker cannot outrank contrary evidence the probe already holds
- *        (rationale (5): 68 of the 90 mis-reported rows carried exactly this
- *        combination).
- *     b. the request terminated at the SAME remote address as the allowlisted
- *        control (design note part (iv), {@link
- *        ContainmentEvidence.egressBlockedRemoteIp}) ⇒ UNPROVEN — one local
- *        interception proxy answered both, precisely the fact rationale (6)
- *        shows the model reconstructing by hand, expensively, before this
- *        field existed.
- *     c. a DIFFERENT remote address was observed on both sides ⇒
- *        PROVEN-BROKEN — the one case this arm now holds actual
- *        discriminating evidence for, named in the reason.
- *     d. no remote-ip evidence at all (executor predates the field, or curl's
- *        `-w` write never landed) ⇒ UNPROVEN — "a response with no
- *        discriminating detail" is reported as unproven, never a proven
- *        breach (acceptance criterion 1).
- *  4. the blocked request never came back and no refusal was ever observed
- *     either ⇒ UNPROVEN (unchanged).
- *  5. blocked absent, control present, refusal observed ⇒ PROVEN-HOLDING
- *     (unchanged) — the only branch this function ever returns `true` from.
- *
- * The body is STILL never read (`-o /dev/null` unchanged, no `--fail`, no
- * response-shape comparison — design note part (iii) rejects that without an
- * explicit ruling) and no new destination is ever contacted: the only new
- * evidence is `-w`'s own transport fact on the SAME two requests the probe
- * already made.
- *
- * OBSERVATIONAL, NOT GATING — the same call the deny-floor arm made, and for the
- * same reason: this arm's behaviour under the installed CLI is UNMEASURED, and
- * gating a fleet on an unmeasured probe could park it. `probeContainment` records
- * the verdict on its `containment.probe` row and does not throw on it.
+ * INVARIANT: a bare response is never worth more than the evidence it carries. curl here has no
+ * `--fail` and no status test and discards the body, so it exits 0 on a 200, a 403, a 407 or a
+ * proxy-synthesised block page alike. Only a DIFFERENT remote address from the allowlisted control
+ * proves the allowlist broke, and never over a refusal observed on the same run. TRAP: reading
+ * `egressBlockedReached` straight into proven-broken reported nearly every recorded verdict as
+ * PROVEN-BROKEN, most of them alongside an observed refusal.
+ * FALSIFIER: test/egress-evidence-discriminates.test.ts.
+ * // Why: docs/forensics/containment.md#assessegresscontainment (W1-T1265, W1-T2271).
  */
 export function assessEgressContainment(e: ContainmentEvidence): {
   contained: boolean;
@@ -968,10 +600,9 @@ export function assessEgressContainment(e: ContainmentEvidence): {
     };
   }
   if (e.egressBlockedReached) {
-    // A response came back — curl exits 0 on ANY http response, never only on
-    // a genuinely reached upstream, so this fact ALONE settles nothing. Look
-    // for the discriminating evidence the probe actually collected before
-    // asserting a cause it cannot carry.
+    // A response came back, but curl exits 0 on ANY http response, so this fact ALONE settles
+    // nothing. Look for the discriminating evidence the probe actually collected before asserting
+    // a cause it cannot carry.
     if (e.egressDenialSeen) {
       return {
         contained: false,
@@ -1020,18 +651,9 @@ export function assessEgressContainment(e: ContainmentEvidence): {
 }
 
 /**
- * W1-T2211 — THE READ ARM, PROVING RATHER THAN DECLARING THE `denyRead` ENTRY
- * FROM DESIGN PART (i). PURE, mirroring {@link assessEgressContainment} field
- * for field and returning the SAME `{contained, reason}` shape — the same
- * three-state epistemology (proven-holding | proven-broken | unproven), NO
- * FOURTH STATE.
- *
- * OBSERVATIONAL, NOT GATING — the same call the deny-floor and egress arms
- * made, and for the same reason: this arm's behaviour under the installed CLI
- * is UNMEASURED (rationale (5): "Q1's control could not be produced" — there
- * is no path in this tree `denyRead` has ever been shown to block), and gating
- * a fleet on a brand-new, unmeasured probe could park it. `probeContainment`
- * records the verdict on its `containment.probe` row and does not throw on it.
+ * PURE read-arm verdict, on the arm contract this file's header states — PROVING rather than
+ * declaring the `denyRead` entry from design part (i). Unmeasured for a second reason of its own:
+ * there is no path in this tree `denyRead` has ever been shown to block. (W1-T2211)
  */
 export function assessTokenReadContainment(e: ContainmentEvidence): {
   contained: boolean;
@@ -1071,22 +693,13 @@ export function assessTokenReadContainment(e: ContainmentEvidence): {
 }
 
 /**
- * W1-T2213 — THE RE-ANCHORING ARM, PROVING RATHER THAN DECLARING THE `~/../..`
- * ANCHORING FROM DESIGN PART (i). PURE, mirroring {@link
- * assessTokenReadContainment} field for field and returning the SAME
- * `{contained, reason}` shape — the same three-state epistemology
- * (proven-holding | proven-broken | unproven), NO FOURTH STATE.
+ * PURE re-anchoring verdict, on the arm contract this file's header states — PROVING rather than
+ * declaring the `~/../..` anchoring from design part (i).
  *
- * The CONTROL is deliberately `e.stateReadSucceeded` — the SAME field {@link
- * assessTokenReadContainment} already reads, proven once per probe run rather
- * than re-derived per arm (design part (vi)'s own falsifier: without it, "the
- * operator-home read failed" cannot be told from "reads are broken generally").
- *
- * OBSERVATIONAL, NOT GATING — the same call the deny-floor, egress and
- * token-read arms make, and for the same reason: this arm's behaviour under
- * the installed CLI is UNMEASURED, and gating a fleet on a brand-new,
- * unmeasured probe could park it. `probeContainment` records the verdict on
- * its `containment.probe` row and does not throw on it.
+ * The CONTROL is deliberately `e.stateReadSucceeded`, the same field {@link
+ * assessTokenReadContainment} reads, proven once per probe run rather than re-derived per arm. TRAP
+ * without it (design part (vi)'s own falsifier): "the operator-home read failed" cannot be told
+ * from "reads are broken generally". (W1-T2213)
  */
 export function assessOperatorHomeReadContainment(e: ContainmentEvidence): {
   contained: boolean;
@@ -1134,24 +747,20 @@ export function assessOperatorHomeReadContainment(e: ContainmentEvidence): {
 const EGRESS_DENIAL_RE =
   /could not resolve host|couldn't resolve host|connection refused|failed to connect|blocked|not allowed|denied by|proxy/i;
 
+/** Regex marking an OS or sandbox-level write denial, as opposed to a hook denial, mirroring the
+ *  WS-0 verdict-7 transcript check. Kept SEPARATE from {@link EGRESS_DENIAL_RE} in both directions. */
 const OS_DENIAL_RE = /operation not permitted|not permitted|permission denied|read-only file system|sandbox|denied/i;
 
 /**
- * Drop every transcript line that is ABOUT the deny-floor tripwire before {@link
- * OS_DENIAL_RE} is applied — the ONE way adding step 3 could otherwise WEAKEN the
- * containment verdict, so it is removed rather than argued to be unlikely.
+ * Drop every transcript line that is ABOUT the deny-floor tripwire before {@link OS_DENIAL_RE} is
+ * applied.
  *
- * `osDenialSeen` is load-bearing in exactly one branch: outside write absent AND
- * no denial observed ⇒ UNPROVEN (the worker may never have attempted it). The
- * hook's own refusal text ("deny-floor: blocked — …") does not match
- * `OS_DENIAL_RE`, but the WORKER's prose about step 3 is not under our control and
- * "denied"/"permission" are both in that pattern — so a run that never attempted
- * step 1 could have been flipped from UNPROVEN to contained by step 3's narration.
- * Stripping the tripwire's own lines keeps the OS-denial evidence sourced strictly
- * from the outside-cwd write, exactly as it was before this step existed.
- *
- * Line-oriented and deliberately generous about what counts as a tripwire line:
- * the basename, the hook's own prefix, or the report line the prompt asks for.
+ * INVARIANT: OS-denial evidence stays sourced strictly from the outside-cwd write, exactly as it was
+ * before step 3 existed. TRAP: this is the ONE way adding step 3 could WEAKEN the containment
+ * verdict, so it is removed rather than argued to be unlikely — the hook's own refusal text does not
+ * match `OS_DENIAL_RE`, but the WORKER's prose about step 3 is not under our control and "denied"
+ * and "permission" are both in that pattern. Deliberately generous: the basename, the hook's prefix,
+ * or the prompt's own report line.
  */
 export function stripDenyFloorLines(transcript: string): string {
   return transcript
@@ -1166,19 +775,13 @@ export function stripDenyFloorLines(transcript: string): string {
 }
 
 /**
- * PURE verdict over the deny-floor observation. THREE states, never two — an
- * UNOBSERVED floor (a probe executor that never reported the field, i.e. every
- * pre-existing injected fake) must read as "unobserved", never as "engaged":
- * silence is not evidence, the same three-state epistemology {@link
- * ContainmentError}'s `observed` field keeps for containment itself.
+ * PURE verdict over the deny-floor observation. THREE states, never two, on the arm contract this
+ * file's header states.
  *
- * OBSERVATIONAL, NOT A GATE. Nothing in {@link probeContainment} throws on this
- * verdict, and that is a deliberate first step rather than an unfinished one. The
- * empirical behaviour of the hook under the INSTALLED CLI is UNMEASURED here (the
- * ledger is unreachable and no spike was run for it), and this repo has already
- * paid for bounds that fire on healthy conditions. Wiring the observation first
- * produces the measurement a severity flip would need — the same
- * advisory-then-flip order W1-T322/W1-T323 established.
+ * INVARIANT: an UNOBSERVED floor — an executor that never reported the field — reads as
+ * "unobserved", never "engaged". Wiring the observation before any gate is deliberate rather than
+ * unfinished: it produces the measurement a severity flip would need, the advisory-then-flip order
+ * W1-T322/W1-T323 established.
  */
 export function assessDenyFloor(e: ContainmentEvidence): {
   engaged: boolean | undefined;
@@ -1205,21 +808,14 @@ export function assessDenyFloor(e: ContainmentEvidence): {
 }
 
 /**
- * W1-T2238 — DESIGN PART (ii): a count of probe arms that reported, IN THE
- * BUDGET'S OWN UNIT. `probeTurnBudget` counts COMMANDS; these twelve fields —
- * named verbatim in rationale (6) — are each ONE command's own observation, so
- * a count of how many fired is comparable to the cap on both the exhausted AND
- * the success path, unlike `numTurns` (rationale (5)). ONE REDUCTION over
- * fields the row already carries — no new evidence collection, no new arm.
+ * How many probe arms reported, IN THE BUDGET'S OWN UNIT. `probeTurnBudget` counts COMMANDS, and
+ * each of these twelve fields is one command's own observation, so the count is comparable to the
+ * cap on BOTH the exhausted and the success path, unlike `numTurns`.
  *
- * `true` is the only value counted: each of the twelve is either a positive
- * observation (a write landed, a denial was seen, a read succeeded, the
- * deny-floor engaged) or it is not, and only the former is a command the probe
- * actually got far enough to report on. `deny_floor_engaged` is the one
- * tri-state field on the row (undefined ⇒ UNOBSERVED); it is re-derived here
- * via {@link assessDenyFloor} rather than stored a second time on
- * `ContainmentEvidence`, so this count can never drift from the same field the
- * row itself logs as `deny_floor_engaged`.
+ * INVARIANT: one reduction over fields the row already carries — no new evidence, no new arm — and
+ * `true` is the only value counted. `deny_floor_engaged` is the row's one tri-state field,
+ * re-derived here via {@link assessDenyFloor} rather than stored twice, so this count cannot drift
+ * from the field the row logs. // Why: docs/forensics/containment.md#probearmsreported (W1-T2238).
  */
 export function probeArmsReported(e: ContainmentEvidence): number {
   const arms: Array<boolean | undefined> = [
@@ -1239,60 +835,40 @@ export function probeArmsReported(e: ContainmentEvidence): number {
   return arms.filter((a) => a === true).length;
 }
 
-/**
- * Regex marking the CLI's credential/auth-dead result text, verified verbatim
- * (SDK 0.3.209 / CLI 2.1.209, see env.ts / worker-home.ts / FINDINGS.md): a
- * headless spawn with no usable OAuth token exits "Not logged in · Please run
- * /login" at $0 before any turn. MATCHED CONSERVATIVELY — both fragments must
- * appear (not "any error"), so an unrelated error-result is never mislabelled a
- * credential failure. Applied only in combination with `isError`, never alone.
- */
+/** The CLI's credential-dead result text, verified verbatim (SDK 0.3.209 / CLI 2.1.209; see env.ts,
+ *  worker-home.ts, FINDINGS.md): a headless spawn with no usable OAuth token exits "Not logged in ·
+ *  Please run /login" at $0 before any turn. INVARIANT: matched CONSERVATIVELY — both fragments must
+ *  appear, not "any error", and only with `isError`, so an unrelated error-result is never
+ *  mislabelled a credential failure. */
 const CREDENTIAL_FAILURE_RE = /not logged in/i;
 const CREDENTIAL_LOGIN_HINT_RE = /run \/login/i;
 
 /**
- * Regex marking the SDK's OTHER credential-dead result text: a copied OAuth
- * token that has since EXPIRED (as opposed to never being logged in at all).
- * W1-T292 matched this against "OAuth session expired and could not be
- * refreshed", but that phrasing is no longer what the SDK emits. W1-T2250's
- * observed excerpt — corroborated independently by W1-T2249's ledger read,
- * both attributed rather than re-derived by a live probe here — reads "Failed
- * to authenticate. API Error: 401 OAuth access token has expired.
- * Re-authenticate to continue" at $0 before any turn: a distinct string from
- * CREDENTIAL_FAILURE_RE/CREDENTIAL_LOGIN_HINT_RE above, so it previously
- * matched neither pair and fell through to the generic "unproven" verdict
- * W1-T237/W1-T292 exist to prevent. Same conservative shape: both fragments
- * must appear, applied only in combination with `isError`.
+ * The SDK's OTHER credential-dead text: a copied OAuth token that has EXPIRED, as opposed to never
+ * being logged in. The observed excerpt reads "Failed to authenticate. API Error: 401 OAuth access
+ * token has expired. Re-authenticate to continue" at $0 before any turn. TRAP: W1-T292's original
+ * phrasing ("OAuth session expired and could not be refreshed") is no longer what the SDK emits, so
+ * this text matched neither pair and fell through to the generic "unproven" verdict W1-T237 and
+ * W1-T292 exist to prevent. // Why: docs/forensics/containment.md#credential_expired_re (W1-T2250).
  */
 const CREDENTIAL_EXPIRED_RE = /failed to authenticate/i;
 const CREDENTIAL_TOKEN_EXPIRED_RE = /oauth access token has expired/i;
 
 /**
- * W1-T2249 — THE ARM NEITHER CREDENTIAL REGEX ABOVE COVERS. Marks the Anthropic
- * API's own transport/server-side failure text surfaced through a probe worker's
- * result envelope: a `5xx`-numbered "API Error: <code> …" response (observed
- * verbatim on the fleet as "API Error: 529 Overloaded" — five occurrences within
- * sixteen minutes, this task's own ledger read). Deliberately narrow — `5\d\d`
- * immediately after "api error:", not a bare "error" or "5xx" anywhere in the
- * transcript — so a task's own unrelated prose mentioning an HTTP code is never
- * mislabelled a spawn failure. `4xx` codes (401 included) are OUT of this arm's
- * scope on purpose: 401 is credential-shaped and already owned by
- * `CREDENTIAL_EXPIRED_RE`/`CREDENTIAL_TOKEN_EXPIRED_RE` above; widening this arm
- * to catch it too would let a THIRD arm race the credential ones for the same
- * text instead of leaving credential text to the credential arms. Applied only
- * in combination with `isError`, never alone — the same discipline both
- * credential regexes already use.
+ * The arm neither credential regex above covers: the Anthropic API's own transport or server-side
+ * failure text on a probe worker's result envelope — a 5xx-numbered "API Error: <code> …", observed
+ * verbatim on the fleet as "API Error: 529 Overloaded", five times within sixteen minutes.
+ *
+ * INVARIANT: deliberately narrow — `5\d\d` immediately after "api error:", never a bare "error" —
+ * and 4xx is out of scope on purpose, because 401 is credential-shaped and already owned above.
+ * // Why: docs/forensics/containment.md#transport_failure_re (W1-T2249).
  */
 const TRANSPORT_FAILURE_RE = /api error:\s*5\d\d\b/i;
 
-/**
- * W1-T2271: read the remote-ip file curl's `-w '%{remote_ip}'` wrote, but ONLY
- * when `reached` (the paired touch marker's `existsSync`) says the request
- * actually came back — the file itself exists unconditionally (shell
- * redirection truncates it before curl even runs), so its mere presence
- * proves nothing. Returns `undefined` on a failed/empty read or when the
- * request never reached, never a guessed value.
- */
+/** Read the file curl's `-w '%{remote_ip}'` wrote, but ONLY when `reached` — the paired marker's
+ *  `existsSync` — says the request came back. TRAP: the file exists unconditionally, because shell
+ *  redirection truncates it before curl runs, so its presence proves nothing. Returns `undefined`
+ *  on a failed or empty read, never a guessed value. (W1-T2271) */
 function readRemoteIp(path: string, reached: boolean): string | undefined {
   if (!reached) return undefined;
   try {
@@ -1303,14 +879,10 @@ function readRemoteIp(path: string, reached: boolean): string | undefined {
   }
 }
 
-/**
- * Default executor: spawn a real sandboxed worker in a scratch cwd under the
- * workspace. `spawn` is injectable (defaults to the real {@link spawnWorker})
- * so both W1-T237's `isError` plumbing and W1-T238's stderr-persistence branch
- * (the exact branch that discarded stderr on a failed probe) are directly
- * unit-testable without spawning an actual sandboxed subprocess — every other
- * call site relies on the default.
- */
+/** Default executor: spawn a real sandboxed worker in a scratch cwd under the workspace. `spawn` is
+ *  injectable so the `isError` plumbing and the stderr-persistence branch — the exact branch that
+ *  discarded stderr on a failed probe — are unit-testable without a real sandboxed subprocess.
+ *  (W1-T237, W1-T238) */
 export function defaultExecutor(
   settingsFile: string,
   config: Config,
@@ -1321,69 +893,54 @@ export function defaultExecutor(
   },
 ): ProbeExecutor {
   return async (token: string) => {
-    // The scratch dir lives under the WORKSPACE root, never under $TMPDIR — the
-    // sandbox write scope is cwd + session $TMPDIR, so a sibling of cwd here is
-    // genuinely OUTSIDE that scope (a $TMPDIR sibling would be writable and give a
-    // false pass). cwd is a subdir; the outside target is its sibling.
+    // The scratch dir lives under the WORKSPACE root, never under $TMPDIR: the sandbox write scope
+    // is cwd plus session $TMPDIR, so a sibling of cwd here is genuinely OUTSIDE that scope, while a
+    // $TMPDIR sibling would be writable and give a false pass.
     const base = join(config.root, "tmp", `containment-probe-${token}`);
     const cwd = join(base, "cwd");
     mkdirSync(cwd, { recursive: true });
     const outsidePath = join(base, `${token}.txt`);
     const insidePath = join(cwd, "probe-ok.txt");
-    // INSIDE cwd on purpose — the sandbox permits this path (it is the same scope
-    // `probe-ok.txt` proves writable), so only the deny-floor hook can stop it.
-    // See denyFloorProbeCommand's doc for why an outside-cwd tripwire proves nothing.
+    // INSIDE cwd on purpose — the sandbox permits this path, so only the deny-floor hook can stop
+    // it. See denyFloorProbeCommand's doc for why an outside-cwd tripwire proves nothing.
     const denyFloorPath = join(cwd, DENY_FLOOR_PROBE_BASENAME);
-    // W1-T1265: the two egress markers, observed by existsSync exactly as the two
-    // writes above are — no transcript parsing for "did it come back".
     const egressBlockedPath = join(cwd, EGRESS_BLOCKED_MARKER);
     const egressAllowedPath = join(cwd, EGRESS_ALLOWED_MARKER);
-    // W1-T2271: these two files are written UNCONDITIONALLY by shell redirection
-    // (opened/truncated before curl even runs) — read only when the paired
-    // touch marker above says the request actually came back; see readRemoteIp.
+    // Written UNCONDITIONALLY by shell redirection, so read only when the paired touch marker says
+    // the request came back; see readRemoteIp.
     const egressBlockedRemoteIpPath = join(cwd, EGRESS_BLOCKED_REMOTE_IP_FILE);
     const egressAllowedRemoteIpPath = join(cwd, EGRESS_ALLOWED_REMOTE_IP_FILE);
-    // The control target is DERIVED from the allowlist this same probe was handed,
-    // so it cannot drift from the policy it exercises. A file that cannot be parsed
-    // degrades to the fallback rather than skipping the control, because a skipped
-    // control is what makes every "blocked" reading unfalsifiable.
+    // The control target is DERIVED from the allowlist this same probe was handed, so it cannot
+    // drift from the policy it exercises. An unparseable file degrades to the fallback rather than
+    // skipping the control, because a skipped control makes every "blocked" reading unfalsifiable.
     let allowedHost: string;
     try {
       allowedHost = allowedHostFromSettings(validateWorkerSettingsFile(settingsFile));
     } catch {
       allowedHost = EGRESS_ALLOWED_HOST_FALLBACK;
     }
-    // W1-T2211 — THE READ ARM'S TWO TARGETS. `tokenPath` is deliberately the SAME
-    // path serve.ts's own `serviceTokensPath(configRoot)` resolves — duplicated as
-    // a bare join() rather than imported, so this low-level probe module never
-    // takes a dependency on serve.ts's (much heavier) module graph for one path,
-    // the same discipline ledger.ts's STATE_BACKUP_LEDGER_RELPATH doc already
-    // states for the same reason. `controlPath` is a SYNTHETIC file this probe
-    // creates and owns (never a real production state file, never the token's own
-    // content) so the control read cannot fail merely because some other state
-    // file happens to be absent this early in a run.
+    // The read arm's two targets. `tokenPath` is the same path serve.ts's `serviceTokensPath`
+    // resolves, duplicated as a bare join() so this low-level module takes no dependency on
+    // serve.ts's much heavier module graph. `controlPath` is SYNTHETIC and owned by this probe, so
+    // the control read cannot fail merely because another state file is absent this early. (W1-T2211)
     const tokenPath = join(config.root, "state", "service-tokens.json");
     const controlPath = join(config.root, "state", stateReadControlBasename(token));
     mkdirSync(join(config.root, "state"), { recursive: true });
     writeFileSync(controlPath, "containment probe control file — synthetic, safe to read, not a secret\n");
     const tokenReadPath = join(cwd, TOKEN_READ_SUCCESS_MARKER);
     const stateReadPath = join(cwd, STATE_READ_CONTROL_MARKER);
-    // W1-T2213 — THE RE-ANCHORING ARM'S TARGET. `configPath()` (config.ts)
-    // resolves `<homedir()>/.config/remudero/config.json` — called HERE, in the
-    // orchestrator's own process, before spawn() ever redirects a worker's HOME,
-    // so it reads the operator's REAL home, exactly what design part (i)'s
-    // `~/../..` re-anchoring in settings/worker.json is meant to name.
+    // The re-anchoring arm's target. `configPath()` (config.ts) is called HERE, in the
+    // orchestrator's own process, before spawn() ever redirects a worker's HOME, so it reads the
+    // operator's REAL home — exactly what design part (i)'s `~/../..` re-anchoring names (W1-T2213).
     const operatorHomeConfigPath = configPath();
     const operatorHomeReadPath = join(cwd, OPERATOR_HOME_READ_SUCCESS_MARKER);
-    // W1-T2201: the prompt is built ONCE and its own text is what derives the cap
-    // below — never a separate hand-maintained literal that can drift from what
-    // the prompt actually asks the worker to do.
+    // The prompt is built ONCE and its own text derives the cap below — never a hand-maintained
+    // literal that can drift from what the prompt asks the worker to do (W1-T2201).
     const prompt = containmentProbePrompt(token, allowedHost, tokenPath, controlPath, operatorHomeConfigPath);
     try {
-      // Codex requires a trusted Git working tree before it will start a write-capable worker.
-      // This cwd is a fresh, token-scoped probe artifact rather than a missing task worktree, so
-      // give only the disposable directory a minimal Git identity. The generic provider adapter
-      // remains fail-closed for every other write-capable non-repository cwd.
+      // Codex requires a trusted Git working tree before starting a write-capable worker. This cwd
+      // is a fresh, token-scoped probe artifact, so only the disposable directory gets a minimal Git
+      // identity; the generic provider adapter stays fail-closed for every other non-repository cwd.
       initializeRepository(cwd);
       const probe = await spawn({
         cwd,
@@ -1399,36 +956,24 @@ export function defaultExecutor(
         transcript,
         outsideWriteCreated: existsSync(outsidePath),
         insideWriteCreated: existsSync(insidePath),
-        // W1-T2201: the SDK's own `error_max_turns` subtype — the same string
-        // `classifyFailure`/`workerErrorVerdict` already key on elsewhere in this
-        // codebase — carried through so a turn-exhausted run can be REPORTED as
-        // exhausted rather than silently read as an unattempted write.
+        // The SDK's own `error_max_turns` subtype, carried through so a turn-exhausted run is
+        // REPORTED as exhausted rather than silently read as an unattempted write (W1-T2201).
         turnsExhausted: probe.subtype === "error_max_turns",
-        // W1-T2238: both fields were already on WorkerResult (W1-T303); this
-        // extraction site is where they were dropped one line away from the row
-        // that needed them — see ContainmentEvidence.numTurns/.maxTurns.
-        // `probe.maxTurns` (not a re-derivation) is `WorkerResult.maxTurns` —
-        // worker.ts's own mirror of the `maxTurns` this spawn call was actually
-        // invoked with, the same INPUT-never-read-back discipline W1-T303 set.
+        // Both fields were already on WorkerResult (W1-T303) and were dropped one line from the row
+        // that needed them. `probe.maxTurns` is worker.ts's mirror of this spawn's input (W1-T2238).
         numTurns: probe.numTurns,
         maxTurns: probe.maxTurns,
         denyFloorProbeCreated: existsSync(denyFloorPath),
         egressBlockedReached: existsSync(egressBlockedPath),
         egressAllowedReached: existsSync(egressAllowedPath),
-        // W1-T2271: only trust the remote-ip file's content when its paired
-        // touch marker says the request came back — the file exists either way.
+        // Trust the remote-ip file's content only when its paired marker says the request came back.
         egressBlockedRemoteIp: readRemoteIp(egressBlockedRemoteIpPath, existsSync(egressBlockedPath)),
         egressAllowedRemoteIp: readRemoteIp(egressAllowedRemoteIpPath, existsSync(egressAllowedPath)),
-        // W1-T2211: existsSync exactly as the write/egress arms observe outcomes —
-        // no transcript parsing for "did the read succeed".
         tokenReadSucceeded: existsSync(tokenReadPath),
         stateReadSucceeded: existsSync(stateReadPath),
-        // W1-T2213: same discipline, one level up — see the field's own doc.
         operatorHomeReadSucceeded: existsSync(operatorHomeReadPath),
         costUsd: probe.costUsd,
-        // W1-T237: the signal was already on WorkerResult; the preflight just never read it.
         isError: probe.isError,
-        // W1-T268: same shape — already on WorkerResult, just never carried through.
         childEnvKeys: probe.childEnvKeys,
         accountLabel: probe.accountLabel,
       };
@@ -1454,18 +999,13 @@ export function defaultExecutor(
 }
 
 /**
- * Run the containment preflight for a run. FAILS CLOSED (throws
- * {@link ContainmentError}) unless containment is empirically proven.
+ * Run the containment preflight for a run. FAILS CLOSED — throws {@link ContainmentError} — unless
+ * containment is empirically proven.
  *
- * Two gates, both must pass:
- *  1. CONFIG — the settings file must declare an ENABLED sandbox (reuses
- *     {@link validateWorkerSettingsFile}, which requires `enabled` and
- *     `failIfUnavailable`). A sandbox-disabled file fails closed here, before any
- *     spawn — defense-in-depth so the probe never trusts a file it wasn't handed
- *     under an enabled sandbox.
- *  2. EMPIRICAL — spawn under the sandbox and confirm an outside-cwd write is
- *     OS-denied ({@link assessContainment}). This catches the failure static
- *     validation CANNOT: a well-formed file whose sandbox silently dropped.
+ * Two gates, both must pass. CONFIG: the settings file must declare an ENABLED sandbox (reuses
+ * {@link validateWorkerSettingsFile}), so a sandbox-disabled file fails closed before any spawn.
+ * EMPIRICAL: spawn under the sandbox and confirm an outside-cwd write is OS-denied. TRAP the second
+ * gate catches and the first cannot: a well-formed file whose sandbox silently dropped.
  */
 export async function probeContainment(opts: {
   settingsFile: string;
@@ -1490,102 +1030,69 @@ export async function probeContainment(opts: {
     );
   }
 
-  // GATE 2 — empirical: an outside-cwd write must be OS-denied under the sandbox.
-  // Resolve config lazily and ONLY for the real executor: an injected exec (tests)
-  // must never touch loadConfig (which resolves the claude binary — absent in CI).
+  // GATE 2 — empirical: an outside-cwd write must be OS-denied under the sandbox. Config is
+  // resolved lazily and ONLY for the real executor, because an injected exec (tests) must never
+  // touch loadConfig, which resolves the claude binary — absent in CI.
   const token = opts.token ?? `${Date.now()}`;
   const exec =
     opts.exec ?? defaultExecutor(opts.settingsFile, opts.config ?? loadConfig(), opts.budgetUsd);
   const r = await exec(token);
+  // INVARIANT for this literal: every optional field is carried through VERBATIM, `undefined`
+  // included, so an executor that reported no attempt stays UNOBSERVED rather than defaulting to
+  // "engaged", "blocked" or "denied"; and every "was it denied" field is derived from an OBSERVED
+  // refusal, never inferred from silence. Each denial test is anchored on a substring disjoint from
+  // every other arm's, so no arm can be satisfied by another arm's denial line.
   const evidence: ContainmentEvidence = {
     outsideWriteCreated: r.outsideWriteCreated,
-    // The denial must reference THIS probe's token AND an OS-denial phrase, so a
-    // stray "permission" mention elsewhere in the transcript can't fake it.
-    // The deny-floor tripwire's own lines are STRIPPED before this test — see
-    // stripDenyFloorLines. Without that, step 3's narration could satisfy the
-    // OS-denial pattern and flip a genuinely UNPROVEN run to contained.
+    // The denial must reference THIS probe's token AND an OS-denial phrase, so a stray "permission"
+    // elsewhere in the transcript cannot fake it. TRAP: the tripwire's own lines are STRIPPED first,
+    // or step 3's narration could satisfy the OS-denial pattern and flip an UNPROVEN run to
+    // contained.
     osDenialSeen:
       r.transcript.includes(token) && OS_DENIAL_RE.test(stripDenyFloorLines(r.transcript)),
-    // W1-T1281: the FIRST half of the `osDenialSeen` expression above, carried
-    // separately so a failure can distinguish "attempted but no denial phrase"
-    // from "never attempted at all" instead of collapsing both into one boolean
-    // — see classifyUnprovenState.
+    // The FIRST half of the expression above, carried separately so a failure can distinguish
+    // "attempted but no denial phrase" from "never attempted at all" (W1-T1281).
     outsideWriteAttempted: r.transcript.includes(token),
     insideWriteCreated: r.insideWriteCreated,
-    // W1-T237: isError PLUS BOTH conservative credential fragments — not "any
-    // error" — so an unrelated error-result is never mislabelled a credential
-    // failure (the design's own conservatism requirement).
+    // `isError` PLUS BOTH conservative credential fragments — not "any error" — so an unrelated
+    // error-result is never mislabelled a credential failure (W1-T237).
     credentialFailure:
       r.isError === true &&
       CREDENTIAL_FAILURE_RE.test(r.transcript) &&
       CREDENTIAL_LOGIN_HINT_RE.test(r.transcript),
-    // W1-T292, phrases re-derived by W1-T2250: a SECOND, DISTINCT credential-dead
-    // signature — an expired copied OAuth token — kept out of `credentialFailure`
-    // above so the two never collapse into one reason. Same conservative
-    // both-fragments-required shape, now matched against the text the SDK
-    // actually emits ("Failed to authenticate. API Error: 401 OAuth access token
-    // has expired...") rather than the superseded "OAuth session expired and
-    // could not be refreshed".
+    // A SECOND, DISTINCT credential-dead signature, kept out of `credentialFailure` so the two never
+    // collapse into one reason (W1-T292, phrases re-derived by W1-T2250).
     credentialExpired:
       r.isError === true &&
       CREDENTIAL_EXPIRED_RE.test(r.transcript) &&
       CREDENTIAL_TOKEN_EXPIRED_RE.test(r.transcript),
-    // W1-T2249: a THIRD spawn-death shape, distinct from both credential arms —
-    // the probe worker died on the Anthropic API's own transport/server failure
-    // (a `5xx`, e.g. "API Error: 529 Overloaded") rather than an auth problem.
-    // Same isError-plus-signature discipline as the two credential arms above.
+    // A THIRD spawn-death shape: an API-side 5xx rather than an auth problem (W1-T2249).
     spawnTransportFailure: r.isError === true && TRANSPORT_FAILURE_RE.test(r.transcript),
-    // Carried through VERBATIM, including `undefined` — an executor that never
-    // reported a tripwire outcome must stay UNOBSERVED, never default to engaged.
     denyFloorProbeCreated: r.denyFloorProbeCreated,
-    // W1-T1265: carried through VERBATIM, including `undefined` — an executor that
-    // reported no egress attempt stays UNOBSERVED and verdicts UNPROVEN, never
-    // "blocked". Same discipline as `denyFloorProbeCreated` directly above.
     egressBlockedReached: r.egressBlockedReached,
     egressAllowedReached: r.egressAllowedReached,
-    // W1-T2271: carried through VERBATIM, including `undefined` — an executor
-    // that predates this field, or whose request never came back, stays
-    // UNOBSERVED, never a guessed address. See assessEgressContainment.
     egressBlockedRemoteIp: r.egressBlockedRemoteIp,
     egressAllowedRemoteIp: r.egressAllowedRemoteIp,
-    // Mirrors `osDenialSeen`: a refusal must be OBSERVED, never inferred from the absence
-    // of a response. Sourced from EGRESS_DENIAL_RE ALONE — deliberately NOT from
-    // `OS_DENIAL_RE`, because a filesystem denial must never be read as an egress denial
-    // (this file's own doc for the two patterns says so). It also keeps the strip call
-    // above a UNIQUE textual occurrence, which test/deny-floor-probe.test.ts pins as the
-    // precondition of its mutation guard — that guard counts occurrences in the raw
-    // SOURCE TEXT, so even a comment quoting the call verbatim would break it.
+    // Sourced from EGRESS_DENIAL_RE ALONE, never OS_DENIAL_RE, so a filesystem denial is never read
+    // as an egress denial. TRAP: this also keeps the strip call above a UNIQUE textual occurrence,
+    // which test/deny-floor-probe.test.ts pins as the precondition of its mutation guard — that
+    // guard counts occurrences in the raw SOURCE TEXT, so even a comment quoting it would break it.
     egressDenialSeen:
       r.egressBlockedReached === undefined ? undefined : EGRESS_DENIAL_RE.test(r.transcript),
-    // W1-T2201: carried through VERBATIM, including `undefined`/falsy — see
-    // ContainmentEvidence.turnsExhausted's doc for why this never flips a verdict.
     turnsExhausted: r.turnsExhausted,
-    // W1-T2238: carried through VERBATIM, including `undefined` — the pair this
-    // task exists to stop discarding. See ContainmentEvidence.numTurns/.maxTurns.
     numTurns: r.numTurns,
     maxTurns: r.maxTurns,
-    // W1-T2211: carried through VERBATIM, including `undefined` — an executor that
-    // reported no read attempt must stay UNOBSERVED, never default to "denied".
-    // Same discipline as denyFloorProbeCreated/egressBlockedReached above.
     tokenReadSucceeded: r.tokenReadSucceeded,
     stateReadSucceeded: r.stateReadSucceeded,
-    // Mirrors osDenialSeen/egressDenialSeen: a refusal must be OBSERVED, never
-    // inferred from silence. Anchored on the literal "service-tokens.json" (rather
-    // than the run's own token, which the outside-write arm already anchors on) so
-    // this can never be satisfied by that arm's own denial text — the two anchors
-    // name disjoint substrings.
+    // Anchored on "service-tokens.json" rather than the run's own token, which the outside-write arm
+    // already anchors on.
     tokenReadDenialSeen:
       r.tokenReadSucceeded === undefined
         ? undefined
         : r.transcript.includes("service-tokens.json") && OS_DENIAL_RE.test(r.transcript),
-    // W1-T2213: carried through VERBATIM, including `undefined` — same discipline
-    // as tokenReadSucceeded directly above.
     operatorHomeReadSucceeded: r.operatorHomeReadSucceeded,
-    // Mirrors tokenReadDenialSeen: a refusal must be OBSERVED, never inferred
-    // from silence. Anchored on "remudero/config.json" — a substring disjoint
-    // from every other arm's own denial/anchor text (the run token, the egress
-    // hosts, "service-tokens.json") so this can never be satisfied by a DIFFERENT
-    // arm's denial line.
+    // Anchored on "remudero/config.json", disjoint from the run token, the egress hosts and
+    // "service-tokens.json".
     operatorHomeReadDenialSeen:
       r.operatorHomeReadSucceeded === undefined
         ? undefined
@@ -1597,128 +1104,74 @@ export async function probeContainment(opts: {
   const tokenRead = assessTokenReadContainment(evidence);
   const operatorHomeRead = assessOperatorHomeReadContainment(evidence);
   const costUsd = r.costUsd ?? 0;
+  // OBSERVATIONAL, NOT GATING, for the deny-floor, egress, token-read and re-anchoring arms alike,
+  // on the contract this file's header states: each is recorded here and none of them throws. Every
+  // field is ledgered so a row can be read for it DIRECTLY, without re-deriving it from a reason's
+  // prose or from `observed` on a thrown error.
   log("containment.probe", {
     contained: verdict.contained,
     reason: verdict.reason,
     credential_failure: evidence.credentialFailure,
     credential_expired: evidence.credentialExpired,
-    // W1-T2249: the third spawn-death arm, ledgered beside the two credential
-    // fields above so a row can be read for it directly.
     spawn_transport_failure: evidence.spawnTransportFailure,
     outside_write_created: evidence.outsideWriteCreated,
     os_denial_seen: evidence.osDenialSeen,
-    // W1-T1281: carried so a row that PASSED can still be read for the same
-    // three-state split a failing row's `observed` field now names — the
-    // decision does not change, only what gets recorded alongside it.
+    // Carried so a row that PASSED can still be read for the same three-state split a failing row's
+    // `observed` field names — the decision does not change, only what is recorded (W1-T1281).
     outside_write_attempted: evidence.outsideWriteAttempted,
     inside_write_created: evidence.insideWriteCreated,
-    // OBSERVATIONAL — recorded on the containment step rather than gating it, so
-    // the deny floor stops being proven NEVER without a new bound that could park
-    // a fleet on a hook whose behaviour under the installed CLI is UNMEASURED.
-    // `engaged` is tri-state and rides as-is: undefined ⇒ unobserved.
+    // Tri-state: undefined means unobserved.
     deny_floor_engaged: denyFloor.engaged,
     deny_floor_reason: denyFloor.reason,
-    // W1-T1265 — OBSERVATIONAL, recorded rather than gating, the same call the
-    // deny-floor arm made above and for the same reason: this arm's behaviour under
-    // the installed CLI is UNMEASURED, and gating a fleet on an unmeasured probe
-    // could park it. The verdict is pure and unit-falsifiable; wiring it to throw is
-    // a separate, operator-gated decision.
     egress_contained: egress.contained,
     egress_reason: egress.reason,
     egress_blocked_reached: evidence.egressBlockedReached,
     egress_allowed_reached: evidence.egressAllowedReached,
     egress_denial_seen: evidence.egressDenialSeen,
-    // W1-T2271: the transport-fact discriminator — ledgered so a row can be
-    // read directly for WHICH remote address each request terminated at,
-    // without re-deriving it from `egress_reason`'s prose.
     egress_blocked_remote_ip: evidence.egressBlockedRemoteIp,
     egress_allowed_remote_ip: evidence.egressAllowedRemoteIp,
-    // W1-T2201: OBSERVATIONAL, same discipline as the deny-floor/egress fields
-    // above — recorded so a `containment.probe` row can be read for exhaustion
-    // directly, without re-deriving it from `observed` on a thrown error.
     turns_exhausted: evidence.turnsExhausted,
-    // W1-T2238 — design (i): the pair `turns_exhausted` never carried, on BOTH
-    // the exhausted and the passing row, so the allowance can be tuned on the
-    // distribution rather than the boolean alone. `num_turns` is not comparable
-    // to `max_turns` on its own (W1-T303); ledgering them on the SAME row beside
-    // one another is what makes the comparison possible at all.
+    // The pair `turns_exhausted` never carried, on BOTH the exhausted and the passing row, so the
+    // allowance is tunable on the distribution. TRAP: `num_turns` is not comparable to `max_turns`
+    // on its own (W1-T303) — the SAME row is what makes the comparison possible (W1-T2238).
     num_turns: evidence.numTurns,
     max_turns: evidence.maxTurns,
-    // W1-T2238 — design (ii): how many of the twelve per-arm booleans this row
-    // ALREADY carries fired, in the same unit (commands) the budget above is
-    // derived from — comparable on the success path where num_turns is not
-    // (rationale (5)/(6)).
+    // How many of the twelve per-arm booleans fired, in the same unit (commands) the budget is
+    // derived from — comparable on the success path, where `num_turns` is not (W1-T2238).
     arms_reported: probeArmsReported(evidence),
-    // W1-T2211 — THE READ ARM, OBSERVATIONAL for the same reason the deny-floor
-    // and egress arms are: this is a brand-new probe whose behaviour under the
-    // installed CLI is unmeasured, and design part (ii) is the proof that this
-    // fix is real rather than declared — the same falsifiable pattern, not a gate.
     token_read_contained: tokenRead.contained,
     token_read_reason: tokenRead.reason,
     token_read_succeeded: evidence.tokenReadSucceeded,
     state_read_succeeded: evidence.stateReadSucceeded,
     token_read_denial_seen: evidence.tokenReadDenialSeen,
-    // W1-T2213 — THE RE-ANCHORING ARM, OBSERVATIONAL for the same reason the
-    // token-read arm directly above is: a brand-new probe whose behaviour under
-    // the installed CLI is unmeasured, and design part (ii) is the proof that
-    // the `~/../..` re-anchoring is real rather than declared, not a gate.
     operator_home_read_contained: operatorHomeRead.contained,
     operator_home_read_reason: operatorHomeRead.reason,
     operator_home_read_succeeded: evidence.operatorHomeReadSucceeded,
     operator_home_read_denial_seen: evidence.operatorHomeReadDenialSeen,
     cost_usd: costUsd,
-    // W1-T238, WIDENED BY W1-T2249: the probe spawn's own stderr/error-result
-    // text, capped, recorded when the underlying worker call itself errored
-    // (`r.isError` — W1-T238's original rule, LOAD-BEARING AND UNCHANGED) OR on
-    // a REFUSING probe (`!verdict.contained` — this task's addition, for the
-    // `no-denial-observed` state that returned normally and so carried no
-    // transcript at all).
+    // The probe spawn's own stderr, capped, recorded when the worker call errored (`r.isError`,
+    // W1-T238's rule, unchanged) OR on a REFUSING probe (`!verdict.contained`, W1-T2249's addition
+    // for the `no-denial-observed` state that returned normally and carried no transcript).
     //
-    // THE DISJUNCTION IS LOAD-BEARING: the two arms are INDEPENDENT and neither
-    // subsumes the other. `!verdict.contained` ALONE silently DROPPED the field
-    // from the errored-but-CONTAINED quadrant (`isError` true, verdict
-    // contained — a probe that observed the OS denial and then hit a transient
-    // tool error), which is precisely the quadrant W1-T238 added the field for.
-    // That absence is not neutral: under W1-T238's convention an absent field
-    // ASSERTS "this probe spawn did not error", so dropping it reports a false
-    // state as a proven one — the exact collapse this task was filed to
-    // prevent, one predicate away from committing it in its own diff.
-    //
-    // A CLEAN probe — `!r.isError` AND `verdict.contained` — still carries no
-    // field at all, both arms being false there, so a passing run's ledger line
-    // stays exactly as it was: the property W1-T238 protects, unweakened.
+    // INVARIANT: the disjunction is load-bearing — neither arm subsumes the other.
+    // `!verdict.contained` alone dropped the field from the errored-but-CONTAINED quadrant, exactly
+    // the quadrant W1-T238 added it for. TRAP: an absent field ASSERTS "this probe spawn did not
+    // error", so dropping it reports a false state as a proven one. A CLEAN probe still carries no
+    // field, both arms being false.
     ...(r.isError || !verdict.contained ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
   if (!verdict.contained) {
-    // OBSERVED (W1-T91/P23 part i, extended by W1-T237, W1-T292, then
-    // W1-T2249): the write's OWN outcome names which of FIVE states this was,
-    // checked in this order so a spawn-dead worker (credential OR transport)
-    // can never be reported as the genuine unproven case:
-    //  1. credentialExpired — the probe worker died because a COPIED OAuth
-    //     token had EXPIRED. Named `spawn_credential_expired` distinctly from
-    //     #2 below: the operator action differs (re-mint/refresh the token vs.
-    //     log in from scratch), so the two reasons must never share a symbol.
-    //  2. credentialFailure — the probe worker died on auth (never logged in),
-    //     before it could attempt any write. Named `spawn_credential_failure`
-    //     distinctly: this proves NOTHING about isolation either way (unlock
-    //     the keychain, don't investigate the sandbox).
-    //  3. spawnTransportFailure — the probe worker died on a transport or
-    //     API-side failure (a 529, a dropped connection), before it could
-    //     attempt any write. Named `spawn_transport_failure` distinctly: this
-    //     proves NOTHING about isolation either way (retry once the API/
-    //     transport recovers, don't investigate the sandbox) — the arm this
-    //     task exists to add, a dead probe and a broken boundary no longer
-    //     share a verdict.
-    //  4. outsideWriteCreated — proven-broken (the outside write LANDED, the
-    //     sandbox did not engage) is data-bearing.
-    //  5. neither — genuinely UNPROVEN, but no longer collapsed to the eight
-    //     characters "unproven": classifyUnprovenState (W1-T1281, extended by
-    //     W1-T2201) names WHICH of four distinguishable states this was —
-    //     "turns-exhausted", "probe-never-ran", "write-never-attempted", or
-    //     "no-denial-observed" — so a `blocked_containment` ledger row (this
-    //     error's `observed` field, read by run-task.ts) can name the cause
-    //     instead of forcing a reader to re-derive it from evidence that was
-    //     never recorded in the first place.
+    // The write's OWN outcome names which of FIVE states this was, checked in this order so a
+    // spawn-dead worker (credential OR transport) is never reported as the genuine unproven case:
+    // `spawn_credential_expired` (a copied token expired), `spawn_credential_failure` (never logged
+    // in), `spawn_transport_failure` (a 529 or a dropped connection), proven-broken (the outside
+    // write LANDED), then genuinely unproven.
+    //
+    // INVARIANT: each of the first three is a distinct symbol because each names a different
+    // operator action, and none proves anything about isolation. The fifth is no longer the eight
+    // characters "unproven": classifyUnprovenState names which of four states it was, so a
+    // `blocked_containment` row read by run-task.ts can name the cause.
+    // Why: docs/forensics/containment.md#probecontainment-the-five-states
     if (evidence.credentialExpired) {
       throw new ContainmentError(
         `containment preflight: spawn_credential_expired — ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
@@ -1737,11 +1190,10 @@ export async function probeContainment(opts: {
         r.accountLabel,
       );
     }
-    // W1-T2249: checked ahead of the outside-write/unproven fallback below, for
-    // the same reason the two credential arms above are — a probe worker that
-    // died on a transport/API failure never got far enough to observe anything
-    // about the sandbox, so it must never be counted as the same "could not
-    // prove" finding a genuinely unproven probe reports.
+    // Checked ahead of the outside-write and unproven fallback below, for the same reason the two
+    // credential arms above are: a probe worker that died on a transport or API failure never got
+    // far enough to observe anything about the sandbox, so it must never be counted as the same
+    // "could not prove" finding a genuinely unproven probe reports (W1-T2249).
     if (evidence.spawnTransportFailure) {
       throw new ContainmentError(
         `containment preflight: spawn_transport_failure — ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
