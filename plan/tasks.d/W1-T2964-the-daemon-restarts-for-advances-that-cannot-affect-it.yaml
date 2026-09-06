@@ -1,0 +1,51 @@
+- id: W1-T2964
+  title: "THE DAEMON RESTARTS FOR ADVANCES THAT CANNOT AFFECT IT — freshness compares SHAS, not CONTENT, so a plan shard or a docs commit forces a full self-restart of a process whose resident module graph those paths can never change, and 45% of measured advances are exactly that"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "W1-T126", "W1-T2845", "W1-T2960"]
+  files: [src/lib/self-sync.ts, test/a-restart-is-only-warranted-by-a-material-advance.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED over the last 60 commits on origin/main, 2026-09-06:
+      touch src/, bin/ or the dependency manifest (a restart is warranted) .... 31  (51%)
+      plan/, docs/, .github/, test/, scripts/, learnings/ ONLY .................. 27  (45%)
+      other .................................................................... 2
+    NEARLY HALF OF ALL SELF-RESTARTS ARE FOR ADVANCES THAT CANNOT CHANGE WHAT THE PROCESS IS RUNNING.
+    W1-T126's restart exists so a merged fix reaches the daemon's RESIDENT module graph — the judge,
+    the linter, the drain loop, all loaded once at process start. A plan shard reaches the fleet
+    without a restart (`syncPlanFromOrigin` re-reads the plan blob at every dispatch); a docs or
+    workflow commit reaches it not at all. Restarting for those costs a boot, a 26 MB board fetch and
+    a tick, and buys nothing.
+
+    THE SIGNAL IS ALREADY IN HAND AND THE CLASSIFICATION ALREADY HAS A PRECEDENT. `DaemonFreshness`
+    is `{ stale: true, oldSha, newSha, installNeeded? }` — BOTH shas are carried, so
+    `git diff --name-only oldSha..newSha` answers materiality exactly, and `installNeeded` already
+    performs this same kind of content classification for the dependency tree. This is one more
+    predicate beside it, not a new mechanism.
+
+    THIS IS A FACT, NOT A JUDGMENT, AND MUST NOT BE ANSWERED BY AN LLM. The operator's instinct that
+    restarts are too frequent is correct and the measurement above confirms it; the remedy is
+    deterministic. "Does this advance touch src/, bin/ or the manifest" is answerable by git, exactly,
+    for free. W1-T2284 already records that an adjudicator in this repo cannot be validated by outcome
+    agreement — "indistinguishable from a rubber stamp by construction, because the null hypothesis
+    scores perfectly" — and a judge on the restart hot path would also cost a spawn and a token bill
+    per tick to answer a question `git diff` answers in milliseconds.
+
+    FAIL TOWARD RESTARTING. An unreadable diff, an unresolvable sha, a shallow clone that cannot reach
+    `oldSha` — every one must be treated as MATERIAL and restart. The cost of a needless restart is a
+    boot; the cost of a missed one is a daemon judging PRs on code that was replaced, which is
+    W1-T126's whole reason for existing.
+  acceptance:
+    - claim: "an advance touching only plan, docs or workflows does not force a restart"
+      proof: "unit test: W1-T2964: a plan-only advance is not material"
+    - claim: "an advance touching src, bin or the dependency manifest still restarts"
+      proof: "unit test: W1-T2964: a src advance is material"
+    - claim: "an unreadable or unresolvable diff is treated as material, so the daemon fails toward restarting"
+      proof: "unit test: W1-T2964: an unreadable diff fails toward material"
