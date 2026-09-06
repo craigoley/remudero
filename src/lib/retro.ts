@@ -1179,11 +1179,15 @@ export function renderReplayCalibration(r: ReplayCalibration): string {
   ].join("\n");
 }
 
+/** PRIMARY CONTROL: caps one retro pass so an OOM retry cannot re-scope a larger window. */
+export const RETRO_MAX_RUNS_PER_PASS = 40;
+
 export interface RetroGather {
   sinceTs?: string;
   totalRuns: number;
+  consumedThroughTs?: string;
+  runsDeferred: number;
   byType: TypeCalibration[];
-  /** W1-T167: per-class cost and merge rate — the measurement half of the routing hypothesis. */
   byClass: ClassCalibration[];
   /** P34 (d), W1-T250: THIS WEEK's burn by model tier. Present ONLY when `buildGather` got a
    *  `mounts` table — omission degrades the section out, never a silent empty-array zero. */
@@ -1240,6 +1244,7 @@ export function buildGather(opts: {
   ledgerNdjson: string;
   learningsMd: string;
   sinceTs?: string;
+  maxRunsPerPass?: number;
   learningsAtMarker?: number;
   /** GitHub gateway for the SHIPPED union (W1-T51/P9). Omit to fall back ledger-only. */
   github?: ShippedGithub;
@@ -1268,7 +1273,11 @@ export function buildGather(opts: {
   const records = parseLedger(opts.ledgerNdjson);
   const followupRecords = opts.followupLedgerNdjson !== undefined ? parseLedger(opts.followupLedgerNdjson) : records;
   const runs = gatherRuns(records);
-  const scoped = opts.sinceTs ? runs.filter((r) => r.startTs > opts.sinceTs!) : runs;
+  const inWindow = opts.sinceTs ? runs.filter((r) => r.startTs > opts.sinceTs!) : runs;
+  const runCap = opts.maxRunsPerPass ?? RETRO_MAX_RUNS_PER_PASS;
+  const scoped = inWindow.length > runCap ? inWindow.slice(0, runCap) : inWindow;
+  const runsDeferred = inWindow.length - scoped.length;
+  const consumedThroughTs = scoped.length > 0 ? scoped[scoped.length - 1].startTs : opts.sinceTs;
   const merged = mergedSince(runs, opts.sinceTs);
   const { shipped, discrepancies } = opts.github
     ? shippedSince(runs, opts.sinceTs, opts.github)
@@ -1282,6 +1291,8 @@ export function buildGather(opts: {
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
+    consumedThroughTs,
+    runsDeferred,
     byType: aggregateByType(scoped),
     // `shipped` is ALWAYS passed: it is the more-accurate-or-equal merge count, so the per-merge
     // figures never divide by the ledger-verdict count MASTER-PLAN says undercounts by over half.

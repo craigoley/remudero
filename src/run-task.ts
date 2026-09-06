@@ -21936,9 +21936,9 @@ async function retroCommand(
     // where the PR's real file set can be read at all.
     repairRetroChangesetClaim(prUrl, log);
 
+    const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
     // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
     // fail closed (the retro may never carry code — one concern).
-    const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
     const codeFiles = codeFilesInDiff(diff);
     if (codeFiles.length > 0) {
       log("retro.error", { error: "retro PR is NOT plan-only", code_files: codeFiles });
@@ -21949,15 +21949,36 @@ async function retroCommand(
     log("pr.opened", { pr_url: prUrl, plan_only: true });
     say(`retro PR (plan-only): ${prUrl}`);
 
-    // Advance the marker (the retro RAN — the gather is now consumed).
+    // W1-T2875 — POSITION IS DELIBERATE: BELOW the plan-only guard, not above it. An earlier draft
+    // of this task moved the advance ABOVE that guard so a code-carrying retro would still consume
+    // its window. test/retro-marker-atomic.test.ts refused it, and that file is right: it exists to
+    // hold "a plan-only violation must NEVER advance the marker" and "a mid-flight failure must
+    // NEVER leave a half-advanced marker". Marker atomicity outranks consuming the window — and the
+    // CAP already breaks the ratchet without touching it, because a bounded window means attempt
+    // N+1 is never larger than attempt N whether or not the marker moved.
+    //
+    // `ts` is the CONSUMED CURSOR, never `now()` where the cursor is newer: a capped pass hands its
+    // remainder to the next one, and stamping `now()` would jump past runs this pass never read.
+    // The comparison keeps it MONOTONIC so a stale gather can never walk the marker backwards.
+    // `marker?.ts` is undefined in TWO states -- no marker file at all, and a marker carrying no
+    // timestamp -- and for this consumer they genuinely coincide: both mean "no prior cursor to
+    // compare against". Read through an explicit `=== undefined` rather than a negated optional
+    // chain, which test/catch-erasure-ratchet.test.ts counts as a conflator: a truthiness test
+    // would ALSO swallow an empty-string ts as absent and hide a malformed marker.
+    const priorTs = marker?.ts;
+    const markerTs =
+      gather.consumedThroughTs && (priorTs === undefined || gather.consumedThroughTs > priorTs)
+        ? gather.consumedThroughTs
+        : new Date().toISOString();
     const nextMarker = {
-      ts: new Date().toISOString(),
+      ts: markerTs,
       learnings_count: gather.learningsNow,
       runs_seen: gather.totalRuns,
       mast_category_counts: gather.mast.byCategory,
     };
     saveMarker(markerPath, nextMarker);
-    log("retro.marker.advanced", nextMarker);
+    log("retro.marker.advanced", { ...nextMarker, runs_deferred: gather.runsDeferred });
+
 
     // Gate: ci green → post remudero-review → arm auto-merge.
     const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
