@@ -8,9 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 24.00
-  files:
-    - src/lib/worker-provider.ts
-    - test/worker-provider.test.ts
+  files: [src/lib/worker-provider.ts, test/worker-provider.test.ts]
   origin: "operator-session#claude-weekly-headroom-must-outweigh-short-window-pressure-2026-09-06"
   plan_refs: ["W1-T2711", "W1-T2748", "W1-T2859", "W1-T2871"]
   status: queued
@@ -61,17 +59,17 @@
     providers remain sampled by the deterministic weighted sequence.
   acceptance:
     - claim: "with Claude session usage 54%, Claude weekly usage 7% and Codex weekly usage 29%, automatic allocation uses the comparable weekly projections and assigns Claude a majority share rather than Codex's observed 72.155% share"
-      proof: "unit test: test/worker-provider.test.ts"
+      proof: "unit test: Claude allocation weighting uses comparable weekly projections"
     - claim: "Claude's five-hour session window remains in the eligibility windows, so an unreadable, invalid or reserve-bound session still excludes Claude before any allocation weight is computed"
-      proof: "unit test: test/worker-provider.test.ts"
+      proof: "unit test: Claude's five-hour session window remains a hard eligibility and reserve gate"
     - claim: "when Claude reports no weekly window, allocation falls back to the existing session window without inventing zero or full headroom and without making a readable provider unreadable"
-      proof: "unit test: test/worker-provider.test.ts"
+      proof: "unit test: Claude allocation falls back to the session window when no weekly window is reported"
     - claim: "the Claude allocation projection contains only bounded names, percentages and reset timestamps already returned by the single capacity read, with no credential or raw response data"
-      proof: "unit test: test/worker-provider.test.ts"
+      proof: "unit test: the Claude allocation projection is bounded to already-read names"
     - claim: "deterministic squared weighting, explicit provider preference, model-health routing and provider-consumption attribution remain unchanged outside the Claude allocation-window projection"
-      proof: "unit test: test/worker-provider.test.ts"
+      proof: "unit test: allocation-window projection leaves deterministic weighting and provider preference untouched"
     - claim: "the implementation adds no capacity probe, worker dispatch, retry, timer, polling, merge, build, deploy, restart or lifecycle action"
-      proof: "unit test: test/worker-provider.test.ts"
+      proof: "unit test: allocation-window projection leaves deterministic weighting and provider preference untouched"
   falsifier: |
     Close without implementation if current main already keeps Claude's five-hour window as a hard
     eligibility guard while weighting Claude-versus-Codex automatic allocation from comparable
