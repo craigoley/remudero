@@ -51,17 +51,17 @@
     is never reaped however old.
   acceptance:
     - claim: "a linked worktree reached through a symlink or platform path alias still resolves to its Git registration and a live upstream branch is kept however old"
-      proof: "real-git unit test: test/adhoc-lane-reap.test.ts"
+      proof: "grep: a live branch is never reaped, whatever spelling reached it in test/adhoc-lane-reap.test.ts"
     - claim: "the regression is deterministic on Linux CI through an explicit symlink alias and also covers macOS's default /var versus /private/var spelling when available"
-      proof: "unit test: test/adhoc-lane-reap.test.ts"
+      proof: "grep: reproduces exactly that mismatch on Linux CI in test/adhoc-lane-reap.test.ts"
     - claim: "if either side of the registration identity comparison cannot be canonicalized, the reaper records a named undecidable keep and performs no remove or prune"
-      proof: "unit test with injected filesystem failure: test/adhoc-lane-reap.test.ts"
+      proof: "grep: the keep must be NAMED as undecidable, never silently folded into another reason in test/adhoc-lane-reap.test.ts"
     - claim: "a successfully canonicalized candidate with no matching Git registration preserves the existing terminal-debris removal behavior"
-      proof: "unit test: test/adhoc-lane-reap.test.ts"
+      proof: "grep: is a PROVEN no-match in src/lib/worker.ts"
     - claim: "canonical paths are used only as comparison keys; removal, ledger fields and Git commands retain their existing original paths and parent-repository contract"
-      proof: "unit test: test/adhoc-lane-reap.test.ts"
+      proof: "grep: every removal and every ledger line still uses the original paths in src/lib/worker.ts"
     - claim: "the new alias regression fails by reaping the live lane when the production canonical-identity fix is removed, while the repaired suite passes"
-      proof: "recorded strict-TDD falsifier: test/adhoc-lane-reap.test.ts"
+      proof: "grep: registered\\.identity === candidate\\.identity in src/lib/worker.ts"
   falsifier: |
     Close without implementation if current main already compares worktree registrations by
     canonical filesystem identity and an armed, aged real-Git lane reached through a symlink alias
