@@ -1,0 +1,16 @@
+# W1-T2676 fixture, used ONLY by the duplicate-surface production-producer test in
+# test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts.
+#
+# Committed with ONE task. The test temporarily rewrites this file's on-disk copy to ADD a second
+# task whose `files:` are a strict SUBSET of this one's, then restores it byte-for-byte in a
+# `finally`. That gives `--base HEAD` a REAL changed-task diff to lint, which is the only way to
+# execute `lintPlanCommand`'s own call site rather than a fixture standing in for it.
+#
+# A DEDICATED fixture, not the shared lint-plan-status-di one: both tests rewrite their fixture on
+# disk, and two suites doing that to one file would corrupt each other under parallel test runs.
+- id: DSC-BASE
+  title: fixture task holding the wider surface (W1-T2676 producer coverage, not a real plan entry)
+  repo: remudero
+  type: implement
+  origin: "test fixture (W1-T2676 coverage, not a real plan entry)"
+  files: [src/lib/merge-hold.ts, src/run-task.ts, test/merge-hold.test.ts, docs/operator-guide.md]

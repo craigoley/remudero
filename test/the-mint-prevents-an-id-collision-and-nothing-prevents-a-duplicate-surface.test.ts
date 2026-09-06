@@ -8,6 +8,7 @@ import {
   type DuplicateSurfaceCorpusEntry,
 } from "../src/lib/task-linter.js";
 import type { Plan, Task } from "../src/lib/plan.js";
+import { creditedMergedIdsFrom, surfaceCorpusFrom } from "../src/run-task.js";
 
 // ── W1-T2676 ─────────────────────────────────────────────────────────────────────────────────
 //
@@ -299,22 +300,99 @@ test("lintPlan alone: a task that is ITSELF merged reports nothing — it is not
   assert.deepEqual(other, [], "the merged shard is not live work for its counterpart either");
 });
 
-test("KNOWN LIMIT, asserted so it cannot regress silently: the exclusion reads `status:`, which a shipped shard does not update", () => {
+test("CREDIT, not status:, is what says a shard already shipped — the case status: alone cannot see", () => {
   // `status:` is what the FILING wrote; nothing updates it on merge, and this repo has measured
-  // shards reading `queued` on main while their build had already merged. So a shard credited as
-  // merged by the trailer / `run-<id>-<digits>` head / commit-subject union — the repo's ONLY
-  // real completion signal — is still live work to this check, and is still reported.
-  //
-  // That is a FALSE POSITIVE on an advisory warning, which is the survivable direction: it names
-  // a pair a human then rules on, and the message says how to clear it. Silently widening the
-  // exclusion would be the unsurvivable one — a real duplicate going unreported. The credit-aware
-  // corpus needs a git-scoped read no `lintPlan` caller performs today, so it is named here and
-  // in the PR body rather than half-built behind an injected seam with no production producer.
+  // shards reading `queued` on main while their build had already merged. Without a credit set,
+  // that landed shard is still live work to this check and is still reported.
   const shippedButUnmarked = planOf([
     task({ id: "W1-T2581", files: [...SEVEN] }), // merged in fact; `status:` never updated
     task({ id: "W1-T2589", files: [...FOUR_SUBSET] }),
   ]);
-  const v = lintPlan(shippedButUnmarked).get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface");
-  assert.equal(v.length, 1, "documents today's behaviour: credit is invisible here, only status: is read");
-  assert.equal(v[0]!.severity, "warn", "and it is advisory, so the false positive is a prompt for a human, not a refusal");
+  const withoutCredit = lintPlan(shippedButUnmarked).get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.equal(withoutCredit.length, 1, "status: alone cannot see credit — this is the false positive");
+
+  // Given the credit projection, the same plan reports nothing. One input is the whole difference.
+  const withCredit = duplicateSurfaceViolations(task({ id: "W1-T2589", files: [...FOUR_SUBSET] }), {
+    openTaskSurfaces: corpus({ id: "W1-T2581", files: SEVEN, status: "queued" }),
+    mergedTaskIds: new Set(["W1-T2581"]),
+  });
+  assert.deepEqual(withCredit, [], "a candidate CREDITED as merged is history, whatever its shard still says");
+});
+
+test("a task CREDITED as merged reports nothing on its own side either", () => {
+  const v = duplicateSurfaceViolations(task({ id: "W1-T2589", files: [...FOUR_SUBSET] }), {
+    openTaskSurfaces: corpus({ id: "W1-T2581", files: SEVEN, status: "queued" }),
+    mergedTaskIds: new Set(["W1-T2589"]),
+  });
+  assert.deepEqual(v, [], "a shipped shard is not competing for a dispatch slot, credited or marked");
+});
+
+test("the credit set only ever NARROWS — an empty one, or an id it does not name, changes nothing", () => {
+  // A credit set is an exclusion list, never an admission one: it must not make the check fire on
+  // something `status:` had already ruled out, and it must not silence an unrelated pair.
+  const base = { openTaskSurfaces: corpus({ id: "W1-T2581", files: SEVEN, status: "queued" }) };
+  const mine = task({ id: "W1-T2589", files: [...FOUR_SUBSET] });
+  assert.equal(duplicateSurfaceViolations(mine, { ...base, mergedTaskIds: new Set() }).length, 1, "an empty credit set is the uncredited behaviour exactly");
+  assert.equal(duplicateSurfaceViolations(mine, { ...base, mergedTaskIds: new Set(["W1-T9999"]) }).length, 1, "an unrelated id changes nothing");
+
+  // And it never RESURRECTS a pair `status:` already excluded.
+  const statusMerged = { openTaskSurfaces: corpus({ id: "W1-T2581", files: SEVEN, status: "merged" }) };
+  assert.deepEqual(duplicateSurfaceViolations(mine, { ...statusMerged, mergedTaskIds: new Set() }), [], "status: merged stays excluded under an empty credit set");
+});
+
+test("the offline linter stays offline: lintPlan supplies no credit set, so its behaviour is unchanged and network-free", () => {
+  // W1-T367 ruled `rmd lint-plan`'s whole-plan pass stays an OFFLINE, DETERMINISTIC linter, so
+  // credit awareness must NOT leak into the default. `lintPlan` derives a corpus and no credit
+  // set; the credit read lives only where `projectPlan` is already resolved (lintPlanCommand's
+  // `--base` pass). This asserts that boundary rather than trusting it.
+  const plan = planOf([task({ id: "W1-T2581", files: [...SEVEN] }), task({ id: "W1-T2589", files: [...FOUR_SUBSET] })]);
+  const v = lintPlan(plan).get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.equal(v.length, 1, "the network-free default still reports on status: alone — deterministic, no projection consulted");
+});
+
+// ── the production producer: what lintPlanCommand's --base pass actually supplies ──────────────
+//
+// Everything above hands `mergedTaskIds` in by hand. That proves the exclusion WORKS; it does not
+// prove anything real ever supplies it — the exact gap that left this criterion unmet twice. The
+// supplier is `lintPlanCommand`'s `--base` pass, which already resolves `projectPlan`'s batched
+// projection for `postMergeAmendment.merged`. Both derivations are exported so they can be driven
+// here directly rather than only from inside a CLI.
+
+test("surfaceCorpusFrom derives the corpus from the plan every caller already holds", () => {
+  const plan = planOf([task({ id: "W1-T2581", files: [...SEVEN] }), task({ id: "W1-T2589", files: [...FOUR_SUBSET], status: "merged" })]);
+  assert.deepEqual(surfaceCorpusFrom(plan), [
+    { id: "W1-T2581", files: SEVEN, status: "queued" },
+    { id: "W1-T2589", files: FOUR_SUBSET, status: "merged" },
+  ]);
+
+  // ...and it feeds the real check: the corpus this produces reports the observed pair.
+  const v = duplicateSurfaceViolations(task({ id: "W1-T2589", files: [...FOUR_SUBSET] }), { openTaskSurfaces: surfaceCorpusFrom(plan) });
+  assert.equal(v.length, 1, "the derived corpus is the one the check actually consumes");
+});
+
+test("creditedMergedIdsFrom reads projectPlan's projection — merged in, unmerged out", () => {
+  const proj = (merged: boolean, indeterminate = false) => ({ merged, indeterminate }) as never;
+  const ids = creditedMergedIdsFrom(
+    new Map([
+      ["W1-T2581", proj(true)],
+      ["W1-T2589", proj(false)],
+    ]),
+  );
+  assert.deepEqual([...ids!].sort(), ["W1-T2581"]);
+});
+
+test("an INDETERMINATE projection is not credited — a rate-limited read must not resurrect a landed shard as live work", () => {
+  // The failure this excludes: a mid-batch auth/rate-limit failure reads as "not merged", the
+  // landed shard re-enters the corpus, and the check reports it against live work. Same per-task
+  // fail-open `postMergeAmendment` already applies to this projection.
+  const proj = (merged: boolean, indeterminate = false) => ({ merged, indeterminate }) as never;
+  const ids = creditedMergedIdsFrom(new Map([["W1-T2581", proj(true, true)]]));
+  assert.deepEqual([...ids!], [], "merged but indeterminate is not credit");
+});
+
+test("no projection is not an empty projection — absent means `read status: alone`, and that is what keeps the offline pass offline", () => {
+  assert.equal(creditedMergedIdsFrom(undefined), undefined, "undefined in, undefined out — never a silently-empty set");
+  // The distinction is load-bearing: an empty SET would still be a credit answer, and collapsing
+  // the two would make the network-free pass claim it had consulted a projection it never read.
+  assert.deepEqual([...creditedMergedIdsFrom(new Map())!], [], "an empty map IS a resolved answer, and it is empty");
 });

@@ -2006,7 +2006,9 @@ function surfaceOf(files: readonly string[] | undefined): string[] {
 export function duplicateSurfaceViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const corpus = opts.openTaskSurfaces;
   if (!corpus || corpus.length === 0) return [];
-  if (DUPLICATE_SURFACE_INERT_STATUSES.has(task.status)) return [];
+  // Inert by EITHER signal. `status:` is what the filing wrote; credit is what actually shipped.
+  const creditedMerged = opts.mergedTaskIds;
+  if (DUPLICATE_SURFACE_INERT_STATUSES.has(task.status) || creditedMerged?.has(task.id)) return [];
 
   const mine = surfaceOf(task.files);
   if (mine.length === 0) return [];
@@ -2016,6 +2018,9 @@ export function duplicateSurfaceViolations(task: Task, opts: LintOpts = {}): Lin
   for (const other of corpus) {
     if (other.id === task.id) continue;
     if (other.status && DUPLICATE_SURFACE_INERT_STATUSES.has(other.status)) continue;
+    // A candidate credited as merged is history even when its shard still reads `queued` —
+    // the case `status:` alone cannot see, and the one this check kept false-positiving on.
+    if (creditedMerged?.has(other.id)) continue;
     const theirs = surfaceOf(other.files);
     if (theirs.length === 0) continue;
     const theirSet = new Set(theirs);
@@ -2279,6 +2284,14 @@ export interface LintOpts {
    *  shard already answered. Absent or empty ⇒ silent. */
   /** Other shards' declared surfaces, for {@link duplicateSurfaceViolations}. Absent ⇒ silent. */
   openTaskSurfaces?: readonly DuplicateSurfaceCorpusEntry[];
+  /** Task ids CREDITED as merged — the GitHub-derived projection (`projectPlan`), NOT a `status:`
+   *  field read. A shard that shipped keeps `status: queued` (nothing updates it on merge), so
+   *  `status:` alone reports landed work as a live duplicate. Supplied ONLY by
+   *  `lintPlanCommand`'s `--base` pass, which already resolves that projection for
+   *  `postMergeAmendment.merged` — no new network call, no new git read. Absent everywhere else,
+   *  which is deliberate: W1-T367 ruled `rmd lint-plan` stays an OFFLINE, DETERMINISTIC linter,
+   *  so the network-free default keeps reading `status:` alone and this only ever narrows. */
+  mergedTaskIds?: ReadonlySet<string>;
   openTaskRecords?: readonly DuplicateAnswerCorpusEntry[];
   /** Jaccard cutoff for {@link unansweredDuplicateTitleViolations}. Default {@link
    *  NEAR_IDENTITY_DUPLICATE_CUTOFF}. */
