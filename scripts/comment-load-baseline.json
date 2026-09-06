@@ -130,7 +130,7 @@
   "src/lib/dispatch-claim.ts": 271,
   "src/lib/dispatch-governor.ts": 103,
   "src/lib/dispatch-overlap.ts": 150,
-  "src/lib/doctor.ts": 367,
+  "src/lib/doctor.ts": 168,
   "src/lib/drain-lock.ts": 40,
   "src/lib/drain.ts": 591,
   "src/lib/emissions.ts": 113,
