@@ -1,0 +1,50 @@
+- id: W1-T2987
+  title: "REVIEW WIDENING DEPENDS ON A PROVIDER SNAPSHOT ONLY A WORKER SPAWN REFRESHES, SO IT GOES STALE EXACTLY WHEN WIDENING MATTERS — telemetry-unavailable is the single largest capacity reason at 347 occurrences and pins effective_width at the floor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: architect
+  plan_refs: ["W1-T2519", "W1-T2853", "W1-T2985"]
+  files: [src/lib/review-capacity.ts, src/lib/provider-routing-status.ts, test/review-widening-survives-a-quiet-provider-snapshot.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED across the full ledger union, 670 `review.capacity` rows by reason:
+      telemetry-unavailable ... 347   <- LARGEST
+      cpu-pressure ............ 111   (W1-T2985 fixes this one)
+      backlog-not-sustained ... 103
+      host-worker-budget ...... 22
+    and the effective_width histogram is `{1: 310, 2: 289}` — the floor more often than the base.
+
+    THE MISSING INPUT IS NOT HOST TELEMETRY. From the newest such row (2026-09-06T21:42:08):
+      cpu_psi_some_avg10_pct 3.16 | mem_available_mib 26516 | memory_psi_some_avg10_pct 0
+      provider_fresh False | provider_readable False | provider_headroom_pct None
+      provider_reserve_pct None | provider_status_age_ms 263410
+    Host CPU and memory read fine. `selectAdaptiveReviewWidth`'s `telemetryAvailable` gate also
+    requires `provider.fresh`, `provider.readable` and finite headroom/reserve, so the provider
+    snapshot alone withholds every scale-up.
+
+    THE SNAPSHOT IS CIRCULAR. `state/provider-routing-status.json` carries
+    `freshUntil = observedAt + 60s` and is written by the provider-selection path — i.e. WHEN A
+    WORKER SPAWNS. During a long build no worker spawns, so the snapshot expires 60 seconds in and
+    stays expired for the half hour that follows. Review widening therefore depends on a signal that
+    only the work whose absence makes widening matter can refresh. Measured on the host: the file
+    exists, is well-formed, and its mtime was 22:14:41 with `freshUntil 22:15:41` while the read at
+    22:35 reported it unusable.
+
+    THE BUILD MUST NOT SIMPLY WIDEN THE FRESHNESS BOUND. That trades one arbitrary number for
+    another and still fails on a longer build. Candidate shapes: refresh the snapshot on the
+    capacity sampler's own cadence rather than on spawn; or separate "provider refused" (a real
+    signal that must block scale-up) from "provider not sampled recently" (an absence that should
+    not); or let host telemetry alone authorise the base width while provider telemetry gates only
+    the third lane. A CONTROL IS REQUIRED EITHER WAY: a genuinely refusing provider must still
+    prevent widening, or this fix trades a starved reviewer for an overdrawn account.
+  acceptance:
+    - claim: "a quiet but healthy provider snapshot no longer withholds review widening"
+      proof: "unit test: W1-T2987: a stale-but-unrefused provider snapshot still permits the base width"
+    - claim: "a provider that genuinely refuses still blocks widening"
+      proof: "unit test: W1-T2987: a refusing provider still blocks widening"
