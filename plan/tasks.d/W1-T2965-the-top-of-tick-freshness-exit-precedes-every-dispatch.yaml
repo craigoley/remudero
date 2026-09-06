@@ -1,0 +1,69 @@
+- id: W1-T2965
+  title: "THE TOP-OF-TICK FRESHNESS EXIT PRECEDES EVERY DISPATCH, SO A DAEMON THAT RESTARTS FASTER THAN IT BOOTS NEVER REACHES THE ADMISSION GATE AT ALL — 33 consecutive containers ended `idle ticks: 0`, and W1-T2960's fix sits downstream of the exit that prevents it running"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "W1-T126", "W1-T936", "W1-T2845", "W1-T2960", "W1-T312"]
+  files: [src/lib/daemon.ts, test/the-top-of-tick-freshness-exit-precedes-every-dispatch.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2960 (#4274) FIXED THE WRONG HALF, AND THE FLEET STILL BUILDS NOTHING. That task made the
+    PRE-ADMISSION re-read defer when a batch was already selected. It merged at 2026-09-06T17:23:18Z
+    and the daemon picked it up immediately — `git merge-base --is-ancestor` puts the fix commit
+    inside the running checkout, and the container reports 0 commits behind. Dispatch did not resume.
+    Measured at 17:35Z, after the fix was live: `run.start` rows since the merge = 0, of which
+    `lane=run-task` = 0, and `daemon.freshness_deferred` — the row W1-T2960 added — has NEVER been
+    written.
+
+    THE REASON THAT ROW NEVER FIRES IS THAT CONTROL NEVER REACHES IT. There are TWO stale exits in
+    the loop, not one. `stopForFreshness` is called from `daemon.ts` at the TOP OF THE TICK, directly
+    after the PAUSE check and BEFORE the sweep and before dispatch; W1-T2960's guarded call site is
+    far below, at the admission gate. The top exit is unconditional. A process that observes a stale
+    main on its FIRST iteration returns before selecting anything, so the admission gate — and its
+    new deferral — is dead code on every one of these lifetimes.
+
+    THE LOG SAYS SO IN ONE FIELD, REPEATED. Read off `docker logs` for one window, 33 consecutive
+    container lifetimes:
+      `### rmd daemon — SELF-HOSTING` boots ....... 33
+      `stopped   : stale` ......................... 33
+      `idle ticks: 0` ............................. 33   (EVERY lifetime, without exception)
+      `exited 75 (freshness)` restarts ............ 28 → 33, climbing
+    `idle ticks: 0` is the whole finding: not one tick completed. The daemon is not choosing badly
+    between candidates — it never gets far enough to have candidates.
+
+    AND THIS IS WHY THE OUTAGE LOOKED LIKE A HEALTHY FLEET FOR TWO DAYS. `stopForFreshness` runs a
+    bounded `runGatedSweep` ON ITS WAY OUT (W1-T1272). So every restart REVIEWS AND MERGES, and only
+    dispatch is skipped. PRs kept merging — #4272, #4274, #4277 all landed during this window — while
+    zero builds started. Every "is the daemon alive" signal reads from the half that still runs.
+
+    THE RACE IS BOOT TIME AGAINST MERGE RATE, AND ON THIS REPO BOOT LOSES. The daemon syncs to
+    origin/main, then boots; between the sync and the loop's first freshness read, its own sweep-side
+    merges (and any other lane's) advance main. Restart cadence measured at roughly one per four
+    minutes, which is comfortably faster than this repo merges. Once main advances during boot, the
+    daemon can never complete a tick — the condition is self-sustaining, not transient.
+
+    THE INVARIANT TO ADD IS FORWARD PROGRESS, AND IT IS NOT A TUNED BOUND. A process that has
+    completed no cycle makes no progress no matter how fresh the code it would restart onto is;
+    restarting it is strictly worse than letting it work once. So the top-of-tick exit must not
+    preempt a lifetime that has not yet completed a tick. This is DELIBERATELY NOT a timer, a retry
+    budget or a backoff — those are the "bound that fires on a healthy condition" family (W1-T312,
+    W1-T380, W1-T382) and would need sizing against a merge rate that changes. It must also NOT
+    weaken W1-T936: PAUSE and STOP still win, and the deferral must be bounded to a single cycle so
+    a stale process cannot run forever — after one tick the existing exit applies unchanged.
+
+    DO NOT SOLVE THIS BY DELETING THE TOP CHECK. It is the three-clocks guard (W1-T126): the judge,
+    the linter and the drain loop live in the daemon's resident module graph and only a restart
+    reloads them. What is wrong is its PRIORITY over the very first cycle, not its existence.
+  acceptance:
+    - claim: "the top-of-tick stale exit does not fire on a lifetime that has completed no tick, so the cycle reaches dispatch"
+      proof: "unit test: W1-T2965: a stale main on the first tick does not exit before dispatch"
+    - claim: "the deferral is bounded to one cycle, so a stale daemon exits at the top once a cycle has completed"
+      proof: "unit test: W1-T2965: a stale main exits at the top of the tick once a cycle has completed"
+    - claim: "PAUSE still outranks the deferral, so W1-T936's relaunch-storm guard is not weakened"
+      proof: "unit test: W1-T2965: pause still wins over a first-tick freshness deferral"
