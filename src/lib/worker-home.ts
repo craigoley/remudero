@@ -287,15 +287,14 @@ export function sweepClaudeConfigBackups(
   return { removed, kept };
 }
 
-/** `lstat`, not `stat`: a SYMLINK named `.git` must be judged as itself, never followed. Unreadable
- *  degrades to "not a directory", which {@link isRepositoryShaped} then treats as a worktree pointer
- *  — the fail-closed direction. */
+/** `lstat`, not `stat`: a SYMLINK named `.git` must be judged as itself, never followed.
+ *  `throwIfNoEntry: false` rather than a catch — a vanished entry answers "not a directory", which
+ *  {@link isRepositoryShaped} reads as a worktree pointer and DISQUALIFIES, the fail-closed
+ *  direction. A genuine read error (EACCES) still throws and reaches the caller: refusing loudly is
+ *  this guard's contract, and swallowing it here would erase the one signal saying the answer is
+ *  unknown. */
 function defaultIsDirectory(path: string): boolean {
-  try {
-    return lstatSync(path).isDirectory();
-  } catch {
-    return false;
-  }
+  return lstatSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false;
 }
 
 /** Is this `.git` entry actually a repository? A linked worktree's `.git` is a FILE carrying a
