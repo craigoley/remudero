@@ -1,4 +1,4 @@
-- id: W1-T2972
+- id: W1-T2977
   title: "LAW 5 REFUSES EVERY MACHINE-AUTHORED RECORD WHERE IT SHOULD JUDGE ONE — machineAuthorVerifyViolation blocks author_class:machine at verify:auto unconditionally, so a benign drafted shard is parked exactly as hard as a dangerous one; gate it on a RECORDED risk-judge ruling pinned to the record it judged, fail-closed when no ruling exists"
   repo: remudero
   depends_on: []

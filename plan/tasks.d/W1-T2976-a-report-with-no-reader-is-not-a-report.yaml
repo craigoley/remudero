@@ -1,4 +1,4 @@
-- id: W1-T2971
+- id: W1-T2976
   title: "A REPORT WITH NO READER IS NOT A REPORT — digestCadence fires daily into inboxNotifyChannel, the console mailbox W1-T2497 has not built, while notify.ts's only adapter is osascript and reports itself unavailable on every non-darwin host; add an email NotifyChannel so a report the fleet already writes reaches a person"
   repo: remudero
   depends_on: []
