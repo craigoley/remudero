@@ -1,0 +1,77 @@
+- id: W1-T2946
+  title: "a Codex semantic reviewer cannot run tests because its read-only sandbox also makes its private TMPDIR read-only"
+  repo: remudero
+  depends_on: [W1-T2868]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  files:
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - src/run-task.ts
+    - test/codex-disposable-review-sandbox.test.ts
+    - test/codex-reviewer-production-wiring.test.ts
+  origin: "operator-session#codex-reviewer-tmpdir-read-only-2026-09-06"
+  plan_refs: ["W1-T2748", "W1-T2868"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #4175 AT HEAD 8915d71053bac2fa5d6b8cca13ff35eebc822120: every GitHub
+    check was green, but `remudero-review` failed after the Codex semantic reviewer tried to run
+    `test/board-snapshot-cache.test.ts`. The raw Codex session transcript recorded seven test
+    failures at `mkdtempSync`, each with `EROFS: read-only file system, mkdtemp
+    '/tmp/rmd-board-snapshot-XXXXXX'`. The reviewer then followed its fail-closed prompt and
+    downgraded the test-backed criteria. Production code and the deterministic proof floor did not
+    fail; the reviewer environment prevented ordinary tests from running.
+
+    W1-T2868 correctly gives the reviewer a disposable exact-head Git clone and verifies it is
+    clean after the reviewer returns. It also preserved Codex `--sandbox read-only`, treating the
+    absence of Claude write tools as equivalent to a filesystem that can run tests. That provider
+    assumption is false: Claude's read-only tool surface still permits test scratch writes, while
+    Codex's read-only filesystem sandbox does not.
+
+    The falsifier was checked against the deployed Azure pin, Codex CLI 0.152.0. In a temporary Git
+    repository, `codex exec --sandbox workspace-write --add-dir <private-tmp>` wrote and verified
+    an exact three-byte file under its private TMPDIR, left the repository clean, returned
+    `PROOF: PASS`, and exited zero. The same production transcript proves read-only fails. Both
+    temporary directories were removed. No repository, PR status, container or configuration was
+    changed by the diagnostic.
+  design: |
+    Add one explicit provider-neutral spawn intent for a test-capable disposable review. Set it
+    only at `runReview` after W1-T2868 has materialized the exact-head disposable clone. Keep the
+    Claude tool allowlist and Claude spawn path unchanged.
+
+    In the Codex adapter only, map that intent to `workspace-write`, add only the per-spawn private
+    TMPDIR as an extra writable directory, and do not grant network access or writable Git metadata
+    roots. The primary workspace may be writable because it is the disposable clone; preserve
+    `assertReviewerSnapshotIntegrity` after semantic parsing so a dirty or moved checkout discards
+    the advisory result. Ordinary read-only specialists and isolation probes remain read-only.
+    Implementation workers keep their existing workspace-write, network and Git-root contract.
+
+    Prove the production `runReview` call site, exact Codex argv, private TMPDIR lifetime, absent
+    network grant, absent Git-root grant, and the read-only contrast through containment spawn
+    recorders. Delete the intent at the call site to prove the regression test fails.
+  acceptance:
+    - claim: "only the exact-head disposable semantic reviewer requests the test-capable sandbox intent, while its Claude inspection-tool contract is unchanged"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "Codex maps that intent to workspace-write with only the private TMPDIR added, without network access or writable Git metadata roots"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "ordinary read-only Codex specialists remain read-only and implementation workers retain their existing workspace-write contract"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "the disposable review checkout and private writable TMPDIR are removed after the review, and the source checkout remains exact and clean"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+    - claim: "deleting the explicit intent restores the read-only argv and fails the production wiring proof"
+      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+  falsifier: |
+    Close this task without implementation if the raw #4175 Codex transcript shows its failing
+    tests could write their scratch directories, or if Codex CLI 0.152.0 can run those tests under
+    the current read-only sandbox. Otherwise, delete `sandboxIntent: "disposable-review"` from the
+    final production call site and require the focused test to move from zero failures to at least
+    one, then restore it and require zero failures.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` initially printed the stale advisory W1-T2933,
+    then atomically held W1-T2946 after skipping the live reservations through W1-T2945. The
+    reservation commit is `663f642` on `refs/rmd-id/W1-T2946`; the held id, not the advisory line,
+    is authoritative.
