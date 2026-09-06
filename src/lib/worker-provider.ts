@@ -391,6 +391,12 @@ export function claudeCapacityFromUsage(
   accountLabel?: string,
 ): ProviderCapacity {
   if (!snapshot) return { provider: "claude", readable: false, windows: [], detail: "capacity unreadable" };
+  const weeklyWindows: ProviderCapacityWindow[] = snapshot.weekly.map((window) => ({
+    name: `weekly (${window.label})`,
+    usedPercent: window.percentUsed,
+    resetsAt: window.resetsAt,
+  }));
+  const validWeeklyWindows = weeklyWindows.filter(validCapacityWindow);
   return {
     provider: "claude",
     readable: true,
@@ -399,12 +405,9 @@ export function claudeCapacityFromUsage(
     ...(accountLabel ? { accountLabel } : {}),
     windows: [
       { name: "session (5h)", usedPercent: snapshot.session.percentUsed, resetsAt: snapshot.session.resetsAt },
-      ...snapshot.weekly.map((window) => ({
-        name: `weekly (${window.label})`,
-        usedPercent: window.percentUsed,
-        resetsAt: window.resetsAt,
-      })),
+      ...weeklyWindows,
     ],
+    ...(validWeeklyWindows.length > 0 ? { allocationWindows: validWeeklyWindows } : {}),
   };
 }
 

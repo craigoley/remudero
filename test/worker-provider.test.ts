@@ -371,6 +371,99 @@ test("Claude usage maps every reported subscription window", () => {
   assert.deepEqual(mapped.windows.map((window) => window.usedPercent), [12, 34]);
 });
 
+// W1-T2949 — short-window pressure masking Claude's weekly headroom.
+test("Claude allocation weighting uses comparable weekly projections, not the five-hour session window", () => {
+  const claude = claudeCapacityFromUsage({
+    billingMode: "subscription",
+    session: { percentUsed: 54, resetsAt: "soon" },
+    weekly: [
+      { label: "all models", percentUsed: 7, resetsAt: "next week" },
+      { label: "Opus", percentUsed: 5, resetsAt: "next week" },
+    ],
+  });
+  const codex: ProviderCapacity = { provider: "codex", readable: true, windows: [{ name: "codex weekly", usedPercent: 29 }] };
+
+  // The fleet-observed shape: Claude 54% session / 7% weekly vs Codex 29% weekly used to hand
+  // Codex a 72.155% share by comparing Claude's five-hour remainder against Codex's weekly
+  // remainder. Comparable weekly projections must flip that to a Claude majority instead.
+  const selected = selectWorkerProvider([claude, codex], 5, 0);
+  assert.equal(selected.provider, "claude");
+  // Codex's observed share, on the OLD five-hour-vs-weekly comparison, was 72.155% — i.e. Claude
+  // held only ~27.845%. The comparable weekly projection must invert that into a Claude majority.
+  assert.ok(
+    (selected.allocationSharePercent ?? 0) > 50,
+    `expected a Claude majority (was Codex 72.155%), got ${JSON.stringify(selected)}`,
+  );
+});
+
+test("Claude's five-hour session window remains a hard eligibility and reserve gate", () => {
+  const exhaustedSession = claudeCapacityFromUsage({
+    billingMode: "subscription",
+    session: { percentUsed: 96, resetsAt: "soon" },
+    weekly: [{ label: "all models", percentUsed: 7, resetsAt: "next week" }],
+  });
+  const codex = capacity("codex", 50);
+  // A reserve-bound five-hour session excludes Claude before any allocation weight is computed,
+  // even though its weekly projection alone shows plenty of headroom.
+  assert.equal(selectWorkerProvider([exhaustedSession, codex], 5, 0).provider, "codex");
+
+  const unreadable: ProviderCapacity = { provider: "claude", readable: false, windows: [], detail: "offline" };
+  assert.equal(selectWorkerProvider([unreadable, codex], 5, 0).provider, "codex");
+
+  const invalidSession: ProviderCapacity = {
+    ...claudeCapacityFromUsage({
+      billingMode: "subscription",
+      session: { percentUsed: 12, resetsAt: "soon" },
+      weekly: [{ label: "all models", percentUsed: 7, resetsAt: "next week" }],
+    }),
+    windows: [{ name: "session (5h)", usedPercent: Number.NaN }, { name: "weekly (all models)", usedPercent: 7 }],
+  };
+  assert.equal(selectWorkerProvider([invalidSession, codex], 5, 0).provider, "codex");
+});
+
+test("Claude allocation falls back to the session window when no weekly window is reported", () => {
+  const noWeekly = claudeCapacityFromUsage({
+    billingMode: "subscription",
+    session: { percentUsed: 40, resetsAt: "soon" },
+    weekly: [],
+  });
+  assert.equal(noWeekly.allocationWindows, undefined);
+  assert.equal(noWeekly.readable, true, "an absent weekly window must not make a readable provider unreadable");
+
+  const codex = capacity("codex", 40);
+  const selected = selectWorkerProvider([noWeekly, codex], 5, 0);
+  // Neither provider dominates once Claude falls back to its own 60%-remaining session window,
+  // and that fallback is neither invented zero headroom (which would exclude Claude) nor invented
+  // full headroom (which would always win Claude the tie).
+  assert.equal(selected.tightestRemainingPercent, 60);
+});
+
+test("the Claude allocation projection is bounded to already-read names, percentages, and reset timestamps", () => {
+  const mapped = claudeCapacityFromUsage({
+    billingMode: "subscription",
+    session: { percentUsed: 54, resetsAt: "soon" },
+    weekly: [{ label: "all models", percentUsed: 7, resetsAt: "next week" }],
+  });
+  assert.deepEqual(mapped.allocationWindows, [{ name: "weekly (all models)", usedPercent: 7, resetsAt: "next week" }]);
+  for (const window of mapped.allocationWindows ?? []) {
+    assert.deepEqual(Object.keys(window).sort(), ["name", "resetsAt", "usedPercent"]);
+  }
+});
+
+test("Claude's allocation-window projection leaves deterministic weighting and provider preference untouched", () => {
+  // Squared weighting and provider-preference behavior are covered directly by the existing
+  // "automatic provider routing" and "explicit provider preference" tests above, which pass
+  // unmodified against this change — this test only pins that a Claude capacity WITHOUT a weekly
+  // allocation projection still drives `selectWorkerProvider` through the unchanged fallback path
+  // (`providerAllocationWindows`) rather than a new code path added elsewhere in the selector.
+  const legacyClaude = capacity("claude", 55);
+  assert.equal(legacyClaude.allocationWindows, undefined);
+  const codex = capacity("codex", 12);
+  const selected = selectWorkerProvider([legacyClaude, codex], 5, 0);
+  assert.equal(selected.provider, "codex");
+  assert.equal(selected.allocationWeight, (88 - 5) ** 2);
+});
+
 test("Claude capacity reads, caches, and tears down a control-only SDK session", async () => {
   clearClaudeCapacityCache();
   let opens = 0;
