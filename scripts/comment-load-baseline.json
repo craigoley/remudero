@@ -22,7 +22,7 @@
   "deploy/Dockerfile": 150,
   "deploy/codex-requirements.toml": 3,
   "deploy/container-runtime-contract.sh": 13,
-  "deploy/entrypoint.sh": 550,
+  "deploy/entrypoint.sh": 218,
   "deploy/host-update.sh": 463,
   "deploy/install-container-runtime-mount-order.sh": 101,
   "deploy/install-host-units.sh": 92,
