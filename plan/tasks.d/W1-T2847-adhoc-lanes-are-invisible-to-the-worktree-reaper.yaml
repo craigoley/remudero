@@ -166,3 +166,44 @@
     are too pessimistic. The console account's Claude Code transcripts are mode 0700 and were not
     readable, so that half of the population was never observed at all; every creation count in
     rationale (4) is therefore a FLOOR.
+
+    ── AMENDMENT 2026-09-06: THE RUNG IS BUILT AND DISARMED, AND ITS ROOT IS EMPTY ──
+
+    THIS TASK'S MECHANISM ALREADY SHIPPED. `runAdhocLaneReapRung` (src/lib/worker.ts) exists, is
+    called from run-task.ts, delegates to `reapStaleWorktrees`, and carries acceptance 2/3/4a/4b in
+    test/adhoc-lane-reap.test.ts. Anyone reading this shard fresh should NOT build a reaper.
+
+    IT RECLAIMS NOTHING TODAY, FOR THREE SEPARATE REASONS, ALL MEASURED 2026-09-06:
+
+    (a) DISARMED BY DESIGN. `enabled` defaults to false, so the pass runs `dryRun` and ledgers what
+        it WOULD reclaim. That is deliberate and correct — survey-first.
+
+    (b) NO ARMING LEVER EXISTS. The call site is `runAdhocLaneReapRung(config, log, { repoDir })` —
+        it passes no `enabled` at all, so the seam can never read anything but its default. Arming
+        is documented as "a separate operator decision", but there is no policy row, env var or flag
+        an operator could flip. Arming therefore requires a code change, not a configuration one.
+
+    (c) ITS ROOT DOES NOT EXIST AND NOTHING WRITES TO IT. `adhocLaneRoot` is
+        `join(config.root, "lanes")` — deliberately NOT config.root itself, because a reaper pointed
+        there would walk live worktrees and non-worktree entries alike (the 2026-07-31 failure this
+        whole line of work exists to avoid). On the Mac host `~/Remudero/lanes` DOES NOT EXIST, and
+        `rmd ledger-grep adhoc_lane.reap` returns ZERO rows — the survey has never once fired.
+
+    THE GAP IS BETWEEN THE CODE AND THE PRACTICE, NOT INSIDE THE CODE. CLAUDE.md carries no
+    worktree-placement guidance at all now (`grep -c 'lanes/' CLAUDE.md` = 0; the rule that once
+    said "cut worktrees elsewhere, e.g. ~/Remudero/<name>-work" is no longer present after the
+    comment/doc compaction programme). So every hand-cut lane lands directly under config.root,
+    where the reaper deliberately will not look. MEASURED: 173 worktrees under config.root, of which
+    the reaper's actual root held none. The author of this amendment cut six more the same way
+    while investigating, which is how strong the pull of the missing convention is.
+
+    SO THE REMAINING WORK IS THREE SMALL THINGS, NOT A REAPER: (i) make `lanes/` the documented and
+    used location, (ii) give `enabled` something an operator can actually set, (iii) then arm it.
+
+    POPULATION CLEARED BY HAND SINCE FILING. An operator-approved pass removed 132 dead-and-clean
+    worktrees through `git worktree remove` (branch absent from `git ls-remote --heads origin`,
+    clean tree): 173 -> 38 worktrees, free space 9.3GiB -> 13GiB, 0 refusals, 0 prunable records.
+    Verified afterwards: 132/132 branch refs still resolve and 132/132 HEAD commits are still in the
+    object store, because `git worktree remove` deletes the checkout and not the ref. A recovery
+    manifest was written first. An implementer measuring this host today therefore finds a SMALL
+    population; the accumulation RATE in rationale (4) is the thing to size against, not the count.
