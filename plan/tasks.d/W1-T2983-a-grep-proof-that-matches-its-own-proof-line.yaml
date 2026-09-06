@@ -1,0 +1,114 @@
+- id: W1-T2983
+  title: "A GREP PROOF NAMING ITS OWN SHARD MATCHES ITS OWN PROOF LINE, SO 167 OF 168 SUCH PROOFS CERTIFY THEMSELVES — 23 of them pin nothing but their own text, no gate can see it, and the self-match actively hides three real warnings from a check that already knows how to describe them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  rationale: |
+    **THE MECHANISM IS CONSTRUCTION, NOT CARELESSNESS.** parseDialectGrep takes a grep proof's
+    pattern as everything before the trailing " in <path>", so the pattern is by definition a
+    literal substring of the proof line that carries it. When the target path is the shard's own
+    yaml, that proof line lives inside the file the pattern searches. The proof therefore matches
+    itself, and it does so before it matches anything it was written to pin.
+
+    **ONE HUNDRED AND SIXTY-SEVEN OF ONE HUNDRED AND SIXTY-EIGHT.** Across the live plan at
+    c51d944e — plan/tasks.yaml merged with 1154 shards, 669 grep proofs that parse to a target —
+    168 name their own file, 149 in shards and 19 in the monolith. Deleting each file's acceptance
+    block and re-running the executor's own invocation, grep -arn -- <pattern> <path>, leaves 167
+    of them still matching from inside the block they came from. The single exception is an
+    accident: W1-T1014's pattern carries a YAML-escaped dot, so the bytes on disk and the bytes
+    handed to grep differ. Nobody designed that.
+
+    **TWENTY-THREE PROOFS PIN NOTHING AT ALL.** For 23 of the 168, the ONLY text the pattern
+    matches anywhere in the file is its own criterion — the proof line, and for four of them the
+    claim line directly above it. Strip the acceptance block and the hit count is zero. These
+    criteria are satisfied by having been written down.
+
+    **NO GATE SEES IT, AND THE REVIEW SIDE IS THE WRONG PLACE TO LOOK.** judgeCriterion grades a
+    gutted shard executed_pass against an empty report, because a positive proof execution
+    overrides the keyword floor. lint-plan returns zero violations for the same file: the proof
+    parses, the dialect prefix is present, the path is declared in files: and it exists, and the
+    pattern carries no blocked metacharacter. Nothing in the linter asks WHERE the match landed.
+    executed_stale does not save it either, and the reason is structural rather than lucky — on a
+    filing PR the shard is absent at the merge base, so no base blob is materialised and the base
+    run cannot pass, so the outcome can never be stale.
+
+    **THE SELF-MATCH HIDES THREE REAL WARNINGS, WHICH IS WORSE THAN BLINDNESS.**
+    proofGrepUnmatchableViolations already opens the target and reports a pattern that can never
+    match — including the line-seam case where a wrap falls inside the phrase. Run over the live
+    plan it returns one violation. Run with acceptance blocks stripped it returns four. The three
+    it cannot currently report are W1-T1014, W1-T1041 and W1-T2419, and every one is a genuine
+    seam: the proof line supplies a match, classifyGrepZeroHit concludes matched, and the check
+    stays silent about a pattern that will never find its prose. W1-T2909 fires in both runs and is
+    the control — its target is src/lib/review.ts, not its own shard.
+  design: |
+    THE OBVIOUS RULE HAS NO COMPLIANT FORM, AND THAT IS THE FIRST FINDING. "A grep proof naming its
+    own file must use a pattern that does not occur in the acceptance block" cannot be satisfied:
+    every regex mechanism that would let such a pattern miss its own proof line is already refused
+    by proof-grep-safety, whose BRE_BLOCKING_METACHARS are [ * ^ and $, with ^ deliberately excluded
+    from the single-literal-class escape. Anchoring is not available. That gate is correct and the
+    reason it blocks is a paid-for one, so weakening it trades a silent false pass for a silent
+    false fail, which is not a fix.
+
+    THE RESTATEMENT THAT IS SATISFIABLE, WITH ITS COST MEASURED RATHER THAN ESTIMATED. "A grep proof
+    whose target is the shard's own file must match at least one line OUTSIDE that file's acceptance
+    block." Honest authors already comply: it refuses 23 of 168, and the other 145 pass untouched.
+    The natural host is a sibling of proofGrepUnmatchableViolations, which already receives the file
+    text and the resolved path, and which is scoped to changed tasks so the retrofit debt against
+    open branches is zero unless a branch touches one of the 23.
+
+    WHY IT HAS TO BE A FILING-TIME CHECK. A review-side repair — strip the acceptance block before
+    running a self-target grep — is more elegant and costs authors nothing, but it does not block the
+    pull request that ships the defect. W1-T2737's forward-reference carve-out grades a failing
+    self-target grep not_yet_built when the diff is plan-only and the target is in the task's own
+    files:, so a record shard's own filing PR passes anyway. Only the linter refuses at filing time.
+
+    THE THREE OPEN QUESTIONS, LEFT OPEN. (i) Severity: 0.6% of shards is cheap enough to block, but
+    the natural host is deliberately warn-only with no override and is deliberately not folded into
+    lintTask's aggregate, so a blocking sibling is a new severity precedent at that call site rather
+    than a config change. (ii) Whether the 23 are one population: three are seams an existing check
+    already knows how to describe and is merely prevented from seeing, and those could ship as a
+    suppression fix at warn while the rest ship as a new refusal. (iii) Whether the record-shard
+    idiom survives at all — W1-T1120 states that being satisfied by its own text on merge is
+    deliberate rather than a dodge, and under the restatement that form survives and merely has to
+    anchor on prose the block does not repeat, which is what this shard itself does.
+  acceptance:
+    - claim: "The shard records the population as a measured ratio over the live plan, monolith included, not over shards alone"
+      proof: "grep: ONE HUNDRED AND SIXTY-SEVEN OF ONE HUNDRED AND SIXTY-EIGHT in plan/tasks.d/W1-T2983-a-grep-proof-that-matches-its-own-proof-line.yaml"
+    - claim: "The shard names the sharpest subset — the proofs whose only match anywhere in the file is their own criterion"
+      proof: "grep: TWENTY-THREE PROOFS PIN NOTHING AT ALL in plan/tasks.d/W1-T2983-a-grep-proof-that-matches-its-own-proof-line.yaml"
+    - claim: "The shard records that the defect suppresses an existing check rather than merely evading one, with the control that fires in both runs"
+      proof: "grep: THE SELF-MATCH HIDES THREE REAL WARNINGS in plan/tasks.d/W1-T2983-a-grep-proof-that-matches-its-own-proof-line.yaml"
+    - claim: "The shard records that the naive rule is unsatisfiable because proof-grep-safety blocks every anchoring mechanism, and refuses to weaken that gate"
+      proof: "grep: THE OBVIOUS RULE HAS NO COMPLIANT FORM in plan/tasks.d/W1-T2983-a-grep-proof-that-matches-its-own-proof-line.yaml"
+    - claim: "The shard leaves severity and remediation to the operator and records why a review-side fix would not block the shipping PR"
+      proof: "grep: WHY IT HAS TO BE A FILING-TIME CHECK in plan/tasks.d/W1-T2983-a-grep-proof-that-matches-its-own-proof-line.yaml"
+  files: [plan/tasks.d/W1-T2983-a-grep-proof-that-matches-its-own-proof-line.yaml]
+  status: queued
+  attempts: 0
+  origin: "oper#plain-language-surfaces-2026-09-04"
+  plan_refs: ["W1-T1120", "W1-T2817", "W1-T2818", "W1-T2737", "W1-T2909", "W1-T1014"]
+  note: |
+    THIS SHARD HOLDS ITSELF TO THE RULE IT PROPOSES, AND THE CHECK CAUGHT ITS SIBLING. Every one of
+    the five patterns above matches at least one line outside this acceptance block; each reads two
+    hits whole-file and one with the block deleted. The same check, run against W1-T2982 in the same
+    session, refused a fourth criterion whose anchor had wrapped across a block-scalar line break so
+    that its only match was its own proof line — the precise defect recorded here, caught before it
+    shipped rather than after. That is the evidence the rule is satisfiable by an author who wants
+    to comply, and the reason the cost figure above is a floor rather than a guess.
+
+    A PREMISE THIS SHARD WAS FILED ON WAS WRONG AND IS CORRECTED HERE RATHER THAN QUIETLY DROPPED.
+    The brief held that acceptance is a REPORTED_MERGED_FIELD, so merged shards could not be
+    repaired without tripping rule 21. It is not in that list, and the list is warn-only in any
+    case. What is actually true is narrower and still binding: criterionKey normalises the CLAIM
+    only, so rewriting a claim on a merged task reads as an ADDITION and blocks, while rewriting a
+    PROOF and leaving its claim byte-identical is a warn. Remediation may move proofs; it may not
+    reword claims.
+
+    THE COUNTS ARE A QUERY TAKEN AT c51d944e, NOT A CONSTANT. 1154 shards, 669 targeted grep proofs,
+    168 self-targeting, 167 self-matching, 23 pinning nothing, and the one-to-four warning delta all
+    move with the tree. Re-derive them with /usr/bin/grep or git grep and the executor's own -arn
+    flags; the harness grep and bare rg are blind to files this corpus contains.
