@@ -1959,19 +1959,27 @@ export function duplicateTitleViolations(task: Task, opts: LintOpts = {}): LintV
 // one surface rarely share a title -- these did not. What collides is `files:`, which is also what
 // makes the overlap expensive: two workers editing one surface produce CONFLICTING PRs.
 
-/** A candidate this task's `files:` is compared against. `Task` already carries `files` and
- *  `status`, so unlike {@link DuplicateAnswerCorpusEntry} nothing has to be threaded in that the
- *  parser drops -- the caller supplies the other shards it wants considered and no more. */
+/** A candidate this task's `files:` is compared against; `merged` is external credit from status.ts. */
 export interface DuplicateSurfaceCorpusEntry {
   id: string;
   files?: readonly string[];
   status?: string;
+  merged?: boolean;
 }
 
-/** Statuses that are NOT live work. A shard already credited as merged (or done, or blocked) is
- *  history: reporting this task as its duplicate would flag every follow-up against the task it
- *  follows, which is the noise that gets an advisory check ignored. */
+/** Statuses that are NOT live work; reporting history as a duplicate would flag follow-ups. */
 const DUPLICATE_SURFACE_INERT_STATUSES: ReadonlySet<string> = new Set(["merged", "done", "blocked"]);
+
+function duplicateSurfaceEntryIsInert(
+  entry: { id: string; status?: string; merged?: boolean },
+  mergedTaskIds: ReadonlySet<string> | undefined,
+): boolean {
+  return (
+    entry.merged === true ||
+    mergedTaskIds?.has(entry.id) === true ||
+    (entry.status !== undefined && DUPLICATE_SURFACE_INERT_STATUSES.has(entry.status))
+  );
+}
 
 /** The smallest OVERLAP this check will call a duplicate.
  *
@@ -2006,9 +2014,7 @@ function surfaceOf(files: readonly string[] | undefined): string[] {
 export function duplicateSurfaceViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const corpus = opts.openTaskSurfaces;
   if (!corpus || corpus.length === 0) return [];
-  // Inert by EITHER signal. `status:` is what the filing wrote; credit is what actually shipped.
-  const creditedMerged = opts.mergedTaskIds;
-  if (DUPLICATE_SURFACE_INERT_STATUSES.has(task.status) || creditedMerged?.has(task.id)) return [];
+  if (duplicateSurfaceEntryIsInert(task, opts.mergedTaskIds)) return [];
 
   const mine = surfaceOf(task.files);
   if (mine.length === 0) return [];
@@ -2017,10 +2023,7 @@ export function duplicateSurfaceViolations(task: Task, opts: LintOpts = {}): Lin
   const out: LintViolation[] = [];
   for (const other of corpus) {
     if (other.id === task.id) continue;
-    if (other.status && DUPLICATE_SURFACE_INERT_STATUSES.has(other.status)) continue;
-    // A candidate credited as merged is history even when its shard still reads `queued` —
-    // the case `status:` alone cannot see, and the one this check kept false-positiving on.
-    if (creditedMerged?.has(other.id)) continue;
+    if (duplicateSurfaceEntryIsInert(other, opts.mergedTaskIds)) continue;
     const theirs = surfaceOf(other.files);
     if (theirs.length === 0) continue;
     const theirSet = new Set(theirs);
@@ -2279,9 +2282,6 @@ export interface LintOpts {
   /** Shingle width for {@link duplicateTitleViolations}. The live caller passes {@link
    *  DUPLICATE_SLUG_SHINGLE_K}; absent ⇒ {@link DEFAULT_SHINGLE_K}. */
   duplicateShingleK?: number;
-  /** The richer corpus {@link unansweredDuplicateTitleViolations}'s BLOCKING arm scores against:
-   *  each entry carries its own `planRefs`/`rationale`, so the check can tell whether the OTHER
-   *  shard already answered. Absent or empty ⇒ silent. */
   /** Other shards' declared surfaces, for {@link duplicateSurfaceViolations}. Absent ⇒ silent. */
   openTaskSurfaces?: readonly DuplicateSurfaceCorpusEntry[];
   /** Task ids CREDITED as merged — the GitHub-derived projection (`projectPlan`), NOT a `status:`
@@ -2292,6 +2292,9 @@ export interface LintOpts {
    *  which is deliberate: W1-T367 ruled `rmd lint-plan` stays an OFFLINE, DETERMINISTIC linter,
    *  so the network-free default keeps reading `status:` alone and this only ever narrows. */
   mergedTaskIds?: ReadonlySet<string>;
+  /** The richer corpus {@link unansweredDuplicateTitleViolations}'s BLOCKING arm scores against:
+   *  each entry carries its own `planRefs`/`rationale`, so the check can tell whether the OTHER
+   *  shard already answered. Absent or empty ⇒ silent. */
   openTaskRecords?: readonly DuplicateAnswerCorpusEntry[];
   /** Jaccard cutoff for {@link unansweredDuplicateTitleViolations}. Default {@link
    *  NEAR_IDENTITY_DUPLICATE_CUTOFF}. */

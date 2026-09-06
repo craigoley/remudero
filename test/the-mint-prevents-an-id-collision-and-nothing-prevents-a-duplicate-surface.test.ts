@@ -195,7 +195,7 @@ test("a shard whose files overlap nothing is never reported, so the check is not
 
 // ── live work only ────────────────────────────────────────────────────────────────────────────
 
-test("a shard already credited as merged is not counted as a duplicate of live work", () => {
+test("a shard marked or credited as merged is not counted as a duplicate of live work", () => {
   // Otherwise every follow-up is flagged against the task it follows, which is how an advisory
   // check earns the reputation that gets it ignored.
   for (const status of ["merged", "done", "blocked"]) {
@@ -204,13 +204,30 @@ test("a shard already credited as merged is not counted as a duplicate of live w
     });
     assert.deepEqual(v, [], `a ${status} candidate is history, not live work`);
   }
+
+  const creditedInCorpus = duplicateSurfaceViolations(task({ id: "W1-T2589", files: [...FOUR_SUBSET] }), {
+    openTaskSurfaces: corpus({ id: "W1-T2581", files: SEVEN, status: "queued", merged: true }),
+  });
+  assert.deepEqual(creditedInCorpus, [], "a corpus entry credited merged is history even when yaml still says queued");
+
+  const creditedById = duplicateSurfaceViolations(task({ id: "W1-T2589", files: [...FOUR_SUBSET] }), {
+    mergedTaskIds: new Set(["W1-T2581"]),
+    openTaskSurfaces: corpus({ id: "W1-T2581", files: SEVEN, status: "queued" }),
+  });
+  assert.deepEqual(creditedById, [], "external merge credit by id is history even when yaml still says queued");
 });
 
-test("a task that is ITSELF merged reports nothing — it is not competing for a dispatch slot", () => {
+test("a task that is ITSELF merged or externally credited reports nothing — it is not competing for a dispatch slot", () => {
   const v = duplicateSurfaceViolations(task({ id: "W1-T2589", status: "merged", files: [...FOUR_SUBSET] }), {
     openTaskSurfaces: corpus({ id: "W1-T2581", files: SEVEN, status: "queued" }),
   });
   assert.deepEqual(v, []);
+
+  const credited = duplicateSurfaceViolations(task({ id: "W1-T2589", status: "queued", files: [...FOUR_SUBSET] }), {
+    mergedTaskIds: new Set(["W1-T2589"]),
+    openTaskSurfaces: corpus({ id: "W1-T2581", files: SEVEN, status: "queued" }),
+  });
+  assert.deepEqual(credited, [], "a task credited merged externally is not live work on its own side either");
 });
 
 // ── the silences that must stay silent ────────────────────────────────────────────────────────
@@ -267,8 +284,9 @@ test("the message tells the reader how to clear it, and refuses the answer that 
 // this file supplies its own `openTaskSurfaces`, so the exclusion was only ever shown over a
 // hand-built corpus while the production corpus is derived inside `lintPlan` from `plan.tasks`.
 // Those are different objects, and a filter that worked on the fixture could still be reading a
-// field the derivation never populates. These two close that gap in the same shape as the pair
-// above: a real plan, no `optsFor`, no explicit corpus.
+// field the derivation never populates. These close that gap in the same shape as the pair above:
+// a real plan, no explicit corpus. One branch proves the yaml-status path, and the other proves the
+// external-credit path a caller gets after deriving merge status from `status.ts`.
 
 test("lintPlan alone: a MERGED candidate in the real plan is not counted as live work (criterion 5, production path)", () => {
   const plan = planOf([
@@ -476,4 +494,33 @@ test("lintPlanCommand --base: a CREDITED-merged shard is not reported, though it
   const uncredited = warningCount(await runDscBase(false));
   assert.equal(uncredited - credited, 1, "credit removes exactly one warning — the pair against a shard that already shipped");
   assert.equal(credited, 1, "and nothing else changed: the remaining warning is unrelated to credit");
+});
+
+test("lintPlan with merge credit: a queued candidate already credited as merged is not counted as live work", () => {
+  const plan = planOf([
+    task({ id: "W1-T2581", files: [...SEVEN] }), // yaml stays queued after merge
+    task({ id: "W1-T2589", files: [...FOUR_SUBSET] }),
+  ]);
+  const v = lintPlan(plan, () => ({ mergedTaskIds: new Set(["W1-T2581"]) }))
+    .get("W1-T2589")!
+    .violations.filter((x) => x.check === "duplicate-surface");
+  assert.deepEqual(v, [], "external merge credit must exclude history even when yaml still says queued");
+
+  const reported = lintPlan(plan, () => ({ mergedTaskIds: new Set() }))
+    .get("W1-T2589")!
+    .violations.filter((x) => x.check === "duplicate-surface");
+  assert.equal(reported.length, 1, "removing only the injected credit makes the same plan report");
+});
+
+test("lintPlan with merge credit: a queued task credited as merged reports nothing on its own side", () => {
+  const plan = planOf([
+    task({ id: "W1-T2581", files: [...SEVEN] }),
+    task({ id: "W1-T2589", files: [...FOUR_SUBSET] }), // yaml stays queued after merge
+  ]);
+  const results = lintPlan(plan, () => ({ mergedTaskIds: new Set(["W1-T2589"]) }));
+  const v = results.get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.deepEqual(v, [], "a credited task is history on its own side too");
+
+  const other = results.get("W1-T2581")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.deepEqual(other, [], "the credited shard is not live work for its counterpart either");
 });
