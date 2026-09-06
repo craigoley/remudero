@@ -176,6 +176,12 @@
       "grepHint": "board.ts comment forensics"
     },
     {
+      "path": "docs/forensics/ci-gate-yml.md",
+      "title": "ci-gate.yml forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "ci-gate.yml forensics"
+    },
+    {
       "path": "docs/forensics/ci-parity.md",
       "title": "ci-parity.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
