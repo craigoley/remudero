@@ -45,21 +45,66 @@ test("a failed exchange leaves GH_TOKEN untouched and NAMES the reason, rather t
   assert.ok(logged.length > 0, `an ATTEMPT that fails must name its reason — saw ${JSON.stringify(logged)}`);
 });
 
-test("CLI entry mints before dispatch, and only when GH_TOKEN is absent", async () => {
-  const { readFileSync } = await import("node:fs");
-  const { fileURLToPath } = await import("node:url");
-  const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-  const code = src
-    .split("\n")
-    .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*") && !l.trim().startsWith("/*"))
-    .join("\n");
-  assert.match(
-    code,
-    /if \(!process\.env\.GH_TOKEN\) \{\s*await refreshInstallationToken\(/,
-    "main() must mint when no token is present — unguarded it would clobber an operator's own exported GH_TOKEN",
-  );
-  const mintAt = code.indexOf("await refreshInstallationToken(");
-  const dispatchAt = code.indexOf("const [cmd, ...rest] = stripRepoRootFlag(");
-  assert.ok(mintAt > 0 && dispatchAt > 0, "sanity: both landmarks are present");
-  assert.ok(mintAt < dispatchAt, "the mint must run BEFORE argv is dispatched, or the first gh call still has no token");
+test("CLI entry MINTS before dispatch — observed by running main(), not by reading its source", async (t) => {
+  // BEHAVIOURAL, not a source-text read: W1-T2905's ratchet is right that grepping src/ for a call
+  // shape is the weaker assertion, and a new test file starts at zero allowance. This drives the
+  // real main() with the app configured and a stubbed exchange, and asserts the token ARRIVED —
+  // which is the property that was missing on the fleet host, not the presence of a line.
+  const saved = {
+    id: process.env.GH_APP_ID,
+    inst: process.env.GH_APP_INSTALLATION_ID,
+    key: process.env.GH_APP_PRIVATE_KEY_PATH,
+    tok: process.env.GH_TOKEN,
+    argv: process.argv,
+  };
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cli-mint-`));
+  // A syntactically valid RSA key is not needed: the exchange itself is stubbed below, and the
+  // signing step reads this file only for its bytes.
+  const keyPath = join(dir, "key.pem");
+  writeFileSync(keyPath, "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
+
+  const stderr: string[] = [];
+  t.mock.method(console, "error", (...a: unknown[]) => {
+    stderr.push(a.map(String).join(" "));
+  });
+  t.mock.method(console, "log", () => {});
+  class ExitCalled extends Error {
+    constructor(public code: number | undefined) {
+      super(`process.exit(${code})`);
+    }
+  }
+  const exitMock = ((code?: number): never => {
+    throw new ExitCalled(code);
+  }) as typeof process.exit;
+  t.mock.method(process, "exit", exitMock);
+
+  try {
+    process.env.GH_APP_ID = "1";
+    process.env.GH_APP_INSTALLATION_ID = "2";
+    process.env.GH_APP_PRIVATE_KEY_PATH = keyPath;
+    delete process.env.GH_TOKEN;
+    process.argv = ["node", "run-task.js", "--no-such-verb"];
+    const { main } = await import("../src/run-task.js");
+    await main().catch(() => {}); // the unknown verb exits; the mint runs BEFORE dispatch either way
+    // THE DISCRIMINATOR is that the ATTEMPT is observable. Asserting only "GH_TOKEN is unset" would
+    // pass identically when no mint ran at all — measured: with the mint deleted that assertion
+    // still read green, which is test theatre. The stubbed key cannot sign, so the exchange fails
+    // and `refreshInstallationToken` NAMES the reason through the logger main() hands it; that line
+    // exists only if the mint was reached.
+    assert.ok(
+      stderr.some((l) => /github_app/.test(l)),
+      `main() must REACH the mint before dispatch — no github_app line on stderr means it never ran: ${JSON.stringify(stderr)}`,
+    );
+    assert.equal(process.env.GH_TOKEN, undefined, "and a failed mint must never leave a partial token behind");
+  } finally {
+    process.argv = saved.argv;
+    for (const [k, v] of [["GH_APP_ID", saved.id], ["GH_APP_INSTALLATION_ID", saved.inst], ["GH_APP_PRIVATE_KEY_PATH", saved.key], ["GH_TOKEN", saved.tok]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 });
