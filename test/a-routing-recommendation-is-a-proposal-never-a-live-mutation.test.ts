@@ -387,11 +387,17 @@ test("the emitted proposal states that its evidence is observational while no go
 // The notice above explains ITSELF, and the explanation is what went stale. It used to say the
 // replay suite had no `HarnessRunner` wired; W1-T2689 wired one, and the sentence kept shipping
 // inside proposals a human ratifies. The caveat was still true, so nothing reddened — a false
-// clause riding a true conclusion is invisible to every gate this repo has. These two tests pin
-// the clause to the world it describes: the first proves the retired reason is FALSE and gone,
-// the second fails the day the surviving reason stops being true.
+// clause riding a true conclusion is invisible to every gate this repo has. This test pins the
+// clause to the world it describes by DRIVING the runner the retired reason denied, then
+// requiring that reason to be absent while the caveat it justified is still present.
+//
+// A second guard — slicing RecommendMountsOptions out of source to fail the day a replay input is
+// wired — was written and REMOVED: it is exactly the snapshot-of-source shape W1-T2905's census
+// refuses (it breaks on a rename that changed no behaviour, and passes on a differently-named
+// field that changed plenty). Pinning the surviving reason needs a mechanism that is not a source
+// read; that is follow-up work, not a thing to smuggle in here.
 
-test("the observational notice does not carry the retired no-HarnessRunner reason, because a runner and a production caller both ship", async () => {
+test("the observational notice does not carry the retired no-HarnessRunner reason, because the runner it denied is real and runs", async () => {
   // The retired reason, falsified against the shipped source rather than against memory of it.
   //
   // DRIVEN, NOT MERELY IMPORTED. `typeof harnessRunnerOver === "function"` would pass against a
@@ -413,13 +419,6 @@ test("the observational notice does not carry the retired no-HarnessRunner reaso
   assert.equal(dispatched, 1, "the runner must actually reach its dispatch, not short-circuit");
   assert.equal(outcome.verdict, "merged", "the runner must return what the dispatch produced");
 
-  const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
-  assert.match(
-    runTaskSrc,
-    /cmd === "replay-goldens"/,
-    "run-task.ts must still dispatch the production caller — without it the retired reason would be true again and this notice would need to say so",
-  );
-
   // So the notice must not still be claiming it.
   assert.doesNotMatch(
     OBSERVATIONAL_EVIDENCE_NOTICE,
@@ -438,27 +437,6 @@ test("the observational notice does not carry the retired no-HarnessRunner reaso
   );
 });
 
-test("the observational notice is forced back open the moment recommendMounts gains a replay input", () => {
-  // THE STALENESS GUARD, and the reason this pair exists rather than a one-line text fix. The
-  // surviving reason — "a replay result is not an input to recommendMounts" — is a claim about
-  // this module's own options, so it can be checked against them. Wire replay evidence in and this
-  // fails, which is the prompt to revisit the wording rather than let it drift a second time.
-  const src = readFileSync(join(REPO_ROOT, "src", "lib", "mount-recommender.ts"), "utf8");
-  const open = "export interface RecommendMountsOptions {";
-  assert.equal(src.split(open).length - 1, 1, "expected exactly one RecommendMountsOptions declaration to slice");
-  const body = src.slice(src.indexOf(open) + open.length);
-  const optionsBlock = body.slice(0, body.indexOf("\n}"));
-
-  // Positive control: the slice really is the options block and really can see a field name. A
-  // zero below means nothing without this — an empty slice would pass every assertion that follows.
-  assert.match(optionsBlock, /billingMode\?:/, "control: the sliced block must contain a known field");
-
-  assert.doesNotMatch(
-    optionsBlock,
-    /replay|golden/i,
-    "recommendMounts has gained a replay/golden input — OBSERVATIONAL_EVIDENCE_NOTICE now understates the evidence and must be rewritten",
-  );
-});
 
 // ── Extra gates, beyond the seven acceptance claims, that back "refuse more often than
 // recommend" (this task's own rationale) ───────────────────────────────────────────────────
