@@ -296,6 +296,12 @@
       "grepHint": "panel-graph.ts comment forensics"
     },
     {
+      "path": "docs/forensics/policy.md",
+      "title": "policy.ts comment forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "policy.ts comment forensics"
+    },
+    {
       "path": "docs/forensics/proof-queue-audit.md",
       "title": "proof-queue-audit.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
