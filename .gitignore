@@ -72,3 +72,15 @@ ee-open.json
 # process exit; this entry is the backstop for a run killed outright, so a crashed suite cannot
 # leave dirt that self-sync's unscoped dirty check reads as a reason to stop deploying.
 test/mutants-*/
+
+# Test fixtures that must live INSIDE the repo, for the same reason `test/mutants-*/` above does:
+# they need a repo-relative path (`relative(REPO_ROOT, planPath)`) or a real work tree, which
+# os.tmpdir() cannot give them. Every creator removes its own directory, so these entries are two
+# things at once: the backstop for a run killed outright, and — the reason they were added —
+# the fix for a CONCURRENCY RACE. `git status --porcelain` in the tracked-tree-dirt detectors
+# includes untracked entries deliberately, so while one test's fixture exists ANY concurrently
+# running test that snapshots the tree sees it as new dirt. MEASURED: ci-shard (1/4) on PR #4272
+# failed `W1-T2791 (acceptance 1)` with `?? .rmd-w1-t2487-fixture-BDNEBM/` — a fixture belonging to
+# a different file entirely, and it passed on the shard's first pass and failed on the retry.
+/.rmd-*-fixture-*/
+test/.tmp-*/
