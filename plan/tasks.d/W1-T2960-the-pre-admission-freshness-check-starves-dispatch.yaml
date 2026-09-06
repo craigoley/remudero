@@ -1,0 +1,66 @@
+- id: W1-T2960
+  title: "THE PRE-ADMISSION FRESHNESS RE-CHECK STARVES DISPATCH ON A BUSY REPO — the tick's own sweep merges advance origin/main, the W1-T2845 re-read then sees the daemon as stale and exits BEFORE admitting anything, and the fleet has dispatched ZERO tasks for two days while reporting a healthy daemon"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "W1-T126", "W1-T2845", "W1-T2865", "W1-T312"]
+  files: [src/lib/daemon.ts, test/the-pre-admission-freshness-check-starves-dispatch.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FLEET HAS NOT DISPATCHED A BUILD SINCE 2026-09-04. Measured over the FULL ledger union
+    (229 `.gz` archives + 2 plain rotations + the live file; 46,510 `run.start` rows, so the query
+    demonstrably sees its corpus):
+      run-task dispatches per day: 08-30: 3067 | 08-31: 6958 | 09-01: 4856
+                                   09-02: 6814 | 09-03: 4747 | 09-04: 2155
+                                   09-05: 0    | 09-06: 0
+    Every `run-W1-T*` PR opened since is SESSION work: those eight task ids have ZERO `run.start`
+    rows anywhere in history. The board looked busy; none of it was the fleet.
+
+    THE MECHANISM IS A SELF-INFLICTED LIVELOCK, AND IT IS IN THE LOG VERBATIM. One container's
+    lifetime, read off `docker logs`:
+      daemon summaries ......................... 28
+      of which `attempted : (none)` ............ 28   (ALL of them)
+      `stopped   : stale` ...................... 28
+      `exited 75 (freshness)` restarts ......... 28
+      ticks that admitted anything ............. 0
+    A tick runs its reconciliation rungs first — sweep, review, and AUTO-MERGE. Those merges advance
+    `origin/main`. The W1-T2845 re-read then fires immediately before admission, correctly observes
+    that main moved past this process's boot sha, and returns `stopForFreshness`. THE TICK'S OWN
+    MERGES CAUSE THE EXIT THAT PREVENTS ITS DISPATCH. The daemon then restarts (5s, in-container,
+    cheap) and does it again. It has become a review-and-merge service that can never build.
+
+    THIS IS THE "BOUND THAT FIRES ON A HEALTHY CONDITION" FAMILY (W1-T312, W1-T380, W1-T382). The
+    bound is not mis-sized; it is unconditional on a repo that merges ~10 PRs in three hours. The
+    population it means to separate — an advance material enough to matter — is never separated,
+    because EVERY tick advances main.
+
+    AND THE PREMISE IS WEAKER THAN IT LOOKS FOR THE ADMISSION CASE SPECIFICALLY. W1-T2845 guards
+    against admitting on stale code. But `worktreeAdd` cuts every worker a fresh worktree FROM
+    `origin/main` HEAD (see its own "was cut from origin/main HEAD" message), and
+    `syncPlanFromOrigin` re-reads the plan blob from origin/main at dispatch. A worker admitted by a
+    "stale" daemon therefore builds CURRENT code against the CURRENT plan. What staleness actually
+    affects is the daemon's own resident module graph — the judge, the linter, the drain loop — which
+    is the three-clocks problem, and which the TOP-OF-TICK check at the same call site already
+    covers.
+
+    DO NOT SIMPLY DELETE THE RE-READ. W1-T2845 was filed on a real gap and W1-T2865 records that
+    moving the drain into the interphase clock freezes phase transitions. The invariant to preserve
+    is "a LONG tick must not admit against code the daemon can no longer reason about"; the invariant
+    to restore is "a busy repo must still dispatch". Candidate shapes for the build to choose
+    between: let the batch already selected be admitted and honour staleness at the NEXT tick
+    boundary (the worker's code is fresh either way); or make the re-read material — refuse only when
+    the advance touches paths the daemon's own module graph depends on; or exempt an advance this
+    tick itself caused, which the tick knows because it performed those merges.
+  acceptance:
+    - claim: "a tick whose own merges advanced main still admits the batch it had already selected"
+      proof: "unit test: W1-T2960: a tick that advanced main itself still admits"
+    - claim: "staleness is still honoured, at the next tick boundary rather than by starving dispatch"
+      proof: "unit test: W1-T2960: staleness still stops the loop after admission"
+    - claim: "an operator STOP or PAUSE still outranks admission, unchanged"
+      proof: "unit test: W1-T2960: stop and pause still preempt admission"
