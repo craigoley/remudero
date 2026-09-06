@@ -1,4 +1,4 @@
-- id: W1-T2971
+- id: W1-T2972
   title: "A FIRED RETRO HOLDS THE WHOLE TICK — the retro rung sits above the dispatch pick and awaits an unbounded run, so a marker 3.7 days and 446 merges behind produces ~11 consecutive retro-only ticks during which the fleet reviews, merges and builds NOTHING while every liveness signal stays green"
   repo: remudero
   depends_on: []
@@ -54,6 +54,6 @@
     own — the precise overlap the interphase-clock handoff exists to prevent.
   acceptance:
     - claim: "a fired retro no longer holds the tick, so the dispatch rung still runs while it is in flight"
-      proof: "unit test: W1-T2971: a fired retro does not hold the tick"
+      proof: "unit test: W1-T2972: a fired retro does not hold the tick"
     - claim: "a second retro is refused while one is detached, and the refusal is named in the ledger"
-      proof: "unit test: W1-T2971: a second retro is refused while one is still detached"
+      proof: "unit test: W1-T2972: a second retro is refused while one is still detached"
