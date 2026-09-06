@@ -170,6 +170,12 @@
       "grepHint": "daemon.ts forensics"
     },
     {
+      "path": "docs/forensics/diff-class.md",
+      "title": "diff-class.mjs forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "diff-class.mjs forensics"
+    },
+    {
       "path": "docs/forensics/diff-coverage.md",
       "title": "diff-coverage.mjs forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",

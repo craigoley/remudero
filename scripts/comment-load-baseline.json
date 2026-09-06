@@ -56,7 +56,7 @@
   "scripts/credit-surface-gate.mjs": 96,
   "scripts/cycle-baseline.json": 0,
   "scripts/cycle-ratchet.mjs": 44,
-  "scripts/diff-class.mjs": 211,
+  "scripts/diff-class.mjs": 100,
   "scripts/diff-coverage.mjs": 147,
   "scripts/fleet-heartbeat.sh": 298,
   "scripts/generate-api-client.mjs": 42,
