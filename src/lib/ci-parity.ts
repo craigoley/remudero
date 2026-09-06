@@ -1631,6 +1631,15 @@ const REGISTRY_CENSUS_SUITES: readonly KnownCensusSuite[] = [
     testFile: "test/source-text-assertion-census.test.ts",
     walks: ["test/"],
   },
+  {
+    // CLAUDE.md's OWN worked example for item (j) — "#2639 added one seamed policy read and reddened
+    // test/config-reader-seams.test.ts ... that references nothing it touched." It walks src/ and
+    // pins an EXACT count of unredirectable policy reads, so any file gaining one moves it; measured
+    // a fifth time when W1-T2971's fourth cadence hook builder took it 25 -> 26.
+    job: "config-reader-seams-census",
+    testFile: "test/config-reader-seams.test.ts",
+    walks: ["src/"],
+  },
 ];
 
 export const KNOWN_CENSUS_SUITES: readonly KnownCensusSuite[] = [
