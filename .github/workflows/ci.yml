@@ -652,7 +652,24 @@ jobs:
         run: npx stryker run
       - name: Mutation ratchet (blocks a test-suite-weakening PR)
         if: steps.trigger.outputs.matched == 'true'
-        run: node scripts/mutation-ratchet.mjs --report reports/mutation/mutation.json --baseline scripts/mutation-baseline.json
+        # W1-T2707: `--ledger` is what makes the verdict emission a real production path rather
+        # than a flag only tests pass. `resolveLedgerPath` is EXPLICIT-ONLY by design (an ambient
+        # default once wrote 35 junk lines into an operator's real ledger), so without this the
+        # emission resolves `unconfigured` on every genuine run and D-10 keeps counting a
+        # population that is never produced. The write is fully contained -- it can never change
+        # this job's exit code or its byte-for-byte stdout.
+        run: node scripts/mutation-ratchet.mjs --report reports/mutation/mutation.json --baseline scripts/mutation-baseline.json --ledger "$GITHUB_WORKSPACE/state/ledger.ndjson"
+      - name: Upload the mutation verdict ledger
+        # Emitting into a path the runner discards would make the line above unobservable, which
+        # is the failure mode this task exists to end. `always()` so a BLOCKING verdict -- the one
+        # D-10 most wants counted -- is uploaded too, not only a passing one.
+        if: always() && steps.trigger.outputs.matched == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-verdict-ledger
+          path: state/ledger.ndjson
+          if-no-files-found: ignore
+          retention-days: 30
 
   learnings-budget-ratchet:
     # §5 TIER 2 (W1-T38, MASTER-PLAN §8A) — "compression is a deliverable" enforced, not
