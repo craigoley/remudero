@@ -308,6 +308,12 @@
       "grepHint": "self-sync.ts forensics"
     },
     {
+      "path": "docs/forensics/service.md",
+      "title": "Forensics: src/lib/service.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/service.ts` used to",
+      "grepHint": "Forensics: src/lib/service.ts"
+    },
+    {
       "path": "docs/forensics/source-size-ratchet.md",
       "title": "source-size-ratchet.mjs forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
