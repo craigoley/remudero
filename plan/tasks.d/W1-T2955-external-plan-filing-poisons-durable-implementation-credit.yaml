@@ -1,0 +1,92 @@
+- id: W1-T2955
+  title: "AN EXTERNAL PLAN FILING POISONS DURABLE IMPLEMENTATION CREDIT — own-run branch corroboration trusts the branch name without checking the material diff when the filing process did not write the fleet's plan-only receipt"
+  repo: remudero
+  depends_on: [W1-T413, W1-T951, W1-T1004]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 24.00
+  files:
+    - src/lib/status.ts
+    - test/external-plan-filing-credit.test.ts
+  origin: "fleet-incident#pr-4246-false-w1-t2952-credit-2026-09-06"
+  plan_refs: ["W1-T413", "W1-T951", "W1-T1004", "W1-T2952"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON ORIGIN/MAIN 50880961 AND THE AZURE FLEET AT 2026-09-06T10:53:16Z. PR #4246
+    changed exactly one file, `plan/tasks.d/W1-T2952-dead-fix-worktree-owner-blocks-every-later-repair.yaml`,
+    while that task declares `src/run-task.ts` and `test/fix-branch-checkout-serialization.test.ts`.
+    The PR body carried `Remudero-Task: W1-T2952`, its head was
+    `run-W1-T2952-1788688420894`, and GitHub merged it at 10:04:18Z. The fleet then wrote
+    `verdict.merged` for W1-T2952 at 10:53:16Z with source `sweep.credit_backfill`, although the
+    shard remains queued and neither declared implementation file was in the PR.
+
+    THE MISSING RECEIPT IS THE DISCRIMINATOR THAT FAILED. W1-T1004 refuses a PR only when the local
+    fleet ledger contains `pr.opened{plan_only:true}` for that exact URL. An operator, Codex task or
+    other external filing process cannot write that daemon-local receipt. With no receipt,
+    `corroborateByBranch` accepts any merged `run-<task>-<digits>` branch without consulting
+    `changedFiles`; the trailer path likewise skips its diff guard for the task's own run branch.
+    `deriveStatus` then persists that live hit through W1-T951's durable credit store, and
+    `buildCreditCandidates` feeds it to `runCreditBackfill`, converting one false inference into a
+    durable `verdict.merged` that prevents the actual build from being selected.
+
+    THIS IS NOT A REQUEST TO REMOVE BRANCH CREDIT OR TRUST FILER IDENTITY. Branch credit covers real
+    implementations whose PR bodies lack a trailer, and a ledger receipt is useful when present.
+    The missing fallback is material evidence already available through `GitHub.changedFiles`,
+    interpreted against the filed task's declared scope. A task that declares non-plan work cannot
+    be implemented by a PR whose complete changeset is plan-only, regardless of who opened it or
+    what its branch and trailer claim.
+  design: |
+    Add one shared material-plan-filing decision in `src/lib/status.ts` and apply it before either
+    live merged-credit path can persist or return credit. Preserve the cheap ledger receipt as the
+    first refusal. When that receipt is absent and the task declares at least one path outside
+    plan scope, read the candidate PR's memoised changed-file list; a non-empty all-plan changeset
+    is a filing and must return the existing `plan-only-changeset` rejection instead of credit.
+
+    Use the same decision for trailer credit and own-run head-branch corroboration. Do not leave a
+    second branch-name path able to bypass it. A genuine task whose declared deliverable is entirely
+    plan scope remains creditable, including on its own run branch. A mixed changeset, a source-file
+    deletion, or any other non-plan path remains implementation evidence.
+
+    Preserve W1-T413's unavailable-read posture: `changedFiles === undefined` is unknown, not an
+    empty or plan-only diff, and must not retroactively demote otherwise valid merged work. Preserve
+    W1-T951's durable-store precedence for records already written; remediation of the already
+    poisoned W1-T2952 credit is a separate explicit correction, not a silent migration in this
+    predicate. The fix must prevent a new false record from reaching the durable store or
+    `runCreditBackfill`. Add no extra GitHub call when the positive ledger receipt already decides,
+    when the task itself declares only plan paths, or when no candidate would otherwise earn credit.
+  acceptance:
+    - claim: "a merged own-run PR with no plan-only ledger receipt is rejected as plan-only when its complete changed-file list is all plan scope but the task declares implementation files"
+      proof: "unit test: test/external-plan-filing-credit.test.ts"
+    - claim: "the same material filing decision protects both trailer credit and head-branch corroboration before either path can write durable credit or enter sweep credit backfill"
+      proof: "unit test: test/external-plan-filing-credit.test.ts"
+    - claim: "a genuine plan-only task still receives merged credit, while a mixed changeset or source-file deletion still receives implementation credit"
+      proof: "unit test: test/external-plan-filing-credit.test.ts"
+    - claim: "an unavailable or malformed changed-file read preserves the existing unknown posture rather than silently treating known merged work as plan-only or an empty changeset"
+      proof: "unit test: test/external-plan-filing-credit.test.ts"
+    - claim: "the existing plan-only ledger receipt remains the cheapest refusal and no changed-file read occurs when that receipt, a plan-only task declaration or an ineligible candidate already decides the result"
+      proof: "unit test: test/external-plan-filing-credit.test.ts"
+    - claim: "removing only the material fallback reproduces PR #4246's false W1-T2952 merge credit and fails the focused suite"
+      proof: "mutation test: test/external-plan-filing-credit.test.ts"
+  falsifier: |
+    Close without implementation if current main already asks for a merged own-run candidate's
+    changed files when its task declares non-plan work and no plan-only ledger receipt exists, then
+    refuses an all-plan diff before durable credit or credit backfill. A guard that exists only on
+    hand-named trailer branches, or only when the local daemon opened the filing, does not falsify
+    the task. PR #4246 plus the 10:53:16Z `verdict.merged` row proves both present guards missed the
+    live case.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held `refs/rmd-id/W1-T2955`; the held id
+    is authoritative. INSTANCE REMEDIATION IS DELIBERATELY NOT HIDDEN HERE: W1-T2952 already has a
+    false durable credit and ledger verdict from #4246. Clearing or correcting that record must use
+    the repository's explicit correction mechanism with operator-visible provenance; this task
+    prevents recurrence and does not rewrite history on startup.
+
+    SCOPE: `src/lib/status.ts` owns `derivePrPrecedence`, both merged-credit paths and the durable
+    write. `test/external-plan-filing-credit.test.ts` is new so every forward proof is load-bearing
+    rather than stale on the merge base. `src/run-task.ts` is not declared: `buildCreditCandidates`
+    already consumes `deriveStatus`, so a corrected projection cannot enter `runCreditBackfill` and
+    no orchestration change is required.
