@@ -21937,6 +21937,29 @@ async function retroCommand(
     repairRetroChangesetClaim(prUrl, log);
 
     const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+    // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
+    // fail closed (the retro may never carry code — one concern).
+    const codeFiles = codeFilesInDiff(diff);
+    if (codeFiles.length > 0) {
+      log("retro.error", { error: "retro PR is NOT plan-only", code_files: codeFiles });
+      say(`retro PR touched code (${codeFiles.join(", ")}) — retros are plan-only; leaving PR OPEN for inspection`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    log("pr.opened", { pr_url: prUrl, plan_only: true });
+    say(`retro PR (plan-only): ${prUrl}`);
+
+    // W1-T2875 — POSITION IS DELIBERATE: BELOW the plan-only guard, not above it. An earlier draft
+    // of this task moved the advance ABOVE that guard so a code-carrying retro would still consume
+    // its window. test/retro-marker-atomic.test.ts refused it, and that file is right: it exists to
+    // hold "a plan-only violation must NEVER advance the marker" and "a mid-flight failure must
+    // NEVER leave a half-advanced marker". Marker atomicity outranks consuming the window — and the
+    // CAP already breaks the ratchet without touching it, because a bounded window means attempt
+    // N+1 is never larger than attempt N whether or not the marker moved.
+    //
+    // `ts` is the CONSUMED CURSOR, never `now()` where the cursor is newer: a capped pass hands its
+    // remainder to the next one, and stamping `now()` would jump past runs this pass never read.
+    // The comparison keeps it MONOTONIC so a stale gather can never walk the marker backwards.
     const markerTs =
       gather.consumedThroughTs && (!marker?.ts || gather.consumedThroughTs > marker.ts)
         ? gather.consumedThroughTs
@@ -21950,17 +21973,6 @@ async function retroCommand(
     saveMarker(markerPath, nextMarker);
     log("retro.marker.advanced", { ...nextMarker, runs_deferred: gather.runsDeferred });
 
-    // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
-    // fail closed (the retro may never carry code — one concern).
-    const codeFiles = codeFilesInDiff(diff);
-    if (codeFiles.length > 0) {
-      log("retro.error", { error: "retro PR is NOT plan-only", code_files: codeFiles });
-      say(`retro PR touched code (${codeFiles.join(", ")}) — retros are plan-only; leaving PR OPEN for inspection`);
-      worktreeRemove(repoDir, worktreePath);
-      return 1;
-    }
-    log("pr.opened", { pr_url: prUrl, plan_only: true });
-    say(`retro PR (plan-only): ${prUrl}`);
 
     // Gate: ci green → post remudero-review → arm auto-merge.
     const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
