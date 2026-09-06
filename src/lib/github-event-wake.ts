@@ -1,57 +1,22 @@
 /**
  * lib/github-event-wake.ts — the signed GitHub-event wake (W1-T2568, MASTER-PLAN, plan_refs
  * W1-T463/W1-T473/W1-T526/W1-T1272/W1-T2430/W1-T2519).
+ * The daemon's poll loop (`lib/daemon.ts`) only notices a GitHub change on its next scheduled
+ * `pollIntervalMs` tick. This module is an early wake for that SAME reconciliation, never a
+ * second one: a signed webhook delivery writes one durable "recheck GitHub" marker, and the
+ * daemon skips the rest of its current wait, every other gate untouched.
  *
- * THE GAP THIS CLOSES: the daemon's full sweep (`runGatedSweep`/`deps.sweep`, lib/daemon.ts)
- * already classifies and acts on every open PR's disposition, but nothing outside the daemon's
- * own `pollIntervalMs` timer ever tells it GitHub state changed — a check completion, a review,
- * a push or a close is invisible until the next scheduled poll (up to 60s late) even when both
- * the daemon and the console are otherwise idle. This module is an EARLY WAKE for that SAME
- * level-triggered reconciliation, never a second one: it authenticates a GitHub repository
- * webhook delivery, writes ONE durable "a wake happened" marker, and gives the daemon a way to
- * skip the REMAINDER of its current poll wait — the ordinary timed poll, the full-sweep
- * retrigger and every existing STOP/PAUSE/headroom gate are completely untouched.
- *
- * THREE PIECES, each independently testable, composed by the two real callers:
- *
- * 1. `createGitHubEventWakeHandler` — a self-authenticated {@link Route} (see
- *    `service.ts`'s `Route.selfAuthenticated`) for `POST /v1/hooks/github`, mounted by
- *    `serve.ts` on the console/service process (`remudero-serve`). Verifies
- *    `X-Hub-Signature-256` (raw-body HMAC-SHA256, constant-time compare) BEFORE trusting
- *    anything else, bounds the body before buffering it, validates JSON/repository identity/
- *    event+action against a small allowlist/delivery id, deduplicates by `X-GitHub-Delivery`,
- *    and — on acceptance only — atomically writes ONE `state/SWEEP_WAKE_REQUESTED` marker. It
- *    NEVER calls GitHub, runs a sweep, or blocks on the daemon: every response is bounded by
- *    this handler's own synchronous-ish work, well inside GitHub's 10-second delivery timeout.
- *
- * 2. The marker primitives (`sweepWakeMarkerPath`/`readSweepWakeMarker`/
- *    `writeSweepWakeMarkerAtomic`/`consumeSweepWakeMarker`) — plain fs helpers over one JSON
- *    file, atomically written (temp file + rename) so a concurrent reader never observes a
- *    torn write. The file lives under the shared state directory both `remudero-daemon` and
- *    `remudero-serve` mount read-write (recon, 2026-09-01: a planted-file `fs.watch` probe
- *    across that exact container boundary fired immediately), which is the whole transport —
- *    no socket, no second listener, no signal.
- *
- * 3. The daemon-side wake mechanics (`createSweepWakeSignal`/`watchSweepWakeMarker`/
- *    `wireSweepWakeToDaemon`) — consumed by `run-task.ts`'s `daemonCommand`. `createSweepWakeSignal`
- *    is PURE (no fs) and does the one load-bearing thing: wrap `DaemonDeps.sleep` so it also
- *    resolves the moment a wake fires (or immediately, if one is already pending), racing
- *    alongside the ordinary timeout rather than replacing it. Every idle wait in `daemon.ts`'s
- *    poll loop already funnels through `deps.sleep` (the STOP/PAUSE branches, every "nothing
- *    runnable" idle branch, the backoff branches) — wrapping that ONE dependency wakes the
- *    SAME loop, through the SAME `runGatedSweep`/`deps.sweep` call, under the SAME cross-call
- *    mutex, wall-clock bound, ledger effects and STOP/PAUSE checks the timer already has, with
- *    ZERO changes to `daemon.ts` itself (which stays fs-free by its own header contract).
- *    `watchSweepWakeMarker` is the impure fs.watch half that turns a marker WRITE into a
- *    `signal.wake()` call; `wireSweepWakeToDaemon` composes both plus the boot-time marker
- *    check into the one `{ sleep, close }` pair `daemonCommand` swaps in for its own `sleep`.
- *
- * WHAT THIS MODULE DELIBERATELY NEVER DOES (design vi/viii): call GitHub, decide a PR's
- * disposition, select a merge method, bypass the durable merge hold, or replace the timer poll.
- * A missed/failed webhook is recovered by the very next ordinary poll — this module never
- * claims exactly-once delivery, and a marker it writes is read ONLY as "something may have
- * changed", never as the queue's actual state.
- */
+ * Three pieces: {@link createGitHubEventWakeHandler}, the self-authenticated webhook route; the
+ * marker primitives (one atomic JSON file under the shared state directory both processes mount
+ * read-write — {@link sweepWakeMarkerPath}, {@link readSweepWakeMarker},
+ * {@link writeSweepWakeMarkerAtomic}, {@link consumeSweepWakeMarker}); and the daemon-side wake
+ * ({@link createSweepWakeSignal}, {@link watchSweepWakeMarker}, {@link wireSweepWakeToDaemon}),
+ * wrapping `DaemonDeps.sleep` so a marker write resolves the poll wait through the same gated sweep.
+ * INVARIANT: never calls GitHub, decides a PR's disposition, selects a merge method, or bypasses
+ * the merge hold — a missed/failed webhook recovers on the next ordinary poll. A marker means
+ * only "something may have changed," never the queue's actual state.
+ * FALSIFIER: test/github-event-sweep-wake.test.ts, test/main-health-event-wake.test.ts.
+ * Why: docs/forensics/github-event-wake.md#module-header (W1-T2568). */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   existsSync,
@@ -66,12 +31,9 @@ import { basename, dirname, join } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
 import { RawBodyTooLargeError, readBoundedRawBody, type Route } from "./service.js";
 
-// ── (i) THE ALLOWLIST — design (ii), "do not subscribe to or accept `*`" ───────────────────
+// ── (i) THE ALLOWLIST — never subscribe to or accept `*` ────────────────────────────────────
 
-/** GitHub's real `pull_request` webhook `action` strings this daemon's sweep can act on — an
- *  open/reopen, a synchronize (new commits), an edit (title/body), a ready/draft transition, or
- *  a close. Every OTHER `pull_request` action (labeled, assigned, review_requested, …) changes
- *  nothing the sweep's disposition rules read, so it is deliberately NOT here. */
+/** `pull_request` actions the sweep can act on differently — every other action is deliberately absent. */
 const ALLOWLISTED_PULL_REQUEST_ACTIONS: ReadonlySet<string> = new Set([
   "opened",
   "reopened",
@@ -82,15 +44,10 @@ const ALLOWLISTED_PULL_REQUEST_ACTIONS: ReadonlySet<string> = new Set([
   "closed",
 ]);
 
-/**
- * True iff `event`+`action` is one this daemon's sweep can actually act on differently as a
- * result — design (ii)'s minimum event set. `check_run` only in its terminal `completed` state
- * (an in-progress run changes nothing a disposition reads); `status` carries no `action` field
- * at all (GitHub's Status API predates the actions convention), so its mere presence, already
- * gated by the event-name allowlist below, is the whole signal; `pull_request_review` on all
- * three actions GitHub documents: `submitted`, `edited`, and `dismissed`. Each can change the
- * review evidence the next level-triggered sweep reads.
- */
+/** INVARIANT: true only for an `event`+`action` the sweep can act on. `check_run` counts only its
+ *  terminal `completed` state; `status` has no `action` field, so presence is the whole signal;
+ *  `pull_request_review` counts `submitted`, `edited`, `dismissed`.
+ *  Why: docs/forensics/github-event-wake.md#isallowlistedgithubevent (design ii). */
 export function isAllowlistedGithubEvent(event: string, action: string | undefined): boolean {
   switch (event) {
     case "pull_request":
@@ -106,17 +63,14 @@ export function isAllowlistedGithubEvent(event: string, action: string | undefin
   }
 }
 
-// ── (ii) SIGNATURE VERIFICATION — design (i), HMAC-SHA256 over the byte-identical raw body ──
+// ── (ii) SIGNATURE VERIFICATION — HMAC-SHA256 over the byte-identical raw body ──────────────
 
 const SIGNATURE_HEADER_PATTERN = /^sha256=([0-9a-f]+)$/i;
 
-/**
- * GitHub's documented `X-Hub-Signature-256` check: HMAC-SHA256 of the RAW body (never the
- * parsed/re-serialized JSON, which could reorder or drop bytes) under the configured secret,
- * compared constant-time against the header's `sha256=<hex>` value. Any malformed header
- * (missing prefix, non-hex, wrong length) is a plain `false` — never a throw, so a probe with a
- * garbage header degrades to an ordinary refusal like any other invalid signature.
- */
+/** GitHub's `X-Hub-Signature-256` check: HMAC-SHA256 of the RAW body (never the reordering-prone
+ *  parsed/re-serialized JSON) under the configured secret, compared constant-time against the
+ *  header's `sha256=<hex>` value. A malformed header returns `false`, never a throw.
+ *  Why: docs/forensics/github-event-wake.md#verifygithubsignature (design i). */
 export function verifyGithubSignature(rawBody: string, signatureHeader: string, secret: string): boolean {
   const match = SIGNATURE_HEADER_PATTERN.exec(signatureHeader.trim());
   if (!match) return false;
@@ -152,12 +106,9 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-// ── (iii) DELIVERY DEDUP — design (iv), bounded so a redelivery/replay burst cannot regrow forever ─
+// ── (iii) DELIVERY DEDUP — bounded, so a redelivery/replay burst cannot regrow it forever ───
 
-/** One recent-delivery dedup window, capacity-bounded (design iv: "the debounce is a bounded
- *  `plan/policy.yaml` row, not a literal beside `fs.watch`" — see policy.ts's
- *  `githubEventWake.dedupCapacity`). FIFO eviction: this is a REPLAY/redelivery guard, not an
- *  audit log, so the oldest-remembered delivery id is the correct one to forget first. */
+/** A recent-delivery dedup window (capacity: policy.ts's `githubEventWake.dedupCapacity`); FIFO eviction, so the oldest id is forgotten first. */
 export interface DeliveryDedupStore {
   /** True iff `deliveryId` was already accepted. Pure: never records the candidate. */
   has(deliveryId: string): boolean;
@@ -193,19 +144,13 @@ export function createDeliveryDedupStore(capacity: number, initial: ReadonlyArra
   };
 }
 
-/** The serve process's durable, bounded replay window. Separate from the coalesced wake marker
- * because accepted ids must survive marker consumption and a serve-container restart. */
+/** The serve process's durable, bounded replay window — separate from the coalesced wake marker so accepted ids survive a restart. */
 export function githubDeliveryDedupPath(root: string): string {
   return join(root, "state", "github-webhook-deliveries.json");
 }
 
-/**
- * Persist the recent-delivery FIFO as one atomically replaced JSON file. The disk write completes
- * before the in-memory store changes, so a failed persistence attempt cannot poison an id and
- * turn a legitimate retry into a false duplicate. A missing or malformed old file starts with an
- * empty window; HMAC remains the authentication boundary and losing this secondary replay cache
- * can cause only an extra level-triggered wake.
- */
+/** Persists the recent-delivery FIFO as one atomically replaced JSON file, write-before-memory so
+ *  a failed write can't poison an id. HMAC is the real auth boundary; losing this cache costs at most one extra wake. */
 export function createPersistentDeliveryDedupStore(path: string, capacity: number): DeliveryDedupStore {
   let initial: string[] = [];
   try {
@@ -231,9 +176,9 @@ export function createPersistentDeliveryDedupStore(path: string, capacity: numbe
   };
 }
 
-// ── (iv) THE DURABLE MARKER — design (iii), "ack the durable intent, never the sweep" ──────
+// ── (iv) THE DURABLE MARKER — ack the durable intent, never the sweep ───────────────────────
 
-/** ONE coalesced record of "a wake happened" — never a queue, never re-derived from GitHub. */
+/** One coalesced record of "a wake happened" — never a queue, never re-derived from GitHub. */
 export interface SweepWakeMarker {
   deliveryId: string;
   event: string;
@@ -242,54 +187,45 @@ export interface SweepWakeMarker {
   receivedAtIso: string;
 }
 
-/** `state/SWEEP_WAKE_REQUESTED`, under `root` — a sibling of `state/STOP`/`state/PAUSE`
- *  (`fleet-control.ts`) and `state/service-tokens.json` (`serve.ts`), the same shared-state
- *  directory both `remudero-daemon` and `remudero-serve` mount read-write. */
+/** `state/SWEEP_WAKE_REQUESTED` under `root`, a sibling of `state/STOP`/`state/PAUSE` in the
+ *  shared-state directory both processes mount read-write. */
 export function sweepWakeMarkerPath(root: string): string {
   return join(root, "state", "SWEEP_WAKE_REQUESTED");
 }
 
-/**
- * Write `record` atomically — a temp file in the SAME directory (so the rename is same-
- * filesystem and therefore atomic) followed by `renameSync` over the real path. A concurrent
- * reader/watcher never observes a partially-written marker; a new delivery simply COALESCES
- * with whatever was there (design iv: a burst of distinct check completions collapses to one
- * pending wake, never a queue of markers).
- */
+/** INVARIANT: writes `record` atomically — a same-directory temp file, then `renameSync` over the
+ *  real path — so a reader never observes a torn write, and a delivery coalesces rather than queuing.
+ *  Why: docs/forensics/github-event-wake.md#writesweepwakemarkeratomic (design iv). */
 export function writeSweepWakeMarkerAtomic(path: string, record: SweepWakeMarker): void {
-  // W1-T2899: the shared primitive, whose cleanup-on-failure arm was lifted from here.
+  // W1-T2899: the shared primitive; its cleanup-on-failure arm was lifted from here.
   writeAtomic(path, JSON.stringify(record));
 }
 
-/** `undefined` on any read/parse failure (absent, mid-write elsewhere, corrupt) — never throws;
- *  an unreadable marker is treated exactly like an absent one (design vi's fail-soft contract). */
+/** `undefined` on any read/parse failure (absent, mid-write, corrupt) — never throws; an
+ *  unreadable marker reads exactly like an absent one. */
 export function readSweepWakeMarker(path: string): SweepWakeMarker | undefined {
   try {
     return JSON.parse(readFileSync(path, "utf8")) as SweepWakeMarker;
   } catch {
-    // Fail-soft by contract (see this function's doc): absent, mid-write and corrupt are ONE
-    // outcome to every caller, so the cause is deliberately not carried out of here.
+    // Fail-soft: absent, mid-write and corrupt are one outcome to every caller.
     return undefined;
   }
 }
 
-/** Atomically CLAIM the current path by renaming it, then read + delete only that claimed inode.
- * A writer that installs a newer marker before or after the claim leaves a path this consumer
- * never unlinks, closing the read-then-unlink race that could otherwise erase a later delivery. */
+/** INVARIANT: consumes ONCE — claims the path by renaming it, then reads and deletes only that
+ *  inode, so a read-then-unlink race can never erase a marker installed around the claim. */
 export function consumeSweepWakeMarker(path: string): SweepWakeMarker | undefined {
   const claimedPath = `${path}.consume-${process.pid}-${Math.random().toString(36).slice(2)}`;
   try {
     renameSync(path, claimedPath);
   } catch {
-    // Nothing to claim: the marker is absent, or a racing consumer won the rename. Both mean
-    // "no delivery for me", which is exactly what `undefined` says.
+    // Nothing to claim: absent, or a racing consumer won the rename. Both mean "no delivery".
     return undefined;
   }
   try {
     return JSON.parse(readFileSync(claimedPath, "utf8")) as SweepWakeMarker;
   } catch {
-    // The claimed inode is unreadable or corrupt. The `finally` below still unlinks it, so a bad
-    // marker is discarded rather than left to wedge every later consume.
+    // Unreadable or corrupt: `finally` still unlinks it, so a bad marker can't wedge later consumes.
     return undefined;
   } finally {
     try {
@@ -300,27 +236,19 @@ export function consumeSweepWakeMarker(path: string): SweepWakeMarker | undefine
   }
 }
 
-// ── (v) THE ROUTE — design (i)/(ii)/(iii)/(vii), the self-authenticated POST /v1/hooks/github ──
+// ── (v) THE ROUTE — the self-authenticated POST /v1/hooks/github ───────────────────────────
 
-/** Bytes, not characters — GitHub's own guidance sizes real payloads in the tens of KB; 1 MiB is
- *  comfortably above any legitimate delivery and far below a DoS-shaped body. Bounded BEFORE
- *  buffering (design i), never after.
- *
- *  BACKSTOP (W1-T1266): no legitimate GitHub delivery approaches this, so it fires only once
- *  something abnormal is already on the wire. It is not what paces or bounds ordinary traffic. */
+/** Bytes, bounded BEFORE buffering, never after. 1 MiB is far above any real delivery — a
+ *  BACKSTOP against an abnormal body, not a pacing limit on ordinary traffic.
+ *  Why: docs/forensics/github-event-wake.md#default_github_webhook_max_body_bytes (W1-T1266). */
 export const DEFAULT_GITHUB_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024;
 
 export interface GithubEventWakeOptions {
-  /** The configured webhook secret, or `undefined` when none is configured — design (vii)'s
-   *  "ship dark": `undefined` makes every request a named, harmless 503 refusal, never a 404
-   *  (a 404 looks like a routing typo; a named unavailable reason is honest about WHY). */
+  /** The configured webhook secret. `undefined` ships dark: every request gets a named 503, never a 404. */
   secret: string | undefined;
-  /** This daemon's OWN `owner/repo` — a payload naming any other repository is a refusal
-   *  (design ii), never silently ignored, so a shared/misconfigured secret cannot wake a
-   *  process that has no business reacting to it. */
+  /** This daemon's own `owner/repo` — another repository's payload is refused, never silently ignored. */
   repository: string;
-  /** Where {@link writeSweepWakeMarkerAtomic} persists the coalesced wake — see
-   *  {@link sweepWakeMarkerPath}. */
+  /** Where {@link writeSweepWakeMarkerAtomic} persists the coalesced wake; see {@link sweepWakeMarkerPath}. */
   markerPath: string;
   /** Bounded recent-delivery dedup — see {@link createDeliveryDedupStore}. */
   dedup: DeliveryDedupStore;
@@ -332,28 +260,15 @@ export interface GithubEventWakeOptions {
 }
 
 /**
- * `POST /v1/hooks/github` — design (iii): validates, then writes/coalesces ONE durable marker
- * and returns. NEVER calls GitHub, NEVER runs a sweep, NEVER touches the merge hold (design
- * viii) — the daemon side (`wireSweepWakeToDaemon`) is the only consumer of what this writes,
- * and it consumes through the SAME gated sweep path the timer already uses.
- *
- * Order of checks, exactly design (i)/(ii)'s own ordering — signature BEFORE anything else is
- * trusted, repository identity BEFORE event/action, delivery id (for dedup) LAST, so nothing
- * before it can be skipped by a caller racing to land a duplicate:
- *   1. no secret configured -> 503, refused, ships dark (design vii).
- *   2. body over {@link GithubEventWakeOptions.maxBodyBytes} -> 413, refused, nothing buffered.
- *   3. missing/malformed `X-Hub-Signature-256` -> 401, refused.
- *   4. invalid JSON -> 400, refused.
- *   5. `repository.full_name` != configured repository -> 403, refused (a refusal, not silence
- *      — design ii: "a supported event for another repository is a refusal").
- *   6. `X-GitHub-Event`/action not in {@link isAllowlistedGithubEvent} -> 202 ignored (a 2xx, so
- *      GitHub never marks a legitimately-uninteresting delivery "failed" and retries it; design
- *      ii: "an attacker cannot use that response to create a marker" — nothing is written here).
- *   7. missing `X-GitHub-Delivery` -> 400, refused (dedup needs it).
- *   8. a delivery id already recorded -> 202 duplicate, nothing re-written.
- *   9. accepted -> marker written/coalesced, delivery id recorded,
- *      `github.wake.accepted` ledgered, 202. A failed marker write records nothing.
- */
+ * `POST /v1/hooks/github`: validates, then writes/coalesces ONE durable marker. Never calls
+ * GitHub, runs a sweep, or touches the merge hold — {@link wireSweepWakeToDaemon} is the only
+ * consumer, through the same gated sweep the timer already uses.
+ * INVARIANT: checks run signature, then repository identity, then delivery id (dedup) last, so
+ * nothing earlier can be skipped by a duplicate-racing caller: no secret (503) -> body too large
+ * (413) -> bad signature (401) -> invalid JSON (400) -> wrong repository (403) -> unlisted
+ * event/action (202 ignored, a 2xx so GitHub never retries it, nothing written) -> missing
+ * delivery id (400) -> duplicate id (202, nothing re-written) -> accepted (202).
+ * Why: docs/forensics/github-event-wake.md#creategithubeventwakehandler (design i, ii, iii, vii). */
 export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Route {
   const log = opts.log ?? (() => {});
   const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_GITHUB_WEBHOOK_MAX_BODY_BYTES;
@@ -448,24 +363,17 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
   };
 }
 
-// ── (vi) THE DAEMON-SIDE WAKE — design (v)/(vi), interrupts the SAME loop, changes nothing else ─
+// ── (vi) THE DAEMON-SIDE WAKE — interrupts the SAME loop, changes nothing else ──────────────
 
-/**
- * The pure, fs-free core of the daemon-side wake — see this module's header, piece 3.
- * `wake()` marks a wake pending; `sleep` resolves the moment
- * a wake is pending (immediately, if one already was — this is what makes a boot-time pending
- * marker and a live `fs.watch` fire behave identically) while STILL retaining the real timeout
- * underneath, so `pollIntervalMs` recovery is never removed, only ever shortened (design vi:
- * "polling is the recovery contract"). An early wake clears that timeout, so no abandoned
- * 60-second timer delays a later normal shutdown. Consuming zero filesystem state — see
- * `wireSweepWakeToDaemon` for the impure half that connects this to an actual marker file.
- */
+/** The pure, fs-free core of the daemon-side wake. `wake()` marks a wake pending; `sleep`
+ *  resolves the moment one is pending, immediately if one already was, while still retaining the
+ *  real timeout — `pollIntervalMs` recovery is only ever shortened, never removed.
+ *  Why: docs/forensics/github-event-wake.md#sweepwakesignal (design v, vi). */
 export interface SweepWakeSignal {
   wake(): void;
   /** Clear an already-observed wake immediately before the top-level loop runs its full sweep. */
   acknowledge(): void;
-  /** Distinguish an event edge from ordinary timer expiry so in-flight work can bypass only
-   * the full-sweep cadence interval, without turning every heartbeat into a full sweep. */
+  /** Distinguishes an event edge from ordinary timer expiry, so in-flight work bypasses only the full-sweep cadence. */
   sleep(ms: number): Promise<"wake" | "timeout">;
   close(): void;
 }
@@ -525,18 +433,11 @@ export function createSweepWakeSignal(
   };
 }
 
-/**
- * The impure half: turn a marker-file WRITE into a {@link SweepWakeSignal.wake} call. Watches
- * the marker's PARENT directory (not the file itself — a file that does not exist yet has
- * nothing to watch, and the marker is unlinked/recreated across its life) and fires only on the
- * exact filename, only while the file actually exists at the moment of the event (so this
- * process's OWN `consumeSweepWakeMarker` unlink — which also raises a `fs.watch` event — never
- * causes a spurious second wake).
- *
- * FAILS SOFT (design vi): any construction/watch error is ledgered ONCE
- * (`github.wake.watch_failed`) and degrades to a no-op watcher — the daemon keeps polling on
- * `pollIntervalMs` exactly as it always has, never crashes, never keeps retrying a broken watch.
- */
+/** The impure half: turns a marker-file write into a {@link SweepWakeSignal.wake} call. Watches
+ *  the marker's PARENT directory so this process's own consuming unlink never causes a spurious wake.
+ *  INVARIANT: fails soft — a watch error is logged once and degrades to a no-op watcher, so the
+ *  daemon keeps polling on `pollIntervalMs` rather than crashing or retrying.
+ *  Why: docs/forensics/github-event-wake.md#watchsweepwakemarker (design vi). */
 export function watchSweepWakeMarker(
   root: string,
   signal: SweepWakeSignal,
@@ -565,34 +466,24 @@ export function watchSweepWakeMarker(
   }
 }
 
-/** What `wireSweepWakeToDaemon` hands `run-task.ts`'s `daemonCommand` — a drop-in replacement
- *  for `DaemonDeps.sleep` plus the one cleanup hook daemon shutdown must call. */
+/** What `wireSweepWakeToDaemon` hands `daemonCommand`: a drop-in `DaemonDeps.sleep` replacement plus the one cleanup hook shutdown must call. */
 export interface SweepWakeWiring {
   sleep: (ms: number) => Promise<"wake" | "timeout">;
   /** Consume the durable marker and clear its in-memory signal immediately before a full sweep. */
   acknowledge(): void;
-  /** Closes the underlying `fs.watch` watcher — MUST be called on every daemon shutdown path
-   *  (signal handler AND the ordinary `finally`), design (v): "the watcher is closed on daemon
-   *  shutdown and cannot keep the process alive after normal stop." */
+  /** MUST be called on every daemon shutdown path, so the `fs.watch` watcher never keeps the process alive after a stop. */
   close(): void;
 }
 
 /** W1-T2741: daemon-side scheduling policy and clock seams for high-fanout event settlement. */
 export interface SweepWakeWireOptions {
-  /** Trailing-edge quiet period for `check_run:completed` and `status`; zero preserves the
-   * pre-W1-T2741 immediate-wake behavior for callers that do not supply committed policy. */
+  /** Trailing-edge quiet period for `check_run:completed`/`status`; zero keeps the immediate-wake behavior. */
   checkSettleMs?: number;
-  /** One injected timer family owns both the ordinary poll race and the trailing settle clock. */
+  /** One injected timer family owns both the ordinary poll race and the settle clock. */
   timers?: SweepWakeTimerDeps;
-  /** Wall clock used only to avoid re-waiting a full settle period for a boot-pending marker. */
+  /** Wall clock, used only to avoid re-waiting a full settle period for a boot-pending marker. */
   now?: () => number;
-  /**
-   * W1-T2787: observe default-branch health when a high-fanout check/status burst settles,
-   * independently of whether the ordinary full-sweep liveness gate can accept the resulting
-   * wake. This runs in the daemon-side marker watcher, never in Serve. Structural PR/review
-   * events do not call it. A callback failure is named and swallowed so it cannot suppress the
-   * wake that still drives ordinary reconciliation.
-   */
+  /** W1-T2787: observes default-branch health when a check/status burst settles; a callback failure is swallowed, never suppressing the wake. */
   onCheckBurstSettled?: () => void;
 }
 
@@ -601,20 +492,12 @@ export function isHighFanoutGithubWake(record: Pick<SweepWakeMarker, "event" | "
   return (record.event === "check_run" && record.action === "completed") || record.event === "status";
 }
 
-/**
- * Compose the marker primitives + {@link createSweepWakeSignal} + {@link watchSweepWakeMarker}
- * into the one `{ sleep, close }` pair `daemonCommand` (`run-task.ts`) swaps in for its own
- * `sleep` dependency. This is the ENTIRE production wiring on the daemon side — design (v)'s
- * "production wiring watches the shared state directory and also checks the marker at boot":
- * boot detection happens here, once, before the daemon's first poll wait ever runs; the marker
- * itself remains durable until {@link SweepWakeWiring.acknowledge} is called immediately before
- * the ordinary full-sweep gate. The live watch is armed immediately after.
- *
- * The boot-time marker is READ but not consumed here. STOP/PAUSE are checked by `runDaemon`
- * before acknowledgement, so a held daemon cannot erase a wake it has not reconciled. The wake
- * seeds `createSweepWakeSignal`'s initial pending state so a paused loop notices promptly, while
- * the durable file remains the recovery source across a stop or restart.
- */
+/** Composes the marker primitives, {@link createSweepWakeSignal} and {@link watchSweepWakeMarker}
+ *  into the `{ sleep, close }` pair `daemonCommand` swaps in for its own `sleep` — the entire
+ *  production wiring on the daemon side.
+ *  INVARIANT: the marker is read but not consumed here — `runDaemon` checks STOP/PAUSE before
+ *  {@link SweepWakeWiring.acknowledge}, so a held daemon can never erase an unreconciled wake.
+ *  Why: docs/forensics/github-event-wake.md#wiresweepwaketodaemon (design v). */
 export function wireSweepWakeToDaemon(
   root: string,
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
@@ -637,8 +520,7 @@ export function wireSweepWakeToDaemon(
   let checkSettleTimer: unknown | undefined;
   let coalescedCheckEdges = 0;
 
-  /** Finish exactly one bounded check/status burst. `wake=false` means an already-accepted
-   * ordinary/structural sweep owns the durable level before the quiet timer fired. */
+  /** Finishes one bounded check/status burst. `wake=false` means an already-accepted sweep owns the durable level. */
   const finishCheckBurst = (wake: boolean) => {
     if (checkSettleTimer !== undefined) timers.clearTimer(checkSettleTimer);
     checkSettleTimer = undefined;
@@ -663,8 +545,7 @@ export function wireSweepWakeToDaemon(
 
   const scheduleRecord = (record: SweepWakeMarker, fromBoot: boolean = false) => {
     if (!isHighFanoutGithubWake(record) || checkSettleMs <= 0) {
-      // A structural transition should never wait behind an older check burst. The next accepted
-      // full sweep sees both because the marker is level-triggered and contains only "reconcile".
+      // A structural transition never waits behind an older check burst.
       finishCheckBurst(false);
       signal.wake();
       return;
@@ -683,10 +564,7 @@ export function wireSweepWakeToDaemon(
       finishCheckBurst(true);
     }, remainingMs);
   };
-  // W1-T2656: remember which durable level has already produced an in-memory edge. If a sweep attempt is
-  // declined while an older pass is still settling, that marker must remain on disk for the next
-  // accepted pass, but re-reading the same level before every sleep must not create a zero-delay
-  // busy loop. A different delivery id is a new edge and wakes immediately.
+  // W1-T2656: the durable level already turned into an in-memory edge, so re-reading it before every sleep can't busy-loop.
   let observedDeliveryId = bootRecord?.deliveryId;
   const wakeForCurrentMarker = () => {
     const record = readSweepWakeMarker(path);
@@ -702,26 +580,19 @@ export function wireSweepWakeToDaemon(
   };
   const watcher = watchSweepWakeMarker(root, watcherSignal, log, watch);
   if (bootRecord) scheduleRecord(bootRecord, true);
-  // Close the consume-to-watch race: a delivery may land after the boot claim but before
-  // fs.watch is armed. The durable path is authoritative, so seed a pending wake if it exists.
+  // Closes the consume-to-watch race: a delivery may land after the boot claim but before fs.watch is armed.
   wakeForCurrentMarker();
   const sleep = (ms: number) => {
-    // `fs.watch` is an acceleration edge, never the source of truth. Re-read the durable level
-    // immediately before every daemon poll wait so a dropped/platform-delayed notification
-    // cannot strand an already-written marker until the full timer expires.
+    // `fs.watch` is only an acceleration edge; re-read the durable level before every poll wait so a dropped notification can't strand a marker.
     wakeForCurrentMarker();
     return signal.sleep(ms);
   };
   return {
     sleep,
     acknowledge: () => {
-      // `runDaemon` calls this only after STOP/PAUSE and the full-sweep liveness gate accept a pass.
-      // Clear the in-memory edge and claim the durable level together. A delivery racing after
-      // the claim writes a new marker and raises a new edge for one later pass.
+      // `runDaemon` calls this only after STOP/PAUSE and the sweep gate accept a pass.
       signal.acknowledge();
-      // A normal poll or a structural event may reach an accepted sweep before the check quiet
-      // period. That pass owns the same level-triggered reconciliation, so retire and report the
-      // collapsed burst instead of letting its timer cause a redundant pass afterward.
+      // An accepted sweep owns the same reconciliation, so retire and report the collapsed burst.
       finishCheckBurst(false);
       consumeSweepWakeMarker(path);
       const stillPending = readSweepWakeMarker(path);
@@ -738,13 +609,11 @@ export function wireSweepWakeToDaemon(
   };
 }
 
-// ── (vii) ENV-VAR RESOLUTION — design (vii), ship dark until an operator configures a secret ──
+// ── (vii) ENV-VAR RESOLUTION — ships dark until an operator configures a secret ─────────────
 
 export const GITHUB_WEBHOOK_SECRET_FILE_ENV = "RMD_GITHUB_WEBHOOK_SECRET_FILE";
 
-/** `explicit ?? env[RMD_GITHUB_WEBHOOK_SECRET_FILE]` — the same precedence
- *  `resolveAccountFilePath` (serve.ts) already uses for an optional mounted file. `undefined`
- *  (no override, no env var) is the shipped-dark default: no secret path, no configured route. */
+/** `explicit ?? env[RMD_GITHUB_WEBHOOK_SECRET_FILE]`. `undefined` is the shipped-dark default. */
 export function resolveGithubWebhookSecretFilePath(
   explicit: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
@@ -752,21 +621,16 @@ export function resolveGithubWebhookSecretFilePath(
   return explicit ?? env[GITHUB_WEBHOOK_SECRET_FILE_ENV];
 }
 
-/**
- * Read the secret file's content (trimmed — a trailing newline from `echo >file` must not
- * become part of the HMAC key), or `undefined` on any read failure (absent file, permission
- * error, `secretFilePath` itself `undefined`). NEVER throws, NEVER logs the content — only
- * presence/absence is ever observable from the caller's side (design vii: "report presence
- * without printing contents").
- */
+/** INVARIANT: reports only presence/absence of the secret, never its content. Returns the file's
+ *  trimmed content or `undefined` on any read failure. Never throws, never logs the content.
+ *  Why: docs/forensics/github-event-wake.md#readgithubwebhooksecret (design vii). */
 export function readGithubWebhookSecret(secretFilePath: string | undefined): string | undefined {
   if (!secretFilePath) return undefined;
   try {
     const content = readFileSync(secretFilePath, "utf8").trim();
     return content.length > 0 ? content : undefined;
   } catch {
-    // Absent, unreadable and permission-denied collapse to one answer on purpose: presence is the
-    // ONLY thing a caller may observe about the secret (design vii), so no cause escapes here.
+    // Absent, unreadable and permission-denied collapse to one answer: only presence is observable.
     return undefined;
   }
 }
