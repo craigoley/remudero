@@ -1,4 +1,4 @@
-- id: W1-T2967
+- id: W1-T2975
   title: "THE DAILY CI-LEARNING RUNG ONLY FIRES WHEN A HUMAN TYPES `rmd ci-learning` — its policy row, marker and two-bound decision all ship, but nothing calls `ciLearningCadenceCheck` from the daemon's poll loop, so the loop the operator asked to run DAILY runs never; give it the check/run hook pair every sibling cadence already has"
   repo: remudero
   depends_on: [W1-T2959]

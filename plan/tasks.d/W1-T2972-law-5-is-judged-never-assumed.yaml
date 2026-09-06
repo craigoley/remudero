@@ -1,4 +1,4 @@
-- id: W1-T2969
+- id: W1-T2972
   title: "LAW 5 REFUSES EVERY MACHINE-AUTHORED RECORD WHERE IT SHOULD JUDGE ONE — machineAuthorVerifyViolation blocks author_class:machine at verify:auto unconditionally, so a benign drafted shard is parked exactly as hard as a dangerous one; gate it on a RECORDED risk-judge ruling pinned to the record it judged, fail-closed when no ruling exists"
   repo: remudero
   depends_on: []
@@ -14,16 +14,16 @@
     - test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts
     - test/law-5-is-judged-never-assumed.test.ts
   origin: "operator-ruling#law-5-should-enforce-only-where-a-judge-finds-risk-2026-09-06"
-  plan_refs: ["W1-T2959", "W1-T2694", "W1-T130", "W1-T178", "W1-T186"]
+  plan_refs: ["W1-T2959", "W1-T2967", "W1-T2968", "W1-T2694", "W1-T130", "W1-T178", "W1-T186"]
   status: queued
   attempts: 0
   rationale: |
     OPERATOR RULING, 2026-09-06, RECORDED AS THE ORIGIN OF THIS TASK. Law 5's arm is to stay, and
     to become conditional: enforcement applies where an LLM judge finds a change risky or bad, and
     a machine-authored record the judge clears may dispatch. This shard exists because the
-    alternative the operator first named — deleting the gate — would have retired the doctrine
-    rather than sharpening it, and the doctrine is load-bearing in six modules that cite Law 5 as
-    the reason they are read-only.
+    alternative first named — deleting the gate — would have retired the doctrine rather than
+    sharpening it, and the doctrine is load-bearing in six modules that cite Law 5 as the reason
+    they are read-only (ci-failure-corpus, daemon ×2, digest ×2, rule-efficacy).
 
     THE GATE IS BINARY AND THE POPULATION IS NOT. `machineAuthorVerifyViolation`
     (src/lib/task-linter.ts) returns a `block` for every `author_class: "machine"` record whose
@@ -43,6 +43,11 @@
     error, timeout, unparseable response) always falls back to ESCALATE, never silent-proceeds
     (W1-T130) — enforced inside assessRisk itself." So the absent-ruling case needs no new policy:
     it is today's behaviour, and today's behaviour becomes the default rather than the only path.
+
+    THIS IS THE GATE W1-T2968's FILING PATH WILL MEET. W1-T2968 gives `mintCiLearningShards`'
+    drafts a way onto disk; every one carries `author_class: machine`, so under today's
+    unconditional arm every filed record parks forever. Ordering is not safety-critical in either
+    direction — parked is the safe default — but W1-T2968 delivers little until this lands.
   design: |
     (i) THE LINTER STAYS PURE AND SYNCHRONOUS. `machineAuthorVerifyViolation` must not make an LLM
     call — it is called per task in a hot loop, it has no budget, and an async gate would make
@@ -77,6 +82,11 @@
     (v) THE JUDGE'S REASONS REACH THE OPERATOR VERBATIM. A blocked ruling quotes `reasons` as the
     judge wrote them (W1-T186: observed reasons, never an inferred symptom), so a refusal is
     diagnosable without opening the ledger.
+
+    (vi) MEASUREMENT-CADENCE IS OPENED ON THE SAME TERMS, DELIBERATELY.
+    src/lib/measurement-cadence.ts also mints `author_class: machine` records, so this gate governs
+    two producers, not one. That is stated here rather than discovered later: a ruling-gated arm
+    applies to every machine author the linter sees.
   acceptance:
     - claim: "a machine-authored record at verify auto with no risk ruling is blocked exactly as it is today, so the default is unchanged and absence is never read as a pass"
       proof: "unit test: test/law-5-is-judged-never-assumed.test.ts"
