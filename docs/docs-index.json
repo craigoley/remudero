@@ -332,6 +332,12 @@
       "grepHint": "worker-branch-shape.mjs comment forensics"
     },
     {
+      "path": "docs/forensics/worker-home.md",
+      "title": "Forensics: src/lib/worker-home.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/worker-home.ts` used to",
+      "grepHint": "Forensics: src/lib/worker-home.ts"
+    },
+    {
       "path": "docs/forensics/worker.md",
       "title": "`src/lib/worker.ts` — comment forensics",
       "summary": "Verbatim archive of the measured facts, incidents and design arguments that used to live in",
