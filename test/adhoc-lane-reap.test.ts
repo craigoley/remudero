@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Config } from "../src/lib/config.js";
 import type { WorktreeReapSummary } from "../src/lib/worker.js";
-import { ADHOC_LANE_REAP_GRACE_MS, adhocLaneRoot, reapStaleWorktrees, runAdhocLaneReapRung } from "../src/lib/worker.js";
+import {
+  ADHOC_LANE_REAP_GRACE_MS,
+  adhocLaneRoot,
+  parseRegisteredWorktrees,
+  reapStaleWorktrees,
+  runAdhocLaneReapRung,
+} from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 /**
@@ -74,6 +80,34 @@ function laneFixture(): { root: string; repo: string; lane: string; branch: stri
   return { root: join(root, "rmd-root"), repo, lane, branch };
 }
 
+function aliasedLaneFixture(): ReturnType<typeof laneFixture> & { registeredPath: string } {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adhoc-lane-alias-`));
+  const repo = join(fixtureRoot, "repo");
+  mkdirSync(repo, { recursive: true });
+  git(["init", "--quiet", "-b", "main"], repo);
+  writeFileSync(join(repo, "f.txt"), "x\n");
+  git(["add", "-A"], repo);
+  git(["commit", "--quiet", "-m", "first"], repo);
+
+  const root = join(fixtureRoot, "rmd-root");
+  const actualLaneRoot = join(fixtureRoot, "actual-lanes");
+  mkdirSync(root, { recursive: true });
+  mkdirSync(actualLaneRoot, { recursive: true });
+  symlinkSync(actualLaneRoot, adhocLaneRoot(cfg(root)), "dir");
+  const branch = "alloc-alias";
+  const lane = join(adhocLaneRoot(cfg(root)), branch);
+  git(["worktree", "add", "--quiet", "-b", branch, lane], repo);
+
+  const old = (Date.now() - ADHOC_LANE_REAP_GRACE_MS * 2) / 1000;
+  for (const p of [lane, join(lane, "f.txt"), join(lane, ".git")]) utimesSync(p, old, old);
+  const registered = parseRegisteredWorktrees(git(["worktree", "list", "--porcelain"], repo));
+  const registeredPath = registered.find((entry) => entry.branch === branch)?.path;
+  assert.ok(registeredPath, "fixture: Git registers the aliased lane");
+  assert.notEqual(registeredPath, lane, "fixture: Git and the directory entry spell one inode differently");
+  assert.equal(realpathSync(registeredPath), realpathSync(lane), "fixture: both spellings resolve to one inode");
+  return { root, repo, lane, branch, registeredPath };
+}
+
 // ── acceptance 2: removal goes through the parent, not a bare recursive delete ─────────────────
 
 test("W1-T2847 (acceptance 2): an armed lane reap removes the worktree THROUGH ITS PARENT — the admin record dies with the directory, never stranded prunable", () => {
@@ -128,6 +162,83 @@ test("W1-T2847 (acceptance 3): a lane whose branch is still live upstream is NEV
     `the keep must be attributed to the branch, not to age — saw ${JSON.stringify(summary.keptReasons)}`,
   );
   assert.doesNotMatch(git(["worktree", "list", "--porcelain"], repo), /^prunable/m);
+});
+
+test("W1-T2950: a symlink-aliased linked worktree still reaches live-branch protection", () => {
+  const { root, repo, lane, branch, registeredPath } = aliasedLaneFixture();
+  const livenessCalls: Array<[string, string]> = [];
+  const summary = reapStaleWorktrees(adhocLaneRoot(cfg(root)), {
+    branchIsLiveUpstream: (candidateBranch, candidateRepo) => {
+      livenessCalls.push([candidateBranch, candidateRepo]);
+      return true;
+    },
+  });
+  assert.deepEqual(summary.reaped, [], "a path alias cannot erase a live branch");
+  assert.deepEqual(summary.keptReasons, [{ name: branch, reason: "live-branch" }]);
+  assert.equal(livenessCalls.length, 1, "the alias earns exactly one liveness read");
+  assert.equal(livenessCalls[0]?.[0], branch, "the original branch name reaches the liveness probe");
+  assert.equal(realpathSync(livenessCalls[0]?.[1] ?? ""), realpathSync(repo), "the original parent repo is preserved");
+  assert.ok(existsSync(lane));
+  assert.ok(existsSync(registeredPath));
+});
+
+test("W1-T2950: an unreadable canonical identity is named and kept fail-closed", () => {
+  const { root, lane, branch } = laneFixture();
+  let livenessCalled = false;
+  const summary = reapStaleWorktrees(adhocLaneRoot(cfg(root)), {
+    canonicalizeWorktreePath: () => {
+      throw new Error("fixture canonicalization refusal");
+    },
+    branchIsLiveUpstream: () => {
+      livenessCalled = true;
+      return false;
+    },
+  });
+  assert.deepEqual(summary.reaped, []);
+  assert.deepEqual(summary.keptReasons, [{ name: branch, reason: "path-identity-unknown" }]);
+  assert.equal(livenessCalled, false, "unknown identity never falls through to an unrelated liveness answer");
+  assert.ok(existsSync(lane), "the undecidable worktree survives");
+});
+
+test("W1-T2950: an unreadable Git-reported identity is also named and kept fail-closed", () => {
+  const { root, lane, branch, registeredPath } = aliasedLaneFixture();
+  let livenessCalled = false;
+  const summary = reapStaleWorktrees(adhocLaneRoot(cfg(root)), {
+    canonicalizeWorktreePath: (candidatePath) => {
+      if (candidatePath === registeredPath) throw new Error("fixture Git-side canonicalization refusal");
+      return realpathSync(candidatePath);
+    },
+    branchIsLiveUpstream: () => {
+      livenessCalled = true;
+      return false;
+    },
+  });
+  assert.deepEqual(summary.reaped, []);
+  assert.deepEqual(summary.keptReasons, [{ name: branch, reason: "path-identity-unknown" }]);
+  assert.equal(livenessCalled, false, "an unreadable Git identity cannot be treated as a proven no-match");
+  assert.ok(existsSync(lane), "the undecidable worktree survives");
+});
+
+test("W1-T2950: a canonicalized non-match preserves terminal-debris removal", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adhoc-lane-debris-`));
+  const debris = join(root, "terminal-debris");
+  mkdirSync(debris);
+  const old = (Date.now() - ADHOC_LANE_REAP_GRACE_MS * 2) / 1000;
+  utimesSync(debris, old, old);
+  const summary = reapStaleWorktrees(root);
+  assert.deepEqual(summary.reaped, ["terminal-debris"]);
+  assert.ok(!existsSync(debris), "a proven unregistered terminal directory is still removed");
+});
+
+test("W1-T2950: an aliased dead branch is removed through its original parent contract", () => {
+  const { root, repo, lane, branch, registeredPath } = aliasedLaneFixture();
+  const summary = reapStaleWorktrees(adhocLaneRoot(cfg(root)), { branchIsLiveUpstream: () => false });
+  assert.deepEqual(summary.reaped, [branch]);
+  assert.ok(!existsSync(lane));
+  assert.ok(!existsSync(registeredPath));
+  const porcelain = git(["worktree", "list", "--porcelain"], repo);
+  assert.doesNotMatch(porcelain, /^prunable/m, "Git removal consumed the aliased registration rather than stranding it");
+  assert.ok(!porcelain.includes(registeredPath), "the original parent no longer registers the removed worktree");
 });
 
 // ── acceptance 4: survey first — ledger what it WOULD reclaim before it may delete ─────────────
@@ -204,6 +315,19 @@ test("W1-T2847: an activity-unknown keep earns its own row — the reaper declin
   const row = lines.find(([s]) => s === "adhoc_lane.reap.undecidable");
   assert.ok(row, "W1-T378's doctrine, inherited rather than re-decided");
   assert.deepEqual(row[1]?.kept, ["board"]);
+});
+
+test("W1-T2950: a path-identity refusal reaches the undecidable ledger row by name", () => {
+  const lines: Array<[string, Record<string, unknown> | undefined]> = [];
+  runAdhocLaneReapRung(cfg("/srv/rmd-root"), (s, f) => lines.push([s, f]), {
+    reap: (() => summaryOf({
+      kept: ["alloc"],
+      keptReasons: [{ name: "alloc", reason: "path-identity-unknown" }],
+    })) as never,
+  });
+  const row = lines.find(([s]) => s === "adhoc_lane.reap.undecidable");
+  assert.ok(row, "the operator can distinguish an identity refusal from a quiet keep");
+  assert.deepEqual(row[1]?.kept_reasons, [{ name: "alloc", reason: "path-identity-unknown" }]);
 });
 
 // ── the WIRING end: runTaskBody really calls the rung ─────────────────────────────────────────

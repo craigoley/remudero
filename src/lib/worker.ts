@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   symlinkSync,
@@ -3222,6 +3223,8 @@ export type WorktreeKeepReason =
   /** The activity probe could not complete (unreadable, or past the entry cap), so liveness is UNKNOWN and the entry is kept.
    * An ambiguous signal keeps; it never destroys. */
   | "activity-unknown"
+  /** Candidate and Git-reported paths could not be compared by canonical filesystem identity. */
+  | "path-identity-unknown"
   /** Removal itself failed — best-effort, the rest of the pass continues. */
   | "removal-failed"
   /** The entry's own `.git` is present but could not be read or parsed, so whether an admin record exists in some parent clone
@@ -3313,6 +3316,8 @@ export interface WorktreeReapOpts {
   /** The tree-activity probe the age gate measures against. Injectable so a test asserts the boundary without a deep fixture
    * per case. Defaults to {@link newestActivityMs}, the REAL bounded walk, which the fixture-free tests drive (W1-T378). */
   newestActivity?: (dir: string) => { mtimeMs: number; complete: boolean };
+  /** Canonical path identity used only to match a directory entry to Git's registration. A failed comparison keeps the tree. */
+  canonicalizeWorktreePath?: (path: string) => string;
   /** SURVEY ONLY when true: an entry that would be reaped is still recorded in `reaped` and `reapedLocks`, so a caller can
    * ledger exactly what it would reclaim, but nothing is removed from disk. Mirrors {@link reapStaleClones}'s own `dryRun`.
    * Default false, unchanged for every existing caller (W1-T406). */
@@ -3362,14 +3367,34 @@ interface WorktreeRegistration {
   branch?: string;
 }
 
-/** Cross-reference `entryPath` against `git worktree list --porcelain` for its OWN resolved repoDir, never a fixed one — the
- * multi-checkout lesson. Null when git does not register the path there, treated identically to "not a worktree": both are
- * hole-(1) debris with no branch to consult. */
-function resolveWorktreeRegistration(entryPath: string): WorktreeRegistration | null {
+type WorktreeRegistrationResolution =
+  | { kind: "known"; registration: WorktreeRegistration | null }
+  | { kind: "unknown" };
+
+/** Cross-reference by filesystem identity: Git may canonicalize `/var` to `/private/var` or resolve a symlink. Original paths
+ * still drive every command and ledger field. A canonicalization failure is unknown, never evidence of no registration. */
+function resolveWorktreeRegistration(
+  entryPath: string,
+  canonicalize: (path: string) => string = realpathSync,
+): WorktreeRegistrationResolution {
   const repoDir = resolveWorktreeRepoDir(entryPath);
-  if (!repoDir) return null;
-  const found = listRegisteredWorktrees(repoDir).find((entry) => entry.path === entryPath);
-  return found ? { repoDir, branch: found.branch } : null;
+  if (!repoDir) return { kind: "known", registration: null };
+  let candidateIdentity: string;
+  try {
+    candidateIdentity = canonicalize(entryPath);
+  } catch {
+    return { kind: "unknown" };
+  }
+  for (const entry of listRegisteredWorktrees(repoDir)) {
+    try {
+      if (canonicalize(entry.path) === candidateIdentity) {
+        return { kind: "known", registration: { repoDir, branch: entry.branch } };
+      }
+    } catch {
+      return { kind: "unknown" };
+    }
+  }
+  return { kind: "known", registration: null };
 }
 
 /** HOW an aged, terminal reap candidate must be REMOVED — never WHETHER, which the gates above decide. `git-remove` deletes
@@ -3471,6 +3496,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
   const now = opts.now ?? (() => Date.now());
   const branchIsLiveUpstream = opts.branchIsLiveUpstream ?? defaultBranchIsLiveUpstream;
   const newestActivity = opts.newestActivity ?? ((d: string) => newestActivityMs(d));
+  const canonicalizeWorktreePath = opts.canonicalizeWorktreePath ?? realpathSync;
   const dryRun = opts.dryRun ?? false;
   const reaped: string[] = [];
   const reapedLocks: string[] = [];
@@ -3512,7 +3538,12 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     // Not a live-pid worktree. A registered branch still live upstream — an open, unmerged PR — is fail-closed KEPT
     // regardless of age. The sweep-W1-T154 falsifier: a `sweep-*` dir writes no lock at all, so lock state alone cannot tell
     // it from debris; only the branch signal can.
-    const registration = resolveWorktreeRegistration(entryPath);
+    const registrationResolution = resolveWorktreeRegistration(entryPath, canonicalizeWorktreePath);
+    if (registrationResolution.kind === "unknown") {
+      keep(name, "path-identity-unknown");
+      continue;
+    }
+    const registration = registrationResolution.registration;
     if (registration?.branch && branchIsLiveUpstream(registration.branch, registration.repoDir)) {
       keep(name, "live-branch");
       continue;
@@ -3640,10 +3671,16 @@ export function runAdhocLaneReapRung(
         reaped_locks: summary.reapedLocks.length,
       });
     }
-    // W1-T378's doctrine, unchanged: an `activity-unknown` keep is the reaper declining to decide, and it is what bounds
-    // growth now that an ambiguous signal keeps rather than destroys.
-    const undecidable = (summary.keptReasons ?? []).filter((k) => k.reason === "activity-unknown");
-    if (undecidable.length) log("adhoc_lane.reap.undecidable", { kept: undecidable.map((k) => k.name) });
+    // These are explicit failures to prove safe deletion, not ordinary live/recent keeps.
+    const undecidable = (summary.keptReasons ?? []).filter(
+      (k) => k.reason === "activity-unknown" || k.reason === "path-identity-unknown",
+    );
+    if (undecidable.length) {
+      log("adhoc_lane.reap.undecidable", {
+        kept: undecidable.map((k) => k.name),
+        kept_reasons: undecidable,
+      });
+    }
     // NAME the lanes no cadence can reach: that population being invisible, not merely unreaped, is the whole reason 4.7G
     // accumulated with no ledger row. Reported beside the survey and NEVER acted on — by definition these sit outside both
     // managed roots (W1-T2847 design (vi)).
