@@ -30,23 +30,29 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
   FixRungCheckoutRefusedError,
+  boundedProcessCwdCensus,
   buildSweepEffects,
+  captureFixOwnerRecoverySnapshot,
   checkoutFixHeadRef,
   createFixRungWorktree,
+  decideFixOwnerRecovery,
   fixBranchClaimKey,
+  removeRegisteredFixWorktree,
   registeredFixWorktreeOwner,
+  type FixOwnerRecoverySnapshot,
 } from "../src/run-task.js";
 import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
 import type { Plan, Task } from "../src/lib/plan.js";
+import type { WorkerResult } from "../src/lib/worker.js";
 
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -334,11 +340,20 @@ function prFor(prNumber: number, headRefName: string): OpenPrView {
 
 type Drive = { logs: Array<{ step: string; extra?: Record<string, unknown> }>; threw: unknown };
 
+interface DriveOptions {
+  registeredWorktreeOwnerPath?: string;
+  ownerAfterRemove?: string;
+  snapshot?: FixOwnerRecoverySnapshot;
+  remove?: (repoDir: string, ownerPath: string) => void;
+  spawn?: () => Promise<WorkerResult>;
+  evidence?: { unmetCriteria: []; ciFailures: Array<{ name: string; logTail: string }> };
+}
+
 /** Drives the REAL `dispatchFix` closure with a stub `gh` on PATH — same convention as
  *  test/uncreditable-head-reason.test.ts's `driveDispatchFix`. `root` is caller-owned (not
  *  cleaned up here) so a test can inspect/pre-seed `state/inflight` and `repos/<repo>` around
  *  the call. */
-async function driveDispatchFix(root: string, headRefName: string, registeredWorktreeOwnerPath?: string): Promise<Drive> {
+async function driveDispatchFix(root: string, headRefName: string, options: DriveOptions = {}): Promise<Drive> {
   const bin = mkdtempSync(join(tmpdir(), "fbcs-gh-"));
   writeFileSync(
     join(bin, "gh"),
@@ -347,7 +362,9 @@ async function driveDispatchFix(root: string, headRefName: string, registeredWor
       'const a = process.argv.slice(2); const i = a.indexOf("--json"); const f = i >= 0 ? a[i+1] : undefined;',
       `const HEAD = ${JSON.stringify(headRefName)};`,
       'if (f && f.includes("headRefName")) process.stdout.write(JSON.stringify({ headRefName: HEAD, body: "" }));',
-      'else if (a[0] === "api" && typeof a[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(a[1])) process.stdout.write(JSON.stringify({ state: "open", merged: false }));',
+      'else if (a[0] === "api" && typeof a[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(a[1])) process.stdout.write(JSON.stringify({ state: "open", merged: false, head: { sha: "cafe1234" } }));',
+      'else if (a[0] === "api" && typeof a[1] === "string" && a[1].includes("/check-runs")) process.stdout.write(JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "success" }] }));',
+      'else if (a[0] === "api" && typeof a[1] === "string" && a[1].includes("/status")) process.stdout.write(JSON.stringify({ statuses: [] }));',
       'else process.stdout.write("{}");',
       "",
     ].join("\n"),
@@ -357,6 +374,7 @@ async function driveDispatchFix(root: string, headRefName: string, registeredWor
   process.env.PATH = `${bin}:${oldPath}`;
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let threw: unknown;
+  let ownerRemoved = false;
   try {
     const effects = buildSweepEffects(
       "acme",
@@ -368,7 +386,7 @@ async function driveDispatchFix(root: string, headRefName: string, registeredWor
       (step, extra) => void logs.push({ step, extra }),
       DEFAULT_SWEEP_POLICY,
       undefined, // reviewRunner
-      undefined, // spawnImpl
+      options.spawn, // spawnImpl
       undefined, // pushEmptyCommit
       undefined, // issuesImpl
       undefined, // stallNotice
@@ -383,10 +401,20 @@ async function driveDispatchFix(root: string, headRefName: string, registeredWor
       undefined, // readJsonImpl
       (_repoDir: string, branchRef: string) => {
         assert.equal(branchRef, `refs/heads/${headRefName}`);
-        return registeredWorktreeOwnerPath;
+        return ownerRemoved ? options.ownerAfterRemove : options.registeredWorktreeOwnerPath;
       },
+      options.snapshot ? () => options.snapshot! : undefined,
+      options.registeredWorktreeOwnerPath
+        ? (repoDir, ownerPath) => {
+            options.remove?.(repoDir, ownerPath);
+            ownerRemoved = true;
+          }
+        : undefined,
     );
-    await effects.dispatchFix(prFor(9001, headRefName) as never, { unmetCriteria: [], ciFailures: [] } as never);
+    await effects.dispatchFix(
+      prFor(9001, headRefName) as never,
+      (options.evidence ?? { unmetCriteria: [], ciFailures: [] }) as never,
+    );
   } catch (e) {
     threw = e;
   } finally {
@@ -443,6 +471,179 @@ test("registered worktree lookup uses the exact branch ref and ignores a detache
   }
 });
 
+const CLEAR_OWNER_SNAPSHOT: FixOwnerRecoverySnapshot = {
+  ownerPath: "/fleet/worktrees/sweep-W1-T500-1785600000003",
+  ageMs: 60_000,
+  path: "clear",
+  branch: "clear",
+  tree: "clear",
+  remoteHead: "clear",
+  ancestry: "clear",
+  branchClaim: "clear",
+  processCwd: "clear",
+  localSha: "1111111111111111111111111111111111111111",
+  remoteSha: "2222222222222222222222222222222222222222",
+};
+
+test("the owner-recovery decision requires every independent proof and names each keep reason", () => {
+  const blocked: Array<[keyof FixOwnerRecoverySnapshot, string]> = [
+    ["path", "foreign_path"],
+    ["branch", "branch_mismatch"],
+    ["tree", "dirty_tree"],
+    ["remoteHead", "remote_head_changed"],
+    ["ancestry", "local_ahead_or_diverged"],
+    ["branchClaim", "live_branch_claim"],
+    ["processCwd", "process_in_worktree"],
+  ];
+  for (const [field, reason] of blocked) {
+    const snapshot = { ...CLEAR_OWNER_SNAPSHOT, [field]: "blocked" } as FixOwnerRecoverySnapshot;
+    assert.deepEqual(decideFixOwnerRecovery(snapshot), { reclaim: false, reason }, String(field));
+  }
+  for (const field of blocked.map(([name]) => name)) {
+    const snapshot = { ...CLEAR_OWNER_SNAPSHOT, [field]: "unknown" } as FixOwnerRecoverySnapshot;
+    assert.deepEqual(decideFixOwnerRecovery(snapshot), { reclaim: false, reason: "probe_unreadable" }, String(field));
+  }
+  assert.deepEqual(decideFixOwnerRecovery(CLEAR_OWNER_SNAPSHOT), {
+    reclaim: true,
+    reason: "proven_abandoned",
+  });
+});
+
+test("the bounded process-cwd census finds descendants and fails closed on unreadable or incomplete procfs", () => {
+  const owner = "/fleet/worktrees/sweep-W1-T500-1";
+  assert.deepEqual(
+    boundedProcessCwdCensus(owner, { readDir: () => ["1"], readLink: () => join(owner, "src") }),
+    { state: "blocked", detail: "cwd_inside_owner" },
+  );
+  assert.deepEqual(
+    boundedProcessCwdCensus(owner, { readDir: () => { throw new Error("no procfs"); } }),
+    { state: "unknown", detail: "proc_unavailable" },
+  );
+  assert.deepEqual(
+    boundedProcessCwdCensus(owner, { readDir: () => ["1", "2"], maxEntries: 1 }),
+    { state: "unknown", detail: "entry_bound" },
+  );
+  let tick = 0;
+  assert.deepEqual(
+    boundedProcessCwdCensus(owner, {
+      readDir: () => ["1"],
+      now: () => tick++ === 0 ? 0 : 251,
+      wallClockMs: 250,
+    }),
+    { state: "unknown", detail: "wall_clock_bound" },
+  );
+  assert.deepEqual(
+    boundedProcessCwdCensus(owner, {
+      readDir: () => ["1"],
+      readLink: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+    }),
+    { state: "unknown", detail: "cwd_unreadable" },
+  );
+  assert.deepEqual(
+    boundedProcessCwdCensus(owner, {
+      readDir: () => ["1", "not-a-pid", "2"],
+      readLink: (path) => {
+        if (path.includes("/1/")) throw Object.assign(new Error("gone"), { code: "ENOENT" });
+        return "/somewhere/else";
+      },
+    }),
+    { state: "clear" },
+  );
+});
+
+test("the material owner snapshot distinguishes clean abandonment from every destructive-risk signal", () => {
+  const root = tmp("rmd-fbcs-owner-snapshot-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const branch = "run-W1-T500-1785600000005";
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const worktreesRoot = join(root, "worktrees");
+    mkdirSync(worktreesRoot, { recursive: true });
+    const ownerPath = join(worktreesRoot, "sweep-W1-T500-1785600000006");
+    createFixRungWorktree(repoDir, ownerPath, branch);
+    const expectedRemoteHead = sha(repoDir, `origin/${branch}`);
+    const inflightDir = join(root, "state", "inflight");
+    const claimKey = fixBranchClaimKey("acme", "scratch-fbcs-repo", branch);
+    const args = { repoDir, ownerPath, worktreesRoot, branch, taskId: "W1-T500", expectedRemoteHead, inflightDir, claimKey };
+    const capture = (processCwd: "clear" | "blocked" | "unknown" = "clear") =>
+      captureFixOwnerRecoverySnapshot(args, {
+        now: () => statSync(ownerPath).mtimeMs + 60_000,
+        processCensus: () => ({ state: processCwd, ...(processCwd === "unknown" ? { detail: "cwd_unreadable" } : {}) }),
+      });
+
+    const clear = capture();
+    assert.equal(clear.ageMs, 60_000);
+    assert.deepEqual(decideFixOwnerRecovery(clear), { reclaim: true, reason: "proven_abandoned" });
+    assert.equal(capture("blocked").processCwd, "blocked");
+    assert.equal(capture("unknown").detail, "cwd_unreadable");
+
+    const holder = acquireInflightLock(inflightDir, claimKey, { run_id: "LIVE-FIX-WORKER" });
+    try {
+      assert.equal(capture().branchClaim, "blocked");
+    } finally {
+      holder.release();
+    }
+
+    mkdirSync(inflightDir, { recursive: true });
+    writeFileSync(join(inflightDir, `${claimKey}.lock`), "not-json");
+    assert.equal(capture().branchClaim, "unknown");
+    rmSync(join(inflightDir, `${claimKey}.lock`));
+    writeFileSync(join(inflightDir, `${claimKey}.lock`), JSON.stringify({
+      pid: 2_147_483_647,
+      run_id: "DEAD-DAEMON-PARENT",
+      host: "",
+      startedAt: "2026-09-05T02:00:00.000Z",
+    }));
+    assert.equal(
+      captureFixOwnerRecoverySnapshot(args, {
+        isPidAlive: () => false,
+        processCensus: () => ({ state: "clear" }),
+      }).branchClaim,
+      "clear",
+      "a proven-dead claim does not keep clean residue forever",
+    );
+    rmSync(join(inflightDir, `${claimKey}.lock`));
+
+    writeFileSync(join(ownerPath, "untracked.txt"), "dirty\n");
+    assert.equal(capture().tree, "blocked");
+    assert.throws(() => removeRegisteredFixWorktree(repoDir, ownerPath), "plain git removal must refuse a dirty owner");
+    assert.equal(registeredFixWorktreeOwner(repoDir, `refs/heads/${branch}`), realpathSync(ownerPath));
+    rmSync(join(ownerPath, "untracked.txt"));
+    writeFileSync(join(ownerPath, "staged.txt"), "staged\n");
+    execFileSync("git", ["-C", ownerPath, "add", "staged.txt"]);
+    assert.equal(capture().tree, "blocked");
+    execFileSync("git", ["-C", ownerPath, "restore", "--staged", "staged.txt"]);
+    rmSync(join(ownerPath, "staged.txt"));
+
+    execFileSync("git", ["-C", ownerPath, "checkout", "--quiet", "--detach"]);
+    assert.equal(capture().branch, "blocked");
+    execFileSync("git", ["-C", ownerPath, "checkout", "--quiet", branch]);
+
+    const staleExpected = args.expectedRemoteHead;
+    const advancer = join(root, "advancer");
+    cloneOf(upstream, advancer);
+    execFileSync("git", ["-C", advancer, "checkout", "--quiet", branch]);
+    commit(advancer, "remote.txt", "remote advance");
+    execFileSync("git", ["-C", advancer, "push", "--quiet", "origin", branch]);
+    assert.equal(capture().remoteHead, "blocked", "a PR head that moved after the sweep snapshot is kept");
+
+    args.expectedRemoteHead = sha(advancer, branch);
+    commit(ownerPath, "local.txt", "local ahead");
+    assert.equal(capture().ancestry, "blocked", "a local-only commit is never removed");
+    args.expectedRemoteHead = staleExpected;
+
+    const otherRoot = join(root, "other-worktrees");
+    mkdirSync(otherRoot);
+    const foreign = captureFixOwnerRecoverySnapshot({ ...args, worktreesRoot: otherRoot }, { processCensus: () => ({ state: "clear" }) });
+    assert.equal(foreign.path, "blocked");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a surviving registered worktree declines before a dead-parent branch claim can be reclaimed", async () => {
   const root = tmp("rmd-fbcs-worktree-owner-");
   const branch = "run-W1-T500-1785600000003";
@@ -459,7 +660,7 @@ test("a surviving registered worktree declines before a dead-parent branch claim
     });
     writeFileSync(claimPath, deadParentClaim);
 
-    const { logs, threw } = await driveDispatchFix(root, branch, ownerPath);
+    const { logs, threw } = await driveDispatchFix(root, branch, { registeredWorktreeOwnerPath: ownerPath });
     const row = logs.find((entry) => entry.step === "sweep.fix.checkout_claim_declined");
     assert.ok(row, `expected a decline row; steps were ${JSON.stringify(logs.map((entry) => entry.step))}`);
     assert.equal(row.extra?.reason, "registered_worktree_owner");
@@ -470,6 +671,146 @@ test("a surviving registered worktree declines before a dead-parent branch claim
     assert.equal(readFileSync(claimPath, "utf8"), deadParentClaim, "the dead-parent claim was not reclaimed");
     assert.ok(!logs.some((entry) => entry.step === "fix.dispatch"), "no strike was spent");
     assert.equal(threw, undefined, "a registered owner stands down cleanly");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function fakeFixWorker(): WorkerResult {
+  return {
+    sessionId: "W1-T2952-PROBE",
+    costUsd: 0,
+    numTurns: 1,
+    text: "REPORT\nno further changes required\n",
+    blocks: ["REPORT\nno further changes required\n"],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    model: "claude-opus-5",
+    effort: "high",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    totalCostUsd: 0,
+    billingMode: "subscription",
+    verdict: "success",
+    qualitySuspect: false,
+    compactionEvents: [],
+    childEnvKeys: [],
+  } as unknown as WorkerResult;
+}
+
+test("a proven-abandoned registered owner is removed without force and the same poll dispatches exactly one repair worker", async () => {
+  const root = tmp("rmd-fbcs-owner-reclaim-");
+  const branch = "run-W1-T500-1785600000007";
+  try {
+    const upstream = seedUpstream(root);
+    mkdirSync(join(root, "repos"), { recursive: true });
+    const repoDir = join(root, "repos", "scratch-fbcs-repo");
+    cloneOf(upstream, repoDir);
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const ownerPath = join(root, "worktrees", "sweep-W1-T500-1785600000008");
+    mkdirSync(join(root, "worktrees"), { recursive: true });
+    createFixRungWorktree(repoDir, ownerPath, branch);
+    const localSha = sha(ownerPath, "HEAD");
+    let removeCalls = 0;
+    let spawnCalls = 0;
+    const { logs, threw } = await driveDispatchFix(root, branch, {
+      registeredWorktreeOwnerPath: ownerPath,
+      snapshot: {
+        ...CLEAR_OWNER_SNAPSHOT,
+        ownerPath,
+        localSha,
+        remoteSha: localSha,
+      },
+      remove: (repo, path) => {
+        removeCalls += 1;
+        removeRegisteredFixWorktree(repo, path);
+      },
+      spawn: async () => {
+        spawnCalls += 1;
+        return fakeFixWorker();
+      },
+      evidence: { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "failing output" }] },
+    });
+
+    assert.equal(removeCalls, 1, "one plain git worktree removal");
+    assert.equal(spawnCalls, 1, "the recovery continues through the ordinary fix rung in the same poll");
+    assert.equal(threw, undefined, "a post-dispatch failure remains fail-soft as before");
+    const recovered = logs.filter((entry) => entry.step === "sweep.fix.checkout_owner_reclaimed");
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0]!.extra?.local_sha, localSha.slice(0, 12));
+    assert.deepEqual(recovered[0]!.extra?.proof, {
+      managed_path: true,
+      exact_branch: true,
+      clean_tree: true,
+      remote_head_unchanged: true,
+      local_not_ahead: true,
+      no_live_claim: true,
+      no_process_cwd: true,
+    });
+    assert.equal(logs.filter((entry) => entry.step === "fix.dispatch").length, 1);
+    assert.equal(registeredFixWorktreeOwner(repoDir, `refs/heads/${branch}`), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a live claim, process cwd, or unreadable owner proof preserves the registered worktree", async () => {
+  const root = tmp("rmd-fbcs-owner-kept-");
+  const branch = "run-W1-T500-1785600000011";
+  const ownerPath = join(root, "worktrees", "sweep-W1-T500-1785600000012");
+  try {
+    mkdirSync(join(root, "repos"), { recursive: true });
+    for (const [field, state, expected] of [
+      ["branchClaim", "blocked", "live_branch_claim"],
+      ["processCwd", "blocked", "process_in_worktree"],
+      ["tree", "unknown", "probe_unreadable"],
+    ] as const) {
+      let removeCalls = 0;
+      const result = await driveDispatchFix(root, branch, {
+        registeredWorktreeOwnerPath: ownerPath,
+        snapshot: { ...CLEAR_OWNER_SNAPSHOT, [field]: state },
+        remove: () => { removeCalls += 1; },
+      });
+      const decline = result.logs.find((entry) => entry.step === "sweep.fix.checkout_claim_declined");
+      assert.equal(decline?.extra?.owner_recovery_reason, expected);
+      assert.equal(removeCalls, 0, `${field} never removes the owner`);
+      assert.equal(result.threw, undefined);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a removal failure or retained registry owner declines without taking the branch claim", async () => {
+  const root = tmp("rmd-fbcs-owner-remove-fails-");
+  const branch = "run-W1-T500-1785600000009";
+  const ownerPath = join(root, "worktrees", "sweep-W1-T500-1785600000010");
+  try {
+    mkdirSync(join(root, "repos"), { recursive: true });
+    const removalFailure = await driveDispatchFix(root, branch, {
+      registeredWorktreeOwnerPath: ownerPath,
+      snapshot: CLEAR_OWNER_SNAPSHOT,
+      remove: () => { throw new Error("git refused"); },
+    });
+    assert.equal(
+      removalFailure.logs.find((entry) => entry.step === "sweep.fix.checkout_claim_declined")?.extra?.owner_recovery_reason,
+      "remove_failed",
+    );
+    assert.equal(removalFailure.threw, undefined);
+
+    const retained = await driveDispatchFix(root, branch, {
+      registeredWorktreeOwnerPath: ownerPath,
+      ownerAfterRemove: `${ownerPath}-replacement`,
+      snapshot: CLEAR_OWNER_SNAPSHOT,
+    });
+    assert.equal(
+      retained.logs.find((entry) => entry.step === "sweep.fix.checkout_claim_declined")?.extra?.owner_recovery_reason,
+      "registry_retained_owner",
+    );
+    assert.equal(retained.threw, undefined);
+    assert.ok(!retained.logs.some((entry) => entry.step === "fix.dispatch"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

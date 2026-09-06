@@ -24,7 +24,7 @@ import {
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -957,7 +957,9 @@ import { checkCliFreshness, checkServiceFreshness, daemonFreshnessFromService } 
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
   acquireInflightLock,
+  inflightLockPath,
   InflightLockError,
+  parseInflightLockInfo,
   readInflightLock,
   sweepStaleInflightLocks,
   type InflightLockHandle,
@@ -29056,6 +29058,217 @@ function boundedWorktreeOwnerPath(value: string): string {
   return value.replace(/[\r\n\0]/g, "?").slice(0, 512);
 }
 
+export type FixOwnerProbeState = "clear" | "blocked" | "unknown";
+
+export interface FixOwnerRecoverySnapshot {
+  ownerPath: string;
+  ageMs: number;
+  path: FixOwnerProbeState;
+  branch: FixOwnerProbeState;
+  tree: FixOwnerProbeState;
+  remoteHead: FixOwnerProbeState;
+  ancestry: FixOwnerProbeState;
+  branchClaim: FixOwnerProbeState;
+  processCwd: FixOwnerProbeState;
+  localSha?: string;
+  remoteSha?: string;
+  detail?: string;
+}
+
+export interface FixOwnerRecoveryDecision {
+  reclaim: boolean;
+  reason:
+    | "proven_abandoned"
+    | "foreign_path"
+    | "branch_mismatch"
+    | "dirty_tree"
+    | "remote_head_changed"
+    | "local_ahead_or_diverged"
+    | "live_branch_claim"
+    | "process_in_worktree"
+    | "probe_unreadable";
+}
+
+/** W1-T2952's pure fail-closed decision. Only `clear` proves safety; stable reasons aggregate. */
+export function decideFixOwnerRecovery(snapshot: FixOwnerRecoverySnapshot): FixOwnerRecoveryDecision {
+  const probes: Array<[FixOwnerProbeState, FixOwnerRecoveryDecision["reason"]]> = [
+    [snapshot.path, "foreign_path"],
+    [snapshot.branch, "branch_mismatch"],
+    [snapshot.tree, "dirty_tree"],
+    [snapshot.remoteHead, "remote_head_changed"],
+    [snapshot.ancestry, "local_ahead_or_diverged"],
+    [snapshot.branchClaim, "live_branch_claim"],
+    [snapshot.processCwd, "process_in_worktree"],
+  ];
+  for (const [state, reason] of probes) {
+    if (state === "unknown") return { reclaim: false, reason: "probe_unreadable" };
+    if (state === "blocked") return { reclaim: false, reason };
+  }
+  return { reclaim: true, reason: "proven_abandoned" };
+}
+
+export interface ProcessCwdCensusDeps {
+  procRoot?: string;
+  maxEntries?: number;
+  wallClockMs?: number;
+  now?: () => number;
+  readDir?: (path: string) => string[];
+  readLink?: (path: string) => string;
+}
+
+/** Bounded current-namespace `/proc/<pid>/cwd` census; unreadable or incomplete means UNKNOWN. */
+export function boundedProcessCwdCensus(
+  ownerPath: string,
+  deps: ProcessCwdCensusDeps = {},
+): { state: FixOwnerProbeState; detail?: string } {
+  const procRoot = deps.procRoot ?? "/proc";
+  const maxEntries = deps.maxEntries ?? 4_096;
+  const wallClockMs = deps.wallClockMs ?? 250;
+  const now = deps.now ?? Date.now;
+  const readDir = deps.readDir ?? ((path: string) => readdirSync(path));
+  const readLink = deps.readLink ?? ((path: string) => readlinkSync(path));
+  const startedAt = now();
+  let entries: string[];
+  try {
+    entries = readDir(procRoot).filter((entry) => /^\d+$/.test(entry));
+  } catch {
+    // Unsupported or unreadable procfs cannot prove that no process owns the worktree.
+    return { state: "unknown", detail: "proc_unavailable" };
+  }
+  if (entries.length > maxEntries) return { state: "unknown", detail: "entry_bound" };
+  const owner = resolve(ownerPath);
+  for (const pid of entries) {
+    if (now() - startedAt > wallClockMs) return { state: "unknown", detail: "wall_clock_bound" };
+    let cwd: string;
+    try {
+      cwd = readLink(join(procRoot, pid, "cwd"));
+    } catch (error) {
+      // A vanished PID is churn; any other unreadable cwd leaves process ownership unknown.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return { state: "unknown", detail: "cwd_unreadable" };
+    }
+    const fromOwner = relative(owner, resolve(cwd));
+    if (fromOwner === "" || (!fromOwner.startsWith(`..${sep}`) && fromOwner !== ".." && !isAbsolute(fromOwner))) {
+      return { state: "blocked", detail: "cwd_inside_owner" };
+    }
+  }
+  return { state: "clear" };
+}
+
+export interface CaptureFixOwnerSnapshotArgs {
+  repoDir: string;
+  ownerPath: string;
+  worktreesRoot: string;
+  branch: string;
+  taskId: string;
+  expectedRemoteHead: string;
+  inflightDir: string;
+  claimKey: string;
+}
+
+export interface CaptureFixOwnerSnapshotDeps {
+  processCensus?: (ownerPath: string) => { state: FixOwnerProbeState; detail?: string };
+  now?: () => number;
+  isPidAlive?: (pid: number) => boolean;
+}
+
+/** Capture independent owner facts; fetch remote first and never collapse a failed read to absence. */
+export function captureFixOwnerRecoverySnapshot(
+  args: CaptureFixOwnerSnapshotArgs,
+  deps: CaptureFixOwnerSnapshotDeps = {},
+): FixOwnerRecoverySnapshot {
+  const snapshot: FixOwnerRecoverySnapshot = {
+    ownerPath: args.ownerPath,
+    ageMs: 0,
+    path: "unknown",
+    branch: "unknown",
+    tree: "unknown",
+    remoteHead: "unknown",
+    ancestry: "unknown",
+    branchClaim: "unknown",
+    processCwd: "unknown",
+  };
+
+  let owner: string;
+  let root: string;
+  try {
+    owner = realpathSync(args.ownerPath);
+    root = realpathSync(args.worktreesRoot);
+    snapshot.ageMs = Math.max(0, (deps.now ?? Date.now)() - statSync(owner).mtimeMs);
+  } catch {
+    // Missing owner/root metadata cannot prove a managed path.
+    snapshot.detail = "owner_path_unreadable";
+    return snapshot;
+  }
+  const escapedTaskId = args.taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  snapshot.path =
+    dirname(owner) === root && new RegExp(`^sweep-${escapedTaskId}-\\d+$`).test(basename(owner)) ? "clear" : "blocked";
+  if (snapshot.path !== "clear") return snapshot;
+
+  const symbolic = spawnSync("git", ["-C", owner, "symbolic-ref", "--quiet", "HEAD"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  snapshot.branch = symbolic.status === 0
+    ? symbolic.stdout.trim() === `refs/heads/${args.branch}` ? "clear" : "blocked"
+    : symbolic.status === 1 ? "blocked" : "unknown";
+  if (snapshot.branch !== "clear") return snapshot;
+
+  const status = spawnSync("git", ["-C", owner, "status", "--porcelain=v1", "--untracked-files=all"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  snapshot.tree = status.status === 0 ? status.stdout.length === 0 ? "clear" : "blocked" : "unknown";
+  if (snapshot.tree !== "clear") return snapshot;
+
+  const fetch = spawnSync(
+    "git",
+    ["-C", args.repoDir, "fetch", "--quiet", "origin", `+refs/heads/${args.branch}:refs/remotes/origin/${args.branch}`],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+  if (fetch.status !== 0) return snapshot;
+  try {
+    snapshot.localSha = execFileSync("git", ["-C", owner, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    snapshot.remoteSha = execFileSync("git", ["-C", args.repoDir, "rev-parse", `refs/remotes/origin/${args.branch}`], {
+      encoding: "utf8",
+    }).trim();
+  } catch {
+    // Unreadable local or fetched SHA cannot prove the no-unpushed-commit relation.
+    return snapshot;
+  }
+  snapshot.remoteHead = snapshot.remoteSha === args.expectedRemoteHead ? "clear" : "blocked";
+  if (snapshot.remoteHead !== "clear") return snapshot;
+  const ancestry = spawnSync("git", ["-C", args.repoDir, "merge-base", "--is-ancestor", snapshot.localSha, snapshot.remoteSha], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  snapshot.ancestry = ancestry.status === 0 ? "clear" : ancestry.status === 1 ? "blocked" : "unknown";
+  if (snapshot.ancestry !== "clear") return snapshot;
+
+  try {
+    const raw = readFileSync(inflightLockPath(args.inflightDir, args.claimKey), "utf8");
+    const holder = parseInflightLockInfo(raw);
+    if (!holder || (holder.host && holder.host !== hostname())) {
+      snapshot.branchClaim = "unknown";
+    } else {
+      snapshot.branchClaim = (deps.isPidAlive ?? defaultIsPidAlive)(holder.pid) ? "blocked" : "clear";
+    }
+  } catch (error) {
+    // Only ENOENT proves no claim file; malformed or unreadable claims remain unknown.
+    snapshot.branchClaim = (error as NodeJS.ErrnoException).code === "ENOENT" ? "clear" : "unknown";
+  }
+  if (snapshot.branchClaim !== "clear") return snapshot;
+
+  const census = (deps.processCensus ?? boundedProcessCwdCensus)(owner);
+  snapshot.processCwd = census.state;
+  snapshot.detail = census.detail;
+  return snapshot;
+}
+
+export function removeRegisteredFixWorktree(repoDir: string, ownerPath: string): void {
+  execFileSync("git", ["-C", repoDir, "worktree", "remove", ownerPath], { stdio: "pipe" });
+}
+
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {
   const recoveryRef = `refs/rmd-recovery/fix/${branch}/${localSha}`;
   let existing: string | null = null;
@@ -29779,11 +29992,13 @@ export function buildSweepEffects(
   // reader those two poll loops already drive `restRollupFor` through, so production wiring is
   // unchanged.
   readJsonImpl: (args: string[]) => Promise<unknown> = ghJsonAsync,
-  // W1-T2863 — appended LAST so every existing positional caller remains byte-for-byte intact.
-  // The registered worktree is Git's durable branch owner across an in-container daemon refresh;
-  // tests inject the read so they can prove admission stands down before the stale pid claim is
-  // reclaimed, without touching a real shared clone.
+  // W1-T2863: durable worktree owner read, appended for positional-call compatibility.
   registeredWorktreeOwnerImpl: (repoDir: string, branchRef: string) => string | undefined = registeredFixWorktreeOwner,
+  // W1-T2952: independent snapshot and non-force removal seams, both appended last.
+  captureFixOwnerSnapshotImpl: (
+    args: CaptureFixOwnerSnapshotArgs,
+  ) => FixOwnerRecoverySnapshot = captureFixOwnerRecoverySnapshot,
+  removeRegisteredFixOwnerImpl: (repoDir: string, ownerPath: string) => void = removeRegisteredFixWorktree,
 ): Pick<
   SweepDeps,
   | "arm"
@@ -30263,19 +30478,8 @@ export function buildSweepEffects(
       // this round's whole checkout→commit→push window (acquired just before the worktree is
       // created, released once `runFixRung` returns/throws), never a narrower slice.
       let branchClaim: InflightLockHandle | undefined;
-      // W1-T1127: TRUE only once `runFixRung` has demonstrably spent a real strike — i.e. its
-      // OWN `fix.dispatch` line below has been written. `runSweep`'s `sweep.disposed` dedup seed
-      // (`prior.fixed`, sweep.ts) is keyed off THAT line's later effect (an `acted:true` row),
-      // never off this closure returning cleanly. Before this task, EVERY throw here — a
-      // `git checkout -B` racing `.git/config`'s lock included — was swallowed unconditionally,
-      // so `runSweep` always saw a clean return and recorded `acted:true`, seeding the dedup for
-      // a head that never received a single `fix.*` ledger row. `fixRungStalledWithoutNewHead`
-      // (sweep.ts, W1-T1110) can only re-arm that gate by reading rows THIS run wrote — with none
-      // written, it reads `false` forever, and the head is stuck (the plan record's rationale).
-      // A throw BEFORE `fix.dispatch` must therefore reach `runSweep`'s own `catch` (which already
-      // sets `acted = false` — untouched by this task) instead of being swallowed here. A throw
-      // AFTER `fix.dispatch` is unchanged: the strike is real, `runSweep` must keep recording
-      // `acted:true` exactly as it always has, so it is still swallowed below.
+      // W1-T1127: only `fix.dispatch` proves a strike. Pre-dispatch throws propagate so sweep logs
+      // acted:false and retries; post-dispatch throws remain fail-soft because the strike is real.
       let dispatchStarted = false;
       try {
         const terminalKey = terminalUncreditableHeadKey(pr.prNumber, pr.headSha);
@@ -30390,24 +30594,93 @@ export function buildSweepEffects(
 
         const registeredOwner = registeredWorktreeOwnerImpl(repoDir, `refs/heads/${realBranch}`);
         if (registeredOwner) {
-          log("sweep.fix.checkout_claim_declined", {
-            reason: "registered_worktree_owner",
+          let snapshot: FixOwnerRecoverySnapshot;
+          try {
+            snapshot = captureFixOwnerSnapshotImpl({
+              repoDir,
+              ownerPath: registeredOwner,
+              worktreesRoot: worktreesDir(config),
+              branch: realBranch,
+              taskId: task.id,
+              expectedRemoteHead: pr.headSha,
+              inflightDir,
+              claimKey: fixBranchClaimKey(owner, repo, realBranch),
+            });
+          } catch {
+            // A throwing snapshot seam is an unreadable proof, never permission to remove.
+            snapshot = {
+              ownerPath: registeredOwner,
+              ageMs: 0,
+              path: "unknown",
+              branch: "unknown",
+              tree: "unknown",
+              remoteHead: "unknown",
+              ancestry: "unknown",
+              branchClaim: "unknown",
+              processCwd: "unknown",
+              detail: "snapshot_threw",
+            };
+          }
+          const recovery = decideFixOwnerRecovery(snapshot);
+          if (!recovery.reclaim) {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: recovery.reason,
+              ...(snapshot.detail ? { owner_recovery_detail: snapshot.detail } : {}),
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: boundedWorktreeOwnerPath(registeredOwner),
+            });
+            return;
+          }
+          try {
+            removeRegisteredFixOwnerImpl(repoDir, registeredOwner);
+          } catch {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: "remove_failed",
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: boundedWorktreeOwnerPath(registeredOwner),
+            });
+            return;
+          }
+          const ownerAfterRemove = registeredWorktreeOwnerImpl(repoDir, `refs/heads/${realBranch}`);
+          if (ownerAfterRemove) {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: "registry_retained_owner",
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: boundedWorktreeOwnerPath(ownerAfterRemove),
+            });
+            return;
+          }
+          log("sweep.fix.checkout_owner_reclaimed", {
             pr_number: pr.prNumber,
             task_id: task.id,
             branch: realBranch,
             worktree_path: boundedWorktreeOwnerPath(registeredOwner),
+            local_sha: snapshot.localSha?.slice(0, 12),
+            remote_sha: snapshot.remoteSha?.slice(0, 12),
+            age_ms: Math.round(snapshot.ageMs),
+            proof: {
+              managed_path: true,
+              exact_branch: true,
+              clean_tree: true,
+              remote_head_unchanged: true,
+              local_not_ahead: true,
+              no_live_claim: true,
+              no_process_cwd: true,
+            },
           });
-          return;
         }
 
-        // W1-T2609 (design ii): an EXCLUSIVE claim on this (repo, branch) pair, taken BEFORE any
-        // worktree/git side effect — the same "declines before touching git" discipline the
-        // preflight/ceiling checks above already keep. Reuses `acquireInflightLock`'s O_EXCL
-        // discipline (never a second locking mechanism, W1-T228) keyed by `fixBranchClaimKey`
-        // rather than `task.id`, because the thing being protected is the BRANCH two concurrent
-        // rounds for the same task share, not the task id alone. A round that loses the race
-        // DECLINES this poll — ledgered exactly like `sweep.fix.uncreditable_head` above — and
-        // the sweep is level-triggered, so the next pass simply retries it.
+        // W1-T2609: reuse the O_EXCL inflight lock for this shared branch's full round. A loser
+        // declines before creating its own worktree; the level-triggered sweep retries next pass.
         try {
           branchClaim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, realBranch), { run_id: runId });
         } catch (e) {
