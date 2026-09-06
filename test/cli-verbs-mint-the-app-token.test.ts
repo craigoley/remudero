@@ -108,3 +108,80 @@ test("CLI entry MINTS before dispatch — observed by running main(), not by rea
     }
   }
 });
+
+test("CLI entry mints before dispatch, and only when GH_TOKEN is absent — the guard, both directions", async (t) => {
+  // W1-T4298 review round. The criterion this proves says the mint is GUARDED, and the previous
+  // suite only ever ran the GH_TOKEN-absent branch: it showed the mint happens, never that it is
+  // skipped. `if (!process.env.GH_TOKEN)` in main() was therefore an untested line, and the body's
+  // promise that "an operator's own exported token is never clobbered" had no falsifier.
+  const saved = {
+    id: process.env.GH_APP_ID,
+    inst: process.env.GH_APP_INSTALLATION_ID,
+    key: process.env.GH_APP_PRIVATE_KEY_PATH,
+    tok: process.env.GH_TOKEN,
+    argv: process.argv,
+  };
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cli-mint-guard-`));
+  const keyPath = join(dir, "key.pem");
+  writeFileSync(keyPath, "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
+
+  let stderr: string[] = [];
+  t.mock.method(console, "error", (...a: unknown[]) => {
+    stderr.push(a.map(String).join(" "));
+  });
+  t.mock.method(console, "log", () => {});
+  const exitMock = ((): never => {
+    throw new Error("exit");
+  }) as typeof process.exit;
+  t.mock.method(process, "exit", exitMock);
+
+  const OPERATOR_TOKEN = "operator-exported-token-sentinel";
+  try {
+    process.env.GH_APP_ID = "1";
+    process.env.GH_APP_INSTALLATION_ID = "2";
+    process.env.GH_APP_PRIVATE_KEY_PATH = keyPath;
+    process.argv = ["node", "run-task.js", "--no-such-verb"];
+    const { main } = await import("../src/run-task.js");
+
+    // ── GUARDED: a token the operator exported is left exactly alone ──────────────────────────
+    process.env.GH_TOKEN = OPERATOR_TOKEN;
+    stderr = [];
+    await main().catch(() => {});
+    assert.ok(
+      !stderr.some((l) => /github_app/.test(l)),
+      `with GH_TOKEN already set the mint must NOT run — saw: ${JSON.stringify(stderr)}`,
+    );
+    assert.equal(
+      process.env.GH_TOKEN,
+      OPERATOR_TOKEN,
+      "an operator's own exported GH_TOKEN must survive the CLI entry untouched",
+    );
+
+    // ── BLOCKING CONTROL, same call shape ────────────────────────────────────────────────────
+    // Without this the assertion above is indistinguishable from a harness that never observes a
+    // github_app line at all — which is exactly how "no mint ran" and "no mint was observable"
+    // read the same. Removing the guard from main() must make THIS pair disagree.
+    delete process.env.GH_TOKEN;
+    stderr = [];
+    await main().catch(() => {});
+    assert.ok(
+      stderr.some((l) => /github_app/.test(l)),
+      `absent GH_TOKEN the mint MUST run, or the guarded case above proves nothing — saw: ${JSON.stringify(stderr)}`,
+    );
+  } finally {
+    process.argv = saved.argv;
+    for (const [k, v] of [
+      ["GH_APP_ID", saved.id],
+      ["GH_APP_INSTALLATION_ID", saved.inst],
+      ["GH_APP_PRIVATE_KEY_PATH", saved.key],
+      ["GH_TOKEN", saved.tok],
+    ] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
