@@ -218,6 +218,12 @@
       "grepHint": "proof-queue-audit.ts forensics"
     },
     {
+      "path": "docs/forensics/recovery-drill.md",
+      "title": "recovery-drill.mjs comment forensics",
+      "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
+      "grepHint": "recovery-drill.mjs comment forensics"
+    },
+    {
       "path": "docs/forensics/retro.md",
       "title": "retro.ts forensics",
       "summary": "The measured facts, incidents and design arguments that used to live as comment prose inside",
