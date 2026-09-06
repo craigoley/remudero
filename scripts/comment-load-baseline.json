@@ -243,7 +243,7 @@
   "src/lib/status-board.ts": 520,
   "src/lib/status.ts": 1736,
   "src/lib/supersession.ts": 50,
-  "src/lib/sweep.ts": 2938,
+  "src/lib/sweep.ts": 1900,
   "src/lib/task-card.ts": 54,
   "src/lib/task-class.ts": 37,
   "src/lib/task-id-reservation.ts": 160,
