@@ -62,15 +62,15 @@
     recorders. Delete the intent at the call site to prove the regression test fails.
   acceptance:
     - claim: "only the exact-head disposable semantic reviewer requests the test-capable sandbox intent, while its Claude inspection-tool contract is unchanged"
-      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+      proof: "unit test: test/codex-reviewer-production-wiring.test.ts"
     - claim: "Codex maps that intent to workspace-write with only the private TMPDIR added, without network access or writable Git metadata roots"
       proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
     - claim: "ordinary read-only Codex specialists remain read-only and implementation workers retain their existing workspace-write contract"
       proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
     - claim: "the disposable review checkout and private writable TMPDIR are removed after the review, and the source checkout remains exact and clean"
-      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+      proof: "unit test: test/codex-reviewer-production-wiring.test.ts"
     - claim: "deleting the explicit intent restores the read-only argv and fails the production wiring proof"
-      proof: "unit test: test/codex-disposable-review-sandbox.test.ts"
+      proof: "unit test: test/codex-reviewer-production-wiring.test.ts"
     - claim: "the reviewer contract revision changes both replay identities, re-arming unchanged PR heads after the sandbox fix ships"
       proof: "unit test: test/review-engine-revision-rearm.test.ts"
   falsifier: |
