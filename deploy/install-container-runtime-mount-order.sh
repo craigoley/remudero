@@ -1,60 +1,20 @@
 #!/usr/bin/env bash
-# install-container-runtime-mount-order — close the third path of the Azure reboot-survivability
-# defect (W1-T2856): make BOTH containerd.service and docker.service wait for the Remudero state
-# bind mount, not only for their own data roots.
+# install-container-runtime-mount-order — makes containerd.service and docker.service wait for
+# their own runtime-data mounts; docker.service also waits for the Remudero state bind mount
+# (RMD_STATE_DIR, which has no default and is refused if unset, relative, absent, or unmounted).
+# Check mode (default) reports gaps and changes nothing; --install renders two repository-owned
+# systemd drop-ins and reloads once.
 #
-# THE INCIDENT THIS CLOSES. On the 2026-09-05 Azure reboot, `docker.service` started before
-# `/mnt/rmd` and its bind mounts were available; Docker loaded an empty root and no Remudero
-# container was there to restart. A same-day emergency host edit installed matching
-# `containerd.service.d`/`docker.service.d` drop-ins with `RequiresMountsFor=/mnt/rmd
-# /var/lib/containerd`, and a later reboot proved that runtime-root ordering worked: both mounts
-# and containerd started before Docker. The LIVE STATE bind mount (named by RMD_STATE_DIR) was
-# never added to either service's dependency set. Per systemd.mount(5) (v255), a `nofail` mount is
-# only WANTED, never ordered before the local-filesystem target — so an auto-restarted container
-# can still resolve `-v "$RMD_STATE_DIR":...` against the un-mounted OS-disk directory before the
-# real bind mount lands. Those emergency files are also untracked machine state: a rebuilt VM or
-# another fleet host starts without them.
+# INVARIANT: each service's EFFECTIVE `RequiresMountsFor` (via `systemctl show`, never the
+# drop-in file on disk) lists its own runtime root; docker's also lists RMD_STATE_DIR. systemd
+# unions RequiresMountsFor= across every drop-in for a unit, so this script only writes its own
+# two files and never edits, merges with, or removes another drop-in.
 #
-# THE FIX IS ONE MORE `RequiresMountsFor=` ROW PER SERVICE, IN THIS REPOSITORY'S OWN DROP-INS.
-# systemd.unit(5) (v255) says `RequiresMountsFor=` adds both `Requires=` and `After=` for every
-# listed path, and a unit's dependencies are the UNION of every drop-in that sets it — so this
-# script never touches, reads for merging, or removes either emergency (or any other
-# administrator) drop-in file. It writes its own two files, under its own name, and lets systemd
-# union them with whatever else is already there.
-#
-# THE TWO SERVICES NEED DIFFERENT ROWS.
-#   containerd.service requires the DATA MOUNT BACKING `/var/lib/containerd` plus
-#     `/var/lib/containerd` itself. The data mount is RESOLVED, not hardcoded: this script reads
-#     the live mount table (default /proc/mounts, override RMD_PROC_MOUNTS_FILE) for the bind
-#     source behind `/var/lib/containerd` (matching the documented fstab layout, "Attaching a data
-#     disk to the container host" in docs/operator-guide.md), then finds the real filesystem mount
-#     enclosing that source. containerd carries no Remudero state requirement — it never opens the
-#     state bind mount.
-#   docker.service requires the resolved Docker data root (`docker info --format
-#     '{{.DockerRootDir}}'`, same call as deploy/host-update.sh), `/var/lib/containerd`, AND the
-#     explicit Remudero state directory.
-#
-# TWO EXPLICIT MODES, NEITHER OF WHICH TOUCHES DOCKER, CONTAINERD, OR A CONTAINER.
-#   (check, default) Compare EACH service's EFFECTIVE `RequiresMountsFor` (via `systemctl show`)
-#     against its own required paths. Writes nothing, reloads nothing, requires no privilege.
-#     Names the service AND every missing path for that service.
-#   (--install) Requires root. Validates RMD_STATE_DIR, renders BOTH drop-ins, writes each
-#     atomically (mktemp + same-directory rename), runs `systemctl daemon-reload` exactly ONCE,
-#     then re-runs the SAME two checks to prove both writes took effect. It never runs `systemctl
-#     start/stop/restart/reload docker.service` or `containerd.service`, and never runs a `docker`
-#     subcommand beyond the read-only `docker info` used to resolve the Docker root, or any
-#     containerd client command (`ctr`/`nerdctl`) at all. Lifecycle timing (when either runtime
-#     restarts, when a reboot is taken) remains the operator's decision — see
-#     docs/operator-guide.md.
-#
-# RMD_STATE_DIR HAS NO DEFAULT, DELIBERATELY. deploy/host-update.sh and deploy/recycle-container.sh
-# fall back to `${HOME:-/root}/rmd-state` because a missing container mount there merely warns.
-# Here a wrong path is silently WRONG for the rest of this host's life — reviving that default
-# would let an unset variable render a drop-in that "protects" a path nothing ever writes to. So
-# RMD_STATE_DIR must be set, absolute, must already exist, and must already be its own mount point
-# before ANYTHING is written — an unset, relative, absent or unmounted value is refused first, in
-# both modes, before the host is touched.
-#
+# TRAP: per systemd.mount(5), a `nofail` mount is only WANTED, never ordered before the
+# local-filesystem target — a bind mount existing does not make a service wait for it.
+# Why: closes the third path of the 2026-09-05 Azure reboot defect (W1-T2856, PR #4021); full
+# incident in docs/forensics/install-container-runtime-mount-order.md.
+# FALSIFIER: test/container-runtime-mount-order-install.test.ts.
 # USAGE
 #   ./deploy/install-container-runtime-mount-order.sh                 # check mode; exit 0/1
 #   RMD_STATE_DIR=/mnt/rmd/state2 ./deploy/install-container-runtime-mount-order.sh --install
@@ -123,11 +83,9 @@ bind_source_for() {
   return 0
 }
 
-# ── the data-disk mount BACKING /var/lib/containerd — the fstab shape docs/operator-guide.md
-# documents is `/mnt/rmd/containerd /var/lib/containerd none bind,nofail 0 0`, so the mount that
-# must be up before Docker or containerd can trust that path is the one enclosing the BIND
-# SOURCE, not the bind target itself. Falls back to the mount enclosing CONTAINERD_ROOT directly
-# when it is not itself a bind mount (e.g. a single-disk host). ─────────────────────────────────
+# ── the mount BACKING /var/lib/containerd (the fstab shape docs/operator-guide.md documents),
+# not the bind target itself — the bind source's own enclosing mount is what must be up first.
+# Falls back to the mount enclosing CONTAINERD_ROOT directly when it is not itself a bind mount. ─
 resolve_data_mount() {
   local bind_source
   bind_source="$(bind_source_for "${CONTAINERD_ROOT}")"
@@ -137,9 +95,8 @@ resolve_data_mount() {
   esac
 }
 
-# ── W1-T2856 criterion 5: unset, relative, absent or unmounted RMD_STATE_DIR is refused before
-# the host is changed. Runs in BOTH modes: check mode cannot name a missing mount it was never
-# given, and install mode must never reach either write with a value this wrong. ────────────────
+# ── W1-T2856 criterion 5: refuses an unset, relative, absent, or unmounted RMD_STATE_DIR before
+# the host changes, in both modes — check mode cannot name a mount it was never given. ──────────
 validate_state_dir() {
   if [ -z "${RMD_STATE_DIR:-}" ]; then
     echo "install-container-runtime-mount-order: REFUSING — RMD_STATE_DIR is not set." >&2
@@ -227,9 +184,8 @@ atomic_write() {
   mv -f "${tmp}" "${target}"
 }
 
-# ── W1-T2856 criteria 1-3, 7: compare the EFFECTIVE dependency set for ONE service, never the
-# file on disk, so a stale or partial drop-in is caught by what systemd actually resolved. Names
-# the SERVICE alongside every missing path (criterion 2). ───────────────────────────────────────
+# ── W1-T2856 criteria 1-3, 7: compares the EFFECTIVE dependency set, never the file on disk, so
+# a stale or partial drop-in is caught, and names the service and every missing path (criterion 2). ─
 check_service() {
   local service="$1"
   shift
