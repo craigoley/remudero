@@ -1,21 +1,16 @@
 /**
  * The fleet authenticates as the installed GitHub App (W1-T1024, MASTER-PLAN §9), so its own
- * `core`/`graphql` rate-limit buckets are separate from an operator's interactive session — see
- * docs/forensics/github-app.md#module-header for the incident that motivated this.
+ * `core`/`graphql` rate-limit buckets are separate from an operator's interactive session.
  *
- * Invariant: `process.env.GH_TOKEN` is the one seam this module writes. `env.ts`'s worker
- * allowlist, `review.ts`'s spawn env, and `entrypoint.sh`'s credential helper all read it at
- * call time, so refreshing it here reaches every consumer with no call-site change — see
- * {@link refreshInstallationToken}.
+ * Invariant: `process.env.GH_TOKEN` is the one seam this module writes — `env.ts`'s worker
+ * allowlist, `review.ts`'s spawn env, and `entrypoint.sh`'s credential helper all read it at call
+ * time, so refreshing it here reaches every consumer with no call-site change (see
+ * {@link refreshInstallationToken}). Every failure leaves it untouched; nothing here refuses to
+ * boot. No secret — the private key or the minted token — ever reaches a log line or a ledger
+ * row; only the installation id, the token's `expires_at`, and a fixed reason string do.
  *
  * Trap: a worker's copy of `GH_TOKEN` is fixed at spawn and can outlive the one-hour token on a
- * long run. That gap is accepted, not fixed, here — see the forensics page.
- *
- * Invariant: every failure (missing config, an unreadable key, a rejected exchange) leaves
- * `GH_TOKEN` exactly as it found it. Nothing here refuses to boot.
- *
- * Invariant: no secret — not the private key, not the minted token — ever reaches a log line or
- * a ledger row; only the installation id, the token's `expires_at`, and a fixed reason string do.
+ * long run. That gap is accepted, not fixed, here.
  */
 // Why: docs/forensics/github-app.md#module-header
 
@@ -36,7 +31,6 @@
 // UNINVESTIGATED: why roughly one exchange in three used to time out when the same container
 // reached GitHub's API in milliseconds unauthenticated. See the forensics page; closing W1-T2311
 // does not explain it.
-//
 // Why: docs/forensics/github-app.md#the-w1-t2311-decision-record
 
 import { readFileSync } from "node:fs";
@@ -85,27 +79,23 @@ export interface RefreshOptions {
   installationId?: string;
   /** Overrides `GH_APP_PRIVATE_KEY_PATH_ENV` — test seam only. */
   privateKeyPath?: string;
-  /** Defaults to `process.env`, the object every consumer reads (see the file header), so a
-   *  test can pass a throwaway object instead of mutating the real process environment. */
+  /** Defaults to `process.env`, the object every consumer reads (see the file header). */
   env?: NodeJS.ProcessEnv;
   /** Injectable clock — defaults to `Date.now`. */
   now?: () => number;
-  /** Injectable fetch — defaults to the global `fetch`. Mirrors `src/lib/service.ts`'s
-   *  `fetchImpl` seam. */
+  /** Injectable fetch — defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
   /** Injectable private-key reader — defaults to `readFileSync(path, "utf8")`. */
   readKey?: (path: string) => string;
-  /** Log sink — defaults to a no-op. Never receives the key or the token; only the installation
-   *  id, the token's `expires_at`, or a fixed reason string (see the file header). */
+  /** Log sink — defaults to a no-op. Never receives the key or token (see the file header). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
 export interface RefreshResult {
   ok: boolean;
-  /** Present on every non-ok result — one of the reasons named in {@link TOKEN_REFRESH_REASONS}. */
+  /** Present on every non-ok result — one of the reasons in {@link TOKEN_REFRESH_REASONS}. */
   reason?: string;
-  /** Present only when `ok` — the minted token's expiry, so the caller can schedule the next
-   *  refresh off it (see {@link nextRefreshDelayMs}). */
+  /** Present only when `ok` — schedules the next refresh (see {@link nextRefreshDelayMs}). */
   expiresAtMs?: number;
 }
 
@@ -314,11 +304,10 @@ export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now()
  * Starts the daemon's own installation-token refresh loop and reports whether it armed.
  *
  * Gated on config presence: with no `GH_APP_*` names set this is byte-identical to before this
- * loop existed, and `armed: false` says so explicitly.
- *
- * `ready` settles once the first mint resolves (or fails and is logged), so a caller can wait for
- * a real token before its first GitHub call, and never rejects — a failed mint is caught, logged
- * and rescheduled like every later tick.
+ * loop existed, and `armed: false` says so explicitly. `ready` settles once the first mint
+ * resolves (or fails and is logged), so a caller can wait for a real token before its first
+ * GitHub call, and never rejects — a failed mint is caught, logged and rescheduled like every
+ * later tick.
  *
  * Every seam is injectable, so a test drives the reschedule arithmetic with no network call and
  * no live timer. `setTimer` returns the timer so the caller can `unref` it.
