@@ -1,63 +1,26 @@
 #!/usr/bin/env node
-// scripts/unwired-gate-check.mjs
+// scripts/unwired-gate-check.mjs — the unwired-gate guard (W1-T2735).
 //
-// UNWIRED-GATE GUARD (W1-T2735).
+// A gate-shaped instrument that nothing invokes is not a gate: it reads like enforcement, answers
+// correctly only when a human runs it by hand, and refuses nothing. This scans every tracked
+// scripts/ executable and every package.json script whose NAME claims to be a gate (a basename or
+// script name ending -check/-gate — see GATE_SHAPED_RE / NPM_CHECK_SHAPED_RE) and proves each is
+// invoked from a .github/workflows/*.yml file or a package.json script (EXECUTING_KEYS below).
+// Why: scripts/credit-surface-gate.mjs sat unwired until a PR reached review uncaught (2026-09-02).
+// docs/forensics/unwired-gate-check.md#the-file-header
 //
-// THE PROPERTY: a gate-shaped instrument that nothing invokes is not a gate. It is a file that
-// reads like enforcement to every later session, answers correctly when a human runs it by hand,
-// and refuses nothing. `scripts/credit-surface-gate.mjs` is the measured exemplar -- it exists to
-// refuse an implementation PR credited on NEITHER the `Remudero-Task:` trailer nor a run-shaped
-// head, its own suite covers exactly that case, and on 2026-09-02 a PR with a bare `Task:` trailer
-// and a `codex/` head reached review with the gate unwired. A human caught it by reading the body.
+// The workflows are PARSED with the yaml dependency, never read as text: a comment naming a
+// script is not an invocation, and this guard's own CI job comment names three siblings that a
+// text search would wrongly credit as wired.
 //
-// THE MECHANISM, which is why this is a CLASS and not two accidents: Rule 25's instrument
-// isolation refuses a PR that edits both a detector and the workflow invoking it, so a producer
-// task must fence the wiring out. Both producers did, correctly and in writing -- W1-T2292
-// criterion 7 ("no caller is edited by this task") and W1-T1214 design (v) (defers "wiring this
-// script into a CI workflow step (a separate PR ...)"). Neither successor was ever filed. The
-// fence is right; nothing noticed that the follow-through never happened. Per CLAUDE.md's own
-// preamble, the remedy for a rule violated silently and repeatedly is to make something REFUSE it.
+// ALLOWANCE / NPM_SCRIPT_ALLOWANCE below record gates unwired today whose wiring is owned
+// elsewhere; they may only SHRINK — there is no verb that appends a row, only an edit a reviewer
+// sees. A stale entry (its script now wired, or gone) is itself reported.
 //
-// THE PREDICATE IS THE NAME, NOT THE DIRECTORY. A tracked `scripts/` executable whose basename
-// ends `-check.<ext>` or `-gate.<ext>` has CLAIMED to be a gate, and this guard holds it to that
-// claim. Everything else under `scripts/` is out of scope by construction: `mount-headroom-sweep`
-// and `plan-state-claims` are operator-run analysis tools, `shell-screenshot` is a dev utility,
-// and `host-parity.ts` is imported programmatically rather than invoked -- none claimed to be a
-// gate, none should be a required check, and a directory-wide predicate would report all four.
+// This proves a gate sits in an EXECUTABLE position, not that its refusal is honoured: a step
+// behind `if: false` or ending `|| true` still reads WIRED here.
 //
-// WIRED means the basename appears in an EXECUTABLE position: the value of a `run:`, `uses:`,
-// `entrypoint:`, `args:` or `cmd:` key in a parsed `.github/workflows/*.yml`, or a value in
-// `package.json`'s `scripts` map. The workflow files are parsed with the `yaml` dependency rather
-// than read as text, because a COMMENT IS NOT AN INVOCATION -- this guard's own CI job names three
-// sibling scripts in its explanatory comment, and a text search credited every one of them as
-// wired. A commented-out step likewise no longer exists after parsing. Job and step `name:` fields
-// are prose and are excluded for the same reason. The match itself requires the position not be
-// preceded by a name character, so `foo-check.mjs` is never credited by a mention of
-// `bar-foo-check.mjs`.
-//
-// THE ALLOWANCE IS RECORDED INLINE AND MAY ONLY SHRINK. Wiring the four current offenders at once
-// is a different task with a different blast radius (the blanking check alone reports 19 live
-// findings, which W1-T2732 owns), so they are recorded here with a reason each and the guard is
-// green on the tree it lands in. A NEWLY added gate-shaped script enters at zero allowance and is
-// refused immediately -- there is no verb to add one, only an edit a reviewer sees. An entry whose
-// script has since been wired, or which names a script that no longer exists, is ITSELF reported:
-// a stale allowance is how a ratchet quietly stops ratcheting.
-//
-// The allowance is deliberately NOT a `scripts/*-baseline.json` file, which is the house idiom for
-// the ratchets: that path is in the reviewer's `INSTRUMENT_SURFACE` (src/lib/review.ts), so a PR
-// draining one entry would trip the very Rule 25 entanglement that produced this class.
-//
-// WHAT THIS CANNOT CATCH -- stated so no reader mistakes a clean run for proof of enforcement: a
-// script that really is in a `run:` step, but whose step is never reached or whose exit code is
-// discarded (a job with an `if:` that is always false, a step with `continue-on-error: true`, a
-// command ending `|| true`), reads as WIRED here. Parsing removes the comment and commented-out
-// cases; it cannot decide reachability. This guard proves a gate sits in an EXECUTABLE position,
-// not that its refusal is honoured. It raises the floor from "nothing invokes this" to "something
-// runs it".
-//
-// Usage:
-//   node scripts/unwired-gate-check.mjs
-// Exits 1 and names every offending path; exits 0 ("clean") otherwise.
+// Usage: node scripts/unwired-gate-check.mjs. Exits 1 and names every offending path; 0 otherwise.
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
@@ -65,21 +28,15 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-/**
- * The gate-shape predicate, applied to a BASENAME. A hyphen is required before the suffix, so
- * `scripts/check.mjs` -- the repo's own aggregate runner -- is not swept in by its bare name.
- */
+/** The gate-shape predicate for a basename. A hyphen before the suffix excludes the bare
+ *  aggregate runner scripts/check.mjs. */
 export const GATE_SHAPED_RE = /-(?:check|gate)\.[^.]+$/;
 
 /** File extensions that make a tracked `scripts/` entry an EXECUTABLE rather than data. */
 export const EXECUTABLE_RE = /\.(?:mjs|js|cjs|ts|sh)$/;
 
-/**
- * THE RECORDED ALLOWANCE. Every entry is a gate-shaped script that is unwired TODAY and whose
- * wiring is owned elsewhere. It may only shrink: delete a row when its script is wired, and this
- * guard will report the row if you forget. There is no verb that appends to it -- adding a row is
- * an edit a reviewer reads, which is the whole point.
- */
+/** Gate-shaped scripts unwired today whose wiring is owned elsewhere — shrink-only (see file
+ *  header); a script that is wired or gone is reported as stale by scanRepo below. */
 export const ALLOWANCE = [
   {
     script: "scripts/coverage-session-blanking-check.mjs",
@@ -106,45 +63,27 @@ export const ALLOWANCE = [
   },
 ];
 
-// ── R-46: the SAME hazard, one level up -- an npm SCRIPT NAME can claim to be a gate too ───────
+// ── R-46: an npm SCRIPT NAME can claim to be a gate too ─────────────────────────────────────
 //
-// {@link GATE_SHAPED_RE} judges a tracked `scripts/` FILE's basename. That predicate is blind to
-// `docs-index:check-paths`: its underlying file, `scripts/generate-docs-index.mjs`, does not end
-// in `-check.mjs`/`-gate.mjs` -- the CLAIM to be a gate lives in the npm alias name
-// (`package.json`'s `"docs-index:check-paths": "node scripts/generate-docs-index.mjs
-// --check-paths"`), not the file it runs. R-46 (docs/audits/recon-2026-09-05.md) measured exactly
-// this: `docs-index:check-paths` failed at HEAD and was invoked by no workflow, and this guard's
-// own file-basename predicate could not see it (`git grep -n docs-index -- .github/` = 0, yet
-// `isGateShaped("scripts/generate-docs-index.mjs")` is false).
+// GATE_SHAPED_RE judges a tracked scripts/ file's basename, blind to a check-shaped npm alias
+// whose underlying file is named differently (docs-index:check-paths runs generate-docs-
+// index.mjs, not itself gate-shaped). Why: R-46 measured this alias unwired and invisible to the
+// file-basename predicate. docs/forensics/unwired-gate-check.md#npm_check_shaped_re
 //
-// THE PREDICATE IS THE NAME, SAME AS ABOVE, ONLY NOW IT IS THE PACKAGE.JSON KEY. A hyphen or colon
-// is required before the `check` suffix, so bare `"check"` (the repo's own aggregate runner,
-// `node scripts/check.mjs`) is not swept in -- the identical hyphen-guard reasoning
-// {@link GATE_SHAPED_RE} already applies to `scripts/check.mjs`/`scripts/gate.mjs`. A trailing
-// `-<word>` (`:check-paths`) is also check-shaped: the generator's OWN two flags are
-// `--check`/`--check-paths`, and both are exactly the shape this predicate exists to catch.
+// Same predicate, now on the package.json KEY: a hyphen or colon must precede "check", and a
+// trailing -<word> (:check-paths) still counts.
 export const NPM_CHECK_SHAPED_RE = /[-:]check(?:-[a-z0-9-]+)?$/i;
 
-/** Characters that can appear inside an npm script name -- wider than a file basename's
- *  {@link isWired} boundary class because npm script names use `:` as a namespace separator
- *  (`docs-index:check`) as well as `-`. Used to stop a shorter script name being credited by a
- *  longer sibling's mention, e.g. `docs-index:check` must never be "wired" merely because
- *  `docs-index:check-paths` appears in a `run:` step -- the identical hazard the file-basename
- *  {@link isWired} guards against for `foo-check.mjs` vs. `bar-foo-check.mjs`. */
+/** Characters allowed inside an npm script name — wider than isWired's boundary class since names
+ *  use ":" as well as "-". Stops docs-index:check being credited as wired merely because
+ *  docs-index:check-paths appears in a run: step (isWired's foo-check.mjs/bar-foo-check.mjs
+ *  hazard, restated for npm names). */
 const NPM_SCRIPT_IDENT_RE = /[A-Za-z0-9_.:-]/;
 
-/**
- * THE RECORDED ALLOWANCE for check-shaped npm SCRIPT NAMES -- the sibling of {@link ALLOWANCE},
- * same shrink-only contract, same written-reason requirement, keyed by `npmScript` (a
- * `package.json` scripts key) rather than a tracked file path. Measured against the real tree
- * 2026-09-05: of 14 check-shaped npm script names, 6 are wired (`api-client:check`,
- * `no-hand-rolled-fetch:check`, `unwired-gate:check`, `mkdtemp-callsite-check`,
- * `task-id-existence:check`, and `docs-index:check`/`docs-index:check-paths` as of THIS PR's own
- * `.github/workflows/docs-index-check.yml`), and the 7 below are not -- each is a DIFFERENT
- * generator's own staleness/consistency check, tested at the unit level but invoked by no CI job,
- * and wiring any one of them is a separate, single-concern PR (widening this allowance list is
- * the visible edit a reviewer sees when that happens; there is no verb that appends to it).
- */
+/** The check-shaped-npm-script sibling of ALLOWANCE: same shrink-only contract, keyed by
+ *  npmScript rather than a file path. Each entry is a different generator's own staleness check,
+ *  unit-tested but invoked by no CI job. Why: measured 2026-09-05, 6 of 14 check-shaped names
+ *  were already wired. docs/forensics/unwired-gate-check.md#npm_script_allowance */
 export const NPM_SCRIPT_ALLOWANCE = [
   {
     npmScript: "learnings-index:check",
@@ -200,9 +139,8 @@ export function isNpmScriptCheckShaped(name) {
   return NPM_CHECK_SHAPED_RE.test(name);
 }
 
-/** The `package.json` scripts map's keys, tolerating a missing/unparseable file the same way
- *  {@link collectWiringText} already does for its own read of the same file (an absent or broken
- *  package.json has no scripts to judge, not a throw). */
+/** package.json's scripts map keys; a missing or unparseable file yields none rather than
+ *  throwing, same as collectWiringText's own read of the file. */
 export function listNpmScriptNames(repoRoot) {
   let pkg = {};
   try {
@@ -213,17 +151,9 @@ export function listNpmScriptNames(repoRoot) {
   return Object.keys(pkg.scripts ?? {});
 }
 
-/**
- * Npm-script-name occurrence at a position not preceded OR FOLLOWED by an npm-script-name
- * character -- the two-sided version of {@link isWired}'s one-sided guard, needed because a
- * check-shaped name can be a PREFIX of a longer sibling's name (`docs-index:check` is a prefix of
- * `docs-index:check-paths`), not merely a suffix of one (`foo-check.mjs` inside
- * `bar-foo-check.mjs`, the case {@link isWired} was built for). Reuses the SAME wiring text
- * {@link collectWiringText} already builds (every workflow's executable strings plus every
- * `package.json` script's VALUE) -- an npm-run invocation and a compound script that chains
- * `npm run <name>` both live there; a script's own KEY is never part of that text, so a script
- * cannot self-credit.
- */
+/** Two-sided occurrence check (isWired is one-sided): a check-shaped name can be a PREFIX of a
+ *  longer sibling's name (docs-index:check inside docs-index:check-paths), not only a suffix.
+ *  Reuses collectWiringText's text, which excludes a script's own KEY, so it cannot self-credit. */
 export function isNpmScriptWired(name, wiringText) {
   let i = wiringText.indexOf(name);
   while (i !== -1) {
@@ -235,10 +165,8 @@ export function isNpmScriptWired(name, wiringText) {
   return false;
 }
 
-/**
- * The npm-script-name judgement, over an injectable tree -- the sibling of {@link scanRepo},
- * same `unwired`/`stale` shape and the same shrink-only contract for its allowance.
- */
+/** The npm-script-name judgement over an injectable tree — scanRepo's sibling, same
+ *  unwired/stale shape and shrink-only allowance contract. */
 export function scanNpmScripts(repoRoot, { allowance = NPM_SCRIPT_ALLOWANCE, scripts, wiringText } = {}) {
   const names = scripts ?? listNpmScriptNames(repoRoot);
   const wiring = wiringText ?? collectWiringText(repoRoot);
@@ -272,17 +200,10 @@ function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** Tracked `scripts/` executables, via `git ls-files` -- the tracked set is the subject, and this
- *  keeps untracked scratch out of scope with no separate exclusion list.
- *
- *  Retries a CLEAN nonzero exit up to twice more, a short beat apart, before throwing: a
- *  same-process `git ls-files` is read-only and never fails on a healthy repo, so a failure here
- *  is either genuinely no-repo (this loop still throws, just after `attempts` tries -- unchanged
- *  for `listTrackedScripts` called against a real non-repo directory) or a TRANSIENT race with
- *  another `git` process sharing this checkout (a momentary `index.lock`, the exact shape
- *  test/setup/tmp-hygiene.ts's own module comment (W1-T1217) already measured and fenced for a
- *  clone racing a background `gc --auto` in this same suite). `spawn` is injectable so a test can
- *  simulate that race deterministically rather than needing a genuinely flaky host. */
+/** Tracked scripts/ executables via git ls-files, so untracked scratch stays out of scope.
+ *  Retries a nonzero exit up to twice more before throwing: a same-process, read-only git call
+ *  fails only on no-repo or a transient race with another git process (an index.lock, per
+ *  test/setup/tmp-hygiene.ts's W1-T1217 fencing); spawn is injectable so a test can simulate it. */
 export function listTrackedScripts(repoRoot, spawn = spawnSync) {
   let res;
   const attempts = 3;
@@ -327,23 +248,14 @@ export function collectExecutingStrings(node, out = []) {
   return out;
 }
 
-/**
- * Every text an invocation can live in: the executable positions of each parsed
- * `.github/workflows/*.yml`, plus every VALUE in `package.json`'s `scripts` map.
+/** Every text an invocation can live in: each parsed .github/workflows/*.yml's executable
+ *  positions, plus every VALUE in package.json's scripts map (never a KEY, so a script named
+ *  after itself cannot self-credit).
+ *  Why: workflows are parsed, not read as text — a comment naming a script is not an invocation.
+ *  docs/forensics/unwired-gate-check.md#collectwiringtext
  *
- * The workflows are PARSED, not read as text. A text search over the raw file credits a script
- * named in a comment -- measured while building this guard: its own CI job comment names
- * `credit-surface-gate.mjs`, `coverage-session-blanking-check.mjs` and
- * `tracked-source-write-check.mjs`, and the text form reported the first of them as newly wired.
- * A comment is not an invocation, and neither is a commented-out step.
- *
- * `package.json` KEYS are excluded for the same reason: an npm script NAMED
- * `state-citation-check` whose body runs something else would otherwise credit itself.
- *
- * A workflow that fails to parse THROWS naming the file rather than contributing nothing -- a
- * silently empty wiring text would report every gate-shaped script as unwired at once, which is
- * loud, but a parse error the operator can read is better than a wall of false violations.
- */
+ *  An unparseable workflow THROWS naming the file, rather than silently reporting every
+ *  gate-shaped script as unwired at once. */
 export function collectWiringText(repoRoot) {
   const parts = [];
   const wfDir = join(repoRoot, ".github", "workflows");
@@ -374,11 +286,9 @@ export function collectWiringText(repoRoot) {
   return parts.join("\n");
 }
 
-/**
- * Basename occurrence at a position not preceded by a name character, so `foo-check.mjs` is never
- * credited by a mention of `bar-foo-check.mjs`. A plain `includes` would silently over-credit the
- * shorter of any two scripts sharing a suffix.
- */
+/** Basename occurrence not preceded by a name character, so foo-check.mjs is never credited by
+ *  a mention of bar-foo-check.mjs — a plain includes would over-credit the shorter of two
+ *  scripts sharing a suffix. */
 export function isWired(relPath, wiringText) {
   const needle = basename(relPath);
   let i = wiringText.indexOf(needle);
@@ -390,12 +300,9 @@ export function isWired(relPath, wiringText) {
   return false;
 }
 
-/**
- * The whole judgement, over an injectable tree. Returns both directions the allowance can be
- * wrong: `unwired` (a gate-shaped script nothing invokes and nothing has recorded) and `stale` (a
- * recorded entry whose script is now wired, or has been deleted) -- because an allowance that only
- * ever grows is not a ratchet.
- */
+/** The whole judgement over an injectable tree: unwired (a gate-shaped script nothing invokes
+ *  and nothing has recorded) and stale (a recorded entry now wired or deleted) — an allowance
+ *  that only ever grows is not a ratchet. */
 export function scanRepo(repoRoot, { allowance = ALLOWANCE, scripts, wiringText } = {}) {
   const tracked = scripts ?? listTrackedScripts(repoRoot);
   const wiring = wiringText ?? collectWiringText(repoRoot);
@@ -423,13 +330,10 @@ export function scanRepo(repoRoot, { allowance = ALLOWANCE, scripts, wiringText 
   return { unwired, stale, gateShaped, scanned: tracked.length };
 }
 
-/**
- * The CLI's whole behaviour, injectable exactly like scripts/tracked-source-write-check.mjs's own
- * `main` (same shape, same reason): every collaborator carries a real default, so the entry point
- * below stays a bare `main()` call while a test drives BOTH the clean and the violation-found path
- * in-process. It RETURNS the exit code rather than assigning it, so a fixture's outcome can never
- * leak into the real `node --test` runner's `process.exitCode`.
- */
+/** The CLI's whole behaviour, injectable like tracked-source-write-check.mjs's own main: every
+ *  collaborator carries a real default, so a test drives both the clean and violation-found
+ *  path in-process. Returns the exit code rather than assigning it, so a fixture's outcome can
+ *  never leak into the real test runner's process.exitCode. */
 export function main({
   repoRoot = join(dirname(fileURLToPath(import.meta.url)), ".."),
   scan = scanRepo,
