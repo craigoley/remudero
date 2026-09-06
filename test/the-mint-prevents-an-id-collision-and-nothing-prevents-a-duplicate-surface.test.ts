@@ -256,3 +256,65 @@ test("the message tells the reader how to clear it, and refuses the answer that 
   assert.match(v[0]!.message, /retire whichever shard the other supersedes, or cite W1-T2581/);
   assert.match(v[0]!.message, /Never by narrowing files:/, "narrowing files: hides the overlap rather than ruling on it");
 });
+
+// ── the merged exclusion, through the REAL call shape ─────────────────────────────────────────
+//
+// The three `lintPlan` tests above prove the FINDING is produced by the function this repo's two
+// callers already invoke. They do not prove the SILENCE is: every merged-candidate assertion in
+// this file supplies its own `openTaskSurfaces`, so the exclusion was only ever shown over a
+// hand-built corpus while the production corpus is derived inside `lintPlan` from `plan.tasks`.
+// Those are different objects, and a filter that worked on the fixture could still be reading a
+// field the derivation never populates. These two close that gap in the same shape as the pair
+// above: a real plan, no `optsFor`, no explicit corpus.
+
+test("lintPlan alone: a MERGED candidate in the real plan is not counted as live work (criterion 5, production path)", () => {
+  const plan = planOf([
+    task({ id: "W1-T2581", files: [...SEVEN], status: "merged" }),
+    task({ id: "W1-T2589", files: [...FOUR_SUBSET] }),
+  ]);
+  const v = lintPlan(plan).get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.deepEqual(v, [], "the corpus lintPlan derives itself must carry status, or history reads as live work");
+
+  // The blocking control: the SAME plan with that one field flipped back to queued MUST report,
+  // or the silence above is vacuous — a plan the check never looked at silently passes too.
+  const live = planOf([
+    task({ id: "W1-T2581", files: [...SEVEN], status: "queued" }),
+    task({ id: "W1-T2589", files: [...FOUR_SUBSET] }),
+  ]);
+  const reported = lintPlan(live).get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.equal(reported.length, 1, "one field is the whole difference between the two runs");
+});
+
+test("lintPlan alone: a task that is ITSELF merged reports nothing — it is not competing for a dispatch slot", () => {
+  const plan = planOf([
+    task({ id: "W1-T2581", files: [...SEVEN] }),
+    task({ id: "W1-T2589", files: [...FOUR_SUBSET], status: "merged" }),
+  ]);
+  const v = lintPlan(plan).get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.deepEqual(v, [], "a shipped shard is history on its own side too, not only as a candidate");
+
+  // ...and the live task on the OTHER side of that same plan still sees nothing, because its
+  // only candidate is merged. Both directions of the one plan, so neither silence is assumed.
+  const other = lintPlan(plan).get("W1-T2581")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.deepEqual(other, [], "the merged shard is not live work for its counterpart either");
+});
+
+test("KNOWN LIMIT, asserted so it cannot regress silently: the exclusion reads `status:`, which a shipped shard does not update", () => {
+  // `status:` is what the FILING wrote; nothing updates it on merge, and this repo has measured
+  // shards reading `queued` on main while their build had already merged. So a shard credited as
+  // merged by the trailer / `run-<id>-<digits>` head / commit-subject union — the repo's ONLY
+  // real completion signal — is still live work to this check, and is still reported.
+  //
+  // That is a FALSE POSITIVE on an advisory warning, which is the survivable direction: it names
+  // a pair a human then rules on, and the message says how to clear it. Silently widening the
+  // exclusion would be the unsurvivable one — a real duplicate going unreported. The credit-aware
+  // corpus needs a git-scoped read no `lintPlan` caller performs today, so it is named here and
+  // in the PR body rather than half-built behind an injected seam with no production producer.
+  const shippedButUnmarked = planOf([
+    task({ id: "W1-T2581", files: [...SEVEN] }), // merged in fact; `status:` never updated
+    task({ id: "W1-T2589", files: [...FOUR_SUBSET] }),
+  ]);
+  const v = lintPlan(shippedButUnmarked).get("W1-T2589")!.violations.filter((x) => x.check === "duplicate-surface");
+  assert.equal(v.length, 1, "documents today's behaviour: credit is invisible here, only status: is read");
+  assert.equal(v[0]!.severity, "warn", "and it is advisory, so the false positive is a prompt for a human, not a refusal");
+});
