@@ -7378,8 +7378,10 @@ Base revision: origin/main at b586cc7d6ebb7bc824469eb50df05c7b7c36d668; every li
 
 ## Second pass (2026-09-06)
 
-Prose removed from `src/lib/review.ts` by the second compaction pass (PR title `docs(review): second-pass comment compaction to the plain-language standard`), archived verbatim. Base commit `58e6c840`; every line
-number below is that base's numbering. The first pass's archive is the sections above this heading.
+Prose removed from `src/lib/review.ts` by the second comment-compaction pass, archived verbatim.
+Base commit `58e6c840`; every line number below is that base's numbering. Sub-headings name the
+top-level symbol each block sat inside or above. The first pass's archive is every section above
+this heading.
 
 ### REVIEW_CONTEXT
 
@@ -7456,7 +7458,7 @@ Removed from `src/lib/review.ts:178-200` (base 58e6c840), verbatim:
  * ordinary code grep gone stale keeps degrading to `executed_stale`. */
 ```
 
-### floorMet
+### CriterionVerdict
 
 Removed from `src/lib/review.ts:222-225` (base 58e6c840), verbatim:
 
@@ -7466,16 +7468,6 @@ Removed from `src/lib/review.ts:222-225` (base 58e6c840), verbatim:
    *  (ledger-reconstructed placeholders in run-task.ts/sweep.ts, which carry no semantic layer)
    *  needs no update; {@link applyVerdictStability} falls back to `met`. */
 ```
-
-Removed from `src/lib/review.ts:1987-1989` (base 58e6c840), verbatim:
-
-```
-  // W1-T178 (verdict stability): capture the DETERMINISTIC floor's own verdict
-  // — mechanical keyword coverage, overridden by whitelisted execution where
-  // applicable — BEFORE the semantic layer below gets a chance to downgrade it.
-```
-
-### holdout
 
 Removed from `src/lib/review.ts:227-229` (base 58e6c840), verbatim:
 
@@ -7495,7 +7487,7 @@ Removed from `src/lib/review.ts:233-235` (base 58e6c840), verbatim:
  *  `fetch-failed` means it asked and the read failed — never once observed here. */
 ```
 
-### diff
+### ReviewEvidence
 
 Removed from `src/lib/review.ts:246-246` (base 58e6c840), verbatim:
 
@@ -7503,16 +7495,12 @@ Removed from `src/lib/review.ts:246-246` (base 58e6c840), verbatim:
   /** The unified PR diff (as `gh pr diff` / `git diff` would produce). */
 ```
 
-### reportIsSubstitute
-
 Removed from `src/lib/review.ts:252-253` (base 58e6c840), verbatim:
 
 ```
    *  // Why: unmarked, a substitute failed two OPPOSITE ways on #2395 — {@link bodyContradictsDiff} manufactured a
    *  // contradiction, while the keyword floor scored the narrative HIGHER than an honest body. */
 ```
-
-### reportSubstituteCause
 
 Removed from `src/lib/review.ts:255-261` (base 58e6c840), verbatim:
 
@@ -7526,8 +7514,6 @@ Removed from `src/lib/review.ts:255-261` (base 58e6c840), verbatim:
    *  // `merge-conflict` never attempt one (2026-08-25). */
 ```
 
-### semantic
-
 Removed from `src/lib/review.ts:263-265` (base 58e6c840), verbatim:
 
 ```
@@ -7535,8 +7521,6 @@ Removed from `src/lib/review.ts:263-265` (base 58e6c840), verbatim:
    *  criteria list. `false` FORCES that criterion to fail; `true`/`undefined` defer to the
    *  mechanical floor. Semantic can only downgrade, never upgrade an unpasted proof to a pass. */
 ```
-
-### semanticClauses
 
 Removed from `src/lib/review.ts:267-270` (base 58e6c840), verbatim:
 
@@ -7547,8 +7531,6 @@ Removed from `src/lib/review.ts:267-270` (base 58e6c840), verbatim:
    *  transcript {@link parseReviewerVerdicts} already parses. */
 ```
 
-### headCheckoutDir
-
 Removed from `src/lib/review.ts:272-274` (base 58e6c840), verbatim:
 
 ```
@@ -7556,8 +7538,6 @@ Removed from `src/lib/review.ts:272-274` (base 58e6c840), verbatim:
    *  working checkout (HEAD DISCIPLINE, W1-T65). Absent ⇒ execution is skipped for every criterion
    *  and the keyword floor is byte-identical to pre-W1-T65 behaviour. */
 ```
-
-### baseCheckoutDir
 
 Removed from `src/lib/review.ts:276-279` (base 58e6c840), verbatim:
 
@@ -7568,8 +7548,6 @@ Removed from `src/lib/review.ts:276-279` (base 58e6c840), verbatim:
    *  check never runs and a proof passing on the head stays `executed_pass`. */
 ```
 
-### baseUnreadablePaths
-
 Removed from `src/lib/review.ts:281-284` (base 58e6c840), verbatim:
 
 ```
@@ -7578,17 +7556,6 @@ Removed from `src/lib/review.ts:281-284` (base 58e6c840), verbatim:
    *  Distinct from `baseCheckoutDir` being absent, a global gap: each path here names a proof
    *  exempted while its siblings were checked against the very same tree. */
 ```
-
-Removed from `src/lib/review.ts:1541-1544` (base 58e6c840), verbatim:
-
-```
-  /** (W1-T460) mirrors {@link ReviewEvidence.baseUnreadablePaths} — the repo-relative paths whose
-   *  base blob could NOT be read while `baseCwd` was built. A proof naming one was never actually
-   *  checked against the base, however healthy `baseCwd` looks, so it is graded `base_unreadable`
-   *  rather than credited with a discrimination nobody measured. */
-```
-
-### baseIsCheckout
 
 Removed from `src/lib/review.ts:286-291` (base 58e6c840), verbatim:
 
@@ -7601,17 +7568,6 @@ Removed from `src/lib/review.ts:286-291` (base 58e6c840), verbatim:
    *  // pass at base ⇒ discriminates" and certifying a test that passes at both commits. */
 ```
 
-Removed from `src/lib/review.ts:1546-1549` (base 58e6c840), verbatim:
-
-```
-  /** (R-11) mirrors {@link ReviewEvidence.baseIsCheckout} — `true` only when `baseCwd` is a real
-   * checkout of the merge-base (a worktree), the one tree a `unit test:` proof can be re-run in.
-   * Absent/false ⇒ every `unit test:` proof's base outcome is `base_unknown` (fail closed), and
-   * `grep:` proofs behave exactly as before. */
-```
-
-### execProof
-
 Removed from `src/lib/review.ts:293-296` (base 58e6c840), verbatim:
 
 ```
@@ -7620,8 +7576,6 @@ Removed from `src/lib/review.ts:293-296` (base 58e6c840), verbatim:
    *  is also the executor {@link preexistingProofHits} reuses against `baseCheckoutDir` — the same
    *  function at a different `cwd`, so one fake covers both sides. */
 ```
-
-### taskDeclaredFiles
 
 Removed from `src/lib/review.ts:298-301` (base 58e6c840), verbatim:
 
@@ -7632,8 +7586,6 @@ Removed from `src/lib/review.ts:298-301` (base 58e6c840), verbatim:
    *  only, never affects `state`. Absent ⇒ it never fires. */
 ```
 
-### openTaskIds
-
 Removed from `src/lib/review.ts:303-305` (base 58e6c840), verbatim:
 
 ```
@@ -7642,8 +7594,6 @@ Removed from `src/lib/review.ts:303-305` (base 58e6c840), verbatim:
    *  absent ⇒ no marker can be honoured, because every claimed id reads as unverifiable. */
 ```
 
-### openTaskDeclaredFiles
-
 Removed from `src/lib/review.ts:309-310` (base 58e6c840), verbatim:
 
 ```
@@ -7651,7 +7601,7 @@ Removed from `src/lib/review.ts:309-310` (base 58e6c840), verbatim:
    *  // Why: keyed on the trailer it would misfire on test/fixtures/golden-verdicts/scope-creep (#1731). */
 ```
 
-### symbols
+### UnwiredAdvisory
 
 Removed from `src/lib/review.ts:326-328` (base 58e6c840), verbatim:
 
@@ -7661,7 +7611,7 @@ Removed from `src/lib/review.ts:326-328` (base 58e6c840), verbatim:
    *  emitter discipline, the same {@link ReviewVerdict.instrumentEntanglementPaths} follows). */
 ```
 
-### floorDegraded
+### ReviewVerdict
 
 Removed from `src/lib/review.ts:343-345` (base 58e6c840), verbatim:
 
@@ -7671,8 +7621,6 @@ Removed from `src/lib/review.ts:343-345` (base 58e6c840), verbatim:
    *  unchanged, and whether a degraded floor should HOLD a risk:high PR is the operator's call, out of scope here. */
 ```
 
-### proofUniqueRuns
-
 Removed from `src/lib/review.ts:348-350` (base 58e6c840), verbatim:
 
 ```
@@ -7680,8 +7628,6 @@ Removed from `src/lib/review.ts:348-350` (base 58e6c840), verbatim:
    *  the row gains two integers rather than an unbounded payload. `undefined`, never `0`, when no head checkout was
    *  supplied. #3744 reads 2 unique runs and 10 reuses, where `proof_exec: 6/6` had hidden twelve child spawns. */
 ```
-
-### floorState
 
 Removed from `src/lib/review.ts:353-356` (base 58e6c840), verbatim:
 
@@ -7692,35 +7638,12 @@ Removed from `src/lib/review.ts:353-356` (base 58e6c840), verbatim:
    *  an unchanged, previously-passing head may not act on alone. */
 ```
 
-Removed from `src/lib/review.ts:2928-2930` (base 58e6c840), verbatim:
-
-```
-  // `testTheater`/`noCriteria`/`criteriaTampered`/`changesetContradictions` are all structural, so they bind the
-  // floor exactly as they bind `state`: a tampering or contradiction failure can never be suppressed by verdict
-  // stability, which only ever forgives a SEMANTIC downgrade. The anchor a re-review of an unchanged head checks.
-```
-
-### capped
-
 Removed from `src/lib/review.ts:362-363` (base 58e6c840), verbatim:
 
 ```
    *  ledgered {@link CappedOverride}.
    *  // Why: an earlier gate exempted every non-`{tdd: strict}` task, making prose the DEFAULT merge floor. */
 ```
-
-Removed from `src/lib/review.ts:3111-3116` (base 58e6c840), verbatim:
-
-```
-  /** W1-T229's `capped` as RECORDED on the `review.posted` line — read back rather than recomputed, so the arming
-   *  path judges the same fact the review posted. It was always written; nothing read it, so a CAPPED verdict —
-   *  which posts `state: "success"` because CAPPED IS NOT FAIL — armed on the strength of that success alone. ABSENT
-   *  MEANS NOT CAPPED (operator ruling, binding): lines older than the field carry no key, and failing closed would
-   *  refuse to arm across the entire pre-field history. {@link cappedFieldAbsent} keeps that fail-open choice
-   *  legible. */
-```
-
-### keywordOnly
 
 Removed from `src/lib/review.ts:365-369` (base 58e6c840), verbatim:
 
@@ -7731,15 +7654,6 @@ Removed from `src/lib/review.ts:365-369` (base 58e6c840), verbatim:
    *  DISCIPLINE, W1-T65). Purely LEGIBILITY, surfaced on the status, ledger and console so a
    *  keyword-only PASS is never mistaken for an observed one. */
 ```
-
-Removed from `src/lib/review.ts:2971-2972` (base 58e6c840), verbatim:
-
-```
-  // working checkout is never substituted (HEAD DISCIPLINE, W1-T65). Purely legibility — `state` is unaffected — but
-  // the status, ledger and console must say so rather than let a keyword-only PASS read as an observed one.
-```
-
-### planOnly
 
 Removed from `src/lib/review.ts:371-376` (base 58e6c840), verbatim:
 
@@ -7752,8 +7666,6 @@ Removed from `src/lib/review.ts:371-376` (base 58e6c840), verbatim:
    *  // Why: a filing whose proof path named a test already on `main` RAN and the carve-out was never reached. */
 ```
 
-### criteriaTampered
-
 Removed from `src/lib/review.ts:381-383` (base 58e6c840), verbatim:
 
 ```
@@ -7762,16 +7674,6 @@ Removed from `src/lib/review.ts:381-383` (base 58e6c840), verbatim:
    *  // no existing field, so it tripped neither disjunct (W1-T400). */
 ```
 
-Removed from `src/lib/review.ts:2861-2863` (base 58e6c840), verbatim:
-
-```
-  // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s
-  // doc for the full design. `!planOnly` is the exemption — a genuine Architect
-  // plan-only correction is never this function's business to fail.
-```
-
-### changesetContradictions
-
 Removed from `src/lib/review.ts:388-390` (base 58e6c840), verbatim:
 
 ```
@@ -7779,8 +7681,6 @@ Removed from `src/lib/review.ts:388-390` (base 58e6c840), verbatim:
    *  and the contradiction is NAMED ({@link failSummary}) since an unexplained red is the shape that gets
    *  overridden. */
 ```
-
-### changesetClaimsRecognised
 
 Removed from `src/lib/review.ts:392-396` (base 58e6c840), verbatim:
 
@@ -7792,8 +7692,6 @@ Removed from `src/lib/review.ts:392-396` (base 58e6c840), verbatim:
    *  withheld on a substitute report. Legibility only. */
 ```
 
-### changesetFenceUnbalancedAtEof
-
 Removed from `src/lib/review.ts:398-400` (base 58e6c840), verbatim:
 
 ```
@@ -7801,8 +7699,6 @@ Removed from `src/lib/review.ts:398-400` (base 58e6c840), verbatim:
    *  inside an open fence (W1-T1264 design (iv)) — see {@link
    *  ChangesetClaimRecognition.fenceUnbalancedAtEof} for why that silently starves
 ```
-
-### instrumentEntangled
 
 Removed from `src/lib/review.ts:405-409` (base 58e6c840), verbatim:
 
@@ -7814,8 +7710,6 @@ Removed from `src/lib/review.ts:405-409` (base 58e6c840), verbatim:
    *  // strikes (#585/#586; docs/forensics/review.md). */
 ```
 
-### instrumentEntanglementPaths
-
 Removed from `src/lib/review.ts:411-413` (base 58e6c840), verbatim:
 
 ```
@@ -7823,8 +7717,6 @@ Removed from `src/lib/review.ts:411-413` (base 58e6c840), verbatim:
    *  and the `src/` product paths beside them (W1-T186 emitter discipline: never a bare "entangled"
    *  with nothing named). `undefined` whenever `instrumentEntangled` is `false`/absent. */
 ```
-
-### unwiredAdvisories
 
 Removed from `src/lib/review.ts:415-423` (base 58e6c840), verbatim:
 
@@ -7840,8 +7732,6 @@ Removed from `src/lib/review.ts:415-423` (base 58e6c840), verbatim:
    * // Why: a blocking check that false-positives on ~50 PRs/day gets routed around within a week. */
 ```
 
-### reachabilityScanned
-
 Removed from `src/lib/review.ts:425-428` (base 58e6c840), verbatim:
 
 ```
@@ -7850,8 +7740,6 @@ Removed from `src/lib/review.ts:425-428` (base 58e6c840), verbatim:
    *  honest, the diff added none); `null` means it did NOT run, the same `checkoutDir` skip
    *  `unwired_export` degrades on. OBSERVABILITY ONLY: it never changes which advisories fire. */
 ```
-
-### unprovenancedDecisionsEntries
 
 Removed from `src/lib/review.ts:430-435` (base 58e6c840), verbatim:
 
@@ -7864,16 +7752,6 @@ Removed from `src/lib/review.ts:430-435` (base 58e6c840), verbatim:
    *  // Why: #1302 appended a bare `## … RULING:` header in neither genre (#1303). */
 ```
 
-Removed from `src/lib/review.ts:2879-2881` (base 58e6c840), verbatim:
-
-```
-  // W1-T352 (DECISIONS.md entry provenance floor): see {@link
-  // ReviewVerdict.unprovenancedDecisionsEntries}'s doc for the full design — BLOCKING, unlike the
-  // W1-T322 advisory floor computed right below it.
-```
-
-### rewardHackingGap
-
 Removed from `src/lib/review.ts:437-441` (base 58e6c840), verbatim:
 
 ```
@@ -7884,8 +7762,6 @@ Removed from `src/lib/review.ts:437-441` (base 58e6c840), verbatim:
    *  `reward_hacking_gap`. Treat absent as `null`. */
 ```
 
-### unexecutableCount
-
 Removed from `src/lib/review.ts:443-445` (base 58e6c840), verbatim:
 
 ```
@@ -7893,16 +7769,6 @@ Removed from `src/lib/review.ts:443-445` (base 58e6c840), verbatim:
    *  `not_executable`/`exec_error` one, over the SAME set `capped`/`floorDegraded` count (W1-T305).
    *  Holdout criteria are counted: the AGGREGATE NUMBER is never secret, only holdout TEXT is. */
 ```
-
-Removed from `src/lib/review.ts:2963-2965` (base 58e6c840), verbatim:
-
-```
-  // W1-T305 (design (1)/(2)): the unexecutable class, made countable. `unexecutableCount` folds
-  // holdout criteria in (an aggregate NUMBER, never secret — matches `capped`'s own scope);
-  // `unexecutableProofs` is VISIBLE-only text (holdout proof text stays worker-invisible, W1-T166).
-```
-
-### unexecutableProofs
 
 Removed from `src/lib/review.ts:447-449` (base 58e6c840), verbatim:
 
@@ -7912,8 +7778,6 @@ Removed from `src/lib/review.ts:447-449` (base 58e6c840), verbatim:
    *  `unexecutableCount` may exceed this array's length when a holdout criterion is among them. */
 ```
 
-### partiallyExecuted
-
 Removed from `src/lib/review.ts:451-454` (base 58e6c840), verbatim:
 
 ```
@@ -7922,24 +7786,6 @@ Removed from `src/lib/review.ts:451-454` (base 58e6c840), verbatim:
    *  from a fully observed review. Never forces `state`; surfaced on {@link passSummary} so a
    *  partially certified PASS is never rendered identically to a fully certified one. */
 ```
-
-Removed from `src/lib/review.ts:2959-2960` (base 58e6c840), verbatim:
-
-```
-  // W1-T305 (design (4)): SOME but not ALL executable criteria were observed — the 52-partial-head
-  // shape the rationale measured, distinct from `capped` (zero observed anywhere).
-```
-
-Removed from `src/lib/review.ts:3125-3128` (base 58e6c840), verbatim:
-
-```
-  /** Recorded `partially_executed`, read back the way `capped`/`planOnly` are (W1-T1020), so {@link
-   *  decideAutoMergeArm} judges the fact the review posted rather than the always-false default it
-   *  silently took. Written unconditionally, so ABSENT MEANS NOT PARTIAL. Optional purely so
-   *  fixtures predating the field keep compiling; a missing value is `false`, never "unknown". */
-```
-
-### executableProofCount
 
 Removed from `src/lib/review.ts:459-461` (base 58e6c840), verbatim:
 
@@ -8004,8 +7850,6 @@ Removed from `src/lib/review.ts:553-555` (base 58e6c840), verbatim:
  *  diff touches no test file, or when a real assertion is added. */
 ```
 
-### if
-
 Removed from `src/lib/review.ts:576-576` (base 58e6c840), verbatim:
 
 ```
@@ -8022,279 +7866,6 @@ Removed from `src/lib/review.ts:581-585` (base 58e6c840), verbatim:
   // // Why: #3922 measured 52 added test lines, zero test-case declarations, `testTheater = true`, 36 green checks.
 ```
 
-Removed from `src/lib/review.ts:764-765` (base 58e6c840), verbatim:
-
-```
-  // shell, so `; & \` $ < >` are inert here, and refusing prose for carrying one was the defect that task fixed. `--`
-  // below already stops a pattern being read as a flag.
-```
-
-Removed from `src/lib/review.ts:770-770` (base 58e6c840), verbatim:
-
-```
-  // untrustworthy (W1-T65/#100), so the target is required instead and an unscoped proof stays on the keyword floor.
-```
-
-Removed from `src/lib/review.ts:773-778` (base 58e6c840), verbatim:
-
-```
-  // `grep -arn -- <pattern> <path>` with cwd pinned to the PR-head CHECKOUT, so a target naming a file the review
-  // host can read but the checkout does not contain turns a proof into a match/no-match ORACLE over that host
-  // filesystem, repeatable because a body edit re-earns review on the same head. WHAT THIS LINE REFUSES, STATED
-  // HONESTLY (R-18): the two escapes VISIBLE IN THE PROOF TEXT, a `..` segment and an ABSOLUTE path. A target
-  // resolving out through a SYMLINK is invisible here — nothing distinguishes `escape/secret.txt` from an in-tree
-  // path — and is refused against the real filesystem in {@link assertGrepTargetsInsideCheckout}.
-```
-
-Removed from `src/lib/review.ts:781-783` (base 58e6c840), verbatim:
-
-```
-  // No shell here (execFile) ⇒ no glob expansion — a literal '*' target can
-  // never resolve to a real file and would always exit non-zero, silently
-  // manufacturing a spurious executed_fail. Refuse rather than run it.
-```
-
-Removed from `src/lib/review.ts:785-787` (base 58e6c840), verbatim:
-
-```
-  // (R-12) A DIRECTORY-SHAPED target is refused — see {@link grepProofTargetNamesNoFile}. This parse has no cwd, so
-  // it can only see the SHAPE; a real directory whose name carries a dot (`plan/tasks.d`) is refused against the
-  // checkout, in {@link assertGrepTargetIsFile}.
-```
-
-Removed from `src/lib/review.ts:914-917` (base 58e6c840), verbatim:
-
-```
-  // `demonstration:` is never executable by construction (W1-T277) — it names an operator action, not an artifact
-  // this process can observe. Refuse rather than falling through to a legacy shape; task-linter.ts decides whether
-  // that null is a defect (verify:auto) or the whole point (verify:human), since review.ts has no `verify` field to
-  // consult.
-```
-
-Removed from `src/lib/review.ts:1236-1238` (base 58e6c840), verbatim:
-
-```
-  // We could look, and did. Rule out the one thing a fixed-string search is
-  // structurally blind to (TRAP 2): a title built from a template literal, which
-  // never appears verbatim in the source that declares it.
-```
-
-Removed from `src/lib/review.ts:1349-1350` (base 58e6c840), verbatim:
-
-```
-    // files, hanging on the browser-driving ones until the timeout kills them, leaking a chrome-headless-shell, and
-    // reporting `exec_error`. `unresolvable` is NOT evidence and never lands here; it falls through to the full glob.
-```
-
-Removed from `src/lib/review.ts:1354-1356` (base 58e6c840), verbatim:
-
-```
-  // AFTER the fast path on purpose: priming a checkout's node_modules is only
-  // worth 120s of `npm ci` if we are actually going to run node. `ensureDeps` is
-  // memoised per cwd, so a later proof in the same checkout still primes it.
-```
-
-Removed from `src/lib/review.ts:1364-1365` (base 58e6c840), verbatim:
-
-```
-  // R-18: BEFORE the spawn, and outside the try on purpose — a target outside the checkout is not
-  // an execution outcome to be classified below, it is a refusal to run the proof at all.
-```
-
-Removed from `src/lib/review.ts:1382-1384` (base 58e6c840), verbatim:
-
-```
-    // A clean nonzero exit. For a name-filtered proof this does NOT necessarily
-    // mean OUR named test failed (see the doc comment above) — read the TAP
-    // stream node still attaches to the error rather than trusting the code.
-```
-
-Removed from `src/lib/review.ts:1390-1391` (base 58e6c840), verbatim:
-
-```
-    // "looked, found nothing" (W1-T219, recon R-13(iv)). Only the latter is evidence of absence; the former degrades
-    // to exec_error rather than false-blocking on an environment or authoring problem.
-```
-
-Removed from `src/lib/review.ts:1393-1396` (base 58e6c840), verbatim:
-
-```
-    // A PURE-PATH `unit test:` proof's clean nonzero exit is not automatically a genuine fail either (W1-T1077) — see
-    // this function's doc for the measured TAP shapes. Read the SAME stdout the name-filtered branch reads; only when
-    // every `not ok` line is the file's own wrapper name does the run count as never-executed. An absent file reports
-    // no TAP lines at all, so this finds no wrapper name and falls through to the unchanged `"fail"`.
-```
-
-Removed from `src/lib/review.ts:1596-1597` (base 58e6c840), verbatim:
-
-```
-      // ABSENT AT BASE (forward reference) — the healthy case: leave it out, grep then finds
-      // nothing, and the proof correctly reads as discriminating.
-```
-
-Removed from `src/lib/review.ts:1673-1674` (base 58e6c840), verbatim:
-
-```
-  // would grade `discriminates`, certifying a test that passes identically at both commits. That run answered nothing
-  // about the base, so it is `base_unknown`. Fails closed on an absent flag.
-```
-
-Removed from `src/lib/review.ts:1763-1765` (base 58e6c840), verbatim:
-
-```
-    // R-15: this rule is no longer gated on the arm. Both arms now score against the report, so a
-    // report that is NOT the body cannot substantiate either of them — the W1-T1100 refusal below
-    // applies to a claim-keyword floor for exactly the reason it applies to a proof-keyword one.
-```
-
-Removed from `src/lib/review.ts:1886-1888` (base 58e6c840), verbatim:
-
-```
-              // W1-T362: record the base-run outcome on the verdict for a `unit test:`
-              // proof specifically (grep's reason text stays byte-identical to its
-              // shipped W1-T273 shape — that check is not in this task's scope).
-```
-
-Removed from `src/lib/review.ts:1994-1994` (base 58e6c840), verbatim:
-
-```
-  // never replace it — a bare overwrite threw away everything earlier branches built in the one branch where an
-```
-
-Removed from `src/lib/review.ts:1998-2004` (base 58e6c840), verbatim:
-
-```
-    // An UNEXPLAINED downgrade cannot outweigh a proof this run watched execute and pass.
-    // `reviewerVerdictContract` calls the fold advisory and promises a reviewer "that emits
-    // nothing parseable simply leaves the floor untouched — never a stall, never a deadlock";
-    // a bare FAIL is that stall, and it is unactionable by construction — the author is told
-    // the proof is non-responsive and nothing about what would answer it. Narrow BY DESIGN to
-    // `executed_pass`: where the floor rests on keyword coverage the reviewer's judgement is
-    // the only real signal and still binds, unexplained or not (W1-T2263 acceptance 3).
-```
-
-Removed from `src/lib/review.ts:2183-2185` (base 58e6c840), verbatim:
-
-```
-  // W1-T2534: a claim inside an inline quoted span is a MENTION of someone else's claim, never
-  // this body's own — the inline sibling of W1-T308's block-level rule. Checked FIRST, because no
-  // amount of surrounding changeset context turns a quotation into an assertion.
-```
-
-Removed from `src/lib/review.ts:2292-2298` (base 58e6c840), verbatim:
-
-```
-  // THE LABEL FORM IS A CLAIM, and the one the house style writes: `data-only: no code.` (#1025's own body) and
-  // `**Plan-only**: one file added`. A colon immediately after the shorthand, through any markdown emphasis, makes it
-  // the SUBJECT of the line, and a path never continues with a colon, so `test/trailer-credit-plan-only.test.ts`
-  // stays silent. W1-T2549 NARROWED W1-T395's SCOPE, IT DID NOT REVERSE IT: a CLOSING DELIMITER ends a SPAN, not a
-  // sentence, so `**Plan-only**:` still reads as a label (test/review-absence-anchor-delimiter.test.ts), but a QUOTE
-  // character leaving the span open is caught by `isInsideInlineQuote` first. See
-  // test/changeset-shorthand-anchor.test.ts.
-```
-
-Removed from `src/lib/review.ts:2300-2301` (base 58e6c840), verbatim:
-
-```
-    // W1-T2679: ...and unless the shorthand is a sibling in a parenthesised enumeration of state
-    // names, where the closing bracket belongs to the list rather than to a label span.
-```
-
-Removed from `src/lib/review.ts:2307-2310` (base 58e6c840), verbatim:
-
-```
-  // THE COPULAR FORM IS A CLAIM: "This is plan-only.", "The diff is data-only." A linking verb immediately before the
-  // shorthand makes it the PREDICATE of what the sentence is about, and in a PR body that subject is the change.
-  // Deliberately IMMEDIATE rather than anywhere-in-sentence, which is what separates it from "makes a triage PR
-  // plan-only by construction" (about the LANE) and "described its revert as data-only" (about ANOTHER PR).
-```
-
-Removed from `src/lib/review.ts:3380-3382` (base 58e6c840), verbatim:
-
-```
-  // Checked BEFORE `state`, `capped` and `override` — irreversibility is a hard refusal an
-  // operator override can never buy back (the CAPPED override two branches down answers "was
-  // enough proof executed", a different question from "can this diff's effect be undone").
-```
-
-Removed from `src/lib/review.ts:3448-3450` (base 58e6c840), verbatim:
-
-```
-  // W1-T205: excludes `planOnly` — decideAutoMergeArm checks the carve-out BEFORE the
-  // override branch, so a planOnly arm never actually consulted `override` even when one
-  // happens to be present; logging "override used" here would misattribute the decision.
-```
-
-Removed from `src/lib/review.ts:3658-3659` (base 58e6c840), verbatim:
-
-```
-  // forged, missing or failing. Arming stays withheld either way, but the REASON must stay honest — "never read as a
-  // verdict in either direction".
-```
-
-Removed from `src/lib/review.ts:3825-3827` (base 58e6c840), verbatim:
-
-```
-  // Neither structural fact above fired and no VISIBLE criterion is unmet, yet
-  // `judgeReview` still folded this verdict to failure — the only two triggers
-  // left in its OR-chain are a holdout-only miss or test theater.
-```
-
-Removed from `src/lib/review.ts:4271-4273` (base 58e6c840), verbatim:
-
-```
-    // An indented, non-bullet "proof:" line right under a "- claim: ..." bullet is a
-    // CONTINUATION of that criterion, not a terminator — attach it and keep scanning
-    // for further bullets instead of dropping every criterion after the first.
-```
-
-Removed from `src/lib/review.ts:4292-4293` (base 58e6c840), verbatim:
-
-```
-    // A blank line before any bullet is tolerated (header, then a gap, then bullets);
-    // once bullets have begun, any blank or unrecognized line ends the block.
-```
-
-Removed from `src/lib/review.ts:4414-4416` (base 58e6c840), verbatim:
-
-```
-  // THE EXEMPTION MUST BE TRUE, NOT MERELY CLAIMED (W1-T2297). This arm's whole warrant is that criteria come from
-  // the plan record rather than the body, and that fails when the trailer names nothing the plan declares: the
-  // reviewer falls back to the body, and a body this gate never looked at ships with whatever its block parses to.
-```
-
-Removed from `src/lib/review.ts:4418-4420` (base 58e6c840), verbatim:
-
-```
-  // reading; falling through re-uses the diagnostics arms below rather than adding a second spelling of "this block
-  // is unreadable".
-  // // Why: on #2908 a trailer resolved to ZERO ids and the body's block gave `bullets written: 5, criteria parsed: 1` — four criteria unseen.
-```
-
-Removed from `src/lib/review.ts:4593-4595` (base 58e6c840), verbatim:
-
-```
-  // CLAIM 4: no anchored trailer ⇒ unchanged — nothing to resolve, and no git object is ever
-  // touched to find that out. The caller's existing PR-body `## Acceptance` fallback (unchanged
-  // by this function) is what recovers criteria here, exactly as it does today.
-```
-
-Removed from `src/lib/review.ts:5422-5424` (base 58e6c840), verbatim:
-
-```
-  // W1-T2738: ci.yml registers JOBS, not files, so its introducing-commit test is a different
-  // question — asked in full by the helper above rather than folded into the file-newness check
-  // below, which it would always fail.
-```
-
-Removed from `src/lib/review.ts:5716-5718` (base 58e6c840), verbatim:
-
-```
-    // Still inside a previously-opened block scalar's continuation — classify by its OWNER and
-    // never reinterpret this line as a fresh field header, however "key:"-shaped its content
-    // looks (a `grep:` proof-dialect content line is exactly this shape).
-```
-
 ### WhitelistedProof
 
 Removed from `src/lib/review.ts:593-599` (base 58e6c840), verbatim:
@@ -8309,8 +7880,6 @@ Removed from `src/lib/review.ts:593-599` (base 58e6c840), verbatim:
 // // Why: a semicolon in ordinary prose refused 158 of 269 dialect proofs (W1-T128; docs/forensics/review.md).
 ```
 
-### nameFiltered
-
 Removed from `src/lib/review.ts:610-614` (base 58e6c840), verbatim:
 
 ```
@@ -8320,8 +7889,6 @@ Removed from `src/lib/review.ts:610-614` (base 58e6c840), verbatim:
    *  file's own wrapper passes trivially, and a named test absent from the head must count as FAIL —
    *  exactly the "grep with no match" class — never a silent pass. */
 ```
-
-### authorSelectedArgv
 
 Removed from `src/lib/review.ts:616-619` (base 58e6c840), verbatim:
 
@@ -8478,7 +8045,47 @@ Removed from `src/lib/review.ts:739-742` (base 58e6c840), verbatim:
  *  that as prose/`dialect-parse-error`: that contract is unchanged. */
 ```
 
-### return { kind: "grep", command: "grep", args: ["
+### parseDialectGrep
+
+Removed from `src/lib/review.ts:764-765` (base 58e6c840), verbatim:
+
+```
+  // shell, so `; & \` $ < >` are inert here, and refusing prose for carrying one was the defect that task fixed. `--`
+  // below already stops a pattern being read as a flag.
+```
+
+Removed from `src/lib/review.ts:770-770` (base 58e6c840), verbatim:
+
+```
+  // untrustworthy (W1-T65/#100), so the target is required instead and an unscoped proof stays on the keyword floor.
+```
+
+Removed from `src/lib/review.ts:773-778` (base 58e6c840), verbatim:
+
+```
+  // `grep -arn -- <pattern> <path>` with cwd pinned to the PR-head CHECKOUT, so a target naming a file the review
+  // host can read but the checkout does not contain turns a proof into a match/no-match ORACLE over that host
+  // filesystem, repeatable because a body edit re-earns review on the same head. WHAT THIS LINE REFUSES, STATED
+  // HONESTLY (R-18): the two escapes VISIBLE IN THE PROOF TEXT, a `..` segment and an ABSOLUTE path. A target
+  // resolving out through a SYMLINK is invisible here — nothing distinguishes `escape/secret.txt` from an in-tree
+  // path — and is refused against the real filesystem in {@link assertGrepTargetsInsideCheckout}.
+```
+
+Removed from `src/lib/review.ts:781-783` (base 58e6c840), verbatim:
+
+```
+  // No shell here (execFile) ⇒ no glob expansion — a literal '*' target can
+  // never resolve to a real file and would always exit non-zero, silently
+  // manufacturing a spurious executed_fail. Refuse rather than run it.
+```
+
+Removed from `src/lib/review.ts:785-787` (base 58e6c840), verbatim:
+
+```
+  // (R-12) A DIRECTORY-SHAPED target is refused — see {@link grepProofTargetNamesNoFile}. This parse has no cwd, so
+  // it can only see the SHAPE; a real directory whose name carries a dot (`plan/tasks.d`) is refused against the
+  // checkout, in {@link assertGrepTargetIsFile}.
+```
 
 Removed from `src/lib/review.ts:791-794` (base 58e6c840), verbatim:
 
@@ -8501,7 +8108,7 @@ Removed from `src/lib/review.ts:798-802` (base 58e6c840), verbatim:
  *  so this declines rather than guessing. */
 ```
 
-### return {
+### parseTestTarget
 
 Removed from `src/lib/review.ts:824-826` (base 58e6c840), verbatim:
 
@@ -8509,28 +8116,6 @@ Removed from `src/lib/review.ts:824-826` (base 58e6c840), verbatim:
   // execFile and this branch names no file, so there is no traversal or glob surface; refusing prose for a semicolon
   // was the biggest single cause of the dead proof floor. TRAP (W1-T112 round 3): that flag compiles its argument as
   // a REGEX, so a title echoing real syntax becomes an unescaped CHARACTER CLASS and manufactures a FAIL.
-```
-
-Removed from `src/lib/review.ts:3340-3342` (base 58e6c840), verbatim:
-
-```
-  // Malformed: a row matched this class but its `verdict` is neither "hold" nor "notify" — only
-  // reachable when a caller hands decideAutoMergeArm a `bands` array that bypassed policy.ts's
-  // own loader (which refuses this shape at load, per ArmCalibrationBandRow's own doc).
-```
-
-Removed from `src/lib/review.ts:3726-3727` (base 58e6c840), verbatim:
-
-```
-  // The fail-open default is legible in the decision's own reason — which every caller already
-  // records — instead of a new ledger step a polling lane would re-emit every tick.
-```
-
-Removed from `src/lib/review.ts:4628-4629` (base 58e6c840), verbatim:
-
-```
-    // was, because git will not, so one extra `cat-file -e` separates the two causes that matter and the next reader
-    // need not re-run probes.
 ```
 
 ### cappedReason
@@ -8565,7 +8150,7 @@ Removed from `src/lib/review.ts:877-883` (base 58e6c840), verbatim:
  *  // wrapped pattern read 0 and every bare one read 1. */
 ```
 
-### trimmed
+### parseWhitelistedProof
 
 Removed from `src/lib/review.ts:898-902` (base 58e6c840), verbatim:
 
@@ -8577,8 +8162,6 @@ Removed from `src/lib/review.ts:898-902` (base 58e6c840), verbatim:
   // instead".
 ```
 
-### dialectSource
-
 Removed from `src/lib/review.ts:906-908` (base 58e6c840), verbatim:
 
 ```
@@ -8587,7 +8170,14 @@ Removed from `src/lib/review.ts:906-908` (base 58e6c840), verbatim:
   // // Why: #1037 parsed 0/4 and #1057 0/6 that way while #1038's unwrapped proofs parsed 8/8.
 ```
 
-### testMatch
+Removed from `src/lib/review.ts:914-917` (base 58e6c840), verbatim:
+
+```
+  // `demonstration:` is never executable by construction (W1-T277) — it names an operator action, not an artifact
+  // this process can observe. Refuse rather than falling through to a legacy shape; task-linter.ts decides whether
+  // that null is a defect (verify:auto) or the whole point (verify:human), since review.ts has no `verify` field to
+  // consult.
+```
 
 Removed from `src/lib/review.ts:920-921` (base 58e6c840), verbatim:
 
@@ -8702,8 +8292,6 @@ Removed from `src/lib/review.ts:1056-1058` (base 58e6c840), verbatim:
  * download. */
 ```
 
-### isInstalled
-
 Removed from `src/lib/review.ts:1063-1065` (base 58e6c840), verbatim:
 
 ```
@@ -8730,14 +8318,6 @@ Removed from `src/lib/review.ts:1096-1098` (base 58e6c840), verbatim:
 /** Production {@link ensureBrowsers} wiring, memoised per process — the browser
  * cache is HOST-global (not per-checkout like `node_modules`), so one check per
  * review process covers every proof it goes on to run. */
-```
-
-Removed from `src/lib/review.ts:1359-1361` (base 58e6c840), verbatim:
-
-```
-    // Same "only when we are actually going to run node" placement as ensureDeps,
-    // and for the same reason: a `grep` proof never launches a browser. See
-    // requiredChromiumDirs for the false-FAIL incident this closes (PR #892).
 ```
 
 ### pinnedPlaywrightCli
@@ -8840,6 +8420,14 @@ Removed from `src/lib/review.ts:1223-1227` (base 58e6c840), verbatim:
  * path, so this returns a {@link NameFilterResolution}; the line is drawn by a CONTROL PROBE, never grep's exit code.
 ```
 
+Removed from `src/lib/review.ts:1236-1238` (base 58e6c840), verbatim:
+
+```
+  // We could look, and did. Rule out the one thing a fixed-string search is
+  // structurally blind to (TRAP 2): a title built from a template literal, which
+  // never appears verbatim in the source that declares it.
+```
+
 ### narrowNameFilteredArgs
 
 Removed from `src/lib/review.ts:1246-1249` (base 58e6c840), verbatim:
@@ -8900,7 +8488,7 @@ Removed from `src/lib/review.ts:1319-1322` (base 58e6c840), verbatim:
  *  `exec_error` (W1-T219), and pre-empting it here would change nothing. */
 ```
 
-### args
+### execWhitelistedProof
 
 Removed from `src/lib/review.ts:1342-1343` (base 58e6c840), verbatim:
 
@@ -8909,7 +8497,59 @@ Removed from `src/lib/review.ts:1342-1343` (base 58e6c840), verbatim:
   // a pure parse with no `cwd`, and the candidate set can only be known against a real checkout.
 ```
 
-### completedResults
+Removed from `src/lib/review.ts:1349-1350` (base 58e6c840), verbatim:
+
+```
+    // files, hanging on the browser-driving ones until the timeout kills them, leaking a chrome-headless-shell, and
+    // reporting `exec_error`. `unresolvable` is NOT evidence and never lands here; it falls through to the full glob.
+```
+
+Removed from `src/lib/review.ts:1354-1356` (base 58e6c840), verbatim:
+
+```
+  // AFTER the fast path on purpose: priming a checkout's node_modules is only
+  // worth 120s of `npm ci` if we are actually going to run node. `ensureDeps` is
+  // memoised per cwd, so a later proof in the same checkout still primes it.
+```
+
+Removed from `src/lib/review.ts:1359-1361` (base 58e6c840), verbatim:
+
+```
+    // Same "only when we are actually going to run node" placement as ensureDeps,
+    // and for the same reason: a `grep` proof never launches a browser. See
+    // requiredChromiumDirs for the false-FAIL incident this closes (PR #892).
+```
+
+Removed from `src/lib/review.ts:1364-1365` (base 58e6c840), verbatim:
+
+```
+  // R-18: BEFORE the spawn, and outside the try on purpose — a target outside the checkout is not
+  // an execution outcome to be classified below, it is a refusal to run the proof at all.
+```
+
+Removed from `src/lib/review.ts:1382-1384` (base 58e6c840), verbatim:
+
+```
+    // A clean nonzero exit. For a name-filtered proof this does NOT necessarily
+    // mean OUR named test failed (see the doc comment above) — read the TAP
+    // stream node still attaches to the error rather than trusting the code.
+```
+
+Removed from `src/lib/review.ts:1390-1391` (base 58e6c840), verbatim:
+
+```
+    // "looked, found nothing" (W1-T219, recon R-13(iv)). Only the latter is evidence of absence; the former degrades
+    // to exec_error rather than false-blocking on an environment or authoring problem.
+```
+
+Removed from `src/lib/review.ts:1393-1396` (base 58e6c840), verbatim:
+
+```
+    // A PURE-PATH `unit test:` proof's clean nonzero exit is not automatically a genuine fail either (W1-T1077) — see
+    // this function's doc for the measured TAP shapes. Read the SAME stdout the name-filtered branch reads; only when
+    // every `not ok` line is the file's own wrapper name does the run count as never-executed. An absent file reports
+    // no TAP lines at all, so this finds no wrapper name and falls through to the unchanged `"fail"`.
+```
 
 Removed from `src/lib/review.ts:1399-1404` (base 58e6c840), verbatim:
 
@@ -9010,8 +8650,6 @@ Removed from `src/lib/review.ts:1501-1503` (base 58e6c840), verbatim:
  * // discovery order flapped fail → pass → fail on this PR's own head commit, unchanged code. */
 ```
 
-### return "no-match";
-
 Removed from `src/lib/review.ts:1522-1524` (base 58e6c840), verbatim:
 
 ```
@@ -9020,7 +8658,7 @@ Removed from `src/lib/review.ts:1522-1524` (base 58e6c840), verbatim:
     // // tests pass under a different name; #466/W1-T183 sat blocked a day or more on it.
 ```
 
-### baseCwd
+### ProofExecContext
 
 Removed from `src/lib/review.ts:1536-1539` (base 58e6c840), verbatim:
 
@@ -9031,7 +8669,23 @@ Removed from `src/lib/review.ts:1536-1539` (base 58e6c840), verbatim:
    * `false` and every grep proof that passes on `cwd` stays `executed_pass`. */
 ```
 
-### planOnlyDiff
+Removed from `src/lib/review.ts:1541-1544` (base 58e6c840), verbatim:
+
+```
+  /** (W1-T460) mirrors {@link ReviewEvidence.baseUnreadablePaths} — the repo-relative paths whose
+   *  base blob could NOT be read while `baseCwd` was built. A proof naming one was never actually
+   *  checked against the base, however healthy `baseCwd` looks, so it is graded `base_unreadable`
+   *  rather than credited with a discrimination nobody measured. */
+```
+
+Removed from `src/lib/review.ts:1546-1549` (base 58e6c840), verbatim:
+
+```
+  /** (R-11) mirrors {@link ReviewEvidence.baseIsCheckout} — `true` only when `baseCwd` is a real
+   * checkout of the merge-base (a worktree), the one tree a `unit test:` proof can be re-run in.
+   * Absent/false ⇒ every `unit test:` proof's base outcome is `base_unknown` (fail closed), and
+   * `grep:` proofs behave exactly as before. */
+```
 
 Removed from `src/lib/review.ts:1556-1560` (base 58e6c840), verbatim:
 
@@ -9041,14 +8695,6 @@ Removed from `src/lib/review.ts:1556-1560` (base 58e6c840), verbatim:
    *  `!existsSync` half, while a call-site grep has no equivalent tell — the CONSUMER file exists in both worlds and
    *  only the CALL is missing. Without this flag the grep carve-out would excuse a build PR that shipped the module
    *  unwired, the class W1-T2732 counted four of. */
-```
-
-Removed from `src/lib/review.ts:2748-2750` (base 58e6c840), verbatim:
-
-```
-/** {@link planOnlyFromFiles} over a raw unified diff — the form run-task.ts's spawn gate needs,
- *  since it holds the diff text and not judgeReview's intermediates. Same predicate, one definition:
- *  a change to plan-only classification lands in both callers or in neither. */
 ```
 
 ### materialiseBaseProofBlobs
@@ -9069,6 +8715,13 @@ Removed from `src/lib/review.ts:1574-1575` (base 58e6c840), verbatim:
 ```
  * failure is RETURNED per path while absence keeps its carve-out ({@link baseBlobErrorIsAbsence}).
  * // Why: a blob directory is a tree `node --test` cannot run in, so 599 unit-test proofs graded "discriminates". */
+```
+
+Removed from `src/lib/review.ts:1596-1597` (base 58e6c840), verbatim:
+
+```
+      // ABSENT AT BASE (forward reference) — the healthy case: leave it out, grep then finds
+      // nothing, and the proof correctly reads as discriminating.
 ```
 
 ### grepProofTargetPath
@@ -9118,7 +8771,12 @@ Removed from `src/lib/review.ts:1659-1661` (base 58e6c840), verbatim:
  * this proof's blob. THAT LAST IS NOT `base_unknown`: that is a GLOBAL gap, this a PER-PROOF one. */
 ```
 
-### return exec(whitelisted, baseCwd) === "pass" ? "
+Removed from `src/lib/review.ts:1673-1674` (base 58e6c840), verbatim:
+
+```
+  // would grade `discriminates`, certifying a test that passes identically at both commits. That run answered nothing
+  // about the base, so it is `base_unknown`. Fails closed on an absent flag.
+```
 
 Removed from `src/lib/review.ts:1679-1680` (base 58e6c840), verbatim:
 
@@ -9127,7 +8785,7 @@ Removed from `src/lib/review.ts:1679-1680` (base 58e6c840), verbatim:
     // file's own TAP wrapper is the only `not ok`) — THROWS out of `exec` and is caught below as `base_unknown`.
 ```
 
-### return classifyBaseProofOutcome(whitelisted, exe
+### preexistingProofHits
 
 Removed from `src/lib/review.ts:1695-1697` (base 58e6c840), verbatim:
 
@@ -9137,7 +8795,7 @@ Removed from `src/lib/review.ts:1695-1697` (base 58e6c840), verbatim:
   // WHICH outcome is reported, never this function's never-a-false-positive contract).
 ```
 
-### reportSubstituted
+### judgeCriterion
 
 Removed from `src/lib/review.ts:1707-1710` (base 58e6c840), verbatim:
 
@@ -9148,8 +8806,6 @@ Removed from `src/lib/review.ts:1707-1710` (base 58e6c840), verbatim:
    *  substantiates anything. Whitelisted proof EXECUTION is unaffected: it observes repo state. */
 ```
 
-### semanticClause
-
 Removed from `src/lib/review.ts:1712-1714` (base 58e6c840), verbatim:
 
 ```
@@ -9157,8 +8813,6 @@ Removed from `src/lib/review.ts:1712-1714` (base 58e6c840), verbatim:
    * claim (W1-T2263). Consulted ONLY where `semantic === false && met`: it never rescues a proof
    * and never annotates a PASS. `undefined` leaves today's constant reason text as the whole note. */
 ```
-
-### floorKeywords
 
 Removed from `src/lib/review.ts:1720-1724` (base 58e6c840), verbatim:
 
@@ -9170,18 +8824,6 @@ Removed from `src/lib/review.ts:1720-1724` (base 58e6c840), verbatim:
    * // resolved-shard criterion read `met` against any body, an empty one included (recon-2026-09-05 R-15). */
 ```
 
-Removed from `src/lib/review.ts:2819-2823` (base 58e6c840), verbatim:
-
-```
-  // `taskDeclaredFiles` is the resolved-task signal throughout this module. On the only arm changed here — a
-  // plan-only diff — it means the criteria were loaded from the task shard rather than parsed from the PR body, so
-  // the proof arrived with the criteria and its filename cannot be evidence about the body (W1-T2713). BOTH arms
-  // score against the report; see judgeCriterion's `floorKeywords` doc for why no arm may read the criterion itself
-  // (R-15).
-```
-
-### kws
-
 Removed from `src/lib/review.ts:1742-1744` (base 58e6c840), verbatim:
 
 ```
@@ -9190,13 +8832,19 @@ Removed from `src/lib/review.ts:1742-1744` (base 58e6c840), verbatim:
   // side varies, and both alternatives are text the criterion supplies, scored against the body.
 ```
 
-### met = false;
-
 Removed from `src/lib/review.ts:1754-1755` (base 58e6c840), verbatim:
 
 ```
     // cannot observe anything for such a proof, so it resolves to UNMET, the same cannot-observe-implies-do-not-act
     // move W1-T119's `indeterminate` makes. `semantic` cannot rescue it; only real WHITELISTED execution below can.
+```
+
+Removed from `src/lib/review.ts:1763-1765` (base 58e6c840), verbatim:
+
+```
+    // R-15: this rule is no longer gated on the arm. Both arms now score against the report, so a
+    // report that is NOT the body cannot substantiate either of them — the W1-T1100 refusal below
+    // applies to a claim-keyword floor for exactly the reason it applies to a proof-keyword one.
 ```
 
 Removed from `src/lib/review.ts:1769-1770` (base 58e6c840), verbatim:
@@ -9206,8 +8854,6 @@ Removed from `src/lib/review.ts:1769-1770` (base 58e6c840), verbatim:
       // floor cannot say more.
 ```
 
-### withheld
-
 Removed from `src/lib/review.ts:1772-1774` (base 58e6c840), verbatim:
 
 ```
@@ -9215,8 +8861,6 @@ Removed from `src/lib/review.ts:1772-1774` (base 58e6c840), verbatim:
       // direction. Only the WORDING branches, and it must not imply a fetch failed: on the measured population the
       // fetch has never failed once, while "this mode never reads the body" is the common case.
 ```
-
-### proofExec
 
 Removed from `src/lib/review.ts:1795-1796` (base 58e6c840), verbatim:
 
@@ -9232,8 +8876,6 @@ Removed from `src/lib/review.ts:1798-1799` (base 58e6c840), verbatim:
   // hard-fail.
 ```
 
-### proofSkip
-
 Removed from `src/lib/review.ts:1801-1803` (base 58e6c840), verbatim:
 
 ```
@@ -9241,8 +8883,6 @@ Removed from `src/lib/review.ts:1801-1803` (base 58e6c840), verbatim:
   // that never PARSED with one that parsed and named nothing — and a CAPPED 0/N verdict looked
   // identical either way, which is what made the code-span defect above cost a whole recon to find.
 ```
-
-### forwardReference
 
 Removed from `src/lib/review.ts:1810-1812` (base 58e6c840), verbatim:
 
@@ -9252,8 +8892,6 @@ Removed from `src/lib/review.ts:1810-1812` (base 58e6c840), verbatim:
       // that made a filing PR unrepairable. Gated on `!nameFiltered`: a bare test-NAME proof has no target path.
 ```
 
-### grepTarget
-
 Removed from `src/lib/review.ts:1819-1821` (base 58e6c840), verbatim:
 
 ```
@@ -9262,8 +8900,6 @@ Removed from `src/lib/review.ts:1819-1821` (base 58e6c840), verbatim:
       // keeps blocking, verbatim.
 ```
 
-### baseOutcome
-
 Removed from `src/lib/review.ts:1839-1841` (base 58e6c840), verbatim:
 
 ```
@@ -9271,8 +8907,6 @@ Removed from `src/lib/review.ts:1839-1841` (base 58e6c840), verbatim:
             // whitelisted check against the PR's merge-base — one execution answers
             // both "is this stale" and, if not, why not (see classifyBaseProofOutcome).
 ```
-
-### proofExec = "base_unreadable";
 
 Removed from `src/lib/review.ts:1847-1851` (base 58e6c840), verbatim:
 
@@ -9284,8 +8918,6 @@ Removed from `src/lib/review.ts:1847-1851` (base 58e6c840), verbatim:
               // the proof is bad, we learned we never asked.
 ```
 
-### proofExec = "stale_self_path";
-
 Removed from `src/lib/review.ts:1859-1861` (base 58e6c840), verbatim:
 
 ```
@@ -9293,8 +8925,6 @@ Removed from `src/lib/review.ts:1859-1861` (base 58e6c840), verbatim:
               // path and this diff's own task declares a REAL path besides it, so the task has an implementing diff.
               // A self-path grep only ever discriminated by proving the shard's own filing text was present —
 ```
-
-### proofExec = "executed_stale";
 
 Removed from `src/lib/review.ts:1873-1876` (base 58e6c840), verbatim:
 
@@ -9305,7 +8935,13 @@ Removed from `src/lib/review.ts:1873-1876` (base 58e6c840), verbatim:
               // converted into a failure.
 ```
 
-### proofExec = "not_executable";
+Removed from `src/lib/review.ts:1886-1888` (base 58e6c840), verbatim:
+
+```
+              // W1-T362: record the base-run outcome on the verdict for a `unit test:`
+              // proof specifically (grep's reason text stays byte-identical to its
+              // shipped W1-T273 shape — that check is not in this task's scope).
+```
 
 Removed from `src/lib/review.ts:1909-1912` (base 58e6c840), verbatim:
 
@@ -9316,8 +8952,6 @@ Removed from `src/lib/review.ts:1909-1912` (base 58e6c840), verbatim:
               // FAILED" — a false block on green, test-passing code.
 ```
 
-### proofExec = "executed_fail";
-
 Removed from `src/lib/review.ts:1917-1919` (base 58e6c840), verbatim:
 
 ```
@@ -9325,8 +8959,6 @@ Removed from `src/lib/review.ts:1917-1919` (base 58e6c840), verbatim:
               // NAME rather than prose, and matches nothing on the head. A fabricated test name is
               // theater and must FAIL, never silently degrade to the keyword floor.
 ```
-
-### proofExec = "not_yet_built";
 
 Removed from `src/lib/review.ts:1925-1931` (base 58e6c840), verbatim:
 
@@ -9340,8 +8972,6 @@ Removed from `src/lib/review.ts:1925-1931` (base 58e6c840), verbatim:
             // // Why: on W1-T2716 that proof failed the PR alone and the author dropped the criterion.
 ```
 
-### proofSkip = "runtime-broken";
-
 Removed from `src/lib/review.ts:1946-1949` (base 58e6c840), verbatim:
 
 ```
@@ -9351,8 +8981,6 @@ Removed from `src/lib/review.ts:1946-1949` (base 58e6c840), verbatim:
             // raw TAP capture, which is unbounded and would carry the run's environment into a durable row.
 ```
 
-### proofSkip = "incomplete-run";
-
 Removed from `src/lib/review.ts:1957-1959` (base 58e6c840), verbatim:
 
 ```
@@ -9361,14 +8989,38 @@ Removed from `src/lib/review.ts:1957-1959` (base 58e6c840), verbatim:
             // results — enough to say WHY a pure-path proof reached no conclusion.
 ```
 
-### proofSkip = "dialect-parse-error";
-
 Removed from `src/lib/review.ts:1972-1974` (base 58e6c840), verbatim:
 
 ```
       // W1-T305: a proof declaring a dialect label (`grep:`/`unit test:`) that still failed to
       // parse is an AUTHORING ERROR, never silently the same bucket as a proof that read as
       // ordinary prose from the start — see isMalformedDialectProof's doc.
+```
+
+Removed from `src/lib/review.ts:1987-1989` (base 58e6c840), verbatim:
+
+```
+  // W1-T178 (verdict stability): capture the DETERMINISTIC floor's own verdict
+  // — mechanical keyword coverage, overridden by whitelisted execution where
+  // applicable — BEFORE the semantic layer below gets a chance to downgrade it.
+```
+
+Removed from `src/lib/review.ts:1994-1994` (base 58e6c840), verbatim:
+
+```
+  // never replace it — a bare overwrite threw away everything earlier branches built in the one branch where an
+```
+
+Removed from `src/lib/review.ts:1998-2004` (base 58e6c840), verbatim:
+
+```
+    // An UNEXPLAINED downgrade cannot outweigh a proof this run watched execute and pass.
+    // `reviewerVerdictContract` calls the fold advisory and promises a reviewer "that emits
+    // nothing parseable simply leaves the floor untouched — never a stall, never a deadlock";
+    // a bare FAIL is that stall, and it is unactionable by construction — the author is told
+    // the proof is non-responsive and nothing about what would answer it. Narrow BY DESIGN to
+    // `executed_pass`: where the floor rests on keyword coverage the reviewer's judgement is
+    // the only real signal and still binds, unexplained or not (W1-T2263 acceptance 3).
 ```
 
 ### AuditableMergedTask
@@ -9391,37 +9043,12 @@ Removed from `src/lib/review.ts:2024-2026` (base 58e6c840), verbatim:
  *  this is the gap {@link judgeReview} cannot see once the task is off its desk. */
 ```
 
-### reason
-
 Removed from `src/lib/review.ts:2032-2034` (base 58e6c840), verbatim:
 
 ```
   /** Plain-language cause, independent of {@link CriterionVerdict.reason}'s keyword-floor
    *  phrasing — there is no PR report to score keyword coverage against here, only the
    *  proof's own execution outcome. */
-```
-
-Removed from `src/lib/review.ts:3558-3559` (base 58e6c840), verbatim:
-
-```
-  /** Human-readable justification. Always names {@link REVIEWER_TOKEN_ENV} when the verdict is
-   *  `"unsafe"` on identity grounds (acceptance criterion 3) — never the credential's value. */
-```
-
-Removed from `src/lib/review.ts:3871-3873` (base 58e6c840), verbatim:
-
-```
-  // `capped_reason` rides alongside `capped` rather than in its own line, so the ONE record that
-  // says a verdict was capped also says why. Absent (never null/"") on an uncapped verdict, so the
-  // existing ledger shape is byte-identical for every healthy review.
-```
-
-Removed from `src/lib/review.ts:6569-6571` (base 58e6c840), verbatim:
-
-```
-  /** Present only when `posted` is false — either {@link decideReviewStatusPost}
-   * refused the write (see `review.post_refused`), or the post itself failed
-   * after retries/as a permanent error (see `review.post_failed`, W1-T135). */
 ```
 
 ### MergedClaimUncheckable
@@ -9493,6 +9120,16 @@ Removed from `src/lib/review.ts:2164-2171` (base 58e6c840), verbatim:
  * // Why: three PR bodies in one session were refused on this sentence (#3388, #3408). */
 ```
 
+### claimsChangesetContext
+
+Removed from `src/lib/review.ts:2183-2185` (base 58e6c840), verbatim:
+
+```
+  // W1-T2534: a claim inside an inline quoted span is a MENTION of someone else's claim, never
+  // this body's own — the inline sibling of W1-T308's block-level rule. Checked FIRST, because no
+  // amount of surrounding changeset context turns a quotation into an assertion.
+```
+
 ### NEXT_WORD_RE
 
 Removed from `src/lib/review.ts:2209-2212` (base 58e6c840), verbatim:
@@ -9504,7 +9141,7 @@ Removed from `src/lib/review.ts:2209-2212` (base 58e6c840), verbatim:
 // real fixture turns up rather than guessing.
 ```
 
-### return !NEED_CLAUSE_RE.test(rest.slice(next[0].l
+### noClaimIsAboutChangeset
 
 Removed from `src/lib/review.ts:2219-2220` (base 58e6c840), verbatim:
 
@@ -9564,8 +9201,6 @@ Removed from `src/lib/review.ts:2250-2253` (base 58e6c840), verbatim:
  *  anywhere-in-sentence would silence a genuine claim sharing a sentence with an unrelated one. */
 ```
 
-### module
-
 Removed from `src/lib/review.ts:2255-2262` (base 58e6c840), verbatim:
 
 ```
@@ -9577,13 +9212,6 @@ Removed from `src/lib/review.ts:2255-2262` (base 58e6c840), verbatim:
  * // moved into a FENCED block, the literals byte-identical (2026-08-31). */
 /**
  * Is the shorthand a member of a parenthesised enumeration rather than a label?
-```
-
-Removed from `src/lib/review.ts:3351-3352` (base 58e6c840), verbatim:
-
-```
-/** Decide whether the auto-merge arming path may proceed, given a freshly computed verdict, whether the task
- * declares `principles: {tdd: strict}`, and an optional operator override. Pure.
 ```
 
 ### shorthandIsInsideEnumeration
@@ -9612,7 +9240,26 @@ Removed from `src/lib/review.ts:2273-2274` (base 58e6c840), verbatim:
  */
 ```
 
-### return !DENIED_LABEL_ANSWER_RE.test(rest);
+### shorthandIsAboutChangeset
+
+Removed from `src/lib/review.ts:2292-2298` (base 58e6c840), verbatim:
+
+```
+  // THE LABEL FORM IS A CLAIM, and the one the house style writes: `data-only: no code.` (#1025's own body) and
+  // `**Plan-only**: one file added`. A colon immediately after the shorthand, through any markdown emphasis, makes it
+  // the SUBJECT of the line, and a path never continues with a colon, so `test/trailer-credit-plan-only.test.ts`
+  // stays silent. W1-T2549 NARROWED W1-T395's SCOPE, IT DID NOT REVERSE IT: a CLOSING DELIMITER ends a SPAN, not a
+  // sentence, so `**Plan-only**:` still reads as a label (test/review-absence-anchor-delimiter.test.ts), but a QUOTE
+  // character leaving the span open is caught by `isInsideInlineQuote` first. See
+  // test/changeset-shorthand-anchor.test.ts.
+```
+
+Removed from `src/lib/review.ts:2300-2301` (base 58e6c840), verbatim:
+
+```
+    // W1-T2679: ...and unless the shorthand is a sibling in a parenthesised enumeration of state
+    // names, where the closing bracket belongs to the list rather than to a label span.
+```
 
 Removed from `src/lib/review.ts:2303-2304` (base 58e6c840), verbatim:
 
@@ -9621,7 +9268,14 @@ Removed from `src/lib/review.ts:2303-2304` (base 58e6c840), verbatim:
     // for why `no <noun>` is still an assertion while `no.` and `not …` are denials.
 ```
 
-### head
+Removed from `src/lib/review.ts:2307-2310` (base 58e6c840), verbatim:
+
+```
+  // THE COPULAR FORM IS A CLAIM: "This is plan-only.", "The diff is data-only." A linking verb immediately before the
+  // shorthand makes it the PREDICATE of what the sentence is about, and in a PR body that subject is the change.
+  // Deliberately IMMEDIATE rather than anywhere-in-sentence, which is what separates it from "makes a triage PR
+  // plan-only by construction" (about the LANE) and "described its revert as data-only" (about ANOTHER PR).
+```
 
 Removed from `src/lib/review.ts:2313-2315` (base 58e6c840), verbatim:
 
@@ -9657,7 +9311,7 @@ Removed from `src/lib/review.ts:2351-2357` (base 58e6c840), verbatim:
  * // trailing paren (#1209), both REAL paths whose TEXT stopped matching once something was pasted around them. */
 ```
 
-### recognisedCount
+### recognizeChangesetClaims
 
 Removed from `src/lib/review.ts:2377-2378` (base 58e6c840), verbatim:
 
@@ -9666,24 +9320,12 @@ Removed from `src/lib/review.ts:2377-2378` (base 58e6c840), verbatim:
   // claim at all". Incremented where each arm decides a match is a genuine claim, never where it decides it false.
 ```
 
-Removed from `src/lib/review.ts:2467-2469` (base 58e6c840), verbatim:
-
-```
-  /** How many claim-shaped tokens were RECOGNISED — matched an arm's shape AND passed its subject anchor — whether
-   *  or not the claim then agreed with `diffFiles`. `contradictions.length` is always <= this: a recognised claim
-   *  that AGREES is counted here and never appears there, which is "checked, and it agrees". A `0` beside an empty
-```
-
-### const { scan, fenceUnbalancedAtEof } = stripQuot
-
 Removed from `src/lib/review.ts:2381-2382` (base 58e6c840), verbatim:
 
 ```
   // every index below lines up with the original body. `fenceUnbalancedAtEof` rides along unused until the return:
   // the arms never branch on it, only the caller reports it.
 ```
-
-### named
 
 Removed from `src/lib/review.ts:2399-2403` (base 58e6c840), verbatim:
 
@@ -9694,8 +9336,6 @@ Removed from `src/lib/review.ts:2399-2403` (base 58e6c840), verbatim:
       // THIRD WRAPPER (W1-T2224) — see {@link enumeratedTokenMatchesChangeset}.
       // // Why: #1192 enumerated three backticked paths and reported one contradiction; with backticks stripped, zero. #1209 then parenthesised its enumeration.
 ```
-
-### for
 
 Removed from `src/lib/review.ts:2442-2443` (base 58e6c840), verbatim:
 
@@ -9715,7 +9355,13 @@ Removed from `src/lib/review.ts:2462-2465` (base 58e6c840), verbatim:
  *  claim is recognised or when it disagrees, only what is counted alongside it. */
 ```
 
-### fenceUnbalancedAtEof
+Removed from `src/lib/review.ts:2467-2469` (base 58e6c840), verbatim:
+
+```
+  /** How many claim-shaped tokens were RECOGNISED — matched an arm's shape AND passed its subject anchor — whether
+   *  or not the claim then agreed with `diffFiles`. `contradictions.length` is always <= this: a recognised claim
+   *  that AGREES is counted here and never appears there, which is "checked, and it agrees". A `0` beside an empty
+```
 
 Removed from `src/lib/review.ts:2474-2477` (base 58e6c840), verbatim:
 
@@ -9873,6 +9519,16 @@ Removed from `src/lib/review.ts:2742-2743` (base 58e6c840), verbatim:
  *  diff a second time. */
 ```
 
+### planOnlyDiff
+
+Removed from `src/lib/review.ts:2748-2750` (base 58e6c840), verbatim:
+
+```
+/** {@link planOnlyFromFiles} over a raw unified diff — the form run-task.ts's spawn gate needs,
+ *  since it holds the diff text and not judgeReview's intermediates. Same predicate, one definition:
+ *  a change to plan-only classification lands in both callers or in neither. */
+```
+
 ### ProofExecutionMemo
 
 Removed from `src/lib/review.ts:2756-2762` (base 58e6c840), verbatim:
@@ -9887,7 +9543,7 @@ Removed from `src/lib/review.ts:2756-2762` (base 58e6c840), verbatim:
  * // Why: all six criteria of #3744 named the byte-identical proof and posted six samples of ONE fact. */
 ```
 
-### returned
+### memoizeProofExecutor
 
 Removed from `src/lib/review.ts:2773-2774` (base 58e6c840), verbatim:
 
@@ -9896,7 +9552,7 @@ Removed from `src/lib/review.ts:2773-2774` (base 58e6c840), verbatim:
   // be distinguishable only by a value that could itself be a legitimate result.
 ```
 
-### diffFiles
+### judgeReview
 
 Removed from `src/lib/review.ts:2813-2815` (base 58e6c840), verbatim:
 
@@ -9906,7 +9562,15 @@ Removed from `src/lib/review.ts:2813-2815` (base 58e6c840), verbatim:
   // this is only a move ahead of the consumer that now needs them.
 ```
 
-### proofMemo
+Removed from `src/lib/review.ts:2819-2823` (base 58e6c840), verbatim:
+
+```
+  // `taskDeclaredFiles` is the resolved-task signal throughout this module. On the only arm changed here — a
+  // plan-only diff — it means the criteria were loaded from the task shard rather than parsed from the PR body, so
+  // the proof arrived with the criteria and its filename cannot be evidence about the body (W1-T2713). BOTH arms
+  // score against the report; see judgeCriterion's `floorKeywords` doc for why no arm may read the criterion itself
+  // (R-15).
+```
 
 Removed from `src/lib/review.ts:2830-2832` (base 58e6c840), verbatim:
 
@@ -9916,7 +9580,13 @@ Removed from `src/lib/review.ts:2830-2832` (base 58e6c840), verbatim:
   // audit callers, which must keep spawning per call.
 ```
 
-### instrumentEntanglement
+Removed from `src/lib/review.ts:2861-2863` (base 58e6c840), verbatim:
+
+```
+  // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s
+  // doc for the full design. `!planOnly` is the exemption — a genuine Architect
+  // plan-only correction is never this function's business to fail.
+```
 
 Removed from `src/lib/review.ts:2873-2875` (base 58e6c840), verbatim:
 
@@ -9926,7 +9596,13 @@ Removed from `src/lib/review.ts:2873-2875` (base 58e6c840), verbatim:
   // already computed — no new diff walk.
 ```
 
-### const { advisories: unwiredAdvisories, reachabil
+Removed from `src/lib/review.ts:2879-2881` (base 58e6c840), verbatim:
+
+```
+  // W1-T352 (DECISIONS.md entry provenance floor): see {@link
+  // ReviewVerdict.unprovenancedDecisionsEntries}'s doc for the full design — BLOCKING, unlike the
+  // W1-T322 advisory floor computed right below it.
+```
 
 Removed from `src/lib/review.ts:2884-2886` (base 58e6c840), verbatim:
 
@@ -9936,16 +9612,12 @@ Removed from `src/lib/review.ts:2884-2886` (base 58e6c840), verbatim:
   // doc for why (ADVISORY ONLY, by design, until W1-T323's measured flip).
 ```
 
-### floorUnmet
-
 Removed from `src/lib/review.ts:2899-2900` (base 58e6c840), verbatim:
 
 ```
   // W1-T2221: hoisted ahead of `state` (was previously computed only for `floorState`,
   // below) so `state` itself can consult it on a plan-only diff — see `unmetForState`.
 ```
-
-### unmetForState
 
 Removed from `src/lib/review.ts:2902-2905` (base 58e6c840), verbatim:
 
@@ -9956,8 +9628,6 @@ Removed from `src/lib/review.ts:2902-2905` (base 58e6c840), verbatim:
   // re-derived from execution facts. A code diff is byte-identical to today: `unmetForState === unmet`.
 ```
 
-### visibleVerdicts
-
 Removed from `src/lib/review.ts:2919-2920` (base 58e6c840), verbatim:
 
 ```
@@ -9965,7 +9635,13 @@ Removed from `src/lib/review.ts:2919-2920` (base 58e6c840), verbatim:
   // has nothing to measure.
 ```
 
-### executedCount
+Removed from `src/lib/review.ts:2928-2930` (base 58e6c840), verbatim:
+
+```
+  // `testTheater`/`noCriteria`/`criteriaTampered`/`changesetContradictions` are all structural, so they bind the
+  // floor exactly as they bind `state`: a tampering or contradiction failure can never be suppressed by verdict
+  // stability, which only ever forgives a SEMANTIC downgrade. The anchor a re-review of an unchanged head checks.
+```
 
 Removed from `src/lib/review.ts:2943-2945` (base 58e6c840), verbatim:
 
@@ -9974,8 +9650,6 @@ Removed from `src/lib/review.ts:2943-2945` (base 58e6c840), verbatim:
   // were legitimately prose. A `satisfied_by` criterion is excluded — an Architect override never attempts execution
   // BY DESIGN.
 ```
-
-### executableCriteria
 
 Removed from `src/lib/review.ts:2952-2955` (base 58e6c840), verbatim:
 
@@ -9986,7 +9660,27 @@ Removed from `src/lib/review.ts:2952-2955` (base 58e6c840), verbatim:
   // criteria at all is never capped.
 ```
 
-### summary
+Removed from `src/lib/review.ts:2959-2960` (base 58e6c840), verbatim:
+
+```
+  // W1-T305 (design (4)): SOME but not ALL executable criteria were observed — the 52-partial-head
+  // shape the rationale measured, distinct from `capped` (zero observed anywhere).
+```
+
+Removed from `src/lib/review.ts:2963-2965` (base 58e6c840), verbatim:
+
+```
+  // W1-T305 (design (1)/(2)): the unexecutable class, made countable. `unexecutableCount` folds
+  // holdout criteria in (an aggregate NUMBER, never secret — matches `capped`'s own scope);
+  // `unexecutableProofs` is VISIBLE-only text (holdout proof text stays worker-invisible, W1-T166).
+```
+
+Removed from `src/lib/review.ts:2971-2972` (base 58e6c840), verbatim:
+
+```
+  // working checkout is never substituted (HEAD DISCIPLINE, W1-T65). Purely legibility — `state` is unaffected — but
+  // the status, ledger and console must say so rather than let a keyword-only PASS read as an observed one.
+```
 
 Removed from `src/lib/review.ts:2975-2978` (base 58e6c840), verbatim:
 
@@ -9997,16 +9691,12 @@ Removed from `src/lib/review.ts:2975-2978` (base 58e6c840), verbatim:
   // CLOSED: an empty diff, or one touching a single file outside `plan/**`/`MASTER-PLAN.md`, is NOT plan-only.
 ```
 
-### partiallyExecuted ? { executed: executedCount, e
-
 Removed from `src/lib/review.ts:2993-2994` (base 58e6c840), verbatim:
 
 ```
               // W1-T305 (design (4)): a partially-observed PASS never renders identically to a fully-
               // observed one — the fraction actually executed rides on the same commit-status text.
 ```
-
-### visibleCriteria
 
 Removed from `src/lib/review.ts:2998-3002` (base 58e6c840), verbatim:
 
@@ -10056,7 +9746,16 @@ Removed from `src/lib/review.ts:3106-3107` (base 58e6c840), verbatim:
  * — {@link applyVerdictStability}'s `prior` argument. */
 ```
 
-### cappedFieldAbsent
+Removed from `src/lib/review.ts:3111-3116` (base 58e6c840), verbatim:
+
+```
+  /** W1-T229's `capped` as RECORDED on the `review.posted` line — read back rather than recomputed, so the arming
+   *  path judges the same fact the review posted. It was always written; nothing read it, so a CAPPED verdict —
+   *  which posts `state: "success"` because CAPPED IS NOT FAIL — armed on the strength of that success alone. ABSENT
+   *  MEANS NOT CAPPED (operator ruling, binding): lines older than the field carry no key, and failing closed would
+   *  refuse to arm across the entire pre-field history. {@link cappedFieldAbsent} keeps that fail-open choice
+   *  legible. */
+```
 
 Removed from `src/lib/review.ts:3121-3123` (base 58e6c840), verbatim:
 
@@ -10064,6 +9763,15 @@ Removed from `src/lib/review.ts:3121-3123` (base 58e6c840), verbatim:
   /** True when the ledger line carried no `capped` key at all, so {@link capped} above is the
    *  fail-open DEFAULT rather than a recorded fact. Surfaced in the arm decision's own reason
    *  string — no new ledger step, so a polling lane cannot amplify it into per-tick noise. */
+```
+
+Removed from `src/lib/review.ts:3125-3128` (base 58e6c840), verbatim:
+
+```
+  /** Recorded `partially_executed`, read back the way `capped`/`planOnly` are (W1-T1020), so {@link
+   *  decideAutoMergeArm} judges the fact the review posted rather than the always-false default it
+   *  silently took. Written unconditionally, so ABSENT MEANS NOT PARTIAL. Optional purely so
+   *  fixtures predating the field keep compiling; a missing value is `false`, never "unknown". */
 ```
 
 ### priorReviewVerdictFromLedger
@@ -10085,21 +9793,11 @@ Removed from `src/lib/review.ts:3171-3172` (base 58e6c840), verbatim:
  * verdict. Pure — the falsifier this exists to prove is a unit fixture, like `judgeReview` itself. */
 ```
 
-### criteria
-
 Removed from `src/lib/review.ts:3188-3189` (base 58e6c840), verbatim:
 
 ```
   // posted verdict stays internally consistent — never a "success" state sitting beside a criteria array that still
   // shows a semantic "unmet".
-```
-
-Removed from `src/lib/review.ts:4608-4610` (base 58e6c840), verbatim:
-
-```
-    // CLAIM 3: a task that resolves but declares no (or empty) acceptance — or a trailer whose
-    // id resolves nowhere in the plan at this head — both read as `criteria: []`, same fail-closed
-    // shape `judgeReview` already refuses to pass (claim 3 is proven at that composition, not here).
 ```
 
 ### floorDegradedAnnotation
@@ -10136,8 +9834,6 @@ Removed from `src/lib/review.ts:3240-3246` (base 58e6c840), verbatim:
  * // Why: the posted STATUS has been three-way since W1-T205 while this annotation stayed two-way. */
 ```
 
-### return
-
 Removed from `src/lib/review.ts:3249-3250` (base 58e6c840), verbatim:
 
 ```
@@ -10154,13 +9850,13 @@ Removed from `src/lib/review.ts:3269-3270` (base 58e6c840), verbatim:
  *  own; both sites are unchanged for a capped CODE PR. */
 ```
 
-### CappedOverride
-
 Removed from `src/lib/review.ts:3278-3278` (base 58e6c840), verbatim:
 
 ```
 // right before the caller would call `armAutoMerge`, and never folded into `state`/`floorState`.
 ```
+
+### CappedOverride
 
 Removed from `src/lib/review.ts:3280-3281` (base 58e6c840), verbatim:
 
@@ -10178,7 +9874,7 @@ Removed from `src/lib/review.ts:3283-3286` (base 58e6c840), verbatim:
  * holding a hand-attributed override need not fabricate one; the binding is ENFORCED at recovery time. */
 ```
 
-### bandWarning
+### ArmDecision
 
 Removed from `src/lib/review.ts:3300-3300` (base 58e6c840), verbatim:
 
@@ -10210,6 +9906,21 @@ Removed from `src/lib/review.ts:3310-3317` (base 58e6c840), verbatim:
  * inert, never silent. */
 ```
 
+Removed from `src/lib/review.ts:3340-3342` (base 58e6c840), verbatim:
+
+```
+  // Malformed: a row matched this class but its `verdict` is neither "hold" nor "notify" — only
+  // reachable when a caller hands decideAutoMergeArm a `bands` array that bypassed policy.ts's
+  // own loader (which refuses this shape at load, per ArmCalibrationBandRow's own doc).
+```
+
+Removed from `src/lib/review.ts:3351-3352` (base 58e6c840), verbatim:
+
+```
+/** Decide whether the auto-merge arming path may proceed, given a freshly computed verdict, whether the task
+ * declares `principles: {tdd: strict}`, and an optional operator override. Pure.
+```
+
 ### decideAutoMergeArm
 
 Removed from `src/lib/review.ts:3357-3358` (base 58e6c840), verbatim:
@@ -10229,8 +9940,6 @@ Removed from `src/lib/review.ts:3360-3364` (base 58e6c840), verbatim:
  *   omitting it keeps today's behaviour byte-for-byte (test/arm-calibration-bands.test.ts). */
 ```
 
-### irreversible
-
 Removed from `src/lib/review.ts:3371-3373` (base 58e6c840), verbatim:
 
 ```
@@ -10239,14 +9948,20 @@ Removed from `src/lib/review.ts:3371-3373` (base 58e6c840), verbatim:
   // byte-for-byte.
 ```
 
-### bands
-
 Removed from `src/lib/review.ts:3375-3377` (base 58e6c840), verbatim:
 
 ```
   // THE RATIFIED BAND TABLE (W1-T2579). Appended LAST, like `irreversible` above, so no positional caller shifts.
   // `undefined` resolves to the committed `plan/policy.yaml` row, which ships `[]`, so omitting this parameter keeps
   // today's behaviour byte-for-byte. A caller wanting a specific table injects one directly, never touching disk.
+```
+
+Removed from `src/lib/review.ts:3380-3382` (base 58e6c840), verbatim:
+
+```
+  // Checked BEFORE `state`, `capped` and `override` — irreversibility is a hard refusal an
+  // operator override can never buy back (the CAPPED override two branches down answers "was
+  // enough proof executed", a different question from "can this diff's effect be undone").
 ```
 
 ### resolveAutoMergeArm
@@ -10260,7 +9975,13 @@ Removed from `src/lib/review.ts:3432-3435` (base 58e6c840), verbatim:
  *  // no human reading the diff. */
 ```
 
-### REVIEWER_IDENTITY_ENV
+Removed from `src/lib/review.ts:3448-3450` (base 58e6c840), verbatim:
+
+```
+  // W1-T205: excludes `planOnly` — decideAutoMergeArm checks the carve-out BEFORE the
+  // override branch, so a planOnly arm never actually consulted `override` even when one
+  // happens to be present; logging "override used" here would misattribute the decision.
+```
 
 Removed from `src/lib/review.ts:3458-3459` (base 58e6c840), verbatim:
 
@@ -10268,6 +9989,8 @@ Removed from `src/lib/review.ts:3458-3459` (base 58e6c840), verbatim:
 // `gh` runs OUTSIDE the sandbox with the operator's own ambient credential (recon R-3/R-6), and that credential is
 // the only thing on the machine that can post a commit status — so any identity that can shell out to `gh`, a worker
 ```
+
+### REVIEWER_IDENTITY_ENV
 
 Removed from `src/lib/review.ts:3465-3465` (base 58e6c840), verbatim:
 
@@ -10304,8 +10027,6 @@ Removed from `src/lib/review.ts:3488-3489` (base 58e6c840), verbatim:
 /** One entry off GitHub's `required_status_checks.checks[]` — the array that actually carries
  *  the pin (`contexts[]` is the deprecated name-only mirror and carries no `app_id` at all). */
 ```
-
-### app_id
 
 Removed from `src/lib/review.ts:3492-3494` (base 58e6c840), verbatim:
 
@@ -10348,8 +10069,6 @@ Removed from `src/lib/review.ts:3513-3518` (base 58e6c840), verbatim:
  * reviewGatePinPrecondition} treats as safe. Pure — `readEnvVar` is supplied, so this never reaches `process.env`. */
 ```
 
-### return "unknown";
-
 Removed from `src/lib/review.ts:3528-3529` (base 58e6c840), verbatim:
 
 ```
@@ -10377,6 +10096,15 @@ Removed from `src/lib/review.ts:3546-3548` (base 58e6c840), verbatim:
  *  records: every fleet-posted status silently rejected for a mismatched app. */
 ```
 
+### ReviewGatePinPrecondition
+
+Removed from `src/lib/review.ts:3558-3559` (base 58e6c840), verbatim:
+
+```
+  /** Human-readable justification. Always names {@link REVIEWER_TOKEN_ENV} when the verdict is
+   *  `"unsafe"` on identity grounds (acceptance criterion 3) — never the credential's value. */
+```
+
 ### reviewGatePinPrecondition
 
 Removed from `src/lib/review.ts:3564-3566` (base 58e6c840), verbatim:
@@ -10398,8 +10126,6 @@ Removed from `src/lib/review.ts:3605-3608` (base 58e6c840), verbatim:
  * this context for the sha. */
 ```
 
-### state
-
 Removed from `src/lib/review.ts:3610-3612` (base 58e6c840), verbatim:
 
 ```
@@ -10407,8 +10133,6 @@ Removed from `src/lib/review.ts:3610-3612` (base 58e6c840), verbatim:
    * `pending` now that {@link postReviewPending} posts one. {@link decideAutoMergeArmAtSha} covers
    * why a pending is never armed and never confused with the untrusted-poster or absent case. */
 ```
-
-### posterLogin
 
 Removed from `src/lib/review.ts:3614-3616` (base 58e6c840), verbatim:
 
@@ -10446,6 +10170,13 @@ Removed from `src/lib/review.ts:3639-3644` (base 58e6c840), verbatim:
  *  review, so a forged or missing status is never confused with one in a log line or an escalation. */
 ```
 
+Removed from `src/lib/review.ts:3658-3659` (base 58e6c840), verbatim:
+
+```
+  // forged, missing or failing. Arming stays withheld either way, but the REASON must stay honest — "never read as a
+  // verdict in either direction".
+```
+
 ### decideArmFromLedgerVerdict
 
 Removed from `src/lib/review.ts:3680-3686` (base 58e6c840), verbatim:
@@ -10471,8 +10202,6 @@ Removed from `src/lib/review.ts:3688-3693` (base 58e6c840), verbatim:
  * "success", regardless of what the live status channel currently says. */
 ```
 
-### override
-
 Removed from `src/lib/review.ts:3697-3698` (base 58e6c840), verbatim:
 
 ```
@@ -10480,13 +10209,18 @@ Removed from `src/lib/review.ts:3697-3698` (base 58e6c840), verbatim:
   // drop the operator's `rmd review --override-capped-by` escape hatch on this path.
 ```
 
-### decision
-
 Removed from `src/lib/review.ts:3716-3717` (base 58e6c840), verbatim:
 
 ```
   // The two checks above are W1-T230's and stay here: they decide WHICH verdict may be trusted, not whether it is
   // good enough to merge on. This function used to answer that itself with `state === "success"` and nothing else — a
+```
+
+Removed from `src/lib/review.ts:3726-3727` (base 58e6c840), verbatim:
+
+```
+  // The fail-open default is legible in the decision's own reason — which every caller already
+  // records — instead of a new ledger step a polling lane would re-emit every tick.
 ```
 
 ### cappedOverrideFromLedger
@@ -10548,6 +10282,14 @@ Removed from `src/lib/review.ts:3809-3812` (base 58e6c840), verbatim:
  * // named criterion, so a ledger grep for that class returned ZERO — measured on #1193. */
 ```
 
+Removed from `src/lib/review.ts:3825-3827` (base 58e6c840), verbatim:
+
+```
+  // Neither structural fact above fired and no VISIBLE criterion is unmet, yet
+  // `judgeReview` still folded this verdict to failure — the only two triggers
+  // left in its OR-chain are a holdout-only miss or test theater.
+```
+
 ### reviewLedgerLegibilityFields
 
 Removed from `src/lib/review.ts:3835-3836` (base 58e6c840), verbatim:
@@ -10562,6 +10304,14 @@ Removed from `src/lib/review.ts:3838-3839` (base 58e6c840), verbatim:
 ```
  * for audit. W1-T305: `unexecutable_count`/`unexecutable_proofs`/`partially_executed` ride alongside unconditionally.
  * // Why: 418 of 821 code-review heads executed ZERO proofs and posted `success` on the keyword floor. */
+```
+
+Removed from `src/lib/review.ts:3871-3873` (base 58e6c840), verbatim:
+
+```
+  // `capped_reason` rides alongside `capped` rather than in its own line, so the ONE record that
+  // says a verdict was capped also says why. Absent (never null/"") on an uncapped verdict, so the
+  // existing ledger shape is byte-identical for every healthy review.
 ```
 
 ### reviewLedgerReasons
@@ -10589,7 +10339,7 @@ Removed from `src/lib/review.ts:3938-3939` (base 58e6c840), verbatim:
  * time this landed zero open PRs carried a legacy capped line for their current head. */
 ```
 
-### failSummary
+### FAIL_PREFIX
 
 Removed from `src/lib/review.ts:3966-3969` (base 58e6c840), verbatim:
 
@@ -10599,6 +10349,8 @@ Removed from `src/lib/review.ts:3966-3969` (base 58e6c840), verbatim:
  * line and the PR review comment.
  * // Why: the W1-T2/#18 refusal said "1 criterion/criteria unmet" and cost a human round-trip.
 ```
+
+### failSummary
 
 Removed from `src/lib/review.ts:3971-3977` (base 58e6c840), verbatim:
 
@@ -10611,8 +10363,6 @@ Removed from `src/lib/review.ts:3971-3977` (base 58e6c840), verbatim:
  * caller-filtered to VISIBLE criteria only (W1-T166), and `hiddenUnmetCount` surfaces unmet HOLDOUT criteria as a
  * bare count, because this text is readable by the very worker a holdout criterion must stay hidden from. */
 ```
-
-### return ${FAIL_PREFIX}Standing rule 15: a criter
 
 Removed from `src/lib/review.ts:3993-3994` (base 58e6c840), verbatim:
 
@@ -10738,7 +10488,7 @@ Removed from `src/lib/review.ts:4212-4220` (base 58e6c840), verbatim:
  * // criterion fell SILENTLY to the keyword floor; `plan/tasks.d/W1-T2781-*.yaml` carries such a claim. */
 ```
 
-### unsplitLabelledClaims
+### parseAcceptanceBlock
 
 Removed from `src/lib/review.ts:4241-4244` (base 58e6c840), verbatim:
 
@@ -10749,12 +10499,25 @@ Removed from `src/lib/review.ts:4241-4244` (base 58e6c840), verbatim:
    *  the pipe belonged to the claim — and restores this. Undefined for every other bullet. */
 ```
 
-### unsplit
+Removed from `src/lib/review.ts:4271-4273` (base 58e6c840), verbatim:
+
+```
+    // An indented, non-bullet "proof:" line right under a "- claim: ..." bullet is a
+    // CONTINUATION of that criterion, not a terminator — attach it and keep scanning
+    // for further bullets instead of dropping every criterion after the first.
+```
 
 Removed from `src/lib/review.ts:4283-4283` (base 58e6c840), verbatim:
 
 ```
       // SECOND `proof:` line under the same bullet is still unrecognised and still ends the block, exactly as before.
+```
+
+Removed from `src/lib/review.ts:4292-4293` (base 58e6c840), verbatim:
+
+```
+    // A blank line before any bullet is tolerated (header, then a gap, then bullets);
+    // once bullets have begun, any blank or unrecognized line ends the block.
 ```
 
 ### acceptanceBlockDiagnostics
@@ -10803,7 +10566,21 @@ Removed from `src/lib/review.ts:4384-4391` (base 58e6c840), verbatim:
  * resolvable trailer is accepted at face value. Priority: no-header, no-trailer, unparseable, empty-proofs. */
 ```
 
-### classifyHeadShaAvailability
+Removed from `src/lib/review.ts:4414-4416` (base 58e6c840), verbatim:
+
+```
+  // THE EXEMPTION MUST BE TRUE, NOT MERELY CLAIMED (W1-T2297). This arm's whole warrant is that criteria come from
+  // the plan record rather than the body, and that fails when the trailer names nothing the plan declares: the
+  // reviewer falls back to the body, and a body this gate never looked at ships with whatever its block parses to.
+```
+
+Removed from `src/lib/review.ts:4418-4420` (base 58e6c840), verbatim:
+
+```
+  // reading; falling through re-uses the diagnostics arms below rather than adding a second spelling of "this block
+  // is unreadable".
+  // // Why: on #2908 a trailer resolved to ZERO ids and the body's block gave `bullets written: 5, criteria parsed: 1` — four criteria unseen.
+```
 
 Removed from `src/lib/review.ts:4487-4488` (base 58e6c840), verbatim:
 
@@ -10811,6 +10588,8 @@ Removed from `src/lib/review.ts:4487-4488` (base 58e6c840), verbatim:
 // reachable from the very PR head being judged — and review then posts
 // "no acceptance criteria to judge (fail closed)" on evidence that was never absent, only unread (measured on #3168).
 ```
+
+### classifyHeadShaAvailability
 
 Removed from `src/lib/review.ts:4490-4499` (base 58e6c840), verbatim:
 
@@ -10827,8 +10606,6 @@ Removed from `src/lib/review.ts:4490-4499` (base 58e6c840), verbatim:
  *  wrong defect entirely. */
 ```
 
-### status
-
 Removed from `src/lib/review.ts:4513-4514` (base 58e6c840), verbatim:
 
 ```
@@ -10836,7 +10613,7 @@ Removed from `src/lib/review.ts:4513-4514` (base 58e6c840), verbatim:
     // carries a numeric exit status, which a real non-zero exit does and a spawn failure does not.
 ```
 
-### cause
+### PlanCriteriaAtHeadDivergence
 
 Removed from `src/lib/review.ts:4524-4525` (base 58e6c840), verbatim:
 
@@ -10875,8 +10652,6 @@ Removed from `src/lib/review.ts:4556-4557` (base 58e6c840), verbatim:
  * set is ONE tree oid rather than a blob oid per shard. NEVER THROWS — a probe failure degrades to `undefined`. */
 ```
 
-### return undefined;
-
 Removed from `src/lib/review.ts:4567-4568` (base 58e6c840), verbatim:
 
 ```
@@ -10884,7 +10659,15 @@ Removed from `src/lib/review.ts:4567-4568` (base 58e6c840), verbatim:
     // pre-W1-T2623 source string instead of turning a failed local OID probe into review failure.
 ```
 
-### gitRunner
+### resolvePlanCriteriaAtHead
+
+Removed from `src/lib/review.ts:4593-4595` (base 58e6c840), verbatim:
+
+```
+  // CLAIM 4: no anchored trailer ⇒ unchanged — nothing to resolve, and no git object is ever
+  // touched to find that out. The caller's existing PR-body `## Acceptance` fallback (unchanged
+  // by this function) is what recovers criteria here, exactly as it does today.
+```
 
 Removed from `src/lib/review.ts:4598-4599` (base 58e6c840), verbatim:
 
@@ -10893,13 +10676,26 @@ Removed from `src/lib/review.ts:4598-4599` (base 58e6c840), verbatim:
   // second, differently-configured git runner for the read-identity probes below.
 ```
 
-### identity
+Removed from `src/lib/review.ts:4608-4610` (base 58e6c840), verbatim:
+
+```
+    // CLAIM 3: a task that resolves but declares no (or empty) acceptance — or a trailer whose
+    // id resolves nowhere in the plan at this head — both read as `criteria: []`, same fail-closed
+    // shape `judgeReview` already refuses to pass (claim 3 is proven at that composition, not here).
+```
 
 Removed from `src/lib/review.ts:4612-4613` (base 58e6c840), verbatim:
 
 ```
     // W1-T2623: the read-identity probes only run when there is a `source` line to append them
     // to — no extra git calls spent naming bytes nobody is about to be told were read.
+```
+
+Removed from `src/lib/review.ts:4628-4629` (base 58e6c840), verbatim:
+
+```
+    // was, because git will not, so one extra `cat-file -e` separates the two causes that matter and the next reader
+    // need not re-run probes.
 ```
 
 ### PrAuthoringPathCoverage
@@ -10929,7 +10725,7 @@ Removed from `src/lib/review.ts:4734-4734` (base 58e6c840), verbatim:
  * human-authored, because that field is Architect-only (rule 15). */
 ```
 
-### humanAuthored
+### RubricPrMeta
 
 Removed from `src/lib/review.ts:4760-4764` (base 58e6c840), verbatim:
 
@@ -10941,7 +10737,7 @@ Removed from `src/lib/review.ts:4760-4764` (base 58e6c840), verbatim:
    *  // Why: until W1-T385 nothing set this field, so the exemption could never fire. */
 ```
 
-### plus
+### walkDiff
 
 Removed from `src/lib/review.ts:4800-4804` (base 58e6c840), verbatim:
 
@@ -11033,8 +10829,6 @@ Removed from `src/lib/review.ts:5013-5013` (base 58e6c840), verbatim:
  * REMOVED ones. A behavior line that is added with no matching removal is net-new logic: dishonest for a refactor. */
 ```
 
-### INSTRUMENT_SURFACE
-
 Removed from `src/lib/review.ts:5038-5039` (base 58e6c840), verbatim:
 
 ```
@@ -11125,8 +10919,6 @@ Removed from `src/lib/review.ts:5291-5293` (base 58e6c840), verbatim:
  *  (`x: t,`) are the same bytes, separating them needs a parser rather than a regex, and guessing wrong fails OPEN. */
 ```
 
-### out
-
 Removed from `src/lib/review.ts:5299-5301` (base 58e6c840), verbatim:
 
 ```
@@ -11206,7 +10998,17 @@ Removed from `src/lib/review.ts:5398-5407` (base 58e6c840), verbatim:
  * // admissible sequence at all. */
 ```
 
-### introducedGates
+### isIntroducingCensusGate
+
+Removed from `src/lib/review.ts:5422-5424` (base 58e6c840), verbatim:
+
+```
+  // W1-T2738: ci.yml registers JOBS, not files, so its introducing-commit test is a different
+  // question — asked in full by the helper above rather than folded into the file-newness check
+  // below, which it would always fail.
+```
+
+### detectInstrumentEntanglement
 
 Removed from `src/lib/review.ts:5449-5451` (base 58e6c840), verbatim:
 
@@ -11226,7 +11028,7 @@ Removed from `src/lib/review.ts:5467-5469` (base 58e6c840), verbatim:
  * reason, so a bare "no docs update" with nothing after it has not stated why and does not count. */
 ```
 
-### ledgerTouched
+### checkDocsAwareness
 
 Removed from `src/lib/review.ts:5479-5480` (base 58e6c840), verbatim:
 
@@ -11306,7 +11108,7 @@ Removed from `src/lib/review.ts:5665-5673` (base 58e6c840), verbatim:
  * // docs/audits/recon-2026-09-05.md). */
 ```
 
-### fieldLineRe
+### planTasksCriterionFieldLines
 
 Removed from `src/lib/review.ts:5688-5691` (base 58e6c840), verbatim:
 
@@ -11315,6 +11117,14 @@ Removed from `src/lib/review.ts:5688-5691` (base 58e6c840), verbatim:
   // indent and the key/rest are never derived two different ways. Requires `key` to be followed IMMEDIATELY by `:`,
   // which is what keeps a `unit test: <title>` or `grep: <pattern> in <path>` proof-dialect CONTENT line, whose colon
   // has a space before it, from ever being misread as a fresh field header.
+```
+
+Removed from `src/lib/review.ts:5716-5718` (base 58e6c840), verbatim:
+
+```
+    // Still inside a previously-opened block scalar's continuation — classify by its OWNER and
+    // never reinterpret this line as a fresh field header, however "key:"-shaped its content
+    // looks (a `grep:` proof-dialect content line is exactly this shape).
 ```
 
 ### criterionFieldTampered
@@ -11341,16 +11151,12 @@ Removed from `src/lib/review.ts:5767-5768` (base 58e6c840), verbatim:
  *  not a merge. */
 ```
 
-### edit
-
 Removed from `src/lib/review.ts:5787-5788` (base 58e6c840), verbatim:
 
 ```
   // hand-opened PR — naming an author the review path could not know AND denying a property it had just computed
   // true.
 ```
-
-### remedy
 
 Removed from `src/lib/review.ts:5793-5799` (base 58e6c840), verbatim:
 
@@ -11651,7 +11457,7 @@ Removed from `src/lib/review.ts:6361-6363` (base 58e6c840), verbatim:
  * verdict is stronger on a PR nobody can act on any more is moot. */
 ```
 
-### __beforeReclaimDelete
+### AcquireReviewStatusLockOpts
 
 Removed from `src/lib/review.ts:6453-6455` (base 58e6c840), verbatim:
 
@@ -11678,7 +11484,7 @@ Removed from `src/lib/review.ts:6470-6471` (base 58e6c840), verbatim:
  * the callers here are N uncoordinated posters that must all eventually run their own read-decide-write. */
 ```
 
-### taskId
+### PostReviewStatusGuardedOpts
 
 Removed from `src/lib/review.ts:6534-6536` (base 58e6c840), verbatim:
 
@@ -11688,14 +11494,22 @@ Removed from `src/lib/review.ts:6534-6536` (base 58e6c840), verbatim:
    * `dep-review-PR<n>`/`PR-<n>` synthetic ids `run-task.ts` falls back to). */
 ```
 
-### post
-
 Removed from `src/lib/review.ts:6551-6553` (base 58e6c840), verbatim:
 
 ```
   /** Injected raw poster for tests. Defaults to {@link postReviewStatus}, which already retries a
    *  TRANSIENT gh error internally (rule (iv) above). May return a Promise, as the default does, or
    *  `void`, so existing sync test fakes keep working. */
+```
+
+### PostReviewStatusGuardedResult
+
+Removed from `src/lib/review.ts:6569-6571` (base 58e6c840), verbatim:
+
+```
+  /** Present only when `posted` is false — either {@link decideReviewStatusPost}
+   * refused the write (see `review.post_refused`), or the post itself failed
+   * after retries/as a permanent error (see `review.post_failed`, W1-T135). */
 ```
 
 ### postReviewStatusGuarded
