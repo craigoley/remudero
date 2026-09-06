@@ -102,21 +102,46 @@
     itself while every gate stayed green. `acceptance-author-gate` accepts a bare `## Acceptance`
     header OR a trailer, so the header alone is sufficient and is the form to emit.
 
-    MEASURED 2026-09-06 OVER 3367 MERGED PULL REQUESTS, so the rung inherits a population rather
-    than a worry. Reading the two credit paths `deriveStatus` actually uses — the `Remudero-Task:`
-    trailer in the PR BODY and the `run-<id>-<epoch>` head ref, never the squashed commit message,
-    which drops the trailer — 150 ids are credited by a plan-only pull request, 47 ONLY that way,
-    and 33 of those declare `src/`, `scripts/`, `test/`, `deploy/` or `.github/` files and so read
-    merged while never having been built. The consequence was proved with the real selector rather
-    than inferred: `runnableCandidates` offers 64 tasks and NONE of those 33, so 33 of 33 are
-    permanently invisible to dispatch. In 24 of them the crediting pull request was the FILING of
-    that very task, which is exactly the shape this rung would emit. Every one still reads
-    `status: queued`, the field the filing wrote and nothing updates on merge.
+    ⚠ CORRECTED 2026-09-06, SAME DAY, BY RUNNING THE SHIPPED PREDICATE. The paragraph that stood
+    here reported "33 tasks read merged while never having been built, 33 of 33 invisible to
+    dispatch, 24 credited by their own filing". THAT MEASUREMENT WAS WRONG and the error is worth
+    more than the number was: it modelled merge credit as the UNION of the trailer and the run-branch
+    head ref — the two paths CLAUDE.md names for BUILDING a merged set — and omitted the two
+    plan-only REFUSALS `deriveStatus` actually applies on top of them.
 
-    A CONTROL IS WHAT MADE THAT NUMBER TRUSTWORTHY, and the first attempt was wrong: a sweep of
-    COMMIT MESSAGES reported a real, merged build of W1-T2669 as never-built, because that pull
-    request's squashed message carries no trailer at all — the build is credited by its head ref.
-    Any re-measure must union both paths and carry a known-built id as its positive control.
+    BOTH REFUSALS SHIP. `isPlanOnlyFilingPr` (W1-T1004) refuses credit when the crediting run wrote
+    its own `pr.opened … plan_only: true` ledger row. And `planOnlyDiffRefusal` (W1-T413, at the
+    trailer rung of `derivePrPrecedence`) reads the pull request's CHANGED FILES through the
+    gateway's `changedFiles` and refuses a plan-only changeset outright. W1-T413 is not an open
+    defect; its fix is live, which also explains why #1602 closed it as already-satisfied.
+
+    MEASURED BY CALLING `deriveStatus` ITSELF, three shapes, one stub gateway and no ledger row so
+    only the DIFF refusal could fire:
+      - a plan-only filing PR on a NON-run branch  → merged=false, source=none   (REFUSED)
+      - a plan-only filing PR on the task's OWN run branch → merged=true, source=trailer
+      - an ordinary build PR carrying source        → merged=true, source=trailer
+
+    SO THE RESIDUAL HOLE IS REAL BUT NARROW, AND IT IS THE ONE THIS RUNG MUST AVOID.
+    `ownsOwnRunBranch` short-circuits the diff refusal as a stated cost control — "a worker's own
+    run-branch PR is an implementation by construction" — so a filing PR that sits on
+    `run-<id>-<epoch>` is waved through, and only W1-T1004's LEDGER row can then refuse it. Of the
+    33 candidates, 23 were credited by a pull request on the task's own run branch (still creditable,
+    subject to that ledger row) and 11 sat on other branches and are refused today. The exact figure
+    needs the daemon host's ledger, which the filing environment could not read; 23 is the upper
+    bound, not the count.
+
+    WHAT THIS CHANGES FOR THE RUNG, WHICH IS THE POINT OF RECORDING IT: emitting a bare
+    `## Acceptance` header with NO trailer is still the correct form, but the reason is narrower than
+    first written — the trailer is refused on a non-run branch anyway. The rung must additionally
+    NEVER open its filing pull request on a `run-<id>-<epoch>` branch naming the id it is filing,
+    because that is precisely the shape the shipped refusals wave through.
+
+    AND THE METHOD LESSON OUTLASTS BOTH NUMBERS. A sweep that reconstructs a system's decision from
+    its INPUTS reproduces the modeller's own rule, not the system's. Both wrong readings here came
+    from that: first reading trailers out of squashed COMMIT MESSAGES (which drop them) instead of
+    pull request bodies, then reconstructing credit without the refusals. The reliable move is to
+    call the shipped function — `deriveStatus` — on the shapes in question, which is what finally
+    settled it and costs less than either sweep.
 
     (vii) NOT IN SCOPE: editing `learnings/*.yaml` or CLAUDE.md directly from the rung — the filed,
     parked shard is the output, and that is the whole Law 5 argument; and the corpus and attribution
