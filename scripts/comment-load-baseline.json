@@ -36,7 +36,7 @@
   "hooks/pre-commit": 22,
   "scripts/acceptance-author-gate.mjs": 98,
   "scripts/assertion-discrimination-baseline.json": 0,
-  "scripts/assertion-discrimination-check.mjs": 123,
+  "scripts/assertion-discrimination-check.mjs": 58,
   "scripts/bound-kind-baseline.json": 0,
   "scripts/check.mjs": 30,
   "scripts/citation-anchor-census.mjs": 101,

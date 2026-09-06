@@ -1,69 +1,29 @@
 #!/usr/bin/env node
 // scripts/assertion-discrimination-check.mjs
 //
-// ASSERTION-DISCRIMINATION gate (W1-T1051).
+// Assertion-discrimination gate (W1-T1051): a test can assert a literal string appears in a repo
+// file's raw text while a comment beside the mechanism is the only thing satisfying it, so the
+// mechanism can die while the assertion stays green. Falsifier: test/assertion-discrimination-
+// check.test.ts.
+// Why: docs/forensics/assertion-discrimination-check.md#module-header.
 //
-// A test can assert that a literal string appears in the RAW text of a repo file while the
-// literal is satisfied only by a COMMENT next to the mechanism the test claims to be pinning.
-// The mechanism can go dead -- the assertion still passes, because the string is still there.
-// That is exactly how a CI wait that should have blocked for ~5 minutes on an apt lock instead
-// returned in ~1 second and shipped green: the test asserted the literal `flock` appeared, the
-// literal was present, and nobody noticed `flock(2)` and dpkg's `fcntl(2)` record lock are
-// independent lock spaces because the assertion could not tell "the wait is real" from "the word
-// is written down somewhere in the file, including in a comment about it."
+// INVARIANT: an assertion read via readFileSync/readFile from a STATICALLY-resolvable repo path
+// (a tmpdir is UNRESOLVED, never skipped or passed) has its target's comments stripped and the
+// same literal rechecked -- raw-present/stripped-gone: FAIL; present in both: PASS; else
+// UNRESOLVED, counted and never silently a pass. Scoped to the variable-bound form via
+// `.includes()`/`.match()`/`assert.match()`/`assert.ok(x.includes(...))` against a plain string
+// literal only.
+// Why: docs/forensics/assertion-discrimination-check.md#scope.
+// Comment syntax is per target: `#` to end-of-line for .yml/.yaml/.sh/.bash; `//` and `/* */` for
+// .ts/.tsx/.js/.mjs/.cjs/.json/.jsonc; either inside a quoted string is never a comment start
+// (test/fixtures/assertion-discrimination-check/targets/quoted-hash.yml pins this); any other
+// extension is UNRESOLVED.
 //
-// Mutation testing cannot see this class at all: it mutates SOURCE, this defect lives in a TEST
-// asserting against a non-source file (a workflow, a script, ...), and `test/**` is never a
-// mutation target in this repo (see stryker.conf.json / mutation-nightly-scope.json).
-//
-// THE PREDICATE (stated so a falsifier can exist): for each assertion whose subject is a
-// variable read via readFileSync/readFile from a path that resolves STATICALLY to a real path
-// inside the repo checkout (never a per-test tmpdir -- those are not "a repo path" and are
-// reported UNRESOLVED, not silently skipped and not silently passed), locate the target file,
-// strip its comments, and re-evaluate the SAME literal against the stripped copy:
-//   - literal present in raw text, ABSENT after stripping -> FAIL (comment-satisfiable only)
-//   - literal present in both                             -> PASS
-//   - literal absent from raw text too (assertion already fails for its own reasons, out of
-//     this check's scope), or the target path / its comment syntax cannot be resolved
-//     statically                                           -> UNRESOLVED (counted separately,
-//                                                              never silently treated as a pass)
-//
-// SCOPE, DELIBERATELY NARROWER THAN THE PROBLEM. Only the variable-bound form is recognised
-// (`const x = readFileSync(...)` / `const x = await readFile(...)`, later checked via
-// `x.includes("literal")`, `x.match(/literal/)`, `assert.match(x, /literal/)`, or
-// `assert.ok(x.includes("literal"))`), and only when the literal is a PLAIN string -- a regex
-// with real metacharacters (e.g. `/^\s*claims:\s*$/m`) is not "a literal a comment could
-// satisfy" in the sense this check decides, so it is not treated as a site at all. An inline
-// `readFileSync(...).includes(...)` chain with no intermediate variable is out of scope too.
-// This is the same "narrower than the problem, and that's the point" shape as every other
-// mechanical gate in this repo -- see the task's own rationale/design for the full case.
-//
-// COMMENT SYNTAX IS PER-TARGET: `#` to end-of-line for .yml/.yaml/.sh/.bash (this also covers a
-// shell comment INSIDE a workflow `run:` block, the exact shape of the flock defect -- the block
-// scalar's lines are still plain text carrying a `#` shell comment token); `//` and `/* */` for
-// .ts/.tsx/.js/.mjs/.cjs/.json/.jsonc. A `#`/`//` byte inside a quoted string is never treated
-// as a comment start (test/fixtures/assertion-discrimination-check/targets/quoted-hash.yml pins
-// this). Any other target extension is UNRESOLVED (no known comment syntax to strip).
-//
-// FAIL LOUD. Resolving zero assertion sites at all is a FAILURE, not a vacuous pass -- an empty
-// comparison is exactly the shape of dead-guard this check exists to catch in itself.
-//
-// A finding may be EXEMPTED via scripts/assertion-discrimination-baseline.json, but every
-// exemption entry MUST carry a non-empty `reason` -- an exemption with no reason is rejected at
-// load time so the list cannot grow silently (mirrors scripts/mutation-baseline.json's captured
-// bootstrap-with-reason shape).
-//
-// READ-ONLY: this script allocates nothing, edits no test, rewrites no baseline.
-//
-// Usage:
-//   node scripts/assertion-discrimination-check.mjs [--root <repo-root>] [--test-dir <dir>]
-//                                                    [--baseline <path>]
-//
-// Defaults: --root <repo root>, --test-dir test, --baseline scripts/assertion-discrimination-baseline.json
-//
-// Mirrors scripts/claims-check.mjs's shape: a plain node module, exported pure pieces for unit
-// testing, one CLI entry point, exposed as an npm script, wired into exactly one unconditional
-// ci.yml job.
+// FAIL LOUD: zero resolved sites is a failure, never a vacuous pass. A finding may be exempted via
+// scripts/assertion-discrimination-baseline.json with a non-empty `reason`. Read-only: allocates
+// nothing, edits no test, rewrites no baseline.
+// Usage: node scripts/assertion-discrimination-check.mjs [--root <repo-root>] [--test-dir <dir>]
+//   [--baseline <path>] (defaults: repo root, test, and the baseline path above).
 
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve as pathResolve, relative, sep } from "node:path";
@@ -84,11 +44,7 @@ export function commentSyntaxForPath(path) {
   return null;
 }
 
-/**
- * Strip `#`-to-end-of-line comments, never treating a `#` inside a single- or double-quoted
- * string as a comment start. Handles YAML and shell alike (both use `#` line comments and the
- * same quoting rules for this check's purposes).
- */
+/** Strip `#`-to-end-of-line comments (YAML and shell); a `#` inside a quoted string is never a comment start. */
 export function stripHashComments(text) {
   let out = "";
   let quote = null; // null | '"' | "'"
@@ -124,10 +80,7 @@ export function stripHashComments(text) {
   return out;
 }
 
-/**
- * Strip `//` line comments and `/* *\/` block comments, never treating either inside a single-,
- * double-, or backtick-quoted string as a comment start.
- */
+/** Strip `//` and `/* *\/` comments; either inside a quoted string is never a comment start. */
 export function stripCStyleComments(text) {
   let out = "";
   let quote = null; // null | '"' | "'" | "`"
@@ -179,14 +132,8 @@ export function stripComments(text, syntax) {
 // ── Static path resolution (repo-checkout paths only, never a per-test tmpdir) ──────────────
 
 /**
- * Resolve a small vocabulary of statically-analysable path expressions to an absolute path, or
- * return null when the expression is not one of them (e.g. a per-test tmpdir variable such as
- * `root` returned from a fixture builder -- deliberately NOT "a repo path", so a join() rooted
- * at one resolves to null / UNRESOLVED rather than being guessed at).
- *
- * `aliases` maps identifier name -> already-resolved absolute path (or the literal string it was
- * bound to, when it is a plain string alias rather than a path anchor), built by a single
- * top-to-bottom pass over the file's `const`/`let` bindings.
+ * Resolves a small vocabulary of static path expressions to an absolute path, or null for a
+ * tmpdir or anything else; `aliases` maps identifiers to their resolved path/literal (one pass).
  */
 export function resolveExpr(exprText, ctx) {
   const text = exprText.trim();
@@ -309,19 +256,15 @@ export function regexSourceAsLiteral(source) {
 }
 
 /**
- * Scan one test file's source text for assertion sites: a variable bound to
- * readFileSync/readFile's result from a statically-resolvable repo path, later checked against a
- * plain-string literal via `.includes()`, `.match()`, `assert.match()`, or
- * `assert.ok(x.includes(...))`.
+ * Scans a test file's source for assertion sites -- a variable bound to readFileSync/readFile's
+ * result from a resolvable repo path, later checked via `.includes()`/`.match()`/`assert.match()`/
+ * `assert.ok(x.includes(...))` against a plain string literal.
  */
 export function findAssertionSites(source, testFilePath, repoRoot) {
   const testFileDir = dirname(testFilePath);
   const ctx = { testFileDir, testFilePath, aliases: new Map() };
-  // name -> [{pos, targetPath}, ...] in ascending `pos` order. Test files commonly reuse a
-  // generic name (`raw`, `src`, `content`, ...) for a DIFFERENT target in each `test(...)`
-  // block, so resolution must be POSITION-SCOPED: a usage resolves against the nearest binding
-  // of the same name that occurs at or before it, never "whichever binding happened to be seen
-  // last while scanning the whole file."
+  // Bindings in ascending `pos` order, POSITION-SCOPED: test files often reuse a generic name for
+  // a different target per `test(...)` block, so a usage binds to the nearest earlier one.
   const readBindings = new Map();
 
   BINDING_RE.lastIndex = 0;
@@ -402,9 +345,7 @@ export function findAssertionSites(source, testFilePath, repoRoot) {
 
 // ── Evaluation ────────────────────────────────────────────────────────────────
 
-/**
- * Evaluate one assertion site. Returns { status: "pass" | "fail" | "unresolved", ...site, detail }.
- */
+/** Evaluates one assertion site; returns { status: "pass"|"fail"|"unresolved", ...site, detail }. */
 export function evaluateSite(site) {
   if (!site.targetPath) {
     return { ...site, status: "unresolved", detail: "target path is not a statically-resolvable repo path" };
@@ -433,11 +374,7 @@ export function evaluateSite(site) {
 
 const BASELINE_FIELDS = ["testFile", "target", "literal", "reason"];
 
-/**
- * Load an exemption baseline: `{ exemptions: [{testFile, target, literal, reason}, ...] }`.
- * Every exemption MUST carry a non-empty `reason` -- an entry without one is rejected at load
- * time (never silently accepted), so the exemption list cannot grow without a written reason.
- */
+/** Loads an exemption baseline `{ exemptions: [{testFile, target, literal, reason}, ...] }`; an entry missing a non-empty `reason` is rejected at load time so the list can't grow silently. */
 export function loadBaseline(path) {
   const text = readFileSync(path, "utf8");
   const doc = JSON.parse(text);
@@ -475,10 +412,8 @@ function listTestFiles(testDir, suffix) {
   return out;
 }
 
-// Real test files always end ".test.ts" (matching package.json's own "test/**/*.test.ts" glob).
-// The falsifier fixture suite below points --test-dir at test/fixtures/assertion-discrimination-
-// check and overrides --suffix to ".fixture.ts" specifically so its fixture "source" files are
-// NEVER picked up by `npm test`'s own real glob (which would otherwise try to execute them).
+// Real test files end ".test.ts" (package.json's glob); the falsifier suite overrides --suffix to
+// ".fixture.ts" so its fixture files are never picked up by `npm test`'s own glob.
 export function scan({ repoRoot, testDir, exemptions, suffix = ".test.ts" }) {
   const exemptionSet = new Set(
     (exemptions ?? []).map((e) => baselineKey(e.testFile, e.target, e.literal)),
