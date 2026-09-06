@@ -152,6 +152,12 @@
       "grepHint": "autonomy.ts forensics"
     },
     {
+      "path": "docs/forensics/board.md",
+      "title": "board.ts comment forensics",
+      "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/board.ts`",
+      "grepHint": "board.ts comment forensics"
+    },
+    {
       "path": "docs/forensics/ci-parity.md",
       "title": "ci-parity.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
@@ -210,6 +216,12 @@
       "title": "env.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from `src/lib/env.ts`",
       "grepHint": "env.ts forensics"
+    },
+    {
+      "path": "docs/forensics/escalate.md",
+      "title": "Forensics — `src/lib/escalate.ts`",
+      "summary": "`src/lib/escalate.ts` raises escalations as GitHub issues (W1-T8, MASTER-PLAN §4 escalation",
+      "grepHint": "Forensics — `src/lib/escalate.ts`"
     },
     {
       "path": "docs/forensics/fs-race-safe.md",
@@ -354,6 +366,12 @@
       "title": "worker-branch-shape.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
       "grepHint": "worker-branch-shape.mjs comment forensics"
+    },
+    {
+      "path": "docs/forensics/worker-home.md",
+      "title": "Forensics: src/lib/worker-home.ts",
+      "summary": "Every measured fact, incident and design argument the comments in `src/lib/worker-home.ts` used to",
+      "grepHint": "Forensics: src/lib/worker-home.ts"
     },
     {
       "path": "docs/forensics/worker.md",
