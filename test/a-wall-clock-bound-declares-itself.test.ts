@@ -309,3 +309,32 @@ test("every bare wall-clock upper bound is migrated, and reverting a member fail
     /test\/run-task\.test\.ts:8500/,
   );
 });
+
+// ── the census is invocable AT BUILD TIME, the way its four siblings are ───────────────────────
+//
+// Criterion 1 asks that the predicate be "re-run at build time". Running inside the full suite is
+// not that: it proves the census executes, not that a builder can deliberately invoke it. Every
+// other census in this repo is reachable as its own `census:*` npm script -- bound-kind,
+// catch-erasure, negative-reachability, no-shallowing -- and this one was reachable only by typing
+// the file path. That is the same shape W1-T2735 named for `scripts/`: an instrument that reads
+// like a gate and that nothing invokes. Asserted here rather than left to convention, because a
+// convention no check enforces is exactly what this repo keeps re-learning.
+
+test("the census is registered as its own census:* script, like every sibling census", () => {
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  const censuses = Object.entries(pkg.scripts).filter(([name]) => name.startsWith("census:"));
+
+  // Vacuity guard: if the prefix ever changes, an empty list would make every assertion below
+  // pass over nothing.
+  assert.ok(censuses.length >= 5, `expected the sibling censuses plus this one, found ${censuses.length}: ${censuses.map(([n]) => n).join(", ")}`);
+
+  const mine = pkg.scripts["census:wall-clock-bound"];
+  assert.ok(mine, `no census:wall-clock-bound script; registered censuses are ${censuses.map(([n]) => n).join(", ")}`);
+  assert.match(mine!, /test\/a-wall-clock-bound-declares-itself\.test\.ts$/, "the script must point at THIS census, not another file");
+
+  // It must invoke the census the same way the siblings do -- a divergent runner (no tsx, no
+  // tmp-hygiene) would run a different thing under the same name.
+  const sibling = pkg.scripts["census:bound-kind"]!;
+  const runnerOf = (cmd: string) => cmd.replace(/\S+\.test\.ts$/, "").trim();
+  assert.equal(runnerOf(mine!), runnerOf(sibling), "this census must be invoked exactly the way its siblings are");
+});
