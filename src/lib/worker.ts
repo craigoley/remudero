@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   symlinkSync,
@@ -3227,7 +3228,10 @@ export type WorktreeKeepReason =
   /** The entry's own `.git` is present but could not be read or parsed, so whether an admin record exists in some parent clone
    * is UNKNOWABLE. An ambiguous signal keeps; it never destroys — the same doctrine `activity-unknown` applies one gate
    * above. See {@link planWorktreeRemoval}. */
-  | "git-unreadable";
+  | "git-unreadable"
+  /** W1-T2950: the candidate's or a registered worktree's canonical path could not be resolved, so registration could
+   *  not be decided. Unknowable never destroys. */
+  | "registration-undecidable";
 
 /** The newest mtime anywhere under `dir`, and whether the walk could be trusted. TRAP: a DIRECTORY's mtime advances only when
  * an entry is added to or removed from THAT directory, never when a nested file is modified, so age-gating on the root's own
@@ -3310,6 +3314,10 @@ export interface WorktreeReapOpts {
   /** Whether `branch` (in `repoDir`) is still live upstream — true means KEEP, fail closed. Defaults to {@link
    * defaultBranchIsLiveUpstream} (an `origin` ls-remote). */
   branchIsLiveUpstream?: (branch: string, repoDir: string) => boolean;
+  /** W1-T2950: canonical-path resolver for the registration identity compare. Injectable so a test can drive the
+   *  UNDECIDABLE arm — the one where the comparison cannot be made — without an unreadable real filesystem. Defaults to
+   *  `realpathSync`. */
+  realpath?: (p: string) => string;
   /** The tree-activity probe the age gate measures against. Injectable so a test asserts the boundary without a deep fixture
    * per case. Defaults to {@link newestActivityMs}, the REAL bounded walk, which the fixture-free tests drive (W1-T378). */
   newestActivity?: (dir: string) => { mtimeMs: number; complete: boolean };
@@ -3362,14 +3370,56 @@ interface WorktreeRegistration {
   branch?: string;
 }
 
+/** W1-T2950: the registration lookup's THREE outcomes. `unregistered` is a PROVEN no-match — hole-(1) debris, safe to treat
+ * as terminal. `undecidable` is "the comparison could not be made", which must never be spelled the same way: conflating them
+ * is how a live lane gets destroyed. */
+type WorktreeRegistrationLookup =
+  | ({ kind: "registered" } & WorktreeRegistration)
+  | { kind: "unregistered" }
+  | { kind: "undecidable" };
+
+/** Canonical filesystem identity for one path, or `undefined` when it cannot be resolved. `realpathSync` because git reports
+ * a CANONICAL worktree path while a caller may hold any spelling that reaches the same inode. Bounded and synchronous, to
+ * match this already-synchronous reaper. */
+function canonicalIdentity(
+  path: string,
+  realpath: (p: string) => string = realpathSync,
+): { kind: "resolved"; identity: string } | { kind: "unresolvable" } {
+  try {
+    return { kind: "resolved", identity: realpath(path) };
+  } catch {
+    // The distinction is CARRIED, not erased: "could not resolve" is a different answer from "does
+    // not match", and folding them into one bare `undefined` is how a live lane gets destroyed.
+    return { kind: "unresolvable" };
+  }
+}
+
 /** Cross-reference `entryPath` against `git worktree list --porcelain` for its OWN resolved repoDir, never a fixed one — the
- * multi-checkout lesson. Null when git does not register the path there, treated identically to "not a worktree": both are
- * hole-(1) debris with no branch to consult. */
-function resolveWorktreeRegistration(entryPath: string): WorktreeRegistration | null {
+ * multi-checkout lesson.
+ *
+ * W1-T2950 — COMPARE BY INODE IDENTITY, NEVER BY BYTE STRING. Git is allowed to report a canonical path that differs from the
+ * spelling used to reach the same directory: MEASURED on macOS, a lane at `/var/folders/...` is registered as
+ * `/private/var/folders/...`. The old `entry.path === entryPath` missed that registration, skipped the `branchIsLiveUpstream`
+ * probe entirely, and let the armed reaper destroy a lane whose PR was still open. The canonical form is ONLY an equality
+ * key — every removal and every ledger line still uses the original paths.
+ *
+ * A CANONICALIZATION FAILURE IS NOT EVIDENCE OF ANYTHING. It returns `undecidable`, never `unregistered`, and there is
+ * deliberately NO fallback to the raw-string compare: falling back would reinstate exactly the defect this fixes, on the one
+ * path where the evidence is weakest (W1-T378/W1-T381's doctrine — ambiguous evidence keeps). */
+function resolveWorktreeRegistration(
+  entryPath: string,
+  realpath: (p: string) => string = realpathSync,
+): WorktreeRegistrationLookup {
   const repoDir = resolveWorktreeRepoDir(entryPath);
-  if (!repoDir) return null;
-  const found = listRegisteredWorktrees(repoDir).find((entry) => entry.path === entryPath);
-  return found ? { repoDir, branch: found.branch } : null;
+  if (!repoDir) return { kind: "unregistered" };
+  const candidate = canonicalIdentity(entryPath, realpath);
+  if (candidate.kind === "unresolvable") return { kind: "undecidable" };
+  for (const entry of listRegisteredWorktrees(repoDir)) {
+    const registered = canonicalIdentity(entry.path, realpath);
+    if (registered.kind === "unresolvable") return { kind: "undecidable" };
+    if (registered.identity === candidate.identity) return { kind: "registered", repoDir, branch: entry.branch };
+  }
+  return { kind: "unregistered" };
 }
 
 /** HOW an aged, terminal reap candidate must be REMOVED — never WHETHER, which the gates above decide. `git-remove` deletes
@@ -3512,7 +3562,14 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     // Not a live-pid worktree. A registered branch still live upstream — an open, unmerged PR — is fail-closed KEPT
     // regardless of age. The sweep-W1-T154 falsifier: a `sweep-*` dir writes no lock at all, so lock state alone cannot tell
     // it from debris; only the branch signal can.
-    const registration = resolveWorktreeRegistration(entryPath);
+    const lookup = resolveWorktreeRegistration(entryPath, opts.realpath ?? realpathSync);
+    // W1-T2950: an undecidable registration is NOT a proven absence of one — it keeps, before any age or activity gate can
+    // reach a removal decision on evidence that was never established.
+    if (lookup.kind === "undecidable") {
+      keep(name, "registration-undecidable");
+      continue;
+    }
+    const registration = lookup.kind === "registered" ? { repoDir: lookup.repoDir, branch: lookup.branch } : null;
     if (registration?.branch && branchIsLiveUpstream(registration.branch, registration.repoDir)) {
       keep(name, "live-branch");
       continue;

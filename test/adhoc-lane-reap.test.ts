@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -285,4 +285,109 @@ test("W1-T2847 (wiring): the run-task call site supplies repoDir, so the report 
     /runAdhocLaneReapRung\(config, log, \{[^}]*enabled:[^}]*armAdhocLaneReap[^}]*\}\)/,
     "arming must be read from plan/policy.yaml's sweep.armAdhocLaneReap, not hardcoded at the call site",
   );
+});
+
+// ── W1-T2950: registration is decided by INODE IDENTITY, never by byte string ──────────────────
+
+/**
+ * The macOS shape, made deterministic on any platform. There, a lane at `/var/folders/...` is
+ * registered by git as `/private/var/folders/...` — same inode, different spelling — and the old
+ * `entry.path === entryPath` compare missed the registration, skipped `branchIsLiveUpstream`
+ * entirely, and let the ARMED reaper destroy a lane whose PR was still open. An explicit symlink
+ * reproduces exactly that mismatch on Linux CI, so the regression is not a platform anecdote.
+ */
+function aliasedLaneFixture(): { root: string; repo: string; lane: string; realLane: string } {
+  const f = laneFixture();
+  // A second spelling of the SAME lane directory: <laneRoot>/alias -> <laneRoot>/alloc.
+  const laneRoot = adhocLaneRoot(cfg(f.root));
+  const alias = join(laneRoot, "alias-alloc");
+  symlinkSync(f.lane, alias, "dir");
+  return { root: f.root, repo: f.repo, lane: alias, realLane: f.lane };
+}
+
+test("W1-T2950: a lane reached through a path ALIAS still resolves to its registration, so a live branch is kept however old", () => {
+  const { root, repo, realLane } = aliasedLaneFixture();
+  let upstreamProbed = false;
+  const summary = runAdhocLaneReapRung(cfg(root), () => {}, {
+    enabled: () => true, // ARMED: a keep here is the doctrine, not the survey
+    reap: ((r: string, o: Record<string, unknown>) =>
+      reapStaleWorktrees(r, {
+        ...o,
+        branchIsLiveUpstream: () => {
+          upstreamProbed = true;
+          return true; // an open, unmerged PR
+        },
+      })) as never,
+  });
+  assert.ok(summary);
+  assert.ok(upstreamProbed, "the upstream probe must be REACHED — skipping it is the defect, not the symptom");
+  assert.deepEqual(summary.reaped, [], "a live branch is never reaped, whatever spelling reached it");
+  assert.ok(existsSync(realLane), "and the real directory survives");
+  assert.doesNotMatch(git(["worktree", "list", "--porcelain"], repo), /^prunable/m);
+});
+
+test("W1-T2950: an UNRESOLVABLE canonical path is undecidable — it keeps, and removes and prunes nothing", () => {
+  const { root, repo, lane } = laneFixture();
+  const summary = reapStaleWorktrees(adhocLaneRoot(cfg(root)), {
+    now: () => Date.now(),
+    isPidAlive: () => false,
+    maxAgeMs: 1,
+    // The one injected failure: canonicalization throws for every path. There is deliberately NO
+    // fallback to the raw-string compare — falling back would reinstate the defect on exactly the
+    // path where the evidence is weakest.
+    realpath: () => {
+      throw new Error("EIO: simulated canonicalization failure");
+    },
+  });
+  assert.deepEqual(summary.reaped, [], "unknowable never destroys");
+  assert.ok(existsSync(lane), "the directory survives");
+  assert.ok(
+    (summary.keptReasons ?? []).some((k) => k.reason === "registration-undecidable"),
+    `the keep must be NAMED as undecidable, never silently folded into another reason — saw ${JSON.stringify(summary.keptReasons)}`,
+  );
+  assert.doesNotMatch(git(["worktree", "list", "--porcelain"], repo), /^prunable/m);
+});
+
+test("W1-T2950: a canonicalized candidate with NO matching registration is still removed as terminal debris", () => {
+  // Criterion 4. The identity compare must not turn every unregistered directory into a keep —
+  // `unregistered` is a PROVEN no-match and stays terminal, and only `undecidable` rescues. Without
+  // this, the fix would trade a destroy-live-work bug for a reclaim-nothing one.
+  const { root, repo } = laneFixture();
+  const laneRoot = adhocLaneRoot(cfg(root));
+  const debris = join(laneRoot, "hole-1-debris");
+  mkdirSync(debris, { recursive: true }); // a real directory git has never registered
+  const old = (Date.now() - ADHOC_LANE_REAP_GRACE_MS * 2) / 1000;
+  utimesSync(debris, old, old);
+
+  const summary = reapStaleWorktrees(laneRoot, {
+    now: () => Date.now(),
+    isPidAlive: () => false,
+    branchIsLiveUpstream: () => false,
+  });
+  assert.ok(
+    summary.reaped.includes("hole-1-debris"),
+    `an unregistered, aged directory is still terminal — saw reaped=${JSON.stringify(summary.reaped)} kept=${JSON.stringify(summary.keptReasons)}`,
+  );
+  assert.ok(!existsSync(debris), "and it is actually gone");
+  assert.doesNotMatch(git(["worktree", "list", "--porcelain"], repo), /^prunable/m);
+});
+
+test("W1-T2950: canonical paths are ONLY comparison keys — removal and the ledger keep the original spelling", () => {
+  // Criterion 5. The canonical form must never leak into what is removed or reported: a summary
+  // naming a /private/var path for a lane the operator cut at /var is a different directory as far
+  // as any later reader is concerned.
+  const { root, repo, realLane } = aliasedLaneFixture();
+  const laneRoot = adhocLaneRoot(cfg(root));
+  const summary = reapStaleWorktrees(laneRoot, {
+    now: () => Date.now(),
+    isPidAlive: () => false,
+    branchIsLiveUpstream: () => false, // branch gone: the lane IS terminal, so removal runs
+  });
+  for (const name of summary.reaped) {
+    assert.doesNotMatch(name, /^\//, `the ledger records a lane NAME, never an absolute canonical path — saw ${name}`);
+  }
+  assert.ok(!existsSync(realLane), "the real lane was removed through its parent");
+  // THE PARENT CONTRACT: removal routed through git, so no admin record is stranded. That is the
+  // 2026-07-31 defect and #3981's fix, and the identity change must not have bypassed it.
+  assert.doesNotMatch(git(["worktree", "list", "--porcelain"], repo), /^prunable/m);
 });
