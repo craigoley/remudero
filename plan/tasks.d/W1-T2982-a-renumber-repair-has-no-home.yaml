@@ -1,0 +1,106 @@
+- id: W1-T2982
+  title: "A TASK-ID RENUMBER HAS NO HOME, SO IT RIDES INSIDE WHATEVER PULL REQUEST NOTICES IT — the 2026-09-06 W1-T2967 collision was repaired across two merged plan PRs and four more id moves inside an unrelated CLI pull request, whose own merged diff carries no plan file at all; rule 25's ride-alone surface names ten paths and none of them is plan/, so nothing anywhere says a renumber lands on its own"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  rationale: |
+    **WHAT THIS RECORDS, AND WHAT IT DELIBERATELY DOES NOT.** W1-T1014 owns the COLLISION — two PRs
+    filing different tasks under one id from a stale base — and #4313 appended the 2026-09-06
+    instance to it on merge. This shard is about the REPAIR, which is a separate motion with a
+    separate cost, and which no shard, doc or gate currently governs. The collision lasted about
+    31 minutes; the repair's wake outlived it and reached a pull request that had no stake in ids.
+
+    **FOUR ID MOVES INSIDE A PULL REQUEST THAT SHIPPED NO PLAN FILE.** #4298 was a CLI change —
+    minting the app token before dispatch. It carried the losing shard through four positions
+    because it had to merge main to stay green while main was unloadable:
+      04f7a5ab 20:05:19Z  W1-T2967 -> W1-T2971   (R091)
+      ed8150bd 20:08:48Z  W1-T2971 -> W1-T2972   (R082, "move the renumber target off an id two other open PRs already claimed")
+      7d28afb2 20:28:38Z  W1-T2972 -> W1-T2971   (R079, "drop the id-collision churn — #4306 owns that repair now")
+      79ae31fa 20:36:25Z  resolved to W1-T2972 by merging origin/main, main's position winning
+    Its merged file list is scripts/comment-load-baseline.json, src/run-task.ts and
+    test/cli-verbs-mint-the-app-token.test.ts. NO PLAN PATH SURVIVED. Every one of those four moves
+    was discarded work, and the last one flipped direction under the branch: it sat on W1-T2971
+    from 20:28:38Z, main went to W1-T2972 at 20:34:13Z via #4306, and the branch's own third
+    position lost to main's at 20:36:25Z.
+
+    **RULE 25 CANNOT SEE A PLAN RENAME, MEASURED BY EXECUTING THE PREDICATE.** Standing rule 25
+    (INSTRUMENT CHANGES RIDE ALONE, W1-T297) is the nearest existing rule, and it is structurally
+    blind here. INSTRUMENT_SURFACE holds ten entries and none contains plan/; run against #4298's
+    own shape the predicate returns entangled false with an empty instrument list, and against
+    a genuine instrument diff in the same call it returns entangled true:
+      detectInstrumentEntanglement([2 plan renames, src/run-task.ts, test/...]) -> {"entangled":false,"instrumentPaths":[]}
+      detectInstrumentEntanglement([".github/workflows/ci.yml","src/run-task.ts"]) -> {"entangled":true,...}
+    The second line is the blocking control: the predicate is alive and refuses a real entanglement
+    in the same shape that passes the plan one. Its own doc blesses the shape it misses, calling a
+    src-only, plan-only or docs-only diff not entangled.
+
+    **THE CONVENTION SETTLES WHO RENUMBERS AND NOT WHERE.** CLAUDE.md's rule is that a contested
+    reservation is never deleted and an unfiled one is never free, so the loser of a race renumbers.
+    That answers WHO. Searched across CLAUDE.md, MASTER-PLAN.md and DECISIONS.md, no phrasing
+    requires the renumber to land as its own pull request, and the only ride-alone rule in the tree
+    is rule 25, measured blind above. The gap is not a weak rule; it is an absent one.
+
+    **THE ANALOGY TO RULE 25 IS IMPERFECT AND THE SHARD SAYS SO RATHER THAN HIDING IT.** Rule 25's
+    premise is that the code's falsifiers were graded by the instrument beside them, so the two must
+    not move together. A plan rename grades nothing. If a rule is wanted here its ground is
+    different — a rename is a whole-file move that conflicts with every branch holding that file —
+    and W1-T297's own precedent is that a ride-alone rule needs a measured false-positive rate
+    before it blocks anything.
+  design: |
+    THE ONE HARD QUESTION A REMEDY MUST ANSWER, STATED SO IT CANNOT BE SKIPPED. #4298 did not carry
+    the renumber out of carelessness. Main was unloadable, and an open PR that merges main to stay
+    green inherits whatever repair is in flight. A rule saying renumbers ride alone must therefore
+    say what an unrelated in-flight PR does during the outage window, or it converts a 31-minute
+    plan outage into a 31-minute freeze on every open branch. Any proposal that does not answer
+    this is not yet a proposal.
+
+    THE CANDIDATE SURFACES, WITHOUT A RECOMMENDATION. (i) A plan/-aware sibling of rule 25 keyed to
+    RENAMES of plan/tasks.d/*.yaml rather than to edits, which is the narrow reading and the one the
+    instance actually supports. (ii) Nothing at all, on the ground that strict branch protection —
+    which #4313 measured decisive for the structural sub-class — removes most repairs before they
+    exist, making this a cost that mostly disappears upstream. (iii) A convention with no gate, in
+    MASTER-PLAN, accepting that CLAUDE.md's own preamble says a rule stated only in prose can be
+    violated silently and repeatedly.
+
+    WHAT WOULD HAVE TO BE MEASURED FIRST, FOR ANY OF THEM. How often a plan rename appears in a diff
+    that also carries src/, over a real window; how many of those were repairs versus ordinary
+    filings; and whether a rename-only refusal would have refused any pull request that merged
+    cleanly. None of those numbers exists yet, and this shard does not invent them.
+  acceptance:
+    - claim: "The shard records that the repair, not the collision, is its subject, and that four id moves rode inside a pull request whose merged diff carries no plan path"
+      proof: "grep: FOUR ID MOVES INSIDE A PULL REQUEST THAT SHIPPED NO PLAN FILE in plan/tasks.d/W1-T2982-a-renumber-repair-has-no-home.yaml"
+    - claim: "The shard records rule 25's blindness as an executed predicate result with a blocking control, not as an assertion about a constant"
+      proof: "grep: RULE 25 CANNOT SEE A PLAN RENAME in plan/tasks.d/W1-T2982-a-renumber-repair-has-no-home.yaml"
+    - claim: "The shard distinguishes the rule that exists (who renumbers) from the rule that does not (where the renumber lands)"
+      proof: "grep: THE CONVENTION SETTLES WHO RENUMBERS AND NOT WHERE in plan/tasks.d/W1-T2982-a-renumber-repair-has-no-home.yaml"
+    - claim: "The shard states the outage-window objection that any ride-alone remedy must answer before it can be adopted"
+      proof: "grep: THE ONE HARD QUESTION A REMEDY MUST ANSWER in plan/tasks.d/W1-T2982-a-renumber-repair-has-no-home.yaml"
+    - claim: "The shard parks the decision rather than picking a remedy, and names the family boundary against W1-T1014"
+      proof: "grep: THIS SHARD PICKS NO REMEDY AND MUST NOT BE READ AS PROPOSING ONE in plan/tasks.d/W1-T2982-a-renumber-repair-has-no-home.yaml"
+  files: [plan/tasks.d/W1-T2982-a-renumber-repair-has-no-home.yaml]
+  status: queued
+  attempts: 0
+  origin: "oper#id-collision-churn-2026-09-06"
+  plan_refs: ["W1-T1014", "W1-T297", "W1-T2676", "W1-T2685", "W1-T2710"]
+  note: |
+    THIS SHARD PICKS NO REMEDY AND MUST NOT BE READ AS PROPOSING ONE. It records a gap and the one
+    objection any filler of that gap has to answer. Widening rule 25 is listed as a candidate and
+    argued AGAINST on its own premise, which is the opposite of proposing it.
+
+    THE FAMILY BOUNDARY. W1-T1014 owns the cross-PR staleness that PRODUCES a collision and is under
+    a standing instruction not to pick a remedy; #4313 already appended this instance to it, priced
+    branch protection against it, and recorded the near-miss where the first repair took an id the
+    fleet already held. None of that is re-filed here. W1-T2676 is duplicate SURFACE not duplicate
+    id; W1-T2685 and W1-T2710 are the mint's own reporting. This shard begins after the collision
+    exists and asks only where its repair belongs.
+
+    THE DATES AND SHAS ARE A WINDOW, NOT A CONSTANT. The four commits, the two merged repair PRs and
+    the ten-entry instrument surface were read at c51d944e on 2026-09-06. Re-derive before acting;
+    a number carried forward from here is a claim about a tree that has moved. One figure in the
+    first draft had already drifted while this was being written — the blocked-review issue opened
+    against #4298 was still open during the recon and had closed at 21:06:43Z before filing — which
+    is the reason this paragraph is here rather than a tidier count.
