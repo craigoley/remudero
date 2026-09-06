@@ -260,7 +260,7 @@ test("W1-T2968 the default writer really writes: a record lands on disk and load
 // ── (7) REACHABILITY: the verb actually calls the filer ──────────────────────────────────────
 
 import { ciLearningCommand } from "../src/run-task.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 
 /** Capture console output for one call. */
 function captured(fn: () => number): { code: number; out: string } {
