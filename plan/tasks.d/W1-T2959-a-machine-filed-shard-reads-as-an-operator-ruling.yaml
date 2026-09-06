@@ -93,7 +93,16 @@
     sessions and change nothing about the fleet's own pull requests; the shard this rung files must
     name the surface that reaches the lane the failure came from.
 
-    (vi) NOT IN SCOPE: editing `learnings/*.yaml` or CLAUDE.md directly from the rung — the filed,
+    (vi) THE FILING PR MUST NOT CARRY A `Remudero-Task:` TRAILER, AND THIS WAS HIT WHILE FILING THIS
+    ARC. W1-T413: "a MERGED PLAN-ONLY PR carrying a `Remudero-Task:` trailer is credited by
+    `deriveStatus` as that task's implementation, so the task reads merged forever and can never be
+    dispatched again." A rung that opens a filing pull request and copies the trailer convention
+    visible on merged filing PRs (#3617, #3748 both carry one) would credit every shard it files as
+    already built, and the fleet would never build any of them — the rung would silently defeat
+    itself while every gate stayed green. `acceptance-author-gate` accepts a bare `## Acceptance`
+    header OR a trailer, so the header alone is sufficient and is the form to emit.
+
+    (vii) NOT IN SCOPE: editing `learnings/*.yaml` or CLAUDE.md directly from the rung — the filed,
     parked shard is the output, and that is the whole Law 5 argument; and the corpus and attribution
     stages, which are W1-T2957 and W1-T2958.
   acceptance:
