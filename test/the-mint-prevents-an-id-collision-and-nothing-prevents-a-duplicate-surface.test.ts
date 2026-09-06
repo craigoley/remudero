@@ -8,7 +8,9 @@ import {
   type DuplicateSurfaceCorpusEntry,
 } from "../src/lib/task-linter.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import { creditedMergedIdsFrom, surfaceCorpusFrom } from "../src/run-task.js";
+import { readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { creditedMergedIdsFrom, lintPlanCommand, surfaceCorpusFrom } from "../src/run-task.js";
 
 // ── W1-T2676 ─────────────────────────────────────────────────────────────────────────────────
 //
@@ -395,4 +397,83 @@ test("no projection is not an empty projection — absent means `read status: al
   // The distinction is load-bearing: an empty SET would still be a credit answer, and collapsing
   // the two would make the network-free pass claim it had consulted a projection it never read.
   assert.deepEqual([...creditedMergedIdsFrom(new Map())!], [], "an empty map IS a resolved answer, and it is empty");
+});
+
+// ── the call site itself, executed ─────────────────────────────────────────────────────────────
+//
+// The two derivations above are exported and driven directly, which proves they COMPUTE the right
+// thing. It does not prove `lintPlanCommand` passes them: deleting either from the opts literal
+// reddened NOTHING in the tests above, which is precisely the "wired nowhere" shape that left this
+// criterion unmet twice. Only executing the real `--base` pass can catch that, so these two do.
+//
+// The fixture is COMMITTED with one task and rewritten on disk to add a second whose files are a
+// strict subset, giving `--base HEAD` a real changed-task diff; it is restored byte-for-byte in a
+// `finally` no matter the outcome. `projectPlan` is injected, so no network is touched.
+
+const DSC_FIXTURE = fileURLToPath(new URL("./fixtures/duplicate-surface-credit/tasks.yaml", import.meta.url));
+const DSC_BASE_YAML = readFileSync(DSC_FIXTURE, "utf8");
+const DSC_WITH_DUPLICATE =
+  DSC_BASE_YAML +
+  `- id: DSC-NEW
+  title: fixture task whose surface is a strict subset of DSC-BASE (W1-T2676 producer coverage)
+  repo: remudero
+  type: implement
+  origin: "test fixture (W1-T2676 coverage, not a real plan entry)"
+  files: [src/lib/merge-hold.ts, src/run-task.ts, test/merge-hold.test.ts]
+`;
+
+async function runDscBase(baseMerged: boolean): Promise<string> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origError = console.error;
+  const origWarn = console.warn;
+  console.log = (m: string) => logs.push(String(m));
+  console.error = (m: string) => logs.push(String(m));
+  console.warn = () => {};
+  writeFileSync(DSC_FIXTURE, DSC_WITH_DUPLICATE, "utf8");
+  try {
+    await lintPlanCommand(["--plan", DSC_FIXTURE, "--base", "HEAD"], {
+      loadConfig: () => ({ root: "/tmp/rmd-dsc-unused" }) as never,
+      resolveOwnerRepo: () => ({ owner: "acme-corp", repo: "widget-fixture" }),
+      ghGateway: () => ({}) as never,
+      // DSC-BASE keeps `status: queued` in the fixture either way — CREDIT is the only thing
+      // that differs between the two runs, which is exactly the signal under test.
+      projectPlan: () =>
+        new Map([["DSC-BASE", { taskId: "DSC-BASE", status: baseMerged ? "merged" : "queued", merged: baseMerged, source: "none" }]]) as never,
+    });
+    return logs.join("\n");
+  } finally {
+    writeFileSync(DSC_FIXTURE, DSC_BASE_YAML, "utf8");
+    console.log = origLog;
+    console.error = origError;
+    console.warn = origWarn;
+  }
+}
+
+/** The summary's warning tally. `lint-plan` PRINTS only blocking violations per task and counts
+ *  warnings in its summary line, so a `duplicate-surface` warning is observable here and nowhere
+ *  else in the output. Keyed on the count deliberately: a first draft matched /duplicate-surface/
+ *  over the whole log and PASSED against the fixture's own PATH
+ *  (`fixtures/duplicate-surface-credit/tasks.yaml`) while the check itself never fired -- a
+ *  recognizer matching something real, and the wrong real thing. */
+function warningCount(out: string): number {
+  const m = /— \d+ failing, (\d+) warning\(s\)/.exec(out);
+  assert.ok(m, `no lint-plan summary line in output:\n${out}`);
+  return Number(m![1]);
+}
+
+test("lintPlanCommand --base: the real call site supplies the corpus — the pair is warned about through the executed path", async () => {
+  const out = await runDscBase(false);
+  assert.match(out, /1 task\(s\) checked \(1 new\/changed vs HEAD\)/, "the --base pass really linted the added task, so this is not a vacuous run");
+  assert.equal(warningCount(out), 2, "duplicate-surface is one of these; without the corpus the --base pass warns once");
+});
+
+test("lintPlanCommand --base: a CREDITED-merged shard is not reported, though its status: still reads queued", async () => {
+  // The ONLY difference between this run and the one above is projectPlan's credit answer: the
+  // fixture bytes, the plan, the diff and DSC-BASE's `status: queued` are all identical. One
+  // warning disappears, and it is the duplicate-surface one.
+  const credited = warningCount(await runDscBase(true));
+  const uncredited = warningCount(await runDscBase(false));
+  assert.equal(uncredited - credited, 1, "credit removes exactly one warning — the pair against a shard that already shipped");
+  assert.equal(credited, 1, "and nothing else changed: the remaining warning is unrelated to credit");
 });
