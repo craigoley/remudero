@@ -198,8 +198,23 @@ function fixturePlan() {
   return loadPlan(f);
 }
 
-async function tickWith(extra: Partial<Parameters<typeof runDaemon>[1]>): Promise<void> {
-  await runDaemon(
+/** One ledger row as this suite reads it. */
+interface TickRow {
+  readonly step: string;
+  readonly fields?: Record<string, unknown>;
+}
+
+/** The tick's OBSERVABLE consequences. Returning both is what lets a best-effort claim be asserted
+ *  rather than merely reached: `summary.attempted` says the tick got to the dispatch rung, and
+ *  `rows` says what the rung wrote on its way there. */
+interface TickResult {
+  readonly attempted: readonly string[];
+  readonly rows: readonly TickRow[];
+}
+
+async function tickWith(extra: Partial<Parameters<typeof runDaemon>[1]>): Promise<TickResult> {
+  const rows: TickRow[] = [];
+  const summary = await runDaemon(
     fixturePlan(),
     {
       refreshMerged: () => NONE_MERGED,   // returns the predicate; it is not the predicate
@@ -209,14 +224,18 @@ async function tickWith(extra: Partial<Parameters<typeof runDaemon>[1]>): Promis
       // rest on their REAL defaults — omitting `sweep` here ran the real one and hung the suite,
       // which is the exact trap CLAUDE.md's coverage section documents (#2237, #2248).
       sweep: async () => {},
-      log: () => {},
+      log: (step: string, fields?: Record<string, unknown>) => void rows.push({ step, fields }),
       ...extra,
     } as never,
     // `max` bounds the ITERATIONS — the field a-bound-that-stops-waiting-does-not-stop-the-work
     // uses. `maxTasks` is not an option, so passing it leaves the loop unbounded.
     { max: 1, pollIntervalMs: 1 } as never,
   );
+  return { attempted: (summary as { attempted: readonly string[] }).attempted, rows };
 }
+
+/** The one task {@link fixturePlan} offers. Reaching the dispatch rung means attempting it. */
+const DISPATCHED = ["W1-T2972FIX"];
 
 test("W1-T2972 the poll loop runs the rung ONLY on a tick that decided to fire", async () => {
   let ran = 0;
@@ -241,19 +260,42 @@ test("W1-T2972 the poll loop runs the rung ONLY on a tick that decided to fire",
 });
 
 test("W1-T2972 a run that THROWS is best-effort and never stops the tick that contains it", async () => {
-  await tickWith({
+  const { attempted, rows } = await tickWith({
     checkCiLearningCadence: () => ({ fire: true, reason: "interval elapsed" }),
     runCiLearningCadence: async () => {
       throw new Error("rung blew up");
     },
   } as never);
-  // Reaching here at all is the assertion: runDaemon resolved rather than rejecting.
-  assert.ok(true, "the tick completed despite the rung throwing");
+
+  // "Never stops the tick" is a claim about a LATER rung, so assert on that rung's output. Merely
+  // returning from runDaemon would also be true of a tick that swallowed the throw and then idled.
+  assert.deepEqual([...attempted], DISPATCHED, "the tick reached the dispatch rung after the throw");
+
+  const steps = rows.map((r) => r.step);
+  const failed = rows.find((r) => r.step === "ci_learning_cadence.run_failed");
+  assert.ok(failed, `the throw is RECORDED, not swallowed; got: ${steps.join(", ")}`);
+  assert.match(String(failed?.fields?.error ?? ""), /rung blew up/, "and the row carries the real message");
+  assert.ok(
+    !steps.includes("ci_learning_cadence.ran"),
+    "a throwing body must not also claim it ran",
+  );
+
+  // CRASH-SAFETY ORDER: the fire is recorded BEFORE the body, so a process that dies mid-run costs
+  // one skipped period instead of re-firing every poll forever. A throw is the observable proxy.
+  assert.ok(
+    steps.indexOf("ci_learning_cadence.fired") >= 0 &&
+      steps.indexOf("ci_learning_cadence.fired") < steps.indexOf("ci_learning_cadence.run_failed"),
+    `the fire must be recorded before the failure; got: ${steps.join(", ")}`,
+  );
 });
 
 test("W1-T2972 a daemon given NEITHER hook ticks exactly as it did before this change", async () => {
-  // The optionality every sibling rung relies on: absent hooks mean the block is skipped, never
-  // that the loop refuses to run.
-  await tickWith({});
-  assert.ok(true, "a daemon with no ci-learning hooks still completes its tick");
+  // The optionality every sibling rung relies on. "Behaves as before" has two halves and BOTH must
+  // be asserted: the loop still reaches dispatch, AND the rung leaves no trace. A test that only
+  // returned would pass just as happily on a block that logged a spurious skip every tick.
+  const { attempted, rows } = await tickWith({});
+
+  assert.deepEqual([...attempted], DISPATCHED, "the loop still reaches the dispatch rung");
+  const traces = rows.map((r) => r.step).filter((s) => s.startsWith("ci_learning_cadence."));
+  assert.deepEqual(traces, [], `an unwired rung must write NOTHING; got: ${traces.join(", ")}`);
 });
