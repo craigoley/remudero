@@ -1,0 +1,100 @@
+- id: W1-T2954
+  title: "THE FIX RUNG CONFUSES AN IMPLEMENT TASK'S FUTURE FILES WITH ITS CURRENT PLAN-FILING ROLE — a plan-only PR may declare src/test implementation paths, so deriving the scope regime from task.files authorizes the repair worker to add that implementation beside the shard and manufacture the Standing Rule 15 refusal it cannot recover from"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/run-task.ts, test/fix-rung-plan-filing-role.test.ts]
+  origin: "codex-lifeguard#4236-plan-filing-became-implementation-2026-09-06"
+  plan_refs: ["W1-T205", "W1-T1227", "W1-T2293", "W1-T2607", "W1-T2713", "W1-T2779"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on 2026-09-06, from GitHub's REST PR/commit records and the Azure ledger union rather
+    than the task record: PR #4236 began at `65176093d1b6` as a one-file plan-only filing for
+    W1-T2949. Its shard correctly declared the future implementation files
+    `src/lib/worker-provider.ts` and `test/worker-provider.test.ts`. A stale review at
+    08:45:47Z marked all six not-yet-built criteria unmet while also recording `planOnly:true` and
+    `reviewer_outcome:not_attempted_plan_only`. The sweep then dispatched a `reviewer-unmet` fix
+    worker at 08:56:15Z. That worker pushed `702795c5f7ca`, adding both future implementation files
+    beside the shard. On the resulting head, the current reviewer correctly failed Standing Rule
+    15 because a criterion was added beside non-plan files. CI and all six implementation proofs
+    passed; branch composition alone made the PR unmergeable.
+
+    THE STALE REVIEW IS NOT THIS TASK'S DEFECT. W1-T2713 and the current plan-only review path now
+    skip proof execution and pass plan filings deterministically; later filings #4246 and #4247
+    proved that live. The required defence still fails at current main: a bad, stale, or future
+    reviewer verdict must not give a fix worker permission to change the role of the PR it is
+    repairing.
+
+    OBSERVED at current main `7339ece5`: `outOfDeclaredScopeFiles`,
+    `fixRungScopeStandDownReason`, and `renderFixPrompt` all select the plan/files regime from
+    `declaredFiles.every(isInPlanScope)`. That asks whether the IMPLEMENT TASK eventually owns only
+    plan paths. It never asks whether the PR's captured baseline diff is plan-only. W1-T2949's task
+    declares source and test paths, so the predicate is false; `renderFixPrompt` therefore told the
+    worker that those paths were allowed, even though the branch it inherited contained only the
+    shard. The pre-strike guard uses the same wrong regime, so it also treats those additions as in
+    scope and cannot catch them after the push.
+
+    THE FALSIFYING EVIDENCE WOULD BE current main selecting the fix scope regime from the captured
+    baseline PR diff, or #4236 already containing a non-plan path before the fix dispatch. Neither
+    is true: GitHub lists only the shard in the first commit, and all three production predicates
+    derive the regime from task.files. W1-T1227 owns the existing scope prompt and pre-strike guard;
+    this is a correction to the fact they classify, not a competing guard. W1-T2293 owns
+    infrastructure-fault disposition, W1-T2713 owns plan-review scoring, W1-T2779 preserves
+    complementary PRs, and W1-T2952 owns abandoned registered-worktree recovery. None changes the
+    fix rung's plan-versus-implementation role test.
+  design: |
+    ONE CONCERN: make the fix rung preserve the role of the PR it inherited.
+
+    Derive `planOnlyFiling` from the already-captured, non-empty `baselineDiffFiles` using the
+    repository's shared `planOnlyDiff`/`isInPlanScope` predicate. Thread that observed role through
+    the existing scope selection used by both `renderFixPrompt` and
+    `fixRungScopeStandDownReason`; do not infer it from a title, branch name, task type, or task
+    files. On an observed plan-only baseline, the prompt must limit a repair to plan scope even
+    when the shard declares future src/test files, and the pre-strike guard must stand down if the
+    worker adds a non-plan path. This still permits an in-plan repair to the shard itself.
+
+    Preserve today's exact-declared-files regime for an implementation baseline. Preserve the
+    existing plan-only-task behavior when every declared task file is itself plan scoped. An
+    absent, failed, or empty baseline read must not be promoted to plan-only by guess; retain the
+    current explicit unknown/fail-open posture and telemetry. The same derived fact must feed both
+    the prompt and the post-push guard so they cannot disagree.
+
+    Do not weaken Standing Rule 15, alter review scoring, add a strike, edit a PR body or task
+    record, auto-close or auto-merge either role, reclaim a worktree, or change any daemon,
+    container, build, deployment, or systemd lifecycle behavior.
+  acceptance:
+    - claim: "a non-empty baseline diff containing only plan-scope paths is classified as a plan-only filing even when the task declares future src and test implementation files"
+      proof: "unit test: test/fix-rung-plan-filing-role.test.ts"
+    - claim: "the first fix prompt for that filing permits an in-plan shard repair but explicitly refuses adding the declared future src or test paths beside it"
+      proof: "unit test: test/fix-rung-plan-filing-role.test.ts"
+    - claim: "if a worker nevertheless adds a non-plan path to that filing, the existing pre-strike guard stands down and names the plan-scope violation before another strike is spent"
+      proof: "unit test: test/fix-rung-plan-filing-role.test.ts"
+    - claim: "an implementation baseline keeps exact declared-file scope and may still repair a declared src or test path, so ordinary red-PR automation is unchanged"
+      proof: "unit test: test/fix-rung-plan-filing-role.test.ts"
+    - claim: "an absent, failed, or empty baseline does not invent a plan-only filing role, and the prompt and guard read one shared classification"
+      proof: "unit test: test/fix-rung-plan-filing-role.test.ts"
+    - claim: "the falsifier recreates #4236's shard-only baseline with future src/test declarations and fails when scope selection is reverted to declaredFiles.every(isInPlanScope)"
+      proof: "unit test: test/fix-rung-plan-filing-role.test.ts"
+  falsifier: |
+    Close without implementation if current main already derives the fix rung's scope regime from
+    the captured baseline PR diff, or if GitHub proves #4236 carried a non-plan file before the
+    08:56:15Z fix dispatch. A change that weakens Standing Rule 15, makes every plan-only review
+    pass, or simply suppresses the stale review is not a falsifier: it leaves the repair lane able
+    to mutate a filing into an implementation the next time upstream evidence is wrong.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` on detached current `origin/main` atomically held
+    `refs/rmd-id/W1-T2954`; the RESERVED id is authoritative. Before writing, the remote run-head
+    query, main shard tree, open PR heads, and merged exact-trailer query all returned zero for
+    W1-T2954 with positive controls available on adjacent task W1-T2953.
+
+    RISK: high is blast radius. This changes whether every fix worker may edit a red PR. The
+    implementation remains one source seam plus its load-bearing test, and the implementation-
+    baseline control exists to prevent a defensive fix from stranding ordinary repairs.
+
+    OPERATOR BOUNDARY: this task changes code and tests only. It authorizes no merge, deployment,
+    image build, recycle, restart, host-unit installation, or mutation of the Azure live checkout.
