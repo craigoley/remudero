@@ -1,7 +1,7 @@
 - id: W1-T2968
   title: "A DRAFT NOBODY FILES IS A REPORT NOBODY READS — `mintCiLearningShards` returns marked, parked drafts and the verb PRINTS them, so the acceptance claim 'one firing FILES at most the ceiling many records' is satisfied by a console line and nothing enters the plan; give the rung a writer that lands each draft as a real `plan/tasks.d/` record under a reserved id"
   repo: remudero
-  depends_on: [W1-T2972]
+  depends_on: [W1-T2971]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -13,7 +13,7 @@
     - src/run-task.ts
     - test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts
   origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
-  plan_refs: ["W1-T2959", "W1-T2972", "W1-T326", "W1-T353", "W1-T413", "W1-T1004"]
+  plan_refs: ["W1-T2959", "W1-T2971", "W1-T326", "W1-T353", "W1-T413", "W1-T1004"]
   status: queued
   attempts: 0
   rationale: |

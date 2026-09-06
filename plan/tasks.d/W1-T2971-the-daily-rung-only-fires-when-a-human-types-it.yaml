@@ -1,4 +1,4 @@
-- id: W1-T2972
+- id: W1-T2971
   title: "THE DAILY CI-LEARNING RUNG ONLY FIRES WHEN A HUMAN TYPES `rmd ci-learning` — its policy row, marker and two-bound decision all ship, but nothing calls `ciLearningCadenceCheck` from the daemon's poll loop, so the loop the operator asked to run DAILY runs never; give it the check/run hook pair every sibling cadence already has"
   repo: remudero
   depends_on: [W1-T2959]
@@ -80,20 +80,25 @@
     anyway and the tick completed. Without it a daemon that crashes inside the rung re-fires it
     every poll forever.
   note: |
-    RENUMBERED TWICE on 2026-09-06, minutes after filing, and neither move changed this task's
-    content. First W1-T2967 -> W1-T2971: #4295 filed a DIFFERENT W1-T2967 ("one whole-file proof
-    cannot answer several criteria") and merged first at 0d7776e9; this shard merged second at
-    c24fad98, so main briefly carried two records claiming one id and `lint-plan` exited 2 with
-    'duplicate task id'. CLAUDE.md's contested-reservation rule settled that one without argument:
-    the LOSER of a race renumbers, and merge order names the loser.
+    A PLAN-ONLY FILING PULL REQUEST MUST CARRY A BARE `## Acceptance` HEADER AND NO
+    `Remudero-Task:` TRAILER. `acceptance-author-gate` fails CLOSED on a body with neither
+    ("review has nothing to resolve criteria from"), and the trailer is the wrong half of the
+    OR: W1-T413 credits a merged plan-only PR carrying one as the named task's implementation.
+    Both filings of this shard omitted the header and reddened that gate; recorded here because
+    the shard is what a later filer reads.
 
-    Then W1-T2971 -> W1-T2972: by the time this shard's own renumber (to W1-T2971) reached CI,
-    W1-T2971 was ALREADY independently claimed by two other still-open PRs (#4300's
-    W1-T2971-a-fired-retro-holds-the-dispatch-rung.yaml, filed the same window this shard's first
-    renumber was proposed, and #4302 citing that same id) -- neither of which had merged, so
-    `task-id-existence` read it as claimed-not-collided and refused this shard's PR outright rather
-    than let a third record chase the same number. Moving on to the next id nobody had cited
-    anywhere -- W1-T2972 -- clears that without waiting on which of the three PRs merges first.
+    AND FIX THE BODY BEFORE THE PUSH, NOT AFTER. `acceptance-author-gate` reads the PR body from
+    `GITHUB_EVENT_PATH` — the event payload, which SNAPSHOTS the body when the event fired. A
+    re-run replays that same payload, so it buys nothing, and a body edited after the push is
+    not seen until the NEXT head. Correct the body first, then push; otherwise each fix costs a
+    whole extra cycle, which is exactly what it cost here.
+
+    RENUMBERED FROM W1-T2967 TO W1-T2971 on 2026-09-06, minutes after filing. #4295 filed a
+    DIFFERENT W1-T2967 ("one whole-file proof cannot answer several criteria") and merged first
+    at 0d7776e9; this shard merged second at c24fad98, so main briefly carried two records
+    claiming one id and `lint-plan` exited 2 with 'duplicate task id'. CLAUDE.md's contested-
+    reservation rule settles it without argument: the LOSER of a race renumbers, and merge order
+    names the loser. Nothing about this task's content changed.
 
     FILED 2026-09-06 from the operator's approval of recommendation 1 after the W1-T2957/2958/2959
     arc merged. MEASURED AT d4004806: daemon.ts contains zero occurrences of `ciLearning`;
