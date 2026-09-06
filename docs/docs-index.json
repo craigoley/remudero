@@ -152,6 +152,12 @@
       "grepHint": "autonomy.ts forensics"
     },
     {
+      "path": "docs/forensics/board.md",
+      "title": "board.ts comment forensics",
+      "summary": "The measured forensics, incidents and design arguments that were removed from `src/lib/board.ts`",
+      "grepHint": "board.ts comment forensics"
+    },
+    {
       "path": "docs/forensics/ci-parity.md",
       "title": "ci-parity.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
