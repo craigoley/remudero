@@ -158,6 +158,12 @@
       "grepHint": "daemon.ts forensics"
     },
     {
+      "path": "docs/forensics/dispatch-overlap.md",
+      "title": "dispatch-overlap.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "dispatch-overlap.ts forensics"
+    },
+    {
       "path": "docs/forensics/drain.md",
       "title": "Forensics — `src/lib/drain.ts`",
       "summary": "A verbatim archive of comment blocks compacted out of `src/lib/drain.ts`. Each heading names",
