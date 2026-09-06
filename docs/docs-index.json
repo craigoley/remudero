@@ -200,6 +200,12 @@
       "grepHint": "Forensics — `src/lib/inbox.ts`"
     },
     {
+      "path": "docs/forensics/install-container-runtime-mount-order.md",
+      "title": "install-container-runtime-mount-order.sh forensics",
+      "summary": "The measured forensics, incident narrative and design arguments removed from",
+      "grepHint": "install-container-runtime-mount-order.sh forensics"
+    },
+    {
       "path": "docs/forensics/learnings.md",
       "title": "learnings.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
