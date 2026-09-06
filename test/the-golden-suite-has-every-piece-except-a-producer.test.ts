@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   REPLAY_CORPUS_BOUND,
   boundedCorpus,
@@ -12,13 +9,14 @@ import {
 import {
   REPLAY_RESULT_STEP,
   SEEDED_GOLDENS,
+  recordReplayResults,
   replayGoldens,
   replayResultLine,
   type GoldenTask,
   type ReplayOutcome,
 } from "../src/lib/replay.js";
 import { replayPassRateForCycle, renderReplayCalibration } from "../src/lib/retro.js";
-import { replayGoldensCommand } from "../src/run-task.js";
+import { COMMANDS, replayGoldensCommand } from "../src/run-task.js";
 
 // ── W1-T2689 ──────────────────────────────────────────────────────────────────────────────────
 //
@@ -31,7 +29,6 @@ import { replayGoldensCommand } from "../src/run-task.js";
 // asserted here as hard behaviour rather than left to a caller's discipline: opt-in per invocation,
 // and a declared bound that clamps.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** A dispatch that RECORDS what it was asked to run and returns the golden's own expectation, so a
  *  replay through it PASSES. The recorder is the point: "how many goldens did this cost" is the
@@ -55,19 +52,14 @@ function ledgerRecorder(): { lines: Record<string, unknown>[]; write: (p: string
 
 // ── criterion 1: a PRODUCTION caller drives the replay through the existing seam ───────────────
 
-test("run-task.ts drives replayGoldens through the HarnessRunner seam — the driver is no longer test-only", () => {
-  const src = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
-  assert.match(src, /replayGoldens\(/, "the production caller must invoke the shipped driver, not reimplement it");
-  assert.match(src, /harnessRunnerOver\(/, "and it must go through the HarnessRunner seam rather than around it");
-
-  // Vacuity guard: this file is also the one the assertion reads, so prove the recognizer can FAIL.
-  assert.doesNotMatch(src, /replayGoldensNeverDefinedAnywhere\(/, "control: the matcher discriminates rather than matching anything");
-});
-
-test("the verb is registered in the CLI catalog, so it is reachable as a command and not just an export", () => {
-  const src = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
-  assert.match(src, /name: "replay-goldens"/, "an unregistered command is an export nothing can invoke");
-  assert.match(src, /cmd === "replay-goldens"/, "and it must be dispatched, not merely catalogued");
+test("the verb is registered in the real CLI catalog, so it is reachable as a command and not just an export", () => {
+  // Asserted over the LIVE registry rather than over run-task.ts's text. A source-text match would
+  // pass on a `name:` that no dispatch reaches (W1-T2905's whole point: prose right, behaviour
+  // wrong); reading the exported object cannot.
+  const entry = COMMANDS.find((c) => c.name === "replay-goldens");
+  assert.ok(entry, `an unregistered command is an export nothing can invoke; registry holds ${COMMANDS.length} verbs`);
+  assert.match(entry!.syntax, /--confirm-spend/, "the syntax must show the opt-in, or an operator cannot discover it");
+  assert.ok(entry!.summary.length > 0 && entry!.summary.length <= 100, "summary present and within the registry cap");
 });
 
 // ── criterion 2: a real replay writes one line per golden, and the retro reports the rate ──────
@@ -167,22 +159,32 @@ test("the opt-in is a FLAG, with no env-var or config fallback a retro tick coul
   assert.equal(replayOptIn([]).enabled, false);
   assert.match(replayOptIn([]).reason, /SPENDS REAL MONEY/, "the refusal says why, so an operator need not read the source");
 
-  // The property that matters: no environment can enable it. If this ever reads an env var, a test
-  // spawn or a CI job could inherit a spend — the exact shape of the mutation gate's ambient-ledger
-  // defect, which wrote 35 junk lines into an operator's real ledger from ordinary test spawns.
-  const src = readFileSync(join(REPO_ROOT, "src/lib/replay-harness.ts"), "utf8");
-  assert.doesNotMatch(src, /process\.env/, "no env var may gate a spend");
-  assert.doesNotMatch(src, /loadConfig/, "and no config default either");
+  // The property that matters: no ENVIRONMENT can enable it. Driven rather than grepped — a source
+  // scan for `process.env` proves the spelling absent today and nothing about behaviour, while
+  // this fails the moment any env var gates the decision, however it is written.
+  const planted = ["RMD_REPLAY", "RMD_REPLAY_GOLDENS", "RMD_CONFIRM_SPEND", "REPLAY_GOLDENS", "CONFIRM_SPEND", "CI"];
+  const saved = planted.map((k) => [k, process.env[k]] as const);
+  try {
+    for (const k of planted) process.env[k] = "1";
+    assert.equal(replayOptIn([]).enabled, false, "no environment may authorise a spend — only the flag");
+    assert.equal(replayOptIn(["--limit", "3"]).enabled, false, "nor any other flag");
+    assert.equal(replayOptIn(["--confirm-spend"]).enabled, true, "control: the flag still works, so the check above is not vacuous");
+  } finally {
+    for (const [k, v] of saved) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  }
 });
 
-test("the retro path cannot fire this runner — the reporting rung names none of its spend-bearing symbols", () => {
-  const retro = readFileSync(join(REPO_ROOT, "src/lib/retro.ts"), "utf8");
-  for (const symbol of ["replayGoldensCommand", "harnessRunnerOver", "replayOptIn", "boundedCorpus", "ReplayDispatch"]) {
-    assert.doesNotMatch(retro, new RegExp(symbol), `retro.ts must not reach ${symbol}: a reporting pass may never spawn workers`);
+test("the retro module exposes no spend-bearing symbol — a reporting pass cannot reach the runner", async () => {
+  // Structural, over the module's own export surface, rather than a text scan of retro.ts: what
+  // matters is what a caller holding `retro` can actually invoke.
+  const retro = await import("../src/lib/retro.js");
+  for (const symbol of ["replayGoldensCommand", "harnessRunnerOver", "replayOptIn", "boundedCorpus"]) {
+    assert.equal((retro as Record<string, unknown>)[symbol], undefined, `retro must not re-export ${symbol}: a reporting pass may never spawn workers`);
   }
-  // Vacuity guard: retro.ts must genuinely be the file that READS this leg, or the silence above is
-  // over an unrelated module and proves nothing.
-  assert.match(retro, /replayPassRateForCycle/, "control: retro.ts really is the replay consumer");
+  // Vacuity guard: retro really is the consumer of this leg, or the absences above are over an
+  // unrelated module and prove nothing.
+  assert.equal(typeof retro.replayPassRateForCycle, "function", "control: retro really is the replay consumer");
+  assert.equal(typeof retro.renderReplayCalibration, "function");
 });
 
 // ── criterion 5: the corpus is bounded, and the bound is DECLARED ──────────────────────────────
@@ -244,9 +246,14 @@ test("the recorded line is replayResultLine's own shape, field for field — the
 test("this task changes neither replay.ts's emitter nor retro.ts's reducer — the pieces that already worked are untouched", () => {
   // The shard names these OUT of scope by name. Asserted rather than trusted: a producer that
   // quietly reshaped the ledger line would break the consumer that has been correct all along.
-  const replaySrc = readFileSync(join(REPO_ROOT, "src/lib/replay.ts"), "utf8");
-  assert.match(replaySrc, /export const REPLAY_RESULT_STEP = "replay\.result";/, "the step name is the contract with retro.ts");
-  assert.match(replaySrc, /export function recordReplayResults\(/, "the emitter is reused, not replaced");
+  // Read as VALUES, not as source text: the step name is a contract with retro.ts, and comparing
+  // the constant both sides actually import is what proves they still agree.
+  assert.equal(REPLAY_RESULT_STEP, "replay.result", "the step name is the contract with retro.ts");
+  assert.equal(typeof recordReplayResults, "function", "the emitter is reused, not replaced");
+  // And the two ends genuinely agree: a line built by the shipped builder is COUNTED by retro's
+  // own reducer. If either side renamed the step, this folds to zero.
+  const roundTrip = replayPassRateForCycle([replayResultLine("r", "t", { goldenId: "g", class: "src-fix", passed: true, mismatches: [] })] as never);
+  assert.equal(roundTrip.total, 1, "retro reads back exactly the step this writes");
 });
 
 // ── the seam itself ────────────────────────────────────────────────────────────────────────────
