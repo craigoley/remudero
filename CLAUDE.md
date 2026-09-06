@@ -272,12 +272,12 @@ carried had gone stale. Each rule cites the PR that earned it.
   cap is sized against this repo's real required-check wall-clock, so a green-in-progress sibling is
   waited out rather than timed out (W1-T312, `WAIT_CAP_SECONDS` in `.github/workflows/ci-gate.yml`).
   Both are FIXED; the citations are the detail. *(#873/#877, W1-T261/#885, W1-T312)*
-- **NEVER BACKGROUND A POLLER OR ARM A CHECK-IN — do not loop on `gh pr view`, `gh run view` or any
-  API call waiting for a state change. Report what you know and STOP.** A lane polled 80 times at a
-  45-second cadence against an 8-13 minute CI cycle, exhausted the shared budget and locked the
-  operator out of his own repo for ~90 minutes, while single calls 403'd and `/rate_limit` still read
-  204 of 5000 used — the ceiling hit was the SECONDARY limit, which counts CADENCE, NOT VOLUME.
-  A wait is the operator's to schedule, never yours. *(2026-08-20 — the ninety-minute lockout)*
+- **CADENCE IS THE BUDGET, NOT INTENT — never loop on `gh pr view`, `gh run view` or any API call
+  waiting for a state change; ONE sparse check-in is fine, a poll is not.** A lane polled 80 times
+  at a 45-second cadence against an 8-13 minute CI cycle, exhausted the shared budget and locked the
+  operator out for ~90 minutes while single calls 403'd at 204 of 5000 used — the ceiling hit was
+  the SECONDARY limit, counting RATE, NOT VOLUME. An hourly re-check keeps a watched PR watched;
+  minutes apart is a poll. *(2026-08-20 lockout; "never arm a check-in" corrected 2026-09-06)*
 - **`gh pr create` is GraphQL and dies with "API rate limit already exceeded" when that budget is
   spent** (frequent on this account while REST/core stays healthy). Open PRs via REST:
   `gh api --method POST repos/<owner>/<repo>/pulls -f title=… -f head=… -f base=main -F body=@<file>`.
