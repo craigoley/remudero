@@ -290,6 +290,12 @@
       "grepHint": "panel-graph.ts comment forensics"
     },
     {
+      "path": "docs/forensics/plan-pr-emitter.md",
+      "title": "Forensics — `src/lib/plan-pr-emitter.ts`",
+      "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/plan-pr-emitter.ts` when its",
+      "grepHint": "Forensics — `src/lib/plan-pr-emitter.ts`"
+    },
+    {
       "path": "docs/forensics/proof-queue-audit.md",
       "title": "proof-queue-audit.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
