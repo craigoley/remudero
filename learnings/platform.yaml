@@ -275,7 +275,9 @@
     process launched with", never "what is it using now" — an investigation that
     reads it to find a credential a long-running daemon rotated in-process gets a
     confident, wrong, and entirely stale answer. Read the mutation at its own
-    seam instead.
+    seam instead. LINUX ONLY: macOS has no /proc at all, so on the mini the file
+    is not stale, it is absent — a probe written against it there fails to open
+    rather than answering wrongly, which is the louder of the two failures.
   assertion: '[ -r /proc/$$/environ ] || exit 0; RMD_ENVIRON_PROBE=1; export RMD_ENVIRON_PROBE;
     grep -qa RMD_ENVIRON_PROBE /proc/$$/environ && exit 1 || exit 0'
   src: operator-session token investigation withdrawn 2026-09-04; probe re-derived 2026-09-06
