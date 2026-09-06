@@ -18,7 +18,7 @@ import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
-import { isHolderStale, reclaimStaleLock, type FileIdentity } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 
 /** Append-only NDJSON ledger (MASTER-PLAN §9). One JSON object per line, keyed by task id; `ts` and
@@ -637,31 +637,14 @@ function readSyncRange(path: string, start: number, end: number): string {
   }
 }
 
-/** Writes `content` as ONE atomic unit: staged into a same-directory temp file with a single
- *  writeSync, then swapped in with a single renameSync, so a concurrent reader sees the whole old
- *  file or the whole new one. `content` accepts a `Buffer` (gzip's output, W1-T2482).
- *  `beforeRename` (R-1) runs with the stage fully written, immediately before the rename; returning
- *  `false` withdraws the swap and leaves the path as it was — how {@link rotateLedger} refuses to
- *  rename over a live file that is no longer the inode it snapshotted. */
+/** The rotation's atomic write — the shared primitive since W1-T2899. `content` accepts a
+ *  `Buffer` (gzip's output, W1-T2482). `beforeRename` (R-1) runs with the stage fully written,
+ *  immediately before the rename; returning `false` withdraws the swap, which is how
+ *  {@link rotateLedger} refuses to rename over a file that is no longer the inode it snapshotted.
+ *  The `rotate-tmp` tag is kept so ledger-grep.ts's `ledgerRotationEntries` cannot mistake a
+ *  stage for an archive. */
 function writeFileAtomic(path: string, content: string | Buffer, beforeRename?: () => boolean): boolean {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmpPath = `${path}.rotate-tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
-  const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8");
-  const fd = openSync(tmpPath, "w");
-  try {
-    const written = writeSync(fd, buf, 0, buf.length);
-    if (written !== buf.length) {
-      console.error(`ledger: short write staging ${tmpPath} for rotation of ${path} (${written}/${buf.length} bytes)`);
-    }
-  } finally {
-    closeSync(fd);
-  }
-  if (beforeRename && !beforeRename()) {
-    rmSync(tmpPath, { force: true }); // withdraw the stage; leave nothing behind
-    return false;
-  }
-  renameSync(tmpPath, path);
-  return true;
+  return writeAtomic(path, content, { beforeRename, tmpTag: "rotate-tmp" });
 }
 
 /** The whole live file read through ONE descriptor, with that descriptor's `fstat` identity, so

@@ -1,3 +1,4 @@
+import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
 import { execFileSync } from "node:child_process";
 // Imported as the module's DEFAULT export (a plain, mutable object), never as named
 // bindings (`import { existsSync } from "node:fs"`) — the same W1-T115 "assert via
@@ -9,7 +10,7 @@ import { execFileSync } from "node:child_process";
 // injected fake) needs every call here to be a live `fs.<method>(...)` property lookup,
 // never a destructured local const.
 import fs from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 /**
  * `rmd onboard <target-dir> --phase inventory` — phase 1 of the four-phase `rmd onboard`
@@ -416,14 +417,11 @@ export interface OnboardInventoryResult {
   writtenPath: string;
 }
 
-/** Sibling-temp-file + `renameSync` atomic write (mirrors `writeFileAtomic` in
- *  src/lib/ledger.ts / `writeDraftAttemptPair` in src/lib/inbox.ts) — a reader never
- *  observes a partial/truncated inventory.json. */
+/** Atomic write of inventory.json through the shared primitive (W1-T2899) — a reader never sees
+ *  a partial file. The INJECTED seam is kept because this module's tests spy on fsDeps; the cost
+ *  is the fsync only the default io can do (see {@link writeAtomicIoFrom}). */
 function writeInventoryAtomic(fsDeps: OnboardFsDeps, path: string, content: string): void {
-  fsDeps.mkdirSync(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-  fsDeps.writeFileSync(tmpPath, content);
-  fsDeps.renameSync(tmpPath, path);
+  writeAtomic(path, content, { io: writeAtomicIoFrom(fsDeps) });
 }
 
 /**

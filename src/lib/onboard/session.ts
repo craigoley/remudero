@@ -4,8 +4,9 @@
 // bindings off `node:fs` are non-configurable, so a test that wants to prove "the only
 // writes are answers.json + ledger.ndjson" by spying on the REAL module needs every call
 // site below to be a live `fs.<method>(...)` property lookup, never a destructured local.
+import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
 import fs from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { Inventory } from "./inventory.js";
 
 /**
@@ -313,13 +314,10 @@ function ledgerPathFor(targetDir: string): string {
   return join(targetDir, "plan", "onboarding", "ledger.ndjson");
 }
 
-/** Atomic temp-file + `renameSync` write — the SAME idiom as recon.ts's
- *  `writeReconArtifactAtomic` / inventory.ts's `writeInventoryAtomic`. */
+/** Atomic JSON write through the shared primitive (W1-T2899). The INJECTED seam is kept for
+ *  the reason inventory.ts's `writeInventoryAtomic` gives. */
 function writeJsonAtomic(fsDeps: SessionFsDeps, path: string, value: unknown): void {
-  fsDeps.mkdirSync(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-  fsDeps.writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n");
-  fsDeps.renameSync(tmpPath, path);
+  writeAtomic(path, JSON.stringify(value, null, 2) + "\n", { io: writeAtomicIoFrom(fsDeps) });
 }
 
 /** Read `plan/onboarding/answers.json`; `{}` when absent. A PRESENT but malformed file

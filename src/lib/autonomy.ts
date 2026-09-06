@@ -1,83 +1,27 @@
-// lib/autonomy.ts — THE QUANTITY HALF (W1-T437), sibling to lib/verdict-calibration.ts's
-// CORRECTNESS join (W1-T424).
-//
-// THE GAP THIS CLOSES. `decideAutoMergeArm` and the arming ledger, strike counts and breaker
-// gates are all CORRECTNESS machinery — they answer "was this merge safe". Nothing answers the
-// QUANTITY question Warp's factory framing puts first: what fraction of shipped changes went
-// out with ZERO human steering, and what did the steered remainder cost. This module is that
-// number: {@link zeroTouchMergeRate}, pure over an injected merge corpus and ledger union.
-//
-// THE CORPUS: every commit on the target ref whose body carries an anchored
-// `Remudero-Task: <id>` trailer (this repo's own PR-body convention — see
-// `findMergedByTrailer`'s measured anchor `^Remudero-Task: <id>$`), read from the SAME git-log
-// dump shape `defaultVerdictCalibrationGitLog` (run-task.ts) already produces —
-// {@link parseTrailerMerges} runs over `lib/verdict-calibration.ts`'s `parseGitEventDump`
-// output, so this module adds no new git plumbing.
-//
-// THE TOUCH SIGNALS, each named on the row it fires for (never collapsed into a bare boolean):
-//   - not auto-armed: no `automerge.armed` ledger line for the task at all — the merge shipped
-//     by some path {@link import("./review.js").decideAutoMergeArm} never blessed.
-//   - fix-rung strikes: a `fix.resolved` or `fix.exhausted` line naming `strikes > 0` — a worker
-//     needed at least one automated repair round. (Strikes are dispatched fix WORKERS, not a
-//     human hand — but design note (i) counts them as a touch because a strike-bearing merge
-//     needed MORE than the first pass, which is exactly the "cost" half of the dial; see the
-//     module's own falsifier test for why this reads correctly against "zero human steering":
-//     a strike is machine-only, but it is not zero-cost, and the rate this module reports is
-//     framed as ZERO-TOUCH, not zero-strike — see {@link MergeTouchRow.touches}' wording.)
-//   - reframe: a `ratify.reframed` line for the task — an operator sent the proposal back for
-//     rework before it shipped.
-//   - operator note: a `panel.operator_note_added` line for the task — an operator hand-authored
-//     guidance into this task's run.
-//   - capped override: an `automerge.capped_override_granted` line for the task — an operator
-//     explicitly approved arming a CAPPED (zero-proof) verdict.
-//   - fix-rung human evidence: a `fix.stood_down` line carrying `issue_url` — the fix rung
-//     detected a foreign (human) push mid-strike and stood down rather than clobbering it.
-//
-// A row with NONE of the above is zero-touch. A row with any of them is human-touched, and
-// EVERY firing touch is named on it — never just the first one found (design (iv)'s falsifier:
-// "deleting the touch attribution fails this").
-//
-// THE ZGROUP-UNION LESSON, STRUCTURAL: {@link mineAutonomyLedgerLines} reads the ledger through
-// `lib/ledger-grep.ts`'s `resolveLedgerUnion` — archives + live file, never the live file alone.
-// When zero archive files are found, {@link zeroTouchMergeRate} reports the WHOLE window
-// UNMEASURED, naming the missing-archive reason, rather than silently computing a rate over
-// whatever the live file alone happened to hold — the same undercount `resolveLedgerUnion`'s own
-// module doc measured at 3.1x.
-//
-// SPLIT BY VERDICT CLASS (design (ii)): every row is also classified `full-pass` /
-// `keyword-floor` / `degraded-arm` (or `null` when no `review.posted` line for the task could be
-// found), reusing lib/verdict-calibration.ts's exact three-way vocabulary — the class split is
-// what makes the number actionable, because it says where the next ratchet notch is safe: a
-// zero-touch rate over full-PASS proof-executed merges is a different trust signal than one over
-// capped/override merges.
-//
-// THE RATCHET IS AN OPERATOR ACT, NOT THIS MODULE'S: {@link CURRENT_ARMING_POSTURE} is a fixed
-// description of what `decideAutoMergeArm` does TODAY, printed alongside the measured rate so a
-// reader can see posture and evidence side by side — this module changes no policy, writes no
-// policy file, and proposes no threshold.
-//
-// NOT IN SCOPE: changing decideAutoMergeArm or any arming policy; W1-T424's revert-join
-// correctness measurement (that is the quality of what shipped; this is the quantity that
-// shipped untouched); alerting or thresholds on the rate.
-//
-// PER-REPO SPLIT (W1-T2492): a harness that works on OTHER repos (`onboard`, `managed-repos.ts`,
-// `rmd daemon --repo`) but only ever measures itself reports one blended rate that a foreign
-// repo's merges cannot move once this repo dominates the denominator — the unstated-denominator
-// shape this repo already refuses everywhere else. `zeroTouchMergeRate` now ALSO splits every row
-// into a `repos: RepoOutcome[]` breakdown, ADDITIVELY: the top-level fields are unchanged, and
-// `repos` carries the same population-floor and no-naked-zero discipline the class split already
-// has (below {@link MIN_REPO_POPULATION_FLOOR} rows prints the count and refuses the rate; zero
-// rows still prints, never omits). A merge's repo comes from `opts.repoOf(taskId)` — this module
-// does no plan I/O of its own, so a caller (run-task.ts's `autonomyRateCommand`) supplies it from
-// the loaded plan's `task.repo` field; a taskId the resolver cannot place lands in
-// {@link UNATTRIBUTABLE_REPO}, never dropped. `opts.knownRepos` names every repo that should be
-// reported even at zero merges (an onboarded-but-idle repo is a finding, not an absent row) —
-// omitted, only repos that actually appear in the corpus are reported. Omitting `repoOf` entirely
-// (every existing caller before this task) makes every merge unattributable, which is the honest
-// answer when the caller supplies no way to place a merge — see the module's own falsifier test
-// for why a single explicit `repoOf` mapping every merge to ONE repo string reproduces exactly
-// the report this module already printed (design: "absent a second repo the per-repo report is
-// the single-repo report it already prints").
+// lib/autonomy.ts — the QUANTITY half of the autonomy measurement (W1-T437), sibling to
+// verdict-calibration.ts's CORRECTNESS join (W1-T424). Correctness machinery — decideAutoMergeArm,
+// the arming ledger, strike counts, breaker gates — answers "was this merge safe"; this module
+// answers what fraction of shipped changes needed zero human steering, and what the steered
+// remainder cost. {@link zeroTouchMergeRate} is the pure core.
+
+// TWO CORPORA, both injected, no I/O of its own: the merge record ({@link parseTrailerMerges},
+// every commit whose body carries an anchored `Remudero-Task: <id>` trailer) and the ledger union
+// ({@link mineAutonomyLedgerLines}, read via `resolveLedgerUnion` — archives plus the live file,
+// never the live file alone; a missing or partial archive reports the window UNMEASURED rather
+// than an undercount from whatever the live file alone held).
+
+// INVARIANT: a merge is zero-touch only when none of classifyRow's six touch signals fire, and
+// every firing signal is named on its row — never just the first found.
+// INVARIANT: every row is also split by verdict class (full-pass/partial-pass/keyword-floor/
+// degraded-arm/unclassified) and by repo ({@link RepoOutcome}; below {@link
+// MIN_REPO_POPULATION_FLOOR} rows the rate is refused, never a naked zero).
+
+// NOT IN SCOPE: changing decideAutoMergeArm or any arming policy (a reviewed diff to
+// lib/review.ts); verdict-calibration.ts's own correctness measurement; alerting or thresholds.
+
+// FALSIFIER: test/autonomy-ratchet.test.ts and the windowed-union / per-repo sibling suites.
+// Why: the corpus derivation, the per-repo split's design argument and every measured incident
+// behind these invariants are archived in docs/forensics/autonomy.md#module-header.
 
 import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
 import { parseGitEventDump, type GitCommitEvent, type VerdictClass } from "./verdict-calibration.js";
@@ -85,16 +29,11 @@ import { parseGitEventDump, type GitCommitEvent, type VerdictClass } from "./ver
 export type { VerdictClass };
 
 /**
- * W1-T1020: this module's OWN extension of `verdict-calibration.ts`'s three-way
- * {@link VerdictClass} vocabulary with a fourth bucket — `"partial-pass"`, a row whose
- * `review.posted` line carries `partially_executed: true` (SOME but not ALL executable
- * criteria observed). Local to autonomy.ts, never added to `verdict-calibration.ts` itself:
- * that module's own correctness-join corpus and this module's quantity report are deliberately
- * separate measurements (see this module's header doc), and widening the shared three-way type
- * would ripple into verdict-calibration.ts's report shape for no reason this task asked for.
- * Before this, a partially-executed row fell through `verdictClassOf`'s `capped`/`floor_degraded`
- * checks into the catch-all `"full-pass"` return — indistinguishable from a review that actually
- * observed every executable criterion.
+ * This module's own fourth verdict-class bucket, added to {@link VerdictClass}: `"partial-pass"` —
+ * some but not all executable criteria observed (`partially_executed: true` on `review.posted`).
+ * Kept local to autonomy.ts, since this module's quantity report and verdict-calibration.ts's
+ * correctness report are deliberately separate measurements.
+ * Why: docs/forensics/autonomy.md#autonomyverdictclass (W1-T1020).
  */
 export type AutonomyVerdictClass = VerdictClass | "partial-pass";
 
@@ -108,16 +47,12 @@ export interface MergeRecord {
   ts: string;
 }
 
-/** Anchored exactly like `findMergedByTrailer`'s own measured form (`^Remudero-Task: <id>$`,
- *  one trailer line, no prefix/suffix noise) — MEASURED over 1,169+ merged PR bodies elsewhere
- *  in this repo's own history as the trailer's real shape. */
+// Anchored exactly like findMergedByTrailer's own trailer shape: one line, no prefix or suffix.
+// Why: docs/forensics/autonomy.md#trailer_re (measured over 1,169+ merged PR bodies).
 const TRAILER_RE = /^Remudero-Task:\s*(\S+)\s*$/m;
 
-/**
- * Extract every trailer-bearing commit from a `parseGitEventDump`-shaped dump — the "merge
- * record" half of this module's two corpora. A commit with no `Remudero-Task:` trailer line in
- * its body is silently excluded (it is not a trailer-bearing merge, not a malformed one).
- */
+/** Every trailer-bearing commit in a `parseGitEventDump`-shaped dump — the merge-record half of
+ *  this module's two corpora. A commit with no `Remudero-Task:` trailer is silently excluded. */
 export function parseTrailerMerges(gitDump: string): MergeRecord[] {
   const merges: MergeRecord[] = [];
   for (const c of parseGitEventDump(gitDump)) {
@@ -130,8 +65,8 @@ export function parseTrailerMerges(gitDump: string): MergeRecord[] {
 
 // ── The ledger side ──────────────────────────────────────────────────────────────────────────
 
-/** Every ledger step this module reads, matched in ONE `resolveLedgerUnion` pass (the same
- *  single-read discipline `mineVerdictRows` uses for its own two steps). */
+/** Every ledger step this module reads, in one `resolveLedgerUnion` pass — same single-read
+ *  discipline as `mineVerdictRows`. */
 const LEDGER_STEP_PATTERN =
   /"step":"(?:automerge\.armed|automerge\.capped_override_granted|review\.posted|fix\.resolved|fix\.exhausted|fix\.stood_down|ratify\.reframed|panel\.operator_note_added)"/;
 
@@ -145,25 +80,17 @@ function parseLedgerJson(raw: string): Record<string, unknown> | null {
 }
 
 export interface AutonomyLedgerMining {
-  /** ALWAYS set — unlike a "nothing to look for" skip, this module always attempts the read;
-   *  `ledger.ok === false` is exactly the missing-archive case this module's UNMEASURED verdict
-   *  reports honestly. */
+  /** Always set — `ledger.ok === false` is the missing-archive case reported as UNMEASURED. */
   ledger: LedgerUnionResult;
   /** Every matched line, grouped by `task_id`. Empty when `!ledger.ok`. */
   linesByTaskId: ReadonlyMap<string, Record<string, unknown>[]>;
 }
 
 /**
- * Mine every touch-relevant ledger line under `stateDir`, over the ledger UNION (never the live
- * file alone — see the module doc). Pure apart from the injected fs.
- *
- * `opts.since` (W1-T2484) is this module's proof of `resolveLedgerUnion`'s new window parameter:
- * a caller who only wants merges from some instant onward can pass it straight through, and any
- * rotation stamped before it is skipped WITHOUT being opened (see `LedgerUnionOptions.since` and
- * `ledger-grep.ts`'s module doc for why that skip cannot drop a matching row). OMITTED, this
- * reads the same unwindowed union it always has — the eight other `resolveLedgerUnion` callers
- * are deliberately left unconverted (see this repo's W1-T2484 plan record) and stay correct
- * exactly because the parameter is optional.
+ * Mines every touch-relevant ledger line under `stateDir`, over the ledger union — never the live
+ * file alone; see the module doc. Pure apart from the injected fs. `opts.since` skips rotations
+ * stamped before an instant without opening them; omitted, this reads the same unwindowed union.
+ * Why: docs/forensics/autonomy.md#mineautonomyledgerlines (W1-T2484).
  */
 export function mineAutonomyLedgerLines(
   stateDir: string,
@@ -199,10 +126,7 @@ export interface MergeTouchRow {
   touches: string[];
 }
 
-/** Per verdict-class outcome — `verdictClass` is `"unclassified"` for rows whose
- *  `review.posted` line could not be recovered, kept as its OWN bucket rather than folded into
- *  any of the four real classes (a guess would misreport which class the ratchet is safe to
- *  move). */
+/** Per verdict-class outcome; `"unclassified"` is its own bucket for an unrecoverable class, never guessed. */
 export interface ZeroTouchClassOutcome {
   verdictClass: AutonomyVerdictClass | "unclassified";
   total: number;
@@ -212,9 +136,8 @@ export interface ZeroTouchClassOutcome {
 }
 
 export interface ZeroTouchMergeRateReport {
-  /** `"unmeasured"` when the ledger union could not be read (zero archive files) — see the
-   *  module doc's zgrep-union lesson. Every other field is a zeroed/empty placeholder in that
-   *  state; `reason` is always set. */
+  /** `"unmeasured"` when the ledger union could not be read; every other field is a zeroed
+   *  placeholder in that state and `reason` is always set. */
   status: "measured" | "unmeasured";
   reason?: string;
   windowDescription: string;
@@ -227,19 +150,16 @@ export interface ZeroTouchMergeRateReport {
   zeroTouchRate: number | null;
   rows: MergeTouchRow[];
   classes: ZeroTouchClassOutcome[];
-  /** W1-T2492: the SAME rows split by repo instead of by verdict class — see this module's
-   *  PER-REPO SPLIT doc above. Always present, additively: with every merge attributed to one
-   *  repo, `repos` has exactly one entry whose `total`/`zeroTouchCount`/`zeroTouchRate` equal
-   *  this report's own top-level fields (the single-repo report is unchanged). */
+  /** The same rows split by repo instead of verdict class (W1-T2492); with one repo attributed
+   *  to every merge, equals the top-level fields exactly. Why: docs/forensics/autonomy.md#module-header. */
   repos: RepoOutcome[];
-  /** Design (iii): the rendering names the current arming posture beside the measured rate —
-   *  this module proposes no change to it. */
+  /** The current arming posture, printed beside the measured rate; proposes no change to it. */
   armingPosture: string;
 }
 
-/** Printed verbatim alongside the rate (design (iii)) — describes what `decideAutoMergeArm`
- *  (lib/review.ts) does TODAY. Moving this policy is a reviewed diff to that function, never a
- *  side effect of reading this report. */
+/** Describes what `decideAutoMergeArm` (lib/review.ts) does today; printed alongside the
+ *  measured rate. Moving this policy is a reviewed diff to that function, never a side effect of
+ *  reading this report. */
 export const CURRENT_ARMING_POSTURE =
   "decideAutoMergeArm arms unconditionally on a full-PASS verdict; also arms — naming the partial " +
   "shape in its reason, never asserting a full PASS — on a PARTIAL-PASS verdict (some but not all " +
@@ -258,35 +178,28 @@ const CLASS_ORDER: readonly (AutonomyVerdictClass | "unclassified")[] = [
 
 // ── The per-repo split (W1-T2492) ───────────────────────────────────────────────────────────
 
-/** Sentinel bucket for a merge whose `taskId` a supplied `repoOf` could not place — reported as
- *  its OWN row, exactly like `ZeroTouchClassOutcome`'s `"unclassified"` bucket, never dropped. */
+/** Sentinel for a `taskId` a supplied `repoOf` could not place — its own row, never dropped. */
 export const UNATTRIBUTABLE_REPO = "(unattributable)";
 
-/** Below this many rows for a repo, the per-repo report prints the count and REFUSES the rate —
- *  same discipline as `lib/verdict-calibration.ts`'s `MIN_POPULATION_FLOOR`, kept as this
- *  module's OWN constant (not imported) because the two reports measure different populations
- *  and moving one floor must never silently move the other. */
+/** Below this many merges, a repo's rate is refused (the count still prints) — this module's
+ *  own floor, never imported from verdict-calibration.ts's, since the two measure different
+ *  populations. Why: docs/forensics/autonomy.md#min_repo_population_floor. */
 export const MIN_REPO_POPULATION_FLOOR = 5;
 
-/** One repo's slice of the zero-touch rate. `total` is the denominator, always named (never a
- *  silently shrunken one) — a repo can appear here at `total: 0` (onboarded, nothing merged yet)
- *  or below the floor (merged too little to support a rate) without being omitted. */
+/** One repo's slice of the rate; `total` is always named, even at 0 or below the floor. */
 export interface RepoOutcome {
   repo: string;
   total: number;
   zeroTouchCount: number;
   /** `null` exactly when `rateRefusedReason` is set. */
   zeroTouchRate: number | null;
-  /** `"zero-merges"`: `total === 0` (an onboarded repo that merged nothing this window).
-   *  `"below-population-floor"`: `0 < total < MIN_REPO_POPULATION_FLOOR`.
-   *  `"corpus-unmeasured"`: the whole window is `status: "unmeasured"` — `total` still counts
-   *  the trailer-bearing merges the git corpus attributed to this repo (that read never touched
-   *  the ledger), but which of them were zero-touch could not be determined. */
+  /** `"zero-merges"`: nothing merged. `"below-population-floor"`: too little to support a rate.
+   *  `"corpus-unmeasured"`: the ledger union was unreadable — `total` still counts, but which
+   *  merges were zero-touch could not be determined. */
   rateRefusedReason?: "zero-merges" | "below-population-floor" | "corpus-unmeasured";
 }
 
-/** Unattributable sorts last; everything else alphabetically — a stable, reviewable order that
- *  never depends on corpus iteration order. */
+/** Unattributable sorts last; everything else alphabetically, for a stable, reviewable order. */
 function sortRepoKeys(repos: readonly string[]): string[] {
   return [...repos].sort((a, b) => {
     if (a === UNATTRIBUTABLE_REPO) return b === UNATTRIBUTABLE_REPO ? 0 : 1;
@@ -348,8 +261,7 @@ function verdictClassOf(lines: readonly Record<string, unknown>[]): AutonomyVerd
   if (!posted) return null;
   if (posted.capped === true) return "degraded-arm";
   if (posted.floor_degraded === true) return "keyword-floor";
-  // W1-T1020: SOME but not ALL executable criteria observed — checked before the catch-all so a
-  // partially-executed row is never indistinguishable from a fully-observed full-pass.
+  // Checked before the catch-all, so a partially-executed row is never mistaken for full-pass.
   if (posted.partially_executed === true) return "partial-pass";
   return "full-pass";
 }
@@ -364,6 +276,9 @@ function strikeCount(lines: readonly Record<string, unknown>[]): number {
   return max;
 }
 
+/** Zero-touch means none of six signals fired: not auto-armed, a fix-rung strike, a reframe, an
+ *  operator note, a capped override, or fix-rung human evidence — each named on the row it fires
+ *  for. Why: docs/forensics/autonomy.md#module-header. */
 function classifyRow(taskId: string, sha: string, ts: string, lines: readonly Record<string, unknown>[]): MergeTouchRow {
   const touches: string[] = [];
 
@@ -402,28 +317,22 @@ function classifyRow(taskId: string, sha: string, ts: string, lines: readonly Re
 }
 
 /**
- * ENTRY EXPORT (the name is load-bearing — see the module doc and the acceptance grep). PURE
- * over its two supplied corpora: `merges` (from {@link parseTrailerMerges}) and
- * `ledgerMining` (from {@link mineAutonomyLedgerLines}) — no I/O of its own.
- *
- * FALSIFIER-shaped by construction (design (iv)): a window with one auto-armed strike-free merge
- * and one reframed merge reports 50% with the reframed merge's touch NAMED; a window whose
- * ledger union could not be read (`ledgerMining.ledger.ok === false`) reports UNMEASURED with
- * the missing-archive reason, never a rate computed from the live file alone.
+ * Entry export — the name is load-bearing (see the module doc and the acceptance grep). Pure over
+ * its two supplied corpora, `merges` and `ledgerMining`; no I/O of its own.
+ * FALSIFIER: a mixed window reports the rate with the touched merge's touch named; an unreadable
+ * ledger union reports UNMEASURED, never a rate computed from the live file alone.
+ * Why: docs/forensics/autonomy.md#zerotouchmergerate.
  */
 export function zeroTouchMergeRate(
   merges: readonly MergeRecord[],
   ledgerMining: AutonomyLedgerMining,
   opts: {
     windowDescription?: string;
-    /** Attributes a merge's `taskId` to the repo its plan record targets. Absent/`undefined`
-     *  return for a given `taskId` lands that merge in {@link UNATTRIBUTABLE_REPO}, never
-     *  dropped. Omitted entirely, every merge is unattributable — the honest answer when the
-     *  caller supplies no way to place one (see the module's PER-REPO SPLIT doc). */
+    /** Attributes a `taskId` to its repo; absent/undefined lands the merge in
+     *  {@link UNATTRIBUTABLE_REPO}. Omitted entirely, every merge is unattributable. */
     repoOf?: (taskId: string) => string | undefined;
-    /** Repos to report even at zero merges (an onboarded-but-idle repo is a finding, not an
-     *  absent row) — e.g. every distinct `task.repo` in the loaded plan. Omitted, only repos
-     *  that actually appear in the corpus are reported. */
+    /** Repos to report even at zero merges — an onboarded-but-idle repo is a finding, not an
+     *  absent row. Omitted, only repos that appear in the corpus are reported. */
     knownRepos?: readonly string[];
     /** Overrides {@link MIN_REPO_POPULATION_FLOOR} — test-only in practice. */
     minRepoPopulationFloor?: number;
