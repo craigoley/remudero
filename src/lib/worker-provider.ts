@@ -1251,15 +1251,6 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     [":tmpdir", "write"],
     ...disposableReadRoots.map((root) => [root, "read"]),
   ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(",");
-  // W1-T2946: `network.enabled=true` here does NOT grant reachable network — it turns ON the
-  // enforcing proxy this profile is routed through (`--enable network_proxy`, below), the ONLY
-  // egress path a disposable review gets. With no `permissions.rmd_review.network.domains` entry,
-  // that proxy's allowlist is empty, so every outbound destination is refused (verified live:
-  // `curl https://example.com` returns HTTP 403 through it). The plain kernel-level network DENY
-  // this replaced (bare `--sandbox workspace-write`, no proxy) also blocked the AF_UNIX socketpair
-  // Node's synchronous child-process IPC needs, breaking every proof this profile exists to run;
-  // routing through an empty-allowlist proxy keeps that local IPC open while still reaching no
-  // external destination — "without network access" in effect, never in the literal flag name.
   const disposableReviewProfile = disposableReview
     ? [
         "--enable", "network_proxy",
