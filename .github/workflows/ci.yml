@@ -1007,7 +1007,7 @@ jobs:
     # paid in context by every agent session that opens a file.
     #
     # It refuses two things and judges nothing else: a file whose comment-line count grew past
-    # scripts/comment-load-baseline.json, and a newly ADDED comment block over 40 lines. The
+    # scripts/comment-load-baseline.json, and a newly ADDED comment block over 25 lines. The
     # written standard is docs/comment-standard.md.
     # FALSIFIER: test/comment-load-ratchet.test.ts.
     name: comment-load-ratchet
@@ -1027,5 +1027,5 @@ jobs:
           cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
-      - name: Comment-load ratchet (no file grows past its ceiling; no added block over 40 lines)
+      - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
         run: npm run --silent comment-load-signal

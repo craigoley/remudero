@@ -176,6 +176,12 @@
       "grepHint": "board.ts comment forensics"
     },
     {
+      "path": "docs/forensics/ci-gate-yml.md",
+      "title": "ci-gate.yml forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "ci-gate.yml forensics"
+    },
+    {
       "path": "docs/forensics/ci-parity.md",
       "title": "ci-parity.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
@@ -320,6 +326,12 @@
       "grepHint": "Forensics: src/lib/feedback.ts"
     },
     {
+      "path": "docs/forensics/fleet-heartbeat-watch-yml.md",
+      "title": "fleet-heartbeat-watch.yml forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "fleet-heartbeat-watch.yml forensics"
+    },
+    {
       "path": "docs/forensics/fs-race-safe.md",
       "title": "fs-race-safe.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
@@ -390,6 +402,12 @@
       "title": "mount-headroom-sweep.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
       "grepHint": "mount-headroom-sweep.mjs comment forensics"
+    },
+    {
+      "path": "docs/forensics/mutation-nightly-yml.md",
+      "title": "mutation-nightly.yml forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "mutation-nightly.yml forensics"
     },
     {
       "path": "docs/forensics/mutation-ratchet.md",

@@ -632,6 +632,9 @@ test("materializeWorkerHome: refuses a worker home inside a git CLONE (.git dire
   try {
     const repo = join(root, "repo");
     mkdirSync(join(repo, ".git"), { recursive: true });
+    // A real clone carries HEAD. Modelling one with a bare empty directory is what let an empty
+    // stray /tmp/.git read as a repository on the fleet host (2026-09-06).
+    writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
     const workerHome = join(repo, "worker-home-RUN1");
 
     assert.throws(
@@ -706,6 +709,7 @@ test("materializeWorkerHome: the guard fires through config.ts's settable worker
     // path by which home scaffolding could reach a tracked tree (this task's filing).
     const trackedCheckout = join(root, "tracked-checkout");
     mkdirSync(join(trackedCheckout, ".git"), { recursive: true });
+    writeFileSync(join(trackedCheckout, ".git", "HEAD"), "ref: refs/heads/main\n");
     const configuredRoot = join(trackedCheckout, "scratch");
     const config = { claudeBin: "/bin/true", root: configRoot, workerHomeRoot: configuredRoot } as unknown as Config;
 
@@ -726,6 +730,7 @@ test("materializeWorkerHome: the guard also fires on the DEFAULT root derivation
     // root == checkout is not a supported shape, but the default derivation (`<root>/worker-home`)
     // nests the home directly under it, so this must refuse rather than silently materialize.
     mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
     const config = { claudeBin: "/bin/true", root } as unknown as Config;
 
     const workerHome = perRunWorkerHomeDir(workerHomeDir(config), "RUN1");
@@ -770,5 +775,46 @@ test("worker home: the existing grants are unchanged", () => {
   assert.ok(rels.includes(playwrightCacheRelPath()), "and the new grant is present beside them");
   for (const s of WORKER_HOME_SYMLINKS) {
     assert.ok(s.reason.trim().length > 0, `every grant carries a written reason — ${s.relPath} does not`);
+  }
+});
+
+// ── an EMPTY directory named .git is not a repository, and must not disqualify a worker home ──
+
+test("gitWorkTreeAncestor: an EMPTY .git DIRECTORY is not a repository and does not disqualify the home", () => {
+  // MEASURED on the fleet host 2026-09-06: an empty /tmp/.git made all of /tmp read as a work tree,
+  // so EVERY worker home under it was refused. git itself disagreed — `git -C /tmp rev-parse` exits
+  // "not a repository" — and CI stayed green while the reviewer went red, because only that host
+  // carried the stray directory.
+  const root = tmp();
+  try {
+    mkdirSync(join(root, ".git"), { recursive: true }); // empty: no HEAD, no objects, no refs
+    assert.equal(
+      gitWorkTreeAncestor(join(root, "worker-home-RUN1")),
+      undefined,
+      "an empty .git directory is not a repository and must not disqualify the home",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("gitWorkTreeAncestor: a REAL clone (.git directory carrying HEAD) still disqualifies", () => {
+  const root = tmp();
+  try {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    assert.equal(gitWorkTreeAncestor(join(root, "worker-home-RUN1")), join(root, ".git"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("gitWorkTreeAncestor: a linked worktree's .git FILE still disqualifies — a non-directory is fail-closed", () => {
+  const root = tmp();
+  try {
+    writeFileSync(join(root, ".git"), "gitdir: /elsewhere/repo/.git/worktrees/wt\n");
+    assert.equal(gitWorkTreeAncestor(join(root, "worker-home-RUN1")), join(root, ".git"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
