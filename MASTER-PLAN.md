@@ -449,8 +449,10 @@ unexercised this cycle, none of them repaired);
 (D-10/W1-T393/#1521, lifetime N=0), the read-sensitivity axis has no consumer (T495/#1835),
 **`OpenPrView.isDraft` has no real producer and `mergeState: "behind"` may have none either, which would
 make T520+T528 unreachable in production**, the golden-corpus lint hook T423 sketches is deferred,
-**the golden-task replay suite T165/#2232 has no `HarnessRunner` wired** so the Self-Harness leg reports
-*no run recorded* by construction, the memory governor T1038/#2321 has no `DaemonDeps`/`DrainDeps` wire,
+**the golden-task replay suite T165/#2232 had no `HarnessRunner` wired until W1-T2689 shipped one plus a
+production caller; the Self-Harness leg still reports *no run recorded*, now because `rmd replay-goldens`
+spends real money and is opt-in per invocation rather than because nothing can run**, the memory
+governor T1038/#2321 has no `DaemonDeps`/`DrainDeps` wire,
 `judgeRepairStall` (T1209/#2511) has no production reader so `rmd doctor` prints `repair-stall: OK`
 unconditionally, the credit-surface gate (T1214/#2520) still has no CI job step,
 `scripts/state-citation-check.mjs` (T1263/#2657) is in neither `ci.yml` nor `ci-gate`'s REQUIRED roster,
@@ -5750,8 +5752,12 @@ WITHIN a cell. Across cells it is not (high risk rides higher mounts by policy),
 that does not match on (type, risk, class) measures difficulty and reports it as model. Recommendations
 are PROPOSALS through the existing `classifyProposal`/`rmd approve` path, never live mutations, and
 refuse below a declared minimum sample. NOTE the standing dependency: §9's pre-merge proof is the golden
-suite, and the replay suite still has no `HarnessRunner` wired, so a routing proposal's evidence is
-observational and the ratifying human is the gate until that changes.
+suite, and W1-T2689 wired BOTH the runner (`harnessRunnerOver`) and a production caller
+(`rmd replay-goldens --confirm-spend --ledger <path>`) — but a replay RESULT is still not an input to
+`recommendMounts` and nothing on that path dispatches one, so a routing proposal's evidence remains
+observational and the ratifying human is the gate until that changes. The conclusion is unchanged; only
+its reason moved, and #4270 retired that clause from `OBSERVATIONAL_EVIDENCE_NOTICE`, which had been
+quoting THIS paragraph into every proposal a human ratifies.
 
 **Fleet-scale learning is PARTIAL POOLING, and both naive forms are harmful** — a global average lets the
 busiest repo govern every other, per-repo isolation throws the fleet's knowledge away at every
