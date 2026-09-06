@@ -206,6 +206,12 @@
       "grepHint": "env.ts forensics"
     },
     {
+      "path": "docs/forensics/escalate.md",
+      "title": "Forensics — `src/lib/escalate.ts`",
+      "summary": "`src/lib/escalate.ts` raises escalations as GitHub issues (W1-T8, MASTER-PLAN §4 escalation",
+      "grepHint": "Forensics — `src/lib/escalate.ts`"
+    },
+    {
       "path": "docs/forensics/fs-race-safe.md",
       "title": "fs-race-safe.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
