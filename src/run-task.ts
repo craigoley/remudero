@@ -24,7 +24,7 @@ import {
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -907,7 +907,7 @@ import {
   workerTranscript,
   uniqueRunBranch,
   excludeNodeModulesFromGit,
-  linkWorktreeNodeModules,
+  linkWorktreeNodeModules, resolveNodeModulesSource,
   worktreeAdd,
   worktreeLockIsPidAlive,
   worktreeRemove,
@@ -5032,7 +5032,7 @@ function materializeReviewerSnapshot(
   reviewRoot: string,
   sourceDir: string | undefined,
   expectedHeadSha: string,
-): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules> } {
+): { cwd: string; nodeModules: ReturnType<typeof linkWorktreeNodeModules>; dependencyReadRoots: string[] } {
   if (!sourceDir || !existsSync(sourceDir)) {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -5095,12 +5095,17 @@ function materializeReviewerSnapshot(
     );
   }
 
-  // The clone's own exclude file may be changed before the reviewer starts; the source checkout
-  // and common Git metadata remain untouched. This makes a linked dependency tree invisible to
-  // the post-review cleanliness proof even for repositories whose committed .gitignore omits it.
+  // The clone's exclude may change; source/common Git metadata remain untouched.
+  // This keeps a linked dependency tree invisible to the post-review cleanliness proof.
+  // Dependency roots outside the disposable checkout are passed to Codex as read-only.
+  // The source checkout still does not receive a broader writable sandbox grant.
+  // Repositories whose committed .gitignore omits node_modules still get a clean review checkout.
   excludeNodeModulesFromGit(cwd);
-  const nodeModules = linkWorktreeNodeModules(sourceDir, cwd);
-  return { cwd, nodeModules };
+  const dependencyRoot = (() => { try { const source = resolveNodeModulesSource(sourceDir); return source ? realpathSync(source) : undefined; } catch { /* No source earns no grant. */ return undefined; } })();
+  const nodeModules = linkWorktreeNodeModules(sourceDir, cwd, dependencyRoot ? { resolveSource: () => dependencyRoot } : {});
+  const dependencyRelative = dependencyRoot ? relative(cwd, dependencyRoot) : "";
+  const dependencyReadRoots = dependencyRoot && (dependencyRelative === ".." || dependencyRelative.startsWith(`..${sep}`) || isAbsolute(dependencyRelative)) ? [dependencyRoot] : [];
+  return { cwd, nodeModules, dependencyReadRoots };
 }
 
 /** A semantic result is usable only while the disposable checkout remains exact and clean. */
@@ -5140,10 +5145,11 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
  * never be missing (a required status that is never posted deadlocks every merge
  * on the repo — the exact failure this task fixes).
  *
- * A FRESH read-only reviewer worker (NEVER resumeSessionId, NEVER forkSession) is
- * spawned as an ADVISORY semantic layer, in a throwaway cwd so it cannot mutate the
- * diff it judges. Its per-criterion verdicts may only DOWNGRADE a criterion to
- * failure ({@link parseReviewerVerdicts} → semantic), never rescue an unpasted
+ * A FRESH reviewer worker with read-only inspection tools (NEVER resumeSessionId,
+ * NEVER forkSession) is spawned as an ADVISORY semantic layer, in a throwaway cwd
+ * so it cannot mutate the diff it judges. It may run tests from private scratch,
+ * but its per-criterion verdicts may only DOWNGRADE a criterion to failure
+ * ({@link parseReviewerVerdicts} → semantic), never rescue an unpasted
  * proof. Its spawn is best-effort: a reviewer that fails to spawn (e.g. the
  * FIELD FINDING 12 self-updater race) never blocks the gate — the deterministic
  * floor still posts, fail-closed.
@@ -5410,11 +5416,8 @@ async function runReview(args: {
             maxBudgetUsd: args.budgetUsd,
             config: args.config,
             queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
-            // W1-T2829: make the existing read-only contract structural at this production call
-            // site. The reviewer still needs inspection tools to fetch the diff and run proofs;
-            // the shared list excludes every write tool, which also lets the Codex adapter use its
-            // narrowly gated non-repository trust bypass for this throwaway cwd.
-            tools: SPECIALIST_TOOLS,
+            // W1-T2829/W1-T2946: preserve read-only tools while granting Codex narrow TMPDIR writes and dependency reads.
+            tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review", sandboxReadRoots: snapshot.dependencyReadRoots,
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );
