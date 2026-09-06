@@ -1179,6 +1179,7 @@ export function renderReplayCalibration(r: ReplayCalibration): string {
   ].join("\n");
 }
 
+/** PRIMARY CONTROL: caps one retro pass so an OOM retry cannot re-scope a larger window. */
 export const RETRO_MAX_RUNS_PER_PASS = 40;
 
 export interface RetroGather {
@@ -1187,7 +1188,6 @@ export interface RetroGather {
   consumedThroughTs?: string;
   runsDeferred: number;
   byType: TypeCalibration[];
-  /** W1-T167: per-class cost and merge rate — the measurement half of the routing hypothesis. */
   byClass: ClassCalibration[];
   /** P34 (d), W1-T250: THIS WEEK's burn by model tier. Present ONLY when `buildGather` got a
    *  `mounts` table — omission degrades the section out, never a silent empty-array zero. */
