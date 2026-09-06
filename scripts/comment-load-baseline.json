@@ -10,7 +10,7 @@
   ".github/workflows/docs-index-check.yml": 44,
   ".github/workflows/fleet-heartbeat-watch.yml": 196,
   ".github/workflows/main-plan-guard.yml": 44,
-  ".github/workflows/mutation-nightly.yml": 153,
+  ".github/workflows/mutation-nightly.yml": 71,
   ".github/workflows/osv-scanner-pr.yml": 23,
   ".github/workflows/osv-scanner.yml": 12,
   ".github/workflows/probe-path-filter.yml": 13,
