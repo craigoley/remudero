@@ -188,6 +188,12 @@
       "grepHint": "daemon.ts forensics"
     },
     {
+      "path": "docs/forensics/deployer.md",
+      "title": "deployer.ts forensics",
+      "summary": "Measured incidents, design arguments and rejected alternatives removed from `src/lib/deployer.ts`",
+      "grepHint": "deployer.ts forensics"
+    },
+    {
       "path": "docs/forensics/diff-class.md",
       "title": "diff-class.mjs forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
