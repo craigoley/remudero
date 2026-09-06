@@ -316,3 +316,58 @@ test("a real run whose fallback run-id lookup throws still returns the gate's ow
   assert.match(res.stderr, /verdict NOT recorded: spawnSync git ENOENT/);
   assert.deepEqual(ledgerLines(root), [], "the failed emission writes no partial verdict");
 });
+
+// ── the production producer, asserted against the REAL workflow ────────────────────────────────
+//
+// Everything above drives the gate with a `--ledger` this suite supplies itself. That proves the
+// emission WORKS; it does not prove anything ever ASKS for it. `resolveLedgerPath` is
+// explicit-only by design — no `--ledger`, no `RMD_ROOT`, no line — so until a real caller passes
+// one, the whole emission resolves `unconfigured` on every genuine run and D-10 keeps reporting a
+// population nothing produces. That caller is ci.yml's mutation-ratchet job, and it is asserted
+// here against the CHECKED-IN workflow rather than a fixture, because a fixture cannot go stale
+// with the file it stands in for.
+
+const CI_WORKFLOW = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", ".github", "workflows", "ci.yml"), "utf8");
+
+/** Every ci.yml line that invokes this gate, normalised. A step written `run: <cmd>` and one
+ *  written as a `run: |` block body are the SAME invocation to the runner but differ by that
+ *  prefix in the file, and the trigger step is a block — so a recognizer keyed on `run: ` sees
+ *  only half the call sites and reports a silence it never actually checked. */
+function gateInvocations(workflow: string): string[] {
+  return workflow
+    .split("\n")
+    .map((l) => l.trim().replace(/^run:\s*/, ""))
+    .filter((l) => l.startsWith("node scripts/mutation-ratchet.mjs"));
+}
+
+/** The gate's real PR-time verdict invocation — the one that reads a report, NOT the
+ *  `--changed-files` trigger step (which scores nothing and must stay silent). */
+function verdictInvocation(workflow: string): string | undefined {
+  return gateInvocations(workflow).find((l) => l.includes("--report"));
+}
+
+test("ci.yml's verdict run passes --ledger, so the emission has a production producer and not only a test's own flag", () => {
+  const line = verdictInvocation(CI_WORKFLOW);
+  assert.ok(line, "the verdict invocation must exist in ci.yml at all — if this fails, the recognizer drifted, not the wiring");
+  assert.match(line!, /--ledger\b/, "no --ledger in CI means resolveLedgerPath returns `unconfigured` on every real run");
+
+  // BLOCKING CONTROL: the same recognizer over the same line with the flag removed must FAIL.
+  // Without this, a recognizer that matched anything at all would report a passing wiring.
+  const stripped = CI_WORKFLOW.replace(/ --ledger "[^"]*"/, "");
+  const strippedLine = verdictInvocation(stripped);
+  assert.ok(strippedLine, "control: the invocation is still found after the flag is removed");
+  assert.doesNotMatch(strippedLine!, /--ledger\b/, "control: the assertion above discriminates rather than matching everything");
+});
+
+test("the --changed-files trigger step is NOT given a ledger — it scores nothing, so it must produce no verdict", () => {
+  const trigger = gateInvocations(CI_WORKFLOW).find((l) => l.includes("--changed-files"));
+  assert.ok(trigger, "the trigger invocation must exist — otherwise this silence is vacuous");
+  assert.doesNotMatch(trigger!, /--ledger\b/, "a ledger here would manufacture a verdict from a run that read no report");
+});
+
+test("the emitted verdict is uploaded, so a real run's line outlives the job that wrote it", () => {
+  // A ledger written to a path the runner discards is unobservable, which is the same dead end as
+  // not writing it. `always()` matters: a BLOCKING verdict is the one D-10 most wants counted.
+  assert.match(CI_WORKFLOW, /name: mutation-verdict-ledger/, "the verdict ledger is uploaded as an artifact");
+  assert.match(CI_WORKFLOW, /if: always\(\) && steps\.trigger\.outputs\.matched == 'true'/, "uploaded on a blocking verdict too, not only a passing one");
+});

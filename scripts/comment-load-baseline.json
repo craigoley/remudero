@@ -3,7 +3,7 @@
   ".github/workflows/acceptance-author-gate.yml": 43,
   ".github/workflows/acr-build.yml": 80,
   ".github/workflows/ci-gate.yml": 210,
-  ".github/workflows/ci.yml": 400,
+  ".github/workflows/ci.yml": 409,
   ".github/workflows/clock-sweep.yml": 52,
   ".github/workflows/codeql.yml": 15,
   ".github/workflows/dependency-review.yml": 76,
