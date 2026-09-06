@@ -3,48 +3,21 @@ import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readF
 import { dirname } from "node:path";
 import { hostname } from "node:os";
 
+// Why: the four CodeQL rounds this helper closed — docs/forensics/fs-race-safe.md#module-header.
 /**
- * The `js/file-system-race`-safe idiom this repo has now shipped for a state file that is
- * created ONCE and read on every later call (config.ts's `loadConfig`, worker-home.ts's
- * `ensureWorkerKeychain`, and — via this shared helper — serve.ts's `resolveServiceTokens`).
- * CodeQL alerts #15/#16 (round 1), #24 (round 2), #71 (round 3), and #60/#61 (round 4, this
- * task) all trace back to the SAME check-then-act shape at a different call site:
- * `existsSync`-then-write on create, or a bare `readFileSync(path, ...)` re-checking the path
- * string on the fallback read. Folding create-or-read into ONE shared helper means a future
- * "first boot writes a state file" site reuses tested code instead of open-coding a fifth copy.
- *
- * Attempts an exclusive `O_CREAT|O_EXCL` ("wx") open at `path` in ONE syscall — no separate
- * existence check that a second process could race between check and write. On success, the
- * open file descriptor is handed back (`created: true`) so the CALLER writes its own freshly
- * generated content through that SAME descriptor — never a path re-open, so there is no window
- * where a later syscall could re-resolve `path` to something else. The caller owns closing it.
- *
- * On EEXIST — the file already exists, whether a concurrent first-provisioner won the race or
- * this is simply the second-and-later boot — this reads it back through a FRESH read descriptor
- * (`openSync(path, "r")` + `readFileSync(fd, ...)`), never `existsSync`-then-`readFileSync(path,
- * ...)`. Reading through the descriptor rather than re-checking the path is what the CodeQL
- * query's own recommendation asks for on the READ itself.
- *
- * BUT THE FALLBACK READ DOES RE-RESOLVE THE PATH, and an earlier revision of this header claimed
- * otherwise. `openSync(path, "r")` resolves `path` by name a second time, so the sequence
- * "`wx` proved it exists" → "open it" is a genuine check-then-act window: a peer that unlinks in
- * between made this helper throw ENOENT out of the very function meant to make the sequence
- * safe. CodeQL flagged exactly that (alert #84, `js/file-system-race`, on the fallback read) and
- * it was RIGHT. {@link createOrReadExclusive} therefore RETRIES rather than asserting the window
- * away — see its body. The flag is answered with code, not with a dismissal.
- *
- * Any other open error (e.g. `EISDIR` from a misconfigured path) propagates unchanged — it is
- * never swallowed as if it were a benign race.
+ * The `js/file-system-race`-safe idiom for a state file created ONCE and read on every later call
+ * — config.ts's `loadConfig`, worker-home.ts's `ensureWorkerKeychain`, and, via this helper,
+ * serve.ts's `resolveServiceTokens`. {@link createOrReadExclusive} opens with `O_CREAT|O_EXCL` in
+ * one syscall — no separate existence check a peer could race between. Success hands back the
+ * descriptor so the caller writes through it directly; EEXIST reads the file back through a
+ * fresh descriptor, never `existsSync`-then-`readFileSync(path, ...)`.
+ * FALSIFIER: test/fs-race-alerts.test.ts.
  */
 export type CreateOrReadResult = { created: true; fd: number } | { created: false; raw: string };
 
-/**
- * Attempts before giving up on the create/read flip-flop below. Each iteration requires a
- * CONCURRENT writer to have both created and unlinked the file since our previous syscall, so
- * two attempts already covers any realistic interleaving; the bound exists so a pathological
- * peer (a loop that unlinks the file continuously) surfaces its own ENOENT rather than
- * spinning this process forever.
- */
+/** Attempts before giving up on the create/read flip-flop below. Two already covers any realistic
+ *  interleaving — a retry needs a peer to have both created and unlinked the file since our last
+ *  syscall — so this only stops a pathological peer from spinning this process forever. */
 const CREATE_OR_READ_ATTEMPTS = 3;
 
 /** The three syscalls this helper makes, injectable so a test can drive the check-then-act
@@ -60,14 +33,8 @@ export function createOrReadExclusive(
   mode: number,
   fsImpl: FsRaceSyscalls = { openSync, readFileSync, closeSync },
 ): CreateOrReadResult {
-  // THE TWO SYSCALLS ARE INDIVIDUALLY ATOMIC BUT NOT ATOMIC TOGETHER, so the flip-flop is
-  // retried rather than assumed away. `wx` failing EEXIST proves the file existed AT THAT
-  // INSTANT; it does not prove it still exists when the fallback read opens it. If a peer
-  // unlinks in that window the read raises ENOENT — which the previous shape let escape as a
-  // crash from a helper whose whole purpose is to make this sequence safe. Looping turns that
-  // window into "someone else's file went away, so try to become the creator ourselves",
-  // which is the only correct answer and the reason CodeQL's js/file-system-race flag on the
-  // fallback read is answerable with code rather than with a dismissal.
+  // Why: a two-syscall create-then-read isn't atomic together — this retry answers the CodeQL
+  // alert on that window rather than asserting it away (alert #84; docs/forensics/fs-race-safe.md).
   for (let attempt = 1; ; attempt++) {
     let fd: number | undefined;
     try {
@@ -82,8 +49,7 @@ export function createOrReadExclusive(
     try {
       readFd = fsImpl.openSync(path, "r");
     } catch (err) {
-      // ENOENT here is precisely the check-then-act window: it existed for the `wx`, and was
-      // gone by the read. Retry — on the next pass we are very likely the creator.
+      // ENOENT here is the check-then-act window: it existed for the `wx`, gone by the read.
       if ((err as NodeJS.ErrnoException).code !== "ENOENT" || attempt >= CREATE_OR_READ_ATTEMPTS) throw err;
       continue;
     }
@@ -95,15 +61,10 @@ export function createOrReadExclusive(
   }
 }
 
-/**
- * Read a file's contents, or `undefined` if it doesn't exist — a single `readFileSync` guarded
- * by a catch on `ENOENT`, NOT a separate `existsSync` check-then-read (the latter is the same
- * `js/file-system-race` TOCTOU shape as the create side: a second process can create or delete
- * the file between the check and the read). This is the ONE shared helper for "read this state
- * file if it happens to exist yet" call sites — relocated here from `src/run-task.ts`, which had
- * it as a private function, so future callers reuse it instead of open-coding another private
- * copy (a second one had already appeared, independently, in `src/lib/panel-graph.ts`).
- */
+/** Reads a file's contents, or `undefined` if it doesn't exist — one `readFileSync` guarded by a
+ *  catch on `ENOENT`, never a separate `existsSync` check (the create side's own TOCTOU shape).
+ *  Why: replaces separate private copies in run-task.ts and panel-graph.ts —
+ *  docs/forensics/fs-race-safe.md#readfileifexists. */
 export function readFileIfExists(path: string): string | undefined {
   try {
     return readFileSync(path, "utf8");
@@ -113,20 +74,12 @@ export function readFileIfExists(path: string): string | undefined {
   }
 }
 
-// ── reclaimStaleLock: the ONE shared "read a dead-holder lock and clear it" idiom ──
-//
-// W1-T289. Four call sites (inflight-lock.ts, drain-lock.ts, review.ts's mutex, and the
-// boot sweep in inflight-lock.ts) each did the same shape: read a lock, decide its holder
-// is dead, then `unlinkSync(lockPath)` UNCONDITIONALLY. The create half of these locks is
-// genuinely atomic (`O_EXCL`), but that unlink is a SEPARATE syscall conditioned on
-// NOTHING — not on the file still being the same dead lock that was just read. Two
-// reclaimers of one dead lock could both decide "stale"; the first to unlink+recreate wins
-// a FRESH LIVE lock, and the second's unconditional unlink then deletes THAT, not the dead
-// lock it actually judged — so both come away believing they hold it.
+// ── reclaimStaleLock: the shared "read a dead-holder lock and clear it" idiom ──
+// Why: the double-reclaim race four call sites once duplicated — docs/forensics/fs-race-safe.md#reclaimstalelock-banner.
 
 /** A file's on-disk identity at the moment it was read — `dev`+`ino` from `fstat` on the
- *  descriptor used for that read. Two of these being equal proves "this is still exactly
- *  the inode I read", which is what {@link reclaimStaleLock} conditions its delete on. */
+ *  descriptor used for that read. Two of these being equal proves "this is still exactly the
+ *  inode I read", which is what {@link reclaimStaleLock} conditions its delete on. */
 export interface FileIdentity {
   dev: number;
   ino: number;
@@ -154,30 +107,22 @@ export type ReclaimStaleLockResult<Holder> =
   | { outcome: "lost" };
 
 export interface ReclaimStaleLockOpts<Holder> {
-  /** Parse raw lock file contents into a holder record, or `null` for missing/garbage
-   *  (garbage is treated the same as "no valid holder" everywhere this is called). */
+  /** Parse raw lock file contents into a holder record, or `null` for missing/garbage (treated
+   *  the same as "no valid holder" everywhere this is called). */
   parseHolder: (raw: string) => Holder | null;
   /** True when `holder` names a dead process — safe to reclaim. */
   isStale: (holder: Holder) => boolean;
-  /** Called whenever a reclaim attempt could NOT complete: this call lost the race to
-   *  another reclaimer (the identity check found the file already changed, or it vanished
-   *  outright). Defaults to `console.error` — the same "leave a visible trace rather than
-   *  swallow it" precedent `ledger.ts` uses for its own write failure — so the empty
-   *  catches this primitive replaces stop being silent. Never throws itself. */
+  /** Called whenever a reclaim could NOT complete — another reclaimer won the race, or the lock
+   *  vanished. Defaults to `console.error`, so this stops being silent. Never throws itself. */
   onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
-  /** Called with the lock's own path and full raw bytes IMMEDIATELY BEFORE the unlink that
-   *  clears it — never after (design (v), W1-T1067: "it must not clear a lock without printing
-   *  it first"). A judgment that removes the only evidence of what it judged, without setting
-   *  that evidence down anywhere first, is unauditable exactly when it matters most — a
-   *  reclaim that turns out to have been wrong. Defaults to `console.error`, the same
-   *  visible-trace precedent {@link defaultOnLostReclaim} already sets for a LOST reclaim, now
-   *  extended to a SUCCESSFUL one. Never throws itself. */
+  /** Called with the lock's path and full raw bytes immediately BEFORE the unlink that clears
+   *  it, never after (W1-T1067 design (v)): erasing the only evidence of a judgment without
+   *  recording it first is unauditable exactly when it matters most. Defaults to
+   *  `console.error`. Never throws itself. */
   onReclaim?: (detail: { lockPath: string; raw: string }) => void;
-  /** TEST-ONLY seam: invoked once the read has judged the current holder stale, BEFORE the
-   *  delete-time identity check runs — exactly the window the TOCTOU lived in. A test uses
-   *  it to run a second reclaimer's ENTIRE flow to completion first (so it unlinks and
-   *  recreates a fresh live lock), then lets this call proceed: its identity check must
-   *  then find the path no longer matches what it read, and refuse to delete it. */
+  /** TEST-ONLY seam, invoked once the holder is judged stale but before the delete-time identity
+   *  check runs — a test uses it to run a second reclaimer's whole flow first, so the identity
+   *  check below must then find the file changed and refuse to delete it. */
   beforeDelete?: () => void;
 }
 
@@ -189,40 +134,23 @@ function defaultOnReclaim(detail: { lockPath: string; raw: string }): void {
   console.error(`[reclaimStaleLock] ${detail.lockPath}: reclaiming stale holder before unlink: ${detail.raw}`);
 }
 
+// Why: the identity-plus-bytes design, the inode-reuse window it still leaves open, and the
+// print-before-clear rule — docs/forensics/fs-race-safe.md#reclaimstalelock (W1-T1067 design (v)).
 /**
- * Safely reclaim `lockPath` if, and only if, the holder read from it is confirmed stale
- * AND the file at `lockPath` is STILL the exact inode that read came from at the moment of
- * deletion. This is the shared primitive behind every "read a lock, and if its holder is
- * dead, clear it" call site: {@link import("./inflight-lock.js").acquireInflightLock},
- * {@link import("./drain-lock.js").acquireDrainLock},
- * {@link import("./review.js").acquireReviewStatusLock}, and the boot sweep
- * {@link import("./inflight-lock.js").sweepStaleInflightLocks}.
- *
- * THE FIX: the delete is conditioned on file IDENTITY, not merely on the path string. The
- * SAME descriptor opened to do the stale-holder READ is `fstat`'d, right after the read,
- * BEFORE it is closed — so the `{dev, ino}` captured is guaranteed to be the identity of
- * the EXACT bytes this call judged dead, never a separately re-resolved path. Immediately
- * before deleting, the path is `stat`'d fresh (by name, since we need to know what is
- * THERE NOW, not what our old descriptor still points to); the unlink proceeds ONLY if
- * `dev`+`ino` still match. If they don't — or the path is gone entirely —
- * another actor already reclaimed (or recreated) it, so this call backs off with
- * `{outcome: "lost"}` rather than deleting whatever is there now. The caller's own acquire
- * loop simply retries from the top, which re-reads the CURRENT state fresh.
- *
- * HONEST ABOUT THE REMAINING WINDOW: `stat`-then-`unlink` is still two syscalls, not one
- * indivisible one — POSIX `unlink(2)` has no compare-and-delete form. What remains is "a
- * brand-new, unrelated file lands on this exact path AND is assigned the SAME (dev, ino)
- * pair as what we just read, in between this call's final `stat` and its `unlink`" — inode
- * reuse within a handful of in-process syscalls. That is categorically narrower than the
- * bug this replaces, which was unconditional: ANY interleaving hit it, not only inode
- * reuse on an already-freed inode landing back on this path in a single-digit-syscall
- * window.
- *
- * PRINTS THE LOCK IN FULL BEFORE REMOVING IT (W1-T1067 design (v), the same print-before-clear
- * discipline W1-T1036's `.git/config.lock` reclaimer already follows): {@link
- * ReclaimStaleLockOpts.onReclaim} runs with the lock's path and exact bytes right before the
- * unlink, so a reclaim is never judged silently — every caller gets this for free, since it is a
- * property of the shared primitive rather than of any one call site.
+ * Reclaims `lockPath` only when the holder read from it is confirmed stale AND the file is still
+ * the exact bytes+inode read at that moment — the shared primitive behind every "read a lock, and
+ * if its holder is dead, clear it" call site: {@link import("./inflight-lock.js").acquireInflightLock},
+ * {@link import("./drain-lock.js").acquireDrainLock}, {@link import("./review.js").acquireReviewStatusLock},
+ * and the boot sweep {@link import("./inflight-lock.js").sweepStaleInflightLocks}. The delete is
+ * conditioned on identity, not the path string: `{dev, ino}` is captured from the same descriptor
+ * the stale read used, then re-checked by a fresh `stat`+read right before the unlink. A mismatch
+ * in dev, ino, or the raw bytes means another actor already reclaimed or recreated the lock, so
+ * this call backs off with `{outcome: "lost"}` instead of deleting whatever is there now; the
+ * caller's own acquire loop simply retries from the top. `stat`-then-`unlink` is still two
+ * syscalls, not one atomic one — a brand-new file landing on this exact path with the SAME
+ * `(dev, ino)` in that narrow window remains possible, though far narrower than the unconditional
+ * delete this replaces.
+ * FALSIFIER: test/lock-reclaim-race.test.ts, test/drain-lock-restart-reclaim.test.ts.
  */
 export function reclaimStaleLock<Holder>(
   lockPath: string,
@@ -254,20 +182,12 @@ export function reclaimStaleLock<Holder>(
     return { outcome: "live", holder };
   }
 
-  // Stale (dead pid) or garbage/unparseable — either way, reclaimable. TEST SEAM: let a
-  // test run a second reclaimer's whole flow here, before this call's identity check.
+  // Stale or unparseable — either way reclaimable. TEST SEAM: let a test run a second
+  // reclaimer's whole flow here, before this call's own identity check.
   opts.beforeDelete?.();
 
-  // IDENTITY IS `dev`+`ino` **AND THE BYTES** — dev+ino ALONE DOES NOT CLOSE THIS RACE.
-  // Measured on ext4 (this repo's CI and Linux hosts): unlink followed immediately by a create
-  // in the same directory REUSES the just-freed inode — a probe writing, unlinking and
-  // rewriting one path read `ino=1957993` both times. So in the exact scenario this function
-  // exists for (reclaimer A unlinks and recreates before B reaches its delete), B's dev+ino
-  // check matches and B deletes A's LIVE lock: the TOCTOU, still open, with a check in front
-  // of it that looks like a fix. The lock's own bytes carry the holder (a pid), so a
-  // replacement writes different content; comparing them detects the swap that the inode
-  // number cannot. Read through a single fd, like the stale read above, so the content and
-  // the identity describe the same open file rather than two path re-resolutions.
+  // Why: dev+ino alone doesn't close this race — measured ext4 inode reuse — so the bytes
+  // comparison below is what actually detects a same-inode swap (docs/forensics/fs-race-safe.md).
   let deleteIdentity: FileIdentity;
   let deleteRaw: string;
   try {
@@ -295,10 +215,8 @@ export function reclaimStaleLock<Holder>(
     return { outcome: "lost" };
   }
 
-  // PRINT BEFORE CLEARING (design (v)): the only copy of what this call judged is about to be
-  // unlinked, so it is set down here, before the syscall that would otherwise remove it
-  // unrecorded — never after, when a crash between the two would leave nothing to explain the
-  // judgment at all.
+  // Print before clearing (design (v)): the only copy of what was judged is set down here,
+  // before the syscall that would otherwise remove it unrecorded.
   onReclaim({ lockPath, raw: deleteRaw });
 
   try {
@@ -311,217 +229,91 @@ export function reclaimStaleLock<Holder>(
   return { outcome: "reclaimed" };
 }
 
-// ── isHolderStale: THE ONE PREDICATE for "does this lock still name a real holder?" ──
-//
-// W1-T368. A bare `!isAlive(held.pid)` (the `isStale` every `reclaimStaleLock` call site
-// used before this) answers "is SOME process currently using this number", never "is it the
-// SAME process that wrote the lock". The pid space wraps (measured on the fleet host:
-// kern.maxproc 4000, kern.maxprocperuid 2666), so a dead holder's number gets reissued in the
-// ordinary course of things — and when that happens the recycled pid reads as LIVE forever,
-// which both refuses every future acquire of the task it names (acquireInflightLock throws)
-// and renders a dead run as RUNNING on the console (deriveStatus's third disjunct). Neither
-// other field the lock already carries was ever compared: `host` not at all, `startedAt` never
-// against anything.
+// ── isHolderStale: the one predicate for "does this lock still name a real holder?" ──
+// Why: the pid-reuse and cross-host incidents behind each rung — docs/forensics/fs-race-safe.md#isholderstale-banner.
 
-/** The identity a lock file already records for its holder — the subset every consumer's
- *  parsed holder type (`InflightLockInfo`, `DrainLockInfo`, ...) structurally satisfies. */
+/** The identity a lock file already records for its holder — the subset every consumer's parsed
+ *  holder type (`InflightLockInfo`, `DrainLockInfo`, ...) structurally satisfies. */
 export interface HolderIdentity {
   pid: number;
-  /** `os.hostname()` of the process that wrote the lock, when the caller's holder shape
-   *  records one. Absent ⇒ the host check below is skipped (pre-W1-T368 behaviour). */
+  /** `os.hostname()` of the process that wrote the lock, when the holder shape records one.
+   *  Absent ⇒ the host check below is skipped (pre-W1-T368 behaviour). */
   host?: string;
-  /** ISO timestamp the holder wrote when it created the lock. Absent ⇒ the start-time check
-   *  below is skipped (pre-W1-T368 behaviour). */
+  /** ISO timestamp the holder wrote at creation. Absent ⇒ the start-time check below is skipped
+   *  (pre-W1-T368 behaviour). */
   startedAt?: string;
 }
 
 export interface IsHolderStaleOpts {
-  /** True when `held.pid` names a process that exists RIGHT NOW — says nothing about whether
-   *  it is the process that wrote the lock. Required: every call site already has one (its own
-   *  `defaultIsPidAlive` or an injected test double). */
+  /** True when `held.pid` names a process that exists RIGHT NOW — says nothing about whether it
+   *  is the process that wrote the lock. Required: every call site already has one. */
   isPidAlive: (pid: number) => boolean;
-  /** Epoch ms `held.pid` actually started, or `null` when indeterminate (probe failed, `held.pid`
-   *  is already dead, platform mechanism unavailable). Defaults to {@link defaultGetProcessStartTime}. */
+  /** Epoch ms `held.pid` actually started, or `null` when indeterminate. Defaults to
+   *  {@link defaultGetProcessStartTime}. */
   getProcessStartTime?: (pid: number) => number | null;
-  /** This host's own identity, for comparison against `held.host`. Defaults to `os.hostname()`;
-   *  injectable so a test can simulate "the lock names a different host" without controlling the
-   *  real machine name. */
+  /** This host's own identity, compared against `held.host`. Defaults to `os.hostname()`;
+   *  injectable so a test can simulate a different host without controlling the real machine. */
   hostname?: () => string;
-  /** W1-T978. True when THIS process is running inside a container — Docker's own `/.dockerenv`
-   *  marker, the same signal `resolveHostPole` (host-parity.ts) is keyed on, established prior
-   *  art for "container-aware" in this codebase. Defaults to {@link defaultInContainer}.
-   *  Injectable so a test can simulate the condition without a real container. See rung 1's own
-   *  doc for why this exists: `os.hostname()` inside a container is the CONTAINER id, so it is
-   *  useless as a per-machine identity there — every replacement mints a new one. */
+  /** True when THIS process runs inside a container — the same `/.dockerenv` marker
+   *  `resolveHostPole` (host-parity.ts) keys on (W1-T978). Defaults to {@link defaultInContainer};
+   *  see {@link isHolderStale}'s own doc for why this matters. */
   inContainer?: () => boolean;
 }
 
 /** A live pid's start time is trusted to within this many ms of the lock's own `startedAt`
- *  before the gap counts as reuse rather than probe noise. `ps -o etime=` only has whole-second
- *  resolution, while `startedAt` is an ISO timestamp with milliseconds — NOT a clock-skew
- *  allowance (the host check already refuses to compare start times across hosts at all). */
+ *  before the gap counts as reuse rather than probe noise — `ps -o etime=` only has whole-second
+ *  resolution, while `startedAt` carries milliseconds. */
 const STALE_START_TOLERANCE_MS = 2000;
 
-/** Docker's own container id shape: a lowercase-hex string, 64 characters (the full id) or 12
- *  (the short form — the SAME length `os.hostname()` actually returns inside a container;
- *  MEASURED against the outage this fixes, `5efb86ede91b` and `eae16667008a`, both 12). Used by
- *  {@link isHolderStale}'s rung 1 to require that a mismatched `held.host`, while this process is
- *  containerised, is actually SHAPED like a container id before treating it as this cell's own
- *  prior history — an arbitrary or human-named `host` (`"boxA"`, a hand-built test fixture) must
- *  stay exactly as unverifiable in a container as it always was off one. */
+/** True when `host` is shaped like a Docker container id (12 or 64 lowercase hex chars) — the
+ *  same shape `os.hostname()` returns inside a container. Guards rung 1 below from treating an
+ *  arbitrary or human-named host as "an earlier boot of this cell" merely because this process
+ *  happens to be containerized.
+ *  Why: the outage this shape check closes — docs/forensics/fs-race-safe.md#lookslikecontainerid
+ *  (W1-T978). */
 function looksLikeContainerId(host: string): boolean {
   return /^[0-9a-f]{12}$/.test(host) || /^[0-9a-f]{64}$/.test(host);
 }
 
+// Why: the container-restart incident and the pid-reuse ordering bug each rung below fixes —
+// docs/forensics/fs-race-safe.md#isholderstale (W1-T396, W1-T978, W1-T1067).
 /**
- * Is `held` stale — safe to reclaim, sweep, or treat as not-running — rather than a genuinely
- * live holder? The ONE predicate every `reclaimStaleLock` caller and `deriveStatus`'s own
- * inflight-lock disjunct now share (previously each kept its own copy of the weaker
- * pid-only check).
- *
- * THREE RUNGS, in order, each ANSWERING what it can and DEFERRING what it can't:
- *   1. `held.host` names a DIFFERENT host than this one ⇒ NOT stale, whatever the local
- *      process table says — UNLESS this process is running inside a CONTAINER, in which case
- *      a mismatch means something else entirely. See "W1-T978" below. A pid is only ever
- *      meaningful on the host that assigned it, so every probe below answers a question about
- *      OUR machine that says nothing about the recorded holder. Unresolvable from here ⇒ never
- *      reap (the same direction of caution `reclaimStaleLock`'s own "lost" outcome already takes).
- *
- *      W1-T978 — A REPLACED CONTAINER COULD NEVER RECLAIM ITS OWN LOCK, because `os.hostname()`
- *      inside a container IS THE CONTAINER ID: Docker mints a new one on every replacement, so
- *      `held.host` (written by the PREVIOUS container) never again equals `myHost` (this one's),
- *      even though nothing genuinely foreign ever touched the lock. MEASURED during a live outage
- *      (2026-08-18): `state/drain.lock` held `{"pid":46,"host":"5efb86ede91b",...}`; container
- *      `5efb86ede91b` no longer existed; the replacement was `eae16667008a`; rung 1 compared the
- *      two, found them different, and refused to boot — forever, since the comparison can only
- *      ever fail again the same way.
- *
- *      THE DISCRIMINATOR IS TWO-PART, DELIBERATELY, NOT "AM I IN A CONTAINER" ALONE. `state/`
- *      (wherever this lock lives) is a bind mount: nothing OTHER than a process on THIS machine
- *      could ever have written to it, so once we know we are running IN a container, a `host`
- *      mismatch CAN mean "an earlier container of this same cell" — but "am I in a container"
- *      says nothing about whether `held.host` is actually a container id at all. `host` is a
- *      free-form field: a lock that genuinely predates containerisation, a hand-edited fixture,
- *      or a future writer on a differently-shaped identity could all put an ARBITRARY string
- *      there, and none of those is "an earlier me" merely because this process happens to be
- *      containerised today. So the second half checks that `held.host` is actually SHAPED like
- *      what `os.hostname()` returns inside a container — {@link looksLikeContainerId}, Docker's
- *      own hex id format — before treating the mismatch as this cell's own history. Only BOTH
- *      together clear the bar: a foreign, human-named, or synthetic `host` stays exactly as
- *      unverifiable in a container as it always was off one.
- *
- *      ONLY THEN is the lock treated as stale directly, WITHOUT consulting rungs 2/3. That
- *      omission is deliberate, not an oversight: a container has its OWN PID NAMESPACE, and pids
- *      restart from 1 (measured: the abandoned lock's pid 46 came back as pid 49 in the
- *      replacement) — so the recorded pid is exactly as likely to collide with a live, UNRELATED
- *      local process as to look cleanly dead, and trusting that collision in EITHER direction is
- *      answering a question the new namespace cannot answer.
- *
- *      On a real (non-containerised) machine, or on any `host` that is not container-id-shaped,
- *      none of this applies and rung 1 behaves exactly as it always has — the discriminator only
- *      ever WIDENS what a container can reclaim of ITS OWN prior identities, never what a bare
- *      machine can, and never a foreign host that merely happens to be read from inside a
- *      container.
- *
- *      W1-T396 MOVED THIS RUNG, and the order is the correctness property. It previously sat
- *      BELOW the pid probe, where it could only ever be reached when a foreign pid number
- *      happened to collide with a live LOCAL process — it guarded the coincidence and not the
- *      case it was written for. The ordinary cross-host reading is that the foreign pid is
- *      ABSENT here, so the pid rung answered "dead ⇒ stale" and the lock was RECLAIMED while
- *      its real holder was still running: two workers on one task, with no error on either
- *      side. Note the shape rather than only the fix — a guard ordered behind a check that
- *      claims its case first is this repo's second instance in two days (W1-T394 is the same
- *      defect in the sweep's rung table).
- *   2. `held.pid` is dead ⇒ stale. The common case, and the ONLY thing that recovers a killed
- *      run: `run-task.ts`'s SIGINT/SIGTERM handlers release the DRAIN lock only, never a
- *      per-task inflight lock, so a signalled run strands its inflight lock and an uncatchable
- *      kill strands both. Reclamation must stay reachable for every same-host holder.
- *   3. `held.pid` is alive on OUR host: compare its ACTUAL start time against `held.startedAt`.
- *      A pid reused by a new process necessarily starts AFTER the original holder wrote the
- *      lock (the original had to be running, and write the file, before it could die and free
- *      the number) — so "this pid started later than the lock claims" is exactly the reuse
- *      signal, decidable without waiting for a real wrap. If the start time can't be determined
- *      (probe failure — the pid could have died in the gap between rungs 1 and 3, `ps` missing,
- *      unparseable output), that is NOT evidence of staleness, so this rung defers too.
- *
- * HONEST ABOUT THE REMAINING WINDOW: this is still a REASON TO BELIEVE the holder is alive,
- * never proof. A cross-host lock is trusted with no verification at all (rung 1), and a
- * same-host reused pid that starts within `STALE_START_TOLERANCE_MS` of the original is
- * indistinguishable from the original (rung 3's whole-second `ps` resolution).
- *
- * AND HONEST ABOUT WHAT RUNG 1 NOW COSTS, since it is reached far more often than before: on a
- * REAL (non-containerised) machine, a foreign-host lock is unreclaimable by this process in
- * EVERY case, not just when its pid collides locally. That is the correct direction — the
- * alternative is stealing a live holder's task — but it makes `host`'s STABILITY load-bearing
- * there. It is written as `os.hostname()` by every acquire path (`inflight-lock`, `drain-lock`,
- * `review`, `task-id-reservation`) and compared against the same `os.hostname()` default here,
- * so the two agree by construction. A bare-metal/VM machine whose hostname CHANGES between
- * acquire and reclaim would still see its own older locks as foreign and therefore permanently
- * unreclaimable, recoverable only by deleting the lock file. Recording a stable per-machine
- * identity instead of a hostname would remove that exposure; it is deliberately not done here
- * because it changes what four writers RECORD rather than how this predicate READS, which is a
- * different concern and a different changeset.
- *
- * W1-T978 NARROWS THIS COST TO NON-CONTAINERS ONLY. Inside a container the analogous exposure —
- * `host` changing on every restart — is exactly the defect this task fixes, and rung 1's new
- * container branch answers it directly rather than accepting it the way the paragraph above
- * accepts it for a real machine.
+ * Is `held` stale — safe to reclaim, sweep, or treat as not-running — or a genuinely live
+ * holder? The one predicate every {@link reclaimStaleLock} caller and `deriveStatus`'s own
+ * inflight-lock check share, checked in three rungs, each answering what it can and deferring
+ * what it can't rather than guessing: (1) Host — a `held.host` naming a different host is never
+ * stale, since a pid means nothing off the host that assigned it, UNLESS this process is
+ * containerized and `held.host` is shaped like a container id, in which case it names an earlier
+ * boot of this same cell. (2) Boot — a `held.startedAt` older than this container's own boot
+ * (pid 1's start time) is dead by construction: no process from an earlier boot exists in this
+ * boot's pid namespace. (3) Pid — dead ⇒ stale; alive ⇒ an actual start time later than
+ * `held.startedAt` means the pid number was reused by a different process. Rung order is
+ * load-bearing (W1-T396): a foreign pid must never fall through to rungs 2/3, which reason only
+ * about this host's own process table.
+ * FALSIFIER: test/lock-holder-identity.test.ts, test/stale-lock-host-ordering.test.ts,
+ * test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts, test/drain-lock-restart-reclaim.test.ts.
  */
 export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): boolean {
-  // RUNG 1 — HOST FIRST, and the order is the whole point (W1-T396). Every rung below
-  // reasons about THIS machine's process table, which describes the recorded holder only
-  // when the recorded holder ran here. Asking any of them about a foreign pid answers a
-  // question nobody posed.
+  // Rung 1 — host, first (W1-T396): a foreign pid answers a question our own process table
+  // was never asked. A container restart replaces the host id, not necessarily the holder.
   if (held.host !== undefined) {
     const myHost = (opts.hostname ?? hostname)();
     if (held.host !== myHost) {
-      // W1-T978: a mismatch on a real machine is still unverifiable and never reaped. A
-      // mismatch INSIDE A CONTAINER, on a `host` actually SHAPED like a container id, can only
-      // be an earlier container of this same bind-mounted cell (see the doc above) — reclaimed
-      // directly, never via the pid/startedAt rungs below, which a fresh pid namespace cannot
-      // answer meaningfully either way. A `host` that is not container-id-shaped stays exactly
-      // as unverifiable as it always was — the shape check is what keeps an arbitrary or
-      // human-named foreign host from being swept in just because THIS process is containerised.
       const inContainer = (opts.inContainer ?? defaultInContainer)();
       return inContainer && looksLikeContainerId(held.host);
     }
   }
 
-  // THE BOOT RUNG (W1-T1067) — sits here, between rung 1 and rung 2, and answers a question
-  // neither of them can: a `docker restart` REUSES the container, so `held.host` above reads
-  // UNCHANGED (rung 1 falls through rather than firing) — but the restart mints a FRESH pid
-  // namespace, so `held.pid` can coincidentally alias a live, unrelated process in the new boot,
-  // one whose own start time gives rung 3 below nothing to compare against the ORIGINAL holder
-  // (that comparison is about the number's CURRENT occupant, not about whether the boot the lock
-  // was written in still exists at all). A lock whose `startedAt` PREDATES this container's own
-  // boot was written by a process of an EARLIER boot and is dead by construction, whatever pid
-  // it names — no live process from a prior boot can be running in this one's pid namespace.
-  //
-  // PID 1 IS THIS CONTAINER'S OWN BOOT CLOCK, so its start time IS the container's boot time —
-  // read through the SAME `getProcessStartTime` probe rung 3 already uses (the same `ps -o
-  // etime=` route, MEASURED available in the live container via `ps -o etimes= -p 1`), so this
-  // costs no new syscall and no new dependency. Skipped entirely when `startedAt` is absent
-  // (pre-W1-T368 shape) or the probe is indeterminate — exactly rung 3's own "no evidence either
-  // way" discipline, never inventing staleness from a probe that couldn't answer.
-  //
-  // CONSERVATIVE IN THE RIGHT DIRECTION (design note iii): it can only ever reclaim a lock OLDER
-  // than this boot. A genuinely concurrent second daemon in THIS container necessarily started
-  // AFTER pid 1, so its lock's `startedAt` is always later than boot time and this rung never
-  // touches it — the single-instance mutex this lock exists to be is never weakened by it.
-  //
-  // ONLY REACHED WHEN RUNG 1 DID NOT ALREADY DECIDE: a genuinely foreign host already returned
-  // above, so this rung only ever runs against `held.host === myHost` or an absent `host` —
-  // never against a lock this process has no business judging at all.
+  // Boot rung (W1-T1067), between rungs 1 and 2: a lock older than this container's own boot
+  // is dead by construction — a fresh pid namespace starts from 1, so its recorded pid could
+  // otherwise alias a live, unrelated process in the new boot.
   if (held.startedAt !== undefined) {
     const getStart = opts.getProcessStartTime ?? defaultGetProcessStartTime;
-    const bootTime = getStart(1);
+    const bootTime = getStart(1); // pid 1 is this container's own boot clock
     if (bootTime !== null) {
       const lockStart = Date.parse(held.startedAt);
-      // The tolerance guards the same whole-second `ps -o etime=` rounding rung 3 already
-      // accounts for: a lock legitimately written moments after THIS boot must not be swept
-      // merely because the boot-time estimate rounded a little late.
       if (!Number.isNaN(lockStart) && lockStart < bootTime - STALE_START_TOLERANCE_MS) {
-        return true; // the boot rung: this lock predates the container it would have to run in
+        return true; // this lock predates the boot it would have to be running in
       }
     }
   }
@@ -542,8 +334,8 @@ export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): bo
   return false;
 }
 
-/** The one syscall {@link defaultGetProcessStartTime} makes, injectable so a test can drive
- *  its parsing/error handling without a real subprocess (mirrors {@link FsRaceSyscalls}). */
+/** The one syscall {@link defaultGetProcessStartTime} makes, injectable so a test can drive its
+ *  parsing/error handling without a real subprocess (mirrors {@link FsRaceSyscalls}). */
 export interface ProcessStartTimeSyscalls {
   execFileSync: typeof execFileSync;
 }
@@ -562,17 +354,11 @@ function parseEtimeToMs(etime: string): number | null {
   return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000;
 }
 
-/**
- * Default {@link IsHolderStaleOpts.getProcessStartTime}: shells out to `ps -o etime=`, whose
- * `[[DD-]HH:]MM:SS` elapsed-time column is the ONE process-age mechanism common to this repo's
- * two real platforms — verified directly rather than assumed: BSD `ps` (macOS, the dev host)
- * and GNU `ps` (`ubuntu-latest`, this repo's CI) both accept `-o etime=`, while GNU-only
- * `etimes`/`lstart` formatting differs enough between the two that elapsed time (this process's
- * age, computed against `Date.now()`) was chosen over wall-clock start time (which would need
- * locale-safe parsing of BSD's `lstart` string) to stay portable. Returns `null` — indeterminate,
- * NOT "dead" — for a pid `ps` can't find, a `ps` binary that isn't on PATH, or output this
- * doesn't recognize; {@link isHolderStale} already treats `null` as "no evidence either way".
- */
+/** Default {@link IsHolderStaleOpts.getProcessStartTime}: shells to `ps -o etime=`, the one
+ *  process-age mechanism both this repo's platforms (BSD `ps` on macOS, GNU `ps` in CI) support.
+ *  Returns `null` — indeterminate, NOT "dead" — for a pid `ps` can't find or output it can't
+ *  parse; {@link isHolderStale} already treats `null` as no evidence either way.
+ *  Why: why elapsed time was chosen over wall-clock start time — docs/forensics/fs-race-safe.md#defaultgetprocessstarttime. */
 export function defaultGetProcessStartTime(
   pid: number,
   sysImpl: ProcessStartTimeSyscalls = defaultProcessStartTimeSyscalls,
@@ -595,15 +381,8 @@ export interface ContainerProbeSyscalls {
 
 const defaultContainerProbeSyscalls: ContainerProbeSyscalls = { existsSync };
 
-/**
- * Default {@link IsHolderStaleOpts.inContainer}: `/.dockerenv`, Docker's own container marker —
- * the SAME signal `resolveHostPole` (host-parity.ts) is keyed on and the SAME path
- * `scripts/host-parity.ts` passes it (`existsSync("/.dockerenv")`), so this is established prior
- * art rather than a new detection strategy. Unlike `resolveHostPole`, which takes the marker as
- * an INJECTED boolean because that module has NO imports at all and values purity above
- * everything, this module already imports `node:fs` for the syscalls above it in this file, so a
- * defaulted probe here costs nothing this module was not already paying (W1-T978 design note v).
- */
+/** Default {@link IsHolderStaleOpts.inContainer}: checks for `/.dockerenv`, Docker's own
+ *  container marker — the same signal `resolveHostPole` (host-parity.ts) keys on. */
 export function defaultInContainer(sysImpl: ContainerProbeSyscalls = defaultContainerProbeSyscalls): boolean {
   return sysImpl.existsSync("/.dockerenv");
 }

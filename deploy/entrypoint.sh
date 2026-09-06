@@ -1,52 +1,33 @@
 #!/usr/bin/env bash
-# rmd-entrypoint — give the container a REAL WORK TREE before it runs anything.
+# rmd-entrypoint — give the container a real git work tree before it runs anything.
 #
-# WHY. The image carries a source SNAPSHOT at /app with no `.git`, and three separate diagnoses on
-# Azure turned out to be that one fact: `rmd status` warns the cwd is not inside a git work tree,
-# `resolveOwnerRepo` throws because `git config --get remote.origin.url` fails, the deployer has
-# nothing to fast-forward and `checkCliFreshness` has nothing to freshen. The operator worked round
-# it by cloning into the volume by hand — and that clone went stale (branched one commit behind
-# origin, producing a scope-guard refusal three phases into a run), lost its node_modules, and
-# needed its remote set with a token by hand. This script is the automation of the workaround, with
-# the failure modes it hit closed.
+# The image ships a source snapshot at /app with no `.git`, which used to break `rmd status`,
+# `resolveOwnerRepo`, and the deployer's freshness check. This script clones or fetches into the
+# mounted state volume instead, so the container always runs inside a real checkout.
 #
-# WHAT IT DOES NOT DO. It does not decide when to reinstall dependencies, and it does not sync a
-# dirty tree. Both already have owners in this codebase and duplicating them would be worse than
-# leaving them alone — see the notes at each step.
+# It deliberately does NOT decide when to reinstall dependencies or sync a dirty tree — both have
+# owners elsewhere in this codebase (see the notes at each step).
 #
-# SKIPPING IT. `RMD_SKIP_BOOTSTRAP=1` runs the command with no clone, no fetch and no install. That
-# is the right mode for probing the image itself (`deploy/verify-image.sh` bypasses this script
-# entirely by overriding the entrypoint, so its checks are unaffected either way).
+# `RMD_SKIP_BOOTSTRAP=1` runs "$@" with no clone, no fetch and no install — for probing the image
+# itself. `deploy/verify-image.sh` bypasses this script entirely, so it is unaffected either way.
+# Why: the workaround this automates — docs/forensics/entrypoint.md#the-file-header.
 
 set -euo pipefail
 
 log() { printf 'rmd-entrypoint: %s\n' "$*" >&2; }
 die() { log "$*"; exit 1; }
 
-# ── GIT IDENTITY IS NOT PART OF THE BOOTSTRAP, SO IT MUST NOT BE SKIPPED WITH IT ─────────────
-# THIS BLOCK USED TO SIT BELOW THE SKIP, AND THE SKIP `exec`s — it never returns. So
-# `RMD_SKIP_BOOTSTRAP=1` left the container with NO identity at all, and MEASURED on the published
-# image that is exactly what verify-image.sh's uid-1000 commit probe hit:
-# `fatal: unable to auto-detect email address (got 'node@<container>.(none)')`.
+# ── Git identity runs before the skip, on purpose ────────────────────────────────────────────
+# Invariant: this write must happen even under RMD_SKIP_BOOTSTRAP=1, because the skip below `exec`s
+# and never returns — an identity written after it would never run. The skip is this script's
+# documented recovery path (an operator inspecting a broken tree by hand), and that path needs to
+# be able to commit too. The write is two local `git config` calls, so making it unconditional costs
+# nothing and needs no network or token.
+# Trap: this block used to sit below the skip, so RMD_SKIP_BOOTSTRAP=1 left the container with no
+# identity at all — verify-image.sh's uid-1000 commit probe hit
+# `fatal: unable to auto-detect email address`. Why: docs/forensics/entrypoint.md#git-identity--why-it-runs-before-the-skip.
 #
-# WHICH SIDE WAS WRONG, since the probe could equally have been retargeted. Three reasons it is
-# this file:
-#   1. The skip's OWN log line enumerates what it skips — "no clone, no fetch, no install". An
-#      identity is none of those three. It was filed inside a block whose stated scope excludes it.
-#   2. The skip is this script's DOCUMENTED RECOVERY PATH: two failure messages below tell an
-#      operator to re-run with RMD_SKIP_BOOTSTRAP=1 to inspect a broken tree by hand. Someone
-#      salvaging uncommitted work is precisely who needs to be able to commit, and that was the one
-#      path with no identity.
-#   3. It costs two local `git config` calls — no network, no token, no clone — so making it
-#      unconditional keeps the verifier's check token-free and runnable on every verification,
-#      rather than only when credentials happen to be around.
-# The honest counter-argument, recorded rather than buried: a WORKER never sets
-# RMD_SKIP_BOOTSTRAP=1, and on the normal path this write already happened BEFORE the clone. So
-# production was never broken, and the probe's "every worker commits NOTHING" wording overstates
-# what it measured. That is a defect in the message, not a reason to leave the recovery path unable
-# to commit.
-#
-# `mkdir -p` first: `git config --global` writes $HOME/.gitconfig and FAILS OUTRIGHT if HOME does
+# `mkdir -p` first: `git config --global` writes $HOME/.gitconfig and fails outright if HOME does
 # not exist (the same trap recorded further down).
 mkdir -p "${HOME:?HOME must be set — git config --global writes \$HOME/.gitconfig and cannot without it}"
 if git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get user.name >/dev/null 2>&1; then
@@ -54,13 +35,9 @@ if git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get use
 else
   git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME:-remudero-worker}"
   git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL:-remudero-worker@users.noreply.github.com}"
-  # `git -C /` HERE TOO, for the same reason the guard above uses it — and it was missed the first
-  # time. A bare `git config --get` resolves LOCAL config, so when the cwd happens to be inside a
-  # repository this line reports THAT repository's identity rather than the global one just written.
-  # MEASURED by a test booting from a checkout: it wrote `remudero-worker` and then announced
-  # `Claude <noreply@anthropic.com>`, the checkout's own committer. The write was always correct;
-  # the REPORT was not, which is the worse half — a boot log that names an identity the commits will
-  # not use is how you diagnose the wrong thing for an hour.
+  # `git -C /` here too, for the reason the guard above uses it: a bare `git config --get` resolves
+  # local config, so from inside a repository this would report THAT repo's identity, not the
+  # global one just written. Why: docs/forensics/entrypoint.md#git-identity--the-report-vs-write-asymmetry.
   log "git identity: $(git -C / config --get user.name) <$(git -C / config --get user.email)> (override with RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL)"
 fi
 
@@ -71,62 +48,30 @@ fi
 
 REPO_URL="${RMD_REPO_URL:-https://github.com/craigoley/remudero.git}"
 
-# ── THE PIN, AND WHAT IT RECOVERS ────────────────────────────────────────────────────────────
-# Cloning at startup breaks the property the image digest used to carry: today a digest names
-# exactly what will run, and a container that clones runs whatever the ref held at boot. RMD_REF is
-# how that is recovered — it takes a branch, a tag or a full commit sha, so an operator who needs
-# "run exactly this code again" pins a sha and gets it back.
-#
-# THE DEFAULT IS `main` RATHER THAN A PINNED SHA, and that is a deliberate trade rather than
-# laziness. A sha default would have to be edited into this file and rebuilt to move, which is the
-# very rebuild-to-change-code cost this whole change exists to remove; and a stale default is worse
-# than no default, because it silently runs old code while looking pinned. `main` is what a fleet
-# host is supposed to be on — the mini's own self-sync fast-forwards to origin/main — so the
-# default matches the fleet and the pin is there when reproducibility matters more than currency.
+# RMD_REF recovers what a cloning container loses: the image digest no longer names exactly what
+# runs, so a branch, tag or sha here lets an operator pin "run exactly this code again". Default is
+# `main`, not a pinned sha — a sha default would need a rebuild to move, and a stale one silently
+# runs old code while looking pinned. Why: docs/forensics/entrypoint.md#ref--the-pin-and-what-it-recovers.
 REF="${RMD_REF:-main}"
 
-# config.root is `$HOME/Remudero` (loadConfig, src/lib/config.ts), and the fleet's own checkout sits
-# beside the state it manages. Deriving both from HOME rather than hardcoding keeps this consistent
-# with the image's ENV HOME and with the volume the operator mounts.
+# config.root is `$HOME/Remudero` (loadConfig, src/lib/config.ts); deriving both from HOME keeps
+# this consistent with the image's ENV HOME and the volume the operator mounts.
 : "${HOME:?HOME must be set — config.root derives from it and an unset HOME sends state to /}"
 CONFIG_ROOT="$HOME/Remudero"
 TREE="$CONFIG_ROOT/remudero"
 
-# ── CREDENTIALS: A HELPER, NOT A TOKEN ON DISK ───────────────────────────────────────────────
-# MEASURED: `gh auth setup-git` REFUSES with only GH_TOKEN set — "You are not logged into any
-# GitHub hosts" — so the obvious one-liner is not available.
-#
-# The two forms that DO work both write the token to disk: a token-bearing remote URL puts it in
-# the clone's .git/config, which lives in the mounted volume and therefore OUTLIVES the container;
-# a `url.insteadOf` rewrite puts it in a gitconfig. Both also go stale the moment the token rotates,
-# and a stale token baked into a remote is a confusing failure.
-#
-# A credential helper avoids both: the token is read from the environment AT CALL TIME, so it is
-# never written anywhere, and rotation is just a new `-e GH_TOKEN`. The helper is stored with
-# `$GH_TOKEN` UNEXPANDED — single-quoted here so this shell does not substitute it — and git's own
-# shell expands it when it runs. The remote URL stays clean.
-# `git config --global` writes $HOME/.gitconfig and FAILS OUTRIGHT if HOME does not exist —
-# "could not lock config file". The image creates /home/node, so this only bites a container
-# started with a HOME that was never made; creating it costs nothing and removes a boot failure
-# whose message says nothing about the real cause. Found by running this script, not by reading it.
+# ── A credential helper, not a token on disk ─────────────────────────────────────────────────
+# `gh auth setup-git` refuses with only GH_TOKEN set, and a token-bearing remote URL or gitconfig
+# rewrite both write the token to disk and go stale on rotation. A helper reads $GH_TOKEN at call
+# time instead — stored single-quoted so THIS shell never expands it — so nothing is ever written
+# and rotation is just a new `-e GH_TOKEN`. Why: docs/forensics/entrypoint.md#credentials--a-helper-not-a-token-on-disk.
 mkdir -p "$HOME"
 
-# W1-T2552: INSTALLED UNCONDITIONALLY. The helper's whole point is that it reads $GH_TOKEN AT CALL
-# TIME, so whether the variable holds anything AT BOOT says nothing about whether it will hold
-# something when git actually runs — and since W1-T2311 the boot env deliberately carries an EMPTY
-# GH_TOKEN, so the `-n` gate that stood here was false on every boot and the helper was NEVER
-# installed. The daemon then minted a perfectly good App installation token into its own
-# `process.env.GH_TOKEN` (github-app.ts's one seam), every git child inherited it, and git ignored
-# it because nothing told git that variable was a credential. MEASURED 2026-08-30: every ref-CAS
-# write died `fatal: could not read Username for 'https://github.com': No such device or address`,
-# which `classifyPushFailure` reports as "unreachable" — while reads kept working, because this
-# repo is public and an anonymous read needs no credential at all. That split (reads fine, writes
-# dead) is what made it read like a permissions problem for an hour.
-#
-# INSTALLING IT WITH AN EMPTY GH_TOKEN IS SAFE AND IS THE POINT: the helper then answers with an
-# empty password, which is exactly what an unauthenticated push would have done anyway, and the
-# moment the App token lands in the environment the SAME helper starts answering with it. Nothing
-# is written to disk but the helper script itself, which contains `$GH_TOKEN` unexpanded.
+# Installed UNCONDITIONALLY (W1-T2552), even with GH_TOKEN empty — the helper reads the variable
+# when git actually calls it, not at boot, and an empty password is exactly what an unauthenticated
+# push would send anyway. A prior `-n "$GH_TOKEN"` gate skipped installing it whenever the boot env
+# carried an empty token (the deliberate default since W1-T2311), so every push died unreachable
+# while reads kept working. Why: docs/forensics/entrypoint.md#credentials--installed-unconditionally-w1-t2552.
 git config --global credential.helper \
   '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
 log "git credentials: helper installed; reads GH_TOKEN at call time (not written to disk)"
@@ -134,89 +79,33 @@ if [ -z "${GH_TOKEN:-}" ]; then
   log "GH_TOKEN is empty at boot — expected under App auth; the daemon mints one into its own env"
 fi
 
-# ── THE COMMIT IDENTITY. WITHOUT IT A WORKER WRITES FILES AND COMMITS NOTHING. ────────────────
-# MEASURED on the published image, as uid 1000 with this entrypoint bypassed:
-#   git config --global --list
-#   → fatal: unable to read config file '/home/node/.gitconfig': No such file or directory
-# and from a real `preflight --ci-parity` in a container:
-#   Author identity unknown
-#   fatal: unable to auto-detect email address (got 'node@817837271c3e.(none)')
+# ── The commit identity: without it a worker writes files and commits nothing ─────────────────
+# Invariant: git cannot auto-detect an identity here — a container's hostname is a bare id, never
+# fully qualified, so git's own `user@host` fallback is refused and `git commit` fails outright.
+# Writing $HOME/.gitconfig is what makes an existing grant (`WORKER_HOME_SYMLINKS`,
+# src/lib/worker-home.ts) resolve for every worker and orchestrator commit site in a container,
+# exactly as it already does for a darwin host inheriting the operator's own identity.
 #
-# GIT CANNOT AUTO-DETECT HERE, and the `.(none)` in that message is exactly why: git will fall back
-# to `user@host` only when the hostname looks fully qualified. A container's hostname is a bare
-# container id, so the fallback is refused and `git commit` fails outright.
+# Configurable rather than baked into the image, because the identity most merged commits actually
+# carry is the operator's own person — not the fleet's to assert, and not something a shared image
+# should hold. It defaults to a purpose-scoped bot, in the same overridable shape this repo already
+# uses for `rmd-feedback-bridge` and `fleet-heartbeat.sh`. `--replace-all` avoids duplicate keys on
+# a re-boot, and the values are written only when git does not already resolve one.
 #
-# THIS IS THE SAME ASYMMETRY AS THE gh CREDENTIAL AND PLAYWRIGHT_BROWSERS_PATH — a FILE that exists
-# on the operator's Mac and simply does not exist here. `WORKER_HOME_SYMLINKS` (src/lib/worker-home.ts)
-# grants `.gitconfig` into every per-run worker HOME with the reason recorded verbatim as "git author
-# identity for commits the worker makes", and `materializeWorkerHome` SKIPS a grant whose source is
-# absent. So on darwin the worker inherits the operator's identity and in a container it silently
-# inherits nothing. Writing $HOME/.gitconfig here is what makes that existing grant resolve — no
-# change to src/ is needed, and both the worker AND the orchestrator's own commit sites
-# (plan-architect, plan-pr-emitter, orientation, the triage/approve paths, none of which passes
-# `-c user.name`) are covered by the one write.
-#
-# WHY THE ENTRYPOINT AND NOT THE IMAGE. The identity that 63 of 64 merged `Remudero-Task:` commits
-# actually carry is `Craig Oley <craigoley@gmail.com>` — the OPERATOR'S OWN, straight out of their
-# `~/.gitconfig`. That is a person, and a person does not belong baked into a published image: it is
-# not the fleet's to assert, it changes, and the image is shared. So the identity is configurable
-# here, defaulting to a purpose-scoped bot in the same shape this repo already uses twice
-# (`rmd-feedback-bridge@users.noreply.github.com` in src/lib/feedback-landing.ts, and
-# `${GIT_AUTHOR_NAME:-remudero-heartbeat}` in scripts/fleet-heartbeat.sh — defaulted but
-# overridable). TO KEEP HISTORY CONSISTENT WITH THOSE 63 COMMITS, run the container with
-# `-e RMD_GIT_AUTHOR_NAME='Craig Oley' -e RMD_GIT_AUTHOR_EMAIL=craigoley@gmail.com`.
-#
-# `--replace-all` rather than a bare set, so a re-boot onto an existing volume cannot accumulate
-# duplicate keys; and the values are only written when git does not already resolve one, so an
-# operator who mounted their own gitconfig keeps it.
-# `git -C /` ON THE PROBE, and it is load-bearing rather than tidy. A bare `git config --get`
-# resolves LOCAL config too, so if this script's cwd happens to sit inside a repository, that
-# repository's own `.git/config` can answer the question — and the worker does not commit there, it
-# commits in a worktree under $HOME/Remudero. Probing from `/`, which is not a repository, restricts
-# the answer to the system and global scopes, i.e. exactly the ones a commit anywhere in this
-# container would inherit. (Found by running this block, not by reading it: the first draft reported
-# "already configured" off the checkout's own local config.) A SYSTEM identity still satisfies it —
-# that is deliberate, since one would make commits work without this write.
-#
-# THE WRITE ITSELF NOW RUNS ABOVE THE RMD_SKIP_BOOTSTRAP BLOCK, not here — everything above this
-# line is WHY the identity exists and what it must be; the argument for WHERE it runs is at the top
-# of this file. It moved because the skip block `exec`s and never returns, so the skip path had no
-# identity at all, which is what the published image's uid-1000 commit probe measured. Nothing about
-# the normal path changed: this write already happened before the clone, and still does.
+# `git -C /` on the probe is load-bearing: a bare `git config --get` would resolve local config if
+# this script's cwd sat inside a repository, when the worker actually commits under $HOME/Remudero.
+# The write itself runs above the RMD_SKIP_BOOTSTRAP block, not here — see that block's own note.
+# Why: docs/forensics/entrypoint.md#the-commit-identity--why-it-must-exist-and-why-it-lives-here.
 
-# ── RESOLVING THE REF: A BRANCH MEANS THE TIP AT BOOT, A SHA MEANS EXACTLY THAT ──────────────
-# MEASURED ON AZURE 2026-08-08, AND REPRODUCED HERE AGAINST A REAL GIT ORIGIN. A boot printed
-# "Your branch is behind 'origin/main' by 3 commits, and can be fast-forwarded" and then
-# "checkout: 354f20c" — the OLDER sha — and reported a successful boot. The next dispatch then
-# branched from stale code, which is W1-T405's scenario arriving one layer upstream.
-#
-# THE CAUSE WAS A TWO-PART COMPOUND, AND NEITHER HALF IS OBVIOUS FROM READING THE OLD CODE.
-#   1. `git checkout --detach main` RESOLVES THE LOCAL BRANCH, AND `git fetch` NEVER MOVES IT.
-#      The default fetch refspec updates `refs/remotes/origin/*` only, so after the initial clone
-#      the local `main` is frozen at the clone-time sha forever. Detaching onto it therefore walks
-#      HEAD BACKWARD on every single boot — measured: a tree already correctly at the newest commit
-#      was moved back to the clone-time sha before anything tried to bring it forward again.
-#   2. THE ONLY THING THAT CLIMBED BACK UP WAS SILENCED. `git merge --ff-only origin/$REF
-#      2>/dev/null || true` discarded both the error text and the exit code, so any failure left
-#      HEAD at the regressed sha and the boot still printed a clean "checkout:" line. Reproduced by
-#      giving the tree an untracked file that an incoming commit also adds — the tracked-only dirty
-#      guard above correctly sees a CLEAN tree, git refuses to overwrite the untracked file, and the
-#      container silently regressed from a good sha to the clone-time one. Once there it stays
-#      there: every later boot repeats the same walk-back and the same silent failure, so the
-#      container is pinned at its first-ever checkout while reporting success each time. That is the
-#      identical shape this script already fixed once, when counting untracked files as dirt made
-#      boot 2 refuse to sync forever.
-#
-# SO THE REF IS RESOLVED ONCE, HERE, AND CHECKED OUT IN ONE STEP. `origin/$REF` is tried FIRST, so
-# a BRANCH name means "the tip as of the fetch that just ran" — which is what a user passing `main`
-# expects and what the old code was already trying to reach, less reliably, via the merge. Anything
-# that is not a branch on the remote — a sha, a tag — has no `refs/remotes/origin/<x>` and falls
-# through to the exact form, so a pin still means exactly what it says. That distinction is the
-# whole point of RMD_REF and it now holds in both directions.
-#
-# NOTHING IS SILENCED. A checkout that cannot proceed DIES, loudly, rather than continuing on
-# whatever HEAD happened to be. Proceeding is the expensive direction: it costs a full run against
-# stale code and then a scope-guard refusal whose message names a different cause.
+# ── Resolving REF: a branch means the tip at boot, a sha means exactly that ──────────────────
+# Invariant: `origin/$REF` is tried first, so a branch name means "the tip as of the fetch that
+# just ran"; anything without a matching remote ref — a sha, a tag — falls through to the exact
+# object, so a pin still means exactly what it says. Nothing here is silenced: a checkout that
+# cannot proceed dies loudly rather than continuing on whatever HEAD happened to be.
+# Trap: the old code checked out the LOCAL branch (frozen at clone time — fetch never moves it)
+# and relied on a silenced `merge --ff-only` to climb back up, which regressed HEAD to the
+# clone-time sha whenever the merge failed and stayed there on every later boot.
+# Why: docs/forensics/entrypoint.md#resolving-ref--a-branch-means-the-tip-at-boot-a-sha-means-exactly-that.
 resolve_target() {
   # A branch on the remote — the freshly-fetched tip.
   if git -C "$TREE" rev-parse --verify --quiet "refs/remotes/origin/$REF^{commit}"; then return 0; fi
@@ -225,43 +114,16 @@ resolve_target() {
   return 1
 }
 
-# ── W1-T1054: A DAEMON-WRITTEN UNTRACKED FILE CAN COLLIDE WITH ITSELF, BY CONSTRUCTION ────────
-# `feedbackDir` (src/lib/feedback.ts) writes `plan/feedback/**` INTO THIS SAME WORKING TREE, and
-# `landFeedback` (src/lib/feedback-landing.ts) lands that identical content upstream as a gated PR
-# but never deletes the local copy once it has landed — every `rmSync` in that module targets a
-# scratch dir, none touches the entry. So the next boot's checkout lands on a commit that ADDS the
-# very path the daemon already wrote locally, byte-for-byte, and the tracked-only dirty guard above
-# (deliberately, see its own comment) does not see it — this is the collision `checkout_target`'s
-# CHECKOUT FAILED message already names as "a common cause". It is guaranteed by the daemon's own
-# routine work, not a race, and it is safe to clear in exactly the one case it can PROVE redundant.
-#
-# THE PREDICATE, CITED RATHER THAN RE-DERIVED. `treeFfSafe` (src/lib/deployer.ts) intersects dirty
-# paths against the INCOMING diff and only conflicts on the overlap; `rmd sync` (W1-T907) already
-# classifies a local path as provably lossless when its bytes equal the origin blob at that path.
-# This is that same predicate, in bash, at boot: an untracked path is removable ONLY IF the incoming
-# target ADDS that same path AND the local bytes are IDENTICAL to the incoming blob there. Anything
-# else — untracked and not in the incoming diff, or in it with different content — is left alone, so
-# the checkout below fails exactly as it always has and the operator sees the same diagnosis.
-#
-# BYTES, NOT TEXT. Comparing content requires reading it into a shell string, which mangles binary
-# data and trailing newlines. `git hash-object` on the local path against the incoming blob's own sha
-# compares bytes exactly, through git's own hashing, with no string handling in this script at all.
-#
-# UNREADABLE MEANS REFUSE, NOT "TREAT AS SAFE". `git rev-parse "$target:$path"` resolves the blob sha
-# from the TREE object alone — it does not need the blob's content to be present locally, so it can
-# succeed even when the object itself is missing or corrupt (a partial fetch, a damaged store). Only
-# `git cat-file -e` actually opens the object, so that is the read this function trusts before
-# calling anything redundant. When it fails, the path is NOT provably safe and stays in place —
-# fail-closed, matching the tracked-only guard's own posture.
-#
-# EVERY CLEARED PATH IS NAMED, ALWAYS. Removing an untracked file is how uncommitted real work
-# disappears if the predicate is ever wrong, so nothing here removes a path without first logging
-# which one and why — the log must show what was discarded even on a boot that then succeeds.
-#
-# NOT IN SCOPE (see plan/tasks.d/W1-T1054-*.yaml): relocating the daemon's feedback write, which has
-# a reader and would silently drop unlanded filings; teaching `landFeedback` to clean up after
-# itself, a real and separate candidate; detecting the outage this caused (W1-T1047, already filed);
-# and the restart budget above, which is correct as it stands.
+# ── W1-T1054: clear an untracked file only when it is provably redundant ──────────────────────
+# Trap: the daemon writes `plan/feedback/**` into this same tree and later lands identical content
+# upstream without deleting the local copy, so the next checkout can add a path that already exists
+# here byte-for-byte — the tracked-only dirty guard does not see it, and `checkout_target` fails.
+# Invariant: a path is cleared only if the incoming target adds that exact path AND the local bytes
+# equal the incoming blob (`git hash-object`, byte comparison — never a shell string, which mangles
+# binary data). An unreadable incoming blob (`git cat-file -e` fails) is treated as NOT safe, fail-
+# closed like the dirty guard itself. Every cleared path is logged by name before removal.
+# Falsifier: test/entrypoint-boot.test.ts's five "entrypoint:" cases for this predicate.
+# Why: docs/forensics/entrypoint.md#clear_redundant_untracked--w1-t1054.
 clear_redundant_untracked() {
   local target="$1" path blob local_sha
   while IFS= read -r -d '' path; do
@@ -293,25 +155,13 @@ checkout_target() {
   fi
 }
 
-# ── THE BOOT FETCH RETRIES A TRANSIENT REF LOCK, BOUNDED, AND ONLY A LOCK (W1-T2501) ─────────
-# MEASURED (operator-log#cannot-lock-ref-2026-08-30): the boot fetch failed to lock THREE refs in
-# one call — `refs/remotes/origin/main`, `heartbeat-mini` and a feature branch — the signature of
-# another git process holding them, not of corruption; the holder finishes. The old code made
-# exactly ONE attempt, logged one line and carried on: the daemon booted on the stale tree that
-# produced, and the advisory id mint two commands later read a corpus four ids behind.
-#
-# THE RETRY KEYS ON THE LOCK, NEVER ON FAILURE GENERALLY — a narrower claim than "retry transient
-# failures". `cannot lock ref` / `unable to update local ref` is git's own wording for exactly this
-# case: another process held the ref when this one reached for it. A network failure or an auth
-# failure is NOT this case, must NOT be retried into a longer boot, and keeps today's single-attempt,
-# fail-open behaviour untouched below.
-#
-# BOUNDED, AND FAILING OPEN STILL SURVIVES. `FETCH_LOCK_RETRY_MAX` caps the attempts and
-# `FETCH_LOCK_RETRY_PAUSE_S` is the backoff between them, so a boot can never wait on this
-# indefinitely. An exhausted retry does not die — the neighbouring housekeeping step's own principle
-# holds here too: a boot must not refuse to start because origin was briefly unreachable — it is
-# reported as a NAMED STALE BOOT (grep `STALE BOOT`) instead of one line among many, so an exhausted
-# retry is at least as visible as the daemon's own freshness vocabulary.
+# ── The boot fetch retries a transient ref lock, bounded, and only a lock (W1-T2501) ─────────
+# Invariant: the retry keys on the LOCK, never on failure generally — `cannot lock ref` / `unable
+# to update local ref` is git's own wording for another process holding the ref, which clears on
+# its own. A network or auth failure is not this case and keeps today's single-attempt, fail-open
+# behaviour. Bounded by FETCH_LOCK_RETRY_MAX/FETCH_LOCK_RETRY_PAUSE_S; an exhausted retry does not
+# die — it is reported as a named "STALE BOOT" so it stays as visible as an ordinary failure.
+# Why: docs/forensics/entrypoint.md#boot_fetch--the-ref-lock-retry-w1-t2501.
 FETCH_LOCK_RETRY_MAX="${RMD_FETCH_LOCK_RETRY_MAX:-5}"
 case "$FETCH_LOCK_RETRY_MAX" in
   '' | *[!0-9]*)
@@ -328,12 +178,9 @@ case "$FETCH_LOCK_RETRY_PAUSE_S" in
     ;;
 esac
 
-# Attempts the boot fetch, retrying ONLY a ref-lock failure, up to FETCH_LOCK_RETRY_MAX times with
-# FETCH_LOCK_RETRY_PAUSE_S between attempts. Returns 0 the moment a fetch succeeds — including a
-# first-try success, which makes no additional call and prints nothing about retrying. Returns
-# non-zero, having already logged the underlying git error, when either the failure is not a ref
-# lock (one attempt only, FETCH_LOCK_EXHAUSTED left 0 so the caller keeps today's plain message) or
-# the retries are exhausted (FETCH_LOCK_EXHAUSTED set to 1, so the caller can name it a stale boot).
+# Retries only a ref-lock failure, up to FETCH_LOCK_RETRY_MAX times. Returns 0 on first or later
+# success. Returns non-zero, having logged the git error, when the failure is not a lock (one
+# attempt only) or retries are exhausted (FETCH_LOCK_EXHAUSTED=1, so the caller names a stale boot).
 boot_fetch() {
   fetch_attempt=1
   FETCH_LOCK_EXHAUSTED=0
@@ -359,55 +206,23 @@ boot_fetch() {
   done
 }
 
-# FETCH, GUARD, CHECKOUT — EXTRACTED SO IT CAN RUN MORE THAN ONCE (W1-T490).
-# The body is byte-for-byte what the `else` branch below used to hold inline; only its location
-# moved. It is a function now because the freshness-restart block at the foot of this script has to
-# re-run it: a daemon that stopped `stale` must come back on the code that made it stale, and the
-# fetch+checkout is the only thing in this container that advances the tree. That is exactly the
-# objection the restart-throttle block below used to raise against looping in-container ("the
-# clone/fetch/checkout above runs ONCE, before this line"), and extracting this is what retires it.
+# Fetch, guard, checkout — a function (W1-T490) so the freshness-restart loop at the foot of this
+# script can re-run it: a daemon that stopped `stale` must come back on the code that made it
+# stale, and this is the only thing in the container that advances the tree.
 sync_tree() {
   log "work tree present at $TREE"
 
-  # ── DROP WORKTREE REGISTRATIONS WHOSE DIRECTORY IS GONE, BEFORE THE FETCH ─────────
-  # NOT the same "prune" as the fetch below. `fetch --prune` drops remote-tracking REFS;
-  # this drops WORKTREE ADMIN RECORDS under `.git/worktrees/` whose checkout directory no
-  # longer exists. The two are unrelated and neither does the other's job.
-  #
-  # WHY THIS CONTAINER ACCUMULATES THEM. The checkout is a bind mount shared with the host,
-  # so `.git/worktrees/` carries registrations the HOST created, pointing at host paths that
-  # have never existed in here. Measured 2026-08-24T00:40Z inside `remudero-daemon`: 22 such
-  # registrations, every one under `/home/craigoleyagent/work/`.
-  #
-  # WHY IT IS LOAD-BEARING RATHER THAN TIDY. `git gc` reads each registered worktree's HEAD.
-  # One unreadable HEAD aborts the whole repack — reproduced: `fatal: bad object
-  # worktrees/<name>/HEAD`, `fatal: failed to run repack`, exit 128. When the abort happens
-  # under AUTOMATIC gc it writes `.git/gc.log`, and git then declines every later automatic
-  # cleanup while that file exists ("Automatic cleanup will not be performed until the file is
-  # removed"). The daemon's checkout had not been packed since 2026-08-21: 6,059 loose objects,
-  # 65.80 MiB loose, 50.94 MiB packed — 0 / 0 / 18.31 MiB once the registrations went.
-  #
-  # AND `git gc` DOES NOT CLEAR THEM ITSELF: `gc.worktreePruneExpire` defaults to three months,
-  # so a registration stale for minutes is still consulted, and still aborts the repack.
-  #
-  # BEFORE THE FETCH, DELIBERATELY. The fetch is the first thing here that can trigger an
-  # automatic gc, so pruning first is what stops that gc tripping over a dead registration and
-  # writing the `gc.log` that silences every cleanup after it. Placing it inside `sync_tree`
-  # covers BOTH call sites — the boot path and the freshness restart below — in one line.
-  #
-  # A REGISTRATION THIS BOOT CREATES IS NOT PRUNED THIS BOOT, AND MUST NOT BE. Lanes start
-  # after this runs; their worktrees are live, and `prune` removes only records whose directory
-  # is ABSENT ("gitdir file points to non-existent location") — verified: a live worktree keeps
-  # both its registration and its files, and no worktree's contents are ever deleted by prune.
-  # A registration created during this boot is therefore cleared at the NEXT restart, which is
-  # the only moment it is safe to clear.
-  #
-  # NON-FATAL, AND THAT IS NOT DEFENSIVE PADDING: `git worktree prune` exits 0 on an already
-  # clean repo but 128 when the cwd is not a repository at all, and a boot must not die on a
-  # housekeeping step. Failure is logged and the sequence continues.
-  #
-  # THIS DOES NOT CLEAR AN EXISTING `gc.log`, and deliberately so — see the note beside the
-  # log line below.
+  # ── Drop dead worktree registrations, before the fetch ────────────────────────────
+  # Invariant: NOT the fetch's own `--prune` (that drops remote-tracking refs) — this drops
+  # `.git/worktrees/` admin records whose checkout directory no longer exists. The bind-
+  # mounted checkout accumulates the HOST's own registrations, pointing at host paths that
+  # never existed in the container.
+  # Trap: `git gc` aborts its whole repack on one unreadable registered worktree HEAD, then
+  # writes `.git/gc.log`, which makes git decline every later automatic cleanup — and gc does
+  # not expire a registration on its own for months. Pruning here, before the fetch that can
+  # trigger an automatic gc, is what stops that. Non-fatal (`worktree prune` exits 128 outside
+  # a repo): logged, never blocks the boot. This does not clear an existing gc.log — see below.
+  # Why: docs/forensics/entrypoint.md#sync_tree--pruning-dead-worktree-registrations-before-the-fetch.
   git -C "$TREE" worktree prune || log "worktree prune FAILED — continuing (housekeeping never blocks the boot)"
 
   if ! boot_fetch; then
@@ -418,14 +233,10 @@ sync_tree() {
     fi
   fi
 
-  # A REPO ALREADY STUCK STAYS STUCK, AND THE ENTRYPOINT SAYS SO RATHER THAN FIXING IT.
-  # `worktree prune` removes the CAUSE; it does not remove `.git/gc.log`, which is the thing
-  # actually suppressing automatic cleanup — verified directly: a planted gc.log survives a
-  # prune untouched. Clearing a gc.log this script did not write would be deleting another
-  # process's only record of why its repack failed, on a checkout shared with the host, with no
-  # way from in here to tell a stale log from one written seconds ago by a maintenance run that
-  # is still going. So this reports it and leaves the decision to an operator, who can clear it
-  # and repack when no lane is running:  rm -f .git/gc.log && git gc --prune=now
+  # A stuck repo stays stuck, deliberately: `worktree prune` removes the cause, not an existing
+  # `.git/gc.log`, because this script cannot tell a stale log from one a maintenance run is
+  # still writing. It reports the file and leaves clearing it to an operator.
+  # Why: docs/forensics/entrypoint.md#sync_tree--reporting-a-stuck-gclog-rather-than-clearing-it.
   if [ -f "$TREE/.git/gc.log" ]; then
     log "NOTE: $TREE/.git/gc.log exists — git is declining AUTOMATIC cleanup until it is removed."
     log "  The stale registrations above are pruned, so the cause is gone, but the log is not"
@@ -433,35 +244,23 @@ sync_tree() {
     log "    rm -f $TREE/.git/gc.log && git -C $TREE gc --prune=now"
   fi
 
-  # ── THE DIRTY-TREE RULE IS THE DEPLOYER'S, NOT A NEW ONE ───────────────────────────────────
-  # `decideDeploy` (src/lib/deployer.ts) guards its fast-forward with a clean-tree check whose
-  # comment is explicit: "abort (never force) on a conflicting dirty tree", reported as
-  # `dirty-tree-conflict`. Uncommitted work is never discarded to make a sync succeed.
-  #
-  # THIS TEST IS STRICTLY MORE CONSERVATIVE THAN THAT ONE, and the difference is worth stating
-  # rather than implying parity. `treeFfSafe` intersects the dirty files with the INCOMING files
-  # and only conflicts on the overlap, so it tolerates local edits the fast-forward would not
-  # touch. Reproducing that in shell would mean reimplementing it, badly, in the one place where
-  # being wrong destroys uncommitted work — so this refuses on ANY dirt. It errs toward leaving
-  # the tree alone, which is the safe direction, and it says so rather than silently skipping.
-  #
-  # `-uno` — TRACKED MODIFICATIONS ONLY, and this is load-bearing rather than a tidy-up. Plain
-  # `--porcelain` also lists UNTRACKED files, and the first boot creates one immediately by
-  # installing node_modules. Measured: with untracked files counted, the second boot refused to
-  # sync and every boot after it would have done the same — a container permanently pinned to
-  # whatever it first cloned, reporting a reason that sounds like the operator left work behind.
-  # Untracked files also cannot conflict with a fast-forward, which is what `treeFfSafe` is
-  # actually about: LOCALLY-MODIFIED files. This matches that intent and removes the trap.
+  # ── The dirty-tree rule is the deployer's, not a new one ──────────────────────────
+  # Invariant: `decideDeploy` (src/lib/deployer.ts) never discards uncommitted work to force a
+  # sync. This check is stricter than that one — it refuses on ANY tracked dirt rather than
+  # reimplementing `treeFfSafe`'s overlap-only conflict in shell, which errs toward leaving the
+  # tree alone.
+  # Trap: `-uno` is load-bearing, not tidy — plain `--porcelain` also lists untracked files, and
+  # the first boot creates one immediately (node_modules), which would refuse every sync after it
+  # forever. Untracked files cannot conflict with a fast-forward, so excluding them matches what
+  # this check is actually for. Why: docs/forensics/entrypoint.md#sync_tree--the-dirty-tree-rule-is-the-deployers-not-a-new-one.
   if [ -n "$(git -C "$TREE" status --porcelain -uno)" ]; then
     log "REFUSING to sync: the work tree has uncommitted changes."
     log "  Nothing has been discarded and nothing was fetched into the checkout."
     log "  This is deliberately stricter than the deployer, which conflicts only on files the"
     log "  fast-forward would touch. Commit or stash, or run with RMD_SKIP_BOOTSTRAP=1."
   else
-    # ONE STEP, NOT CHECKOUT-THEN-MERGE. The old pair walked HEAD down to the frozen local branch
-    # and then relied on a silenced `merge --ff-only` to climb back — see the resolver above for the
-    # measured regression that produced. There is no merge here because there is nothing to merge:
-    # the target IS the freshly-fetched tip, so a single detach lands on it directly.
+    # One step, not checkout-then-merge: the target IS the freshly-fetched tip (see the resolver
+    # above), so a single detach lands on it directly — no merge to silently fail.
     checkout_target
   fi
 }
@@ -476,27 +275,16 @@ else
   sync_tree
 fi
 
-# RECORD WHAT ACTUALLY RUNS. The point of the pin is lost if the resolved commit is not observable,
-# so print it unconditionally — this line is what makes "which code ran" answerable after the fact,
-# and it is the closest thing to the digest guarantee the snapshot used to give.
+# Print the resolved commit unconditionally — the pin is worthless if "which code ran" cannot be
+# answered after the fact.
 log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
 
-# ── THE BOOTSTRAP INSTALL, AND ONLY THAT ─────────────────────────────────────────────────────
-# `ensureInstallFresh` (src/run-task.ts) ALREADY solves "should I reinstall": it hashes
-# package.json + package-lock.json, compares against `.rmd-install-hash` written inside
-# node_modules by the last successful install, and its own doc states a matching hash is "a total
-# no-op — no redundant install, ever". Two call sites already wire it. Re-deciding that here would
-# duplicate a mechanism that is better than anything this script could compute.
-#
-# BUT IT CANNOT BOOTSTRAP ITSELF. `bin/rmd` ends in `exec "$DIR/node_modules/.bin/tsx"`, so on a
-# fresh clone with no node_modules there is no way to REACH ensureInstallFresh — every verb dies at
-# "Cannot find package 'tsx'", which is exactly the failure that killed the hand-made clone. So the
-# only install this script owes is the first one, conditioned on tsx being absent rather than on
-# anything about freshness. After that, rmd's own hash decides, as it does on every other host.
-#
-# This also answers the sharing question the wrong way round on purpose: the clone gets its OWN
-# node_modules. REQ 4 in the Dockerfile records that one shared install emptied under a running
-# daemon twice in a week, and /app's install belongs to /app's lockfile, not to this checkout's.
+# ── The bootstrap install, and only that ─────────────────────────────────────────────────────
+# Invariant: `ensureInstallFresh` (src/run-task.ts) already decides "should I reinstall" for every
+# later run, so this script owes only the FIRST install — it cannot reach that check itself, since
+# `bin/rmd` needs `node_modules/.bin/tsx` to run at all. Conditioned on tsx being absent, not on
+# freshness. The clone gets its OWN node_modules, deliberately not shared with /app's (Dockerfile
+# REQ 4). Why: docs/forensics/entrypoint.md#the-bootstrap-install-and-only-that.
 if [ ! -x "$TREE/node_modules/.bin/tsx" ]; then
   log "no node_modules/.bin/tsx — running the bootstrap install (rmd's own freshness check takes over after this)"
   ( cd "$TREE" && npm ci ) || die "npm ci failed in $TREE"
@@ -506,68 +294,22 @@ fi
 
 cd "$TREE"
 
-# ── RESTART RATE LIMIT: THE CONTAINER COUNTERPART OF launchd's ThrottleInterval ───────────────
-# `generateLaunchdPlist` (src/lib/launchd.ts) gives the mini `KeepAlive {SuccessfulExit: false}`
-# plus `ThrottleInterval` (plan/policy.yaml's `launchd.throttleIntervalS`, 60). Docker's
-# `--restart=on-failure:N` caps the COUNT, not the RATE — so the container half of that pair is
-# missing, and the measured precedent is a duplicate task id making the plan unreadable and
-# crash-looping the daemon at ~5 restarts/minute.
-#
-# THIS SLEEPS BEFORE EXITING, AND — SINCE W1-T490 — LOOPS FOR EXACTLY ONE CASE. The original text
-# here rejected looping outright, on two grounds. The FIRST no longer holds and the SECOND still
-# does, so the block below honours the second and retires the first.
-#
-#   RETIRED: "The clone/fetch/checkout above runs ONCE, before this line — so an in-container retry
-#   loop would re-run the daemon against the SAME tree forever and `stale` would never clear." That
-#   was true only of a loop around `"$@"`. The bootstrap is now the `sync_tree` FUNCTION above, so
-#   the loop below re-runs the fetch and the checkout before every retry and staleness clears
-#   exactly as a container restart would clear it.
-#
-#   STILL BINDING: "IT ALSO LEAVES `--restart=on-failure:N` INTACT, which an internal loop would
-#   render inert: the container still exits non-zero once per attempt, so N still counts attempts."
-#   A container that never exits is never counted, so an unconditional loop would delete the
-#   crash-loop bound entirely. THE LOOP BELOW IS THEREFORE NARROW: it re-enters ONLY on
-#   `DAEMON_EXIT_STALE`, and every other non-zero exit still falls straight through to the sleep and
-#   the exit, so a crash is counted by docker exactly as it was.
-#
-# ── WHY `stale` HAD TO BE SEPARATED AT ALL ───────────────────────────────────────────────────
-# `daemonExitCode` (src/lib/daemon.ts) used to map `blocked`, `error` AND `stale` onto 1, and
-# docker's `on-failure:N` counts every non-zero exit against N. MEASURED (Azure, 2026-08-14): the
-# policy cannot read the code — `exit 1` and `exit 42` both parked at `RestartCount=2` under
-# `on-failure:2` — and health never refunds the budget: containers exiting after 0s, 20s and 120s of
-# clean work all parked permanently, the only observed reset being a manual `docker start`. So a
-# freshness restart, which happens ONCE PER MERGE (14 rows in 24 hours), spent the same finite budget
-# as a crash, and a healthy merging fleet exhausted `on-failure:5` in roughly half a day. The
-# measured cost was a 2h56m outage — 90% of that day's downtime — that only a human ended.
-#
-# THE FIX IS NOT A POLICY CHANGE. `--restart=on-failure:5` is on the operator's `docker run` and is
-# deliberately left alone: an unbounded `always`/`unless-stopped` would have spun forever on the
-# MEASURED lock storm of 2026-08-13 22:23:40–22:26:10 (5 boots, 3 exits and 3 "a drain/daemon is
-# already running" collisions in 150 seconds, arriving 13–17s apart). The bound is wanted. What
-# changes is only WHICH exits are charged to it.
-#
-# THE FRESHNESS LOOP IS ITSELF BOUNDED, so nothing here is unbounded in either direction. It retries
-# at most `RMD_FRESHNESS_RESTART_MAX` times (default 100) and sleeps `FRESHNESS_RESTART_PAUSE_S`
-# between attempts — NOT the crash throttle. That clause read "the SAME throttle" until 2026-08-18
-# and had been wrong since the separate pause was introduced in the block below; the two statements
-# contradicted each other in one file. A pathological restart-storm is still rate-limited and falls through
-# to a real exit, handing the container back to docker's count. Rate here, count there, still — the
-# only difference is that routine freshness no longer spends the count.
-#
-# EXIT 0 IS NEVER THROTTLED. `daemonExitCode` maps stopped/max_reached to 0, and a `STOP` file
-# yields `stopped` — so an operator stopping the fleet from the host gets an immediate clean exit
-# and `on-failure` leaves the container down. Sleeping there would delay a requested stop by a
-# minute for no reason.
-#
-# THE INTERVAL COMES FROM THE ENVIRONMENT, NEVER FROM THE REPO. plan/policy.yaml is read by
-# `generateLaunchdPlist` at PLIST-GENERATION time and baked into static XML; launchd never reads
-# the repo at crash time. Reading it here instead would need the plan loadable at exactly the
-# moment an unloadable plan is what is crashing the daemon — the measured incident. So the value
-# is supplied at `docker run` and read from the environment, which is the same bake-it-once shape.
-#
-# OPT-IN, so the default path is byte-for-byte what it was: unset, this script still `exec`s.
-# That matters because `exec "$@"` serves every container invocation, not just the daemon, and a
-# one-shot verb must not acquire a minute of latency on a non-zero exit.
+# ── The restart rate limit: the container counterpart of launchd's ThrottleInterval ───────────
+# Invariant: docker's `--restart=on-failure:N` caps the restart COUNT, never the RATE, so this
+# sleeps before a non-zero exit to rate-limit it. Since W1-T490 it also LOOPS in-container, but
+# only for `DAEMON_EXIT_STALE`: `sync_tree` is a function now, so the loop can re-run the fetch and
+# checkout on each retry, and staleness clears exactly as a container restart would clear it. Every
+# other non-zero exit still falls straight through to the sleep and the exit — an unconditional
+# loop would delete docker's crash-loop bound entirely, which this narrow re-entry does not.
+# Trap: `stale` used to share exit code 1 with a real crash, so a routine freshness restart (far
+# more frequent than a crash) spent the same finite `on-failure` budget — measured cost, a 2h56m
+# outage. Splitting the code is what lets a healthy, frequently-restarting fleet avoid spending a
+# crash-loop budget it was never meant to touch.
+# Exit 0 is never throttled: an operator-requested stop must not acquire extra latency.
+# The interval is supplied at `docker run`, never read from the repo — reading it here would need
+# the plan loadable at exactly the moment an unloadable plan is what is crashing the daemon.
+# Opt-in: unset, this script still `exec`s, so a one-shot verb pays no latency on a non-zero exit.
+# Why: docs/forensics/entrypoint.md#the-restart-rate-limit--why-the-container-needs-one-at-all.
 RESTART_THROTTLE_S="${RMD_RESTART_THROTTLE_S:-0}"
 case "$RESTART_THROTTLE_S" in
   '' | *[!0-9]*)
@@ -582,46 +324,22 @@ fi
 
 log "restart throttle: a NON-ZERO exit will sleep ${RESTART_THROTTLE_S}s before exiting, so docker restarts at that rate"
 
-# THE FRESHNESS EXIT CODE, DUPLICATED FROM `DAEMON_EXIT_STALE` (src/lib/daemon.ts) ON PURPOSE.
-# This script cannot import that module: it runs at the exact moment the daemon has failed, and the
-# note on the throttle interval above already records why nothing here may depend on the repo being
-# loadable then. `test/entrypoint-boot.test.ts` greps this file for the constant and fails if the two
-# ever drift, so the duplication is pinned rather than merely commented.
+# Duplicated from `DAEMON_EXIT_STALE` (src/lib/daemon.ts) — this script runs before any node
+# process exists, so it cannot import the constant. test/entrypoint-boot.test.ts greps both this
+# and the two below out of the file and asserts they equal the exported constants, so a drift is a
+# red test, never a silent mis-route.
 DAEMON_EXIT_STALE=75
 
-# THE BLOCKED EXIT CODE, DUPLICATED FROM `DAEMON_EXIT_BLOCKED` (src/lib/daemon.ts) ON PURPOSE, for
-# the same reason the line above duplicates its sibling: this script runs before any node process
-# exists, so it cannot import the constant. `test/entrypoint-boot.test.ts` reads BOTH numbers out
-# of this file and asserts they equal the exported constants, so a drift is a red test, not a
-# silent mis-route.
+# Duplicated from `DAEMON_EXIT_BLOCKED`, same reason and same falsifier as above.
 DAEMON_EXIT_BLOCKED=76
-# THE ENVIRONMENTAL EXIT CODE, DUPLICATED FROM `DAEMON_EXIT_ENVIRONMENTAL` (src/lib/daemon.ts) for
-# the same reason as the two above, and asserted equal by the same test.
+# Duplicated from `DAEMON_EXIT_ENVIRONMENTAL`, same reason and same falsifier as above.
 DAEMON_EXIT_ENVIRONMENTAL=77
-# ── WHY 100, MEASURED 2026-08-18 (was 20, sized against a merge rate the fleet has outgrown) ──
-# The note above sizes this budget from a freshness restart happening "ONCE PER MERGE (14 rows in
-# 24 hours)". That rate is gone. MEASURED over the eight complete UTC days ending 2026-08-18, via
-# the REST pulls API: 29, 41, 54, 58, 63, 71, 73, 86 merges per day — median 63 (4.5x the sizing
-# assumption) and even the quietest day, 29, is 2.1x it. 56 merges landed in the US-Eastern day of
-# 2026-08-17 alone. At 20 the budget is spent inside a single day, after which a ROUTINE freshness
-# exit falls through and spends `--restart=on-failure:5` instead — re-creating the exact
-# conflation of "stale" with "crash" that this whole block exists to undo.
-#
-# THE WORST CASE THIS NUMBER CREATES, STATED PLAINLY RATHER THAN LEFT TO BE DERIVED:
-#   FRESHNESS_RESTART_MAX x FRESHNESS_RESTART_PAUSE_S = 100 x 5s = 500s (8m20s)
-# of in-container ceiling before a freshness exit reaches docker's count. The multiplier is the
-# PAUSE below, never `RESTART_THROTTLE_S` (120s in production) — the freshness path does not sleep
-# the crash throttle, which is what the corrected sentence above now says.
-#
-# AND IT HAS A PRICE, NOT ONLY A CEILING. Every restart re-runs `sync_tree`, whose first act is a
-# real `git fetch --prune origin`. 100 restarts is 100 fetches against the origin. That cost is
-# accepted deliberately for the headroom; it is recorded here so the next person raising this number
-# knows what they are buying and does not have to re-derive it from the loop body.
-#
-# WHY THE DEFAULT MOVED RATHER THAN THE OPERATOR KEEPING AN ENV VAR: 100 was being carried only as
-# `-e RMD_FRESHNESS_RESTART_MAX=100` on `docker run`, so any container rebuilt without that flag
-# silently reverted to 20 with nothing reporting the regression. A default that has to be
-# re-supplied by hand on every rebuild is not a default.
+# 100, not the original 20: MEASURED 2026-08-18 merge rates (median 63/day) spend a budget of 20
+# inside a single day, after which a routine freshness exit falls through and spends the crash
+# budget instead — the exact conflation this whole block exists to undo. Worst case is
+# FRESHNESS_RESTART_MAX x FRESHNESS_RESTART_PAUSE_S (500s), and every restart re-runs `sync_tree`'s
+# real fetch, a cost accepted deliberately for the headroom.
+# Why: docs/forensics/entrypoint.md#why-freshness_restart_max-is-100-measured-2026-08-18.
 FRESHNESS_RESTART_MAX="${RMD_FRESHNESS_RESTART_MAX:-100}"
 case "$FRESHNESS_RESTART_MAX" in
   '' | *[!0-9]*)
@@ -630,13 +348,11 @@ case "$FRESHNESS_RESTART_MAX" in
     ;;
 esac
 
-# THE FRESHNESS RETRY GETS ITS OWN, SHORT PAUSE — SEPARATE FROM THE CRASH THROTTLE ABOVE. A
-# freshness restart is one per merge, with a real fetch and checkout between attempts; it is not
-# the shape the crash throttle exists to slow (the measured 2026-08-13 lock storm, same boot
-# failing the same way 13-17s apart). Sleeping the FULL `RESTART_THROTTLE_S` (120s in production)
-# before every in-container re-sync bought nothing but idle time. THE BOUND IS REPLACED, NOT
-# REMOVED: the loop above is still capped at `FRESHNESS_RESTART_MAX` attempts, so worst case is
-# now `FRESHNESS_RESTART_MAX` x `FRESHNESS_RESTART_PAUSE_S` instead of x `RESTART_THROTTLE_S`.
+# The freshness retry gets its own short pause, separate from the crash throttle above: a
+# freshness restart is not the boot-failing-the-same-way shape that throttle exists to slow (see
+# docs/forensics/entrypoint.md#the-restart-rate-limit--why-the-container-needs-one-at-all), and
+# sleeping the full crash throttle here bought nothing but idle time. The bound is replaced, not
+# removed — still capped at `FRESHNESS_RESTART_MAX` attempts.
 FRESHNESS_RESTART_PAUSE_S="${RMD_FRESHNESS_RESTART_PAUSE_S:-5}"
 case "$FRESHNESS_RESTART_PAUSE_S" in
   '' | *[!0-9]*)
@@ -645,21 +361,14 @@ case "$FRESHNESS_RESTART_PAUSE_S" in
     ;;
 esac
 
-# ── W1-T2537: THE BLOCKED RETRY, THE OTHER HALF OF THE FRESHNESS LOOP ────────────────────────
-# A `blocked` stop is a COMPLETED drain pass reporting that a task is blocked — not a crash. It
-# was charged to docker's `on-failure:N` exactly as a crash was, and MEASURED 2026-08-30 that
-# left the container `Exited (1)` for 46+ minutes after a pass that had dispatched three tasks and
-# opened three PRs. The loop is self-sustaining: a red board is what PRODUCES blocked passes, so
-# the budget empties fastest when the fleet is most needed, and once empty nothing drains.
-#
-# NEITHER NUMBER IS PICKED. The cap MIRRORS `FRESHNESS_RESTART_MAX` above — the same worst-case
-# shape already ratified for the sibling path, and the bound is what hands a pathological loop
-# back to docker's count instead of replacing a bound with nothing. The pause is the daemon's OWN
-# `DEFAULT_POLL_INTERVAL_MS` (60s, src/lib/daemon.ts), documented there as "check back once a
-# minute while nothing is runnable" — which is exactly what a blocked board is. Deliberately NOT
-# the 5s freshness pause (a blocked board needs CI wall-clock to change; a stale checkout does
-# not) and NOT the 120s crash throttle (that exists to slow a boot failing the same way, and this
-# is a pass that ran to completion).
+# ── W1-T2537: the blocked retry, the other half of the freshness loop ────────────────────────
+# Invariant: a `blocked` stop is a COMPLETED drain pass, not a crash — charging it to docker's
+# `on-failure:N` anyway left the container down for 46+ minutes after a pass that had actually
+# dispatched three tasks (MEASURED 2026-08-30). The loop is self-sustaining: a red board is what
+# produces blocked passes, so the crash budget empties fastest exactly when draining is needed most.
+# The cap mirrors FRESHNESS_RESTART_MAX; the pause is the daemon's own DEFAULT_POLL_INTERVAL_MS
+# (60s) — "check back once a minute while nothing is runnable" is what a blocked board is.
+# Why: docs/forensics/entrypoint.md#the-blocked-retry--the-other-half-of-the-freshness-loop-w1-t2537.
 BLOCKED_RESTART_MAX="${RMD_BLOCKED_RESTART_MAX:-100}"
 case "$BLOCKED_RESTART_MAX" in
   '' | *[!0-9]*)
@@ -694,48 +403,23 @@ case "$BLOCKED_RESTART_PAUSE_S" in
     ;;
 esac
 
-# ── SIGNAL FORWARDING (W1-T1067) — RESTORE WHAT `exec` GIVES FOR FREE ───────────────────────
-# `exec "$@"` above REPLACES this shell with the child, so the child inherits this pid directly
-# and every signal tini sends it arrives unmediated. Down here, once the throttle is non-zero,
-# this shell stays alive as tini's actual child and runs the daemon as a SEPARATE process below —
-# so with no trap, this shell's own default disposition to SIGTERM is to die immediately, which
-# leaves the daemon running, now ORPHANED, with nothing forwarded to it, until docker's grace
-# period expires and SIGKILLs it — too late for `run-task.ts`'s own SIGTERM handler ever to run
-# and release `state/drain.lock`. MEASURED on the live container (2026-08-20): the process tree
-# under a 120s throttle carried no node process at all, only this shell asleep in the crash
-# throttle's `sleep`, because the PREVIOUS restart's node had been SIGKILLed with the lock still
-# held. Forwarding the signal to the child and waiting for ITS real exit — never dying here first
-# — is what restores exactly the delivery `exec` gives for free.
-#
-# THE REAL EXIT CODE IS CAPTURED INSIDE THE TRAP ITSELF, not by resuming the interrupted `wait`
-# below. Per bash's own documented `wait` semantics: when THIS shell is blocked in the `wait`
-# builtin and a signal for which a trap is set arrives, `wait` returns IMMEDIATELY with a
-# pseudo-status greater than 128, and the trap runs right after — so the value that first `wait`
-# produces describes bash's own interruption, never the child's actual outcome, and resuming that
-# interrupted statement is not a reliable place to read the child's real code from. The trap's OWN
-# `wait "$child_pid"` below is a FRESH call, issued once the forward has already been sent and no
-# further signal is pending, so it blocks for the child's genuine completion and records it in
-# `child_rc` — which the main loop then prefers over whatever the interrupted `wait` returned.
-#
-# ── W1-T2586: A HANDLED TERM MUST EXIT 0, OR THE STOP NEVER STICKS ─────────────────────────────
-# MEASURED 2026-09-01: `docker stop remudero-daemon` forwards TERM here, the daemon releases its
-# locks and dies, and the process it dies AS still carries a non-zero code — the daemon re-raises
-# the signal against itself once its own cleanup is done (`daemonCommand`'s `onSignal`,
-# src/run-task.ts), so a killed-by-SIGTERM wait status is 128+15=143. `on-failure` cannot tell
-# 143 from a crash, and the 120s throttle below THROTTLES the relaunch rather than preventing it —
-# so the operator sees `Exited`, believes the stop worked, and the container comes back 27 minutes
-# later on its own. A leak that `docker stop` was reached for specifically to end then ran for a
-# further 24 minutes and ~$45 before anyone noticed it was never stopped.
-#
-# `signal_forwarded` IS THE DISTINCTION `daemonExitCode` (src/lib/daemon.ts) CANNOT MAKE FROM
-# INSIDE THE CONTAINER. That function already maps a real `stopped` reason to exit 0; the defect
-# is that a SIGNAL-DRIVEN stop never reaches it as `stopped` — Node dies BY the re-raised signal,
-# which has no reason string at all, only a wait status. But this shell does not need the
-# daemon's own classification: it knows an operator/supervisor signal arrived, because IT is what
-# received TERM/INT and chose to forward it. That fact alone is what "handled deliberately"
-# means here, and it is set exactly once, only inside this handler, only after a live child was
-# actually signalled — never inferred from the resulting exit code, which is what would risk
-# calling an UNRELATED crash a clean stop (the ⚠ this task's own rationale warns against).
+# ── Signal forwarding (W1-T1067): restore what `exec` gives for free ────────────────────────
+# Invariant: once the throttle is non-zero, this shell runs the daemon as a SEPARATE backgrounded
+# process rather than exec'ing it, so a signal tini sends no longer reaches the daemon unless this
+# shell forwards it. Without the trap below, this shell's default TERM disposition is to die
+# immediately, orphaning the daemon with nothing forwarded until docker's SIGKILL grace period —
+# too late for its own handler to release `state/drain.lock` (measured on a live container: node
+# had already been SIGKILLed with the lock still held).
+# Trap: a handled TERM must exit 0, or `docker stop` never sticks. The daemon re-raises the signal
+# against itself once its cleanup is done, so a clean stop still carries wait status 143 — which
+# `on-failure` cannot tell from a crash, so an operator's stop silently comes back on its own
+# (measured cost: ~24 minutes and ~$45 before anyone noticed). `signal_forwarded` is the fact this
+# shell knows and `daemonExitCode` cannot: it is what received TERM/INT and chose to forward it,
+# set only after a live child was actually signalled, never inferred from the exit code alone.
+# Falsifier: the real exit code is captured inside the trap's own fresh `wait`, not by resuming the
+# interrupted one — bash returns a pseudo-status >128 from an interrupted `wait`, which describes
+# bash's own interruption, never the child's outcome.
+# Why: docs/forensics/entrypoint.md#signal-forwarding--restoring-what-exec-gives-for-free-w1-t1067.
 signal_forwarded=""
 child_pid=""
 child_rc=""
@@ -752,18 +436,11 @@ forward_signal() {
 trap 'forward_signal TERM' TERM
 trap 'forward_signal INT' INT
 
-# CAPTURE THE CODE IN THE SAME COMMAND THAT RUNS IT. `if "$@"; then ...; fi; rc=$?` reads $? from
-# the COMPOUND, which is 0 when the condition merely tested false — so a crashing daemon exited 0,
-# docker's `on-failure` saw a success, and the container stayed down through exactly the crash it
-# is meant to restart. Caught by the non-zero-direction test below, which asserted the propagated
-# code rather than only the sleep; the sleep and both log lines were already correct.
-#
-# BACKGROUNDED, NOT FOREGROUND, so the trap above can react while it runs (a foreground `"$@"`
-# leaves this shell unable to run a trap until the command completes — precisely the delivery gap
-# this block exists to close). `child_rc` starts EMPTY every pass and is only ever set by the trap
-# above, so an ordinary, unsignaled exit leaves it empty and `rc` keeps exactly the value the plain
-# `wait` below already produced — byte-for-byte the prior behaviour on every path this block does
-# not touch.
+# Trap: the exit code must be captured from the SAME command that runs it — `if "$@"; then ...; fi;
+# rc=$?` reads $? from the compound, which is 0 whenever the condition merely tested false, so a
+# crashing daemon read as a success. Backgrounded, not foreground, so the trap above can react
+# while it runs; `child_rc` starts empty every pass and only the trap sets it, so an unsignaled
+# exit leaves `rc` exactly what the plain `wait` below produces.
 freshness_restarts=0
 blocked_restarts=0
 environmental_restarts=0
@@ -798,10 +475,9 @@ while :; do
     exit 0
   fi
 
-  # THE ONE CASE THAT DOES NOT SPEND THE BUDGET. A `stale` stop is not a failure: the daemon is
-  # asking to come back on code that has since merged, and daemon.ts calls it the path that "WANTS
-  # exactly that restart". Serving it here means the container never exits, so docker never counts
-  # it — while the re-sync below makes the retry meaningful rather than a re-run of the same tree.
+  # A `stale` stop is not a failure — the daemon wants exactly this restart, on code that has
+  # since merged — so serving it here means docker never counts it, and the re-sync makes the
+  # retry meaningful rather than a re-run of the same tree.
   if [ "$rc" -eq "$DAEMON_EXIT_STALE" ] && [ "$freshness_restarts" -lt "$FRESHNESS_RESTART_MAX" ]; then
     freshness_restarts=$((freshness_restarts + 1))
     log "exited $rc (freshness) — restart ${freshness_restarts}/${FRESHNESS_RESTART_MAX} IN-CONTAINER, so docker's on-failure budget is not spent"
@@ -812,12 +488,9 @@ while :; do
     continue
   fi
 
-  # W1-T2537 — THE SECOND CASE THAT DOES NOT SPEND THE BUDGET, and for the same reason: a
-  # `blocked` stop is a pass that RAN TO COMPLETION and found a task blocked. Re-syncing first is
-  # not decoration — PRs may have merged while that pass ran, so the next pass genuinely has a
-  # different board to work, which is what makes the retry meaningful rather than a re-run of the
-  # same tree. Past the cap it falls through to the crash throttle below, so the bound is
-  # REPLACED, never removed.
+  # W1-T2537 — the second case that does not spend the budget: a `blocked` stop is a pass that
+  # ran to COMPLETION, so re-syncing first gives the next pass a genuinely different board. Past
+  # the cap it falls through to the crash throttle, so the bound is replaced, never removed.
   if [ "$rc" -eq "$DAEMON_EXIT_BLOCKED" ] && [ "$blocked_restarts" -lt "$BLOCKED_RESTART_MAX" ]; then
     blocked_restarts=$((blocked_restarts + 1))
     log "exited $rc (blocked) — restart ${blocked_restarts}/${BLOCKED_RESTART_MAX} IN-CONTAINER, so docker's on-failure budget is not spent"
@@ -828,14 +501,11 @@ while :; do
     continue
   fi
 
-  # W1-T2546 — THE THIRD CASE THAT DOES NOT SPEND THE BUDGET. An environmental refusal (a GitHub
-  # rate-limit 403, a 5xx, a transport fault) is not a crash: nothing about the tree, the plan or
-  # the code is wrong, and the correct response is to WAIT. MEASURED 2026-08-31: two PRs opened
-  # successfully, the pass died reading one back on `API rate limit exceeded ... (HTTP 403)`, and
-  # docker counted the restart. During a lockout window EVERY pass can die that way, so the crash
-  # budget drains at the rate the limiter refuses and the fleet ends up dead with a red board and
-  # no failing check to explain it. Past the cap it falls through to the crash throttle below, so
-  # the bound is REPLACED, never removed.
+  # W1-T2546 — the third case that does not spend the budget: an environmental refusal (a GitHub
+  # rate-limit 403, a 5xx, a transport fault) is not a crash, and waiting is the correct response.
+  # During a lockout window every pass can die this way, draining the crash budget at the rate the
+  # limiter refuses. Past the cap it falls through to the crash throttle, bound replaced not removed.
+  # Why: docs/forensics/entrypoint.md#the-environmental-refusal-retry-arm-w1-t2546.
   if [ "$rc" -eq "$DAEMON_EXIT_ENVIRONMENTAL" ] && [ "$environmental_restarts" -lt "$ENVIRONMENTAL_RESTART_MAX" ]; then
     environmental_restarts=$((environmental_restarts + 1))
     log "exited $rc (environmental) — restart ${environmental_restarts}/${ENVIRONMENTAL_RESTART_MAX} IN-CONTAINER, so docker's on-failure budget is not spent"
@@ -846,10 +516,8 @@ while :; do
     continue
   fi
 
-  # EVERYTHING ELSE EXITS, AND IS COUNTED. A crash (`error` ⇒ 1) reaches here on its first
-  # attempt, so `--restart=on-failure:N` bounds a crash loop exactly as it did before this block
-  # existed. A freshness storm reaches here only after exhausting the loop above, which is what
-  # keeps the in-container path from replacing a bound with nothing.
+  # Everything else exits, and is counted: a crash reaches here on its first attempt, so
+  # `--restart=on-failure:N` still bounds a crash loop exactly as before this block existed.
   if [ "$rc" -eq "$DAEMON_EXIT_STALE" ]; then
     log "exited $rc (freshness) — but ${FRESHNESS_RESTART_MAX} in-container restarts are already spent, so this one goes to docker's count"
   fi
