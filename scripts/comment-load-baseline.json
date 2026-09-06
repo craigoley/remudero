@@ -214,6 +214,7 @@
   "src/lib/receipt.ts": 135,
   "src/lib/relay-client.ts": 101,
   "src/lib/relint.ts": 97,
+  "src/lib/replay-harness.ts": 76,
   "src/lib/replay.ts": 82,
   "src/lib/reply-interpreter.ts": 104,
   "src/lib/repo-location.ts": 50,
@@ -262,6 +263,6 @@
   "src/lib/worker.ts": 1104,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16063,
+  "src/run-task.ts": 16091,
   "src/spike.ts": 18
 }
