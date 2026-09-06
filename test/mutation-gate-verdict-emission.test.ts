@@ -49,10 +49,10 @@ function tmpRoot(kind: string): string {
 /** Run the real CLI with RMD_ROOT pointed at a scratch root, so the emission lands where we can
  *  read it. Spawning the actual process (not calling an export) is what makes this a test of the
  *  GATE rather than of a function the gate might not call. */
-function runCli(args: string[], root: string) {
+function runCli(args: string[], root: string, env: Record<string, string> = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: "utf8",
-    env: { ...process.env, RMD_ROOT: root, GITHUB_RUN_ID: "", GITHUB_SHA: "", GITHUB_REF: "", GITHUB_REPOSITORY: "" },
+    env: { ...process.env, RMD_ROOT: root, GITHUB_RUN_ID: "", GITHUB_SHA: "", GITHUB_REF: "", GITHUB_REPOSITORY: "", ...env },
   });
 }
 
@@ -197,6 +197,7 @@ test("resolveVerdictRunId prefers the Actions run id, then the sha, then git HEA
   assert.equal(resolveVerdictRunId({ GITHUB_SHA: "abc" }), "abc");
   assert.equal(resolveVerdictRunId({}, () => ({ stdout: "deadbeef\n" })), "deadbeef");
   assert.equal(resolveVerdictRunId({}, () => ({ stdout: "" })), "unknown", "never an empty id");
+  assert.throws(() => resolveVerdictRunId({}, () => ({ error: new Error("git unavailable") })), /git unavailable/);
 });
 
 test("resolveVerdictPrUrl builds a URL only for a pull_request ref", () => {
@@ -304,4 +305,14 @@ test("a real run whose ledger cannot be written still returns the gate's own exi
   const res = runCli(["--report", join(FIXTURES, "above-baseline.json"), "--baseline", BASELINE], root);
   assert.equal(res.status, 0, "still the gate's own verdict");
   assert.match(res.stderr, /verdict NOT recorded/);
+});
+
+test("a real run whose fallback run-id lookup throws still returns the gate's own exit code", () => {
+  // This covers the containment around the whole emission call, not only appendLedger's write arm:
+  // losing the measurement must not turn a passing mutation score into a red required check.
+  const root = tmpRoot("w1-t2707-run-id-error-");
+  const res = runCli(["--report", join(FIXTURES, "above-baseline.json"), "--baseline", BASELINE], root, { PATH: "" });
+  assert.equal(res.status, 0, res.stdout + res.stderr);
+  assert.match(res.stderr, /verdict NOT recorded: spawnSync git ENOENT/);
+  assert.deepEqual(ledgerLines(root), [], "the failed emission writes no partial verdict");
 });

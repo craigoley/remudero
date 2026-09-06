@@ -592,6 +592,7 @@ export function resolveVerdictRunId(env, spawn = spawnSync) {
   if (env.GITHUB_RUN_ID) return env.GITHUB_RUN_ID;
   if (env.GITHUB_SHA) return env.GITHUB_SHA;
   const res = spawn('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' });
+  if (res.error) throw res.error;
   return ((res.stdout ?? '').trim()) || 'unknown';
 }
 
