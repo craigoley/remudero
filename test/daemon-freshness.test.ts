@@ -684,7 +684,13 @@ test("W1-T2865: late freshness closes the interphase review clock before its fin
   let lateLightPasses = 0;
 
   const daemon = runDaemon(fixturePlan(), {
-    refreshMerged: () => () => false,
+    // W1-T2984 — EVERYTHING MERGED, so this tick selects nothing and the clock choreography below
+    // is measured on its own. It used to read `() => false`, which left A and B runnable; that did
+    // not matter while a consumed wake `continue`d before dispatch, but the wake no longer discards
+    // an admitted batch, so a runnable queue would now start a real dispatch and its own in-flight
+    // ticker inside this fixture. The subject here is the LATE FRESHNESS BOUNDARY closing the
+    // interphase clock before its final sweep, which has nothing to do with dispatch.
+    refreshMerged: () => () => true,
     runOne: async (id) => okResult(id),
     sleep: () => new Promise<void>((resolve) => sweepTickerWaiters.push(resolve)),
     checkFreshness: (): DaemonFreshness =>
