@@ -235,7 +235,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
     "keychainProvisionLockWaitMs",
-    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "githubEventWake",
+    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "ciLearningCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "githubEventWake",
     "armCalibrationBands",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
@@ -522,6 +522,15 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // closing a PR off a supersession verdict; the disposition and the verdict shape are
     // both net-new.
     "sweep.supersessionDisposal",
+    // W1-T2959: the three `ciLearningCadence.*` fields join them — the daily CI-failure learning
+    // rung they pace did not exist before this task, so there is no prior literal to cite as a
+    // source site. `enabled: false` in particular is not a lift of any sibling cadence's default:
+    // every sibling defaults ON because it is read-only, and this rung drafts records, so citing
+    // one of them would claim a source-site copy that never happened AND import a justification
+    // that does not hold here.
+    "ciLearningCadence.enabled",
+    "ciLearningCadence.minIntervalMinutes",
+    "ciLearningCadence.maxPerDay",
     // W1-T943: `workerStall` joins them too — no prior literal ever measured a worker-quiet
     // threshold before this task's own filing verified plan/policy.yaml carried zero rows for it.
     "workerStall",
