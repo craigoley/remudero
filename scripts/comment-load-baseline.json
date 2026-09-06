@@ -98,7 +98,7 @@
   "src/lib/alert-lane.ts": 133,
   "src/lib/analytics-route.ts": 118,
   "src/lib/auto-triage.ts": 332,
-  "src/lib/autonomy.ts": 185,
+  "src/lib/autonomy.ts": 90,
   "src/lib/block-reason.ts": 103,
   "src/lib/board-review.ts": 244,
   "src/lib/board.ts": 667,
