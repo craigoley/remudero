@@ -272,7 +272,7 @@ test("the declaration recognizer is the helper import query, not a clock-idiom t
     `the seam should have the migrated members as declarers; found ${importers.length}: ${importers.join(", ")}`,
   );
 
-  const helperDeclarations = gitGrepLines(["grep", "-nE", "^export function assertWallClockBound\\b", "--", "test/helpers/*.ts"]);
+  const helperDeclarations = gitGrepLines(["grep", "-nE", "^export function assertWallClockBound\\(", "--", "test/helpers/*.ts"]);
   assert.equal(helperDeclarations.length, 1, `the helper function must be declared in exactly one place: ${helperDeclarations.join(", ")}`);
   assert.match(
     helperDeclarations[0]!,
