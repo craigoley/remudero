@@ -4113,11 +4113,20 @@ export function reviewerVerdictContract(count: number): string {
     ``,
     `MACHINE-READABLE OUTPUT (required — this is what the orchestrator posts`,
     `the status from, since you do not post it yourself): emit`,
-    `EXACTLY one line per criterion, in this form and nothing else on the line:`,
-    `  REVIEW_VERDICT <n>: PASS   (proof is responsive and substantiated)`,
-    `  REVIEW_VERDICT <n>: FAIL   (proof missing, unpasted, or non-responsive)`,
+    `EXACTLY one line per criterion, in this form:`,
+    `  REVIEW_VERDICT <n>: PASS`,
+    `  REVIEW_VERDICT <n>: FAIL   <why THIS proof did not substantiate THIS claim>`,
     `for n = 1..${count}. These are folded into the deterministic verdict and may`,
     `only DOWNGRADE a criterion to failure, never rescue an unpasted proof.`,
+    ``,
+    `ON A FAIL, THE TEXT AFTER THE TOKEN IS THE WHOLE POINT. It is recorded verbatim`,
+    `on that criterion's row and is the ONLY thing an author or operator ever sees`,
+    `about your judgment — there is no transcript they can read. Name what you`,
+    `checked and what was missing, specific to this claim: "ran the named test, it`,
+    `passes but asserts only that the file parses" tells someone what to fix.`,
+    `A bare category like "non-responsive" repeats what the token already said and`,
+    `leaves them nothing to act on. One line; anything after a newline is dropped.`,
+    `PASS lines are never annotated — the clause is read only on FAIL.`,
   ].join("\n");
 }
 

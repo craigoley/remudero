@@ -192,6 +192,18 @@ test(`an added comment block of exactly ${MAX_ADDED_BLOCK_LINES} lines passes an
   assert.equal(over[0].file, "src/a.ts");
 });
 
+// THE LITERAL BOUNDARY. Every other block test above is written through MAX_ADDED_BLOCK_LINES, so
+// all of them follow the constant wherever it moves and none would notice it moving. This one
+// names the numbers, so lowering 40 -> 25 on 2026-09-06 is falsifiable: restore 40 and it fails.
+test("an added comment block of 26 lines is refused and one of 25 lines is not", () => {
+  const measured = (f: string) => f === "src/a.ts";
+  assert.deepEqual(findOversizedAddedBlocks(addedCommentDiff(25), measured), [], "25 lines is the ceiling itself, not past it");
+  const over = findOversizedAddedBlocks(addedCommentDiff(26), measured);
+  assert.equal(over.length, 1, "26 lines is one past the ceiling and must be refused");
+  assert.equal(over[0].lines, 26);
+  assert.equal(over[0].file, "src/a.ts");
+});
+
 test("an added run is broken by a code line, and a file outside the measured set is never scanned", () => {
   const half = Math.ceil((MAX_ADDED_BLOCK_LINES + 1) / 2);
   const split = [
