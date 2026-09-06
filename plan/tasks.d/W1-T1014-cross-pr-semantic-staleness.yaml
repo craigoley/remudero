@@ -180,3 +180,46 @@
     (non-fast-forward)`, ZERO occurrences of `could not read Username`, and left that ref unchanged
     at 39efeddb87f3c0180e35244b3891a1fc2edf14d7. An exit code of 128 with an auth message would
     have proven nothing about the gate.
+
+    A SECOND INSTANCE, 2026-09-06, AND IT SETTLES ONE CORNER OF THE RULING THIS SHARD ASKS FOR.
+    The 2026-08-18 instance was SEMANTIC — a test asserting a contract another PR replaced. This
+    one is STRUCTURAL, which is why it belongs here as evidence rather than as a separate filing:
+    #4295 and #4296 filed DIFFERENT tasks under the SAME id W1-T2967, from the same base, and
+    merged 8 minutes apart (19:38:43Z and 19:46:42Z). Each was green. Neither could see the other.
+    loadPlan then refused on main, and every open PR went red on lint-plan, task-id-existence and
+    claims regardless of its own diff — the blast radius rationale (2) predicts, observed. main was
+    unloadable from 19:46:42Z until #4301 merged at 20:17:31Z, about 31 minutes.
+
+    OPTION (a) WOULD HAVE PREVENTED THIS ONE, MEASURED RATHER THAN ARGUED. Replayed at 0d7776e9
+    (#4295's merge commit) with #4296's shard applied on top — exactly the tree strict: true would
+    have forced #4296 to validate against before it could merge — the invocation #4296's OWN ci job
+    runs exits 2:
+      $ npm run lint-plan -- --base 0d7776e9
+      ### rmd lint-plan: duplicate task id 'W1-T2967' (shard plan/tasks.d/W1-T2967-the-daily-rung-
+      only-fires-when-a-human-types-it.yaml collides with an earlier plan entry)      EXIT=2
+    For the STRUCTURAL sub-class, then, (a) is not merely a throughput trade against a hoped-for
+    catch: it is decisive, through a required check the repo already runs, adding no new gate.
+    Live protection at the time of writing still reads required_status_checks {strict: false} and
+    enforce_admins false, re-read from the API rather than carried from rationale (iii).
+
+    WHAT IT DOES NOT SETTLE, GIVEN EQUAL WEIGHT. One instance where (a) binds does not PRICE (a):
+    the serialised ceiling in (iii) is untouched and still sits below observed demand on 4 of 11
+    days, and this instance supplies no new arithmetic for it. It says nothing about (b) or (c).
+    And it does not generalise backwards — against the 2026-08-18 SEMANTIC case a duplicate-id
+    check would not fire at all, and only re-running the other PR's suite, option (b), could have
+    caught it. Two instances, two mechanisms, one shape: the ruling still needs both halves, and
+    this shard must still NOT PICK ONE.
+
+    A FOURTH REMEDY, NOT LISTED ABOVE, WAS REFUTED IN PASSING — recorded so the ruling does not
+    spend a cycle rediscovering it. "Refuse a filing whose id holds no reservation ref" would NOT
+    have caught this: refs/rmd-id/W1-T2967 was minted at 19:25:32Z, BEFORE BOTH filings, and both
+    filed against that one ref. One ref, two tasks. A reservation ref carries only a pid, host and
+    timestamp in its message and has no identity field, so nothing downstream can distinguish its
+    own holder from a second writer reusing it. The reservation substrate answers "is this number
+    taken", never "is it taken BY YOU".
+
+    PROVENANCE: appended 2026-09-06 by an operator session that lived through the outage; the
+    filing itself is unchanged and no acceptance criterion was touched. The repair also produced a
+    NEAR-MISS worth one line — #4301, fixing the collision, picked W1-T2971 off a filename scan
+    while the fleet had held refs/rmd-id/W1-T2971 since 19:54:07Z and had already cut a run branch
+    against it; that was caught by hand, by nothing automated, which is the same gap in miniature.
