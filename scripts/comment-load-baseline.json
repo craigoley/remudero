@@ -205,7 +205,7 @@
   "src/lib/project-init.ts": 176,
   "src/lib/prompt-manifest.ts": 65,
   "src/lib/proof-grammar.ts": 30,
-  "src/lib/proof-queue-audit.ts": 211,
+  "src/lib/proof-queue-audit.ts": 93,
   "src/lib/provenance.ts": 33,
   "src/lib/provider-routing-policy.ts": 26,
   "src/lib/provider-routing-status.ts": 12,
