@@ -39,7 +39,7 @@
   "scripts/assertion-discrimination-check.mjs": 58,
   "scripts/bound-kind-baseline.json": 0,
   "scripts/check.mjs": 30,
-  "scripts/citation-anchor-census.mjs": 101,
+  "scripts/citation-anchor-census.mjs": 50,
   "scripts/claims-check.mjs": 71,
   "scripts/claude-md-budget-baseline.json": 0,
   "scripts/claude-md-budget-ratchet.mjs": 69,
