@@ -158,6 +158,12 @@
       "grepHint": "board.ts comment forensics"
     },
     {
+      "path": "docs/forensics/ci-parity.md",
+      "title": "ci-parity.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "ci-parity.ts forensics"
+    },
+    {
       "path": "docs/forensics/ci-yml.md",
       "title": "ci.yml forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
@@ -258,6 +264,12 @@
       "title": "Forensics — `src/lib/open-prs-rest.ts`",
       "summary": "A verbatim archive of the comment blocks compacted out of `src/lib/open-prs-rest.ts`. Each",
       "grepHint": "Forensics — `src/lib/open-prs-rest.ts`"
+    },
+    {
+      "path": "docs/forensics/panel-graph.md",
+      "title": "panel-graph.ts comment forensics",
+      "summary": "The measured forensics, incidents and design arguments that were removed from",
+      "grepHint": "panel-graph.ts comment forensics"
     },
     {
       "path": "docs/forensics/proof-queue-audit.md",
