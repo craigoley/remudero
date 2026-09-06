@@ -1205,3 +1205,38 @@ test("W1-T2627: doctorCommand end to end — unrelated is a WARN naming the run;
     assert.match(lines.join("\n"), /base-unknown/);
   }
 });
+
+// ── disk headroom is judged PROPORTIONALLY too, so a large volume gets a warning band ─────────
+
+test("judgeDiskHeadroom: on a large volume the absolute floors give NO warning band — the proportional arm is what fires", () => {
+  const GiB = 1024 ** 3;
+  const total = 228 * GiB; // MEASURED 2026-09-06 on the fleet's Mac host
+  const free = 9.4 * GiB; //  ... at 96% full, which had filled to 100% four times in four months
+
+  // The defect: absolute-only, this reads OK. 2GiB is 0.9% of 228GiB, so the check only leaves OK
+  // once the volume is 99.1% full — past the point a single `npm ci` can still succeed.
+  assert.equal(judgeDiskHeadroom(free).verdict, "OK", "absolute floors alone still read OK — the band that was missing");
+  assert.equal(judgeDiskHeadroom(free, total).verdict, "FAIL", "with the volume size, 4.1% free is a FAIL");
+  assert.match(judgeDiskHeadroom(free, total).measured, /4\.1% of 228GiB/, "the row states the fraction, not just the bytes");
+});
+
+test("judgeDiskHeadroom: a healthy large volume is still OK — the proportional arm is a band, not a permanent red", () => {
+  const GiB = 1024 ** 3;
+  assert.equal(judgeDiskHeadroom(100 * (1024 ** 3), 228 * GiB).verdict, "OK");
+  assert.equal(judgeDiskHeadroom(20 * (1024 ** 3), 228 * GiB).verdict, "WARN", "between 5% and 10% warns");
+});
+
+test("judgeDiskHeadroom: on a SMALL volume the absolute floor still dominates — the 55MiB incident's sizing is preserved", () => {
+  const GiB = 1024 ** 3;
+  // 10GiB volume: 10% is 1GiB, below the 2GiB floor, so the floor wins and behaviour is unchanged.
+  assert.equal(judgeDiskHeadroom(1.5 * GiB, 10 * GiB).verdict, "WARN", "1.5GiB free is under the 2GiB absolute floor");
+  assert.equal(judgeDiskHeadroom(3 * GiB, 10 * GiB).verdict, "OK", "3GiB clears both arms on a small volume");
+});
+
+test("judgeDiskHeadroom: an unreadable volume size SKIPS the proportional arm rather than fabricating a denominator", () => {
+  const GiB = 1024 ** 3;
+  const withoutTotal = judgeDiskHeadroom(9.4 * GiB);
+  assert.equal(withoutTotal.verdict, "OK", "absolute-only behaviour is byte-identical to before");
+  assert.equal(withoutTotal.measured, judgeDiskHeadroom(9.4 * GiB, undefined).measured, "an explicit undefined total reads the same as an omitted one");
+  assert.doesNotMatch(withoutTotal.threshold, /% of/, "and the threshold text names no fraction it could not compute");
+});

@@ -7,6 +7,7 @@ import {
   refuseUnsupportedArgs,
   classifyReadFailure,
   readDiskFreeBytes,
+  readDiskTotalBytes,
   // W1-T1082: the SAME judge + thresholds `rmd doctor` reports against — imported here, never
   // re-derived, so the daemon and `rmd doctor` cannot disagree mid-incident (see
   // escalateDiskHeadroomBreach's own doc, below).
@@ -27048,6 +27049,7 @@ export interface DoctorDeps {
   isWorktreeBaseAncestor?: (worktreePath: string, base: string, head: string) => boolean | undefined;
   readMemInfo?: () => MemInfo;
   readDiskFreeBytes?: (path: string) => number | undefined;
+  readDiskTotalBytes?: (path: string) => number | undefined;
   readPauseAgeMs?: (root: string, nowMs: number) => number | undefined;
   readGitLocks?: (root: string, nowMs: number) => Array<{ path: string; ageMs: number }>;
   readLockFiles?: (dir: string) => { locks: string[]; unreadableReason?: string };
@@ -27121,6 +27123,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     ...(cadence.boundDerivation === undefined ? {} : { dispatchBoundDerivation: cadence.boundDerivation }),
     mem: (deps.readMemInfo ?? readMemInfo)(),
     ...(((v) => (v === undefined ? {} : { diskFreeBytes: v }))((deps.readDiskFreeBytes ?? readDiskFreeBytes)(root))),
+    ...(((v) => (v === undefined ? {} : { diskTotalBytes: v }))((deps.readDiskTotalBytes ?? readDiskTotalBytes)(root))),
     ...(((v) => (v === undefined ? {} : { pauseAgeMs: v }))((deps.readPauseAgeMs ?? readPauseAgeMs)(root, nowMs))),
     totalLocks: lockFiles.length,
     ...(lockRead.unreadableReason === undefined ? {} : { locksUnreadableReason: lockRead.unreadableReason }),

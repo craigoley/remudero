@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { readDiskFreeBytes, deriveLastPoll } from "./daemon-health.js";
+import { readDiskFreeBytes, readDiskTotalBytes, deriveLastPoll } from "./daemon-health.js";
 import { pauseFilePath } from "./fleet-control.js";
 
 // Why: the day-long outage and ninety-minute API lockout behind these constraints — docs/forensics/doctor.md#module-header.
@@ -106,13 +106,40 @@ export function judgeLedgerFreshness(ageMs: number | undefined, boundMs: number)
 export const DISK_FAIL_BYTES = 512 * 1024 * 1024;
 export const DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024;
 
-export function judgeDiskHeadroom(freeBytes: number | undefined): Check {
-  const threshold = `WARN < ${humanBytes(DISK_WARN_BYTES)}, FAIL < ${humanBytes(DISK_FAIL_BYTES)}`;
+/** The absolute floors above are a FLOOR, not the whole judgement. They were sized off one
+ *  container's 55MiB incident so the warning would "arrive with time to act"
+ *  (docs/forensics/doctor.md#judgeDiskHeadroom) — and on a small volume they do. On a large one
+ *  they cannot: MEASURED 2026-09-06 on this fleet's Mac host, a 228GiB volume at 96% full with
+ *  9.4GiB free read OK, because 2GiB is 0.9% of it. There is no warning BAND at that size — the
+ *  check only leaves OK once the volume is 99.1% full, by which point a single `npm ci` has
+ *  already failed. That host has filled to 100% four times in four months.
+ *
+ *  So headroom is judged proportionally TOO, and the stricter of the two wins. judgeMemory in this
+ *  same file already reads fractions for exactly this reason; disk was the outlier. Deliberately
+ *  gentler than memory's 20/10 — a disk fills over days, not milliseconds, so a narrower band
+ *  still leaves time to act without crying wolf. */
+export const DISK_WARN_FRACTION = 0.1;
+export const DISK_FAIL_FRACTION = 0.05;
+
+export function judgeDiskHeadroom(freeBytes: number | undefined, totalBytes?: number): Check {
+  // `undefined` total ⇒ the absolute floors alone, byte-identical to the pre-proportional
+  // behaviour: an unreadable denominator must SKIP the proportional arm, never fabricate one.
+  const warnAt = Math.max(DISK_WARN_BYTES, (totalBytes ?? 0) * DISK_WARN_FRACTION);
+  const failAt = Math.max(DISK_FAIL_BYTES, (totalBytes ?? 0) * DISK_FAIL_FRACTION);
+  const threshold =
+    totalBytes === undefined
+      ? `WARN < ${humanBytes(DISK_WARN_BYTES)}, FAIL < ${humanBytes(DISK_FAIL_BYTES)}`
+      : `WARN < ${humanBytes(warnAt)} (max of ${humanBytes(DISK_WARN_BYTES)} and ${Math.round(DISK_WARN_FRACTION * 100)}% of ${humanBytes(totalBytes)}), ` +
+        `FAIL < ${humanBytes(failAt)}`;
   if (freeBytes === undefined) {
     return { name: "disk-headroom", verdict: "WARN", measured: "unreadable", threshold };
   }
-  const verdict: Verdict = freeBytes < DISK_FAIL_BYTES ? "FAIL" : freeBytes < DISK_WARN_BYTES ? "WARN" : "OK";
-  return { name: "disk-headroom", verdict, measured: humanBytes(freeBytes), threshold };
+  const verdict: Verdict = freeBytes < failAt ? "FAIL" : freeBytes < warnAt ? "WARN" : "OK";
+  const measured =
+    totalBytes === undefined || totalBytes <= 0
+      ? humanBytes(freeBytes)
+      : `${humanBytes(freeBytes)} (${((freeBytes / totalBytes) * 100).toFixed(1)}% of ${humanBytes(totalBytes)})`;
+  return { name: "disk-headroom", verdict, measured, threshold };
 }
 
 // Why: the measured ~4%-available freeze with no OOM signal — docs/forensics/doctor.md#judgememory.
@@ -658,7 +685,7 @@ export function readGitLocks(repoRoot: string, nowMs: number, deps: { readdir?: 
   return out;
 }
 
-export { readDiskFreeBytes };
+export { readDiskFreeBytes, readDiskTotalBytes };
 
 // ── composition, rendering, and the verb ──────────────────────────────────────────────────────
 
@@ -701,6 +728,8 @@ export interface DoctorInputs {
   repairDispatchBoundDerivation?: string;
   mem: MemInfo;
   diskFreeBytes?: number;
+  /** Total volume size, for the proportional arm of {@link judgeDiskHeadroom}. Absent ⇒ absolute floors only. */
+  diskTotalBytes?: number;
   pauseAgeMs?: number;
   totalLocks: number;
   deadLocks: readonly string[];
@@ -739,7 +768,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeStaleGitLocks(inputs.gitLocks),
     judgeCheckoutDepth(inputs.checkoutDepth),
     judgeWorktreeBases(inputs.worktreeBases ?? []),
-    judgeDiskHeadroom(inputs.diskFreeBytes),
+    judgeDiskHeadroom(inputs.diskFreeBytes, inputs.diskTotalBytes),
     judgeMemory(inputs.mem.availableBytes, inputs.mem.totalBytes, inputs.mem.swapTotalBytes),
     judgeNodeVersionPin(inputs.runningNodeVersion, inputs.nvmrcVersion),
   ];
