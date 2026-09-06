@@ -428,6 +428,12 @@
       "grepHint": "task-id-existence-check.mjs forensics"
     },
     {
+      "path": "docs/forensics/task-id-reservation.md",
+      "title": "task-id-reservation.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "task-id-reservation.ts forensics"
+    },
+    {
       "path": "docs/forensics/task-linter.md",
       "title": "Forensics: src/lib/task-linter.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/task-linter.ts` used to",
