@@ -38,10 +38,11 @@
     walk live worktrees and non-worktree entries alike (the 2026-07-31 failure)". That refusal is
     about ENUMERATION BY DIRECTORY WALK. `unmanagedWorktreeLanes` does not walk a directory — it
     reads `git worktree list --porcelain` for `repoDir`, so it can only ever name a worktree git
-    itself has registered. `repos/`, `state/`, `logs/` and `worker-home/` are structurally
-    unreachable through it: they carry no registration, so they never enter the candidate set. The
-    hazard the 2026-07-31 rule guards is absent from this enumeration by construction, which is the
-    single claim this task turns on and the one a reviewer should attack first.
+    itself has registered. `repos/`, `state/`, `logs/` and `worker-home/` are
+    structurally unreachable through it: they carry no registration, so they never enter the
+    candidate set. The hazard the 2026-07-31 rule guards is absent from this enumeration by
+    construction, which is the single claim this task turns on and the one a reviewer should
+    attack first.
 
     (4) THE COST OF NOT DOING IT, MEASURED. 166 of the 173 lanes were created in a single month;
     at ~26MB each that is ~140MB/day, and 13GiB of headroom is roughly three months. The host has
