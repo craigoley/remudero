@@ -242,6 +242,12 @@
       "grepHint": "ledger.ts forensics"
     },
     {
+      "path": "docs/forensics/measurement-cadence.md",
+      "title": "measurement-cadence.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from",
+      "grepHint": "measurement-cadence.ts forensics"
+    },
+    {
       "path": "docs/forensics/mount-headroom-sweep.md",
       "title": "mount-headroom-sweep.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
