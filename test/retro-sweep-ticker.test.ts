@@ -6,6 +6,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
+// W1-T2981 — the retro is DETACHED now, so `runDaemon` returns while it is still in flight.
+// These tests assert on what the retro did, so each must drain that action before asserting; the
+// assertions themselves are unchanged.
+import { drainDetachedSweepActions } from "../src/lib/sweep.js";
 import type { RunResult } from "../src/lib/run-result.js";
 import { waitForCiGreen, pollToGate } from "../src/run-task.js";
 
@@ -55,7 +59,6 @@ test("W1-T276: the light sweep runs while a fired retro is in flight, so the swe
   });
   const sleep: DaemonDeps["sleep"] = async (_ms) => {
     sleeps++;
-    if (sleeps >= 3) releaseRetro?.();
   };
   let stopChecks = 0;
   const summary = await runDaemon(plan, {
@@ -76,9 +79,13 @@ test("W1-T276: the light sweep runs while a fired retro is in flight, so the swe
     },
     sweepLight: async () => {
       lightSweeps++;
+      // W1-T2981 — gate on the TICKER's own ticks, not a shared `sleep` counter: the detached retro
+      // leaves the main loop running and calling `deps.sleep`, which would release this early.
+      if (lightSweeps >= 3) releaseRetro?.();
     },
     sleep,
   });
+  await drainDetachedSweepActions({ boundMs: 5000 });
   assert.equal(summary.stopReason, "stopped");
   assert.ok(lightSweeps >= 3, `the light-sweep ticker ran while the retro was in flight (saw ${lightSweeps} tick(s))`);
 });
@@ -129,6 +136,7 @@ test("W1-T276: the ticker stops on every retro exit path — including a THROWIN
     sleep: async () => {},
     log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
   });
+  await drainDetachedSweepActions({ boundMs: 5000 });
   assert.equal(summary.stopReason, "stopped", "a throwing runRetroTrigger must never crash the daemon loop");
   const runFailed = lines.find((l) => l.step === "daemon.retro_trigger.run_failed");
   assert.ok(runFailed, "the retro's own throw is still ledgered as daemon.retro_trigger.run_failed");
@@ -157,7 +165,6 @@ test("W1-T276: the retro's light-sweep ticker never dispatches a task while the 
   });
   const sleep: DaemonDeps["sleep"] = async (_ms) => {
     sleeps++;
-    if (sleeps >= 4) releaseRetro?.();
   };
   let stopChecks = 0;
   const summary = await runDaemon(plan, {
@@ -179,9 +186,13 @@ test("W1-T276: the retro's light-sweep ticker never dispatches a task while the 
     },
     sweepLight: async () => {
       lightSweeps++;
+      // W1-T2981 — gate on the TICKER's own ticks, not a shared `sleep` counter: the detached retro
+      // leaves the main loop running and calling `deps.sleep`, which would release this early.
+      if (lightSweeps >= 4) releaseRetro?.();
     },
     sleep,
   });
+  await drainDetachedSweepActions({ boundMs: 5000 });
   assert.equal(summary.stopReason, "stopped");
   assert.ok(lightSweeps >= 4, `the ticker ran multiple times during the retro (saw ${lightSweeps})`);
   assert.equal(runOneCalls, 0, "the light-sweep ticker restricted to sweepLight must never dispatch a task");

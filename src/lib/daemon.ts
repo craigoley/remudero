@@ -52,7 +52,12 @@ import type { GhRateLimitBuckets } from "./daemon-health.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
 // A value import, unlike the type-only line above. Safe: sweep.ts imports nothing from this
 // module, so this edge closes no cycle (W1-T2744).
-import { detachedSweepActionCount, drainDetachedSweepActions } from "./sweep.js";
+import {
+  detachSweepAction,
+  detachedActionInFlight,
+  detachedSweepActionCount,
+  drainDetachedSweepActions,
+} from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch-governor.js";
@@ -881,6 +886,15 @@ async function sweepLightDuringRetro(
  * the start condition stays coupled to the light-pass hook, because eight suites count waits as their
  * idle proxy. Disk headroom rides this same row (W1-T1082), and a supplied retrigger lets this ticker
  * re-fire the full pass on its own cadence (W1-T1272). Forensics: docs/forensics/daemon.md. */
+/** W1-T2981 — ONE in-flight ticker at a time, process-wide. Before the retro was detached only one
+ *  rung could be blocked at once, so overlap was impossible by construction. A detached retro keeps
+ *  its ticker while the tick proceeds into dispatch, which starts its own — and two tickers each run
+ *  `sweepLight` on the poll cadence, doubling GitHub calls exactly when the fleet is busiest. This
+ *  repo has already lost 90 minutes to a secondary rate limit, so the second ticker is an inert stub
+ *  rather than a second caller. The FIRST holder keeps the clock; the loser's `stop()` still
+ *  resolves, so every call site stays symmetric. */
+let inFlightTickerActive = false;
+
 /** The most stale the account-headroom reading may be before the in-flight ticker takes its own. The
  * governor sampled on the loop whose duration it was meant to bound: the reading is written once per
  * iteration, after the pass carrying the largest spender, so sampling rate was inversely coupled to
@@ -902,6 +916,9 @@ function startInFlightTicker(
   // cannot double-read. Optional and trailing, so every existing call site is unchanged (W1-T2565).
   headroomSampler?: { lastSampleMs: number; now: () => number; policy: HeadroomPolicy; enforced: boolean },
 ): { stop: () => Promise<void> } {
+  // W1-T2981: a second concurrent ticker would double every light sweep — hand back an inert one.
+  if (inFlightTickerActive) return { stop: async () => {} };
+  inFlightTickerActive = true;
   let active = true;
   // A wake edge is consumed when it shortens a wait, but its durable marker is not claimed until the
   // gate accepts a pass. Retain that intent across a hold or an older still-settling pass, and retry
@@ -1021,6 +1038,9 @@ function startInFlightTicker(
   return {
     stop: async () => {
       active = false;
+      // W1-T2981: release the process-wide holder BEFORE awaiting, so a slow or throwing pass can
+      // never strand the flag and leave every later ticker inert for the life of the process.
+      inFlightTickerActive = false;
       if (ticker) await ticker;
       // Stop owns this clock, not every process-global action a light pass ever detached. sweep.ts
       // retains each fix until it settles; awaiting that registry here turned the full-pass bound into an
@@ -2182,7 +2202,14 @@ export async function runDaemon(
       } catch (e) {
         log("daemon.retro_trigger.check_failed", { error: String((e as Error)?.message ?? e) });
       }
-      if (decision?.fire) {
+      // W1-T2981 — the REFUSAL is decided BEFORE `retro_triggered` is written, so that row keeps
+      // naming an actual fire. With the retro detached the loop keeps ticking while it runs, and the
+      // trigger legitimately still reads `fire` on the next tick because the marker has not advanced
+      // yet; logging first turned ONE retro into two `retro_triggered` rows and would have made every
+      // later count of "how often did the retro fire" wrong by the number of ticks it spanned.
+      if (decision?.fire && deps.runRetroTrigger && detachedActionInFlight("retro")) {
+        log("daemon.retro_trigger.already_detached", { reason: decision.reason });
+      } else if (decision?.fire) {
         log("retro_triggered", {
           reason: decision.reason,
           merges_since_marker: decision.mergesSinceMarker,
@@ -2191,25 +2218,31 @@ export async function runDaemon(
           days_since_marker: Number.isFinite(decision.daysSinceMarker) ? decision.daysSinceMarker : "unbounded",
         });
         if (deps.runRetroTrigger) {
-          // The retro already owns the established liveness/retrigger ticker. Hand clock
-          // ownership over without overlap; an event consumed by the inter-phase clock returns
-          // to the ordinary top-of-iteration full sweep before admitting this optional spend.
-          if (await stopInterphaseReviewClock()) continue;
-          try {
-            // The retro's own await is unbounded, like the dispatch below, so it is wrapped in the same
-            // light-sweep ticker and reconciliation keeps dispositioning PRs while it runs (W1-T276).
-            await sweepLightDuringRetro(
-              deps,
-              pollIntervalMs,
-              log,
-              () => deps.runRetroTrigger!(decision),
-              diskHeadroomLatch,
-              sweepRetrigger,
+          // DETACHED, NOT AWAITED (W1-T2981). This await was unbounded and sits ABOVE the dispatch
+          // pick, so a fired retro held the whole tick: MEASURED 2026-09-06, the daemon logged
+          // `retro_triggered` and then never wrote `daemon.idle` or any dispatch row again, while the
+          // light sweep kept reviewing and merging — every liveness signal green, nothing built. With
+          // the marker 3.7 days / 446 merges behind and RETRO_MAX_RUNS_PER_PASS at 40, ~11 such ticks.
+          // A retro gates nothing: it SPENDS (hence its place below headroom) but no rung downstream
+          // reads its result. It goes on the registry the sweep's fix dispatches use, which
+          // `stopForFreshness` already drains, so a restart still lets a running retro finish.
+          // NO `sweepLightDuringRetro` HERE, deliberately: it starts a second "retro" ticker while the
+          // tick proceeds into dispatch, which starts its own — the overlap the clock handoff prevents.
+          {
+            detachSweepAction(
+              sweepLightDuringRetro(
+                deps,
+                pollIntervalMs,
+                log,
+                () => deps.runRetroTrigger!(decision),
+                diskHeadroomLatch,
+                sweepRetrigger,
+              ).catch((e) => {
+                log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
+              }),
+              { actionKind: "retro", taskId: "DAEMON" },
             );
-          } catch (e) {
-            log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
-          } finally {
-            restartInterphaseReviewClock();
+            log("daemon.retro_trigger.detached", { reason: decision.reason });
           }
         }
       }
