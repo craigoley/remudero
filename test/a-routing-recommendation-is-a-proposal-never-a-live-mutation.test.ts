@@ -37,6 +37,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { validateMounts, type Mounts } from "../src/lib/mounts.js";
 import { updateProposalRegistry } from "../src/lib/inbox.js";
+import { harnessRunnerOver } from "../src/lib/replay-harness.js";
 import {
   DEFAULT_MIN_SAMPLE_N,
   mountRecommendationProposalCandidate,
@@ -380,6 +381,63 @@ test("the emitted proposal states that its evidence is observational while no go
   assert.match(candidate.summary, /OBSERVATIONAL/);
   assert.equal(rec.note.includes(OBSERVATIONAL_EVIDENCE_NOTICE), true);
   assert.equal(candidate.summary.includes(OBSERVATIONAL_EVIDENCE_NOTICE), true);
+});
+
+// The notice above explains ITSELF, and the explanation is what went stale. It used to say the
+// replay suite had no `HarnessRunner` wired; W1-T2689 wired one, and the sentence kept shipping
+// inside proposals a human ratifies. The caveat was still true, so nothing reddened — a false
+// clause riding a true conclusion is invisible to every gate this repo has. These two tests pin
+// the clause to the world it describes: the first proves the retired reason is FALSE and gone,
+// the second fails the day the surviving reason stops being true.
+
+test("the observational notice does not carry the retired no-HarnessRunner reason, because a runner and a production caller both ship", () => {
+  // The retired reason, falsified against the shipped source rather than against memory of it.
+  assert.equal(typeof harnessRunnerOver, "function", "lib/replay-harness.ts must export the runner the notice once said did not exist");
+  const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  assert.match(
+    runTaskSrc,
+    /cmd === "replay-goldens"/,
+    "run-task.ts must still dispatch the production caller — without it the retired reason would be true again and this notice would need to say so",
+  );
+
+  // So the notice must not still be claiming it.
+  assert.doesNotMatch(
+    OBSERVATIONAL_EVIDENCE_NOTICE,
+    /HarnessRunner/,
+    "the notice must not explain itself with a reason the two assertions above just falsified",
+  );
+
+  // ...while the caveat the retired reason used to justify is untouched. Deleting the caveat is
+  // not a way to pass the assertion above.
+  assert.match(OBSERVATIONAL_EVIDENCE_NOTICE, /OBSERVATIONAL ONLY/);
+  assert.match(OBSERVATIONAL_EVIDENCE_NOTICE, /no golden-suite run backs/i);
+  assert.match(
+    OBSERVATIONAL_EVIDENCE_NOTICE,
+    /not an input to recommendMounts/,
+    "the notice must name the reason that IS still true, not merely drop the one that is not",
+  );
+});
+
+test("the observational notice is forced back open the moment recommendMounts gains a replay input", () => {
+  // THE STALENESS GUARD, and the reason this pair exists rather than a one-line text fix. The
+  // surviving reason — "a replay result is not an input to recommendMounts" — is a claim about
+  // this module's own options, so it can be checked against them. Wire replay evidence in and this
+  // fails, which is the prompt to revisit the wording rather than let it drift a second time.
+  const src = readFileSync(join(REPO_ROOT, "src", "lib", "mount-recommender.ts"), "utf8");
+  const open = "export interface RecommendMountsOptions {";
+  assert.equal(src.split(open).length - 1, 1, "expected exactly one RecommendMountsOptions declaration to slice");
+  const body = src.slice(src.indexOf(open) + open.length);
+  const optionsBlock = body.slice(0, body.indexOf("\n}"));
+
+  // Positive control: the slice really is the options block and really can see a field name. A
+  // zero below means nothing without this — an empty slice would pass every assertion that follows.
+  assert.match(optionsBlock, /billingMode\?:/, "control: the sliced block must contain a known field");
+
+  assert.doesNotMatch(
+    optionsBlock,
+    /replay|golden/i,
+    "recommendMounts has gained a replay/golden input — OBSERVATIONAL_EVIDENCE_NOTICE now understates the evidence and must be rewritten",
+  );
 });
 
 // ── Extra gates, beyond the seven acceptance claims, that back "refuse more often than
