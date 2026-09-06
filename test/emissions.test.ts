@@ -16,6 +16,17 @@ import { rotationStampIso } from "../src/lib/ledger-grep.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+function captureEmissions(stateDir?: string): { code: number; out: string } {
+  const lines: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+  try {
+    return { code: emissionsCommand([], stateDir ? { stateDir } : undefined), out: lines.join("\n") };
+  } finally {
+    console.log = realLog;
+  }
+}
+
 // ── The instrument's own calibration, asserted rather than remembered.
 //
 // Three prior instruments in this repo found their detection wrong on the first pass, so the
@@ -257,19 +268,10 @@ test("THE OTHER DIRECTION: with no skippable rotation the read is byte-for-byte 
   }
 });
 
-test("emissionsCommand renders the real report over the real corpus", () => {
+test("W1-T2951: emissionsCommand's default-state smoke test asserts only stable report structure", () => {
   // Drives the WHOLE body — derivation, attribution, the ledger scan, the render — against this
-  // checkout and this host's ledger. Read-only: it writes nothing and spawns nothing.
-  const lines: string[] = [];
-  const realLog = console.log;
-  console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
-  let code: number;
-  try {
-    code = emissionsCommand([]);
-  } finally {
-    console.log = realLog;
-  }
-  const out = lines.join("\n");
+  // checkout and this host's mutable ledger. Read-only: it writes nothing and spawns nothing.
+  const { code, out } = captureEmissions();
   assert.equal(code, 0);
   assert.match(out, /^rmd emissions — window 30d/m);
   assert.match(out, /corpus\s+: \d+ ledger file\(s\)/);
@@ -277,19 +279,37 @@ test("emissionsCommand renders the real report over the real corpus", () => {
   // separately — assertVerbScanAgreesWithRegistry has already asserted they're equal by this
   // point, but the report states its own corpus check rather than collapsing to one number.
   assert.match(out, /verbs\s+: \d+ declared, \d+ scanned, \d+ measurable, \d+ unauditable/);
-  // The false-positive lock, against the LIVE corpus rather than a fixture: the daemon and the
-  // sweep run constantly, so neither may ever be classified as dead here.
-  //
-  // CONDITIONAL ON THERE BEING A CORPUS, and that is not a hedge. `state/` is gitignored, so a CI
-  // checkout has ZERO ledger files and EVERY verb correctly reads as unreachable — asserting the
-  // opposite there tests the runner's filesystem, not this code. The shape assertions above hold
-  // on any corpus; this one is a statement about a host that has actually run the fleet, so it is
-  // gated on the report's own corpus count rather than on an assumption about where it runs.
-  const corpusFiles = Number(/corpus\s+: (\d+) ledger file\(s\)/.exec(out)?.[1] ?? "0");
-  if (corpusFiles > 0) {
-    assert.doesNotMatch(out, /UNREACHABLE-IN-PRACTICE\s+rmd (daemon|sweep)\b/);
-  }
   assert.match(out, /UNAUDITABLE \(no ledger step carries the verb's name\)/);
+});
+
+test("W1-T2951: unrelated review rows do not become evidence that daemon or sweep ran", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-emissions-unrelated-"));
+  try {
+    writeFileSync(join(dir, "ledger.ndjson"), `${JSON.stringify({ ts: new Date().toISOString(), step: "review.posted" })}\n`);
+    const { code, out } = captureEmissions(dir);
+    assert.equal(code, 0);
+    assert.match(out, /corpus\s+: 1 ledger file\(s\).*1 lines scanned, 1 distinct in-window events/);
+    assert.match(out, /UNREACHABLE-IN-PRACTICE\s+rmd daemon\s+0 line\(s\)/);
+    assert.match(out, /UNREACHABLE-IN-PRACTICE\s+rmd sweep\s+0 line\(s\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2951: explicit daemon and sweep events make only their own verbs live", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-emissions-fleet-live-"));
+  try {
+    const ts = new Date().toISOString();
+    const rows = ["daemon.poll", "sweep.disposed", "review.posted"].map((step) => JSON.stringify({ ts, step })).join("\n");
+    writeFileSync(join(dir, "ledger.ndjson"), `${rows}\n`);
+    const { code, out } = captureEmissions(dir);
+    assert.equal(code, 0);
+    assert.match(out, /LIVE\s+rmd daemon\s+1 line\(s\)/);
+    assert.match(out, /LIVE\s+rmd sweep\s+1 line\(s\)/);
+    assert.doesNotMatch(out, /UNREACHABLE-IN-PRACTICE\s+rmd (daemon|sweep)\b/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("an unreadable ledger file is skipped, not a crash — the corrupted-corpus arm", () => {
