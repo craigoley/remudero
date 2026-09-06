@@ -1,0 +1,50 @@
+- id: W1-T2992
+  title: "EVERY GOVERNOR THAT CAN SHED MUST PROVE IT CAN RECOVER — the adaptive review width never once reached its maximum in 601 decisions and its healthy window never reached 2 of the 3 samples it requires, so a three-lane ceiling has been a one-lane floor with extra steps"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  origin: architect
+  plan_refs: ["W1-T2853", "W1-T2985", "W1-T2987", "W1-T312", "W1-T380", "W1-T382"]
+  files: [src/lib/review-capacity.ts, test/a-governor-that-sheds-must-recover.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED across the full ledger union, every adaptive review-width decision ever taken:
+      effective_width ever observed ... {1: 311, 2: 290}   <- THE MAXIMUM OF 3 NEVER OCCURRED
+      healthy_samples histogram ...... {0: 596, 1: 5}      <- needs 3; reached 1 five times, 2 never
+    601 decisions. The "temporary capacity earned by a sustained healthy window" (policy.yaml's own
+    words for lane three) HAS NEVER ONCE BEEN EARNED. This is not a degraded controller; it is a
+    mechanism that has never functioned.
+
+    CONTRAST WITH DISPATCH, WHICH IS MERELY MIS-SIZED. `dispatch.concurrent_set` widths across the
+    same corpus: {1: 21, 2: 146, 3: 151}. Dispatch ran three-wide 151 times when configured at 3. A
+    static bound with evidence works; the adaptive one does not.
+
+    THREE SEPARATE DEFECTS WERE FOUND IN ONE DAY, ALL THE SAME SHAPE — shed easily, recover never:
+      W1-T2985  cpu shed read PSI `some` (saturation, 80.57%) not `full` (starvation, 0.00%)
+      W1-T2987  provider telemetry expired 60s after a worker spawn and gated all recovery
+      W1-T2987  `effectiveWidth = Math.min(effectiveWidth, baseWidth)` — from the floor, min(1,2)=1
+    Each was a one-way ratchet, and each held for months while every reading looked healthy.
+
+    WHAT TO BUILD, AND THE DECISION TO MAKE FIRST. A governor that can shed must have a recovery
+    path that is REACHABLE and TESTED — a test that drives it from the floor under steady healthy
+    observations and asserts it returns to base, and from base to max where a max exists. That
+    invariant would have caught all three of the above at authoring time.
+
+    THEN DECIDE THE CONTROLLER'S FATE ON THE RE-READ CENSUS, NOT ON OPTIMISM. Once W1-T2985 and
+    W1-T2987 are live, re-read the `review.capacity` reason census. If lane three is still never
+    earned, DELETE the earn-back mechanism and run a static width sized from evidence, as dispatch
+    does — three ways to fail closed around a ceiling that is never reached is a liability, not
+    adaptive capacity. Deleting a mechanism that has never worked is a legitimate outcome of this
+    task and must not be treated as a failure to fix it.
+  acceptance:
+    - claim: "a shed governor driven by steady healthy observations provably returns to its base width"
+      proof: "unit test: W1-T2992: a shed width recovers to base under steady healthy observations"
+    - claim: "the recovery is bounded — it never exceeds base without the evidence base requires"
+      proof: "unit test: W1-T2992: recovery never overshoots the earned ceiling"
+    - claim: "the maximum width is reachable under sustained health, or the mechanism offering it is gone"
+      proof: "unit test: W1-T2992: the advertised maximum is reachable under sustained health"

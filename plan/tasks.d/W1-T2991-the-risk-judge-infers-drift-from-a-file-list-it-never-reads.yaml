@@ -1,0 +1,52 @@
+- id: W1-T2991
+  title: "THE RISK JUDGE ESCALATES ON A FILE LIST IT NEVER OPENS, SO 'THE WORK WAS NOT DONE' AND 'THE WORK WAS ALREADY DONE' ARRIVE AS THE SAME VERDICT — a correct PR was blocked and routed to a human on an inference the judge itself labels as made without reading the diff"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: "operator-session#4316-was-blocked-by-a-false-escalation-2026-09-06"
+  plan_refs: ["§4", "W1-T2519"]
+  files: [src/lib/review.ts, test/a-declared-file-absent-from-a-diff-is-not-proof-of-drift.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON #4316, 2026-09-06. The risk judge escalated at high risk, confidence 0.85, opening
+    issue #4317 and withholding auto-merge 55 seconds after it had been armed:
+      "The declared FILES TOUCHED list names src/lib/task-linter.ts, but the ACTUAL CHANGE ... shows
+       only test/a-renamed-shard-silently-becomes-a-second-concern.test.ts was modified (+128, -0).
+       The source file is absent from the actual-change manifest ... represents both drift from plan
+       and an unusual shape for an implementation task."
+
+    THE VERDICT WAS WRONG, AND ITS OWN TEXT SAYS WHY: "on the change's description/files alone, NO
+    DIFF WAS READ". Measured at that PR's merge-base:
+      - `ownFalsifierRenameCandidates` is present in src/lib/task-linter.ts — 3 occurrences.
+      - It landed in #4019, "fix(linter): name the third exit Rule 19's sizing violation always had".
+    W1-T2673's implementation was ALREADY ON MAIN. The only thing missing was its falsifier, which is
+    exactly the 128 lines the PR adds. The PR was correct, green at 30/30, and reviewed PASS.
+
+    A DECLARED SOURCE FILE ABSENT FROM THE CHANGED SET MEANS ONE OF TWO THINGS — the work was not
+    done, or it was already done — AND THEY ARE DISTINGUISHABLE ONLY BY READING THE FILE. The judge
+    cannot tell them apart, so it escalates both, and the operator has to open the diff and decide.
+    That is the cost: not a wrong merge, a MANUAL one.
+
+    THE ASYMMETRY RUNS THE OTHER WAY FROM MOST GATES HERE. A false negative costs one unimplemented
+    task, which review's proof execution and the coverage gates already catch downstream. A false
+    positive costs an operator's attention on every occurrence and trains them to close escalations
+    unread — which is strictly worse than not raising them.
+
+    WHAT TO BUILD. Before escalating on "declared file absent from the change", the judge must
+    establish whether the declared file ALREADY satisfies the task at the merge-base — a read, not a
+    guess. If it does, the shape is a test-only completion and must not escalate; if it does not, or
+    the read fails, escalate as today. DO NOT simply drop the check: an implement task that ships no
+    implementation is a real defect this caught in principle. And DO NOT resolve it by reading the
+    whole diff into the judge prompt — the escalation must stay cheap enough to run on every PR.
+  acceptance:
+    - claim: "a declared source file that already satisfies the task at the merge-base does not escalate"
+      proof: "unit test: W1-T2991: a declared file already satisfying the task does not escalate"
+    - claim: "a declared source file that is genuinely untouched and unsatisfied still escalates"
+      proof: "unit test: W1-T2991: a genuinely unimplemented declared file still escalates"
+    - claim: "a read that fails escalates rather than passing silently"
+      proof: "unit test: W1-T2991: an unreadable merge-base escalates"

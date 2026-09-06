@@ -82,6 +82,9 @@ export type ReviewCapacityReason =
   | "review-unhealthy"
   | "review-latency-expanded"
   | "telemetry-unavailable"
+  /** W1-T2987 — host telemetry read fine; only the PROVIDER snapshot was absent or stale. Distinct
+   *  from `telemetry-unavailable`, which means the host itself could not be read. */
+  | "provider-telemetry-unavailable"
   | "backlog-not-sustained"
   | "host-worker-budget"
   | "provider-headroom"
@@ -187,20 +190,43 @@ export function selectAdaptiveReviewWidth(
   } else if (observation.activeWorkers + effectiveWidth > policy.hostWorkerBudget) {
     directPressure("host-worker-budget");
   } else {
-    const telemetryAvailable =
+    // W1-T2987 — THE TWO TELEMETRY SOURCES ARE SEPARATE, BECAUSE THEIR ABSENCES MEAN DIFFERENT
+    // THINGS. Host readings come from files that always exist; provider readings come from
+    // `provider-routing-status.json`, which carries `freshUntil = observedAt + 60s` and is rewritten
+    // only when a WORKER SPAWNS. During a long build nothing spawns, so it expires a minute in and
+    // stays expired — and review widening then depends on a signal that only the work whose absence
+    // makes widening matter can refresh. MEASURED across the ledger union: `telemetry-unavailable`
+    // is the LARGEST shed reason at 347 of 670 rows, ahead of cpu-pressure's 111, with
+    // `effective_width` at the floor in 310 samples against 289 at base — while the rows themselves
+    // show host telemetry perfectly readable (`cpu_psi 3.16`, `mem_available_mib 26516`).
+    const hostTelemetryAvailable =
       finite(observation.memAvailableMib) &&
       finite(observation.cpuPsiFullAvg10Pct) &&
-      finite(observation.memoryPsiSomeAvg10Pct) &&
+      finite(observation.memoryPsiSomeAvg10Pct);
+    const providerTelemetryAvailable =
       observation.provider.fresh &&
       observation.provider.readable &&
       finite(observation.provider.headroomPct) &&
       finite(observation.provider.reservePct);
 
-    if (!telemetryAvailable) {
+    if (!hostTelemetryAvailable) {
+      // Unchanged: with the host unreadable nothing can be authorised, and a prior shed stands.
       effectiveWidth = Math.min(effectiveWidth, baseWidth);
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
       reason = "telemetry-unavailable";
+    } else if (!providerTelemetryAvailable) {
+      // HOST TELEMETRY ALONE AUTHORISES THE BASE WIDTH; the provider gates only the lane ABOVE it,
+      // which policy already calls "temporary capacity earned by a sustained healthy window". The
+      // old branch ran `Math.min(effectiveWidth, baseWidth)` here, and from the floor that is
+      // `min(1, 2) = 1` — so a width shed for any reason could never climb back while the provider
+      // snapshot was quiet, which is most of the time. Recovery stays ADDITIVE, one lane per sample,
+      // and never exceeds base on this path. A provider that genuinely REFUSES is unaffected: that
+      // is `directPressure("provider-refused")` above, which sheds before this branch is reached.
+      effectiveWidth = Math.min(effectiveWidth + 1, baseWidth);
+      healthySamples = 0;
+      lastHealthySampleAtMs = undefined;
+      reason = "provider-telemetry-unavailable";
     } else if (observation.queueDepth <= effectiveWidth) {
       effectiveWidth = Math.min(effectiveWidth, baseWidth);
       healthySamples = 0;
