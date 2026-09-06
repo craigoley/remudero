@@ -290,6 +290,12 @@
       "grepHint": "install-container-runtime-mount-order.sh forensics"
     },
     {
+      "path": "docs/forensics/launchd.md",
+      "title": "launchd.ts forensics",
+      "summary": "The measured forensics, incident narratives and design arguments removed from `src/lib/launchd.ts`",
+      "grepHint": "launchd.ts forensics"
+    },
+    {
       "path": "docs/forensics/learnings.md",
       "title": "learnings.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",
