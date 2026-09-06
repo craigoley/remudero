@@ -247,13 +247,15 @@ test("W1-T2959 an unreadable corpus that DID yield a repaired pair still names w
 // ── (v) THE OUTPUT MUST REACH THE LANE THAT OPENS THE PRs ────────────────────────────────────
 
 test("W1-T2959 a draft names a surface a DISPATCHED WORKER can actually read", () => {
-  // MEASURED, not assumed: spawnWorker passes `settingSources: []` (src/lib/worker.ts), the SDK's
-  // isolation mode, so a dispatched worker NEVER reads CLAUDE.md. A shard whose remedy were "add a
-  // CLAUDE.md bullet" would improve interactive sessions and change nothing about the fleet's own
-  // pull requests — the exact failure this criterion exists to prevent.
-  const workerSrc = readFileSync("src/lib/worker.ts", "utf8");
-  assert.match(workerSrc, /settingSources:\s*\[\]/, "the isolation this criterion depends on still ships");
-
+  // WHY THE SURFACE MATTERS: spawnWorker passes `settingSources: []`, the SDK's isolation mode, so a
+  // dispatched worker NEVER reads CLAUDE.md. A shard whose remedy were "add a CLAUDE.md bullet"
+  // would improve interactive sessions and change nothing about the fleet's own pull requests.
+  //
+  // THAT INVARIANT IS NOT RE-ASSERTED HERE, DELIBERATELY. `claims`' own `worker-loads-no-claude-md`
+  // (W1-T2759) already holds it as a shipped gate. Reading src/lib/worker.ts as TEXT here would add
+  // no coverage the gate does not have, and would be the exact defect W1-T2905's census refuses: a
+  // test that passes when the prose is right and the behaviour wrong, and breaks on a refactor that
+  // moved the prose and nothing else.
   const r = mintCiLearningShards(corpus({ pairs: [pair({ pr: 100, gate: "coverage-ratchet" })] }), []);
   const d = r.drafts[0];
   assert.match(d.remedySurface, /learnings\//, "the remedy must name the surface that reaches the fleet");
