@@ -17627,12 +17627,24 @@ export function ciLearningCommand(
   // `isDispatchEligible` refuses and `machineAuthorVerifyViolation` blocks if it ever reads `auto`.
   if (result.drafts.length > 0) {
     const file = deps.fileShards ?? fileCiLearningShards;
-    const filing = file(result.drafts, root, { mintTaskId: ciLearningTaskIdMinter(root), planOrigins });
-    for (const f of filing.filed) console.log(`  FILED ${f.taskId} -> ${f.relPath}`);
-    for (const sk of filing.skipped) console.log(`  ALREADY IN THE PLAN (not re-filed): ${sk}`);
-    // A refusal is NAMED. A rung that silently dropped what the linter would not accept would be
-    // reporting a clean run over a record it could not write.
-    for (const rf of filing.refused) console.log(`  REFUSED by the task linter (${rf.reason}): ${rf.findingId}`);
+    // FILING IS BEST-EFFORT AND MUST NEVER TAKE THE REPORT DOWN WITH IT. The minter fails CLOSED by
+    // inheritance — an unreachable origin or an unreadable plan throws rather than minting
+    // optimistically — and that is right for the CLAIM but wrong for the OPERATOR: the drafts above
+    // are already on screen and losing them to an exception turns a partial success into nothing.
+    // MEASURED: without this, an unreadable plan under the run's root took the whole verb out with
+    // ENOENT, reddening three of W1-T2959's tests, which pass a tmp root with no plan in it.
+    try {
+      const filing = file(result.drafts, root, { mintTaskId: ciLearningTaskIdMinter(root), planOrigins });
+      for (const f of filing.filed) console.log(`  FILED ${f.taskId} -> ${f.relPath}`);
+      for (const sk of filing.skipped) console.log(`  ALREADY IN THE PLAN (not re-filed): ${sk}`);
+      // A refusal is NAMED. A rung that silently dropped what the linter would not accept would be
+      // reporting a clean run over a record it could not write.
+      for (const rf of filing.refused) console.log(`  REFUSED by the task linter (${rf.reason}): ${rf.findingId}`);
+    } catch (e) {
+      // NAMED, never swallowed: "drafted but not filed" is a different outcome from "filed", and an
+      // operator reading this must be able to tell them apart.
+      console.error(`  NOT FILED — the filer could not run (${(e as Error).message}); the drafts above stand unfiled`);
+    }
   }
 
   if (!rest.includes("--force")) recordCiLearningCadenceFire(root, new Date());

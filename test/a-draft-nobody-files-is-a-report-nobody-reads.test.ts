@@ -345,3 +345,29 @@ test("W1-T2968 the verb feeds the plan's own origins into the minter, closing th
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("W1-T2968 a filer that THROWS does not take the report down with it, and says so", () => {
+  // The minter fails CLOSED by inheritance — an unreachable origin or unreadable plan throws rather
+  // than minting optimistically, which is right for the claim and wrong for the operator: the
+  // drafts are already on screen. MEASURED: before this, an unreadable plan under the run's root
+  // took the whole verb out with ENOENT and reddened three of W1-T2959's tests.
+  const root = mkdtempSync(join(tmpdir(), "rmd-ci-learning-throw-"));
+  try {
+    const r = captured(() =>
+      ciLearningCommand(["--force"], {
+        root,
+        loadWindow: () => repairedWindow() as never,
+        planOrigins: [],
+        fileShards: () => {
+          throw new Error("origin unreachable");
+        },
+      }),
+    );
+    assert.equal(r.code, 0, "a filing failure is not a failed report");
+    assert.match(r.out, /DRAFT ci-learning:4283:coverage-ratchet/, "the drafts still reach the operator");
+    assert.match(r.out, /NOT FILED/, "and 'drafted but not filed' is NAMED, never silently equal to 'filed'");
+    assert.match(r.out, /origin unreachable/, "carrying the real reason");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
