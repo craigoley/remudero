@@ -176,7 +176,7 @@
   "src/lib/log-rotation.ts": 50,
   "src/lib/main-health-rung.ts": 10,
   "src/lib/managed-repos.ts": 20,
-  "src/lib/measurement-cadence.ts": 298,
+  "src/lib/measurement-cadence.ts": 330,
   "src/lib/merge-state.ts": 52,
   "src/lib/mount-recommender.ts": 195,
   "src/lib/mounts.ts": 194,
@@ -200,7 +200,7 @@
   "src/lib/plan-coherence.ts": 70,
   "src/lib/plan-index.ts": 29,
   "src/lib/plan-pr-emitter.ts": 179,
-  "src/lib/plan.ts": 176,
+  "src/lib/plan.ts": 181,
   "src/lib/policy.ts": 231,
   "src/lib/producer-completeness.ts": 242,
   "src/lib/producer-identity.ts": 70,
@@ -266,5 +266,6 @@
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
   "src/run-task.ts": 16225,
+  "src/run-task.ts": 16231,
   "src/spike.ts": 18
 }
