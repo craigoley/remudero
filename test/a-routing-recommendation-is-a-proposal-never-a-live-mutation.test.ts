@@ -38,6 +38,7 @@ import { test } from "node:test";
 import { validateMounts, type Mounts } from "../src/lib/mounts.js";
 import { updateProposalRegistry } from "../src/lib/inbox.js";
 import { harnessRunnerOver } from "../src/lib/replay-harness.js";
+import type { GoldenTask } from "../src/lib/replay.js";
 import {
   DEFAULT_MIN_SAMPLE_N,
   mountRecommendationProposalCandidate,
@@ -390,9 +391,28 @@ test("the emitted proposal states that its evidence is observational while no go
 // the clause to the world it describes: the first proves the retired reason is FALSE and gone,
 // the second fails the day the surviving reason stops being true.
 
-test("the observational notice does not carry the retired no-HarnessRunner reason, because a runner and a production caller both ship", () => {
+test("the observational notice does not carry the retired no-HarnessRunner reason, because a runner and a production caller both ship", async () => {
   // The retired reason, falsified against the shipped source rather than against memory of it.
+  //
+  // DRIVEN, NOT MERELY IMPORTED. `typeof harnessRunnerOver === "function"` would pass against a
+  // stub export that throws on first use, and "a runner exists" is exactly the claim the retired
+  // reason denied — so prove the seam actually adapts a dispatch into a HarnessRunner and returns
+  // what that dispatch produced.
   assert.equal(typeof harnessRunnerOver, "function", "lib/replay-harness.ts must export the runner the notice once said did not exist");
+  const golden: GoldenTask = {
+    id: "G-notice-probe",
+    class: "src-fix",
+    title: "a probe golden, never dispatched anywhere real",
+    task: { id: "W1-T0", type: "implement", verify: "auto", files: [] },
+    expected: { verdict: "merged", filesTouched: [], prTrailerTaskId: "W1-T0" },
+  };
+  let dispatched = 0;
+  const runner = harnessRunnerOver({ dispatch: () => { dispatched++; return { verdict: "merged", filesTouched: [] }; } });
+  assert.equal(typeof runner, "function", "harnessRunnerOver must return a callable HarnessRunner");
+  const outcome = await runner(golden);
+  assert.equal(dispatched, 1, "the runner must actually reach its dispatch, not short-circuit");
+  assert.equal(outcome.verdict, "merged", "the runner must return what the dispatch produced");
+
   const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   assert.match(
     runTaskSrc,

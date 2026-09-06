@@ -66,12 +66,12 @@ import { routingObjectiveFor, type ArmWindowShare, type RoutingObjectiveKind } f
  * interval, and the {@link RoutingObjectiveKind} that ultimately governed it (this task's own
  * acceptance).
  *
- * OBSERVATIONAL EVIDENCE, NAMED AS SUCH — THE CAVEAT HELD, ITS REASON DID NOT. It used to read
- * "the replay suite has no `HarnessRunner` wired" (quoting MASTER-PLAN, which still carries that);
- * W1-T2689 shipped the runner and a production caller, so the clause was false in every proposal
- * carrying it while the conclusion stayed true — a shape that reddens nothing, hence the falsifier.
- * The caveat now rests on ground this module can assert about ITSELF: a replay result is not an
- * input to {@link recommendMounts}, so a recommendation is ledger observation, never a golden proof.
+ * OBSERVATIONAL EVIDENCE, NAMED AS SUCH. MASTER-PLAN's own status paragraph records that the
+ * golden-task replay suite "has no `HarnessRunner` wired" (the Self-Harness leg reports no run
+ * recorded BY CONSTRUCTION). Until that ships, every recommendation's evidence is ledger
+ * observation only, not a golden-suite proof — {@link OBSERVATIONAL_EVIDENCE_NOTICE} says so
+ * explicitly in every emitted proposal, so a proposal never implies a golden run backed it when
+ * none did.
  */
 
 /** The `scripts/mount-headroom-sweep.mjs` arm shape this module reads (a structural subset —
@@ -137,12 +137,10 @@ export const DEFAULT_MIN_SAMPLE_N = 30;
 /** Printed verbatim inside every emitted recommendation (never a refusal — a refusal asserts
  *  nothing that would need this caveat). See this module's own header, "OBSERVATIONAL EVIDENCE". */
 export const OBSERVATIONAL_EVIDENCE_NOTICE =
-  "Evidence is OBSERVATIONAL ONLY — no golden-suite run backs this recommendation. The replay " +
-  "suite has both a runner and a production caller (`rmd replay-goldens`), but a replay result is " +
-  "not an input to recommendMounts and nothing on this path dispatches one, so what follows rests " +
-  "on retained-ledger observation alone. This is a measurement, not a proof; ratify only after " +
-  "human review against the golden suite this table is otherwise gated behind, never on this note " +
-  "alone.";
+  "Evidence is OBSERVATIONAL ONLY — no golden-suite run backs this recommendation (the golden-task " +
+  "replay suite has no HarnessRunner wired yet, MASTER-PLAN). This is a measurement, not a proof; " +
+  "ratify only after human review against the golden suite this table is otherwise gated behind, " +
+  "never on this note alone.";
 
 /** One arm as it appears inside an emitted recommendation — the fields a human needs to judge it,
  *  never the whole {@link MountHeadroomArm} (turn percentiles are noise for a routing decision). */
