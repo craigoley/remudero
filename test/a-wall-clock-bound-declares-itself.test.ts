@@ -8,18 +8,24 @@ import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HELPER = "test/helpers/wall-clock-bound.js";
+const THIS_FILE = "test/a-wall-clock-bound-declares-itself.test.ts";
+const HELPER_IMPORT = "helpers/wall-clock-bound.js";
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 14;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 22;
+const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
+const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 
 // ── W1-T2811 ────────────────────────────────────────────────────────────────────────────────
 //
-// The recognizer for "an assertion that bounds a REAL elapsed measurement from above" — the only
-// assertion shape a loaded host can fail with no defect in the code under test.
+// The recognizer for a DECLARED wall-clock bound is the import query below: which test files
+// import the helper. That is the maintained surface, not a grep over clock spellings.
 //
-// IT LOOKS FOR THE BARE FORM, NOT FOR MEMBERSHIP. A migrated member calls
-// `assertWallClockBound(measured, bound, msg)`, which carries no `<` and therefore stops matching
-// on its own; nothing has to remember to remove it from a list. That is the whole design: the
-// declaration is the call site, so the recognizer is EXACT rather than approximate, unlike a
-// roster of test names (this repo already carries three of those) or `censusPopulationDrift`'s
-// self-described "approximate by construction" text match.
+// The bare-bound scan is only a falsifier. A migrated member calls
+// `assertWallClockBound(measured, bound, msg)`, so reverting it to `assert.ok(elapsed < N, ...)`
+// becomes an undeclared bare assertion and the census names the file. It is deliberately not the
+// membership roster; the declaration is the call site, and the recognizer is exact rather than
+// approximate, unlike a roster of test names or `censusPopulationDrift`'s self-described
+// "approximate by construction" text match.
 //
 // THE PATTERN IS STILL A GREP AND STILL BLIND IN THE SAME WAY the shard's own census was — it
 // keys on the spellings a bound is written in today. That is fine HERE and would not be fine as a
@@ -77,6 +83,57 @@ function candidateLines(): Array<{ file: string; line: number; text: string }> {
   return rows;
 }
 
+function gitGrepLines(args: readonly string[]): string[] {
+  let out = "";
+  try {
+    out = execFileSync("git", [...args], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (e) {
+    const err = e as { status?: number; stdout?: string };
+    if (err.status !== 1) throw e;
+    out = err.stdout ?? "";
+  }
+  return out.split("\n").filter(Boolean);
+}
+
+function declaredMemberFiles(): string[] {
+  return gitGrepLines(["grep", "-lF", HELPER_IMPORT, "--", "test/*.test.ts"])
+    .filter((file) => file !== THIS_FILE)
+    .sort();
+}
+
+function declaredAssertionSites(): Array<{ file: string; line: number; text: string }> {
+  return gitGrepLines(["grep", "-nE", "^[[:space:]]*assertWallClockBound[[:space:]]*\\(", "--", "test/*.test.ts"])
+    .map((raw) => {
+      const m = /^([^:]+):(\d+):(.*)$/.exec(raw);
+      assert.ok(m, `git grep emitted an unparsable declaration row: ${raw}`);
+      return { file: m[1]!, line: Number(m[2]), text: m[3]!.trim() };
+    })
+    .filter((site) => site.file !== THIS_FILE);
+}
+
+function declarationPopulation(): { files: string[]; sites: Array<{ file: string; line: number; text: string }> } {
+  return { files: declaredMemberFiles(), sites: declaredAssertionSites() };
+}
+
+function assertPopulationClearsFloor(population: { files: readonly string[]; sites: readonly { file: string }[] }): void {
+  assert.ok(
+    population.files.length >= WALL_CLOCK_BOUND_FILE_FLOOR,
+    `W1-T2811 build-time census measured ${population.files.length} declaring file(s), below the ` +
+      `${WALL_CLOCK_BOUND_FILE_FLOOR}-file abandonment floor; close the task unbuilt with this ` +
+      `measurement recorded. Declaring files: ${population.files.join(", ") || "(none)"}`,
+  );
+  assert.ok(
+    population.sites.length >= WALL_CLOCK_BOUND_SITE_FLOOR,
+    `W1-T2811 build-time census measured ${population.sites.length} assertion site(s), below the ` +
+      `${WALL_CLOCK_BOUND_SITE_FLOOR}-site abandonment floor; close the task unbuilt with this ` +
+      `measurement recorded.`,
+  );
+}
+
 
 /** Every line in `text` that reads as a bare wall-clock upper bound, as `{line, text}`. */
 function bareBoundLines(text: string): Array<{ line: number; text: string }> {
@@ -94,16 +151,50 @@ function bareBoundLines(text: string): Array<{ line: number; text: string }> {
   return out;
 }
 
+function undeclaredWallClockBounds(
+  candidates: readonly { file: string; line: number; text: string }[],
+  sourceForFile: (file: string) => string,
+): string[] {
+  const byFile = new Map<string, Array<{ line: number; text: string }>>();
+  for (const c of candidates) {
+    if (c.file === THIS_FILE) continue;
+    if (!BARE_BOUND_RE.test(c.text)) continue;
+    const list = byFile.get(c.file) ?? [];
+    list.push({ line: c.line, text: c.text.trim() });
+    byFile.set(c.file, list);
+  }
+
+  const undeclared: string[] = [];
+  for (const [rel, hits] of byFile) {
+    if (!REAL_CLOCK_RE.test(sourceForFile(rel))) continue;
+    for (const h of hits) undeclared.push(`${rel}:${h.line}  ${h.text}`);
+  }
+  return undeclared;
+}
+
+function assertNoUndeclaredWallClockBounds(undeclared: readonly string[]): void {
+  assert.deepEqual(
+    undeclared,
+    [],
+    `these assertions bound a REAL elapsed measurement without declaring it, so a loaded host reds ` +
+      `them with no defect in the code under test. Replace each with ` +
+      `assertWallClockBound(measured, bound, message) from ${HELPER}:\n  ` +
+      undeclared.join("\n  "),
+  );
+}
+
 // ── the helper's own contract ─────────────────────────────────────────────────────────────────
 
 test("assertWallClockBound asserts exactly the bound the call site asserted -- no tolerance, no slack", () => {
   // The whole risk of routing 22 real assertions through one function is that the function
   // quietly weakens them. It must be the SAME comparison: strictly less than, no epsilon.
-  assert.doesNotThrow(() => assertWallClockBound(1999, 2000, "under"));
+  assert.equal(assertWallClockBound(1999, 2000, "under"), undefined);
   assert.throws(() => assertWallClockBound(2000, 2000, "exactly at the bound is NOT under it"), /exactly at the bound/);
   assert.throws(() => assertWallClockBound(2001, 2000, "over"), /over/);
   // A bound in minutes works the same as one in milliseconds -- the helper names no unit.
   assert.doesNotThrow(() => assertWallClockBound(0.5, 1, "half a minute"));
+  const helperSource = readFileSync(join(REPO_ROOT, "test/helpers/wall-clock-bound.ts"), "utf8");
+  assert.doesNotMatch(helperSource, /\b(?:setTimeout|setImmediate|retry|skip)\s*\(/, "the helper adds no wait, retry, or skip call");
 });
 
 test("assertWallClockBound's failure NAMES the wall-clock dependence, so the red is self-explaining", () => {
@@ -122,9 +213,9 @@ test("assertWallClockBound's failure NAMES the wall-clock dependence, so the red
   assert.equal((caught as { actual?: unknown }).actual, 9999);
 });
 
-// ── the positive control, first: a recognizer that cannot see its own subject proves nothing ──
+// ── the positive control, first: a bare-bound falsifier that cannot see its subject proves nothing ──
 
-test("the recognizer FIRES on a bare wall-clock bound and stays quiet on the migrated form", () => {
+test("the bare-bound falsifier fires on a reverted member and stays quiet on the migrated form", () => {
   const bare = ["const t0 = Date.now();", "const elapsedMs = Date.now() - t0;", '  assert.ok(elapsedMs < 2000, "too slow");'].join("\n");
   const migrated = [
     "const t0 = Date.now();",
@@ -132,7 +223,7 @@ test("the recognizer FIRES on a bare wall-clock bound and stays quiet on the mig
     '  assertWallClockBound(elapsedMs, 2000, "too slow");',
   ].join("\n");
 
-  assert.equal(bareBoundLines(bare).length, 1, "the recognizer must see a bare bound -- otherwise the census below is vacuous");
+  assert.equal(bareBoundLines(bare).length, 1, "the falsifier must see a bare bound -- otherwise the census below is vacuous");
   assert.equal(bareBoundLines(migrated).length, 0, "the migrated form carries no `<`, so it stops matching on its own");
 
   // A bound on an INJECTED clock is not a member: load cannot make it fail.
@@ -142,49 +233,79 @@ test("the recognizer FIRES on a bare wall-clock bound and stays quiet on the mig
 
 // ── the census ────────────────────────────────────────────────────────────────────────────────
 
-test("every wall-clock-bounded assertion in the suite declares itself through the helper", () => {
-  const candidates = candidateLines();
-  assert.ok(candidates.length > 20, `the prefilter must be reading a real corpus, got ${candidates.length} candidate line(s)`);
+test("the build-time declaration census records the measured population and enforces its abandonment floor", () => {
+  const population = declarationPopulation();
+  assertPopulationClearsFloor(population);
+  assert.equal(
+    population.files.length,
+    RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES,
+    `build-time declaration census measured ${population.files.length} declaring file(s), but the ` +
+      `recorded W1-T2811 population is ${RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES}: ${population.files.join(", ")}`,
+  );
+  assert.equal(
+    population.sites.length,
+    RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES,
+    `build-time declaration census measured ${population.sites.length} assertion site(s), but the ` +
+      `recorded W1-T2811 population is ${RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES}`,
+  );
 
-  // Only the files the prefilter actually named get read -- a handful, not the whole suite.
-  const byFile = new Map<string, Array<{ line: number; text: string }>>();
-  for (const c of candidates) {
-    if (c.file === "test/a-wall-clock-bound-declares-itself.test.ts") continue; // its own fixtures are strings
-    if (!BARE_BOUND_RE.test(c.text)) continue;
-    const list = byFile.get(c.file) ?? [];
-    list.push({ line: c.line, text: c.text.trim() });
-    byFile.set(c.file, list);
-  }
-
-  const undeclared: string[] = [];
-  for (const [rel, hits] of byFile) {
-    // The bounded value must come from a REAL clock somewhere in that file; an injected one
-    // cannot be made to fail by load.
-    if (!REAL_CLOCK_RE.test(readFileSync(join(REPO_ROOT, rel), "utf8"))) continue;
-    for (const h of hits) undeclared.push(`${rel}:${h.line}  ${h.text}`);
-  }
-
-  assert.deepEqual(
-    undeclared,
-    [],
-    `these assertions bound a REAL elapsed measurement without declaring it, so a loaded host reds ` +
-      `them with no defect in the code under test. Replace each with ` +
-      `assertWallClockBound(measured, bound, message) from ${HELPER}:\n  ` +
-      undeclared.join("\n  "),
+  assert.throws(
+    () => assertPopulationClearsFloor({ files: ["test/one.test.ts", "test/two.test.ts"], sites: [{ file: "test/one.test.ts" }] }),
+    /below the 3-file abandonment floor; close the task unbuilt with this measurement recorded/,
+  );
+  assert.throws(
+    () =>
+      assertPopulationClearsFloor({
+        files: ["test/one.test.ts", "test/two.test.ts", "test/three.test.ts"],
+        sites: [{ file: "test/one.test.ts" }, { file: "test/two.test.ts" }, { file: "test/three.test.ts" }],
+      }),
+    /below the 4-site abandonment floor; close the task unbuilt with this measurement recorded/,
   );
 });
 
-test("the declared members import the helper -- the seam has actual declarers, not zero", () => {
-  // Guards the OTHER direction of vacuity: a census that reads zero because nobody declares is
-  // indistinguishable from one that reads zero because everybody does.
-  const importers = execFileSync("git", ["grep", "-l", "helpers/wall-clock-bound.js", "--", "test/*.test.ts"], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  })
-    .split("\n")
-    .filter(Boolean);
+test("the declaration recognizer is the helper import query, not a clock-idiom text match", () => {
+  const importers = declaredMemberFiles();
+  const siteFiles = [...new Set(declaredAssertionSites().map((site) => site.file))].sort();
+  assert.deepEqual(siteFiles, importers, "every helper call sits in, and only in, a file declaring the helper import");
   assert.ok(
-    importers.length >= 10,
+    importers.length >= RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES,
     `the seam should have the migrated members as declarers; found ${importers.length}: ${importers.join(", ")}`,
+  );
+
+  const helperDeclarations = gitGrepLines(["grep", "-nE", "^export function assertWallClockBound\\b", "--", "test/helpers/*.ts"]);
+  assert.equal(helperDeclarations.length, 1, `the helper function must be declared in exactly one place: ${helperDeclarations.join(", ")}`);
+  assert.match(
+    helperDeclarations[0]!,
+    /^test\/helpers\/wall-clock-bound\.ts:\d+:export function assertWallClockBound\(measured: number, bound: number, message: string\): void \{$/,
+  );
+
+  const realClockFiles = gitGrepLines(["grep", "-lE", "Date\\.now\\(\\)|performance\\.now\\(\\)|process\\.hrtime", "--", "test/*.test.ts"]);
+  assert.ok(
+    realClockFiles.length > importers.length,
+    `a clock-idiom text match would count ${realClockFiles.length} files, while the declaration ` +
+      `recognizer is the ${importers.length}-file helper import query`,
+  );
+});
+
+test("every bare wall-clock upper bound is migrated, and reverting a member fails by file name", () => {
+  const candidates = candidateLines();
+  assert.ok(candidates.length > 20, `the prefilter must be reading a real corpus, got ${candidates.length} candidate line(s)`);
+
+  assertNoUndeclaredWallClockBounds(undeclaredWallClockBounds(candidates, (rel) => readFileSync(join(REPO_ROOT, rel), "utf8")));
+
+  const reverted = [
+    "const started = process.hrtime.bigint();",
+    "const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;",
+    '  assert.ok(elapsedMs < 50, "three attempts must not pace");',
+  ].join("\n");
+  assert.throws(
+    () =>
+      assertNoUndeclaredWallClockBounds(
+        undeclaredWallClockBounds(
+          [{ file: "test/run-task.test.ts", line: 8500, text: '  assert.ok(elapsedMs < 50, "three attempts must not pace");' }],
+          () => reverted,
+        ),
+      ),
+    /test\/run-task\.test\.ts:8500/,
   );
 });

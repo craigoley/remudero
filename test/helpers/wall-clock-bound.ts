@@ -10,6 +10,11 @@ import { AssertionError } from "node:assert";
 // condition a load-caused failure does not reproduce under. So the observational mechanism
 // degrades to SILENCE here rather than flapping.
 //
+// BUILD-TIME CENSUS: test/a-wall-clock-bound-declares-itself.test.ts re-runs the declaration
+// query and records this branch's measured population: 14 files, 22 assertion sites. The stated
+// floor is 3 files or 4 sites; below either, W1-T2811 should close unbuilt with that measurement
+// rather than carrying a seam for a class too small to express.
+//
 // THE DECLARATION IS THE CALL SITE. Nothing is registered and nothing is listed: a member says so
 // by calling this, and stops being one by not calling it. That matters because the alternative —
 // a roster derived by grep — is a function of WHO GREPPED. Measured: two independent censuses
