@@ -21936,6 +21936,25 @@ async function retroCommand(
     // where the PR's real file set can be read at all.
     repairRetroChangesetClaim(prUrl, log);
 
+    // W1-T2875: ADVANCE THE MARKER HERE, ABOVE THE PLAN-ONLY GUARD — the window was consumed the
+    // moment the gather was analysed and a PR written from it, which has already happened by this
+    // line. It used to sit BELOW the guard, so a retro whose PR carried code returned 1 with the
+    // marker untouched and the next pass re-scoped the same window plus whatever had accrued —
+    // the ratchet, reached by a second route. `ts` is the CONSUMED CURSOR, not `now()`: a capped
+    // pass must hand its remainder to the next one rather than skip it.
+    //
+    // THIS DOES NOT FIX THE OOM CASE AND IS NOT MEANT TO. A V8 heap abort kills the process without
+    // unwinding, so no statement here ever runs; that half is closed by RETRO_MAX_RUNS_PER_PASS
+    // bounding the window itself. This arm closes the CATCHABLE terminal outcomes.
+    const nextMarker = {
+      ts: gather.consumedThroughTs ?? new Date().toISOString(),
+      learnings_count: gather.learningsNow,
+      runs_seen: gather.totalRuns,
+      mast_category_counts: gather.mast.byCategory,
+    };
+    saveMarker(markerPath, nextMarker);
+    log("retro.marker.advanced", { ...nextMarker, runs_deferred: gather.runsDeferred });
+
     // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
     // fail closed (the retro may never carry code — one concern).
     const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
@@ -21948,16 +21967,6 @@ async function retroCommand(
     }
     log("pr.opened", { pr_url: prUrl, plan_only: true });
     say(`retro PR (plan-only): ${prUrl}`);
-
-    // Advance the marker (the retro RAN — the gather is now consumed).
-    const nextMarker = {
-      ts: new Date().toISOString(),
-      learnings_count: gather.learningsNow,
-      runs_seen: gather.totalRuns,
-      mast_category_counts: gather.mast.byCategory,
-    };
-    saveMarker(markerPath, nextMarker);
-    log("retro.marker.advanced", nextMarker);
 
     // Gate: ci green → post remudero-review → arm auto-merge.
     const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));

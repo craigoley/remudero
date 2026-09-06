@@ -1179,9 +1179,37 @@ export function renderReplayCalibration(r: ReplayCalibration): string {
   ].join("\n");
 }
 
+/**
+ * W1-T2875 — THE BOUND THAT BREAKS THE RATCHET. `state/last-retro.json` advances only when a retro
+ * SUCCEEDS, so a retro that dies leaves `sinceTs` frozen and the next one re-scopes over a window
+ * that has only grown. MEASURED 2026-09-05: the marker sat at 2026-09-03T02:24:39Z for two days
+ * while scope climbed 63 -> 68 runs and six consecutive attempts aborted at V8's heap limit
+ * (`Ineffective mark-compacts`, exit 134). Five of those exits spent docker's `on-failure:5` budget
+ * and the fleet then sat dead for three hours.
+ *
+ * A `finally` CANNOT FIX THIS. The abort is a V8 OOM: the process dies without unwinding, so no
+ * in-process hook — not `finally`, not an exit handler — ever runs to advance the marker. The only
+ * remedy that survives an abort is to make the window it re-scopes over BOUNDED, so attempt N+1 is
+ * never larger than attempt N whatever killed attempt N.
+ *
+ * CONSUMED OLDEST-FIRST, SO NOTHING IS SKIPPED. `gatherRuns` sorts ascending by `startTs` (see its
+ * sort), and the cap takes the FRONT of that window. A capped pass consumes the oldest runs and
+ * reports {@link RetroGather.consumedThroughTs}; the marker advances to exactly that, so the next
+ * pass resumes where this one stopped. This is a CURSOR, not a filter — a deferred run is deferred,
+ * never dropped.
+ */
+export const RETRO_MAX_RUNS_PER_PASS = 40;
+
 export interface RetroGather {
   sinceTs?: string;
   totalRuns: number;
+  /** W1-T2875: the `startTs` of the newest run this pass actually CONSUMED, or `sinceTs` when it
+   *  consumed none. The marker advances to this rather than to `now()`, so a capped pass hands the
+   *  remainder to the next one instead of skipping it. */
+  consumedThroughTs?: string;
+  /** W1-T2875: runs inside the window that this pass did NOT consume because the cap was reached.
+   *  Non-zero is normal after a backlog, and is what the next pass will pick up. */
+  runsDeferred: number;
   byType: TypeCalibration[];
   /** W1-T167: per-class cost and merge rate — the measurement half of the routing hypothesis. */
   byClass: ClassCalibration[];
@@ -1240,6 +1268,9 @@ export function buildGather(opts: {
   ledgerNdjson: string;
   learningsMd: string;
   sinceTs?: string;
+  /** W1-T2875: cap on runs consumed in ONE pass, defaulting to {@link RETRO_MAX_RUNS_PER_PASS}.
+   *  Injectable so a test can drive the boundary without seeding forty fixtures. */
+  maxRunsPerPass?: number;
   learningsAtMarker?: number;
   /** GitHub gateway for the SHIPPED union (W1-T51/P9). Omit to fall back ledger-only. */
   github?: ShippedGithub;
@@ -1268,7 +1299,13 @@ export function buildGather(opts: {
   const records = parseLedger(opts.ledgerNdjson);
   const followupRecords = opts.followupLedgerNdjson !== undefined ? parseLedger(opts.followupLedgerNdjson) : records;
   const runs = gatherRuns(records);
-  const scoped = opts.sinceTs ? runs.filter((r) => r.startTs > opts.sinceTs!) : runs;
+  // W1-T2875: bound the window, oldest-first. See RETRO_MAX_RUNS_PER_PASS for why a `finally`
+  // cannot substitute for this, and why the front of the window is the correct end to take.
+  const inWindow = opts.sinceTs ? runs.filter((r) => r.startTs > opts.sinceTs!) : runs;
+  const runCap = opts.maxRunsPerPass ?? RETRO_MAX_RUNS_PER_PASS;
+  const scoped = inWindow.length > runCap ? inWindow.slice(0, runCap) : inWindow;
+  const runsDeferred = inWindow.length - scoped.length;
+  const consumedThroughTs = scoped.length > 0 ? scoped[scoped.length - 1].startTs : opts.sinceTs;
   const merged = mergedSince(runs, opts.sinceTs);
   const { shipped, discrepancies } = opts.github
     ? shippedSince(runs, opts.sinceTs, opts.github)
@@ -1282,6 +1319,8 @@ export function buildGather(opts: {
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
+    consumedThroughTs,
+    runsDeferred,
     byType: aggregateByType(scoped),
     // `shipped` is ALWAYS passed: it is the more-accurate-or-equal merge count, so the per-merge
     // figures never divide by the ledger-verdict count MASTER-PLAN says undercounts by over half.
