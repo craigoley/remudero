@@ -290,7 +290,12 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // IT PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this comment requires: the
   // calibration failed at 24-vs-23 while test 2 stayed green, so the reader arrived already seamed
   // and is NOT allowlisted — adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
-  assert.equal(readers.length, 24, `expected 24 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // W1-T2847 moved it again, 24 -> 25: `runAdhocLaneReapRung`'s arming now reads
+  // `sweep.armAdhocLaneReap`. SAME ORDER AS THE ENTRY ABOVE, and for the same reason — test 2 was
+  // GREEN before this number moved, because the reader was written with its `opts.armAdhocLaneReap
+  // ?? ` seam from the start rather than seamed afterwards to quiet a red. So it is NOT allowlisted;
+  // adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
+  assert.equal(readers.length, 25, `expected 25 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

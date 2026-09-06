@@ -689,6 +689,23 @@ sweep:
     value: true
     origin: "net-new"
 
+  # W1-T2847: ARMS the ad-hoc lane reap rung over `<config.root>/lanes`. The rung shipped
+  # survey-first — `enabled` defaults false — and its doc called arming "a separate operator
+  # decision", but the call site passed no `enabled` at all, so no operator could make one. This row
+  # is the lever that was missing.
+  #
+  # MEASURED before arming, 2026-09-06: 173 worktrees under config.root, of which the reaper's own
+  # root held ZERO, and `rmd ledger-grep adhoc_lane.reap` returned zero rows — the survey had never
+  # fired, because nothing writes to `lanes/`. Arming alone therefore reclaims nothing; it is the
+  # convention that has to move, and this row is what makes the reaper act once it does.
+  #
+  # Every refusal still applies underneath: a live pid, a branch still live upstream, an incomplete
+  # activity probe and a 14-day ceiling all KEEP, and removal routes through the parent
+  # (`git worktree remove`), never a bare rm.
+  armAdhocLaneReap:
+    value: true
+    origin: "net-new"
+
   # W1-T905: "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half). A
   # `sweep.disposed` row already NAMES a classified surface on its own `disposition` field
   # (mergeable/blocked-fixable/stale/blocked-ambiguous/dep-review/post-review/conflicted/wait —
