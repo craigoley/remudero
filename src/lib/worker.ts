@@ -760,10 +760,11 @@ export interface SpawnWorkerArgs {
     writeStatus?: typeof writeProviderRoutingStatus;
     now?: () => number;
   };
-  /** Restrict the model's base built-in tool set (SDK `Options.tools`). Unset means the SDK default. Passing e.g. `["Bash"]`
-   * makes a worker read-only BY CONSTRUCTION: Write/Edit/ NotebookEdit/MultiEdit never enter the model's context, so it
-   * cannot use one even if asked (isolation.ts's preflight probe, W1-T17). */
+  /** Restrict built-in tools; e.g. `["Bash"]` makes writes unavailable by construction (isolation probe, W1-T17).
+   * `sandboxIntent` marks the exact-head disposable reviewer whose Codex sandbox must run tests (W1-T2946).
+   * Claude still receives only `tools`; it does not interpret this provider-adapter hint. */
   tools?: string[];
+  sandboxIntent?: "disposable-review";
   /** Override the toolchain-resolution cache and seams. Omitted means the shared per-process `claudeExecutableCache` and live
    * fs/PATH/subprocess; tests inject a fresh cache and fakes here rather than reaching into the module-level singleton
    * (W1-T113). */

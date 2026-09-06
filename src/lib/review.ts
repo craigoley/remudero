@@ -44,7 +44,7 @@ export type PostableReviewState = ReviewState | "pending";
  *  so a new commit OR a body edit earns a fresh retry budget while comments, labels and other `updated_at` churn do
  *  not. The revision rearms the same evidence only after a material reviewer-contract change, deliberately
  *  independent of boot commits, provider choice and model sampling. */
-export const REVIEW_ENGINE_REVISION = "w1-t2868-exact-head-materialization-v1";
+export const REVIEW_ENGINE_REVISION = "w1-t2946-codex-disposable-review-v1";
 
 export function reviewInputDigest(
   headSha: string,
