@@ -1,70 +1,22 @@
 #!/usr/bin/env node
-// scripts/source-size-ratchet.mjs
+// scripts/source-size-ratchet.mjs — per-file source-size ratchet (W1-T2734).
 //
-// W1-T2734 — SOURCE LINE COUNT IS A REVIEW-RISK SIGNAL, NOT A CORRECTNESS VERDICT.
+// INVARIANT: source line count is a review-risk signal, not a correctness verdict — growth always
+//   measures successfully; only an unreadable base or other failure exits non-zero. Falsifier:
+//   test/a-source-file-cannot-outgrow-its-baseline.test.ts.
+// INVARIANT: default mode refreshes origin/main, measures the merge-base-to-HEAD change per
+//   touched src/**/*.ts file, and never reads or writes scripts/source-size-baseline.json. That
+//   shared baseline (grow blocks, shrink auto-records) is reachable only via the explicit
+//   --baseline flag, kept for old evidence and fixture reproducibility; package.json's fast-gate
+//   entry never passes it.
 //
-// Default mode refreshes origin/main, measures the merge-base-to-HEAD change for each touched
-// src/**/*.ts file, and emits deterministic human plus schema-versioned JSON evidence. Growth is
-// always a successful measurement. An unreadable base or other measurement failure is non-zero.
-// The historical W1-T2488 shared-baseline ratchet remains reproducible only when the caller passes
-// `--baseline`; package.json keeps that explicit compatibility command off the habitual fast gate.
+// Default usage: node scripts/source-size-ratchet.mjs [--json] [--base <ref>] [--root <dir>]
+// Legacy usage (explicit --baseline mode only):
+//   node scripts/source-size-ratchet.mjs --baseline <path> [--check] [--root <dir>]
+// Defaults: --root . (resolved absolute), --baseline <root>/scripts/source-size-baseline.json
 //
-// Default usage:
-//   node scripts/source-size-ratchet.mjs
-//   node scripts/source-size-ratchet.mjs --json
-//   node scripts/source-size-ratchet.mjs --base <ref>
-//   node scripts/source-size-ratchet.mjs --root <dir>
-//
-// HISTORICAL W1-T2488 RATCHET (EXPLICIT --baseline MODE ONLY).
-//
-// THE ASYMMETRY THIS CLOSES. This repo already ratchets CLAUDE.md's injected byte weight
-// (scripts/claude-md-budget-ratchet.mjs), diff coverage (scripts/coverage-ratchet.mjs),
-// dependency cycles (scripts/cycle-ratchet.mjs), the learnings budget
-// (scripts/learnings-budget-ratchet.mjs) and the mutation score (scripts/mutation-ratchet.mjs) --
-// every one of those exists because something grew unnoticed. `src/run-task.ts` grew to 32,119
-// lines against a next-largest source file of 8,445 with nothing watching. This is the sixth
-// ratchet, in the same lineage, for the one dimension the other five do not cover.
-//
-// A RATCHET, NOT A CAP. Every path recorded in scripts/source-size-baseline.json is a CEILING on
-// that ONE file, not a target: today's line count is legal forever, and growing past it is the
-// only thing this script refuses. LOWERING a recorded ceiling is always free -- a shrunk file
-// rewrites its own baseline entry DOWN, automatically, the moment the run is otherwise clean, so
-// the gain can never quietly regress. RAISING a ceiling is the move this gate exists to refuse: a
-// grown file BLOCKS, naming the file and its exact overage in lines, and this script never writes
-// a growing entry back to disk -- only a human raising scripts/source-size-baseline.json by hand,
-// on the record, can move a ceiling up. A file no longer found under `src/` (renamed away or
-// deleted) is dropped from the baseline silently -- deleting a file is not growth, and a stale
-// entry for a file that no longer exists asserts nothing. A file with no recorded entry at all is
-// RECORDED, not refused -- there is nothing to have grown past yet.
-//
-// THE MEASURE IS `wc -l` SEMANTICS -- a count of trailing `\n` bytes -- so the two SURFACE figures
-// this task's own rationale cites (32119 for src/run-task.ts, 8445 for src/lib/sweep.ts) are the
-// exact numbers `countLines` returns for the shipped tree, not an approximation of them.
-//
-// HISTORICAL FAST-GATE BASIS. W1-T2488's baseline mode qualified because it was deterministic,
-// seconds-fast and local-only. W1-T2734 changes the ordinary path deliberately: it shells git and
-// refreshes origin/main so its PR-relative signal cannot silently measure against a stale base.
-// The baseline implementation below remains local-only and is reachable solely through the
-// explicit `--baseline` compatibility form.
-//
-// WHY A FILESYSTEM WALK, NOT `git ls-files`. A subprocess spawn is exactly the cost this step
-// exists to avoid paying, and `src/` carries no build output or ignored `.ts` file today (an
-// untracked scratch file dropped there is recorded on its first run like any other new file,
-// never silently exempted) -- so walking the directory tree directly gives the identical set of
-// paths `git ls-files -- src` would, with no process spawned to get it.
-//
-// Legacy usage:
-//   node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json
-//   node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json --check
-//   node scripts/source-size-ratchet.mjs --root <dir> --baseline <path>
-//
-// Defaults: --root . (resolved to an absolute path), --baseline <root>/scripts/source-size-baseline.json
-//
-// The pure functions below (countLines, readBaseline, evaluateSourceSizeRatchet) are exported so
-// test/a-source-file-cannot-outgrow-its-baseline.test.ts can exercise both the CLI process
-// directly (spawn + exit code, against isolated fixture directories) and the measurement/
-// comparison logic in isolation, mirroring test/cycle-ratchet.test.ts's own convention for its
-// sibling gate.
+// Why: the six-ratchet lineage, the bucketed-ceiling conflict fix, and the filesystem-walk-over-
+// git-ls-files choice are archived in docs/forensics/source-size-ratchet.md#module-header.
 
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -139,46 +91,16 @@ export function readBaseline(text, path) {
 }
 
 /**
- * W1-T2539 -- THE BUCKET. A recorded ceiling is rounded UP to a multiple of this, never the exact
- * line count, and that single change removes an entire conflict class.
- *
- * WHY AN EXACT COUNT COLLIDES. Every PR that grows a file must edit the SAME LINE of the baseline,
- * so two such PRs always conflict -- and the conflict is UNRESOLVABLE by the merge-conflict rung,
- * because changing a value on an existing JSON key is a deletion plus an addition and
- * `isPureConcurrentAddition` (src/lib/sweep.ts) refuses any deletion. MEASURED 2026-08-31 on the
- * three PRs left dirty after W1-T2536 turned that rung on: ours -1/-2/-2 against theirs -5/-7/-10,
- * all on this file. Two more, resolved by hand the same night, scored the same.
- *
- * WHAT BUCKETING BUYS, AND THE SECOND PROPERTY IS THE ONE THAT MATTERS.
- *   (a) Growth that stays inside the current bucket does not touch the baseline at all, so there
- *       is no line to collide on. MEASURED over 300 first-parent commits (this repo squash-merges,
- *       so `--merges` reads a near-empty corpus -- controlled at 2656 first-parent commits
- *       available): per-commit growth of a single source file is p50 40, p75 85, p90 141, p99 287,
- *       max 441, and the baseline is touched in 19 of 300 commits (6.3%).
- *   (b) When two PRs DO both cross the same boundary they write the SAME VALUE, and git
- *       auto-merges an identical change with no conflict at all. That is what removes the class
- *       rather than merely making it rarer.
- *
- * 500 IS DERIVED, NOT PICKED: it exceeds the observed MAXIMUM single-commit growth (441), so no
- * one commit can traverse a whole bucket from a standing start. REPLAYING THE THREE REAL CONFLICTS
- * AT THIS BUCKET, ALL THREE DISAPPEAR -- each pair rounds to ONE value and each merged truth fits
- * under it, so there is no differing line to conflict on and no breach to record:
- *     3136 / 3138   -> both 3500, merged truth 3230  fits
- *     32692 / 32713 -> both 33000, merged truth 32818 fits
- *     32743 / 32718 -> both 33000, merged truth 32748 fits
- * (An earlier draft of this comment quoted 3250 and 32750 -- those are a 250-bucket's answers,
- * caught by probing `ceilingFor` rather than trusting the arithmetic in the comment.)
- *
- * THE COST, STATED RATHER THAN BURIED: the ratchet is COARSER. A file may grow up to 499 lines
- * past its last recorded ceiling before the gate notices -- 1.5% of a 32k-line file, 15% of a 3k
- * one. This is a ratchet against unbounded growth, not a precise budget (W1-T2526 calls it "a size
- * ledger records how long a file is and grades no falsifier"), so the trade is judged worth it.
- * An operator who disagrees changes ONE exported constant.
- *
- * MIGRATION IS LAZY, DELIBERATELY. The existing entries are exact counts and stay valid ceilings;
- * each file re-records into a bucket the first time it grows past its current value. An EAGER
- * rewrite of all of them would itself be a large diff to this exact file -- a conflict magnet
- * against every in-flight PR, which is the defect this task exists to remove.
+ * W1-T2539 -- THE BUCKET. A recorded ceiling rounds UP to a multiple of this, so two PRs that
+ * cross the same boundary write the SAME value and merge without a conflict.
+ * INVARIANT: an exact-count baseline always conflicts on concurrent growth (the merge-conflict
+ *   rung refuses any deletion, and changing a JSON value is delete-plus-add). 500 exceeds the
+ *   observed maximum single-commit growth, so no one commit crosses a bucket from a standing start.
+ * TRAP: a file may grow up to 499 lines past its last ceiling before this gate notices -- the
+ *   coarseness this bucket trades for (W1-T2526: "a size ledger ... grades no falsifier").
+ * Migration is lazy: existing entries stay valid until a file next grows past its own value.
+ * Why: the conflict arithmetic and replayed PRs are archived in
+ * docs/forensics/source-size-ratchet.md#ceiling_bucket_lines.
  */
 export const CEILING_BUCKET_LINES = 500;
 
@@ -189,27 +111,16 @@ export function ceilingFor(lines) {
   return Math.max(CEILING_BUCKET_LINES, Math.ceil(lines / CEILING_BUCKET_LINES) * CEILING_BUCKET_LINES);
 }
 /**
- * Pure verdict over one run's measured line counts.
+ * Pure verdict over one run's measured line counts. `currentLines` is `{ [path]: lineCount }` for
+ * every file `listSourceFiles` sees; `baseline` is the previously recorded map.
  *
- * `currentLines` is `{ [path]: measuredLineCount }` for every file `listSourceFiles` currently
- * sees. `baseline` is the previously recorded map (`readBaseline`'s return).
- *
- *   - absent from baseline:        NEW -- pushed into `added`; `nextBaseline` takes its BUCKET.
- *   - `current > recorded`:        GROWN -- pushed into `violations` (named, with the exact
- *                                  overage in lines); `nextBaseline` keeps the OLD value, so a
- *                                  growing file's ceiling never advances just because it ran.
- *   - `ceilingFor(current) < recorded`: SHRUNK BY A WHOLE BUCKET -- pushed into `shrunk`;
- *                                  `nextBaseline` takes the lower BUCKET. A smaller shrink leaves
- *                                  the ceiling alone (W1-T2539), so the gain is held only when it
- *                                  is big enough to be worth a colliding edit.
- *   - `current === recorded`:      unchanged; carried through to `nextBaseline` as-is.
- *
- * A path recorded in `baseline` but absent from `currentLines` (the file was deleted or renamed
- * away) is dropped from `nextBaseline` -- deleting a file is not growth, and keeping a ceiling for
- * a file that no longer exists asserts nothing.
- *
- * `ok` is `violations.length === 0`. The caller decides what to DO with `shrunk`/`added` (the CLI
- * writes `nextBaseline` back to disk only when `ok` is true); this function performs no I/O.
+ * Per path: absent from baseline is NEW (recorded at its bucket); `current > recorded` is GROWN
+ * (a violation; `nextBaseline` keeps the OLD value so a growing file's ceiling never advances by
+ * running); `ceilingFor(current) < recorded` is SHRUNK BY A WHOLE BUCKET (ceiling lowered — a
+ * smaller shrink leaves it alone, W1-T2539); otherwise unchanged. A path missing from
+ * `currentLines` (file deleted or renamed) is dropped, never carried as a stale ceiling.
+ * `ok` is `violations.length === 0`; the caller decides what to do with `shrunk`/`added` and
+ * performs all I/O — this function does none.
  */
 export function evaluateSourceSizeRatchet(currentLines, baseline) {
   const violations = [];
@@ -219,9 +130,8 @@ export function evaluateSourceSizeRatchet(currentLines, baseline) {
   for (const path of Object.keys(currentLines).sort()) {
     const lines = currentLines[path];
     const recorded = baseline[path];
-    // W1-T2539: every value written here is a BUCKET, never the raw count -- see
-    // {@link CEILING_BUCKET_LINES}. The COMPARISON is still against the raw line count, so the gate
-    // refuses exactly what it always refused; only the recorded number changes.
+    // W1-T2539: every value written here is a BUCKET ({@link CEILING_BUCKET_LINES}); the
+    // comparison below stays against the raw line count, so the gate refuses exactly as before.
     if (recorded === undefined) {
       added.push({ path, lines });
       nextBaseline[path] = ceilingFor(lines);
@@ -229,18 +139,16 @@ export function evaluateSourceSizeRatchet(currentLines, baseline) {
       violations.push({ path, lines, baseline: recorded, overage: lines - recorded });
       nextBaseline[path] = recorded;
     } else if (ceilingFor(lines) < recorded) {
-      // SHRUNK, but only by a WHOLE BUCKET. A smaller shrink leaves the ceiling alone: rewriting it
-      // for every few lines lost would re-introduce exactly the colliding edit this task removes,
-      // on the way DOWN instead of up.
+      // SHRUNK, but only by a WHOLE BUCKET -- a smaller shrink leaves the ceiling alone, or
+      // rewriting it for every few lines lost would re-introduce the colliding edit going DOWN.
       shrunk.push({ path, from: recorded, to: ceilingFor(lines) });
       nextBaseline[path] = ceilingFor(lines);
     } else {
       nextBaseline[path] = recorded;
     }
   }
-  // A path recorded in `baseline` but not (re)written into `nextBaseline` above is one
-  // `currentLines` never saw this run -- the file was deleted or renamed away. Named here so the
-  // caller can decide to persist the drop even when nothing else about this run changed.
+  // A baseline path not (re)written into `nextBaseline` above was deleted or renamed away; named
+  // here so the caller can persist the drop even when nothing else about this run changed.
   const removed = Object.keys(baseline)
     .filter((path) => !(path in nextBaseline))
     .sort();
@@ -286,18 +194,10 @@ function runLegacyRatchet(argv) {
     for (const v of verdict.violations) {
       console.error(`  - ${v.path}: ${v.lines} lines > baseline ${v.baseline} lines (+${v.overage} line(s) over)`);
     }
-    // THE REMEDY MUST BE FOLLOWABLE BY WHOEVER READS IT, INCLUDING AN AGENT (W1-T2532). The
-    // earlier wording ended "raise the entry in <absolute runner path> by hand", and both halves
-    // were defects in practice: "by hand" reads as "a human must do this", so the sweep's ci-log
-    // fix worker declined to touch the file and pushed nothing that moved the finding -- MEASURED
-    // as four consecutive `ci-log false-block` escalations (issues #3362, #3368, #3369, #3374)
-    // against PRs whose ONLY failing check was this gate, while 6 of 9 open PRs sat blocked. And
-    // the absolute path is the CI runner's, which names nothing the reader can edit.
-    //
-    // NOTHING ABOUT WHAT THIS GATE REFUSES CHANGES. The verdict, the exit code and the violation
-    // lines above are untouched; only the sentence explaining what to do about them is. Raising a
-    // ceiling is still a deliberate, reviewed edit that lands in the diff where a reviewer reads
-    // it -- that visibility, not the difficulty of making the edit, is what the ratchet is for.
+    // TRAP (W1-T2532): the remedy text must be followable by an agent, not only a human. Wording
+    // that read "by hand" made a fix worker decline to touch the file, leaving PRs blocked on
+    // nothing but this gate. What this gate refuses is unchanged; only that sentence is.
+    // Why: docs/forensics/source-size-ratchet.md#the-blocked-remedy.
     const rel = relative(root, baselinePath).split(sep).join("/") || DEFAULT_BASELINE_RELATIVE_PATH;
     console.error(`  TO FIX: either shrink the growth back down, or record it -- edit ${rel} and set:`);
     for (const v of verdict.violations) {
@@ -311,14 +211,10 @@ function runLegacyRatchet(argv) {
         `rule (W1-T2526), because a size ledger records how long a file is and grades no falsifier. ` +
         `Re-run this script afterwards; it must print "OK".`,
     );
-    // AND THE PR BODY GOES STALE THE MOMENT YOU DO IT (W1-T2532, round 2). `bodyContradictsDiff`
-    // (src/lib/review.ts) OPENS THE DIFF and FAILS the PR when the body's own file claim no longer
-    // matches it -- so adding the line above turns a body that said "exactly 4 files" into a
-    // refusal, from a DIFFERENT gate, with a message that never mentions this one. MEASURED
-    // 2026-08-31: three PRs (#3365, #3373, #3378) landed on that refusal within one sweep, the
-    // extra file being scripts/source-size-baseline.json in every case; #3365's fix worker then
-    // read this text, recorded the ceiling AND corrected its own file count, which is the whole
-    // reason this sentence exists.
+    // TRAP (W1-T2532, round 2): recording the ceiling changes the diff, so a PR body's own file
+    // count or "plan-only" claim goes stale and `bodyContradictsDiff` (src/lib/review.ts) fails
+    // the PR from a different gate that never mentions this one.
+    // Why: docs/forensics/source-size-ratchet.md#pr-body-goes-stale.
     console.error(
       `  THEN UPDATE THE PR BODY: adding that line changes the diff, so any "exactly N files" or ` +
         `"plan-only" claim in the body is now false and \`bodyContradictsDiff\` will fail the PR for ` +
@@ -369,14 +265,8 @@ function runLegacyRatchet(argv) {
   return 0;
 }
 
-// W1-T2734 — SOURCE SIZE IS A SIGNAL, NOT A CORRECTNESS VERDICT.
-//
-// The baseline ratchet above is retained only behind an explicit `--baseline` argument so old
-// evidence and deliberate historical-ledger maintenance remain reproducible. The ordinary CLI
-// path — and the package script/FAST_GATE_STEPS entry wired to it — never reads or writes that
-// shared file. It measures the current PR against its refreshed merge base and emits evidence a
-// reviewer or future routing policy can consume. Positive growth is always exit 0; only an
-// inability to measure is a failure.
+// Signal mode (below): the ordinary CLI path and its package/FAST_GATE_STEPS entry never touch
+// the shared baseline file above — see the module header's invariants.
 
 export const SOURCE_SIZE_SIGNAL_SCHEMA_VERSION = 1;
 
