@@ -434,19 +434,16 @@ export function defaultCreditStorePath(ledgerPath: string): string {
 
 // ── W1-T2970: THE CREDIT OVERRIDE RECORD — un-crediting without editing history ───────────────
 //
-// Both credit paths READ HISTORY: the `Remudero-Task:` trailer on a merged pull request body, and
-// `findMergedByHeadBranch` on the `run-<taskId>-<digits>` head ref. Correcting a task that reads
-// merged-but-never-built therefore meant EDITING A MERGED PULL REQUEST BODY — rewriting a record
-// after the fact, unreviewably, with no field anywhere saying why. This is the reviewable diff that
-// replaces that edit.
+// Both credit paths READ HISTORY (trailer, and `run-<taskId>-<digits>` head ref), so correcting a
+// task that reads merged-but-never-built meant EDITING A MERGED PULL REQUEST BODY — unreviewably,
+// with no field saying why. This is the reviewable diff that replaces that edit.
 //
-// INVARIANT — SUBTRACT ONLY. A row that GRANTED credit would let a file assert something shipped
-// when no pull request says so: Law 5's laundering shape pointed the other way. `remove-credit` is
-// the only legal action and anything else is REFUSED BY NAME, never silently dropped.
-//
-// INVARIANT — FAIL TOWARD THE STATUS QUO. Absent, unreadable or unparseable, this record yields NO
-// rows, so the projection answers exactly as it does today. The opposite polarity would re-dispatch
-// the entire merged backlog the first time the file was malformed.
+// INVARIANT — SUBTRACT ONLY: a row that GRANTED credit would assert something shipped when no pull
+// request says so (Law 5's laundering shape, reversed). `remove-credit` is the only legal action;
+// anything else is REFUSED BY NAME.
+// INVARIANT — FAIL TOWARD THE STATUS QUO: absent, unreadable or unparseable yields NO rows, so the
+// projection answers as today. The opposite polarity re-dispatches the whole merged backlog on one
+// malformed edit. Full rationale: plan/credit-overrides.yaml's own header.
 
 /** One operator ruling that a (task, pull request) credit pairing does not stand. */
 export interface CreditOverrideRow {
@@ -466,10 +463,9 @@ export interface CreditOverrideLoad {
   refused: Array<{ reason: string; raw: unknown }>;
 }
 
-/** `<root>/plan/credit-overrides.yaml`, derived from the ledger path the way
- *  {@link defaultCreditStorePath} derives its own — so every existing caller consults this with no
- *  new required field. Deliberately under `plan/`, not `state/`: the correction must be a diff a
- *  reviewer reads. */
+/** `<root>/plan/credit-overrides.yaml`, derived from `ledgerPath` as {@link defaultCreditStorePath}
+ *  derives its own, so every existing caller consults this with no new required field. Under
+ *  `plan/` and not `state/`: the correction must be a diff a reviewer reads. */
 export function defaultCreditOverridePath(ledgerPath: string): string {
   return `${dirname(dirname(ledgerPath))}/plan/credit-overrides.yaml`;
 }
@@ -1843,9 +1839,9 @@ function isPlanOnlyFilingPr(
   return ledgerLines.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
 }
 
-/** Apply the credit override to a projection. SUBTRACT-ONLY: an uncredited projection is returned
- *  untouched, so no row can manufacture credit. The refused projection keeps the PR it was credited
- *  by, so a reader can see WHICH pairing was corrected, and carries the ruling's reason. */
+/** SUBTRACT-ONLY: an uncredited projection returns untouched, so no row can manufacture credit. The
+ *  refused projection keeps the PR it was credited by, so a reader sees WHICH pairing was
+ *  corrected, and carries the ruling's reason. */
 function applyCreditOverride(taskId: string, p: StatusProjection, deps: DeriveDeps): StatusProjection {
   if (!p.merged) return p; // nothing to subtract — the only direction this rung moves
   const readFile =
