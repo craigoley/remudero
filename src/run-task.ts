@@ -34757,12 +34757,14 @@ function defaultWipeTestMergedState(taskId: string, planPath: string, config: Co
 }
 
 /**
- * `rmd wipe-test <task-id> [--factor learnings|recon] [--repo remudero-sandbox]
+ * `rmd wipe-test <task-id> [--factor learnings|recon|rules] [--repo remudero-sandbox]
  * [--allow-non-sandbox]` — the P12 learning-utility A/B harness (W1-T86; see
  * src/lib/wipe-test.ts's module doc for the full design). Runs `<task-id>` TWICE through
  * `runTask`: arm A unmasked, arm B with `--factor`'s factor MASKED (the store itself
  * untouched — see `computeMatchedLearningsForArm` for `learnings`, `opts.maskRecon` above
- * for `recon`) — then computes + LEDGERS the deltas between them (`wipetest.pair`, now
+ * for `recon`, `opts.maskRules` for `rules` (W1-T2761) — the `workerRuleHeadlines.enabled`
+ * row itself is never written, only the rendered `rule_headlines` part is forced empty) —
+ * then computes + LEDGERS the deltas between them (`wipetest.pair`, now
  * carrying WHICH factor it varied — W1-T2512). SANDBOX-ONLY by default
  * (`resolveWipeTestTarget`): a bare `--repo remudero` (or any non-sandbox name) is REFUSED
  * before either arm ever spawns, for EVERY factor — the guard reads only `--repo`/
@@ -39686,9 +39688,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "wipe-test",
-    syntax: "rmd wipe-test <task-id> [--factor learnings|recon] [--repo remudero-sandbox] [--allow-non-sandbox]",
+    syntax: "rmd wipe-test <task-id> [--factor learnings|recon|rules] [--repo remudero-sandbox] [--allow-non-sandbox]",
     summary: "P12 A/B harness: run a sandbox task twice, ledger the deltas for one factor.",
-    detail: "the P12 learning-utility A/B harness (W1-T86, generalised to a named FACTOR by W1-T2512): runs <task-id> TWICE — arm A with --factor's factor ON, arm B with it MASKED (the store itself untouched, whether that store is task-matched learnings or the recon artifact) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec, now naming which factor it varied); --factor defaults to \"learnings\" (byte-identical to before W1-T2512), \"recon\" masks the recon worker spawn instead; SANDBOX-ONLY by default for every factor, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs of the SAME factor is signal",
+    detail: "the P12 learning-utility A/B harness (W1-T86, generalised to a named FACTOR by W1-T2512, joined by \"rules\" in W1-T2761): runs <task-id> TWICE — arm A with --factor's factor ON, arm B with it MASKED (the store itself untouched, whether that store is task-matched learnings, the recon artifact, or the workerRuleHeadlines policy row) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec, now naming which factor it varied); --factor defaults to \"learnings\" (byte-identical to before W1-T2512), \"recon\" masks the recon worker spawn instead, \"rules\" masks the rule_headlines prompt part instead; SANDBOX-ONLY by default for every factor, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs of the SAME factor is signal",
   },
   {
     name: "stop",
