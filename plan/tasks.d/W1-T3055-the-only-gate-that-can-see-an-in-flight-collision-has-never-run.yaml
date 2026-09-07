@@ -1,0 +1,131 @@
+- id: W1-T3055
+  title: "THE ONE CHECK THAT CAN SEE AN IN-FLIGHT ID COLLISION HAS NEVER RUN — `task-id-existence`'s open-PR half shells `gh api` from the only `gh`-using job in `ci.yml` that passes no token, so every run since it shipped has logged SKIPPED and exited 0, and an unreadable surface is rendered as a clean gate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 30.00
+  files:
+    - .github/workflows/ci.yml
+    - scripts/task-id-existence-check.mjs
+    - test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts
+  origin: "operator-session#w1-t3016-falsifier-fired-2026-09-07"
+  plan_refs: ["W1-T3016", "W1-T2324", "W1-T2203", "W1-T1048", "W1-T351"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE GATE IS BUILT, WIRED, AND BLIND. W1-T2324 (Q3) shipped the whole open-vs-open collision
+    check into scripts/task-id-existence-check.mjs — `addedIdsAtHead` takes the set difference
+    against the base so only ADDED ids are judged, `fetchOpenPrRows` reads the open-PR list, and
+    `evaluateOpenPrIdCollisions` refuses and NAMES the claiming PR by url. The `task-id-existence`
+    job in ci.yml runs it on every pull request. Nothing about it is missing.
+
+    IT HAS NEVER ONCE EXECUTED. `fetchOpenPrRows` shells `gh api`, and that job passes no token:
+
+      grep -c 'GH_TOKEN\|GITHUB_TOKEN' .github/workflows/ci.yml   ->  1
+
+    the single hit being the commitlint step (line 283), not this one. `gh` with no credentials
+    exits non-zero, `fetchOpenPrRows` returns `{ reachable: false }`, and the half degrades to a
+    `console.log` and exit 0.
+
+    MEASURED ON THE PR THAT FILED W1-T3016 — the run is public and the log is quoted verbatim.
+    Run 34118136551, job 101729656513, head eb907a0b, a PR that ADDED three shards and therefore
+    reached the half by construction:
+
+      task-id-existence: open-PR collision check SKIPPED -- could not read the open-PR list for
+      craigoley/remudero (network blip, or `gh` has no credentials in this environment). ...
+      task-id-existence: OK -- every id cited under src, deploy resolves ... and no declared id
+      collides with "origin/main".
+
+    Conclusion `success`. A green check whose own log says it could not perform the check.
+
+    THIS IS THE COLLISION NOBODY COULD SEE. W1-T3016 was filed off four id collisions in one
+    evening; `W1-T2996` is the one that read "free on main" while an open `run-W1-T2996-*` head
+    already held it. That is precisely and only what this half answers, and it was installed,
+    required, and mute for the whole period the collisions happened.
+
+    WHY THIS SUPERSEDES W1-T3016 RATHER THAN JOINING IT. W1-T3016's own falsifier says: "Close
+    without implementation if an existing gate already refuses a newly added shard id that collides
+    with an open PR's shard." It does. Building the filed `scripts/filing-id-collision-check.mjs`
+    would stand a second gate over the identical surface, asking an identical question through the
+    identical `gh api` call — which would ALSO have no token unless this task's one-line wiring
+    lands first. W1-T3016 is closed with its criteria preserved verbatim; every one of them is
+    carried here.
+
+    AND THE SECOND HALF IS THE HARDER ONE. Wiring the token starts the check; it does not make an
+    outage visible. Today an unreadable surface prints SKIPPED to stdout and the summary line still
+    reads OK. W1-T3016's design (iv) names that shape and forbids it — "It must never render an
+    unreadable surface as a clean one; that is the vacuous-pass shape this repo has paid for
+    repeatedly" — and the repo has the correct treatment 700 lines up in the SAME FILE, in the only
+    other job that shells `gh`: commitlint refuses an empty read outright rather than letting it
+    reach the linter as a blank string, with a comment recording that the empty-read signature
+    "cost three investigations" (W1-T351).
+  design: |
+    (i) TWO CHANGES, AND THE SECOND IS WHAT MAKES THE FIRST HONEST.
+
+      WIRE:   `env: GH_TOKEN: ${{ github.token }}` on the task-id-existence check step, the same
+              idiom the commitlint step already uses. This alone starts the open-PR half.
+      REFUSE: when the check is REQUIRED, an unresolvable owner/repo or an unreadable open-PR list
+              FAILS, naming what could not be read. A gate that cannot see must not report OK.
+
+    (ii) REQUIRED IS AN EXPLICIT PER-STEP OPT-IN (`--require-open-prs`), NEVER `GITHUB_ACTIONS`,
+    AND THE REASON IS RECORDED IN THIS REPO IN A NEIGHBOURING SCRIPT. scripts/coverage-ratchet.mjs
+    (~line 201) states it: "OPT-IN, AND DELIBERATELY NOT `GITHUB_ACTIONS`. This job runs the whole
+    suite to produce its lcov, and test/{coverage-ratchet,diff-coverage}.test.ts spawn THIS script
+    over BLOCKING fixtures with no `env` override -- so a `GITHUB_ACTIONS`-gated emit would publish
+    fixture failures as real annotations." An env-detected requirement fires inside every fixture
+    that spawns this script under CI. A flag cannot.
+
+    (iii) THE npm ENTRY IS DELIBERATELY LEFT PERMISSIVE, AND THAT IS A DESIGN CHOICE WITH A NAMED
+    BENEFICIARY. `ci-parity` registers this job as `npmScriptEntry("task-id-existence",
+    "task-id-existence:check")` — it runs the NPM SCRIPT, not the workflow's `run:` line. Putting
+    the flag in the ci.yml STEP therefore leaves `rmd preflight --ci-parity` degrading exactly as
+    it does today, which matters because W1-T2203 records a whole class of lane that has no working
+    `gh` at all. Requiring it locally would refuse those lanes for their environment rather than
+    their diff — a bound firing on a healthy condition, this repo's named recurring defect.
+
+    (iv) DEGRADED STAYS DEGRADED WHERE IT IS HONEST. Without the flag the current SKIP text is
+    unchanged, byte for byte. The refusal is not a stricter reading of the same evidence; it is the
+    statement that in CI the token is present by construction, so a failed read is an anomaly and
+    not the ordinary case.
+
+    (v) THE BASE-COLLISION HALF IS NOT TOUCHED. It already refuses an unreadable base, already runs
+    on every PR, and is independent of `gh`. Nothing in this task may weaken it, and the falsifier
+    below pins that.
+
+    (vi) THE DECISION IS EXTRACTED AS A PURE FUNCTION so both arms are provable without a network,
+    an env mutation, or a spawned `gh`. Driving it only through `main` would leave the refusal arm
+    reachable in exactly one environment — the one that cannot be reproduced in a test.
+  acceptance:
+    - claim: with the check required, an unreadable open-PR list REFUSES and names what it could not read, instead of logging SKIPPED and exiting 0
+      proof: "unit test: test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts"
+    - claim: with the check required, an owner/repo that cannot be resolved REFUSES rather than silently skipping the half
+      proof: "unit test: test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts"
+    - claim: without the flag the degraded path is unchanged — an unreadable surface still SKIPs and still exits 0, so a lane with no working gh is not refused for its environment
+      proof: "unit test: test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts"
+    - claim: a readable open-PR surface that names no collision passes whether or not the check is required, so the refusal discriminates on the READ and not on the flag
+      proof: "unit test: test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts"
+    - claim: the ci.yml step passes a token to the task-id-existence check, so the open-PR half can read the surface it has never once reached
+      proof: "grep: require-open-prs in .github/workflows/ci.yml"
+  falsifier: |
+    Close without implementation if the open-PR collision half is in fact executing in CI today —
+    read any task-id-existence job log on a PR that ADDS a shard id and look for the "open-PR
+    collision check SKIPPED" line. If that line is absent and a real read occurred, only the
+    fail-closed half of this task is warranted, not the wiring.
+
+    A change that makes the check REQUIRED BY DEFAULT does not satisfy this task: `rmd preflight
+    --ci-parity` runs the same npm entry, and W1-T2203 records lanes that get 403 from the
+    reservation namespace in the same second a branch push succeeds — the same lanes that have no
+    working `gh`. Refusing them for their environment is the bound-on-a-healthy-condition defect
+    this repo has shipped three times.
+
+    A change that gates the requirement on `GITHUB_ACTIONS` rather than an explicit per-step flag
+    does not satisfy it either, for the reason scripts/coverage-ratchet.mjs already records: the
+    suite spawns these scripts as fixtures with no env override, so an env-gated requirement fires
+    inside the fixtures too.
+
+    And if the base-collision half stops refusing an unreadable base, this task has broken the
+    working half to fix the blind one.
