@@ -62,6 +62,24 @@ function forkPoint(): string {
   return execFileSync("git", ["merge-base", "HEAD", "origin/main"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 }
 
+/** W1-T2732's OWN merged diff (#4419, `03a9a68a`) — the range the two SCOPE FENCES below have
+ *  always been about: "the detector script is byte-for-byte unedited" and "no src/ path is added".
+ *  Both were constraints on THIS TASK'S diff, and `forkPoint()` expressed that correctly only
+ *  while its PR was open.
+ *
+ *  ONCE MERGED THEY RE-ARMED AGAINST EVERY LATER PR. `git diff <merge-base>` on any other branch
+ *  is that branch's own diff, so the fences silently became "no PR may ever add a src/ path" and
+ *  "no PR may ever edit the detector" — assertions this task never made and could not enforce.
+ *  MEASURED 2026-09-07: they failed #4450 (W1-T3040) and #4455 (W1-T2762), neither of which has
+ *  anything to do with this detector, each on a shard whose FLAKE-RETRY also failed; every
+ *  src/-touching PR after them would fail the same way.
+ *
+ *  Pinning to the fixed historical range keeps BOTH assertions verbatim and permanently
+ *  checkable — they are claims about what W1-T2732 shipped, which is settled — while constraining
+ *  nobody else. `forkPoint()` remains right for the live checks above, which are about the tree
+ *  under test rather than about this task's own scope. Why: W1-T3040. */
+const W1_T2732_DIFF = ["03a9a68a~1", "03a9a68a"];
+
 // ── acceptance 1: "the check runs in CI as a required gate ... named by the same script path
 // the repository already uses for its sibling gates" ────────────────────────────────────────
 
@@ -191,7 +209,7 @@ test("both the clean run and a violation run still print the blind-spots stateme
 // deleted outright, and its full 25/25-passing suite is unaffected otherwise -- verified by
 // running it, not merely asserted here.
 test("the detector script itself is byte-for-byte unedited against this task's own fork point", () => {
-  const result = spawnSync("git", ["diff", "--quiet", forkPoint(), "--", "scripts/coverage-session-blanking-check.mjs"], {
+  const result = spawnSync("git", ["diff", "--quiet", ...W1_T2732_DIFF, "--", "scripts/coverage-session-blanking-check.mjs"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
   });
@@ -199,7 +217,7 @@ test("the detector script itself is byte-for-byte unedited against this task's o
 });
 
 test("no src/ path is added to this diff", () => {
-  const result = spawnSync("git", ["diff", "--name-only", forkPoint()], { cwd: REPO_ROOT, encoding: "utf8" });
+  const result = spawnSync("git", ["diff", "--name-only", ...W1_T2732_DIFF], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const srcPaths = result.stdout.split("\n").filter((p) => p.startsWith("src/"));
   assert.deepEqual(srcPaths, [], `no src/ path may ride with this diff; found:\n${srcPaths.join("\n")}`);
