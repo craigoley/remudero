@@ -426,6 +426,21 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     verb: "rmd next-task-id --reserve / rmd run-task / rmd drain",
     note: "W1-T1055: the push IS the claim, so two concurrent minters cannot leave holding the same number.",
   },
+  // ── src/lib/branch-reaper.ts ─────────────────────────────────────────────────────────────
+  {
+    id: "prune-deletable-branches",
+    action: "delete every branch in an already-classified manifest via `git push origin --delete`",
+    module: "src/lib/branch-reaper.ts",
+    symbol: "the prune's `git push origin --delete` chunk loop (the reap-branches executing half)",
+    boundary: "git-push",
+    gate: "operator-verb",
+    ledgerSteps: [],
+    verb: "rmd reap-branches --prune",
+    note:
+      "W1-T3020: operator-invoked only — no daemon rung, sweep or cadence calls this, and a census test fails if " +
+      "that ever changes. Re-derives no classification of its own; it deletes exactly the manifest planBranchReap " +
+      "(lib/status.ts) already produced.",
+  },
   // ── src/lib/onboard/synthesize.ts ────────────────────────────────────────────────────────
   {
     id: "onboard-draft-pr",
