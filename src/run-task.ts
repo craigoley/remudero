@@ -32076,6 +32076,7 @@ export function buildSweepEffects(
   | "dispatchFix"
   | "escalate"
   | "readLiveState"
+  | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
   | "depReview"
   | "postReview"
@@ -33029,6 +33030,25 @@ export function buildSweepEffects(
     // blocked-fixable disposition actually spends a fix-rung strike — see
     // `SweepDeps.readLiveState`'s own doc for the fail-open contract.
     readLiveState: (pr) => ghLiveState(pr.prUrl),
+
+    // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
+    // dispatch surface invokes `dispatchFix`. Reads the SAME process-lifetime `terminalHeads`
+    // map (above) `dispatchFix`'s own `priorTerminal?.escalated` early-return already consults —
+    // no second cache, no fresh GitHub read. Declines only the exact `PR@head SHA` whose
+    // escalation was already delivered; a cached entry that has not yet delivered (or was never
+    // cached at all) returns `undefined` and the ordinary dispatch path — including the failed-
+    // delivery retry — runs unchanged.
+    terminalFixStandDown: (pr) => {
+      const terminal = terminalHeads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
+      // Written as two explicit checks, not `!terminal?.escalated` — that negated-optional-chain
+      // shape is exactly the conflator test/catch-erasure-ratchet.test.ts's detector (b) exists to
+      // hold at zero (it folds "no cached entry at all" and "cached but not yet delivered" into
+      // one boolean the same way an erasing catch folds a failure and an absence together). Both
+      // cases really do return the SAME `undefined` here — that is this seam's design (iv), not an
+      // accidental erasure — but spelling it out keeps the two conditions separately legible.
+      if (terminal === undefined || terminal.escalated !== true) return undefined;
+      return `terminal uncreditable head already escalated for this PR@head (${TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP})`;
+    },
 
     // W1-T2789 — the sweep-level consumer of the SAME reversed-compare reader and exact-path
     // decision runFixRung already uses. This is deliberately not exposed through Serve.
