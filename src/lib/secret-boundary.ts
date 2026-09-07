@@ -142,6 +142,19 @@ export async function startBoundaryProxy(opts: StartBoundaryProxyOpts): Promise<
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const body = Buffer.concat(chunks);
     const target = new URL(req.url ?? "/", destination.upstreamBaseUrl);
+    // THE REQUEST TARGET IS WORKER-CONTROLLED AND `new URL(target, base)` IS NOT A JOIN: an
+    // absolute-form target ("http://evil/x"), a protocol-relative one ("//evil/x") and a
+    // backslash path ("/\\evil/x") each DISCARD the base and resolve to another origin. The real
+    // credential is attached below, so without this check the one request a prompt-injected
+    // worker can already make — it holds the sentinel by design — exfiltrates the real token to
+    // a host of its choosing, through the boundary built to prevent exactly that. Compare the
+    // RESOLVED origin, never the raw string: every shape above is normalised by then.
+    if (target.origin !== new URL(destination.upstreamBaseUrl).origin) {
+      log(boundaryLedgerRow(destination.host, "refuse", "refused", "request target resolves off the declared destination"));
+      res.writeHead(403, { "content-type": "text/plain" });
+      res.end("boundary: request target is not on the declared destination");
+      return;
+    }
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) {
       if (!v || k.toLowerCase() === "host" || k.toLowerCase() === "authorization") continue;

