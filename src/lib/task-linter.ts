@@ -39,7 +39,7 @@ import { classifyGrepZeroHit } from "./grep-zero-cause.js";
  *  this site holds a `--base` diff, so it alone supplies the diff-scoped contexts. (ii) PRE-DISPATCH
  *  — `assertLintClean` in `rmd run-task`, so a task failing a BLOCKING check is never dispatched.
  *  A BLOCK refuses dispatch; a WARN is visibility-only, and each check states its own severity and
- *  any knob that demotes it. Two are warn-only BY CONSTRUCTION, with no knob anywhere.
+ *  any knob that demotes it. Three are warn-only BY CONSTRUCTION, with no knob anywhere.
  *  Why: docs/forensics/task-linter.md#module-header holds the incidents each check was earned by
  *  (W1-T6/T9/T12, W1-T100/T101, W1-T180, W1-T246, W1-T310, W1-T326, W1-T519). */
 
@@ -73,7 +73,8 @@ export type LintCheck =
   | "duplicate-learning"
   | "dispatch-priority"
   | "declared-scope"
-  | "advisory-routing";
+  | "advisory-routing"
+  | "deferred-follow-up";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -502,7 +503,7 @@ export function proofShapeViolations(task: Task): LintViolation[] {
  *  authoring typo rather than deliberate prose. None of these match {@link parseWhitelistedProof},
  *  so the proof still falls through to free prose. Checked at the START of the trimmed proof only,
  *  because a dialect label is how a proof begins (mirrors review.ts's `isDialectPrefixed`). */
-const NEAR_MISS_PREFIX_RE = /^(?:unit tests\s*:|unit test over\b|integration test\s*:)/i;
+export const NEAR_MISS_PREFIX_RE = /^(?:unit tests\s*:|unit test over\b|integration test\s*:)/i;
 
 /** True iff a `unit test:` body reads as a runtime narrative rather than a literal test-title
  *  substring. `--test-name-pattern` is a substring match against a real title, so a compound,
@@ -1893,6 +1894,106 @@ export function advisoryRoutingViolations(task: Task): LintViolation[] {
   return [];
 }
 
+// ── DEFERRED FOLLOW-UP NAMES NO FILED ID (W1-T2687) ─────────────────────────
+// A shard's own prose says the rest of the work "lands in a follow-up" or "is left to a second
+// PR", and then no id is minted, no shard is filed, and the deferral survives only as a sentence
+// in a merged rationale that no selector, no linter and no census reads — the remainder becomes
+// indistinguishable from work nobody ever intended. MET THREE TIMES IN ONE SESSION: W1-T470's CI
+// wiring step deferred to a second PR that was never filed, a PR body carrying three prose
+// follow-ups with no shard behind any of them, and a coverage step left unwired for three weeks.
+// REPORT-ONLY, PERMANENTLY — NOT A ROLLOUT PHASE. This is a heuristic over PROSE: it cannot tell a
+// genuine unfiled deferral from a rationale merely discussing one, and a shard is often right to
+// describe scope it deliberately excluded. A blocking gate here would refuse honest filings for
+// their wording and teach authors to launder the sentence, which is precisely the failure this
+// check exists to name. WARN-only, with no override anywhere — matching {@link
+// advisoryRoutingViolations}'s construction, the prior REPORT-ONLY precedent in this file.
+
+export interface DeferredFollowUpMatcher {
+  /** Surfaced in the warn message — the phrase shape acceptance criterion 1 checks for
+   *  ("a second PR" / "a follow-up", the two shapes the commissioning session actually saw). */
+  category: string;
+  /** Matches a PREPOSITION immediately governing the deferred-to noun phrase ("in"/"to"/"as"/"via"
+   *  a follow-up or second PR) — never a bare mention of "follow-up" or "PR" on their own, which
+   *  this repo's own prose (including this section's comment) uses constantly and benignly.
+   *  PRECISION OVER RECALL: a shard that merely says "no follow-up task exists" or "the follow-up
+   *  escape" (case in point: this very file's `postMergeAmendmentViolations`) names no PREPOSITION
+   *  immediately before the noun phrase, and does not match. */
+  pattern: RegExp;
+}
+
+/** Two rows, one per phrase shape named in the task title. Each requires a preposition directly
+ *  governing the noun phrase, deliberately excluding the determiner "the": "to THE follow-up" more
+ *  often points at an already-known, already-filed thing ("the follow-up escape", "the follow-up
+ *  sweep") than at a fresh, unfiled promise, and narrowing recall here is the false-positive
+ *  measurement this check owes (see {@link deferredFollowUpViolations}'s doc). */
+export const DEFERRED_FOLLOW_UP_LEXICON: ReadonlyArray<DeferredFollowUpMatcher> = [
+  {
+    category: "a second PR",
+    pattern: /\b(?:in|to|as|via|for)\s+(?:a|another)\s+(?:second|later|next)\s+(?:PR|pull request)\b/i,
+  },
+  {
+    category: "a follow-up",
+    pattern: /\b(?:in|to|as|via)\s+(?:a|another)\s+follow-?up\b/i,
+  },
+];
+
+/** A task id already filed as a plan shard, named inline in prose — deliberately permissive (an
+ *  optional trailing lowercase letter, `W1-T12a`'s own shape per the sub-shard convention already
+ *  live in this plan) since this only detects PRESENCE of an id-shaped token, unlike {@link
+ *  citesTaskId}, which verifies a SPECIFIC id and needs the tighter non-alnum boundary. */
+export const FILED_TASK_ID_IN_TEXT_RE = /\bW\d+-T\d+[a-z]?\b/;
+
+/** The prose sentence surrounding `text[index]`, bounded by the nearest sentence-final punctuation
+ *  or paragraph break on each side, with internal whitespace/newlines collapsed to single spaces —
+ *  so an author's wrapped source line reads as one continuous sentence in a warn message rather
+ *  than replaying the file's own line breaks. Pure string slicing; never a regex over the whole
+ *  text, so it cannot mis-anchor on an unrelated period elsewhere in a long rationale. */
+export function sentenceAround(text: string, index: number): string {
+  const before = text.slice(0, index);
+  const after = text.slice(index);
+  const startBoundary = Math.max(before.lastIndexOf(". "), before.lastIndexOf(".\n"), before.lastIndexOf("\n\n"));
+  const start = startBoundary === -1 ? 0 : startBoundary + 1;
+  const endMatch = /[.!?](?:\s|$)/.exec(after);
+  const end = endMatch ? index + endMatch.index + 1 : text.length;
+  return text.slice(start, end).replace(/\s+/g, " ").trim();
+}
+
+/** `task`'s narrative text (title + rationale + note, {@link advisoryRoutingViolations}'s own
+ *  field set) matched against {@link DEFERRED_FOLLOW_UP_LEXICON}. For every sentence matching a
+ *  row, {@link FILED_TASK_ID_IN_TEXT_RE} decides the verdict: a filed id anywhere in that SAME
+ *  sentence means the deferral is complete and silent; its absence means the sentence is quoted
+ *  in full so the author sees the exact prose and can either mint an id or reword the exclusion as
+ *  a decision rather than a promise. Deduplicated by sentence text, so one long paragraph
+ *  repeating the same phrase (e.g. within a quoted proof) draws one warn, not several. WARN-only:
+ *  no severity here is ever `"block"`, on any input — see the section comment. */
+export function deferredFollowUpViolations(task: Task): LintViolation[] {
+  const text = [task.title, task.rationale, task.note].filter(Boolean).join("\n\n");
+  if (!text.trim()) return [];
+  const violations: LintViolation[] = [];
+  const seen = new Set<string>();
+  for (const entry of DEFERRED_FOLLOW_UP_LEXICON) {
+    const re = new RegExp(entry.pattern.source, entry.pattern.flags.includes("g") ? entry.pattern.flags : `${entry.pattern.flags}g`);
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const sentence = sentenceAround(text, m.index);
+      if (FILED_TASK_ID_IN_TEXT_RE.test(sentence)) continue; // cites an id — complete and silent
+      if (seen.has(sentence)) continue;
+      seen.add(sentence);
+      violations.push({
+        check: "deferred-follow-up",
+        severity: "warn",
+        message:
+          `task ${task.id}'s text defers work to ${entry.category} without naming a filed id in the ` +
+          `same sentence, so the deferred half is owned by nobody once this merges. Sentence: ` +
+          `"${sentence}"\nMint a task id for the deferred work and name it in this sentence, or ` +
+          "reword it to state the excluded scope as a decision rather than a promise. This is " +
+          "REPORT-ONLY, permanently: it never blocks dispatch or a filing, on any input.",
+      });
+    }
+  }
+  return violations;
+}
+
 // ── DUPLICATE-CLOSURE AT KNOWLEDGE INTAKE (W1-T420, narrowed W1-T2486) ───────
 // ONE PURE MODULE (knowledge-dedup.ts's `bestNearDuplicate`), THREE CONSUMERS, TWO SEVERITIES,
 // matched to population size and false-positive cost. Every consumer takes its corpus by parameter,
@@ -2339,8 +2440,8 @@ export interface LintOpts {
  *  proof-shape, proof-dialect, proof-resolvability, provenance, ruling-verify — always run. Each
  *  injected-predicate check is a no-op absent its own `opts` field: post-merge-amendment,
  *  blocked-disposition, budget-sanity, duplicate-title and its narrow arm, proof-name-resolution.
- *  Dispatch-priority, advisory-routing and blocked-record-unruled always run with no `opts` field
- *  at all, and the last two can never block. */
+ *  Dispatch-priority, advisory-routing, deferred-follow-up and blocked-record-unruled always run
+ *  with no `opts` field at all, and the last three can never block. */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);
@@ -2372,6 +2473,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   if (declaredScope) violations.push(declaredScope);
   violations.push(...dispatchPriorityViolations(task));
   violations.push(...advisoryRoutingViolations(task));
+  violations.push(...deferredFollowUpViolations(task));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);
