@@ -2166,6 +2166,58 @@ export function parseReport(text: string): Report | null {
   return { raw: text, prUrl: anchoredPrUrl(text) };
 }
 
+/** One id a worker's `LEARNINGS_USED` line named that was never injected into ITS run — refused
+ *  by name, never stamped as used. `reason` is carried per-entry (design ii), not merely a bare
+ *  id list, so a ledger row built from this stays legible without re-deriving why each one failed. */
+export interface LearningsUsedRefusal {
+  id: string;
+  reason: string;
+}
+
+/** {@link parseLearningsUsed}'s answer: which claimed ids were honoured, which were refused (and
+ *  why), and the injected set they were checked against — the exact three fields design (ii)
+ *  says `learnings.used` ledgers (`used_ids`, `injected_ids`, a reason per refusal). */
+export interface LearningsUsedResult {
+  usedIds: string[];
+  refused: LearningsUsedRefusal[];
+  injectedIds: string[];
+}
+
+const LEARNINGS_USED_REFUSAL_REASON = "never injected into this run";
+
+/** ANCHORED `LEARNINGS_USED` extraction — the citation miner's missing producer (W1-T2760). Same
+ * last-line-wins discipline as {@link anchoredPrUrl} (W1-T62): only a line matching
+ * `LEARNINGS_USED:` anchored to its own start counts, and when the contract is honoured twice the
+ * LAST one wins. `null` when the report carries no anchored line at all — a SILENT report,
+ * distinguishable from one that explicitly wrote `LEARNINGS_USED: none` (which parses to
+ * `usedIds: []`, not `null`).
+ *
+ * Every claimed `learnings#<id>` is checked against `injectedIds` — the run's OWN
+ * `matched_ids` (the ids `learnings.injected` actually put in this worker's prompt). An id absent
+ * from that set is REFUSED BY NAME, never counted as used: a worker citing a learning it was never
+ * shown is the exact fabrication the keyword floor already catches on the PR-body channel, and
+ * trusting it here would let the citation miner's new signal be gamed as easily as the old one was
+ * silent. Duplicate ids within one line count once. */
+export function parseLearningsUsed(text: string, injectedIds: readonly string[]): LearningsUsedResult | null {
+  const matches = [...text.matchAll(/^[ \t]*LEARNINGS_USED:[ \t]*(.*)$/gim)];
+  if (matches.length === 0) return null;
+  const value = matches[matches.length - 1][1].trim();
+  const injected = new Set(injectedIds);
+  const usedIds: string[] = [];
+  const refused: LearningsUsedRefusal[] = [];
+  if (!/^none$/i.test(value)) {
+    const seen = new Set<string>();
+    for (const m of value.matchAll(/learnings#([A-Za-z0-9][A-Za-z0-9-]*)/g)) {
+      const id = m[1];
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (injected.has(id)) usedIds.push(id);
+      else refused.push({ id, reason: LEARNINGS_USED_REFUSAL_REASON });
+    }
+  }
+  return { usedIds, refused, injectedIds: [...injectedIds] };
+}
+
 /** Strip presentation decoration from a decision option or recommendation label, so the value returned is the DATA and not the
  * data plus chrome: the inline `(RECOMMENDED)` marker, markdown emphasis, code ticks and emoji go, then whitespace collapses.
  * Why: the WS-0 `)` bleed and the T1D noise are one class of bug, a decorated label mistaken for the value it dresses up. */
