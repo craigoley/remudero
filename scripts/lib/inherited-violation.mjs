@@ -6,14 +6,6 @@
  * identical at the point of refusal, and the remedy it prints ("record this number") reads as
  * "your growth", which for the second case is wrong and confusing.
  *
- * MEASURED 2026-09-07. `source-size-ratchet` was BLOCKED on `src/run-task.ts` on a CLEAN
- * origin/main checkout, so EVERY open pull request inherited the failure whatever its own diff
- * contained. It surfaced on a branch touching only `src/lib/review.ts` — a diff with no possible
- * relationship to the violation. Nobody's individual mistake: several PRs each grew that file,
- * each recorded the ceiling its OWN tree measured, and the sum crossed a bucket boundary after
- * they merged. The bucket debounces concurrent growth WITHIN a boundary; it cannot debounce a
- * crossing no individual run ever saw. Six PRs were red on it at once and nothing said why.
- *
  * THE TEST IS THE SAME ONE THE REVIEWER ALREADY MAKES FOR PROOFS. `classifyBaseProofOutcome`
  * (src/lib/review.ts) re-runs a proof against the merge base and calls a pass there STALE, because
  * a check that holds on both sides discriminates nothing. A violation that reproduces on the base
@@ -23,6 +15,8 @@
  * licence to merge past the gate, and recording it here is a real repair. What changes is that the
  * author is told whose repair it is, which is the difference between "I broke this" and "I am
  * doing main's housekeeping in my PR".
+ *
+ * Incident that motivated this: learnings/ci.yaml#inherited-violation-not-authors (W1-T3037).
  */
 
 /**

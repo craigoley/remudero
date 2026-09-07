@@ -72,6 +72,7 @@
   "scripts/learnings-assert-check.mjs": 57,
   "scripts/learnings-budget-baseline.json": 0,
   "scripts/learnings-budget-ratchet.mjs": 113,
+  "scripts/lib/inherited-violation.mjs": 250,
   "scripts/lib/json-duplicate-keys.mjs": 29,
   "scripts/mkdtemp-callsite-check.mjs": 50,
   "scripts/mount-headroom-sweep.mjs": 125,
