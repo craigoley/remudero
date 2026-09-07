@@ -16,7 +16,9 @@ import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type Update
 import { proofQueueAudit, type ProofQueueAuditOffender, type ProofQueueAuditOpts, type ProofQueueAuditReport } from "./proof-queue-audit.js";
 import { attributeVerbs, deriveCliVerbs, deriveStepPrefixes, EMISSIONS_ALLOWLIST } from "./emissions.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
-import type { Task } from "./plan.js";
+import { loadPlanFromYaml, type Task } from "./plan.js";
+import { lintTask } from "./task-linter.js";
+import { slug as kebabSlug } from "./feedback-docket.js";
 
 /**
  * lib/measurement-cadence.ts — W1-T1259: runs `rule-efficacy`, `verdict-calibration` and
@@ -1398,4 +1400,140 @@ export function mintCiLearningShards(
   // The weaker claim wins: a window that was never fully seen cannot report "clear".
   const status: CiLearningMintResult["status"] = blind ? "unreadable" : drafts.length > 0 ? "backlog" : "clear";
   return { status, drafts, excludedFindings, unreadableShas };
+}
+
+// ── W1-T2968: THE WRITER — a draft becomes a real plan record ─────────────────────────────────
+//
+// W1-T2959's criterion 2 says "one firing FILES at most the ceiling many records" while the rung
+// console-logged drafts and wrote nothing. LAW 5 IS THE WHOLE SAFETY ARGUMENT and it holds only
+// because the mark survives the FILE — see plan.ts's `author_class` parse line, which W1-T2959
+// omitted, leaving every on-disk record unmarked and `machineAuthorVerifyViolation` unfireable.
+// INVARIANT — VALIDATE BEFORE WRITING: every rendered record is parsed back and linted with the
+// repo's OWN linter, and a refusal is NAMED rather than written and retracted.
+
+/** The filesystem surface the filer needs — injected, so a test drives the whole writer with no
+ *  real writes. The defaults are the one line each that only the on-disk test reaches. */
+export interface CiLearningShardWriteFs {
+  mkdirSync: (dir: string, opts: { recursive: true }) => unknown;
+  writeFileSync: (path: string, data: string, enc: "utf8") => void;
+}
+
+export interface CiLearningFilingDeps {
+  /** THE RESERVATION PATH (task-id-reservation.ts), never `max(id)+1` — a counter collides the
+   *  first time two hosts fire in one minute, the race `refs/rmd-id/` settles. */
+  mintTaskId: () => string;
+  /** Every `origin:` the plan ALREADY holds — deriving "already filed" from the corpus alone
+   *  re-files everything the moment a window is re-read. */
+  planOrigins: readonly string[];
+  fs?: CiLearningShardWriteFs;
+  join?: (...parts: string[]) => string;
+}
+
+export interface CiLearningFiledShard {
+  relPath: string;
+  taskId: string;
+  findingId: string;
+}
+
+export interface CiLearningFilingResult {
+  filed: CiLearningFiledShard[];
+  /** Findings the plan already holds — reported, never silently dropped. */
+  skipped: string[];
+  /** Records the linter refused, each with its reason. */
+  refused: { findingId: string; reason: string }[];
+}
+
+/** Shard slug length, matching the `plan/tasks.d/` convention inbox.ts files under. */
+const CI_LEARNING_SLUG_MAX = 72;
+
+/** Render ONE draft as a single-element YAML task list — the shard file's whole contents.
+ *  `origin:` carries the finding id, so it is both Rule 17 provenance and the idempotency key. */
+export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string): string {
+  const q = (v: string) => JSON.stringify(v); // YAML accepts JSON scalars, so this escapes correctly
+  return [
+    `- id: ${taskId}`,
+    `  title: ${q(draft.title)}`,
+    "  repo: remudero",
+    "  depends_on: []",
+    "  type: implement",
+    // PARKED: isDispatchEligible refuses `verify !== "auto"`, so this record waits for a person.
+    "  verify: human",
+    "  risk: low",
+    "  status: queued",
+    "  attempts: 0",
+    // LAW 5: the author class rides the record.
+    "  author_class: machine",
+    `  origin: ${q(draft.findingId)}`,
+    "  files:",
+    `    - ${CI_LEARNING_LESSONS_FILE}`,
+    "  acceptance:",
+    `    - claim: ${q(`the lane that trips the ${draft.gate} gate is reached by a matched learnings entry rather than prose no dispatched worker reads`)}`,
+    `      proof: ${q(`grep: ${draft.findingId} in ${CI_LEARNING_LESSONS_FILE}`)}`,
+    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Remedy surface: ${draft.remedySurface}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
+    "",
+  ].join("\n");
+}
+
+/** The one `learnings/` file a drafted remedy names. A concrete path, not the `learnings/*.yaml`
+ *  GLOB: a `grep:` proof is a BASIC REGEX, so a glob matches nothing and the criterion would
+ *  degrade silently (CLAUDE.md's proof section). */
+export const CI_LEARNING_LESSONS_FILE = "learnings/ci-gate-lessons.yaml";
+
+/** Parse rendered shard bytes back and lint them. EXPORTED so BOTH arms are reachable: every draft
+ *  the renderer produces takes the LINT arm, so the UNPARSEABLE one is testable only here — a catch
+ *  no test can enter is a claim, not a guard (CI's diff-coverage caught exactly that). */
+export function ciLearningRecordVerdict(contents: string, label: string): { ok: boolean; reason: string } {
+  try {
+    const task = loadPlanFromYaml(contents, label).tasks[0];
+    const lint = lintTask(task);
+    return lint.ok
+      ? { ok: true, reason: "" }
+      : { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
+  } catch (e) {
+    return { ok: false, reason: `unparseable: ${(e as Error).message}` };
+  }
+}
+
+/**
+ * File each draft as a real `plan/tasks.d/` record. Skips what the plan already holds, refuses what
+ * the linter would, and writes only what survives both.
+ */
+export function fileCiLearningShards(
+  drafts: readonly CiLearningShardDraft[],
+  worktreePath: string,
+  deps: CiLearningFilingDeps,
+): CiLearningFilingResult {
+  const fs: CiLearningShardWriteFs = deps.fs ?? { mkdirSync, writeFileSync };
+  const joinPath = deps.join ?? join;
+  const held = new Set(deps.planOrigins);
+  const filed: CiLearningFiledShard[] = [];
+  const skipped: string[] = [];
+  const refused: { findingId: string; reason: string }[] = [];
+
+  for (const d of drafts) {
+    // IDEMPOTENCY FIRST, so a skipped draft burns no reservation — an id spent on a record never
+    // written is a gap the allocator's max+1 floor never revisits.
+    if (held.has(d.findingId)) {
+      skipped.push(d.findingId);
+      continue;
+    }
+    const taskId = deps.mintTaskId();
+    const contents = ciLearningShardYaml(d, taskId);
+
+    // VALIDATE BEFORE WRITING: a record this rung cannot get past the repo's own linter must never
+    // reach the disk.
+    const verdict = ciLearningRecordVerdict(contents, `ci-learning:${taskId}`);
+    if (!verdict.ok) {
+      refused.push({ findingId: d.findingId, reason: verdict.reason });
+      continue;
+    }
+
+    const stem = kebabSlug(d.title, CI_LEARNING_SLUG_MAX).replace(/-+$/, "");
+    const relPath = `plan/tasks.d/${taskId}${stem ? `-${stem}` : ""}.yaml`;
+    fs.mkdirSync(joinPath(worktreePath, "plan", "tasks.d"), { recursive: true });
+    fs.writeFileSync(joinPath(worktreePath, relPath), contents, "utf8");
+    filed.push({ relPath, taskId, findingId: d.findingId });
+    held.add(d.findingId); // two identical drafts in ONE firing file once
+  }
+  return { filed, skipped, refused };
 }

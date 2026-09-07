@@ -268,6 +268,12 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
       note: e.note as string | undefined,
       rationale: e.rationale as string | undefined,
       origin: e.origin as string | undefined,
+      // W1-T2968 — LAW 5'S MARK MUST SURVIVE THE FILE. Omitting this line made
+      // `machineAuthorVerifyViolation` unfireable on every record that lives on disk: the field
+      // parsed to `undefined`, so a machine-authored shard at `verify: auto` linted CLEAN while the
+      // identical in-memory task blocked. W1-T2959 shipped the rule and its tests built Task objects
+      // directly, so the unit passed and the wire was never exercised.
+      author_class: e.author_class as TaskAuthorClass | undefined,
       prompt: e.prompt as string | undefined,
       context: e.context as ContextClaim[] | undefined,
       files: Array.isArray(e.files) ? (e.files as string[]) : undefined,

@@ -529,6 +529,7 @@ import {
   type CiLearningCadencePolicy,
   type CiLearningCadenceRunResult,
   measurementCadenceMarkerPath,
+  fileCiLearningShards,
   mintCiLearningShards,
   recordCiLearningCadenceFire,
   recordMeasurementCadenceFire,
@@ -17540,7 +17541,15 @@ export function censusMembershipCommand(
  *  and a rung that both concluded and committed would be that argument's only weak point. */
 export function ciLearningCommand(
   rest: string[],
-  deps: CiFailuresCommandDeps & { root?: string; policy?: CiLearningCadencePolicy } = {},
+  deps: CiFailuresCommandDeps & {
+    root?: string;
+    policy?: CiLearningCadencePolicy;
+    /** W1-T2968 — every `origin:` the plan already holds. Injected so a test drives idempotency
+     *  without a plan on disk; production reads the real plan. */
+    planOrigins?: readonly string[];
+    /** W1-T2968 — the filer. Injected so a test writes nothing; production files for real. */
+    fileShards?: typeof fileCiLearningShards;
+  } = {},
 ): number {
   const badArg = unknownArgError("ci-learning", rest, ["--days"], ["--force"]);
   if (badArg) {
@@ -17593,7 +17602,11 @@ export function ciLearningCommand(
   }
 
   const corpus = collectCiFailureCorpus(input);
-  const result = mintCiLearningShards(corpus, []);
+  // W1-T2968 — THE PLAN IS THE RECORD. This argument was hardcoded `[]`, so idempotency was inert:
+  // every re-read of one window re-drafted everything it had already drafted. A filed record
+  // carries its finding id as its `origin:`, which is what makes the plan answerable here.
+  const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(root);
+  const result = mintCiLearningShards(corpus, planOrigins);
   console.log(`rmd ci-learning — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
   console.log(`  status: ${result.status}`);
   if (result.unreadableShas.length > 0) {
@@ -17608,8 +17621,61 @@ export function ciLearningCommand(
   for (const e of result.excludedFindings) {
     console.log(`  EXCLUDED by the ceiling (named, not dropped): ${e}`);
   }
+
+  // W1-T2968 — FILE THEM. W1-T2959's acceptance said "one firing FILES at most the ceiling many
+  // records" while this verb printed and wrote nothing; a draft nobody files is a report nobody
+  // reads. Each record lands MARKED (`author_class: machine`) and PARKED (`verify: human`), which
+  // `isDispatchEligible` refuses and `machineAuthorVerifyViolation` blocks if it ever reads `auto`.
+  if (result.drafts.length > 0) {
+    const file = deps.fileShards ?? fileCiLearningShards;
+    // FILING IS BEST-EFFORT AND MUST NEVER TAKE THE REPORT DOWN WITH IT. The minter fails CLOSED by
+    // inheritance — an unreachable origin or an unreadable plan throws rather than minting
+    // optimistically — and that is right for the CLAIM but wrong for the OPERATOR: the drafts above
+    // are already on screen and losing them to an exception turns a partial success into nothing.
+    // MEASURED: without this, an unreadable plan under the run's root took the whole verb out with
+    // ENOENT, reddening three of W1-T2959's tests, which pass a tmp root with no plan in it.
+    try {
+      const filing = file(result.drafts, root, { mintTaskId: ciLearningTaskIdMinter(root), planOrigins });
+      for (const f of filing.filed) console.log(`  FILED ${f.taskId} -> ${f.relPath}`);
+      for (const sk of filing.skipped) console.log(`  ALREADY IN THE PLAN (not re-filed): ${sk}`);
+      // A refusal is NAMED. A rung that silently dropped what the linter would not accept would be
+      // reporting a clean run over a record it could not write.
+      for (const rf of filing.refused) console.log(`  REFUSED by the task linter (${rf.reason}): ${rf.findingId}`);
+    } catch (e) {
+      // NAMED, never swallowed: "drafted but not filed" is a different outcome from "filed", and an
+      // operator reading this must be able to tell them apart.
+      console.error(`  NOT FILED — the filer could not run (${(e as Error).message}); the drafts above stand unfiled`);
+    }
+  }
+
   if (!rest.includes("--force")) recordCiLearningCadenceFire(root, new Date());
   return 0;
+}
+
+/** Every `origin:` the plan already holds — the idempotency surface {@link fileCiLearningShards}
+ *  consults. An unreadable plan yields `[]` and the linter-validated write still cannot duplicate a
+ *  record within one firing; it is a degraded read, and the verb says so rather than crashing. */
+export function ciLearningPlanOrigins(root: string): string[] {
+  try {
+    return loadPlan(join(root, "plan", "tasks.yaml"))
+      .tasks.map((t) => t.origin)
+      .filter((o): o is string => typeof o === "string" && o.length > 0);
+  } catch {
+    console.error("rmd ci-learning: the plan could not be read for already-filed findings — proceeding without it");
+    return [];
+  }
+}
+
+/** THE RESERVATION PATH, never a counter: the same `reserveTaskIdRemote` + `gitRemoteRefReserver`
+ *  pair `next-task-id --reserve` uses, so a machine-filed id races the fleet's own ids correctly.
+ *  FAIL-CLOSED by inheritance — an unreachable origin throws here rather than minting optimistically. */
+export function ciLearningTaskIdMinter(root: string): () => string {
+  return () => {
+    const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root });
+    const runGit = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+    const held = reserveTaskIdRemote(mint.n, gitRemoteRefReserver({ run: gitRunAdapter(runGit) }));
+    return held.taskId;
+  };
 }
 
 export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } = {}): number {
