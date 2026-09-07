@@ -4937,6 +4937,10 @@ export const ENFORCEMENT_DATA: Readonly<Record<string, string>> = {
   "plan/claims.yaml":
     "the falsifiable self-checks scripts/claims-check.mjs runs on every PR — blunting an assertion " +
     "here is the self-concealing edit this whole category exists to catch",
+  "plan/credit-overrides.yaml":
+    "the operator's credit rulings (W1-T2970) — deriveStatus consults it to SUBTRACT merge credit, so a " +
+    "row here changes what the fleet believes shipped and therefore what it dispatches; riding the " +
+    "plan-only carve-out past the proof floor is exactly the edit this category refuses",
   "plan/policy.yaml":
     "the fleet's operating constants AS DATA — src/lib/policy.ts's loadPolicy feeds dispatch lanes, " +
     "cost ceilings and cadence governors from it, so an edit changes what the fleet OBEYS",
