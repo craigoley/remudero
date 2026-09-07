@@ -764,6 +764,52 @@ function parseTestTarget(body: string): WhitelistedProof | null {
   };
 }
 
+/** One `grep:` refusal, named for a human and paired with the REAL sentence {@link
+ *  explainGrepProofRefusal} returns for it — never a hand-typed paraphrase (W1-T2762). Built once, at
+ *  module load, by running canonical bad proofs through the parser's own explainer; throws if an
+ *  example ever stops refusing, so the fixture itself cannot drift from the parser silently. */
+function grepRefusalExample(when: string, proof: string): { when: string; proof: string; message: string } {
+  const message = explainGrepProofRefusal(proof);
+  if (!message) throw new Error(`PROOF_DIALECT: example ${JSON.stringify(proof)} did not refuse — fixture is stale`);
+  return { when, proof, message };
+}
+
+/** The `grep:`/`unit test:` dialect's PARSE SHAPE, machine-readable — the two forms, their prefix and
+ *  body regexes, and every refusal with the SAME message the parser (or, for `grep:`, {@link
+ *  explainGrepProofRefusal}) actually produces. Consumed by scripts/generate-proof-dialect.mjs to
+ *  render docs/proof-dialect.md and by test/proof-dialect-doc.test.ts to hold CLAUDE.md's proof
+ *  section to these same values (W1-T2762). DERIVATION ONLY: every field here reads an existing
+ *  regex/constant/function: {@link parseDialectGrep} and {@link parseTestTarget} still own the actual
+ *  parse, this does not redeclare it, and no parsing behaviour changes. */
+export const PROOF_DIALECT = {
+  grep: {
+    prefixRe: DIALECT_GREP_RE,
+    form: "grep: <pattern> in <path>",
+    pathRe: DIALECT_GREP_PATH_RE,
+    fileTargetRequirement: GREP_PROOF_FILE_TARGET_REQUIREMENT,
+    refusals: [
+      grepRefusalExample("empty body", "grep: "),
+      grepRefusalExample("no `in <path>` clause", "grep: TODO"),
+      grepRefusalExample("path traverses out of the checkout (`..`)", "grep: TODO in ../secret.txt"),
+      grepRefusalExample("absolute path", "grep: TODO in /etc/passwd"),
+      grepRefusalExample("glob (`*`) in the path", "grep: TODO in src/*.ts"),
+      grepRefusalExample("directory-shaped target (final segment carries no extension)", "grep: TODO in src/lib"),
+    ],
+  },
+  unitTest: {
+    prefixRe: DIALECT_TEST_RE,
+    form: 'unit test: "test/<name>.test.ts" (runs that file) or a bare test title (name-filtered)',
+    exactPathRe: TEST_PATH_EXACT_RE,
+    refusals: [
+      { when: "empty body", message: "empty `unit test:` body — nothing to run" },
+      {
+        when: "an exact test-file path escaping the checkout (`..`)",
+        message: "no path traversal out of the checkout",
+      },
+    ],
+  },
+} as const;
+
 /** Tokenise a fenced shell-like command, honoring simple `"…"` / `'…'` quoting. No
  * escape sequences (a proof needing one is simply not whitelisted — fine). */
 function tokenizeFenced(s: string): string[] {
@@ -3973,12 +4019,14 @@ function stripQuotes(s: string): string {
 }
 
 /** The Acceptance HEADER line. Extracted as a shared constant so {@link parseAcceptanceBlock} and {@link
- *  acceptanceBlockDiagnostics} can never disagree about where a block begins. */
-const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\**\s*:?\s*\**\s*$/i;
+ *  acceptanceBlockDiagnostics} can never disagree about where a block begins. Exported (W1-T2762) so
+ *  scripts/generate-proof-dialect.mjs can render it and test/proof-dialect-doc.test.ts can hold prose
+ *  copies of this shape to the same regex. */
+export const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\**\s*:?\s*\**\s*$/i;
 
 /** A criterion BULLET. Shared with {@link acceptanceBlockDiagnostics} for the same reason as {@link
- *  ACCEPTANCE_HEADER_RE}. */
-const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
+ *  ACCEPTANCE_HEADER_RE}. Exported for the same reason {@link ACCEPTANCE_HEADER_RE} is (W1-T2762). */
+export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
 
 /** Where a single-line bullet's claim ends and its proof begins — index plus separator width, or null when the bullet
  * carries no `|`. THE SEPARATOR IS THE ONE THAT YIELDS AN EXECUTABLE PROOF. NOT SIMPLY THE LAST ` | `, which repairs a

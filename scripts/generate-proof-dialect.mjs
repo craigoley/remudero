@@ -1,0 +1,243 @@
+// scripts/generate-proof-dialect.mjs
+//
+// Proof-dialect reference page generator + drift gate (W1-T2762).
+//
+// The acceptance-proof dialect is taught THREE times: `ACCEPTANCE_PROOF_GRAMMAR`
+// (src/lib/proof-grammar.ts, the ONE copy both filing lanes read and the only one
+// test/proof-grammar.test.ts already runs through the real parser), CLAUDE.md's "Writing proofs
+// and acceptance criteria" section (hand-written prose, six bullets), and `rmd check-proof`'s
+// `detail` string (src/run-task.ts, also hand-written). Only the first is tested against the
+// parser. This script closes that gap the way scripts/generate-cli-reference.mjs (W1-T48) already
+// closed it for docs/cli-reference.md: render docs/proof-dialect.md from the SAME constants the
+// parser, the filing-time linter and `rmd check-proof` all read --
+// `ACCEPTANCE_PROOF_GRAMMAR` (src/lib/proof-grammar.ts), `ACCEPTANCE_HEADER_RE` /
+// `ACCEPTANCE_BULLET_RE` / `PROOF_DIALECT` (src/lib/review.ts), `SCENARIO_NARRATIVE_BOUNDS`
+// (src/lib/task-linter.ts) and `CHECK_PROOF_EXIT` (src/run-task.ts) -- so a committed page cannot
+// drift from what the reviewer actually enforces, and `test/proof-dialect-doc.test.ts` can hold
+// CLAUDE.md's prose copy to these same values.
+//
+// The generated file is content-only (no timestamp, no invocation-environment data) so it is
+// byte-stable across runs when none of those constants changed -- that is what makes `--check` a
+// meaningful staleness gate rather than a permanent false positive (same discipline as
+// scripts/generate-cli-reference.mjs / scripts/generate-learnings-index.mjs).
+//
+// Usage:
+//   npm run proof-dialect          # regenerate docs/proof-dialect.md
+//   npm run proof-dialect:check    # exit 1 if the committed file is stale (run in `npm test`,
+//                                  # so CI's `ci` job -- already a REQUIRED check -- byte-compares
+//                                  # it on every PR; see test/proof-dialect-doc.test.ts)
+//
+// Run directly with `tsx` (not plain `node`): the source constants live in `.ts` modules, and only
+// tsx's loader can import those from this script.
+
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { parseArgs } from "node:util";
+import { pathToFileURL } from "node:url";
+import { ACCEPTANCE_PROOF_GRAMMAR } from "../src/lib/proof-grammar.ts";
+import { ACCEPTANCE_HEADER_RE, ACCEPTANCE_BULLET_RE, PROOF_DIALECT } from "../src/lib/review.ts";
+import { SCENARIO_NARRATIVE_BOUNDS } from "../src/lib/task-linter.ts";
+import { CHECK_PROOF_EXIT } from "../src/run-task.ts";
+
+const DEFAULT_OUT = join("docs", "proof-dialect.md");
+
+/** The verdict->exit-code table `rmd check-proof --help` prints, one row per {@link CHECK_PROOF_EXIT}
+ *  entry. The NUMBERS are read live from that constant so a renumbering fails `--check`; the
+ *  one-line meanings are this page's own prose (check-proof's `detail` keeps its own, longer
+ *  narrative -- this is not a byte-for-byte copy of it, only the same facts). */
+const VERDICT_MEANINGS = {
+  pass: "the proof ran and MATCHED -- the criterion is substantiated.",
+  fail: "the proof ran and did NOT match -- genuinely unmet, overrides the keyword floor.",
+  refused: "nothing executed -- bad usage, an unparseable proof, or an unresolved `unit test:` name run declined.",
+  noMatch: "ran and named nothing -- degrades to the keyword floor, NEVER read as fail.",
+  execError: "a timeout, spawn failure, or `grep` exit 2 -- inconclusive, also degrades.",
+  executedStale: "(`--base` only) passed on both trees -- discriminates nothing, never read as fail.",
+};
+
+/**
+ * Split a rendered reference doc into { headingName -> its "## <heading>\n..." block }, keyed by
+ * the section heading -- used only to NAME which constant's section drifted in a --check failure
+ * (mirrors scripts/generate-cli-reference.mjs's extractCommandSections), never to decide pass/fail
+ * (that is a plain whole-file byte comparison).
+ */
+export function extractDialectSections(text) {
+  const re = /^## (.+)$/gm;
+  const matches = [...text.matchAll(re)];
+  const sections = {};
+  for (let i = 0; i < matches.length; i++) {
+    const name = matches[i][1];
+    const start = matches[i].index;
+    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+    sections[name] = text.slice(start, end);
+  }
+  return sections;
+}
+
+/** Section names whose rendered content differs (or is missing/added) between two reference docs. */
+export function driftedDialectSectionNames(committed, fresh) {
+  const committedSections = extractDialectSections(committed);
+  const freshSections = extractDialectSections(fresh);
+  const names = new Set([...Object.keys(committedSections), ...Object.keys(freshSections)]);
+  return [...names].filter((name) => committedSections[name] !== freshSections[name]).sort();
+}
+
+/** Render one `grep:` refusal example as `- REFUSED \`<proof>\` -- <message>`. */
+function renderGrepRefusal(r) {
+  return `- REFUSED \`${r.proof}\` (${r.when}) -- ${r.message}`;
+}
+
+/** Render the full proof-dialect reference page -- pure function of the four source constants,
+ *  no I/O. Mirrors scripts/generate-cli-reference.mjs's renderReference. */
+export function renderProofDialectPage(grammar, headerRe, bulletRe, dialect, narrativeBounds, exitCodes) {
+  const lines = [];
+  lines.push("<!--");
+  lines.push("AUTO-GENERATED -- DO NOT EDIT BY HAND.");
+  lines.push("Generated by scripts/generate-proof-dialect.mjs from the SAME constants the reviewer's");
+  lines.push("own parser reads: ACCEPTANCE_PROOF_GRAMMAR (src/lib/proof-grammar.ts),");
+  lines.push("ACCEPTANCE_HEADER_RE / ACCEPTANCE_BULLET_RE / PROOF_DIALECT (src/lib/review.ts),");
+  lines.push("SCENARIO_NARRATIVE_BOUNDS (src/lib/task-linter.ts) and CHECK_PROOF_EXIT");
+  lines.push("(src/run-task.ts). Run `npm run proof-dialect` to regenerate after changing any of");
+  lines.push("those. `npm run proof-dialect:check` (part of `npm test`, W1-T2762) fails CI if this");
+  lines.push("file has drifted from a fresh regeneration.");
+  lines.push("-->");
+  lines.push("");
+  lines.push("# The acceptance-proof dialect");
+  lines.push("");
+  lines.push(
+    "Every acceptance criterion's `proof:` is EXECUTED by the reviewer against this grammar. This " +
+      "page renders it from the SAME constants the parser (`src/lib/review.ts`), the filing-time " +
+      "linter (`src/lib/task-linter.ts`) and `rmd check-proof` (`src/run-task.ts`) all read -- it " +
+      "cannot state a rule the code does not enforce. `test/proof-dialect-doc.test.ts` runs every " +
+      'example below through the real parser and holds CLAUDE.md\'s "Writing proofs and acceptance ' +
+      'criteria" section to these same values.',
+  );
+  lines.push("");
+  lines.push("## The grammar");
+  lines.push("");
+  lines.push("The grammar both filing lanes (`rmd triage`, `rmd plan`) teach, verbatim:");
+  lines.push("");
+  for (const line of grammar) lines.push(line.replace(/^ {2}/, ""));
+  lines.push("");
+  lines.push("## Acceptance header (`ACCEPTANCE_HEADER_RE`)");
+  lines.push("");
+  lines.push("An `Acceptance:` block begins at a bare HEADER line matching:");
+  lines.push("");
+  lines.push("```");
+  lines.push(String(headerRe));
+  lines.push("```");
+  lines.push("");
+  lines.push("Accepted, verbatim: `Acceptance:`, `**Acceptance:**`, `## Acceptance`, `Acceptance criteria:`.");
+  lines.push("Refused: a heading carrying trailing prose on the same line (e.g. `## Validation`).");
+  lines.push("");
+  lines.push("## Acceptance bullet (`ACCEPTANCE_BULLET_RE`)");
+  lines.push("");
+  lines.push("A criterion is a BULLET matching:");
+  lines.push("");
+  lines.push("```");
+  lines.push(String(bulletRe));
+  lines.push("```");
+  lines.push("");
+  lines.push("Accepted markers: `-`, `*`, `1.`, `1)`. Any other leading marker is not a bullet.");
+  lines.push("");
+  lines.push("## `grep:` proofs (`PROOF_DIALECT.grep`)");
+  lines.push("");
+  lines.push(`Form: \`${dialect.grep.form}\``);
+  lines.push("");
+  lines.push(`Path requirement: ${dialect.grep.fileTargetRequirement}.`);
+  lines.push("");
+  lines.push("Refusals, each paired with the exact sentence the parser's own explainer returns:");
+  lines.push("");
+  for (const r of dialect.grep.refusals) lines.push(renderGrepRefusal(r));
+  lines.push("");
+  lines.push("## `unit test:` proofs (`PROOF_DIALECT.unitTest`)");
+  lines.push("");
+  lines.push(`Form: \`${dialect.unitTest.form}\``);
+  lines.push("");
+  lines.push("Refusals:");
+  lines.push("");
+  for (const r of dialect.unitTest.refusals) lines.push(`- REFUSED (${r.when}) -- ${r.message}`);
+  lines.push("");
+  lines.push("## Scenario-narrative bounds (`SCENARIO_NARRATIVE_BOUNDS`)");
+  lines.push("");
+  lines.push(
+    "A `unit test:` body reads as a multi-clause SCENARIO NARRATIVE, not a single test's title, " +
+      "and is refused by `proof-resolvability` (`looksLikeScenarioNarrative`, src/lib/task-linter.ts), " +
+      "when it is over " +
+      `${narrativeBounds.maxBodyLength} characters, or carries ${narrativeBounds.commasToRefuseAlone}+ ` +
+      `commas, or carries \`"; "\` plus ${narrativeBounds.commasToRefuseWithSemicolon}+ comma(s).`,
+  );
+  lines.push("");
+  lines.push("## Verdict -> exit code (`rmd check-proof`, `CHECK_PROOF_EXIT`)");
+  lines.push("");
+  for (const [verdict, exit] of Object.entries(exitCodes)) {
+    lines.push(`- \`${verdict}\` -> exit ${exit}: ${VERDICT_MEANINGS[verdict] ?? "(no meaning recorded)"}`);
+  }
+  lines.push("");
+  lines.push("## Examples");
+  lines.push("");
+  lines.push("Two PASS examples, run through the real parser by `test/proof-dialect-doc.test.ts`:");
+  lines.push("");
+  lines.push("- PASS `grep: someSymbol( in src/lib/review.ts`");
+  lines.push("- PASS `unit test: test/proof-grammar.test.ts`");
+  lines.push("");
+  lines.push("Every `grep:` refusal above, restated as one example proof per row:");
+  lines.push("");
+  for (const r of dialect.grep.refusals) lines.push(renderGrepRefusal(r));
+  // Trim the trailing blank line the loop above leaves, then end with exactly one newline.
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n") + "\n";
+}
+
+function main(argv) {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      out: { type: "string", default: DEFAULT_OUT },
+      check: { type: "boolean", default: false },
+    },
+  });
+
+  const fresh = renderProofDialectPage(
+    ACCEPTANCE_PROOF_GRAMMAR,
+    ACCEPTANCE_HEADER_RE,
+    ACCEPTANCE_BULLET_RE,
+    PROOF_DIALECT,
+    SCENARIO_NARRATIVE_BOUNDS,
+    CHECK_PROOF_EXIT,
+  );
+
+  if (values.check) {
+    let committed;
+    try {
+      committed = readFileSync(values.out, "utf8");
+    } catch {
+      console.error(
+        `generate-proof-dialect: ${values.out} does not exist -- run 'npm run proof-dialect' to generate it.`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    if (committed !== fresh) {
+      const drifted = driftedDialectSectionNames(committed, fresh);
+      const named = drifted.length > 0 ? ` Drifted section(s): ${drifted.join(", ")}.` : "";
+      console.error(
+        `generate-proof-dialect: ${values.out} is STALE -- it does not match a fresh regeneration ` +
+          `from the live parser constants.${named}\nRun 'npm run proof-dialect' and commit the result.`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`generate-proof-dialect: OK -- ${values.out} matches the live parser constants.`);
+    process.exitCode = 0;
+    return;
+  }
+
+  writeFileSync(values.out, fresh);
+  console.log(`generate-proof-dialect: wrote ${values.out}.`);
+  process.exitCode = 0;
+}
+
+// Only run when executed directly (`tsx scripts/generate-proof-dialect.mjs ...`), never on import.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main(process.argv.slice(2));
+}

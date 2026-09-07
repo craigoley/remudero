@@ -618,11 +618,30 @@ export const PROOF_PAYLOAD_SHAPES: ReadonlyArray<ProofPayloadShape> = [
  *  prefix ({@link NEAR_MISS_PREFIX_RE}) makes no promise this rule polices and is a separate hint. */
 const RESOLVABILITY_DIALECT_RE = /^(unit test|grep):\s*([\s\S]*)$/i;
 
+/** The numeric bounds {@link looksLikeScenarioNarrative} tests a `unit test:` body against — pulled
+ *  out to a named, exported constant (W1-T2762) so scripts/generate-proof-dialect.mjs can render them
+ *  and test/proof-dialect-doc.test.ts can hold CLAUDE.md's proof section to these SAME numbers,
+ *  instead of a second hand-typed "100 characters" / "one comma" copy drifting from the check below.
+ *  {@link looksLikeScenarioNarrative} reads these fields; it does not restate the numbers. */
+export const SCENARIO_NARRATIVE_BOUNDS = {
+  /** A body longer than this reads as prose regardless of punctuation. */
+  maxBodyLength: 100,
+  /** This many commas or more, alone, reads as a multi-clause narrative. */
+  commasToRefuseAlone: 2,
+  /** A `"; "` PLUS this many comma(s) also reads as a narrative — fewer commas than {@link
+   *  commasToRefuseAlone} alone requires, since the semicolon already signals a second clause. */
+  commasToRefuseWithSemicolon: 1,
+} as const;
+
 /** True iff `body` reads as a multi-clause scenario narrative rather than a single test's title.
  *  See the module comment above for why a lone arrow does not, by itself, qualify. */
 function looksLikeScenarioNarrative(body: string): boolean {
   const commas = (body.match(/,/g) ?? []).length;
-  return commas >= 2 || (body.includes("; ") && commas >= 1) || body.length > 100;
+  return (
+    commas >= SCENARIO_NARRATIVE_BOUNDS.commasToRefuseAlone ||
+    (body.includes("; ") && commas >= SCENARIO_NARRATIVE_BOUNDS.commasToRefuseWithSemicolon) ||
+    body.length > SCENARIO_NARRATIVE_BOUNDS.maxBodyLength
+  );
 }
 
 /** Every criterion whose proof STARTS with the executable dialect but whose payload matches NONE of

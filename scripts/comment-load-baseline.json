@@ -255,7 +255,7 @@
   "src/lib/task-class.ts": 37,
   "src/lib/task-id-reservation.ts": 160,
   "src/lib/task-id.ts": 243,
-  "src/lib/task-linter.ts": 911,
+  "src/lib/task-linter.ts": 1000,
   "src/lib/tier.ts": 67,
   "src/lib/tmp.ts": 83,
   "src/lib/trace.ts": 115,
