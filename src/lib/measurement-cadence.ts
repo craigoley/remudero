@@ -43,6 +43,7 @@ import {
   type InjectCoverageImprovementDeps,
   type InjectCoverageImprovementResult,
 } from "./coverage-improvement.js";
+import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadenceResult } from "./hand-run-census.js";
 import { lintTask } from "./task-linter.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 
@@ -1111,6 +1112,9 @@ export interface MeasurementCadenceRunResult {
   wipeTest?: WipeTestCadenceReportResult;
   /** The coverage-improvement rung, set when the daemon supplies the repo/artifact reader input. */
   coverageImprovement?: CoverageImprovementCadenceResult;
+  /** The hand-run census (W1-T2697), set when `opts.handRunCensus` is supplied — see
+   *  {@link handRunCensus}. */
+  handRunCensus?: HandRunCensusCadenceResult;
 }
 
 /** The verdict-calibration/autonomy-rate git join's only I/O — same shallow-clone refusal as
@@ -1173,6 +1177,11 @@ export interface MeasurementCadenceReportOpts {
   /** coverage-improvement's CI artifact reader + producer input. Optional for old tests; the
    *  daemon hook supplies it in production. */
   coverageImprovement?: Omit<CoverageImprovementCadenceOpts, "stateDir">;
+  /** hand-run-census's writer input (W1-T2697) — root, ledger path and run id, plus test seams.
+   *  Optional: omitted skips the census-and-propose pass entirely, the same opt-in shape
+   *  `coverageImprovement` above uses (both need a caller-supplied `run_id` for their own ledger
+   *  marker, so neither can run unconditionally off `stateDir` alone). */
+  handRunCensus?: Omit<HandRunCensusCadenceOpts, "stateDir">;
 }
 
 const WIPE_TEST_PAIR_PATTERN = /"step":"wipetest\.pair"/;
@@ -1422,6 +1431,12 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     ? runCoverageImprovementCadence({ ...opts.coverageImprovement, stateDir: opts.stateDir })
     : undefined;
 
+  // ── hand-run census (W1-T2697): census the operator's own ledger rows, propose a routine for
+  // each verb sequence that recurs across the policy floor of distinct days — see
+  // hand-run-census.ts's module doc for the full design. Opt-in like coverageImprovement above,
+  // for the same reason: its own ledger marker needs a caller-supplied run_id.
+  const handRunCensusResult = opts.handRunCensus ? handRunCensus({ ...opts.handRunCensus, stateDir: opts.stateDir }) : undefined;
+
   // ── the adoption report's mint — gated on `opts.escalate` like rule-efficacy's write above;
   // off, it reports the measured status without touching the registry.
   const adoptionMint: AdoptionMintCadenceResult = opts.escalate
@@ -1478,6 +1493,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     wipeTest,
     ...(coverageImprovement ? { coverageImprovement } : {}),
     verbCensus,
+    ...(handRunCensusResult ? { handRunCensus: handRunCensusResult } : {}),
   };
 }
 

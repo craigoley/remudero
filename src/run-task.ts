@@ -512,8 +512,10 @@ import {
   LEDGER_COST_TAG_INFRA,
   matchesRepoScopedTask,
   DECISION_RELEVANT_LEDGER_STEPS,
+  markDaemonProcessActor,
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
+import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
 import {
   ledgerRotationEntries,
@@ -17814,6 +17816,55 @@ export function ledgerGrepCommand(rest: string[], opts: { stateDir?: string } = 
 }
 
 /**
+ * `rmd hand-runs` (W1-T2697) — print the hand-run census on demand: which exact verb sequence has
+ * the OPERATOR (never a worker, never the daemon — `src/lib/ledger.ts`'s `actor` stamp) hand-typed
+ * on at least the policy floor of distinct days, over the ledger UNION (never the live file alone
+ * — W1-T1013). READ-ONLY: this is `censusHandRuns` (src/lib/hand-run-census.ts) alone, never the
+ * writer half (`handRunCensus`, wired into `runMeasurementCadenceReport`'s own cadence instead) —
+ * printing a census must never itself propose a routine.
+ */
+export function handRunsCommand(rest: string[], opts: { stateDir?: string } = {}): number {
+  const badArg = unknownArgError("hand-runs", rest, [], []);
+  if (badArg) {
+    console.error(badArg);
+    console.error(`usage: ${commandSyntax("hand-runs")}\n` + USAGE);
+    return 2;
+  }
+
+  // Same injected-and-defaulted seam `ledgerGrepCommand`/`emissionsCommand` use, for the same
+  // reason: a test drives this against a synthetic state root instead of this host's real one.
+  const stateDir =
+    opts.stateDir ??
+    (() => {
+      try {
+        return join(loadConfig().root, "state");
+      } catch {
+        return undefined;
+      }
+    })();
+  if (stateDir === undefined) {
+    console.error("rmd hand-runs: cannot resolve a state dir — unreadable config");
+    return 1;
+  }
+
+  const result = censusHandRuns(stateDir);
+  if (result.status === "refused") {
+    console.error(`rmd hand-runs: refused — ${result.refusedReason}`);
+    return 1;
+  }
+
+  console.log(`operator rows: ${result.operatorRowCount}`);
+  console.log(`recurrences:   ${result.recurrences.length}`);
+  for (const r of result.recurrences) {
+    console.log("");
+    console.log(`sequence: ${r.sequence.join(" → ")}`);
+    console.log(`days (${r.distinctDays.length}): ${r.distinctDays.join(", ")}`);
+    console.log(`sessions: ${r.sessionCount}`);
+  }
+  return 0;
+}
+
+/**
  * `rmd rule-efficacy [--no-escalate]` — W1-T418's repeat-incident rate: for each rule in
  * lib/rule-efficacy.ts's signature table, the count of same-class ledger rows strictly AFTER
  * the rule's effective (citing) date, over the ledger UNION (lib/ledger-grep.ts) — never the
@@ -26138,6 +26189,13 @@ export async function daemonCommand(
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
   } = {},
 ): Promise<number> {
+  // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
+  // every `appendLedger` call this process makes (in-process, e.g. a wired sweep tick) from here
+  // on reports `actor: "daemon"` rather than the operator-shell default. See
+  // `deriveLedgerActor`'s doc (src/lib/ledger.ts) for why a worker this daemon later spawns is
+  // still `"worker"` despite inheriting this same env marker.
+  markDaemonProcessActor();
+
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
   // ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored. daemon
   // takes only these flags; anything else prints usage and exits non-zero, spawning nothing.
@@ -38622,6 +38680,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
   },
   {
+    name: "hand-runs",
+    syntax: "rmd hand-runs",
+    summary: "Print which verb sequence the operator keeps hand-running, on demand.",
+    detail: "W1-T2697: the ledger records every rmd verb but never who ran it — a worker subprocess, the daemon's own in-process loop, and an operator's bare `./bin/rmd` are now distinguished by the `actor` field every appendLedger call stamps at write time (a pre-stamp row reads `unknown`, never guessed). This prints the hand-run census: over the archive+live ledger UNION (never the live file alone — W1-T1013), operator rows are grouped into sessions by their writing process and a thirty-minute gap, each session reduced to its ordered step sequence, and any sequence of length >= 2 recurring across at least the policy floor of DISTINCT CALENDAR DAYS (never session count) is printed with its days and session count. The same census, when the daemon's own cadence supplies a run id, additionally proposes each unproposed recurrence as ONE `plan/feedback/` entry (deduped by sequence signature against the ledger union, `hand_run.census_proposed`) — this command never does that itself. READ-ONLY: writes no ledger line, no feedback entry, no state file.",
+  },
+  {
     name: "ci-failures",
     syntax: "rmd ci-failures [--days N]",
     summary: "Report the window's red CI gates, each paired with the commit that repaired it.",
@@ -39567,6 +39631,10 @@ export async function main(
   }
   if (cmd === "ledger-grep") {
     process.exit(ledgerGrepCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(handRunsCommand(rest)) cannot carry a DA hit without forking the process; handRunsCommand's own logic — arg validation, the state-dir resolution, the refused/measured render — is unit-tested in test/hand-run-census.test.ts (same irreducible-glue shape as the sibling ledger-grep dispatch case).
+  if (cmd === "hand-runs") {
+    process.exit(handRunsCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ciFailuresCommand(rest)) cannot carry a DA hit without forking the process; ciFailuresCommand's own logic — arg validation, the --days bound, the window load and every corpus status render — is unit-tested in test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts (same irreducible-glue shape as the sibling rule-efficacy/check-proof/emissions dispatch cases).
   if (cmd === "ci-failures") {
