@@ -1814,7 +1814,10 @@ export function remedyFilesForFailingChecks(
   for (const step of steps) {
     if (!failing.has(step.job) || !step.remedyFiles) continue;
     for (const path of step.remedyFiles) {
-      const key = `${step.job} ${path}`;
+      // The separator is a NUL written as an ESCAPE, never a raw byte: a raw one in tracked
+      // source trips test/no-raw-nul.test.ts, and it is what makes this harness's grep skip a
+      // whole file silently (CLAUDE.md clause (b)). The value is identical either way.
+      const key = `${step.job}\u0000${path}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push({ path, job: step.job });
