@@ -10,7 +10,8 @@
   files: [src/lib/sweep.ts, test/sweep.test.ts]
   origin: "operator-brief#unbounded-identical-disposition-2026-08-26"
   plan_refs: ["W1-T2304", "W1-T2327", "W1-T2340", "W1-T2339", "W1-T1066"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     MEASURED 2026-08-26 off `sweep.disposed` ledger rows over a union reading 33 archives with the
@@ -108,3 +109,31 @@
     the rate measured and the task must be closed rather than implemented. The measurement to re-run
     is the same one: group rows by pr_number, key each on disposition plus head_sha, and take the
     longest consecutive run.
+  note: |
+
+    RETIRED 2026-09-07 — ALREADY BUILT. Selected for a build pass and refused on validation: the
+    mechanism this shard specifies is PRESENT at origin/main, with the exact N this rationale
+    derived. MEASURED, by symbol:
+
+      src/lib/sweep.ts:396   repeatDispositionBound: number;          (declared on SweepPolicy)
+      src/lib/sweep.ts:556   repeatDispositionBound: 50,              (the default — this shard's N)
+      src/lib/sweep.ts:3882  const repeatBoundTripped = repeatStreak >= policy.repeatDispositionBound;
+      src/lib/digest.ts:423  references it — the digest surface (Q2) named as the one already read
+      test/sweep.test.ts     12 references
+
+    The module header states the invariant in its own words: "a repeated (disposition, head_sha)
+    pair escalates ONCE at {@link SweepPolicy.repeatDispositionBound}". That is this shard's design
+    (Q1 key, Q2 surface, Q3 constraints) as shipped code. `status: queued` was simply never written
+    back on merge — the class W1-T3043 exists to close.
+
+    THE FALSIFIER DOES NOT FIRE, AND WAS RE-RUN. Its instruction: close if no PR reaches fifty
+    consecutive dispositions of one verdict on one unchanged head. Re-derived 2026-09-07 over the
+    live ledger and all rotations, DEDUPED by (ts, pr) because rotation retains rows into every
+    later archive (raw 1,355,599 rows -> 77,915 unique, 94.3% duplication): longest identical
+    (disposition, head_sha) run is 531 on PR #2828, and 150 of 2342 PRs (6.4%) reach N=50 — against
+    the 8.2% this shard predicted. So the loop is real and the calibration held. It is retired
+    because it SHIPPED, not because the defect was imaginary.
+
+    NOTE FOR A LATER READER: long runs persisting is NOT evidence the bound is missing. Q3 requires
+    the sweep to keep re-deriving every tick — the counter counts derivations, it never replaces
+    one — so a 531-run with a single escalation at 50 is the designed behaviour, not a regression.
