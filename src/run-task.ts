@@ -15939,13 +15939,15 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
  *
  *   - refuse:   not a Dependabot PR, or its diff touches source outside the
  *     manifest/lockfile allowlist. Nothing is posted (exit 2).
- *   - hold:     a required check is genuinely red. Nothing is posted (exit 1) —
- *     the caller (a future poll / drain) tries again later.
+ *   - hold:     a required check on a minor/patch bump is genuinely red.
+ *     Nothing is posted (exit 1) — the caller tries again later.
  *   - arm:      minor/patch, confined, gates green. Posts remudero-review=success
  *     and arms auto-merge (exit 0).
- *   - escalate: major (or unparseable — fail closed). Posts remudero-review=
- *     failure (so it can NEVER auto-merge) and opens a MANUAL needs-human issue
- *     carrying the release notes via the SHIPPED escalate() path (exit 1).
+ *   - migrate:  parseable major. Captures durable feedback, comments the
+ *     Dependabot ignore command, closes without deleting the branch, and arms
+ *     nothing (exit 0 only after every outward action completes).
+ *   - escalate: unparseable or identity-unsafe major (fail closed). Posts
+ *     remudero-review=failure and opens a MANUAL needs-human issue (exit 1).
  */
 /**
  * impl-BI — the injectable effects of {@link depReviewCommand}. The `arm` branch's tail was the

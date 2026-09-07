@@ -27,10 +27,10 @@ import type { Escalation } from "./escalate.js";
  *   - ESCALATE — an unparseable bump, or a major whose dependency identity cannot
  *     be safely extracted. Fail closed via the existing MANUAL escalation path.
  *
- * A fourth outcome, HOLD, covers an otherwise-good PR whose required checks are
- * not yet green (still running, or genuinely red): nothing is posted and the
- * caller tries again later — mirrors run-task.ts's waitForCiGreen/pollToGate,
- * where pending is never treated as pass.
+ * HOLD covers an otherwise-good minor/patch PR whose required checks are not
+ * yet green (still running, or genuinely red): nothing is posted and the caller
+ * tries again later — mirrors run-task.ts's waitForCiGreen/pollToGate, where
+ * pending is never treated as pass.
  */
 
 // ── Author ───────────────────────────────────────────────────────────────
@@ -208,10 +208,10 @@ export function parseAnchoredVersionBumps(text: string): SemverLevel[] {
 /**
  * The PR's overall semver level across its title + body: the WORST (highest-risk)
  * constituent bump wins — major beats unknown beats minor beats patch. A grouped
- * PR with even ONE major constituent escalates the WHOLE PR (fail closed; Standing
- * rules 2/4 — never split the difference on a mixed-risk group). No parseable
- * bump anywhere is `unknown` — also fail-closed, handled the same as `major` by
- * {@link decideDepReview}.
+ * PR with even ONE major constituent classifies the WHOLE PR as major (fail
+ * closed; Standing rules 2/4 — never split the difference on a mixed-risk
+ * group). No parseable bump anywhere is `unknown`, which still reaches manual
+ * escalation in {@link decideDepReview}.
  *
  * The TITLE is parsed whole (a one-line Dependabot-authored string); the BODY is
  * parsed via {@link parseAnchoredVersionBumps} only — its non-summary lines are

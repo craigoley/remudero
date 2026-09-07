@@ -121,7 +121,7 @@ test("overallSemverLevel: PR #81's title+body parses as major", () => {
   assert.equal(overallSemverLevel(PR81_TITLE, PR81_BODY), "major");
 });
 
-test("overallSemverLevel: a grouped PR with ANY major constituent escalates the WHOLE group", () => {
+test("overallSemverLevel: a grouped PR with ANY major constituent classifies the WHOLE group", () => {
   const groupedBody = "Updates `a` from 1.0.0 to 1.0.1\nUpdates `b` from 2.0.0 to 3.0.0\n";
   assert.equal(overallSemverLevel("Bump the group with 2 updates", groupedBody), "major");
 });
