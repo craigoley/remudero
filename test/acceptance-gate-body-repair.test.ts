@@ -521,3 +521,70 @@ test("runFixRung (acceptance 8, fail-open): a body write that throws mid-repair 
   assert.equal(spawnCalls.length, 1, "a failed write never blocks the ordinary strike from still running");
   assert.equal(outcome.outcome, "fixed");
 });
+
+// ── W1-T3038: recover the author's criteria before replacing them ────────────────────────────────
+
+/*
+ * MEASURED on origin/main: a body carrying FOUR real criteria written `- <claim> — <dialect>: …`
+ * went in and ONE placeholder came out, silently. An em dash is not a separator, so each bullet
+ * parsed with an empty proof, bodyNeedsAcceptanceRepair called the body defective, and the fallback
+ * DISPLACED the author's own criteria — which were one character from correct the whole time. The
+ * placeholder's own proof carries no dialect, so `rmd check-proof` REFUSES it: the gate went green
+ * having proved nothing, and nothing reported that four criteria had been lost.
+ *
+ * emDashSeparatedProof (W1-T3028) already knew how to split those bullets. It fed the DIAGNOSER and
+ * nothing else, so the REPAIR could not use what the report had worked out. That is the gap here.
+ */
+
+import { recoverableCriteria } from "../src/lib/plan-pr-emitter.js";
+import { parseAcceptanceBlock } from "../src/lib/review.js";
+
+const emDashBody = (n: number) =>
+  ["## Acceptance", ""]
+    .concat(Array.from({ length: n }, (_, i) => `- [x] **claim ${i}** — unit test: real title ${i}`))
+    .concat([""])
+    .join("\n");
+
+test("W1-T3038: the author's recoverable criteria survive the repair instead of being displaced", () => {
+  const repaired = acceptanceGateBodyRepair(emDashBody(4));
+  assert.ok(repaired, "an em-dash body is still defective and must be repaired");
+  const parsed = parseAcceptanceBlock(repaired!.repairedBody);
+  const criteria = Array.isArray(parsed) ? parsed : (parsed as { criteria: unknown[] }).criteria;
+  assert.equal(criteria.length, 4, "all four of the author's criteria must come back, not one placeholder");
+  assert.doesNotMatch(
+    repaired!.repairedBody,
+    /carries a judgeable Acceptance block \(mechanically repaired/,
+    "the generic fallback must not appear when the author's own criteria were recoverable",
+  );
+});
+
+test("W1-T3038: every recovered proof carries a runnable dialect, so the verdict is not capped", () => {
+  const repaired = acceptanceGateBodyRepair(emDashBody(3))!;
+  const bullets = repaired.repairedBody.split("\n").filter((l) => /^\s*(?:[-*]|\d+[.)])\s+/.test(l));
+  assert.ok(bullets.length >= 3);
+  for (const b of bullets) {
+    assert.match(b, /(?:unit test|grep):/, `a recovered bullet must carry an executable proof: ${b}`);
+  }
+});
+
+test("W1-T3038: a body with nothing recoverable still gets the fallback — that is what it is for", () => {
+  // No dialect after the dash anywhere: nothing to recover, so displacing is the right answer.
+  const body = ["## Acceptance", "", "- [x] **a claim** — just explanatory prose.", ""].join("\n");
+  const repaired = acceptanceGateBodyRepair(body);
+  assert.ok(repaired);
+  assert.match(
+    repaired!.repairedBody,
+    /carries a judgeable Acceptance block \(mechanically repaired/,
+    "with nothing recoverable the fallback is correct and must still be emitted",
+  );
+});
+
+test("W1-T3038: recoverableCriteria reads only bullets, and only ones with a dialect after the dash", () => {
+  assert.deepEqual(recoverableCriteria("no bullets here at all\n"), []);
+  assert.deepEqual(recoverableCriteria("- a claim — with prose only\n"), []);
+  assert.deepEqual(recoverableCriteria("- a claim — unit test: t\n"), [{ claim: "a claim", proof: "unit test: t" }]);
+  // A numbered bullet is a bullet (ACCEPTANCE_BULLET_RE accepts `1.`/`1)`), so it recovers too.
+  assert.deepEqual(recoverableCriteria("1. a claim — grep: x in src/a.ts\n"), [
+    { claim: "a claim", proof: "grep: x in src/a.ts" },
+  ]);
+});

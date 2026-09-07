@@ -713,7 +713,7 @@ test("impl-FR: a successful arm emits NO detector signal — the notifier must s
 });
 
 // ── THE SAFETY LOCK. The most important test here. ──────────────────────────────────
-test("impl-FR SAFETY: a MAJOR bump is never armed and never reaches the detector", async () => {
+test("impl-FR SAFETY: a MAJOR bump migrates and still never arms or reaches the detector", async () => {
   const rec = issueRecorder();
   const r = await driveDepReview({
     title: "build(deps): bump @types/node from 25.4.1 to 26.1.2",
@@ -733,7 +733,7 @@ test("impl-FR SAFETY: a MAJOR bump is never armed and never reaches the detector
     "no arm line of any kind for a major bump",
   );
   const decided = r.steps.filter((s) => s.step === "dep-review.decided");
-  assert.equal(decided[0].decision, "escalate", "the lane's own policy still owns this outcome");
+  assert.equal(decided[0].decision, "migrate", "the lane's own policy still owns this outcome");
   rmSync(r.tmp, { recursive: true, force: true });
 });
 

@@ -9,7 +9,7 @@ scoped to Dependabot PRs only, that fixes that. This document describes the
 lane as it is **wired and running** — not an aspiration — and records its live
 proof.
 
-## The four-way verdict
+## The five-way verdict
 
 `decideDepReview` (`src/lib/dep-review.ts`) is a pure function, no LLM ever, run
 in this fail-closed order:
@@ -21,30 +21,42 @@ in this fail-closed order:
    `.github/workflows/*.yml` for the actions ecosystem). A "dependency bump"
    that also edits source is not a dependency bump. **Nothing is posted** —
    identical to today's silence, but now a deliberate outcome. Exit 2.
-2. **`hold`** — a required check is genuinely red or still pending. **Nothing
-   is posted**; the caller (a future poll / `rmd drain`) tries again later.
-   Exit 1.
-3. **`arm`** — a minor/patch bump, confined to manifests, every required gate
+2. **`migrate`** — a parseable major bump, confined to manifests. Red checks on
+   the bot PR are treated as migration evidence, not as a reason to wait for a
+   branch the lane will never edit. `rmd dep-review` captures one durable
+   feedback entry keyed by `owner/repo + dependency@target-major`, comments the
+   exact Dependabot command `@dependabot ignore this major version`, and closes
+   the PR without deleting its branch. It posts no successful
+   `remudero-review` status and never arms auto-merge. Exit 0 only after
+   capture, command, and close all complete.
+3. **`escalate`** — a bump whose semver level cannot be parsed, or a major
+   whose dependency identity cannot be safely extracted. That still uses the
+   existing `MANUAL` needs-human escalation issue carrying the PR's release
+   notes. Exit 1.
+4. **`hold`** — a minor/patch bump with a required check genuinely red or still
+   pending. **Nothing is posted**; the caller (a future poll / `rmd drain`)
+   tries again later. Exit 1.
+5. **`arm`** — a minor/patch bump, confined to manifests, every required gate
    green: post `remudero-review=success` and arm GitHub auto-merge. Exit 0.
-4. **`escalate`** — a **major** bump, or one whose semver level cannot be
-   parsed from the title/body (fail-closed — MASTER-PLAN §5 FLEET FINDING: a
-   28-minute production outage once rode in on an unvetted major). Post
-   `remudero-review=failure` (so the PR can **never** auto-merge) and open a
-   `MANUAL` needs-human escalation issue carrying the PR's release notes, via
-   the shipped `escalate()` path (`src/lib/escalate.ts`, W1-T8). Exit 1.
 
 The semver level is the **worst** constituent bump across every `from X to Y`
 pair Dependabot lists in the title/body — a grouped PR with even one major
-constituent escalates the whole PR (never split the difference on a
-mixed-risk group).
+constituent migrates the whole PR (never split the difference on a mixed-risk
+group). Dependency identities are parsed only from Dependabot's own anchored
+summary lines (`Updates \`pkg\` from X to Y`, `Bumps [pkg](...) from X to Y`,
+or the title's `bump pkg from X to Y`), never from release-note prose.
 
 ## The call site
 
 `rmd dep-review <pr> [--repo <name>]` (`src/run-task.ts`): fetches the PR
 (author, title, body, head sha, status-check rollup) and diff via `gh`, runs
 `decideDepReview`, ledgers `dep-review.decided`, then acts on the verdict
-exactly as above. It never shells out a decision — `lib/dep-review.ts` decides,
-this command only posts.
+exactly as above. The `migrate` branch is deliberately staged: durable feedback
+capture first, then the Dependabot ignore comment, then PR close. If capture
+fails, the PR is left untouched. If comment or close fails, the migration entry
+remains and the incomplete action is ledgered so the next sweep pass retries it
+instead of treating feedback existence as resolution. It never shells out a
+decision — `lib/dep-review.ts` decides, this command only posts.
 
 ## Live-proof evidence (W1-T54b)
 
@@ -72,29 +84,17 @@ by a prior instance of this task
   is MERGED** (`state: MERGED`, `mergedAt: 2026-07-15T21:18:21Z`, verified live
   via `gh pr view 80 --json state,mergedAt`) — the arm direction merges
   through the live `[ci-gate, remudero-review]` gate end to end.
-- **Escalate proof — [PR #81](https://github.com/craigoley/remudero/pull/81)**
-  (`build(deps-dev): bump @types/node from 22.20.1 to 26.1.1`): `rmd
-  dep-review 81` decided `escalate` (`"MAJOR version bump — excluded from
-  auto-merge at the dep-review lane"`), posted `remudero-review=failure` to
-  the head commit (verified live — `statusCheckRollup` reads
-  `{"context":"remudero-review","state":"FAILURE"}`), and opened
-  **[issue #89](https://github.com/craigoley/remudero/issues/89)**
-  (`[MANUAL] dep-review-PR81: major dependency bump needs human review`),
-  carrying the release notes and a merge/close choice, recommendation
-  "merge" (ledger step `dep-review.escalated`,
-  `issue_url: https://github.com/craigoley/remudero/issues/89`). **PR #81 is
-  still OPEN** (`state: OPEN`, verified live) — the escalate direction blocks
-  auto-merge end to end; only an admin override could land it.
+- **Historical major proof — [PR #81](https://github.com/craigoley/remudero/pull/81)**
+  (`build(deps-dev): bump @types/node from 22.20.1 to 26.1.1`) used the old
+  `escalate` behavior: `rmd dep-review 81` posted `remudero-review=failure`
+  and opened **[issue #89](https://github.com/craigoley/remudero/issues/89)**.
+  That proved major bumps did not auto-merge, but it did not create a durable
+  migration queue or suppress the major proposal. The same `@types/node` 26
+  target recurred as #3654, and red checks then held the PR before it reached
+  the old major branch. The current lane converts that class to `migrate`
+  before checking red gates.
 
-Both directions of the lane are proven, live, against the real required gate:
-a confined minor/patch bump merges unattended, and a major bump is held open
-with a human decision point, never silently merged.
-
-The ledger also shows two intermediate `hold` decisions for PR #81 between
-the first and final `escalate` runs (`redChecks: ["remudero-review"]` — the
-lane's own previously-posted `remudero-review=failure` status reads back as a
-red required check on a re-run, since `FAILURE` is a red conclusion). That is
-`decideDepReview`'s fail-closed design working as documented: on re-run it
-never assumes a prior red status is stale, and the caller (a repeated `rmd
-dep-review 81` invocation, per the module doc's own description of `hold`)
-tried again until the escalation issue was actually opened.
+The lane is now proven by unit fixtures rather than another live Dependabot
+write: a confined minor/patch bump merges unattended, a parseable major becomes
+durable migration feedback and is closed/suppressed only after capture, and an
+unparseable proposal still fail-closes through the MANUAL escalation path.

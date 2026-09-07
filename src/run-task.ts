@@ -789,7 +789,14 @@ import {
 } from "./lib/proof-queue-audit.js";
 import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./lib/ledger-replay.js";
-import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
+import {
+  DEPENDABOT_IGNORE_MAJOR_COMMAND,
+  buildDepReviewArmUnreachableEscalation,
+  buildDepReviewEscalation,
+  decideDepReview,
+  depReviewMigrationSubmissionKey,
+  renderDepReviewMigrationFeedback,
+} from "./lib/dep-review.js";
 import {
   headWasCreatedAfterReflogSnapshot,
   parseHeadReflog,
@@ -15932,13 +15939,15 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
  *
  *   - refuse:   not a Dependabot PR, or its diff touches source outside the
  *     manifest/lockfile allowlist. Nothing is posted (exit 2).
- *   - hold:     a required check is genuinely red. Nothing is posted (exit 1) —
- *     the caller (a future poll / drain) tries again later.
+ *   - hold:     a required check on a minor/patch bump is genuinely red.
+ *     Nothing is posted (exit 1) — the caller tries again later.
  *   - arm:      minor/patch, confined, gates green. Posts remudero-review=success
  *     and arms auto-merge (exit 0).
- *   - escalate: major (or unparseable — fail closed). Posts remudero-review=
- *     failure (so it can NEVER auto-merge) and opens a MANUAL needs-human issue
- *     carrying the release notes via the SHIPPED escalate() path (exit 1).
+ *   - migrate:  parseable major. Captures durable feedback, comments the
+ *     Dependabot ignore command, closes without deleting the branch, and arms
+ *     nothing (exit 0 only after every outward action completes).
+ *   - escalate: unparseable or identity-unsafe major (fail closed). Posts
+ *     remudero-review=failure and opens a MANUAL needs-human issue (exit 1).
  */
 /**
  * impl-BI — the injectable effects of {@link depReviewCommand}. The `arm` branch's tail was the
@@ -15958,7 +15967,7 @@ export interface DepReviewDeps {
   postStatus?: typeof postReviewStatusGuarded;
   arm?: (prUrl: string, taskId: string | undefined) => ArmOutcome;
   /**
-   * impl-FR — appended LAST so no existing caller shifts. Used by BOTH escalating call sites.
+   * impl-FR — used by BOTH escalating call sites.
    *
    * I first wired only the new detector and left the escalate branch's hardcoded gateway alone,
    * on the reasoning that this task had no business widening it. The `live-write-guard` falsified
@@ -15968,6 +15977,34 @@ export interface DepReviewDeps {
    * asserted, so both sites now take the seam.
    */
   issues?: IssueGateway;
+  captureMigrationFeedback?: (args: {
+    root: string;
+    id: string;
+    raw: string;
+    submissionKey: string;
+  }) => FeedbackEntry;
+  prMutations?: DepReviewPrMutations;
+}
+
+export interface DepReviewPrMutations {
+  comment(prUrl: string, body: string): void;
+  close(prUrl: string, opts: { comment: string; deleteBranch: false }): void;
+}
+
+function depReviewMigrationFeedbackId(submissionKey: string): string {
+  return `fb-dep-review-${createHash("sha256").update(submissionKey).digest("hex").slice(0, 16)}`;
+}
+
+function defaultDepReviewPrMutations(owner: string, repo: string): DepReviewPrMutations {
+  const repoArg = `${owner}/${repo}`;
+  return {
+    comment(prUrl, body) {
+      execFileSync("gh", ["pr", "comment", prUrl, "--repo", repoArg, "--body", body], { stdio: "pipe" });
+    },
+    close(prUrl, opts) {
+      execFileSync("gh", ["pr", "close", prUrl, "--repo", repoArg, "--comment", opts.comment], { stdio: "pipe" });
+    },
+  };
 }
 
 async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepReviewDeps = {}): Promise<number> {
@@ -16017,6 +16054,100 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   if (result.decision === "hold") {
     console.log(`no remudero-review posted (holding for gates): ${view.url}`);
     return 1;
+  }
+  if (result.decision === "migrate") {
+    const submissionKey = depReviewMigrationSubmissionKey(owner, repo, result.migrationBumps);
+    const feedbackId = depReviewMigrationFeedbackId(submissionKey);
+    const raw = renderDepReviewMigrationFeedback({
+      prUrl: view.url,
+      prNumber: view.number,
+      title: view.title ?? "",
+      body: view.body ?? "",
+      bumps: result.migrationBumps,
+      redChecks: result.redChecks,
+    });
+    let entry: FeedbackEntry;
+    try {
+      entry = (deps.captureMigrationFeedback ?? ((args) =>
+        captureFeedback(args.root, {
+          id: args.id,
+          raw: args.raw,
+          origin: "repair#dep-review",
+          submissionKey: args.submissionKey,
+        })))({
+        root: config.root,
+        id: feedbackId,
+        raw,
+        submissionKey,
+      });
+    } catch (e) {
+      log("dep-review.migrate.capture_failed", {
+        pr_url: view.url,
+        head_sha: view.headRefOid,
+        submission_key: submissionKey,
+        error: String((e as Error)?.message ?? e),
+      });
+      console.log(`migration feedback NOT captured; leaving PR open with no Dependabot command: ${view.url}`);
+      return 1;
+    }
+    log("dep-review.migrate.feedback_captured", {
+      pr_url: view.url,
+      head_sha: view.headRefOid,
+      feedback_id: entry.id,
+      submission_key: submissionKey,
+      migration_bumps: result.migrationBumps,
+    });
+
+    const prMutations = deps.prMutations ?? defaultDepReviewPrMutations(owner, repo);
+    try {
+      prMutations.comment(view.url, DEPENDABOT_IGNORE_MAJOR_COMMAND);
+      log("dep-review.migrate.ignore_commented", {
+        pr_url: view.url,
+        head_sha: view.headRefOid,
+        feedback_id: entry.id,
+        command: DEPENDABOT_IGNORE_MAJOR_COMMAND,
+      });
+    } catch (e) {
+      log("dep-review.migrate.incomplete", {
+        pr_url: view.url,
+        head_sha: view.headRefOid,
+        feedback_id: entry.id,
+        action: "comment",
+        error: String((e as Error)?.message ?? e),
+      });
+      console.log(`migration feedback captured (${entry.id}), but Dependabot ignore comment failed; will retry: ${view.url}`);
+      return 1;
+    }
+
+    const closeComment = `Closed by rmd dep-review after filing migration feedback ${entry.id}; Dependabot major proposal suppressed by comment.`;
+    try {
+      prMutations.close(view.url, { comment: closeComment, deleteBranch: false });
+      log("dep-review.migrate.closed", {
+        pr_url: view.url,
+        head_sha: view.headRefOid,
+        feedback_id: entry.id,
+        delete_branch: false,
+      });
+    } catch (e) {
+      log("dep-review.migrate.incomplete", {
+        pr_url: view.url,
+        head_sha: view.headRefOid,
+        feedback_id: entry.id,
+        action: "close",
+        error: String((e as Error)?.message ?? e),
+      });
+      console.log(`migration feedback captured (${entry.id}) and ignore commented, but close failed; will retry: ${view.url}`);
+      return 1;
+    }
+
+    log("dep-review.migrate.completed", {
+      pr_url: view.url,
+      head_sha: view.headRefOid,
+      feedback_id: entry.id,
+      submission_key: submissionKey,
+    });
+    console.log(`migration feedback captured (${entry.id}); Dependabot major ignored and PR closed: ${view.url}`);
+    return 0;
   }
   if (result.decision === "arm") {
     // W1-T228: guarded post — decideDepReview never executes a proof, so
@@ -31786,6 +31917,17 @@ export function buildSweepEffects(
       const decided = readLedgerLines(ledgerPath)
         .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
         .at(-1);
+      if (decided?.decision === "migrate") {
+        const completed = readLedgerLines(ledgerPath)
+          .filter(
+            (l) =>
+              l.step === "dep-review.migrate.completed" &&
+              l.task_id === `dep-review-PR${pr.prNumber}` &&
+              l.head_sha === pr.headSha,
+          )
+          .at(-1);
+        return completed ? "migrate" : "hold";
+      }
       return typeof decided?.decision === "string" ? decided.decision : "unknown";
     },
 

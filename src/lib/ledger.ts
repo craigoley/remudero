@@ -388,6 +388,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // capability's only memory, so archived away the rung opens a SECOND prerequisite PR.
   "fix.prerequisite_opened",
   "dep-review.decided",
+  // W1-T2705: the dedup marker for a migration already submitted. `depReviewOutcomeFor`
+  // (run-task.ts) reads it back per PR + head and answers "migrate" only when present —
+  // archived away, a completed migration reads as `hold` and the rung submits it again.
+  "dep-review.migrate.completed",
   "review.posted",
   "review.post_refused",
   // W1-T913: `lastPendingReviewStatusFromLedger` (review.ts) reads this back for per-head
