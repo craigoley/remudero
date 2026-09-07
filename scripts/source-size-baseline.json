@@ -9,7 +9,7 @@
   "src/lib/board-review.ts": 590,
   "src/lib/board-snapshot-cache.ts": 500,
   "src/lib/board.ts": 1500,
-  "src/lib/body-repair.ts": 196,
+  "src/lib/body-repair.ts": 500,
   "src/lib/branch-reaper.ts": 500,
   "src/lib/bundle.ts": 500,
   "src/lib/ci-failure-corpus.ts": 500,

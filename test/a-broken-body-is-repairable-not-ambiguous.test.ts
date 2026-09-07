@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   RUN_BRANCH_RE,
   diagnoseBodyDefects,
+  emDashSeparatedProof,
   refusesToAuthorAClaim,
   renderBodyDefects,
   taskIdFromHeadRef,
@@ -147,4 +148,68 @@ test("W1-T2541: RUN_BRANCH_RE accepts the fleet's own head shape and refuses eve
   assert.equal(RUN_BRANCH_RE.test("plan-2539-2543"), false);
   assert.equal(RUN_BRANCH_RE.test("run-W1-T2480"), false, "no epoch suffix is not this shape");
   assert.equal(RUN_BRANCH_RE.exec("main"), null);
+});
+
+// ── W1-T3028: the em-dash separator, recovered rather than discarded ─────────────────────────────
+
+/*
+ * CLAUDE.md records this shape shipping three times — #2534, #2535, #2555 — each landing on
+ * `acceptanceAuthorTimeCheck`'s `empty-proofs` refusal. An em dash is not a separator, so
+ * `- <claim> — unit test: <title>` parses as ONE claim with NO proof; that empty proof makes the
+ * body defective, and `ensureJudgeableBody` then demotes the author's header and appends a
+ * fallback block — discarding criteria that were one character from correct.
+ *
+ * NOT the #4420 case, which is what sent me looking: its bullets read `**claim** — explanatory
+ * prose`, no dialect after the dash, so nothing was recoverable there and its fallback was right.
+ * The two shapes are one character apart in the source and entirely different in what can be done,
+ * which is why the DIALECT test decides this and not the dash.
+ *
+ * The criteria were one character from correct the whole time, which is why this carries a REPAIR
+ * rather than a bare report: both halves are already the author's own words, and this only moves
+ * the boundary between them.
+ */
+
+test("W1-T3028: an em-dash bullet is diagnosed with the exact repaired line, not reported as merely inert", () => {
+  const defects = diagnoseBodyDefects("Remudero-Task: W1-T1\n", [
+    { claim: "the gate refuses a failed diff — unit test: a FAILED `git diff` produces a NOT-OK step", proof: "" },
+  ]);
+  const d = defects.find((x) => x.kind === "em-dash-separator");
+  assert.ok(d, "the em-dash shape must be its own diagnosis");
+  assert.equal(d!.criterion, 1);
+  assert.equal(
+    d!.repair,
+    "- the gate refuses a failed diff | unit test: a FAILED `git diff` produces a NOT-OK step",
+    "the repair is the author's own two halves with the separator corrected",
+  );
+  assert.match(d!.why, /DISCARDS/, "the why must name what happens if it is left alone");
+  assert.equal(defects.some((x) => x.kind === "inert-proof"), false, "and it must not double-report as inert");
+});
+
+test("W1-T3028: an em dash used as ordinary punctuation is left alone, so no proof is invented", () => {
+  const defects = diagnoseBodyDefects("Remudero-Task: W1-T1\n", [
+    { claim: "the reaper deletes nothing — that is the deliverable, not a staging step", proof: "" },
+  ]);
+  assert.equal(defects.some((x) => x.kind === "em-dash-separator"), false);
+  assert.ok(defects.some((x) => x.kind === "inert-proof"), "it is still reported, just with no derived repair");
+});
+
+test("W1-T3028: a claim carrying its own em dash keeps it — the proof is the tail, not the first split", () => {
+  const out = emDashSeparatedProof(
+    "a bound that fires on a healthy condition — this repo's own recurring defect — grep: WAIT_CAP_SECONDS in ci-gate.yml",
+  );
+  assert.ok(out);
+  assert.equal(out!.claim, "a bound that fires on a healthy condition — this repo's own recurring defect");
+  assert.equal(out!.proof, "grep: WAIT_CAP_SECONDS in ci-gate.yml");
+});
+
+test("W1-T3028: a bullet with no claim left, or no dialect at all, is not repaired", () => {
+  assert.equal(emDashSeparatedProof("— unit test: something"), undefined, "nothing would remain as a claim");
+  assert.equal(emDashSeparatedProof("a claim with no dialect after it — just prose"), undefined);
+});
+
+test("W1-T3028: a bullet that already carries a real proof is never rewritten", () => {
+  const defects = diagnoseBodyDefects("Remudero-Task: W1-T1\n", [
+    { claim: "a claim — with an em dash in it", proof: "unit test: some title" },
+  ]);
+  assert.equal(defects.some((x) => x.kind === "em-dash-separator"), false);
 });
