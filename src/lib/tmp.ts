@@ -98,7 +98,7 @@ export interface TempSweepOpts {
 }
 
 /**
- * W1-T3058 — the fleet's PRE-W1-T2786 temp prefix, still written by every callsite
+ * W1-T3065 — the fleet's PRE-W1-T2786 temp prefix, still written by every callsite
  * `hooks/mkdtemp-allowlist.txt` has not yet migrated (W1-T2775 owns that half). Without it
  * {@link sweepStaleTempDirs} fails these names on the FIRST test in its loop, so they are never
  * aged and never removed: MEASURED 138 dirs and 11 GiB on the operator's Mac, which reached 100%
@@ -161,7 +161,7 @@ export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
   }
 
   for (const name of entries) {
-    // W1-T3058: the current prefix OR a declared legacy one. WHICH NAMES are considered widened
+    // W1-T3065: the current prefix OR a declared legacy one. WHICH NAMES are considered widened
     // here; WHEN one is removed did not — the directory-only test, the age ceiling and the
     // per-entry try/catch below all apply to a legacy name exactly as they do to an `rmd-` one.
     if (!isRmdOwnedTempName(name)) continue;

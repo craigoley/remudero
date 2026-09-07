@@ -1,4 +1,4 @@
-// W1-T3058 — `sweepStaleTempDirs` opened with `startsWith(RMD_TMP_PREFIX)` and the prefix is
+// W1-T3065 — `sweepStaleTempDirs` opened with `startsWith(RMD_TMP_PREFIX)` and the prefix is
 // `rmd-`, so every pre-W1-T2786 `remudero-*` dir failed the FIRST test in the loop: never aged,
 // never removed. MEASURED on the operator's Mac: 138 dirs, 11 GiB, a 228 GiB volume at 100%, and an
 // agent session that could not run a single command because the harness could not write its output.
@@ -39,7 +39,7 @@ function aged(dir: string, name: string, ageMs: number): string {
 const OLD = DEFAULT_TEMP_SWEEP_MAX_AGE_MS * 2;
 const FRESH = 1000;
 
-test("W1-T3058 criterion 1: a STALE legacy dir is reaped on the same rule as an rmd- dir", () => {
+test("W1-T3065 criterion 1: a STALE legacy dir is reaped on the same rule as an rmd- dir", () => {
   const dir = root();
   const legacy = aged(dir, "remudero-task2802", OLD);
   const current = aged(dir, `${RMD_TMP_PREFIX}whatever`, OLD);
@@ -48,7 +48,7 @@ test("W1-T3058 criterion 1: a STALE legacy dir is reaped on the same rule as an 
   assert.equal(existsSync(current), false, "and the current prefix still is");
 });
 
-test("W1-T3058 criterion 1: a FRESH legacy dir is kept — the age ceiling did not move", () => {
+test("W1-T3065 criterion 1: a FRESH legacy dir is kept — the age ceiling did not move", () => {
   // The widening is WHICH NAMES are considered, never WHEN one is removed. A dir a concurrent
   // invocation is still using must never be collateral.
   const dir = root();
@@ -57,7 +57,7 @@ test("W1-T3058 criterion 1: a FRESH legacy dir is kept — the age ceiling did n
   assert.equal(existsSync(legacy), true);
 });
 
-test("W1-T3058 criterion 2 (falsifier): A BYSTANDER IS NEVER REMOVED, AT ANY AGE", () => {
+test("W1-T3065 criterion 2 (falsifier): A BYSTANDER IS NEVER REMOVED, AT ANY AGE", () => {
   // `acc-` and `kick-` are real prefixes in hooks/mkdtemp-allowlist.txt, which is exactly why that
   // file was REJECTED as the source for this set: sweeping them would delete a stranger's /tmp dir.
   const dir = root();
@@ -70,7 +70,7 @@ test("W1-T3058 criterion 2 (falsifier): A BYSTANDER IS NEVER REMOVED, AT ANY AGE
   }
 });
 
-test("W1-T3058 criterion 2 (falsifier): a FILE matching a swept prefix is left alone", () => {
+test("W1-T3065 criterion 2 (falsifier): a FILE matching a swept prefix is left alone", () => {
   const dir = root();
   const file = join(dir, "remudero-not-a-directory");
   writeFileSync(file, "x");
@@ -80,7 +80,7 @@ test("W1-T3058 criterion 2 (falsifier): a FILE matching a swept prefix is left a
   assert.equal(existsSync(file), true, "the directory-only guard applies to legacy names too");
 });
 
-test("W1-T3058 criterion 4: every shipped legacy prefix is long enough to be unambiguous", () => {
+test("W1-T3065 criterion 4: every shipped legacy prefix is long enough to be unambiguous", () => {
   // A BACKSTOP, not a tunable: it exists so a careless `acc-` addition fails here instead of
   // deleting a bystander's directory in production.
   assert.ok(LEGACY_TMP_PREFIXES.length > 0);
@@ -96,7 +96,7 @@ test("W1-T3058 criterion 4: every shipped legacy prefix is long enough to be una
   assert.ok("kick-".length < MIN_LEGACY_TMP_PREFIX_LENGTH);
 });
 
-test("W1-T3058: the ownership predicate admits both prefixes and nothing else", () => {
+test("W1-T3065: the ownership predicate admits both prefixes and nothing else", () => {
   assert.equal(isRmdOwnedTempName(`${RMD_TMP_PREFIX}x`), true);
   assert.equal(isRmdOwnedTempName("remudero-task1"), true);
   assert.equal(isRmdOwnedTempName("acc-x"), false);
@@ -104,7 +104,7 @@ test("W1-T3058: the ownership predicate admits both prefixes and nothing else", 
   assert.equal(isRmdOwnedTempName("xremudero-y"), false, "the prefix must be at the START");
 });
 
-test("W1-T3058 criterion 3 (falsifier): the sweep NEVER throws, whatever the root", () => {
+test("W1-T3065 criterion 3 (falsifier): the sweep NEVER throws, whatever the root", () => {
   // The CLI preamble calls this on every invocation. A verb that died because housekeeping threw
   // would be a far worse defect than the one being fixed.
   assert.doesNotThrow(() => sweepStaleTempDirs({ root: "/definitely/not/a/real/path/12345" }));
@@ -113,7 +113,7 @@ test("W1-T3058 criterion 3 (falsifier): the sweep NEVER throws, whatever the roo
   assert.doesNotThrow(() => sweepStaleTempDirs({ root: dir }));
 });
 
-test("W1-T3058 criterion 3: the added cost is MEASURED, not asserted cheap", () => {
+test("W1-T3065 criterion 3: the added cost is MEASURED, not asserted cheap", () => {
   // Design (iii) requires a number rather than a claim. 200 entries is well past a real /tmp.
   const dir = root();
   for (let i = 0; i < 200; i++) aged(dir, `remudero-bulk-${i}`, FRESH);

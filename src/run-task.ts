@@ -40072,7 +40072,7 @@ export async function main(
   // See {@link installUnhandledRejectionGuard} — it is idempotent, so the in-process `main()`
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
-  // W1-T3058 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
+  // W1-T3065 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
   // both daemon rungs, so a machine running `rmd` by hand and no daemon reclaimed NOTHING: the
   // operator's Mac reached 100% of a 228 GiB volume with 138 stale dirs and 11 GiB of debris, and
   // an agent session failed outright because the harness could not write its own output file.
