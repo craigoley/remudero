@@ -852,6 +852,7 @@ import {
   decideRedBaseRefresh,
   failingSourceFilesFromCiFailures,
   failingTestFilesFromCiFailures,
+  projectMergedTaskCandidates,
   REGENERABLE_ARTIFACT_GENERATORS,
   actionableGateFailuresFromReasons,
   armOutcomeArmed,
@@ -32647,8 +32648,15 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // I/O `selectUpdateBranchTarget` performs itself.
   const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+  // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
+  // composition change, not a new read: the credit rung already built exactly this set, just
+  // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
+  // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
+  // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
+  // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
+  const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
   const summary = await runSweep(
-    prsForFixRung,
+    projectMergedTaskCandidates(prsForFixRung, creditCandidates),
     {
       ...effects,
       ledgerPath,
@@ -32666,7 +32674,6 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // the open-PR reconciliation above, but over every task's OWNED merge state
   // rather than open-PR pipeline state — the gate-side-merge fixture (0 of 195
   // runs ledgered a merge while GitHub showed 28) this rung exists to close.
-  const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
   const creditSummary = await runCreditBackfill(creditCandidates, { ledgerPath, runId, log, dryRun });
 
   // fb-1784756088300-6a481e — the escalation-lifecycle reconciler rung: close stale
@@ -33530,8 +33537,15 @@ export function buildSweepHook(
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
       const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+      // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
+      // composition change, not a new read: the credit rung already built exactly this set, just
+      // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
+      // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
+      // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
+      // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
+      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runSweep(
-        prsForFixRung,
+        projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         {
           ...effects,
           ledgerPath,
@@ -33555,7 +33569,6 @@ export function buildSweepHook(
       await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
-      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
       // W1-T175 — the worktree reaper rung, on the daemon's own poll cadence: the hole
       // this closes is specifically an IDLE fleet (no run dispatched, so pruneStaleRuns'
