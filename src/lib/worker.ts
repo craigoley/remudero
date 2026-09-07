@@ -1138,13 +1138,19 @@ async function finishSelectedCapacityMeasurement(
  *    unsandboxed.
  *  - `env.home` — a worker-home dir UNIQUE to this call, reaped in a `finally` whatever the outcome (W1-T170, W1-T2463). */
 
-/** The `settingSources` every spawn passes below (`settingSources: [],` in SDK option terms), so
- *  `~/.claude/settings.json` and every
+/** The literal SDK option object every spawn's `settingSources` is drawn from below, kept as an
+ *  object literal (rather than inlined at the call site) so the ONE place that ever writes
+ *  `settingSources: []` in this file is this declaration — the raw-text census in
+ *  `test/what-a-worker-loads.test.ts` reads that literal text directly, and a caller wanting the
+ *  real value now imports {@link WORKER_SETTING_SOURCES} instead of re-deriving it. */
+const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = { settingSources: [] };
+
+/** The `settingSources` every spawn passes below, so `~/.claude/settings.json` and every
  *  other filesystem-settings source are never loaded. Exported (W1-T2766, design iv) so a caller
  *  measuring whether a repo-owned `.claude/skills/<name>/SKILL.md` reaches a worker reads the REAL
  *  value a spawn uses — see {@link import("./skill-workshop.js").describeWorkerSkillReachability}
  *  — never a value asserted independently of it. */
-export const WORKER_SETTING_SOURCES: SettingSource[] = [];
+export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const releaseWorkerOccupancy = claimWorkerOccupancy();
