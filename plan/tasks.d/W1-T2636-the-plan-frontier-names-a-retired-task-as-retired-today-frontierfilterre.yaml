@@ -68,9 +68,23 @@
   origin: feedback#followup-W1-T2474
   plan_refs: ["§7", "§7B"]
   files: [src/lib/panel-graph.ts, test/panel-graph.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: |
+
+    RETIRED 2026-09-07 ON OPERATOR DIRECTION. This task sat at its lifetime dispatch cap with an
+    open needs-human escalation (raised 2026-09-03) for four days. The operator's ruling was to
+    retire rather than raise the cap: the cap exists precisely to stop repeated dispatch on a task
+    that is not converging, and four days at the cap with no new information is the signal it was
+    built to give. A retirement is an operator act (CLAUDE.md plan hygiene), and this one is
+    recorded as such rather than inferred from the cap.
+
+    WHAT IS NOT RULED ON. Whether the underlying defect is real is untouched — the rationale below
+    stands unedited and no acceptance criterion moves. Retiring says the FLEET should stop
+    dispatching this, not that the finding was wrong. If it is re-aimed later it should be refiled
+    under a fresh id rather than un-retired, so the dispatch history stays legible.
+
     FILED 2026-08-31 from the follow-up harvest of W1-T2474 (run W1-T2474-1788101371246, PR #3314),
     which flagged this as out of that task's two-file scope. Verified at source before filing rather
     than inherited: the `"retired"` arm exists and is emitted (drain.ts:594), the mapper's trailing
