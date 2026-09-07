@@ -154,6 +154,7 @@ test("renderDigest: GOLDEN full-text render with `inbox` absent — the exact pr
       "issues reviewed: (no poll this window)",
       "verdict downgrades suppressed: 0",
       "notional cost: $3.00",
+      "prompt parts: (not observed this window)",
     ].join("\n"),
   );
 });
@@ -174,6 +175,7 @@ test("renderDigest: GOLDEN full-text render with `inbox` present — the SAME li
       "inbox: 2 ready",
       "verdict downgrades suppressed: 0",
       "notional cost: $3.00",
+      "prompt parts: (not observed this window)",
     ].join("\n"),
   );
 });
