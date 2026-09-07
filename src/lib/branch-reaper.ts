@@ -283,3 +283,75 @@ export function readOrphanedHeadCount(
   return countOrphanedHeads(remoteNames, openPrHeads, isInBaseHistory);
 }
 
+
+// ── the PRUNE (W1-T3020) ─────────────────────────────────────────────────────────────────────────
+
+/** One deletable branch and the sha that makes its deletion reversible. */
+export interface BranchManifestEntry {
+  readonly name: string;
+  /** `"unknown"` when `git rev-parse` could not resolve the ref — see {@link pruneDeletableBranches}. */
+  readonly sha: string;
+}
+
+export interface BranchPruneOutcome {
+  readonly deleted: readonly string[];
+  /** Named and NOT attempted, each with the reason it was left alone. */
+  readonly skipped: readonly { readonly name: string; readonly reason: string }[];
+  /** A chunk whose push failed, carrying every name in it — those branches still exist. */
+  readonly failed: readonly { readonly names: readonly string[]; readonly error: string }[];
+}
+
+/**
+ * Delete the branches a {@link BranchManifestEntry} manifest names. THE EXECUTING HALF of
+ * `reapBranchesCommand`, kept here for the same reason every other declaration in this module is:
+ * it takes its one effect as an injected `exec`, so a test drives the real decision logic —
+ * including a failing push — without touching a remote.
+ *
+ * IT DELETES ONLY WHAT IT IS GIVEN. Every guard, hold and undetermined decision was already made by
+ * `planBranchReap` (`lib/status.ts`); this function re-derives none of it and cannot widen the set.
+ * That split is deliberate: the classification is the reviewed part, and a deleter that also
+ * classified could disagree with the dry run the operator just read.
+ *
+ * A `sha` OF `"unknown"` IS SKIPPED, NEVER DELETED. The manifest's whole purpose is that
+ * `git push origin <sha>:refs/heads/<name>` restores what this removes; a ref whose sha would not
+ * resolve has no such line, so deleting it would be the one irreversible case. The dry run already
+ * prints `unknown` for a branch that vanished mid-run, and this is the same condition read as a
+ * refusal rather than a cosmetic label.
+ *
+ * PUSHES IN CHUNKS, because one refspec git rejects fails the WHOLE push: a single 143-ref command
+ * turns one stale ref into zero deletions, while a chunk confines that to its own group and the
+ * outcome names the survivors. The default is deliberately modest for the same reason.
+ */
+export function pruneDeletableBranches(
+  manifest: readonly BranchManifestEntry[],
+  exec: (cmd: string, args: string[]) => string,
+  opts: { readonly chunkSize?: number } = {},
+): BranchPruneOutcome {
+  const chunkSize = Math.max(1, opts.chunkSize ?? 25);
+  const deleted: string[] = [];
+  const skipped: { name: string; reason: string }[] = [];
+  const failed: { names: readonly string[]; error: string }[] = [];
+
+  const deletable: BranchManifestEntry[] = [];
+  for (const entry of manifest) {
+    if (entry.sha === "unknown" || entry.sha === "") {
+      skipped.push({ name: entry.name, reason: "sha unresolvable — deletion would not be reversible" });
+      continue;
+    }
+    deletable.push(entry);
+  }
+
+  for (let i = 0; i < deletable.length; i += chunkSize) {
+    const chunk = deletable.slice(i, i + chunkSize);
+    try {
+      exec("git", ["push", "origin", "--delete", ...chunk.map((e) => e.name)]);
+      for (const e of chunk) deleted.push(e.name);
+    } catch (err) {
+      // The whole chunk survives: git applies a rejected push atomically per invocation, so naming
+      // the group is the honest report — claiming any individual name deleted would be a guess.
+      failed.push({ names: chunk.map((e) => e.name), error: String((err as Error)?.message ?? err) });
+    }
+  }
+
+  return { deleted, skipped, failed };
+}

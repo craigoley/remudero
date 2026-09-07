@@ -1042,7 +1042,9 @@ import {
   declaredGuardsBlockSpan,
   parseBranchCitationHits,
   planReverseBranchDrift,
+  pruneDeletableBranches,
   remoteBranchNames,
+  type BranchManifestEntry,
 } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
 // initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
@@ -17383,12 +17385,13 @@ export function reapBranchesCommand(
     creditLedgerPath?: string;
   } = {},
 ): number {
-  const badArg = unknownArgError("reap-branches", rest, [], []);
+  const badArg = unknownArgError("reap-branches", rest, [], ["--prune"]);
   if (badArg) {
     console.error(badArg);
     console.error(`usage: ${commandSyntax("reap-branches")}`);
     return 2;
   }
+  const prune = rest.includes("--prune");
   const exec =
     opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
 
@@ -17568,6 +17571,7 @@ export function reapBranchesCommand(
   console.log(`branches:  ${names.length} on origin`);
   console.log(`guarded:   ${plan.guarded.length}  ${plan.guarded.join(", ")}`);
   console.log(`deletable: ${plan.deletable.length}`);
+  const manifest: BranchManifestEntry[] = [];
   for (const b of plan.deletable) {
     let sha = "unknown";
     try {
@@ -17575,6 +17579,7 @@ export function reapBranchesCommand(
     } catch {
       /* a branch that vanished mid-run reports `unknown` rather than aborting the report */
     }
+    manifest.push({ name: b, sha });
     console.log(`  ${sha}\t${b}`);
   }
   // W1-T2246: "no PR" and "could not tell" are different reasons for the same disposition — a
@@ -17589,7 +17594,20 @@ export function reapBranchesCommand(
   if (plan.undetermined.length > 0) {
     console.log(`  undetermined: ${plan.undetermined.join(", ")}`);
   }
-  console.log("DRY RUN — nothing was deleted.");
+  /*
+   * DRIFT DOES NOT BLOCK THE PRUNE, and that is a decision rather than an oversight. Every drift
+   * class this verb reports concerns the DECLARED GUARD LIST, and each one can only make the
+   * guarded set larger or name a branch that is already gone: `undeclaredGuards` is guarded by the
+   * name grep whether or not it is declared (planBranchReap ORs the two), `danglingCitations` and
+   * `deadDeclaredGuards` name branches absent from origin, and `orphanDeclarations` stays declared
+   * and therefore guarded. None can move a branch INTO `deletable`. Refusing to prune on drift
+   * would be a bound firing on a healthy condition — this repo's named recurring defect, and the
+   * live repo carries three such signals today, so the refusal would fire on its first real run.
+   * Drift still fails the exit code below; it just does not veto the deletions.
+   */
+  if (!prune) {
+    console.log("DRY RUN — nothing was deleted. Re-run with --prune to delete the branches above.");
+  }
 
   if (opts.ledgerPath) {
     appendLedger(opts.ledgerPath, {
@@ -17606,6 +17624,36 @@ export function reapBranchesCommand(
       orphan_declarations: orphanDeclarations,
       missing_branches: deadDeclaredGuards,
     });
+  }
+
+  if (prune) {
+    const outcome = pruneDeletableBranches(manifest, exec);
+    console.log(`pruned:    ${outcome.deleted.length} deleted, ${outcome.skipped.length} skipped, ` +
+      `${outcome.failed.reduce((n, f) => n + f.names.length, 0)} failed`);
+    // THE RESTORE LINES ARE THE POINT OF PRINTING A MANIFEST AT ALL (see this verb's own doc): a
+    // deletion nobody can undo is the thing W1-T447 declined to ship, and one line per branch is
+    // what converts this from irreversible to merely inconvenient. STDOUT, never `state/`.
+    for (const name of outcome.deleted) {
+      const sha = manifest.find((e) => e.name === name)?.sha ?? "unknown";
+      console.log(`  restore: git push origin ${sha}:refs/heads/${name}`);
+    }
+    for (const s of outcome.skipped) console.error(`rmd reap-branches: skipped ${s.name} — ${s.reason}`);
+    for (const f of outcome.failed) {
+      console.error(`rmd reap-branches: push failed for ${f.names.length} branch(es), all still on origin ` +
+        `(${f.names.join(", ")}): ${f.error}`);
+    }
+    if (opts.ledgerPath) {
+      appendLedger(opts.ledgerPath, {
+        run_id: `REAP-${Date.now()}`,
+        task_id: "REAP",
+        step: "branch_reap.pruned",
+        deleted: outcome.deleted.length,
+        skipped: outcome.skipped.length,
+        failed: outcome.failed.reduce((n, f) => n + f.names.length, 0),
+        deleted_branches: outcome.deleted,
+      });
+    }
+    if (outcome.failed.length > 0) return 1;
   }
 
   let drift = false;
@@ -38308,9 +38356,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "reap-branches",
-    syntax: "rmd reap-branches",
-    summary: "Dry-run classification of every remote branch as deletable, guarded or held.",
-    detail: "W1-T447 DRY RUN: classify every remote branch as deletable, guarded or held, print a sha->name manifest for the deletable set, and DELETE NOTHING. Deletable = the head of a merged PR, the head of a closed-unmerged PR, or no PR at all with a tip already an ancestor of origin/main (so every commit is in main and removing the ref loses nothing). Guarded = named in src/, scripts/, deploy/ or .github/, or listed in DECLARED_BRANCH_GUARDS; protection is evaluated FIRST and wins, so a branch that is both merged and referenced by source is never offered for deletion. EXITS NON-ZERO when a grep-guarded branch is missing from the declared list (drift), and when git ls-remote returns nothing rather than reporting empty buckets over a corpus it could not read. Deletes nothing, pushes nothing, writes no state file.",
+    syntax: "rmd reap-branches [--prune]",
+    summary: "Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.",
+    detail: "W1-T447 DRY RUN: classify every remote branch as deletable, guarded or held, print a sha->name manifest for the deletable set, and DELETE NOTHING. Deletable = the head of a merged PR, the head of a closed-unmerged PR, or no PR at all with a tip already an ancestor of origin/main (so every commit is in main and removing the ref loses nothing). Guarded = named in src/, scripts/, deploy/ or .github/, or listed in DECLARED_BRANCH_GUARDS; protection is evaluated FIRST and wins, so a branch that is both merged and referenced by source is never offered for deletion. EXITS NON-ZERO when a grep-guarded branch is missing from the declared list (drift), and when git ls-remote returns nothing rather than reporting empty buckets over a corpus it could not read. Without --prune it deletes nothing, pushes nothing and writes no state file. --prune (W1-T3020) deletes EXACTLY the branches the dry run just listed and nothing else: it re-derives no classification, so it cannot disagree with the report the operator read, and every guard/hold/undetermined decision stays where planBranchReap made it. It prints `git push origin <sha>:refs/heads/<name>` for each deletion, which is what makes the removal reversible, and SKIPS any branch whose sha would not resolve, since that is the one case no restore line exists for. Pushes in chunks so one stale ref cannot fail every deletion, and exits non-zero if any chunk failed. Drift does NOT veto the prune: every drift class concerns the declared guard list and can only widen the guarded set or name an already-absent branch, so refusing on it would be a bound firing on a healthy condition. OPERATOR-INVOKED ONLY -- no daemon rung, sweep or automatic caller reaches this verb; the fleet never holds the delete.",
   },
   {
     name: "ledger-grep",

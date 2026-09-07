@@ -10,7 +10,7 @@
   "src/lib/board-snapshot-cache.ts": 500,
   "src/lib/board.ts": 1500,
   "src/lib/body-repair.ts": 196,
-  "src/lib/branch-reaper.ts": 285,
+  "src/lib/branch-reaper.ts": 500,
   "src/lib/bundle.ts": 500,
   "src/lib/ci-failure-corpus.ts": 500,
   "src/lib/ci-gate-required.ts": 500,

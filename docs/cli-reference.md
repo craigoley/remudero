@@ -28,7 +28,7 @@ usage:
   rmd replay <since> <until> [--task <id>] [--step <prefix>]   # Narrate a ledger window in plain text: what the fleet decided, in order.
   rmd authority [--json]   # Every external write the fleet may make without the operator, its gate, and its last firing.
   rmd check-proof <proof> [--allow-full-suite] [--base <ref>]   # Run one acceptance proof through the reviewer's own executor and print its verdict.
-  rmd reap-branches   # Dry-run classification of every remote branch as deletable, guarded or held.
+  rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
   rmd census-membership [--base <ref>]   # Name the population-walking census suites this diff enters.
@@ -230,13 +230,13 @@ run ONE acceptance proof through the REVIEWER'S OWN parser and executor and prin
 
 ### `rmd reap-branches`
 
-Dry-run classification of every remote branch as deletable, guarded or held.
+Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
 
 ```
-rmd reap-branches
+rmd reap-branches [--prune]
 ```
 
-W1-T447 DRY RUN: classify every remote branch as deletable, guarded or held, print a sha->name manifest for the deletable set, and DELETE NOTHING. Deletable = the head of a merged PR, the head of a closed-unmerged PR, or no PR at all with a tip already an ancestor of origin/main (so every commit is in main and removing the ref loses nothing). Guarded = named in src/, scripts/, deploy/ or .github/, or listed in DECLARED_BRANCH_GUARDS; protection is evaluated FIRST and wins, so a branch that is both merged and referenced by source is never offered for deletion. EXITS NON-ZERO when a grep-guarded branch is missing from the declared list (drift), and when git ls-remote returns nothing rather than reporting empty buckets over a corpus it could not read. Deletes nothing, pushes nothing, writes no state file.
+W1-T447 DRY RUN: classify every remote branch as deletable, guarded or held, print a sha->name manifest for the deletable set, and DELETE NOTHING. Deletable = the head of a merged PR, the head of a closed-unmerged PR, or no PR at all with a tip already an ancestor of origin/main (so every commit is in main and removing the ref loses nothing). Guarded = named in src/, scripts/, deploy/ or .github/, or listed in DECLARED_BRANCH_GUARDS; protection is evaluated FIRST and wins, so a branch that is both merged and referenced by source is never offered for deletion. EXITS NON-ZERO when a grep-guarded branch is missing from the declared list (drift), and when git ls-remote returns nothing rather than reporting empty buckets over a corpus it could not read. Without --prune it deletes nothing, pushes nothing and writes no state file. --prune (W1-T3020) deletes EXACTLY the branches the dry run just listed and nothing else: it re-derives no classification, so it cannot disagree with the report the operator read, and every guard/hold/undetermined decision stays where planBranchReap made it. It prints `git push origin <sha>:refs/heads/<name>` for each deletion, which is what makes the removal reversible, and SKIPS any branch whose sha would not resolve, since that is the one case no restore line exists for. Pushes in chunks so one stale ref cannot fail every deletion, and exits non-zero if any chunk failed. Drift does NOT veto the prune: every drift class concerns the declared guard list and can only widen the guarded set or name an already-absent branch, so refusing on it would be a bound firing on a healthy condition. OPERATOR-INVOKED ONLY -- no daemon rung, sweep or automatic caller reaches this verb; the fleet never holds the delete.
 
 ### `rmd ledger-grep`
 
