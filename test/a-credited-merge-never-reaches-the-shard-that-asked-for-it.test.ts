@@ -7,6 +7,9 @@
 // every task as uncredited and silently reopen the whole plan.
 
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -161,20 +164,71 @@ test("W1-T3043 (wiring): DRY RUN IS THE DEFAULT and writes nothing", async () =>
   assert.deepEqual(written, [], "no --write means no file is touched");
 });
 
-test("W1-T3043 (wiring): with NO projection injected, the REAL one runs — the default seam is not dead code", async () => {
-  // Every other case here injects `creditedMergedIds`, which is correct for them and left
-  // `defaultCreditedMergedIds` unreachable: diff-coverage blocked this PR on its six lines. This
-  // one omits ONLY that seam, so the real projection (loadConfig -> ledger -> plan ->
-  // buildCreditCandidates) executes. `readShards`/`writeShard` stay injected, so no shard is read
-  // from disk and nothing is written. A synthetic id cannot be credited by any real projection, so
-  // the assertion is about the DEFAULT having run and answered, never about today's credit set.
+/** A HOME whose `~/.config/remudero/config.json` is exactly `body` — the same lever
+ *  test/credited-proof-visibility-seam-defaults.test.ts uses, because `configPath()` is
+ *  `join(homedir(), ".config", "remudero", "config.json")` and node's `os.homedir()` reads `$HOME`. */
+function homeWithConfig(body: string): { home: string; root: string } {
+  const home = mkdtempSync(join(tmpdir(), "rmd-reconcile-home-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-reconcile-root-"));
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), body, "utf8");
+  mkdirSync(join(root, "state"), { recursive: true });
+  return { home, root };
+}
+
+async function withHome<T>(home: string, fn: () => Promise<T>): Promise<T> {
+  const prior = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    return await fn();
+  } finally {
+    if (prior === undefined) delete process.env.HOME;
+    else process.env.HOME = prior;
+  }
+}
+
+test("W1-T3043 (wiring): with NO projection injected the REAL default runs — proved by a config it alone reads", async () => {
+  // Every other case injects `creditedMergedIds`, which is right for what they assert and left
+  // `defaultCreditedMergedIds` unreachable — the #977/#978 all-fakes shape, and diff-coverage
+  // blocked this PR on its six lines. Omitting ONLY that seam runs the real one.
+  //
+  // THE PAIR IS THE DISCRIMINATOR. Both calls are identical except for the config the default
+  // reads: valid => it resolves and the command completes; malformed => `loadConfig` throws and
+  // the command REFUSES. An injected seam would return 0 for both, so this cannot pass without
+  // the default actually being consulted. `$HOME` is the lever (not a `claude` binary on PATH),
+  // so both outcomes are deterministic on a CI runner and in an agent container alike.
+  const ok = homeWithConfig(JSON.stringify({ claudeBin: "/bin/echo", root: "PLACEHOLDER" }));
+  writeFileSync(
+    join(ok.home, ".config", "remudero", "config.json"),
+    JSON.stringify({ claudeBin: "/bin/echo", root: ok.root }),
+    "utf8",
+  );
+  const bad = homeWithConfig("{ this is not json");
   const written: string[] = [];
-  const code = await planReconcileCommand([], {
-    readShards: () => [{ taskId: "W1-T90909-synthetic", path: "/p/synthetic.yaml", text: shard() }],
-    writeShard: (path) => written.push(path),
-  });
-  assert.equal(code, 0, "the real credit projection must be readable; a throw here would exit 1");
-  assert.deepEqual(written, [], "no --write, and a synthetic id is credited by nothing");
+  try {
+    const good = await withHome(ok.home, () =>
+      planReconcileCommand([], {
+        readShards: () => [{ taskId: "W1-T90909-synthetic", path: "/p/synthetic.yaml", text: shard() }],
+        writeShard: (path) => written.push(path),
+      }),
+    );
+    assert.equal(good, 0, "a readable config must let the real projection resolve");
+    assert.equal(written.length, 0, "no --write, and a synthetic id is credited by nothing");
+
+    const refused = await withHome(bad.home, () =>
+      planReconcileCommand([], {
+        readShards: () => [{ taskId: "W1-T90909-synthetic", path: "/p/synthetic.yaml", text: shard() }],
+        writeShard: (path) => written.push(path),
+      }),
+    );
+    assert.equal(refused, 1, "an unreadable config must ABORT — only the default reads it at all");
+    assert.equal(written.length, 0, "and a refusal still writes nothing");
+  } finally {
+    rmSync(ok.home, { recursive: true, force: true });
+    rmSync(ok.root, { recursive: true, force: true });
+    rmSync(bad.home, { recursive: true, force: true });
+    rmSync(bad.root, { recursive: true, force: true });
+  }
 });
 
 test("W1-T3043 (wiring, falsifier): AN UNREADABLE PROJECTION ABORTS AND WRITES NOTHING", async () => {
