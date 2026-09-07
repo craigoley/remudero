@@ -1140,10 +1140,14 @@ async function finishSelectedCapacityMeasurement(
 
 /** The literal SDK option object every spawn's `settingSources` is drawn from below, kept as an
  *  object literal (rather than inlined at the call site) so the ONE place that ever writes
- *  `settingSources: []` in this file is this declaration — the raw-text census in
- *  `test/what-a-worker-loads.test.ts` reads that literal text directly, and a caller wanting the
- *  real value now imports {@link WORKER_SETTING_SOURCES} instead of re-deriving it. */
-const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = { settingSources: [] };
+ *  `settingSources: [],` in this file is this declaration — BOTH the comment-stripped raw-text
+ *  census in `test/what-a-worker-loads.test.ts` AND plan/claims.yaml's `worker-loads-no-claude-md`
+ *  claim read that literal text (trailing comma included) directly out of the object literal
+ *  below, not out of this prose, so a caller wanting the real value imports
+ *  {@link WORKER_SETTING_SOURCES} instead of re-deriving it. */
+const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
+  settingSources: [],
+};
 
 /** The `settingSources` every spawn passes below, so `~/.claude/settings.json` and every
  *  other filesystem-settings source are never loaded. Exported (W1-T2766, design iv) so a caller
@@ -1469,7 +1473,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       pathToClaudeCodeExecutable: claudeBin,
       env: childEnv,
       settings: args.settingsFile,
-      settingSources: WORKER_SETTING_SOURCES,
+      settingSources: WORKER_SETTING_SOURCES, // real value: settingSources: [] (see WORKER_SPAWN_ISOLATION above)
       // Run the CLI DETACHED into its own process group and session, so teardown reaches every descendant — including one
       // outliving the CLI's own exit — with a single group signal. This REPLACES the SDK's default local spawn, so
       // `stderrChunks` is fed from THIS closure rather than an `Options.stderr` callback, which the SDK never invokes for a
