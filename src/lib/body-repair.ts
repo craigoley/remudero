@@ -50,7 +50,7 @@ export interface BodyCriterion {
  * human, never silently dropped.
  */
 export interface BodyDefect {
-  kind: "no-trailer" | "wrapped-proof" | "inert-proof";
+  kind: "no-trailer" | "wrapped-proof" | "inert-proof" | "em-dash-separator";
   /** 1-based criterion index, when the defect belongs to one. */
   criterion?: number;
   /** What an operator (or a later writer) should do — derived, never invented. */
@@ -80,6 +80,46 @@ export interface BodyRepairDeps {
 /** True iff `proof` carries a runnable house dialect. Mirrors the reviewer's own vocabulary. */
 function hasRunnableDialect(proof: string): boolean {
   return /^\s*(?:grep:|unit test:)/i.test(proof ?? "");
+}
+
+/**
+ * W1-T3028 — A CLAIM THAT SWALLOWED ITS OWN PROOF BEHIND AN EM DASH.
+ *
+ * `parseAcceptanceBlock` splits a bullet on ` | ` only. An em dash is NOT a separator, so
+ * `- <claim> — unit test: <title>` parses as ONE claim with NO proof, silently. CLAUDE.md names
+ * this as shipped three times (#2534/#2535/#2555) and states the remedy in one line: convert every
+ * ` — proof: ` to ` | `.
+ *
+ * WHY IT MATTERS MORE THAN ONE MORE INERT PROOF. An empty proof makes
+ * `bodyNeedsAcceptanceRepair` true, and `ensureJudgeableBody` then DEMOTES the author's header and
+ * appends a fallback block. So the author's real criteria — which are sitting right there, fully
+ * written, one character from correct — are discarded in favour of whatever fallback the caller
+ * carries. CLAUDE.md records this exact shape shipping three times — #2534, #2535, #2555 — each
+ * landing on `acceptanceAuthorTimeCheck`'s `empty-proofs` refusal.
+ *
+ * NOT the #4420 case, which is what sent me looking: its bullets read `**claim** — explanatory
+ * prose`, with no dialect after the dash, so nothing was recoverable there and its fallback was the
+ * right answer. The two shapes are one character apart in the source and entirely different in what
+ * can be done about them, which is why the DIALECT test below decides this and not the dash.
+ *
+ * DERIVED, NEVER INVENTED, which is what lets this carry a `repair` at all ({@link
+ * refusesToAuthorAClaim}): both halves are already the author's own words. This only moves the
+ * boundary between them, and only when the right-hand side already opens with a runnable dialect —
+ * so an em dash used as ordinary punctuation inside a claim is untouched.
+ */
+export function emDashSeparatedProof(claim: string): { claim: string; proof: string } | undefined {
+  // The LAST em dash whose right side opens with a dialect: a claim may legitimately contain an
+  // earlier one, and the proof is always the tail.
+  const parts = (claim ?? "").split(/\s+\u2014\s+/);
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const candidate = parts.slice(i).join(" \u2014 ").trim();
+    if (hasRunnableDialect(candidate)) {
+      const left = parts.slice(0, i).join(" \u2014 ").trim();
+      if (left.length === 0) return undefined; // nothing would remain as a claim
+      return { claim: left, proof: candidate };
+    }
+  }
+  return undefined;
 }
 
 /** A `grep:` proof's pattern wholly enclosed in a matching delimiter pair, and its bare form. */
@@ -138,6 +178,23 @@ export function diagnoseBodyDefects(
 
   criteria.forEach((c, i) => {
     const proof = c.proof ?? "";
+    // Checked BEFORE the inert-proof arm: an em-dash bullet reaches here with an EMPTY proof, so it
+    // would otherwise be reported as merely inert — true, but it names no remedy, and the criterion
+    // is then discarded by ensureJudgeableBody rather than repaired.
+    const split = proof.trim().length === 0 ? emDashSeparatedProof(c.claim ?? "") : undefined;
+    if (split !== undefined) {
+      out.push({
+        kind: "em-dash-separator",
+        criterion: i + 1,
+        repair: `- ${split.claim} | ${split.proof}`,
+        why:
+          "parseAcceptanceBlock splits on ` | ` only, so this bullet's em dash is read as part of " +
+          "the CLAIM and the criterion resolves with no proof at all. That empty proof makes the " +
+          "body defective, and the repair path then DISCARDS every criterion here in favour of a " +
+          "fallback block — losing criteria that are one character from correct",
+      });
+      return;
+    }
     if (!hasRunnableDialect(proof)) {
       out.push({
         kind: "inert-proof",
