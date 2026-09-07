@@ -329,8 +329,8 @@ test/fleet-control.test.ts	kick-unsafe- # pre-existing at W1-T2786 re-key — W1
 test/fleet-digest-cadence.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/fleet-heartbeat-image-sha.test.ts	fleet-heartbeat-imgsha- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/fleet-heartbeat-supervisor-tick.test.ts	fleet-heartbeat-supervisor- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/fleet-heartbeat.test.ts	fleet-heartbeat- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/fleet-heartbeat.test.ts	fleet-heartbeat-rec- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
+test/helpers/fleet-heartbeat-harness.ts	fleet-heartbeat- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending (re-keyed by W1-T494: the runner moved to a shared helper so a second suite could drive it; same callsite, same prefix, grandfather unchanged)
+test/helpers/fleet-heartbeat-harness.ts	fleet-heartbeat-rec- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending (re-keyed by W1-T494: the runner moved to a shared helper so a second suite could drive it; same callsite, same prefix, grandfather unchanged)
 test/fleet-heartbeat.test.ts	heartbeat-watch- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/fleet-hold-shared.test.ts	fleet-hold-shared- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/fs-race-alerts.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
