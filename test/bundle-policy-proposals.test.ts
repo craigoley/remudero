@@ -397,3 +397,52 @@ test("W1-T2702: bundleCommand routes 'import' to bundleImportCommand", () => {
 test("W1-T2702: bundleImportCommand requires --pin", () => {
   assert.equal(bundleImportCommand(["some-file.yaml"]), 2);
 });
+
+// ── W1-T2702: the refusal arms, which a well-formed fixture never reaches ────────────────────────
+
+/*
+ * diff-coverage flagged bundle.ts:312/315/320-322/430 — every one an early return for a bundle that
+ * is malformed rather than merely empty. The existing suite supplies well-formed YAML throughout,
+ * which is the shape CLAUDE.md names: when every test hands in a good input, the refusal arms are
+ * unreachable and the gate that would have caught a broken message never runs. Each case below
+ * drives one arm and asserts the REASON, because a refusal whose text is wrong is as bad as none —
+ * the caller stages nothing and the operator is told why.
+ */
+
+test("W1-T2702: a bundle that is not valid YAML is refused, naming the parse failure", () => {
+  const out = verifyBundlePolicyProposalsPin(":\n  - [unclosed\n");
+  assert.equal(out.ok, false);
+  assert.match(out.reason ?? "", /not valid YAML/);
+});
+
+test("W1-T2702: a bundle that parses to a non-mapping is refused rather than treated as empty", () => {
+  // Both shapes a YAML document can take that are NOT a mapping — a scalar and a sequence. An empty
+  // proposals section and "this is not a bundle at all" must not arrive as the same answer.
+  for (const text of ["just a string\n", "- one\n- two\n"]) {
+    const out = verifyBundlePolicyProposalsPin(text);
+    assert.equal(out.ok, false, `${JSON.stringify(text)} must be refused`);
+    assert.match(out.reason ?? "", /must be a mapping/);
+    assert.match(out.reason ?? "", /not staged/, "the refusal must say the proposals were not staged");
+  }
+});
+
+test("W1-T2702: a bundle missing its proposals hash is refused — an unverifiable section is not a passing one", () => {
+  for (const text of ["policy_proposals: []\n", 'policy_proposals: []\npolicyProposalsHash: ""\n']) {
+    const out = verifyBundlePolicyProposalsPin(text);
+    assert.equal(out.ok, false, `${JSON.stringify(text)} must be refused`);
+    assert.match(out.reason ?? "", /policyProposalsHash/);
+    assert.match(out.reason ?? "", /cannot verify/);
+  }
+});
+
+test("W1-T2702: buildBundle aborts when the policy text it was handed cannot be extracted", () => {
+  // The abort path at the caller: extractPolicyProposalRows refuses, and buildBundle must surface
+  // that reason rather than shipping a bundle with a silently empty proposals section. It refuses
+  // only on a YAML PARSE failure — a well-formed document that is merely the wrong SHAPE extracts
+  // zero rows and succeeds, which is why this fixture is unparseable rather than just not a mapping.
+  const out = buildBundle([entry({ id: "policy-fact" })], validSettings(), provenance, {
+    policyYamlText: "sweep:\n  - [unclosed\n",
+  });
+  assert.equal(out.ok, false);
+  assert.match(out.reason ?? "", /bundle aborted/);
+});
