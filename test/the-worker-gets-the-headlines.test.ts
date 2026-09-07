@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
 
 import { buildRuleHeadlinesPart, implementPromptParts, renderImplementPrompt } from "../src/run-task.js";
 import { renderAnchorBlock } from "../src/lib/compaction.js";
 import { assertProvenance } from "../src/lib/provenance.js";
+import { policyPath, validatePolicy } from "../src/lib/policy.js";
 import {
   wipeTestFactorMasksLearnings,
   wipeTestFactorMasksRecon,
@@ -11,6 +15,8 @@ import {
   WIPE_TEST_FACTORS,
 } from "../src/lib/wipe-test.js";
 import type { Task } from "../src/lib/plan.js";
+
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /**
  * test/the-worker-gets-the-headlines.test.ts — W1-T2761.
@@ -174,4 +180,27 @@ test("a rules-factor pair leaves the learnings/recon mask decisions both false o
     assert.equal(wipeTestFactorMasksLearnings("rules", arm), false);
     assert.equal(wipeTestFactorMasksRecon("rules", arm), false);
   }
+});
+
+// ── acceptance: the `workerRuleHeadlines` policy row itself, present and absent ─────────────────
+
+test("validatePolicy: a PRESENT workerRuleHeadlines row is validated and lifted, both enabled:true and enabled:false", () => {
+  const raw = parseYaml(readFileSync(policyPath(REPO_ROOT), "utf8")) as Record<string, unknown>;
+  const on = validatePolicy({
+    ...raw,
+    workerRuleHeadlines: { enabled: { value: true, origin: "net-new" } },
+  });
+  assert.equal(on.values.workerRuleHeadlines.enabled, true);
+  const off = validatePolicy({
+    ...raw,
+    workerRuleHeadlines: { enabled: { value: false, origin: "net-new" } },
+  });
+  assert.equal(off.values.workerRuleHeadlines.enabled, false);
+});
+
+test("validatePolicy: workerRuleHeadlines ABSENT from raw still lifts a well-formed default (enabled: false)", () => {
+  const raw = parseYaml(readFileSync(policyPath(REPO_ROOT), "utf8")) as Record<string, unknown>;
+  assert.equal("workerRuleHeadlines" in raw, false, "the shipped policy.yaml ships this row absent, on purpose");
+  const p = validatePolicy(raw);
+  assert.deepEqual(p.values.workerRuleHeadlines, { enabled: false });
 });
