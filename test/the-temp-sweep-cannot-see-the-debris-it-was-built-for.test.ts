@@ -7,6 +7,7 @@
 // else's directory is strictly worse than the disk filling.
 
 import assert from "node:assert/strict";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -119,5 +120,8 @@ test("W1-T3058 criterion 3: the added cost is MEASURED, not asserted cheap", () 
   const started = Date.now();
   sweepStaleTempDirs({ root: dir });
   const elapsedMs = Date.now() - started;
-  assert.ok(elapsedMs < 2000, `one sweep over 200 entries took ${elapsedMs}ms — too slow for a CLI preamble`);
+  // DECLARED, not bare (W1-T2811): this bounds a REAL elapsed measurement, the one assertion shape
+  // a loaded host can fail with no defect in the code under test. The declaration IS the call site,
+  // and test/a-wall-clock-bound-declares-itself.test.ts names any file that reverts to `assert.ok`.
+  assertWallClockBound(elapsedMs, 2000, `one sweep over 200 entries took ${elapsedMs}ms — too slow for a CLI preamble`);
 });
