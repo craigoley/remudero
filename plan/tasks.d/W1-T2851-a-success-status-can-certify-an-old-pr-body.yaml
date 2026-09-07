@@ -78,3 +78,56 @@
 
     This task is not a request for a larger retry cap. The current input has zero attempts. It
     closes the missing transition that lets an old successful status hide a repaired input.
+    2026-09-07, SCHEDULED BUILD PASS. THE FALSIFIER FIRES. Closed-without-implementation is this
+    shard's own instruction for this reading, and it is recorded here rather than acted on, because
+    retiring a shard is not a worker's call.
+
+    THE FALSIFIER'S FIRST ARM, VERBATIM: "Close without implementation if the current sweep routes
+    a SUCCESS status with a prior same-head, different body digest and zero current-input attempts
+    to `post-review`". IT DOES (OBSERVED, src/lib/sweep.ts at origin/main 74d502f47). The
+    DISPOSITION_RULES table carries this row STRICTLY BEFORE the `mergeable` row:
+
+        disposition: "post-review",
+        when: (pr) =>
+          pr.checksState === "green" &&
+          pr.requiredContextsUnreadable !== true &&
+          pr.reviewState === "success" &&
+          pr.reviewInputDigest !== undefined &&
+          pr.priorReviewAttemptsForInput === 0 &&
+          pr.reviewPostRefused !== true,
+
+    with the reason "checks green and GitHub reports remudero-review success, but the ledger has no
+    matching completed review.posted evidence for this exact input — re-running the authoritative
+    reviewer before auto-merge". `priorReviewAttemptsForInput` comes from `reviewAttemptsForInput`
+    (run-task.ts), which counts only rows matching task/PR/head AND the exact
+    `review_input_digest` — so a repaired body reads ZERO and the row matches. That is the #3979
+    shape, routed to `post-review` before `mergeable` can see it.
+
+    IT SHIPPED AS W1-T2860, not as this task: commit 46cf4e202 `fix(sweep): recover unowned
+    successful reviews (#4029)`, titled "A SUCCESSFUL GITHUB REVIEW WITHOUT LEDGER EVIDENCE
+    DEADLOCKS AUTO-MERGE — the sweep calls the PR mergeable forever while the safety gate refuses
+    every arm". Same green-but-motionless deadlock, a more general remedy.
+
+    THE SECOND ARM COULD NOT BE EVALUATED, AND THAT IS NOT A REFUTATION OF IT. The live ledger
+    carries ONE row mentioning `pull/3979`, ZERO `review.posted` rows for it, and no `v1:637d`
+    digest anywhere — but the ledger has rotated since 2026-09-04, so absence here is consistent
+    with rotation rather than with the defect. Positive control: 416 `review.posted` rows are
+    readable across the file and its `.bak`. The falsifier is disjunctive ("or"), so arm one alone
+    settles it.
+
+    ONE DIFFERENCE FROM THIS SHARD'S DESIGN, STATED SO NOBODY READS IT AS A GAP. Criterion 5 wants
+    the superseded-input scan keyed on PR URL and head "rather than the old task id", so a trailer
+    repair still triggers re-review. `reviewAttemptsForInput` keys on task id TOO. That makes the
+    row MORE likely to fire after an identity repair, never less — a changed trailer also reads
+    zero attempts — so the criterion's concern is satisfied incidentally rather than by design.
+
+    AND ONE HYPOTHESISED RESIDUE THAT IS NOT REAL, checked rather than asserted: the row's
+    `reviewPostRefused !== true` guard looked like it would drop a refused input through to
+    `mergeable` with a stale success. It does not — a THIRD row (sweep.ts, just below) matches
+    `reviewPostRefused === true` and escalates, "rather than retrying indefinitely".
+
+    HOW THIS ALMOST READ AS UNBUILT, RECORDED BECAUSE IT IS THE REUSABLE PART. The first check run
+    here was `git grep reviewInputChangedSinceVerdict` — the symbol THIS SHARD INVENTS — which
+    returns nothing and looks like a clean "mechanism absent". Searching for a proposed name rather
+    than for the BEHAVIOUR is how a shipped remedy reads as unbuilt; the declared-file-absent
+    heuristic has the same shape and the same failure mode.
