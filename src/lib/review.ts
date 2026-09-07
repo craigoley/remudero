@@ -4819,6 +4819,10 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T1051: the assertion-discrimination gate's rule logic, behind a required, unconditional
   // ci.yml job — same shape as the task-id existence entry directly above.
   "^scripts/assertion-discrimination-check\\.mjs$",
+  // W1-T2732: the coverage-session-blanking detector's rule logic, behind its own required job
+  // (.github/workflows/coverage-session-blanking.yml) — the same shape as the two entries above,
+  // and it is REQUIRED, so a change to it changes what CI refuses.
+  "^scripts/coverage-session-blanking-check\\.mjs$",
   // W1-T1060: the author-time acceptance gate's rule logic, behind its own unconditional pull_request job
   // (.github/workflows/acceptance-author-gate.yml, already covered by the workflows entry above; this line is the
   // script that job's `run:` step calls).
