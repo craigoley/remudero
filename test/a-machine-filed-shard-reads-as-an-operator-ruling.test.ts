@@ -28,6 +28,7 @@ import {
   ciLearningCadenceMarkerPath,
   ciLearningShardId,
   mintCiLearningShards,
+  CI_LEARNING_DOMINANT_FILE_COUNT,
   recordCiLearningCadenceFire,
 } from "../src/lib/measurement-cadence.js";
 import type { CiFailureCorpus, CiFailurePair } from "../src/lib/ci-failure-corpus.js";
@@ -584,4 +585,78 @@ test("W1-T3044: a cluster carries the UNION of the files its repairs touched", (
   };
   const r = mintCiLearningShards(corpus as never, []);
   assert.deepEqual([...r.drafts[0].repairFiles].sort(), ["src/a.ts", "src/b.ts"], "no repair evidence is lost");
+});
+
+// ── W1-T3051: the lesson is the file the repairs kept returning to ───────────────────────────────
+
+/*
+ * W1-T3044 got the right THREE clusters filed. It did not make any of them worth reading: the
+ * repair evidence was a SET union, so a 26-pull-request cluster carried 66 files in no order.
+ * MEASURED on a real 14-day window, the three drafts carried 66, 29 and 51 files apiece. A worker
+ * told "this gate refused 26 pull requests and the repairs touched these 66 files" has learned
+ * nothing it can act on.
+ *
+ * Counting per repair instead answers the question a lesson needs: which file did the repairs keep
+ * coming BACK to. A file touched once is noise, so a single hit never qualifies — and when the
+ * repairs agree on nothing, saying so is the honest answer rather than promoting an arbitrary
+ * first entry.
+ */
+
+test("W1-T3051: the file most repairs touched is named with its share, not buried in a union", () => {
+  const corpus = {
+    status: "measured" as const,
+    unreadableShas: [],
+    prsScanned: 4,
+    pairs: [
+      clusterPair(1, "g", ["scripts/comment-load-baseline.json", "src/a.ts"]),
+      clusterPair(2, "g", ["scripts/comment-load-baseline.json", "src/b.ts"]),
+      clusterPair(3, "g", ["scripts/comment-load-baseline.json"]),
+      clusterPair(4, "g", ["src/c.ts"]),
+    ],
+  };
+  const d = mintCiLearningShards(corpus as never, []).drafts[0];
+  assert.deepEqual(
+    d.dominantRepairFiles,
+    [{ file: "scripts/comment-load-baseline.json", prs: 3 }],
+    "three of four repairs returned to it — that is the lesson",
+  );
+  assert.equal(d.repairFiles[0], "scripts/comment-load-baseline.json", "and the full list leads with it");
+});
+
+test("W1-T3051: a file touched by exactly ONE repair is noise and is never named as the subject", () => {
+  const corpus = {
+    status: "measured" as const,
+    unreadableShas: [],
+    prsScanned: 3,
+    pairs: [clusterPair(1, "g", ["src/a.ts"]), clusterPair(2, "g", ["src/b.ts"]), clusterPair(3, "g", ["src/c.ts"])],
+  };
+  const d = mintCiLearningShards(corpus as never, []).drafts[0];
+  assert.deepEqual(d.dominantRepairFiles, [], "three repairs sharing nothing have no single subject");
+  assert.equal(d.repairFiles.length, 3, "the evidence is still carried — only the CLAIM is withheld");
+});
+
+test("W1-T3051: one repair listing a file twice cannot inflate its share", () => {
+  const corpus = {
+    status: "measured" as const,
+    unreadableShas: [],
+    prsScanned: 2,
+    pairs: [clusterPair(1, "g", ["src/a.ts", "src/a.ts"]), clusterPair(2, "g", ["src/b.ts"])],
+  };
+  const d = mintCiLearningShards(corpus as never, []).drafts[0];
+  assert.deepEqual(d.dominantRepairFiles, [], "a duplicate within ONE repair is still one repair");
+});
+
+test("W1-T3051: at most three files are named, and ranking is deterministic", () => {
+  const files = ["e.ts", "d.ts", "c.ts", "b.ts"];
+  const corpus = {
+    status: "measured" as const,
+    unreadableShas: [],
+    prsScanned: 2,
+    pairs: [clusterPair(1, "g", files), clusterPair(2, "g", files)],
+  };
+  const a = mintCiLearningShards(corpus as never, []).drafts[0];
+  const b = mintCiLearningShards(corpus as never, []).drafts[0];
+  assert.equal(a.dominantRepairFiles.length, CI_LEARNING_DOMINANT_FILE_COUNT, "capped, so a reader takes it in");
+  assert.deepEqual(a.dominantRepairFiles.map((r) => r.file), ["b.ts", "c.ts", "d.ts"], "an equal tie sorts by path");
+  assert.deepEqual(a.dominantRepairFiles, b.dominantRepairFiles, "the same window ranks the same way twice");
 });
