@@ -1,0 +1,107 @@
+#!/bin/sh
+# hooks/pre-push — W1-T3059. THE ROUTES REFUSE; THEY NO LONGER ONLY SUGGEST.
+#
+# WHY THIS EXISTS. Three checks shipped recently — the census-membership verb, rule15-precheck, and
+# the ratchet contract — and every one of them is UNENFORCED PROSE: a worker learns of them only by
+# reading a contract line it is free to skip. CLAUDE.md's own header says exactly what that is worth:
+# a rule stated only in prose "can be violated silently and repeatedly, which is why several of these
+# bullets exist at all". The measured case is the census family — a suite WALKS a population and names
+# none of a caller's symbols, so the mandated `git grep -l <symbol>` sweep is structurally blind to it
+# (four such CI failures across #4283/#4290, none found by a correctly-run sweep). A check the author
+# must remember is a check that fails exactly when the author is busy.
+#
+# WHY A HOOK IS CHEAP NOW AND WAS NOT. W1-T221 weighed this route and deferred it, recording that
+# "this repo currently ships no git hooks at all ... so the hook route carries install machinery this
+# task would also owe". That is now STALE: hooks/commit-msg and hooks/pre-commit ship, and spawnWorker
+# sets `core.hooksPath=hooks` on every worker worktree it creates. The install path this route owed is
+# already built and paid for; this file is picked up with no new machinery at all.
+#
+# WHICH IS ALSO THE BLAST RADIUS, so it SHIPS OFF. Being picked up automatically by every worker means
+# a mistake here does not redden one PR, it stops the fleet pushing. The switch below is the whole
+# safety story and is deliberately the first thing that runs: with RMD_PREPUSH_GATES unset this exits 0
+# before touching a file, a repo, or a subprocess. Turning it on is a separate, watched decision — the
+# same shape as the ci-learning cadence switch, and for the same reason.
+set -u
+
+[ "${RMD_PREPUSH_GATES:-0}" = "1" ] || exit 0
+
+fail=0
+
+# A CHECK THAT COULD NOT RUN IS NOT A CHECK THAT PASSED — AND IT IS NOT A VIOLATION EITHER. Both
+# checks below are skipped-with-a-name when their entry point is absent, and rule15-precheck's own
+# exit 2 (an unreadable diff) is honoured as unreadable. Blocking a push because a check was missing
+# would be this repo's recurring defect: a bound that fires on a healthy condition.
+if [ -f scripts/rule15-precheck.mjs ]; then
+  # VIA THE LOADER, like every other entry point here: the script imports `src/lib/review.js`, a
+  # path that exists only under tsx, so a bare `node` exits 1 with ERR_MODULE_NOT_FOUND — which the
+  # exit-code arms below would have read as a rule-15 VIOLATION. A check that cannot run must not be
+  # able to masquerade as a check that failed; package.json's own `rule15-precheck` alias is tsx.
+  node --import tsx scripts/rule15-precheck.mjs
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "pre-push: rule15-precheck could not read the diff — not blocking on an unreadable check" >&2
+  elif [ "$rc" -ne 0 ]; then
+    fail=1
+  fi
+else
+  echo "pre-push: scripts/rule15-precheck.mjs absent — skipped, NOT passed" >&2
+fi
+
+# The verb owns membership; this reads its answer. stdout is the bare file list, and anything the
+# verb could not place goes to stderr, where it stays visible to the author instead of quietly
+# shortening the list this runs.
+if [ -x ./bin/rmd ]; then
+  # COUNTED, NOT ECHOED. The verb names every suite it cannot place, and on this tree that is 119
+  # lines — a wall of text on every push, which is how a check earns its way into being switched
+  # off. The count still has to be SAID: it is the difference between "this diff joins no census"
+  # and "this ran the part of the model that exists", and a hook that printed neither would be
+  # claiming a coverage it does not have.
+  # Scratch goes to TMPDIR, never into the worktree: a stray file left by an interrupted hook is an
+  # untracked path, and this repo has a daemon that reacts to a dirty tree. A hook must not be able
+  # to create work for the thing it is protecting.
+  unmodelled=0
+  census_err=$(mktemp "${TMPDIR:-/tmp}/rmd-prepush-census-XXXXXX" 2>/dev/null || true)
+  if [ -n "$census_err" ]; then
+    census_files=$(RMD_SELF_SYNC_DONE=1 ./bin/rmd census-membership --files 2>"$census_err")
+    unmodelled=$(grep -ac '^unmodelled: ' "$census_err" 2>/dev/null)
+    : "${unmodelled:=0}"
+    # An UNMAPPABLE suite is a different animal from an unmodelled one — the model placed the path
+    # but the table has no test file for it — so it is shown in full rather than counted away.
+    grep -a '^unmapped: ' "$census_err" >&2 2>/dev/null || true
+    rm -f "$census_err"
+  else
+    # No scratch file: let the verb's own stderr through rather than swallow what it had to say.
+    census_files=$(RMD_SELF_SYNC_DONE=1 ./bin/rmd census-membership --files)
+  fi
+  if [ -n "$census_files" ]; then
+    echo "pre-push: running the census suites this diff joins —" >&2
+    echo "$census_files" | sed 's/^/  /' >&2
+    # THE SAME LOADERS package.json's "test" script uses. A bare `node --test` on these .ts files
+    # half-works — some suites pass under type stripping and others fail on an import that never
+    # resolved — which is worse than not running them: it manufactures failures that are artifacts
+    # of the runner. MEASURED while building this: test/authority-ratchet.test.ts "failed" that way
+    # and passes 6/6 under the real invocation.
+    # shellcheck disable=SC2086
+    node --test --import tsx --import ./test/setup/tmp-hygiene.ts $census_files || fail=1
+  else
+    echo "pre-push: this diff joins no MODELLED census suite" >&2
+  fi
+  if [ "$unmodelled" -gt 0 ] 2>/dev/null; then
+    echo "pre-push: $unmodelled census suite(s) are unmodelled and were NOT run —" >&2
+    echo "         'rmd census-membership' names them; this cleared only what it could place." >&2
+  fi
+else
+  echo "pre-push: ./bin/rmd absent — census suites not enumerated, NOT cleared" >&2
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "" >&2
+  echo "pre-push REFUSED. These are checks CI runs on this diff; fixing them here costs one" >&2
+  echo "local run, and fixing them after the push costs a red PR and a review cycle." >&2
+  echo "" >&2
+  echo "To push anyway (an emergency, and it will be judged on the PR):" >&2
+  echo "  RMD_PREPUSH_GATES=0 git push ..." >&2
+  exit 1
+fi
+
+exit 0
