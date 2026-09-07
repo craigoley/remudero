@@ -619,7 +619,7 @@ export type PromotionTaintCandidate = Pick<LearningEntry, "src"> & {
 };
 
 export type PromotionTaintResult =
-  | { tainted: false }
+  | { tainted: false; sourceClass?: undefined; reason?: undefined }
   | { tainted: true; sourceClass: ExternalSourceClass; reason: string };
 
 const EXTERNAL_SOURCE_CLASS_SET = new Set<string>(EXTERNAL_SOURCE_CLASSES);

@@ -130,9 +130,11 @@ test("an unreadable ledger union yields a refused revert-recall report member ra
       gitLog: () => ({ dump: "", ref: "fixture" }),
     });
 
-    assert.equal(result.revertRecall.status, "refused");
-    assert.equal(result.revertRecall.proposedFlipCount, null);
-    assert.match(result.revertRecall.refusedReason ?? "", /ledger union unreadable/);
+    const recall = result.revertRecall;
+    assert.ok(recall, "runMeasurementCadenceReport must include the revert-recall member");
+    assert.equal(recall.status, "refused");
+    assert.equal(recall.proposedFlipCount, null);
+    assert.match(recall.refusedReason ?? "", /ledger union unreadable/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

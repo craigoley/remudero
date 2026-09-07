@@ -1019,7 +1019,7 @@ export interface MeasurementCadenceRunResult {
   verdictCalibration: VerdictCalibrationCadenceResult;
   autonomyRate: AutonomyRateCadenceResult;
   /** Proposed `active -> contested` flips for learnings whose source PR was reverted. */
-  revertRecall: RevertRecallCadenceResult;
+  revertRecall?: RevertRecallCadenceResult;
   /** The fourth verb — see {@link runAdoptionReport}. */
   adoptionReport?: AdoptionReportResult;
   /** The adoption report's mint outcome, gated on `opts.escalate` like
