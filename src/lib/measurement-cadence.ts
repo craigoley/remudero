@@ -1675,7 +1675,12 @@ export interface CiLearningShardDraft {
   findingId: string;
   title: string;
   gate: string;
+  /** The first pull request in the cluster — retained so every existing reader keeps working. */
   pr: number;
+  /** EVERY pull request this gate refused in the window (W1-T3044). A cluster is one LESSON, and
+   *  this is the evidence it was derived from: a draft that named only its first PR would be
+   *  summarising away the very thing that makes the lesson worth carrying. */
+  prs: number[];
   /** The files the repair actually touched: the lesson is in the delta, not the red. */
   repairFiles: string[];
   /** LAW 5: the author class rides the record. */
@@ -1730,21 +1735,56 @@ export function mintCiLearningShards(
     .filter((p) => !already.has(ciLearningShardId(p)))
     .sort((a, b) => (a.pr !== b.pr ? a.pr - b.pr : a.gate.localeCompare(b.gate)));
 
+  /*
+   * W1-T3044 — COMPACT BY CAUSE, THEN CAP. The ceiling used to truncate a list of INSTANCES: one
+   * finding per (pull request, gate), first three win, the rest named and dropped.
+   *
+   * MEASURED over a real 14-day window: 119 findings across 36 pull requests but only 22 DISTINCT
+   * GATES. Truncating instances covered 3 of 119 — three per cent of what the window had to say,
+   * and which three was an artifact of pull-request number order. Grouping by the gate and ranking
+   * by how many pull requests it refused covers 65 of 119 from the SAME three-draft budget: the
+   * three causes were ci-gate (26), ci (20) and coverage-ratchet (19).
+   *
+   * A gate that refused twenty-six pull requests is one lesson, not twenty-six. Nothing is lost by
+   * grouping: each draft NAMES its pull requests and the union of the files their repairs touched,
+   * so the per-instance detail a lesson needs is carried rather than summarised away. The excluded
+   * list now names remaining CAUSES too, which is nineteen readable lines instead of a hundred and
+   * sixteen.
+   */
+  const clusters = new Map<string, { gate: string; prs: number[]; repairFiles: Set<string>; firstId: string }>();
+  for (const p of ordered) {
+    const existing = clusters.get(p.gate);
+    const cluster = existing ?? { gate: p.gate, prs: [], repairFiles: new Set<string>(), firstId: ciLearningShardId(p) };
+    cluster.prs.push(p.pr);
+    for (const f of p.repairFiles ?? []) cluster.repairFiles.add(f);
+    if (!existing) clusters.set(p.gate, cluster);
+  }
+  // Most pull requests refused first; the gate name breaks ties so one window always ranks the same
+  // way twice. `ordered` is already deterministic, so `prs` within a cluster is too.
+  const rankedClusters = [...clusters.values()].sort((a, b) =>
+    b.prs.length !== a.prs.length ? b.prs.length - a.prs.length : a.gate.localeCompare(b.gate),
+  );
+
   const drafts: CiLearningShardDraft[] = [];
   const excludedFindings: string[] = [];
-  for (const p of ordered) {
+  for (const c of rankedClusters) {
     if (drafts.length >= CI_LEARNING_MINT_CEILING) {
-      excludedFindings.push(ciLearningShardId(p)); // named, never dropped
+      excludedFindings.push(c.firstId); // the CAUSE is named, never dropped
       continue;
     }
+    const prList = c.prs.map((n) => `#${n}`).join(", ");
     drafts.push({
-      findingId: ciLearningShardId(p),
+      findingId: c.firstId,
       title:
-        `THE ${p.gate} GATE WENT RED ON #${p.pr} AND WAS REPAIRED — carry the lesson to the lane ` +
-        `that hit it, so the same gate does not refuse a second pull request for the same reason`,
-      gate: p.gate,
-      pr: p.pr,
-      repairFiles: [...(p.repairFiles ?? [])],
+        `THE ${c.gate} GATE REFUSED ${c.prs.length} PULL REQUEST${c.prs.length === 1 ? "" : "S"} IN THIS ` +
+        `WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the ` +
+        `same gate stops refusing for the same reason`,
+      gate: c.gate,
+      pr: c.prs[0],
+      // Every pull request in the cluster and every file their repairs touched: the per-instance
+      // detail a lesson is derived FROM, carried rather than summarised away.
+      prs: [...c.prs],
+      repairFiles: [...c.repairFiles],
       author_class: "machine",
       verify: "human",
       remedySurface: CI_LEARNING_REMEDY_SURFACE,
