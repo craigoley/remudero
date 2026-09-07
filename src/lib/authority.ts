@@ -434,7 +434,7 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     symbol: "the prune's `git push origin --delete` chunk loop (the reap-branches executing half)",
     boundary: "git-push",
     gate: "operator-verb",
-    ledgerSteps: [],
+    ledgerSteps: ["branch_reap.pruned"],
     verb: "rmd reap-branches --prune",
     note:
       "W1-T3020: operator-invoked only — no daemon rung, sweep or cadence calls this, and a census test fails if " +
