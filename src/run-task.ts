@@ -58,7 +58,7 @@ import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-s
 import { isHolderStale, readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
-import { bodyVsDiffContractLines, IMPLEMENT_ROLE_LINES, outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
+import { bodyVsDiffContractLines, IMPLEMENT_ROLE_LINES, outputContractLines, ratchetContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
 import {
   lintFiledTasks,
   newMonolithIdsAgainstBase,
@@ -6411,6 +6411,9 @@ export function renderFixPrompt(opts: {
     // literal the implement contract uses, so the two prompts cannot drift.
     ...commitMessageContractLines(),
     `branch (only a run-<taskId>-<epochMs> head is creditable).`,
+    // W1-T2997: the fix rung needs this MORE than the implement contract does — it exists
+    // because CI went red, and a ratchet an earlier round left unrecorded is the commonest reason.
+    ...ratchetContractLines(),
     // W1-T464: this rung used to spread ciParityContractLines() here — the same
     // `rmd preflight --ci-parity` obligation the implement contract carried (W1-T295) — but the
     // orchestrator never gated on a preflight failure (run-task.ts's own handling of it has no
