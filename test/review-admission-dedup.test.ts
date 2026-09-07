@@ -157,9 +157,21 @@ test("W1-T2583: dedup filtering preserves both bounds and immutable oldest-first
     "the plan-filing bound remains three and ordering remains immutable oldest-first");
 });
 
-test("W1-T2792: after the first pair delivers, the next pass admits the next pair", async () => {
+/*
+ * THE INVARIANT IS DEDUP, NOT THE WIDTH. This asserted a fixed pair because `reviewLanes` was 2
+ * when it was written, so restoring it to 3 (W1-T3024) reddened a test that was still describing
+ * correct behaviour — the first pass admitted [1,2,3] and the assertion wanted [1,2]. What the test
+ * exists to prove is that a DELIVERED outcome is excluded before ranking and spends no slot on the
+ * next pass, which holds at any width. Derived from the policy so the next lane-width change moves
+ * no test: hard-coding the width is what made a policy row a test edit.
+ */
+test("W1-T2792: after the first lanes-worth delivers, the next pass admits the next", async () => {
   const path = ledgerPath();
+  const lanes = DEFAULT_SWEEP_POLICY.reviewLanes;
   const prs = [1, 2, 3, 4].map((n) => reviewPr(n, `2026-08-2${n}T00:00:00Z`));
+  const expectedFirst = prs.slice(0, lanes).map((pr) => pr.prNumber);
+  const expectedSecond = prs.slice(lanes).map((pr) => pr.prNumber);
+  assert.ok(expectedSecond.length > 0, "the fixture must hold more PRs than one pass can admit, or this proves nothing");
   const firstPosted: number[] = [];
   await runSweepLightPass(
     [...prs].reverse(),
@@ -176,11 +188,11 @@ test("W1-T2792: after the first pair delivers, the next pass admits the next pai
       },
     }),
   );
-  assert.deepEqual(firstPosted.sort((a, b) => a - b), [1, 2]);
+  assert.deepEqual(firstPosted.sort((a, b) => a - b), expectedFirst, "the first pass fills every review lane");
 
   const secondPosted: number[] = [];
   await runSweepLightPass([...prs].reverse(), deps(path, secondPosted, { runId: "REVIEW-SECOND-PAIR" }));
-  assert.deepEqual(secondPosted.sort((a, b) => a - b), [3, 4],
+  assert.deepEqual(secondPosted.sort((a, b) => a - b), expectedSecond,
     "delivered outcomes are excluded before ranking and spend no slot on the next pass");
 });
 
