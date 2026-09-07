@@ -30775,7 +30775,20 @@ export function buildEscalationReconcileCandidates(
   // would make `issuesSeen > total` on a healthy pass whenever a PR happens to carry the label,
   // i.e. a false alarm in the one field added to stop false alarms.
   const intake: EscalationIntake = { issuesSeen: open.length, droppedNoTaskTrailer: 0, droppedNoReferent: 0 };
-  const deps: DeriveDeps = { ledgerPath, github: injected.github ?? buildBatchedGithub(owner, repo, { log }) };
+  // W1-T3067 — THE SECOND DESTRUCTIVE CONSUMER, wired for the same reason as the first. This
+  // builder reads `proj.merged` and feeds the closer that CLOSES a needs-human issue; a credit
+  // earned by a plan-only filing would close an escalation whose task is not done, which is the
+  // supersession incident (#4461) in a different surface. The free local evidence must reach here
+  // too, or the refusal is fixed in one place and open in the other.
+  //
+  // A SECOND `git log` PER SWEEP PASS IS THE COST, and it is local and bounded. The alternative —
+  // hoisting one map through the sweep composition into both builders — threads a new argument
+  // through call sites that do not otherwise change, for a saving measured in milliseconds.
+  const deps: DeriveDeps = {
+    ledgerPath,
+    github: injected.github ?? buildBatchedGithub(owner, repo, { log }),
+    mergedPathsByPr: readMergedPathsByPr(repoRoot),
+  };
   const candidates: EscalationReconcileCandidate[] = [];
   for (const issue of open) {
     const taskId = /^\*\*Task:\*\*\s*(\S+)\s*$/m.exec(issue.body ?? "")?.[1];

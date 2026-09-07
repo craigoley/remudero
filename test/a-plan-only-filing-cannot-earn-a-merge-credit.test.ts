@@ -5,6 +5,9 @@
 // The ledger arm cannot catch them either, so nothing did — and W1-T2794's rung closed #4461.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { isPlanOnlyChangeset } from "../src/lib/status.js";
@@ -12,7 +15,11 @@ import { readMergedPathsByPr } from "../src/run-task.js";
 
 /** The #3195 shape: a filing opened from the task's OWN run branch. */
 const FILING_PATHS = ["plan/tasks.d/W1-T2371-the-risk-judge-cannot-pass-an-amendment.yaml"];
-/** The #3614 shape: a filing-ish SUBJECT whose diff is real work. */
+/** A docs change that IS real work. NOT #3614 — I first attributed this shape to that PR from its
+ *  `docs:` subject, and the producer later showed #3614's actual diff is `plan/tasks.d/*.yaml`.
+ *  The fixture is kept because the PROPERTY it pins is real (a docs diff is not a filing); only the
+ *  attribution was wrong, and naming a fixture after a PR it does not describe is how a false
+ *  premise survives in a test suite. */
 const DOCS_IMPL_PATHS = ["CLAUDE.md"];
 /** An ordinary implementation. */
 const SRC_PATHS = ["src/lib/risk-judge.ts", "test/risk-judge-plan-only-amendment.test.ts"];
@@ -22,9 +29,9 @@ test("W1-T3067 criterion 1: the #3195 shape IS a plan-only changeset, so the ref
   assert.equal(isPlanOnlyChangeset(FILING_PATHS), true);
 });
 
-test("W1-T3067 criterion 2 (falsifier): the #3614 shape is NOT plan-only — a docs implementation keeps its credit", () => {
-  // THE ROW THAT STOPS AN OVERCORRECTION. Classifying by SUBJECT would have stripped this credit:
-  // `docs: retire stale CLAUDE.md cap figures` IS W1-T2611's implementation.
+test("W1-T3067 criterion 2 (falsifier): a docs or src diff is NOT plan-only, so a real implementation keeps its credit", () => {
+  // THE ROW THAT STOPS AN OVERCORRECTION: #1926 and #2146 are ordinary implementations under a
+  // `chore: wip` subject, and subject-matching would strip both. The paths keep them.
   assert.equal(isPlanOnlyChangeset(DOCS_IMPL_PATHS), false);
   assert.equal(isPlanOnlyChangeset(SRC_PATHS), false);
   assert.equal(isPlanOnlyChangeset([...FILING_PATHS, ...SRC_PATHS]), false, "a mixed diff is not a filing");
@@ -78,4 +85,44 @@ test("W1-T3067 (falsifier): SUBJECT AND DIFF DISAGREE, AND THE DIFF IS RIGHT", (
     true,
     "yet its diff is plan-only — the paths decide, not the words",
   );
+});
+
+// ══════════ WHICH CONSUMERS MUST CARRY THE EVIDENCE ══════════════════════════════════════════
+
+/** Read one function body out of run-task.ts, for the structural checks below. */
+function functionBody(src: string, name: string): string {
+  const start = src.indexOf("function " + name + "(");
+  assert.ok(start >= 0, name + " not found");
+  const next = src.indexOf("\nfunction ", start + 1);
+  const alt = src.indexOf("\nexport function ", start + 1);
+  const end = Math.min(next === -1 ? src.length : next, alt === -1 ? src.length : alt);
+  return src.slice(start, end);
+}
+
+test("W1-T3067: every DESTRUCTIVE credit consumer supplies mergedPathsByPr", () => {
+  // buildCreditCandidates closes a PR; buildEscalationReconcileCandidates closes a needs-human
+  // issue. BOTH read proj.merged, so a filing-earned credit in either destroys something. Wiring
+  // one and not the other is the failure this pins: the refusal fixed in one surface, open in the
+  // other. Structural because these builders construct DeriveDeps inline — nothing but the source
+  // says whether the evidence reaches them.
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const src = readFileSync(join(root, "src", "run-task.ts"), "utf8");
+  for (const fn of ["buildCreditCandidates", "buildEscalationReconcileCandidates"]) {
+    const body = functionBody(src, fn);
+    assert.match(body, /DeriveDeps = \{/, fn + " should construct DeriveDeps");
+    assert.match(body, /mergedPathsByPr: readMergedPathsByPr\(/,
+      fn + " drives a destructive act on proj.merged, so it MUST supply the local path evidence");
+  }
+});
+
+test("W1-T3067: the DISPLAY consumers are deliberately NOT wired, and that is a recorded cost decision", () => {
+  // The board, inboxCommand and the ratify loaders also derive status and supply no map. None of
+  // them closes anything, and the board renders per request while readMergedPathsByPr scans
+  // thousands of commits. Recorded as a test so the asymmetry is a decision on the record rather
+  // than an oversight a later reader "fixes" into a per-render repo scan.
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const board = readFileSync(join(root, "src", "lib", "status-board.ts"), "utf8");
+  assert.match(board, /DeriveDeps = \{/, "the board does derive status");
+  assert.doesNotMatch(board, /mergedPathsByPr/,
+    "display-only and per-request: wiring it would pay a repo-wide git log per render");
 });
