@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,7 +15,7 @@ import {
   wipeTestCadenceMarkerPath,
 } from "../src/lib/measurement-cadence.js";
 import { runDaemon } from "../src/lib/daemon.js";
-import { WIPE_TEST_PAIRING_FLOOR } from "../src/lib/wipe-test.js";
+import { runWipeTestPair, WIPE_TEST_PAIRING_FLOOR } from "../src/lib/wipe-test.js";
 import { buildWipeTestCadenceDaemonHooks } from "../src/run-task.js";
 
 const NOW = new Date("2026-09-06T12:00:00Z");
@@ -39,6 +39,19 @@ function okUnion(matches: string[] = []): LedgerUnionResult {
     unclassified: [],
     ok: true,
     matches,
+  };
+}
+
+function unreadableUnion(): LedgerUnionResult {
+  return {
+    stateDir: "/state",
+    archiveFiles: [],
+    archiveCount: 0,
+    liveFileRead: false,
+    unread: [],
+    unclassified: [],
+    ok: false,
+    matches: [],
   };
 }
 
@@ -120,6 +133,33 @@ test("buildWipeTestCadenceDaemonHooks rotates generated sandbox subjects and alt
   }
 });
 
+test("buildWipeTestCadenceDaemonHooks refuses unreadable ledgers and bad generated subjects", () => {
+  const root = tmp("rmd-wipe-cadence-bad-subject-");
+  try {
+    const unreadable = buildWipeTestCadenceDaemonHooks({
+      config: { root } as Config,
+      policy: policy(),
+      learningsIndex: index,
+      ledgerUnion: () => unreadableUnion(),
+      now: () => NOW,
+    }).checkWipeTestCadence();
+    assert.equal(unreadable.fire, false);
+    assert.match(unreadable.reason, /ledger union unreadable/);
+
+    const badSubject = buildWipeTestCadenceDaemonHooks({
+      config: { root } as Config,
+      policy: policy(),
+      learningsIndex: () => ({ files: { "a.yaml": { entries: ["a"], globs: [] } }, bySubsystem: {} }),
+      ledgerUnion: () => okUnion(),
+      now: () => NOW,
+    }).checkWipeTestCadence();
+    assert.equal(badSubject.fire, false);
+    assert.match(badSubject.reason, /no isolating literal path/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runWipeTestCadence refuses an unresolvable target before any worker spawn", async () => {
   const root = tmp("rmd-wipe-cadence-refuse-");
   try {
@@ -148,6 +188,62 @@ test("runWipeTestCadence refuses an unresolvable target before any worker spawn"
   }
 });
 
+test("runWipeTestPair materializes generated sandbox subjects and ledgers the pair", async () => {
+  const root = tmp("rmd-wipe-pair-core-");
+  try {
+    const repoDir = join(root, "repos", "remudero-sandbox");
+    const stateDir = join(root, "state");
+    mkdirSync(join(repoDir, "plan"), { recursive: true });
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(repoDir, "plan", "tasks.yaml"), "[]\n");
+    const gitCalls: string[] = [];
+    const runCalls: Array<{ taskId: string; maskLearnings?: boolean }> = [];
+    const result = await runWipeTestPair(
+      { id: "wt-sbx-9", files: ["src/a.ts"], selectedShards: ["a.yaml"] },
+      "learnings",
+      {
+        owner: "craigoley",
+        selfRepo: "remudero",
+        repoRoot: root,
+        config: { root } as Config,
+        ledgerPath: join(stateDir, "ledger.ndjson"),
+        pairIndex: 0,
+        runId: "WIPETEST-1",
+        now: () => NOW,
+        resolveMergedState: () => ({ merged: false }),
+        execFileSyncFn: ((cmd: string, args: readonly string[]) => {
+          gitCalls.push([cmd, ...args].join(" "));
+          return Buffer.from("");
+        }) as never,
+        runTaskFn: (async (taskId, opts) => {
+          runCalls.push({ taskId, maskLearnings: opts.maskLearnings });
+          return {
+            taskId,
+            runId: `RUN-${runCalls.length}`,
+            merged: true,
+            costUsd: runCalls.length,
+            verdict: "merged",
+          };
+        }) as never,
+      },
+    );
+
+    assert.equal(result.status, "measured");
+    assert.deepEqual(gitCalls, [
+      `git -C ${repoDir} fetch --quiet origin`,
+      `git -C ${repoDir} reset --hard --quiet origin/main`,
+    ]);
+    assert.deepEqual(runCalls, [
+      { taskId: "wt-sbx-9", maskLearnings: undefined },
+      { taskId: "wt-sbx-9", maskLearnings: true },
+    ]);
+    assert.match(readFileSync(join(repoDir, "plan", "tasks.d", "wt-sbx-9.yaml"), "utf8"), /src\/a\.ts/);
+    assert.match(readFileSync(join(stateDir, "ledger.ndjson"), "utf8"), /"step":"wipetest\.pair"/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runMeasurementCadenceReport includes a wipe-test seat that refuses below the pairing floor", () => {
   const root = tmp("rmd-wipe-report-floor-");
   try {
@@ -162,6 +258,25 @@ test("runMeasurementCadenceReport includes a wipe-test seat that refuses below t
     assert.equal(learnings.status, "refused");
     assert.equal(learnings.pairCount, WIPE_TEST_PAIRING_FLOOR - 1);
     assert.match(learnings.refusedReason ?? "", /below pairing floor/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runMeasurementCadenceReport keeps verbCensus last and ignores torn wipe-test rows", () => {
+  const root = tmp("rmd-wipe-report-order-");
+  try {
+    const result = runMeasurementCadenceReport({
+      stateDir: join(root, "state"),
+      cwd: root,
+      escalate: false,
+      gitLog: () => ({ dump: "", ref: "origin/main" }),
+      ledgerUnion: () => okUnion(["{not json", pairLine({ factor: "learnings" })]),
+    });
+    assert.equal(Object.keys(result).at(-1), "verbCensus");
+    const learnings = result.wipeTest!.factors.find((f) => f.factor === "learnings")!;
+    assert.equal(learnings.status, "refused");
+    assert.equal(learnings.pairCount, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -226,6 +341,42 @@ test("runDaemon ledgers wipe-test cadence fired, skipped, and refused rows", asy
     assert.ok(lines.some((l) => l.step === "wipetest.cadence.fired"));
     assert.ok(lines.some((l) => l.step === "wipetest.cadence.refused"));
     assert.ok(lines.some((l) => l.step === "wipetest.cadence.skipped"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runDaemon ledgers wipe-test cadence check and run failures", async () => {
+  const root = tmp("rmd-wipe-daemon-failures-");
+  try {
+    const planPath = join(root, "tasks.yaml");
+    writeFileSync(planPath, "- id: T1\n  title: t\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n");
+    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    let tick = 0;
+    await runDaemon(loadPlan(planPath), {
+      refreshMerged: () => () => true,
+      runOne: async () => {
+        throw new Error("never");
+      },
+      checkStop: () => (++tick > 3 ? "bound" : undefined),
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+      checkWipeTestCadence: () => {
+        if (tick === 1) throw new Error("check boom");
+        if (tick === 2) {
+          return { fire: true, reason: "first run", seq: 1, subject: { id: "wt-sbx-1" }, factor: "learnings" };
+        }
+        return { fire: false, reason: "daily cap reached" };
+      },
+      runWipeTestCadence: async () => {
+        throw new Error("run boom");
+      },
+    });
+
+    assert.ok(lines.some((l) => l.step === "wipetest.cadence.check_failed"));
+    assert.ok(
+      lines.some((l) => l.step === "wipetest.cadence.refused" && String(l.extra.reason).includes("run boom")),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
