@@ -58,7 +58,7 @@
   "scripts/cycle-ratchet.mjs": 44,
   "scripts/diff-class.mjs": 100,
   "scripts/diff-coverage.mjs": 147,
-  "scripts/fleet-heartbeat.sh": 298,
+  "scripts/fleet-heartbeat.sh": 320,
   "scripts/generate-api-client.mjs": 42,
   "scripts/generate-capability-snapshot.mjs": 57,
   "scripts/generate-cli-reference.mjs": 34,
