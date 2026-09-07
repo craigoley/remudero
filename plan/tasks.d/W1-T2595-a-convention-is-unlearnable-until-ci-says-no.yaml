@@ -11,7 +11,8 @@
   files: [src/lib/ci-parity.ts, test/fast-gate-admits-the-census-class.test.ts, test/a-convention-is-unlearnable-until-ci-says-no.test.ts]
   origin: "operator-brief#census-family-unlearnable-2026-09-01"
   plan_refs: ["W1-T294", "W1-T338", "W1-T1266"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     ── MEASURED, ONE EVENING, THREE PULL REQUESTS ──────────────────────────────────────────────
@@ -128,3 +129,28 @@
       proof: "unit test: test/a-convention-is-unlearnable-until-ci-says-no.test.ts"
     - claim: "the added entries measure under the wall-clock bound the census already holds the fast gate to, so the gate does not become slow enough to skip"
       proof: "unit test: test/a-convention-is-unlearnable-until-ci-says-no.test.ts"
+  note: |
+
+    RETIRED 2026-09-07 ON OPERATOR DIRECTION — OVERTAKEN, AND THE RESIDUE IS NOT A BUILD PASS'S CALL.
+    MEASURED at origin/main on 2026-09-07, against this shard's own figures:
+
+      - the shard measures FAST_GATE_STEPS at 13 entries, 4 census / 9 non-census. It is now
+        5 census / 10 non-census: test/fast-gate-admits-the-census-class.test.ts pins
+        CENSUS_STEPS.length === 5 (W1-T2695's authority-census) and NON_CENSUS_STEPS.length === 10.
+      - the hand-count this shard was filed to work around is GONE as a hand-count:
+        CENSUS_FAST_GATE_STEPS is now DERIVED from CENSUS_ADMITTED_MEMBERS (src/lib/ci-parity.ts),
+        so admission is data, not a numbered list.
+      - of the four suites named in the title, bound-kind and catch-erasure are already admitted;
+        config-reader-seams and route-scope-matrix are neither npm scripts nor CI jobs, so the
+        "add them to the parity gate" shape does not apply to them as written.
+
+    AND THE REMAINING ADMISSION IS EXPLICITLY REFUSED TO A BUILD PASS. ci-parity.ts records, in its
+    own refusal text: "admission is the defensible alternative and was NOT taken here — it is a
+    measured cost decision that changes FAST_GATE_STEPS composition, which a build pass should not
+    make unilaterally. If an operator judges (a) satisfied, this row becomes an ADMITTED entry with
+    a measured ms." So what is left of this task is an operator cost decision, not an implementation.
+
+    WHAT IS NOT RULED ON: the underlying complaint — that some author-time conventions first speak
+    when CI goes red — is not refuted. Admitting a further census suite remains available to the
+    operator through CENSUS_ADMITTED_MEMBERS with a measured ms, which is a smaller and better-aimed
+    act than this shard.
