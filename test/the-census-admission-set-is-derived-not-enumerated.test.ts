@@ -153,6 +153,9 @@ test("test/enforcement-data-carveout.test.ts: re-measured HERE (not copied from 
   const childEnv = { ...process.env };
   delete childEnv.NODE_TEST_CONTEXT;
   delete childEnv.NODE_OPTIONS;
+  // W1-T2732: blank the coverage session var too -- `delete` is a no-op on it, and an unblanked
+  // value would silently enrol this child in whatever coverage session is running this suite.
+  childEnv.NODE_V8_COVERAGE = undefined;
   const startedAt = Date.now();
   execFileSync(
     process.execPath,

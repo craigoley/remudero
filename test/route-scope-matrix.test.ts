@@ -389,6 +389,9 @@ test("createService: a malformed token store refuses an authenticated request wi
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
     delete childEnv.NODE_OPTIONS;
+    // W1-T2732: blank the coverage session var too -- `delete` is a no-op on it, and an unblanked
+    // value would silently enrol this child in whatever coverage session is running this suite.
+    childEnv.NODE_V8_COVERAGE = undefined;
 
     let threw = false;
     let output = "";

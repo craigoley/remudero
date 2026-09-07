@@ -99,7 +99,10 @@ test("END TO END: a KILLED run leaks its scratch where TMPDIR points, not into t
     // allocates no scratch at all — the count reads 0 for a reason unrelated to what is measured.
     const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env };
     delete childEnv.NODE_TEST_CONTEXT;
-    if (!("NODE_V8_COVERAGE" in env)) delete childEnv.NODE_V8_COVERAGE;
+    // W1-T2732: `delete` is a no-op -- node force-injects NODE_V8_COVERAGE into spawned children
+    // regardless of the env option, so blank it instead. A caller-supplied NODE_V8_COVERAGE (the
+    // `named` control below) is left exactly as given -- that value is the thing being measured.
+    if (!("NODE_V8_COVERAGE" in env)) childEnv.NODE_V8_COVERAGE = undefined;
     const child = spawn(process.execPath, ["--experimental-test-coverage", "--test-coverage-exclude=test/**", "--test", spec], {
       cwd: root,
       env: childEnv,

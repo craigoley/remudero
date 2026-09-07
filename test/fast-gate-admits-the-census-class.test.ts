@@ -183,6 +183,9 @@ test("census:bound-kind targets test/bound-kind-declared.test.ts, and that suite
   const childEnv = { ...process.env };
   delete childEnv.NODE_TEST_CONTEXT;
   delete childEnv.NODE_OPTIONS;
+  // W1-T2732: blank the coverage session var too -- `delete` is a no-op on it, and an unblanked
+  // value would silently enrol this child in whatever coverage session is running this suite.
+  childEnv.NODE_V8_COVERAGE = undefined;
   const output = execFileSync(
     process.execPath,
     [

@@ -47,6 +47,10 @@ function runNodeTestFile(fixturePath: string, testNamePattern?: string): { statu
   // exactly like the real `npm test` invocation does at the top level.
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  // W1-T2732: also blank the coverage session var -- `delete` on it is a no-op (node re-injects
+  // it into every spawned child), so an unblanked value here would silently enrol this fresh
+  // child in whatever coverage session is running this very suite.
+  env.NODE_V8_COVERAGE = undefined;
   try {
     execFileSync(process.execPath, args, { cwd: REPO_ROOT, stdio: "pipe", env });
     return { status: 0 };

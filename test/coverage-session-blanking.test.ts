@@ -117,18 +117,20 @@ test("a delete of the coverage variable inside a STRING (a child-process script 
 
 // ── claim: "the falsifier holds against a real file: test/base-blob-read-failure.test.ts is
 // named while its delete stands" ─────────────────────────────────────────────────────────────
-
-test("the REAL repo, scanned end to end via git ls-files, still names test/base-blob-read-failure.test.ts's delete", () => {
-  const { defects, filesScanned } = scanRepo(REPO_ROOT);
+//
+// W1-T2732 UPDATE: this task's own remit -- unlike W1-T2292's, which deliberately stopped at
+// naming callers -- is to actually clear the population this scan reports, so it does not
+// "deliberately not fix callers" the way the comment above once read. `defects`/`suspects` no
+// longer have a real, live example to pin a line/expr to once the corpus is clean; the
+// end-to-end `git ls-files` integration path this test exercises is still proven for real by
+// "main() prints the blind-spots statement AFTER naming a violation" below, which drives the
+// identical scanRepo()-via-git-ls-files path against a synthetic fixture repo carrying a planted
+// violation. This test's own job narrows to proving the REAL, live corpus is clean end to end.
+test("the REAL repo, scanned end to end via git ls-files, is clean of both defect shapes (W1-T2732 cleared the corpus)", () => {
+  const { defects, suspects, filesScanned } = scanRepo(REPO_ROOT);
   assert.ok(filesScanned > 700, `sanity: the scan must actually have read a real corpus (got ${filesScanned})`);
-  const hit = defects.find((d) => d.file === "test/base-blob-read-failure.test.ts");
-  assert.ok(
-    hit,
-    "test/base-blob-read-failure.test.ts's own `delete childEnv.NODE_V8_COVERAGE;` (rationale §2(a)'s named " +
-      "exemplar) must still be flagged -- this task deliberately does not fix callers, only names them",
-  );
-  assert.equal(hit!.line, 436); // R-11 added lines above the delete in that file; the pin follows it
-  assert.equal(hit!.expr, "childEnv");
+  assert.deepEqual(defects, [], "W1-T2732 converted every delete-is-noop site to real blanking");
+  assert.deepEqual(suspects, [], "W1-T2732 blanked every unblanked NODE_TEST_CONTEXT-strip finding");
 });
 
 // ── claim: "blanking by explicit undefined and by empty string are both accepted, and neither is
@@ -260,12 +262,18 @@ test("main() prints the blind-spots statement AFTER naming a violation", () => {
   }
 });
 
-test("the CLI, run directly (no injected collaborators), exits 1 against the real repo and prints both findings and blind spots", () => {
+// W1-T2732 UPDATE: the real repo now reads clean (see the "is clean of both defect shapes" test
+// above) -- this task's whole point is wiring this CLI into CI as a gate, which requires the real
+// tree to actually pass it. The CLI's own `main()` default `repoRoot` resolves from the SCRIPT's
+// own path, not `cwd`, so a direct CLI spawn can only ever exercise the REAL repo, never a
+// fixture; the FAILED/violation path is already covered for real, via git ls-files end to end,
+// by "main() prints the blind-spots statement AFTER naming a violation" above (same scanRepo()
+// path, driven in-process against a fixture repoRoot instead of a CLI spawn).
+test("the CLI, run directly (no injected collaborators), exits 0 against the real repo now that W1-T2732 cleared it, and still prints blind spots", () => {
   const result = spawnSync(process.execPath, [SCRIPT], { encoding: "utf8" });
-  assert.equal(result.status, 1, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-  assert.match(result.stderr, /coverage-session-blanking-check: FAILED/);
-  assert.match(result.stderr, /test\/base-blob-read-failure\.test\.ts:436: delete childEnv\.NODE_V8_COVERAGE/);
-  assert.match(result.stderr, /Unreachable by this scan/);
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.match(result.stdout, /coverage-session-blanking-check: clean/);
+  assert.match(result.stdout, /Unreachable by this scan/);
 });
 
 // ── claim: "no caller is edited by this task and no existing mutation detector changes
@@ -278,16 +286,19 @@ test("this check script contains none of the mutating fs calls -- it cannot edit
   }
 });
 
-test("the real corpus's two named-in-the-task-note mutation-detector files are still present, unedited by this task", () => {
-  // The task's own note: "ONE SITE IS ALREADY FIXED FOR THE OTHER HALF OF ITS PROBLEM AND STILL
-  // HAS THIS ONE" -- test/ledger-rotation.test.ts (W1-T964) and test/dispatch-lifetime-breaker.test.ts
-  // (W1-T951) both still strip NODE_TEST_CONTEXT without blanking NODE_V8_COVERAGE. If either had
-  // been edited (by this task, which must not touch callers) this scan's suspects list would
-  // change shape.
-  const { suspects } = scanRepo(REPO_ROOT);
+test("the real corpus's two named-in-the-task-note mutation-detector files are still tracked and are no longer suspects (W1-T2732 cleared them)", () => {
+  // W1-T2292's own note pinned test/ledger-rotation.test.ts (W1-T964) and
+  // test/dispatch-lifetime-breaker.test.ts (W1-T951) as two callers that DELIBERATELY stayed
+  // unblanked, because that task's own scope fence forbade touching callers. W1-T2732 is the
+  // successor whose whole remit is clearing exactly that population -- both files now blank
+  // NODE_V8_COVERAGE alongside their existing NODE_TEST_CONTEXT strip (see each file's own
+  // "W1-T2732" comment), and the mutation-detector tests below prove each file's OWN pinning
+  // check still fires correctly after that edit.
+  const { suspects, filesScanned } = scanRepo(REPO_ROOT);
   const files = suspects.map((s) => s.file);
-  assert.ok(files.includes("test/ledger-rotation.test.ts"), "ledger-rotation.test.ts must be untouched by this task");
-  assert.ok(files.includes("test/dispatch-lifetime-breaker.test.ts"), "dispatch-lifetime-breaker.test.ts must be untouched by this task");
+  assert.ok(filesScanned > 700, `sanity: the scan must actually have read a real corpus (got ${filesScanned})`);
+  assert.ok(!files.includes("test/ledger-rotation.test.ts"), "ledger-rotation.test.ts was cleared by W1-T2732");
+  assert.ok(!files.includes("test/dispatch-lifetime-breaker.test.ts"), "dispatch-lifetime-breaker.test.ts was cleared by W1-T2732");
 });
 
 // Same discipline, same reason, as test/tracked-source-write-guard.test.ts's own MUTATION_DETECTORS
@@ -321,6 +332,9 @@ for (const { file, name } of MUTATION_DETECTORS) {
     // not touch.
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
+    // W1-T2732: this file's own scanner would flag the strip above as unblanked -- blank the
+    // coverage var too, same remedy as every other tracked test file this task cleared.
+    childEnv.NODE_V8_COVERAGE = undefined;
     const result = spawnSync(process.execPath, args, { cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, env: childEnv });
     assert.equal(
       result.status,

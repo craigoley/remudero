@@ -527,6 +527,9 @@ test("W1-T951: removing the durable credit lookup fails the positive test", () =
     // reason (a silently-skipped child looks identical to a clean exit).
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
+    // W1-T2732: blank the coverage session var too -- `delete` is a no-op on it, and an unblanked
+    // value would silently enrol this child in whatever coverage session is running this suite.
+    childEnv.NODE_V8_COVERAGE = undefined;
     childResult = spawnSync(process.execPath, args, { cwd: sandbox, encoding: "utf8", timeout: 90_000, env: childEnv });
   } finally {
     // The sandbox goes away regardless of what the child did. There is nothing to RESTORE: the

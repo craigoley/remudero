@@ -147,7 +147,9 @@ function driveReviewCommand(scratchDir: string, scenarios: ProbeScenario[]): Pro
     const childEnv = { ...process.env };
     // Same hygiene as test/base-blob-read-failure.test.ts's own probe: a coverage-instrumented
     // child that never exercises most of the module graph it loads only pollutes the ratchet.
-    delete childEnv.NODE_V8_COVERAGE;
+    // W1-T2732: `delete` is a no-op -- node force-injects NODE_V8_COVERAGE into spawned children
+    // regardless of the env option, so blank it instead.
+    childEnv.NODE_V8_COVERAGE = undefined;
     const r = spawnSync(process.execPath, ["--import", "tsx", script, "--repo-root", scratchDir], {
       cwd: REPO_ROOT, // so the bare `tsx` loader specifier resolves from THIS checkout's node_modules
       encoding: "utf8",

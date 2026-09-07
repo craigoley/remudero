@@ -39,12 +39,6 @@ export const EXECUTABLE_RE = /\.(?:mjs|js|cjs|ts|sh)$/;
  *  header); a script that is wired or gone is reported as stale by scanRepo below. */
 export const ALLOWANCE = [
   {
-    script: "scripts/coverage-session-blanking-check.mjs",
-    reason:
-      "W1-T2732 owns the wiring; the check exits 1 today on 3 delete-is-noop defects and 16 " +
-      "unblanked-NODE_TEST_CONTEXT findings, so wiring it here would redden every open PR at once.",
-  },
-  {
     script: "scripts/credit-surface-gate.mjs",
     reason:
       "W1-T1214 design (v) deferred the workflow step to a successor that was never filed. It " +

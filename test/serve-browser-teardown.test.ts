@@ -73,6 +73,10 @@ test("every browser-launching test file awaits the launch PROMISE in teardown, n
 function cleanTestEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  // W1-T2732: also blank the coverage session var -- `delete` on it is a no-op (node re-injects
+  // it into every spawned child), so an unblanked value here would silently enrol this fresh
+  // child in whatever coverage session is running this very suite.
+  env.NODE_V8_COVERAGE = undefined;
   return env;
 }
 
