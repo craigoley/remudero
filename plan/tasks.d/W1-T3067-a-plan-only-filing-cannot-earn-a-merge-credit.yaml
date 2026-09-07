@@ -1,0 +1,127 @@
+- id: W1-T3067
+  title: "`ownsOwnRunBranch` SKIPS THE DIFF-BASED PLAN-ONLY REFUSAL ON THE ASSUMPTION THAT A RUN-BRANCH PR IS AN IMPLEMENTATION BY CONSTRUCTION, AND IT IS NOT — a worker dispatched on a task can open a `chore(plan)` amendment from that same branch, which is exactly what #3195 and #3896 are; the ledger arm cannot catch them either, so both refusals miss and a filing earns a merge credit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 18.00
+  files: [src/lib/status.ts, test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts]
+  origin: "operator-session#4461-closed-by-a-filing-credit-2026-09-07"
+  plan_refs: ["W1-T413", "W1-T3063", "W1-T2794", "W1-T75"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ⚠ CORRECTED AFTER FILING. This shard was first written blaming the LEDGER arm alone. That arm is
+    genuinely broken (below), but it is the SECOND of two refusals, and re-checking the source found
+    the first one being skipped outright. The corrected cause is recorded here rather than quietly
+    swapped, because the original reading would have produced a fix that left the real bypass open.
+
+    THE DIFF-BASED REFUSAL EXISTS AND IS SKIPPED. src/lib/status.ts:
+
+      const planOnlyDiffRefusal =
+        wouldCredit && !planOnlyFilingRefusal && !ownsOwnRunBranch(head, task.id)
+          ? (() => { const files = deps.github.changedFiles?.(trailerPr.url);
+                     return files !== undefined && isPlanOnlyChangeset(files); })()
+
+    Its own comment states the assumption: "a worker's own run-branch PR is an implementation by
+    construction, so only the residual case pays". THAT ASSUMPTION IS FALSE. A worker dispatched on
+    a task opens its PR from `run-<id>-<epoch>`, and nothing obliges that PR to be an
+    implementation — a lane that decides the right move is an amendment files one from the same
+    branch. MEASURED: #3195's head is `run-W1-T2371-1787887882921` and its whole diff is
+    `plan/tasks.d/W1-T2371-*.yaml`; #3896's head is `run-W1-T2648-1788508326964`. Both are exactly
+    the shape the shortcut waves through.
+
+    AND THE LEDGER ARM CANNOT CATCH THEM EITHER, so nothing does. `isPlanOnlyFilingPr` is
+    `ledgerLines.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true)`,
+    and it fails open for two independent reasons: older rows carry no `plan_only` key at all
+    (#3195's archived row, verbatim, has none), and `deriveStatus` reads the LIVE ledger, which
+    retains only 200 `pr.opened` rows — measured at exactly 200, with #3195's in an archive.
+
+    WHAT IT COST. W1-T2794's supersession rung closed PR #4461, a validated implementation of
+    W1-T2371, because the task read merged — credited to #3195.
+
+    MEASURED BLAST RADIUS, 2026-09-07: of 255 merge-credited tasks, 5 were credited by a PR whose
+    merge subject is a filing subject — W1-T526/#1926, W1-T991/#2146, W1-T2371/#3195,
+    W1-T2611/#3614, W1-T2648/#3896.
+
+    ⚠ AND THE SUBJECT IS THE WRONG DISCRIMINATOR, WHICH THAT SAME SAMPLE SHOWS. #3614
+    (`docs: retire stale CLAUDE.md cap figures`) IS W1-T2611's implementation — retiring the figures
+    is the work — and #1926/#2146 (`chore: wip …`) are ordinary implementations under a sloppy
+    prefix. Classifying by subject would strip three correct credits to fix two wrong ones. W1-T3063
+    uses the subject ONLY to gate a destructive close, where erring toward "leave the PR open" is
+    free; it is not fit to decide credit.
+
+    THE CHANGED PATHS ARE GROUND TRUTH AND ARE ALREADY CLASSIFIED. `isPlanOnlyChangeset` and
+    `isInPlanScope` already exist and already decide this correctly — the defect is not that the
+    repo lacks the predicate, it is that the shortcut prevents the predicate from being consulted.
+
+  design: |
+    (i) STOP SKIPPING THE REFUSAL THAT ALREADY WORKS. The change is to `ownsOwnRunBranch`'s role:
+    it may no longer suppress the diff-based plan-only refusal. A run branch says WHO opened the PR,
+    never WHAT is in it, and the changed paths already answer the latter correctly.
+
+    (i-b) AND PAY FOR IT LOCALLY, NOT PER-PR OVER THE NETWORK. The shortcut existed as a COST
+    control — `deps.github.changedFiles` is a GitHub call and `deriveStatus` runs once per plan task
+    (~1,400 a pass). Supply the changed paths from ONE local `git log origin/main --name-only` built
+    per pass and threaded through the existing `DeriveDeps` seam, so removing the shortcut costs no
+    network at all. Fall back to the existing `changedFiles` call only when the local map has no
+    entry, which preserves today's behaviour exactly for anything outside the scanned window.
+
+    (ii) SUBTRACT-ONLY, AND THE DIRECTION IS THE SAFETY PROPERTY. `applyCreditOverride`'s own doc
+    states the discipline — "an uncredited projection returns untouched, so no row can manufacture
+    credit". This task only ever makes a REFUSAL fire that already should have. It cannot mark
+    anything merged; every failure mode is a task staying uncredited one pass longer.
+
+    (iii) ONE LOCAL READ FOR THE WHOLE PASS, NOT ONE PER TASK. `git log origin/main --format=... 
+    --name-only` yields every merge commit's PR number and changed paths in a single invocation.
+    `deriveStatus` is called once per plan task — around 1,400 — so a per-task `git show` would be
+    1,400 subprocesses a sweep. Build the map once and pass it through the existing `DeriveDeps`
+    seam, the way `ledgerPath` and `github` already travel.
+
+    (iv) AN UNREADABLE MAP CHANGES NOTHING. No entry for a PR means the path arm abstains and the
+    ledger arm decides alone — exactly today's behaviour. The fix must never turn a failed git read
+    into a refusal, or a transient error would silently uncredit the plan.
+
+    (v) DO NOT TOUCH THE SUBJECT PATH. W1-T3063's `FILING_SUBJECT_RE` gates a destructive close and
+    stays as it is. This task must not make credit depend on a subject; the measurement above is why.
+  acceptance:
+    - claim: "a merge commit touching only plan-scope paths refuses the credit even when no ledger row carries plan_only"
+      proof: "unit test: test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts"
+    - claim: "a merge commit touching any non-plan path keeps its credit, so a docs or src implementation under a filing-shaped subject is not stripped"
+      proof: "unit test: test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts"
+    - claim: "an absent or unreadable path map leaves the existing ledger-only behaviour byte-identical"
+      proof: "unit test: test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts"
+    - claim: "the refusal is subtract-only: no input to this path can turn an uncredited task into a credited one"
+      proof: "unit test: test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts"
+  falsifier: |
+    THE FIVE MEASURED CREDITS ARE THE FIXTURE, AND THE TEST MUST SPLIT THEM CORRECTLY. Assert
+    #3195-shaped (only `plan/tasks.d/x.yaml`) REFUSES, and #3614-shaped (`CLAUDE.md`) KEEPS. A
+    change that refuses both is the subject-matcher's error in a new place and is worse than the
+    defect: it would strip three correct credits to fix two wrong ones.
+
+    AND THE DIRECTION MUST BE PROVABLE. Assert that for an UNCREDITED projection, every input to
+    this path — plan-only map, empty map, missing map — leaves it uncredited. If any arrangement can
+    create credit, the subtract-only claim is false and the change must not ship.
+
+    PROVE IT LOAD-BEARING: with the path arm removed, the no-ledger-row row must redden while the
+    non-plan-path row and the subtract-only rows stay green. A test that reddens everywhere is
+    pinning the arm's existence rather than what it decides.
+  note: |
+    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3067`.
+
+    THIS IS THE SOURCE DEFECT BEHIND #4461. W1-T3063 (in flight) makes the DESTRUCTIVE consumer safe
+    by refusing to close without positive implementation evidence; this makes the CREDIT itself
+    correct. They are complements: W1-T3063 protects one act, this protects every reader of the
+    projection — the board, `lint-plan`'s open-task split, and `rmd plan-reconcile`, which writes
+    `status:` into the shards themselves.
+
+    ⚠ THAT LAST CONSUMER IS WHY THIS IS WORTH DOING NOW. W1-T3043's reconcile verb writes
+    `status: merged` onto every credited shard. Run against today's projection it would stamp a
+    filing-earned credit into the plan file permanently, where no later reader could tell it from a
+    real one.
+
+    risk:high is BLAST RADIUS. The projection is read by nearly everything; the mitigation is that
+    the change is subtract-only and abstains whenever its new evidence is unavailable.
