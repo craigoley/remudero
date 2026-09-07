@@ -67,7 +67,7 @@
     - claim: "each grammar statement CLAUDE.md's proof section quotes agrees with the live descriptor"
       proof: "unit test: test/proof-dialect-doc.test.ts"
     - claim: "the page and its check are wired the way the cli reference is"
-      proof: "grep: proof-dialect:check in package.json"
+      proof: "grep: generate-proof-dialect\\.mjs in package.json"
     - claim: "the page is tracked and names the header shape"
       proof: "grep: ACCEPTANCE_HEADER_RE in docs/proof-dialect.md"
   risk: high
