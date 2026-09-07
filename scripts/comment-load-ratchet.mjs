@@ -130,6 +130,40 @@ export function readBaseline(text, path) {
 }
 
 /**
+ * W1-T3022 -- THE BUCKET, adopted from scripts/source-size-ratchet.mjs's CEILING_BUCKET_LINES
+ * (W1-T2539). A recorded ceiling rounds UP to a multiple of this, so two PRs that cross the same
+ * boundary write the SAME value and merge without a conflict.
+ *
+ * INVARIANT, in this file's own words before this constant existed: "two concurrent PRs that both
+ * grow the SAME file edit the same line here and conflict. If that becomes common the fix is that
+ * file's bucket trick (CEILING_BUCKET_LINES), not a wider gate." IT BECAME COMMON. Measured
+ * 2026-09-07: all FOUR open CONFLICTING pull requests (#4360, #4383, #4394, #4395) conflicted on
+ * this file and nothing else, and every one of them on the SAME key, src/run-task.ts -- main
+ * 16427 against 16432 / 16468 / 16493 / 16434. All five round to 16500.
+ *
+ * WHY 250 AND NOT THE SIBLING'S 500: sized the way W1-T2539 sized its own, against measured
+ * single-commit growth in this baseline over 60 days -- 83 growth events, p50 16, p90 46, MAX 68.
+ * 250 exceeds that maximum by 3.7x, so no one commit crosses a bucket from a standing start; 500
+ * would exceed the MEAN FILE (216 comment lines) and park most of the corpus in a single bucket,
+ * which would retire the gate rather than debounce it.
+ *
+ * TRAP, stated because it is the real cost: a file may now grow up to 249 comment lines past its
+ * last ceiling before this gate notices. That is the coarseness the bucket trades for, and it is
+ * the same trade W1-T2526 records for the size ledger -- this gate is a REVIEW SIGNAL about
+ * volume, and grades no falsifier.
+ *
+ * Migration is lazy: an existing exact entry stays valid until its file next grows past it, at
+ * which point the refusal prints the bucketed value to record.
+ */
+export const CEILING_BUCKET_COMMENTS = 250;
+
+/** The ceiling a file of `comments` comment lines records: rounded UP to the next
+ *  {@link CEILING_BUCKET_COMMENTS}. Never 0 -- a comment-free file still gets one full bucket. */
+export function ceilingForComments(comments) {
+  return Math.max(CEILING_BUCKET_COMMENTS, Math.ceil(comments / CEILING_BUCKET_COMMENTS) * CEILING_BUCKET_COMMENTS);
+}
+
+/**
  * Pure verdict over one run's measured counts.
  *
  *   - absent from baseline      -> ADDED; recorded at today's count.
@@ -148,14 +182,19 @@ export function evaluateCommentLoadRatchet(currentComments, baseline) {
     const comments = currentComments[path];
     const recorded = baseline[path];
     if (recorded === undefined) {
+      // W1-T3022: a new file records its BUCKET, so two PRs adding the same file agree.
       added.push({ path, comments });
-      nextBaseline[path] = comments;
+      nextBaseline[path] = ceilingForComments(comments);
     } else if (comments > recorded) {
+      // Unchanged: growth past the recorded ceiling is still refused, and the old ceiling is still
+      // never advanced automatically. Only the value the refusal ASKS for is bucketed.
       violations.push({ path, comments, baseline: recorded, overage: comments - recorded });
       nextBaseline[path] = recorded;
-    } else if (comments < recorded) {
-      shrunk.push({ path, from: recorded, to: comments });
-      nextBaseline[path] = comments;
+    } else if (ceilingForComments(comments) < recorded) {
+      // W1-T3022: lowered only by a WHOLE BUCKET. An exact-count shrink used to rewrite this entry
+      // on any decrease, which is the same every-PR-edits-the-same-line churn the bucket removes.
+      shrunk.push({ path, from: recorded, to: ceilingForComments(comments) });
+      nextBaseline[path] = ceilingForComments(comments);
     } else {
       nextBaseline[path] = recorded;
     }
@@ -283,7 +322,9 @@ function reportGrowth(violations, baselineRelPath) {
   console.error(`  TO FIX, in this same PR, either way: (a) shorten the prose you added -- see docs/comment-standard.md`);
   console.error(`  for what a comment must state and what may be cut; or (b) if the growth is right, record it in`);
   console.error(`  ${baselineRelPath} so a reviewer reads the decision, setting:`);
-  for (const v of violations) console.error(`    "${v.path}": ${v.comments},`);
+  // W1-T3022: print the BUCKET, never the exact count -- an author who records what the refusal
+  // prints must end up with a value another concurrent PR would write identically.
+  for (const v of violations) console.error(`    "${v.path}": ${ceilingForComments(v.comments)},`);
   console.error(`  Re-run this script afterwards; it must print "OK". Recording is an ordinary, reviewed outcome, not a defeat.`);
   console.error(`  THEN RE-DERIVE ANY FILE-COUNT CLAIM IN THE PR BODY from \`git diff --name-only origin/main...HEAD\`:`);
   console.error(`  editing the baseline changes the diff, and \`bodyContradictsDiff\` fails a body whose "exactly N files"`);

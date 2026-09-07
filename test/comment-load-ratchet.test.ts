@@ -122,19 +122,39 @@ test("the tokenizer counts every comment shape, ignores blank lines, and never c
 
 // ── the baseline half ────────────────────────────────────────────────────────────────────────
 
-test("evaluate: growth violates, a shrink ratchets down, a new file is recorded, a gone file is dropped", () => {
+test("evaluate: growth violates, a WHOLE-BUCKET shrink ratchets down, a new file records its bucket, a gone file is dropped", () => {
+  // W1-T3022: values chosen to cross bucket boundaries, because a shrink INSIDE one bucket no
+  // longer rewrites the entry — that churn is the conflict this task removes. The next test pins
+  // the inside-a-bucket case directly.
   const verdict = evaluateCommentLoadRatchet(
-    { "src/grew.ts": 12, "src/shrank.ts": 3, "src/new.ts": 5, "src/same.ts": 7 },
-    { "src/grew.ts": 10, "src/shrank.ts": 9, "src/same.ts": 7, "src/gone.ts": 4 },
+    { "src/grew.ts": 300, "src/shrank.ts": 100, "src/new.ts": 5, "src/same.ts": 250 },
+    { "src/grew.ts": 250, "src/shrank.ts": 900, "src/same.ts": 250, "src/gone.ts": 4 },
   );
   assert.equal(verdict.ok, false);
-  assert.deepEqual(verdict.violations, [{ path: "src/grew.ts", comments: 12, baseline: 10, overage: 2 }]);
-  assert.deepEqual(verdict.shrunk, [{ path: "src/shrank.ts", from: 9, to: 3 }]);
+  assert.deepEqual(verdict.violations, [{ path: "src/grew.ts", comments: 300, baseline: 250, overage: 50 }]);
+  assert.deepEqual(verdict.shrunk, [{ path: "src/shrank.ts", from: 900, to: 250 }], "900 -> 250 crosses whole buckets");
   assert.deepEqual(verdict.added, [{ path: "src/new.ts", comments: 5 }]);
   assert.deepEqual(verdict.removed, ["src/gone.ts"]);
   // A grown file's ceiling is NEVER advanced by the run that found the growth.
-  assert.equal(verdict.nextBaseline["src/grew.ts"], 10);
-  assert.equal(verdict.nextBaseline["src/shrank.ts"], 3);
+  assert.equal(verdict.nextBaseline["src/grew.ts"], 250);
+  assert.equal(verdict.nextBaseline["src/shrank.ts"], 250);
+  assert.equal(verdict.nextBaseline["src/new.ts"], 250, "a new file records its BUCKET, so two PRs adding it agree");
+});
+
+test("W1-T3022: a shrink INSIDE one bucket leaves the entry untouched — the every-PR-edits-this-line churn", () => {
+  const verdict = evaluateCommentLoadRatchet({ "src/a.ts": 100 }, { "src/a.ts": 250 });
+  assert.equal(verdict.ok, true);
+  assert.deepEqual(verdict.shrunk, [], "100 and 250 are the same bucket — nothing to rewrite");
+  assert.equal(verdict.nextBaseline["src/a.ts"], 250);
+});
+
+test("W1-T3022: two concurrent growths of one file record the SAME value — the conflict, removed", () => {
+  // The measured shape: main 16427, four PRs at 16432 / 16468 / 16493 / 16434, all conflicting on
+  // this one key. Every one of them records 16500.
+  const written = [16427, 16432, 16468, 16493, 16434].map(
+    (c) => evaluateCommentLoadRatchet({ "src/run-task.ts": c }, {}).nextBaseline["src/run-task.ts"],
+  );
+  assert.deepEqual(written, [16500, 16500, 16500, 16500, 16500], "identical values do not conflict in a text merge");
 });
 
 test("CLI: a file that grew past its ceiling is REFUSED, named, and exits 1", () => {
@@ -150,13 +170,15 @@ test("CLI: a file that grew past its ceiling is REFUSED, named, and exits 1", ()
   }
 });
 
-test("CLI: a file that shrank has its ceiling REWRITTEN DOWN in the baseline, and the run passes", () => {
-  const root = fixtureRepo({ "src/a.ts": 5, "scripts/comment-load-baseline.json": 0 }, `// one\n${CLEAN}`);
+test("CLI: a file that shrank BY A WHOLE BUCKET has its ceiling REWRITTEN DOWN in the baseline, and the run passes", () => {
+  // W1-T3022: 600 -> one comment line crosses buckets, so the gain is still held; a shrink inside
+  // one bucket deliberately does not rewrite the entry (see the evaluate tests above).
+  const root = fixtureRepo({ "src/a.ts": 600, "scripts/comment-load-baseline.json": 0 }, `// one\n${CLEAN}`);
   try {
     const res = run(root);
     assert.equal(res.status, 0, res.stdout + res.stderr);
     const written = JSON.parse(readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8"));
-    assert.equal(written["src/a.ts"], 1, "the gain must be held, not left at the old ceiling of 5");
+    assert.equal(written["src/a.ts"], 250, "the gain must be held at the BUCKET, not left at the old ceiling of 600");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -355,13 +377,15 @@ test("main --json: emits a schema-versioned report and carries the same verdict 
 });
 
 test("main --check: refuses to leave a required baseline change unwritten, and names each one", () => {
-  const root = fixtureRepo({ "src/a.ts": 5, "src/gone.ts": 3, "scripts/comment-load-baseline.json": 0 }, `// one\n${CLEAN}`);
+  // W1-T3022: 600 crosses a bucket down to 250, so a "lower" line is still required; 5 -> 1 no
+  // longer is, because both sit inside one bucket.
+  const root = fixtureRepo({ "src/a.ts": 600, "src/gone.ts": 3, "scripts/comment-load-baseline.json": 0 }, `// one\n${CLEAN}`);
   try {
     const before = readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8");
     const { code, err } = runInProcess(["--root", root, "--base", "main", "--check"]);
     assert.equal(code, 1);
     assert.match(err, /CHECK FAILED/);
-    assert.match(err, /lower {2}"src\/a\.ts": 5 -> 1/);
+    assert.match(err, /lower {2}"src\/a\.ts": 600 -> 250/);
     assert.match(err, /remove "src\/gone\.ts"/);
     assert.equal(
       readFileSync(join(root, "scripts", "comment-load-baseline.json"), "utf8"),
