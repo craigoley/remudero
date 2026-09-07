@@ -43,3 +43,44 @@ test("W1-T2997: the contract does not reinstate the full ci-parity step", () => 
     "W1-T464's removal stands: ~15-17 minutes of a ~61-minute lane, gating nothing");
   assert.match(contract, /Do not run it/, "and the worker is told so explicitly, not left to infer it");
 });
+
+// ── W1-T3039: the contract names the census-membership route ─────────────────────────────────────
+
+/*
+ * WHY THIS LINE EXISTS. W1-T464 removed the full CI-parity preflight from the worker contract for
+ * a sound reason — ~15-17 minutes of a ~61-minute lane, and the orchestrator never gated on it.
+ * W1-T2997 put back the two CHEAP ratchets. That was the right direction and too narrow: a whole
+ * class of failure still reached CI, the CENSUS suites, which walk a population and assert a
+ * property of the WHOLE SET. Those redden on a file referencing nothing they touch, so
+ * `git grep <symbol>` cannot find them — CLAUDE.md's own clause (j).
+ *
+ * `rmd census-membership` (W1-T2969) already computes the map from a diff to those suites and
+ * nothing told a worker to run it. MEASURED 2026-09-07 against the gates that actually refused
+ * that day: run-task.ts -> command-registry-census, policy.ts -> config-reader-seams-census,
+ * dep-review.ts -> negative-reachability-census, a new test/ file -> source-text-census. Four of
+ * five, each a CI cycle that need not have been spent. Cost: 1.4s for the verb, ~0.8s per suite.
+ *
+ * IT MUST STAY DISTINGUISHABLE FROM THE PREFLIGHT W1-T464 REMOVED, which is why the contract says
+ * so in its own words and test/ci-parity-contract.test.ts still forbids the literal command.
+ */
+
+test("W1-T3039: the contract routes a worker to the census suites its own diff joins", () => {
+  const text = ratchetContractLines().join("\n");
+  assert.match(text, /rmd census-membership/, "the verb that computes the map must be named");
+  assert.match(text, /WALKS a population/i, "and why those suites are invisible to a symbol grep");
+  assert.match(text, /your OWN diff can move/i, "scoped to the diff, never the whole tree");
+});
+
+test("W1-T3039: it is stated as NARROWING the gap, not closing it — instrument-surface is not in the map", () => {
+  // An overclaim here is the failure mode: a worker told "this covers it" stops looking. The map
+  // did NOT name instrument-surface for src/lib/review.ts on the day it was measured.
+  const text = ratchetContractLines().join("\n");
+  assert.match(text, /instrument-surface/, "the known gap must be named");
+  assert.match(text, /does not close it/i, "and the limit stated plainly");
+});
+
+test("W1-T3039: it still does not resurrect the full preflight W1-T464 removed", () => {
+  const text = ratchetContractLines().join("\n");
+  assert.doesNotMatch(text, /rmd preflight --ci-parity/, "W1-T464's own guard, restated here");
+  assert.match(text, /NOT the full preflight/i);
+});
