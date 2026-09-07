@@ -53,17 +53,25 @@ function gitAdd(root: string) {
   execFileSync("git", ["-C", root, "add", "-A"], { encoding: "utf8" });
 }
 
-/** W1-T3043 CORRECTION: `merge-base(HEAD, origin/main)` is this task's own fork point only WHILE
- *  this PR is still open. Once #4419 merged, `HEAD` in every LATER PR's CI run is that PR's own
- *  tip and `origin/main` is current main -- so `merge-base` collapses to THAT PR's own fork point,
- *  and the two tests below stop being "acceptance proof for W1-T2732" and become "no future PR may
- *  ever touch src/", which read: it reddened the very first PR to re-run CI after #4419 landed
- *  (W1-T3043, which had never touched this file). Pinning both endpoints to the two commits that
- *  actually bound #4419's own diff (03a9a68a0's sole parent, and 03a9a68a0 itself) keeps the
- *  historical fact the comments below assert -- permanently, since neither commit moves -- without
- *  reading every later PR's own src/ changes as a violation of a task that already shipped. */
-const SHIPPED_TASK_BASE = "64565c6ca92905a450467faba065e71463ca6e51";
-const SHIPPED_TASK_HEAD = "03a9a68a04d74d173e7b9e7fe4309d66201840ef";
+/** W1-T2732's OWN merged diff (#4419, `03a9a68a`) — the range the two SCOPE FENCES below have
+ *  always been about: "the detector script is byte-for-byte unedited" and "no src/ path is added".
+ *  Both were constraints on THIS TASK'S diff, and `forkPoint()` expressed that correctly only
+ *  while its PR was open.
+ *
+ *  ONCE MERGED THEY RE-ARMED AGAINST EVERY LATER PR. `git diff <merge-base>` on any other branch
+ *  is that branch's own diff, so the fences silently became "no PR may ever add a src/ path" and
+ *  "no PR may ever edit the detector" — assertions this task never made and could not enforce.
+ *  MEASURED 2026-09-07: they failed #4450 (W1-T3040) and #4455 (W1-T2762), neither of which has
+ *  anything to do with this detector, each on a shard whose FLAKE-RETRY also failed; every
+ *  src/-touching PR after them would fail the same way.
+ *
+ *  Pinning to the fixed historical range keeps BOTH assertions verbatim and permanently
+ *  checkable — they are claims about what W1-T2732 shipped, which is settled — while constraining
+ *  nobody else. `forkPoint()` is REMOVED rather than kept: pinning left it with no callers, and an
+ *  earlier revision of this comment claimed it still served "the live checks above" — it did not.
+ *  W1-T3043's lane reached the identical pins independently (64565c6c..03a9a68a, verified equal to
+ *  `03a9a68a~1..03a9a68a`), which is corroboration, not coincidence. Why: W1-T3040 / W1-T3043. */
+const W1_T2732_DIFF = ["03a9a68a~1", "03a9a68a"];
 
 // ── acceptance 1: "the check runs in CI as a required gate ... named by the same script path
 // the repository already uses for its sibling gates" ────────────────────────────────────────
@@ -194,19 +202,15 @@ test("both the clean run and a violation run still print the blind-spots stateme
 // deleted outright, and its full 25/25-passing suite is unaffected otherwise -- verified by
 // running it, not merely asserted here.
 test("the detector script itself is byte-for-byte unedited against this task's own fork point", () => {
-  const result = spawnSync(
-    "git",
-    ["diff", "--quiet", SHIPPED_TASK_BASE, SHIPPED_TASK_HEAD, "--", "scripts/coverage-session-blanking-check.mjs"],
-    { cwd: REPO_ROOT, encoding: "utf8" },
-  );
+  const result = spawnSync("git", ["diff", "--quiet", ...W1_T2732_DIFF, "--", "scripts/coverage-session-blanking-check.mjs"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
   assert.equal(result.status, 0, "scripts/coverage-session-blanking-check.mjs must not be edited by this task");
 });
 
 test("no src/ path is added to this diff", () => {
-  const result = spawnSync("git", ["diff", "--name-only", SHIPPED_TASK_BASE, SHIPPED_TASK_HEAD], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  });
+  const result = spawnSync("git", ["diff", "--name-only", ...W1_T2732_DIFF], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const srcPaths = result.stdout.split("\n").filter((p) => p.startsWith("src/"));
   assert.deepEqual(srcPaths, [], `no src/ path may ride with this diff; found:\n${srcPaths.join("\n")}`);

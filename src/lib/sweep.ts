@@ -614,6 +614,16 @@ export interface OpenPrView {
   actionableGateFailures?: ActionableGateFailure[];
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
   priorStrikes: number;
+  /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
+   *  credit projection ({@link CreditCandidate} with `merged: true`). STRICTLY STRONGER EVIDENCE
+   *  than {@link supersededBy}, which means only that a higher-numbered OPEN peer shares the
+   *  trailer: this one says the task is DONE, by a PR GitHub proves merged.
+   *
+   *  ⚠ ABSENT MEANS UNKNOWN, NEVER "NOT MERGED". Closing is destructive queue hygiene, so every
+   *  darkness — no candidate set, an unreadable projection, a PR with no task id, or a candidate
+   *  that does not read `merged: true` — leaves this undefined and the PR's disposition unchanged.
+   *  Populated by {@link projectMergedTaskCandidates}; never inferred from YAML `status:`. */
+  taskMergedBy?: number;
   /** A NEWER open PR crediting the same task supersedes this one. */
   supersededBy?: number;
   /** W1-T920 — a {@link SupersessionVerdict} for this PR, gated and default OFF. Distinct from
@@ -1232,6 +1242,37 @@ export function isBlockedCi(pr: OpenPrView): boolean {
   return pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0; // W1-T2504
 }
 
+/** W1-T2794 — stamp {@link OpenPrView.taskMergedBy} onto each open PR whose task a credit
+ *  candidate proves MERGED. PURE: no I/O, no GitHub call, no ledger read — the caller already
+ *  built this candidate set for the credit-backfill rung, and this reuses that same array rather
+ *  than deriving a second one.
+ *
+ *  ⚠ FAIL OPEN ON DARKNESS, WHICH IS THE WHOLE SAFETY PROPERTY. Only a candidate with
+ *  `merged === true` and a concrete `prNumber` can stamp anything. An empty or absent candidate
+ *  array (a failed projection is indistinguishable from "nothing merged"), a PR carrying no
+ *  `taskId`, or a candidate for another task all leave the view BYTE-IDENTICAL — so a read failure
+ *  can never be laundered into a close.
+ *
+ *  ⚠ AND NEVER THE WINNER ITSELF. A candidate naming this very PR is skipped: the merged PR is not
+ *  normally in the open array at all, but a stale listing must not be able to close the PR that
+ *  did the work. */
+export function projectMergedTaskCandidates(
+  prs: readonly OpenPrView[],
+  candidates: readonly CreditCandidate[] | undefined,
+): OpenPrView[] {
+  const mergedByTask = new Map<string, number>();
+  for (const c of candidates ?? []) {
+    if (c.merged === true && typeof c.prNumber === "number" && c.taskId) mergedByTask.set(c.taskId, c.prNumber);
+  }
+  if (mergedByTask.size === 0) return [...prs];
+  return prs.map((pr) => {
+    if (pr.taskId === undefined) return pr;
+    const mergedBy = mergedByTask.get(pr.taskId);
+    if (mergedBy === undefined || mergedBy === pr.prNumber) return pr;
+    return { ...pr, taskMergedBy: mergedBy };
+  });
+}
+
 /** W1-T1269 — does the CURRENT unmet-criteria set repeat, claim-for-claim, what the most recent
  *  strike was already dispatched to resolve? THE EARLIER STOP, never a longer leash. KEYED ON
  *  IDENTITY, NEVER ON COUNT, and stops ONLY on an EXACT match — the inclusion-descent rule is
@@ -1742,6 +1783,24 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
         `over ${ev.diff.rawLineCount} raw line(s) [corpus control]`
       );
     },
+  },
+  {
+    // W1-T2794 — A TASK ALREADY MERGED BEATS EVERY OPEN-PEER ARGUMENT, so this row sits ABOVE the
+    // `supersededBy` row below it. That row's arithmetic is "a higher-numbered OPEN peer shares
+    // this trailer", which vanished the moment the winner merged and left the open array — which is
+    // exactly how #3877 stayed open, was reviewed PASS, and then escalated `blocked-ambiguous`
+    // every sweep after #3874 merged W1-T2786 and the credit rung wrote a durable `verdict.merged`.
+    //
+    // ⚠ THE FIELD IS THE GATE, NOT THIS PREDICATE. `taskMergedBy` is populated ONLY by
+    // {@link projectMergedTaskCandidates} from an ownership-asserted `merged: true` candidate, so
+    // absence here is darkness and this row simply does not match — the PR keeps whatever
+    // disposition it had. Nothing infers completion from YAML `status:`.
+    //
+    // W1-T2779 IS NOT WEAKENED: a plan filing is not a merged implementation candidate, so a
+    // complement can never populate this field and can never be closed by this row.
+    disposition: "stale",
+    when: (pr) => pr.taskMergedBy != null,
+    reason: (pr) => `task ${pr.taskId ?? "(unknown)"} already merged by #${pr.taskMergedBy} — closing the leftover implementation PR`,
   },
   {
     // W1-T932 — LETS THIS ROW YIELD, NEVER DISABLES IT: a guard that works for ordinary duplicate
