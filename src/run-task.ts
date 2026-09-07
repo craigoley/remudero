@@ -6866,6 +6866,32 @@ export interface FixRungOutcome {
   blockedOnPr?: number;
 }
 
+type CiEvidenceDisagreementObservation = {
+  rollup: {
+    checks_state: OpenPrView["checksState"];
+    red_checks: string[];
+  };
+  miner: {
+    enumerable_failures: Array<{ name: string }>;
+  };
+};
+
+function ciEvidenceDisagreementObservation(args: {
+  checksState?: OpenPrView["checksState"];
+  redChecks?: readonly string[];
+  ciFailures: readonly CiFailure[];
+}): CiEvidenceDisagreementObservation {
+  return {
+    rollup: {
+      checks_state: args.checksState ?? "red",
+      red_checks: [...(args.redChecks ?? [])],
+    },
+    miner: {
+      enumerable_failures: args.ciFailures.map((failure) => ({ name: failure.name })),
+    },
+  };
+}
+
 /**
  * W1-T177: the real live-state reader every fix-rung/sweep spending site
  * wires — ONE fresh read, never a cached snapshot. A throw (rate limit,
@@ -8579,6 +8605,7 @@ export async function runFixRung(opts: {
    * review yet").
    */
   ciFailures?: CiFailure[];
+  ciEvidenceDisagreement?: CiEvidenceDisagreementObservation;
   /**
    * W1-T106 (the #170 DIRTY strand): merge-conflict evidence for a
    * `conflicted` dispatch — this PR's merge state is dirty, so no CI check
@@ -9244,6 +9271,19 @@ export async function runFixRung(opts: {
         "blocked_ci dispatch with zero enumerable failing check(s) — the checks-red rollup and the ci-log " +
         "evidence miner disagree, so there is nothing to hand a fix worker; standing down rather than " +
         "spending a strike on empty evidence";
+      const disagreement = opts.ciEvidenceDisagreement
+        ? {
+            rollup: opts.ciEvidenceDisagreement.rollup,
+            miner: ciEvidenceDisagreementObservation({ ciFailures: currentCiFailures }).miner,
+          }
+        : ciEvidenceDisagreementObservation({ ciFailures: currentCiFailures });
+      deps.log("fix.ci_evidence_disagreement", {
+        site: "rung.empty_ci_failures",
+        strike: strikes + 1,
+        reason,
+        rollup: disagreement.rollup,
+        miner: disagreement.miner,
+      });
       deps.log("fix.stood_down", { site: "rung.empty_ci_failures", strike: strikes + 1, reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
       return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
@@ -29428,7 +29468,13 @@ export function buildFixRungDispatchArgs(args: {
   budgetUsd: number;
   strikeCap: number;
   evidence: FixDispatchEvidence;
-  pr: { headSha: string; reviewSummary?: string; pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean } };
+  pr: {
+    headSha: string;
+    reviewSummary?: string;
+    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
+    checksState?: OpenPrView["checksState"];
+    redRequiredChecks?: readonly string[];
+  };
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount };
 }): Omit<Parameters<typeof runFixRung>[0], "deps"> {
   const { evidence, pr } = args;
@@ -29504,6 +29550,13 @@ export function buildFixRungDispatchArgs(args: {
     initialReview,
     constraint: pr.pendingAnswer?.constraint,
     ciFailures: evidence.ciFailures,
+    ciEvidenceDisagreement: isCiLog
+      ? ciEvidenceDisagreementObservation({
+          checksState: pr.checksState,
+          redChecks: pr.redRequiredChecks,
+          ciFailures: evidence.ciFailures ?? [],
+        })
+      : undefined,
     mergeConflict: evidence.mergeConflict,
     // W1-T2236: threaded through unconditionally, mirroring `ciFailures`/`mergeConflict` above —
     // `runFixRung`'s round-1 gate only reads this when it is ALSO a review-mode round (neither
@@ -32649,6 +32702,8 @@ export async function fixCommand(
   // checksStateFromRollup's doc.
   const requiredContexts = ghRequiredStatusCheckContexts(owner, repo);
   const checksState = checksStateFromRollup(raw.statusCheckRollup, requiredContexts);
+  const ciGateRequired = readCiGateRequiredChecks(repoRoot);
+  const redRequiredChecks = redQualityGateNames(raw.statusCheckRollup, ciGateRequired);
   const pr: OpenPrView = {
     prNumber: raw.number,
     prUrl: raw.url,
@@ -32674,6 +32729,7 @@ export async function fixCommand(
     reviewSummary: undefined,
     // W1-T100: the ci-log fix mode's input — see buildOpenPrViews.
     ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, raw.statusCheckRollup) : undefined,
+    redRequiredChecks,
   };
 
   const planPath =
