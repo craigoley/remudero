@@ -42,6 +42,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { pgrepFailureMeansZero } from "./deployer.js";
 import { isHolderStale, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
+import { secretBoundaryEnv, type SecretBoundaryHandles } from "./secret-boundary.js";
 import {
   readClaudeModelHealth,
   resolveClaudeModelHealth,
@@ -203,6 +204,11 @@ export interface WorkerResult {
   /** Worker-home grants LOST or HEALED for this spawn (see {@link lostWorkerHomeGrants}). Absent when every grant landed, so a
    * healthy run's verdict row grows nothing. */
   lostGrants?: WorkerHomeGrantOutcome[];
+  /** W1-T2699: why the per-worktree git credential-helper wiring did NOT apply, when it did not.
+   * Absent on every healthy spawn, so a working boundary grows no field. Present means this worker's
+   * git fell back to the AMBIENT credential path and the boundary was not in force — the one
+   * outcome on this boundary that used to leave no trace anywhere. */
+  credentialHelperUnwired?: string;
   /** `true` the moment ONE compaction fired (`compactionEvents.length > 0`, MASTER-PLAN 8B). This call's acceptance proofs
    * must then be re-verified against repo state (W1-T3F), never trusted from a possibly-lossy REPORT. */
   qualitySuspect: boolean;
@@ -334,6 +340,8 @@ export function workerLedgerFields(r: WorkerResult): {
           ),
         }
       : {}),
+    // Omitted whenever the boundary applied — present only when a worker ran on ambient credentials.
+    ...(r.credentialHelperUnwired ? { credential_helper_unwired: r.credentialHelperUnwired } : {}),
     ...(r.provider ? { provider: r.provider } : {}),
     model: r.model,
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
@@ -845,6 +853,11 @@ export interface SpawnWorkerArgs {
     expectedRunMs: number | undefined,
     spawn: { runId?: string; taskId?: string },
   ) => void;
+  /** W1-T2699: the daemon-held secret boundary. Omitted, `secretBoundaryEnv` is a no-op — this
+   *  spawn's env stays byte-identical, opting in per call site rather than under every caller at
+   *  once. Set, `CLAUDE_CODE_OAUTH_TOKEN` is replaced by a sentinel and a loopback base URL, and
+   *  (with `credentialHelperSocketPath`) `args.cwd`'s local git config points at the socket helper. */
+  secretBoundary?: SecretBoundaryHandles;
 }
 
 let providerTieBreaker = 0;
@@ -1390,9 +1403,36 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // configured. Otherwise ANTHROPIC_* is stripped as before (W1-T258).
       allowApiKey: config.overflow === "api_key",
     });
+    // W1-T2699: every spawn's env routes through secretBoundaryEnv, a no-op absent `args.secretBoundary` (see its doc).
+    // Applied by MUTATING `childEnv` in place rather than rebinding it: W1-T2800's own structural falsifier
+    // (test/codex-worker-home-redirection.test.ts) greps this file's source for the literal `const childEnv =
+    // buildWorkerEnv(...)` assignment above, so `childEnv` stays that exact declaration and the substitution below is a
+    // second, visible step over the SAME object every downstream read (options.env, collectWorkerResult's
+    // childEnvKeys) already closes over.
+    if (args.secretBoundary) {
+      const boundedEnv = secretBoundaryEnv(childEnv, args.secretBoundary);
+      delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
+      Object.assign(childEnv, boundedEnv);
+    }
     // Attribution markers merged in AFTER the allowlist and extras above, so they are authoritative whatever `args.env`
     // contains — no caller has a legitimate reason to set REMUDERO_RUN_ID/TASK_ID/SCOPE itself (W1-T117).
     Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)));
+    // The git-credential half of the boundary (design (ii)): a LOCAL, per-worktree config write.
+    // Best-effort and guarded, mirroring `lostWorkerHomeGrants`'s never-throw contract above.
+    // NOT SWALLOWED. A failure here means the boundary DID NOT APPLY and git falls back to the
+    // ambient `$GH_TOKEN` helper — the exposure this shard closes. Every other decision here is
+    // ledgered, so this one rides `lostGrants`' own channel: the result, rendered by
+    // `workerLedgerFields`, absent when the wiring landed. Still never throws.
+    let credentialHelperUnwired: string | undefined;
+    if (args.secretBoundary?.credentialHelperSocketPath) {
+      try {
+        wireCredentialHelperSocket(args.cwd, args.secretBoundary.credentialHelperSocketPath);
+      } catch (e) {
+        // Not rethrown: a boundary that could not be wired must not fail the run, only be VISIBLE.
+        // The reason leaves this block on the result and is rendered as `credential_helper_unwired`.
+        credentialHelperUnwired = e instanceof Error ? e.message : String(e);
+      }
+    }
 
     const stderrChunks: string[] = [];
     const blocks: string[] = [];
@@ -1492,6 +1532,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // WorkerResult.maxTurns}. `undefined`, never guessed, when no cap was set.
             maxTurns: args.maxTurns,
             lostGrants,
+            credentialHelperUnwired,
             // Read off THIS spawn's `options` by index access, never a property access the `Options` type does not declare,
             // and never written here. `options` sets this key nowhere today, so it is `false` on every real spawn — the
             // ledger row saying so explicitly is the point (W1-T2245).
@@ -1786,6 +1827,8 @@ export async function collectWorkerResult(
     maxTurns?: number;
     /** See {@link WorkerResult.lostGrants} — mirrored verbatim, never re-derived here. */
     lostGrants?: WorkerHomeGrantOutcome[];
+    /** See {@link WorkerResult.credentialHelperUnwired} — mirrored verbatim, never re-derived. */
+    credentialHelperUnwired?: string;
     /** Configured input, mirrored verbatim — see {@link WorkerResult.compactionConfigured}. Defaults to `false`, never guessed
      * `true`, for every caller that omits it (W1-T2245). */
     compactionConfigured?: boolean;
@@ -1959,6 +2002,7 @@ export async function collectWorkerResult(
 
   return {
     ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
+    ...(opts.credentialHelperUnwired ? { credentialHelperUnwired: opts.credentialHelperUnwired } : {}),
     sessionId,
     costUsd,
     numTurns,
@@ -2262,6 +2306,29 @@ export const ADHOC_LANE_REAP_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
  * means this process could not have started. */
 function installRootDir(): string {
   return join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
+}
+
+/** W1-T2699: point `cwd`'s LOCAL git config at the socket-based credential helper, resetting any
+ *  accumulated `credential.helper` first — an empty value clears git's collected helper list
+ *  (MEASURED against git 2.39.5), so the local entry added right after is the only one git tries
+ *  in this worktree, superseding `deploy/entrypoint.sh`'s global `$GH_TOKEN`-reading helper. */
+export function wireCredentialHelperSocket(cwd: string, socketPath: string): void {
+  const helperScript = join(installRootDir(), "scripts", "git-credential-socket-helper.mjs");
+  execFileSync("git", ["-C", cwd, "config", "--local", "credential.helper", ""], { stdio: "ignore" });
+  // WITHOUT THIS, NOTHING IS EVER SCOPED. git's credential context carries protocol+host ONLY
+  // unless `credential.useHttpPath` is set — MEASURED against git 2.39.5: the helper receives
+  // "protocol=https\nhost=github.com" bare, and "protocol=https\nhost=github.com\npath=<owner>/<repo>.git"
+  // with it. `repoFromCredentialRequest` then falls back to the bare host, which names no
+  // owner/repo, and `mintScopedToken` used to answer that by minting an INSTALLATION-WIDE token —
+  // the broadest credential available, in the shard whose whole purpose is the narrowest one.
+  // Setting the path here is what makes the scoping real; mintScopedToken now REFUSES rather
+  // than widening if it ever arrives absent anyway.
+  execFileSync("git", ["-C", cwd, "config", "--local", "credential.useHttpPath", "true"], { stdio: "ignore" });
+  execFileSync(
+    "git",
+    ["-C", cwd, "config", "--local", "--add", "credential.helper", `!node "${helperScript}" "${socketPath}"`],
+    { stdio: "ignore" },
+  );
 }
 
 /** Which `node_modules` a fresh worktree resolves its dev CLIs from. Prefers the PARENT CLONE's own install, and falls back to

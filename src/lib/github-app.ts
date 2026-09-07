@@ -291,6 +291,121 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   return { ok: true, expiresAtMs };
 }
 
+/** {@link mintScopedToken}'s own ledger steps — kept OUT of {@link TOKEN_REFRESH_REASONS}' closed
+ *  nine-reason vocabulary (that set is asserted exact, test/token-refresh-reason-provenance.test.ts):
+ *  a per-request mint is a different event from the daemon's own ambient refresh (W1-T2699). */
+export const SCOPED_TOKEN_MINTED_STEP = "github_app.scoped_token_minted";
+/** @see SCOPED_TOKEN_MINTED_STEP */
+export const SCOPED_TOKEN_MINT_FAILED_STEP = "github_app.scoped_token_mint_failed";
+
+export interface ScopedTokenResult {
+  ok: boolean;
+  token?: string;
+  /** Capped at `now() + ttlMs`, never GitHub's own fixed one-hour expiry alone (W1-T2398's model). */
+  expiresAtMs?: number;
+  reason?: string;
+}
+
+/**
+ * Mint an installation token SCOPED to one repository (design (iii), W1-T2699) — the smallest
+ * token a push needs, via `repositories`/`permissions` on the exchange body, never the ambient
+ * installation-wide token {@link refreshInstallationToken} mints. Never touches `opts.env`: this
+ * is a per-request value for the credential-helper socket (secret-boundary.ts), not `GH_TOKEN`.
+ */
+export async function mintScopedToken(repo: string, ttlMs: number, opts: RefreshOptions = {}): Promise<ScopedTokenResult> {
+  const env = opts.env ?? process.env;
+  const now = opts.now ?? Date.now;
+  const log = opts.log ?? (() => {});
+  const fetchFn = opts.fetchImpl ?? fetch;
+  const readKey = opts.readKey ?? ((p: string) => readFileSync(p, "utf8"));
+
+  const appId = opts.appId ?? env[GH_APP_ID_ENV];
+  const installationId = opts.installationId ?? env[GH_APP_INSTALLATION_ID_ENV];
+  const keyPath = opts.privateKeyPath ?? env[GH_APP_PRIVATE_KEY_PATH_ENV];
+  if (!appId || !installationId || !keyPath) {
+    return { ok: false, reason: "app not configured" };
+  }
+
+  let privateKeyPem: string;
+  try {
+    privateKeyPem = readKey(keyPath);
+  } catch {
+    log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: "private key unreadable" });
+    return { ok: false, reason: "private key unreadable" };
+  }
+  let jwt: string;
+  try {
+    jwt = signAppJwt(appId, privateKeyPem, now);
+  } catch {
+    log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: "jwt signing failed" });
+    return { ok: false, reason: "jwt signing failed" };
+  }
+
+  // REFUSE RATHER THAN WIDEN. A `repo` that names no owner/repo cannot be scoped, and the old
+  // fallback answered that by omitting `repositories` entirely — which does not mint a narrower
+  // token, it mints the INSTALLATION-WIDE one. That is the opposite of this function's purpose and
+  // it was the live path: without `credential.useHttpPath` git sends the helper a bare host, so
+  // every mint took this branch (worker.ts's `wireCredentialHelperSocket` now sets it). Failing
+  // closed here means a future caller that loses the path gets a refusal it can see, never a
+  // silent escalation to the broadest credential the App can issue.
+  const name = repo.includes("/") ? repo.split("/")[1] : undefined;
+  if (!name) {
+    log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: "request names no owner/repo to scope to" });
+    return { ok: false, reason: "request names no owner/repo to scope to" };
+  }
+  const body = { repositories: [name], permissions: { contents: "write", pull_requests: "write" } };
+
+  const timeoutController = new AbortController();
+  const timeoutTimer = setTimeout(
+    () => timeoutController.abort(new Error("scoped token exchange timed out")),
+    EXCHANGE_TIMEOUT_MS,
+  );
+  let res: Response;
+  try {
+    res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: timeoutController.signal,
+    });
+  } catch (err) {
+    const reason = describeExchangeCatch(err, timeoutController);
+    log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason });
+    return { ok: false, reason };
+  } finally {
+    clearTimeout(timeoutTimer);
+  }
+
+  if (!res.ok) {
+    log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: `exchange rejected: ${res.status}` });
+    return { ok: false, reason: `exchange rejected: ${res.status}` };
+  }
+  let parsed: { token?: string; expires_at?: string };
+  try {
+    parsed = (await res.json()) as { token?: string; expires_at?: string };
+  } catch {
+    log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: "exchange response unparsable" });
+    return { ok: false, reason: "exchange response unparsable" };
+  }
+  if (!parsed.token || !parsed.expires_at) {
+    log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: "exchange response missing token" });
+    return { ok: false, reason: "exchange response missing token" };
+  }
+
+  const realExpiry = Date.parse(parsed.expires_at);
+  const cappedExpiry = Math.min(
+    Number.isFinite(realExpiry) ? realExpiry : now() + INSTALLATION_TOKEN_LIFETIME_MS,
+    now() + ttlMs,
+  );
+  log(SCOPED_TOKEN_MINTED_STEP, { installation_id: installationId, scoped_repo: repo, expires_at: new Date(cappedExpiry).toISOString() });
+  return { ok: true, token: parsed.token, expiresAtMs: cappedExpiry };
+}
+
 /**
  * Delay, in ms, until the next refresh should fire — strictly inside the token's remaining life,
  * never at or past its expiry. Clamped at zero so a stale `expiresAtMs` (e.g. a clock jump)
