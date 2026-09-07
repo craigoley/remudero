@@ -1187,7 +1187,7 @@ function wipeTestPairFromLedgerRow(line: string): WipeTestPair | undefined {
   try {
     parsed = JSON.parse(line);
   } catch {
-    return undefined;
+    return undefined; // torn or foreign line — never takes the whole ledger read down
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
   const row = parsed as Record<string, unknown>;
