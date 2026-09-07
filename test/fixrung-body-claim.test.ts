@@ -317,10 +317,15 @@ test("runFixRung (acceptance 3): a claim the rung cannot update confidently is l
 // the function that actually shells out -- never runs in any of them: the CLAUDE.md #977/#978
 // shape, where a fully-faked seam leaves its default implementation unreachable and uncovered.
 // This drives the REAL leaf against a recorder `gh` first on PATH, and asserts the argv it
-// builds, because that argv is the whole contract (`gh pr edit <url> --body <body>`) -- a wrong
-// flag here would silently rewrite the wrong field of a live PR.
+// builds, because that argv is the whole contract -- a wrong flag here would silently rewrite the
+// wrong field of a live PR.
+//
+// W1-T2948: that contract is now the REST pulls endpoint, not `gh pr edit`, whose GraphQL query
+// selects deprecated Projects Classic metadata and fails before the edit reaches the PR. The
+// argv's full shape is owned by test/pr-body-rest-write.test.ts; this site keeps its own
+// assertion because it is the one that proves the FIX RUNG's leaf is the one that moved.
 
-test("updatePrBodyViaGh: shells the REAL `gh pr edit --body`, with the URL and body it was given", async () => {
+test("updatePrBodyViaGh: shells the REAL REST body write, with the URL and body it was given", async () => {
   const binDir = mkdtempSync(join(tmpdir(), "fixrung-gh-bin-"));
   const recordPath = join(binDir, "argv.json");
   writeFileSync(
@@ -333,7 +338,7 @@ test("updatePrBodyViaGh: shells the REAL `gh pr edit --body`, with the URL and b
   try {
     await updatePrBodyViaGh("https://github.com/o/r/pull/1216", "the corrected body");
     const argv = JSON.parse(readFileSync(recordPath, "utf8")) as string[];
-    assert.deepEqual(argv, ["pr", "edit", "https://github.com/o/r/pull/1216", "--body", "the corrected body"]);
+    assert.deepEqual(argv, ["api", "-X", "PATCH", "repos/o/r/pulls/1216", "-f", "body=the corrected body"]);
   } finally {
     process.env.PATH = originalPath;
   }
