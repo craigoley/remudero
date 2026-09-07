@@ -635,7 +635,7 @@ export function readMergeCreditedTaskIds(
     gunzipSync?: (buf: Buffer) => Buffer;
     readFileBuffer?: (p: string) => Buffer;
   } = {},
-): { credited: Set<string>; filesRead: number; complete: boolean } {
+): { credited: Set<string>; filesRead: number; complete: boolean; budgetExhausted: boolean } {
   const credited = new Set<string>();
   const wanted = new Set(opts.candidates ?? []);
   // O(1) per line: decrement a counter rather than re-testing the whole candidate set — a bounded read is only
@@ -654,7 +654,7 @@ export function readMergeCreditedTaskIds(
   const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path, opts.ledgerFs ?? realLedgerFs);
   for (const l of live) take(l);
   let filesRead = 1;
-  if (done()) return { credited, filesRead, complete: true };
+  if (done()) return { credited, filesRead, complete: true, budgetExhausted: false };
 
   let names: string[];
   try {
@@ -662,18 +662,25 @@ export function readMergeCreditedTaskIds(
   } catch {
     // An unreadable state dir degrades to the live answer, never to a throw. W1-T119: a read that failed is not
     // a read that said no.
-    return { credited, filesRead, complete: false };
+    // W1-T3019: the corpus was never enumerated, so an outstanding candidate's absence is UNPROVEN
+    // here for the same reason the cap makes it unproven — files that were never opened.
+    return { credited, filesRead, complete: false, budgetExhausted: wanted.size > 0 && outstanding > 0 };
   }
   const rotations = ledgerRotationEntries(names, dirname(path)).sort((a, b) =>
     a.path < b.path ? 1 : a.path > b.path ? -1 : 0,
   );
   const cap = opts.maxRotations ?? CREDIT_SCAN_MAX_ROTATIONS;
+  // W1-T3019: files this walk never opens — past the cap, plus any that fail to read below. It
+  // separates "the corpus ran out" (an absence PROVED) from "the budget ran out" (merely not
+  // found). `filesRead` cannot: a corrupt rotation spends a slot without incrementing it.
+  let unopened = Math.max(0, rotations.length - cap);
   for (const entry of rotations.slice(0, cap)) {
     let text: string;
     try {
       const buf = (opts.readFileBuffer ?? ((p: string) => nodeReadFileSync(p)))(entry.path);
       text = (entry.form === "gzip" ? (opts.gunzipSync ?? nodeGunzipSync)(buf) : buf).toString("utf8");
     } catch {
+      unopened += 1;
       continue; // a corrupt rotation costs its rows, never the answer
     }
     filesRead += 1;
@@ -686,11 +693,12 @@ export function readMergeCreditedTaskIds(
         // a torn line costs its own credit, never the walk
       }
     }
-    if (done()) return { credited, filesRead, complete: true };
+    if (done()) return { credited, filesRead, complete: true, budgetExhausted: false };
   }
   // `complete: false` means the cap or the corpus ran out with candidates unresolved — those get re-credited,
   // which is today's behaviour, not a regression.
-  return { credited, filesRead, complete: wanted.size === 0 ? true : outstanding <= 0 };
+  const complete = wanted.size === 0 ? true : outstanding <= 0;
+  return { credited, filesRead, complete, budgetExhausted: !complete && unopened > 0 };
 }
 
 /** The ledger union a RENDERING surface needs: the live file plus dated rotations, NEWEST FIRST, stopping at

@@ -43,6 +43,16 @@ function corpus(opts: { live?: string[]; rotations?: Record<string, string[]> })
 
 /** More rotations than the cap, none of them carrying the candidate's credit — so the walk runs
  *  out of budget rather than out of corpus, which is the production shape. */
+/** EXACTLY the cap's worth of rotations — the corpus ends where the budget does. */
+function exactlyCapRotations(): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (let i = 0; i < CREDIT_SCAN_MAX_ROTATIONS; i++) {
+    const stamp = `2026-09-0${1 + (i % 7)}T${String(i).padStart(2, "0")}-00-00-000Z`;
+    out[`ledger.${stamp}.ndjson`] = [row({ task_id: `FILLER-${i}`, step: "run.start" })];
+  }
+  return out;
+}
+
 function overCapRotations(): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (let i = 0; i < CREDIT_SCAN_MAX_ROTATIONS + 4; i++) {
@@ -157,5 +167,32 @@ test("W1-T3019: an unmerged candidate is still a no-op regardless of what the sc
   const s = await runCreditBackfill([{ ...candidate("W1-T404"), merged: false }], { ledgerPath, runId: "SWEEP-1" });
   assert.equal(s.corrected, 0, "merged:false is the first gate and this task does not touch it");
   assert.equal(s.creditScanUnknown, 1, "the candidate is still counted as unproven — measurement is not gated on merge state");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ── the cap BOUNDARY, both sides. `filesRead >= cap + 1` is wrong in both directions and the
+//    suite above could not see either: it tests cap - 1 (proven) and cap + 4 (unproven), and the
+//    two shapes that reach `cap + 1` WITHOUT the budget being the binding constraint sit between
+//    them. Both were measured failing before `budgetExhausted` moved into readMergeCreditedTaskIds.
+test("W1-T3019: a corpus of EXACTLY the cap is a proven absence — every file that exists was opened", async () => {
+  const dir = corpus({ rotations: exactlyCapRotations() });
+  const s = await runCreditBackfill([candidate("W1-T900")], { ledgerPath: join(dir, "ledger.ndjson"), dryRun: true } as never);
+  assert.equal(s.creditScanFilesRead, CREDIT_SCAN_MAX_ROTATIONS + 1, "live + the cap in rotations — the same count an EXHAUSTED walk reports");
+  assert.equal(s.creditScanComplete, false, "the candidate is still unresolved…");
+  assert.equal(s.creditScanExhaustedBudget, false, "…but nothing was left unopened, so the absence is PROVEN, not churn");
+  assert.equal(s.creditScanUnknown, 0, "a filesRead-based discriminator reports 1 here, inventing churn that did not happen");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("W1-T3019: a walk that RESOLVES its last candidate on the final allowed rotation did not run out of budget", async () => {
+  const rotations = overCapRotations();
+  const newestFirst = Object.keys(rotations).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+  rotations[newestFirst[CREDIT_SCAN_MAX_ROTATIONS - 1]] = [credit("W1-T901")];
+  const dir = corpus({ rotations });
+  const s = await runCreditBackfill([candidate("W1-T901")], { ledgerPath: join(dir, "ledger.ndjson"), dryRun: true } as never);
+  assert.equal(s.creditScanComplete, true, "control: the walk really did resolve every candidate");
+  assert.equal(s.creditScanFilesRead, CREDIT_SCAN_MAX_ROTATIONS + 1, "and it reached the same file count an exhausted walk reports");
+  assert.equal(s.creditScanExhaustedBudget, false, "a walk that PROVED every candidate cannot also have run out of budget");
+  assert.equal(s.corrected, 0, "and the credit it found still suppresses the correction");
   rmSync(dir, { recursive: true, force: true });
 });

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { diagnoseBodyDefects } from "./body-repair.js";
 import { appendLedger } from "./ledger.js";
-import { CREDIT_SCAN_MAX_ROTATIONS, readLedgerLines, readMergeCreditedTaskIds, taskIdFromRunBranch } from "./status.js";
+import { readLedgerLines, readMergeCreditedTaskIds, taskIdFromRunBranch } from "./status.js";
 import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
 import { loadDefaultCostAnomalyPolicy, recordCostAnomalies, type CostAnomalyPolicy } from "./cost-anomaly.js";
 import {
@@ -5395,7 +5395,8 @@ export interface CreditBackfillSummary {
    * rung working correctly.
    */
   creditScanExhaustedBudget: boolean;
-  /** Files the credit walk opened (live + rotations). At the cap this is CREDIT_SCAN_MAX_ROTATIONS + 1. */
+  /** Files the credit walk opened (live + rotations). Diagnostic only — see the discriminator's
+   *  own note for why this count cannot decide whether the budget was exhausted. */
   creditScanFilesRead: number;
   /**
    * Candidates whose credit state is UNKNOWN — not found, on a walk that ran out of BUDGET. Always
@@ -5447,8 +5448,13 @@ export async function runCreditBackfill(
   // never what this pass then corrected.
   // THE DISCRIMINATOR IS THE BUDGET, NOT `complete`. `complete` is false whenever ANY candidate is
   // unresolved — including a brand-new merge nothing has credited yet, which this rung exists to
-  // credit. Only a walk that hit the cap leaves an absence it did not prove.
-  const creditScanExhaustedBudget = creditScan.filesRead >= CREDIT_SCAN_MAX_ROTATIONS + 1;
+  // credit. Only a walk that left files unopened has an absence it did not prove.
+  //
+  // READ FROM THE WALK, never re-derived from `filesRead` — that test was wrong in BOTH directions
+  // (measured): a corpus of exactly `cap` rotations, and a walk resolving its last candidate ON the
+  // final rotation, both reach `cap + 1` without the budget binding; and a corrupt rotation spends
+  // a slot without incrementing the count, hiding a genuinely exhausted walk.
+  const creditScanExhaustedBudget = creditScan.budgetExhausted;
   const creditScanUnknown = creditScanExhaustedBudget ? candidates.filter((c) => !credited.has(c.taskId)).length : 0;
 
   const results: CreditBackfillResult[] = [];

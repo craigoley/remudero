@@ -243,7 +243,7 @@ test("W1-T2720: reapBranchesCommand loads one merged plan and reads credit once 
       readMergeCreditedTaskIds: (_path, opts) => {
         creditReads += 1;
         readCandidates = [...(opts?.candidates ?? [])];
-        return { credited: new Set(["W1-T1060"]), filesRead: 1, complete: false };
+        return { credited: new Set(["W1-T1060"]), filesRead: 1, complete: false, budgetExhausted: false };
       },
     });
   } finally {
