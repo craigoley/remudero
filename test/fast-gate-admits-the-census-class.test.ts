@@ -62,21 +62,23 @@ const NON_CENSUS_STEPS = FAST_GATE_STEPS.filter((s) => s.boundMs === undefined);
 // ═══════════════════ acceptance: "the fast gate runs every census suite that ═══════════════════
 // ═══════════════════ measures under the per-step bound" ═════════════════════════════════════
 
-test("FAST_GATE_STEPS: exactly four census entries, each bound at the shared FAST_GATE_CENSUS_BOUND_MS constant — never a one-off number per entry", () => {
-  assert.equal(CENSUS_STEPS.length, 4, "the task admits exactly four of the six measured census suites");
+test("FAST_GATE_STEPS: exactly five census entries, each bound at the shared FAST_GATE_CENSUS_BOUND_MS constant — never a one-off number per entry", () => {
+  // W1-T2695 added a fifth (`authority-census`) under the same measured predicate this task's own
+  // header describes — not the `enforcement-data-carveout` suite this file's header excludes.
+  assert.equal(CENSUS_STEPS.length, 5, "the task admits four of the six measured census suites, plus W1-T2695's authority-census");
   for (const step of CENSUS_STEPS) {
     assert.equal(step.boundMs, FAST_GATE_CENSUS_BOUND_MS, `${step.job} must reference the shared PRIMARY CONTROL constant`);
   }
   assert.equal(NON_CENSUS_STEPS.length, 10, "the seven pre-existing npm-script gates plus W1-T2491's branch-shape gate, W1-T2488's source-size-ratchet and the comment-load ratchet are untouched by this task");
 });
 
-test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the four census entries, every one measures under the bound and passes on this HEAD", () => {
+test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the census entries, every one measures under the bound and passes on this HEAD", () => {
   // Isolated from the seven pre-existing entries via the `steps` seam — one of those seven
   // (cli-reference:check) is independently fragile in a sandboxed test runner (tsx's own IPC
   // pipe setup, unrelated to this task's diff), and this claim is specifically about the census
   // class this task adds, not a re-verification of the other seven's own environment.
   const result = runPreflightFast(REPO_ROOT, { steps: CENSUS_STEPS });
-  assert.equal(result.steps.length, 4);
+  assert.equal(result.steps.length, 5);
   for (const step of result.steps) {
     assert.equal(step.ok, true, `expected ${step.name} to pass on a clean HEAD: ${step.detail}`);
     assert.doesNotMatch(step.detail, /BOUND EXCEEDED/, `${step.name} must not report BOUND EXCEEDED on a clean, fast run`);

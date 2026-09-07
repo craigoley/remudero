@@ -38201,7 +38201,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "authority",
     syntax: "rmd authority [--json]",
-    summary: "What the fleet may do without the operator: every external write, its gate, its policy value, and its last firing.",
+    summary: "Every external write the fleet may make without the operator, its gate, and its last firing.",
     detail: "W1-T2695: derives one table from plan/policy.yaml's schema and the GitHub/git write surface (lib/authority.ts's AUTHORITY_TABLE) — for each external write: the module+symbol that performs it, its gate kind (policy row / ledger verdict / operator verb / always), the plan/policy.yaml value that governs it (when any), the plan/ratifications.yaml pin (when W1-T2694's file carries one), and the last time it fired in the ledger union. Joins the ledger archive+live union (lib/ledger-grep.ts's resolveLedgerUnion), never the live ledger.ndjson alone, and REFUSES the whole report — never blanking each row's last-fired column — when that union could not be read. --json prints the same rows as JSON instead of the formatted table. test/authority-ratchet.test.ts enumerates every tracked src file with a detectable external write (an assertLiveWriteAllowed call, a gh REST write-verb argv, a gh pr/issue create-merge-comment-close argv, or a raw git push argv) and fails naming any file missing from AUTHORITY_TABLE. READ-ONLY: no network call, no gh/git spawn, writes nothing.",
   },
   {

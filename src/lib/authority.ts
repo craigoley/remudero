@@ -575,6 +575,8 @@ export function loadRatificationPins(root: string = installRepoRoot()): Record<s
     }
     return out;
   } catch {
+    // Unreadable path, invalid YAML, or a read racing a concurrent write all degrade to "no pins
+    // known yet" — the same posture as an absent file (W1-T2694's file may not exist at all).
     return {};
   }
 }
