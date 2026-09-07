@@ -203,7 +203,7 @@
   "src/lib/plan-index.ts": 29,
   "src/lib/plan-pr-emitter.ts": 179,
   "src/lib/plan.ts": 196,
-  "src/lib/policy.ts": 235,
+  "src/lib/policy.ts": 250,
   "src/lib/producer-completeness.ts": 242,
   "src/lib/producer-identity.ts": 70,
   "src/lib/project-init.ts": 176,
@@ -268,6 +268,6 @@
   "src/lib/worker.ts": 1172,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16470,
+  "src/run-task.ts": 16750,
   "src/spike.ts": 18
 }
