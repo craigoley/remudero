@@ -6651,6 +6651,62 @@ export function remedyGeneratorNamedInLog(logTail: string): string | undefined {
 }
 
 /**
+ * W1-T2733 — HOW MANY DISTINCT REMEDY LINES ARE CARRIED FORWARD FROM OUTSIDE THE TAIL.
+ * BACKSTOP, not the primary control: deduplication is what actually stops a repetitive log growing
+ * the fix prompt (one remedy repeated 3,000 times retains ONCE), and this catches only the residue
+ * that dedupe cannot — a log naming many DISTINCT generators, which no honest CI run does. Small
+ * because {@link allCiFailuresAreGeneratorFixable} needs one remedy per failing check, not a
+ * catalogue; a job naming more than this is not a case the deterministic rung should be reasoning
+ * about at all.
+ */
+export const MAX_RETAINED_REMEDY_LINES = 5;
+
+/** W1-T2733 — the marker that says these lines did not come from the tail. Present ONLY when
+ *  something was retained, so a log with no recognised remedy is byte-identical to before. */
+export const RETAINED_REMEDY_HEADER = "--- generator remedy line(s) retained from earlier in this job (W1-T2733) ---";
+
+/**
+ * W1-T2733 — KEEP A DECLARED GENERATOR REMEDY THAT THE TAIL SLICE WOULD HAVE THROWN AWAY.
+ *
+ * OBSERVED ON PR #3716 (head 2ff348e5). `ci-shard (3/4)` printed
+ * `Run 'npm run docs-index' and commit the result.` beside its one failing assertion, then ran on
+ * through 3,253 more tests and a retry. `fetchCiFailures` fetches the WHOLE
+ * `gh run view --log-failed` output and keeps only its final 60 lines, so the remedy sat thousands
+ * of lines before that slice. {@link allCiFailuresAreGeneratorFixable} therefore saw a tail with no
+ * remedy, the W1-T2551 pre-strike generator rung could not fire, and the sweep spent BOTH worker
+ * strikes plus escalation #3722 on a command it could have run deterministically in seconds.
+ *
+ * THE RECOGNIZER IS NOT WIDENED. This reuses {@link remedyGeneratorNamedInLog}'s existing grammar
+ * verbatim, and {@link declaredGeneratorScriptFor}'s package.json pairing remains the execution
+ * authority — retaining a line makes it VISIBLE, never runnable. A crafted log can therefore add
+ * at most {@link MAX_RETAINED_REMEDY_LINES} deduplicated lines naming scripts that must still exist
+ * in package.json before anything runs.
+ *
+ * BYTE-IDENTICAL WHEN THERE IS NOTHING TO RETAIN, which is the vast majority of CI failures (a real
+ * test failure, a lint error, a type error). The header and the retained block appear only when a
+ * remedy was found OUTSIDE the tail and is not already named inside it.
+ */
+export function retainGeneratorRemedyLines(fullLog: string, tailLines: number): string {
+  const lines = (fullLog ?? "").split("\n");
+  const tail = lines.slice(-tailLines);
+  const tailText = tail.join("\n");
+  // Seeded from the tail so a remedy already visible there is never repeated above it — the tail
+  // is the preferred evidence and this only ever supplements it.
+  const seen = new Set(tail.map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
+  const retained: string[] = [];
+  for (const line of lines.slice(0, Math.max(0, lines.length - tail.length))) {
+    if (remedyGeneratorNamedInLog(line) === undefined) continue;
+    const trimmed = line.trim();
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    retained.push(trimmed);
+    if (retained.length >= MAX_RETAINED_REMEDY_LINES) break;
+  }
+  if (retained.length === 0) return tailText;
+  return [RETAINED_REMEDY_HEADER, ...retained, "", tailText].join("\n");
+}
+
+/**
  * ONE failing check's declared generator fix, or `undefined` when this check is OUT of the class
  * this task targets (acceptance criterion 3: a check with no generator counterpart still reaches
  * the ordinary rung unchanged). Requires BOTH: the check's own log names a remedy generator (the
@@ -28677,7 +28733,9 @@ export function fetchCiFailures(
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
         });
-        logTail = out.split("\n").slice(-tailLines).join("\n");
+        // W1-T2733: the tail, PLUS any declared generator remedy the slice would have discarded.
+        // Identical bytes to the plain slice whenever the log names no recognised remedy.
+        logTail = retainGeneratorRemedyLines(out, tailLines);
         // A read that SUCCEEDS but yields nothing is a genuinely quiet job, not a failed read —
         // the one case where an empty tail is the honest answer, and the one the other two
         // causes must stay distinguishable from.
