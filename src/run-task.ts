@@ -30662,6 +30662,49 @@ export function buildOpenPrViews(
  * === [] here, never a hard failure of its own.
  */
 /**
+ * W1-T3067 — every merge commit's CHANGED PATHS on `origin/main`, keyed by the PR number a squash
+ * merge puts in `(#N)`. ONE local git invocation per pass. This is the producer the plan-only DIFF
+ * refusal needs: a merged PR's merge commit is on `origin/main` by definition, so this answers for
+ * exactly the population credit is derived over, and it answers for FREE.
+ *
+ * ⚠ WITHOUT THIS THE REFUSAL IS INERT. `DeriveDeps.mergedPathsByPr` defaults to absent, and absent
+ * means the pre-W1-T3067 shortcut decides — which is what credited #3195, a `chore(plan)` on its
+ * own run branch, and cost the validated build in #4461.
+ *
+ * ⚠ BEST-EFFORT, AND AN EMPTY MAP IS THE SAFE ANSWER: a failed or truncated read leaves every PR
+ * without an entry, which restores exactly today's behaviour rather than refusing anything. A
+ * transient git failure must never be able to uncredit the plan.
+ */
+export function readMergedPathsByPr(root: string, limit = MERGED_PATHS_SCAN_LIMIT): Map<number, string[]> {
+  const byPr = new Map<number, string[]>();
+  try {
+    const out = execFileSync(
+      "git",
+      ["log", "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
+      { cwd: root, encoding: "utf8", maxBuffer: 1 << 26 },
+    );
+    let current: number | undefined;
+    for (const raw of out.split("\n")) {
+      if (raw.startsWith("\u0000")) {
+        const m = raw.slice(1).match(/\(#(\d+)\)\s*$/);
+        current = m ? Number(m[1]) : undefined;
+        if (current !== undefined && !byPr.has(current)) byPr.set(current, []);
+        continue;
+      }
+      const path = raw.trim();
+      if (!path || current === undefined) continue;
+      const files = byPr.get(current);
+      // FIRST commit wins per PR: `--first-parent` walks newest-first, and a PR number appearing
+      // twice means a re-merge, whose newest paths are the ones credit was derived from.
+      if (files && files.length < MERGED_PATHS_PER_PR_CAP) files.push(path);
+    }
+  } catch {
+    /* best-effort: an unreadable log yields an empty map, and absent restores today's behaviour */
+  }
+  return byPr;
+}
+
+/**
  * W1-T3063 — `origin/main`'s merge subjects, keyed by the PR number a squash merge puts in
  * `(#N)`. ONE local git invocation per sweep pass; no network, no per-candidate cost.
  *
@@ -30688,6 +30731,12 @@ function readMergeSubjectsByPr(root: string): Map<number, string> {
   return byPr;
 }
 
+/** How far back {@link readMergedPathsByPr} scans. A BACKSTOP on cost, not a correctness bound: a
+ *  merge outside the window has no entry and takes the pre-existing path. */
+const MERGED_PATHS_SCAN_LIMIT = 4000;
+/** Per-PR path cap. `isPlanOnlyChangeset` only needs to see ONE non-plan path to answer, so a
+ *  1,000-file merge does not need 1,000 strings held to decide it. */
+const MERGED_PATHS_PER_PR_CAP = 200;
 /** How far back {@link readMergeSubjectsByPr} scans. A BACKSTOP on cost, not a correctness bound:
  *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
 const MERGE_SUBJECT_SCAN_LIMIT = 5000;
@@ -30707,7 +30756,13 @@ function buildCreditCandidates(
 ): CreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
-  const deps: DeriveDeps = { ledgerPath, github: github ?? buildBatchedGithub(owner, repo, { log }) };
+  // W1-T3067: the free local evidence the plan-only DIFF refusal needs, built ONCE for the whole
+  // walk below rather than per task — `deriveStatus` runs once per plan task (~1,400 a pass).
+  const deps: DeriveDeps = {
+    ledgerPath,
+    github: github ?? buildBatchedGithub(owner, repo, { log }),
+    mergedPathsByPr: readMergedPathsByPr(repoRoot),
+  };
   // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
   // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
@@ -30792,7 +30847,20 @@ export function buildEscalationReconcileCandidates(
   // would make `issuesSeen > total` on a healthy pass whenever a PR happens to carry the label,
   // i.e. a false alarm in the one field added to stop false alarms.
   const intake: EscalationIntake = { issuesSeen: open.length, droppedNoTaskTrailer: 0, droppedNoReferent: 0 };
-  const deps: DeriveDeps = { ledgerPath, github: injected.github ?? buildBatchedGithub(owner, repo, { log }) };
+  // W1-T3067 — THE SECOND DESTRUCTIVE CONSUMER, wired for the same reason as the first. This
+  // builder reads `proj.merged` and feeds the closer that CLOSES a needs-human issue; a credit
+  // earned by a plan-only filing would close an escalation whose task is not done, which is the
+  // supersession incident (#4461) in a different surface. The free local evidence must reach here
+  // too, or the refusal is fixed in one place and open in the other.
+  //
+  // A SECOND `git log` PER SWEEP PASS IS THE COST, and it is local and bounded. The alternative —
+  // hoisting one map through the sweep composition into both builders — threads a new argument
+  // through call sites that do not otherwise change, for a saving measured in milliseconds.
+  const deps: DeriveDeps = {
+    ledgerPath,
+    github: injected.github ?? buildBatchedGithub(owner, repo, { log }),
+    mergedPathsByPr: readMergedPathsByPr(repoRoot),
+  };
   const candidates: EscalationReconcileCandidate[] = [];
   for (const issue of open) {
     const taskId = /^\*\*Task:\*\*\s*(\S+)\s*$/m.exec(issue.body ?? "")?.[1];
@@ -32076,6 +32144,7 @@ export function buildSweepEffects(
   | "dispatchFix"
   | "escalate"
   | "readLiveState"
+  | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
   | "depReview"
   | "postReview"
@@ -33029,6 +33098,25 @@ export function buildSweepEffects(
     // blocked-fixable disposition actually spends a fix-rung strike — see
     // `SweepDeps.readLiveState`'s own doc for the fail-open contract.
     readLiveState: (pr) => ghLiveState(pr.prUrl),
+
+    // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
+    // dispatch surface invokes `dispatchFix`. Reads the SAME process-lifetime `terminalHeads`
+    // map (above) `dispatchFix`'s own `priorTerminal?.escalated` early-return already consults —
+    // no second cache, no fresh GitHub read. Declines only the exact `PR@head SHA` whose
+    // escalation was already delivered; a cached entry that has not yet delivered (or was never
+    // cached at all) returns `undefined` and the ordinary dispatch path — including the failed-
+    // delivery retry — runs unchanged.
+    terminalFixStandDown: (pr) => {
+      const terminal = terminalHeads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
+      // Written as two explicit checks, not `!terminal?.escalated` — that negated-optional-chain
+      // shape is exactly the conflator test/catch-erasure-ratchet.test.ts's detector (b) exists to
+      // hold at zero (it folds "no cached entry at all" and "cached but not yet delivered" into
+      // one boolean the same way an erasing catch folds a failure and an absence together). Both
+      // cases really do return the SAME `undefined` here — that is this seam's design (iv), not an
+      // accidental erasure — but spelling it out keeps the two conditions separately legible.
+      if (terminal === undefined || terminal.escalated !== true) return undefined;
+      return `terminal uncreditable head already escalated for this PR@head (${TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP})`;
+    },
 
     // W1-T2789 — the sweep-level consumer of the SAME reversed-compare reader and exact-path
     // decision runFixRung already uses. This is deliberately not exposed through Serve.

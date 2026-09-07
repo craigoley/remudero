@@ -1,0 +1,133 @@
+- id: W1-T3070
+  title: "THE FILE-THEN-BUILD TWO-PR PATTERN THIS REPO MANDATES IS STRUCTURALLY REFUSED BY ITS OWN ID GATE — `evaluateOpenPrIdCollisions` calls an id CLAIMED on a bare `W1-T<n>` text mention in another open PR title/body/head ref, while its own side (`addedIdsAtHead`) is a precise set difference of DECLARED plan records, so the build PR — whose fleet-generated head is `run-<taskId>-*` by construction — is counted as a rival claimant of the very id its own filing PR declares, and the filing PR can never merge while its build is open"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 16.00
+  files:
+    - scripts/task-id-existence-check.mjs
+    - test/open-pr-id-collision-arms.test.ts
+  origin: "operator-session#pr-4487-blocked-by-its-own-build-pr-2026-09-07"
+  plan_refs: ["W1-T2324", "W1-T3055", "W1-T509"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE TWO SIDES OF THIS GATE ARE NOT THE SAME KIND OF THING, AND THAT ASYMMETRY IS THE DEFECT.
+
+    OBSERVED, scripts/task-id-existence-check.mjs:279-288 (`addedIdsAtHead`) — MY side of the
+    comparison is a SET DIFFERENCE over DECLARED PLAN IDS: an id counts as "added" only when this
+    branch declares it in a plan file the base does not. Its own comment insists on the precision:
+    "a file unchanged from `base` is a carried-along shard, not an add."
+
+    OBSERVED, scripts/task-id-existence-check.mjs:331-340 (`evaluateOpenPrIdCollisions`) — THE OTHER
+    side is a TEXT SCAN. A rival PR "claims" the id if `mentionedIds([r.title, r.body, r.head.ref])`
+    contains it. Nothing asks whether that PR declares a plan record. `MENTION_RE` is
+    `/\bW1-T[0-9]+\b/g` and its comment (:265-266) states the trade deliberately: "Loose by design:
+    over-counting only refuses an innocent PR; under-counting could merge a real collision."
+
+    THAT TRADE WAS PRICED WRONG, AND ONLY BECAUSE OF A FACT ABOUT THIS REPO THAT W1-T2324 HAD NO
+    REASON TO WEIGH: the innocent PR is not a rare accident. It is GENERATED, by name, for every
+    task that follows the pattern standing rule 15 requires.
+
+    OBSERVED, src/lib/worker.ts:2903 (`uniqueRunBranch`) — the fleet names a worker branch
+    `run-${runId}`, and the run id carries the task id. MEASURED 2026-09-07 against
+    `repos/craigoley/remudero/pulls?state=closed&per_page=100`: 65 of the last 100 closed PRs have a
+    head ref matching `^run-W1-T[0-9]+`, and 6 of the merged ones match `^run-W1-T[0-9]+-build`.
+    So a build PR mentions its task id in its HEAD REF whether or not anyone writes it in prose —
+    and by convention it also appears in the title, e.g. "fix(status): ... (W1-T3067)".
+
+    THE LIVE CASE, MEASURED 2026-09-07 at origin/main b2828c91a. PR #4487 is the plan-only FILING of
+    W1-T3067; it changes exactly one file, `plan/tasks.d/W1-T3067-*.yaml`. PR #4488 is its BUILD;
+    its five changed files are scripts/comment-load-baseline.json, src/lib/status.ts,
+    src/run-task.ts and two test files — NOT ONE PLAN FILE. #4487's `task-id-existence` check
+    reports, verbatim from the CI log:
+
+      task-id-existence: FAILED -- the following added id(s) are ALREADY CLAIMED by another OPEN PR:
+        W1-T3067 -- claimed by https://github.com/craigoley/remudero/pull/4488
+      Renumber to a fresh reserved id.
+
+    The remedy it prints cannot be taken. Renumbering the filing to a fresh id orphans the build PR,
+    whose branch, title, tests and shard reference all name W1-T3067; renumbering both is renumbering
+    a task because a gate misread its own sibling. #4488 passes the same check (it adds no id), so
+    the pair is not symmetric: the FILING is the one that cannot merge, which inverts rule 15's whole
+    point that the criterion lands BEFORE the build.
+
+    WHY THE PAIR IS NOT SIMPLY SERIALISABLE. Merging the build first and the filing second does clear
+    both checks, and that is the workaround in use today. It is a workaround and not a fix: it merges
+    an implementation before the criterion that authorises it, which is the exact ordering standing
+    rule 15 exists to forbid. The alternative — hold the build unopened until the filing merges — is
+    correct but costs a full CI round trip of serialisation on every task, and the fleet does not do
+    it: `createDaemonLaneWorktree` (src/run-task.ts:36334) cuts the run branch when the lane starts.
+
+    NO STANDING MECHANISM ALREADY REACHES THIS, each ruled out by reading the instrument at
+    b2828c91a rather than by inference:
+      - There is NO sibling/build/filing exemption anywhere in the script: `grep -niE
+        "sibling|build pr|filing|two-pr|companion|exempt"` returns only the written-baseline
+        comments at :14, :367, :394, :407-408.
+      - The written baseline does NOT reach this half. `loadBaseline`/`evaluateIds` feed the CITATION
+        check (:576-583); the open-vs-open block (:530-574) never consults `baseline`. So the
+        documented escape hatch is unavailable here by construction, not by policy.
+      - The script makes NO files-API call at all (`grep -n "/files"` returns nothing), so it has no
+        way today to tell a declaration from a mention.
+
+    THE FIX IS TO MAKE THE TWO SIDES THE SAME KIND OF THING. Keep the loose mention scan exactly as
+    it is — as a cheap PREFILTER, which is what it is good at — and then CONFIRM each suspected
+    claimant against the only authority that settles it: does that PR actually change a plan file
+    declaring this id? A mention becomes a refusal only when confirmed. A genuine two-shard collision
+    still refuses, because the rival really does declare it.
+
+    FAIL-CLOSED IS PRESERVED, AND THAT IS NOT A DETAIL. This gate's stated philosophy is that "an
+    unreadable surface read as an empty one is the false zero that produced every id collision on
+    2026-08-26" (:511-515). So an unreadable confirmation — network failure, a diff too large for a
+    patch, a plan file changed whose patch GitHub omits — must keep the refusal, not drop it. The
+    change may only ever turn a refusal into a pass on POSITIVE evidence that the claimant declares
+    no such id.
+
+    THE OBJECTION, STATED AT FULL STRENGTH. W1-T2324 chose looseness ON PURPOSE and pinned it:
+    test/open-pr-id-collision-arms.test.ts:135,139 asserts that a row whose head ref is
+    `run-W1-T4242-123` IS a claimant, with the message "title, body AND head ref all scan". This task
+    argues that ruling was right on its facts and wrong on a fact it did not have — that the
+    head-ref arm was chosen as a cheap way to catch a rival worker, and the rival it actually catches
+    every time is the task's own sibling. THE PINNED ASSERTION MUST SURVIVE ANYWAY: under fail-closed
+    confirmation those fixture rows carry no file evidence, so they remain collisions and that test
+    stays green untouched. If a builder finds it cannot be kept green, that is a signal the design
+    drifted into weakening the gate — stop and say so rather than editing the assertion.
+
+    The weaker half of the objection is real and is not argued away: this adds a network call to a
+    required gate, on a path that today is pure. It is bounded — it fires only when a mention
+    collision is already suspected, which is rare — and it fails closed, so an outage costs the
+    status quo and never a missed collision. But it is a new dependency in a gate whose value is that
+    it is hard to fool, and a builder who finds a way to settle "does this PR declare the id" without
+    leaving the process should prefer that.
+  acceptance:
+    - claim: a claimant PR that MENTIONS an added id but declares no plan record for it is no longer a collision, so the mandated filing+build pair merges in the order rule 15 requires
+      proof: "unit test: test/open-pr-id-collision-arms.test.ts"
+    - claim: a claimant PR that genuinely DECLARES the same id in a plan file is still refused, so the collision this gate exists to catch is untouched
+      proof: "unit test: test/open-pr-id-collision-arms.test.ts"
+    - claim: an unreadable confirmation (call fails, non-JSON, or a changed plan file whose patch is absent) KEEPS the refusal, so no false zero can turn a real collision into a pass
+      proof: "unit test: test/open-pr-id-collision-arms.test.ts"
+    - claim: the six existing W1-T2324 assertions in test/open-pr-id-collision-arms.test.ts pass UNEDITED, so this narrows the gate on evidence rather than relaxing a pinned ruling
+      proof: "unit test: test/open-pr-id-collision-arms.test.ts"
+  falsifier: |
+    Close without implementation if the pair does not actually deadlock. Reproduce it: open a
+    plan-only PR declaring a fresh id, open a second PR whose head ref is `run-<that id>-build-<n>`
+    and which changes NO plan file, and run
+    `node scripts/task-id-existence-check.mjs --base origin/main --require-open-prs` on the first.
+    If it passes, the finding is wrong and this shard is void.
+
+    Close it also if the confirmation cannot be made fail-closed — if there is any input under which
+    an unreadable GitHub answer lets a genuine two-shard collision through, the cure is worse than
+    the disease and the honest outcome is to leave the gate loose and serialise the pattern instead.
+
+    Editing or deleting the pinned assertion at test/open-pr-id-collision-arms.test.ts:135-139 does
+    NOT satisfy this task. That assertion is the control: if the implementation cannot keep it green,
+    the implementation has weakened the gate rather than sharpened it.
+
+    Widening `MENTION_RE`, dropping the head-ref arm from the mention scan, or exempting PRs by
+    branch-name pattern (`-build`, `run-*`) does not satisfy it either. A branch-name exemption is
+    the same class of mistake as the bug — deciding a question of DECLARATION by reading a STRING —
+    and it would let a real rival worker escape by naming its branch conventionally.
