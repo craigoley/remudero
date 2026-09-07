@@ -13,7 +13,8 @@
     - test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts
   origin: "operator-session#ci-parity-base-drift-2026-09-07"
   plan_refs: ["W1-T294", "W1-T2810", "W1-T2854", "W1-T405"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     THE REPO ALREADY NAMES THIS MECHANISM, IN A TEST FILE, AND THEN LEAVES THE GATE EXPOSED TO IT.
@@ -115,3 +116,22 @@
     inside one process cannot stop another process moving the ref. A change that keeps the ref name
     and merely widens the reporting fails the first criterion. A pin that falls back to the ref on
     a failed rev-parse fails the third.
+  note: |
+
+    RETIRED 2026-09-07 — ALREADY BUILT. Selected for a build pass and refused on validation. The
+    base-pinning mechanism is present at origin/main, both halves:
+
+      src/lib/ci-parity.ts:295  basePinCache — a per-(spawn, repoRoot) pin, taken once per run
+      src/lib/ci-parity.ts:341  requirePinnedBase — throws "REFUSED — ...; refusing to diff against
+                                the moving ref instead", which is this shard's whole complaint
+      5 call sites            already diff against the pinned sha rather than the name
+      src/lib/ci-parity.ts:327  peekPinnedBase — "the pin IF ONE WAS TAKEN, resolving nothing"
+      src/lib/ci-parity.ts:738  "The sha this run's diff steps pinned" — the VERDICT STAMP half the
+                                title says is missing ("never the base sha it measured against")
+
+    AND ITS OWN DECLARED TEST EXISTS AND PASSES: test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts,
+    11 tests, 11 pass, 0 fail. A shard whose named falsifier suite is green on main is built.
+
+    NOTE ON TIMING: that test file's mtime is 2026-09-07T17:54 — it landed within the hour of this
+    retirement, so this is not an old shard whose status drifted over weeks. It is the closing-write
+    gap (W1-T3043) observed at its shortest: built, merged, and still reading `queued` minutes later.

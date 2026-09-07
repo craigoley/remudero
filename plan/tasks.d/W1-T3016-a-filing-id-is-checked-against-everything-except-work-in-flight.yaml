@@ -15,7 +15,8 @@
     - test/a-filing-id-is-checked-against-work-in-flight.test.ts
   origin: "operator-session#four-id-collisions-in-one-evening-2026-09-07"
   plan_refs: ["W1-T2203", "W1-T1055", "W1-T2324", "W1-T509", "W1-T278"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     MEASURED 2026-09-06/07, FOUR COLLISIONS IN ONE EVENING ACROSS THREE LANES, EVERY ONE THE SAME
@@ -97,3 +98,27 @@
     once both are on main, and `task-id-existence` does not, because it resolves a trailer rather
     than judging an added id. A check that BLOCKS on a missing reservation does not satisfy this
     task: it would refuse the lanes W1-T2203 records as unable to write that namespace.
+  note: |
+
+    RETIRED 2026-09-07 — ITS FALSIFIER FIRES. The falsifier reads: "Close without implementation if
+    an existing gate already refuses a newly added shard id that collides with an open PR's shard."
+    IT DOES. `scripts/task-id-existence-check.mjs` already implements every clause of this shard's
+    own design, by symbol:
+
+      (i)  the in-flight question   evaluateOpenPrIdCollisions(added.ids, openPrs.rows, ownHeadRef)  (:298, called :519)
+           over the REST open-PR read   fetchOpenPrRows(owner, repo, cwd)                            (:249)
+      (ii) BLOCK on an in-flight collision   process.exitCode = 1                                    (:530)
+           BLOCK on a collision with main    evaluateAddedIdCollisions (:316, called :471) -> exit 1 (:479)
+           WARN on a missing reservation     "WARNING -- could not read reservation refs"            (:448)
+      (iv) DEGRADED, never clean             "SKIPPED -- could not read the open-PR list"            (:513)
+      (v)  WIRED                             ci.yml job `task-id-existence` runs task-id-existence:check
+      (vi) ONLY ADDED ids                    "ADDED is a SET DIFFERENCE, never a per-file scan"      (:311)
+
+    Clause (vi) is not merely satisfied but PAID FOR: that function's own doc records "a per-file
+    scan reported 232 false collisions", which is the mistake this shard would have re-made.
+
+    WHAT IS NOT RULED ON. The four collisions this shard was filed from (W1-T2967/2968/2969/2996)
+    were real. The gate that would have caught them existed at filing time; the shard's own
+    rationale did not check `task-id-existence-check.mjs` beyond its NAME, and its "task-id-existence
+    resolves a TRAILER against the plan and says nothing about a newly ADDED id" is simply wrong
+    about that file. Retiring records that the work is done, not that the incidents were imaginary.
