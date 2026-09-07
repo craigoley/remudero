@@ -1,0 +1,113 @@
+- id: W1-T3064
+  title: "THE FIX RUNG'S RATCHET CONTRACT HAS NO FALSIFIER AT THE POINT OF DELIVERY — `renderFixPrompt`'s `...ratchetContractLines()` spread can be deleted with every test that renders that prompt still green, while the byte-identical spread in `outputContractLines` reddens on the first assertion, so the copy the code's own comment calls the one this rung needs MOST is the only one nothing observes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 10.00
+  files:
+    - test/a-fix-rung-carries-the-ratchet-contract-it-was-given.test.ts
+  origin: "operator-session#four-findings-verified-one-survived-2026-09-07"
+  plan_refs: ["W1-T2997", "W1-T1105", "W1-T464", "W1-T133"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE PRODUCER IS WELL TESTED. ITS DELIVERY IS NOT. `ratchetContractLines` (src/lib/compaction.ts)
+    has SIX assertions in test/a-worker-runs-the-cheap-gates-before-it-pushes.test.ts — five call it
+    directly, one goes through `outputContractLines`. Nothing here says the function is untested; it
+    is one of the better-covered producers in that file. What has no falsifier is the SPLICE.
+
+    THERE ARE TWO IDENTICAL SPREADS AND ONLY ONE IS OBSERVED:
+
+      src/lib/compaction.ts   `...ratchetContractLines(),`  inside `outputContractLines`  -> COVERED
+      src/run-task.ts         `...ratchetContractLines(),`  inside `renderFixPrompt`'s footer -> NOT
+
+    MEASURED 2026-09-07 at origin/main 92d6d23c, over the 15 test files that could possibly observe
+    it (every file matching `git grep -l renderFixPrompt -- test/`, plus the producer suite; every
+    path ls-verified before running, per the ghost-path rule):
+
+      baseline                                  # tests 494 / # pass 494 / # fail 0
+      fix-rung spread deleted (1 line)          # tests 494 / # pass 494 / # fail 0
+      POSITIVE CONTROL — sibling spread deleted # tests 494 / # pass 493 / # fail 1
+                                                not ok 35 - W1-T2997: the implement contract names
+                                                            the ratchets it must run before pushing
+
+    The control is the point. It is the SAME harness, the SAME 494-test corpus and the SAME mutation
+    shape — one `...ratchetContractLines(),` line removed — differing only in which of the two call
+    sites is cut. It reddens when the covered site is cut and stays silent when this one is. So the
+    zero is a real absence, not a blind experiment. An independent verification arm reproduced this
+    over the FULL suite (15,214 tests both sides) and compared failure SETS rather than counts:
+    0 new failures, 0 disappeared.
+
+    THE CODE'S OWN COMMENT ARGUES THIS IS THE COPY THAT MATTERS MOST. Directly above the unobserved
+    spread, verbatim: "W1-T2997: the fix rung needs this MORE than the implement contract does — it
+    exists because CI went red, and a ratchet an earlier round left unrecorded is the commonest
+    reason." The rung that exists BECAUSE a ratchet went unrecorded is the one whose ratchet
+    instruction nothing checks.
+
+    HOW IT SHIPPED, AND WHY THIS IS NOT A REBUKE. `git log -S ratchetContractLines -- src/` returns
+    exactly one commit (2a466507, #4360, W1-T2997) against a control of 5 for `outputContractLines`.
+    That commit's entire src/run-task.ts change is the import, a two-line comment, and this spread;
+    its commit message says the contract is placed "in both the implement contract and the fix rung",
+    and the test file it added in the same commit never imports `renderFixPrompt`. One half acquired
+    a falsifier and the other did not, in a single well-reasoned commit one day old. That is the
+    ordinary shape of this defect, which is why a falsifier — not a review habit — is the remedy.
+
+    NO STANDING MECHANISM REACHES IT, EACH RULED OUT BY READING THE INSTRUMENT:
+      - test/ci-parity-contract.test.ts is the only suite that both renders `renderFixPrompt` and
+        sits near this text. Its fix-prompt assertions are `assert.doesNotMatch(fix, /rmd preflight
+        --ci-parity/)` and `assert.match(fix, /git push origin HEAD/)`. A `doesNotMatch` is
+        STRENGTHENED by removing a line, never broken — a non-falsifier by construction, not partial
+        coverage.
+      - mutation-nightly (W1-T133) cannot: scripts/mutation-nightly-scope.json sets
+        commandBudgetMs 8000 and its own comment names run-task.ts among the modules "still running
+        at 40s", so it is excluded by name and the score is a lower bound. The workflow header also
+        states it is "NOT a required check, ever".
+      - The PR-time mutation gate cannot: stryker.conf.json sets `"mutate": ["src/lib/classify.ts"]`.
+
+    W1-T1105 is the precedent, not coverage: two `throw new Error(...)` messages that "can be emptied
+    without a red ... neither string is asserted anywhere under test/". This repo files this class
+    per instance rather than waiting for a standing mechanism to absorb it.
+
+    THE OBJECTION, STATED AT FULL STRENGTH. The output is prose in a prompt, and a test asserting
+    that `renderFixPrompt` contains a literal it visibly splices in looks tautological — the failure
+    mode is "someone deleted the line", which the diff already shows. This repo runs
+    source-text-assertion-census precisely because asserting on text banks debt instead of paying it.
+    The answer is that the assertion is on RENDERED OUTPUT of a function under its real inputs, which
+    is what the accepted `outputContractLines` test in the producer suite already does — not a read
+    of source text, which is what that census refuses. The weaker half of the objection is real and
+    is not argued away: the implement contract still carries these lines, so losing the fix-rung copy
+    degrades a re-statement rather than the only statement. It matters anyway because the fix rung
+    runs many turns later, after compaction, which is the entire reason the anchor machinery exists.
+  acceptance:
+    - claim: deleting the `...ratchetContractLines()` spread from renderFixPrompt's footer fails this suite, so the fix rung's DELIVERY of the contract is observed and not merely its producer
+      proof: "unit test: test/a-fix-rung-carries-the-ratchet-contract-it-was-given.test.ts"
+    - claim: the suite asserts on the RENDERED output of renderFixPrompt under real inputs, never on the source text of run-task.ts, so it pays the debt rather than banking it
+      proof: "unit test: test/a-fix-rung-carries-the-ratchet-contract-it-was-given.test.ts"
+    - claim: every fix mode whose prompt carries the footer is covered, so a mode-specific regression that drops the contract from one branch and not the others is caught
+      proof: "unit test: test/a-fix-rung-carries-the-ratchet-contract-it-was-given.test.ts"
+    - claim: the existing direct-call coverage of ratchetContractLines is left intact, so this adds a falsifier at the seam rather than relocating the producer's own
+      proof: "unit test: test/a-fix-rung-carries-the-ratchet-contract-it-was-given.test.ts"
+  falsifier: |
+    Close without implementation if deleting `...ratchetContractLines(),` from `renderFixPrompt`'s
+    footer already reddens something. Measure it the way this shard did, and do not trust a scoped
+    run on its own: run the deletion against the full suite, compare failure SETS rather than counts,
+    and require a `# tests`/`# pass`/`# fail` summary on both sides. Run the sibling-spread control
+    (delete the `outputContractLines` one instead) in the same corpus — if THAT does not redden
+    either, the harness is blind and the measurement says nothing about coverage.
+
+    A test that calls `ratchetContractLines()` directly does not satisfy this task. That is what the
+    six existing assertions already do, and it is exactly the coverage that leaves this seam
+    unobserved — the whole finding is that the producer is tested and its delivery is not.
+
+    A test that reads src/run-task.ts as text and asserts the line is present does not satisfy it
+    either: that is the source-text assertion this repo's own census exists to refuse, and it would
+    pass against a file that no longer compiles.
+
+    If a builder finds that the fix rung should not carry these lines at all — the argument being
+    that the implement contract already states them and the fix rung inherits its scope — then the
+    honest outcome is to REMOVE the spread and say so, not to add a test defending a line that
+    should not be there. W1-T464 removed `ciParityContractLines()` from both prompts together on
+    exactly that reasoning, and that precedent is live.
