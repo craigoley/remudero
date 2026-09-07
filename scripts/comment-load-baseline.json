@@ -128,7 +128,7 @@
   "src/lib/daemon.ts": 1065,
   "src/lib/dep-review.ts": 149,
   "src/lib/deployer.ts": 324,
-  "src/lib/digest.ts": 280,
+  "src/lib/digest.ts": 326,
   "src/lib/dispatch-claim.ts": 130,
   "src/lib/dispatch-governor.ts": 103,
   "src/lib/dispatch-overlap.ts": 150,
@@ -265,6 +265,6 @@
   "src/lib/worker.ts": 1136,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16380,
+  "src/run-task.ts": 16416,
   "src/spike.ts": 18
 }
