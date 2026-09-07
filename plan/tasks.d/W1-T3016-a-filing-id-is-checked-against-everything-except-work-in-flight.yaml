@@ -69,10 +69,10 @@
     `scripts/filing-id-collision-check.mjs` this record specifies would place a second gate over
     the identical surface, reading it through the identical uncredentialed `gh api` call.
 
-    CARRIED, NOT DROPPED. W1-T3057 wires the token and makes an unreadable surface REFUSE instead
+    CARRIED, NOT DROPPED. W1-T3058 wires the token and makes an unreadable surface REFUSE instead
     of rendering as a clean gate — which is this record's own design (iv), the half that was never
     the missing piece of code but is still the missing behaviour. The five acceptance criteria
-    below are preserved verbatim and unedited; W1-T3057 carries each one. Nothing here retires
+    below are preserved verbatim and unedited; W1-T3058 carries each one. Nothing here retires
     anything else, and no criterion was rewritten to match a diff.
   design: |
     (i) ONE QUESTION, ASKED OF THE ONE SURFACE NOTHING ELSE READS: for each shard this PR ADDS,
