@@ -63,6 +63,7 @@ import {
   drainNowFilePath,
   pauseFilePath,
   pendingKicks,
+  quietHoursFilePath,
   readSharedPause,
   realSharedPauseGitDeps,
   sharedPauseRef,
@@ -872,6 +873,11 @@ const STATIC_LATCHES: readonly StaticLatchDef[] = [
       const reason = typeof json?.reason === "string" ? json.reason : undefined;
       return `no new task spawns until \`rmd resume\`${reason ? ` (${reason})` : ""} — any in-flight task still completes`;
     },
+  },
+  {
+    name: "QUIET_HOURS",
+    path: quietHoursFilePath,
+    consequence: () => "new daemon dispatch is deferred while sweeps and in-flight work keep completing",
   },
   {
     name: "DEPLOY_AUTO",
