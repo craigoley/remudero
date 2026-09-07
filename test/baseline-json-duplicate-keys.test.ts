@@ -1,123 +1,86 @@
-// test/baseline-json-duplicate-keys.test.ts — W1-T3023: a ratchet baseline may not carry the same
-// key twice inside one object.
+// test/baseline-json-duplicate-keys.test.ts — W1-T3023: a ratchet baseline may not name a key twice.
 //
-// WHY THIS EXISTS, MEASURED. Resolving a `scripts/comment-load-baseline.json` rebase conflict by
-// taking the UNION of both sides — the obvious move for a file that is one flat sorted map, and
-// the one a merge tool suggests — produces a document with the key twice. `JSON.parse` does not
-// error on that: it takes the LAST occurrence, silently. On 2026-09-07 that resolution put
-// `"src/run-task.ts"` in the file twice, last-wins picked the STALE 16253 over main's 16432, and
-// the ratchet then reported a +181 growth that had not happened and printed a ceiling 179 too low
-// to record. Recording it would have banked a wrong number into a gate every later PR is measured
-// against, and nothing in the pipeline would have said a word. It happened three times in one
-// session and was caught by eye each time.
+// WHY, MEASURED. Resolving a `scripts/comment-load-baseline.json` rebase conflict by taking the
+// UNION of both sides — the obvious move for a flat sorted map, and what a merge tool suggests —
+// produces a document with the key twice. `JSON.parse` does not error: it takes the LAST one,
+// silently. On 2026-09-07 that put "src/run-task.ts" in the file twice, last-wins picked the stale
+// 16253 over main's 16432, and the ratchet reported a +181 growth that had not happened against a
+// ceiling 179 too low to record. That conflict arose FOUR times in one session, caught by eye each
+// time. Recording the printed number would have banked a wrong ceiling into a gate every later PR
+// is measured against, with nothing in the pipeline saying a word.
 //
-// WHY A TEST AND NOT A NOTE. CLAUDE.md's own header says a rule stated only in prose "can be
-// violated silently and repeatedly, which is why several of these bullets exist at all", and that
-// the fix is to make something REFUSE it. This is the refusal. It needs no allowlist: there is no
-// legitimate reason for a ratchet baseline to name one key twice, and a file that does is either a
-// bad merge or a generator bug.
+// WHY IN `readBaseline` AND NOT A SUITE THAT WALKS THE BASELINES. Two reasons. It is where the
+// defect BITES — that function's own doc already refuses "a silently-disarmed ceiling", and a
+// duplicate key is exactly one — so a worker running the two cheap ratchets before its first push
+// (the W1-T2997 contract) is refused locally instead of by CI. And a test that ENUMERATED the
+// baseline files would be census-shaped: the census recognizer detects a suite that walks a file
+// population, and `censusPopulationDrift` then refuses it as an undisclosed census suite until
+// CENSUS_POPULATION names it — which for an ADMITTED member means a fast-gate job of its own. A
+// millisecond check does not earn a CI step.
 //
-// THE PARSE MUST BE ITS OWN. Every JSON reader in the standard library — `JSON.parse`, and so
-// every `readFileSync(...)` wrapper over it — has already discarded the duplicate by the time it
-// returns, so a checker built on one cannot see what it is looking for. The scanner below reads
-// the TEXT.
+// A TRAP WORTH THE LINE, since this file met it: that recognizer greps SOURCE TEXT, so a comment
+// merely NAMING the enumeration idioms trips it exactly as a real caller would. An earlier draft of
+// this very paragraph listed them and was refused as an undisclosed suite. Describe the shape;
+// do not spell the tokens.
+//
+// Everything below drives inline text through the REAL exported functions.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+// The repo's idiom for a plain-JS script under test: a dynamic import with an explicit cast, since
+// the .mjs files carry no declarations (test/comment-load-ratchet.test.ts does the same).
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const load = async (rel: string) => (await import(pathToFileURL(join(REPO_ROOT, rel)).href)) as Record<string, Function>;
 
-/**
- * Every key that appears more than once within a single JSON object, as `<path>.<key>`.
- *
- * A minimal scanner rather than a parser: it tracks string state (with escapes) so a brace or
- * quote inside a value cannot desynchronise it, keeps a stack of containers so an ARRAY OF OBJECTS
- * is handled correctly — sibling objects repeating a field name is normal and must not report —
- * and treats a string as a KEY only when the next non-whitespace character is a colon and the
- * enclosing container is an object.
- */
-export function duplicateKeys(text: string): string[] {
-  const dups: string[] = [];
-  const stack: { isObject: boolean; seen: Set<string> }[] = [];
-  let i = 0;
-  while (i < text.length) {
-    const c = text[i];
-    if (c === '"') {
-      let j = i + 1;
-      let raw = "";
-      while (j < text.length) {
-        if (text[j] === "\\") {
-          raw += text[j + 1];
-          j += 2;
-          continue;
-        }
-        if (text[j] === '"') break;
-        raw += text[j];
-        j++;
-      }
-      let k = j + 1;
-      while (k < text.length && /\s/.test(text[k])) k++;
-      const top = stack[stack.length - 1];
-      if (text[k] === ":" && top?.isObject) {
-        if (top.seen.has(raw)) dups.push(raw);
-        top.seen.add(raw);
-      }
-      i = j + 1;
-      continue;
-    }
-    if (c === "{") stack.push({ isObject: true, seen: new Set() });
-    else if (c === "[") stack.push({ isObject: false, seen: new Set() });
-    else if (c === "}" || c === "]") stack.pop();
-    i++;
-  }
-  return dups;
-}
+const { duplicateKeys } = await load("scripts/lib/json-duplicate-keys.mjs");
+const { readBaseline: readCommentLoadBaseline } = await load("scripts/comment-load-ratchet.mjs");
+const { readBaseline: readSourceSizeBaseline } = await load("scripts/source-size-ratchet.mjs");
 
-function trackedBaselines(): string[] {
-  return execFileSync("git", ["ls-files", "scripts/*baseline*.json"], { cwd: ROOT, encoding: "utf8" })
-    .split("\n")
-    .filter(Boolean);
-}
-
-test("W1-T3023: the scanner finds a duplicate key, and does not report sibling objects that share field names", () => {
+test("W1-T3023: the scanner finds a key repeated inside one object", () => {
   assert.deepEqual(duplicateKeys('{"a": 1, "b": 2}'), [], "distinct keys are clean");
-  assert.deepEqual(duplicateKeys('{"a": 1, "a": 2}'), ["a"], "the same key twice in one object must report");
-
-  // THE FALSE POSITIVE THIS MUST NOT HAVE. A first attempt at this check counted key names across
-  // the whole file and flagged every array-of-objects baseline in the repo — assertion-discrimination,
-  // state-citation, task-id-existence — because their rows all carry `reason`. Sibling objects are
-  // not duplicates.
-  assert.deepEqual(duplicateKeys('[{"reason": "x"}, {"reason": "y"}]'), [], "siblings sharing a field are clean");
-  assert.deepEqual(duplicateKeys('{"o": {"a": 1}, "p": {"a": 2}}'), [], "nested objects each get their own scope");
-  assert.deepEqual(duplicateKeys('{"o": {"a": 1, "a": 2}}'), ["a"], "a duplicate nested one level down still reports");
-
-  // A brace, a quote and a colon inside VALUES must not desynchronise the scan.
-  assert.deepEqual(duplicateKeys('{"a": "{\\"x\\": 1}", "b": "c:d"}'), [], "braces and colons inside strings are data");
-  assert.deepEqual(duplicateKeys('{"a": "v", "a": "{"}'), ["a"], "and a real duplicate is still found beside them");
+  assert.deepEqual(duplicateKeys('{"a": 1, "a": 2}'), ["a"], "the same key twice in one object reports");
+  assert.deepEqual(duplicateKeys('{"o": {"a": 1, "a": 2}}'), ["a"], "and one level down too");
 });
 
-test("W1-T3023: no tracked ratchet baseline carries a duplicate key", () => {
-  const files = trackedBaselines();
-  // A POSITIVE CONTROL on the corpus, not a formality: an empty file list and a clean repo are the
-  // same green, and this check exists precisely because a silent wrong answer is the failure mode.
-  assert.ok(files.length >= 10, `expected the baseline corpus, saw ${files.length} file(s): ${files.join(", ")}`);
+test("W1-T3023: sibling objects sharing a field name are NOT duplicates", () => {
+  // THE FALSE POSITIVE THIS MUST NOT HAVE. Counting key names file-wide — the naive version of this
+  // check — flags four legitimate baselines in this repo (assertion-discrimination, state-citation,
+  // task-id-existence, mutation) because every row in them carries `reason`.
+  assert.deepEqual(duplicateKeys('[{"reason": "x"}, {"reason": "y"}]'), []);
+  assert.deepEqual(duplicateKeys('{"o": {"a": 1}, "p": {"a": 2}}'), []);
+});
 
-  const offenders: string[] = [];
-  for (const rel of files) {
-    const dups = duplicateKeys(readFileSync(join(ROOT, rel), "utf8"));
-    if (dups.length > 0) offenders.push(`${rel}: ${[...new Set(dups)].sort().join(", ")}`);
-  }
-  assert.deepEqual(
-    offenders,
-    [],
-    "a ratchet baseline names a key twice. JSON.parse takes the LAST one silently, so the gate that " +
-      "reads this file is now measuring against a number nobody chose — the signature of a rebase " +
-      "conflict resolved by unioning both sides. Resolve it by taking the file from the merge base " +
-      "and re-running the ratchet, which prints the number to record.\n" +
-      offenders.join("\n"),
+test("W1-T3023: a brace, quote or colon inside a VALUE does not desynchronise the scan", () => {
+  assert.deepEqual(duplicateKeys('{"a": "{\\"x\\": 1}", "b": "c:d"}'), [], "punctuation in strings is data");
+  assert.deepEqual(duplicateKeys('{"a": "v", "a": "{"}'), ["a"], "and a real duplicate beside it is still found");
+});
+
+test("W1-T3023: comment-load's readBaseline refuses a duplicate key and names the remedy", () => {
+  // The exact shape the bad union produced: the stale value appended after the current one.
+  const unioned = '{\n  "src/lib/x.ts": 10,\n  "src/run-task.ts": 16432,\n  "src/run-task.ts": 16253\n}\n';
+  assert.equal(JSON.parse(unioned)["src/run-task.ts"], 16253, "JSON.parse silently takes the LAST — the defect");
+
+  assert.throws(
+    () => readCommentLoadBaseline(unioned, "scripts/comment-load-baseline.json"),
+    (e: unknown) => {
+      const msg = (e as Error).message;
+      assert.match(msg, /names a key twice/);
+      assert.match(msg, /src\/run-task\.ts/, "the offending key must be named");
+      assert.match(msg, /merge base/, "and the remedy stated");
+      return true;
+    },
   );
+  // A clean baseline still reads, so the guard is not a blanket refusal.
+  assert.deepEqual(readCommentLoadBaseline('{"src/a.ts": 3}', "p"), { "src/a.ts": 3 });
+});
+
+test("W1-T3023: source-size's readBaseline refuses one too — the sibling with the same union hazard", () => {
+  assert.throws(
+    () => readSourceSizeBaseline('{"src/a.ts": 500, "src/a.ts": 250}', "scripts/source-size-baseline.json"),
+    /names a key twice/,
+  );
+  assert.deepEqual(readSourceSizeBaseline('{"src/a.ts": 500}', "p"), { "src/a.ts": 500 });
 });
