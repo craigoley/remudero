@@ -1,0 +1,105 @@
+- id: W1-T3031
+  title: "THE `review.capacity` ROW CANNOT EXPLAIN ITS OWN `telemetry-unavailable` VERDICT — the decision gates on `cpuPsiFullAvg10Pct` and the ledger writes only `cpu_psi_some_avg10_pct`, so the deciding reading is the one field the row omits; `telemetry-unavailable` is the largest shed reason at 349 of 753 decisions and no row says WHICH of the three readings was absent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 8.00
+  files:
+    - src/lib/review-capacity.ts
+    - test/the-capacity-row-cannot-explain-its-own-telemetry-verdict.test.ts
+  origin: "operator-request#follow-up-work-2026-09-07"
+  plan_refs: ["W1-T2987"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ROW OMITS THE FIELD THAT DECIDED IT. OBSERVED in src/lib/review-capacity.ts: the
+    `hostTelemetryAvailable` test (~line 204) requires `finite(observation.cpuPsiFullAvg10Pct)`
+    alongside memory and memory-PSI, and failing it sheds to base with `reason =
+    "telemetry-unavailable"`. The evidence object DOES carry the value (~line 281,
+    `...(finite(observation.cpuPsiFullAvg10Pct) ? { cpuPsiFullAvg10Pct } : {})`). But the ledger
+    write (~line 463) records `cpu_psi_some_avg10_pct` and NOTHING for the full metric. The
+    row therefore carries the reading the decision did NOT consult and drops the one it did.
+
+    AND THE REASON NAMES NO READING. `telemetry-unavailable` is a single token for a conjunction of
+    three conditions. A reader cannot tell whether memory, CPU-PSI-full, or memory-PSI was the
+    absent one, so the largest shed reason in the fleet is also the least diagnosable.
+
+    MEASURED across the live ledger and all 364 rotations (traversal verified by positive control:
+    1,151,673 `sweep.disposed` rows read, zero permission denials). Of 753 `review.capacity`
+    decisions since 2026-09-05: `telemetry-unavailable` 349, `backlog-not-sustained` 127,
+    `cpu-pressure` 111, `provider-telemetry-unavailable` 92, `host-worker-budget` 58,
+    `review-latency-expanded` 9, `healthy-window` 5, `memory-pressure` 1. So 441 of 753 (59%) of
+    capacity decisions are shed for a TELEMETRY reason rather than for observed load, on a host
+    with 31 GiB of RAM.
+
+    ⚠ WHAT IS NOT ESTABLISHED, AND AN INSTRUMENT ERROR THAT NEARLY BECAME A FINDING. A first pass
+    tallied "CPU reading absent in 349 of 349 rows" and concluded the metric was unreadable. That
+    tally was an ARTIFACT: it searched for `cpu_psi_full_avg10_pct`, a key the ledger never writes,
+    so it measured the logging gap and not the reading. MEASURED directly instead: this host's
+    `/proc/pressure/cpu` DOES expose a full line (`full avg10=0.00 avg60=0.00 avg300=0.00`), as does
+    the cgroup. So whether the reading was genuinely absent at decision time is UNKNOWN and stays
+    unknown until the field is logged. THAT IS PRECISELY THE POINT OF THIS TASK: it makes the
+    question answerable. It does not answer it, and it must not pretend to.
+  design: |
+    (i) LOG THE DECIDING FIELD. Add `cpu_psi_full_avg10_pct` to the `review.capacity` row, read off
+    the SAME `evidence` object every sibling field uses and with the same `?? null` idiom. Do not
+    remove `cpu_psi_some_avg10_pct`: `some` is still consulted by the `cpu-pressure` arm, and
+    dropping it would trade one blind spot for another.
+
+    (ii) NAME WHICH READING WAS ABSENT, AS A FIELD AND NOT AS A NEW REASON. Add a pure
+    `absentHostReadings(observation)` returning the names of whichever of the three host readings is
+    non-finite, and carry it on the row. DO NOT change the `reason` token: `ReviewCapacityReason` is
+    a closed union and the string is matched by other readers, so widening it would be a breaking
+    change for an observability gain. Additive field, stable vocabulary.
+
+    (iii) THE LIST IS EMPTY WHENEVER TELEMETRY IS COMPLETE, so the field is not noise on the healthy
+    path and a reader can filter on it directly.
+
+    (iv) DIAGNOSTIC ONLY — NO POLICY MOVES. This task changes what is RECORDED. It does not change
+    `hostTelemetryAvailable`, does not change which PSI metric gates capacity, and does not widen or
+    narrow any lane. Whether the widener SHOULD gate on `full` (documented as not meaningful at the
+    root cgroup on some kernels) rather than `some` is a real question this makes answerable and
+    deliberately leaves to the operator. Say so in the source.
+  acceptance:
+    - claim: "the capacity row records the cpu PSI full reading the decision actually gates on"
+      proof: "unit test: test/the-capacity-row-cannot-explain-its-own-telemetry-verdict.test.ts"
+    - claim: "a telemetry-unavailable decision names which of the three host readings was absent"
+      proof: "unit test: test/the-capacity-row-cannot-explain-its-own-telemetry-verdict.test.ts"
+    - claim: "a decision with complete host telemetry names no absent reading, so the field is silent on the healthy path"
+      proof: "unit test: test/the-capacity-row-cannot-explain-its-own-telemetry-verdict.test.ts"
+    - claim: "the reason vocabulary and the width the decision returns are both unchanged, so this is observability and not policy"
+      proof: "unit test: test/the-capacity-row-cannot-explain-its-own-telemetry-verdict.test.ts"
+  falsifier: |
+    A DIAGNOSTIC CHANGE THAT MOVES A WIDTH IS NOT A DIAGNOSTIC CHANGE. Assert, over a table of
+    observations spanning every arm (host-unavailable, provider-unavailable, backlog-not-sustained,
+    cpu-pressure, healthy-window), that BOTH the returned `effectiveWidth` and the `reason` token
+    are identical to what the function returns today. If any width or any reason moved, the change
+    is wrong however good the new field looks.
+
+    AND THE ABSENT-LIST MUST DISCRIMINATE, NOT DECORATE. Assert it names CPU alone when only the cpu
+    reading is missing, memory alone when only memory is, and both when both are — a list that is
+    always empty, or always full, would pass a test that only checks the field exists.
+
+    PROVE IT LOAD-BEARING: with `absentHostReadings` stubbed to return `[]`, the naming rows must
+    redden while the width/reason invariance rows stay green. The second half is what proves those
+    rows pin policy invariance rather than the new field.
+  note: |
+    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3031`.
+
+    FILED PLAN-ONLY, built separately, so the shard does not trip Standing rule 15.
+
+    PROVENANCE: the operator asked to "make the telemetry observable" after being shown that 59% of
+    capacity decisions shed for a telemetry reason rather than observed load.
+
+    NOT W1-T2987, WHICH FIXED THE OTHER HALF. That task found the PROVIDER snapshot expiring a
+    minute after the last worker spawn and rewrote the provider branch so host telemetry alone
+    authorises the base width. Its own comment records `telemetry-unavailable` as the largest shed
+    reason at 347 of 670 rows and leaves the HOST half untouched — the count is 349 of 753 today, so
+    the gap it named is still open. This task does not re-litigate its fix; it makes the residue
+    diagnosable.
+
+    risk:low — additive fields on a ledger row, no branch condition touched. The falsifier's
+    width-and-reason invariance table is the evidence for that claim, not the claim itself.
