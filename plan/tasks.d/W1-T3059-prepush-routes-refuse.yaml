@@ -1,4 +1,4 @@
-- id: W1-T3057
+- id: W1-T3059
   title: "THE THREE PRE-PUSH ROUTES SHIPPED AS PROSE AND A PROSE RULE IS VIOLATED SILENTLY — census-membership, rule15-precheck and the ratchet contract all depend on a worker choosing to remember them, while spawnWorker already sets core.hooksPath on every worktree it makes: give the routes a refusal, behind a switch that ships OFF"
   repo: remudero
   depends_on: []
@@ -68,6 +68,15 @@
     Every claim about the hook's own behaviour is therefore proven BEHAVIOURALLY, by a test that
     executes it, which is the stronger evidence anyway: the test runs the hook as a subprocess and
     reads its exit code, rather than asserting that a phrase appears in a file.
+
+    ID PROVENANCE — RENUMBERED W1-T3057 -> W1-T3059 AFTER A COLLISION THIS FILING DID NOT CAUSE.
+    W1-T3057 was verified free at mint time, but open PR #4463 was mid-flight through the SAME
+    renumber under the same collision pressure (its own record documents two hops off W1-T3057
+    for this exact reason) and its PR body's prose mentions of "W1-T3057" register as a claim
+    under `task-id-existence`'s open-PR mention scan even though its declared plan id had already
+    moved on to W1-T3058. `rmd next-task-id --reserve` confirmed W1-T3059 free and reserved it
+    (`refs/rmd-id/W1-T3059`) before this record moved. ONLY the id line, filename and this note
+    change; acceptance and design are left byte-identical.
 
   acceptance:
     - claim: "the switch ships off, so an unset environment cannot block a push"
