@@ -139,3 +139,81 @@ test("an unreadable ledger union yields a refused revert-recall report member ra
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/*
+ * W1-T2701: the two arms below were added by this change and no test reached either. The taint
+ * gate resolves a source class from a DECLARED field as well as from provenance text, and the
+ * cadence report maps each recalled proposal into its report row — a map callback that never runs
+ * while every fixture leaves `proposals` empty. Both are the arms that fire in production.
+ */
+
+test("W1-T2701: a declared external source class taints on its own, under either field spelling", () => {
+  for (const field of ["sourceClass", "source_class"] as const) {
+    const candidate = { ...entry({ id: `declared-${field}`, src: "retro#procedural (W1-T300)" }), [field]: "github-issue-body" };
+    assert.deepEqual(
+      promotionTaint(candidate),
+      {
+        tainted: true,
+        sourceClass: "github-issue-body",
+        reason: "provenance resolves to external-text source class github-issue-body",
+      },
+      `a declared ${field} must taint even when the provenance text is a clean fleet source`,
+    );
+  }
+
+  const undeclared = { ...entry({ id: "declared-unknown", src: "retro#procedural (W1-T300)" }), sourceClass: "retro" };
+  assert.equal(promotionTaint(undeclared).tainted, false, "a source class outside the external set must not taint");
+});
+
+test("W1-T2701: a recalled proposal reaches the cadence report carrying its entry id and both PR numbers", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-revert-recall-proposal-"));
+  try {
+    const stateDir = join(root, "state");
+    mkdirSync(join(root, "learnings"), { recursive: true });
+    mkdirSync(stateDir, { recursive: true });
+    // The recall arm runs only past the ledger-union precondition; one readable archive clears it.
+    writeFileSync(
+      join(stateDir, "ledger.2026-01-01T00-00-00-000Z.ndjson"),
+      JSON.stringify({ step: "containment.probe" }) + "\n",
+    );
+    writeFileSync(
+      join(root, "learnings", "architecture.yaml"),
+      [
+        "- id: reverted-source-fact",
+        "  subsystem: knowledge",
+        "  lifecycle: active",
+        "  files: [ src/lib/learnings.ts ]",
+        "  fact: a fact whose source PR was reverted",
+        "  src: fleet#build PR#8",
+        '  cited: "2026-01-01"',
+        "",
+      ].join("\n"),
+    );
+
+    const mergeSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const revertSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const dump = [
+      `\x02${mergeSha}\x002026-01-01T00:00:00+00:00\x00fix(learnings): source fact (W1-T8) (#8)\x00\x01src/lib/learnings.ts\n`,
+      `\x02${revertSha}\x002026-01-02T00:00:00+00:00\x00Revert "fix(learnings): source fact (W1-T8) (#8)" (#108)\x00This reverts commit ${mergeSha}.\x01src/lib/learnings.ts\n`,
+    ].join("");
+
+    const result = runMeasurementCadenceReport({
+      stateDir,
+      cwd: root,
+      escalate: false,
+      gitLog: () => ({ dump, ref: "fixture" }),
+    });
+
+    const recall = result.revertRecall;
+    assert.ok(recall, "the report must include the revert-recall member");
+    assert.equal(recall.status, "measured");
+    assert.equal(recall.proposedFlipCount, 1);
+    assert.deepEqual(
+      recall.proposals,
+      [{ entryId: "reverted-source-fact", sourcePr: 8, revertingPr: 108 }],
+      "the report row must carry the entry id and both PR numbers, not the whole proposal",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
