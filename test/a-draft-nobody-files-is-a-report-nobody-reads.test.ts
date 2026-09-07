@@ -38,6 +38,7 @@ function draft(over: Partial<CiLearningShardDraft> = {}): CiLearningShardDraft {
       "THE coverage-ratchet GATE WENT RED ON #4283 AND WAS REPAIRED — carry the lesson to the lane " +
       "that hit it, so the same gate does not refuse a second pull request for the same reason",
     gate: "coverage-ratchet",
+    prs: [4283],
     pr: 4283,
     repairFiles: ["src/lib/rule-efficacy.ts"],
     author_class: "machine",

@@ -10,7 +10,8 @@
   files: [src/lib/install-inputs.ts, src/lib/worker.ts, src/run-task.ts, test/the-deferred-drift-ruling-leaves-a-measured-defect-with-no-owner.test.ts]
   origin: "operator-session#live-dependency-source-falsified-2026-09-02"
   plan_refs: ["W1-T151", "W1-T2618", "W1-T2621", "W1-T2625", "W1-T2626"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     THIS AMENDS THE TASK BEFORE IMPLEMENTATION BECAUSE LIVE EVIDENCE FALSIFIED ITS PREMISE.
@@ -108,6 +109,38 @@
     worker symlinks no longer resolve to the runtime checkout. Commit distance alone does not
     falsify this amendment; dependency compatibility is content-addressed.
   note: |
+
+    RETIRED 2026-09-07 ON OPERATOR DIRECTION — OVERTAKEN BY W1-T2777, WHICH THIS SHARD DOES NOT CITE.
+    Validated in a build pass and refused implementation because the mechanism is PRESENT. MEASURED
+    at origin/main, criterion by criterion:
+
+      1 "records the exact node_modules source selected ... never labels repoDir as the linked
+        source" — DONE. `recordCanonicalCheckoutDrift` (src/lib/worker.ts) now takes a
+        `resolveSource` dep, computes `inThisClone = source === join(repoDir, "node_modules")`, and
+        emits either "the node_modules just symlinked into this worktree comes from that stale tree"
+        or "this worktree's node_modules comes from <source>, not from that stale tree, so the
+        distance does not reach its dependencies".
+      2 "matching install inputs proceed silently" — DONE. `linkWorktreeNodeModules` compares
+        `hashInstallInputs(worktreePath)` against `hashInstallInputs(dirname(source))` AT SYMLINK
+        TIME, and its own comment says the compare is against `parentOf(source)`, "not `repoDir`".
+      5 "one shared install-input identity implementation" — DONE. `src/lib/install-hash.ts` exists
+        and run-task.ts imports `hashInstallInputs`/`installHashMarkerPath` from it.
+      6 "the production worker path calls the shared helper" — DONE, same import plus
+        `linkWorktreeNodeModules`'s `hashInstallInputs` dep defaulting to it.
+      7 "the Azure fallback shape never emits the old 1,903-commit false attribution" — DONE, by 1.
+
+    THE EVIDENCE IS ALSO STALE. Re-measured 2026-09-07: `/home/node/Remudero/repos/remudero` is 57
+    commits behind (not 1,903) and still has no node_modules; the canonical checkout is 7 behind and
+    owns node_modules with a live `.rmd-install-hash`. And the shard's "both observed worker links
+    resolve to the canonical tree" no longer holds — six of seven live worktrees hold a REAL 442 MiB
+    node_modules, which is a DIFFERENT defect and is filed as W1-T3041.
+
+    WHAT IS NOT RULED ON. Criterion 3's "deterministic pre-spawn refusal or park" is the one arm not
+    clearly shipped: today a lockfile mismatch yields the `linked-lockfile-mismatch` outcome and a
+    warning, and proceeds. If an operator wants a REFUSAL there, that is a small, well-aimed task
+    against `linkWorktreeNodeModules`'s existing outcome — not this shard, whose other six criteria
+    are already satisfied and whose premise is superseded.
+
     AMENDMENT EVIDENCE is live and current as of 2026-09-02. The earlier task's 1,859 and 1,863
     measurements were true readings of the cache but a false attribution of the dependency
     artifact. This replacement preserves the underlying goal — prevent current code from running
