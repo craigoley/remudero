@@ -1,0 +1,56 @@
+- id: W1-T3058
+  title: "A SCOPE FENCE OUTLIVED ITS OWN TASK AND NOW REDDENS EVERY BRANCH THAT TOUCHES src/ — W1-T2732's fences diff against merge-base(HEAD, origin/main), which stops meaning 'this task' the moment the task merges, and #4462 and #4455 are both red on it within the hour: re-point them at the fixed commit that shipped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "session 2026-09-07 — found while diagnosing why #4462 and #4455 were red on ci-shard (2/4)"
+  plan_refs: ["W1-T2732"]
+  rationale: |
+    (1) THE DEFECT, EXACTLY. `test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts`
+    carries two scope fences that W1-T2732 wrote about its own branch, both computed against
+    `forkPoint()` = `merge-base(HEAD, origin/main)`. While that task's branch was open, `HEAD` was
+    its branch and the fences said what they meant: "MY diff adds no src/ path", "MY diff does not
+    edit the detector script". The file merged, and `HEAD` became every LATER author's branch. The
+    same two assertions now read as claims about unrelated work, and "no src/ path is added to this
+    diff" fails for anyone who edits a single file under `src/`.
+
+    (2) MEASURED, WITH TIMES. #4419 merged the file at 2026-09-07T17:45:11Z. Inside the hour, #4462
+    and #4455 were both red on `ci-shard (2/4)` naming this assertion, and it reproduces on a fresh
+    branch that appends one line to one src file. It passes on `main`, where the diff is empty --
+    so the fence is green exactly where anyone looks at it and red everywhere it is not, which is
+    why it cleared review and then blocked the queue.
+
+    (3) WHY THE ORIGINAL DOC DID NOT CATCH IT, worth recording because the near-miss is instructive.
+    That helper's comment is careful and correct about a DIFFERENT hazard: it explains at length
+    that a literal `git diff origin/main` picks up unrelated files as `origin/main` moves, and
+    chooses the merge-base to avoid it. The reasoning is sound; it simply never asks what `HEAD`
+    means after the branch is gone. A fence is written while its branch is open, which is the one
+    moment its defect is invisible.
+
+    (4) THE FIX, AND WHY IT IS NOT A DELETION. Both fences are re-pointed at `SHIPPING_COMMIT`, the
+    fixed sha of W1-T2732's own squash commit. The claims stay checkable forever and stay TRUE --
+    they were true -- but a fixed sha cannot move under a later author, so they can no longer fail
+    on anyone else's work. Deleting them would have discarded real evidence; leaving them would have
+    kept a landmine. Post-merge, scope enforcement belongs to the reviewer (`scope_violation`,
+    rule 15), never to a test in the permanent suite, and that is the general lesson: a scope fence
+    is a claim about ONE COMMIT, not a standing property of the repository.
+
+    (5) FALSIFIED THREE WAYS rather than asserted. On a branch made to touch `src/`: the repaired
+    file passes 12/12, and the file as it stands on `origin/main` fails that same branch on
+    assertion 11 -- the landmine reproduced on demand. And with `SHIPPING_COMMIT` set to a bogus
+    sha, two assertions FAIL rather than passing over an empty path list, which is the positive
+    control that keeps `[]` from certifying itself.
+
+  acceptance:
+    - claim: "the fences are anchored to the commit that shipped the task rather than to the current branch"
+      proof: "grep: SHIPPING_COMMIT in test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts"
+    - claim: "the paths under test come from that fixed commit rather than from a live diff"
+      proof: "grep: shippedPaths in test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts"
+    - claim: "an unreadable shipping commit fails the assertion instead of passing over an empty list"
+      proof: "grep: must be readable, else this proves nothing in test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts"
+  files: [test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts]
+  status: queued

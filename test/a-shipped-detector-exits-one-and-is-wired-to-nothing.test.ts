@@ -53,13 +53,34 @@ function gitAdd(root: string) {
   execFileSync("git", ["-C", root, "add", "-A"], { encoding: "utf8" });
 }
 
-/** This task's own fork point, not `origin/main` itself -- `origin/main` keeps moving as OTHER
- *  PRs merge, so a literal `git diff origin/main` picks up every unrelated file every one of
- *  them touched and reads as a false "src/ added" the moment any of them lands. The merge-base
- *  is the one stable point that scopes the diff to what THIS task's own branch actually changed,
- *  same discipline as W1-T907's three-way dedupe-then-pull recipe. */
-function forkPoint(): string {
-  return execFileSync("git", ["merge-base", "HEAD", "origin/main"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+/**
+ * W1-T3058 — THE SHIPPING COMMIT, NOT THE CURRENT BRANCH. W1-T2732's two scope fences below were
+ * written against `merge-base(HEAD, origin/main)`. That is the right answer WHILE a task's own
+ * branch is open and the wrong one the moment it merges: from then on `HEAD` is every LATER
+ * author's branch, and the fences read as claims about work that has nothing to do with W1-T2732.
+ * The doc they replaced was careful about the RIGHT hazard (origin/main moving) and missed this
+ * one entirely, which is why it survived review.
+ *
+ * MEASURED. #4419 merged this file at 2026-09-07T17:45:11Z. Within the hour, "no src/ path is
+ * added to this diff" was failing on every open branch that touches `src/` -- #4462 and #4455 both
+ * red on `ci-shard (2/4)` for it, and it reproduces on any new branch that edits one src file. The
+ * suite passes on `main`, where the diff is empty, so the fence is green exactly where it is
+ * looked at and red everywhere it is not.
+ *
+ * A SCOPE FENCE IS A CLAIM ABOUT ONE COMMIT. Re-pointing both fences at the commit that shipped the
+ * task keeps the evidence -- the claim was true and stays checkable forever -- and removes the
+ * landmine, because a fixed sha cannot move under a later author. Post-merge, scope belongs to the
+ * reviewer (`scope_violation`, rule 15), never to a test in the permanent suite.
+ */
+const SHIPPING_COMMIT = "03a9a68a0";
+
+/** The paths W1-T2732's own squash commit changed. A FIXED sha, so no later branch alters it. */
+function shippedPaths(): string[] {
+  const out = execFileSync("git", ["show", "--name-only", "--pretty=format:", SHIPPING_COMMIT], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  return out.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
 // ── acceptance 1: "the check runs in CI as a required gate ... named by the same script path
@@ -190,19 +211,20 @@ test("both the clean run and a violation run still print the blind-spots stateme
 // achievable, still-meaningful form (see that file's own "W1-T2732 UPDATE" comments) rather than
 // deleted outright, and its full 25/25-passing suite is unaffected otherwise -- verified by
 // running it, not merely asserted here.
-test("the detector script itself is byte-for-byte unedited against this task's own fork point", () => {
-  const result = spawnSync("git", ["diff", "--quiet", forkPoint(), "--", "scripts/coverage-session-blanking-check.mjs"], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  });
-  assert.equal(result.status, 0, "scripts/coverage-session-blanking-check.mjs must not be edited by this task");
+test("W1-T2732 shipped without editing the detector script it wired", () => {
+  assert.ok(
+    !shippedPaths().includes("scripts/coverage-session-blanking-check.mjs"),
+    "the task wired an EXISTING detector; editing it would have been a different task",
+  );
 });
 
-test("no src/ path is added to this diff", () => {
-  const result = spawnSync("git", ["diff", "--name-only", forkPoint()], { cwd: REPO_ROOT, encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
-  const srcPaths = result.stdout.split("\n").filter((p) => p.startsWith("src/"));
-  assert.deepEqual(srcPaths, [], `no src/ path may ride with this diff; found:\n${srcPaths.join("\n")}`);
+test("W1-T2732 shipped with no src/ path riding along", () => {
+  // The claim W1-T2732 made about ITSELF, still checked -- and now unable to fail on anyone else's
+  // branch, which is the whole repair. The non-empty assertion is the positive control: without it
+  // an unreadable sha would return [] and this would pass over an empty set.
+  const paths = shippedPaths();
+  assert.ok(paths.length > 0, `the shipping commit ${SHIPPING_COMMIT} must be readable, else this proves nothing`);
+  assert.deepEqual(paths.filter((path) => path.startsWith("src/")), [], "no src/ path rode with that commit");
 });
 
 test("this check script contains none of the mutating fs calls -- it cannot edit any caller it scans (unaffected by this task)", () => {
