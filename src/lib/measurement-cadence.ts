@@ -1479,6 +1479,22 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string)
  *  degrade silently (CLAUDE.md's proof section). */
 export const CI_LEARNING_LESSONS_FILE = "learnings/ci-gate-lessons.yaml";
 
+/** Parse rendered shard bytes back and lint them — the whole of "validate before writing".
+ *  EXPORTED so both arms are reachable: every draft the renderer produces takes the LINT arm, so
+ *  the UNPARSEABLE arm is testable only here (the all-fakes/catch-arm trap — a catch no test can
+ *  enter is a claim, not a guard). */
+export function ciLearningRecordVerdict(contents: string, label: string): { ok: boolean; reason: string } {
+  try {
+    const task = loadPlanFromYaml(contents, label).tasks[0];
+    const lint = lintTask(task);
+    return lint.ok
+      ? { ok: true, reason: "" }
+      : { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
+  } catch (e) {
+    return { ok: false, reason: `unparseable: ${(e as Error).message}` };
+  }
+}
+
 /**
  * File each draft as a real `plan/tasks.d/` record. Skips what the plan already holds, refuses what
  * the linter would, and writes only what survives both.
@@ -1505,18 +1521,9 @@ export function fileCiLearningShards(
     const taskId = deps.mintTaskId();
     const contents = ciLearningShardYaml(d, taskId);
 
-    // VALIDATE BEFORE WRITING: parse the rendered bytes back and lint them. A record this rung
-    // cannot get past the repo's own linter must never reach the disk.
-    let verdict: { ok: boolean; reason: string };
-    try {
-      const task = loadPlanFromYaml(contents, `ci-learning:${taskId}`).tasks[0];
-      const lint = lintTask(task);
-      verdict = lint.ok
-        ? { ok: true, reason: "" }
-        : { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
-    } catch (e) {
-      verdict = { ok: false, reason: `unparseable: ${(e as Error).message}` };
-    }
+    // VALIDATE BEFORE WRITING: a record this rung cannot get past the repo's own linter must never
+    // reach the disk.
+    const verdict = ciLearningRecordVerdict(contents, `ci-learning:${taskId}`);
     if (!verdict.ok) {
       refused.push({ findingId: d.findingId, reason: verdict.reason });
       continue;

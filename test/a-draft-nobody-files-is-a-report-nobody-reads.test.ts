@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { lintTask } from "../src/lib/task-linter.js";
 import {
+  ciLearningRecordVerdict,
   ciLearningShardYaml,
   fileCiLearningShards,
   type CiLearningShardDraft,
@@ -370,4 +371,20 @@ test("W1-T2968 a filer that THROWS does not take the report down with it, and sa
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("W1-T2968 the UNPARSEABLE arm is a guard, not a claim — bytes that will not parse are refused", () => {
+  // MEASURED BY CI, not guessed: diff-coverage blocked on this catch arm because every draft the
+  // renderer produces parses cleanly and takes the LINT arm instead. A catch no test can enter is a
+  // claim rather than a guard, so the verdict is reachable on its own (the catch-arm trap).
+  const control = ciLearningRecordVerdict(ciLearningShardYaml(draft(), "W1-T2994"), "control");
+  assert.deepEqual(control, { ok: true, reason: "" }, "control: a real rendered record passes both arms");
+
+  const notYaml = ciLearningRecordVerdict("- id: [unclosed\n  title: \"x", "broken");
+  assert.equal(notYaml.ok, false, "bytes that will not parse are REFUSED, never written");
+  assert.match(notYaml.reason, /unparseable:/, "and named as unparseable, distinct from a lint refusal");
+
+  const notATask = ciLearningRecordVerdict("- id: W1-T1\n  title: t\n", "no-repo");
+  assert.equal(notATask.ok, false, "a well-formed document that is not a task is refused too");
+  assert.match(notATask.reason, /unparseable:/);
 });
