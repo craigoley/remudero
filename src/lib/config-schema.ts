@@ -229,13 +229,13 @@ function describeExpected(schema: ValueSchema): string {
 function validateValue(value: unknown, schema: ValueSchema, path: string, issues: ConfigShapeIssue[]): void {
   switch (schema.kind) {
     case "string":
-      if (typeof value !== "string") issues.push({ path, message: "expected string" });
+      if (typeof value !== "string") issues.push({ path, message: `expected ${describeExpected(schema)}` });
       return;
     case "number":
-      if (typeof value !== "number" || !Number.isFinite(value)) issues.push({ path, message: "expected number" });
+      if (typeof value !== "number" || !Number.isFinite(value)) issues.push({ path, message: `expected ${describeExpected(schema)}` });
       return;
     case "boolean":
-      if (typeof value !== "boolean") issues.push({ path, message: "expected boolean" });
+      if (typeof value !== "boolean") issues.push({ path, message: `expected ${describeExpected(schema)}` });
       return;
     case "enum":
       if (typeof value !== "string" || !schema.values.includes(value)) {
@@ -243,7 +243,13 @@ function validateValue(value: unknown, schema: ValueSchema, path: string, issues
       }
       return;
     case "nullable":
-      if (value !== null) validateValue(value, schema.value, path, issues);
+      if (value !== null) {
+        const firstNewIssue = issues.length;
+        validateValue(value, schema.value, path, issues);
+        for (let i = firstNewIssue; i < issues.length; i++) {
+          issues[i] = { path: issues[i]!.path, message: `expected ${describeExpected(schema)}` };
+        }
+      }
       return;
     case "array":
       if (!Array.isArray(value)) {
@@ -253,6 +259,10 @@ function validateValue(value: unknown, schema: ValueSchema, path: string, issues
       value.forEach((item, i) => validateValue(item, schema.element, `${path}[${i}]`, issues));
       return;
     case "object":
+      if (!isPlainRecord(value)) {
+        issues.push({ path, message: `expected ${describeExpected(schema)}` });
+        return;
+      }
       validateObject(value, schema.fields, path, issues);
       return;
   }
