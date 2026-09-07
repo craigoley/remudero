@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { inflateRawSync } from "node:zlib";
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { captureFeedback, type CaptureFeedbackOptions, type FeedbackEntry } from "./feedback.js";
 import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } from "./ledger-grep.js";
@@ -242,6 +244,288 @@ export function parseFiledCoverageImprovementLines(rawLines: readonly string[]):
  *  the EXACT same debt `signature`. */
 export function alreadyFiledForSignature(rawLines: readonly string[], signature: string): boolean {
   return parseFiledCoverageImprovementLines(rawLines).some((r) => r.signature === signature);
+}
+
+// ── CI artifact reader (W1-T2661): daemon-side input for the producer above ─────────────────
+
+export const COVERAGE_MERGED_ARTIFACT_NAME = "coverage-merged";
+export const COVERAGE_AGGREGATOR_JOB_NAME = "coverage-ratchet";
+export const COVERAGE_IMPROVEMENT_READ_STEP = "coverage_improvement.read";
+export const COVERAGE_IMPROVEMENT_REFUSED_STEP = "coverage_improvement.refused";
+
+export type CoverageArtifactRefusalReason =
+  | "github_unreadable"
+  | "no_merged_pr"
+  | "no_completed_coverage_ratchet_run"
+  | "no_coverage_merged_artifact"
+  | "artifact_unreadable"
+  | "download_not_lcov";
+
+export interface MergedCoverageArtifact {
+  lcovText: string;
+  workflowRunId: number;
+  headSha: string;
+  artifactId: number;
+  prNumber: number;
+}
+
+export type FetchMergedCoverageArtifactResult =
+  | ({ status: "read" } & MergedCoverageArtifact)
+  | {
+      status: "refused";
+      reason: CoverageArtifactRefusalReason;
+      detail: string;
+      workflowRunId?: number;
+      headSha?: string;
+      artifactId?: number;
+      prNumber?: number;
+    };
+
+export type CoverageArtifactGhJson = (args: string[]) => unknown;
+export type CoverageArtifactGhBuffer = (args: string[]) => Buffer;
+
+export interface FetchMergedCoverageArtifactDeps {
+  owner: string;
+  repo: string;
+  artifactName?: string;
+  aggregatorJobName?: string;
+  ghJson?: CoverageArtifactGhJson;
+  ghBuffer?: CoverageArtifactGhBuffer;
+  extractLcovFromZip?: (zip: Buffer) => string | undefined;
+  ledgerPath?: string;
+  ledgerRunId?: string;
+  taskId?: string;
+  writeLedgerLine?: (path: string, line: LedgerLine) => void;
+}
+
+export function mergedPullsRestArgs(owner: string, repo: string): string[] {
+  return ["api", `repos/${owner}/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`];
+}
+
+export function workflowRunsForHeadRestArgs(owner: string, repo: string, headSha: string): string[] {
+  return ["api", `repos/${owner}/${repo}/actions/runs?head_sha=${headSha}&status=completed&per_page=100`];
+}
+
+export function workflowJobsForRunRestArgs(owner: string, repo: string, workflowRunId: number): string[] {
+  return ["api", `repos/${owner}/${repo}/actions/runs/${workflowRunId}/jobs?per_page=100`];
+}
+
+export function workflowArtifactsForRunRestArgs(owner: string, repo: string, workflowRunId: number): string[] {
+  return ["api", `repos/${owner}/${repo}/actions/runs/${workflowRunId}/artifacts?per_page=100`];
+}
+
+export function workflowArtifactZipRestArgs(owner: string, repo: string, artifactId: number): string[] {
+  return ["api", `repos/${owner}/${repo}/actions/artifacts/${artifactId}/zip`];
+}
+
+function defaultCoverageArtifactGhJson(args: string[]): unknown {
+  const out = execFileSync("gh", args, { encoding: "utf8", maxBuffer: 1 << 24 });
+  return JSON.parse(out);
+}
+
+function defaultCoverageArtifactGhBuffer(args: string[]): Buffer {
+  return execFileSync("gh", args, { maxBuffer: 1 << 28 });
+}
+
+function isLcovText(text: string): boolean {
+  return /^SF:/m.test(text) && /^end_of_record$/m.test(text);
+}
+
+function zipEntryData(zip: Buffer, localHeaderOffset: number, compressedSize: number, compressionMethod: number): Buffer | undefined {
+  if (localHeaderOffset < 0 || localHeaderOffset + 30 > zip.length) return undefined;
+  if (zip.readUInt32LE(localHeaderOffset) !== 0x04034b50) return undefined;
+  const nameLen = zip.readUInt16LE(localHeaderOffset + 26);
+  const extraLen = zip.readUInt16LE(localHeaderOffset + 28);
+  const dataStart = localHeaderOffset + 30 + nameLen + extraLen;
+  const dataEnd = dataStart + compressedSize;
+  if (dataStart > zip.length || dataEnd > zip.length) return undefined;
+  const compressed = zip.subarray(dataStart, dataEnd);
+  if (compressionMethod === 0) return compressed;
+  if (compressionMethod === 8) return inflateRawSync(compressed);
+  return undefined;
+}
+
+function findZipEndOfCentralDirectory(zip: Buffer): number {
+  const min = Math.max(0, zip.length - 65_557);
+  for (let i = zip.length - 22; i >= min; i--) {
+    if (zip.readUInt32LE(i) === 0x06054b50) return i;
+  }
+  return -1;
+}
+
+/** Extract the first LCOV-looking text member from a GitHub Actions artifact zip. */
+export function extractLcovFromArtifactZip(zip: Buffer): string | undefined {
+  const eocd = findZipEndOfCentralDirectory(zip);
+  if (eocd < 0 || eocd + 22 > zip.length) return undefined;
+  const entryCount = zip.readUInt16LE(eocd + 10);
+  let cursor = zip.readUInt32LE(eocd + 16);
+  for (let i = 0; i < entryCount && cursor + 46 <= zip.length; i++) {
+    if (zip.readUInt32LE(cursor) !== 0x02014b50) return undefined;
+    const compressionMethod = zip.readUInt16LE(cursor + 10);
+    const compressedSize = zip.readUInt32LE(cursor + 20);
+    const nameLen = zip.readUInt16LE(cursor + 28);
+    const extraLen = zip.readUInt16LE(cursor + 30);
+    const commentLen = zip.readUInt16LE(cursor + 32);
+    const localHeaderOffset = zip.readUInt32LE(cursor + 42);
+    const name = zip.subarray(cursor + 46, cursor + 46 + nameLen).toString("utf8");
+    const data = zipEntryData(zip, localHeaderOffset, compressedSize, compressionMethod);
+    if (data && (name.endsWith(".info") || /lcov/i.test(name))) {
+      const text = data.toString("utf8");
+      if (isLcovText(text)) return text;
+    }
+    cursor += 46 + nameLen + extraLen + commentLen;
+  }
+  return undefined;
+}
+
+function writeCoverageArtifactLedgerLine(
+  deps: FetchMergedCoverageArtifactDeps,
+  step: string,
+  extra: Record<string, unknown>,
+): void {
+  if (!deps.ledgerPath) return;
+  const writeLine = deps.writeLedgerLine ?? appendLedger;
+  writeLine(deps.ledgerPath, {
+    run_id: deps.ledgerRunId ?? `COVERAGE-IMPROVEMENT-${Date.now()}`,
+    task_id: deps.taskId ?? "coverage-improve",
+    step,
+    ...extra,
+  });
+}
+
+function refusal(
+  deps: FetchMergedCoverageArtifactDeps,
+  reason: CoverageArtifactRefusalReason,
+  detail: string,
+  extra: Omit<Extract<FetchMergedCoverageArtifactResult, { status: "refused" }>, "status" | "reason" | "detail"> = {},
+): FetchMergedCoverageArtifactResult {
+  writeCoverageArtifactLedgerLine(deps, COVERAGE_IMPROVEMENT_REFUSED_STEP, { reason, detail, ...extra });
+  return { status: "refused", reason, detail, ...extra };
+}
+
+function mergedPrRows(rows: unknown): Array<{ number: number; mergedAt: string; headSha: string }> {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((row) => {
+      const r = row as { number?: unknown; merged_at?: unknown; head?: { sha?: unknown } };
+      return typeof r.number === "number" && typeof r.merged_at === "string" && typeof r.head?.sha === "string"
+        ? { number: r.number, mergedAt: r.merged_at, headSha: r.head.sha }
+        : undefined;
+    })
+    .filter((r): r is { number: number; mergedAt: string; headSha: string } => r !== undefined)
+    .sort((a, b) => (a.mergedAt < b.mergedAt ? 1 : a.mergedAt > b.mergedAt ? -1 : b.number - a.number));
+}
+
+function completedAggregatorRunId(runsPayload: unknown, jobsForRun: (runId: number) => unknown, jobName: string): number | undefined {
+  const runs = (runsPayload as { workflow_runs?: unknown })?.workflow_runs;
+  if (!Array.isArray(runs)) return undefined;
+  const ordered = [...runs]
+    .filter((run): run is { id: number; status?: string; conclusion?: string; created_at?: string; run_started_at?: string } => {
+      const r = run as { id?: unknown; status?: unknown; conclusion?: unknown; created_at?: unknown; run_started_at?: unknown };
+      return typeof r.id === "number" && r.status === "completed" && r.conclusion === "success";
+    })
+    .sort((a, b) => {
+      const at = a.run_started_at ?? a.created_at ?? "";
+      const bt = b.run_started_at ?? b.created_at ?? "";
+      return at < bt ? 1 : at > bt ? -1 : b.id - a.id;
+    });
+  for (const run of ordered) {
+    const jobs = (jobsForRun(run.id) as { jobs?: unknown })?.jobs;
+    if (!Array.isArray(jobs)) continue;
+    const hasAggregator = jobs.some((job) => {
+      const j = job as { name?: unknown; status?: unknown; conclusion?: unknown };
+      return j.name === jobName && j.status === "completed" && j.conclusion === "success";
+    });
+    if (hasAggregator) return run.id;
+  }
+  return undefined;
+}
+
+function artifactIdByName(artifactsPayload: unknown, artifactName: string): number | undefined {
+  const artifacts = (artifactsPayload as { artifacts?: unknown })?.artifacts;
+  if (!Array.isArray(artifacts)) return undefined;
+  const match = artifacts.find((artifact) => {
+    const a = artifact as { id?: unknown; name?: unknown; expired?: unknown };
+    return typeof a.id === "number" && a.name === artifactName && a.expired !== true;
+  }) as { id?: number } | undefined;
+  return match?.id;
+}
+
+/**
+ * Resolve the newest merged PR with a completed, successful `coverage-ratchet` aggregator run,
+ * read W1-T2662's `coverage-merged` artifact from that run, and return the LCOV text. Every
+ * miss is a named refusal so the daemon never turns "not readable" into an empty report.
+ */
+export function fetchMergedCoverageArtifact(deps: FetchMergedCoverageArtifactDeps): FetchMergedCoverageArtifactResult {
+  const ghJson = deps.ghJson ?? defaultCoverageArtifactGhJson;
+  const ghBuffer = deps.ghBuffer ?? defaultCoverageArtifactGhBuffer;
+  const extract = deps.extractLcovFromZip ?? extractLcovFromArtifactZip;
+  const artifactName = deps.artifactName ?? COVERAGE_MERGED_ARTIFACT_NAME;
+  const aggregatorJobName = deps.aggregatorJobName ?? COVERAGE_AGGREGATOR_JOB_NAME;
+
+  let prs: Array<{ number: number; mergedAt: string; headSha: string }>;
+  try {
+    prs = mergedPrRows(ghJson(mergedPullsRestArgs(deps.owner, deps.repo)));
+  } catch (e) {
+    return refusal(deps, "github_unreadable", `merged PR list unreadable: ${String((e as Error)?.message ?? e)}`);
+  }
+  if (prs.length === 0) {
+    return refusal(deps, "no_merged_pr", `no merged PRs were returned for ${deps.owner}/${deps.repo}`);
+  }
+
+  let selected: { prNumber: number; headSha: string; workflowRunId: number } | undefined;
+  try {
+    for (const pr of prs) {
+      const runs = ghJson(workflowRunsForHeadRestArgs(deps.owner, deps.repo, pr.headSha));
+      const workflowRunId = completedAggregatorRunId(
+        runs,
+        (runId) => ghJson(workflowJobsForRunRestArgs(deps.owner, deps.repo, runId)),
+        aggregatorJobName,
+      );
+      if (workflowRunId !== undefined) {
+        selected = { prNumber: pr.number, headSha: pr.headSha, workflowRunId };
+        break;
+      }
+    }
+  } catch (e) {
+    return refusal(deps, "github_unreadable", `workflow run lookup unreadable: ${String((e as Error)?.message ?? e)}`);
+  }
+  if (!selected) {
+    return refusal(deps, "no_completed_coverage_ratchet_run", `no merged PR head has a completed ${aggregatorJobName} run`);
+  }
+
+  let artifactId: number | undefined;
+  try {
+    artifactId = artifactIdByName(ghJson(workflowArtifactsForRunRestArgs(deps.owner, deps.repo, selected.workflowRunId)), artifactName);
+  } catch (e) {
+    return refusal(deps, "artifact_unreadable", `artifact list unreadable: ${String((e as Error)?.message ?? e)}`, selected);
+  }
+  if (artifactId === undefined) {
+    return refusal(deps, "no_coverage_merged_artifact", `no ${artifactName} artifact on run ${selected.workflowRunId}`, selected);
+  }
+
+  let zip: Buffer;
+  try {
+    zip = ghBuffer(workflowArtifactZipRestArgs(deps.owner, deps.repo, artifactId));
+  } catch (e) {
+    return refusal(deps, "artifact_unreadable", `artifact ${artifactId} download unreadable: ${String((e as Error)?.message ?? e)}`, {
+      ...selected,
+      artifactId,
+    });
+  }
+  const lcovText = extract(zip);
+  if (lcovText === undefined) {
+    return refusal(deps, "download_not_lcov", `artifact ${artifactId} did not contain an LCOV report`, { ...selected, artifactId });
+  }
+
+  writeCoverageArtifactLedgerLine(deps, COVERAGE_IMPROVEMENT_READ_STEP, {
+    workflow_run_id: selected.workflowRunId,
+    head_sha: selected.headSha,
+    artifact_id: artifactId,
+    artifact_name: artifactName,
+    pr_number: selected.prNumber,
+  });
+  return { status: "read", lcovText, workflowRunId: selected.workflowRunId, headSha: selected.headSha, artifactId, prNumber: selected.prNumber };
 }
 
 // ── Orchestration (the producer's one entry point) ──────────────────────────────────────────
