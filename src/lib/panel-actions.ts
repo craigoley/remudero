@@ -1,7 +1,7 @@
 /**
  * lib/panel-actions.ts — the control panel's human-in-the-loop write actions (MASTER-PLAN §7,
  * "editing capability tiers": answer questions, approve MANUAL items, pause/resume/stop, the
- *). A thin Route layer over existing mechanism — service.ts's Route,
+ * quiet-hours toggle). A thin Route layer over existing mechanism — service.ts's Route,
  * fleet-control.ts's flag files, worker.ts's questions store — plus one primitive this file owns:
  * the `panel.*` ledger lines that make every write attributable. Routing is exact-match only
  * (service.ts v0, no path params), so every route takes its target in the POST body.
@@ -26,7 +26,7 @@ import {
 import type { Route } from "./service.js";
 import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
-import { isPaused, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPause, requestStop, resumeFleet, stopDetail } from "./fleet-control.js";
+import { isPaused, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
 import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
@@ -41,7 +41,7 @@ import {
   type InterpretReplyDeps,
 } from "./reply-interpreter.js";
 
-/** Non-task-scoped panel actions (pause/resume/stop) ledger under this sentinel — mirrors run-task.ts's drainCommand, which ledgers its own fleet-wide lines as `task_id: "DRAIN"`. */
+/** Non-task-scoped panel actions (pause/resume/stop/quiet-hours) ledger under this sentinel — mirrors run-task.ts's drainCommand, which ledgers its own fleet-wide lines as `task_id: "DRAIN"`. */
 export const PANEL_TASK_ID = "PANEL";
 
 /** Close a MANUAL-queue GitHub issue — the "check-off" MASTER-PLAN §4 describes. Behind an interface, like escalate.ts's `IssueGateway`, so tests never touch the network. */
@@ -174,8 +174,9 @@ export interface FleetControlStatus {
   pauseDetail?: string;
   stopped: boolean;
   stopDetail?: string;
+  quietHours: boolean;
   /** CONTROL INVARIANT — whether a recent `daemon.*` heartbeat falls inside the liveness bound
-   *  (status.ts's `DEFAULT_LIVENESS_BOUND_MS`). `paused`/`stopped` above are a claim;
+   *  (status.ts's `DEFAULT_LIVENESS_BOUND_MS`). `paused`/`stopped`/`quietHours` above are a claim;
    *  this is evidence, so a crashed daemon reads distinct from a running one. Omitted, never a
    *  fabricated `false`, when not observed — `daemonLiveReason` always names why.
    *  Falsifier: test/daemon-liveness-taxonomy.test.ts.
@@ -242,7 +243,7 @@ export interface ControlStatusDeps extends Pick<PanelActionDeps, "root" | "ledge
   livenessBoundMs?: number;
 }
 
-/** GET /v1/control/status — read-scoped. Derives Pause/Resume/STOP button states
+/** GET /v1/control/status — read-scoped. Derives Pause/Resume/STOP/quiet-hours button states
  *  from the actual fleet-control flag files, never stateless buttons. Also carries `daemonLive`,
  *  read once per request from the same heartbeat GET /v1/daemon-health computes. */
 export function buildControlStatusRoute(deps: ControlStatusDeps): Route {
@@ -268,6 +269,7 @@ export function buildControlStatusRoute(deps: ControlStatusDeps): Route {
         pauseDetail: pauseDetail(deps.root),
         stopped: isStopped(deps.root),
         stopDetail: stopDetail(deps.root),
+        quietHours: isQuietHours(deps.root),
         daemonLive: verdict.live,
         daemonLiveReason: verdict.reason,
       };
@@ -330,6 +332,35 @@ export function buildStopRoute(deps: PanelActionDeps): Route {
       const origin = bearerTokenId(req);
       ledgerPanelAction(deps, "panel.stop_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null });
       sendJson(res, 200, { stopped: true, reason: info.reason ?? null });
+    }),
+  };
+}
+
+// ── POST /v1/quiet-hours ─────────────────────────────────────────────────────
+
+interface QuietHoursInput {
+  enabled: boolean;
+}
+
+function validateQuietHours(body: unknown): { error: string } | QuietHoursInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.enabled !== "boolean") return { error: "enabled must be a boolean" };
+  return { enabled: body.enabled };
+}
+
+/** POST /v1/quiet-hours — toggle the quiet-hours flag, write-scoped. */
+export function buildQuietHoursRoute(deps: PanelActionDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/quiet-hours",
+    scope: "write",
+    // W1-T404: MIDDLE — reversible (toggled again) but a dispatch-throttling preference.
+    tier: "middle",
+    handler: jsonAction(validateQuietHours, (input, req, res) => {
+      const enabled = setQuietHours(deps.root, input.enabled);
+      const origin = bearerTokenId(req);
+      ledgerPanelAction(deps, "panel.quiet_hours_toggled", PANEL_TASK_ID, origin, { enabled });
+      sendJson(res, 200, { quietHours: enabled });
     }),
   };
 }
@@ -805,6 +836,7 @@ export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
     buildPauseRoute(deps),
     buildResumeRoute(deps),
     buildStopRoute(deps),
+    buildQuietHoursRoute(deps),
     buildAnswerQuestionRoute(deps),
     buildApproveManualRoute(deps),
     buildEscalationMarkHandledRoute(deps),

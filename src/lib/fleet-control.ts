@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 import { repoScopedTaskKey } from "./ledger.js";
 
 /**
- * Fleet control set (MASTER-PLAN §4A/§4B) — `rmd stop|pause|resume`.
+ * Fleet control set (MASTER-PLAN §4A/§4B) — `rmd stop|pause|resume`, plus the
+ * quiet-hours toggle (W3-T5, MASTER-PLAN §7/§9).
  *
  * Flag files under `<root>/state/`, checked at the top of every drain tick
  * (lib/drain.ts, W1-T11 acceptance). Mirrors the eventual daemon/panel control
@@ -18,11 +19,13 @@ import { repoScopedTaskKey } from "./ledger.js";
  * can tell "holding, resumable" from "operator pulled the plug" apart in the
  * ledger. `rmd resume` clears BOTH flags — the one command that always means go.
  *
- * QUIET HOURS WAS REMOVED (2026-09-07, operator ruling). It shipped as a third flag here with no
- * consumer — the console could set it, the board rendered it, and NO dispatch path ever read it
- * (drain.ts/daemon.ts/sweep.ts scored zero mentions against a PAUSE control of 6/3/15). W1-T2655
- * proposed wiring it; the operator ruled the fleet keeps no quiet hours, so the mechanism is gone
- * rather than given a consumer. Do not re-add it without that ruling being reversed.
+ * **Quiet hours** is a THIRD, independent flag (W3-T5): "is now an OPTIONAL
+ * wizard toggle, default OFF" (§9) — unlike STOP/PAUSE it does not gate the
+ * drain loop. `dispatch-governor.ts` reads it for the daemon's dispatch-only
+ * deferral, so new daemon spawns wait while drainage and in-flight work keep
+ * completing. `rmd resume` deliberately does NOT touch it — quiet hours is a
+ * schedule preference, not an emergency hold, so an operator resuming from a
+ * STOP/PAUSE should not silently lose their quiet-hours setting.
  *
  * Plain flag files (not a lock — no liveness/staleness semantics like
  * drain-lock.ts/inflight-lock.ts): existence alone gates the loop, so a
@@ -42,6 +45,10 @@ export function stopFilePath(root: string): string {
 
 export function pauseFilePath(root: string): string {
   return join(root, "state", "PAUSE");
+}
+
+export function quietHoursFilePath(root: string): string {
+  return join(root, "state", "QUIET_HOURS");
 }
 
 
@@ -105,6 +112,11 @@ export function isPaused(root: string): boolean {
   return existsSync(pauseFilePath(root));
 }
 
+/** Gate predicate: existence alone, independent of whether the JSON parses (fail CLOSED). */
+export function isQuietHours(root: string): boolean {
+  return existsSync(quietHoursFilePath(root));
+}
+
 
 /** Human-readable ledger/summary detail when STOPPED; `undefined` when not. */
 export function stopDetail(root: string): string | undefined {
@@ -118,6 +130,21 @@ export function pauseDetail(root: string): string | undefined {
   if (!isPaused(root)) return undefined;
   const info = readFlag(pauseFilePath(root));
   return info?.reason ? `PAUSE requested: ${info.reason}` : "PAUSE file present — run `rmd resume` to clear";
+}
+
+/**
+ * `rmd quiet-hours on|off` / the panel's quiet-hours toggle (W3-T5) — flip the flag. Unlike
+ * STOP/PAUSE this is a plain boolean preference, not an emergency hold, so it has no
+ * "request with a reason that survives to a detail string" shape: `on` writes the flag,
+ * `off` clears it, and the return value is simply the resulting state.
+ */
+export function setQuietHours(root: string, enabled: boolean): boolean {
+  if (enabled) {
+    writeFlag(quietHoursFilePath(root), undefined);
+    return true;
+  }
+  clearFlag(quietHoursFilePath(root));
+  return false;
 }
 
 

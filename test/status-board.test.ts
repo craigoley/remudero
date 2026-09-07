@@ -22,6 +22,7 @@ import {
   requestKick,
   requestPause,
   requestStop,
+  setQuietHours,
 } from "../src/lib/fleet-control.js";
 import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 import { deployAutoPath, deployFailedAlertPath } from "../src/lib/deployer.js";
@@ -174,10 +175,11 @@ test("buildStatusBoard: LATCHES — nothing active renders 'no active latches', 
   assert.match(renderStatusBoardText(model), /no active latches/);
 });
 
-test("buildStatusBoard: LATCHES — every marker class in the table renders with age + consequence when present (STOP, PAUSE, DEPLOY_AUTO, inflight lock, pending kick, drain-now)", () => {
+test("buildStatusBoard: LATCHES — every marker class in the table renders with age + consequence when present (STOP, PAUSE, QUIET_HOURS, DEPLOY_AUTO, inflight lock, pending kick, drain-now)", () => {
   const root = tmpRoot();
   requestStop(root, "operator pulled the plug");
   requestPause(root, "maintenance window");
+  setQuietHours(root, true);
   writeFileSync(deployAutoPath(root), "");
   requestKick(root, "W1-T99", "console");
   requestDrainNow(root, "console");
@@ -185,11 +187,14 @@ test("buildStatusBoard: LATCHES — every marker class in the table renders with
 
   const model = buildStatusBoard(root, join(tmpdir(), "does-not-exist.ndjson"), baseDeps({ isPidAlive: (pid) => pid === 999 }));
   const names = model.latches.rows.map((r) => r.name).sort();
-  assert.deepEqual(names, ["PAUSE", "STOP", "drain-now", "inflight:W1-T5", "kick:W1-T99", "DEPLOY_AUTO"].sort());
+  assert.deepEqual(names, ["PAUSE", "QUIET_HOURS", "STOP", "drain-now", "inflight:W1-T5", "kick:W1-T99", "DEPLOY_AUTO"].sort());
 
   for (const row of model.latches.rows) {
     assert.ok(row.consequence.length > 0, `${row.name} must carry a stated consequence`);
   }
+  const quiet = model.latches.rows.find((r) => r.name === "QUIET_HOURS");
+  assert.match(quiet?.consequence ?? "", /new daemon dispatch is deferred/);
+  assert.match(quiet?.consequence ?? "", /sweeps and in-flight work keep completing/);
   // STOP outranks PAUSE for the LATCHES next action, but DEPLOY_FAILED (absent here) would win
   // over both — see the DEPLOY_FAILED test above for that ordering.
   assert.match(model.latches.nextAction ?? "", /STOP is set/);

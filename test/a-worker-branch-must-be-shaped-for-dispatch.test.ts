@@ -21,6 +21,7 @@
 // tested once at the bottom, against THIS repo's own real checkout).
 
 import assert from "node:assert/strict";
+import { taskIdFromRunBranch } from "../src/lib/status.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -456,4 +457,55 @@ test("control: this repo's OWN current branch, run right now, does not regress t
   if (headCommit === mergeBase) {
     assert.equal(commitMessagesSinceBase(REPO_ROOT, mergeBase), "", "at the base itself, there is no new commit to claim anything");
   }
+});
+
+// ── W1-T3042: the capture must look like a task id, or the extractor invents one ─────────────────
+
+/*
+ * `^run-(.+)-\d+$` is greedy with no second anchor, so any extra hyphenated segment before the
+ * epoch is swallowed whole: `run-W1-T3030-build-<epoch>` yielded `W1-T3030-build`.
+ *
+ * That is NOT a failure to credit. It is a credit for a task THAT DOES NOT EXIST — worse, because a
+ * phantom id enters the merged set while the real task stays uncredited and eligible for
+ * re-dispatch. MEASURED 2026-09-07 over 255 merged pull requests: 100 run-shaped heads, 92
+ * extracting a valid id and 8 a phantom — five from a `-file-`/`-build-` pairing used that day,
+ * three from TRIAGE feedback branches naming no task at all.
+ *
+ * Returning `undefined` costs those eight nothing, because they never credited a real task. The
+ * control below is the half that matters: the 92 well-formed shapes must be UNAFFECTED, or this
+ * would be trading a phantom credit for a lost one.
+ */
+
+test("W1-T3042: an extra segment before the epoch names NO task, rather than inventing one", () => {
+  assert.equal(taskIdFromRunBranch("run-W1-T3030-build-1788796682000"), undefined);
+  assert.equal(taskIdFromRunBranch("run-W1-T3030-file-1788796561000"), undefined);
+  // TRIAGE ids are REAL — the auto-triage lane mints `TRIAGE-<feedbackId>` and names its branch
+  // `run-TRIAGE-<feedbackId>-<epochMs>`. An earlier rule rejected them as "not id-shaped" and broke
+  // that lane's own in-flight guard. The rule is about a SUFFIX, not about looking canonical.
+  assert.equal(
+    taskIdFromRunBranch("run-TRIAGE-fb-1785792135748-755f93-1787130932763"),
+    "TRIAGE-fb-1785792135748-755f93",
+    "a triage run names its own task and must keep crediting it",
+  );
+});
+
+test("W1-T3042: CONTROL — every well-formed shape still credits exactly what it did before", () => {
+  // The half that would make this a regression rather than a fix.
+  assert.equal(taskIdFromRunBranch("run-W1-T3030-1788796561000"), "W1-T3030");
+  assert.equal(taskIdFromRunBranch("run-W1-T1-1784457601815"), "W1-T1");
+  assert.equal(taskIdFromRunBranch("run-W3-T8-1788796561000"), "W3-T8", "a non-W1 workstream still credits");
+  assert.equal(taskIdFromRunBranch("run-W12-T3456-1"), "W12-T3456", "multi-digit on both sides");
+  assert.equal(taskIdFromRunBranch("run-SBX-T1-1690000000000"), "SBX-T1", "a sandbox id is still an id");
+  assert.equal(taskIdFromRunBranch("run-A-1690000000000"), "A", "and a hyphen-free synthetic id, which the fixtures use");
+  // Letter-suffixed ids are REAL and split-out: W1-T12a..e, W1-T1B..D. An earlier pattern without
+  // them rejected W1-T12a and reddened the credit projection's own suite.
+  assert.equal(taskIdFromRunBranch("run-W1-T12a-1784124446138"), "W1-T12a");
+  assert.equal(taskIdFromRunBranch("run-W1-T1C-1690000000000"), "W1-T1C");
+});
+
+test("W1-T3042: a head that is not run-shaped at all is still undefined, unchanged", () => {
+  assert.equal(taskIdFromRunBranch("chore/file-W1-T3030-1788796561000"), undefined);
+  assert.equal(taskIdFromRunBranch("run-W1-T3030"), undefined, "no epoch suffix is not the dispatch shape");
+  assert.equal(taskIdFromRunBranch(undefined), undefined);
+  assert.equal(taskIdFromRunBranch(""), undefined);
 });

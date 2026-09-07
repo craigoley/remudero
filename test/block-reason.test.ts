@@ -42,7 +42,7 @@ test("verdictFailureClass: blocked_transient classifies transient", () => {
   assert.equal(verdictFailureClass("blocked_transient"), "transient");
 });
 
-test("verdictFailureClass: every other non-merged verdict classifies strike (fail-closed)", () => {
+test("verdictFailureClass: every failure verdict classifies strike (fail-closed)", () => {
   const verdicts = [
     "blocked",
     "blocked_ci",
@@ -62,6 +62,11 @@ test("verdictFailureClass: every other non-merged verdict classifies strike (fai
 
 test("verdictFailureClass: task_already_merged (W1-T319) ALSO classifies transient -- a pre-spawn merged refusal is never a strike", () => {
   assert.equal(verdictFailureClass("task_already_merged"), "transient");
+});
+
+test("reasonAboutBlock: awaiting_merge is a non-failure disposition, not a strike or retry", () => {
+  const disposition = reasonAboutBlock(plan(), "A", "awaiting_merge", INITIAL_RETRY_STATE);
+  assert.deepEqual(disposition, { kind: "awaiting_merge" });
 });
 
 test("reasonAboutBlock: a task_already_merged verdict retries (no strike, no halt+escalate) -- it only ever reaches here via the pick-then-merge race, and the task IS merged", () => {
@@ -150,6 +155,7 @@ test("verdictIsFixable: every other non-transient verdict is NOT fixable — no 
     "blocked_inflight",
     "blocked_git_fetch",
     "blocked_illformed",
+    "awaiting_merge",
     "no_pr",
     "pr_attribution_failed",
     "failed",

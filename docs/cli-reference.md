@@ -20,6 +20,7 @@ usage:
   rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text>   # Engage or release an attributable, durable PR or fleet auto-merge hold.
   rmd dep-review <pr-number> [--repo <name>]   # Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
   rmd lint-plan [--plan <path>] [--base <git-ref>]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
+  rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
   rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
   rmd next-task-id [--plan <path>] [--offline] [--reserve]   # Print (or --reserve atomically claim) the next free W1-T<n> task id.
@@ -32,7 +33,7 @@ usage:
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
-  rmd census-membership [--base <ref>]   # Name the population-walking census suites this diff enters.
+  rmd census-membership [--base <ref>] [--files]   # Name the population-walking census suites this diff enters.
   rmd ci-learning [--days N] [--force]   # Draft a marked, parked shard for each repaired CI failure in the window.
   rmd rule-efficacy [--no-escalate]   # Report each rule's post-citation repeat-incident rate over the ledger union.
   rmd coverage-improve [--lcov <path> | --from-ci]   # File one feedback entry ranking src/ files by uncovered branches (85-90% band).
@@ -149,6 +150,16 @@ rmd lint-plan [--plan <path>] [--base <git-ref>]
 ```
 
 §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing
+
+### `rmd plan-reconcile`
+
+Flip status: queued to merged on shards the credit projection reports merged.
+
+```
+rmd plan-reconcile [--plan <path>] [--write]
+```
+
+W1-T3043: the control-plane write lib/plan.ts's header says belongs here — that loader is read-only and 'the control plane flips status', and until this verb nothing performed the flip, so 253 of 254 credited-merged shards still read queued. ONE-WAY (queued -> merged, never the reverse: a symmetric reconcile during a GitHub outage would reopen the whole plan) and DRY RUN by default; --write applies, and the two share one pure decision path so a preview cannot disagree with the apply. Reuses buildCreditCandidates, the same projection the sweep's credit rung trusts. A retirement is never overwritten, a negative/absent/throwing credit leaves the shard byte-identical, and only the status field moves. IT DOES NOT COMMIT: the operator lands the result as one plan-only PR.
 
 ### `rmd proof-queue-audit`
 
@@ -275,10 +286,10 @@ W1-T2957: the one failure corpus that arrives with its own fix. For every pull r
 Name the population-walking census suites this diff enters.
 
 ```
-rmd census-membership [--base <ref>]
+rmd census-membership [--base <ref>] [--files]
 ```
 
-W1-T2969: the answer censusSuiteMembership (W1-T2523) has always been able to give and nothing could ask for. A census suite WALKS a population and asserts a property of the whole set, so it names none of a caller's symbols and `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is structurally blind to it. MEASURED 2026-09-06: four CI failures across #4283 and #4290 were census baselines, and a correctly-run symbol sweep found none of them. Models both halves: the fast-gate census members, DERIVED from CENSUS_ADMITTED_MEMBERS, and the registry-shaped suites (the COMMANDS name list, the policy key set, the source-text-read ratchet) that are not fast-gate members and must not become them. A suite the model cannot place is NAMED as unmodelled rather than dropped, so 'joins nothing' is never confused with 'the model does not know'. REPORT-ONLY: runs no suite, gates nothing, exits 0 whatever it finds.
+W1-T2969: the answer censusSuiteMembership (W1-T2523) has always been able to give and nothing could ask for. A census suite WALKS a population and asserts a property of the whole set, so it names none of a caller's symbols and `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is structurally blind to it. MEASURED 2026-09-06: four CI failures across #4283 and #4290 were census baselines, and a correctly-run symbol sweep found none of them. Models both halves: the fast-gate census members, DERIVED from CENSUS_ADMITTED_MEMBERS, and the registry-shaped suites (the COMMANDS name list, the policy key set, the source-text-read ratchet) that are not fast-gate members and must not become them. A suite the model cannot place is NAMED as unmodelled rather than dropped, so 'joins nothing' is never confused with 'the model does not know'. REPORT-ONLY: runs no suite, gates nothing, exits 0 whatever it finds. `--files` emits the same membership as the bare TEST FILE PATHS on stdout, one per line, so a caller can run them without carrying a second copy of the table; incompleteness (an unmodelled or unmappable suite) is named on stderr, never folded into the list, because a caller that cannot tell a partial enumeration from a complete one reads its own subset pass as covering the whole set.
 
 ### `rmd ci-learning`
 

@@ -66,7 +66,7 @@ import {
 } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
-import { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch-governor.js";
+import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
@@ -582,6 +582,10 @@ export interface DaemonDeps {
    *  sweep hooks (W1-T321, the W1-T121 23-open-PR incident). Wrapped by the same governor seam,
    *  consulted again before dispatch, failing closed on a throw (W1-T342). Forensics: docs/forensics/daemon.md. */
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
+  /** Quiet-hours preference: a defined return defers NEW dispatch only. Routed through the dispatch
+   *  governor, never through `checkPause`, so sweep/drainage paths keep running and an unreadable
+   *  read fails open in `checkDispatchGovernors` (W1-T2655). */
+  checkQuietHours?: () => QuietHoursHoldResult | undefined;
   /** True when a task's own read is indeterminate — a genuine read failure rather than a clean
    *  absence of evidence — re-derived from the same projection. Optional (W1-T119). */
   isIndeterminate?: (taskId: string) => boolean;
@@ -1508,6 +1512,13 @@ export async function runDaemon(
         memory_floor_mib: verdict.result.floorMib,
         poll_interval_ms: pollIntervalMs,
       });
+    } else if (verdict.kind === "quiet_hours") {
+      log("daemon.quiet_hours", {
+        tick,
+        quiet_hours: true,
+        ...(verdict.result.detail ? { detail: verdict.result.detail } : {}),
+        poll_interval_ms: pollIntervalMs,
+      });
     } else {
       log("daemon.governor_check_failed", {
         tick,
@@ -1682,6 +1693,15 @@ export async function runDaemon(
       const state = blockRetryStates.get(task.id) ?? INITIAL_RETRY_STATE;
       const disposition = reasonAboutBlock(planForBatch, task.id, result.verdict, state);
 
+      if (disposition.kind === "awaiting_merge") {
+        blockRetryStates.delete(task.id);
+        log("daemon.block.awaiting_merge", {
+          task: task.id,
+          verdict: result.verdict,
+          pr_url: result.prUrl,
+        });
+        return { kind: "continue" };
+      }
       if (disposition.kind === "retry_transient") {
         // Transient: no strike. Selection naturally retries the same task next tick, since it is still
         // unmerged and its deps are unchanged, so no separate re-dispatch mechanism is needed.

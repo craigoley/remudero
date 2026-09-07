@@ -45,6 +45,7 @@ import {
   spawnDetachedGroup,
   workerInstallationScope,
 } from "../src/lib/worker-containment.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -645,6 +646,34 @@ test("PAUSE clears via rmd resume and the SAME process resumes dispatching on it
   const heartbeats = lines.filter((l) => l.step === "daemon.pause");
   assert.equal(heartbeats.length, 2, "exactly one heartbeat per paused tick before resume");
   assert.ok(s.ticks >= 2, "the paused ticks and the dispatching ticks share one summary — one process throughout");
+});
+
+test("QUIET_HOURS is a dispatch governor, not PAUSE, so sweeps continue while new spawns defer", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-quiet-hours-`));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let sweeps = 0;
+  let stopped = false;
+  const s = await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async (id) => okResult(id),
+    sweep: () => {
+      sweeps++;
+    },
+    checkStop: () => (stopped ? stopDetail(root) ?? "test complete" : undefined),
+    checkPause: () => pauseDetail(root),
+    checkQuietHours: () => ({ deferred: true, detail: "QUIET_HOURS file present" }),
+    sleep: async () => {
+      requestStop(root, "test complete");
+      stopped = true;
+    },
+    log: (step, extra = {}) => lines.push({ step, extra }),
+  });
+  assert.equal(s.stopReason, "stopped");
+  assert.deepEqual(s.attempted, [], "quiet hours defers new daemon dispatch");
+  assert.equal(sweeps, 1, "the sweep rung still runs before the dispatch-only governor");
+  assert.ok(lines.some((l) => l.step === "daemon.quiet_hours"), "quiet hours emits its own governor heartbeat");
+  assert.equal(lines.some((l) => l.step === "daemon.pause"), false, "quiet hours never routes through PAUSE");
 });
 
 // ── headroom (W1-T4) ─────────────────────────────────────────────────────────

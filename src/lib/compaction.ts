@@ -251,7 +251,14 @@ export function ratchetContractLines(): string[] {
    * the list must be re-read whenever a no-allowlist gate is added: source-text-assertion-census was
    * missed on the first ship (#4351), so that suite asserts all three names are present.
    *
-   * WHY THE LAST LINE DOES NOT SPELL THE COMMAND. test/ci-parity-contract.test.ts asserts the
+   * WHY THE RULE-15 LINE DOES NOT SPELL THE PLAN'S PATH, for the same reason and a different guard.
+ * test/run-task.test.ts asserts a fix worker's prompt never matches /plan\/tasks\.yaml/ — W1-T58's
+ * own guard that a worker is never DIRECTED AT the plan, because it may not correct a mis-specified
+ * task. This line directs it AWAY from the plan and the literal match cannot tell the two apart.
+ * Weakening that guard to fit new prose would be the wrong trade, so the path is described rather
+ * than spelled, exactly as the ci-parity line below is.
+ *
+ * WHY THE LAST LINE DOES NOT SPELL THE COMMAND. test/ci-parity-contract.test.ts asserts the
    * worker contract `doesNotMatch(/rmd preflight --ci-parity/)` — W1-T464's own guard against the
    * obligation creeping back. This line is a PROHIBITION, not an obligation, but the guard is a
    * literal match and cannot tell them apart, and weakening a guard to fit new prose is the wrong
@@ -289,6 +296,15 @@ export function ratchetContractLines(): string[] {
     "  src/lib/dep-review.ts -> negative-reachability-census, a new test/ file -> source-text-census.",
     "  Four of the five, each one a CI cycle that need not have been spent. The fifth,",
     "  instrument-surface, is not in this map — so this narrows the gap, it does not close it.",
+    "- IF YOUR DIFF TOUCHES `plan/` AT ALL, ask this before pushing — it costs milliseconds:",
+    "    npm run --silent rule15-precheck",
+    "  Standing rule 15 makes criteria text Architect-only: a diff that ADDS or EDITS a claim/proof",
+    "  in the plan's own task file or one of its shards is REFUSED unless the PR is plan-only. Filing a",
+    "  shard beside your own implementation trips it every time. MEASURED 2026-09-07: three PRs did",
+    "  exactly that, each refused after a FULL CI cycle, each repaired the same mechanical way — lift",
+    "  the shard into its own plan-only PR, drop it from this branch. The gate named that remedy in",
+    "  its own refusal every time and nothing executed it. The check imports the reviewer's OWN",
+    "  predicate, so it cannot tell you to split something the gate would have passed.",
     "- This is NOT the full CI-parity preflight, which stays REMOVED from your contract (W1-T464):",
     "  that one runs ~15-17 minutes and is the hand route's gate, not yours. Do not run it.",
   ];
