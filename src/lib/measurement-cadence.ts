@@ -1885,6 +1885,13 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string)
     // LAW 5: the author class rides the record.
     "  author_class: machine",
     `  origin: ${q(draft.findingId)}`,
+    // W1-T3052 — THE WATERMARK, so the lesson can later be judged on its OUTCOME. The origin names
+    // only the cluster's FIRST pull request; efficacy needs the HIGHEST, because "did this gate
+    // refuse anything AFTER the lesson landed" is the one question that settles whether a filed
+    // lesson worked. Pull-request numbers are monotonic, so the highest is the watermark and needs
+    // no clock. Written as data, never prose: a reader that had to parse the note would be a second
+    // parser for a fact the record can simply carry.
+    `  ci_learning_prs: [${draft.prs.join(", ")}]`,
     "  files:",
     `    - ${CI_LEARNING_LESSONS_FILE}`,
     "  acceptance:",
@@ -1893,6 +1900,79 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string)
     `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Remedy surface: ${draft.remedySurface}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
     "",
   ].join("\n");
+}
+
+/**
+ * W1-T3055 — DID THE LESSON WORK? The one question that settles whether this whole loop is worth
+ * running, and nothing asked it.
+ *
+ * Every signal upstream measures something SHORT of the outcome. `cited_count` measured INJECTION —
+ * was the fact put in a prompt — and retro.ts's own comment calls it "a proxy standing in for a
+ * signal nothing produced", which ranked the least-injected entry as least useful and fed the next
+ * injection. W1-T2760 added `LEARNINGS_USED`, which is better and still a worker's own CLAIM that
+ * it used a lesson. A claim is not an outcome.
+ *
+ * The outcome is: after a lesson about gate G landed, did G go on refusing pull requests? Pull
+ * request numbers are monotonic, so the highest number the lesson was derived from is a watermark
+ * and no clock is needed. Anything above it is the "after" population.
+ *
+ * `unmeasurable` IS A VERDICT, and the important one. A lesson filed from the newest pull requests
+ * in a window has no "after" yet, and reporting it as `held` would be a vacuous pass — a claim of
+ * success over an empty set, which is the exact shape this repo's coverage and ledger sections
+ * already refuse. A lesson is only ever judged against pull requests that actually came later.
+ */
+export interface CiLessonEfficacy {
+  gate: string;
+  findingId: string;
+  /** The highest pull request the lesson was derived from: everything above it is the "after". */
+  watermarkPr: number;
+  /** Pull requests ABOVE the watermark that this gate refused anyway. */
+  recurredPrs: number[];
+  /** How many later pull requests existed at all — the denominator `held` is meaningless without. */
+  laterPrsSeen: number;
+  verdict: "held" | "recurred" | "unmeasurable";
+}
+
+/**
+ * Judge each filed lesson against the pull requests that came after it.
+ *
+ * PURE: the corpus and the lessons are both handed in, so this needs no clock, no network and no
+ * plan read. A caller supplies lessons parsed from the plan's own `ci_learning_prs` records.
+ */
+export function judgeCiLessonEfficacy(
+  corpus: Pick<CiFailureCorpus, "pairs">,
+  lessons: readonly { findingId: string; gate: string; watermarkPr: number }[],
+): CiLessonEfficacy[] {
+  return lessons.map((lesson) => {
+    // Every pull request in the window that came AFTER the lesson, whatever gate it tripped: the
+    // denominator. Without it, a gate that simply saw no traffic reads identically to one a lesson
+    // actually fixed.
+    const laterPrs = new Set(corpus.pairs.filter((p) => p.pr > lesson.watermarkPr).map((p) => p.pr));
+    const recurredPrs = [
+      ...new Set(
+        corpus.pairs
+          .filter((p) => p.gate === lesson.gate && p.pr > lesson.watermarkPr)
+          .map((p) => p.pr),
+      ),
+    ].sort((a, b) => a - b);
+    const verdict: CiLessonEfficacy["verdict"] =
+      laterPrs.size === 0 ? "unmeasurable" : recurredPrs.length > 0 ? "recurred" : "held";
+    return { gate: lesson.gate, findingId: lesson.findingId, watermarkPr: lesson.watermarkPr, recurredPrs, laterPrsSeen: laterPrs.size, verdict };
+  });
+}
+
+/** Read a filed lesson's gate and watermark back out of a shard's own fields. Returns `undefined`
+ *  for a record that carries no `ci_learning_prs` — every lesson filed before W1-T3055, which is
+ *  UNJUDGEABLE rather than passing: an older record has no watermark and inventing one from the
+ *  origin's first pull request would judge the lesson against its own evidence. */
+export function parseFiledCiLesson(contents: string): { findingId: string; gate: string; watermarkPr: number } | undefined {
+  const origin = /^\s*origin:\s*"(ci-learning:(\d+):(.+?))"\s*$/m.exec(contents);
+  if (!origin) return undefined;
+  const prs = /^\s*ci_learning_prs:\s*\[([0-9,\s]*)\]\s*$/m.exec(contents);
+  if (!prs) return undefined;
+  const nums = prs[1].split(",").map((n) => Number(n.trim())).filter((n) => Number.isInteger(n) && n > 0);
+  if (nums.length === 0) return undefined;
+  return { findingId: origin[1], gate: origin[3], watermarkPr: Math.max(...nums) };
 }
 
 /** The one `learnings/` file a drafted remedy names. A concrete path, not the `learnings/*.yaml`
