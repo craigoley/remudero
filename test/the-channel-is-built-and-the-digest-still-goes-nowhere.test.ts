@@ -131,6 +131,45 @@ test("W1-T3000 each delivery writes its OWN ledger row, so two outcomes are neve
   }
 });
 
+test("W1-T3000 the DEFAULT email channel is constructed for real when none is injected", async () => {
+  // Every other test in this file injects `emailChannel`, which leaves the `??` default —
+  // `emailChannel(notifyRecipient(config))` — unreachable. That is the all-fakes trap CLAUDE.md
+  // records against a different seam (#977/#978): when every test supplies its own
+  // implementation, the real one is covered by nothing and its one assumption ships unexercised.
+  //
+  // NOTHING IS SENT HERE. With RMD_MAIL_COMMAND absent the real adapter reports itself
+  // unavailable, so `notify` never reaches its transport — the assertion below is precisely that
+  // the REAL channel produced that refusal, naming the variable an operator must set.
+  const root = fixtureRoot();
+  const saved = process.env.RMD_MAIL_COMMAND;
+  delete process.env.RMD_MAIL_COMMAND;
+  try {
+    const inbox = recorder();
+    const hooks = buildDigestCadenceDaemonHooks({
+      config: { root } as Config,
+      now: () => new Date("2026-08-30T12:00:00Z"),
+      channel: inbox.channel,
+      // emailChannel deliberately NOT injected — the default path is the subject.
+    });
+
+    await hooks.runDigestCadence();
+
+    const emailRow = notifyRows(root).find((r) => r.channel === "email");
+    assert.ok(emailRow, "the default channel must still be constructed and still ledger its attempt");
+    assert.equal(emailRow.delivered, false);
+    assert.match(
+      String(emailRow.reason),
+      /RMD_MAIL_COMMAND/,
+      "the REAL adapter's own reason must reach the ledger — a fake could not produce this string",
+    );
+    assert.equal(inbox.got.length, 1, "and the inbox digest is unaffected by the default's state");
+  } finally {
+    if (saved === undefined) delete process.env.RMD_MAIL_COMMAND;
+    else process.env.RMD_MAIL_COMMAND = saved;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T3000 an unconfigured email channel is ledgered undelivered with its reason, and the cadence still completes", async () => {
   // The fleet host with no RMD_MAIL_COMMAND set. The inbox digest must survive, the gap must be
   // recorded, and the rung must not throw — notify.ts's "degrade, never throw, and never lie
