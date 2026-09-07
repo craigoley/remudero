@@ -48,6 +48,36 @@ export function decideDelivery(openIssues, marker) {
   return existing ? { action: 'comment', number: existing.number } : { action: 'create' };
 }
 
+// Pure. THE CLOSING SIDE OF decideDelivery, and deliberately the STRICTER of the two. W1-T3030:
+// the raiser had no close path at all, so a job that recovered left its delivery-of-record open
+// forever -- #3387 sat open across five consecutive passing nightlies because the general
+// escalation reconciler needs a task referent and a cron job has none.
+//
+// ⚠ MARKER CONTAINMENT IS THE ONLY ADMITTED SIGNAL, and that is the safety property, not a
+// detail. This function's caller CLOSES what it returns, so a title match, a label match, or "the
+// only open issue" would each let one job close an issue a human opened by hand or that belongs to
+// another source. decideDelivery may fall back on looser reasoning because its worst case is a
+// duplicate comment; the worst case here is a silenced escalation. Unsure => none.
+export function decideRecovery(openIssues, marker) {
+  const existing = (openIssues ?? []).find((i) => typeof i?.body === 'string' && i.body.includes(marker));
+  return existing ? { action: 'close', number: existing.number } : { action: 'none' };
+}
+
+// Pure. What the closing comment says. Names the run that recovered it so the close is auditable
+// from the issue alone, and states plainly that the record -- not the underlying job -- is what is
+// being resolved.
+export function buildRecoveryBody({ source, marker, runUrl, when }) {
+  return [
+    marker,
+    `**\`${source}\` recovered** on its scheduled run${when ? ` (${when})` : ''} and this delivery of record is being closed automatically.`,
+    '',
+    `Recovering run: ${runUrl || '(unknown)'}`,
+    '',
+    'This closes the RECORD, not a judgment that the underlying job is now healthy -- it means the job',
+    'stopped failing. If it fails again a new delivery reopens the thread under the same marker.',
+  ].join('\n');
+}
+
 // Pure. Keep the TAIL of the log: for every failure mode in scope the diagnosis is the last thing
 // written (the ratchet prints its violations after the score line; a crashing step's stack is at
 // the end), so trimming the head preserves the actionable part.
@@ -141,6 +171,36 @@ export function deliver(
   return { action: 'create', url: (created ?? '').trim(), marker };
 }
 
+// The effect half of {@link decideRecovery}, sharing deliver()'s injected-`exec` shape.
+//
+// ⚠ THE OPPOSITE FAILURE POLARITY FROM deliver(). That function swallows a failed `gh issue list`
+// and proceeds, because an unnotified human is worse than an unlabelled issue. Here a failed read
+// yields an empty list, which is INDISTINGUISHABLE from "nothing to close" -- so the swallow is
+// kept, but it can only ever produce the no-op. A read failure must never be able to close.
+export function resolve(
+  { source, label = 'needs-human', repo, body },
+  exec = (file, args) => execFileSync(file, args, { encoding: 'utf8' }),
+) {
+  const marker = markerFor(source);
+  const repoArgs = repo ? ['--repo', repo] : [];
+
+  let open = [];
+  try {
+    open = ghJson(
+      ['issue', 'list', ...repoArgs, '--state', 'open', '--label', label, '--limit', '100', '--json', 'number,body,title'],
+      exec,
+    );
+  } catch {
+    open = [];
+  }
+
+  const decision = decideRecovery(open, marker);
+  if (decision.action === 'none') return { action: 'none', marker };
+  exec('gh', ['issue', 'comment', String(decision.number), ...repoArgs, '--body', body]);
+  exec('gh', ['issue', 'close', String(decision.number), ...repoArgs]);
+  return { ...decision, marker };
+}
+
 // Every collaborator is injected LAST with a real default, so the CLI call stays `main()` while a
 // test can drive the whole entry point without shelling out to `gh` or touching the filesystem.
 // Returns the exit code rather than setting it, so the assertion is on a value, not a global.
@@ -149,6 +209,7 @@ export function main({
   env = process.env,
   readFile = (p) => readFileSync(p, 'utf8'),
   deliverFn = deliver,
+  resolveFn = resolve,
   log = console.log,
   error = console.error,
 } = {}) {
@@ -163,8 +224,42 @@ export function main({
       preamble: { type: 'string' },
       label: { type: 'string', default: 'needs-human' },
       repo: { type: 'string' },
+      // W1-T3030: the recovery mode. Callers pass this on their SUCCESS path; --title and
+      // --body-file are meaningless here and are not read.
+      resolved: { type: 'boolean', default: false },
     },
   });
+
+  // The resolver needs only identity, so it is gated BEFORE the raise path's own arg check --
+  // requiring --title to close an issue would make every green run pass a title it never uses.
+  if (values.resolved) {
+    if (!values.source) {
+      error('needs-human-issue: --source is required');
+      return 1;
+    }
+    try {
+      const result = resolveFn({
+        source: values.source,
+        label: values.label,
+        repo: values.repo,
+        body: buildRecoveryBody({
+          source: values.source,
+          marker: markerFor(values.source),
+          runUrl: env.RUN_URL,
+          when: env.RUN_WHEN,
+        }),
+      });
+      log(
+        result.action === 'close'
+          ? `needs-human-issue: closed recovered issue #${result.number} (marker ${result.marker})`
+          : `needs-human-issue: nothing to close (marker ${result.marker})`,
+      );
+      return 0;
+    } catch (err) {
+      error(`needs-human-issue: RESOLVE FAILED -- ${err.message}`);
+      return 1;
+    }
+  }
 
   if (!values.source || !values.title) {
     error('needs-human-issue: --source and --title are required');
