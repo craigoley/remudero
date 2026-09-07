@@ -4852,6 +4852,14 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "package-lock.json": "a dependency lockfile, not gate logic",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
+  "scripts/rule15-precheck.mjs":
+    "VERIFIED NON-INSTRUMENT (W1-T3040) — an author-time convenience exposed only as the " +
+    "`rule15-precheck` package.json script; no workflow `run:` step invokes it. It RESTATES NO " +
+    "RULE: it imports the reviewer's own `criterionFieldTampered` and `planOnlyDiff` from this " +
+    "file rather than re-deriving either, so a diff touching it cannot change what any gate " +
+    "MEASURES — a stronger claim than the deferred-widening entries below, which do carry their " +
+    "own rule logic. Promoting it would also entangle the PR that introduces it with its own " +
+    "registration, the circularity W1-T402 clause (v) records for its siblings.",
   "scripts/clock-shift.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/clock-sweep.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "deploy/recycle-container.sh":
@@ -5502,7 +5510,10 @@ function planTasksCriterionFieldLines(lines: DiffLine[], kind: "add" | "del"): D
  * was APPENDED — a pure append tripped neither disjunct before W1-T400 widened the ADD side (#1295). Both read as "the
  * criteria no longer say what the Architect wrote". Diff-derived ONLY: callers apply their OWN exemption on top —
  * {@link checkSatisfiedByGuard} uses `planOnly && humanAuthored`, {@link judgeReview} `planOnly` alone. */
-function criterionFieldTampered(diff: string): boolean {
+/** EXPORTED FOR THE AUTHOR-TIME CHECK (W1-T3040). The pre-push check and this reviewer must never
+ *  be two predicates: a local check that disagreed with the gate would be worse than none, sending
+ *  an author to split a PR the reviewer would have passed, or clearing one it will refuse. */
+export function criterionFieldTampered(diff: string): boolean {
   const lines = walkDiff(diff);
   const addedField = planTasksCriterionFieldLines(lines, "add").length > 0;
   const removedField = planTasksCriterionFieldLines(lines, "del").length > 0;
