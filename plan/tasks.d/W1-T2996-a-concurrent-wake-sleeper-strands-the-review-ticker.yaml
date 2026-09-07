@@ -1,0 +1,42 @@
+- id: W1-T2996
+  title: "A CONCURRENT GITHUB-WAKE SLEEPER STRANDS THE ONLY REVIEW TICKER — the single activeWait slot is overwritten when a detached retro starts before the interphase clock stops, then the interphase timer clears the retro wait forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: "fleet-lifeguard#review-clock-dark-2026-09-07"
+  plan_refs: ["W1-T2568", "W1-T2744", "W1-T2852", "W1-T2981", "W1-T2984"]
+  files: [src/lib/github-event-wake.ts, test/github-event-sweep-wake.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED on the Azure fleet 2026-09-07: the daemon detached a retro at 01:42:29Z, admitted two
+    dispatch lanes at 01:42:33Z, and then emitted no `daemon.alive`, `daemon.sweep.retriggered`,
+    `review.capacity`, or `review.posted` rows for more than twenty minutes. Serve continued accepting
+    GitHub deliveries, and the daemon continued logging every settled check burst plus a green
+    `main.health.observed`; the process and both workers remained alive. Three fully-green PRs sat
+    without remudero-review.
+
+    THE FAILURE CHAIN IS MATERIAL, NOT INFERRED FROM THE SYMPTOM. `startInterphaseReviewClock` calls
+    the shared `SweepWakeSignal.sleep` in one-second quanta. Before that clock is stopped, the retro
+    rung synchronously starts `sweepLightDuringRetro`, whose in-flight ticker calls the SAME signal's
+    `sleep`. `createSweepWakeSignal` stores only one `activeWait`, so the retro call overwrites the
+    interphase call. When the interphase timer fires, its closure clears that shared slot while
+    resolving only the interphase promise. The retro timer later sees no active slot and returns
+    without resolving; GitHub wakes see no active waiter and can only set `pending`. W1-T2981's
+    process-wide ticker guard then makes the dispatch ticker inert, leaving no review clock at all.
+
+    The wake signal is a coalesced edge, not a single-owner lock. It must retain every concurrent
+    sleeper's timer independently while still delivering one wake edge to one waiting consumer.
+    The oldest waiter wins the edge; every other waiter keeps its timeout, so existing single-pass
+    admission and coalescing semantics remain intact and overlapping clocks cannot strand each other.
+  acceptance:
+    - claim: "two concurrent sleepers retain independent timeout registrations"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+    - claim: "after the earlier clock times out, a GitHub wake still resolves the later review ticker"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
+    - claim: "daemon shutdown resolves and cancels every concurrent sleeper"
+      proof: "unit test: test/github-event-sweep-wake.test.ts"
