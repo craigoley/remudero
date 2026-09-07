@@ -91,3 +91,56 @@ test("W1-T3037: the notice names the ref and every inherited path, and says reco
 test("W1-T3037: nothing inherited prints no notice at all, so a clean refusal is not diluted", () => {
   assert.equal(inheritedNotice([], "origin/main", "source-size-ratchet"), undefined);
 });
+
+// ── THE TWO CATCH ARMS ───────────────────────────────────────────────────────────────────────
+//
+// Every test above injects a `run` and a `measure` that RETURN, so neither throwing arm is
+// reachable from them — the all-fakes shape CLAUDE.md names ("write one test that really shells
+// out, and one per catch arm"), and diff-coverage caught it: lines 33 and 79-80 of
+// scripts/lib/inherited-violation.mjs were added with zero covering tests.
+//
+// Both arms decide the SAME question this module exists to answer — whose repair is this — and
+// both must answer "we could not tell" rather than guessing. That is the module's own stated
+// hazard: its first draft read unreadable as absent and reported an INHERITED violation as
+// INTRODUCED, silently.
+
+test("W1-T3037: a `run` that THROWS reads as unreadable, never as absent — the arm that once blamed the author", () => {
+  const thrower = () => {
+    throw new Error("spawn ENOMEM");
+  };
+
+  const read = contentAtRef(thrower, "origin/main", "src/huge.ts");
+
+  assert.equal(read.kind, "unreadable", "a throw is git NOT ANSWERING, which is not the same as the path being absent");
+  assert.notEqual(read.kind, "absent", "reading it as absent is what reports an INHERITED violation as INTRODUCED");
+  assert.match(String(read.why), /threw/, "and it must say WHY it could not tell");
+});
+
+test("W1-T3037: a `run` that throws leaves the violation UNDETERMINED, so no side is claimed on no evidence", () => {
+  const thrower = () => {
+    throw new Error("spawn ENOMEM");
+  };
+
+  const split = splitInheritedViolations([{ path: "src/huge.ts" }], opts(thrower, (t) => t.length, { "src/huge.ts": 1 }));
+
+  assert.deepEqual(split.undetermined.map((v) => v.path), ["src/huge.ts"]);
+  assert.deepEqual(split.inherited, [], "an unreadable base cannot substantiate INHERITED");
+  assert.deepEqual(split.introduced, [], "and must not fall through to INTRODUCED either");
+});
+
+test("W1-T3037: a `measure` that THROWS on the base content leaves the violation undetermined too", () => {
+  // The base content read fine; it is the MEASUREMENT of it that failed. Same answer, because the
+  // question is still unanswerable — and a measurement that throws is not evidence of a small file.
+  const measureThrows = () => {
+    throw new Error("unparseable at base");
+  };
+
+  const split = splitInheritedViolations(
+    [{ path: "src/odd.ts" }],
+    opts(runner(0, "content\n"), measureThrows, { "src/odd.ts": 1 }),
+  );
+
+  assert.deepEqual(split.undetermined.map((v) => v.path), ["src/odd.ts"]);
+  assert.deepEqual(split.inherited, []);
+  assert.deepEqual(split.introduced, [], "a throwing measure must never be read as 'small at base', which would blame the author");
+});
