@@ -1042,7 +1042,10 @@ import {
   declaredGuardsBlockSpan,
   parseBranchCitationHits,
   planReverseBranchDrift,
+  pruneDeletableBranches,
   remoteBranchNames,
+  withholdActiveBranches,
+  type BranchManifestEntry,
 } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
 // initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
@@ -17297,17 +17300,28 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
 
 /**
  * FOLD ONE `state`/`merged_at!=null` ROW INTO THE MOST DECISIVE `prState` SEEN SO FAR for one
- * head — merged beats open beats closed, and this never downgrades. Shared by the bulk paginated
+ * head — OPEN beats merged beats closed, and this never downgrades. Shared by the bulk paginated
  * walk and the per-head follow-up (`perHeadPrState`) below it so the "most decisive wins" rule is
  * defined exactly once (W1-T2246).
+ *
+ * OPEN LEADS, AND W1-T3020 CORRECTED IT TO — the original order read `merged` as most decisive,
+ * which is right for a branch used ONCE and wrong for a REUSED NAME. `prState` decides whether a
+ * REF may be deleted, and merged/closed are statements about PAST pull requests on that name while
+ * `open` is a statement about the ref RIGHT NOW. MEASURED on the live repo: `claude/resolve-p27-
+ * findings-rnvu61` carries ten merged PRs and one open (#4392, filed hours earlier), and
+ * `claude/remudero-planning-clarify-142opb` the same shape (#4391) — under merged-leads both folded
+ * to `merged`, landed in `plan.deletable`, and a prune would have deleted the head of two live PRs.
+ * A stale branch whose old PR was never closed now HOLDS instead, which is the safe direction for a
+ * decision that removes a ref.
  */
-function foldPrState(
+export function foldPrState(
   cur: BranchFacts["prState"] | undefined,
   state: string,
   merged: string,
 ): BranchFacts["prState"] {
   const next: BranchFacts["prState"] = merged === "true" ? "merged" : state === "open" ? "open" : "closed";
-  if (cur === "merged" || (cur === "open" && next === "closed")) return cur;
+  if (cur === "open" || next === "open") return "open";
+  if (cur === "merged") return cur;
   return next;
 }
 
@@ -17383,12 +17397,13 @@ export function reapBranchesCommand(
     creditLedgerPath?: string;
   } = {},
 ): number {
-  const badArg = unknownArgError("reap-branches", rest, [], []);
+  const badArg = unknownArgError("reap-branches", rest, [], ["--prune"]);
   if (badArg) {
     console.error(badArg);
     console.error(`usage: ${commandSyntax("reap-branches")}`);
     return 2;
   }
+  const prune = rest.includes("--prune");
   const exec =
     opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
 
@@ -17568,6 +17583,7 @@ export function reapBranchesCommand(
   console.log(`branches:  ${names.length} on origin`);
   console.log(`guarded:   ${plan.guarded.length}  ${plan.guarded.join(", ")}`);
   console.log(`deletable: ${plan.deletable.length}`);
+  const manifest: BranchManifestEntry[] = [];
   for (const b of plan.deletable) {
     let sha = "unknown";
     try {
@@ -17575,7 +17591,9 @@ export function reapBranchesCommand(
     } catch {
       /* a branch that vanished mid-run reports `unknown` rather than aborting the report */
     }
-    console.log(`  ${sha}\t${b}`);
+    const reason = plan.reasons[b] ?? "unknown";
+    manifest.push({ name: b, sha, reason });
+    console.log(`  ${sha}\t${b}\t${reason}`);
   }
   // W1-T2246: "no PR" and "could not tell" are different reasons for the same disposition — a
   // single "(no PR, commits not in main)" string asserted BOTH about the whole bucket, which is
@@ -17589,7 +17607,20 @@ export function reapBranchesCommand(
   if (plan.undetermined.length > 0) {
     console.log(`  undetermined: ${plan.undetermined.join(", ")}`);
   }
-  console.log("DRY RUN — nothing was deleted.");
+  /*
+   * DRIFT DOES NOT BLOCK THE PRUNE, and that is a decision rather than an oversight. Every drift
+   * class this verb reports concerns the DECLARED GUARD LIST, and each one can only make the
+   * guarded set larger or name a branch that is already gone: `undeclaredGuards` is guarded by the
+   * name grep whether or not it is declared (planBranchReap ORs the two), `danglingCitations` and
+   * `deadDeclaredGuards` name branches absent from origin, and `orphanDeclarations` stays declared
+   * and therefore guarded. None can move a branch INTO `deletable`. Refusing to prune on drift
+   * would be a bound firing on a healthy condition — this repo's named recurring defect, and the
+   * live repo carries three such signals today, so the refusal would fire on its first real run.
+   * Drift still fails the exit code below; it just does not veto the deletions.
+   */
+  if (!prune) {
+    console.log("DRY RUN — nothing was deleted. Re-run with --prune to delete the branches above.");
+  }
 
   if (opts.ledgerPath) {
     appendLedger(opts.ledgerPath, {
@@ -17606,6 +17637,88 @@ export function reapBranchesCommand(
       orphan_declarations: orphanDeclarations,
       missing_branches: deadDeclaredGuards,
     });
+  }
+
+  /*
+   * THE SCREEN RUNS IN BOTH MODES, so the dry run's answer IS what `--prune` will do. Reporting a
+   * `deletable` count the prune then silently departs from would defeat the point of a dry run —
+   * the operator reads it precisely to decide whether to run the delete.
+   *
+   * RE-READ THE OPEN HEADS HERE rather than reusing the fold above: that fold ranked merged over
+   * open until W1-T3020, and any report is stale the moment a PR opens after it, so this is a
+   * SECOND and INDEPENDENT signal and a defect in one cannot disarm the other.
+   *
+   * THE TWO MODES DIFFER ONLY ON A FAILED READ. `--prune` REFUSES, because an unread list is
+   * indistinguishable from "none open" and would silently disarm the one guard standing between a
+   * delete and a live PR head. The dry run says so and reports the rest, since a report is still
+   * worth having without it — and it deletes nothing either way.
+   */
+  let openHeads: Set<string> | undefined;
+  try {
+    const raw = exec("gh", ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`, "--jq", ".[].head.ref"]);
+    openHeads = new Set(raw.split("\n").map((l) => l.trim()).filter(Boolean));
+  } catch (err) {
+    const why = String((err as Error)?.message ?? err);
+    if (prune) {
+      console.error(
+        `rmd reap-branches: --prune refused — could not re-read the open pull requests, and an ` +
+          `unread list is indistinguishable from "none open": ${why}`,
+      );
+      return 1;
+    }
+    console.error(`rmd reap-branches: the active-branch screen could not read the open pull requests (${why}) — ` +
+      `the deletable set below is NOT screened, and --prune would refuse until this read succeeds`);
+  }
+
+  const tipAgeMs = (name: string): number | undefined => {
+    try {
+      const secs = Number(exec("git", ["log", "-1", "--format=%ct", `origin/${name}`]).trim());
+      return Number.isFinite(secs) && secs > 0 ? Date.now() - secs * 1000 : undefined;
+    } catch {
+      return undefined; // withholdActiveBranches treats an unreadable age as a reason to withhold
+    }
+  };
+
+  const screen = openHeads ? withholdActiveBranches(manifest, openHeads, tipAgeMs) : undefined;
+  if (screen && screen.withheld.length > 0) {
+    console.log(`withheld:  ${screen.withheld.length} branch(es) look ACTIVE and will not be deleted`);
+    for (const w of screen.withheld) console.log(`  ${w.name} — ${w.reason}`);
+  }
+  // `deletable` is the CLASSIFICATION's answer and `prunable` is what --prune would actually touch.
+  // Printing only the first would let an operator read 140 and get 139, which is the kind of gap
+  // that makes a dry run stop being trusted.
+  if (screen) console.log(`prunable:  ${screen.proceed.length}  (deletable minus the active-branch screen)`);
+
+  if (prune) {
+    const outcome = pruneDeletableBranches(screen!.proceed, exec);
+    console.log(`pruned:    ${outcome.deleted.length} deleted, ${outcome.skipped.length} skipped, ` +
+      `${outcome.failed.reduce((n, f) => n + f.names.length, 0)} failed`);
+    // THE RESTORE LINES ARE THE POINT OF PRINTING A MANIFEST AT ALL (see this verb's own doc): a
+    // deletion nobody can undo is the thing W1-T447 declined to ship, and one line per branch is
+    // what converts this from irreversible to merely inconvenient. STDOUT, never `state/`.
+    for (const name of outcome.deleted) {
+      const sha = manifest.find((e) => e.name === name)?.sha ?? "unknown";
+      console.log(`  restore: git push origin ${sha}:refs/heads/${name}`);
+    }
+    for (const s of outcome.skipped) console.error(`rmd reap-branches: skipped ${s.name} — ${s.reason}`);
+    for (const f of outcome.failed) {
+      console.error(`rmd reap-branches: push failed for ${f.names.length} branch(es), all still on origin ` +
+        `(${f.names.join(", ")}): ${f.error}`);
+    }
+    if (opts.ledgerPath) {
+      appendLedger(opts.ledgerPath, {
+        run_id: `REAP-${Date.now()}`,
+        task_id: "REAP",
+        step: "branch_reap.pruned",
+        withheld: screen!.withheld.length,
+        withheld_branches: screen!.withheld.map((w) => w.name),
+        deleted: outcome.deleted.length,
+        skipped: outcome.skipped.length,
+        failed: outcome.failed.reduce((n, f) => n + f.names.length, 0),
+        deleted_branches: outcome.deleted,
+      });
+    }
+    if (outcome.failed.length > 0) return 1;
   }
 
   let drift = false;
@@ -38308,9 +38421,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "reap-branches",
-    syntax: "rmd reap-branches",
-    summary: "Dry-run classification of every remote branch as deletable, guarded or held.",
-    detail: "W1-T447 DRY RUN: classify every remote branch as deletable, guarded or held, print a sha->name manifest for the deletable set, and DELETE NOTHING. Deletable = the head of a merged PR, the head of a closed-unmerged PR, or no PR at all with a tip already an ancestor of origin/main (so every commit is in main and removing the ref loses nothing). Guarded = named in src/, scripts/, deploy/ or .github/, or listed in DECLARED_BRANCH_GUARDS; protection is evaluated FIRST and wins, so a branch that is both merged and referenced by source is never offered for deletion. EXITS NON-ZERO when a grep-guarded branch is missing from the declared list (drift), and when git ls-remote returns nothing rather than reporting empty buckets over a corpus it could not read. Deletes nothing, pushes nothing, writes no state file.",
+    syntax: "rmd reap-branches [--prune]",
+    summary: "Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.",
+    detail: "W1-T447 DRY RUN: classify every remote branch as deletable, guarded or held, print a sha->name manifest for the deletable set, and DELETE NOTHING. Deletable = the head of a merged PR, the head of a closed-unmerged PR, or no PR at all with a tip already an ancestor of origin/main (so every commit is in main and removing the ref loses nothing). Guarded = named in src/, scripts/, deploy/ or .github/, or listed in DECLARED_BRANCH_GUARDS; protection is evaluated FIRST and wins, so a branch that is both merged and referenced by source is never offered for deletion. EXITS NON-ZERO when a grep-guarded branch is missing from the declared list (drift), and when git ls-remote returns nothing rather than reporting empty buckets over a corpus it could not read. Without --prune it deletes nothing, pushes nothing and writes no state file. --prune (W1-T3020) deletes EXACTLY the branches the dry run just listed and nothing else: it re-derives no classification, so it cannot disagree with the report the operator read, and every guard/hold/undetermined decision stays where planBranchReap made it. It prints `git push origin <sha>:refs/heads/<name>` for each deletion, which is what makes the removal reversible, and SKIPS any branch whose sha would not resolve, since that is the one case no restore line exists for. Pushes in chunks so one stale ref cannot fail every deletion, and exits non-zero if any chunk failed. Drift does NOT veto the prune: every drift class concerns the declared guard list and can only widen the guarded set or name an already-absent branch, so refusing on it would be a bound firing on a healthy condition. An ACTIVE-BRANCH SCREEN runs in BOTH modes, so the dry run's `prunable` line is what --prune would actually delete: it withholds any head carrying an open pull request RE-READ at that moment (independent of the classification's own folded prState, which ranked merged above open until W1-T3020), and any branch classified on no-pull-request evidence (tip_in_main, patch_id_equivalent) whose tip is newer than 24h or whose age cannot be read -- a worker that has just cut run-<taskId>-<epochMs> from main and pushed it looks exactly like an abandoned probe ref, and only time separates them. A merged or closed PR is not age-gated: that PR is decisive evidence about the work. If the open-PR read FAILS, --prune REFUSES (an unread list is indistinguishable from 'none open') while the dry run reports the gap and screens nothing. OPERATOR-INVOKED ONLY -- no daemon rung, sweep or automatic caller reaches this verb; the fleet never holds the delete.",
   },
   {
     name: "ledger-grep",

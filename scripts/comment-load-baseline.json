@@ -97,7 +97,7 @@
   "src/lib/account-usage.ts": 180,
   "src/lib/alert-lane.ts": 133,
   "src/lib/analytics-route.ts": 118,
-  "src/lib/authority.ts": 112,
+  "src/lib/authority.ts": 113,
   "src/lib/auto-triage.ts": 150,
   "src/lib/autonomy.ts": 90,
   "src/lib/block-reason.ts": 103,
@@ -105,7 +105,7 @@
   "src/lib/board-snapshot-cache.ts": 2,
   "src/lib/board.ts": 299,
   "src/lib/body-repair.ts": 79,
-  "src/lib/branch-reaper.ts": 151,
+  "src/lib/branch-reaper.ts": 223,
   "src/lib/bundle.ts": 100,
   "src/lib/ci-failure-corpus.ts": 65,
   "src/lib/ci-gate-required.ts": 2,
@@ -266,6 +266,6 @@
   "src/lib/worker.ts": 1136,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16429,
+  "src/run-task.ts": 16470,
   "src/spike.ts": 18
 }
