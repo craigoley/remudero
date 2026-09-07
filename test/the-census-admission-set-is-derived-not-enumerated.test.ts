@@ -197,8 +197,9 @@ test("every CENSUS_ADMITTED_MEMBERS entry has a corresponding FAST_GATE_STEPS st
   for (const job of stepJobs) assert.ok(memberJobs.has(job), `FAST_GATE_STEPS step ${job} has no ADMITTED population member`);
 });
 
-test("CENSUS_POPULATION: exactly four ADMITTED members today, each under FAST_GATE_CENSUS_BOUND_MS", () => {
-  assert.equal(CENSUS_ADMITTED_MEMBERS.length, 4);
+test("CENSUS_POPULATION: exactly five ADMITTED members today, each under FAST_GATE_CENSUS_BOUND_MS", () => {
+  // W1-T2695: `authority-census` is the fifth, joining the four W1-T2478 admitted.
+  assert.equal(CENSUS_ADMITTED_MEMBERS.length, 5);
   for (const m of CENSUS_ADMITTED_MEMBERS) {
     assert.equal(m.verdict.status, "ADMITTED");
     if (m.verdict.status === "ADMITTED") {
@@ -226,12 +227,16 @@ test("FAST_GATE_CENSUS_BOUND_MS is unchanged at 2000ms", () => {
 
 test("the four suites W1-T2478 admitted are still admitted, by job name, unchanged", () => {
   const jobs = CENSUS_ADMITTED_MEMBERS.map((m) => m.job).sort();
-  assert.deepEqual(jobs, ["bound-kind-census", "catch-erasure-census", "negative-reachability-census", "no-shallowing-census"].sort());
+  // W1-T2695 added a fifth (`authority-census`) without touching the original four's own entries.
+  assert.deepEqual(
+    jobs,
+    ["authority-census", "bound-kind-census", "catch-erasure-census", "negative-reachability-census", "no-shallowing-census"].sort(),
+  );
 });
 
-test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the four census entries, every one measures under the bound and passes on this HEAD", () => {
+test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the five census entries, every one measures under the bound and passes on this HEAD", () => {
   const result = runPreflightFast(REPO_ROOT, { steps: CENSUS_STEPS });
-  assert.equal(result.steps.length, 4);
+  assert.equal(result.steps.length, 5);
   for (const step of result.steps) {
     assert.equal(step.ok, true, `expected ${step.name} to pass on a clean HEAD: ${step.detail}`);
     assert.doesNotMatch(step.detail, /BOUND EXCEEDED/, `${step.name} must not report BOUND EXCEEDED on a clean, fast run`);

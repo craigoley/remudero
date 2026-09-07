@@ -72,7 +72,6 @@ const WRITE_TOKEN = "route-wiring-write-token";
  *  write route appears in neither this list nor the covered set — so a route added tomorrow surfaces
  *  immediately rather than joining a silent backlog. */
 const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
-  ["POST /v1/quiet-hours", "schedule window; a failure delays dispatch, never strands it"],
   ["POST /v1/manual/approve", "needs a plan fixture with a verify:human task"],
   ["POST /v1/inbox/approve", "needs an inbox-proposals fixture; ratify gateway already injected"],
   ["POST /v1/inbox/reframe", "needs an inbox-proposals fixture; ratify gateway already injected"],

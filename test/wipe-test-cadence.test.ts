@@ -17,12 +17,16 @@ import {
 import { runDaemon } from "../src/lib/daemon.js";
 import { runWipeTestPair, WIPE_TEST_PAIRING_FLOOR } from "../src/lib/wipe-test.js";
 import { buildWipeTestCadenceDaemonHooks } from "../src/run-task.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const NOW = new Date("2026-09-06T12:00:00Z");
 const ON = { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1 };
 
 function tmp(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
+  // RMD_TMP_PREFIX so src/lib/tmp.ts's sweepStaleTempDirs can reap these on boot — the hook
+  // refuses an unprefixed callsite, and a helper taking the prefix as a parameter is exactly the
+  // shape it cannot resolve statically, so the prefix is applied here rather than at each caller.
+  return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));
 }
 
 function policy(wipeTestCadence = ON): Policy {

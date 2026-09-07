@@ -1,0 +1,75 @@
+- id: W1-T3000
+  title: "THE EMAIL CHANNEL IS BUILT AND THE DAILY DIGEST STILL GOES NOWHERE — W1-T2976 merged `emailChannel` and `buildDigestCadenceDaemonHooks` still constructs `inboxNotifyChannel` alone, so the adapter that exists to give the report a reader has no caller; deliver the SAME rendered text a second time, over email, with its own ledger row"
+  repo: remudero
+  depends_on: [W1-T2976]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files:
+    - src/run-task.ts
+    - test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts
+  origin: "operator-session#daily-daemon-report-by-email-2026-09-06"
+  plan_refs: ["W1-T2976", "W1-T2497", "W1-T2277", "W1-T8"]
+  status: queued
+  attempts: 0
+  rationale: |
+    A CONSUMER-LESS PRODUCER, WHICH IS THIS REPO'S MOST-RECORDED SHAPE. W1-T2976 shipped
+    `emailChannel` (src/lib/notify.ts) precisely so a daily report could reach an operator while
+    the console mailbox W1-T2497 is unbuilt. MEASURED at the merge of #4350: `git grep -n
+    emailChannel -- src/` returns its definition and NOTHING ELSE — no caller anywhere.
+    `buildDigestCadenceDaemonHooks` still passes `deps.channel ?? inboxNotifyChannel(config.root)`
+    with `channelName: "inbox"`, exactly as before.
+
+    So the state today is worse than before in one specific way: the adapter exists, which reads
+    as "the email path is done", while `digestCadence` continues to render a digest every day into
+    the surface nobody can read. That is the same "correct code that nothing calls" pattern
+    daemon.ts already records twice in its own comments (#2952's board-review rung, #1066's
+    auto-triage consumer), and W1-T2959 made it three.
+
+    THE TEXT IS ALREADY RETURNED, WHICH IS WHY THIS IS SMALL. `runDigestCadenceReport` returns
+    `{ text, channelName, delivered }` — the rendered digest comes back to its caller. Nothing has
+    to be re-rendered, re-queried or re-summarised to deliver it a second time.
+  design: |
+    (i) TWO DELIVERIES, TWO LEDGER ROWS — NEVER A FAN-OUT CHANNEL. A `NotifyChannel` that wrapped
+    both and forwarded to each would produce ONE `notify.sent` row for TWO outcomes, so an inbox
+    write that succeeded and an email that could not deliver would collapse into a single verdict.
+    notify.ts refuses exactly that shape in as many words: a row asserting a send that never
+    happened is the self-contradicting-record defect. Calling `notify` once per channel gives each
+    its own row, its own `channel` name, and its own `delivered`/`reason`.
+
+    (ii) THE EMAIL SEND USES THE RETURNED TEXT, so the digest is rendered ONCE. A second render
+    would re-read the ledger union at a different instant and could disagree with the first.
+
+    (iii) THE EMAIL CHANNEL IS INJECTABLE, defaulting to `emailChannel(notifyRecipient(config))` —
+    the same `deps.channel ??` shape the inbox side already uses, so every existing test is
+    unaffected and the new ones drive a recorder.
+
+    (iv) ADDITIVE, AND THE INBOX WRITE IS UNTOUCHED. The console mailbox inherits the digest when
+    W1-T2497 lands; this adds a reader, it does not move one. `rmd digest`, the manual verb, keeps
+    defaulting to `imessageChannel` and is not in scope.
+
+    (v) AN UNCONFIGURED EMAIL CHANNEL MUST NOT BREAK THE CADENCE. With no `RMD_MAIL_COMMAND` set,
+    `emailChannel.unavailable()` names the reason and `notify` ledgers `delivered: false` without
+    throwing — so a fleet host that has not configured a transport keeps its inbox digest and
+    reports the gap, rather than losing the rung.
+
+    (vi) THE RUNG'S RETURN VALUE STAYS THE INBOX RESULT. `DigestCadenceRunResult` describes the
+    primary delivery; widening it is a separate question and not this task's.
+  acceptance:
+    - claim: a digest cadence fire delivers the rendered report to the email channel as well as the console inbox
+      proof: "unit test: test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts"
+    - claim: each delivery writes its own ledger row naming its own channel, so an inbox success and an email failure are never collapsed into one verdict
+      proof: "unit test: test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts"
+    - claim: the digest is rendered once and the same text is delivered to both, never re-rendered per channel
+      proof: "unit test: test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts"
+    - claim: an email channel with no transport configured is ledgered undelivered with its reason and does not throw or stop the cadence
+      proof: "unit test: test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts"
+    - claim: the existing console-inbox delivery is unchanged, so this adds a reader rather than moving one
+      proof: "unit test: test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts"
+  falsifier: |
+    Close without implementation if `buildDigestCadenceDaemonHooks` already delivers over
+    `emailChannel`, or if the console mailbox (W1-T2497) has shipped and the operator reads the
+    daily digest there. A change that REPLACES the inbox delivery with email, or that wraps both in
+    one channel and writes a single ledger row for two outcomes, does not satisfy this task.

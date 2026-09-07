@@ -76,6 +76,27 @@ export interface ContextClaim {
  *  who commissioned it. Absent reads `"operator"`, the pre-field default. */
 export type TaskAuthorClass = "machine" | "operator";
 
+/**
+ * W1-T2977 — the RECORDED risk-judge ruling that lets `author_class: machine` sit at `verify:
+ * auto`. RECORDED, not computed: `machineAuthorVerifyViolation` runs per task with no budget and
+ * no network, so risk-judge.ts judges at FILING time and the linter only reads. ABSENT ⇒ refused,
+ * the pre-W1-T2977 behaviour and risk-judge's own unavailable direction (W1-T130).
+ */
+export interface TaskRiskRuling {
+  /** The judge's verdict label, carried verbatim rather than re-derived. */
+  verdict: string;
+  /** `planRiskJudgeAction`'s kind. ONLY `"proceed"` clears; anything else refuses. */
+  action: "proceed" | "escalate";
+  /** The judge's OWN self-reported confidence, 0..1, verbatim. */
+  confidence: number;
+  /** OBSERVED reasons (W1-T186), quoted verbatim in a refusal so it reads without the ledger. */
+  reasons: string[];
+  judged_at: string;
+  /** {@link "./task-linter.js".taskRulingPin} of the record AS JUDGED — a mismatch is drift, and
+   *  without it the arm is defeated by editing: earn a pass, then rewrite the record (W1-T2694). */
+  pin: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -116,6 +137,10 @@ export interface Task {
    *  indistinguishable under `origin:` alone. Absent ⇒ a person's shard, so nothing already in the
    *  plan changes meaning. `"machine"` is refused at `verify: auto`, parking it for an operator. */
   author_class?: TaskAuthorClass;
+  /** W1-T2977 — the recorded risk-judge ruling that lets a machine-authored record dispatch. Absent
+   *  on a `machine` record ⇒ refused at `verify: auto`, unchanged from W1-T2959. See
+   *  {@link TaskRiskRuling} for why it is recorded rather than computed, and why it carries a pin. */
+  risk_ruling?: TaskRiskRuling;
   /** Pre-authored worker instruction (the "what to do"). */
   prompt?: string;
   /** Pre-cited context claims folded into the rendered prompt's CONTEXT block. */
@@ -268,6 +293,12 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
       note: e.note as string | undefined,
       rationale: e.rationale as string | undefined,
       origin: e.origin as string | undefined,
+      // W1-T2968 — LAW 5'S MARK MUST SURVIVE THE FILE. Omitting this line made
+      // `machineAuthorVerifyViolation` unfireable on every record that lives on disk: the field
+      // parsed to `undefined`, so a machine-authored shard at `verify: auto` linted CLEAN while the
+      // identical in-memory task blocked. W1-T2959 shipped the rule and its tests built Task objects
+      // directly, so the unit passed and the wire was never exercised.
+      author_class: e.author_class as TaskAuthorClass | undefined,
       prompt: e.prompt as string | undefined,
       context: e.context as ContextClaim[] | undefined,
       files: Array.isArray(e.files) ? (e.files as string[]) : undefined,

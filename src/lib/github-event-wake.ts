@@ -393,20 +393,22 @@ export function createSweepWakeSignal(
   timers: SweepWakeTimerDeps = realSweepWakeTimers,
 ): SweepWakeSignal {
   let pending = initiallyPending;
-  let activeWait: { timer: unknown; resolve: (result: "wake" | "timeout") => void } | undefined;
-  const finishActiveWait = (result: "wake" | "timeout") => {
-    const active = activeWait;
-    if (!active) return;
-    activeWait = undefined;
-    timers.clearTimer(active.timer);
+  type ActiveWait = { timer?: unknown; resolve: (result: "wake" | "timeout") => void };
+  const activeWaits: ActiveWait[] = [];
+  const finishActiveWait = (active: ActiveWait, result: "wake" | "timeout") => {
+    const index = activeWaits.indexOf(active);
+    if (index < 0) return;
+    activeWaits.splice(index, 1);
+    if (active.timer !== undefined) timers.clearTimer(active.timer);
     active.resolve(result);
   };
   return {
     wake() {
       pending = true;
-      if (activeWait) {
+      const active = activeWaits[0];
+      if (active) {
         pending = false;
-        finishActiveWait("wake");
+        finishActiveWait(active, "wake");
       }
     },
     acknowledge() {
@@ -418,17 +420,14 @@ export function createSweepWakeSignal(
         return Promise.resolve("wake");
       }
       return new Promise<"wake" | "timeout">((resolve) => {
-        const timer = timers.setTimer(() => {
-          if (!activeWait) return;
-          activeWait = undefined;
-          resolve("timeout");
-        }, ms);
-        activeWait = { timer, resolve };
+        const active: ActiveWait = { resolve };
+        activeWaits.push(active);
+        active.timer = timers.setTimer(() => finishActiveWait(active, "timeout"), ms);
       });
     },
     close() {
       pending = false;
-      finishActiveWait("timeout");
+      for (const active of [...activeWaits]) finishActiveWait(active, "timeout");
     },
   };
 }

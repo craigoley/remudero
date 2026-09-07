@@ -21,6 +21,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
+import { gitGrepRunner, resolveSymbolDefinitions } from "./helpers/rule-citation-symbols.js";
+
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string): string => readFileSync(join(REPO_ROOT, rel), "utf8");
 
@@ -79,12 +81,12 @@ test("every enforcing symbol the decoding row names is DEFINED in src/ — a cit
       // DEFINED, not exported: `criterionFieldTampered` is module-private inside src/lib/review.ts,
       // and that is fine — a citation must point at a real symbol, not necessarily a public one.
       // Requiring `export` here would push an unrelated visibility change into this task.
-      const hits = execFileSync("git", ["grep", "-lE", `(export )?(function|const) ${symbol}\\b`, "--", "src/"], {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-      })
-        .split("\n")
-        .filter(Boolean);
+      // W1-T2849: the pattern carried a trailing `\b` and this whole gate read ZERO on git 2.54.0,
+      // where `git grep -E` no longer honours the boundary — so it reported "points at nothing" for
+      // every symbol, including ones plainly defined. The boundary bought nothing: the pattern
+      // already anchors on `(function|const) ` to the left. `resolveSymbolDefinitions` also runs a
+      // POSITIVE CONTROL first and throws rather than returning a zero its own query cannot back.
+      const hits = resolveSymbolDefinitions(symbol, gitGrepRunner(REPO_ROOT));
       assert.ok(hits.length > 0, `rule ${n}'s enforcing symbol ${symbol} is defined nowhere in src/ — the citation points at nothing`);
     }
   }

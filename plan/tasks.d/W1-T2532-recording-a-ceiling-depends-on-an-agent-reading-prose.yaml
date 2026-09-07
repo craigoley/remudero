@@ -85,3 +85,64 @@
       proof: "unit test: test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts"
     - claim: "removing the opt-in guard makes the CI assertion pass over a tree that really is over its baseline"
       proof: "unit test: test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts"
+  note: |
+    2026-09-07, SCHEDULED BUILD PASS. RE-DERIVED THE POPULATION AS THIS SHARD'S OWN RATIONALE
+    INSTRUCTS ("RE-DERIVE THE POPULATION BEFORE BUILDING... report the count with the sha it was
+    taken at"). THE MECHANISM GAP IS REAL AND CONFIRMED BY EXPERIMENT; THE SEVERITY THAT SIZED THE
+    BUILD IS GONE. Recorded rather than built, and the count is below so the next reader re-derives
+    from a dated figure rather than from 2026-08-31.
+
+    THE COUNT (OBSERVED, at origin/main 1024b66b0, 2026-09-07T07:51:03Z). For every open PR, its
+    head merged with origin/main, then `npm run source-size-ratchet` — the ENFORCING `--baseline`
+    mode, which is what `.github/workflows/ci.yml:1016` runs:
+
+      #4337 run-W1-T2659   merge conflict (not measurable)
+      #4351 run-W1-T2672   merge conflict (not measurable)
+      #4360 run-W1-T2997   merge conflict (not measurable)
+      #4371 run-W1-T2699   OK
+      #4376 chore/record-w1-t2914  OK
+      #4377 run-W1-T2701   OK
+      #4380 run-W1-T2849   OK
+
+    ZERO of seven blocked; zero of the four that merge cleanly. The filing measured SIX of NINE on
+    2026-08-31. W1-T2734 landed the bucketed-ceiling redesign after that filing, and a bucket
+    absorbs ordinary growth: five builds on 2026-09-07 added 137, 64, 54, 226 and 19 lines across
+    src/run-task.ts and others without this gate firing once.
+
+    THE MECHANISM GAP IS NOT STALE, AND WAS RE-CONFIRMED BY EXPERIMENT RATHER THAN BY READING
+    (OBSERVED): 600 code lines appended to src/lib/tmp.ts made `npm run source-size-ratchet` print
+    `BLOCKED -- 1 source file(s) grew past their recorded baseline` and the same prose remedy the
+    rationale describes. There is still no recording mode: the script accepts `--baseline`,
+    `--check`, `--root`, `--base` and `--json`, and none of them writes on a GROW. So the claim
+    "recording is a manual step no lane performs" holds exactly as filed. What no longer holds is
+    the 6-of-9 board that made it worth $14 at risk:high.
+
+    THE SIBLING RATCHET WAS TESTED THE SAME WAY AND BEHAVES THE SAME (OBSERVED): six comment lines
+    added to the same file made `npm run comment-load-ratchet` — the DEFAULT, no-flag invocation —
+    print BLOCKED and write nothing to scripts/comment-load-baseline.json. Its "shrink
+    auto-records" applies only to shrinks. So neither ratchet self-records on growth, and the
+    remedy this shard proposes is the missing mechanism for both.
+
+    WHERE THE BURDEN ACTUALLY LANDS TODAY, WHICH IS THE REASON TO RE-AIM RATHER THAN CLOSE. Across
+    the same five builds, source-size fired ZERO times and comment-load fired THREE, each cleared
+    by a session editing scripts/comment-load-baseline.json by hand — the exact manual step this
+    shard is about, on the ratchet it does not name. `files:` here is
+    scripts/source-size-ratchet.mjs and package.json. Re-aiming at, or generalising over, the
+    comment-load ratchet is a scope decision and is left to the operator; a worker re-pointing a
+    shard at a different instrument on its own reading would be the shape this plan already
+    refuses.
+
+    THIS SHARD'S OWN RE-DERIVATION QUERY IS STALE AND WOULD MISLEAD THE NEXT READER (OBSERVED). It
+    says to run `node scripts/source-size-ratchet.mjs`. After W1-T2734 that DEFAULT mode "never
+    reads or writes scripts/source-size-baseline.json" (the script's own header, lines 7-11) and
+    measures merge-base-to-HEAD growth instead, so it reports OK on a tree that the enforcing mode
+    blocks. The query that reproduces the filing's figure is `npm run source-size-ratchet`, which
+    passes `--baseline`.
+
+    NOT CLAIMED. No opinion is recorded on whether the opt-in `--record` mode should be built — the
+    design constraint in the rationale (CI must never take a writing path, or the assertion goes
+    vacuous) still looks right, and the acceptance criteria still describe a coherent instrument.
+    What is recorded is only that the measurement justifying it no longer reproduces, that the
+    defect it names does, and that the cost has moved to a sibling. The wiring half is also still
+    unresolved: the rationale's own trace — `runPreflightFast` has one call site and the fleet's
+    workers do not run the fast gate — was not re-checked here.

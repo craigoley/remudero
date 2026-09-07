@@ -1,0 +1,32 @@
+# plan/credit-overrides.yaml — W1-T2970. THE OPERATOR'S CREDIT RULINGS.
+#
+# WHAT THIS REPLACES. `deriveStatus` reads merge credit from two places, and both live in history:
+# the `Remudero-Task:` trailer on a merged pull request body, and `findMergedByHeadBranch` matching
+# `run-<taskId>-<digits>` on the head ref. Correcting a task that reads merged-but-never-built
+# therefore meant EDITING A MERGED PULL REQUEST BODY — rewriting a record after the fact,
+# unreviewably, with no field anywhere saying why or who. A row here is that correction as a diff a
+# reviewer reads instead.
+#
+# IT MAY ONLY SUBTRACT. `remove-credit` is the only legal action; a row trying to GRANT credit is
+# refused by name at load. A file that could assert something shipped when no pull request says so
+# is a record laundering authority, which is what Law 5 refuses in the other direction.
+#
+# AN UNREADABLE FILE CHANGES NOTHING. Absent, corrupt or unparseable, this yields no rows and the
+# projection answers exactly as it does today — deliberately, because the opposite polarity would
+# re-dispatch the entire merged backlog on one malformed edit.
+#
+# THE PAIRING IS THE KEY, not the task: a task may legitimately be credited by a different pull
+# request than the one being corrected, so a row names both.
+#
+# EACH ROW:
+#   - task: W1-T<n>            the task losing credit
+#     pr: <number>             the pull request whose credit does not stand
+#     action: remove-credit    the only legal value
+#     reason: "..."            why — required; an unreasoned ruling is the shape this replaces
+#     author_class: operator   required; un-crediting is a person's ruling, never a machine's
+#
+# EMPTY BY DESIGN. W1-T2970 builds the place to record a ruling; deciding WHICH tasks to un-credit
+# is the operator's, one row at a time. The measurement that motivated this — up to 23 tasks
+# credited by a pull request on their own run branch — is an upper bound, not a verdict on any of
+# them.
+[]

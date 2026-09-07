@@ -151,18 +151,15 @@ test("a local PAUSE on the same host renders exactly one row, not two, for the s
 test("every file-backed latch keeps the row it renders today, unchanged in name and consequence", () => {
   const root = freshRoot();
   writeFileSync(join(root, "state", "STOP"), JSON.stringify({ at: NOW_ISO, reason: "operator halt" }));
-  writeFileSync(join(root, "state", "QUIET_HOURS"), JSON.stringify({ at: NOW_ISO }));
   const l = boardWith(root, { readSharedPauseState: () => "absent" });
 
   const stop = l.rows.find((r) => r.name === "STOP");
   assert.ok(stop, "STOP still renders exactly as before");
   assert.match(stop!.consequence, /halts within one tick/);
 
-  const quiet = l.rows.find((r) => r.name === "QUIET_HOURS");
-  assert.ok(quiet, "QUIET_HOURS still renders exactly as before");
-  assert.match(quiet!.consequence, /quiet-hours preference is set/);
-
-  assert.equal(l.rows.length, 2, "no ref-backed row leaked in beside the two file-backed ones");
+  // QUIET_HOURS was the second file-backed row until it was removed (2026-09-07 operator ruling);
+  // STOP is now the only one this fixture writes, so the count moves 2 -> 1 and the claim is unchanged.
+  assert.equal(l.rows.length, 1, "no ref-backed row leaked in beside the one file-backed row");
 });
 
 // ── claim: the next-action line fires for a hold the block can now see, and names no releasing

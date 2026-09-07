@@ -3,7 +3,7 @@
 // The control panel's browser entry point: the W3-T2 read-only live board (GET /v1/status +
 // GET /v1/status/stream) plus the W3-T5 human-in-the-loop WRITE actions (MASTER-PLAN §7
 // "editing capability tiers" -- answer questions, approve MANUAL items, Pause/Resume/STOP,
-// quiet-hours toggle). Both talk to the daemon ONLY via @remudero/api-client (MASTER-PLAN
+// Both talk to the daemon ONLY via @remudero/api-client (MASTER-PLAN
 // §7A; scripts/no-hand-rolled-fetch-check.mjs enforces zero direct fetch/axios/XHR calls
 // here) -- the write actions call the SAME client instance the board reads from, since
 // DaemonClientOptions carries one token and the daemon's write scope is a superset of read
@@ -186,7 +186,7 @@ function runAction(status: HTMLElement, action: string, fn: () => Promise<unknow
 }
 
 /**
- * Wire the fleet-control buttons, the quiet-hours toggle, and the answer/approve forms in
+ * Wire the fleet-control buttons and the answer/approve forms in
  * `doc` to `client`'s write methods (W3-T5). Pure DOM wiring -- every actual daemon call goes
  * through `client`, never a hand-rolled HTTP call of its own (scripts/no-hand-rolled-fetch-check.mjs).
  */
@@ -209,10 +209,6 @@ export function wireControls(doc: Document, client: DaemonClient): void {
     runAction(status, "STOP", () => client.stopFleet(reasonInput.value.trim() || undefined));
   });
 
-  const quietHoursToggle = requiredEl<HTMLInputElement>(doc, "quiet-hours-toggle");
-  quietHoursToggle.addEventListener("change", () => {
-    runAction(status, "Quiet hours", () => client.setQuietHours(quietHoursToggle.checked));
-  });
 
   requiredEl<HTMLFormElement>(doc, "answer-question-form").addEventListener("submit", (e) => {
     e.preventDefault();

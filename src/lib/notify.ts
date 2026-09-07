@@ -89,6 +89,60 @@ export function imessageChannel(
   };
 }
 
+// ── W1-T2976: the second adapter, because the first cannot deliver here ───────
+//
+// `digestCadence` renders daily into `inboxNotifyChannel` (the console mailbox W1-T2497 has not
+// built) while {@link imessageChannel} is unavailable off darwin — so the report reaches nobody.
+// SHELLS A COMMAND THE OPERATOR NAMES rather than speaking SMTP: an SMTP client would be an async
+// socket in a synchronous `send`, a second credential store, and a hand-rolled protocol
+// `no-hand-rolled-fetch` refuses. Every credential stays OUTSIDE this module — the operator's
+// command may read one, this code never sees it.
+
+/** Env var naming the sendmail-compatible command, argv-split on spaces (e.g. `/usr/sbin/sendmail -t`). */
+export const EMAIL_COMMAND_ENV = "RMD_MAIL_COMMAND";
+
+/** The send seam: run `argv` and pipe `body` to its stdin. Injectable so no test opens a socket. */
+export type EmailSpawn = (argv: string[], body: string) => void;
+
+function defaultEmailSpawn(argv: string[], body: string): void {
+  execFileSync(argv[0], argv.slice(1), { input: body, stdio: ["pipe", "ignore", "pipe"] });
+}
+
+/** RFC-5322-ish envelope a sendmail-compatible command reads from stdin (`-t` takes To: from here). */
+function envelope(recipient: string, message: string): string {
+  const subject = (message.split("\n").find((l) => l.trim() !== "") ?? "remudero report").slice(0, 120);
+  return `To: ${recipient}\nSubject: ${subject}\n\n${message}\n`;
+}
+
+/**
+ * Email channel (W1-T2976). ADDITIVE — `rmd digest` and the cadence's inbox write are unchanged.
+ *
+ * `readEnv` IS CALLED PER OPERATION, NEVER CAPTURED: a channel built before the operator sets a
+ * command must work once they do, and capturing would freeze the first answer (#2248).
+ */
+export function emailChannel(
+  recipient: string,
+  opts: { spawn?: EmailSpawn; readEnv?: () => NodeJS.ProcessEnv } = {},
+): NotifyChannel {
+  const readEnv = opts.readEnv ?? (() => process.env);
+  const spawn = opts.spawn ?? defaultEmailSpawn;
+  const command = (): string => (readEnv()[EMAIL_COMMAND_ENV] ?? "").trim();
+  return {
+    unavailable() {
+      // TWO MISSING HALVES, TWO DISTINCT ANSWERS. An operator reading this has to know which one
+      // to fix, so these never collapse into one "not configured".
+      if (recipient.trim() === "") return "no email recipient configured — set `notifyRecipient` in config.json";
+      if (command() === "") return `no email transport configured — set ${EMAIL_COMMAND_ENV} to a sendmail-compatible command`;
+      return undefined;
+    },
+    send(message) {
+      // Only the command NAME and its flags cross this boundary; a credential the operator's
+      // command reads is never loaded, logged or ledgered here.
+      spawn(command().split(/\s+/), envelope(recipient, message));
+    },
+  };
+}
+
 export interface NotifyDeps {
   channel: NotifyChannel;
   ledgerPath: string;

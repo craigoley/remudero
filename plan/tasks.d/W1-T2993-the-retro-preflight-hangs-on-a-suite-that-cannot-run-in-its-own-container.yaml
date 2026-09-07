@@ -1,0 +1,66 @@
+- id: W1-T2993
+  title: "THE RETRO'S PREFLIGHT RUNS THE FULL SUITE INSIDE THE DAEMON CONTAINER AND test/entrypoint-boot.test.ts HANGS THERE AT FILE SCOPE, SO THE RETRO CAN NEVER PUBLISH — the marker has been frozen since 2026-09-03 and the self-improvement loop has produced nothing since"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  origin: "operator-session#the-self-improvement-loop-has-been-dead-since-09-03"
+  plan_refs: ["W1-T2875", "W1-T2988", "W1-T2981"]
+  files: [test/entrypoint-boot.test.ts, src/lib/retro.ts, test/the-retro-preflight-names-the-suite-that-hung.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SELF-IMPROVEMENT LOOP IS THE THING THAT IS BROKEN. `state/last-retro.json` reads
+    2026-09-03T02:24:39.835Z; the retro lane has 44 `retro.start` rows and ZERO `pr.opened` on
+    2026-09-06, and the trigger re-fired 60 times that day with `merges_since_marker` pinned at 446.
+    Nothing has been learned from a PR review or a fix in three days.
+
+    THE PREFLIGHT FAILS ON A HUNG SUITE, NOT ON BROKEN CODE. The newest `retro.preflight_failed`
+    carries `exit_class: tests_failed`, `suite_count: 238`, `elapsed_ms: 742749` and a
+    `failing_tests` list clustered entirely in self-sync/freshness/deploy. Every one of those tests
+    PASSES on origin/main: 13/13 individually, 64/64 for the four suites together, and `ci` is
+    `completed/success` on the two most recent main commits. The code is fine.
+
+    REPRODUCED, INSIDE THE DAEMON CONTAINER:
+      docker exec remudero-daemon sh -c "cd /home/node/Remudero/remudero && \
+        node --test --test-timeout 45000 --import tsx test/entrypoint-boot.test.ts"
+      -> test at test/entrypoint-boot.test.ts:1:1
+         'test timed out after 45000ms'   tests 1 | pass 0 | fail 0 | CANCELLED 1
+    It times out at FILE SCOPE — before any subtest reports — at both 45s and 120s. The same file
+    passes on a developer machine and in CI. `bash` and `git` are both present in the image
+    (/usr/bin/bash, /usr/bin/git) and the container is not a tty.
+
+    THE SUITE BOOTS THE REAL `deploy/entrypoint.sh`, WHICH IS THE CONTAINER'S OWN BOOT PATH. Running
+    it inside a live daemon container is the one environment where it cannot be assumed hermetic, and
+    that is precisely where the retro runs its preflight. WHICH CALL BLOCKS IS NOT YET ESTABLISHED —
+    two hypotheses were formed and DISPROVED and must not be re-litigated without new evidence: a
+    missing git identity (the container has `remudero-worker` configured globally) and HOME
+    redirection losing it (worker HOMEs carry their own `.gitconfig` with a valid identity).
+
+    THE PREFLIGHT ALSO REPORTED THIS BADLY, WHICH IS A SECOND DEFECT IN THE SAME PLACE. A file that
+    HANGS was folded into `failing_tests` alongside genuine assertion failures, and
+    `test/entrypoint-boot.test.ts` is not named in that list at all — the tests attributed to it are
+    the ones that never got to run. A cancelled suite and a failed assertion are different facts and
+    a preflight that cannot tell them apart sends every diagnosis to the wrong file, as it did here
+    for three days.
+    ANSWERED BY W1-T2994, 2026-09-07 — THIS SHARD'S "WHICH CALL BLOCKS IS NOT YET ESTABLISHED" IS NO
+    LONGER TRUE AND MUST NOT BE READ AS OPEN. `deploy/entrypoint.sh` reads
+    `RESTART_THROTTLE_S="${RMD_RESTART_THROTTLE_S:-0}"` and takes `exec "$@"` only when it is zero;
+    non-zero falls through to a supervised `while :; do` that never returns. The daemon container
+    sets `RMD_RESTART_THROTTLE_S=120`, and the fixture spawned with `env: { ...process.env }` at six
+    sites, so inside the container the test booted the supervised loop and blocked forever. Fixed by
+    scrubbing the `RMD_` prefix from the fixture's spawn environment; verified in the same container
+    that hung, 45 pass / 0 cancelled against a prior `tests 1 | cancelled 1`.
+
+    WHAT REMAINS HERE IS THE SECOND DEFECT THIS SHARD NAMES, AND IT IS UNFIXED: the preflight folded
+    a CANCELLED suite into `failing_tests` beside genuine assertion failures, and never named the
+    file that actually hung. That is what sent three days of diagnosis to the wrong files.
+
+  acceptance:
+    - claim: "the suite no longer hangs when run inside the daemon container, or is refused there with a named reason"
+      proof: "unit test: W1-T2993: the entrypoint boot fixture cannot block indefinitely"
+    - claim: "a preflight suite that is CANCELLED is reported as cancelled and named, never folded into failing_tests"
+      proof: "unit test: W1-T2993: a cancelled suite is named as cancelled rather than reported as failing tests"

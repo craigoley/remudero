@@ -149,6 +149,7 @@ test("renderDigest: a window with no cache data OMITS the 'cache hit' lines enti
       "issues reviewed: (no poll this window)",
       "verdict downgrades suppressed: 0",
       "notional cost: $1.00",
+      "prompt parts: (not observed this window)",
     ].join("\n"),
   );
 });

@@ -112,3 +112,35 @@
     measurements were true readings of the cache but a false attribution of the dependency
     artifact. This replacement preserves the underlying goal — prevent current code from running
     against incompatible dependencies — while changing the observed object and predicate.
+
+    LARGELY SUPERSEDED, MEASURED 2026-09-07 — READ BEFORE DISPATCHING. This shard is verify: auto,
+    so the daemon CAN take it and spend a full build rediscovering the following.
+
+    THE FALSIFIER ABOVE DOES NOT FIRE, AND THAT IS NOT THE SAME AS THE WORK REMAINING. Both of its
+    conditions were checked live: linkWorktreeNodeModules still does not always select repoDir
+    (resolveNodeModulesSource returns the first of [repoDir/node_modules, installRoot/node_modules]
+    that EXISTS, and repoDir/node_modules does NOT exist on the fleet host), and all four live worker
+    symlinks still resolve to the runtime checkout /home/node/Remudero/remudero/node_modules. The
+    premise holds. What the falsifier never asks is whether the REMEDY already shipped elsewhere.
+
+    IT DID, UNDER A DIFFERENT FILENAME — which is exactly why a files:-presence check misses it.
+    This shard declares src/lib/install-inputs.ts, which does not exist. The work landed as
+    src/lib/install-hash.ts:
+      - hashInstallInputs is defined there and imported by src/lib/worker.ts:62.
+      - It is wired on the PRODUCTION path: worker.ts:2333 inside linkWorktreeNodeModules, with an
+        injectable seam defaulting to the real function — the shard's own wiring requirement.
+      - The comparison is already against the LINKED ARTIFACT, not the unrelated checkout:
+        hashFn(worktreePath) !== hashFn(nmSourceDir) where nmSourceDir = dirname(source), i.e.
+        parentOf(source). The code comment credits W1-T2777 for exactly that.
+
+    AND THE OTHER HALF — the warning that asserted the stale clone — shipped too:
+    recordCanonicalCheckoutDrift now opens "NAME THE SOURCE, NEVER ASSUME IT IS THIS CLONE"
+    (worker.ts:2571), and the live warning on the fleet host reads "...this worktree's node_modules
+    comes from /home/node/Remudero/remudero/node_modules, not from that stale tree, so the distance
+    does not reach its dependencies", which is the behaviour this shard asks for.
+
+    WHAT IS NOT CLAIMED HERE. Whether EVERY acceptance criterion is met was not verified
+    criterion-by-criterion; the CENTRAL mechanism (measure the linked artifact's install-input
+    compatibility rather than an unrelated checkout, wired on the production path) demonstrably
+    ships. An operator should rule whether any residue justifies a build or whether this retires as
+    superseded by W1-T2777. Recorded rather than retired: retiring a shard is not a worker's call.

@@ -137,3 +137,36 @@
     W1-T2732 was atomically reserved at `refs/rmd-id/W1-T2732` before this file was written.
     Successor to W1-T2292's stated scope fence, not a re-file of it: that task's deliverable (the
     detector) shipped and passes; this one is that detector's missing consumer.
+
+    OBSTRUCTED BY ONE UNWAIVABLE FALSE POSITIVE, MEASURED 2026-09-07 — READ THIS BEFORE STARTING.
+    The scan now reports 3 delete-is-noop and SEVENTEEN unblanked findings (not 16:
+    test/the-census-admission-set-is-derived-not-enumerated.test.ts joined the population after this
+    shard was filed and is absent from files: above). Nineteen of the twenty are ordinary and
+    mechanical. ONE IS NOT.
+
+    test/merge-lcov.test.ts:60 builds its child env as
+      const env = { ...process.env, NODE_V8_COVERAGE: directory };
+      delete env.NODE_TEST_CONTEXT;
+    and hands it to three spawns of node --test --experimental-test-coverage (lines 141/145/149).
+    The variable is set ON PURPOSE: the child must WRITE coverage into that directory, because
+    merging those directories is what the suite tests. Blanking it defeats the test outright.
+
+    EVERY EXIT IS CLOSED, AND EACH WAS CHECKED RATHER THAN ASSUMED:
+      - Blank it: contradicts the test's purpose.
+      - Drop the NODE_TEST_CONTEXT strip so rule (b) never fires: MEASURED — the suite goes
+        9 pass / 0 fail to 7 pass / 2 FAIL ("coverage merge CLI merges raw V8 ranges..." and
+        "compact shard reports defer source-map translation..."). The strip is load-bearing.
+      - Waive it in the scan: there is NO allowlist, waiver or baseline in
+        scripts/coverage-session-blanking-check.mjs (grep for allowlist|waiver|baseline|exempt
+        returns nothing), and acceptance criterion 5 here forbids editing that script at all.
+
+    So wiring the check as a REQUIRED gate would redden CI permanently on a legitimate test. The
+    scan's own header already concedes the shape: rule (b) is "a strong suspicion, not a proof".
+    This is that suspicion being wrong, in a place the task cannot route around.
+
+    WHAT THIS TASK NEEDS BEFORE IT CAN BE BUILT — an operator ruling, one of:
+      (a) relax criterion 5 so the scan may gain a waiver mechanism, and wire it required; or
+      (b) wire it ADVISORY (reported, never blocking), which needs no waiver and no criterion change; or
+      (c) restructure merge-lcov so the nested runner needs neither the strip nor the variable —
+          the largest blast radius of the three, and the only one that touches a passing suite.
+    Recorded rather than chosen: the routes differ in blast radius and this is not a worker's call.

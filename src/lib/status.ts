@@ -9,6 +9,7 @@ import fs from "node:fs";
 import { readdirSync as nodeReaddirSync, readFileSync as nodeReadFileSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 import { dirname } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { ledgerRotationEntries } from "./ledger-grep.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -160,6 +161,9 @@ export interface StatusProjection {
    *  live lock. Marks "NOT EVIDENCED", never "dead". Why: W1-T314 rendered `running, 10h25m, $27.75` ten hours
    *  after its run was refused */
   processUnevidenced?: true;
+  /** W1-T2970 — an operator ruling SUBTRACTED this task's credit, with the reason that ruling gave.
+   *  Present only when a row refused the pairing; its absence means no override applied. */
+  creditOverride?: { reason: string; pr: number };
   /** An OPEN escalation no LATER `run.start` has superseded. Omitted, not `false`, once superseded or merged. */
   needsHuman?: true;
   /** The escalation issue's own URL (W1-T182), so NEEDS ME renders a direct link rather than soliciting one. */
@@ -349,6 +353,11 @@ export interface DeriveDeps {
    *  {@link defaultCreditStorePath}. Injectable so a test, or a caller sharing one store across many
    *  ledger directories, can point elsewhere. */
   creditStorePath?: string;
+  /** W1-T2970 — path to the credit override record. Defaults to {@link defaultCreditOverridePath}
+   *  off `ledgerPath`, so no caller must supply it for the rung to be live. */
+  creditOverridePath?: string;
+  /** W1-T2970 — test seam: read the override record's text. Production reads the real file. */
+  readCreditOverrideFile?: () => string;
   /** Reader for the durable credit store; defaults to {@link loadCreditStore}. Injectable so a test
    *  can hand a canned store directly and prove the resolution never touches `deps.github`. */
   readCreditStore?: () => CreditStore;
@@ -421,6 +430,95 @@ const realCreditStoreFs: CreditStoreFsDeps = {
  *  new required `DeriveDeps` field — only a caller sharing one store injects {@link DeriveDeps.creditStorePath}. */
 export function defaultCreditStorePath(ledgerPath: string): string {
   return `${dirname(ledgerPath)}/merge-credit.json`;
+}
+
+// ── W1-T2970: THE CREDIT OVERRIDE RECORD — un-crediting without editing history ───────────────
+//
+// Both credit paths READ HISTORY (trailer, and `run-<taskId>-<digits>` head ref), so correcting a
+// task that reads merged-but-never-built meant EDITING A MERGED PULL REQUEST BODY — unreviewably,
+// with no field saying why. This is the reviewable diff that replaces that edit.
+//
+// INVARIANT — SUBTRACT ONLY: a row that GRANTED credit would assert something shipped when no pull
+// request says so (Law 5's laundering shape, reversed). `remove-credit` is the only legal action;
+// anything else is REFUSED BY NAME.
+// INVARIANT — FAIL TOWARD THE STATUS QUO: absent, unreadable or unparseable yields NO rows, so the
+// projection answers as today. The opposite polarity re-dispatches the whole merged backlog on one
+// malformed edit. Full rationale: plan/credit-overrides.yaml's own header.
+
+/** One operator ruling that a (task, pull request) credit pairing does not stand. */
+export interface CreditOverrideRow {
+  task: string;
+  pr: number;
+  /** The ONLY legal action — see the subtract-only invariant above. */
+  action: "remove-credit";
+  /** Why. A ruling with no reason is the unreviewable shape this record replaces. */
+  reason: string;
+  /** LAW 5: the author class rides the record. An override is an operator ruling, never a machine's. */
+  author_class: "operator";
+}
+
+/** Rows that survived, and every row refused WITH ITS REASON. */
+export interface CreditOverrideLoad {
+  rows: CreditOverrideRow[];
+  refused: Array<{ reason: string; raw: unknown }>;
+}
+
+/** `<root>/plan/credit-overrides.yaml`, derived from `ledgerPath` as {@link defaultCreditStorePath}
+ *  derives its own, so every existing caller consults this with no new required field. Under
+ *  `plan/` and not `state/`: the correction must be a diff a reviewer reads. */
+export function defaultCreditOverridePath(ledgerPath: string): string {
+  return `${dirname(dirname(ledgerPath))}/plan/credit-overrides.yaml`;
+}
+
+/** Parse the override record. NEVER throws: any read or parse failure yields no rows, which is the
+ *  status quo. A structurally valid row that is not a `remove-credit` ruling is REFUSED by name. */
+export function loadCreditOverrides(readFile: () => string): CreditOverrideLoad {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(readFile());
+  } catch {
+    return { rows: [], refused: [] }; // unreadable or unparseable — fail toward the status quo
+  }
+  if (!Array.isArray(parsed)) return { rows: [], refused: [] };
+
+  const rows: CreditOverrideRow[] = [];
+  const refused: Array<{ reason: string; raw: unknown }> = [];
+  for (const raw of parsed) {
+    const r = raw as Partial<CreditOverrideRow>;
+    if (r?.action !== "remove-credit") {
+      refused.push({ raw, reason: `action must be "remove-credit" — this record may only SUBTRACT credit, never grant it (saw ${JSON.stringify(r?.action ?? null)})` });
+      continue;
+    }
+    if (typeof r.task !== "string" || !r.task) {
+      refused.push({ raw, reason: "task must be a task id" });
+      continue;
+    }
+    if (typeof r.pr !== "number") {
+      refused.push({ raw, reason: "pr must be the pull request NUMBER — the pairing is the key, not the task alone" });
+      continue;
+    }
+    if (typeof r.reason !== "string" || !r.reason.trim()) {
+      refused.push({ raw, reason: "reason is required — an unreasoned ruling is the shape this record replaces" });
+      continue;
+    }
+    if (r.author_class !== "operator") {
+      refused.push({ raw, reason: "author_class must be operator — un-crediting is a person's ruling (Law 5)" });
+      continue;
+    }
+    rows.push({ task: r.task, pr: r.pr, action: "remove-credit", reason: r.reason, author_class: "operator" });
+  }
+  return { rows, refused };
+}
+
+/** The row refusing THIS pairing, if any. Per PAIRING and never per task: a task may legitimately
+ *  be credited by a different pull request than the one being corrected. */
+export function creditOverrideFor(
+  rows: readonly CreditOverrideRow[],
+  taskId: string,
+  prNumber: number | undefined,
+): CreditOverrideRow | undefined {
+  if (prNumber === undefined) return undefined;
+  return rows.find((r) => r.task === taskId && r.pr === prNumber);
 }
 
 /** Reads the durable store — `{}` on a missing OR corrupt file, never a throw. The store is an ACCELERATOR, not
@@ -1741,6 +1839,27 @@ function isPlanOnlyFilingPr(
   return ledgerLines.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
 }
 
+/** SUBTRACT-ONLY: an uncredited projection returns untouched, so no row can manufacture credit. The
+ *  refused projection keeps the PR it was credited by, so a reader sees WHICH pairing was
+ *  corrected, and carries the ruling's reason. */
+function applyCreditOverride(taskId: string, p: StatusProjection, deps: DeriveDeps): StatusProjection {
+  if (!p.merged) return p; // nothing to subtract — the only direction this rung moves
+  const readFile =
+    deps.readCreditOverrideFile ??
+    (() => nodeReadFileSync(deps.creditOverridePath ?? defaultCreditOverridePath(deps.ledgerPath), "utf8"));
+  const row = creditOverrideFor(loadCreditOverrides(readFile).rows, taskId, p.prNumber);
+  if (!row) return p;
+  return {
+    ...p,
+    status: "queued",
+    merged: false,
+    // `none` is the honest source once the credit is refused: no evidence stands. The finer fact
+    // rides the sparse field, the taxonomy convention this file states for StatusProjection.
+    source: "none",
+    creditOverride: { reason: row.reason, pr: row.pr },
+  };
+}
+
 /** Derive one task's PR-precedence merge-state from GitHub, in the fixed precedence — the logic `deriveStatus`
  *  carried before W1-T155. Takes the ledger its caller already read once, rather than re-reading the file. */
 function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Record<string, unknown>>): StatusProjection {
@@ -2216,7 +2335,12 @@ export function resolveEscalation(
 export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   const readLedger = deps.readLedger ?? readLedgerLines;
   const ledgerLines = readLedger(deps.ledgerPath);
-  const base = derivePrPrecedence(task, deps, ledgerLines);
+  const credited = derivePrPrecedence(task, deps, ledgerLines);
+
+  // W1-T2970 — THE OVERRIDE RUNG. Consulted only on a GRANTED credit, and only ever to SUBTRACT it:
+  // there is no path here that can turn an uncredited task into a merged one. Applied ABOVE the
+  // merged-is-terminal return, because that return is exactly what an override exists to prevent.
+  const base = applyCreditOverride(task.id, credited, deps);
 
   // MERGED is terminal — nothing below can add anything more useful than "it landed".
   if (base.merged) return base;

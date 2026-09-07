@@ -18,7 +18,7 @@ import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { test } from "node:test";
 
 import { rollupFor, GhPaceFloorStandDownError, type GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { pollToGate, waitForCiGreen, STALL_WINDOW } from "../src/run-task.js";
+import { pollToGate, waitForCiGreen, STALL_WINDOW, ciGateState } from "../src/run-task.js";
 
 const PR_URL = "https://github.com/acme/remudero/pull/42";
 const OWNER = "acme";
@@ -157,7 +157,7 @@ test("W1-T2268: every waitForCiGreen iteration reads REST (`gh api`), never Grap
     () => [{ name: "ci", status: "completed", conclusion: "success" }],
   );
   const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson });
-  assert.equal(outcome, "green");
+  assert.equal(ciGateState(outcome), "green");
   assert.ok(calls.length > 0, "the fixture was actually reached");
   assert.ok(
     calls.every((c) => c[0] === "api"),
@@ -192,7 +192,7 @@ test("W1-T2268: waitForCiGreen observes a transition to green on the FIRST itera
   );
   const slept: number[] = [];
   const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson, sleep: async (ms) => void slept.push(ms) });
-  assert.equal(outcome, "green");
+  assert.equal(ciGateState(outcome), "green");
   assert.equal(iterations(), 2, "green must be observed on the SECOND iteration (index 1), not later");
   assert.deepEqual(slept, [6000], "exactly one sleep between the pending iteration and the green one — no extra wait");
 });
@@ -206,7 +206,7 @@ test("W1-T2268: the poll cadence is unchanged — one sleep per iteration, at ev
   );
   const slept: number[] = [];
   const outcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson, sleep: async (ms) => void slept.push(ms) });
-  assert.equal(outcome, "green");
+  assert.equal(ciGateState(outcome), "green");
   assert.equal(iterations(), 5, "four pending iterations then the green one — every observation still happened");
   assert.deepEqual(slept, [6000, 6000, 6000, 6000], "six seconds between every poll, unchanged by the transport swap");
 });
@@ -250,7 +250,7 @@ test("W1-T2268: pollToGate and waitForCiGreen are drivable end to end without a 
       () => [{ name: "ci", status: "completed", conclusion: "success" }],
     );
     const ciOutcome = await waitForCiGreen(PR_URL, () => {}, 6, { readJson: ci.readJson, sleep: async () => {} });
-    assert.equal(ciOutcome, "green");
+    assert.equal(ciGateState(ciOutcome), "green");
   } finally {
     process.env.PATH = savedPath;
   }

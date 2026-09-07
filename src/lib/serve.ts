@@ -14,8 +14,8 @@
  * TWO ROOTS, ONE `PanelActionDeps` SHAPE (verified from source, not assumed): panel-actions.ts's
  * six routes all take a `PanelActionDeps` with a single `root` field, but that field backs TWO
  * genuinely different filesystem locations elsewhere in this codebase:
- *   - `requestPause`/`requestStop`/`resumeFleet`/`setQuietHours` (fleet-control.ts) read/write
- *     `<root>/state/{STOP,PAUSE,QUIET_HOURS}` — and MUST agree with what `rmd daemon`/`rmd
+ *   - `requestPause`/`requestStop`/`resumeFleet` (fleet-control.ts) read/write
+ *     `<root>/state/{STOP,PAUSE}` — and MUST agree with what `rmd daemon`/`rmd
  *     drain` check (`stopDetail(config.root)` etc., run-task.ts's daemonCommand) or a panel
  *     STOP would write a flag file the real daemon never looks at.
  *   - `appendQuestionAnswer` (worker.ts, only `buildAnswerQuestionRoute` calls it) writes
@@ -27,7 +27,7 @@
  * `~/Remudero`, a workspace; repoRoot is the git checkout serve runs from) — one shared `root`
  * cannot satisfy both correctly. Since every `build*Route` function takes its own independent
  * `PanelActionDeps`, {@link buildServeRoutes} passes TWO differently-rooted instances: a
- * `fleetControlRoot`-rooted one for pause/resume/stop/quiet-hours/approve-manual, and a
+ * `fleetControlRoot`-rooted one for pause/resume/stop/approve-manual, and a
  * `questionsRoot`-rooted one for answer-question alone — both share the SAME `ledgerPath`
  * (every module's `panel.*`/`daemon.*` ledger lines always live under config.root, unambiguous
  * everywhere else in this codebase).
@@ -73,7 +73,6 @@ import {
   buildKickRoute,
   buildMergeHoldRoute,
   buildPauseRoute,
-  buildQuietHoursRoute,
   buildResumeRoute,
   buildStopRoute,
   bearerTokenId,
@@ -572,7 +571,7 @@ export function gatePrewarmOnClients(
  *      route exists instead of querying a live DrainSummary).
  *   5. everything else, COLLAPSED behind grouped counts (queued: N, merged: N, other: N) with
  *      an expand + filter/search over the remaining GET /v1/status tasks.
- * Fleet control (Pause/Resume/STOP/quiet-hours) and an auxiliary "more tools" panel (submit
+ * Fleet control (Pause/Resume/STOP) and an auxiliary "more tools" panel (submit
  * feedback, plan→task→PR graph) follow below the five sections.
  *
  * W1-T336: the priority order above is now expressed by WHICH TAB a section renders under
@@ -1415,9 +1414,6 @@ export function renderShellHtml(
     <button id="pause-btn" type="button" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Pause</button>
     <button id="resume-btn" type="button" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Resume</button>
     <button id="stop-btn" type="button" class="danger" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">STOP</button>
-    <label style="display:flex; align-items:center; gap:0.35rem; margin:0;">
-      <input id="quiet-hours" type="checkbox" disabled title="Read-only — enter a write token to enable this action" /> Quiet hours
-    </label>
   </div>
   <p id="controls-status" role="status" aria-live="polite" class="counts"></p>
   <!-- W1-T364: the operator's own write control over the daily cost ceiling override (W1-T332's
@@ -1567,7 +1563,7 @@ ${renderConsoleShellScript()}
   // re-applied by probeWriteScope when the write token changes, so a write-scope flip alone never
   // has to wait for the next poll tick to re-render the fleet-control buttons correctly. Never
   // written to except by applyControlStatus itself, which always receives a real fetched status.
-  let lastControlStatus = { paused: false, stopped: false, quietHours: false };
+  let lastControlStatus = { paused: false, stopped: false };
   // W1-T202: has the FIRST real GET /v1/status ever landed? probeWriteScope/the write-token
   // clear handler both re-run paintFromTasksById off tasksById to re-gate NEEDS ME/UP NEXT rows
   // -- but BEFORE any real data has landed, tasksById is legitimately empty, and reconcileRows
@@ -1687,7 +1683,7 @@ ${renderConsoleShellScript()}
   // code and conflating them would replace a silent success with a confident lie:
   //
   //   done      - the console service ITSELF performed the action before replying. Mark handled has
-  //               already closed the issue; pause/resume/stop/quiet-hours have already written the
+  //               already closed the issue; pause/resume/stop have already written the
   //               fleet-control state the daemon reads; a decision/approve/reframe/answer has already
   //               been persisted. "Done" is true at the moment the operator reads it.
   //   requested - the service recorded an INTENT and nothing more. /v1/drain/kick and /v1/drain/run
@@ -1711,7 +1707,6 @@ ${renderConsoleShellScript()}
     "/v1/control/pause": { kind: "done", text: "Fleet PAUSED — no new task will be dispatched until you resume." },
     "/v1/control/resume": { kind: "done", text: "Fleet RESUMED — dispatch is live again." },
     "/v1/control/stop": { kind: "done", text: "Fleet STOPPED — dispatch is halted until you resume." },
-    "/v1/quiet-hours": { kind: "done", text: "Quiet hours updated." },
     "/v1/drain/kick": { kind: "requested", text: "Run REQUESTED — not started yet. The daemon picks this up at its next poll and can still refuse it (for example a task that is not runnable). Watch RECENT for the outcome." },
     "/v1/drain/run": { kind: "requested", text: "Drain REQUESTED — not started yet. The daemon runs one dispatch cycle at its next poll. Watch RECENT for the outcome." },
     // W1-T364: the store's write completes synchronously (writeDailyCostCeilingOverride runs
@@ -2784,7 +2779,7 @@ ${renderConsoleShellScript()}
     // below) -- safe to let every section settle its one-time default/summary off THIS paint.
     sectionDefaultsReady = true;
     paintFromTasksById();
-    applyControlStatus(snapshot.controlStatus ?? { paused: false, stopped: false, quietHours: false });
+    applyControlStatus(snapshot.controlStatus ?? { paused: false, stopped: false });
     // W1-T222: the cache-restore path already carries FULL side-data (recent/up-next/feedback),
     // unlike refreshAll's own first (status-only) pass below -- safe to attempt the deep link here.
     applyDeepLinkIfNeeded();
@@ -4395,10 +4390,9 @@ ${renderConsoleShellScript()}
     const pauseBtn = document.getElementById("pause-btn");
     const resumeBtn = document.getElementById("resume-btn");
     const stopBtn = document.getElementById("stop-btn");
-    const quietHours = document.getElementById("quiet-hours");
     const drainBtn = document.getElementById("drain-now-btn");
     // W1-T364: the ceiling control's own three write-gated elements, on the SAME static
-    // fleet-control row gating surface as pause/resume/stop/quiet-hours/drain above.
+    // fleet-control row gating surface as pause/resume/stop/drain above.
     const ceilingInput = document.getElementById("cost-ceiling-input");
     const ceilingSetBtn = document.getElementById("cost-ceiling-set-btn");
     const ceilingClearBtn = document.getElementById("cost-ceiling-clear-btn");
@@ -4412,8 +4406,6 @@ ${renderConsoleShellScript()}
     stopBtn.disabled = locked;
     resumeBtn.disabled = locked || (!status.paused && !status.stopped);
     resumeBtn.setAttribute("aria-pressed", String(!status.paused && !status.stopped && false));
-    quietHours.disabled = locked;
-    quietHours.checked = status.quietHours;
     if (drainBtn) drainBtn.disabled = locked;
     if (ceilingInput) ceilingInput.disabled = locked;
     if (ceilingSetBtn) ceilingSetBtn.disabled = locked;
@@ -4421,7 +4413,6 @@ ${renderConsoleShellScript()}
     pauseBtn.title = locked ? lockTitle : "";
     resumeBtn.title = locked ? lockTitle : "";
     stopBtn.title = locked ? lockTitle : "";
-    quietHours.title = locked ? lockTitle : "";
     if (drainBtn) drainBtn.title = locked ? lockTitle : "";
     if (ceilingInput) ceilingInput.title = locked ? lockTitle : "";
     if (ceilingSetBtn) ceilingSetBtn.title = locked ? lockTitle : "";
@@ -4475,10 +4466,6 @@ ${renderConsoleShellScript()}
   document.getElementById("resume-btn").addEventListener("click", () => {
     if (!hasWriteScope) return; // W1-T202 defense-in-depth alongside this button's own 'disabled'
     postJson("/v1/control/resume").then(refreshAll);
-  });
-  document.getElementById("quiet-hours").addEventListener("change", (e) => {
-    if (!hasWriteScope) return; // W1-T202 defense-in-depth alongside this control's own 'disabled'
-    postJson("/v1/quiet-hours", { enabled: e.target.checked }).then(refreshAll);
   });
 
   // ── W1-T202: the write-token entry/clear UI -- the ONLY place a write token is ever accepted
@@ -5037,7 +5024,7 @@ ${renderConsoleShellScript()}
         getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
         getJson("/v1/feedback").catch(() => ({ entries: [] })),
         getJson("/v1/inbox").catch(() => ({ ready: [], drafting: [] })),
-        getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false, quietHours: false })),
+        getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false })),
         // W1-T159: the daemon-health widget's own fetch -- a fetch failure here must never break
         // the rest of the refresh (same catch-and-degrade convention as every sibling above); the
         // widget just keeps showing its last-known values (or "…" pre-first-success).
@@ -6235,7 +6222,6 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),
     buildStopRoute(fleetControlDeps),
-    buildQuietHoursRoute(fleetControlDeps),
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
     buildEscalationMarkHandledRoute(fleetControlDeps),

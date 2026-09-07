@@ -349,7 +349,7 @@
     - claim: "the shard establishes the duplication from both commands and names the difference that is not instrumentation"
       proof: "grep: tmp-hygiene is loaded by ci and NOT by coverage-ratchet in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"
     - claim: "the shard records that the two harnesses reach different verdicts on the same tests rather than assuming the split is cosmetic"
-      proof: "grep: 12 of 600 runs disagreed at the test step in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"
+      proof: "grep: DEMONSTRABLY DISAGREE, IN BOTH DIRECTIONS in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"
     - claim: "the artifact path is priced from step-level timings so the consumer job's real cost is visible"
       proof: "grep: the three coverage-gate steps took 0s each in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"
     - claim: "the external-versus-real classifier is stated with the correction the spec reporter forced"

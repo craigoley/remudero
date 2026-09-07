@@ -174,7 +174,7 @@ test("every postJson call site is covered by the helper — no call site does it
   assert.ok(sites.length >= 12, `expected at least 12 postJson call sites, found ${sites.length}`);
   for (const route of ["/v1/feedback", "/v1/inbox/reframe", "/v1/feedback/decision",
     "/v1/escalation/mark-handled", "/v1/inbox/approve", "/v1/drain/kick", "/v1/drain/run",
-    "/v1/control/stop", "/v1/control/pause", "/v1/control/resume", "/v1/quiet-hours"]) {
+    "/v1/control/stop", "/v1/control/pause", "/v1/control/resume"]) {
     assert.ok(sites.includes(route), `write route ${route} must still go through postJson`);
   }
   assert.match(clientFn("postJson"), /res\.ok/, "the .ok check must live in the HELPER, covering every site at once");

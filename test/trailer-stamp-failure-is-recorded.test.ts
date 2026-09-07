@@ -79,7 +79,9 @@ test("ensureTaskTrailer: a successful read+write logs nothing", () => {
   ensureTaskTrailer(PR_URL, TASK_ID, log, readReturning("some existing body"), write);
   assert.equal(rows.length, 0, "no diagnostic row on the success path");
   assert.equal(calls.length, 1, "the write did happen");
-  assert.ok(String(calls[0][4]).includes(`Remudero-Task: ${TASK_ID}`), "the trailer that was written carries the handed id");
+  // W1-T2948: the argv is the REST pulls PATCH, so the body rides in the last `-f body=…` value.
+  assert.equal(calls[0][0], "api", "the stamp shares the one REST writer rather than its own gh pr edit copy");
+  assert.ok(String(calls[0][5]).includes(`Remudero-Task: ${TASK_ID}`), "the trailer that was written carries the handed id");
 });
 
 // ── 4: a body that already carries the trailer returns early and writes nothing ─────
