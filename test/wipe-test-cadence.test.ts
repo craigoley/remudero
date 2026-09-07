@@ -215,7 +215,7 @@ test("runWipeTestPair materializes generated sandbox subjects and ledgers the pa
           gitCalls.push([cmd, ...args].join(" "));
           return Buffer.from("");
         }) as never,
-        runTaskFn: (async (taskId, opts) => {
+        runTaskFn: (async (taskId: string, opts: { maskLearnings?: boolean }) => {
           runCalls.push({ taskId, maskLearnings: opts.maskLearnings });
           return {
             taskId,
