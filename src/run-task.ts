@@ -4685,6 +4685,7 @@ export function outOfDeclaredScopeFiles(
  * PURE: no I/O — every list is the caller's own read, never fetched here.
  */
 export const FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION = "gate_remedy_scope_deadlock" as const;
+const FIX_RUNG_STOOD_DOWN_LEDGER_STEP = "fix.stood_down" as const;
 
 export interface FixRungGateRemedyScopeDeadlock {
   disposition: typeof FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION;
@@ -4753,7 +4754,7 @@ function gateRemedyScopeDeadlock(
 export function countGateRemedyScopeDeadlockLedgerMembers(lines: readonly Record<string, unknown>[]): number {
   return lines.filter(
     (line) =>
-      line.step === "fix.stood_down" &&
+      line.step === FIX_RUNG_STOOD_DOWN_LEDGER_STEP &&
       line.disposition === FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION &&
       typeof line.gate === "string" &&
       typeof line.file === "string",
