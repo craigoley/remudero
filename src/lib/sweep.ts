@@ -1242,6 +1242,21 @@ export function isBlockedCi(pr: OpenPrView): boolean {
   return pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0; // W1-T2504
 }
 
+/** W1-T3063 — the subject prefixes that FILE or AMEND a task rather than implementing it.
+ *  Deliberately the vocabulary `lint-plan`'s failing-split already excludes, verbatim — "a filing
+ *  cites a task; it does not implement it" — never a second list that could drift from it. */
+export const FILING_SUBJECT_RE = /^(?:chore\((?:plan|triage|feedback)\)|docs\(plan\)|plan:|docs:|chore:)/;
+
+/** W1-T3063 — does this merge subject describe an IMPLEMENTATION? `undefined` in, `undefined` out:
+ *  a subject that could not be read is not evidence either way, and every destructive consumer must
+ *  treat it as a refusal. PURE. */
+export function creditSubjectIsImplementation(subject: string | undefined): boolean | undefined {
+  if (subject === undefined) return undefined;
+  const trimmed = subject.trim();
+  if (trimmed === "") return undefined;
+  return !FILING_SUBJECT_RE.test(trimmed);
+}
+
 /** W1-T2794 — stamp {@link OpenPrView.taskMergedBy} onto each open PR whose task a credit
  *  candidate proves MERGED. PURE: no I/O, no GitHub call, no ledger read — the caller already
  *  built this candidate set for the credit-backfill rung, and this reuses that same array rather
@@ -1262,6 +1277,10 @@ export function projectMergedTaskCandidates(
 ): OpenPrView[] {
   const mergedByTask = new Map<string, number>();
   for (const c of candidates ?? []) {
+    // W1-T3063 — `=== true` IS THE FIX, and the strictness is the point: `undefined` (the subject
+    // could not be read) and `false` (a filing earned the credit) must BOTH decline. A truthy test
+    // here would re-admit the unknown case, which is how #4461 was closed against a `chore(plan)`.
+    if (c.creditIsImplementation !== true) continue;
     if (c.merged === true && typeof c.prNumber === "number" && c.taskId) mergedByTask.set(c.taskId, c.prNumber);
   }
   if (mergedByTask.size === 0) return [...prs];
@@ -5493,6 +5512,13 @@ export interface CreditCandidate {
   prNumber: number;
   prUrl: string;
   merged: boolean;
+  /** W1-T3063 — did the CREDITING pr actually implement the task, or merely cite it? `undefined`
+   *  means UNKNOWN and is treated exactly like `false` by every destructive consumer: absence of
+   *  evidence is not evidence of supersession. Derived from the merge subject against the same
+   *  filing vocabulary `lint-plan` already excludes ("a filing cites a task; it does not implement
+   *  it"), never from a second list. Why: #4461, a validated build, was closed against #3195, a
+   *  `chore(plan)` touching one shard. */
+  creditIsImplementation?: boolean;
 }
 
 /** One task's credit-backfill outcome this pass. */
