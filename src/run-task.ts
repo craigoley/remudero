@@ -4684,19 +4684,104 @@ export function outOfDeclaredScopeFiles(
  *
  * PURE: no I/O — every list is the caller's own read, never fetched here.
  */
+export const FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION = "gate_remedy_scope_deadlock" as const;
+
+export interface FixRungGateRemedyScopeDeadlock {
+  disposition: typeof FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION;
+  gate: string;
+  file: string;
+  declaringEntry: string;
+  declaringEntryExists: boolean;
+  source: "registry" | "ci-output";
+}
+
+type ReachableRemedyFileInput = string | RemedyFileForGate;
+
+function remedyFilePath(remedy: ReachableRemedyFileInput): string {
+  return typeof remedy === "string" ? remedy : remedy.path;
+}
+
+function declaredGateRemedyEntry(gate: string, file: string): string {
+  return `FAST_GATE_STEPS[job="${gate}"].remedyFiles includes "${file}"`;
+}
+
+function missingGateRemedyEntry(gate: string, file: string): string {
+  return `MISSING FAST_GATE_STEPS remedyFiles entry for gate "${gate}" and file "${file}"`;
+}
+
+function failureOutputNamesRemedyPath(failure: Pick<CiFailure, "logTail">, path: string): boolean {
+  return failure.logTail
+    .split(/\r?\n/)
+    .some((line) => /\bTO FIX:/i.test(line) && /\bedit\b/i.test(line) && line.includes(path));
+}
+
+function gateRemedyScopeDeadlock(
+  newOutOfScopePaths: readonly string[],
+  reachableRemedyFiles: readonly ReachableRemedyFileInput[],
+  failingChecks: readonly Pick<CiFailure, "name" | "logTail">[],
+): FixRungGateRemedyScopeDeadlock | undefined {
+  const declaredRemedies = reachableRemedyFiles.filter((r): r is RemedyFileForGate => typeof r !== "string");
+  for (const file of newOutOfScopePaths) {
+    const declared = declaredRemedies.find((r) => r.path === file);
+    if (declared) {
+      return {
+        disposition: FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION,
+        gate: declared.job,
+        file,
+        declaringEntry: declaredGateRemedyEntry(declared.job, file),
+        declaringEntryExists: true,
+        source: "registry",
+      };
+    }
+  }
+  for (const file of newOutOfScopePaths) {
+    const failure = failingChecks.find((f) => failureOutputNamesRemedyPath(f, file));
+    if (failure) {
+      return {
+        disposition: FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION,
+        gate: failure.name,
+        file,
+        declaringEntry: missingGateRemedyEntry(failure.name, file),
+        declaringEntryExists: false,
+        source: "ci-output",
+      };
+    }
+  }
+  return undefined;
+}
+
+export function countGateRemedyScopeDeadlockLedgerMembers(lines: readonly Record<string, unknown>[]): number {
+  return lines.filter(
+    (line) =>
+      line.step === "fix.stood_down" &&
+      line.disposition === FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION &&
+      typeof line.gate === "string" &&
+      typeof line.file === "string",
+  ).length;
+}
+
 export function fixRungScopeStandDownReason(
   currentDiffFiles: readonly string[],
   baselineDiffFiles: readonly string[],
   declaredFiles: readonly string[] | undefined,
-  reachableRemedyFiles: readonly string[] = [],
-): { reason: string; scopeKind: "files" | "plan"; newOutOfScopePaths: string[] } | undefined {
+  reachableRemedyFiles: readonly ReachableRemedyFileInput[] = [],
+  failingChecks: readonly Pick<CiFailure, "name" | "logTail">[] = [],
+):
+  | {
+      reason: string;
+      scopeKind: "files" | "plan";
+      newOutOfScopePaths: string[];
+      gateRemedyDeadlock?: FixRungGateRemedyScopeDeadlock;
+    }
+  | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
   const planOnlyTask = declaredFiles.every(isInPlanScope);
+  const reachableRemedyPaths = reachableRemedyFiles.map(remedyFilePath);
   // W1-T2653: widen the comparison set for THIS call only — never plan-only (see doc above).
   const effectiveDeclaredFiles = planOnlyTask
     ? declaredFiles
-    : reachableRemedyFiles.length > 0
-    ? [...declaredFiles, ...reachableRemedyFiles]
+    : reachableRemedyPaths.length > 0
+    ? [...declaredFiles, ...reachableRemedyPaths]
     : declaredFiles;
   const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles));
   const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles).filter(
@@ -4713,7 +4798,12 @@ export function fixRungScopeStandDownReason(
       : `a fix worker added path(s) outside the declared scope: ${newOutOfScopePaths.join(", ")} — declared ` +
         `files: ${declaredFiles.join(", ")} — dispatching another strike would compound on a PR the next ` +
         `round's rule-15/rule-25 refusal already can't recover from`;
-  return { reason, scopeKind, newOutOfScopePaths };
+  return {
+    reason,
+    scopeKind,
+    newOutOfScopePaths,
+    gateRemedyDeadlock: gateRemedyScopeDeadlock(newOutOfScopePaths, reachableRemedyFiles, failingChecks),
+  };
 }
 
 /**
@@ -9704,20 +9794,28 @@ export async function runFixRung(opts: {
               currentDiffFiles,
               baselineDiffFiles,
               opts.task.files,
-              reachableRemedyFiles.map((r) => r.path),
+              reachableRemedyFiles,
+              currentCiFailures ?? [],
             )
           : undefined;
       if (scopeStandDown) {
+        const gateRemedy = scopeStandDown.gateRemedyDeadlock;
+        const summary = gateRemedy
+          ? `fix rung standing down — gate-remedy scope deadlock: ${gateRemedy.gate} prescribes ${gateRemedy.file} (${gateRemedy.declaringEntryExists ? "declared" : "missing registry entry"}) — ${opts.prUrl}`
+          : `fix rung standing down — a fix worker's own repair left this PR out of scope (${scopeStandDown.scopeKind}) — ${opts.prUrl}`;
+        const gateRemedyDetail = gateRemedy
+          ? ` Observed blocker: failing gate ${gateRemedy.gate} prescribes ${gateRemedy.file} as its own remedy; declaring entry: ${gateRemedy.declaringEntry}.`
+          : "";
         const issueUrl = escalate(
           {
             class: "BLOCKED",
             taskId: opts.taskId,
             runId: opts.runId,
             headSha: review.headSha,
-            summary: `fix rung standing down — a fix worker's own repair left this PR out of scope (${scopeStandDown.scopeKind}) — ${opts.prUrl}`,
+            summary,
             detail:
               `The blocked_review FIX RUNG (W1-T76, W1-T1227) refused to dispatch strike ${strikes + 1}: ` +
-              `${scopeStandDown.reason}. Only a human can undo an already-pushed out-of-scope commit — the ` +
+              `${scopeStandDown.reason}.${gateRemedyDetail} Only a human can undo an already-pushed out-of-scope commit — the ` +
               `next round cannot, because the review verdict for this head is written once per sha (W1-T1227 ` +
               `rationale 8) and a fix worker may never edit the PR body or the task record to route around it ` +
               `(design note iv).`,
@@ -9741,6 +9839,16 @@ export async function runFixRung(opts: {
           reason: scopeStandDown.reason,
           scope_kind: scopeStandDown.scopeKind,
           out_of_scope_paths: scopeStandDown.newOutOfScopePaths,
+          ...(gateRemedy
+            ? {
+                disposition: gateRemedy.disposition,
+                gate: gateRemedy.gate,
+                file: gateRemedy.file,
+                declaring_entry: gateRemedy.declaringEntry,
+                declaring_entry_exists: gateRemedy.declaringEntryExists,
+                gate_remedy_source: gateRemedy.source,
+              }
+            : {}),
           issue_url: issueUrl,
         });
         deps.say(
