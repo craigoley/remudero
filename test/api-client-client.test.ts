@@ -7,7 +7,6 @@ import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
   buildPauseRoute,
-  buildQuietHoursRoute,
   buildResumeRoute,
   buildStopRoute,
   type IssueCloser,
@@ -111,7 +110,6 @@ function buildWriteFixtureService(root: string, issues: IssueCloser = fakeIssueC
     buildPauseRoute(deps),
     buildResumeRoute(deps),
     buildStopRoute(deps),
-    buildQuietHoursRoute(deps),
     buildAnswerQuestionRoute(deps),
     buildApproveManualRoute(deps),
   ];
@@ -161,13 +159,6 @@ test("createDaemonClient.stopFleet(): POSTs /v1/control/stop, returns the result
   });
 });
 
-test("createDaemonClient.setQuietHours(): POSTs /v1/quiet-hours, returns the resulting state", async () => {
-  await withWriteFixture(async (baseUrl) => {
-    const client = createDaemonClient({ baseUrl, token: WRITE_TOKEN });
-    assert.deepEqual(await client.setQuietHours(true), { quietHours: true });
-    assert.deepEqual(await client.setQuietHours(false), { quietHours: false });
-  });
-});
 
 test("createDaemonClient.answerQuestion(): POSTs /v1/questions/answer, returns the recorded answer", async () => {
   await withWriteFixture(async (baseUrl) => {

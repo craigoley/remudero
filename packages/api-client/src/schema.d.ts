@@ -76,13 +76,6 @@ export interface components {
       stopped: boolean;
       reason?: string | null;
     };
-    /** POST /v1/quiet-hours's body -- the toggle's target state. */
-    QuietHoursRequest: {
-      enabled: boolean;
-    };
-    QuietHoursResult: {
-      quietHours: boolean;
-    };
     /** POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing has no path params, src/lib/service.ts). */
     AnswerQuestionRequest: {
       taskId: string;
@@ -269,17 +262,6 @@ export interface paths {
     post: {
       responses: {
           "200": StopResult;
-          "400": Error;
-          "401": Error;
-          "403": Error;
-          "404": Error;
-        };
-    };
-  };
-  "/v1/quiet-hours": {
-    post: {
-      responses: {
-          "200": QuietHoursResult;
           "400": Error;
           "401": Error;
           "403": Error;

@@ -20,7 +20,7 @@ info:
     src/lib/board.ts.
 
     W3-T5 (MASTER-PLAN §7 -- human-in-the-loop panel actions) adds the first
-    write routes: POST /v1/control/{pause,resume,stop}, POST /v1/quiet-hours,
+    write routes: POST /v1/control/{pause,resume,stop},
     POST /v1/questions/answer, and POST /v1/manual/approve, all write-scoped
     and built via src/lib/panel-actions.ts.
 
@@ -291,23 +291,6 @@ components:
           type:
             - string
             - "null"
-
-    QuietHoursRequest:
-      type: object
-      description: POST /v1/quiet-hours's body -- the toggle's target state.
-      required:
-        - enabled
-      properties:
-        enabled:
-          type: boolean
-
-    QuietHoursResult:
-      type: object
-      required:
-        - quietHours
-      properties:
-        quietHours:
-          type: boolean
 
     AnswerQuestionRequest:
       type: object
@@ -835,8 +818,7 @@ paths:
       summary: Resume the fleet -- clears BOTH STOP and PAUSE.
       description: >
         MASTER-PLAN §4A: the one command that always means go (src/lib/fleet-control.ts's
-        `resumeFleet`). Does NOT touch quiet hours -- a schedule preference, not an emergency
-        hold. Ledgers `panel.resume_requested`. No request body.
+        `resumeFleet`). Ledgers `panel.resume_requested`. No request body.
       security:
         - bearerWrite: []
       responses:
@@ -875,38 +857,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StopResult"
-        "400":
-          $ref: "#/components/responses/InvalidRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-
-  /v1/quiet-hours:
-    post:
-      summary: Toggle quiet hours -- a scheduler preference (default OFF), independent of STOP/PAUSE.
-      description: >
-        MASTER-PLAN §9: "quiet-hours is now an OPTIONAL wizard toggle, default OFF." Flips
-        src/lib/fleet-control.ts's QUIET_HOURS flag; the scheduler that reads it to throttle
-        spawns is later work (this route ships the mechanism, not the consumer -- same split
-        every route on this surface follows). Ledgers `panel.quiet_hours_toggled`.
-      security:
-        - bearerWrite: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/QuietHoursRequest"
-      responses:
-        "200":
-          description: The resulting quiet-hours state.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/QuietHoursResult"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":

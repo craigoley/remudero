@@ -1,7 +1,7 @@
 // test/control-status-daemon-liveness.test.ts — W1-T288.
 //
 // THE DEFECT: GET /v1/control/status's body was flags-only ({paused, pauseDetail, stopped,
-// stopDetail, quietHours}), and #controls-status's text was `status.stopped ? status.stopDetail
+// stopDetail}), and #controls-status's text was `status.stopped ? status.stopDetail
 // : status.paused ? status.pauseDetail : "fleet is running"` -- a ternary with no liveness input
 // at all. A CRASHED daemon leaves no STOP flag behind (that absence is exactly what distinguishes
 // a crash from a deliberate stop), so "fleet is running" rendered identically whether the fleet
@@ -199,13 +199,11 @@ function harness() {
   const pauseBtn = fakeButton();
   const resumeBtn = fakeButton();
   const stopBtn = fakeButton();
-  const quietHours = { disabled: false, title: "", checked: false };
   const controlsStatus = { textContent: "" };
   const elements: Record<string, unknown> = {
     "pause-btn": pauseBtn,
     "resume-btn": resumeBtn,
     "stop-btn": stopBtn,
-    "quiet-hours": quietHours,
     "drain-now-btn": null, // never mounted in this sandbox -- applyControlStatus must tolerate that
     "controls-status": controlsStatus,
   };
@@ -228,20 +226,20 @@ function harness() {
 
 test("W1-T288: with no stop/pause flag and daemonLive NOT carried (unobserved), #controls-status does NOT read 'fleet is running'", () => {
   const h = harness();
-  h.apply({ paused: false, stopped: false, quietHours: false });
+  h.apply({ paused: false, stopped: false});
   assert.notEqual(h.text(), "fleet is running", "the falsifier: absence of flags alone must never render as running");
   assert.doesNotMatch(h.text(), /^fleet is running$/);
 });
 
 test("W1-T288: a fleet whose liveness cannot be observed renders as UNOBSERVED text, a real third state -- never silently 'running'", () => {
   const h = harness();
-  h.apply({ paused: false, stopped: false, quietHours: false });
+  h.apply({ paused: false, stopped: false});
   assert.match(h.text(), /not observed|unobserved/i, `expected an explicit unobserved-liveness message, got ${JSON.stringify(h.text())}`);
 });
 
 test("W1-T288: a live daemon with a recent heartbeat (daemonLive: true) still renders 'fleet is running'", () => {
   const h = harness();
-  h.apply({ paused: false, stopped: false, quietHours: false, daemonLive: true, daemonLiveReason: "fresh-poll" });
+  h.apply({ paused: false, stopped: false, daemonLive: true, daemonLiveReason: "fresh-poll" });
   assert.equal(h.text(), "fleet is running");
 });
 
@@ -251,9 +249,9 @@ test("W1-T288: a live daemon with a recent heartbeat (daemonLive: true) still re
 // states this task exists to separate never read the same.
 test("a stale heartbeat and an absent ledger render DIFFERENT sentences, and only one of them claims the daemon is down", () => {
   const stale = harness();
-  stale.apply({ paused: false, stopped: false, quietHours: false, daemonLive: false, daemonLiveReason: "last-poll-stale" });
+  stale.apply({ paused: false, stopped: false, daemonLive: false, daemonLiveReason: "last-poll-stale" });
   const absent = harness();
-  absent.apply({ paused: false, stopped: false, quietHours: false, daemonLiveReason: "ledger-absent" });
+  absent.apply({ paused: false, stopped: false, daemonLiveReason: "ledger-absent" });
 
   assert.match(stale.text() ?? "", /DOWN/);
   assert.match(absent.text() ?? "", /unknown/i);
@@ -265,7 +263,7 @@ test("every reason the route can send renders its own distinct sentence -- no tw
   const reasons = ["fresh-poll", "last-poll-stale", "no-daemon-activity", "ledger-empty", "ledger-absent", "ledger-unreadable"];
   const rendered = reasons.map((daemonLiveReason) => {
     const h = harness();
-    h.apply({ paused: false, stopped: false, quietHours: false, daemonLiveReason });
+    h.apply({ paused: false, stopped: false, daemonLiveReason });
     return h.text();
   });
   assert.equal(new Set(rendered).size, reasons.length, `two reasons share a sentence: ${JSON.stringify(rendered)}`);
@@ -277,18 +275,18 @@ test("every reason the route can send renders its own distinct sentence -- no tw
 
 test("a status carrying NO reason at all still renders the pre-change sentence -- an older server must not blank the panel", () => {
   const h = harness();
-  h.apply({ paused: false, stopped: false, quietHours: false });
+  h.apply({ paused: false, stopped: false});
   assert.equal(h.text(), "fleet liveness not observed");
 });
 
 test("W1-T288: STOP still wins over liveness exactly as today -- even with daemonLive: true, a stopped fleet shows its stopDetail, never 'fleet is running'", () => {
   const h = harness();
-  h.apply({ paused: false, stopped: true, stopDetail: "operator stop: taste test", quietHours: false, daemonLive: true });
+  h.apply({ paused: false, stopped: true, stopDetail: "operator stop: taste test", daemonLive: true });
   assert.equal(h.text(), "operator stop: taste test");
 });
 
 test("W1-T288: PAUSE still wins over an UNOBSERVED liveness exactly as today -- a paused fleet shows its pauseDetail, never the unobserved message", () => {
   const h = harness();
-  h.apply({ paused: true, pauseDetail: "taking a breather", stopped: false, quietHours: false });
+  h.apply({ paused: true, pauseDetail: "taking a breather", stopped: false});
   assert.equal(h.text(), "taking a breather");
 });
