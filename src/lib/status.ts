@@ -1435,7 +1435,43 @@ function latestActualPrUrl(
  *  run-task.ts's predicate is a boolean shape test with no capture group (W1-T453). */
 export function taskIdFromRunBranch(head: string | undefined): string | undefined {
   const m = /^run-(.+)-\d+$/.exec(head ?? "");
-  return m ? m[1] : undefined;
+  if (!m) return undefined;
+  // W1-T3042 — THE CAPTURE MUST LOOK LIKE A TASK ID, or this invents one.
+  //
+  // `(.+)` is greedy and the shape has no second anchor, so any extra hyphenated segment before the
+  // epoch is swallowed whole: `run-W1-T3030-build-1788796682000` yielded `W1-T3030-build`. That is
+  // not a failure to credit — it is a CREDIT FOR A TASK THAT DOES NOT EXIST, which is worse,
+  // because a phantom id enters the merged set while the real task stays uncredited and eligible
+  // for re-dispatch.
+  //
+  // MEASURED 2026-09-07 over 255 merged pull requests: 100 run-shaped heads, 92 extracting a valid
+  // id and 8 a phantom — five from a `-file-`/`-build-` pairing used that day, three from TRIAGE
+  // feedback branches that name no task at all. Returning `undefined` costs those eight nothing:
+  // they never credited a real task, so no credit is lost, and a caller can now SAY the branch
+  // names no task instead of acting on an id nobody minted.
+  return namesATask(m[1]) ? m[1] : undefined;
+}
+
+/**
+ * Could this capture BE a task id, or is it an id with something stapled on?
+ *
+ * NOT a whitelist of id formats, deliberately. Anchoring on `W<n>-T<n>` — the only shape the plan
+ * currently mints — rejected the synthetic ids this repo's own fixtures use (`A`, `D`) and broke
+ * four suites, including the in-flight guard that stops a second dispatch onto a pushed branch.
+ * That failure was the useful one: it says the rule must be about the SHAPE OF THE SUFFIX, not
+ * about which workstream letters are in fashion.
+ *
+ * So: a capture with NO hyphen cannot be carrying a suffix and is taken as given, which keeps every
+ * synthetic and future id working. A capture WITH hyphens must be a whole task id — `W1-T3030`, `W1-T12a` and
+ * `SBX-T4` are; `W1-T3030-build` and `TRIAGE-fb-repair-conflicted-2957` are not, and neither names
+ * a task anything ever minted.
+ */
+function namesATask(capture: string): boolean {
+  if (!capture.includes("-")) return true;
+  // The trailing letters are not decoration: W1-T12a..e and W1-T1B..D are real, split-out task ids,
+  // and an earlier pattern without them rejected W1-T12a and reddened the credit projection's own
+  // suite. MEASURED against every id in plan/tasks.yaml and every shard: 1457 of 1457 match.
+  return /^[A-Za-z]+\d*-T\d+[A-Za-z]*$/.test(capture);
 }
 
 /**
