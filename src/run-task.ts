@@ -594,6 +594,7 @@ import {
   lintTask,
   planShardSlugCorpus,
   proofGrepUnmatchableViolations,
+  proofGrepSelfCertifyingViolations,
   shardSlugFromPath,
   TaskLintError,
   type LintOpts,
@@ -20039,7 +20040,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // dormant, exactly the recorded failure W1-T488/W1-T497/W1-T1053 already paid for once each.
     // WARN-only (never blocks), so appending it here changes nothing about `assertLintClean` or
     // the pre-dispatch gate — it only ever adds to `warned` below, on this one changed-tasks pass.
-    const violations = scope ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts)] : lintViolations;
+    const violations = scope
+      ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts), ...proofGrepSelfCertifyingViolations(task, opts)]
+      : lintViolations;
     const blocking = violations.filter((v) => v.severity === "block");
     const soft = violations.filter((v) => v.severity === "warn");
     if (blocking.length) {
