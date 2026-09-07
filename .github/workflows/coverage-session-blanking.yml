@@ -1,30 +1,20 @@
 # COVERAGE-SESSION-BLANKING gate (W1-T2732).
 #
-# W1-T2292 built scripts/coverage-session-blanking-check.mjs (`delete env.NODE_V8_COVERAGE` reads
-# as an opt-out and is not one -- node's child_process force-injects that variable into every
-# spawned child regardless of the `env` option, so a child spawned this way stays enrolled in the
-# parent's coverage session and its function/line table merges into the parent's report, keyed on
-# the absolute path) and its own falsifying unit test, and stopped there by design -- its own
-# criterion 7 read "no caller is edited by this task", so wiring a caller was never in its remit
-# and no successor was filed. Measured 2026-09-02: the script exited 1, naming 3 delete-is-noop
-# defects and 16 unblanked-NODE_TEST_CONTEXT findings, and neither .github/workflows/ nor
-# package.json referenced it anywhere. W1-T2732 is that missing successor: it cleared the
-# population this script reports (every delete-is-noop site converted to real blanking, every
-# unblanked strip blanked) and wires the now-clean script here.
+# W1-T2292 built scripts/coverage-session-blanking-check.mjs (a `delete env.NODE_V8_COVERAGE`
+# reads as an opt-out and is not one -- node force-injects that variable into every spawned
+# child regardless of `env`, merging the child's coverage into the parent's report) and its own
+# falsifying test, but its own criterion 7 fenced it from wiring a caller. W1-T2732 is that
+# successor: it clears the population the script reports and wires the now-clean script here.
 #
-# WHY ITS OWN FILE RATHER THAN A ci.yml JOB. A new ci.yml job needs a CI_PARITY_TABLE entry in
-# src/lib/ci-parity.ts (test/preflight-ci-parity.test.ts refuses a ci.yml job with none), and
-# W1-T2732 is fenced from adding any src/ path to this diff. A standalone workflow file needs no
-# parity entry (CI_PARITY_TABLE is scoped to ci.yml by design) and is the direction ci-gate.yml's
-# own header already states remudero's required checks are moving toward -- the same reasoning
-# scripts/unwired-gate-check.mjs's own workflow file (unwired-gate.yml) already documents in full.
+# ITS OWN FILE, NOT A ci.yml JOB: a new ci.yml job needs a src/lib/ci-parity.ts
+# CI_PARITY_TABLE entry (test/preflight-ci-parity.test.ts refuses one without it), and this
+# task is fenced from adding any src/ path -- same reasoning unwired-gate.yml already
+# documents for its own workflow file.
 #
-# Runs UNCONDITIONALLY on every PR (no path filter, no job `if:` beyond the PR trigger) -- the
-# same fail-closed shape as ci.yml's task-id-existence/assertion-discrimination gates and
-# unwired-gate.yml's own job: a path-filtered REQUIRED check that can go silently absent is the
-# synthwatch #102 deadlock class ci-gate.yml exists to avoid. Named in ci-gate.yml's REQUIRED list
-# (this same PR) so a red run here actually blocks a merge -- W1-T2292's detector is decorative
-# advisory-only until something refuses on its behalf.
+# Runs unconditionally on every PR (no path filter, no job `if:` beyond the PR trigger), the
+# same fail-closed shape as unwired-gate.yml's own job: a path-filtered REQUIRED check that can
+# go silently absent is the deadlock class ci-gate.yml exists to avoid. Named in ci-gate.yml's
+# REQUIRED list (this same PR) so a red run here actually blocks a merge.
 name: coverage-session-blanking
 
 on:
