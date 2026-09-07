@@ -274,7 +274,7 @@ test("renderVerbCensusDigestLine on a refused census names why, never a fabricat
   assert.ok(!/\d+ silent of/.test(line), "a refusal must never render as a measured figure");
 });
 
-// ── acceptance 1 + 7: A CADENCE FIRE RUNS THE CENSUS AND RECORDS IT, THE FIVE PRIOR VERBS
+// ── acceptance 1 + 7: A CADENCE FIRE RUNS THE CENSUS AND RECORDS IT, THE PRIOR VERBS
 //    UNCHANGED IN BEHAVIOUR AND ORDER ───────────────────────────────────────────────────────────
 
 test("runMeasurementCadenceReport attaches verbCensus last, leaving the existing fields unchanged", () => {
@@ -298,6 +298,7 @@ test("runMeasurementCadenceReport attaches verbCensus last, leaving the existing
       "boardReview",
       "proofDebtReport",
       "proofDebtMint",
+      "wipeTest",
       "verbCensus",
     ]);
     // The five prior verbs behave exactly as they did before this task — same refusal shapes

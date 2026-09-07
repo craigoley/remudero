@@ -1318,6 +1318,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     adoptionMint,
     boardReview,
     proofDebtReport,
+    proofDebtMint,
     wipeTest,
     verbCensus,
   };
