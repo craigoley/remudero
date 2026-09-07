@@ -1467,12 +1467,25 @@ export function taskIdFromRunBranch(head: string | undefined): string | undefine
  * a task anything ever minted.
  */
 function namesATask(capture: string): boolean {
-  if (!capture.includes("-")) return true;
-  // The trailing letters are not decoration: W1-T12a..e and W1-T1B..D are real, split-out task ids,
-  // and an earlier pattern without them rejected W1-T12a and reddened the credit projection's own
-  // suite. MEASURED against every id in plan/tasks.yaml and every shard: 1457 of 1457 match.
-  return /^[A-Za-z]+\d*-T\d+[A-Za-z]*$/.test(capture);
+  // THE TEST IS "IS THIS AN ID WITH SOMETHING STAPLED ON", NOT "DOES THIS LOOK LIKE AN ID", and
+  // three failures taught that. A whitelist of id formats rejected the synthetic ids the fixtures
+  // use (`A`, `D`) and broke the in-flight dispatch guard; adding letter suffixes was still wrong
+  // for `W1-T12a`; and requiring a hyphen-free-or-canonical shape rejected `TRIAGE-fb-<id>-<hex>`,
+  // which IS a real task id — the auto-triage lane mints it — and broke that lane's own guard.
+  //
+  // So the rule targets the defect directly: strip a trailing `-<word>` and ask whether what
+  // remains is already a whole task id. `W1-T3030-build` leaves `W1-T3030`, which is — so the
+  // branch carries an id plus a suffix and names no task. `TRIAGE-fb-1785792135748-755f93` leaves
+  // `TRIAGE-fb-1785792135748`, which is not, so the capture is the id itself and is taken as given.
+  const suffixed = /^(.+)-[A-Za-z][A-Za-z0-9]*$/.exec(capture);
+  if (suffixed && TASK_ID_SHAPE.test(suffixed[1])) return false;
+  return true;
 }
+
+/** The canonical minted shape — `W<n>-T<n>` with an optional split-out letter (`W1-T12a`,
+ *  `W1-T1C`). Used ONLY to recognise an id that has had a suffix appended, never as a whitelist:
+ *  1457 of 1457 plan ids match it, and ids that do NOT (TRIAGE runs) are still real. */
+const TASK_ID_SHAPE = /^[A-Za-z]+\d*-T\d+[A-Za-z]*$/;
 
 /**
  * Extract the task id a SLUG branch declares in its own name — the shape {@link taskIdFromRunBranch} cannot

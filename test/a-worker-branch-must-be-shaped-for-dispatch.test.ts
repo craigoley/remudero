@@ -479,10 +479,13 @@ test("control: this repo's OWN current branch, run right now, does not regress t
 test("W1-T3042: an extra segment before the epoch names NO task, rather than inventing one", () => {
   assert.equal(taskIdFromRunBranch("run-W1-T3030-build-1788796682000"), undefined);
   assert.equal(taskIdFromRunBranch("run-W1-T3030-file-1788796561000"), undefined);
+  // TRIAGE ids are REAL — the auto-triage lane mints `TRIAGE-<feedbackId>` and names its branch
+  // `run-TRIAGE-<feedbackId>-<epochMs>`. An earlier rule rejected them as "not id-shaped" and broke
+  // that lane's own in-flight guard. The rule is about a SUFFIX, not about looking canonical.
   assert.equal(
-    taskIdFromRunBranch("run-TRIAGE-fb-repair-conflicted-2957-1788647839988"),
-    undefined,
-    "a feedback run names no task either, and must not claim one",
+    taskIdFromRunBranch("run-TRIAGE-fb-1785792135748-755f93-1787130932763"),
+    "TRIAGE-fb-1785792135748-755f93",
+    "a triage run names its own task and must keep crediting it",
   );
 });
 
