@@ -327,7 +327,16 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // is NOT allowlisted; adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5. The
   // file set is UNCHANGED (`src/run-task.ts` already carried the other reads above), so the
   // `files` assertion below needed no edit.
-  assert.equal(readers.length, 28, `expected 28 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // TWENTY-NINE since `runTaskBody`'s own `ruleHeadlinesEnabled` (run-task.ts, W1-T2761) landed —
+  // a TWENTY-THIRD consumer, also SEAMED (`opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy()`),
+  // resolving the `workerRuleHeadlines.enabled` row that gates the `rule_headlines` prompt part. IT
+  // PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this comment requires: the seam was
+  // written from the start (mirroring `workerAbandonMs`'s own `opts.workerAbandonMs ?? ` shape a few
+  // lines above it), not added afterwards to quiet a red. So it is NOT allowlisted; adding it to
+  // ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5. The file set is UNCHANGED
+  // (`src/run-task.ts` already carried the other reads above), so the `files` assertion below
+  // needed no edit.
+  assert.equal(readers.length, 29, `expected 29 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

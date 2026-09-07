@@ -1343,8 +1343,12 @@ export function renderLearningsContext(selected: LearningEntry[]): string {
 /**
  * Progressive disclosure for a headline-and-body rule corpus (W1-T2508). CLAUDE.md's bullets are
  * already written `- **HEADLINE** body`, an agent-skill-shaped split nobody had to invent, only
- * honour. Nothing here is wired into {@link renderLearningsContext} or `run-task.ts`: it proves
- * the retrieval path is safe before any body is withheld.
+ * honour. Still not wired into {@link renderLearningsContext} — that block stays the
+ * doctrine+matched-learnings pair it always was. W1-T2761 DOES wire the headline HALF into
+ * `run-task.ts`'s `implementPromptParts`/`renderAnchorBlock` (via `buildRuleHeadlinesPart`,
+ * policy-gated on `workerRuleHeadlines.enabled`); the on-demand BODY half
+ * (`retrieveRuleBody`/`retrieveRuleBodyOnDemand`) stays exactly what it was — proof that the
+ * retrieval path is safe — with no live call site asking for one rule's body by name yet.
  */
 
 /** One parsed rule bullet. INVARIANT: the headline wrapped in `**` markers, followed by `body`,

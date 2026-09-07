@@ -92,7 +92,11 @@ test("W1-T2759: the implement prompt over a fixture task carries no line from CL
   } as unknown as Task;
   const parts = implementPromptParts(task, "", "RUN-1");
   const names = parts.map((p) => p.name);
-  assert.deepEqual(names, ["doctrine", "task_claims", "recon", "operator_notes", "matched_learnings", "task_body"]);
+  // W1-T2761: `rule_headlines` now joins the array, always named, empty here because this call
+  // passes no `ruleHeadlinesPart` argument (the `workerRuleHeadlines.enabled` row is absent/off
+  // by default) — this test's own premise ("carries no line from CLAUDE.md's rule bullets")
+  // still holds by construction below, since an empty part value contributes nothing.
+  assert.deepEqual(names, ["doctrine", "rule_headlines", "task_claims", "recon", "operator_notes", "matched_learnings", "task_body"]);
   const rendered = parts.map((p) => p.value).join("\n");
 
   // Every headline bullet in CLAUDE.md, checked against the rendered prompt. A worker that loaded

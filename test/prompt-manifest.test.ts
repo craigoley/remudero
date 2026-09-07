@@ -128,7 +128,9 @@ test("implementPromptParts feeds the SAME five named context parts renderImpleme
   const t = task();
   const parts = implementPromptParts(t, "recon text", "W1-T2297-1700000000000", "learnings text", "notes text");
   const names = parts.map((p) => p.name);
-  assert.deepEqual(names, ["doctrine", "task_claims", "recon", "operator_notes", "matched_learnings", "task_body"]);
+  // W1-T2761: `rule_headlines` joins the array too (empty here — this call passes no
+  // `ruleHeadlinesPart` argument), right after `doctrine` per design (ii)'s stable-prefix order.
+  assert.deepEqual(names, ["doctrine", "rule_headlines", "task_claims", "recon", "operator_notes", "matched_learnings", "task_body"]);
 
   const manifest = buildPromptManifest(parts);
   assert.equal(manifest.find((r) => r.name === "recon")?.present, true);
