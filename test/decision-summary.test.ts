@@ -21,7 +21,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, test } from "node:test";
+import { after, before } from "node:test";
+import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
 import { decisionSummaryHtml } from "../src/lib/console-shell-script.js";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
@@ -558,6 +559,10 @@ async function withShell<T>(deps: ServeDeps, fn: (base: string) => Promise<T>): 
 let browser: Browser;
 let browserPromise: Promise<Browser> | undefined;
 before(async () => {
+  // W1-T3018: with the pinned build verifiably absent on an author-time host every test
+  // here is already registered as skipped, so launching could only produce the per-test
+  // errors that misread as a real regression. Never taken under CI.
+  if (BROWSER_SKIP !== undefined) return;
   browserPromise = chromium.launch({ args: ["--no-sandbox"] });
   browser = await browserPromise;
 });

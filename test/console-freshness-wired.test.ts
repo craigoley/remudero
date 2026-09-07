@@ -16,7 +16,8 @@ import { readFileSync, appendFileSync, mkdirSync, mkdtempSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { after, before, test } from "node:test";
+import { after, before } from "node:test";
+import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
@@ -137,6 +138,10 @@ async function withShell<T>(deps: ServeDeps, fn: (base: string) => Promise<T>): 
 let browser: Browser;
 let browserPromise: Promise<Browser> | undefined;
 before(async () => {
+  // W1-T3018: with the pinned build verifiably absent on an author-time host every test
+  // here is already registered as skipped, so launching could only produce the per-test
+  // errors that misread as a real regression. Never taken under CI.
+  if (BROWSER_SKIP !== undefined) return;
   browserPromise = chromium.launch({ args: ["--no-sandbox"] });
   browser = await browserPromise;
 });
