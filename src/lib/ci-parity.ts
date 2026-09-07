@@ -1462,6 +1462,17 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // engine portability, and its criterion-3 assertion happens to walk the tree. It is here because
   // `censusPopulationDrift` REFUSES an undisclosed census-shaped file and that gate cannot be
   // satisfied from inside the task's declared paths. One refusal row, no behaviour.
+  // W1-T3021: this task's own falsifier. It is here for the reason the two entries below it are —
+  // `censusPopulationDrift` refuses an undisclosed census-shaped file — and it was caught by the
+  // very widening it ships, LOCALLY and while still untracked, which is the whole point.
+  refusedForPredicate(
+    "test/census-discovery-sees-the-file-you-are-adding.test.ts",
+    "a",
+    "W1-T3021's discovery falsifier. It walks NOTHING: every git call it makes runs inside a throwaway fixture " +
+      "repository it created, and the `ls-files` the recognizer sees is a FIXTURE BODY string (the census-shaped " +
+      "suite text it writes into that fixture), not an enumeration this file performs over the real tree. The " +
+      "`src/` strings are its own import paths. Same self-match shape as the two entries below.",
+  ),
   refusedForPredicate(
     "test/rule-citation-gate-engine-portable.test.ts",
     "a",
@@ -1587,6 +1598,23 @@ export const CENSUS_DIR_WALK_STOPGAP =
  *  which the `src/` filter had to read anyway — one recognizer with two idioms. */
 export const CENSUS_DISCOVERY_PROBE_ARGV: readonly string[] = [
   "grep",
+  // W1-T3021 — `--untracked`, or this probe is blind LOCALLY to the one file a PR is adding.
+  //
+  // `git grep` searches TRACKED content only. A census-shaped suite that does not yet exist in the
+  // index is therefore invisible to `censusPopulationDrift` on the author's machine and visible to
+  // it in CI, where the tree is committed — so the drift guard reports a clean zero locally and
+  // reds the PR that adds the suite. MEASURED: that is exactly how #4380 failed all four ci-shards
+  // on `undisclosed census-shaped file(s): test/rule-citation-gate-engine-portable.test.ts` after a
+  // local run of the same guard printed clean.
+  //
+  // COSTS NOTHING IN CI, WHICH IS WHY IT IS SAFE: a CI checkout has no untracked files, so the
+  // discovered set there is byte-identical with and without this flag. It changes only what an
+  // author sees before committing.
+  //
+  // `--exclude-standard` IS NOT NEEDED AND MUST NOT BE ADDED: `git grep --untracked` already
+  // honours .gitignore (verified against git 2.39.5 and 2.54.0 — an ignored census-shaped fixture
+  // is NOT returned), so scratch files cannot enter the population.
+  "--untracked",
   "-lE",
   "ls-files|readdirSync|globSync",
   "--",
