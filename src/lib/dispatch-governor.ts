@@ -114,6 +114,7 @@ export function checkDispatchGovernors(
   try {
     quietHours = deps.checkQuietHours?.();
   } catch (_err) {
+    // Deliberate fail-open: an unreadable preference marker is equivalent to absent.
     quietHours = undefined;
   }
   if (quietHours) return { kind: "quiet_hours", result: quietHours };
