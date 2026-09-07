@@ -10,7 +10,9 @@
  * issues directly. Every one of these is gated somewhere; no single surface listed the gates
  * together. This module is that surface, derived from source rather than hand-maintained prose
  * (W1-T2266 measured every prose inventory in this repo going stale within weeks).
- *
+ */
+
+/**
  * WHAT "THE GATEWAY MODULES" TURNED OUT TO BE (read before trusting this task's own filing
  * rationale — CLAUDE.md's standing rule to verify the installed code over an inherited claim).
  * The filing rationale names `src/lib/open-prs-rest.ts` and `src/lib/github-app.ts` as "the
@@ -26,7 +28,9 @@
  * gh REST write-verb argv shapes (`-X POST/PATCH/PUT/DELETE`, `pr create|merge|comment|close`,
  * `issue create|close`) and raw `git push` argv literals that the guard does not (yet) wrap.
  * `test/authority-ratchet.test.ts` enumerates from source, not from this paragraph's claim.
- *
+ */
+
+/**
  * WHAT DOES NOT CHANGE (design note v). No gate moves, no action gains or loses authority. Two
  * rows below (`post-review-status`/`post-review-pr-comment`, `triage-claim-ref-push`) name real
  * gaps — a write with no `assertLiveWriteAllowed` guard at all — because the report's job is to
