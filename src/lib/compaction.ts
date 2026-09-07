@@ -220,6 +220,68 @@ export function bodyVsDiffContractLines(): string[] {
  */
 
 /**
+ * W1-T2997 — THE BOUNDED PRE-PUSH GATE, WHICH DOES NOT BRING BACK WHAT W1-T464 REMOVED.
+ *
+ * Read the tombstone above first. `ciParityContractLines()` went because the orchestrator never
+ * gated on a preflight failure and the step cost ~15-17 minutes of a ~61-minute lane. All of that
+ * stands: `--ci-parity` stays gone, and the ratchets named here run in SECONDS.
+ *
+ * WHAT THE TOMBSTONE ASSUMED, AND WHAT WAS MEASURED. It concluded a worker "is not unprotected"
+ * because "`blocked_ci` is a first-class, non-halting verdict whose fix rung already exists for
+ * exactly this case". MEASURED 2026-09-07: eight open PRs, every one a fleet build, verdict census
+ * `blocked_ci` 7, `blocked` 1, merged by the fleet itself ZERO. The fix rung exists and was not
+ * closing them. Four were repaired by hand and needed no judgement — #4330, #4324, #4343 and #4333
+ * were red on ratchets the change itself moved and never recorded.
+ *
+ * AND THE HOUSE RULE CANNOT REACH A WORKER. CLAUDE.md's first bullet is "run the shipped local gate
+ * before your FIRST push", and its own header states a dispatched worker never sees the file, since
+ * `spawnWorker` passes `settingSources: []`. A rule only humans read cannot bind the lane that keeps
+ * breaking it — precisely what that header warns about.
+ */
+export function ratchetContractLines(): string[] {
+  /*
+   * THE SPLIT BELOW IS LOAD-BEARING AND MUST NOT BE FLATTENED. `comment-load-ratchet` and
+   * `source-size-ratchet` print the exact line to write and call recording "an ordinary, reviewed
+   * outcome, not a defeat" — recording IS the fix. `negative-reachability-ratchet` and
+   * `catch-erasure-ratchet` say in their own text "no allowlist to add it to": a recorded number there
+   * BANKS the debt rather than paying it, and the real repairs this session made for them were a
+   * two-armed regex fixture and a bound error, neither derivable from the failure output. Telling a
+   * worker to "record the baseline" against those would teach it to hide the defect they exist to
+   * surface, so this names both classes and what each one actually wants. Naming them BY NAME means
+   * the list must be re-read whenever a no-allowlist gate is added: source-text-assertion-census was
+   * missed on the first ship (#4351), so that suite asserts all three names are present.
+   *
+   * WHY THE LAST LINE DOES NOT SPELL THE COMMAND. test/ci-parity-contract.test.ts asserts the
+   * worker contract `doesNotMatch(/rmd preflight --ci-parity/)` — W1-T464's own guard against the
+   * obligation creeping back. This line is a PROHIBITION, not an obligation, but the guard is a
+   * literal match and cannot tell them apart, and weakening a guard to fit new prose is the wrong
+   * trade. It is worded around instead, deliberately: the guard keeps its full force.
+   */
+  return [
+    "- BEFORE YOUR FIRST PUSH, run the two CHEAP ratchets over your own change — seconds, not",
+    "  minutes, and the single most common reason a fleet build lands red:",
+    "    npm run --silent comment-load-signal",
+    "    npm run --silent source-size-ratchet",
+    "  If either BLOCKS it prints the exact JSON line to write into its baseline file, and calls",
+    "  recording 'an ordinary, reviewed outcome, not a defeat'. Record it in THIS commit and re-run",
+    "  until both print OK. Deliberate growth is expected; leaving it unrecorded is not.",
+    "- THREE OTHER RATCHETS EXIST AND MUST NOT BE TREATED THE SAME WAY. If any of",
+    "  test/negative-reachability-ratchet.test.ts, test/catch-erasure-ratchet.test.ts or",
+    "  test/source-text-assertion-census.test.ts fails, do NOT record a number: the first two say",
+    "  in their own text 'no allowlist to add it to', and the third says re-capturing its baseline",
+    "  upward 'is NOT a remedy — that is the ratchet this task exists to hold'. A recorded number",
+    "  there banks the debt instead of paying it. Each names the repair it wants: a fixture that",
+    "  drives the surface's UNHEALTHY arm and asserts an output; a catch that binds its error and",
+    "  carries a reason; or, for a new source-text read, asserting on BEHAVIOUR instead — and only",
+    "  where the test's SUBJECT genuinely IS the source text, the declared '@source-text-subject'",
+    "  marker, which makes that choice reviewable rather than silent. If that repair does not fit",
+    "  this task's one concern, say so in your REPORT's '## Follow-ups' rather than silencing it.",
+    "- This is NOT the full CI-parity preflight, which stays REMOVED from your contract (W1-T464):",
+    "  that one runs ~15-17 minutes and is the hand route's gate, not yours. Do not run it.",
+  ];
+}
+
+/**
  * THE ROLE SENTENCE — the one thing `renderImplementPrompt` never said.
  *
  * MEASURED (state/recon-implement-acts-as-recon.md, re-derived at db4e110): `renderReconPrompt`'s
@@ -266,6 +328,7 @@ export function outputContractLines(taskId: string): string[] {
   return [
     "# OUTPUT CONTRACT",
     "- Make ONLY the change described in TASK; one concern.",
+    ...ratchetContractLines(),
     // W1-T502: THE CADENCE INSTRUCTION. Until this line, the contract taught exactly one
     // terminal act ("stage the changed file(s) and commit", below) — for the whole life of a
     // run, everything a worker produced existed ONLY as dirty files and index entries in its
