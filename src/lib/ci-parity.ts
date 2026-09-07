@@ -350,6 +350,58 @@ function mergeBaseDiffText(repoRoot: string, spawn: PreflightSpawn): string {
   return res.stdout;
 }
 
+/**
+ * W1-T3013 — THE ONE REFUSAL BOTH COVERAGE MODES REACH when there is no diff to measure.
+ *
+ * Lifted to a constant rather than written twice: {@link runPreflightCoverage}'s
+ * `coverage-mode:diff-scope` arm already refused in these words, and the coverage-ratchet entry
+ * needed the same sentence. Two hand-written copies of one refusal are two things to drift.
+ */
+export const EMPTY_DIFF_COVERAGE_REFUSAL = "origin/main...HEAD (freshly refreshed) is an empty diff; there is no diff to assert coverage over";
+
+/**
+ * W1-T3013 — THE THREE-DOT DIFF, CHECKED, because feeding an unchecked one to `diff-coverage.mjs`
+ * produces a gate that cannot fail.
+ *
+ * THE DEFECT THIS EXISTS FOR, and both halves are correct in isolation. {@link mergeBaseDiffText}
+ * returns `res.stdout` without reading `res.status`, so a failed `git diff` yields "".
+ * `scripts/diff-coverage.mjs` over an empty added-line set reports OK — rightly, since the claim
+ * is vacuously true. Composed through the entry's `input:`, a git failure renders as a clean green
+ * `diff-coverage` step: the vacuous-pass family CLAUDE.md's coverage section already names,
+ * reached from the diff side rather than the lcov side.
+ *
+ * BOTH CONDITIONS ARE READ BECAUSE THEY CATCH DIFFERENT FAULTS, and neither subsumes the other:
+ * a non-zero or null `status` is git ERRORING; an empty `stdout` on a zero status is git
+ * SUCCEEDING over a PR that diffs nothing. The second is equally not a coverage result, and is
+ * exactly what `coverage-mode:diff-scope` refuses on the other path.
+ *
+ * REFUSES, NEVER REPAIRS: no retry, no fallback ref, no synthesised diff. A gate that cannot
+ * measure says so in its own step.
+ *
+ * THE DETAIL OPENS WITH `FAIL`, NOT `REFUSED`, and that is this table's contract rather than a
+ * preference: test/preflight-ci-parity.test.ts asserts every step detail matches
+ * `^<name>: (PASS|FAIL|EXCLUDED)`. {@link runPreflightCoverage} builds its steps by hand, outside
+ * that contract, so it keeps its own `REFUSED —` opening. The SENTENCE is what is shared
+ * ({@link EMPTY_DIFF_COVERAGE_REFUSAL}); the opening word belongs to each mode's own vocabulary.
+ */
+function mergeBaseDiffForCoverage(
+  repoRoot: string,
+  spawn: PreflightSpawn,
+): { readonly ok: true; readonly text: string } | { readonly ok: false; readonly detail: string } {
+  const res = spawn("git", ["diff", `${requirePinnedBase(repoRoot, spawn)}...HEAD`], { cwd: repoRoot });
+  if (res.status !== 0) {
+    const stderr = (res.stderr ?? "").trim();
+    return {
+      ok: false,
+      detail:
+        `FAIL — could not compute the origin/main...HEAD diff: \`git diff\` exited ${res.status ?? "null"}` +
+        `${stderr ? `: ${stderr.slice(0, 200)}` : ""} — the DIFF could not be measured, so this step is not a coverage result`,
+    };
+  }
+  if ((res.stdout ?? "").trim() === "") return { ok: false, detail: `FAIL — ${EMPTY_DIFF_COVERAGE_REFUSAL}` };
+  return { ok: true, text: res.stdout };
+}
+
 /** The changed-files list both trigger scripts consume, written once and memoized per (spawn, repoRoot). */
 const changedFilesPathCache = new WeakMap<PreflightSpawn, Map<string, string>>();
 function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
@@ -1002,10 +1054,14 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
         }),
       );
       const diffCoverage = runStep("coverage-ratchet:diff-coverage", () => {
-        const diffText = mergeBaseDiffText(repoRoot, spawn);
+        // W1-T3013: the diff is CHECKED before it becomes stdin. An unchecked one turns a git
+        // failure into a green step, because diff-coverage.mjs is right to pass over an empty
+        // added-line set — the gate was asking it a question it cannot refuse.
+        const diff = mergeBaseDiffForCoverage(repoRoot, spawn);
+        if (!diff.ok) return { ok: false, detail: diff.detail };
         return shellOut(spawn, "diff-coverage.mjs (origin/main...HEAD, refreshed base)", process.execPath, [join(repoRoot, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath], {
           cwd: repoRoot,
-          input: diffText,
+          input: diff.text,
         });
       });
       return [refresh, test, ratchet, diffCoverage];
@@ -2008,6 +2064,10 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
 // Why: the refusals and the vacuous-OK argument — docs/forensics/ci-parity.md (W1-T1074).
 
 /** Every path `origin/main...HEAD` touches. The CALLER never supplies this (design ii). */
+// THE IDENTICAL UNCHECKED SHAPE AS `mergeBaseDiffForCoverage`, DELIBERATELY LEFT. This one's
+// caller converts an empty result into the `coverage-mode:diff-scope` refusal, so the path is
+// already fail-closed end to end; checking here would alter a verdict the gate reaches correctly.
+// Noted so the resemblance reads as considered rather than missed (W1-T3013).
 function computeChangedFiles(repoRoot: string, spawn: PreflightSpawn): string[] {
   const res = spawn("git", ["diff", "--name-only", `${requirePinnedBase(repoRoot, spawn)}...HEAD`], { cwd: repoRoot });
   return res.stdout
@@ -2088,8 +2148,8 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
     steps.push({
       name: "coverage-mode:diff-scope",
       ok: false,
-      detail:
-        "coverage-mode:diff-scope: REFUSED — origin/main...HEAD (freshly refreshed) is an empty diff; there is no diff to assert coverage over",
+      // W1-T3013: the sentence is now a shared constant, so the two coverage modes cannot drift.
+      detail: `coverage-mode:diff-scope: REFUSED — ${EMPTY_DIFF_COVERAGE_REFUSAL}`,
     });
     return { steps, ok: false };
   }
