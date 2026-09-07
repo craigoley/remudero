@@ -1,0 +1,40 @@
+- id: W1-T2998
+  title: "THE FIX RUNG DISPATCHES A WHOLE LLM WORKER FOR A RED RATCHET THAT PRINTS ITS OWN ONE-LINE FIX — four of tonight's blocked_ci builds needed nothing but a recorded number, and each cost a fix round that a deterministic repair would have closed in seconds"
+  repo: remudero
+  depends_on: [W1-T2997]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: "operator-session#eight-fleet-prs-none-merging-2026-09-07"
+  plan_refs: ["W1-T2997", "W1-T2427", "W1-T1110"]
+  files: [src/lib/sweep.ts, test/a-recordable-ratchet-is-repaired-not-dispatched.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07: of eight fleet builds, seven ended `blocked_ci`. Four were repaired by hand
+    this session and needed NO judgement whatsoever — #4330, #4324, #4343 and #4333 were red on
+    `comment-load-ratchet` and `source-size-ratchet`, both of which print the exact JSON line to
+    write and call recording "an ordinary, reviewed outcome, not a defeat".
+
+    THE FIX RUNG ALREADY DISPATCHES ON A FAILING CHECK, and for this class that is the wrong
+    instrument: it spends a full LLM worker, a worktree and a CI cycle to write a number the failing
+    script already printed. W1-T2997 stops most of these arriving; this closes the ones that still do —
+    a rebase onto a moved main can move a whole-repo count that was correct when the worker measured
+    it, so the class cannot be eliminated at the push boundary alone.
+
+    THE SAFETY PROPERTY IS THE WHOLE DESIGN, AND IT IS NOT OPTIONAL. Only ratchets that NAME
+    recording as their ordinary outcome may be repaired this way. `negative-reachability-ratchet` and
+    `catch-erasure-ratchet` say in their own text "no allowlist to add it to": a recorded number
+    there BANKS the debt instead of paying it, and the real fixes this session made for them were a
+    two-armed regex fixture and a bound error — neither derivable from the failure output. A repair
+    that cannot tell the two classes apart must not ship; when in doubt it must fall through to the
+    existing dispatch, never guess.
+  acceptance:
+    - claim: "a red comment-load or source-size ratchet is repaired deterministically rather than dispatched"
+      proof: "unit test: W1-T2998: a recordable ratchet failure is repaired without dispatching a worker"
+    - claim: "a no-allowlist ratchet is never auto-recorded and still reaches the fix rung"
+      proof: "unit test: W1-T2998: a no-allowlist ratchet is refused and falls through to dispatch"
+    - claim: "an unrecognised failure shape falls through rather than being guessed at"
+      proof: "unit test: W1-T2998: an unrecognised gate failure falls through to dispatch"

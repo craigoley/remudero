@@ -1,0 +1,39 @@
+- id: W1-T2999
+  title: "A STALE FLEET PR IS ESCALATED TO A HUMAN RATHER THAN REBASED, SO A TRIVIAL BASELINE CONFLICT ON A BRANCH WITH NO AUTHOR SITS UNTIL AN OPERATOR OPENS IT — and a conflicted PR registers no check runs, so it reads as merely queued"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: "operator-session#eight-fleet-prs-none-merging-2026-09-07"
+  plan_refs: ["W1-T1116", "W1-T2397"]
+  files: [src/lib/sweep.ts, test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07: #4337 and #4349 each showed ONE check run where a healthy PR shows thirty —
+    the signature CLAUDE.md names, `mergeable_state: dirty` reading as "still queued". The sweep
+    dispositions them `blocked-ambiguous` with reason "merge conflict (mergeState dirty)", files an
+    escalation and dedups it. That is deliberate and, for a human-authored branch, right.
+
+    FOR A FLEET BRANCH IT IS THE WRONG DEFAULT. A `run-<taskId>-<epochMs>` head has no human author
+    waiting on it, and the conflicts observed this session were: one line of
+    `scripts/comment-load-baseline.json`, and a `LintCheck` union where main and the branch each
+    added a member and BOTH belonged. Every one was resolved mechanically in under a minute, and
+    each had sat unmergeable until an operator did it.
+
+    WHAT THIS IS NOT. It is not "auto-resolve conflicts": a content conflict inside source belongs to
+    a human or a fix worker, and this must refuse it. The safe subset is a REBASE THAT SUCCEEDS ON
+    ITS OWN — no conflict markers, gates re-run green afterwards. Anything else keeps today's
+    escalation exactly as it is. The rebase must also be attributable: force-with-lease only, so a
+    branch another writer has touched is never clobbered, which this session hit for real when a
+    second lane had already fixed a branch it was about to overwrite.
+  acceptance:
+    - claim: "a fleet branch whose rebase applies cleanly is rebased and re-gated rather than escalated"
+      proof: "unit test: W1-T2999: a cleanly-rebasable fleet branch is rebased instead of escalated"
+    - claim: "a rebase that conflicts still escalates, unchanged"
+      proof: "unit test: W1-T2999: a conflicting rebase still escalates"
+    - claim: "a branch that moved under us is never force-clobbered"
+      proof: "unit test: W1-T2999: a branch advanced by another writer is left alone"
