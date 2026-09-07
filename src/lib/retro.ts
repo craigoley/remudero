@@ -3880,7 +3880,12 @@ export const RETRO_PUBLICATION_EPISODE_MS = 6 * 60 * 60 * 1000;
 
 /** Consecutive failures before the operator is told. ONE failure is ordinary — a flake, a transient
  *  suite failure, a repair that will succeed next pass — and escalating it would train the operator
- *  to ignore the notice. TWO in an episode is a pattern the retro cannot repair itself. */
+ *  to ignore the notice. TWO in an episode is a pattern the retro cannot repair itself.
+ *
+ *  PRIMARY CONTROL, not a BACKSTOP: this number alone decides whether the operator hears about a
+ *  stuck retro. Nothing else notices — that is the whole defect W1-T2988 exists to close — so
+ *  raising it silences the only signal, and there is no second mechanism behind it to catch what
+ *  it lets through. */
 export const RETRO_PUBLICATION_STRIKE_CAP = 2;
 
 /** The only two fields this decision reads. Deliberately STRUCTURAL rather than `LedgerLine`: the
