@@ -226,7 +226,7 @@
   "src/lib/review-capacity.ts": 46,
   "src/lib/review-provider-provenance.ts": 29,
   "src/lib/review.ts": 1980,
-  "src/lib/risk-judge.ts": 160,
+  "src/lib/risk-judge.ts": 197,
   "src/lib/risk-score.ts": 151,
   "src/lib/routing-objective.ts": 68,
   "src/lib/routing-prior.ts": 99,
