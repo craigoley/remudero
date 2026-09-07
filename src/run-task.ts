@@ -933,6 +933,7 @@ import {
   isCappedReviewOrphanEscalation,
   type ArmAttemptOutcome,
   type ArmOutcomeName,
+  creditSubjectIsImplementation,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -4861,7 +4862,14 @@ export function openTaskIdsFromPlan(plan: Plan, projection?: ReadonlyMap<string,
 
 interface GateOutcome {
   merged: boolean;
+  verdict?: "awaiting_merge" | "blocked_ci";
   reason: string;
+  headSha?: string;
+  checks?: string[];
+}
+
+function rollupCheckSummary(rollup: RollupEntry[] | undefined): string[] {
+  return (rollup ?? []).map((c) => `${c.name ?? c.context ?? "unknown"}:${c.conclusion ?? c.status ?? c.state ?? ""}`);
 }
 
 /**
@@ -5001,25 +5009,44 @@ export async function pollToGate(
     const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
     const state = prStateFromRest(row);
     if (state === "MERGED") return { merged: true, reason: "checks green" };
-    if (state === "CLOSED") return { merged: false, reason: "pr closed" };
+    if (state === "CLOSED") return { merged: false, verdict: "blocked_ci", reason: "pr closed" };
     const sha = mapRestPr(row).headRefOid;
     const roll = await restRollupFor(owner, repo, sha, read);
+    const checks = rollupCheckSummary(roll);
     const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
     if (red) {
-      log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown" });
-      return { merged: false, reason: `required check red: ${red.name ?? red.context ?? "unknown"}` };
+      log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown", head_sha: sha, checks });
+      return {
+        merged: false,
+        verdict: "blocked_ci",
+        reason: `required check red: ${red.name ?? red.context ?? "unknown"}`,
+        headSha: sha,
+        checks,
+      };
     }
     readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
     if (stall.stalled) {
-      log("pr.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
+      const verdict = stall.pending.length === 0 ? "awaiting_merge" : "blocked_ci";
+      const reason =
+        stall.pending.length > 0
+          ? `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
+          : `all observed checks terminal green for ${STALL_WINDOW} consecutive polls; awaiting GitHub merge`;
+      log("pr.stalled", {
+        pending: stall.pending,
+        identicalPolls: STALL_WINDOW,
+        verdict,
+        reason,
+        head_sha: sha,
+        checks,
+      });
       return {
         merged: false,
-        reason:
-          stall.pending.length > 0
-            ? `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
-            : `no progress for ${STALL_WINDOW} consecutive polls`,
+        verdict,
+        reason,
+        headSha: sha,
+        checks,
       };
     }
       // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
@@ -5030,7 +5057,7 @@ export async function pollToGate(
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
         state,
-        checks: roll.map((c) => `${c.name ?? c.context}:${c.conclusion ?? c.status ?? c.state}`),
+        checks,
       });
     }
     // W1-T463: see `waitForCiGreen`'s note — a timer, not a blocking child process.
@@ -14823,18 +14850,21 @@ async function runTask(
       return { taskId, runId, prUrl, merged: true, costUsd, verdict: "merged" };
     }
 
-    // Blocked: leave the PR open (auto-merge stays armed; it will land later if
-    // the check goes green) and the worktree for post-mortem.
+    // Blocked or awaiting merge: leave the PR open (auto-merge stays armed; it will land later if
+    // GitHub materializes it) and the worktree for post-mortem.
+    const terminalVerdict = outcome.verdict ?? "blocked_ci";
     log("verdict", {
-      verdict: "blocked_ci",
+      verdict: terminalVerdict,
       pr_url: prUrl,
       reason: outcome.reason,
+      ...(outcome.headSha ? { head_sha: outcome.headSha } : {}),
+      ...(outcome.checks ? { checks: outcome.checks } : {}),
       cost_usd: costUsd,
       billing_mode: billingMode(impl.childEnvKeys),
       account_label: impl.accountLabel,
     });
-    say(`verdict: blocked_ci (${outcome.reason}) — PR left OPEN: ${prUrl}`);
-    return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
+    say(`verdict: ${terminalVerdict} (${outcome.reason}) — PR left OPEN: ${prUrl}`);
+    return { taskId, runId, prUrl, merged: false, costUsd, verdict: terminalVerdict };
   } catch (err) {
     // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
     // and return a terminal verdict rather than falling through to the generic `run.error` +
@@ -30674,12 +30704,42 @@ export function readMergedPathsByPr(root: string, limit = MERGED_PATHS_SCAN_LIMI
   return byPr;
 }
 
+/**
+ * W1-T3063 — `origin/main`'s merge subjects, keyed by the PR number a squash merge puts in
+ * `(#N)`. ONE local git invocation per sweep pass; no network, no per-candidate cost.
+ *
+ * ⚠ BEST-EFFORT, AND AN EMPTY MAP IS THE SAFE ANSWER. A failed or truncated read leaves every
+ * candidate's subject undefined, which {@link creditSubjectIsImplementation} reports as unknown and
+ * every destructive consumer declines on. The failure mode is a PR that stays open one pass longer,
+ * never one that closes on evidence nobody read.
+ */
+function readMergeSubjectsByPr(root: string): Map<number, string> {
+  const byPr = new Map<number, string>();
+  try {
+    const out = execFileSync("git", ["log", "origin/main", "--format=%s", "-n", String(MERGE_SUBJECT_SCAN_LIMIT)], {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: 1 << 24,
+    });
+    for (const line of out.split("\n")) {
+      const m = line.match(/\(#(\d+)\)\s*$/);
+      if (m && !byPr.has(Number(m[1]))) byPr.set(Number(m[1]), line);
+    }
+  } catch {
+    /* best-effort: an unreadable log yields an empty map, and unknown declines */
+  }
+  return byPr;
+}
+
 /** How far back {@link readMergedPathsByPr} scans. A BACKSTOP on cost, not a correctness bound: a
  *  merge outside the window has no entry and takes the pre-existing path. */
 const MERGED_PATHS_SCAN_LIMIT = 4000;
 /** Per-PR path cap. `isPlanOnlyChangeset` only needs to see ONE non-plan path to answer, so a
  *  1,000-file merge does not need 1,000 strings held to decide it. */
 const MERGED_PATHS_PER_PR_CAP = 200;
+/** How far back {@link readMergeSubjectsByPr} scans. A BACKSTOP on cost, not a correctness bound:
+ *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
+const MERGE_SUBJECT_SCAN_LIMIT = 5000;
 
 function buildCreditCandidates(
   owner: string,
@@ -30703,11 +30763,23 @@ function buildCreditCandidates(
     github: github ?? buildBatchedGithub(owner, repo, { log }),
     mergedPathsByPr: readMergedPathsByPr(repoRoot),
   };
+  // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
+  // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
+  // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
+  const mergeSubjects = readMergeSubjectsByPr(repoRoot);
   const candidates: CreditCandidate[] = [];
   for (const task of plan.tasks) {
     const proj = deriveStatus(task, deps);
     if (proj.merged && proj.prNumber !== undefined && proj.prUrl !== undefined) {
-      candidates.push({ taskId: task.id, prNumber: proj.prNumber, prUrl: proj.prUrl, merged: true });
+      candidates.push({
+        taskId: task.id,
+        prNumber: proj.prNumber,
+        prUrl: proj.prUrl,
+        merged: true,
+        // W1-T3063: what EARNED the credit, not merely that one exists. Undefined when the subject
+        // is outside the scanned window — and undefined declines, by design.
+        creditIsImplementation: creditSubjectIsImplementation(mergeSubjects.get(proj.prNumber)),
+      });
     }
   }
   return candidates;
@@ -32072,6 +32144,7 @@ export function buildSweepEffects(
   | "dispatchFix"
   | "escalate"
   | "readLiveState"
+  | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
   | "depReview"
   | "postReview"
@@ -33025,6 +33098,25 @@ export function buildSweepEffects(
     // blocked-fixable disposition actually spends a fix-rung strike — see
     // `SweepDeps.readLiveState`'s own doc for the fail-open contract.
     readLiveState: (pr) => ghLiveState(pr.prUrl),
+
+    // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
+    // dispatch surface invokes `dispatchFix`. Reads the SAME process-lifetime `terminalHeads`
+    // map (above) `dispatchFix`'s own `priorTerminal?.escalated` early-return already consults —
+    // no second cache, no fresh GitHub read. Declines only the exact `PR@head SHA` whose
+    // escalation was already delivered; a cached entry that has not yet delivered (or was never
+    // cached at all) returns `undefined` and the ordinary dispatch path — including the failed-
+    // delivery retry — runs unchanged.
+    terminalFixStandDown: (pr) => {
+      const terminal = terminalHeads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
+      // Written as two explicit checks, not `!terminal?.escalated` — that negated-optional-chain
+      // shape is exactly the conflator test/catch-erasure-ratchet.test.ts's detector (b) exists to
+      // hold at zero (it folds "no cached entry at all" and "cached but not yet delivered" into
+      // one boolean the same way an erasing catch folds a failure and an absence together). Both
+      // cases really do return the SAME `undefined` here — that is this seam's design (iv), not an
+      // accidental erasure — but spelling it out keeps the two conditions separately legible.
+      if (terminal === undefined || terminal.escalated !== true) return undefined;
+      return `terminal uncreditable head already escalated for this PR@head (${TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP})`;
+    },
 
     // W1-T2789 — the sweep-level consumer of the SAME reversed-compare reader and exact-path
     // decision runFixRung already uses. This is deliberately not exposed through Serve.
@@ -40141,6 +40233,20 @@ export async function main(
   // See {@link installUnhandledRejectionGuard} — it is idempotent, so the in-process `main()`
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
+  // W1-T3065 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
+  // both daemon rungs, so a machine running `rmd` by hand and no daemon reclaimed NOTHING: the
+  // operator's Mac reached 100% of a 228 GiB volume with 138 stale dirs and 11 GiB of debris, and
+  // an agent session failed outright because the harness could not write its own output file.
+  //
+  // ⚠ IT CAN NEVER FAIL THE VERB. `sweepStaleTempDirs` is documented best-effort and non-throwing,
+  // and this call is wrapped anyway: a CLI command that died because a tmp sweep threw would be a
+  // far worse defect than the disk filling. The age ceiling is unchanged, so a dir a concurrent
+  // invocation is still using is never collateral.
+  try {
+    sweepStaleTempDirs();
+  } catch {
+    /* best-effort by contract — never let housekeeping fail the verb the operator asked for */
+  }
   // THE GITHUB APP IS THE FLEET HOST'S ONLY CREDENTIAL, and until now only `daemonCommand` and
   // `serveCommand` minted from it. `gh auth login` is never run there and the boot env deliberately
   // carries NO `GH_TOKEN` (deploy/recycle-container.sh, see github-app.ts's header), so every OTHER

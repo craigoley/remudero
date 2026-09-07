@@ -77,7 +77,7 @@ test("haltsDrain: a genuinely blocking verdict DOES halt — the set is a named 
   for (const v of ["blocked", "blocked_review", "failed", "blocked_budget", "blocked_containment"]) {
     assert.equal(haltsDrain({ merged: false, verdict: v }), true, `${v} must still halt`);
   }
-  assert.equal(NON_HALTING_VERDICTS.size, 4, "exactly four verdicts are exempt");
+  assert.equal(NON_HALTING_VERDICTS.size, 5, "exactly five verdicts are exempt");
 });
 
 test("runDrain CONTINUES past a blocked_ci and spends its remaining budget", async () => {

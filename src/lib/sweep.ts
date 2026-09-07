@@ -1242,6 +1242,21 @@ export function isBlockedCi(pr: OpenPrView): boolean {
   return pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0; // W1-T2504
 }
 
+/** W1-T3063 — the subject prefixes that FILE or AMEND a task rather than implementing it.
+ *  Deliberately the vocabulary `lint-plan`'s failing-split already excludes, verbatim — "a filing
+ *  cites a task; it does not implement it" — never a second list that could drift from it. */
+export const FILING_SUBJECT_RE = /^(?:chore\((?:plan|triage|feedback)\)|docs\(plan\)|plan:|docs:|chore:)/;
+
+/** W1-T3063 — does this merge subject describe an IMPLEMENTATION? `undefined` in, `undefined` out:
+ *  a subject that could not be read is not evidence either way, and every destructive consumer must
+ *  treat it as a refusal. PURE. */
+export function creditSubjectIsImplementation(subject: string | undefined): boolean | undefined {
+  if (subject === undefined) return undefined;
+  const trimmed = subject.trim();
+  if (trimmed === "") return undefined;
+  return !FILING_SUBJECT_RE.test(trimmed);
+}
+
 /** W1-T2794 — stamp {@link OpenPrView.taskMergedBy} onto each open PR whose task a credit
  *  candidate proves MERGED. PURE: no I/O, no GitHub call, no ledger read — the caller already
  *  built this candidate set for the credit-backfill rung, and this reuses that same array rather
@@ -1262,6 +1277,10 @@ export function projectMergedTaskCandidates(
 ): OpenPrView[] {
   const mergedByTask = new Map<string, number>();
   for (const c of candidates ?? []) {
+    // W1-T3063 — `=== true` IS THE FIX, and the strictness is the point: `undefined` (the subject
+    // could not be read) and `false` (a filing earned the credit) must BOTH decline. A truthy test
+    // here would re-admit the unknown case, which is how #4461 was closed against a `chore(plan)`.
+    if (c.creditIsImplementation !== true) continue;
     if (c.merged === true && typeof c.prNumber === "number" && c.taskId) mergedByTask.set(c.taskId, c.prNumber);
   }
   if (mergedByTask.size === 0) return [...prs];
@@ -2870,6 +2889,17 @@ export interface SweepDeps {
    *  merged mid-sweep, dispatched anyway). Omitted, or a failed read, behaves exactly as before —
    *  standing down fires ONLY on a positive, freshly observed terminal reading. */
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
+  /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
+   *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
+   *  surface's own live-state/claim checks. `buildSweepEffects` supplies it from the SAME
+   *  `terminalUncreditableHeads` cache W1-T2723's `dispatchFix` already consults internally — no
+   *  second cache, no GitHub read here. Returns a stable, explicit stand-down reason ONLY when the
+   *  exact `PR@head SHA` entry is present AND its escalation was already delivered; returns
+   *  `undefined` for every other case, including a cached entry whose delivery failed (design (iv)
+   *  — that one must still reach `dispatchFix` so the existing retry-on-failed-delivery path runs).
+   *  A caller that omits this dep (every existing test/fixture) sees dispatch behave byte-for-byte
+   *  as before. */
+  terminalFixStandDown?: (pr: OpenPrView) => string | undefined;
   /** W1-T2789 — fresh reversed-compare evidence for a checks-red PR that the strike table would
    *  otherwise make terminal. Optional or unreadable preserves the ordinary disposition. The
    *  decision itself is {@link decideRedBaseRefresh}, shared verbatim with the fix rung. */
@@ -4350,6 +4380,20 @@ export async function runSweep(
               const fixEvidence = isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
                 : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures };
+              // W1-T2752 — a delivered terminal decision for this EXACT PR@head is FINAL:
+              // `dispatchFix` already declines it internally (W1-T2723's `priorTerminal?.escalated`
+              // check), but only after being invoked, so an unmoved head still recorded a phantom
+              // `acted:true` on every poll after the one that delivered the escalation. This outer
+              // check stands the whole disposition down BEFORE the claim/invocation below —
+              // synchronous, read-only, no GitHub call — while a cached entry whose delivery
+              // FAILED falls through unchanged, exactly as {@link SweepDeps.terminalFixStandDown}'s
+              // own doc requires.
+              const terminalStandDown = deps.terminalFixStandDown?.(pr);
+              if (terminalStandDown) {
+                acted = false;
+                standDownReason = terminalStandDown;
+                break;
+              }
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
               // alone, without the fresh re-read it also performs, would not have stopped the
               // observed race. A refusal spends nothing and stands down like any declined lane.
@@ -4393,6 +4437,14 @@ export async function runSweep(
               // "conflicted" analogue of the blocked-fixable capture above — both are
               // dispatch-based repair surfaces, so both feed `spent` the same way.
               const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict };
+              // W1-T2752: the conflicted twin of the blocked-fixable terminal check above, same
+              // reasoning — see `SweepDeps.terminalFixStandDown`'s own doc.
+              const conflictedTerminalStandDown = deps.terminalFixStandDown?.(pr);
+              if (conflictedTerminalStandDown) {
+                acted = false;
+                standDownReason = conflictedTerminalStandDown;
+                break;
+              }
               // W1-T2520: the conflicted twin of the blocked-fixable claim above, same reasoning
               // — see `claimFixDispatch`'s own doc.
               const conflictedFixClaim = claimFixDispatch(pr);
@@ -5493,6 +5545,13 @@ export interface CreditCandidate {
   prNumber: number;
   prUrl: string;
   merged: boolean;
+  /** W1-T3063 — did the CREDITING pr actually implement the task, or merely cite it? `undefined`
+   *  means UNKNOWN and is treated exactly like `false` by every destructive consumer: absence of
+   *  evidence is not evidence of supersession. Derived from the merge subject against the same
+   *  filing vocabulary `lint-plan` already excludes ("a filing cites a task; it does not implement
+   *  it"), never from a second list. Why: #4461, a validated build, was closed against #3195, a
+   *  `chore(plan)` touching one shard. */
+  creditIsImplementation?: boolean;
 }
 
 /** One task's credit-backfill outcome this pass. */

@@ -2,6 +2,8 @@
   "files": {
     "architecture.yaml": {
       "entries": [
+        "a-rigged-probe-measures-nothing",
+        "a-roster-error-needs-a-second-derivation",
         "cache-prefix-bytes",
         "check-absence-is-not-a-passed-check",
         "claude-code-hybrid-retrieval",
@@ -22,6 +24,7 @@
         "no-rewriting-proofs-on-verify-human",
         "operator-message-standard-is-tested-verbatim",
         "plan-only-pr-not-auto-capped",
+        "proof-weaker-than-claim",
         "remudero-review-is-a-commit-status",
         "rule19-span-and-never-file-empty-files-list",
         "run-task-has-zero-catch-erasure-headroom",
@@ -43,6 +46,7 @@
         "plan/tasks.d",
         "plan/tasks.yaml",
         "src/lib/auto-triage.ts",
+        "src/lib/containment.ts",
         "src/lib/daemon.ts",
         "src/lib/dispatch-overlap.ts",
         "src/lib/drain.ts",
@@ -58,6 +62,7 @@
         "src/lib/sweep.ts",
         "src/lib/task-id-reservation.ts",
         "src/lib/task-linter.ts",
+        "src/lib/worker.ts",
         "src/run-task.ts",
         "test/catch-erasure-ratchet.test.ts",
         "test/run-task.test.ts"
@@ -90,18 +95,23 @@
     },
     "failures.yaml": {
       "entries": [
+        "an-error-names-its-cause-not-its-check",
+        "bare-node-test-resolution-failure",
         "control-surface-fail-loud-stop-one-shot",
+        "cost-is-the-execution-falsifier",
         "cost-separates-never-ran-from-ran-and-failed",
         "criteria-go-stale-on-relocation",
         "ls-remote-grep-matches-the-sha-column",
         "no-live-operator-in-headless-worker",
         "probe-must-exercise-the-real-consuming-client",
         "reviewer-floor-casing-blind",
-        "rules-must-sweep-the-existing-queue"
+        "rules-must-sweep-the-existing-queue",
+        "tap-proximity-is-not-causation"
       ],
       "globs": [
         "bin/rmd",
         "plan/tasks.yaml",
+        "src",
         "src/lib/dispatch-claim.ts",
         "src/lib/drain.ts",
         "src/lib/fleet-control.ts",
@@ -112,7 +122,8 @@
         "src/lib/service.ts",
         "src/lib/status.ts",
         "src/lib/sweep.ts",
-        "src/run-task.ts"
+        "src/run-task.ts",
+        "test"
       ]
     },
     "platform.yaml": {
@@ -277,6 +288,7 @@
       "ci.yaml"
     ],
     "testing": [
+      "failures.yaml",
       "testing.yaml"
     ]
   }

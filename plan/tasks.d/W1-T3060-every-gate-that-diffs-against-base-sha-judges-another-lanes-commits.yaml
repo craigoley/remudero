@@ -1,0 +1,101 @@
+- id: W1-T3060
+  title: "SEVEN CI GATES DIFF AGAINST A BASE SHA CAPTURED WHEN THE WEBHOOK FIRED, WHILE HEAD IS THE MERGE COMMIT AGAINST MAIN'S CURRENT TIP — so every commit merged in between is attributed to the PR, and `diff-coverage` blocks a plan-only PR on another lane's uncovered source lines"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 30.00
+  files: [.github/workflows/ci.yml, test/a-moving-base-attributes-another-lanes-lines.test.ts]
+  origin: "operator-session#four-false-reds-in-one-afternoon-2026-09-07"
+  plan_refs: ["W1-T3017", "W1-T2428", "W1-T1033", "W1-T2732"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON `origin/main` 2026-09-07. `.github/workflows/ci.yml` assigns
+    `BASE_SHA: ${{ github.event.pull_request.base.sha }}` at SEVEN sites across SIX jobs, and five
+    of them feed a `git diff "${BASE_SHA}"...HEAD`:
+
+      357  coverage-ratchet            --name-only -> changed-files.txt -> diff-class.mjs
+      541  coverage-ratchet-required   --name-only -> changed-files.txt -> diff-class.mjs
+      587  coverage-ratchet-required   git diff "${BASE_SHA}"...HEAD > pr.diff -> diff-coverage.mjs
+      682  mutation-ratchet            --name-only -> changed-files.txt
+      763  learnings-budget-ratchet    the §8A net-byte comparand for claude-md-budget-ratchet
+      870  lint-plan                   npm run lint-plan -- --base "$BASE_SHA"
+      931  containment-probe           --name-only -> changed-files.txt
+
+    `base.sha` is the base branch's tip AT THE MOMENT THE WEBHOOK FIRED. `HEAD` in a
+    `pull_request` checkout is the MERGE COMMIT of the PR head into main's CURRENT tip. The two are
+    not the same point, and on a fleet that merges several times an hour they diverge constantly:
+    every commit that landed in between is inside `HEAD` but outside `BASE_SHA`, so the diff
+    reports it as this PR's own ADDED lines.
+
+    FOUR FALSE REDS IN ONE AFTERNOON, AND ONE OF THEM IS UNANSWERABLE. #4463's entire three-dot
+    diff is TWO `plan/*.yaml` files. It was blocked by `diff-coverage` on
+    `src/run-task.ts:18466-18469` — lines byte-identical at its merge base, in a file it does not
+    touch. A plan-only PR cannot add source lines; the attribution is simply wrong. #4455 was
+    blocked the same way on the same file.
+
+    THE FAST LANE IS DEFEATED BY THE SAME VARIABLE, WHICH IS WHY THE BLOCK LANDS AT ALL. The
+    classifier at 357/541 reads that same stale diff into `changed-files.txt` and hands it to
+    `diff-class.mjs`. With another lane's `src/` files in the list, a genuinely PLAN_ONLY diff
+    classifies as SOURCE, so the `CLASS != SOURCE` early-exit never fires and `diff-coverage` runs
+    on a PR it was designed to skip. Misclassification and misattribution compound.
+
+    AND IT REACHES A BLOCKING PLAN GATE. `lint-plan --base "$BASE_SHA"` judges the CHANGED-TASKS
+    set. Against a stale base that set includes every task any intervening merge touched: on one
+    run this lane watched it go from "2 task(s) checked" to "3 task(s) checked (5 new/changed)"
+    with no change to the branch.
+
+    THE WORKAROUND IS REAL BUT IT IS NOT A FIX. Pushing anything re-captures a fresh `base.sha`,
+    so merging main in clears it — which is what this lane did four times today. That is a manual
+    step per occurrence, on a PR whose author has done nothing wrong, and it silently re-arms the
+    moment main moves again.
+  design: |
+    (i) THE DIFF MUST BE TAKEN AGAINST THE TREE CI ACTUALLY BUILT, NOT AGAINST A SNAPSHOT OF WHAT
+    MAIN WAS WHEN A WEBHOOK FIRED. On a `pull_request` event `HEAD` is a merge commit whose FIRST
+    PARENT is the base side; `HEAD^1` is therefore the exact point the merge was taken from and is
+    correct BY CONSTRUCTION however long the job waited in the queue. `git diff HEAD^1...HEAD` (or
+    the merge-base of `HEAD^1` and `HEAD`) replaces `"${BASE_SHA}"...HEAD` at every site.
+
+    (ii) FIX ALL SEVEN OR THE DEFECT SURVIVES WHERE IT IS HARDEST TO SEE. The two `diff-coverage`
+    sites produce a loud red; `lint-plan`, `mutation-ratchet`, `containment-probe` and the §8A
+    net-byte arm produce a WIDER measurement that usually still passes, so they degrade silently
+    and would keep the defect alive after the obvious half is repaired.
+
+    (iii) THE PUSH-EVENT PATH MUST KEEP WORKING. `base.sha` is empty on a push, which every site
+    already handles by skipping. `HEAD^1` does not exist on a non-merge commit either, so the
+    replacement must degrade the same way rather than erroring — the existing
+    `[ "${GITHUB_EVENT_NAME}" = "pull_request" ] || exit 0` guards stay, and the falsifier covers
+    the push case explicitly.
+
+    (iv) THE FALSIFIER IS A TWO-TREE COMPARISON, NOT AN ASSERTION ABOUT ONE. Build a base, a PR
+    branch off it, and a SECOND commit merged into the base afterwards; take the diff both ways.
+    The stale form must report the intervening commit's files, the fixed form must not. A test
+    that only checked the fixed form would pass against the current workflow too.
+
+    (v) NOT A RE-RUN HEURISTIC, AND NOT A RETRY. Nothing here should detect drift and re-run; the
+    diff is simply taken from the correct point the first time.
+  acceptance:
+    - claim: a diff taken from the merge commit's first parent excludes commits merged into the base after the PR opened, where a diff from the webhook's base.sha attributes them to the PR
+      proof: "unit test: test/a-moving-base-attributes-another-lanes-lines.test.ts"
+    - claim: a plan-only diff still classifies as PLAN_ONLY when unrelated commits have landed on the base, so the fast lane skips diff-coverage as designed
+      proof: "unit test: test/a-moving-base-attributes-another-lanes-lines.test.ts"
+    - claim: the push-event path is unchanged — with no pull_request payload every affected step still skips rather than erroring on a base that does not exist
+      proof: "unit test: test/a-moving-base-attributes-another-lanes-lines.test.ts"
+    - claim: no ci.yml step computes a diff from github.event.pull_request.base.sha any more, so the quiet consumers are fixed with the loud ones
+      proof: "grep: HEAD\\^1 in .github/workflows/ci.yml"
+  falsifier: |
+    Close without implementation if a diff from `github.event.pull_request.base.sha` cannot in fact
+    attribute another lane's commits — reproduce by opening a PR, merging an unrelated commit to
+    main, and re-running: if `pr.diff` contains only the PR's own files, the premise is wrong.
+
+    A change that fixes only the two `diff-coverage` sites does NOT satisfy this task: the
+    remaining five keep measuring a wider set, silently, and `lint-plan` is a blocking gate among
+    them.
+
+    A change that makes any step RE-RUN, retry, or detect-and-recompute on drift does not satisfy
+    it either. The requirement is to diff from the correct point once, not to notice afterwards
+    that the wrong point was used.

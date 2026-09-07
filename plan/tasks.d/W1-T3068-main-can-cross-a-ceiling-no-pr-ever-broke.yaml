@@ -1,0 +1,59 @@
+- id: W1-T3068
+  title: "MAIN CAN CROSS AN ABSOLUTE CEILING THAT NO PULL REQUEST EVER BROKE, AND NOTHING MEASURES IT — every ratchet job in ci.yml is pull_request-only, so the first symptom is N open PRs red on a breach none of them caused: measure the absolute ceilings against main on push"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  origin: "session 2026-09-07 — diagnosed while clearing a board where four PRs were red on one inherited breach"
+  plan_refs: ["W1-T2488", "W1-T1033"]
+  rationale: |
+    (1) THE DEFECT IS AN ARITHMETIC ONE, NOT A GATE BUG. `source-size-ratchet` enforces an ABSOLUTE
+    per-file LINE ceiling. Its job in `ci.yml` carries `if: github.event_name == 'pull_request'`, so
+    it measures a PR head and nothing measures the branch those heads merge into. That is correct for
+    a DIFF-SCOPED gate -- `lint-plan` and `task-id-existence` ask questions that only exist relative
+    to a base. It is NOT correct for an absolute ceiling, because two PRs can each sit UNDER the
+    ceiling, both go green, and their SUM cross it on merge. No pull request is wrong. main is.
+
+    (2) MEASURED, WITH THE CONTRADICTION THAT PROVES IT. At origin/main c8a5c5e8e,
+    `npm run source-size-ratchet` read `src/run-task.ts: 40516 lines > baseline 40500`. ci.yml's
+    push-event run FOR THAT SAME SHA reported SUCCESS. Both are true: the gate that would have caught
+    it did not run, because it is pull_request-only. The two readings disagree only because they
+    measure different things.
+
+    (3) THE COST LANDS ON EVERYONE EXCEPT THE CAUSE. 2026-09-07: four open pull requests -- #4475,
+    #4484, #4485, #4487 -- went red on `source-size` for a breach none of them introduced. Three
+    touched no source file at all (two were plan-only). The ratchet is honest about it in its own
+    output ("INHERITED, not introduced by this diff. Every open pull request sees"), which is what
+    makes the failure so expensive: it is correctly reported and attributed to the wrong PRs, and it
+    is cleared only when a human notices and records the ceiling by hand. Fixing main does not
+    retro-clear them either; each stale red needs a re-run.
+
+    (4) THE FIX IS A SIGNAL, NOT A GATE, AND THAT IS THE DESIGN. A push-only job measures the
+    absolute ceilings against main itself. It blocks nothing -- there is nothing left to block once a
+    merge has landed -- and it exists to fail AT THE MERGE THAT CAUSED THE DRIFT, where the cause is
+    still attributable, instead of surfacing later as N red PRs with no owner.
+
+    (5) IT MUST NEVER BECOME A REQUIRED CHECK, and the job's own comment says so. It is SKIPPED on
+    every pull_request event, and ci.yml's INVARIANT 2 states that a required check which goes
+    SKIPPED deadlocks merges exactly as hard as a failing one. Requiring this name would deadlock
+    every PR permanently. A test pins that it never claims to run on pull requests.
+
+    (6) TWO INVARIANTS THE SUITE PINS BECAUSE THEY ARE THE WAYS THIS ROTS. A failing ceiling must not
+    SHORT-CIRCUIT the rest -- a `&&` chain would report one file while several are over, which reads
+    as a smaller problem than it is. And every ceiling measured on main must ALSO be measured on
+    pull requests: one enforced on PRs but not main reopens this defect, and one enforced on main but
+    not on PRs would red the branch with no way to fix it before merging. Both lists are derived from
+    the workflow itself rather than a second hand-kept roster.
+
+  acceptance:
+    - claim: "the absolute ceilings are measured against main on the event that produced the drift"
+      proof: "unit test: test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts"
+    - claim: "a failing ceiling does not mask the ones measured after it"
+      proof: "grep: main-ceiling-drift: \\${gate} BLOCKED on main itself in .github/workflows/ci.yml"
+    - claim: "the job is push-only, so requiring its name could never deadlock a pull request"
+      proof: "unit test: test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts"
+  files: [.github/workflows/ci.yml, test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts]
+  status: queued

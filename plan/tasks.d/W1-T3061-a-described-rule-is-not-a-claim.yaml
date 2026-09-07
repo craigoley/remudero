@@ -1,0 +1,100 @@
+- id: W1-T3061
+  title: "A PR BODY THAT DESCRIBES THE PLAN-ONLY RULE IS REFUSED FOR CLAIMING IT — `recognizeChangesetClaims` reads the copular form inside `refused UNLESS the PR is plan-only`, and the attributive form in a hypothetical `a very large plan-only diff`, as this changeset's own assertion"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files: [src/lib/review.ts, test/a-described-rule-is-not-a-claim.test.ts]
+  origin: "operator-session#two-false-review-refusals-2026-09-07"
+  plan_refs: ["W1-T2549", "W1-T2534", "W1-T2533", "W1-T2679", "W1-T308"]
+  status: queued
+  attempts: 0
+  rationale: |
+    TWO PRs REFUSED IN ONE AFTERNOON, EACH AFTER A FULL CI CYCLE, NEITHER MAKING THE CLAIM.
+    `remudero-review` reported `body contradicts its own diff: claimed "plan-only"` on #4450 and
+    again on #4457. Both bodies were accurate about their own diffs; both merged unchanged in
+    substance once ONE mention was marked as a quotation.
+
+    MEASURED against `recognizeChangesetClaims` on `origin/main` 2026-09-07, five bodies over the
+    same two-file changeset:
+
+      REFUSED  "A shard is refused unless the PR is plan-only."      <- states the RULE
+      REFUSED  "1020 files is a very large plan-only diff."          <- a HYPOTHETICAL run
+      clean    "Depends on #4454, which files the shard plan-only."  <- about ANOTHER PR
+      REFUSED  "This PR is plan-only."                               <- CONTROL: a real false claim
+      clean    "... unless the whole diff is `plan-only`."           <- the same mention, quoted
+
+    The control is the point: the check IS doing its job on a genuine false claim, and the
+    third row shows the predicate already distinguishes some non-assertions. These are two
+    specific gaps, not a broken check.
+
+    THE TWO SHAPES, AND WHY EACH SLIPS THROUGH.
+      COPULAR-UNDER-A-CONDITIONAL. `SELF_REFERENTIAL_CLAIM_RE` looks for a linking verb
+      IMMEDIATELY before the shorthand, which "the PR is plan-only" satisfies exactly. The
+      subordinator that makes it hypothetical — `unless`, and equally `if`/`when`/`only when` —
+      sits in front of the whole clause, where an immediate-predecessor read cannot see it. The
+      existing `DENIED_ATTRIBUTIVE_RE`/`DENIED_LABEL_ANSWER_RE` handle NEGATION at that position
+      already; a conditional is the same class of qualifier and has no equivalent.
+
+      ATTRIBUTIVE-ON-A-HYPOTHETICAL. `SHORTHAND_HEAD_NOUN_RE` requires the modified noun to be a
+      changeset word, which `diff` in "a very large plan-only diff" is. But the sentence's SUBJECT
+      is "1020 files" under a `--write` the author is declining to run — a diff that does not
+      exist. The head-noun read is correct about the noun and wrong about which changeset it names.
+
+    THE COST IS A FULL REVIEW CYCLE AND IT LANDS ON EXACTLY THE WRONG PRs. A body is most likely
+    to quote the plan-only rule when the PR is ABOUT that rule: #4450 built `rule15-precheck`,
+    whose entire subject is the split the sentence describes. The check refuses the change that
+    strengthens the very rule it is enforcing.
+  design: |
+    (i) A QUALIFIER IN FRONT OF THE CLAUSE IS NOT AN ASSERTION, and negation is the precedent.
+    W1-T2533 already added `DENIED_ATTRIBUTIVE_RE` and `DENIED_LABEL_ANSWER_RE` so that "this is
+    NOT a plan-only change" reads as a denial rather than a claim. A CONDITIONAL sits in the same
+    position and does the same thing to the assertion: extend the same mechanism to a small,
+    enumerated set of subordinators rather than inventing a second one.
+
+    (ii) ENUMERATED, NEVER INFERRED. A closed list (`unless`, `if`, `when`, `whenever`, `only
+    when`, `provided`) keeps the widening auditable and keeps the failure direction safe: a
+    subordinator not on the list leaves today's behaviour exactly as it is, so nothing that
+    refuses now silently stops refusing.
+
+    (iii) THE ATTRIBUTIVE HALF NEEDS THE SUBJECT, NOT A LONGER FORWARD SCAN. "a very large
+    plan-only diff" is a real changeset noun; what makes it not-this-PR is the subject in front of
+    it. The narrowest honest fix is to treat the attributive form as a claim only when the noun
+    phrase is not already governed by a determiner naming something else ("a", "another",
+    "1020 files is a ...") — and where that cannot be decided, to KEEP REFUSING, because a false
+    refusal costs a cycle while a false pass costs the guarantee.
+
+    (iv) THE INLINE-QUOTE ESCAPE STAYS AND IS DOCUMENTED WHERE AUTHORS WILL FIND IT. W1-T2534's
+    `isInsideInlineQuote` already makes a marked mention silent, and that is the remedy both PRs
+    used. It is currently discoverable only by reading review.ts; the refusal message should name
+    it, so an author who hits this can act without reading the parser.
+
+    (v) EVERY EXISTING REFUSAL MUST SURVIVE. The suite carries the four bodies measured above plus
+    the control, and the control is what makes the rest meaningful: "This PR is plan-only." on a
+    src-touching diff must still be refused after the change.
+  acceptance:
+    - claim: a body stating the rule conditionally — refused unless the PR is plan-only — is no longer read as this changeset's own claim
+      proof: "unit test: test/a-described-rule-is-not-a-claim.test.ts"
+    - claim: a body describing a hypothetical diff it is declining to produce is not read as describing this one
+      proof: "unit test: test/a-described-rule-is-not-a-claim.test.ts"
+    - claim: a genuine false claim — This PR is plan-only on a diff touching src — is STILL refused, so the widening removed no guarantee
+      proof: "unit test: test/a-described-rule-is-not-a-claim.test.ts"
+    - claim: the refusal names the inline-quote escape, so an author can mark a mention without reading the parser
+      proof: "unit test: test/a-described-rule-is-not-a-claim.test.ts"
+  falsifier: |
+    Close without implementation if `recognizeChangesetClaims` already distinguishes these two
+    shapes — drive it over the five bodies in the rationale; if only the control refuses, the
+    premise is wrong and nothing needs changing.
+
+    A change that makes the plan-only check refuse LESS in general does not satisfy this task. The
+    control ("This PR is plan-only." over a src-touching diff) must still be refused, and a
+    diff that removes it, weakens it, or makes it conditional has traded a false refusal for a
+    false pass — the more expensive direction, since a false pass merges.
+
+    Widening by matching any subordinator, or by scanning further forward from the shorthand, does
+    not satisfy it either: W1-T2549 records that a second, differently-shaped implementation is
+    how these arms drifted apart the first time.

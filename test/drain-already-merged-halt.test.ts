@@ -108,6 +108,7 @@ function verdictsFromSource(): string[] {
 const HALTS: Record<string, boolean> = {
   merged: false,
   already_satisfied: false,
+  awaiting_merge: false,
   blocked_ci: false,
   no_pr: false,
   blocked_illformed: false,
@@ -139,7 +140,7 @@ test("the halt set is EXHAUSTIVE over RunResult's own verdict union — a new ve
   );
 });
 
-test("haltsDrain: exactly four non-merged verdicts continue the drain; every other one still stops it", () => {
+test("haltsDrain: exactly five non-merged verdicts continue the drain; every other one still stops it", () => {
   for (const [verdict, shouldHalt] of Object.entries(HALTS)) {
     const isMergedResult = verdict === "merged" || verdict === "already_satisfied";
     assert.equal(
@@ -150,7 +151,13 @@ test("haltsDrain: exactly four non-merged verdicts continue the drain; every oth
   }
   // The membership itself, stated: emptying the set would satisfy every "no longer halts"
   // assertion in this file while destroying the guarantee the halting tests below hold.
-  assert.deepEqual([...NON_HALTING_VERDICTS].sort(), ["blocked_ci", "blocked_illformed", "no_pr", "task_already_merged"]);
+  assert.deepEqual([...NON_HALTING_VERDICTS].sort(), [
+    "awaiting_merge",
+    "blocked_ci",
+    "blocked_illformed",
+    "no_pr",
+    "task_already_merged",
+  ]);
 });
 
 // ── the fixture really has work behind A ───────────────────────────────────────────────────
