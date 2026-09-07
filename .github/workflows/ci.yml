@@ -1016,8 +1016,10 @@ jobs:
           cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
-      - name: Task-id existence check (every cited id resolves; no declared id collides with main)
-        run: npm run --silent task-id-existence:check
+      - name: Task-id existence check (cited ids resolve; no id collides with main OR an open PR — W1-T3055 supplies the token that half needs; docs/forensics/task-id-existence-check.md)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: npm run --silent task-id-existence:check -- --require-open-prs
 
   source-size:
     # SOURCE-SIZE ratchet — a per-file LINE ceiling, the same shape as the comment-load and
