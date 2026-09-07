@@ -1294,8 +1294,7 @@ export function execWhitelistedProof(
   if (whitelisted.kind === "test") {
     ensureDeps(cwd);
     // Same "only when we are actually going to run node" placement as ensureDeps: a `grep` proof never launches a
-    // browser. Resolved test files that import no browser driver skip the CDN-facing preflight; unresolved/unknown
-    // sets still install, preserving the safe direction from the false-FAIL incident this closes (#892).
+    // browser. Resolved files importing no browser driver skip the CDN-facing preflight; unknown sets still install.
     if (preflightFiles === undefined || preflightFiles.length === 0 || resolvedTestFilesNeedBrowserPreflight(cwd, preflightFiles)) {
       (deps.preflightBrowsers ?? ensureBrowsersOnce)(cwd);
     }
