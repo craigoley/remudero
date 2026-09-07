@@ -8,11 +8,11 @@ import type { Escalation } from "./escalate.js";
  * UNMERGEABLE — fail-closed, but FROZEN, never even surfaced as actionable. This
  * module is a SECOND deterministic judge (alongside lib/review.ts's task-acceptance
  * judge), scoped to Dependabot PRs: no LLM, ever, and its only write paths are (a)
- * the `remudero-review` commit status and (b) a MANUAL escalation issue for majors
+ * the `remudero-review` commit status and (b) durable migration feedback for majors
  * (both posted by the run-task.ts CLI wiring — this module decides, it never
  * shells out).
  *
- * THE THREE-WAY VERDICT is a PURE function ({@link decideDepReview}) so each
+ * THE FIVE-WAY VERDICT is a PURE function ({@link decideDepReview}) so each
  * branch is a unit fixture, proven over RECORDED Dependabot PRs (live #80/#81 on
  * this repo), before any gate depends on it:
  *   - REFUSE   — not authored by Dependabot, or the diff touches a file outside
@@ -21,16 +21,16 @@ import type { Escalation } from "./escalate.js";
  *     posted: identical to today's silence, but now a DELIBERATE outcome.
  *   - ARM      — a confined minor/patch bump with every required gate green: post
  *     remudero-review=success and arm auto-merge.
- *   - ESCALATE — a MAJOR bump, or one whose level cannot be determined (fail
- *     closed — MASTER-PLAN §5 FLEET FINDING: a 28-minute production outage once
- *     rode in on an unvetted major). Post remudero-review=failure (so the PR
- *     stays blocked — NO auto-merge) and open a MANUAL needs-human issue carrying
- *     the release notes, via the SHIPPED escalate() path (lib/escalate.ts, W1-T8).
+ *   - MIGRATE  — a parseable MAJOR bump. Capture a durable feedback entry for
+ *     the migration, then tell Dependabot to ignore this major proposal and close
+ *     the PR without deleting its branch. No status is posted and no auto-merge is armed.
+ *   - ESCALATE — an unparseable bump, or a major whose dependency identity cannot
+ *     be safely extracted. Fail closed via the existing MANUAL escalation path.
  *
- * A fourth outcome, HOLD, covers an otherwise-good PR whose required checks are
- * not yet green (still running, or genuinely red): nothing is posted and the
- * caller tries again later — mirrors run-task.ts's waitForCiGreen/pollToGate,
- * where pending is never treated as pass.
+ * HOLD covers an otherwise-good minor/patch PR whose required checks are not
+ * yet green (still running, or genuinely red): nothing is posted and the caller
+ * tries again later — mirrors run-task.ts's waitForCiGreen/pollToGate, where
+ * pending is never treated as pass.
  */
 
 // ── Author ───────────────────────────────────────────────────────────────
@@ -94,6 +94,105 @@ export function parseVersionBumps(text: string): SemverLevel[] {
  * dependency bumps.
  */
 const DEPENDABOT_SUMMARY_LINE_RE = /^\s*(?:Updates|Bumps)\b/i;
+/** EXPORTED FOR ITS OWN FIXTURE. negative-reachability-ratchet requires a regex surface to be
+ *  driven directly with BOTH arms asserted — a match and a non-match — rather than only through a
+ *  caller, because a caller that happens to work proves nothing about where the pattern stops.
+ *  Not "structurally total": it legitimately does not match an unprefixed line, and that no-op is
+ *  the arm the fixture exists to pin. */
+export const CONVENTIONAL_TITLE_PREFIX_RE = /^\s*[a-z][\w-]*(?:\([\w./-]+\))?!?:\s*/i;
+const DEPENDENCY_VERSION = String.raw`v?(\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?)`;
+
+export interface DepReviewBumpFact {
+  dependency: string;
+  fromVersion: string;
+  toVersion: string;
+  level: SemverLevel;
+  targetMajor: number | null;
+}
+
+function dependencyBumpFact(dependency: string, fromVersion: string, toVersion: string): DepReviewBumpFact {
+  const parsedTarget = parseVersion(toVersion);
+  return {
+    dependency: dependency.trim(),
+    fromVersion,
+    toVersion,
+    level: bumpLevel(fromVersion, toVersion),
+    targetMajor: parsedTarget ? parsedTarget[0] : null,
+  };
+}
+
+function parseDependabotBumpFactLine(line: string): DepReviewBumpFact[] {
+  const text = line.replace(CONVENTIONAL_TITLE_PREFIX_RE, "").trim();
+  const patterns = [
+    new RegExp(String.raw`^Updates\s+\`([^\`]+)\`\s+from\s+${DEPENDENCY_VERSION}\s+to\s+${DEPENDENCY_VERSION}`, "i"),
+    new RegExp(String.raw`^Bumps\s+\[([^\]]+)\]\([^)]+\)\s+from\s+${DEPENDENCY_VERSION}\s+to\s+${DEPENDENCY_VERSION}`, "i"),
+    new RegExp(String.raw`^Bumps?\s+\`([^\`]+)\`\s+from\s+${DEPENDENCY_VERSION}\s+to\s+${DEPENDENCY_VERSION}`, "i"),
+    new RegExp(String.raw`^Bumps?\s+([^\s,]+)\s+from\s+${DEPENDENCY_VERSION}\s+to\s+${DEPENDENCY_VERSION}`, "i"),
+  ];
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (m) return [dependencyBumpFact(m[1], m[2], m[3])];
+  }
+  return [];
+}
+
+/**
+ * Dependency/version facts parsed only from Dependabot's own summary surfaces: the PR title and
+ * anchored body summary lines. These facts are stricter than {@link overallSemverLevel}: a
+ * parseable version pair without a dependency identity is not enough to dedupe migration work.
+ */
+export function parseDependabotBumpFacts(title: string, body: string): DepReviewBumpFact[] {
+  const seen = new Set<string>();
+  const facts: DepReviewBumpFact[] = [];
+  for (const line of [title, ...body.split("\n").filter((l) => DEPENDABOT_SUMMARY_LINE_RE.test(l))]) {
+    for (const fact of parseDependabotBumpFactLine(line)) {
+      const key = `${fact.dependency}\0${fact.fromVersion}\0${fact.toVersion}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      facts.push(fact);
+    }
+  }
+  return facts;
+}
+
+export function majorMigrationBumps(title: string, body: string): DepReviewBumpFact[] {
+  return parseDependabotBumpFacts(title, body).filter((b) => b.level === "major" && b.targetMajor !== null);
+}
+
+export function depReviewMigrationSubmissionKey(owner: string, repo: string, bumps: DepReviewBumpFact[]): string {
+  const targets = bumps
+    .map((b) => `${b.dependency.trim().toLowerCase()}@${b.targetMajor}`)
+    .sort()
+    .join(",");
+  return `dep-review:migration:${owner.trim().toLowerCase()}/${repo.trim().toLowerCase()}:${targets}`;
+}
+
+export const DEPENDABOT_IGNORE_MAJOR_COMMAND = "@dependabot ignore this major version";
+
+export function renderDepReviewMigrationFeedback(args: {
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  body: string;
+  bumps: DepReviewBumpFact[];
+  redChecks: string[];
+}): string {
+  return [
+    `Migrate dependency major proposed by Dependabot PR #${args.prNumber}: ${args.title}`,
+    "",
+    "Dependabot proposed a parseable semver-major dependency update. rmd must migrate the",
+    "runtime, manifests, source, and tests together on an owned task branch instead of holding",
+    "the bot PR open or editing Dependabot's branch.",
+    "",
+    `PR: ${args.prUrl}`,
+    `Major target(s): ${args.bumps.map((b) => `${b.dependency} ${b.fromVersion} -> ${b.toVersion}`).join(", ")}`,
+    `Red checks observed on the proposal: ${args.redChecks.length > 0 ? args.redChecks.join(", ") : "none"}`,
+    "",
+    "Dependabot proposal body:",
+    "",
+    args.body.trim().length > 0 ? args.body.trim() : "(empty body)",
+  ].join("\n");
+}
 
 /**
  * Parse version bumps ONLY from Dependabot's own summary lines, never from the
@@ -114,10 +213,10 @@ export function parseAnchoredVersionBumps(text: string): SemverLevel[] {
 /**
  * The PR's overall semver level across its title + body: the WORST (highest-risk)
  * constituent bump wins — major beats unknown beats minor beats patch. A grouped
- * PR with even ONE major constituent escalates the WHOLE PR (fail closed; Standing
- * rules 2/4 — never split the difference on a mixed-risk group). No parseable
- * bump anywhere is `unknown` — also fail-closed, handled the same as `major` by
- * {@link decideDepReview}.
+ * PR with even ONE major constituent classifies the WHOLE PR as major (fail
+ * closed; Standing rules 2/4 — never split the difference on a mixed-risk
+ * group). No parseable bump anywhere is `unknown`, which still reaches manual
+ * escalation in {@link decideDepReview}.
  *
  * The TITLE is parsed whole (a one-line Dependabot-authored string); the BODY is
  * parsed via {@link parseAnchoredVersionBumps} only — its non-summary lines are
@@ -217,9 +316,9 @@ export function redChecks(checks: DepReviewCheck[]): string[] {
     .map((c) => c.name ?? c.context ?? "unknown");
 }
 
-// ── The three(+one)-way verdict ──────────────────────────────────────────
+// ── The five-way verdict ─────────────────────────────────────────────────
 
-export type DepReviewDecision = "arm" | "escalate" | "refuse" | "hold";
+export type DepReviewDecision = "arm" | "escalate" | "refuse" | "hold" | "migrate";
 
 export interface DepReviewInput {
   author: DepReviewAuthor;
@@ -234,6 +333,7 @@ export interface DepReviewResult {
   semverLevel: SemverLevel;
   offendingFiles: string[];
   redChecks: string[];
+  migrationBumps: DepReviewBumpFact[];
   reason: string;
 }
 
@@ -241,13 +341,14 @@ export interface DepReviewResult {
  * The pure verdict function. Order matters and is FAIL-CLOSED throughout: author
  * and diff-confinement are checked before anything else (a REFUSE never even asks
  * whether the gates are green — nothing is posted for a PR this lane should never
- * have opinions on), then gate health, then the semver-level branch. See the
- * module doc for what each of the four decisions means.
+ * have opinions on), then parseable major migrations before gate health. See the
+ * module doc for what each decision means.
  */
 export function decideDepReview(input: DepReviewInput): DepReviewResult {
   const semverLevel = overallSemverLevel(input.title, input.body);
   const offending = offendingFiles(input.diff);
   const red = redChecks(input.checks);
+  const migrationBumps = majorMigrationBumps(input.title, input.body);
 
   if (!isDependabotAuthor(input.author)) {
     return {
@@ -255,6 +356,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       semverLevel,
       offendingFiles: offending,
       redChecks: red,
+      migrationBumps,
       reason: `author '${input.author.login}' is not dependabot[bot] — this lane reviews Dependabot PRs only`,
     };
   }
@@ -264,16 +366,20 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       semverLevel,
       offendingFiles: offending,
       redChecks: red,
+      migrationBumps,
       reason: `diff touches file(s) outside the manifest/lockfile allowlist: ${offending.join(", ")}`,
     };
   }
-  if (red.length > 0) {
+  if (semverLevel === "major" && migrationBumps.length > 0) {
     return {
-      decision: "hold",
+      decision: "migrate",
       semverLevel,
       offendingFiles: offending,
       redChecks: red,
-      reason: `required check(s) not green: ${red.join(", ")}`,
+      migrationBumps,
+      reason: `MAJOR dependency proposal requires rmd-owned migration: ${migrationBumps
+        .map((b) => `${b.dependency} ${b.fromVersion}->${b.toVersion}`)
+        .join(", ")}`,
     };
   }
   if (semverLevel === "major" || semverLevel === "unknown") {
@@ -282,10 +388,21 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       semverLevel,
       offendingFiles: offending,
       redChecks: red,
+      migrationBumps,
       reason:
         semverLevel === "major"
-          ? "MAJOR version bump — excluded from auto-merge at the dep-review lane (MASTER-PLAN §5 FLEET FINDING)"
+          ? "MAJOR version bump parsed without a stable dependency identity — fail closed, treated like unparseable"
           : "semver level could not be determined from the PR title/body — fail closed, treated like a major",
+    };
+  }
+  if (red.length > 0) {
+    return {
+      decision: "hold",
+      semverLevel,
+      offendingFiles: offending,
+      redChecks: red,
+      migrationBumps,
+      reason: `required check(s) not green: ${red.join(", ")}`,
     };
   }
   return {
@@ -293,6 +410,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
     semverLevel,
     offendingFiles: offending,
     redChecks: red,
+    migrationBumps,
     reason: `${semverLevel} bump, confined to manifests, gates green — safe to auto-merge`,
   };
 }
