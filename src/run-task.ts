@@ -449,6 +449,7 @@ import {
   checkRetroIntegrity,
   codeFilesInDiff,
   evaluateRetroTrigger,
+  gatePromotionCandidatesBeforeRanking,
   gatherRuns,
   loadMastMapping,
   mineFollowups,
@@ -21795,16 +21796,17 @@ export async function promotionProposalSectionFor(opts: {
     }
     const load = opts.loadCorpus ?? loadLearningsCorpus;
     const loaded = load(opts.corpusDir);
-    const entries = selectPromotionCycleEntries(loaded, opts.maxEntriesPerCycle ?? DEFAULT_PROMOTION_MAX_ENTRIES_PER_CYCLE);
+    const gated = gatePromotionCandidatesBeforeRanking(loaded, opts.log);
+    const entries = selectPromotionCycleEntries(gated.accepted, opts.maxEntriesPerCycle ?? DEFAULT_PROMOTION_MAX_ENTRIES_PER_CYCLE);
     const pass = await runPromotionPass(entries, {
       judge: opts.judge,
       log: opts.log,
       confidenceThreshold: opts.confidenceThreshold,
     });
     return `\n\n${renderPromotionProposals({
-      corpusSize: entries.length,
+      corpusSize: entries.length + gated.refused.length,
       ranPass: true,
-      results: pass.results,
+      results: [...gated.refused.map((r) => r.result), ...pass.results],
       confidenceThreshold: opts.confidenceThreshold,
     })}`;
   } catch (e) {
