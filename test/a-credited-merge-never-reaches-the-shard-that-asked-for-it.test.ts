@@ -231,6 +231,48 @@ test("W1-T3043 (wiring): with NO projection injected the REAL default runs — p
   }
 });
 
+test("W1-T3043 (wiring): with NO readShards injected, the REAL reader walks a directory", async () => {
+  // The SECOND default seam in this command, unreachable for the same reason as the first: every
+  // other case injects `readShards`. Driven through `--plan <dir>` so it walks a real fixture
+  // tree and touches neither the repo nor plan/tasks.d. The directory deliberately holds all
+  // three cases the reader distinguishes — a shard with an `- id:`, a .yaml WITHOUT one, and a
+  // non-.yaml file — so the skip arms are exercised, not just the happy path.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-reconcile-shards-"));
+  const written: string[] = [];
+  try {
+    writeFileSync(join(dir, "W1-T1234.yaml"), shard(), "utf8");
+    writeFileSync(join(dir, "no-id.yaml"), "title: has no id line\n", "utf8");
+    writeFileSync(join(dir, "README.md"), "not a shard\n", "utf8");
+    const code = await planReconcileCommand(["--plan", dir, "--write"], {
+      creditedMergedIds: () => new Set(["W1-T1234"]),
+      writeShard: (path) => written.push(path),
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(
+      written,
+      [join(dir, "W1-T1234.yaml")],
+      "the real reader must have found the id-bearing shard, and skipped the id-less .yaml and the non-.yaml",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3043 (wiring, falsifier): AN UNREADABLE SHARD DIRECTORY EXITS 2 AND NEVER REACHES THE PROJECTION", async () => {
+  // The catch arm of that same seam. Reached by pointing --plan at a directory that does not
+  // exist, so the REAL `readdirSync` throws — no injected thrower, so the arm is proved by the
+  // failure it actually handles. `creditedMergedIds` throws too: if the command reached it, the
+  // exit code would be 1, so exit 2 also proves the abort happens BEFORE the projection.
+  const missing = join(tmpdir(), `rmd-reconcile-absent-${Date.now()}`);
+  const written: string[] = [];
+  const code = await planReconcileCommand(["--plan", missing], {
+    creditedMergedIds: () => { throw new Error("must not be reached"); },
+    writeShard: (path) => written.push(path),
+  });
+  assert.equal(code, 2, "an unreadable shard directory is a usage-level abort, not a projection failure");
+  assert.equal(written.length, 0);
+});
+
 test("W1-T3043 (wiring, falsifier): AN UNREADABLE PROJECTION ABORTS AND WRITES NOTHING", async () => {
   // Treating a failed credit read as "nothing merged" would be silently safe but would report a
   // count derived from a failed read as if it were a finding.
