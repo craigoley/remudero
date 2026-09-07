@@ -25,6 +25,8 @@ import {
   renderReconcileCloseComment,
   renderRepeatEscalationQuestion,
   renderSweepSummary,
+  type Disposition,
+  type SweepSummary,
   runCreditBackfill,
   runEscalationReconcile,
   runSweep,
@@ -4652,4 +4654,81 @@ test("W1-T2345: an ALREADY-escalated blocked-ambiguous PR still trips the repeat
   assert.equal(t.trips[0].disposition, "blocked-ambiguous");
   assert.equal(t.trips[0].streak, 3);
   assert.equal(third.escalated.length, 0, "W1-T2381: the repeat trip itself opens no issue — pass 1's was the only one");
+});
+
+// ── W1-T3027: the summary accounts for every open PR ────────────────────────────────────────────
+
+/*
+ * MEASURED against the live repo on 2026-09-07: `rmd sweep --dry-run` printed "11 open PR(s) · 0
+ * action(s) taken · mergeable 0 · blocked-fixable 2 · conflicted 0 · stale 0 · blocked-ambiguous 0".
+ * Every number true; nine of eleven PRs in no bucket the line prints, because it named five of the
+ * eight dispositions and omitted the three a healthy board mostly sits in. An operator asking
+ * whether the review lane is running — the question this repo's recurring remudero-review stall
+ * makes people ask — could not answer it from the one summary the verb emits.
+ */
+
+function summaryWith(byDisposition: Record<Disposition, number>, total: number): SweepSummary {
+  return { total, byDisposition, actionsTaken: 0, actionsFailed: 0, actions: [], noneCount: 0 };
+}
+
+test("W1-T3027: the summary names every disposition, so the counts sum to the open total", () => {
+  const line = renderSweepSummary(
+    summaryWith(
+      {
+        mergeable: 0,
+        "blocked-fixable": 2,
+        conflicted: 0,
+        stale: 0,
+        "blocked-ambiguous": 0,
+        "dep-review": 0,
+        "post-review": 9,
+        wait: 0,
+      },
+      11,
+    ),
+  );
+
+  // The three the old line dropped, with post-review carrying nine of the eleven.
+  assert.match(line, /post-review 9/, "the lane holding most of the board must be visible");
+  assert.match(line, /dep-review 0/);
+  assert.match(line, /wait 0/);
+  assert.match(line, /11 open PR\(s\)/);
+  assert.doesNotMatch(line, /UNACCOUNTED/, "these buckets sum to the total, so no residual is flagged");
+});
+
+test("W1-T3027: a residual is called out rather than left for the reader to subtract", () => {
+  const line = renderSweepSummary(
+    summaryWith(
+      {
+        mergeable: 0,
+        "blocked-fixable": 2,
+        conflicted: 0,
+        stale: 0,
+        "blocked-ambiguous": 0,
+        "dep-review": 0,
+        "post-review": 0,
+        wait: 0,
+      },
+      11,
+    ),
+  );
+  assert.match(line, /⚠️ 9 UNACCOUNTED/, "9 open PRs in no bucket is a counting defect, and must say so");
+});
+
+test("W1-T3027: every Disposition the union declares appears in the rendered line", () => {
+  // A census over the TYPE's own members, so a disposition added later cannot be silently omitted
+  // the way these three were — the exact defect this task exists to end.
+  const all: Disposition[] = [
+    "mergeable",
+    "blocked-fixable",
+    "stale",
+    "blocked-ambiguous",
+    "dep-review",
+    "post-review",
+    "conflicted",
+    "wait",
+  ];
+  const zeroes = Object.fromEntries(all.map((d) => [d, 0])) as Record<Disposition, number>;
+  const line = renderSweepSummary(summaryWith(zeroes, 0));
+  for (const d of all) assert.match(line, new RegExp(`${d} 0`), `${d} must be rendered`);
 });
