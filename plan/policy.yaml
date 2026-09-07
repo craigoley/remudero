@@ -1014,6 +1014,31 @@ ciLearningCadence:
     min: 1
     max: 24
 
+# W1-T2659's wipe-test cadence rung — its OWN row and marker
+# (state/last-wipe-test-cadence.json), not folded into measurementCadence, digestCadence,
+# boardReview or ciLearningCadence, so a short interval on one rung never drags another.
+#
+# DEFAULT OFF: one fire dispatches a real sandbox subject twice through the wipe-test pair core.
+# That is real budget spend, so it follows the opt-in posture of machine-writing/spending rungs,
+# not the safe-on posture of read-only report rows.
+#
+# 1440 / 1 matches the intended daily falsifier pulse while leaving the operator one switch to
+# enable it deliberately.
+wipeTestCadence:
+  enabled:
+    value: false
+    origin: "net-new"   # NOT safe-on: one fire spends two worker dispatches
+  minIntervalMinutes:
+    value: 1440
+    origin: "net-new"
+    min: 15
+    max: 1440
+  maxPerDay:
+    value: 1
+    origin: "net-new"
+    min: 1
+    max: 24
+
 retro:
   mergesThreshold:
     value: 25

@@ -149,6 +149,13 @@ export interface PolicyValues {
     minIntervalMinutes: number;
     maxPerDay: number;
   };
+  /** W1-T2659's wipe-test cadence rung — DEFAULTS OFF because one fire spends two worker
+   *  dispatches against the sandbox target. Its marker is independent from every other cadence. */
+  wipeTestCadence: {
+    enabled: boolean;
+    minIntervalMinutes: number;
+    maxPerDay: number;
+  };
   headroom: {
     curve: PolicyHeadroomRung[];
     reservePct: number;
@@ -260,6 +267,9 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "ciLearningCadence.enabled": "net-new",
   "ciLearningCadence.minIntervalMinutes": "net-new",
   "ciLearningCadence.maxPerDay": "net-new",
+  "wipeTestCadence.enabled": "net-new",
+  "wipeTestCadence.minIntervalMinutes": "net-new",
+  "wipeTestCadence.maxPerDay": "net-new",
   "retro.mergesThreshold": "lifted",
   "retro.daysThreshold": "lifted",
   "headroom.curve": "lifted",
@@ -580,6 +590,16 @@ export function validatePolicy(raw: unknown): Policy {
         maxPerDay: numberField("ciLearningCadence.maxPerDay", ciLearningRaw.maxPerDay, origin),
       }
     : { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 };
+  // W1-T2659's wipe-test cadence spends by dispatching the pair core twice, so absent defaults
+  // disabled like CI-learning rather than enabled like the read-only report rows.
+  const wipeTestRaw = raw.wipeTestCadence as Record<string, unknown> | undefined;
+  const wipeTestCadence = wipeTestRaw
+    ? {
+        enabled: booleanField("wipeTestCadence.enabled", wipeTestRaw.enabled, origin),
+        minIntervalMinutes: numberField("wipeTestCadence.minIntervalMinutes", wipeTestRaw.minIntervalMinutes, origin, bounds),
+        maxPerDay: numberField("wipeTestCadence.maxPerDay", wipeTestRaw.maxPerDay, origin),
+      }
+    : { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 };
   const retroMergesThreshold = numberField("retro.mergesThreshold", retroRaw.mergesThreshold, origin);
   const retroDaysThreshold = numberField("retro.daysThreshold", retroRaw.daysThreshold, origin);
 
@@ -651,6 +671,7 @@ export function validatePolicy(raw: unknown): Policy {
       digestCadence,
       boardReview,
       ciLearningCadence,
+      wipeTestCadence,
       headroom: { curve, reservePct, enabled: headroomEnabled },
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },
