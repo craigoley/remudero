@@ -270,7 +270,10 @@ test("headline: the failing count carries the split and the classifier's rule pr
       }),
     });
     assert.equal(exitCode, 1, "blocking violations must still exit 1 — the split is display only");
-    assert.match(stdout, /2 open failing \(1 with a merged implementation, 1 with none\)/);
+    // W1-T2736: the residue ids now print beside the count they summarise, inside the same
+    // parenthesis. The count itself is unchanged — that is what this suite pins — so the
+    // assertion keeps its exact prefix and admits the naming the split already computed.
+    assert.match(stdout, /2 open failing \(1 with a merged implementation, 1 with none: FIX-EVID-OPEN\)/);
     assert.match(
       stdout,
       /failing-split evidence: a Remudero-Task trailer or commit-subject citation on origin\/main/,

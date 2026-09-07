@@ -19929,6 +19929,53 @@ export function surfaceCorpusFrom(plan: Plan): DuplicateSurfaceCorpusEntry[] {
   return plan.tasks.map((t) => ({ id: t.id, files: t.files, status: t.status }));
 }
 
+/**
+ * W1-T2736 — NAME THE RESIDUE THE SPLIT ALREADY FOUND.
+ *
+ * `classifyFailingMergeEvidence` computes both arrays and the headline used only `.length` on
+ * each, so the line could say the residue was three ids and never which three. W1-T1260 measured
+ * what that cost: the check name is not a locator either (57 tasks carry a blocking
+ * `[declared-scope]`, two of them the residue), so locating them meant re-implementing the verb's
+ * own split by hand. The ids are already in memory; this prints them.
+ *
+ * DISPLAY ONLY. The failing count, the exit code and every pre-existing summary substring are
+ * untouched — this appends inside the existing parenthesis and never alters what precedes it.
+ *
+ * THE IDS PRINT WITH THE COUNT, NOT BESIDE IT, and that is deliberate: the summary is one
+ * `console.log` (stdout) while every violation row goes to stderr, so `cmd 2>&1 > f` separates
+ * them. Ids carried inside the count's own string inherit the count's stream.
+ */
+function formatLintResidueIds(without: readonly string[]): string {
+  if (without.length === 0) return "";
+  const named = without.slice(0, LINT_RESIDUE_NAME_CAP);
+  const truncated = without.length - named.length;
+  return `: ${named.join(", ")}${truncated > 0 ? `, +${truncated} more` : ""}`;
+}
+
+/**
+ * How many residue ids the headline names before truncating. PRIMARY CONTROL — this is the only
+ * thing governing the printed list's length, not a backstop behind some other limit. Small on
+ * purpose: the residue is the SIGNAL in this report (measured 2026-09-02: 1 genuinely open and
+ * failing id out of 160 named rows), so a run whose residue does not fit in one line is itself the
+ * finding, and `+N more` says so rather than flooding the summary the operator reads.
+ */
+const LINT_RESIDUE_NAME_CAP = 12;
+
+/**
+ * W1-T2736 — THE LIST MUST CARRY ITS OWN UNRELIABILITY OR IT IS WORSE THAN NO LIST, which is the
+ * register the split's own code already sets ("a wrong split is worse than no split").
+ *
+ * The split reads TWO of the four credit paths — a commit-subject citation and a commit-body
+ * trailer — and misses the two W1-T1260 measured as load-bearing: the PR-body trailer and the
+ * `run-<id>-<epoch>` head ref. On the three ids it examined when that was measured it was wrong on
+ * two (W1-T2 and W1-T326 are both credited). So these ids are where to START a credit check, never
+ * a verdict that work remains, and the line says exactly that.
+ */
+const LINT_RESIDUE_CAVEAT_LINE =
+  "\n  the named ids are a STARTING POINT for a credit check, never a verdict that work remains: " +
+  "this split reads 2 of 4 credit paths (commit-subject citation, commit-body trailer) and misses " +
+  "the PR-body trailer and the run-<id>-<epoch> head ref";
+
 /** The ids CREDITED as merged, from `projectPlan`'s batched projection — the GitHub-derived
  *  signal, NOT a `status:` field read. A shard that shipped keeps `status: queued` (nothing updates
  *  it on merge), so `status:` alone reports landed work as a live duplicate.
@@ -20345,11 +20392,14 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     try {
       const { dump, ref } = (deps.readMergeEvidenceLog ?? defaultMergeEvidenceLog)(repoRoot);
       const { withImpl, without } = classifyFailingMergeEvidence(failingTaskIds, dump);
-      failingSplit = ` (${withImpl.length} with a merged implementation, ${without.length} with none)`;
+      failingSplit =
+        ` (${withImpl.length} with a merged implementation, ${without.length} with none` +
+        `${formatLintResidueIds(without)})`;
       evidenceRuleLine =
         `\n  failing-split evidence: a Remudero-Task trailer or commit-subject citation on ${ref}, ` +
         `with chore(plan)/chore(triage)/chore(feedback)/docs(plan)/plan:/docs:/chore: filing ` +
-        `subjects excluded — a filing cites a task; it does not implement it`;
+        `subjects excluded — a filing cites a task; it does not implement it` +
+        (without.length > 0 ? LINT_RESIDUE_CAVEAT_LINE : "");
     } catch (e) {
       failingSplit = ` (merge-evidence unavailable: ${(e as Error).message})`;
     }
