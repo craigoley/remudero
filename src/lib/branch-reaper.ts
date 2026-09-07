@@ -286,12 +286,31 @@ export function readOrphanedHeadCount(
 
 // ── the PRUNE (W1-T3020) ─────────────────────────────────────────────────────────────────────────
 
-/** One deletable branch and the sha that makes its deletion reversible. */
+/** One deletable branch, the sha that makes its deletion reversible, and WHY `planBranchReap` put
+ *  it in `deletable` — the reason is what {@link withholdActiveBranches} weighs. */
 export interface BranchManifestEntry {
   readonly name: string;
   /** `"unknown"` when `git rev-parse` could not resolve the ref — see {@link pruneDeletableBranches}. */
   readonly sha: string;
+  /** `planBranchReap`'s own `reasons[name]`: `merged`, `merged_squash_patch_id_differs`,
+   *  `closed_unmerged`, `tip_in_main` or `patch_id_equivalent`. */
+  readonly reason: string;
 }
+
+/**
+ * THE TWO REASONS THAT REST ON NO PULL REQUEST AT ALL. `planBranchReap` reaches them when a branch
+ * has no PR and its commits are already in main — content-wise, deleting the ref loses nothing, and
+ * for the DRY RUN that is the whole question.
+ *
+ * FOR A DELETE IT IS NOT, because "no PR yet" and "no PR ever" are the same observation. A worker
+ * that has just cut `run-<taskId>-<epochMs>` from main and pushed it to claim the id has a tip that
+ * IS main's tip, no PR, and therefore lands in `deletable` — indistinguishable from a year-dead
+ * probe ref. `probe-ref-perm-16166` sat in the live deletable set on exactly this route. The
+ * distinction those two need is TIME, which is why {@link withholdActiveBranches} age-gates these
+ * two reasons and leaves the PR-decisive ones alone: a merged or closed PR is proof about the work,
+ * whatever the branch's age, and gating it would withhold branches that are genuinely finished.
+ */
+export const NO_PR_EVIDENCE_REASONS: readonly string[] = ["tip_in_main", "patch_id_equivalent"];
 
 export interface BranchPruneOutcome {
   readonly deleted: readonly string[];
@@ -354,4 +373,81 @@ export function pruneDeletableBranches(
   }
 
   return { deleted, skipped, failed };
+}
+
+/** A branch the prune declined to delete, and the sentence saying why. */
+export interface WithheldBranch {
+  readonly name: string;
+  readonly reason: string;
+}
+
+export interface ActiveBranchScreen {
+  readonly proceed: readonly BranchManifestEntry[];
+  readonly withheld: readonly WithheldBranch[];
+}
+
+/**
+ * THE LAST SCREEN BEFORE A DELETE: withhold anything that looks ACTIVE, on evidence gathered at
+ * PRUNE time rather than inherited from the classification.
+ *
+ * IT DOES NOT RE-CLASSIFY — it only ever REMOVES from the set `planBranchReap` produced, so the
+ * prune can still never delete something the dry run did not offer. Its two rules are the two ways
+ * a branch in that set can nonetheless be in use:
+ *
+ * (1) AN OPEN PR ON THE HEAD, RE-READ NOW. `prState` was folded during the classification, and two
+ *     things can go wrong with a value that old: the fold itself can be wrong (it was — a reused
+ *     branch name with ten merged PRs and one open folded to `merged` until W1-T3020 put `open`
+ *     first), and a PR can be opened in the seconds between the report and the delete. Re-reading
+ *     the open heads is one cheap call and is INDEPENDENT of the fold, so a second defect in that
+ *     path cannot also defeat this. A branch here is withheld whatever its reason says.
+ *
+ * (2) RECENT WORK ON NO-PR EVIDENCE. For {@link NO_PR_EVIDENCE_REASONS} the classification rests on
+ *     "no PR and the commits are in main", which a just-created worker branch satisfies exactly as
+ *     well as an abandoned one. Age is the only thing separating them, so a tip newer than the
+ *     bound is withheld — and so is a tip whose age could not be read at all, because an unknown
+ *     age is the case where being wrong deletes live work.
+ *
+ * A merged or closed PR is NOT age-gated: that PR is decisive evidence about the work itself, and
+ * gating it would withhold branches finished hours ago for no gain. MEASURED on the live repo: of
+ * 141 deletable, 7 had a tip newer than a day and every one of those carried a merged or closed PR.
+ */
+export function withholdActiveBranches(
+  manifest: readonly BranchManifestEntry[],
+  openPrHeads: ReadonlySet<string>,
+  tipAgeMs: (name: string) => number | undefined,
+  opts: { readonly minNoPrEvidenceAgeMs?: number } = {},
+): ActiveBranchScreen {
+  // A day. A dispatched build is bounded well under it, so this withholds an in-flight branch for
+  // its whole life while costing a finished one only a later run of the same verb.
+  const minAge = opts.minNoPrEvidenceAgeMs ?? 24 * 60 * 60 * 1000;
+  const proceed: BranchManifestEntry[] = [];
+  const withheld: WithheldBranch[] = [];
+
+  for (const entry of manifest) {
+    if (openPrHeads.has(entry.name)) {
+      withheld.push({ name: entry.name, reason: "an open pull request is on this head right now" });
+      continue;
+    }
+    if (NO_PR_EVIDENCE_REASONS.includes(entry.reason)) {
+      const age = tipAgeMs(entry.name);
+      if (age === undefined) {
+        withheld.push({
+          name: entry.name,
+          reason: `classified '${entry.reason}' (no pull request) and its tip age could not be read`,
+        });
+        continue;
+      }
+      if (age < minAge) {
+        withheld.push({
+          name: entry.name,
+          reason: `classified '${entry.reason}' (no pull request) and its tip is ${Math.round(age / 3600000)}h old — ` +
+            `newer than the ${Math.round(minAge / 3600000)}h bound, so a just-started worker branch cannot be ruled out`,
+        });
+        continue;
+      }
+    }
+    proceed.push(entry);
+  }
+
+  return { proceed, withheld };
 }

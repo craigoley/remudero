@@ -17,7 +17,7 @@ import { test } from "node:test";
 import { pruneDeletableBranches, type BranchManifestEntry } from "../src/lib/branch-reaper.js";
 
 function entries(...names: string[]): BranchManifestEntry[] {
-  return names.map((name, i) => ({ name, sha: `${String(i).repeat(40)}`.slice(0, 40) }));
+  return names.map((name, i) => ({ name, sha: `${String(i).repeat(40)}`.slice(0, 40), reason: "merged" }));
 }
 
 /** Records every argv it is handed, so a test asserts on what was ACTUALLY pushed. */
@@ -48,9 +48,9 @@ test("W1-T3020: the prune deletes exactly the manifest it is given, and pushes t
 
 test("W1-T3020: a branch whose sha did not resolve is skipped with its reason, never deleted", () => {
   const manifest: BranchManifestEntry[] = [
-    { name: "resolvable", sha: "a".repeat(40) },
-    { name: "vanished-mid-run", sha: "unknown" },
-    { name: "empty-sha", sha: "" },
+    { name: "resolvable", sha: "a".repeat(40), reason: "merged" },
+    { name: "vanished-mid-run", sha: "unknown", reason: "merged" },
+    { name: "empty-sha", sha: "", reason: "merged" },
   ];
   const rec = recordingExec();
 
@@ -148,3 +148,59 @@ test("W1-T3020: merged still beats closed, so the fold did not simply become 'la
 // Imported eagerly for the synchronous test above; the async import in the first test proves the
 // symbol is reachable from the CLI module itself rather than only through this alias.
 import { foldPrState as foldPrStateSync } from "../src/run-task.js";
+
+// ── the active-branch screen (W1-T3020) ─────────────────────────────────────────────────────────
+
+import { withholdActiveBranches, NO_PR_EVIDENCE_REASONS } from "../src/lib/branch-reaper.js";
+
+const HOUR = 3600_000;
+function m(name: string, reason: string): BranchManifestEntry {
+  return { name, sha: "a".repeat(40), reason };
+}
+
+test("W1-T3020: a head with an open PR right now is withheld whatever the classification said", () => {
+  const manifest = [m("run-W1-T1-1", "merged"), m("reused-name", "merged"), m("plain", "closed_unmerged")];
+  const screen = withholdActiveBranches(manifest, new Set(["reused-name"]), () => 90 * 24 * HOUR);
+
+  assert.deepEqual(screen.proceed.map((e) => e.name), ["run-W1-T1-1", "plain"]);
+  assert.deepEqual(screen.withheld.map((w) => w.name), ["reused-name"]);
+  assert.match(screen.withheld[0].reason, /open pull request/);
+});
+
+test("W1-T3020: a no-PR-evidence branch younger than the bound is withheld — the just-started worker case", () => {
+  for (const reason of NO_PR_EVIDENCE_REASONS) {
+    const screen = withholdActiveBranches([m("run-W1-T9-fresh", reason)], new Set(), () => 2 * HOUR);
+    assert.deepEqual(screen.proceed, [], `'${reason}' with a 2h-old tip must not be deleted`);
+    assert.match(screen.withheld[0].reason, /no pull request/);
+    assert.match(screen.withheld[0].reason, /2h old/);
+  }
+});
+
+test("W1-T3020: the same branch passes once its tip is older than the bound", () => {
+  const screen = withholdActiveBranches([m("run-W1-T9-old", "tip_in_main")], new Set(), () => 30 * 24 * HOUR);
+  assert.deepEqual(screen.proceed.map((e) => e.name), ["run-W1-T9-old"]);
+  assert.deepEqual(screen.withheld, []);
+});
+
+test("W1-T3020: an unreadable tip age withholds rather than deletes — unknown is not 'old enough'", () => {
+  const screen = withholdActiveBranches([m("run-W1-T9-unknown", "patch_id_equivalent")], new Set(), () => undefined);
+  assert.deepEqual(screen.proceed, []);
+  assert.match(screen.withheld[0].reason, /age could not be read/);
+});
+
+test("W1-T3020: a merged or closed PR is NOT age-gated, so work finished an hour ago still prunes", () => {
+  // The live shape this protects: 7 of 141 deletable had a tip newer than a day, every one with a
+  // decisive PR. Age-gating those would withhold finished work for a day to no purpose.
+  const manifest = [m("just-merged", "merged"), m("just-closed", "closed_unmerged"), m("squashed", "merged_squash_patch_id_differs")];
+  const screen = withholdActiveBranches(manifest, new Set(), () => 1 * HOUR);
+  assert.deepEqual(screen.proceed.map((e) => e.name), ["just-merged", "just-closed", "squashed"]);
+  assert.deepEqual(screen.withheld, []);
+});
+
+test("W1-T3020: the screen only ever REMOVES — it can never add a branch the dry run did not offer", () => {
+  const manifest = [m("a", "merged"), m("b", "tip_in_main"), m("c", "closed_unmerged")];
+  const screen = withholdActiveBranches(manifest, new Set(["c"]), () => 1 * HOUR);
+  const names = new Set(manifest.map((e) => e.name));
+  for (const e of screen.proceed) assert.ok(names.has(e.name), "every survivor must come from the manifest");
+  assert.equal(screen.proceed.length + screen.withheld.length, manifest.length, "and nothing may be lost");
+});
