@@ -1,0 +1,60 @@
+- id: W1-T3066
+  title: "EVERY PR THE FLEET OPENS ARRIVES WITH NOTHING TO JUDGE, AND THE REPAIR ALREADY EXISTS ONE CI CYCLE TOO LATE — ghPrCreateFillCommand derives the body from the commit, a commit carries no Acceptance block, and acceptance-author-gate fails closed: apply ensureJudgeableBody at the create seam"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  origin: "session 2026-09-07 — six PRs repaired by hand in one sitting, every one the same defect"
+  plan_refs: ["W1-T1202", "W1-T2272", "W1-T2316"]
+  rationale: |
+    (1) THE DEFECT IS STRUCTURAL, NOT OCCASIONAL. `ghPrCreateFillCommand` (`src/run-task.ts`) builds
+    the REST create argv and sets `body` to `fillDerivedBody(worktreePath)` -- the worktree's own
+    commit history. A commit message carries no Acceptance block, because commit messages do not.
+    So EVERY pull request opened through this seam reaches `acceptance-author-gate` with zero
+    criteria and fails closed, by construction, on a PR whose other checks may be entirely green.
+
+    (2) MEASURED, IN ONE SITTING. 2026-09-07: #4447, #4449, #4461, #4465, #4471 and #4472 each
+    opened with no judgeable block. Each burned a full CI cycle to discover it, and each was then
+    repaired -- some by the fix rung, some by hand. That is six cycles spent proving the same fact
+    about the same seam.
+
+    (3) THE REPAIR ALREADY EXISTS AND RUNS TOO LATE. `acceptanceGateBodyRepair` (W1-T2272) calls
+    `ensureJudgeableBody` AFTER the gate has already refused the PR. The predicate, the renderer and
+    the recovery of an author's own salvageable criteria are all built and tested. This task moves
+    the call to the moment the body is assembled. Nothing new is invented.
+
+    (4) WHAT IT BUYS AND WHAT IT DOES NOT, STATED PLAINLY, because the honest limit is the whole
+    reason this is small. It does NOT make a PR's claims better: a generic block says only that the
+    body parses, and it says so in its own text. It removes a WASTED CYCLE. It weakens nothing that
+    was not already weakened -- the fix rung substitutes this same generic block today, later. And
+    it is INERT wherever real criteria resolve: `bodyNeedsAcceptanceRepair` leaves a healthy block
+    untouched, an author's recoverable criteria beat the fallback by construction, and a body whose
+    `Remudero-Task:` trailer resolves against a merged shard is judged from the shard.
+
+    (5) THE WORDING IS NOT SHARED WITH THE FIX RUNG, DELIBERATELY. The rung's fallback says the body
+    was "repaired by the fix rung after acceptance-author-gate refused it". That is true there and
+    FALSE at open time, where the gate has refused nothing. A body that misreports its own
+    provenance is a defect this repo has paid for before, so the open-time fallback carries its own
+    sentence and a test asserts it does not borrow the other's.
+
+    (6) THE CALLER SWEEP FOUND THE ONE THING THAT HAD TO CHANGE, which is recorded because the
+    sweep is exactly what CLAUDE.md mandates and exactly what a symbol grep would have missed if the
+    suite had been a census. `test/pr-create-rest-transport.test.ts` asserted byte equality between
+    the argv body and `fillDerivedBody`'s output. The invariant W1-T1202 design (iii) protects is
+    that the derived body is never REPLACED by an invented one; byte equality also forbade
+    APPENDING. It is narrowed to pin the derived text verbatim AND bound what may follow it to an
+    Acceptance block -- stricter about the thing that matters, where the old form bounded the
+    addition only by forbidding it.
+
+  acceptance:
+    - claim: "a commit-derived body opens the pull request with a block the gate can judge"
+      proof: "unit test: test/a-pr-opens-with-a-judgeable-body.test.ts"
+    - claim: "the auto-authored block names open time as its provenance rather than borrowing the fix rung's"
+      proof: "grep: PR_OPEN_TIME_ACCEPTANCE_FALLBACK in src/run-task.ts"
+    - claim: "a body that already parses judgeably is passed through untouched"
+      proof: "unit test: test/a-pr-opens-with-a-judgeable-body.test.ts"
+  files: [src/run-task.ts, test/a-pr-opens-with-a-judgeable-body.test.ts, test/pr-create-rest-transport.test.ts]
+  status: queued
