@@ -135,7 +135,7 @@ const BASELINE_COMMAND_NAMES = [
   "alert-fix", "approve", "authority", "autonomy-rate", "away", "bundle", "check-acceptance", "check-proof",
   "census-membership", "ci-failures", "ci-learning", "console-url", "correct", "coverage-improve", "daemon", "daemon-plist", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
-  "emissions", "escalate", "feedback", "fix", "inbox", "init", "install-checkout", "issues",
+  "emissions", "escalate", "feedback", "fix", "hand-runs", "inbox", "init", "install-checkout", "issues",
   "learnings", "ledger-grep", "lint-plan", "merge-hold", "next-task-id", "notify", "onboard", "ops", "pause",
   "peek", "plan", "preflight", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "reframe", "relay", "replay", "replay-goldens", "resume", "retro", "review", "rule-efficacy", "run-task",
@@ -144,13 +144,20 @@ const BASELINE_COMMAND_NAMES = [
 ].sort();
 
 // W1-T2580: `bundle` — the day-one knowledge bundle export verb — joins the registry.
+// W1-T2697: `hand-runs` — the operator hand-run mining verb — joins the registry.
 // W1-T2695: `authority` — the fleet-authority report verb — joins the registry.
 // W1-T2694: `ratify` — Law 5's signature, printing a gated rung's live operation-hash row for
 // the operator to commit — joins the registry.
+// W1-T2697: `hand-runs` — the operator hand-run mining verb — joins the registry.
 test("COMMANDS carries the established command names plus the operator merge-hold writer", () => {
-  assert.equal(BASELINE_COMMAND_NAMES.length, 71);
+  // ONE literal, deliberately: this is the reviewed count, and a verb joining the registry should
+  // cost exactly one considered edit here beside its line above.
+  assert.equal(BASELINE_COMMAND_NAMES.length, 72);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
-  assert.equal(COMMANDS.length, 71);
+  // DERIVED from that list, not a second literal. Two copies of the same number meant a new verb
+  // reddened this twice and reported "expected 71, got 72", which names nothing about what changed;
+  // the deepEqual above is what actually says WHICH name moved.
+  assert.equal(COMMANDS.length, BASELINE_COMMAND_NAMES.length);
 });
 
 // ── Regression control: this test file is where a re-widened top-level listing would show up ──
