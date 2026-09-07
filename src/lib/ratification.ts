@@ -59,6 +59,11 @@ export function loadRatifications(path: string): Ratifications {
   try {
     raw = parseYaml(readFileSync(path, "utf8"));
   } catch {
+    // DELIBERATE ERASURE, and the one case where absence and failure genuinely coincide for every
+    // consumer: this module's header commits an unreadable pin file to the SAME answer as a missing
+    // one — no pin for any rung, which each rung already reads as the safe "fire". Distinguishing
+    // them would give a caller a difference it must not act on, since refusing to fire on a corrupt
+    // pin file is exactly the unattended-tick crash that contract exists to prevent.
     return new Map();
   }
   if (!Array.isArray(raw)) return new Map();
