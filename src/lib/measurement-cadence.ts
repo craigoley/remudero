@@ -18,6 +18,12 @@ import { attributeVerbs, deriveCliVerbs, deriveStepPrefixes, EMISSIONS_ALLOWLIST
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
 import { loadPlanFromYaml, type Task } from "./plan.js";
 import {
+  loadLearningsCorpus,
+  mineRevertedLearningSourcePrsFromGitDump,
+  projectLearningsHome,
+  revertRecall as recallRevertedLearnings,
+} from "./learnings.js";
+import {
   classifyImprovementTier,
   fetchMergedCoverageArtifact,
   injectCoverageImprovementTask,
@@ -187,6 +193,11 @@ export interface VerdictCalibrationCadenceResult extends MeasurementCadenceVerbS
 export interface AutonomyRateCadenceResult extends MeasurementCadenceVerbStatus {
   totalMerges: number;
   zeroTouchRate: number | null;
+}
+
+export interface RevertRecallCadenceResult extends MeasurementCadenceVerbStatus {
+  proposedFlipCount: number | null;
+  proposals: { entryId: string; sourcePr: number; revertingPr: number }[];
 }
 
 // ── The adoption report: a fourth verb (W1-T2266) ──────────────────────────────────────────────
@@ -1007,6 +1018,8 @@ export interface MeasurementCadenceRunResult {
   ruleEfficacy: RuleEfficacyCadenceResult;
   verdictCalibration: VerdictCalibrationCadenceResult;
   autonomyRate: AutonomyRateCadenceResult;
+  /** Proposed `active -> contested` flips for learnings whose source PR was reverted. */
+  revertRecall: RevertRecallCadenceResult;
   /** The fourth verb — see {@link runAdoptionReport}. */
   adoptionReport?: AdoptionReportResult;
   /** The adoption report's mint outcome, gated on `opts.escalate` like
@@ -1126,7 +1139,8 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
         };
 
   // ── verdict-calibration + autonomy-rate share the ONE git dump read ──────────────────────────
-  const { rows } = mineVerdictRows(opts.stateDir);
+  const verdictMining = mineVerdictRows(opts.stateDir);
+  const { rows } = verdictMining;
   const autonomyLedger = mineAutonomyLedgerLines(opts.stateDir);
 
   let gitDump = "";
@@ -1167,6 +1181,46 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     totalMerges: aReport.totalMerges,
     zeroTouchRate: aReport.zeroTouchRate,
   };
+
+  let revertRecall: RevertRecallCadenceResult;
+  if (!verdictMining.ledger.ok) {
+    revertRecall = {
+      status: "refused",
+      refusedReason:
+        `ledger union unreadable for revert recall under ${opts.stateDir}: ` +
+        `${verdictMining.ledger.archiveCount} archive(s), ${verdictMining.ledger.unread.length} unread`,
+      proposedFlipCount: null,
+      proposals: [],
+    };
+  } else if (gitReadError) {
+    revertRecall = {
+      status: "refused",
+      refusedReason: `git history unavailable: ${gitReadError}`,
+      proposedFlipCount: null,
+      proposals: [],
+    };
+  } else {
+    try {
+      const corpus = loadLearningsCorpus(projectLearningsHome(opts.cwd));
+      const recall = recallRevertedLearnings(corpus, mineRevertedLearningSourcePrsFromGitDump(gitDump));
+      revertRecall = {
+        status: "measured",
+        proposedFlipCount: recall.proposals.length,
+        proposals: recall.proposals.map((p) => ({
+          entryId: p.entryId,
+          sourcePr: p.sourcePr,
+          revertingPr: p.revertingPr,
+        })),
+      };
+    } catch (e) {
+      revertRecall = {
+        status: "refused",
+        refusedReason: `learnings corpus unreadable: ${String((e as Error)?.message ?? e)}`,
+        proposedFlipCount: null,
+        proposals: [],
+      };
+    }
+  }
 
   // ── the fourth verb: the adoption report (W1-T2266) ──────────────────────────────────────────
   const adoptionReport = runAdoptionReport({
@@ -1235,6 +1289,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     ruleEfficacy,
     verdictCalibration,
     autonomyRate,
+    revertRecall,
     adoptionReport,
     adoptionMint,
     boardReview,

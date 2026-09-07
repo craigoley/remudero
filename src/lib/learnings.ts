@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { citation } from "./provenance.js";
+import { EXTERNAL_SOURCE_CLASSES, type ExternalSourceClass } from "./untrusted-envelope.js";
 
 /**
  * Promptsmith: the read side of the compounding thesis (WS-8, W1-T19, W1-T33). It injects the two
@@ -611,6 +612,70 @@ export interface ScrubResult {
   reasons: string[];
 }
 
+export type PromotionTaintCandidate = Pick<LearningEntry, "src"> & {
+  sourceClass?: unknown;
+  source_class?: unknown;
+  provenance?: unknown;
+};
+
+export type PromotionTaintResult =
+  | { tainted: false }
+  | { tainted: true; sourceClass: ExternalSourceClass; reason: string };
+
+const EXTERNAL_SOURCE_CLASS_SET = new Set<string>(EXTERNAL_SOURCE_CLASSES);
+
+function regexpEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function candidateProvenanceText(candidate: PromotionTaintCandidate): string {
+  const parts: string[] = [];
+  for (const value of [candidate.src, candidate.sourceClass, candidate.source_class, candidate.provenance]) {
+    if (typeof value === "string" && value.length > 0) parts.push(value);
+  }
+  return parts.join("\n");
+}
+
+function sourceClassMentioned(text: string, sourceClass: ExternalSourceClass): boolean {
+  const cls = regexpEscape(sourceClass);
+  return [
+    new RegExp(`<untrusted_external_data\\s+[^>]*source="${cls}"[^>]*>`, "i"),
+    new RegExp(`\\buntrusted_external_data\\b[^\\n>]*\\bsource="${cls}"`, "i"),
+    new RegExp(`\\bsource[_ -]?class\\b\\s*[:=]\\s*["']?${cls}\\b`, "i"),
+    new RegExp(`\\bexternal(?:-text)?\\b\\s*[:=]\\s*["']?${cls}\\b`, "i"),
+    new RegExp(`\\bclass\\s+["']${cls}["']`, "i"),
+  ].some((re) => re.test(text));
+}
+
+/**
+ * Refuse learnings promotion when the candidate's provenance says it was derived from external
+ * prompt text (the classes W1-T2700 envelopes). This is provenance-only: the fact text is not
+ * inspected, and an ordinary fleet-run `src` stays clean.
+ */
+export function promotionTaint(candidate: PromotionTaintCandidate): PromotionTaintResult {
+  for (const value of [candidate.sourceClass, candidate.source_class]) {
+    if (typeof value === "string" && EXTERNAL_SOURCE_CLASS_SET.has(value)) {
+      return {
+        tainted: true,
+        sourceClass: value as ExternalSourceClass,
+        reason: `provenance resolves to external-text source class ${value}`,
+      };
+    }
+  }
+
+  const text = candidateProvenanceText(candidate);
+  for (const sourceClass of EXTERNAL_SOURCE_CLASSES) {
+    if (sourceClassMentioned(text, sourceClass)) {
+      return {
+        tainted: true,
+        sourceClass,
+        reason: `provenance resolves to external-text source class ${sourceClass}`,
+      };
+    }
+  }
+  return { tainted: false };
+}
+
 /** Every free-text field of an entry a leaked secret/PII value could hide in. `files` (globs) is excluded — not free text. */
 function scrubbableFields(entry: LearningEntry): (string | undefined)[] {
   return [entry.fact, entry.src, entry.assertion, entry.quarantinedReason];
@@ -752,8 +817,8 @@ export interface PromotionJudgeDeps {
   confidenceThreshold?: number;
 }
 
-/** Which stage {@link promoteEntry} stopped at. `"scrub"` and `"top-layer"` never reach the judge. */
-export type PromotionStage = "scrub" | "top-layer" | "judge" | "promoted";
+/** Which stage {@link promoteEntry} stopped at. `"taint"`, `"scrub"` and `"top-layer"` never reach the judge. */
+export type PromotionStage = "taint" | "scrub" | "top-layer" | "judge" | "promoted";
 
 /** The full, auditable outcome of one {@link promoteEntry} call. */
 export interface PromotionResult {
@@ -761,6 +826,8 @@ export interface PromotionResult {
   promoted: boolean;
   stage: PromotionStage;
   scrub: ScrubResult;
+  /** Set iff provenance taint was checked on this result. `tainted:true` blocks before scrub. */
+  taint?: PromotionTaintResult;
   /** Set iff the judge was actually invoked (i.e. scrub passed and the entry was below the top layer). */
   verdict?: PromotionJudgeVerdict;
   /** Set iff `promoted`: the entry's next-layer shape, with `layer` bumped and `src` redacted. Not yet written to any home — see the module doc's transport note. */
@@ -781,6 +848,18 @@ export interface PromotionResult {
  */
 export async function promoteEntry(entry: LearningEntry, deps: PromotionJudgeDeps): Promise<PromotionResult> {
   const log = deps.log ?? (() => {});
+  const taint = promotionTaint(entry);
+  if (taint.tainted) {
+    log("learning.refused_tainted", { id: entry.id, source_class: taint.sourceClass, reason: taint.reason });
+    return {
+      entryId: entry.id,
+      promoted: false,
+      stage: "taint",
+      scrub: { blocked: false, reasons: [] },
+      taint,
+      reason: `blocked at provenance taint (never reached scrub or judge): ${taint.reason}`,
+    };
+  }
   const scrub = scrubEntry(entry);
   log("promotion.scrub", { id: entry.id, blocked: scrub.blocked, reasons: scrub.reasons });
   if (scrub.blocked) {
@@ -821,7 +900,7 @@ export async function promoteEntry(entry: LearningEntry, deps: PromotionJudgeDep
 
   const promotedEntry: LearningEntry = { ...entry, layer: to, src: redactProvenance(entry.src) };
   log("promotion.promoted", { id: entry.id, from, to });
-  return { entryId: entry.id, promoted: true, stage: "promoted", scrub, verdict, promotedEntry, reason: `promoted ${from} -> ${to}` };
+  return { entryId: entry.id, promoted: true, stage: "promoted", scrub, taint, verdict, promotedEntry, reason: `promoted ${from} -> ${to}` };
 }
 
 /** The batched outcome of {@link runPromotionPass}: every entry's individual result, plus the flat list of new next-layer entries produced. */
@@ -843,6 +922,146 @@ export async function runPromotionPass(entries: LearningEntry[], deps: Promotion
     if (result.promoted && result.promotedEntry) promotedEntries.push(result.promotedEntry);
   }
   return { results, promotedEntries };
+}
+
+export interface RevertedLearningSourcePr {
+  sourcePr: number;
+  revertingPr: number;
+  sourceSha?: string;
+  revertingSha?: string;
+}
+
+export interface RevertRecallProposal {
+  entryId: string;
+  sourcePr: number;
+  revertingPr: number;
+  fromLifecycle: "active";
+  toLifecycle: "contested";
+  proposedEntry: LearningEntry;
+  reason: string;
+}
+
+export interface RevertRecallResult {
+  proposals: RevertRecallProposal[];
+  /** The unchanged input entries, surfaced so callers can prove recall never deletes. */
+  retained: LearningEntry[];
+}
+
+function sourcePrRefs(src: string): number[] {
+  const refs = new Set<number>();
+  const patterns = [/\bPR\s*#\s*(\d+)\b/gi, /\bpull\/(\d+)\b/gi];
+  for (const pattern of patterns) {
+    for (const match of src.matchAll(pattern)) {
+      const n = Number(match[1]);
+      if (Number.isInteger(n) && n > 0) refs.add(n);
+    }
+  }
+  return [...refs].sort((a, b) => a - b);
+}
+
+/** Proposal-only recall: a learning whose source PR was reverted is proposed `contested`, never
+ *  edited or removed here. The Architect/operator still owns the shard diff. */
+export function revertRecall(
+  learnings: readonly LearningEntry[],
+  revertedSources: readonly RevertedLearningSourcePr[],
+): RevertRecallResult {
+  const bySourcePr = new Map<number, RevertedLearningSourcePr>();
+  for (const reverted of revertedSources) {
+    if (!bySourcePr.has(reverted.sourcePr)) bySourcePr.set(reverted.sourcePr, reverted);
+  }
+
+  const proposals: RevertRecallProposal[] = [];
+  for (const entry of learnings) {
+    if (entry.lifecycle !== "active") continue;
+    const hit = sourcePrRefs(entry.src)
+      .map((sourcePr) => bySourcePr.get(sourcePr))
+      .find((r): r is RevertedLearningSourcePr => r !== undefined);
+    if (!hit) continue;
+    proposals.push({
+      entryId: entry.id,
+      sourcePr: hit.sourcePr,
+      revertingPr: hit.revertingPr,
+      fromLifecycle: "active",
+      toLifecycle: "contested",
+      proposedEntry: { ...entry, lifecycle: "contested" },
+      reason: `source PR#${hit.sourcePr} was reverted by PR#${hit.revertingPr}; propose lifecycle: contested`,
+    });
+  }
+  return { proposals, retained: [...learnings] };
+}
+
+interface GitEventForLearningRecall {
+  sha: string;
+  subject: string;
+  body: string;
+}
+
+function parseRecallGitEvents(dump: string): GitEventForLearningRecall[] {
+  const events: GitEventForLearningRecall[] = [];
+  for (const chunk of dump.split("\x02")) {
+    if (!chunk) continue;
+    const sep = chunk.indexOf("\x01");
+    if (sep === -1) continue;
+    const parts = chunk.slice(0, sep).split("\x00");
+    const [sha, , subject] = parts;
+    if (!sha) continue;
+    events.push({ sha, subject: subject ?? "", body: parts.slice(3).join("\x00") });
+  }
+  return events;
+}
+
+function prRefs(text: string): number[] {
+  const refs = new Set<number>();
+  const patterns = [/\(#(\d+)\)/g, /\bPR\s*#\s*(\d+)\b/gi, /\bpull\/(\d+)\b/gi];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const n = Number(match[1]);
+      if (Number.isInteger(n) && n > 0) refs.add(n);
+    }
+  }
+  return [...refs];
+}
+
+function shaMatches(candidate: string, full: string): boolean {
+  const a = candidate.toLowerCase();
+  const b = full.toLowerCase();
+  return a.length >= 7 && b.length >= 7 && (a === b || a.startsWith(b) || b.startsWith(a));
+}
+
+export function mineRevertedLearningSourcePrsFromGitDump(gitDump: string): RevertedLearningSourcePr[] {
+  const events = parseRecallGitEvents(gitDump);
+  const prBySha = new Map<string, number>();
+  for (const event of events) {
+    if (/^revert\b/i.test(event.subject.trim())) continue;
+    const refs = prRefs(event.subject);
+    if (refs.length > 0) prBySha.set(event.sha, refs[refs.length - 1]!);
+  }
+
+  const out: RevertedLearningSourcePr[] = [];
+  const seen = new Set<string>();
+  for (const event of events) {
+    if (!/^revert\b/i.test(event.subject.trim())) continue;
+    const refs = prRefs(event.subject);
+    const revertingPr = refs.at(-1);
+    let sourcePr = refs.length >= 2 ? refs[refs.length - 2] : undefined;
+    let sourceSha: string | undefined;
+    const bodyMatch = /This reverts commit\s+([0-9a-f]{7,40})/i.exec(event.body);
+    if (bodyMatch) {
+      const named = bodyMatch[1]!;
+      const source = [...prBySha.entries()].find(([sha]) => shaMatches(named, sha));
+      if (source) {
+        sourceSha = source[0];
+        sourcePr = source[1];
+      }
+    }
+    if (!sourcePr || !revertingPr) continue;
+    const key = `${sourcePr}\0${revertingPr}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ sourcePr, revertingPr, ...(sourceSha ? { sourceSha } : {}), revertingSha: event.sha });
+  }
+  out.sort((a, b) => a.sourcePr - b.sourcePr || a.revertingPr - b.revertingPr);
+  return out;
 }
 
 // ── TRANSPORT: EXPORT/IMPORT (§6, W1-T425) ──────────────────────────────────
