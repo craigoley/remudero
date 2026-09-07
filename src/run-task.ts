@@ -18458,7 +18458,21 @@ export function ciLearningCommand(
   for (const d of result.drafts) {
     console.log(`  DRAFT ${d.findingId}  author_class=${d.author_class} verify=${d.verify}`);
     console.log(`    ${d.title}`);
-    console.log(`    remedy surface: ${d.remedySurface}  repair touched: ${d.repairFiles.join(",") || "(none recorded)"}`);
+    // W1-T3051 — the SUBJECT first, the full list second. A flat union ran to 66 files on a
+    // 26-pull-request cluster and told a reader nothing; what the repairs kept returning to is the
+    // lesson. When they agree on nothing, say that rather than promote an arbitrary first entry.
+    if (d.dominantRepairFiles.length > 0) {
+      const named = d.dominantRepairFiles
+        .map((r) => `${r.file} (${r.prs} of ${d.prs.length} repairs)`)
+        .join(", ");
+      console.log(`    the repairs kept returning to: ${named}`);
+    } else {
+      console.log(`    the repairs share no file — this gate reddened for unrelated reasons`);
+    }
+    console.log(
+      `    remedy surface: ${d.remedySurface}  repair touched: ${d.repairFiles.length} file(s)` +
+        `${d.repairFiles.length > 0 ? ` (most-repaired first: ${d.repairFiles.slice(0, 5).join(", ")})` : ""}`,
+    );
   }
   for (const e of result.excludedFindings) {
     console.log(`  EXCLUDED by the ceiling (named, not dropped): ${e}`);
