@@ -1271,6 +1271,25 @@ const ENVIRONMENT_MIN_TAIL_LINES = 4;
 /** The share of log-tail lines that must be the SAME line before one message is "near-total". */
 const ENVIRONMENT_REPEAT_RATIO = 0.9;
 
+/** W1-T3029 — the Standing rule 15 refusal `failSummary` (lib/review.ts) emits. Matched as TEXT
+ *  for the SAME reason {@link UNSATISFIABLE_GATE_MARKER} is: the structured
+ *  `ReviewVerdict.criteriaTampered` boolean is not carried on {@link OpenPrView}, only
+ *  {@link OpenPrView.reviewSummary} is. SAFE TO MATCH BECAUSE THE STRING IS A FIXED LITERAL: that
+ *  branch of `failSummary` interpolates nothing (it is capped at 140 chars by the commit-status
+ *  API and its own comment records five suites pinning `Standing rule 15`). THE KNOWN COST: a
+ *  reword there drops this match silently and the reason below reverts to the generic wording —
+ *  the same text coupling rule 25's marker already carries, and the same failure mode. */
+const RULE_15_REFUSAL_MARKER = /Standing rule 15/;
+
+/** W1-T3029 — did the review refuse under Standing rule 15 (a criterion added/edited beside
+ *  non-plan files)? DIAGNOSTIC ONLY: no caller routes on this, and design (iii) REFUSES to make one.
+ *  Rule 15's remedy is a PR SPLIT, a shape change no in-place fix rung can perform, so promoting
+ *  this to an `actionableGateFailure` would spend strikes that cannot succeed — strictly worse than
+ *  an unhelpful message. It changes what the escalation SAYS, never what the sweep DOES. */
+export function namesRule15Refusal(pr: OpenPrView): boolean {
+  return pr.reviewSummary !== undefined && RULE_15_REFUSAL_MARKER.test(pr.reviewSummary);
+}
+
 /** The required check failing on EVERY open PR in this pass, or `undefined`. THE VACUITY GUARD IS
  *  THE LOAD-BEARING PART: with a single open PR the claim is trivially true of its own failure, so
  *  fewer than two returns `undefined`. Any PR NOT failing this check also yields `undefined`, since
@@ -1902,7 +1921,15 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
             const repair = d.find((x) => x.kind === "no-trailer")?.repair;
             return repair === undefined ? "" : ` — derived repair: add \`${repair}\` to the PR body`;
           })()
-        : "review failing with no actionable unmet criteria (contradictory) — escalating",
+        : // W1-T3029 — THE THIRD CAUSE OF THE SAME EMPTY SET, tested strictly after the arm above so
+          // W1-T440's unrecoverable case still wins wherever it applies (design v). A rule-15
+          // refusal is FULLY DIAGNOSED — `failSummary` states the PR shape to change — so calling
+          // it "contradictory" names a property the verdict does not have. Disposition is
+          // deliberately unmoved; see {@link namesRule15Refusal} for why routing it would be worse.
+          namesRule15Refusal(pr)
+          ? `review failing on Standing rule 15 — a criterion was added/edited beside non-plan files — ` +
+            `escalating — derived repair: file the shard in its own plan-only PR, then build it in a second PR`
+          : "review failing with no actionable unmet criteria (contradictory) — escalating",
   },
   {
     // W1-T106 — CONFLICTED is a POSITIVE disposition, ABOVE mergeable: a dirty PR is NEVER armed
