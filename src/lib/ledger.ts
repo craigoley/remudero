@@ -20,6 +20,7 @@ import { gzipSync } from "node:zlib";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
+import { WORKER_SCOPE_ENV } from "./worker-containment.js";
 
 /** Append-only NDJSON ledger (MASTER-PLAN §9). One JSON object per line, keyed by task id; `ts` and
  *  `host` are stamped at write time. Every worker and brain-plane call spreads the same telemetry
@@ -79,6 +80,56 @@ export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boo
   return evidence.workerRan && evidence.judgmentPosted;
 }
 
+// ── W1-T2697: THE ACTOR STAMP ────────────────────────────────────────────────────────────────
+// A ledger row records `step`, `task_id`, `run_id` and `ts` but never WHO invoked it — a worker
+// subprocess, the daemon's own in-process loop, and an operator's bare `./bin/rmd` from a shell
+// are indistinguishable (`git grep -nE 'actor|invoked_by' src/lib/ledger.ts` read nothing at
+// intake). Derived at WRITE TIME from process context only, never guessed after the fact and
+// never asked of the caller (design note i, plan/tasks.d — "the operator teaches by doing").
+
+/** Who wrote a ledger row, as {@link deriveLedgerActor} derives it. */
+export type LedgerActor = "daemon" | "worker" | "operator";
+
+/** In-process signal the daemon's OWN command sets on itself once, at boot — see
+ *  {@link markDaemonProcessActor}. Nothing else ever sets this. */
+const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
+
+/** Mark THIS process as the daemon. Call once, at the top of `daemonCommand` (run-task.ts),
+ *  before its first `appendLedger` call. Every ledger row this process (or anything it calls
+ *  in-process, e.g. a wired sweep tick) writes from here on reports `actor: "daemon"` — UNLESS
+ *  that same write also carries a worker's own markers, which win first (see
+ *  {@link deriveLedgerActor}'s ordering). */
+export function markDaemonProcessActor(): void {
+  process.env[DAEMON_PROCESS_ACTOR_ENV] = "1";
+}
+
+/**
+ * Derive the actor for a ledger row from process context alone (design note i). ORDER MATTERS: a
+ * worker subprocess's own marker ({@link WORKER_SCOPE_ENV}, worker-containment.ts's
+ * `workerMarkerEnv`) is checked FIRST, so a worker spawned BY the daemon — which inherits the
+ * daemon's `DAEMON_PROCESS_ACTOR_ENV` via plain env inheritance, plus its own fresh worker
+ * markers layered on top by `spawnWorker`/`worker-provider.ts` — is still reported `"worker"`,
+ * never `"daemon"`. Neither marker present is the operator's own shell: nothing marks that today,
+ * and nothing should — the ABSENCE of both markers is what identifies it, never a positive signal
+ * of its own.
+ */
+export function deriveLedgerActor(env: NodeJS.ProcessEnv = process.env): LedgerActor {
+  if (env[WORKER_SCOPE_ENV]) return "worker";
+  if (env[DAEMON_PROCESS_ACTOR_ENV]) return "daemon";
+  return "operator";
+}
+
+/** {@link LedgerActor} widened with `"unknown"` — a row written before this task stamped
+ *  nothing, reported as unknown rather than guessed (design note i, last sentence). */
+export type LedgerRowActor = LedgerActor | "unknown";
+
+/** Read a parsed ledger line's actor. A missing or malformed `actor` field reports `"unknown"`,
+ *  NEVER inferred from any other field on the row — the one read-side rule this task adds.
+ *  Falsifier: test/hand-run-census.test.ts. */
+export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
+  return line.actor === "daemon" || line.actor === "worker" || line.actor === "operator" ? line.actor : "unknown";
+}
+
 /**
  * Append one line. The record is issued as exactly ONE `writeSync` and the kernel's acceptance is
  * checked, so a writer's record is never split across two syscalls with another appender's line in
@@ -90,14 +141,27 @@ export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boo
  * `identity` stamps the writing machine onto every row under the same `host` key this repo's
  * lock-holder records use. Appended LAST so no caller shifts; injectable only so one test can
  * drive two identities in one process (W1-T972, test/ledger-host-identity.test.ts).
+ *
+ * `actor` stamps who invoked this write (`opts.actor`, defaulting to {@link deriveLedgerActor}) —
+ * design note i, W1-T2697. `actor_pid` carries the writing process's own pid alongside it, for
+ * `hand-run-census.ts`'s session mining (design note ii). Named `actor_pid`, NOT `pid` —
+ * `fix.spawn_reclaimed` (run-task.ts) already logs a `pid` field naming a DIFFERENT process (the
+ * reclaimed candidate's), and this stamp's spread position (before `...line`) would let that
+ * unrelated meaning silently win the key if the two shared a name.
  */
 export function appendLedger(
   path: string,
   line: LedgerLine,
-  opts: { ceilingBytes?: number; identity?: () => string } = {},
+  opts: { ceilingBytes?: number; identity?: () => string; actor?: () => LedgerActor } = {},
 ): void {
   mkdirSync(dirname(path), { recursive: true });
-  const record = { ts: new Date().toISOString(), host: (opts.identity ?? hostname)(), ...line };
+  const record = {
+    ts: new Date().toISOString(),
+    host: (opts.identity ?? hostname)(),
+    actor: (opts.actor ?? deriveLedgerActor)(),
+    actor_pid: process.pid,
+    ...line,
+  };
   const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
   const fd = openSync(path, "a");
   try {
@@ -367,6 +431,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T2862: the source-size follow-up consumer reads this exact signature from the archive +
   // live ledger union before deciding whether the same maintainability obligation may file again.
   "source_size.followup.filed",
+  // W1-T2697: hand-run-census.ts's dedup marker — `handRunCensus` reads this exact signature back
+  // via a ledger UNION before proposing the same recurring hand-run sequence a second time.
+  // Dropping it re-files the same routine proposal on every cadence tick after a rotation, the
+  // same W1-T470 discipline `coverage.improvement.filed` above already follows.
+  "hand_run.census_proposed",
   // W1-T949: the reservation-REFUSAL record for each id-filing lane, carrying `id`/`ref`/`outcome`
   // as structured fields so "why did this filing open no PR" stays queryable a week later. Like
   // "review.unwired_advisory" the deciding reader is a HUMAN, so these never appear in the
