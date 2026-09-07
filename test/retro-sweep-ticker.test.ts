@@ -11,7 +11,7 @@ import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 // assertions themselves are unchanged.
 import { drainDetachedSweepActions } from "../src/lib/sweep.js";
 import type { RunResult } from "../src/lib/run-result.js";
-import { waitForCiGreen, pollToGate } from "../src/run-task.js";
+import { waitForCiGreen, pollToGate, ciGateState } from "../src/run-task.js";
 
 // ── W1-T276: the RETRO SWEEP TICKER ─────────────────────────────────────────
 //
@@ -358,7 +358,7 @@ test("W1-T463 FALSIFIER: a timer scheduled BEFORE the CI wait FIRES DURING it", 
   }, 30);
   const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 0.02, { readJson: read });
   clearTimeout(timer);
-  assert.equal(outcome, "green");
+  assert.equal(ciGateState(outcome), "green");
   assert.notEqual(firedAt, undefined, "the timer never fired -- the event loop did not turn during the wait");
   assert.ok(
     (firedAt ?? Infinity) < Date.now(),
@@ -376,7 +376,7 @@ test("W1-T463 MUTANT: a BLOCKING sleep starves that same timer -- the falsifier 
   // Same function, same reads, same cadence -- only the sleep is the pre-W1-T463 shape.
   const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 0.05, { readJson: read, sleep: blockingSleep });
   clearTimeout(timer);
-  assert.equal(outcome, "green", "the mutant still RETURNS correctly, which is exactly why a return-value test proves nothing");
+  assert.equal(ciGateState(outcome), "green", "the mutant still RETURNS correctly, which is exactly why a return-value test proves nothing");
   assert.equal(fired, false, "a blocking sleep must starve the timer -- if this fires, the falsifier above is vacuous");
 });
 
@@ -389,7 +389,7 @@ test("W1-T463: the poll CADENCE is unchanged -- one sleep per poll, at everySec 
       slept.push(ms);
     },
   });
-  assert.equal(outcome, "green");
+  assert.equal(ciGateState(outcome), "green");
   assert.equal(calls(), 5, "four pending reads then the green one");
   assert.deepEqual(slept, [6000, 6000, 6000, 6000], "six seconds between polls, unchanged -- a faster poll burns the secondary rate limit");
 });
@@ -406,7 +406,7 @@ test("W1-T463: the ci.polling LOG cadence is unchanged -- i === 0 || i % 5 === 0
 test("W1-T463: the RED direction still returns red, and stops polling immediately", async () => {
   const { read, calls } = rollupReads(1, [{ name: "ci", conclusion: "FAILURE" }]);
   const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 6, { readJson: read, sleep: async () => {} });
-  assert.equal(outcome, "red", "blocked_ci handling depends on this exact value");
+  assert.equal(ciGateState(outcome), "red", "blocked_ci handling depends on this exact value");
   assert.equal(calls(), 2, "one pending read then the red one -- it must not keep polling past a red");
 });
 
@@ -424,7 +424,7 @@ test("W1-T463: the TIMEOUT direction still returns timeout on a stalled rollup",
   };
   const steps: string[] = [];
   const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", (s) => steps.push(s), 6, { readJson: read, sleep: async () => {} });
-  assert.equal(outcome, "timeout");
+  assert.equal(ciGateState(outcome), "timeout");
   assert.ok(steps.includes("ci.stalled"), "and it must say which checks were still pending when it gave up");
 });
 
@@ -524,7 +524,7 @@ test("W1-T463: the DEFAULT gh read is driven for real -- an async execFile, not 
   process.env.PATH = `${dir}:${prevPath ?? ""}`;
   try {
     const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 0.02);
-    assert.equal(outcome, "green", "the default reader must really parse the child's stdout");
+    assert.equal(ciGateState(outcome), "green", "the default reader must really parse the child's stdout");
   } finally {
     process.env.PATH = prevPath;
     rmSync(dir, { recursive: true, force: true });
