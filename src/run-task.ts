@@ -4861,7 +4861,14 @@ export function openTaskIdsFromPlan(plan: Plan, projection?: ReadonlyMap<string,
 
 interface GateOutcome {
   merged: boolean;
+  verdict?: "awaiting_merge" | "blocked_ci";
   reason: string;
+  headSha?: string;
+  checks?: string[];
+}
+
+function rollupCheckSummary(rollup: RollupEntry[] | undefined): string[] {
+  return (rollup ?? []).map((c) => `${c.name ?? c.context ?? "unknown"}:${c.conclusion ?? c.status ?? c.state ?? ""}`);
 }
 
 /**
@@ -5001,25 +5008,44 @@ export async function pollToGate(
     const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
     const state = prStateFromRest(row);
     if (state === "MERGED") return { merged: true, reason: "checks green" };
-    if (state === "CLOSED") return { merged: false, reason: "pr closed" };
+    if (state === "CLOSED") return { merged: false, verdict: "blocked_ci", reason: "pr closed" };
     const sha = mapRestPr(row).headRefOid;
     const roll = await restRollupFor(owner, repo, sha, read);
+    const checks = rollupCheckSummary(roll);
     const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
     if (red) {
-      log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown" });
-      return { merged: false, reason: `required check red: ${red.name ?? red.context ?? "unknown"}` };
+      log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown", head_sha: sha, checks });
+      return {
+        merged: false,
+        verdict: "blocked_ci",
+        reason: `required check red: ${red.name ?? red.context ?? "unknown"}`,
+        headSha: sha,
+        checks,
+      };
     }
     readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
     if (stall.stalled) {
-      log("pr.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
+      const verdict = stall.pending.length === 0 ? "awaiting_merge" : "blocked_ci";
+      const reason =
+        stall.pending.length > 0
+          ? `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
+          : `all observed checks terminal green for ${STALL_WINDOW} consecutive polls; awaiting GitHub merge`;
+      log("pr.stalled", {
+        pending: stall.pending,
+        identicalPolls: STALL_WINDOW,
+        verdict,
+        reason,
+        head_sha: sha,
+        checks,
+      });
       return {
         merged: false,
-        reason:
-          stall.pending.length > 0
-            ? `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
-            : `no progress for ${STALL_WINDOW} consecutive polls`,
+        verdict,
+        reason,
+        headSha: sha,
+        checks,
       };
     }
       // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
@@ -5030,7 +5056,7 @@ export async function pollToGate(
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
         state,
-        checks: roll.map((c) => `${c.name ?? c.context}:${c.conclusion ?? c.status ?? c.state}`),
+        checks,
       });
     }
     // W1-T463: see `waitForCiGreen`'s note — a timer, not a blocking child process.
@@ -14823,18 +14849,21 @@ async function runTask(
       return { taskId, runId, prUrl, merged: true, costUsd, verdict: "merged" };
     }
 
-    // Blocked: leave the PR open (auto-merge stays armed; it will land later if
-    // the check goes green) and the worktree for post-mortem.
+    // Blocked or awaiting merge: leave the PR open (auto-merge stays armed; it will land later if
+    // GitHub materializes it) and the worktree for post-mortem.
+    const terminalVerdict = outcome.verdict ?? "blocked_ci";
     log("verdict", {
-      verdict: "blocked_ci",
+      verdict: terminalVerdict,
       pr_url: prUrl,
       reason: outcome.reason,
+      ...(outcome.headSha ? { head_sha: outcome.headSha } : {}),
+      ...(outcome.checks ? { checks: outcome.checks } : {}),
       cost_usd: costUsd,
       billing_mode: billingMode(impl.childEnvKeys),
       account_label: impl.accountLabel,
     });
-    say(`verdict: blocked_ci (${outcome.reason}) — PR left OPEN: ${prUrl}`);
-    return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
+    say(`verdict: ${terminalVerdict} (${outcome.reason}) — PR left OPEN: ${prUrl}`);
+    return { taskId, runId, prUrl, merged: false, costUsd, verdict: terminalVerdict };
   } catch (err) {
     // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
     // and return a terminal verdict rather than falling through to the generic `run.error` +

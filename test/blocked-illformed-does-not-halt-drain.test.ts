@@ -97,8 +97,8 @@ test("haltsDrain: blocked_illformed no longer halts, while every genuinely block
   }
   assert.deepEqual(
     [...NON_HALTING_VERDICTS].sort(),
-    ["blocked_ci", "blocked_illformed", "no_pr", "task_already_merged"],
-    "the exempt set is exactly these four — not three, and not everything",
+    ["awaiting_merge", "blocked_ci", "blocked_illformed", "no_pr", "task_already_merged"],
+    "the exempt set is exactly these five — not four, and not everything",
   );
   assert.equal(haltsDrain({ merged: true, verdict: "merged" }), false, "a merged result never halts");
 });
