@@ -1693,6 +1693,15 @@ export async function runDaemon(
       const state = blockRetryStates.get(task.id) ?? INITIAL_RETRY_STATE;
       const disposition = reasonAboutBlock(planForBatch, task.id, result.verdict, state);
 
+      if (disposition.kind === "awaiting_merge") {
+        blockRetryStates.delete(task.id);
+        log("daemon.block.awaiting_merge", {
+          task: task.id,
+          verdict: result.verdict,
+          pr_url: result.prUrl,
+        });
+        return { kind: "continue" };
+      }
       if (disposition.kind === "retry_transient") {
         // Transient: no strike. Selection naturally retries the same task next tick, since it is still
         // unmerged and its deps are unchanged, so no separate re-dispatch mechanism is needed.

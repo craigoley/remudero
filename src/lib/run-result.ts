@@ -23,6 +23,7 @@ export interface RunResult {
     | "merged"
     | "blocked"
     | "blocked_ci"
+    | "awaiting_merge"
     | "blocked_review"
     | "blocked_budget"
     | "blocked_containment"

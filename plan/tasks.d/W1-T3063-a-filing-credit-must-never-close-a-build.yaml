@@ -1,0 +1,108 @@
+- id: W1-T3063
+  title: "THE SUPERSESSION RUNG CLOSES A REAL BUILD ON A CREDIT EARNED BY A PLAN-ONLY FILING — W1-T2794 shipped a rung that closes an open PR whose task reads merged, and the refusal meant to stop a filing earning that credit is keyed on a `pr.opened` row carrying `plan_only: true`, so for any PR whose row predates that field or has rotated out of the live ledger the refusal FAILS OPEN: #4461, a validated implementation, was closed against #3195, a `chore(plan)` touching one shard"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 15.00
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-filing-credit-must-never-close-a-build.test.ts]
+  origin: "operator-session#4461-closed-by-a-filing-credit-2026-09-07"
+  plan_refs: ["W1-T2794", "W1-T413", "W1-T2779"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED, WITH DAMAGE ALREADY DONE. PR #4461 implemented W1-T2371 — 10 passing tests, three
+    load-bearing controls, all gates green. The sweep closed it at 2026-09-07T18:32 with:
+    "Closed by rmd sweep: task W1-T2371 already merged by #3195 — closing the leftover
+    implementation PR". Its branch has since been deleted.
+
+    #3195 IS NOT AN IMPLEMENTATION. Its title is `chore(plan): record that W1-T2371's
+    amendment-block trigger ...` and its diff is ONE file:
+    `plan/tasks.d/W1-T2371-the-risk-judge-cannot-pass-an-amendment.yaml`. MEASURED at origin/main
+    AFTER the close: `git grep -c "isPlanOnlyAmendment\|PLAN_DECLARING_SUBJECT_RE" -- src/lib/risk-judge.ts`
+    reads 0. The task's mechanism is still absent; the work was destroyed, not superseded.
+
+    THE REFUSAL THAT EXISTS FAILS OPEN, AND THE EVIDENCE IS EXACT. `isPlanOnlyFilingPr`
+    (src/lib/status.ts) is `ledgerLines.some((l) => l.step === "pr.opened" && l.pr_url === prUrl &&
+    l.plan_only === true)`. The archived row for #3195 is, verbatim:
+
+      {"ts":"2026-08-28T03:45:01.414Z","host":"1abc274530a9","run_id":"W1-T2371-1787887882921",
+       "task_id":"W1-T2371","step":"pr.opened","lane":"run-task",
+       "pr_url":"https://github.com/craigoley/remudero/pull/3195"}
+
+    There is NO `plan_only` field on it, so the predicate is false and no refusal is raised. Two
+    independent reasons it can be false — the field postdating the row, and the live ledger
+    retaining only 200 `pr.opened` rows (MAX_RETAINED_LINES_PER_STEP) while `deriveStatus` reads the
+    LIVE file — and either alone is enough. A refusal that fails OPEN is not a refusal.
+
+    WHY THIS IS W1-T2794'S DEFECT AND NOT ONLY status.ts's. That task's own shard says "Closing is
+    destructive queue hygiene and therefore requires positive evidence" and "FAIL OPEN ON DARKNESS".
+    It honoured both for an ABSENT credit and neither for a WRONG one: a positive credit was taken
+    as sufficient without asking what earned it. The rung amplified a latent, quiet miscredit into a
+    destroyed pull request, which is the difference between a stale board and lost work.
+
+    NOTE THE SHAPE. W1-T2371 is the task about the risk judge misjudging plan-only amendments. It
+    was closed because a plan-only amendment was miscredited as its implementation.
+  design: |
+    (i) POSITIVE EVIDENCE OF AN IMPLEMENTATION, OR NO CLOSE. `CreditCandidate` gains
+    `creditIsImplementation?: boolean`, and {@link projectMergedTaskCandidates} stamps
+    `taskMergedBy` ONLY when it is exactly `true`. `undefined` and `false` both decline. This is the
+    whole fix: the rung already fails closed on an absent credit, and now fails closed on an
+    unexplained one.
+
+    (ii) THE PRODUCER DERIVES IT FROM THE MERGE SUBJECT, WITH NO NEW GITHUB CALL. `lint-plan`'s
+    failing-split already names the vocabulary — "chore(plan)/chore(triage)/chore(feedback)/
+    docs(plan)/plan:/docs:/chore: filing subjects excluded — a filing cites a task; it does not
+    implement it". Read `origin/main`'s subjects ONCE per sweep with a single local `git log
+    --format=%s`, map `(#N)` to its subject, and mark a candidate an implementation when its subject
+    is present AND not a filing. W1-T2794 promised "no new GitHub or ledger read" and this keeps
+    that promise: one local git invocation, not one per candidate.
+
+    (iii) AN UNKNOWN SUBJECT IS NOT AN IMPLEMENTATION. A PR whose subject cannot be found in the
+    scanned window leaves the flag undefined and the PR open. Preferring a stale open PR over a
+    wrongly-closed one is the entire trade this task exists to make.
+
+    (iv) DO NOT REPAIR status.ts HERE. `isPlanOnlyFilingPr`'s ledger dependence is a real second
+    defect with a wider blast radius — every consumer of the credit projection, not just this rung.
+    It deserves its own task and its own measurement. This one makes the DESTRUCTIVE consumer safe
+    first; a quiet miscredit on a board is survivable, a closed build is not.
+  acceptance:
+    - claim: "a credit earned by a filing subject never closes an open implementation PR"
+      proof: "unit test: test/a-filing-credit-must-never-close-a-build.test.ts"
+    - claim: "a credit whose crediting subject is unknown also never closes, so absence of evidence is not evidence of supersession"
+      proof: "unit test: test/a-filing-credit-must-never-close-a-build.test.ts"
+    - claim: "a credit from a real implementation subject still closes the leftover PR, so W1-T2794's incident remains fixed"
+      proof: "unit test: test/a-filing-credit-must-never-close-a-build.test.ts"
+    - claim: "the filing vocabulary is the one lint-plan already excludes, not a second list"
+      proof: "unit test: test/a-filing-credit-must-never-close-a-build.test.ts"
+  falsifier: |
+    THE #3195 SHAPE IS THE FIXTURE, AND IT MUST NOT CLOSE. Drive the projection with a candidate
+    whose crediting subject is `chore(plan): record that W1-T2371's amendment-block trigger fired`
+    and assert the open PR is NOT stamped and NOT closed. If it still closes, the fix does not
+    address the incident it was written for.
+
+    AND THE W1-T2794 INCIDENT MUST STILL BE FIXED. Drive the SAME projection with
+    `feat(sweep): close a leftover open PR (#3874)` and assert it DOES close. A fix that makes the
+    rung inert would trade a destroyed PR for the stranded-and-escalating PR W1-T2794 removed, and
+    is not an improvement.
+
+    PROVE IT LOAD-BEARING: with the `=== true` narrowed back to a truthy test, the unknown-subject
+    row must redden while the filing row and the implementation row keep their verdicts. Both
+    directions are needed — a test that only reddens on removal is asserting the flag exists rather
+    than what it gates.
+  note: |
+    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3063`.
+
+    THIS IS A REGRESSION IN WORK MERGED THE SAME DAY (#4447, W1-T2794), filed by the agent that
+    shipped it. The rung is only hours old, so the exposure window is small — but it is live, and
+    every sweep pass re-evaluates every open PR against the same projection.
+
+    RECOVERY OF #4461 IS SEPARATE AND IS NOT THIS TASK. Its branch is deleted; the commit is still
+    reachable from the closed PR's head and can be re-pushed. That is an operator-visible act on a
+    PR the fleet closed in error, not a code change, and it must not be bundled into this fix.
+
+    risk:high is BLAST RADIUS. The diff narrows one condition, but the condition governs an
+    automatic PR close — the most destructive act the sweep can take without an operator.

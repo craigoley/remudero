@@ -4861,7 +4861,14 @@ export function openTaskIdsFromPlan(plan: Plan, projection?: ReadonlyMap<string,
 
 interface GateOutcome {
   merged: boolean;
+  verdict?: "awaiting_merge" | "blocked_ci";
   reason: string;
+  headSha?: string;
+  checks?: string[];
+}
+
+function rollupCheckSummary(rollup: RollupEntry[] | undefined): string[] {
+  return (rollup ?? []).map((c) => `${c.name ?? c.context ?? "unknown"}:${c.conclusion ?? c.status ?? c.state ?? ""}`);
 }
 
 /**
@@ -5001,25 +5008,44 @@ export async function pollToGate(
     const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
     const state = prStateFromRest(row);
     if (state === "MERGED") return { merged: true, reason: "checks green" };
-    if (state === "CLOSED") return { merged: false, reason: "pr closed" };
+    if (state === "CLOSED") return { merged: false, verdict: "blocked_ci", reason: "pr closed" };
     const sha = mapRestPr(row).headRefOid;
     const roll = await restRollupFor(owner, repo, sha, read);
+    const checks = rollupCheckSummary(roll);
     const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
     if (red) {
-      log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown" });
-      return { merged: false, reason: `required check red: ${red.name ?? red.context ?? "unknown"}` };
+      log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown", head_sha: sha, checks });
+      return {
+        merged: false,
+        verdict: "blocked_ci",
+        reason: `required check red: ${red.name ?? red.context ?? "unknown"}`,
+        headSha: sha,
+        checks,
+      };
     }
     readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
     if (stall.stalled) {
-      log("pr.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
+      const verdict = stall.pending.length === 0 ? "awaiting_merge" : "blocked_ci";
+      const reason =
+        stall.pending.length > 0
+          ? `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
+          : `all observed checks terminal green for ${STALL_WINDOW} consecutive polls; awaiting GitHub merge`;
+      log("pr.stalled", {
+        pending: stall.pending,
+        identicalPolls: STALL_WINDOW,
+        verdict,
+        reason,
+        head_sha: sha,
+        checks,
+      });
       return {
         merged: false,
-        reason:
-          stall.pending.length > 0
-            ? `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
-            : `no progress for ${STALL_WINDOW} consecutive polls`,
+        verdict,
+        reason,
+        headSha: sha,
+        checks,
       };
     }
       // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
@@ -5030,7 +5056,7 @@ export async function pollToGate(
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
         state,
-        checks: roll.map((c) => `${c.name ?? c.context}:${c.conclusion ?? c.status ?? c.state}`),
+        checks,
       });
     }
     // W1-T463: see `waitForCiGreen`'s note — a timer, not a blocking child process.
@@ -14823,18 +14849,21 @@ async function runTask(
       return { taskId, runId, prUrl, merged: true, costUsd, verdict: "merged" };
     }
 
-    // Blocked: leave the PR open (auto-merge stays armed; it will land later if
-    // the check goes green) and the worktree for post-mortem.
+    // Blocked or awaiting merge: leave the PR open (auto-merge stays armed; it will land later if
+    // GitHub materializes it) and the worktree for post-mortem.
+    const terminalVerdict = outcome.verdict ?? "blocked_ci";
     log("verdict", {
-      verdict: "blocked_ci",
+      verdict: terminalVerdict,
       pr_url: prUrl,
       reason: outcome.reason,
+      ...(outcome.headSha ? { head_sha: outcome.headSha } : {}),
+      ...(outcome.checks ? { checks: outcome.checks } : {}),
       cost_usd: costUsd,
       billing_mode: billingMode(impl.childEnvKeys),
       account_label: impl.accountLabel,
     });
-    say(`verdict: blocked_ci (${outcome.reason}) — PR left OPEN: ${prUrl}`);
-    return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
+    say(`verdict: ${terminalVerdict} (${outcome.reason}) — PR left OPEN: ${prUrl}`);
+    return { taskId, runId, prUrl, merged: false, costUsd, verdict: terminalVerdict };
   } catch (err) {
     // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
     // and return a terminal verdict rather than falling through to the generic `run.error` +
@@ -18288,7 +18317,7 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
 }
 
 /**
- * `rmd census-membership [--base <ref>]` — W1-T2969: which population-walking suites does this diff
+ * `rmd census-membership [--base <ref>] [--files]` — W1-T2969: which population-walking suites does this diff
  * enter? `censusSuiteMembership` has answered that since W1-T2523 and nothing could ask it.
  * MEASURED 2026-09-06: four census-baseline CI failures across #4283/#4290, none naming a symbol
  * either diff touched, so the mandated caller sweep was blind to all four with the rule in context
@@ -18299,7 +18328,7 @@ export function censusMembershipCommand(
   rest: string[],
   deps: { repoRoot?: string; spawn?: PreflightSpawn; changedPaths?: readonly string[] } = {},
 ): number {
-  const badArg = unknownArgError("census-membership", rest, ["--base"], []);
+  const badArg = unknownArgError("census-membership", rest, ["--base"], ["--files"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -18331,6 +18360,29 @@ export function censusMembershipCommand(
   }
 
   const report = censusSuiteMembershipFor(changed, root, deps.spawn ?? defaultPreflightSpawn);
+  if (rest.includes("--files")) {
+    // W1-T3059 — ONE PREDICATE, NEVER TWO. The pre-push hook that RUNS these suites reads this
+    // list; it does not carry its own copy of the table. A second copy is the drift this repo has
+    // already paid for once (rule15-precheck imports the reviewer's own predicate for the same
+    // reason), and a hook whose table lags the model refuses the wrong diffs, silently.
+    const byJob = new Map(CENSUS_MEMBERSHIP_SUITES.map((s) => [s.job, s.testFile] as const));
+    const files = new Set<string>();
+    for (const e of report.entries) {
+      for (const suite of e.suites) {
+        const file = byJob.get(suite);
+        // A suite the table cannot map is NAMED, never dropped: silently shortening the list is
+        // how a caller comes to run a subset and read its pass as covering the whole set.
+        if (file === undefined) console.error(`unmapped: ${suite}`);
+        else files.add(file);
+      }
+    }
+    for (const file of [...files].sort()) console.log(file);
+    // STDOUT stays a clean file list a caller can splice; INCOMPLETENESS goes to stderr, so a
+    // partial enumeration cannot be mistaken for a complete one. An unmodelled census is a suite
+    // this diff may join and this cannot run — the caller must say so rather than imply coverage.
+    for (const unknown of report.unknownCoverage) console.error(`unmodelled: ${unknown}`);
+    return 0;
+  }
   console.log(`rmd census-membership — ${changed.length} changed path(s) against ${base}`);
   const joining = report.entries.filter((e) => e.suites.length > 0);
   if (joining.length === 0) {
@@ -39301,9 +39353,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "census-membership",
-    syntax: "rmd census-membership [--base <ref>]",
+    syntax: "rmd census-membership [--base <ref>] [--files]",
     summary: "Name the population-walking census suites this diff enters.",
-    detail: "W1-T2969: the answer censusSuiteMembership (W1-T2523) has always been able to give and nothing could ask for. A census suite WALKS a population and asserts a property of the whole set, so it names none of a caller's symbols and `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is structurally blind to it. MEASURED 2026-09-06: four CI failures across #4283 and #4290 were census baselines, and a correctly-run symbol sweep found none of them. Models both halves: the fast-gate census members, DERIVED from CENSUS_ADMITTED_MEMBERS, and the registry-shaped suites (the COMMANDS name list, the policy key set, the source-text-read ratchet) that are not fast-gate members and must not become them. A suite the model cannot place is NAMED as unmodelled rather than dropped, so 'joins nothing' is never confused with 'the model does not know'. REPORT-ONLY: runs no suite, gates nothing, exits 0 whatever it finds.",
+    detail: "W1-T2969: the answer censusSuiteMembership (W1-T2523) has always been able to give and nothing could ask for. A census suite WALKS a population and asserts a property of the whole set, so it names none of a caller's symbols and `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is structurally blind to it. MEASURED 2026-09-06: four CI failures across #4283 and #4290 were census baselines, and a correctly-run symbol sweep found none of them. Models both halves: the fast-gate census members, DERIVED from CENSUS_ADMITTED_MEMBERS, and the registry-shaped suites (the COMMANDS name list, the policy key set, the source-text-read ratchet) that are not fast-gate members and must not become them. A suite the model cannot place is NAMED as unmodelled rather than dropped, so 'joins nothing' is never confused with 'the model does not know'. REPORT-ONLY: runs no suite, gates nothing, exits 0 whatever it finds. `--files` emits the same membership as the bare TEST FILE PATHS on stdout, one per line, so a caller can run them without carrying a second copy of the table; incompleteness (an unmodelled or unmappable suite) is named on stderr, never folded into the list, because a caller that cannot tell a partial enumeration from a complete one reads its own subset pass as covering the whole set.",
   },
   {
     name: "ci-learning",

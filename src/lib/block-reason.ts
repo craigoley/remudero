@@ -96,6 +96,7 @@ export function verdictIsFixable(verdict: RunResult["verdict"]): boolean {
 }
 
 export type BlockDisposition =
+  | { kind: "awaiting_merge" }
   | { kind: "retry_transient"; state: RetryState }
   | { kind: "independent_failure"; dependents: string[] }
   | { kind: "fixable_blocker"; dependents: string[]; state: RetryState }
@@ -115,6 +116,7 @@ export function reasonAboutBlock(
   verdict: RunResult["verdict"],
   state: RetryState = INITIAL_RETRY_STATE,
 ): BlockDisposition {
+  if (verdict === "awaiting_merge") return { kind: "awaiting_merge" };
   const cls = verdictFailureClass(verdict);
   if (cls === "transient") {
     const action = planRetry(state, "transient");

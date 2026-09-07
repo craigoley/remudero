@@ -118,7 +118,8 @@
 # ── Cost is the falsifier for "did this actually execute" (W1-T2784) ──
 - id: cost-separates-never-ran-from-ran-and-failed
   subsystem: diagnosis
-  lifecycle: active
+  lifecycle: superseded
+  superseded_by: cost-is-the-execution-falsifier
   operator_impact: true
   files: [src/lib/isolation.ts, src/lib/dispatch-claim.ts]
   fact: >-
@@ -134,6 +135,65 @@
     diagnosis at the wrong layer.
   src: W1-T2754,W1-T2784
   cited: "2026-09-03"
+- id: cost-is-the-execution-falsifier
+  subsystem: diagnosis
+  lifecycle: active
+  operator_impact: true
+  files: [src/lib/isolation.ts, src/lib/dispatch-claim.ts]
+  fact: >-
+    Cost is the falsifier for whether a classified verdict was earned. A verdict
+    name gives the classification; the billed cost says whether the instrument
+    ran at all, at both probe and cycle altitude. Measured cases: a $0 Codex
+    isolation probe that never started, W1-T2636's $0.000972 API 529 whose throw
+    was swallowed, and a $0.0000 cycle summary that never got to do work. This
+    is not "zero cost is a bug": `task_already_merged` honestly costs $0. For a
+    verdict claiming work happened, zero or near-zero cost is the first layer to
+    check.
+  src: W1-T2754,W1-T2784,W1-T2805
+  cited: "2026-09-07"
+- id: bare-node-test-resolution-failure
+  subsystem: testing
+  lifecycle: active
+  operator_impact: false
+  files: [test]
+  fact: >-
+    Bare `node --test` silently module-resolution-fails for test files importing
+    `src/`: a `.js` specifier that the repo's tsx runner resolves becomes one
+    failed test with `ERR_MODULE_NOT_FOUND`, so a count measured that way is
+    wrong rather than useful. Use the repo runner shape,
+    `node --test --import tsx --import ./test/setup/tmp-hygiene.ts`, before
+    carrying any test count.
+  src: W1-T2805
+  cited: "2026-09-07"
+- id: tap-proximity-is-not-causation
+  subsystem: testing
+  lifecycle: active
+  operator_impact: false
+  files: [test]
+  fact: >-
+    TAP output proximity is not causation. Concurrent `node --test` runners
+    interleave stdout/stderr, so context lines around a failure may belong to a
+    different suite and can falsely explain the red. Unlike the killed-run trap,
+    this still prints a complete summary; the guard is to trace each diagnostic
+    to its TAP test header or rerun the named suite alone before carrying the
+    cause.
+  src: W1-T2805
+  cited: "2026-09-07"
+- id: an-error-names-its-cause-not-its-check
+  subsystem: diagnosis
+  lifecycle: active
+  operator_impact: false
+  files: [src]
+  fact: >-
+    A failure message is self-diagnosing only when it separates its cause from
+    neighbouring causes in the same failure class; naming the check that fired
+    is not enough. `retro preflight exceeded 1200000ms` did not say it missed by
+    948ms, and an isolation parse error hid that the spawn never ran. The
+    counter-example is `source-size-signal: MEASUREMENT FAILED -- invalid
+    arguments: Unknown option '--check'`: it names the cause, not just the
+    check. Before shipping a message, ask whether two causes can print it.
+  src: W1-T2803,W1-T2755,W1-T2805
+  cited: "2026-09-07"
 - id: ls-remote-grep-matches-the-sha-column
   subsystem: dispatch
   lifecycle: active
