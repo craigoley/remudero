@@ -585,8 +585,29 @@ sweep:
   # measured, against implement at $5.28) and the review rung is already starved (W1-T2519), so
   # holding reviews at 3 while dispatch runs at 2 would drain the open-PR backlog faster. That is a
   # ruling with its own evidence, not a consequence of this one — file it, do not infer it here.
+  # W1-T3024 — OPERATOR DIRECTION 2026-09-07: RESTORED TO 3. The hold above asked for "the
+  # measurement that justifies it rather than restoring on optimism". Both measurements are here,
+  # and they do NOT agree — recorded that way on purpose.
+  #
+  # MEMORY, WHICH JUSTIFIES IT: the cap's own reasoning was sized against "7.75 GiB total + 4 GiB
+  # swapfile" measured 2026-08-20. `free -h` on this host today reads 31 GiB total, 19 GiB free,
+  # 29 GiB available, 4 GiB swap untouched — roughly a 4x change in the constraint the ceiling was
+  # built on. dispatchLanes is 2, so the host sum this row's prose warns about goes 4 -> 5 against
+  # a ~1.33 GiB per-worker peak and a 1.5 GiB reserve.
+  #
+  # COST, WHICH DOES NOT: the hold is conditioned on "burn per run is down" against $0.63/run for
+  # REVIEW runs. Measured 2026-09-07 off the authoritative verdict rows: 18 costed runs, $102.89,
+  # p50 $1.68, p90 $20.89, max $23.95 — and NO review run carried cost in the readable window, so
+  # the populations are not even comparable. This restore is therefore taken on operator direction
+  # and on the memory measurement, NOT on the cost condition the hold names. Said plainly so a
+  # later reader does not mistake it for that condition having been met.
+  #
+  # AND THE REASON THIS ROW IS LOAD-BEARING AT ALL (W1-T3025): the adaptive widener that was
+  # supposed to earn lane three has fired 718 times since 2026-09-05 and granted it ZERO times —
+  # 59% of refusals are missing telemetry, not pressure, on a host reporting 0% PSI and 29 GiB
+  # free. Until that is fixed this committed value is the ONLY way a third lane exists.
   reviewLanes:
-    value: 2
+    value: 3
     origin: "net-new"
     min: 1
     max: 3

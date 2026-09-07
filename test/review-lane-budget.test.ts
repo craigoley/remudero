@@ -151,8 +151,17 @@ test("W1-T1049 acceptance 4 — dispatchLanes remains independent while reviewLa
 
 // ── the split is a no-op today: the shipped default preserves today's effective behavior ──
 
-test("W1-T1049 — DEFAULT_SWEEP_POLICY.reviewLanes defaults to dispatchLanes' own shipped value: the split changes NO effective behavior by itself, only who controls the number", () => {
-  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, DEFAULT_SWEEP_POLICY.dispatchLanes);
+test("W1-T1049 — reviewLanes and dispatchLanes are INDEPENDENT rows, and the split is now exercised", () => {
+  // The original assertion was `reviewLanes === dispatchLanes`, true only while the two values
+  // happened to coincide. W1-T1049 built the split so review concurrency could be controlled
+  // WITHOUT moving dispatch; W1-T3024 is the first time an operator used it (review 2 -> 3, host
+  // sum 4 -> 5). Equality was never the invariant — independence was.
+  //
+  // Both are pinned as LITERALS, for the reason test/review-lane-fairness.test.ts gives: reading
+  // the rows here would assert values against themselves and guard nothing, so an UNINTENDED
+  // change to either must still redden this.
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 3, "review budget, plan/policy.yaml sweep.reviewLanes");
+  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 2, "build budget, its own row — unmoved by the review retune");
 });
 
 // ── every refusal arm of the policy row's validator, one test each ─────────────────────────

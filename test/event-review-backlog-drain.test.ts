@@ -275,8 +275,11 @@ test("W1-T2584/W1-T2771: an active review remains exclusive while an unstarted q
   assert.deepEqual(fullAttempts, [1], "the full sweep re-reads the overtaking pass's durable outcome and never double-posts");
 });
 
-test("W1-T2584: the shipped review width remains two", () => {
-  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 2);
+test("W1-T2584: the shipped review width is what plan/policy.yaml commits", () => {
+  // W1-T3024: 2 -> 3 on operator direction 2026-09-07. Kept as a LITERAL for the reason
+  // test/review-lane-fairness.test.ts states — reading the row here would assert a value against
+  // itself and guard nothing, so an UNINTENDED budget change must still redden this.
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 3);
 });
 
 test("W1-T2584: the daemon sweep hook forwards its production continuation callback into runSweep", () => {

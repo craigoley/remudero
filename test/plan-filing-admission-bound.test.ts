@@ -94,9 +94,11 @@ test("W1-T2439 (acceptance 2): the cheap lane is BOUNDED — a queue deeper than
 // ── acceptance 3: the spawning lane uses the configured review budget ───────────────────────
 
 test("W1-T2439/W1-T2792: the spawning lane admits the oldest configured reviewLanes", () => {
-  const q = [build(20, "2026-08-01T00:00:00Z"), build(21, "2026-08-02T00:00:00Z"), build(22, "2026-08-03T00:00:00Z")];
+  // W1-T3024: reviewLanes 2 -> 3, so the fixture carries FOUR builds — the point of this test is
+  // that the oldest N win and the rest are refused, which needs one more build than there are lanes.
+  const q = [build(20, "2026-08-01T00:00:00Z"), build(21, "2026-08-02T00:00:00Z"), build(22, "2026-08-03T00:00:00Z"), build(23, "2026-08-04T00:00:00Z")];
   const { spawning } = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW);
-  assert.deepEqual(spawning.map((p) => p.prNumber), [20, 21], "the oldest two builds win the configured two lanes");
+  assert.deepEqual(spawning.map((p) => p.prNumber), [20, 21, 22], "the oldest three builds win the configured three lanes");
   assert.equal(selectReviewAdmission(q, DEFAULT_SWEEP_POLICY, NOW)?.prNumber, 20,
     "and the singular entry point is byte-identical in behaviour to what W1-T526 always ran");
 });
@@ -106,12 +108,15 @@ test("W1-T2439 (acceptance 3): a build is REFUSED by the spawning bound even whi
     build(20, "2026-08-01T00:00:00Z"),
     build(21, "2026-08-02T00:00:00Z"),
     build(22, "2026-08-03T00:00:00Z"),
+    // W1-T3024: a FOURTH build, so one is still in excess of the three configured lanes — without
+    // it this test would assert nothing about refusal.
+    build(23, "2026-08-06T00:00:00Z"),
     filing(30, "2026-08-04T00:00:00Z"),
     filing(31, "2026-08-05T00:00:00Z"),
   ];
   const { spawning, planFilings } = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW);
-  assert.deepEqual(spawning.map((p) => p.prNumber), [20, 21], "both configured semantic lanes are admitted");
-  assert.ok(!planFilings.some((p) => p.prNumber === 22), "the THIRD build is not smuggled into the cheap lane");
+  assert.deepEqual(spawning.map((p) => p.prNumber), [20, 21, 22], "all three configured semantic lanes are admitted");
+  assert.ok(!planFilings.some((p) => p.prNumber === 23), "the FOURTH build is not smuggled into the cheap lane");
   assert.deepEqual(planFilings.map((p) => p.prNumber), [30, 31], "only real filings ride the cheap lane");
 });
 

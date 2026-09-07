@@ -166,11 +166,13 @@ test("W1-T1218: the review budget and its floor are unchanged", () => {
   // ordering takes no policy argument at all — it cannot widen or narrow the lane count.
   //
   // The pinned value tracks plan/policy.yaml's `sweep.reviewLanes` row, which the operator moved
-  // 3 -> 2 in #3486 as a deliberate, reversible cost hold while the per-run cost work lands. That
-  // PR updated test/review-lane-budget.test.ts's copy of this same constant and missed this one,
-  // which is why main went red. Kept as a LITERAL on purpose: reading the row here would assert a
-  // value against itself and guard nothing, so an unintended budget change must still redden this.
-  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 2, "the shipped budget is unchanged");
+  // 3 -> 2 in #3486 as a deliberate, reversible cost hold while the per-run cost work lands, and
+  // then 2 -> 3 in W1-T3024 on 2026-09-07 — the hold was always "provisional and reversible". That
+  // first PR updated test/review-lane-budget.test.ts's copy of this same constant and missed this
+  // one, which is why main went red; both are updated together here. Kept as a LITERAL on purpose:
+  // reading the row here would assert a value against itself and guard nothing, so an unintended
+  // budget change must still redden this.
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 3, "the shipped budget is what policy.yaml commits");
   assert.equal(validateReviewLanesRow({ value: 3, origin: "net-new", min: 1, max: 3 }), 3);
   assert.throws(() => validateReviewLanesRow({ value: 4, origin: "net-new", min: 1, max: 3 }), /reviewLanes/i,
     "a value past the bound is still a PolicyError — the ceiling still refuses");

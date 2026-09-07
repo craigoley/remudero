@@ -420,7 +420,8 @@ test("light/event review falls back to the bounded base width when adaptive sele
 
   await runSweepLightPass(prs, deps, DEFAULT_SWEEP_POLICY);
 
-  assert.deepEqual(posted.sort((a, b) => a - b), [4001, 4002]);
+  // W1-T3024: the bounded BASE width is 3, so the fallback admits three.
+  assert.deepEqual(posted.sort((a, b) => a - b), [4001, 4002, 4003]);
   assert.deepEqual(logs.filter((entry) => entry.step === "review.capacity.selector_failed"), [{
     step: "review.capacity.selector_failed",
     extra: {
