@@ -1,0 +1,15 @@
+- id: W1-T9999
+  title: "a fixture shard for the rule-15 precheck"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 1.00
+  files: [src/lib/x.ts]
+  origin: "operator-session#rule15-precheck-fixture"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "a fixture criterion"
+      proof: "unit test: a fixture title"

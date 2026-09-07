@@ -161,3 +161,4 @@ export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
   }
   return { removed, kept, oldestKeptAgeMs };
 }
+// a source change riding along

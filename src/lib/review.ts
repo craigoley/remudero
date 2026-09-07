@@ -5502,7 +5502,10 @@ function planTasksCriterionFieldLines(lines: DiffLine[], kind: "add" | "del"): D
  * was APPENDED — a pure append tripped neither disjunct before W1-T400 widened the ADD side (#1295). Both read as "the
  * criteria no longer say what the Architect wrote". Diff-derived ONLY: callers apply their OWN exemption on top —
  * {@link checkSatisfiedByGuard} uses `planOnly && humanAuthored`, {@link judgeReview} `planOnly` alone. */
-function criterionFieldTampered(diff: string): boolean {
+/** EXPORTED FOR THE AUTHOR-TIME CHECK (W1-T3040). The pre-push check and this reviewer must never
+ *  be two predicates: a local check that disagreed with the gate would be worse than none, sending
+ *  an author to split a PR the reviewer would have passed, or clearing one it will refuse. */
+export function criterionFieldTampered(diff: string): boolean {
   const lines = walkDiff(diff);
   const addedField = planTasksCriterionFieldLines(lines, "add").length > 0;
   const removedField = planTasksCriterionFieldLines(lines, "del").length > 0;
