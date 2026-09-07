@@ -76,6 +76,133 @@ export interface Proposal {
   /** W1-T2451: the board item this proposal was minted from, absent for every other family. It is what makes "the PR
    *  this is ABOUT has resolved" expressible, since anchors here are always []. */
   originatingItemId?: string;
+  /** W1-T2702: present ONLY on a proposal {@link stageBundleProposals} minted from an imported knowledge bundle's
+   *  `policy_proposals` row — absent for every other proposal family. Provenance for the receiving operator: which
+   *  bundle this row travelled in, and the pin they verified it against before staging. */
+  source?: BundleProposalSource;
+}
+
+// ── BUNDLE-SOURCED POLICY PROPOSALS (W1-T2702) ────────────────────────────────────────────────
+//
+// A BUNDLE CARRIES WHAT THE FLEET KNOWS AND NOT HOW IT IS ALLOWED TO ACT: `rmd bundle export`
+// (bundle.ts) now carries every operator-ratified `plan/policy.yaml` row as a `PolicyProposalRow`
+// alongside doctrine/learnings. `stageBundleProposals` below is the ONLY place that row becomes
+// something the receiving repo's operator can act on — it stages ONE {@link Proposal} per row
+// through {@link updateProposalRegistry} (the ONE sanctioned proposal writer every other minter,
+// board-review.ts/retro.ts/measurement-cadence.ts/rule-efficacy.ts, already goes through) and
+// touches NOTHING ELSE. `rmd inbox` tiers a staged proposal exactly like any other; `rmd approve`
+// is the ONLY path that can turn it into a committed `plan/policy.yaml` value, and that always
+// means a plan PR the receiving operator reviews and merges — Rule 15/Law 5, by construction.
+
+/** One `bundle.ts` `PolicyProposalRow`, duplicated STRUCTURALLY rather than imported: inbox.ts is
+ *  a foundational module several others already import FROM (board-review.ts, retro.ts,
+ *  measurement-cadence.ts, rule-efficacy.ts, digest.ts) — importing UP into bundle.ts would be the
+ *  one edge that runs the other way. TypeScript's structural typing means `bundle.ts`'s own
+ *  `PolicyProposalRow` satisfies this shape with zero conversion at every call site (run-task.ts's
+ *  `bundleImportCommand` passes bundle.ts's rows here directly). */
+export interface BundlePolicyProposalRow {
+  path: string;
+  origin: string;
+  value: unknown;
+  bounds?: { min: number; max: number };
+  rationale: string;
+  rowHash: string;
+}
+
+/** Where a staged policy proposal travelled from — the receiving operator's context for
+ *  {@link Proposal.source}. `rowHash` is BOTH the provenance record and the dedup key: {@link
+ *  bundlePolicyProposalId} derives the proposal's own id from it, so a re-import of the SAME
+ *  (unedited) row can never mint a second proposal. */
+export interface BundleProposalSource {
+  kind: "bundle";
+  sourceRepo: string;
+  sourceSha: string;
+  /** The `--pin` the importing operator supplied and verified against the bundle file. */
+  pin: string;
+  rowHash: string;
+}
+
+/** Derive a staged policy proposal's id from its row hash — DERIVED, never random, mirroring
+ *  {@link understoodRequestProposalId}'s own "re-classifying the same thing names the same
+ *  proposal" discipline. Exported so a caller (or a test) can predict the id a given row stages
+ *  under without re-deriving the truncation rule by hand. */
+export function bundlePolicyProposalId(rowHash: string): string {
+  return `bundle-policy:${rowHash.slice(0, 16)}`;
+}
+
+/** Render one staged proposal's `summary` from its row — the rationale, value, bounds and origin
+ *  the operator needs to ratify or reject it, all carried verbatim from the exporting repo. */
+function renderBundlePolicyProposalSummary(row: BundlePolicyProposalRow, source: { sourceRepo: string; sourceSha: string }): string {
+  const boundsLine = row.bounds ? `\nBounds: [${row.bounds.min}, ${row.bounds.max}]` : "";
+  const rationaleLine = row.rationale ? `\nRationale (from the exporting repo): ${row.rationale}` : "";
+  return (
+    `Ratify imported policy row '${row.path}' from ${source.sourceRepo}@${source.sourceSha.slice(0, 12)}:\n` +
+    `Value: ${JSON.stringify(row.value)}\n` +
+    `Origin: ${row.origin}${boundsLine}${rationaleLine}\n\n` +
+    `Approving this proposal drafts a plan PR that sets 'plan/policy.yaml's '${row.path}' row to this value — ` +
+    `plan/policy.yaml itself is untouched until that PR merges.`
+  );
+}
+
+/** The outcome of one {@link stageBundleProposals} call: which rows minted a NEW proposal this call, and which were
+ *  already staged (same row hash → same derived id → skipped, never duplicated). */
+export interface StageBundleProposalsResult {
+  staged: string[];
+  alreadyStaged: string[];
+}
+
+/**
+ * `rmd bundle import`'s staging path (W1-T2702, design (ii)): mint one {@link Proposal} per
+ * `rows` entry and write it through {@link updateProposalRegistry} — the grep target this task's
+ * acceptance names (`stageBundleProposals(` in this file). NEVER writes `plan/policy.yaml` or any
+ * other policy file; the registry write above is this function's entire footprint.
+ *
+ * IDEMPOTENT BY ROW HASH: {@link bundlePolicyProposalId} derives each proposal's id from
+ * `row.rowHash`, so a row already present in the registry (an unedited re-import, or a second
+ * bundle carrying the same ratified value) is skipped and reported in `alreadyStaged`, never
+ * staged twice. A row whose value/bounds/origin/rationale changed since the last import hashes
+ * differently and mints a NEW proposal id — the receiving operator has never seen or ratified
+ * this EXACT row before, so it is new work for them, not an update to old work; any
+ * still-open prior proposal for the same path is left exactly as it is, for the operator to
+ * reconcile (reframe/conflict) the ordinary way, never silently retired by this function.
+ */
+export function stageBundleProposals(
+  registryPath: string,
+  rows: BundlePolicyProposalRow[],
+  source: Omit<BundleProposalSource, "kind" | "rowHash">,
+  opts: UpdateProposalRegistryOpts = {},
+): StageBundleProposalsResult {
+  const staged: string[] = [];
+  const alreadyStaged: string[] = [];
+  updateProposalRegistry(
+    registryPath,
+    (current) => {
+      // Re-derived every call (updateProposalRegistry may retry the read under the lock): stale
+      // results from a prior attempt must never leak into what this call reports.
+      staged.length = 0;
+      alreadyStaged.length = 0;
+      const currentIds = new Set(current.map((p) => p.id));
+      const additions: Proposal[] = [];
+      for (const row of rows) {
+        const id = bundlePolicyProposalId(row.rowHash);
+        if (currentIds.has(id)) {
+          alreadyStaged.push(id);
+          continue;
+        }
+        additions.push({
+          id,
+          summary: renderBundlePolicyProposalSummary(row, source),
+          evidenceAnchors: [],
+          source: { kind: "bundle", sourceRepo: source.sourceRepo, sourceSha: source.sourceSha, pin: source.pin, rowHash: row.rowHash },
+        });
+        staged.push(id);
+      }
+      if (additions.length === 0) return null; // nothing new — skip the write entirely, never a no-op rewrite
+      return [...current, ...additions];
+    },
+    opts,
+  );
+  return { staged, alreadyStaged };
 }
 
 // ── The understood-request handoff (W1-T2500) ──────────────────────────────────────────────

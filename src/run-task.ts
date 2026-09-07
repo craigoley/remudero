@@ -414,6 +414,7 @@ import {
   renderRatifyTelemetry,
   INBOX_DRAFT_DISALLOWED_TOOLS,
   runDraftRung,
+  stageBundleProposals,
   summarizeInboxPoll,
   updateProposalRegistry,
   writeDraftAttemptPair,
@@ -669,7 +670,8 @@ import {
   type RiskJudgeVerdict,
 } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
-import { buildBundle, renderBundle } from "./lib/bundle.js";
+import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
+import { parse as parseYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import {
@@ -38277,41 +38279,125 @@ export function learningsImportCommand(rest: string[]): number {
 }
 
 /**
- * `rmd bundle export|...` — dispatches the day-one knowledge bundle verb (W1-T2580). Only
- * `export` exists today; there is deliberately no `rmd bundle import` — the shipped `rmd
- * learnings import <file> --pin <hash>` (W1-T425, above) already consumes a bundle this
- * produces, since a {@link Bundle} is the exact `GlobalArtifact` shape that command already
- * writes to the RMD-GLOBAL layer.
+ * `rmd bundle export|import` — dispatches the day-one knowledge bundle verbs (W1-T2580 export,
+ * W1-T2702 import). `import` is genuinely new CLI surface, not a reuse of the shipped `rmd
+ * learnings import <file> --pin <hash>` (W1-T425) under a second name: {@link bundleImportCommand}
+ * calls THAT command for the learnings/doctrine/worker-settings half (a {@link Bundle} really is
+ * the `GlobalArtifact` shape it already verifies and writes, so that half needs no new code), then
+ * ADDS the W1-T2702 half — staging `policy_proposals` into the inbox — which `rmd learnings
+ * import` knows nothing about and never will.
  */
 export function bundleCommand(rest: string[]): number {
   const sub = rest[0];
   if (sub === "export") return bundleExportCommand(rest.slice(1));
+  if (sub === "import") return bundleImportCommand(rest.slice(1));
   console.error(
-    `rmd bundle: unknown subcommand '${sub ?? ""}' — usage: rmd bundle export <path>\n` + USAGE,
+    `rmd bundle: unknown subcommand '${sub ?? ""}' — usage: rmd bundle export <path> | rmd bundle import <file> --pin <hash>\n` +
+      USAGE,
   );
   return 2;
 }
 
 /**
- * `rmd bundle export <path>` — THE MISSING EXPORT HALF (W1-T2580): assembles this checkout's
- * doctrine preamble, its BUDGET-SELECTED project learnings corpus (every entry's provenance
- * intact — never filtered to `share: public`, unlike `rmd learnings export`'s §6 commons
- * transport), and the committed worker-settings template's ASSERTED values into one
- * deterministic, hash-pinned bundle ({@link buildBundle}, src/lib/bundle.ts) written to
- * `<path>`. Refuses (writes nothing) when the corpus selects zero entries, a candidate matches
- * the leak-grep tripwire, or the worker-settings template itself fails validation — every
- * refusal is reported via the SAME {@link buildBundle} this command is a thin wrapper over,
- * never reimplemented here.
+ * `rmd bundle import <file> --pin <hash>` (W1-T2702, design (ii)): the receiving side of {@link
+ * bundleExportCommand}. Two phases, in order:
  *
- * `opts.projectDir`/`opts.headSha`/`opts.settingsPath`/`opts.now` are injectable, same seam
- * `learningsExportCommand` uses for `projectDir`/`headSha` — so a test can drive the real
- * success path over a fixture corpus and a fixture settings template, and can assert
- * byte-identical output across two calls by pinning `now`/`headSha` rather than reading the
- * real clock/git history.
+ * 1. THE LEARNINGS HALF (W1-T2580/W1-T425, unchanged): delegates to {@link learningsImportCommand}
+ *    verbatim — same pin check ({@link verifyBundlePin}), same write to the RMD-GLOBAL artifact
+ *    path. A phase-1 failure (bad pin, unreadable file, missing `--pin`) stops here; phase 2 never
+ *    runs against a bundle that failed its OWN entries check.
+ * 2. THE POLICY-PROPOSALS HALF (W1-T2702, new): an INDEPENDENT tamper check over `policy_proposals`
+ *    ({@link verifyBundlePolicyProposalsPin} — `verifyBundlePin` above only ever covers `entries`,
+ *    never this section, by design; see bundle.ts's `computePolicyProposalsHash` doc for why it is
+ *    a separate pin rather than folded into the one hash), then {@link stageBundleProposals}
+ *    (inbox.ts) — the ONLY write this phase performs. `plan/policy.yaml` is NEVER written by this
+ *    command; only `rmd approve` merging a plan PR moves a value into it.
+ *
+ * `opts.registryPath` is injectable (tests) the same way every other registry-writing command in
+ * this file takes one; defaults to the real `<config.root>/state/inbox-proposals.json`.
+ */
+export function bundleImportCommand(rest: string[], opts: { registryPath?: string } = {}): number {
+  const file = rest[0];
+  const badArg = unknownArgError("bundle import", rest.slice(1), ["--pin"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  if (!file) {
+    console.error(`rmd bundle import: <file> is required — usage: rmd bundle import <file> --pin <hash>\n` + USAGE);
+    return 2;
+  }
+  const pin = flagValue(rest, "--pin");
+  if (!pin) {
+    console.error(`rmd bundle import: --pin <hash> is required — the operator-supplied hash the bundle must match\n` + USAGE);
+    return 2;
+  }
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    console.error(`rmd bundle import: cannot read ${file}: ${String((e as Error)?.message ?? e)}`);
+    return 2;
+  }
+
+  const learningsExit = learningsImportCommand(rest);
+  if (learningsExit !== 0) return learningsExit;
+
+  const proposalsCheck = verifyBundlePolicyProposalsPin(text);
+  if (!proposalsCheck.ok) {
+    console.error(`rmd bundle import: ${proposalsCheck.reason}`);
+    return 1;
+  }
+  if (proposalsCheck.rows.length === 0) {
+    console.log(
+      "### rmd bundle import — the learnings/doctrine/worker-settings half imported above; " +
+        "0 policy proposals in this bundle, nothing staged.",
+    );
+    return 0;
+  }
+  let sourceRepo = "unknown";
+  let sourceSha = "unknown";
+  try {
+    const parsed = parseYaml(text) as { provenance?: { sourceRepo?: unknown; sourceSha?: unknown } };
+    if (typeof parsed.provenance?.sourceRepo === "string") sourceRepo = parsed.provenance.sourceRepo;
+    if (typeof parsed.provenance?.sourceSha === "string") sourceSha = parsed.provenance.sourceSha;
+  } catch {
+    // unreachable: verifyBundlePolicyProposalsPin above already parsed this exact text successfully.
+  }
+  const config = loadConfig();
+  const registryPath = opts.registryPath ?? join(config.root, "state", "inbox-proposals.json");
+  const result = stageBundleProposals(registryPath, proposalsCheck.rows, { sourceRepo, sourceSha, pin });
+  console.log(
+    `### rmd bundle import — staged ${result.staged.length} policy proposal(s)` +
+      `${result.alreadyStaged.length > 0 ? `, ${result.alreadyStaged.length} already staged (skipped)` : ""}` +
+      `${result.staged.length > 0 ? `: ${result.staged.join(", ")}` : ""}.\n` +
+      `rmd inbox tiers them like any other proposal; rmd approve ratifies each into its own plan PR. ` +
+      `plan/policy.yaml was not written by this command.`,
+  );
+  return 0;
+}
+
+/**
+ * `rmd bundle export <path>` — THE MISSING EXPORT HALF (W1-T2580, extended by W1-T2702): assembles
+ * this checkout's doctrine preamble, its BUDGET-SELECTED project learnings corpus (every entry's
+ * provenance intact — never filtered to `share: public`, unlike `rmd learnings export`'s §6
+ * commons transport), the committed worker-settings template's ASSERTED values, and (W1-T2702)
+ * every operator-ratified `plan/policy.yaml` row as a proposal, into one deterministic,
+ * hash-pinned bundle ({@link buildBundle}, src/lib/bundle.ts) written to `<path>`. Refuses (writes
+ * nothing) when the corpus selects zero entries, a candidate matches the leak-grep tripwire, the
+ * worker-settings template fails validation, or `plan/policy.yaml` fails to parse — every refusal
+ * is reported via the SAME {@link buildBundle} this command is a thin wrapper over, never
+ * reimplemented here.
+ *
+ * `opts.projectDir`/`opts.headSha`/`opts.settingsPath`/`opts.policyPath`/`opts.now` are injectable,
+ * same seam `learningsExportCommand` uses for `projectDir`/`headSha` — so a test can drive the real
+ * success path over a fixture corpus, a fixture settings template, and a fixture policy file, and
+ * can assert byte-identical output across two calls by pinning `now`/`headSha` rather than reading
+ * the real clock/git history.
  */
 export function bundleExportCommand(
   rest: string[],
-  opts: { projectDir?: string; headSha?: () => string; settingsPath?: string; now?: () => string } = {},
+  opts: { projectDir?: string; headSha?: () => string; settingsPath?: string; policyPath?: string; now?: () => string } = {},
 ): number {
   const out = rest[0];
   const badArg = unknownArgError("bundle export", rest.slice(1), [], []);
@@ -38331,6 +38417,14 @@ export function bundleExportCommand(
     console.error(`rmd bundle export: cannot read worker-settings template ${settingsPath}: ${String((e as Error)?.message ?? e)}`);
     return 1;
   }
+  const policyPath = opts.policyPath ?? join(repoRoot, "plan", "policy.yaml");
+  let policyYamlText: string;
+  try {
+    policyYamlText = readFileSync(policyPath, "utf8");
+  } catch (e) {
+    console.error(`rmd bundle export: cannot read policy file ${policyPath}: ${String((e as Error)?.message ?? e)}`);
+    return 1;
+  }
   const entries = loadLearningsCorpus(opts.projectDir ?? projectLearningsHome(repoRoot));
   let sourceRepo = "unknown";
   try {
@@ -38348,19 +38442,21 @@ export function bundleExportCommand(
     // no git history readable — same degrade-to-"unknown" as above.
   }
   const readNow = opts.now ?? (() => new Date().toISOString());
-  const result = buildBundle(entries, rawSettings, { sourceRepo, sourceSha, exportedAt: readNow() });
+  const result = buildBundle(entries, rawSettings, { sourceRepo, sourceSha, exportedAt: readNow() }, { policyYamlText });
   if (!result.ok) {
     console.error(`rmd bundle export: ${result.reason}`);
     return 1;
   }
   writeFileSync(out, renderBundle(result.bundle), "utf8");
   const n = result.bundle.entries.length;
+  const p = result.bundle.policy_proposals.length;
   console.log(
     `### rmd bundle export — wrote ${out}: ${n} learning${n === 1 ? "" : "s"} + doctrine + worker-settings ` +
-      `conventions from ${sourceRepo}@${sourceSha.slice(0, 12)}.\n` +
+      `conventions + ${p} policy proposal${p === 1 ? "" : "s"} from ${sourceRepo}@${sourceSha.slice(0, 12)}.\n` +
       `hash=${result.bundle.hash}\n` +
-      `Carry this file to a fresh deployment and load it via the EXISTING transport: ` +
-      `rmd learnings import ${out} --pin ${result.bundle.hash}`,
+      `Carry this file to a fresh deployment: rmd bundle import ${out} --pin ${result.bundle.hash} — stages the ` +
+      `learnings/doctrine/worker-settings half AND the ${p} policy proposal${p === 1 ? "" : "s"} into the inbox for ` +
+      `the receiving operator to ratify. plan/policy.yaml is never written by import.`,
   );
   return 0;
 }
@@ -38902,9 +38998,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "bundle",
-    syntax: "rmd bundle export <path>",
-    summary: "Export one hash-pinned bundle of doctrine, budgeted learnings and worker-settings conventions.",
-    detail: "the day-one knowledge bundle (W1-T2580, W1-T992's BYO-subscription consumer): assembles the two mandatory doctrine lines, the BUDGET-SELECTED project learnings corpus (DEFAULT_KNOWLEDGE_BUDGET_CHARS, every entry's provenance intact -- never filtered to `share: public`, unlike `rmd learnings export`'s separate §6 commons transport which stays banked and unchanged), and the committed worker-settings template's ASSERTED values (sandbox.enabled/failIfUnavailable/autoAllowBashIfSandboxed, sandbox.network.allowedDomains -- never its raw deny-paths) into ONE deterministic, hash-pinned bundle a fresh deployment loads via the EXISTING `rmd learnings import <file> --pin <hash>` transport (W1-T425) -- no new import path, no tokens/ledger/state/customer code ever read. Refuses (writes nothing) on zero selected entries, a leak-grep tripwire hit (naming the entry), or a worker-settings template that fails validation.",
+    syntax: "rmd bundle export <path> | rmd bundle import <file> --pin <hash>",
+    summary: "Export/import one hash-pinned bundle of doctrine, learnings, worker-settings and ratified policy proposals.",
+    detail: "the day-one knowledge bundle (W1-T2580, W1-T992's BYO-subscription consumer; W1-T2702 adds operating limits): export assembles the two mandatory doctrine lines, the BUDGET-SELECTED project learnings corpus (DEFAULT_KNOWLEDGE_BUDGET_CHARS, every entry's provenance intact -- never filtered to `share: public`, unlike `rmd learnings export`'s separate §6 commons transport which stays banked and unchanged), the committed worker-settings template's ASSERTED values (sandbox.enabled/failIfUnavailable/autoAllowBashIfSandboxed, sandbox.network.allowedDomains -- never its raw deny-paths), and every operator-ratified `plan/policy.yaml` row (origin: net-new, or a W1-T2694 ratification pin when that exists) as a proposal, into ONE deterministic, hash-pinned bundle. Refuses (writes nothing) on zero selected entries, a leak-grep tripwire hit (naming the entry), a worker-settings template that fails validation, or unparseable policy YAML. `import <file> --pin <hash>` delegates the learnings/doctrine/worker-settings half to the UNCHANGED `rmd learnings import` (W1-T425), then independently pin-checks and stages the policy proposals into the inbox (`stageBundleProposals`, inbox.ts) for `rmd approve` to ratify -- plan/policy.yaml itself is never written by import, on either side, only by a merged plan PR.",
   },
   {
     name: "trace",
