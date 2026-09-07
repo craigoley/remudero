@@ -859,6 +859,7 @@ import {
   decideRedBaseRefresh,
   failingSourceFilesFromCiFailures,
   failingTestFilesFromCiFailures,
+  projectMergedTaskCandidates,
   REGENERABLE_ARTIFACT_GENERATORS,
   actionableGateFailuresFromReasons,
   armOutcomeArmed,
@@ -30364,6 +30365,20 @@ export function buildOpenPrViews(
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
       strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
       supersededBy,
+      // W1-T2794 — DECLARED HERE, STAMPED LATER, and the two are not the same thing. The real
+      // writer is `projectMergedTaskCandidates` (lib/sweep.ts), which runs AFTER this producer
+      // because it needs the credit-candidate set this function has no access to; that ordering
+      // IS the fix, so it cannot be collapsed into this literal. The value is `undefined` because
+      // this producer genuinely cannot know it — and per OpenPrView.taskMergedBy's own doc, ABSENT
+      // MEANS UNKNOWN, NEVER "NOT MERGED", so the default is also the safe one.
+      //
+      // Assigned rather than omitted for the reason the comment above `isPlanFiling` already
+      // states: `producerAssignedKeys` (lib/producer-completeness.ts) recognises a producer only by
+      // its TOP-LEVEL KEYS, so a field written solely through a `{ ...pr, k }` transformer reads
+      // UNWIRED — #3127 hit the same wall from the conditional-spread side. This key is what makes
+      // the census's answer match the truth; it is NOT the guard on the projection itself, which
+      // is covered by test/merged-task-open-pr-supersession.test.ts's neutering arm.
+      taskMergedBy: undefined,
       lastActivityAt: pr.updatedAt,
       // W1-T1201: the age clamp's other half — see `RawOpenPr.createdAt`'s own doc for why this
       // is `undefined` in the real gateway today (no producer in lib/open-prs-rest.ts yet) and
@@ -32912,8 +32927,15 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // I/O `selectUpdateBranchTarget` performs itself.
   const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+  // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
+  // composition change, not a new read: the credit rung already built exactly this set, just
+  // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
+  // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
+  // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
+  // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
+  const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
   const summary = await runSweep(
-    prsForFixRung,
+    projectMergedTaskCandidates(prsForFixRung, creditCandidates),
     {
       ...effects,
       ledgerPath,
@@ -32931,7 +32953,6 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // the open-PR reconciliation above, but over every task's OWNED merge state
   // rather than open-PR pipeline state — the gate-side-merge fixture (0 of 195
   // runs ledgered a merge while GitHub showed 28) this rung exists to close.
-  const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
   const creditSummary = await runCreditBackfill(creditCandidates, { ledgerPath, runId, log, dryRun });
 
   // fb-1784756088300-6a481e — the escalation-lifecycle reconciler rung: close stale
@@ -33795,8 +33816,15 @@ export function buildSweepHook(
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
       const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+      // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
+      // composition change, not a new read: the credit rung already built exactly this set, just
+      // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
+      // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
+      // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
+      // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
+      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runSweep(
-        prsForFixRung,
+        projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         {
           ...effects,
           ledgerPath,
@@ -33820,7 +33848,6 @@ export function buildSweepHook(
       await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
-      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
       // W1-T175 — the worktree reaper rung, on the daemon's own poll cadence: the hole
       // this closes is specifically an IDLE fleet (no run dispatched, so pruneStaleRuns'
@@ -34320,6 +34347,11 @@ export async function fixCommand(
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
     // same task) — out of scope for a single explicitly-named PR lookup.
     supersededBy: undefined,
+    // W1-T2794 — likewise, and PERMANENTLY so here: `taskMergedBy` is stamped by the sweep's
+    // `projectMergedTaskCandidates` pass over the whole open array. routeFix resolves ONE named PR
+    // and never runs that pass, so this stays `undefined` — which the field's own doc defines as
+    // UNKNOWN, leaving every disposition it feeds untouched.
+    taskMergedBy: undefined,
     lastActivityAt: raw.updatedAt,
     // W1-T1201: same age-clamp projection as buildOpenPrViews above — see RawOpenPr.createdAt's
     // doc for why this is `undefined` in the real gateway today.
