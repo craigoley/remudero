@@ -79,7 +79,7 @@ usage:
   rmd ratify <rung>   # Print a gated rung's live operation-hash row for the operator to commit; writes nothing.
   rmd skill list   # List the skill registry: every .remudero/skills/<name>.yaml entry.
   rmd learnings export <out> | rmd learnings import <file> --pin <hash>   # The knowledge-commons transport: export/import opted-in learnings, hash-pinned.
-  rmd bundle export <path>   # Export one hash-pinned bundle of doctrine, budgeted learnings and worker-settings conventions.
+  rmd bundle export <path> | rmd bundle import <file> --pin <hash>   # Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.
   rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
@@ -741,13 +741,13 @@ the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects
 
 ### `rmd bundle`
 
-Export one hash-pinned bundle of doctrine, budgeted learnings and worker-settings conventions.
+Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.
 
 ```
-rmd bundle export <path>
+rmd bundle export <path> | rmd bundle import <file> --pin <hash>
 ```
 
-the day-one knowledge bundle (W1-T2580, W1-T992's BYO-subscription consumer): assembles the two mandatory doctrine lines, the BUDGET-SELECTED project learnings corpus (DEFAULT_KNOWLEDGE_BUDGET_CHARS, every entry's provenance intact -- never filtered to `share: public`, unlike `rmd learnings export`'s separate §6 commons transport which stays banked and unchanged), and the committed worker-settings template's ASSERTED values (sandbox.enabled/failIfUnavailable/autoAllowBashIfSandboxed, sandbox.network.allowedDomains -- never its raw deny-paths) into ONE deterministic, hash-pinned bundle a fresh deployment loads via the EXISTING `rmd learnings import <file> --pin <hash>` transport (W1-T425) -- no new import path, no tokens/ledger/state/customer code ever read. Refuses (writes nothing) on zero selected entries, a leak-grep tripwire hit (naming the entry), or a worker-settings template that fails validation.
+the day-one knowledge bundle (W1-T2580, W1-T992's BYO-subscription consumer; W1-T2702 adds operating limits): export assembles the two mandatory doctrine lines, the BUDGET-SELECTED project learnings corpus (DEFAULT_KNOWLEDGE_BUDGET_CHARS, every entry's provenance intact -- never filtered to `share: public`, unlike `rmd learnings export`'s separate §6 commons transport which stays banked and unchanged), the committed worker-settings template's ASSERTED values (sandbox.enabled/failIfUnavailable/autoAllowBashIfSandboxed, sandbox.network.allowedDomains -- never its raw deny-paths), and every operator-ratified `plan/policy.yaml` row (origin: net-new, or a W1-T2694 ratification pin when that exists) as a proposal, into ONE deterministic, hash-pinned bundle. Refuses (writes nothing) on zero selected entries, a leak-grep tripwire hit (naming the entry), a worker-settings template that fails validation, or unparseable policy YAML. `import <file> --pin <hash>` delegates the learnings/doctrine/worker-settings half to the UNCHANGED `rmd learnings import` (W1-T425), then independently pin-checks and stages the policy proposals into the inbox (`stageBundleProposals`, inbox.ts) for `rmd approve` to ratify -- plan/policy.yaml itself is never written by import, on either side, only by a merged plan PR.
 
 ### `rmd trace`
 

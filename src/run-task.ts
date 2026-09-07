@@ -38999,7 +38999,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "bundle",
     syntax: "rmd bundle export <path> | rmd bundle import <file> --pin <hash>",
-    summary: "Export/import one hash-pinned bundle of doctrine, learnings, worker-settings and ratified policy proposals.",
+    summary: "Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.",
     detail: "the day-one knowledge bundle (W1-T2580, W1-T992's BYO-subscription consumer; W1-T2702 adds operating limits): export assembles the two mandatory doctrine lines, the BUDGET-SELECTED project learnings corpus (DEFAULT_KNOWLEDGE_BUDGET_CHARS, every entry's provenance intact -- never filtered to `share: public`, unlike `rmd learnings export`'s separate §6 commons transport which stays banked and unchanged), the committed worker-settings template's ASSERTED values (sandbox.enabled/failIfUnavailable/autoAllowBashIfSandboxed, sandbox.network.allowedDomains -- never its raw deny-paths), and every operator-ratified `plan/policy.yaml` row (origin: net-new, or a W1-T2694 ratification pin when that exists) as a proposal, into ONE deterministic, hash-pinned bundle. Refuses (writes nothing) on zero selected entries, a leak-grep tripwire hit (naming the entry), a worker-settings template that fails validation, or unparseable policy YAML. `import <file> --pin <hash>` delegates the learnings/doctrine/worker-settings half to the UNCHANGED `rmd learnings import` (W1-T425), then independently pin-checks and stages the policy proposals into the inbox (`stageBundleProposals`, inbox.ts) for `rmd approve` to ratify -- plan/policy.yaml itself is never written by import, on either side, only by a merged plan PR.",
   },
   {
