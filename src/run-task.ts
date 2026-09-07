@@ -933,6 +933,7 @@ import {
   isCappedReviewOrphanEscalation,
   type ArmAttemptOutcome,
   type ArmOutcomeName,
+  creditSubjectIsImplementation,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -30660,6 +30661,37 @@ export function buildOpenPrViews(
  * plan-unavailable repo (already logged by the caller) simply yields plan.tasks
  * === [] here, never a hard failure of its own.
  */
+/**
+ * W1-T3063 — `origin/main`'s merge subjects, keyed by the PR number a squash merge puts in
+ * `(#N)`. ONE local git invocation per sweep pass; no network, no per-candidate cost.
+ *
+ * ⚠ BEST-EFFORT, AND AN EMPTY MAP IS THE SAFE ANSWER. A failed or truncated read leaves every
+ * candidate's subject undefined, which {@link creditSubjectIsImplementation} reports as unknown and
+ * every destructive consumer declines on. The failure mode is a PR that stays open one pass longer,
+ * never one that closes on evidence nobody read.
+ */
+function readMergeSubjectsByPr(root: string): Map<number, string> {
+  const byPr = new Map<number, string>();
+  try {
+    const out = execFileSync("git", ["log", "origin/main", "--format=%s", "-n", String(MERGE_SUBJECT_SCAN_LIMIT)], {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: 1 << 24,
+    });
+    for (const line of out.split("\n")) {
+      const m = line.match(/\(#(\d+)\)\s*$/);
+      if (m && !byPr.has(Number(m[1]))) byPr.set(Number(m[1]), line);
+    }
+  } catch {
+    /* best-effort: an unreadable log yields an empty map, and unknown declines */
+  }
+  return byPr;
+}
+
+/** How far back {@link readMergeSubjectsByPr} scans. A BACKSTOP on cost, not a correctness bound:
+ *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
+const MERGE_SUBJECT_SCAN_LIMIT = 5000;
+
 function buildCreditCandidates(
   owner: string,
   repo: string,
@@ -30676,11 +30708,23 @@ function buildCreditCandidates(
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
   const deps: DeriveDeps = { ledgerPath, github: github ?? buildBatchedGithub(owner, repo, { log }) };
+  // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
+  // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
+  // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
+  const mergeSubjects = readMergeSubjectsByPr(repoRoot);
   const candidates: CreditCandidate[] = [];
   for (const task of plan.tasks) {
     const proj = deriveStatus(task, deps);
     if (proj.merged && proj.prNumber !== undefined && proj.prUrl !== undefined) {
-      candidates.push({ taskId: task.id, prNumber: proj.prNumber, prUrl: proj.prUrl, merged: true });
+      candidates.push({
+        taskId: task.id,
+        prNumber: proj.prNumber,
+        prUrl: proj.prUrl,
+        merged: true,
+        // W1-T3063: what EARNED the credit, not merely that one exists. Undefined when the subject
+        // is outside the scanned window — and undefined declines, by design.
+        creditIsImplementation: creditSubjectIsImplementation(mergeSubjects.get(proj.prNumber)),
+      });
     }
   }
   return candidates;
