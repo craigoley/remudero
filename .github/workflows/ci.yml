@@ -226,11 +226,38 @@ jobs:
         env:
           SHARD_RESULT: ${{ needs.ci.result }}
         run: |
-          if [ "$SHARD_RESULT" != "success" ]; then
-            echo "ci: one or more test shards did not succeed (matrix result: ${SHARD_RESULT})."
-            exit 1
-          fi
-          echo "ci: all four test shards succeeded."
+          # W1-T3014 — NAME THE CASE IN THE FIRST CLAUSE. The old single `if` printed "did not
+          # succeed" for failure, cancellation and skip alike, burying the actual result in a
+          # parenthetical inside a sentence whose main clause asserted the wrong thing. MEASURED: of
+          # nine red collapsed checks in one session, SEVEN were `cancelled` (a superseded matrix)
+          # and two were real failures that nearly rode out because readers had learned to discount
+          # the sentence.
+          #
+          # ⚠ THE GATE DOES NOT MOVE. Every non-success value still exits 1, INCLUDING the `*)` arm:
+          # an unrecognised result is refused, never passed. A default arm that fell through to
+          # success would turn a novel GitHub result into a green required check — strictly worse
+          # than the defect this fixes, and invisible until it happened.
+          case "$SHARD_RESULT" in
+            success)
+            echo "ci: all four test shards succeeded."
+              ;;
+            failure)
+              echo "ci: a test shard FAILED (matrix result: failure) — open the shard log; this is a real break until that log says otherwise."
+              exit 1
+              ;;
+            cancelled)
+              echo "ci: the shard matrix was CANCELLED (matrix result: cancelled) — usually a newer push superseded this head, so this is not by itself evidence of a test failure, and the current head's own run is the authoritative one. Still red on purpose: a cancelled matrix proves nothing about the tree. Open the shard log — a head sha tells you whether a failure is CURRENT, never whether it is REAL."
+              exit 1
+              ;;
+            skipped)
+              echo "ci: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it."
+              exit 1
+              ;;
+            *)
+              echo "ci: unrecognised matrix result '${SHARD_RESULT}' — refusing. A required check must never pass a state it does not understand."
+              exit 1
+              ;;
+          esac
 
   commitlint:
     # W1-T31 (MASTER-PLAN §6A), relocated by W1-T129 — the Conventional Commits gate. This repo
@@ -491,10 +518,41 @@ jobs:
         env:
           SHARD_RESULT: ${{ needs.coverage-ratchet.result }}
         run: |
-          if [ "$SHARD_RESULT" != "success" ]; then
-            echo "coverage-ratchet: one or more coverage shards did not succeed (matrix result: ${SHARD_RESULT})."
-            exit 1
-          fi
+          # W1-T3014 — NAME THE CASE IN THE FIRST CLAUSE. The old single `if` printed "did not
+          # succeed" for failure, cancellation and skip alike, burying the actual result in a
+          # parenthetical inside a sentence whose main clause asserted the wrong thing. MEASURED: of
+          # nine red collapsed checks in one session, SEVEN were `cancelled` (a superseded matrix)
+          # and two were real failures that nearly rode out because readers had learned to discount
+          # the sentence.
+          #
+          # ⚠ THE GATE DOES NOT MOVE. Every non-success value still exits 1, INCLUDING the `*)` arm:
+          # an unrecognised result is refused, never passed. A default arm that fell through to
+          # success would turn a novel GitHub result into a green required check — strictly worse
+          # than the defect this fixes, and invisible until it happened.
+          case "$SHARD_RESULT" in
+            success)
+            # This job printed nothing on success before W1-T3014 and still prints nothing: the
+            # falsifier requires the happy path to be byte-identical, and a new line here would be a
+            # reporting change to every green PR in the fleet.
+            :
+              ;;
+            failure)
+              echo "coverage-ratchet: a coverage shard FAILED (matrix result: failure) — open the shard log; this is a real break until that log says otherwise."
+              exit 1
+              ;;
+            cancelled)
+              echo "coverage-ratchet: the shard matrix was CANCELLED (matrix result: cancelled) — usually a newer push superseded this head, so this is not by itself evidence of a test failure, and the current head's own run is the authoritative one. Still red on purpose: a cancelled matrix proves nothing about the tree. Open the shard log — a head sha tells you whether a failure is CURRENT, never whether it is REAL."
+              exit 1
+              ;;
+            skipped)
+              echo "coverage-ratchet: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it."
+              exit 1
+              ;;
+            *)
+              echo "coverage-ratchet: unrecognised matrix result '${SHARD_RESULT}' — refusing. A required check must never pass a state it does not understand."
+              exit 1
+              ;;
+          esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
