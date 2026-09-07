@@ -1,0 +1,109 @@
+- id: W1-T3041
+  title: "SIX LIVE WORKER WORKTREES CARRY A REAL 442 MiB `node_modules` INSTEAD OF THE SYMLINK THE DESIGN GUARANTEES — `linkWorktreeNodeModules`'s own header calls a symlink an INVARIANT and names the 2026-07-29 incident an install here caused, yet MEASURED 2026-09-07 six of seven live worktrees hold full copies (different inodes, 285 entries, no `.rmd-install-hash`), so rule 8 of hooks/deny-floor.sh — which fires only when `node_modules` is a SYMLINK — is not reaching whatever performs them"
+  repo: remudero
+  depends_on: []
+  type: investigate
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [test/a-worker-worktree-carries-a-real-node-modules.test.ts]
+  origin: "operator-session#build-pass-measured-2026-09-07"
+  plan_refs: ["W1-T2312", "W1-T2313", "W1-T2777", "W1-T137"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07 IN THE RUNNING AZURE CONTAINER, READ-ONLY. Of seven live worktrees under
+    `/home/node/Remudero/worktrees/`:
+
+      run-RETRO-1788799176568          SYMLINK -> /home/node/Remudero/remudero/node_modules
+      sweep-W1-T2697-1788792431780     REAL DIR, 285 entries, no .rmd-install-hash
+      sweep-W1-T2705-1788792448119     REAL DIR, 285 entries, no .rmd-install-hash
+      sweep-W1-T2732-1788798402793     REAL DIR, 285 entries, no .rmd-install-hash
+      sweep-W1-T3014-1788799074725     REAL DIR, 285 entries, no .rmd-install-hash
+      sweep-W1-T3030-build-1788798307184  REAL DIR, 285 entries, no .rmd-install-hash
+      sweep-W1-T3031-build-1788798213517  REAL DIR, 285 entries, no .rmd-install-hash
+
+    NOT HARDLINKS AND NOT SYMLINKS — FULL COPIES. `du -sh` reads 442M for a worktree's tree and 442M
+    for the canonical one, and `.package-lock.json` has inode 1347085 in the worktree against
+    1067453 in the canonical tree. The `du` traversal reported ZERO permission-denied lines, so 442M
+    is not an under-report. Six copies is roughly 2.6 GiB of duplicated dependency tree, created at
+    a rate of one per worker run; the container's overlay went 23G -> 25G across this session.
+
+    THIS CONTRADICTS A STATED INVARIANT. `linkWorktreeNodeModules`'s own header: "Give a fresh
+    worktree a `node_modules`, by SYMLINK — never by installing. INVARIANT: a symlink, never
+    `npm ci`. An install here is what emptied the shared `node_modules` under the live daemon on
+    2026-07-29." `prepareWorktree` calls it on every worktree it makes (src/lib/worker.ts).
+
+    AND THE GUARD THAT EXISTS CANNOT SEE THIS. W1-T2312 shipped rule 8 in `hooks/deny-floor.sh`,
+    which denies an installing package manager — but ONLY when the project dir's `node_modules` is a
+    SYMLINK (`[ -L "${hook_cwd:-.}/node_modules" ]`). That discriminator is deliberate and correct
+    for its stated purpose (a real or absent tree is the legitimate install case). Its consequence
+    here is that once a real tree exists, every subsequent install is permitted, and the state is
+    self-perpetuating: `linkWorktreeNodeModules` returns `already-present` when the destination
+    exists, so no later call restores the link.
+
+    ⚠ THE CAUSE IS NOT ESTABLISHED, AND THIS TASK MUST NOT PRETEND OTHERWISE. What is measured is
+    the STATE, not the act that produced it. Candidates NOT distinguished by this filing:
+      (a) a worker running `npm ci` in its worktree, following `hooks/commit-msg`'s own line 59
+          advice ("run `npm ci` first, then retry `git commit`") through a surface the PreToolUse
+          hook does not intercept — npm replaces a symlink with a real directory, which would also
+          explain the absent `.rmd-install-hash`, since only `ensureInstallFresh` writes that marker;
+      (b) the symlink never being created for this worktree class, leaving the destination absent
+          and the install legitimate under rule 8's own carve-out;
+      (c) something else entirely.
+    (a) and (b) have DIFFERENT fixes and the evidence gathered so far does not separate them. A
+    build that picks one without separating them first is guessing.
+  design: |
+    (i) SEPARATE THE CAUSES BEFORE PROPOSING A FIX. The first deliverable is a discriminating
+    measurement, not a patch: for one freshly created worktree of the `sweep-*` class, record
+    whether `node_modules` is a symlink IMMEDIATELY after `prepareWorktree` returns, and whether it
+    is still a symlink at first push. That single observation separates (a) from (b), and the two
+    have different owners — (a) is a hook-coverage gap, (b) is a linking gap.
+
+    (ii) THE TEST IS A DETECTOR, NOT A REPAIR. Whatever the cause, a regression lock that FAILS when
+    a worktree the fleet created holds a real `node_modules` is worth having on its own, because the
+    invariant is stated in source and is currently false in production. It must read the live
+    worktree root from config rather than assuming a path, and must SKIP (never fail) when no
+    worktree exists, so it is not a flake on a clean host.
+
+    (iii) DO NOT WIDEN RULE 8 TO DENY INSTALLS AGAINST A REAL TREE. That carve-out is load-bearing:
+    `ensureInstallFresh` legitimately installs into a real tree, and a fresh clone must be able to
+    install at all. Fixing (a) by removing the discriminator would break the ordinary path.
+
+    (iv) DO NOT DELETE THE EXISTING COPIES AS PART OF THIS TASK. Reclaiming ~2.6 GiB is ordinary
+    housekeeping an operator can do while no worker is live; doing it inside a build pass would
+    destroy the evidence this task exists to explain, and a worker holding one of those trees open
+    would fail mid-run.
+  acceptance:
+    - claim: "a worktree the fleet created whose node_modules is a real directory rather than a symlink is detected and named, and a host with no live worktree skips rather than fails"
+      proof: "unit test: test/a-worker-worktree-carries-a-real-node-modules.test.ts"
+    - claim: "the detector reads the worktree root from configuration rather than assuming an absolute path"
+      proof: "unit test: test/a-worker-worktree-carries-a-real-node-modules.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF THE STATE IS NOT REPRODUCIBLE. Re-measure before building: if
+    every live worktree's `node_modules` is a symlink, this was a transient produced by hand-run
+    lanes rather than by the fleet, and the task should be closed rather than built on a stale
+    observation. NOTE THE SPECIFIC CONFOUND: this session ran several HAND-CUT lanes under
+    `/home/node/Remudero/lanes/` that deliberately symlinked `node_modules` — those are NOT fleet
+    worktrees and must be excluded from any re-measurement. The six copies measured above are all
+    under `/home/node/Remudero/worktrees/`, which is the fleet's own directory.
+
+    AND DO NOT SHIP A DETECTOR THAT CANNOT DISCRIMINATE. It must PASS against a fixture worktree
+    whose `node_modules` is a symlink and FAIL against one whose `node_modules` is a real directory.
+    A detector that only ever fires, or only ever passes, proves nothing about the invariant.
+  note: |
+    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3041`.
+
+    verify:human AND type:investigate ON PURPOSE. The measurement is solid; the CAUSE is not, and
+    the two live candidates have different owners and different fixes. Filing this as an implement
+    task would invite a worker to guess between them.
+
+    PROVENANCE: found while validating W1-T2716, whose premise concerns which `node_modules` a
+    worker actually uses. W1-T2716 itself was retired as overtaken in the same pass — W1-T2777
+    already shipped the shared install-input identity and the link-time lockfile compare, and
+    `recordCanonicalCheckoutDrift` already names the resolved source rather than `repoDir`.
+
+    risk:high — nothing here changes behaviour, but the state it describes is a stated INVARIANT
+    being false in production on the fleet's own host, and the obvious fix (widening rule 8) would
+    break the ordinary install path. The band reflects how easy this is to fix wrongly.
