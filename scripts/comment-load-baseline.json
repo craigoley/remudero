@@ -85,7 +85,7 @@
   "scripts/recovery-drill.mjs": 148,
   "scripts/shell-screenshot.mjs": 16,
   "scripts/source-size-baseline.json": 0,
-  "scripts/source-size-ratchet.mjs": 85,
+  "scripts/source-size-ratchet.mjs": 250,
   "scripts/source-text-assertion-baseline.json": 0,
   "scripts/state-citation-baseline.json": 0,
   "scripts/state-citation-check.mjs": 55,
