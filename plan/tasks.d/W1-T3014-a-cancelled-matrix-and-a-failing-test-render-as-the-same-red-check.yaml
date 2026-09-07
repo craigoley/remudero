@@ -1,0 +1,97 @@
+- id: W1-T3014
+  title: "A CANCELLED MATRIX AND A FAILING TEST RENDER AS THE SAME RED CHECK — the two collapse steps in ci.yml branch on `!= \"success\"` and print one sentence for failure, cancellation and skip alike, so a superseded run is indistinguishable from a real break without opening a shard log; keep every non-success exit 1 and make the check SAY WHICH"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files:
+    - .github/workflows/ci.yml
+    - test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts
+  origin: "operator-request#follow-up-work-2026-09-07"
+  plan_refs: ["W1-T2428", "W1-T1033"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07 IN ONE SESSION. Nine red collapsed checks were investigated across the
+    session's PRs. SEVEN were `SHARD_RESULT: cancelled` — a matrix cancelled because a newer push
+    superseded the head — and TWO were real shard failures that would have shipped had they been
+    waved through. Every one of the nine presented identically: a red `ci` (or `coverage-ratchet`)
+    check whose entire body is one line saying shards "did not succeed".
+
+    THE MECHANISM, VERBATIM. `ci.yml` carries two collapse jobs, `ci-required` (line ~227) and
+    `coverage-ratchet-required` (line ~492). Both read the matrix's rolled-up
+    `needs.<job>.result` into `SHARD_RESULT` and both branch the same way:
+
+        if [ "$SHARD_RESULT" != "success" ]; then
+          echo "...: one or more test shards did not succeed (matrix result: ${SHARD_RESULT})."
+          exit 1
+        fi
+
+    The result IS interpolated into the sentence — so the information is not lost, it is buried in
+    a parenthetical inside a sentence whose main clause asserts the wrong thing. `cancelled` is not
+    a shard that "did not succeed"; it is a shard that was never allowed to finish. A reader who
+    trusts the main clause goes looking for a test failure that does not exist, and a reader who
+    learns to distrust it starts waving red checks through — which is how the two real failures in
+    that nine nearly rode out.
+
+    THIS IS A DIAGNOSTIC DEFECT, NOT A GATE DEFECT. Exiting 1 on `cancelled` is CORRECT: a
+    cancelled matrix proves nothing about the tree, and a green required check there would let a
+    PR merge untested. Nothing about the gate's decision should move.
+  design: |
+    (i) WEAKEN NOTHING. Every non-`success` value still exits 1 — `failure`, `cancelled`,
+    `skipped`, and any value GitHub adds later. The default arm of whatever branch replaces the
+    single `if` MUST be refusal, so an unrecognised result is refused rather than passed. Assert
+    that explicitly with an invented result value; a table of known cases that falls through to
+    success is the one way this task could do harm.
+
+    (ii) NAME THE CASE IN THE FIRST CLAUSE, NOT A PARENTHETICAL. `failure` says a shard failed and
+    the log is worth opening. `cancelled` says the run was superseded or cancelled, that this is
+    not evidence of a test failure, and that the CURRENT head's own run is the authoritative one.
+    `skipped` says the matrix never ran. Each still ends in exit 1.
+
+    (iii) BOTH JOBS, ONE SHAPE. `ci-required` and `coverage-ratchet-required` have the identical
+    defect and must get the identical treatment; fixing one leaves the session's other half of the
+    false alarms in place.
+
+    (iv) DO NOT ADD A CONDITION TO EITHER JOB. Both carry `if: ${{ always() }}` deliberately —
+    W1-T1033 asserts on the absence of `if:` in the neighbouring coverage job body, and the
+    fast-lane class logic (W1-T2428) already decides what runs. This task edits the run: script's
+    reporting only.
+
+    (v) A CANCELLED CHECK STILL MEANS "GO LOOK". The wording must not invite dismissal. The
+    session that measured this had two real failures inside a majority-cancelled set; head-sha
+    tells you whether a failure is CURRENT, never whether it is REAL. Say the shard log is the
+    only thing that settles it.
+  acceptance:
+    - claim: "a cancelled matrix result produces a message naming cancellation rather than asserting shards did not succeed"
+      proof: "unit test: test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts"
+    - claim: "a failure result still produces a message naming a failing shard and still exits non-zero"
+      proof: "unit test: test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts"
+    - claim: "an unrecognised result value is refused, so the branch's default arm is refusal and not success"
+      proof: "unit test: test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts"
+    - claim: "both collapse jobs carry the same treatment, so neither required check keeps the old single sentence"
+      proof: "unit test: test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts"
+  falsifier: |
+    THE ONE THAT MATTERS IS THE PASS-THROUGH. Feed the collapse logic a result value that is
+    neither `success` nor any case the new branch enumerates, and require refusal. A `case`
+    statement whose `*)` arm falls through to success would turn a novel GitHub result into a green
+    required check — strictly worse than the defect being fixed, and invisible until it happens.
+    That row must be present and must be red-on-revert of the default arm alone.
+
+    SECOND: `success` must still exit 0 and still print its existing line. If the happy path moves,
+    every green PR in the fleet is being re-decided by a reporting change.
+
+    PROVE IT LOAD-BEARING: with the change reverted, a row asserting the cancelled message names
+    cancellation must fail, while the `success` row and the unrecognised-value row both still pass.
+    That asymmetry is the evidence the change is confined to wording and adds no new admission.
+  note: |
+    FILED 2026-09-07 under an id the operator minted through `refs/rmd-id/`.
+
+    risk:medium — it edits two REQUIRED checks. The verdicts are held fixed by design (i) and by
+    two falsifier rows, but the blast radius of a mistake here is every PR in the fleet, so the
+    band reflects the surface rather than the size of the diff. The test must read `ci.yml` as data
+    and exercise the collapse logic; a test that only greps the workflow for a phrase proves the
+    string exists and nothing about which arm exits what.

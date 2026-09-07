@@ -1,0 +1,99 @@
+- id: W1-T3016
+  title: "A NEW SHARD'S ID IS CHECKED AGAINST EVERYTHING EXCEPT THE WORK IN FLIGHT — `loadPlan` fails loud on a duplicate only once BOTH shards are on main, and `next-task-id` reads open PRs only when `gh` exists, so a filer who picks an id off a directory listing collides with another open PR and nothing refuses it until the second one merges"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 30.00
+  files:
+    - scripts/filing-id-collision-check.mjs
+    - package.json
+    - .github/workflows/ci.yml
+    - test/a-filing-id-is-checked-against-work-in-flight.test.ts
+  origin: "operator-session#four-id-collisions-in-one-evening-2026-09-07"
+  plan_refs: ["W1-T2203", "W1-T1055", "W1-T2324", "W1-T509", "W1-T278"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-06/07, FOUR COLLISIONS IN ONE EVENING ACROSS THREE LANES, EVERY ONE THE SAME
+    CAUSE. A filer picked an id from `ls plan/tasks.d/` instead of from `rmd next-task-id`:
+
+      W1-T2967   two shards filed 8 minutes apart, both on main -> `loadPlan` threw
+                 `duplicate task id`, which broke EVERY plan-loading gate on EVERY PR until
+                 repaired, and `assertLintClean` reads the same plan at dispatch
+      W1-T2968   a filing re-used an id another lane had already filed and merged
+      W1-T2969   the same, one id along
+      W1-T2970   the same again
+      W1-T2996   read "free on main" while an open `run-W1-T2996-*` head already held it
+
+    THE MINT VERB WOULD HAVE ANSWERED EVERY ONE OF THEM. `rmd next-task-id` derives from four
+    surfaces and reports what it could not reach, e.g. "open PRs not enumerated (spawnSync gh
+    ENOENT)". It is not the tool that failed; it is the tool nobody ran.
+
+    NOTHING REFUSES SKIPPING IT, AND THAT IS THE ACTUAL DEFECT. CLAUDE.md documents the sweep at
+    length and says of itself, in its own opening: "Nothing in this file is a gate … a rule stated
+    ONLY here can be violated silently and repeatedly, which is why several of these bullets exist
+    at all. When a rule below turns out to matter, the fix is to make something refuse it — file
+    the task; do not sharpen the wording and call it closed." This is that task.
+
+    THE EXISTING GATES EACH MISS IT FOR A DIFFERENT REASON, WHICH IS WHY A NEW ONE IS WARRANTED
+    RATHER THAN A WIDENED ONE. `loadPlan`'s duplicate check fires only when both shards are on
+    main — by then the collision is merged and the repair is a renumber plus every inbound
+    reference. `task-id-existence` resolves a TRAILER against the plan and says nothing about a
+    newly ADDED id. `lint-plan` reads the plan, not GitHub. None of them can see an open PR.
+  design: |
+    (i) ONE QUESTION, ASKED OF THE ONE SURFACE NOTHING ELSE READS: for each shard this PR ADDS,
+    does its id also appear in a shard on another OPEN pull request? That is the in-flight
+    collision, it is decidable from the REST open-PR read this repo already owns
+    (`src/lib/open-prs-rest.ts`, chosen over GraphQL for the reason W1-T2324 records), and it is
+    the one none of the existing gates can answer.
+
+    (ii) BLOCK WHAT IS DECIDABLE, ADVISE WHAT IS NOT — and the split is the whole design.
+      BLOCK: the id appears in a shard on another open PR. Two lanes are filing the same number;
+             one must renumber, and merge order should not be what decides it.
+      BLOCK: the id already names a shard on `main`. `loadPlan` catches this later and loudly;
+             catching it here NAMES the other file instead of failing every gate on every PR.
+      WARN:  the id carries no `refs/rmd-id/` reservation. ADVISORY ONLY, because one class of
+             lane cannot write that namespace at all — a push there returns 403 from an agent
+             container in the same second a branch push succeeds (W1-T2203). Blocking on a
+             reservation would refuse exactly the lanes that cannot obtain one.
+
+    (iii) A RESERVATION IS NOT PROOF OF OWNERSHIP AND MUST NOT BE READ AS ONE. `refs/rmd-id/*` has
+    no identity field — CLAUDE.md records two hosts minting the same id 5.76s apart, where only
+    the commit message's pid+host+time named the winner. So the warning says "no reservation
+    holds this id", never "this id is someone else's".
+
+    (iv) UNREADABLE IS NOT UNCOLLIDED. If the open-PR read fails — rate limit, outage, no token —
+    the check reports DEGRADED and names what it could not see, exactly as `next-task-id` does.
+    It must never render an unreadable surface as a clean one; that is the vacuous-pass shape this
+    repo has paid for repeatedly.
+
+    (v) WIRED, OR IT IS NOTHING. The script gets a `filing-id-collision:check` npm entry and a
+    `ci.yml` job beside `task-id-existence`, whose two-line wiring it mirrors exactly. An unwired gate is the failure this repo has
+    shipped three times by its own count (#2952, #1066, W1-T2959), and `unwired-gate` exists to
+    refuse it.
+
+    (vi) ONLY ADDED SHARDS ARE JUDGED. A PR that edits or renames an existing shard is not filing
+    a new id, and must not be refused for one that was already there.
+  acceptance:
+    - claim: a PR adding a shard whose id also appears in a shard on another open pull request is refused, and the refusal names the other pull request
+      proof: "unit test: test/a-filing-id-is-checked-against-work-in-flight.test.ts"
+    - claim: a PR adding a shard whose id already names a shard on main is refused, and the refusal names the existing file rather than failing every plan-loading gate later
+      proof: "unit test: test/a-filing-id-is-checked-against-work-in-flight.test.ts"
+    - claim: an id carrying no reservation is reported as a warning and never as a refusal, so a lane that cannot write the namespace is not refused for it
+      proof: "unit test: test/a-filing-id-is-checked-against-work-in-flight.test.ts"
+    - claim: an unreadable open-PR surface is reported as degraded and named, never rendered as no collision found
+      proof: "unit test: test/a-filing-id-is-checked-against-work-in-flight.test.ts"
+    - claim: a PR that edits or renames an existing shard without adding an id is not refused
+      proof: "unit test: test/a-filing-id-is-checked-against-work-in-flight.test.ts"
+    - claim: the check is invoked by a ci.yml job, so it is a gate rather than an unreachable script
+      proof: "grep: filing-id-collision in .github/workflows/ci.yml"
+  falsifier: |
+    Close without implementation if an existing gate already refuses a newly added shard id that
+    collides with an open PR's shard — `loadPlan`'s duplicate check does not, because it fires only
+    once both are on main, and `task-id-existence` does not, because it resolves a trailer rather
+    than judging an added id. A check that BLOCKS on a missing reservation does not satisfy this
+    task: it would refuse the lanes W1-T2203 records as unable to write that namespace.

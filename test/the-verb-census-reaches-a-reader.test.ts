@@ -293,6 +293,7 @@ test("runMeasurementCadenceReport attaches verbCensus last, leaving the existing
       "ruleEfficacy",
       "verdictCalibration",
       "autonomyRate",
+      "revertRecall",
       "adoptionReport",
       "adoptionMint",
       "boardReview",

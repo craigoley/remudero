@@ -1,0 +1,120 @@
+- id: W1-T3015
+  title: "THE COMMENT-LOAD BASELINE IS THE ONE GATE REMEDY THE SCOPE GUARD STILL REFUSES — `comment-load-ratchet` prints `scripts/comment-load-baseline.json` as its own fix, but that path is absent from `REGENERABLE_ARTIFACT_GENERATORS`, so committing it is an out-of-scope overrun, the fix prompt forbids it, and a conflict on it is refused; register it, as W1-T2650/W1-T2651 did for its twin"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files:
+    - src/lib/sweep.ts
+    - test/the-comment-load-baseline-is-the-one-gate-remedy-the-scope-guard-still-refuses.test.ts
+  origin: "operator-request#follow-up-work-2026-09-07"
+  plan_refs: ["W1-T2548", "W1-T2650", "W1-T2651", "W1-T106", "W1-T2999"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE TRAP W1-T2650/W1-T2651 CLOSED IS STILL OPEN FOR THE TWIN GATE. Those tasks record it in
+    `scopeGuardOutOfScopeFiles`'s own banner: the DECLARED SCOPE sentence forbade every path outside
+    `task.files`, INCLUDING the one edit a failing gate had just printed as its remedy, so a worker
+    obeying the prompt left the PR red and a worker obeying the gate was stood down over the very
+    path the gate demanded — "no lane in the fleet could clear it either way." The fix was to admit
+    `scripts/source-size-baseline.json` and then read the exemption off
+    `REGENERABLE_ARTIFACT_GENERATORS` so there was one registry, not two lists.
+
+    `comment-load-ratchet` IS THE SAME GATE SHAPE AND ITS PATH WAS NEVER REGISTERED. MEASURED:
+    `scripts/comment-load-ratchet.mjs` declares
+    `DEFAULT_BASELINE_RELATIVE_PATH = "scripts/comment-load-baseline.json"`, ships as an ENFORCING
+    npm script alongside a `--no-record` signal twin exactly as source-size does, and its blocked
+    report prints, in as many words, "record it in scripts/comment-load-baseline.json so a reviewer
+    reads the decision" followed by the literal lines to set. The registry lists seven paths and
+    that is not one of them.
+
+    THREE CONSUMERS INHERIT THE GAP, NOT ONE. `REGENERABLE_ARTIFACT_GENERATORS` is read by
+    `isRegenerableArtifactConflict` (merge-conflict admission, W1-T2548), by
+    `scopeGuardOutOfScopeFiles` (`run-task.ts`, the overrun guard), and by `renderFixPrompt`, which
+    interpolates the registry's keys into the REGISTRY EXCEPTION sentence a worker actually reads.
+    So today a worker fixing a comment-load failure is TOLD not to touch the baseline, is FLAGGED
+    with `scope_guard.overrun` if it does, and has the next round's fix rung stand down over it.
+
+    THE MERGE-CONFLICT HALF IS THE OBSERVED SYMPTOM, NOT THE CORE. Three PRs in one session went
+    `mergeable_state: dirty` and stalled, all three conflicting on this file. The merge-conflict
+    admission rung already ships (W1-T106/W1-T2548) and handles registered artifacts correctly; it
+    simply refuses this path because the registry does not declare it.
+
+    NOT W1-T2999, WHICH WAS FILED FROM THE SAME SESSION'S SYMPTOM AND SOLVES A DIFFERENT PROBLEM.
+    That task rebases a stale fleet branch when the rebase applies CLEANLY, and says in its own
+    words that it "is not auto-resolve conflicts" — a real conflict still escalates there,
+    untouched. So it AVOIDS this conflict when the branch happens to rebase clean and is silent
+    when it does not. This task is the other side: what the fleet does with the conflict it
+    actually has, plus the scope-guard consequence (iii), which involves no conflict at all and no
+    rebase. They share a file (`src/lib/sweep.ts`) and a symptom and nothing else; neither
+    subsumes the other, and either shipping alone still leaves the other's case open. If both are
+    in flight, expect a one-line conflict in the registry region and resolve it by keeping both.
+  design: |
+    (i) ONE ENTRY, THE EXISTING SHAPE: `"scripts/comment-load-baseline.json": "comment-load-ratchet"`.
+    The value must be the `package.json` SCRIPT NAME (rule 2 — the table is data), and it must be
+    the RECORDING script, not `comment-load-signal`, which passes `--no-record` and by construction
+    leaves the file byte-identical. Registering the signal twin would declare a generator that
+    regenerates nothing.
+
+    (ii) PROVE THE REGENERATION CLAIM, DO NOT ASSERT IT. The registry's own comment says re-running
+    the generator on the merged tree is "correct by construction". For this path that is true in
+    exactly the sense it is already true for `scripts/source-size-baseline.json`:
+    `evaluateCommentLoadRatchet`'s `nextBaseline` is a function of the measured tree AND the
+    incoming baseline — a path that GREW keeps `recorded`, it does not advance. MEASURED: the
+    source-size generator has the identical shape (`nextBaseline[path] = recorded` on a violation).
+    So this inherits the admitted member's semantics exactly and introduces no new class of
+    non-determinism. Say that in the source comment rather than implying a purity the code does not
+    have.
+
+    (iii) THE SCOPE CARVE-OUT IS THE LOAD-BEARING CONSEQUENCE AND MUST BE ASSERTED DIRECTLY. Adding
+    a key widens what `scopeGuardOutOfScopeFiles` permits and changes the sentence
+    `renderFixPrompt` renders. Assert both through their own functions with the real registry — a
+    test that only reads the table proves the row exists and nothing about the behaviour that made
+    it worth adding.
+
+    (iv) THE PLAN-ONLY REGIME STAYS UNTOUCHED. `renderFixPrompt` omits the REGISTRY EXCEPTION for a
+    plan-only task on purpose (the pre-strike gate grades those by plan membership, which this
+    registry was never wired into). This task must not change that; assert the omission still
+    holds for a plan-only task after the key is added.
+
+    (v) NO OTHER PATH JOINS. The registry is bounded by a list a human wrote — that is the stated
+    mechanism. Add this one key and nothing else; a sweep for other gates printing a path remedy is
+    a separate finding, not a licence to widen here.
+  acceptance:
+    - claim: "a conflict confined to the comment-load baseline is admitted as a regenerable-artifact conflict and names its generator"
+      proof: "unit test: test/the-comment-load-baseline-is-the-one-gate-remedy-the-scope-guard-still-refuses.test.ts"
+    - claim: "committing the comment-load baseline alongside a task's declared scope is no longer reported as an out-of-scope file"
+      proof: "unit test: test/the-comment-load-baseline-is-the-one-gate-remedy-the-scope-guard-still-refuses.test.ts"
+    - claim: "the registry exception a non-plan-only worker is shown names the comment-load baseline among the paths it may commit"
+      proof: "unit test: test/the-comment-load-baseline-is-the-one-gate-remedy-the-scope-guard-still-refuses.test.ts"
+    - claim: "a plan-only task is still shown no registry exception, so the plan-scope regime is unchanged"
+      proof: "unit test: test/the-comment-load-baseline-is-the-one-gate-remedy-the-scope-guard-still-refuses.test.ts"
+  falsifier: |
+    THE FAIL-CLOSED DEFAULT IS WHAT A REGISTRY EDIT CAN BREAK. Assert an UNDECLARED path is still
+    refused on every one of the three consumers: a conflict straddling it is refused WHOLE (the
+    mixed case is the mechanism), it is still reported out of scope, and it is still absent from the
+    rendered exception. If registering one key relaxed anything for a path not in the table, the
+    change is wrong regardless of the four criteria passing.
+
+    AND THE UNDECLARED-TASK ARM: `scopeGuardOutOfScopeFiles` refuses EVERY file when a task declares
+    no scope at all, registry artifact or not — its banner says so explicitly. Assert that arm is
+    untouched with the new key present. That is the row where a careless implementation would leak
+    the exemption into the fail-closed default.
+
+    PROVE IT LOAD-BEARING: with the key removed, the admission row and the scope row must both
+    redden, while every undeclared-path row above stays green. Both directions are needed — a test
+    that only reddens on removal could be asserting the table's contents rather than the behaviour.
+  note: |
+    FILED 2026-09-07 under an id the operator minted through `refs/rmd-id/`.
+
+    A CORRECTION TO THE FINDING THAT PRODUCED THIS TASK. It was first written up as "the fleet has
+    no merge-conflict resolution rung." That premise is FALSE — W1-T106/W1-T2548 ship one and it
+    works. Re-checking before filing moved the task from a feature request to a one-key data gap,
+    and moved the primary consumer from the conflict rung to the scope guard.
+
+    risk:medium — the diff is one line of data, but it widens a SCOPE CARVE-OUT that decides
+    whether a worker's commit is flagged as an overrun. The band is set by that consumer, not by
+    the line count.

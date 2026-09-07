@@ -11,8 +11,8 @@ import { parse as parseYaml } from "yaml";
 import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { tryEscalate } from "./escalate.js";
 import { appendLedger, type LedgerLine } from "./ledger.js";
-import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD } from "./learnings.js";
-import type { Lifecycle, LearningEntry, PromotionResult } from "./learnings.js";
+import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD, promotionTaint } from "./learnings.js";
+import type { Lifecycle, LearningEntry, PromotionResult, PromotionTaintResult } from "./learnings.js";
 import { resolveMountForClass, type Mounts } from "./mounts.js";
 import {
   scanPlanCoherence,
@@ -2595,6 +2595,7 @@ export async function phraseProceduralCandidate(
 /** What one {@link PromotionResult} means for the Architect, with the two `stage: "judge"` outcomes kept apart. */
 export type PromotionDisposition =
   | "proposed"
+  | "declined-tainted"
   | "declined-scrub"
   | "declined-top-layer"
   | "declined-project-specific"
@@ -2606,6 +2607,7 @@ export function classifyPromotionResult(
   result: PromotionResult,
   confidenceThreshold: number = DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD,
 ): PromotionDisposition {
+  if (result.stage === "taint") return "declined-tainted";
   if (result.stage === "scrub") return "declined-scrub";
   if (result.stage === "top-layer") return "declined-top-layer";
   if (result.promoted) return "proposed";
@@ -2614,6 +2616,46 @@ export function classifyPromotionResult(
     return "declined-low-confidence";
   }
   return "declined-project-specific";
+}
+
+export interface TaintedPromotionCandidate {
+  entry: LearningEntry;
+  taint: Extract<PromotionTaintResult, { tainted: true }>;
+  result: PromotionResult;
+}
+
+export interface PromotionCandidateGateResult {
+  accepted: LearningEntry[];
+  refused: TaintedPromotionCandidate[];
+}
+
+export function gatePromotionCandidatesBeforeRanking(
+  entries: readonly LearningEntry[],
+  log?: (event: string, data: Record<string, unknown>) => void,
+): PromotionCandidateGateResult { // filters external-text-derived candidates before ranking; refusals become ordinary promotion results, writing nothing.
+  const accepted: LearningEntry[] = [];
+  const refused: TaintedPromotionCandidate[] = [];
+  for (const entry of entries) {
+    const taint = promotionTaint(entry);
+    if (!taint.tainted) {
+      accepted.push(entry);
+      continue;
+    }
+    log?.("learning.refused_tainted", { id: entry.id, source_class: taint.sourceClass, reason: taint.reason });
+    refused.push({
+      entry,
+      taint,
+      result: {
+        entryId: entry.id,
+        promoted: false,
+        stage: "taint",
+        scrub: { blocked: false, reasons: [] },
+        taint,
+        reason: `blocked at provenance taint before ranking: ${taint.reason}`,
+      },
+    });
+  }
+  return { accepted, refused };
 }
 
 /** What {@link renderPromotionProposals} needs, so an empty corpus and an all-declined pass never render the same line. */

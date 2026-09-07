@@ -1,0 +1,119 @@
+- id: W1-T3018
+  title: "AN ABSENT BROWSER READS AS A REPO FULL OF BROKEN TESTS — when the pinned Chromium build is missing, all eleven `serve.*` suites launch anyway and emit one raw Playwright error per test, which is indistinguishable from a real regression; a session read that as `origin/main` being 189-red and carried the false claim into two merged PR bodies"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 30.00
+  files:
+    - test/browser-absence.ts
+    - test/an-absent-browser-reads-as-a-repo-full-of-broken-tests.test.ts
+    - test/serve.computed-visibility.test.ts
+    - test/serve.density-ia.test.ts
+    - test/serve.detail-journey.test.ts
+    - test/serve.find.test.ts
+    - test/serve.first-paint.test.ts
+    - test/serve.glance.test.ts
+    - test/serve.live-state.test.ts
+    - test/serve.liveness-honesty.test.ts
+    - test/serve.shell-ux.test.ts
+    - test/serve.test.ts
+    - test/serve.write-ack.test.ts
+  origin: "operator-session#189-red-was-a-missing-chromium-2026-09-07"
+  plan_refs: ["W1-T202", "W1-T1063", "W1-T1027", "W1-T1034", "W1-T2691"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS EXACT MISREADING IS ALREADY RECORDED IN THIS REPO, AND IT HAPPENED AGAIN ANYWAY.
+    test/serve-launch-uniformity.test.ts:5 describes rounds 1 and 2 of W1-T202:
+
+      "chasing a contention race that did not exist. The real cause was environmental: the review
+       host had no Chromium build matching the pinned Playwright, so every launch failed
+       deterministically and the gate reported it as a defect in the code under review."
+
+    W1-T202 fixed the DRIFT that misreading produced — two suites launching differently from five —
+    and made per-file launch tweaks structurally hard. IT DID NOT CHANGE WHAT AN ABSENT BROWSER
+    LOOKS LIKE. The suites still launch, still fail deterministically, and still present as ordinary
+    red tests. So the guard against the second-order damage shipped and the first-order signal was
+    left exactly as it was.
+
+    MEASURED IN THIS CONTAINER 2026-09-07. `rmd check-proof` on any test proof prints, before the
+    run: "(browser preflight: installing Chromium for the pinned Playwright — missing chromium-1234,
+    chromium_headless_shell-1234)" then "(browser preflight: install FAILED — ...)". The cache holds
+    build 1194; `playwright ^1.62.1` pins 1234. ONE environmental cause, and every browser-driving
+    suite reds behind it.
+
+    THE COST IS MEASURED, NOT HYPOTHETICAL, AND IT IS MINE. A session in this container read the
+    resulting failures as "origin/main is 189-red", repeated the claim across the session, and put
+    it in the bodies of TWO PRs that then merged. Correcting comments had to be posted on both. CI's
+    own shards were green on those same commits throughout — the two sides never disagreed about the
+    code, only about whether a browser existed. A claim about main's health is exactly the kind this
+    fleet acts on, and this signal manufactures false ones at 100+ per run.
+
+    THE PREFLIGHT ALREADY KNOWS THE ANSWER AND THROWS IT AWAY. `ensureBrowsers` (`src/lib/review.ts`)
+    returns a FACT — `"ok" | "installed" | "failed" | "unreadable"` — computed from
+    `requiredChromiumDirs` against the pinned `browsers.json` and an `INSTALLATION_COMPLETE` marker
+    check that deliberately reads a half-extracted directory as absent. That is a precise, already-
+    tested absence signal. Nothing downstream consumes it: the suites run regardless, so the fact is
+    logged and discarded. This task connects the existing answer to the existing question.
+
+    WHY THE OTHER TASKS DO NOT COVER IT. W1-T1063 closes ONE CAUSE of absence (the worker HOME
+    redirect hiding the image's populated cache); W1-T1027 and W1-T1034 close two more (apt and
+    timeout failures during install); W1-T2691 narrows when the preflight fires. Each removes a
+    cause. NONE changes what the remaining causes look like, and the cause measured here — a cache
+    holding the wrong BUILD NUMBER — is a fourth that none of them addresses.
+  design: |
+    (i) THE SKIP IS NOT A WAY TO GET GREEN, AND EVERY OTHER CHOICE BELOW EXISTS TO KEEP IT THAT WAY.
+    CLAUDE.md forbids skipping, disabling or quarantining a test to reach green, and a skip
+    mechanism is precisely the shape that rule guards. So the mechanism is built to be USELESS for
+    that purpose:
+
+    (ii) IT NEVER FIRES IN CI. Under `isCiEnv()` an absent browser is a REAL failure — CI installs
+    the browser, and if it is missing there, that is the defect. The skip is author-time only, on a
+    developer or agent host. This single property is what makes the rest safe: nothing merges
+    because a test was skipped, because nothing merges on an author-time run.
+
+    (iii) IT FIRES ONLY ON VERIFIED ABSENCE, NEVER ON A FAILED LAUNCH. The predicate is the
+    `requiredChromiumDirs` + `INSTALLATION_COMPLETE` check `ensureBrowsers` already owns, evaluated
+    BEFORE any launch. A launch that fails for any other reason — a crash, a timeout, a real bug —
+    still fails, loudly, exactly as today. Absence and failure must not share an outcome; that
+    conflation is the whole defect being fixed, and reproducing it inside the fix would be worse
+    than leaving it alone.
+
+    (iv) IT IS LOUD, NAMED, AND COUNTED. One line naming the missing build and the expected one, and
+    the suite reports SKIPPED rather than passing. A silent skip reads as a pass, which converts a
+    false red into a false green — strictly the more dangerous direction, and the reason this is not
+    simply an early `return`.
+
+    (v) ONE SHARED HELPER, NOT ELEVEN GUARDS. `test/serve-launch-uniformity.test.ts` exists to make
+    per-file launch divergence structurally hard, and eleven hand-written guards would be exactly
+    the drift it refuses. The helper is a single module the browser-driving suites call.
+    CONSTRAINT, CARRIED FROM THAT FILE'S OWN NOTE: it must not contain the Playwright launch call as
+    a contiguous literal, because test/serve-browser-teardown.test.ts enumerates browser-launching
+    suites with a fixed-string grep over `test/` and would recruit it into a teardown-shape guard it
+    has no browser to satisfy.
+
+    (vi) THE FALSIFIER IS THE CI LEG. Force `isCiEnv()` true with the browser absent and require a
+    FAILURE, not a skip. Without that leg this change is indistinguishable from the quarantine the
+    repo forbids, and the test suite would not be able to tell the two apart either.
+  acceptance:
+    - claim: with the pinned Chromium build absent on an author-time host, a browser-driving suite reports a single named skip naming the missing build rather than one launch error per test
+      proof: "unit test: test/an-absent-browser-reads-as-a-repo-full-of-broken-tests.test.ts"
+    - claim: with the pinned Chromium build absent under isCiEnv, the suite FAILS and never skips, so nothing can reach green by way of an absent browser
+      proof: "unit test: test/an-absent-browser-reads-as-a-repo-full-of-broken-tests.test.ts"
+    - claim: a launch that fails for any reason other than verified absence still fails loudly, so absence and failure never share an outcome
+      proof: "unit test: test/an-absent-browser-reads-as-a-repo-full-of-broken-tests.test.ts"
+    - claim: a skipped suite reports as skipped and never as passing, so a false red is not converted into a false green
+      proof: "unit test: test/an-absent-browser-reads-as-a-repo-full-of-broken-tests.test.ts"
+    - claim: the absence predicate reads a half-extracted install as absent, matching the INSTALLATION_COMPLETE contract the browser preflight already relies on
+      proof: "unit test: test/an-absent-browser-reads-as-a-repo-full-of-broken-tests.test.ts"
+  falsifier: |
+    Close without implementation if an absent browser already produces a named skip rather than
+    per-test launch errors — measured 2026-09-07 in this container it produces the errors, and
+    test/serve-launch-uniformity.test.ts records the same misreading being made once before.
+    A version that skips under CI does NOT satisfy this task and must be rejected: it would be the
+    quarantine CLAUDE.md forbids, wearing this task's name. A version that skips on any launch
+    failure rather than on verified absence also fails, for the same reason in a subtler form.
