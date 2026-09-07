@@ -97,6 +97,7 @@
   "src/lib/account-usage.ts": 180,
   "src/lib/alert-lane.ts": 133,
   "src/lib/analytics-route.ts": 118,
+  "src/lib/authority.ts": 112,
   "src/lib/auto-triage.ts": 150,
   "src/lib/autonomy.ts": 90,
   "src/lib/block-reason.ts": 103,
@@ -265,6 +266,6 @@
   "src/lib/worker.ts": 1136,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16416,
+  "src/run-task.ts": 16432,
   "src/spike.ts": 18
 }

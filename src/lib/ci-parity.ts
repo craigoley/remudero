@@ -1158,6 +1158,17 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     verdict: { status: "ADMITTED", measuredMs: 1201 },
   },
   {
+    testFile: "test/authority-ratchet.test.ts",
+    job: "authority-census",
+    script: "census:authority",
+    walks: ["src/"],
+    reason:
+      "same-class (W1-T2478) — a census suite: walks tracked src/**/*.ts, asserts every file with a detectable external write " +
+      "(assertLiveWriteAllowed call, gh REST write-verb argv, gh pr/issue create-merge-comment-close argv, or raw git push argv) " +
+      "against its own AUTHORITY_TABLE baseline (src/lib/authority.ts) by module; measured well under the bound below",
+    verdict: { status: "ADMITTED", measuredMs: 520 },
+  },
+  {
     testFile: "test/no-shallowing-of-the-canonical-checkout.test.ts",
     job: "no-shallowing-census",
     script: "census:no-shallowing",

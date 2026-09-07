@@ -515,6 +515,13 @@ import {
 } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import {
+  buildAuthorityReport,
+  authorityLedgerPattern,
+  loadRatificationPins,
+  renderAuthorityReport,
+  type AuthorityReport,
+} from "./lib/authority.js";
+import {
   collectCiFailureCorpus,
   rollupAtSha,
   type CiFailureCorpusInput,
@@ -17038,6 +17045,59 @@ export function replayCommand(
   }
   console.log(buildReplay(resolved.lines, { since, until, taskId, stepPrefix }));
   return 0;
+}
+
+/** Injectable seam for `authorityCommand` — same shape as `ReplayCommandOpts` above: a test
+ *  drives both the measured and refused (`ledger.ok === false`) paths without a real state root. */
+export interface AuthorityCommandDeps {
+  out?: (s: string) => void;
+  err?: (s: string) => void;
+  stateDir?: string;
+  loadPolicy?: () => Policy;
+  loadPins?: () => Record<string, string>;
+  resolveLedger?: (stateDir: string, pattern: RegExp) => ReturnType<typeof resolveLedgerUnion>;
+}
+
+/**
+ * `rmd authority [--json]` — W1-T2695: what the fleet may do without the operator, joined to
+ * plan/policy.yaml's values, plan/ratifications.yaml's pins (if any), and each action's last
+ * ledgered firing.
+ *
+ * READ-ONLY BY CONSTRUCTION: every input below is a tree read (policy.yaml, ratifications.yaml,
+ * the ledger union) — no `gh`/network call, no `execFileSync`, no write. See lib/authority.ts's
+ * `AUTHORITY_TABLE` for what is enumerated and `test/authority-ratchet.test.ts` for what refuses
+ * a new external write that names no gate here.
+ */
+export function authorityCommand(rest: string[], deps: AuthorityCommandDeps = {}): number {
+  const badArg = unknownArgError("authority", rest, [], ["--json"]);
+  const out = deps.out ?? console.log;
+  const err = deps.err ?? console.error;
+  if (badArg) {
+    err(`${badArg}\n${USAGE}`);
+    return 2;
+  }
+  const stateDir = deps.stateDir ?? dirname(ledgerPathFor(loadConfig()));
+  const loadPolicyFn = deps.loadPolicy ?? loadDefaultPolicy;
+  let policy: Policy | undefined;
+  try {
+    policy = loadPolicyFn();
+  } catch {
+    // A read-only report never crashes on an unparsable policy.yaml — every policy-gated row's
+    // policyValue simply reads "-" (undefined), same posture as statusCommand's "GitHub is
+    // decoration, never a gate" for its own network reads.
+    policy = undefined;
+  }
+  const loadPinsFn = deps.loadPins ?? (() => loadRatificationPins());
+  const pins = loadPinsFn();
+  const resolveLedgerFn = deps.resolveLedger ?? resolveLedgerUnion;
+  const ledger = resolveLedgerFn(stateDir, authorityLedgerPattern());
+  const report: AuthorityReport = buildAuthorityReport({ policy, pins, ledger });
+  if (rest.includes("--json")) {
+    out(JSON.stringify(report, null, 2));
+  } else {
+    out(renderAuthorityReport(report));
+  }
+  return report.status === "refused" ? 1 : 0;
 }
 
 /**
@@ -38139,6 +38199,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2296: a deterministic, plain-text narration of a LEDGER WINDOW — between two ISO-8601 instants, what did the fleet decide, in what order, and for what recorded reasons. Reuses buildReceipt's discipline (src/lib/ledger-replay.ts's buildReplay) over a WINDOW instead of a run: reads the archive∪live UNION (lib/ledger-grep.ts's resolveLedgerUnion, never the live ledger.ndjson alone), filters to [since, until] inclusive, orders by each row's own ts, and renders every row's own outcome/reason fields — a field the row does not carry prints `absent (no \"<field>\" field on this row)`, never a fabricated value. --task narrows to one task id; --step narrows to one step-name prefix (a family, e.g. `automerge.`). A partial ledger corpus (zero archives, or a rotation found and unreadable) is REFUSED, never narrated as a shorter story. READ-ONLY: writes no ledger line, no state file, posts nothing.",
   },
   {
+    name: "authority",
+    syntax: "rmd authority [--json]",
+    summary: "Every external write the fleet may make without the operator, its gate, and its last firing.",
+    detail: "W1-T2695: derives one table from plan/policy.yaml's schema and the GitHub/git write surface (lib/authority.ts's AUTHORITY_TABLE) — for each external write: the module+symbol that performs it, its gate kind (policy row / ledger verdict / operator verb / always), the plan/policy.yaml value that governs it (when any), the plan/ratifications.yaml pin (when W1-T2694's file carries one), and the last time it fired in the ledger union. Joins the ledger archive+live union (lib/ledger-grep.ts's resolveLedgerUnion), never the live ledger.ndjson alone, and REFUSES the whole report — never blanking each row's last-fired column — when that union could not be read. --json prints the same rows as JSON instead of the formatted table. test/authority-ratchet.test.ts enumerates every tracked src file with a detectable external write (an assertLiveWriteAllowed call, a gh REST write-verb argv, a gh pr/issue create-merge-comment-close argv, or a raw git push argv) and fails naming any file missing from AUTHORITY_TABLE. READ-ONLY: no network call, no gh/git spawn, writes nothing.",
+  },
+  {
     name: "check-proof",
     syntax: "rmd check-proof <proof> [--allow-full-suite] [--base <ref>]",
     summary: "Run one acceptance proof through the reviewer's own executor and print its verdict.",
@@ -39067,6 +39133,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(replayCommand(arg, rest[1], rest.slice(2))) cannot carry a DA hit without forking the process; replayCommand's own logic — arg validation, the resolved/refused union branches, and the buildReplay print path — is unit-tested in test/ledger-replay.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/receipt/ledger-grep dispatch cases).
   if (cmd === "replay" && arg) {
     process.exit(replayCommand(arg, rest[1], rest.slice(2)));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(authorityCommand(rest)) cannot carry a DA hit without forking the process; authorityCommand's own logic — arg validation, the policy/pins/ledger join, the refused-union branch, and the JSON/table render — is unit-tested in test/authority-table.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/receipt/replay dispatch cases).
+  if (cmd === "authority") {
+    process.exit(authorityCommand(rest));
   }
   if (cmd === "lint-plan") {
     process.exit(await lintPlanCommand(rest));
