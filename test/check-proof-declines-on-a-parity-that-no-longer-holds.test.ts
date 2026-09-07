@@ -212,6 +212,13 @@ test("a unit-test proof whose merge-base worktree cannot be created reports UNKN
 });
 
 test("no source string anywhere still claims a unit-test proof is out of scope because only grep proofs get a base blob", () => {
+  // @source-text-subject — W1-T2905's census counts this read; this is its declared exception, not
+  // a way around it. The property under test is the ABSENCE of two specific stale strings from
+  // run-task.ts's own source, and no call through checkProofCommand can demonstrate an absence —
+  // the acceptance tests above already cover every OUTPUT this verb can produce; this test's own
+  // subject is the source text itself, guarding against the stale wording resurfacing in a branch
+  // those fixtures do not happen to exercise (e.g. an untested argv shape).
+  //
   // Read the working file directly (not `git show HEAD:...`) — this repo's run-task.ts is large
   // enough that `git show`'s captured stdout can exceed execFileSync's default maxBuffer (ENOBUFS).
   const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
