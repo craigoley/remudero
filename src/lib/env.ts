@@ -14,6 +14,7 @@
  */
 
 import { join } from "node:path";
+import { ENV_REGISTRY, type EnvRegistryEntry } from "./config-schema.js";
 
 // Why: why USER/CLAUDE_CODE_OAUTH_TOKEN/GH_TOKEN are each safe to copy, and the container-parity
 // incident behind GH_TOKEN — docs/forensics/env.md#allowlist (W1-T236, W1-T258).
@@ -27,6 +28,16 @@ import { join } from "node:path";
  * FALSIFIER: test/token-authenticated-worker.test.ts, test/gh-token-worker-env.test.ts.
  */
 const ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "USER", "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"] as const;
+
+const REGISTERED_HARNESS_ENV_NAMES = new Set(ENV_REGISTRY.map((entry) => entry.name));
+
+export function registeredHarnessEnvVars(): readonly EnvRegistryEntry[] {
+  return ENV_REGISTRY;
+}
+
+export function isRegisteredHarnessEnvName(name: string): boolean {
+  return REGISTERED_HARNESS_ENV_NAMES.has(name);
+}
 
 /** Any key matching this is a billing-boundary violation and must not survive into a child env. */
 const ANTHROPIC_KEY = /^ANTHROPIC_/i;

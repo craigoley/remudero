@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigShapeError, validateConfigShape } from "../src/lib/config-schema.js";
-import { loadConfig } from "../src/lib/config.js";
+import { loadConfig, validateConfig } from "../src/lib/config.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,6 +18,23 @@ test("validateConfigShape refuses a wrong-typed field and names the field and so
       assert.match(err.message, /unit-test-config\.json/);
       assert.match(err.message, /softBudgetThresholdUsd/);
       assert.match(err.message, /expected number/);
+      return true;
+    },
+  );
+});
+
+test("validateConfig refuses a wrong-typed field before semantic rules run", () => {
+  assert.throws(
+    () =>
+      validateConfig({
+        claudeBin: "/usr/bin/claude",
+        root: "/tmp/root",
+        softBudgetThresholdUsd: "25",
+      } as never),
+    (err: unknown) => {
+      assert.ok(err instanceof ConfigShapeError);
+      assert.match(err.message, /validateConfig input/);
+      assert.match(err.message, /softBudgetThresholdUsd/);
       return true;
     },
   );
