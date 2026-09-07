@@ -774,13 +774,10 @@ function grepRefusalExample(when: string, proof: string): { when: string; proof:
   return { when, proof, message };
 }
 
-/** The `grep:`/`unit test:` dialect's PARSE SHAPE, machine-readable — the two forms, their prefix and
- *  body regexes, and every refusal with the SAME message the parser (or, for `grep:`, {@link
- *  explainGrepProofRefusal}) actually produces. Consumed by scripts/generate-proof-dialect.mjs to
- *  render docs/proof-dialect.md and by test/proof-dialect-doc.test.ts to hold CLAUDE.md's proof
- *  section to these same values (W1-T2762). DERIVATION ONLY: every field here reads an existing
- *  regex/constant/function: {@link parseDialectGrep} and {@link parseTestTarget} still own the actual
- *  parse, this does not redeclare it, and no parsing behaviour changes. */
+/** The `grep:`/`unit test:` dialect's PARSE SHAPE, machine-readable — the two forms, their prefix and body regexes, and every refusal with the SAME message
+ *  the parser (or, for `grep:`, {@link explainGrepProofRefusal}) actually produces. Consumed by scripts/generate-proof-dialect.mjs to render
+ *  docs/proof-dialect.md and by test/proof-dialect-doc.test.ts to hold CLAUDE.md's proof section to these same values (W1-T2762). DERIVATION ONLY: every
+ *  field here reads an existing regex/constant/function: {@link parseDialectGrep} and {@link parseTestTarget} still own the actual parse, this does not redeclare it, and no parsing behaviour changes. */
 export const PROOF_DIALECT = {
   grep: {
     prefixRe: DIALECT_GREP_RE,
