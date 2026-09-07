@@ -65,6 +65,12 @@ test("acceptance 3: a diff carrying BOTH a ledger bump and a genuine overrun nam
 });
 
 test("acceptance 4: the discount reads the shared table, not a second copy of its pattern", () => {
+  // @source-text-subject — W1-T2905's declared exception, taken deliberately rather than by
+  // re-capturing its baseline upward, which that ratchet names as "NOT a remedy". Remedy (1),
+  // asserting on behaviour, cannot express this claim: an inline duplicate of the regex and a
+  // reference to GENERATED_LEDGER_CLASSES behave IDENTICALLY today, and the whole point of the
+  // assertion is the drift the duplicate would allow the moment that constant gains a row. So the
+  // SUBJECT here genuinely is the source text, which is the condition the marker exists for.
   // A source-structure check — the same idiom test/scope-guard-overrun.test.ts uses for its own
   // wiring pin — because a discount that duplicated the regex inline would pass tests 1-3 today
   // and silently drift the moment GENERATED_LEDGER_CLASSES gains a row nobody re-typed here.
