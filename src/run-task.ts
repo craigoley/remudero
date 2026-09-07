@@ -246,7 +246,7 @@ import {
   type RestRollupEntry,
 } from "./lib/open-prs-rest.js";
 import { buildMainHealthRung } from "./lib/main-health-rung.js";
-import { imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
+import { emailChannel, imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
   alertTaskId,
@@ -21074,6 +21074,8 @@ export function buildDigestCadenceDaemonHooks(deps: {
   now?: () => Date;
   policy?: Policy;
   channel?: NotifyChannel;
+  /** W1-T3000: the SECOND delivery, defaulting to `emailChannel(notifyRecipient(config))`. */
+  emailChannel?: NotifyChannel;
 } = {}): {
   checkDigestCadence: () => MeasurementCadenceDecision;
   runDigestCadence: () => Promise<DigestCadenceRunResult>;
@@ -21109,13 +21111,14 @@ export function buildDigestCadenceDaemonHooks(deps: {
       // `config.root` are always THIS process's own checkout, never a drained target's.
       const verbCensus = runVerbCensus({ checkoutDir: repoRoot, stateDir: join(config.root, "state"), ledgerUnion: resolveLedgerUnion });
       const verbCensusSuggestion: GenerativeDigestItem = { kind: "generative", text: renderVerbCensusDigestLine(verbCensus) };
-      return runDigestCadenceReport({
+      const runId = `DIGEST-${now.getTime()}`;
+      const report = runDigestCadenceReport({
         ledgerPath,
         sinceIso: defaultDigestSinceIso(nowIso),
         deps: {
           channel: deps.channel ?? inboxNotifyChannel(config.root),
           ledgerPath,
-          runId: `DIGEST-${now.getTime()}`,
+          runId,
           taskId: "DIGEST",
           channelName: "inbox",
         },
@@ -21127,6 +21130,19 @@ export function buildDigestCadenceDaemonHooks(deps: {
         // rendered wrapper marks every entry here `[SUGGESTED]` regardless of origin.
         suggestions: [verbCensusSuggestion],
       });
+      // W1-T3000: THE SAME RENDERED TEXT, A SECOND TIME. Its OWN `notify` call, never a fan-out
+      // channel: one `notify.sent` row cannot carry two outcomes, and an inbox success beside an
+      // undeliverable email would collapse into one verdict — the shape notify.ts refuses by name.
+      // An unavailable channel degrades and ledgers its reason, so a host with no transport keeps
+      // its inbox digest and reports the gap.
+      notify(report.text, {
+        channel: deps.emailChannel ?? emailChannel(notifyRecipient(config)),
+        ledgerPath,
+        runId,
+        taskId: "DIGEST",
+        channelName: "email",
+      });
+      return report;
     });
   return { checkDigestCadence: check, runDigestCadence: run };
 }
