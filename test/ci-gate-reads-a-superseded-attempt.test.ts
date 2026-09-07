@@ -15,23 +15,84 @@
  * looking complete, which is why this file tests BOTH halves and says so.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
-import { ciGateFromRollup, ciGateSha, ciGateState, waitForCiGreen } from "../src/run-task.js";
+import { buildFixRungDispatchArgs, ciGateFromRollup, ciGateSha, ciGateState, runFixRung, waitForCiGreen } from "../src/run-task.js";
+import { dedupeRollupByLatestAttempt, type RollupCheckEntry } from "../src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { ReviewVerdict } from "../src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
+import type { Mount } from "../src/lib/mounts.js";
+import type { Config } from "../src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
 const PR_URL = "https://github.com/acme/remudero/pull/42";
 const OWNER = "acme";
 const REPO = "remudero";
+const FIX_RUNG_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 
-/** The measured incident's own three attempts of ONE required check on ONE sha (`acceptance-author-gate`
- *  at edb9cfb3), newest last. */
-const THREE_ATTEMPTS = [
+/** The measured incident's own three attempts of ONE required check on ONE sha
+ *  (`acceptance-author-gate` at edb9cfb3), newest last. */
+const THREE_ATTEMPTS: RollupCheckEntry[] = [
   { name: "acceptance-author-gate", status: "COMPLETED", conclusion: "CANCELLED", startedAt: "2026-09-04T13:48:42Z" },
   { name: "acceptance-author-gate", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-09-04T13:49:20Z" },
   { name: "acceptance-author-gate", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-09-04T13:50:02Z" },
 ];
-const CI_GREEN = { name: "ci", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-09-04T13:50:30Z" };
+const CI_GREEN: RollupCheckEntry = { name: "ci", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-09-04T13:50:30Z" };
+
+function result(over: Partial<WorkerResult> = {}): WorkerResult {
+  return {
+    sessionId: "s", costUsd: 0, numTurns: 0, text: "", blocks: [], stderr: "", subtype: "success",
+    isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "default",
+    effort: "default", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {}, compactionEvents: [], qualitySuspect: false, ...over,
+  };
+}
+
+function ciLogInitialReview(headSha = "deadbeef"): ReviewVerdict & { headSha: string; reviewerOutcome: string } {
+  return {
+    state: "failure", criteria: [], testTheater: false,
+    summary: "sweep-reconstructed: required checks red - ci-log dispatch",
+    floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+    headSha, reviewerOutcome: "sweep-reconstructed-ci-log",
+  };
+}
+
+function fixRungBaseOpts(task: { id: string; title: string }) {
+  return {
+    taskId: task.id, runId: `${task.id}-1730000000000`, task, prUrl: PR_URL,
+    branch: `run-${task.id}-1730000000000`, worktreePath: "/tmp/rmd-t2804-wt",
+    initialSessionId: "", mount: FIX_RUNG_MOUNT, settingsFile: "/tmp/rmd-t2804-settings.json",
+    config: {} as Config, budgetUsd: 10,
+    reviewBase: { owner: OWNER, repo: REPO, headCheckoutDir: "/tmp/rmd-t2804-wt", reviewerMount: FIX_RUNG_MOUNT },
+  };
+}
+
+function tmpLedgerPath(): string {
+  return join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t2804-`)), "ledger.ndjson");
+}
+
+function fakeIssueStore(): IssueGateway {
+  let seq = 900;
+  const issues: Array<{ number: number; url: string; title: string; body: string }> = [];
+  return {
+    create(title, body) {
+      const number = seq++;
+      const url = `https://github.com/acme/remudero/issues/${number}`;
+      issues.push({ number, url, title, body });
+      return url;
+    },
+    listOpen(): OpenIssue[] {
+      return issues.map((i) => ({ number: i.number, url: i.url, title: i.title, body: i.body }));
+    },
+    comment() {
+      // not exercised by these tests
+    },
+  };
+}
 
 // ── FORWARD: a superseded red attempt no longer outvotes its own successor ───────────────────
 
@@ -104,15 +165,39 @@ test("W1-T2804: the GREEN verdict is unchanged — it still requires a check nam
 
 // ── shared rule not a fourth filter ─────────────────────────────────────────────────────────
 
-test("W1-T2804: shared rule not a fourth filter — the gate CALLS dedupeRollupByLatestAttempt rather than re-deriving it", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const body = src.slice(src.indexOf("export function ciGateFromRollup"));
-  const fn = body.slice(0, body.indexOf("\n}\n") + 3);
-  assert.ok(
-    fn.includes("dedupeRollupByLatestAttempt("),
-    "W1-T457's standing instruction: give this reader the rule the gate already has, never invent a fourth one that can drift",
-  );
-  assert.ok(!/\.sort\(/.test(fn), "a hand-rolled ordering here would be exactly that fourth filter");
+test("W1-T2804: shared rule not a fourth filter — applying dedupeRollupByLatestAttempt to the gate's own input changes no verdict", () => {
+  // BEHAVIOURAL, never a source-text read. If the gate had grown a FOURTH hand-rolled filter, it
+  // would agree with the shared rule on the easy cases and diverge on exactly the two the shared
+  // rule DEFINES: a `startedAt` tie (keep the LAST encountered) and a missing `startedAt` (sorts
+  // OLDER). Pre-deduping the input with the shared rule must be a no-op for every one of them.
+  const corpora: RollupCheckEntry[][] = [
+    [...THREE_ATTEMPTS, CI_GREEN],
+    [THREE_ATTEMPTS[2], THREE_ATTEMPTS[0], CI_GREEN, THREE_ATTEMPTS[1]],
+    // a tie: same name, same startedAt, LAST encountered wins — so the order decides, and both
+    // orders are asserted so a filter that kept the FIRST is caught in one direction or the other.
+    [{ name: "ci", conclusion: "FAILURE", startedAt: "2026-09-04T13:50:02Z" }, { name: "ci", conclusion: "SUCCESS", startedAt: "2026-09-04T13:50:02Z" }],
+    [{ name: "ci", conclusion: "SUCCESS", startedAt: "2026-09-04T13:50:02Z" }, { name: "ci", conclusion: "FAILURE", startedAt: "2026-09-04T13:50:02Z" }],
+    // a missing stamp against a present one, both orders
+    [{ name: "ci", conclusion: "FAILURE" }, { name: "ci", conclusion: "SUCCESS", startedAt: "2026-09-04T13:50:02Z" }],
+    [{ name: "ci", conclusion: "SUCCESS", startedAt: "2026-09-04T13:50:02Z" }, { name: "ci", conclusion: "FAILURE" }],
+  ];
+  for (const rollup of corpora) {
+    assert.equal(
+      ciGateFromRollup(rollup),
+      ciGateFromRollup(dedupeRollupByLatestAttempt(rollup)),
+      `the gate must already have applied W1-T457's rule, so applying it again is a no-op: ${JSON.stringify(rollup)}`,
+    );
+  }
+
+  // CONTROL ON THE CORPUS: a plausible WRONG rule (keep the first entry per name) picks a different
+  // survivor on the tie and missing-stamp cases, so the assertions above are not vacuous.
+  const keepFirst = (rollup: RollupCheckEntry[]): RollupCheckEntry[] => {
+    const seen = new Map<string, RollupCheckEntry>();
+    for (const c of rollup) if (!seen.has(c.name ?? c.context ?? "")) seen.set(c.name ?? c.context ?? "", c);
+    return [...seen.values()];
+  };
+  const divergent = corpora.filter((r) => ciGateFromRollup(keepFirst(r)) !== ciGateFromRollup(r));
+  assert.ok(divergent.length >= 2, `the corpus must contain cases a drifted filter gets WRONG (found ${divergent.length})`);
 });
 
 // ── one sha per decision / pinning is not parsing ────────────────────────────────────────────
@@ -142,23 +227,105 @@ test("W1-T2804: one sha per decision — the gate reports the head it judged, so
   assert.equal(rowReads, 1, "the sha is the ALREADY-RESOLVED head — a second read would be a second chance to skew");
 });
 
-test("W1-T2804: pinning is not parsing — a bare verdict from a caller-supplied reader pins nothing and every consumer falls open", () => {
-  // Every pre-existing `deps.waitForCiGreen` stub returns a bare verdict. Those keep working and
-  // change no behavior: `ciGateSha` reports undefined, the miner resolves its own head exactly as
-  // it did before this task. Recorded so a later reader cannot mistake the dedupe above for the
-  // whole concern — the parse fix alone leaves the two readers free to answer about two commits.
+test("W1-T2804: one sha per decision, END TO END — the round's gate sha reaches the miner and the row that reports their disagreement", async () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const minerCalls: Array<string | undefined> = [];
+  const spawnCalls: SpawnWorkerArgs[] = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts({ id: "W1-T2804", title: "pin both CI readers to one sha" }),
+    strikeCap: 2,
+    initialReview: ciLogInitialReview(),
+    ciFailures: [{ name: "ci", logTail: "Error: build failed" }],
+    ciEvidenceDisagreement: {
+      sha: "sweep-resolved-sha",
+      rollup: { checks_state: "red", red_checks: ["ci"] },
+      miner: { enumerable_failures: [{ name: "ci" }] },
+    },
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      // The gate judged `gate-resolved-sha`. Everything downstream in THIS round must answer
+      // about that commit, not re-resolve its own.
+      waitForCiGreen: async () => ({ state: "red" as const, sha: "gate-resolved-sha" }),
+      fetchCiFailures: async (_prUrl: string, sha?: string) => {
+        minerCalls.push(sha);
+        return []; // the miner enumerates nothing — the disagreement this rung stands down on
+      },
+      runReview: async () => {
+        throw new Error("must never be reached: ci never goes green");
+      },
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => logs.push({ step, extra }),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(outcome.outcome, "stood_down", "an empty miner still stands the rung down rather than spending a strike on empty evidence");
+  assert.deepEqual(minerCalls, ["gate-resolved-sha"], "the miner was PINNED to the sha the round's own gate read judged");
+
+  const rows = logs.filter((l) => l.step === "fix.ci_evidence_disagreement");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].extra?.sha, "gate-resolved-sha", "and the row names that one commit, so it claims a shared subject only when there is one");
+});
+
+test("W1-T2804: pinning is not parsing — a bare verdict pins nothing and every consumer falls open, exactly as before this task", async () => {
+  // Every pre-existing `deps.waitForCiGreen` stub returns a BARE verdict. Recorded behaviourally so
+  // a later reader cannot mistake the dedupe above for the whole concern: the parse fix alone
+  // leaves the two readers free to answer about two different commits, and does so silently.
   assert.equal(ciGateState("timeout"), "timeout");
   assert.equal(ciGateSha("timeout"), undefined);
   assert.equal(ciGateSha({ state: "red" }), undefined);
   assert.equal(ciGateSha({ state: "red", sha: "abc" }), "abc");
 
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.ok(
-    src.includes("currentCiFailures = await deps.fetchCiFailures(opts.prUrl, ciGateSha(ci));"),
-    "the post-strike miner must be pinned to the sha the round's own gate read judged",
-  );
-  assert.ok(
-    src.includes("sha: disagreement.sha,"),
-    "and the sha both readers answered about must be OBSERVABLE in the row that reports their disagreement",
-  );
+  const minerCalls: Array<string | undefined> = [];
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts({ id: "W1-T2804B", title: "a bare verdict pins nothing" }),
+    strikeCap: 2,
+    initialReview: ciLogInitialReview(),
+    ciFailures: [{ name: "ci", logTail: "Error: build failed" }],
+    deps: {
+      spawn: async () => result({ sessionId: "fix-session-1" }),
+      waitForCiGreen: async () => "red", // the pre-existing shape
+      fetchCiFailures: async (_prUrl: string, sha?: string) => {
+        minerCalls.push(sha);
+        return [];
+      },
+      runReview: async () => {
+        throw new Error("must never be reached: ci never goes green");
+      },
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+  assert.equal(outcome.outcome, "stood_down");
+  assert.deepEqual(minerCalls, [undefined], "no sha, so the miner resolves its own head — byte-identical to the behaviour before this task");
+});
+
+test("W1-T2804: the sweep-reconstructed dispatch carries the head it already resolved, so round 1 is pinned too", () => {
+  const args = buildFixRungDispatchArgs({
+    task: { id: "W1-T2804C", title: "the dispatch names its own head" },
+    runId: "SWEEP-1730000000000",
+    prUrl: PR_URL,
+    branch: "run-W1-T2804C-1730000000000",
+    worktreePath: "/tmp/rmd-t2804-dispatch-wt",
+    mount: FIX_RUNG_MOUNT,
+    settingsFile: "/tmp/rmd-t2804-dispatch-settings.json",
+    config: {} as Config,
+    budgetUsd: 10,
+    strikeCap: 2,
+    evidence: { unmetCriteria: [], ciFailures: [] },
+    pr: { headSha: "cafe1234", checksState: "red", redRequiredChecks: ["ci-gate"] },
+    reviewBase: { owner: OWNER, repo: REPO, headCheckoutDir: "/tmp/rmd-t2804-dispatch-wt", reviewerMount: FIX_RUNG_MOUNT },
+  });
+  assert.equal(args.ciEvidenceDisagreement?.sha, "cafe1234", "the sweep mined its evidence from THIS head — naming it is what makes the shared subject legible");
 });
