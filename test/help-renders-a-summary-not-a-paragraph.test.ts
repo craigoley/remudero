@@ -144,11 +144,12 @@ const BASELINE_COMMAND_NAMES = [
 ].sort();
 
 // W1-T2580: `bundle` — the day-one knowledge bundle export verb — joins the registry.
+// W1-T2697: `hand-runs` — the operator hand-run mining verb — joins the registry.
 // W1-T2695: `authority` — the fleet-authority report verb — joins the registry.
 test("COMMANDS carries the established command names plus the operator merge-hold writer", () => {
-  assert.equal(BASELINE_COMMAND_NAMES.length, 70);
+  assert.equal(BASELINE_COMMAND_NAMES.length, 71);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
-  assert.equal(COMMANDS.length, 70);
+  assert.equal(COMMANDS.length, 71);
 });
 
 // ── Regression control: this test file is where a re-widened top-level listing would show up ──
