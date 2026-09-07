@@ -82,11 +82,11 @@ test("unresolved name-filtered test proofs still preflight and run the full test
 
 test("name-filtered test proofs use their resolved file set for the browser preflight decision", () => {
   const cwd = checkoutWith({
-    "test/source-title.test.ts": 'test("fixture title", () => {});\n',
+    "test/source-title.test.ts": 'test("source fixture title", () => {});\n',
     "test/browser-title.test.ts": 'import { chromium } from "playwright";\ntest("browser fixture title", () => chromium);\n',
   });
 
-  const sourceOnly = runProof("unit test: fixture title", cwd);
+  const sourceOnly = runProof("unit test: source fixture title", cwd);
   const browser = runProof("unit test: browser fixture title", cwd);
 
   assert.equal(sourceOnly.outcome, "pass");
