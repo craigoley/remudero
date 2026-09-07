@@ -2297,6 +2297,15 @@ function installRootDir(): string {
 function wireCredentialHelperSocket(cwd: string, socketPath: string): void {
   const helperScript = join(installRootDir(), "scripts", "git-credential-socket-helper.mjs");
   execFileSync("git", ["-C", cwd, "config", "--local", "credential.helper", ""], { stdio: "ignore" });
+  // WITHOUT THIS, NOTHING IS EVER SCOPED. git's credential context carries protocol+host ONLY
+  // unless `credential.useHttpPath` is set — MEASURED against git 2.39.5: the helper receives
+  // "protocol=https\nhost=github.com" bare, and "protocol=https\nhost=github.com\npath=<owner>/<repo>.git"
+  // with it. `repoFromCredentialRequest` then falls back to the bare host, which names no
+  // owner/repo, and `mintScopedToken` used to answer that by minting an INSTALLATION-WIDE token —
+  // the broadest credential available, in the shard whose whole purpose is the narrowest one.
+  // Setting the path here is what makes the scoping real; mintScopedToken now REFUSES rather
+  // than widening if it ever arrives absent anyway.
+  execFileSync("git", ["-C", cwd, "config", "--local", "credential.useHttpPath", "true"], { stdio: "ignore" });
   execFileSync(
     "git",
     ["-C", cwd, "config", "--local", "--add", "credential.helper", `!node "${helperScript}" "${socketPath}"`],

@@ -110,6 +110,31 @@ export interface StartBoundaryProxyOpts {
 }
 
 /**
+ * The URL a request is actually forwarded to: protocol, host and port ALWAYS copied from the
+ * DECLARED destination, only path and query carried over from the request.
+ *
+ * THE SECOND OF TWO INDEPENDENT DEFENCES, and it is separate from the origin CHECK in
+ * {@link startBoundaryProxy} on purpose. The check REFUSES an off-origin target and ledgers it —
+ * a worker aiming off-host is a finding to record, not something to quietly correct. This pins the
+ * origin structurally, so no URL-parsing corner case, and no future edit that weakens that check,
+ * can put the real credential on a host the operator never declared.
+ *
+ * EXPORTED AND PURE BECAUSE IT IS OTHERWISE UNPROVABLE. While the check stands, the two defences
+ * are observationally identical — every target that reaches this point has already been proven
+ * on-origin, so a test driving the pin THROUGH the proxy passes whether the pin exists or not
+ * (measured: rebuilding `target` straight from the request left all 25 tests green). Calling this
+ * directly with an off-origin target is the only way to falsify it.
+ */
+export function forwardedTarget(requestUrl: string | undefined, declaredBaseUrl: string): URL {
+  const declared = new URL(declaredBaseUrl);
+  const requested = new URL(requestUrl ?? "/", declared);
+  const target = new URL(declared);
+  target.pathname = requested.pathname;
+  target.search = requested.search;
+  return target;
+}
+
+/**
  * Start the loopback reverse proxy. Binds `127.0.0.1:0` (an ephemeral port — never a fixed one,
  * so two daemons on one host cannot collide) and, per request, reads ONLY the Authorization
  * header to decide the destination: an unrecognised bearer is refused immediately — no other
@@ -160,9 +185,11 @@ export async function startBoundaryProxy(opts: StartBoundaryProxyOpts): Promise<
     // already covers every shape, and this makes the guarantee hold by CONSTRUCTION rather than by
     // a comparison someone could later reorder or drop — which is also what lets a taint analysis
     // see it. CodeQL kept the SSRF alert on the compared-origin form for exactly that reason.
-    const target = new URL(declared.toString());
-    target.pathname = requested.pathname;
-    target.search = requested.search;
+    // EXTRACTED rather than inline: while the refusal above stands, the two defences are
+    // observationally identical, so a test driving this THROUGH the proxy passes whether the
+    // rebuild exists or not (measured). {@link forwardedTarget} can be called with a target the
+    // refusal would have rejected, which is the only way to falsify it.
+    const target = forwardedTarget(req.url, destination.upstreamBaseUrl);
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) {
       if (!v || k.toLowerCase() === "host" || k.toLowerCase() === "authorization") continue;

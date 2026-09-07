@@ -13,27 +13,19 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { createConnection } from "node:net";
-import { mkdirSync, readdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import {
-  boundaryLedgerRow,
-  declaredHostsFromWorkerSettings,
-  mintSentinel,
-  repoFromCredentialRequest,
-  secretBoundaryEnv,
-  startBoundaryProxy,
-  startCredentialHelperSocket,
-  MODEL_HOST_DEFAULT,
-  type BoundaryDestination,
-  type BoundaryLedgerRow,
-} from "../src/lib/secret-boundary.js";
+import { MODEL_HOST_DEFAULT, boundaryLedgerRow, declaredHostsFromWorkerSettings, forwardedTarget, mintSentinel, repoFromCredentialRequest, secretBoundaryEnv, startBoundaryProxy, startCredentialHelperSocket, type BoundaryDestination, type BoundaryLedgerRow, type ScopedTokenMint } from "../src/lib/secret-boundary.js";
 import { buildWorkerEnv } from "../src/lib/env.js";
 import { mintScopedToken } from "../src/lib/github-app.js";
 import { ALLOWED_NETWORK_DOMAINS } from "../src/lib/settings.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
+
+/** The repo root, for the ONE structural assertion below that must read worker.ts's own source. */
+const REPO_ROOT_FOR_WIRING = join(import.meta.dirname, "..");
 
 function keyPair() {
   return generateKeyPairSync("rsa", {
@@ -570,4 +562,137 @@ test("W1-T2699 (5): only path and query cross over — the forwarded origin is a
   } finally {
     await proxy.close();
   }
+});
+
+/*
+ * THE SECOND, STRUCTURAL HALF OF (5) — AND WHY IT IS TESTED DIRECTLY.
+ *
+ * The three tests above prove the origin CHECK refuses an off-host target. `forwardedTarget` is a
+ * separate defence: it copies protocol, host and port from the DECLARED destination and carries
+ * over only path and query, so the forwarded origin cannot come from worker input at all.
+ *
+ * IT CANNOT BE PROVEN THROUGH THE PROXY. While the check stands, every target reaching the pin has
+ * already been proven on-origin, so the two implementations are observationally identical. MEASURED:
+ * a first draft of these tests drove the pin through `startBoundaryProxy`, and rebuilding `target`
+ * straight from the request left all 25 green — a falsifier that reddens nothing is test theatre.
+ * Calling the pure function with a target the check would have refused is the only discriminator.
+ */
+test("W1-T2699 (5): forwardedTarget pins the origin to the declared destination even for a target the check would refuse", () => {
+  const declaredBase = "https://upstream.invalid";
+  const offHost = ["http://evil.invalid/x", "//evil.invalid/x", "/\\\\evil.invalid/x", "https://upstream.invalid@evil.invalid/x", "https://upstream.invalid:8443/x"];
+  for (const target of offHost) {
+    assert.equal(
+      forwardedTarget(target, declaredBase).origin,
+      declaredBase,
+      `${target}: the forwarded origin must be the declared one, never the request's`,
+    );
+  }
+});
+
+test("W1-T2699 (5): forwardedTarget carries path and query, and admits no credentials or fragment from the request", () => {
+  const declaredBase = "https://upstream.invalid";
+
+  assert.equal(forwardedTarget("/v1/messages?beta=true", declaredBase).href, "https://upstream.invalid/v1/messages?beta=true");
+  assert.equal(forwardedTarget(undefined, declaredBase).href, "https://upstream.invalid/", "a missing target defaults to the root of the declared host");
+
+  // A host-SHAPED path is a path, not host control — the confusing case a reader (and a scanner)
+  // can misread. It must survive as a path, on the declared origin.
+  assert.equal(forwardedTarget("/..//evil.invalid", declaredBase).origin, declaredBase);
+  assert.equal(forwardedTarget("/%2f%2fevil.invalid/x", declaredBase).origin, declaredBase);
+
+  const u = forwardedTarget("http://user:pw@evil.invalid/x#frag", declaredBase);
+  assert.equal(u.username, "", "no username may reach the forwarded URL");
+  assert.equal(u.password, "", "no password may reach the forwarded URL");
+  assert.equal(u.hash, "", "no fragment may reach the forwarded URL");
+  assert.equal(u.host, "upstream.invalid");
+});
+
+// ── (6) THE SCOPED TOKEN WAS NEVER SCOPED ────────────────────────────────────────────────────
+//
+// MEASURED against git 2.39.5, with the config `wireCredentialHelperSocket` actually writes:
+// git hands a credential helper `protocol=https\nhost=github.com` and NOTHING ELSE unless
+// `credential.useHttpPath` is set, in which case it adds `path=<owner>/<repo>.git`. The original
+// wiring set only `credential.helper`, so every production request named a bare host,
+// `repoFromCredentialRequest` fell back to that host, and `mintScopedToken`'s `repo.includes("/")`
+// was false — which omitted `repositories` from the exchange body and minted the
+// INSTALLATION-WIDE token. The narrowest-credential shard was issuing the broadest credential.
+//
+// Two independent halves, one test each: the path now arrives, and an absent path REFUSES.
+
+test("W1-T2699 (6): a bare host names no repo to scope to, so it must never be answered with a token", async () => {
+  const attempts: string[] = [];
+  const mint: ScopedTokenMint = async (repo) => {
+    attempts.push(repo);
+    return { ok: false, reason: "request names no owner/repo to scope to" };
+  };
+  const rows: BoundaryLedgerRow[] = [];
+  const socketPath = join(mkdtempSync(join(tmpdir(), "rmd-cred-")), "s.sock");
+  const handle = await startCredentialHelperSocket({ socketPath, mint, log: (r) => rows.push(r) });
+  try {
+    // Exactly what git sends with no `useHttpPath` — the shape the original wiring produced.
+    const reply = await socketRoundTrip(socketPath, "protocol=https\nhost=github.com\n\n");
+    assert.equal(reply, "", "a request that cannot be scoped must receive no credential at all");
+    assert.deepEqual(attempts, ["github.com"], "the bare host is what reaches the mint");
+    assert.ok(
+      rows.some((r) => r.decision === "refuse"),
+      "the refusal must ledger, so an unscopable request is visible rather than silent",
+    );
+  } finally {
+    await handle.close();
+  }
+});
+
+test("W1-T2699 (6): with the path git now sends, the mint is asked for an owner/repo it can scope to", async () => {
+  const attempts: string[] = [];
+  const mint: ScopedTokenMint = async (repo) => {
+    attempts.push(repo);
+    return { ok: true, token: "SCOPED" };
+  };
+  const socketPath = join(mkdtempSync(join(tmpdir(), "rmd-cred-")), "s.sock");
+  const handle = await startCredentialHelperSocket({ socketPath, mint });
+  try {
+    const reply = await socketRoundTrip(socketPath, "protocol=https\nhost=github.com\npath=craigoley/remudero.git\n\n");
+    assert.match(reply, /password=SCOPED/, "a scopable request is answered");
+    assert.deepEqual(attempts, ["craigoley/remudero"], "the owner/repo — with .git stripped — is what gets scoped");
+  } finally {
+    await handle.close();
+  }
+});
+
+test("W1-T2699 (6): wireCredentialHelperSocket sets credential.useHttpPath, without which nothing is ever scoped", () => {
+  // A STRUCTURAL assertion on the wiring, because the behavioural one lives in git, not in this
+  // process: the helper only ever sees a path if this config is written. FALSIFIER: drop the
+  // useHttpPath line from wireCredentialHelperSocket and this fails.
+  const src = readFileSync(join(REPO_ROOT_FOR_WIRING, "src", "lib", "worker.ts"), "utf8");
+  const fn = src.slice(src.indexOf("function wireCredentialHelperSocket"));
+  const body = fn.slice(0, fn.indexOf("\n}\n"));
+  assert.match(body, /credential\.useHttpPath/, "the wiring must ask git for the path");
+  assert.match(body, /"true"/, "and set it on");
+});
+
+test("W1-T2699 (6): mintScopedToken REFUSES a repo it cannot scope to, and never falls back to an installation-wide token", async () => {
+  // THE REAL FUNCTION, not the socket's injected fake — the fix lives in github-app.ts and the
+  // fake-mint test above cannot reach it. The old code answered an unscopable `repo` by OMITTING
+  // `repositories` from the exchange body, which does not narrow the token, it mints the
+  // installation-wide one. Assert both halves: no exchange is attempted, and the reason is named.
+  const { privateKey } = keyPair();
+  let exchanged = false;
+  const fetchImpl = (async () => {
+    exchanged = true;
+    return fakeResponse(201, { token: "MUST-NEVER-BE-MINTED", expires_at: new Date(Date.now() + 3600_000).toISOString() });
+  }) as unknown as typeof fetch;
+
+  for (const unscopable of ["github.com", "unknown", ""]) {
+    const result = await mintScopedToken(unscopable, 1000, {
+      appId: "app-1",
+      installationId: "inst-1",
+      privateKeyPath: "/fake/key.pem",
+      readKey: () => privateKey,
+      fetchImpl,
+    });
+    assert.equal(result.ok, false, `${JSON.stringify(unscopable)}: must refuse`);
+    assert.equal(result.token, undefined, `${JSON.stringify(unscopable)}: must carry no token`);
+    assert.match(String(result.reason), /owner\/repo/, `${JSON.stringify(unscopable)}: must name why`);
+  }
+  assert.equal(exchanged, false, "an unscopable request must never reach GitHub's token exchange at all");
 });

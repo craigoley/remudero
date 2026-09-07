@@ -341,10 +341,19 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
     return { ok: false, reason: "jwt signing failed" };
   }
 
+  // REFUSE RATHER THAN WIDEN. A `repo` that names no owner/repo cannot be scoped, and the old
+  // fallback answered that by omitting `repositories` entirely — which does not mint a narrower
+  // token, it mints the INSTALLATION-WIDE one. That is the opposite of this function's purpose and
+  // it was the live path: without `credential.useHttpPath` git sends the helper a bare host, so
+  // every mint took this branch (worker.ts's `wireCredentialHelperSocket` now sets it). Failing
+  // closed here means a future caller that loses the path gets a refusal it can see, never a
+  // silent escalation to the broadest credential the App can issue.
   const name = repo.includes("/") ? repo.split("/")[1] : undefined;
-  const body = name
-    ? { repositories: [name], permissions: { contents: "write", pull_requests: "write" } }
-    : { permissions: { contents: "write", pull_requests: "write" } };
+  if (!name) {
+    log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason: "request names no owner/repo to scope to" });
+    return { ok: false, reason: "request names no owner/repo to scope to" };
+  }
+  const body = { repositories: [name], permissions: { contents: "write", pull_requests: "write" } };
 
   const timeoutController = new AbortController();
   const timeoutTimer = setTimeout(
