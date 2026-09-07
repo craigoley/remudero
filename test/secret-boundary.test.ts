@@ -22,10 +22,7 @@ import { MODEL_HOST_DEFAULT, boundaryLedgerRow, declaredHostsFromWorkerSettings,
 import { buildWorkerEnv } from "../src/lib/env.js";
 import { mintScopedToken } from "../src/lib/github-app.js";
 import { ALLOWED_NETWORK_DOMAINS } from "../src/lib/settings.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
-
-/** The repo root, for the ONE structural assertion below that must read worker.ts's own source. */
-const REPO_ROOT_FOR_WIRING = join(import.meta.dirname, "..");
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, wireCredentialHelperSocket } from "../src/lib/worker.js";
 
 function keyPair() {
   return generateKeyPairSync("rsa", {
@@ -659,15 +656,37 @@ test("W1-T2699 (6): with the path git now sends, the mint is asked for an owner/
   }
 });
 
-test("W1-T2699 (6): wireCredentialHelperSocket sets credential.useHttpPath, without which nothing is ever scoped", () => {
-  // A STRUCTURAL assertion on the wiring, because the behavioural one lives in git, not in this
-  // process: the helper only ever sees a path if this config is written. FALSIFIER: drop the
-  // useHttpPath line from wireCredentialHelperSocket and this fails.
-  const src = readFileSync(join(REPO_ROOT_FOR_WIRING, "src", "lib", "worker.ts"), "utf8");
-  const fn = src.slice(src.indexOf("function wireCredentialHelperSocket"));
-  const body = fn.slice(0, fn.indexOf("\n}\n"));
-  assert.match(body, /credential\.useHttpPath/, "the wiring must ask git for the path");
-  assert.match(body, /"true"/, "and set it on");
+test("W1-T2699 (6): wireCredentialHelperSocket leaves git ASKING for the path, without which nothing is ever scoped", () => {
+  // BEHAVIOURAL, not a source grep. An earlier draft read worker.ts as text and asserted the
+  // literal `credential.useHttpPath` appeared in it — the snapshot-of-source shape
+  // test/source-text-assertion-census.test.ts (W1-T2905) exists to refuse, and it refused this
+  // one: such a test passes when the prose is present and the behaviour is broken, and fails when
+  // a refactor moves the prose and the behaviour is intact. Reading the config back out of a real
+  // repo asserts the effect instead, and catches a typo in the key, which a grep for it cannot.
+  const repo = mkdtempSync(join(tmpdir(), "rmd-wire-"));
+  execFileSync("git", ["-C", repo, "init", "-q"]);
+  const read = (key: string): string => {
+    try {
+      return execFileSync("git", ["-C", repo, "config", "--local", "--get", key], { encoding: "utf8" }).trim();
+    } catch {
+      return "";
+    }
+  };
+  assert.equal(read("credential.useHttpPath"), "", "the control: unset before the wiring runs");
+
+  wireCredentialHelperSocket(repo, join(repo, "helper.sock"));
+
+  assert.equal(
+    read("credential.useHttpPath"),
+    "true",
+    "git must be asked for the path — without it the helper sees a bare host and nothing can be scoped",
+  );
+  const helpers = execFileSync("git", ["-C", repo, "config", "--local", "--get-all", "credential.helper"], { encoding: "utf8" })
+    .split("\n")
+    .filter((l) => l.trim() !== "");
+  assert.equal(helpers.length, 1, "exactly one helper — the reset must have cleared any inherited list");
+  assert.match(helpers[0]!, /git-credential-socket-helper\.mjs/, "and it must be the socket helper");
+  rmSync(repo, { recursive: true, force: true });
 });
 
 test("W1-T2699 (6): mintScopedToken REFUSES a repo it cannot scope to, and never falls back to an installation-wide token", async () => {

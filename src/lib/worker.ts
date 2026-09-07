@@ -2294,7 +2294,7 @@ function installRootDir(): string {
  *  accumulated `credential.helper` first — an empty value clears git's collected helper list
  *  (MEASURED against git 2.39.5), so the local entry added right after is the only one git tries
  *  in this worktree, superseding `deploy/entrypoint.sh`'s global `$GH_TOKEN`-reading helper. */
-function wireCredentialHelperSocket(cwd: string, socketPath: string): void {
+export function wireCredentialHelperSocket(cwd: string, socketPath: string): void {
   const helperScript = join(installRootDir(), "scripts", "git-credential-socket-helper.mjs");
   execFileSync("git", ["-C", cwd, "config", "--local", "credential.helper", ""], { stdio: "ignore" });
   // WITHOUT THIS, NOTHING IS EVER SCOPED. git's credential context carries protocol+host ONLY
