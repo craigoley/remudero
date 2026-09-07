@@ -196,6 +196,36 @@ test("W1-T2970 a row missing its reason or author class is refused — a ruling 
   assert.equal(loadCreditOverrides(() => noAuthor).rows.length, 0, "no author class, no row");
 });
 
+test("W1-T2970 EVERY refusal arm is entered — a malformed task id or PR number is refused too", () => {
+  // MEASURED by a per-line coverage audit before pushing: the `task` and `pr` arms had ZERO hits
+  // while the action/reason/author arms were covered. A refusal arm no test can enter is a claim
+  // rather than a guard, and this record's whole value is that a bad row cannot quietly apply.
+  const noTask = `- pr: 1657
+  action: remove-credit
+  reason: "x"
+  author_class: operator
+`;
+  const noTaskLoad = loadCreditOverrides(() => noTask);
+  assert.deepEqual(noTaskLoad.rows, [], "a row with no task id applies to nothing");
+  assert.match(noTaskLoad.refused[0].reason, /task/, "and says so");
+
+  const prAsString = `- task: W1-T444
+  pr: "1657"
+  action: remove-credit
+  reason: "x"
+  author_class: operator
+`;
+  const prLoad = loadCreditOverrides(() => prAsString);
+  assert.deepEqual(prLoad.rows, [], "a PR that is not a NUMBER applies to nothing — the pairing key must be exact");
+  assert.match(prLoad.refused[0].reason, /pr must be/, "and says so");
+
+  // AND THE WHOLE FILE IS NOT LOST TO ONE BAD ROW: a valid row beside a malformed one still loads.
+  const mixed = noTask + OVERRIDE_YAML;
+  const mixedLoad = loadCreditOverrides(() => mixed);
+  assert.equal(mixedLoad.rows.length, 1, "the good row survives");
+  assert.equal(mixedLoad.refused.length, 1, "and the bad one is named");
+});
+
 test("W1-T2970 creditOverrideFor matches on the PAIRING and nothing else", () => {
   const rows = loadCreditOverrides(() => OVERRIDE_YAML).rows;
   assert.ok(creditOverrideFor(rows, "W1-T444", 1657), "exact pairing matches");
