@@ -137,7 +137,7 @@ const BASELINE_COMMAND_NAMES = [
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
   "emissions", "escalate", "feedback", "fix", "inbox", "init", "install-checkout", "issues",
   "learnings", "ledger-grep", "lint-plan", "merge-hold", "next-task-id", "notify", "onboard", "ops", "pause",
-  "peek", "plan", "preflight", "project", "proof-queue-audit", "reap-branches", "receipt",
+  "peek", "plan", "preflight", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "reframe", "relay", "replay", "replay-goldens", "resume", "retro", "review", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "up",
   "verdict-calibration", "wipe-test",
@@ -145,10 +145,12 @@ const BASELINE_COMMAND_NAMES = [
 
 // W1-T2580: `bundle` — the day-one knowledge bundle export verb — joins the registry.
 // W1-T2695: `authority` — the fleet-authority report verb — joins the registry.
+// W1-T2694: `ratify` — Law 5's signature, printing a gated rung's live operation-hash row for
+// the operator to commit — joins the registry.
 test("COMMANDS carries the established command names plus the operator merge-hold writer", () => {
-  assert.equal(BASELINE_COMMAND_NAMES.length, 70);
+  assert.equal(BASELINE_COMMAND_NAMES.length, 71);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
-  assert.equal(COMMANDS.length, 70);
+  assert.equal(COMMANDS.length, 71);
 });
 
 // ── Regression control: this test file is where a re-widened top-level listing would show up ──
