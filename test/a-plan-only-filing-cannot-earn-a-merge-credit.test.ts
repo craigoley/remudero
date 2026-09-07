@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { isPlanOnlyChangeset } from "../src/lib/status.js";
+import { readMergedPathsByPr } from "../src/run-task.js";
 
 /** The #3195 shape: a filing opened from the task's OWN run branch. */
 const FILING_PATHS = ["plan/tasks.d/W1-T2371-the-risk-judge-cannot-pass-an-amendment.yaml"];
@@ -52,4 +53,29 @@ test("W1-T3067: a run-branch head is NOT evidence of an implementation", () => {
     assert.match(head, /^run-W1-T\d+-\d+$/, "sanity: these ARE the branch shape the shortcut trusted");
   }
   assert.equal(isPlanOnlyChangeset(FILING_PATHS), true, "yet the diff on that branch is a filing");
+});
+
+// ══════════ the producer — without it the refusal above is inert ══════════════════════════════
+
+test("W1-T3067: the producer maps a PR to its merge commit's paths, or abstains", () => {
+  // Injected root, so this never depends on the repo it happens to run in.
+  const empty = readMergedPathsByPr("/definitely/not/a/repo/12345");
+  assert.equal(empty.size, 0, "an unreadable root yields an EMPTY map, never a throw");
+  // and an empty map is 'no opinion' everywhere it is consulted
+  assert.equal(empty.get(3195), undefined);
+});
+
+test("W1-T3067 (falsifier): SUBJECT AND DIFF DISAGREE, AND THE DIFF IS RIGHT", () => {
+  // Measured against the real repository while building this: #3614's subject reads
+  // `docs: retire stale CLAUDE.md cap figures`, which I inferred was an implementation. Its actual
+  // merge diff is `plan/tasks.d/W1-T2282-*.yaml` — a filing. The subject misled a careful reader on
+  // the very sample being used to argue against subject-matching, which is the whole case for
+  // deciding on paths.
+  const subjectSaysImplementation = "docs: retire stale CLAUDE.md cap figures, cite enforcer instead";
+  assert.doesNotMatch(subjectSaysImplementation, /^chore\(plan\)/, "its subject is not filing-shaped");
+  assert.equal(
+    isPlanOnlyChangeset(["plan/tasks.d/W1-T2282-docs-is-the-uncovered-knowledge-corpus.yaml"]),
+    true,
+    "yet its diff is plan-only — the paths decide, not the words",
+  );
 });

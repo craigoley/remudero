@@ -30631,6 +30631,56 @@ export function buildOpenPrViews(
  * plan-unavailable repo (already logged by the caller) simply yields plan.tasks
  * === [] here, never a hard failure of its own.
  */
+/**
+ * W1-T3067 — every merge commit's CHANGED PATHS on `origin/main`, keyed by the PR number a squash
+ * merge puts in `(#N)`. ONE local git invocation per pass. This is the producer the plan-only DIFF
+ * refusal needs: a merged PR's merge commit is on `origin/main` by definition, so this answers for
+ * exactly the population credit is derived over, and it answers for FREE.
+ *
+ * ⚠ WITHOUT THIS THE REFUSAL IS INERT. `DeriveDeps.mergedPathsByPr` defaults to absent, and absent
+ * means the pre-W1-T3067 shortcut decides — which is what credited #3195, a `chore(plan)` on its
+ * own run branch, and cost the validated build in #4461.
+ *
+ * ⚠ BEST-EFFORT, AND AN EMPTY MAP IS THE SAFE ANSWER: a failed or truncated read leaves every PR
+ * without an entry, which restores exactly today's behaviour rather than refusing anything. A
+ * transient git failure must never be able to uncredit the plan.
+ */
+export function readMergedPathsByPr(root: string, limit = MERGED_PATHS_SCAN_LIMIT): Map<number, string[]> {
+  const byPr = new Map<number, string[]>();
+  try {
+    const out = execFileSync(
+      "git",
+      ["log", "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
+      { cwd: root, encoding: "utf8", maxBuffer: 1 << 26 },
+    );
+    let current: number | undefined;
+    for (const raw of out.split("\n")) {
+      if (raw.startsWith("\u0000")) {
+        const m = raw.slice(1).match(/\(#(\d+)\)\s*$/);
+        current = m ? Number(m[1]) : undefined;
+        if (current !== undefined && !byPr.has(current)) byPr.set(current, []);
+        continue;
+      }
+      const path = raw.trim();
+      if (!path || current === undefined) continue;
+      const files = byPr.get(current);
+      // FIRST commit wins per PR: `--first-parent` walks newest-first, and a PR number appearing
+      // twice means a re-merge, whose newest paths are the ones credit was derived from.
+      if (files && files.length < MERGED_PATHS_PER_PR_CAP) files.push(path);
+    }
+  } catch {
+    /* best-effort: an unreadable log yields an empty map, and absent restores today's behaviour */
+  }
+  return byPr;
+}
+
+/** How far back {@link readMergedPathsByPr} scans. A BACKSTOP on cost, not a correctness bound: a
+ *  merge outside the window has no entry and takes the pre-existing path. */
+const MERGED_PATHS_SCAN_LIMIT = 4000;
+/** Per-PR path cap. `isPlanOnlyChangeset` only needs to see ONE non-plan path to answer, so a
+ *  1,000-file merge does not need 1,000 strings held to decide it. */
+const MERGED_PATHS_PER_PR_CAP = 200;
+
 function buildCreditCandidates(
   owner: string,
   repo: string,
@@ -30646,7 +30696,13 @@ function buildCreditCandidates(
 ): CreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
-  const deps: DeriveDeps = { ledgerPath, github: github ?? buildBatchedGithub(owner, repo, { log }) };
+  // W1-T3067: the free local evidence the plan-only DIFF refusal needs, built ONCE for the whole
+  // walk below rather than per task — `deriveStatus` runs once per plan task (~1,400 a pass).
+  const deps: DeriveDeps = {
+    ledgerPath,
+    github: github ?? buildBatchedGithub(owner, repo, { log }),
+    mergedPathsByPr: readMergedPathsByPr(repoRoot),
+  };
   const candidates: CreditCandidate[] = [];
   for (const task of plan.tasks) {
     const proj = deriveStatus(task, deps);
