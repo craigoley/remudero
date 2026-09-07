@@ -1,4 +1,4 @@
-- id: W1-T3055
+- id: W1-T3057
   title: "THE ONE CHECK THAT CAN SEE AN IN-FLIGHT ID COLLISION HAS NEVER RUN — `task-id-existence`'s open-PR half shells `gh api` from the only `gh`-using job in `ci.yml` that passes no token, so every run since it shipped has logged SKIPPED and exited 0, and an unreadable surface is rendered as a clean gate"
   repo: remudero
   depends_on: []
@@ -67,6 +67,29 @@
     other job that shells `gh`: commitlint refuses an empty read outright rather than letting it
     reach the linter as a blank string, with a comment recording that the empty-read signature
     "cost three investigations" (W1-T351).
+    ── RENUMBERED FROM W1-T3055, AND ITS BUILD IS ALREADY MERGED ──────────────────────────────
+
+    THIS RECORD CARRIES AN ORPHAN CREDIT AND SAYS SO RATHER THAN LOOKING TIDY. The build merged as
+    `c02a2ae4` (#4467) BEFORE this renumber, so its trailer reads `Remudero-Task: W1-T3055` and its
+    head was `run-W1-T3055-<epochMs>` — BOTH credit paths point at an id that is not this one. Every
+    projection that derives "which tasks are merged" from trailers or run-branch names will therefore
+    credit W1-T3055 and show W1-T3057 with no implementation. That is a real divergence, not a
+    formatting detail, and it cannot be repaired without rewriting a merged commit.
+
+    WHY THE RENUMBER, MEASURED. `refs/rmd-id/W1-T3055` is held by `1528@Craigs-Mac-mini` at
+    2026-09-07T17:43:55.363Z. This lane's own reservation push at 17:42:51.793Z returned 403 — the
+    W1-T2203 container class that cannot write that namespace at all — so it tried FIRST and holds
+    NOTHING. The ref has no identity field; only its commit message names a winner, and it names the
+    other host. Open PR #4462 also claims W1-T3055 in its title. Per the standing rule that the loser
+    of a race renumbers, this record moved to W1-T3057, verified free at 18:26Z against reservation
+    refs, `origin/main`'s plan, and every open PR's title/body/head ref. Operator-ratified.
+
+    THE SOURCE COMMENTS SHIPPED IN c02a2ae4 STILL CITE W1-T3055 — in ci.yml's step name,
+    scripts/task-id-existence-check.mjs, test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts
+    and docs/forensics/task-id-existence-check.md. They are wrong by exactly this renumber and are
+    left for a follow-up rather than silently patched here, because `rule15-filing` refuses a plan
+    record riding with out-of-plan paths. None of them trips `task-id-existence`, whose scan roots
+    are `src` and `deploy` only.
   design: |
     (i) TWO CHANGES, AND THE SECOND IS WHAT MAKES THE FIRST HONEST.
 
