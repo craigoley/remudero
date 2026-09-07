@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { ENV_REGISTRY } from "../src/lib/config-schema.js";
+import { isRegisteredHarnessEnvName, registeredHarnessEnvVars } from "../src/lib/env.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const ENV_LITERAL = /(["'`])(RMD_[A-Z0-9_]+|REMUDERO_[A-Z0-9_]+)\1/g;
@@ -43,4 +44,10 @@ test("each registered env var names its purpose and readers", () => {
     assert.ok(entry.purpose.trim().length > 0, `${entry.name} must describe its purpose`);
     assert.ok(entry.readBy.length > 0, `${entry.name} must name at least one reader`);
   }
+});
+
+test("env.ts exposes the same registry for runtime readers", () => {
+  assert.deepEqual(registeredHarnessEnvVars(), ENV_REGISTRY);
+  assert.equal(isRegisteredHarnessEnvName("RMD_SELF_SYNC_DONE"), true);
+  assert.equal(isRegisteredHarnessEnvName("RMD_UNKNOWN_TEST_VAR"), false);
 });

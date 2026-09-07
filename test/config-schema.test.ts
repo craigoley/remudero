@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ConfigShapeError, validateConfigShape } from "../src/lib/config-schema.js";
+import { CONFIG_SCHEMA, ConfigShapeError, validateConfigShape, type Config } from "../src/lib/config-schema.js";
 import { loadConfig, validateConfig } from "../src/lib/config.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,6 +21,42 @@ test("validateConfigShape refuses a wrong-typed field and names the field and so
       return true;
     },
   );
+});
+
+test("CONFIG_SCHEMA declares the config field shape as metadata", () => {
+  const fields = new Set<keyof Config>([
+    "claudeBin",
+    "root",
+    "installRoot",
+    "zdotdir",
+    "workerShell",
+    "workerHomeRoot",
+    "softBudgetThresholdUsd",
+    "workerModel",
+    "architectModel",
+    "accessTeamDomain",
+    "accessAudience",
+    "notifyRecipient",
+    "overflow",
+    "dailyCapUsd",
+    "fixStrikeCap",
+    "consoleUrl",
+    "serve",
+    "relay",
+    "headroom",
+    "workerProviders",
+    "learningsHomes",
+  ]);
+  assert.deepEqual(
+    CONFIG_SCHEMA.map((field) => field.name).sort(),
+    [...fields].sort(),
+  );
+  for (const field of CONFIG_SCHEMA) {
+    assert.ok(field.type.trim(), `${field.name} must declare a type`);
+    assert.ok(field.source.trim(), `${field.name} must declare a source`);
+    assert.ok(field.description.trim(), `${field.name} must declare a description`);
+    assert.ok("default" in field, `${field.name} must declare a default, even when undefined`);
+  }
 });
 
 test("validateConfig refuses a wrong-typed field before semantic rules run", () => {
