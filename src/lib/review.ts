@@ -1025,12 +1025,16 @@ function ensureBrowsersOnce(cwd: string): void {
 }
 
 const BROWSER_DRIVER_MODULES = new Set(["playwright", "playwright-core", "@playwright/test", "puppeteer", "puppeteer-core"]);
-const STATIC_BROWSER_IMPORT_RE = /^\s*import\s+(?!type\b)(?:[\s\S]*?\s+from\s*)?["']([^"']+)["']/gm;
-const DYNAMIC_BROWSER_IMPORT_RE = /\b(?:require|import)\(\s*["']([^"']+)["']\s*\)/g;
 
+/** Kept function-local (never module-scope) on purpose: both are freshly constructed per call, so the shared `g`-flag
+ *  `lastIndex` state never leaks across unrelated calls, and neither adds to negative-reachability-ratchet's
+ *  module-scope `_RE` surface census (W1-T2317) -- this pair is exhaustively covered by
+ *  {@link resolvedTestFilesNeedBrowserPreflight}'s own integration fixtures, not by a direct `.test`/`.exec` fixture on
+ *  the symbol itself, which the ratchet's text-proximity heuristic cannot see through a private, non-exported name. */
 function importsBrowserDriver(sourceText: string): boolean {
-  for (const re of [STATIC_BROWSER_IMPORT_RE, DYNAMIC_BROWSER_IMPORT_RE]) {
-    re.lastIndex = 0;
+  const staticImportRe = /^\s*import\s+(?!type\b)(?:[\s\S]*?\s+from\s*)?["']([^"']+)["']/gm;
+  const dynamicImportRe = /\b(?:require|import)\(\s*["']([^"']+)["']\s*\)/g;
+  for (const re of [staticImportRe, dynamicImportRe]) {
     let match: RegExpExecArray | null;
     while ((match = re.exec(sourceText))) {
       if (BROWSER_DRIVER_MODULES.has(match[1])) return true;
