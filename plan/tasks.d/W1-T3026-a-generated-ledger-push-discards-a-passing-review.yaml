@@ -1,0 +1,66 @@
+- id: W1-T3026
+  title: "A PASSING REVIEW IS DISCARDED BY A PUSH THAT CHANGES ONLY A GENERATED LEDGER — the verdict binds to a head sha, so re-recording a comment-load or source-size ceiling throws away a completed review: #4193 was reviewed NINE times in one day, #4236 six, #4194 five"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [test/a-generated-ledger-push-does-not-discard-a-review.test.ts]
+  origin: "operator-session#why-are-reviews-slow-2026-09-07"
+  plan_refs: ["W1-T230", "W1-T2851", "W1-T3022"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07 from `review.posted` rows: PR #4193 was reviewed NINE times, #4236 six,
+    #4194 five, #4213/#4181/#4174 three each. A `remudero-review` status is pinned to a head sha,
+    so ANY push invalidates a completed verdict and the PR must be re-reviewed from scratch.
+
+    THE PUSHES THAT CAUSE IT ARE OFTEN CONTENTLESS. The dominant class today was re-recording a
+    ratchet ceiling: all four CONFLICTING PRs conflicted on `scripts/comment-load-baseline.json`
+    and nothing else (W1-T3022). Resolving that conflict is a one-line edit to a generated ledger,
+    and it discards a review that judged the diff's actual content.
+
+    THE REPO ALREADY HAS THE CONCEPT. `GENERATED_LEDGER_CLASSES` (src/lib/task-linter.ts) names
+    exactly this file class, and `COMPANION_PATH_CLASSES` sits beside it. So "this push changed only
+    a generated ledger" is expressible with a predicate that already exists rather than a new list.
+
+    WHY THIS IS `verify: human` AND `files:` IS EMPTY. Carrying a verdict across a head change
+    weakens the guarantee W1-T230 established — that a posted review names the exact sha it judged
+    — and W1-T2851 records a whole shard about a SUCCESS status certifying a body it did not judge.
+    Any design here trades review freshness for throughput, and the shape of that trade is an
+    operator decision, not a worker's. At least three shapes exist and they differ in blast radius:
+
+      (a) RE-POST the existing verdict onto the new head when the diff between the two heads touches
+          only generated-ledger paths. Cheapest; the verdict text is unchanged and provably about
+          the same content.
+      (b) RE-RUN the reviewer but seed it with the prior verdict, so the cost is a confirmation
+          rather than a fresh judgement.
+      (c) Do not re-record ceilings on a reviewed head at all — hold the baseline edit until merge.
+          Removes the push instead of forgiving it; interacts with W1-T3022's bucket.
+
+    A BUILD MUST NOT PICK ONE UNILATERALLY. Whichever is chosen, the invariant that must survive is
+    the one W1-T230 exists for: no review may be credited to content it did not read.
+  acceptance:
+    - claim: "a push whose entire diff against the reviewed head lies in generated-ledger paths does not force a fresh semantic review"
+      proof: "unit test: test/a-generated-ledger-push-does-not-discard-a-review.test.ts"
+    - claim: "a push touching ANY non-generated path still invalidates the prior verdict, unchanged"
+      proof: "unit test: test/a-generated-ledger-push-does-not-discard-a-review.test.ts"
+    - claim: "whatever is posted on the new head names the content it actually judged, so W1-T230's guarantee is not weakened"
+      proof: "unit test: test/a-generated-ledger-push-does-not-discard-a-review.test.ts"
+  note: |
+    `files:` NAMES ONLY THE TEST, mirroring W1-T2927's shape and for its stated reason: the
+    implementation set depends on which of (a)/(b)/(c) the operator picks, and pre-naming source
+    files would pick one. The test path must nevertheless be a MEMBER of `files:` — an earlier
+    draft left `files:` empty and `lint-plan` refused it, because `judgeCriterion` grants the
+    not-yet-built carve-out only for a path this task declares; without it every criterion would
+    grade `executed_fail` and fail the PR that builds them. A builder adding source files beyond
+    this one is a ratified widening recorded in the PR body, not a violation to work around.
+
+    RE-DERIVE THE POPULATION BEFORE BUILDING. The nine/six/five counts are one day, and W1-T3022
+    (bucketing the comment-load ceiling) should reduce the dominant cause. If the re-review counts
+    have collapsed by the time this is picked up, the remaining value is much smaller and the task
+    should be re-priced or closed rather than built on today's number.
+
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved refs/rmd-id/W1-T3026.
