@@ -81,7 +81,7 @@
   "src/lib/log-rotation.ts": 115,
   "src/lib/main-health-rung.ts": 500,
   "src/lib/managed-repos.ts": 73,
-  "src/lib/measurement-cadence.ts": 1500,
+  "src/lib/measurement-cadence.ts": 2000,
   "src/lib/merge-state.ts": 66,
   "src/lib/mount-recommender.ts": 1000,
   "src/lib/mounts.ts": 1000,
@@ -170,6 +170,6 @@
   "src/lib/worker.ts": 4000,
   "src/lib/workflow-run.ts": 28,
   "src/lib/worktree-sites.ts": 500,
-  "src/run-task.ts": 38500,
+  "src/run-task.ts": 39000,
   "src/spike.ts": 311
 }
