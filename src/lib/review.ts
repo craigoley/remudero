@@ -1026,11 +1026,7 @@ function ensureBrowsersOnce(cwd: string): void {
 
 const BROWSER_DRIVER_MODULES = new Set(["playwright", "playwright-core", "@playwright/test", "puppeteer", "puppeteer-core"]);
 
-/** Kept function-local (never module-scope) on purpose: both are freshly constructed per call, so the shared `g`-flag
- *  `lastIndex` state never leaks across unrelated calls, and neither adds to negative-reachability-ratchet's
- *  module-scope `_RE` surface census (W1-T2317) -- this pair is exhaustively covered by
- *  {@link resolvedTestFilesNeedBrowserPreflight}'s own integration fixtures, not by a direct `.test`/`.exec` fixture on
- *  the symbol itself, which the ratchet's text-proximity heuristic cannot see through a private, non-exported name. */
+/** Function-local (not module-scope) so no shared `g`-flag `lastIndex` leaks; covered via {@link resolvedTestFilesNeedBrowserPreflight}'s own fixtures (W1-T2317). */
 function importsBrowserDriver(sourceText: string): boolean {
   const staticImportRe = /^\s*import\s+(?!type\b)(?:[\s\S]*?\s+from\s*)?["']([^"']+)["']/gm;
   const dynamicImportRe = /\b(?:require|import)\(\s*["']([^"']+)["']\s*\)/g;
@@ -1297,8 +1293,7 @@ export function execWhitelistedProof(
   // actually going to run node. `ensureDeps` is memoised per cwd, so a later proof in the same checkout still primes.
   if (whitelisted.kind === "test") {
     ensureDeps(cwd);
-    // Same "only when we are actually going to run node" placement as ensureDeps: a `grep` proof never launches a
-    // browser. Resolved files importing no browser driver skip the CDN-facing preflight; unknown sets still install.
+    // Same placement as ensureDeps: a `grep` proof never launches a browser; a resolved set with no browser import skips this CDN-facing step.
     if (preflightFiles === undefined || preflightFiles.length === 0 || resolvedTestFilesNeedBrowserPreflight(cwd, preflightFiles)) {
       (deps.preflightBrowsers ?? ensureBrowsersOnce)(cwd);
     }
