@@ -591,18 +591,7 @@ jobs:
             exit 0
           fi
           node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
-      # W1-T2662 (W1-T470's deferred step): the merge above produced coverage/lcov.info and then
-      # discarded it with the runner -- W1-T2661's tier-two reader needs it as an artifact literally
-      # named `coverage-merged`. No `if:` on either step below: this job body carries none anywhere
-      # (test/fast-lane-classifier.test.ts's acceptance 6 asserts it). A push event (the merge step's
-      # own push guard above) or a non-SOURCE fast-lane class (every shard staged its own `skipped`
-      # marker, so nothing was merged) both leave coverage/lcov.info absent here -- staging then
-      # falls back to a `skipped` marker under the same artifact name, so the reader's "no artifact"
-      # and "skipped" refusals stay distinguishable (deliberately not the shards' own
-      # GITHUB_EVENT_NAME:class marker text -- test/push-ci-on-main.test.ts requires every step in
-      # THIS job that mentions GITHUB_EVENT_NAME to PR-guard itself as PR-only work, which this step
-      # is not: it must produce a marker on a push too).
-      - name: Stage the merged lcov for the coverage-merged artifact
+      - name: Stage the merged lcov for the coverage-merged artifact # W1-T2662, for W1-T2661's reader
         run: |
           mkdir -p coverage-merged-artifact
           if [ -s coverage/lcov.info ]; then
