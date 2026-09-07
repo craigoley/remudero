@@ -144,6 +144,7 @@ const BASELINE_COMMAND_NAMES = [
 ].sort();
 
 // W1-T2580: `bundle` — the day-one knowledge bundle export verb — joins the registry.
+// W1-T2697: `hand-runs` — the operator hand-run mining verb — joins the registry.
 // W1-T2695: `authority` — the fleet-authority report verb — joins the registry.
 // W1-T2694: `ratify` — Law 5's signature, printing a gated rung's live operation-hash row for
 // the operator to commit — joins the registry.
