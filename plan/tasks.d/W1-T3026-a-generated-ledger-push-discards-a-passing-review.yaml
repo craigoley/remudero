@@ -10,7 +10,8 @@
   files: [test/a-generated-ledger-push-does-not-discard-a-review.test.ts]
   origin: "operator-session#why-are-reviews-slow-2026-09-07"
   plan_refs: ["W1-T230", "W1-T2851", "W1-T3022"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     MEASURED 2026-09-07 from `review.posted` rows: PR #4193 was reviewed NINE times, #4236 six,
@@ -62,5 +63,49 @@
     (bucketing the comment-load ceiling) should reduce the dominant cause. If the re-review counts
     have collapsed by the time this is picked up, the remaining value is much smaller and the task
     should be re-priced or closed rather than built on today's number.
+
+    2026-09-07, BUILD PASS — THE SHARD'S OWN PRE-BUILD CONDITION FIRES. This shard instructs:
+    "RE-DERIVE THE POPULATION BEFORE BUILDING ... If the re-review counts have collapsed by the time
+    this is picked up, the remaining value is much smaller and the task should be re-priced or
+    closed rather than built on today's number." IT HAS COLLAPSED. Recorded here rather than acted
+    on, because retiring or re-pricing a shard is an operator act, not a worker's.
+
+    MEASURED across the live ledger and all rotations, DEDUPED. Raw `review.posted` rows are 85,316
+    but only 837 are distinct reviews: rotation RETAINS decision-relevant steps, so a row reappears
+    in every subsequent archive and a naive count over-reports by 99.0%. The dedup key is
+    (ts, pr, head_sha). CONTROL: the deduped counts reproduce this shard's own cited figures exactly
+    — #4193 = 9, #4236 = 6, #4194 = 5 — which is what establishes the key is right. (Those nine fell
+    on 2026-09-06, not 09-07 as the rationale says; the counts are correct, the date is off by one.)
+
+    AGE-CONTROLLED, so a partial day cannot manufacture the result — reviews within 6h of each PR's
+    FIRST review, counting only PRs whose 6h window has fully elapsed:
+
+        cohort      PRs   mean   max   >1   >=3
+        2026-09-02  152   1.26     4   34     4
+        2026-09-03  108   1.23     4   19     4
+        2026-09-04   94   1.40    12   20     4
+        2026-09-05  120   1.15     4   15     2
+        2026-09-06  124   1.31     9   20     7
+        2026-09-07   39   1.05     2    2     0
+
+    Every prior cohort contains PRs reviewed 4-12 times. The 09-07 cohort contains NONE above 2 and
+    none at all with >=3. That is the predicted effect of W1-T3022 (bucketing the comment-load
+    ceiling, #4406) and W1-T3015 (registering it as a regenerable artifact, #4422), which together
+    removed the dominant contentless-push class this shard was filed against.
+
+    CAVEAT, EQUAL WEIGHT: n=39 for the final cohort against ~120 for the others, and the day was
+    partial when measured. Under the prior ~16% rate of PRs with >1 review, 2 of 39 is low but not
+    extraordinary (binomial p is around 0.06) — so the MEAN is suggestive rather than conclusive.
+    The load-bearing observation is the MAX: every earlier cohort had a PR reviewed at least four
+    times and this one has none above two. One more full day would settle it.
+
+    RETIRED 2026-09-07 ON OPERATOR DIRECTION, acting on the recommendation below. The mechanism is
+    NOT refuted: a verdict still binds to a head sha, so a generated-ledger push still discards a
+    passing review. What collapsed is how OFTEN, which is what this shard itself said to measure. If
+    the counts rebound, refile under a fresh id against the new number rather than un-retiring.
+
+    RECOMMENDATION: re-price toward closure rather than build. The three designs (a)/(b)/(c) all
+    trade review freshness against a throughput problem whose measured size has fallen by roughly an
+    order of magnitude, and (a) and (b) both weaken W1-T230's guarantee to buy it.
 
     ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved refs/rmd-id/W1-T3026.
