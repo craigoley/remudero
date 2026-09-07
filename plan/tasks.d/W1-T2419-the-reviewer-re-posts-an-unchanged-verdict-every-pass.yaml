@@ -133,7 +133,7 @@
 
   acceptance:
     - claim: "The shard records the measured repeat on one unmoved head, by count and by interval, rather than asserting it."
-      proof: "grep: TEN CONSECUTIVE PASSES in plan/tasks.d/W1-T2419-the-reviewer-re-posts-an-unchanged-verdict-every-pass.yaml"
+      proof: "grep: CONSECUTIVE PASSES from 21:06:02 to 21:18:57 in plan/tasks.d/W1-T2419-the-reviewer-re-posts-an-unchanged-verdict-every-pass.yaml"
     - claim: "The shard names the symbol whose own doc explains why a delivered verdict has no ledger dedup."
       proof: "grep: reviewPostRefusedFor in plan/tasks.d/W1-T2419-the-reviewer-re-posts-an-unchanged-verdict-every-pass.yaml"
     - claim: "The shard records that nothing compares a new verdict against the standing one, with the control that makes that zero real."
