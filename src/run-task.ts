@@ -3966,12 +3966,63 @@ export function changeView(prUrl: string, fetch: (args: string[]) => unknown = g
 }
 
 /**
- * W1-T307: write a PR's body via gh — the mechanism {@link deriveChangesetClaimUpdate}'s narrow,
+ * W1-T2948 — THE ARGV EVERY PR-BODY WRITE IN THIS MODULE IS BUILT FROM, over REST.
+ *
+ * THE DEFECT THIS REPLACES, observed at the production effect twice. `gh pr edit --body` is
+ * implemented over GraphQL, and its query selects `repository.pullRequest.projectCards` —
+ * Projects Classic, which GitHub has deprecated. The whole command fails BEFORE the supplied edit
+ * reaches the pull request, so a deterministic, zero-model body repair that already had the
+ * complete replacement text in hand fell through to a model worker, a commit and an extra CI cycle
+ * (#4228). The same failure was reproduced from a container shell on 2026-09-07 against #4372.
+ *
+ * `-f` (--raw-field), NEVER `-F` (--field), and the distinction is load-bearing: `-F` reads a
+ * value beginning with `@` as a FILENAME and substitutes `{owner}`/`{repo}`/`{branch}`
+ * placeholders from the current checkout. A PR body legitimately contains both. Verified against
+ * the real `gh` with `--verbose`: `-f 'body=@/etc/hostname and {owner} literal'` puts that
+ * string in the request payload verbatim.
+ *
+ * A URL that does not resolve to owner/repo/number THROWS here, before any process is spawned —
+ * mirroring {@link changeView}'s own refusal. Guessing the target from the current checkout is how
+ * a body repair would land on the wrong pull request.
+ */
+export function prBodyRestArgs(prUrl: string, body: string): string[] {
+  const target = prUrlTarget(prUrl);
+  if (!target) {
+    throw new Error(
+      `pr body write: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to guess ` +
+        "a repository or PR number from the current checkout",
+    );
+  }
+  // PATCH against the SINGLE pull request — never an issue-wide, project, GraphQL, merge or branch
+  // endpoint — and the body as ONE argv value, never shell text.
+  return ["api", "-X", "PATCH", `repos/${target.owner}/${target.repo}/pulls/${target.number}`, "-f", `body=${body}`];
+}
+
+/**
+ * W1-T2948 — the single effect the three production PR-body writers in this module share, so the
+ * acceptance repair, the trailer stamp and the retro repair cannot drift back onto separate copies
+ * of a failing transport. TRANSPORT ONLY: `execFileSync("gh", …, { stdio: "pipe" })` is kept
+ * exactly as each caller had it, so a nonzero exit still THROWS and every existing
+ * fail-soft/fail-open contract and ledger row above these callers is unchanged.
+ */
+export function writePrBodyRest(
+  prUrl: string,
+  body: string,
+  exec: (args: string[]) => unknown = (args) => execFileSync("gh", args, { stdio: "pipe" }),
+): void {
+  exec(prBodyRestArgs(prUrl, body));
+}
+
+/**
+ * W1-T307: write a PR's body — the mechanism {@link deriveChangesetClaimUpdate}'s narrow,
  * mechanical edit is actually committed through. Injectable so a unit test can assert the UPDATE
  * ITSELF (what was written) rather than mocking a subprocess.
+ *
+ * W1-T2948: routed through {@link writePrBodyRest}. The name is kept — it is still `gh` — but the
+ * transport is the REST pulls endpoint, not `gh pr edit`, whose GraphQL query is the defect.
  */
 export async function updatePrBodyViaGh(prUrl: string, body: string): Promise<void> {
-  execFileSync("gh", ["pr", "edit", prUrl, "--body", body], { stdio: "pipe" });
+  writePrBodyRest(prUrl, body);
 }
 
 /**
@@ -4197,7 +4248,10 @@ export function ensureTaskTrailer(
     if (body.includes(trailer)) return;
     const newBody = body.trim().length > 0 ? `${body.trimEnd()}\n\n${trailer}\n` : `${trailer}\n`;
     phase = "write";
-    write(["pr", "edit", prUrl, "--body", newBody]);
+    // W1-T2948: the SHARED builder, so this stamp cannot retain its own copy of the failing
+    // transport. An unresolvable URL throws here and lands in the catch below with phase "write" —
+    // the same best-effort row this path already wrote, on a target it refused to guess.
+    write(prBodyRestArgs(prUrl, newBody));
   } catch (e) {
     log("trailer_stamp.failed", {
       task_id: taskId,
@@ -15054,8 +15108,10 @@ function defaultRetroFetchBody(url: string): string {
   return view.body ?? "";
 }
 
+/** W1-T2948: the retro's repair goes through the SAME REST writer as the acceptance repair and the
+ *  trailer stamp — one transport, one place to fix. */
 function defaultRetroEditBody(url: string, body: string): void {
-  execFileSync("gh", ["pr", "edit", url, "--body", body], { stdio: "pipe" });
+  writePrBodyRest(url, body);
 }
 
 /**
