@@ -20,6 +20,7 @@ import {
   renderDepReviewMigrationFeedback,
   redChecks,
   type DepReviewCheck,
+  CONVENTIONAL_TITLE_PREFIX_RE,
 } from "../src/lib/dep-review.js";
 
 // ── Recorded fixtures (acceptance #1, the FALSIFIER) ────────────────────────
@@ -620,4 +621,46 @@ test("depReviewCommand migrate: failed comment or close is ledgered incomplete a
   rmSync(commentFailure.tmp, { recursive: true, force: true });
   rmSync(first.tmp, { recursive: true, force: true });
   rmSync(second.tmp, { recursive: true, force: true });
+});
+
+// ── W1-T2705: the conventional-prefix strip, both arms ───────────────────────────────────────────
+
+/*
+ * negative-reachability-ratchet counted CONVENTIONAL_TITLE_PREFIX_RE as a fixture-less surface:
+ * every fixture fed it a title that HAS a conventional prefix, so the non-matching arm — where the
+ * replace is a no-op and the line must survive verbatim — was never driven. That arm is not an
+ * error path, which is exactly why it was easy to leave untested: it is the case where the regex
+ * does nothing and the caller must still work.
+ */
+
+test("W1-T2705: a Dependabot line with a conventional-commit prefix has it stripped before parsing", () => {
+  const facts = parseDependabotBumpFacts("chore(deps): Bumps `left-pad` from 1.0.0 to 2.0.0", "");
+  assert.equal(facts.length, 1, "the prefix must not prevent the bump from parsing");
+  assert.equal(facts[0].dependency, "left-pad");
+  assert.equal(facts[0].level, "major");
+});
+
+test("W1-T2705: a line with NO conventional prefix is left verbatim — the strip is a no-op, not a consumer", () => {
+  // The negative arm. If the regex ever over-matched, this line would lose its leading word and
+  // parse to nothing; asserting the SAME fact both ways is what makes that visible.
+  const facts = parseDependabotBumpFacts("Bumps `left-pad` from 1.0.0 to 2.0.0", "");
+  assert.equal(facts.length, 1, "an unprefixed line must parse exactly as the prefixed one does");
+  assert.equal(facts[0].dependency, "left-pad");
+  assert.equal(facts[0].level, "major");
+});
+
+test("W1-T2705: prose that merely contains a colon is not mistaken for a prefix", () => {
+  // `note: ` looks prefix-shaped, and stripping it is correct; what must NOT happen is a colon
+  // deeper in the line being treated as one, which would eat the dependency name.
+  const facts = parseDependabotBumpFacts("Bumps `scope:pkg` from 1.0.0 to 2.0.0", "");
+  assert.equal(facts.length, 1);
+  assert.equal(facts[0].dependency, "scope:pkg", "a colon inside the name must survive the strip");
+});
+
+test("W1-T2705: CONVENTIONAL_TITLE_PREFIX_RE matches a prefix and does NOT match an unprefixed line", () => {
+  // The surface driven directly, both arms. A caller-only test cannot show where the pattern stops.
+  assert.equal(CONVENTIONAL_TITLE_PREFIX_RE.test("chore(deps): Bumps `x` from 1 to 2"), true);
+  assert.equal(CONVENTIONAL_TITLE_PREFIX_RE.test("feat!: something"), true);
+  assert.equal(CONVENTIONAL_TITLE_PREFIX_RE.test("Bumps `x` from 1.0.0 to 2.0.0"), false, "no prefix, no match");
+  assert.equal(CONVENTIONAL_TITLE_PREFIX_RE.test("Updates `x` from 1.0.0 to 2.0.0"), false);
 });

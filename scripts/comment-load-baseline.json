@@ -129,7 +129,7 @@
   "src/lib/coverage-improvement.ts": 150,
   "src/lib/daemon-health.ts": 187,
   "src/lib/daemon.ts": 1073,
-  "src/lib/dep-review.ts": 149,
+  "src/lib/dep-review.ts": 250,
   "src/lib/deployer.ts": 324,
   "src/lib/digest.ts": 326,
   "src/lib/dispatch-claim.ts": 130,

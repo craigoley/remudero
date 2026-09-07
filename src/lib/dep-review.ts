@@ -94,7 +94,12 @@ export function parseVersionBumps(text: string): SemverLevel[] {
  * dependency bumps.
  */
 const DEPENDABOT_SUMMARY_LINE_RE = /^\s*(?:Updates|Bumps)\b/i;
-const CONVENTIONAL_TITLE_PREFIX_RE = /^\s*[a-z][\w-]*(?:\([\w./-]+\))?!?:\s*/i;
+/** EXPORTED FOR ITS OWN FIXTURE. negative-reachability-ratchet requires a regex surface to be
+ *  driven directly with BOTH arms asserted — a match and a non-match — rather than only through a
+ *  caller, because a caller that happens to work proves nothing about where the pattern stops.
+ *  Not "structurally total": it legitimately does not match an unprefixed line, and that no-op is
+ *  the arm the fixture exists to pin. */
+export const CONVENTIONAL_TITLE_PREFIX_RE = /^\s*[a-z][\w-]*(?:\([\w./-]+\))?!?:\s*/i;
 const DEPENDENCY_VERSION = String.raw`v?(\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?)`;
 
 export interface DepReviewBumpFact {
