@@ -10,7 +10,8 @@
   files: [src/run-task.ts, test/recon-degrade.test.ts]
   origin: architect
   plan_refs: ["§8A", "§8B", "W1-T501", "W1-T166"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     HOW THIS WAS FOUND, AND WHAT IS AND IS NOT PROVEN. A follow-up harvested from run
@@ -168,4 +169,8 @@
     ⚠ FOR WHOEVER SEQUENCES THIS: it edits `src/run-task.ts`, the file every other task contends
     for, so it collides on the W1-T171 file-overlap check with any concurrently-dispatched task
     declaring that path — W1-T501 in particular declares the IDENTICAL two-file list and touches
-    the SAME helper. Land one, then the other; do not co-dispatch them."
+    the SAME helper. Land one, then the other; do not co-dispatch them.
+
+    RETIRED 2026-09-07 ON OPERATOR DIRECTION. This task sat at its lifetime dispatch cap with an open needs-human escalation (raised 2026-09-03) for four days. The operator's ruling was to retire rather than raise the cap: the cap exists precisely to stop repeated dispatch on a task that is not converging, and four days at the cap with no new information is the signal it was built to give. A retirement is an operator act (CLAUDE.md plan hygiene), and this one is recorded as such rather than inferred from the cap.
+
+    WHAT IS NOT RULED ON. Whether the underlying defect is real is untouched - the rationale stands unedited and no acceptance criterion moves. Retiring says the FLEET should stop dispatching this, not that the finding was wrong. If it is re-aimed later it should be refiled under a fresh id rather than un-retired, so the dispatch history stays legible."
