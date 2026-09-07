@@ -22,6 +22,7 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
+import { assertNoDuplicateKeys } from "./lib/json-duplicate-keys.mjs";
 
 export const DEFAULT_BASELINE_RELATIVE_PATH = "scripts/source-size-baseline.json";
 
@@ -71,6 +72,9 @@ export function countLines(text) {
  *  mode W1-T1277 found in four OTHER ratchets and this one refuses to add a fifth (or sixth)
  *  instance of. */
 export function readBaseline(text, path) {
+  // A duplicate key is the silently-disarmed ceiling this function's doc refuses, and JSON.parse
+  // cannot report one — it takes the last and says nothing. Checked BEFORE the parse, on the text.
+  assertNoDuplicateKeys(text, path, "source-size-ratchet");
   let parsed;
   try {
     parsed = JSON.parse(text);

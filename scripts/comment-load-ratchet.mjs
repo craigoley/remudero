@@ -29,6 +29,7 @@ import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
+import { assertNoDuplicateKeys } from "./lib/json-duplicate-keys.mjs";
 
 /** The tracked directories a comment in this repo is measured in. `test/` is excluded: a test
  *  file's prose is read by whoever debugs that one suite, not by every session opening src/. */
@@ -109,6 +110,9 @@ export function listMeasuredFiles(root) {
  * an empty map — a silently-disarmed ceiling is the failure mode every ratchet here refuses.
  */
 export function readBaseline(text, path) {
+  // A duplicate key is the silently-disarmed ceiling this function's doc refuses, and JSON.parse
+  // cannot report one — it takes the last and says nothing. Checked BEFORE the parse, on the text.
+  assertNoDuplicateKeys(text, path, "comment-load-ratchet");
   let parsed;
   try {
     parsed = JSON.parse(text);
