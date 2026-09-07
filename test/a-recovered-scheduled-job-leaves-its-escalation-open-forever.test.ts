@@ -165,3 +165,47 @@ test("W1-T3030 criterion 4: every workflow that RAISES also RESOLVES", () => {
   }
   assert.equal(raisers.length, 4, "all four known raisers must be covered");
 });
+
+// ── the two refusal arms diff-coverage flagged ───────────────────────────────────────────────────
+
+/*
+ * scripts/needs-human-issue.mjs:237-238 and :259 — the missing-`--source` refusal and the catch
+ * around `resolveFn`. Every case above supplies a source and a resolver that returns, so neither
+ * arm ran: the shape where a suite exercises only the path it was written for. Both matter to a
+ * scheduled job, which calls this on EVERY green run — a wrong exit code there either spams a
+ * workflow red or hides a real failure.
+ */
+
+test("W1-T3030: --resolved without --source is refused, naming the missing flag", () => {
+  const errs: string[] = [];
+  let resolverCalled = false;
+  const code = main({
+    argv: ["--resolved"],
+    env: {},
+    resolveFn: () => {
+      resolverCalled = true;
+      return { action: "none", marker: "m" };
+    },
+    log: () => {},
+    error: (m: string) => void errs.push(m),
+  });
+  assert.equal(code, 1, "a resolve with no identity must not exit 0");
+  assert.match(errs.join("\n"), /--source is required/, "and must name the flag it wants");
+  assert.equal(resolverCalled, false, "the resolver must never run without an identity to resolve");
+});
+
+test("W1-T3030: a throwing resolver exits non-zero and names the failure, never a silent success", () => {
+  const errs: string[] = [];
+  const code = main({
+    argv: ["--resolved", "--source", "clock-sweep"],
+    env: {},
+    resolveFn: () => {
+      throw new Error("gh exploded");
+    },
+    log: () => {},
+    error: (m: string) => void errs.push(m),
+  });
+  assert.equal(code, 1, "a failed resolve must not read as a clean no-op");
+  assert.match(errs.join("\n"), /RESOLVE FAILED/);
+  assert.match(errs.join("\n"), /gh exploded/, "the underlying reason must reach the operator");
+});
