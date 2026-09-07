@@ -86,6 +86,9 @@ test("interceptor: a fixture's bare mkdtempSync prefix is created as rmd-test- u
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
     delete childEnv.NODE_OPTIONS;
+    // W1-T2732: blank the coverage session var too -- `delete` is a no-op on it, and an unblanked
+    // value would silently enrol this child in whatever coverage session is running this suite.
+    childEnv.NODE_V8_COVERAGE = undefined;
     execFileSync("node", ["--test", "--import", "tsx", "--import", HYGIENE_IMPORT, fixture], {
       encoding: "utf8",
       cwd: REPO_ROOT,

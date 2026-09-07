@@ -433,7 +433,10 @@ test("W1-T460 (5): the production showBlob pipes git's stderr — a review over 
     // measured honestly, removing it moved the aggregate ratchet only 90.20% -> 90.16%, so this
     // spawn was NOT the cause of that drop (the deeper in-process `reviewCommand` drive was).
     const childEnv = { ...process.env };
-    delete childEnv.NODE_V8_COVERAGE;
+    // W1-T2732: `delete` is a no-op here -- node's child_process force-injects NODE_V8_COVERAGE
+    // into every spawned child regardless of the env option, so the child stayed enrolled in the
+    // parent's coverage session despite this line. Blanking (not deleting) is the fix that works.
+    childEnv.NODE_V8_COVERAGE = undefined;
     const r = spawnSync(process.execPath, ["--import", "tsx", script], { cwd: REPO_ROOT, encoding: "utf8", env: childEnv });
     assert.equal(r.status, 0, `child failed: ${r.stderr}`);
     assert.doesNotMatch(r.stderr, /fatal:/, "git's absence message must not surface on a PASSING review");
