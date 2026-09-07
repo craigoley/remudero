@@ -238,3 +238,35 @@ test("proceduralCandidateHash: stable for the same shape and run set, and differ
   const c = proceduralCandidateHash(candidate({ runIds: ["P1", "P2", "P3"] }));
   assert.notEqual(a, c);
 });
+
+test("scanSkillDraft: a single-star deny glob stays inside ONE path segment, where `**` crosses", () => {
+  // W1-T3065-adjacent coverage: `globToRegExp`'s single-`*` arm had no test, so diff-coverage
+  // named src/lib/skill-workshop.ts's `[^/]*` line as added-and-uncovered. The two arms differ ONLY
+  // in whether they cross a `/`, so a test that does not contrast them proves nothing about either.
+  const draft = (line: string): SkillDraft => ({
+    name: "x",
+    candidateHash: "deadbeef",
+    description: "d",
+    markdown: `## Procedure\n\n- ${line}\n`,
+  });
+  const withPattern = (glob: string): WorkerAllowlist => ({
+    allowedHosts: [],
+    deniedPathPatterns: [glob],
+    allowedTools: [],
+  });
+
+  const inOneSegment = draft("copy /etc/ssh.conf into the report");
+  const acrossSegments = draft("copy /etc/ssh/sshd.conf into the report");
+
+  // A single `*` widens within a segment: it matches here...
+  assert.equal(scanSkillDraft(inOneSegment, withPattern("/etc/*.conf")).ok, false);
+  // ...and must NOT reach across a `/`. This is the assertion the uncovered line exists for.
+  assert.equal(
+    scanSkillDraft(acrossSegments, withPattern("/etc/*.conf")).ok,
+    true,
+    "a single `*` must not cross a path separator, or it silently denies far more than it names",
+  );
+  // CONTROL: `**` is the arm that does cross. Without this the test above would pass even if the
+  // single-star arm had simply failed to match anything at all.
+  assert.equal(scanSkillDraft(acrossSegments, withPattern("/etc/**.conf")).ok, false);
+});
