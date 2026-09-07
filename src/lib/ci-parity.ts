@@ -16,8 +16,11 @@ import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type Prefligh
  *   mirrored carries `mirrored: false` and a `reason`, so an absent entry and a considered
  *   exclusion never look alike.
  * - CI'S OWN COMMAND, NEVER A PROXY. Each mirrored step shells the argv ci.yml invokes.
- * - MERGE-BASE PARITY. Every diff-consuming step refreshes `origin/main` before diffing
- *   three-dot against it; a stale base silently changes what counts as added (#585).
+ * - MERGE-BASE PARITY. `origin/main` is fetched ONCE per run and immediately RESOLVED TO A SHA
+ *   ({@link pinnedBase}); every diff-consuming step diffs three-dot against that SHA, never the
+ *   ref. A stale base silently changes what counts as added (#585), and a base moved mid-run by a
+ *   sibling worktree sharing the clone does the same in the other direction — which memoizing the
+ *   fetch cannot prevent, because refs are clone-scoped (W1-T3017).
  * - EACH STEP REPORTS INDEPENDENTLY. {@link runStep} never lets one job throw out of the run.
  *
  * TRAP: a job added to ci.yml with no entry would under-cover in silence; `ci-parity:drift` fails
@@ -248,9 +251,10 @@ function runTriggerScopedJob(
   return [trigger, ...buildFollowUps()];
 }
 
-/** `git fetch origin main` — the merge-base-parity refresh every diff-consuming step runs first,
- *  so a stale `origin/main` cannot narrow or widen what counts as an added line. Memoized per
- *  (spawn, repoRoot). */
+/** `git fetch origin main` — the merge-base-parity refresh, run ONCE per (spawn, repoRoot) and
+ *  reused, so a stale `origin/main` cannot narrow or widen what counts as an added line. The
+ *  fetch alone pins nothing: {@link pinnedBase} resolves it to a sha, which is what every diff
+ *  site then uses. */
 const originMainRefreshCache = new WeakMap<PreflightSpawn, Map<string, CiParityLeafResult>>();
 function refreshOriginMain(repoRoot: string, spawn: PreflightSpawn): CiParityLeafResult {
   let byRoot = originMainRefreshCache.get(spawn);
@@ -262,12 +266,87 @@ function refreshOriginMain(repoRoot: string, spawn: PreflightSpawn): CiParityLea
   if (cached) return cached;
   const result = shellOut(spawn, "git fetch origin main (merge-base refresh)", "git", ["fetch", "origin", "main"], { cwd: repoRoot });
   byRoot.set(repoRoot, result);
+  // PIN IMMEDIATELY, while the fetched value is still the fetched value. Every second between the
+  // fetch and the resolve is a window in which a sibling can move the ref, so the two belong
+  // together rather than at each diff site.
+  if (result.ok) pinnedBase(repoRoot, spawn);
   return result;
 }
 
-/** The three-dot diff CI's own diff-scoped jobs compute, always against the just-refreshed `origin/main`. */
+/**
+ * W1-T3017 — the base this run diffs against, RESOLVED TO A SHA and cached per (spawn, repoRoot).
+ *
+ * WHY A SHA AND NOT THE REF. A ref is CLONE-scoped, not process-scoped: any worktree sharing this
+ * clone moves `origin/main` for every process at once the moment it fetches, and
+ * {@link refreshOriginMain} is itself such a fetch — test/moving-base-changed-files.test.ts states
+ * the mechanism outright ("the fleet moves the ref on itself"). So memoizing the FETCH cannot make
+ * a run self-consistent; only naming a sha can. What moves is what counts as an ADDED line, so a
+ * base that shifts mid-run makes `diff-coverage` gain or lose lines it must cover, and the red
+ * names the author's own file.
+ *
+ * REFUSES, NEVER FALLS BACK TO THE REF NAME. The `lint-plan` entry below previously read
+ * `rev-parse origin/main` and fell back with `|| "origin/main"` — which silently restores the
+ * moving-ref behaviour at exactly the moment the pin is most needed. {@link runPreflightCoverage}
+ * already refuses outright on a base-refresh failure, so refusing here follows the precedent
+ * standing beside it rather than inventing a policy.
+ */
+export type BasePin = { sha: string } | { failure: string };
+
+const basePinCache = new WeakMap<PreflightSpawn, Map<string, BasePin>>();
+
+/** Resolve (and cache) this run's base. A cached FAILURE is returned as-is: within one run the
+ *  base must not change its mind, and a retry that succeeded would split the run across two bases. */
+export function pinnedBase(repoRoot: string, spawn: PreflightSpawn): BasePin {
+  let byRoot = basePinCache.get(spawn);
+  if (!byRoot) {
+    byRoot = new Map();
+    basePinCache.set(spawn, byRoot);
+  }
+  const cached = byRoot.get(repoRoot);
+  if (cached) return cached;
+  let pin: BasePin;
+  try {
+    const res = spawn("git", ["rev-parse", "origin/main"], { cwd: repoRoot });
+    const sha = (res.stdout ?? "").trim();
+    pin =
+      res.status === 0 && /^[0-9a-f]{40}$/.test(sha)
+        ? { sha }
+        : {
+            failure: `could not resolve origin/main to a commit (git rev-parse exited ${res.status}, output ${JSON.stringify(sha)})`,
+          };
+  } catch (e) {
+    // RECORDS, NEVER ERASES — a throw and an unresolvable ref are different facts.
+    pin = { failure: `could not resolve origin/main to a commit: ${String((e as Error)?.message ?? e)}` };
+  }
+  byRoot.set(repoRoot, pin);
+  return pin;
+}
+
+/** The pin IF ONE WAS TAKEN, resolving nothing. A run with no diff-consuming step has no base, and
+ *  reporting one it never used would be the guess the stamp exists to remove. */
+export function peekPinnedBase(repoRoot: string, spawn: PreflightSpawn): BasePin | undefined {
+  return basePinCache.get(spawn)?.get(repoRoot);
+}
+
+/** Test seam only: the cache is process-lifetime by design, so a suite driving several bases
+ *  through one spawn needs a way to start clean. Never called from production paths. */
+export function clearPinnedBaseForTest(spawn: PreflightSpawn, repoRoot?: string): void {
+  const byRoot = basePinCache.get(spawn);
+  if (!byRoot) return;
+  if (repoRoot === undefined) byRoot.clear();
+  else byRoot.delete(repoRoot);
+}
+
+/** The pinned sha, or a THROW that {@link runStep} turns into a named failing step. */
+function requirePinnedBase(repoRoot: string, spawn: PreflightSpawn): string {
+  const pin = pinnedBase(repoRoot, spawn);
+  if ("failure" in pin) throw new Error(`REFUSED — ${pin.failure}; refusing to diff against the moving ref instead`);
+  return pin.sha;
+}
+
+/** The three-dot diff CI's own diff-scoped jobs compute, against this run's PINNED base sha. */
 function mergeBaseDiffText(repoRoot: string, spawn: PreflightSpawn): string {
-  const res = spawn("git", ["diff", "origin/main...HEAD"], { cwd: repoRoot });
+  const res = spawn("git", ["diff", `${requirePinnedBase(repoRoot, spawn)}...HEAD`], { cwd: repoRoot });
   return res.stdout;
 }
 
@@ -281,7 +360,7 @@ function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
   }
   const cached = byRoot.get(repoRoot);
   if (cached) return cached;
-  const res = spawn("git", ["diff", "--name-only", "origin/main...HEAD"], { cwd: repoRoot });
+  const res = spawn("git", ["diff", "--name-only", `${requirePinnedBase(repoRoot, spawn)}...HEAD`], { cwd: repoRoot });
   const dir = mkdtempSync(join(tmpdir(), "rmd-ci-parity-"));
   const path = join(dir, "changed-files.txt");
   writeFileSync(path, res.stdout, "utf8");
@@ -471,6 +550,17 @@ export interface RunContext {
   behindUnknownReason: string | undefined;
   /** When this checkout last FETCHED `origin/main`, from the reflog — NOT the tip date, which tracks main. */
   originFetchedAt: string | undefined;
+  /** W1-T3017 — the base sha every diff-consuming step in this run measured against. ABSENT, never
+   *  guessed, when no step pinned a base: a run that took no diff has no base to name, and a
+   *  plausible-looking sha it never used is worse than silence. */
+  baseSha?: string;
+  /** True when the ref moved AFTER this run pinned it — a sibling worktree sharing the clone
+   *  fetched mid-run. INFORMATION, NOT A VERDICT: the run's own diffs are unaffected precisely
+   *  because they named the sha, and a gate that failed because someone else fetched would be a
+   *  bound firing on a healthy condition. `undefined` when there was no pin to compare. */
+  baseMovedDuringRun?: boolean;
+  /** What the ref points at NOW, present only when it differs from {@link baseSha}. */
+  baseShaAtEnd?: string;
   /** Core-normalised 1-minute loadavg at the START of the run; `undefined` when unavailable. */
   loadStart: number | undefined;
   /** The same reading at the END. Both, because one sample answers neither question: a start
@@ -507,6 +597,10 @@ export function computeRunContext(input: {
   loadavgStart: readonly number[] | undefined;
   loadavgEnd: readonly number[] | undefined;
   cpuCount: number;
+  /** The sha this run's diff steps pinned, or `undefined` when none did. */
+  baseSha?: string;
+  /** What `origin/main` resolves to at the END of the run, for the drift comparison. */
+  baseShaAtEnd?: string;
 }): RunContext {
   const trimmed = (input.behindText ?? "").trim();
   const parsed = /^\d+$/.test(trimmed) ? Number(trimmed) : undefined;
@@ -520,6 +614,16 @@ export function computeRunContext(input: {
           ? input.behindFailure.trim()
           : "no origin/main ref — shallow or unfetched clone",
     originFetchedAt: parseReflogFetchStamp(input.reflogText),
+    // ABSENT, NOT FALSE. `baseMovedDuringRun` is a comparison, so with nothing to compare it has
+    // no answer — and `false` would assert the base held still, which is a stronger claim than the
+    // evidence supports.
+    ...(input.baseSha !== undefined ? { baseSha: input.baseSha } : {}),
+    ...(input.baseSha !== undefined && input.baseShaAtEnd !== undefined
+      ? {
+          baseMovedDuringRun: input.baseShaAtEnd !== input.baseSha,
+          ...(input.baseShaAtEnd !== input.baseSha ? { baseShaAtEnd: input.baseShaAtEnd } : {}),
+        }
+      : {}),
     loadStart: normalisedLoad(input.loadavgStart, input.cpuCount),
     loadEnd: normalisedLoad(input.loadavgEnd, input.cpuCount),
     cpuCount: input.cpuCount,
@@ -542,7 +646,16 @@ export function runContextLine(ctx: RunContext): string {
       : `load=${fmtLoad(ctx.loadStart)}->${fmtLoad(ctx.loadEnd)} of ${ctx.cpuCount} cpu${
           isLoadedRun(ctx) ? " (LOADED)" : ""
         }`;
-  return `context: sha=${ctx.headSha}, ${behind}, ${fetched}, ${load}`;
+  // W1-T3017 — WHICH base, not just how far from it. `behind=` is a distance that decays the
+  // moment main advances; the sha is what makes a verdict reproducible, and the drift clause is
+  // the only place a mid-run move is ever reported.
+  const base =
+    ctx.baseSha === undefined
+      ? ""
+      : ctx.baseMovedDuringRun === true
+        ? `, base=${ctx.baseSha} (origin/main moved to ${ctx.baseShaAtEnd ?? "unknown"} during this run; the diffs above are unaffected — they named the sha)`
+        : `, base=${ctx.baseSha}`;
+  return `context: sha=${ctx.headSha}${base}, ${behind}, ${fetched}, ${load}`;
 }
 
 function fmtLoad(v: number | undefined): string {
@@ -570,6 +683,8 @@ export function detectRunContext(input: {
   loadavgStart: readonly number[] | undefined;
   loadavgEnd: readonly number[] | undefined;
   cpuCount: number;
+  /** The sha this run's diff steps pinned ({@link peekPinnedBase}), or `undefined` when none did. */
+  baseSha?: string;
 }): RunContext {
   // RECORDS, NEVER ERASES. A catch returning the same `undefined` an empty read produces would
   // fold "the read failed" into "there was nothing to read" — the erasure shape
@@ -586,8 +701,17 @@ export function detectRunContext(input: {
   };
   const behind = read(["rev-list", "--count", "HEAD..origin/main"]);
   const reflog = read(["reflog", "show", "--date=iso-strict", "--format=%gd", "-n", "1", "origin/main"]);
+  // W1-T3017 — the END-of-run value of the ref, read ONLY to compare against what this run pinned.
+  // A local `rev-parse` is not a fetch, so the NEVER FETCHES invariant above is untouched; and it
+  // is read only when there is a pin to compare it with, so an unpinned run spawns nothing extra.
+  const pinned = input.baseSha;
+  const atEnd = pinned === undefined ? undefined : read(["rev-parse", "origin/main"]);
   return computeRunContext({
     headSha: input.headSha,
+    ...(pinned !== undefined ? { baseSha: pinned } : {}),
+    ...(atEnd !== undefined && "text" in atEnd && atEnd.text.trim() !== ""
+      ? { baseShaAtEnd: atEnd.text.trim() }
+      : {}),
     behindText: "text" in behind ? behind.text : undefined,
     behindFailure: "reason" in behind ? behind.reason : undefined,
     reflogText: "text" in reflog ? reflog.text : undefined,
@@ -920,10 +1044,13 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
     mirrored: true,
     run: (repoRoot, spawn) => {
       const refresh = runStep("lint-plan:base-refresh", () => refreshOriginMain(repoRoot, spawn));
-      const baseRes = spawn("git", ["rev-parse", "origin/main"], { cwd: repoRoot });
-      const base = baseRes.stdout.trim() || "origin/main";
+      // OUTSIDE any runStep, DELIBERATELY: a pin failure here must reach runCiParity's TOP-LEVEL
+      // catch and report `lint-plan:error`. That is the only production caller exercising that
+      // catch, and test/preflight-ci-parity.test.ts asserts it by name — moving this inside a
+      // runStep would leave the top-level arm covered by nothing.
+      const base = requirePinnedBase(repoRoot, spawn);
       const lint = runStep("lint-plan:ci-parity", () =>
-        shellOut(spawn, "npm run --silent lint-plan -- --base <refreshed origin/main>", "npm", ["run", "--silent", "lint-plan", "--", "--base", base], { cwd: repoRoot }),
+        shellOut(spawn, "npm run --silent lint-plan -- --base <pinned origin/main>", "npm", ["run", "--silent", "lint-plan", "--", "--base", base], { cwd: repoRoot }),
       );
       return [refresh, lint];
     },
@@ -1854,7 +1981,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
 
 /** Every path `origin/main...HEAD` touches. The CALLER never supplies this (design ii). */
 function computeChangedFiles(repoRoot: string, spawn: PreflightSpawn): string[] {
-  const res = spawn("git", ["diff", "--name-only", "origin/main...HEAD"], { cwd: repoRoot });
+  const res = spawn("git", ["diff", "--name-only", `${requirePinnedBase(repoRoot, spawn)}...HEAD`], { cwd: repoRoot });
   return res.stdout
     .split("\n")
     .map((l) => l.trim())
@@ -1912,6 +2039,21 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
   const refresh = runStep("coverage-mode:base-refresh", () => refreshOriginMain(repoRoot, spawn));
   steps.push(refresh);
   if (!refresh.ok) return { steps, ok: false };
+
+  // W1-T3017 — A REFUSAL STEP, NOT A THROW. Everything below runs OUTSIDE `runStep`, so a
+  // `requirePinnedBase` throw here would escape this function entirely and crash `preflightCommand`
+  // rather than report. This pipeline's contract is to REFUSE with a named step once a stage cannot
+  // support a trustworthy verdict, and an unresolvable base is exactly such a stage: without it
+  // there is no honest three-dot range to scope coverage over.
+  const pin = pinnedBase(repoRoot, spawn);
+  if ("failure" in pin) {
+    steps.push({
+      name: "coverage-mode:base-pin",
+      ok: false,
+      detail: `coverage-mode:base-pin: REFUSED — ${pin.failure}; refusing to diff against the moving ref instead`,
+    });
+    return { steps, ok: false };
+  }
 
   const changedFiles = computeChangedFiles(repoRoot, spawn);
   if (changedFiles.length === 0) {

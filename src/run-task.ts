@@ -288,6 +288,7 @@ import {
   buildPreflightSummary,
   censusSuiteMembershipFor,
   detectRunContext,
+  peekPinnedBase,
   runContextLine,
   FAST_GATE_STEPS,
   CENSUS_MEMBERSHIP_SUITES,
@@ -20697,13 +20698,19 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // proof that adding a surface is not enough on its own — it has been computed on this path all
   // along and written to the JSON summary, and never reached the sentence a human reads.
   const headSha = readHeadShaForSummary();
+  // W1-T3017 — PEEK, never resolve. The pin belongs to whichever mode actually diffed; a run with
+  // no diff-consuming step has no base, and resolving one here would put a sha on the line that no
+  // step ever measured against.
+  const preflightSpawn = deps.spawn ?? defaultPreflightSpawn;
+  const pin = peekPinnedBase(repoRoot, preflightSpawn);
   const runContext = detectRunContext({
     repoRoot,
     headSha,
-    spawn: deps.spawn ?? defaultPreflightSpawn,
+    spawn: preflightSpawn,
     loadavgStart,
     loadavgEnd: deps.loadavg ? deps.loadavg() : osLoadavg(),
     cpuCount: deps.cpuCount ?? osCpus().length,
+    ...(pin !== undefined && "sha" in pin ? { baseSha: pin.sha } : {}),
   });
   console.log(
     (ok

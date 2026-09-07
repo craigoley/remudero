@@ -24,6 +24,12 @@ const REPO_ROOT = process.cwd();
 /** Records every spawn call and answers from a lookup table keyed by a substring of
  *  `[file, ...args].join(" ")`, falling back to a clean `{status: 0}` for anything unlisted —
  *  duplicated locally per test/preflight-ci-parity.test.ts's own file-scoping convention. */
+/** W1-T3017 — the sha this suite's fake resolves `origin/main` to. SHA-SHAPED because
+ *  `pinnedBase` refuses anything that is not 40 hex characters rather than diffing against it. */
+const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
+/** The three-dot range every diff-consuming step must now name — the SHA, never the moving ref. */
+const PINNED_RANGE = `${PINNED_BASE_SHA}...HEAD`;
+
 function recordingSpawn(map: Record<string, { status: number; stdout?: string; stderr?: string }> = {}) {
   const calls: { file: string; args: string[]; opts?: { cwd?: string; input?: string } }[] = [];
   const spawn: PreflightSpawn = (file, args, opts) => {
@@ -34,6 +40,10 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
         return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
       }
     }
+    // W1-T3017: real git answers `rev-parse origin/main` with a sha, and every diff below now
+    // names that sha rather than the moving ref. Below the map, so a test wanting a failed
+    // resolve can still override it.
+    if (file === "git" && args[0] === "rev-parse") return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
     return { status: 0, stdout: "", stderr: "" };
   };
   return { spawn, calls };
@@ -53,18 +63,18 @@ test("runPreflightCoverage: takes no diff/range parameter at all — a caller ca
 
 test("runPreflightCoverage: refreshes origin/main (git fetch) BEFORE deriving the three-dot changed-file list, and BEFORE the diff piped into diff-coverage.mjs", () => {
   const { spawn, calls } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
-    "diff origin/main...HEAD": { status: 0, stdout: "diff --git a/src/lib/example.ts b/src/lib/example.ts\n+x\n" },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
+    [`diff ${PINNED_RANGE}`]: { status: 0, stdout: "diff --git a/src/lib/example.ts b/src/lib/example.ts\n+x\n" },
   });
   runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
 
   const fetchIdx = calls.findIndex((c) => c.file === "git" && c.args.join(" ") === "fetch origin main");
   assert.ok(fetchIdx >= 0, "expected a `git fetch origin main` call to refresh the base");
 
-  const changedFilesIdx = calls.findIndex((c, i) => i > fetchIdx && c.file === "git" && c.args.join(" ") === "diff --name-only origin/main...HEAD");
+  const changedFilesIdx = calls.findIndex((c, i) => i > fetchIdx && c.file === "git" && c.args.join(" ") === `diff --name-only ${PINNED_RANGE}`);
   assert.ok(changedFilesIdx > fetchIdx, "the changed-file list must be derived AFTER the refresh, never before");
 
-  const diffCoverageDiffIdx = calls.findIndex((c, i) => i > fetchIdx && c.file === "git" && c.args.join(" ") === "diff origin/main...HEAD");
+  const diffCoverageDiffIdx = calls.findIndex((c, i) => i > fetchIdx && c.file === "git" && c.args.join(" ") === `diff ${PINNED_RANGE}`);
   assert.ok(diffCoverageDiffIdx > fetchIdx, "the diff fed to diff-coverage.mjs must also be derived AFTER the refresh");
 
   const twoDot = calls.some((c) => c.file === "git" && c.args.some((a) => /^origin\/main\.\.HEAD$/.test(a)));
@@ -74,8 +84,8 @@ test("runPreflightCoverage: refreshes origin/main (git fetch) BEFORE deriving th
 test("runPreflightCoverage: the diff piped into diff-coverage.mjs is exactly what the refreshed three-dot `git diff` produced, never a hand-built or cached one", () => {
   const sentinelDiff = "diff --git a/src/lib/example.ts b/src/lib/example.ts\n+added line\n";
   const { spawn, calls } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
-    "diff origin/main...HEAD": { status: 0, stdout: sentinelDiff },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
+    [`diff ${PINNED_RANGE}`]: { status: 0, stdout: sentinelDiff },
   });
   runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
 
@@ -103,7 +113,7 @@ test("runPreflightCoverage: a base-refresh failure REFUSES immediately — no ch
 
 test("runPreflightCoverage: an EMPTY diff (origin/main...HEAD touches nothing) is REFUSED, not reported as a pass, and the expensive suite never runs", () => {
   const { spawn, calls } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "" },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "" },
   });
   const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
 
@@ -120,7 +130,7 @@ test("runPreflightCoverage: an EMPTY diff (origin/main...HEAD touches nothing) i
 
 test("runPreflightCoverage: a TREE DIRTY in a diffed file is REFUSED, not reported as a pass, and the expensive suite never runs", () => {
   const { spawn, calls } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: " M src/lib/example.ts\n" },
   });
   const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
@@ -137,7 +147,7 @@ test("runPreflightCoverage: a TREE DIRTY in a diffed file is REFUSED, not report
 
 test("runPreflightCoverage: a diffed file with NO uncommitted change (clean tree) is a positive control — tree-clean PASSES and the run proceeds", () => {
   const { spawn } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
   });
   const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
@@ -149,7 +159,7 @@ test("runPreflightCoverage: a diffed file with NO uncommitted change (clean tree
 
 test("runPreflightCoverage: the dirty-tree check is SCOPED to exactly the diffed pathspec, never a bare tree-wide `git status --porcelain` — a dirty file outside the diff cannot refuse the run", () => {
   const { spawn, calls } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
   });
   runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
@@ -163,7 +173,7 @@ test("runPreflightCoverage: the dirty-tree check is SCOPED to exactly the diffed
 
 test("runPreflightCoverage: a changed source file with NO lcov SF: record yields UNPROVEN and NAMES the file — never a bare pass over an empty set", () => {
   const { spawn, calls } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
   });
   // lcov this run produced never saw src/lib/example.ts at all — no SF: record for it.
@@ -182,7 +192,7 @@ test("runPreflightCoverage: a changed source file with NO lcov SF: record yields
 
 test("runPreflightCoverage: a changed TEST file with no SF: record is fine — the instrumentation assertion only names SOURCE files, never test files", () => {
   const { spawn } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\ntest/example.test.ts\n" },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\ntest/example.test.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
   });
   // lcov instruments the source file but (as node --test's own coverage does) carries no SF:
@@ -196,9 +206,9 @@ test("runPreflightCoverage: a changed TEST file with no SF: record is fine — t
 
 test("runPreflightCoverage: every changed source file instrumented — the positive control — PASSES and proceeds to the real diff-coverage.mjs", () => {
   const { spawn, calls } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
-    "diff origin/main...HEAD": { status: 0, stdout: "diff --git a/src/lib/example.ts b/src/lib/example.ts\n+x\n" },
+    [`diff ${PINNED_RANGE}`]: { status: 0, stdout: "diff --git a/src/lib/example.ts b/src/lib/example.ts\n+x\n" },
   });
   const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
 
@@ -213,7 +223,7 @@ test("runPreflightCoverage: every changed source file instrumented — the posit
 
 test("runPreflightCoverage: the suite run itself failing (e.g. a real test failure) is reported as its own FAIL and short-circuits — instrumentation is never asserted over a failed run's lcov", () => {
   const { spawn, calls } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
     "test-with-retry.mjs": { status: 1, stderr: "1 test failed" },
   });
@@ -230,7 +240,7 @@ test("runPreflightCoverage: the suite run itself failing (e.g. a real test failu
 
 test("runPreflightCoverage: the coverage run is invoked with --enable-source-maps, --test-coverage-exclude=test/**, and the FULL test/**/*.test.ts glob — same flags --ci-parity's coverage-ratchet job uses, never a scoped run", () => {
   const { spawn, calls } = recordingSpawn({
-    "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
   });
   runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
@@ -254,7 +264,7 @@ test(
     const emptyRoot = mkdtempSync(join(tmpdir(), "preflight-coverage-no-lcov-"));
     try {
       const { spawn, calls } = recordingSpawn({
-        "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
+        [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
         "status --porcelain": { status: 0, stdout: "" },
       });
       const result = runPreflightCoverage(emptyRoot, { spawn });
@@ -331,7 +341,8 @@ test("preflightCommand: --coverage ADDS the coverage-mode steps after the three 
     if (key.includes("tsc")) return { status: 0, stdout: "", stderr: "" };
     if (key.includes("git log")) return { status: 0, stdout: "\0feat(x): fine\n", stderr: "" };
     if (key.includes("fetch origin main")) return { status: 0, stdout: "", stderr: "" };
-    if (key.includes("diff --name-only origin/main...HEAD")) return { status: 0, stdout: "", stderr: "" }; // empty diff -> refused
+    if (key.includes("rev-parse origin/main")) return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
+    if (key.includes(`diff --name-only ${PINNED_RANGE}`)) return { status: 0, stdout: "", stderr: "" }; // empty diff -> refused
     return { status: 0, stdout: "", stderr: "" };
   };
   const originalLog = console.log;

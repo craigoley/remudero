@@ -38,10 +38,22 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
         return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
       }
     }
+    // W1-T3017: `rev-parse origin/main` must answer with a SHA, because that is what real git does
+    // and because every diff site now names the resolved sha rather than the moving ref. An empty
+    // default here would make the pin REFUSE — correct behaviour, but it would mask every argv
+    // assertion below behind a refusal instead of exercising them. Listed BELOW the map so a test
+    // that wants a failing resolve can still override it.
+    if (file === "git" && args[0] === "rev-parse") return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
     return { status: 0, stdout: "", stderr: "" };
   };
   return { spawn, calls };
 }
+
+/** The sha {@link recordingSpawn} resolves `origin/main` to — arbitrary but SHA-SHAPED, because
+ *  `pinnedBase` refuses anything that is not 40 hex characters rather than diffing against it. */
+const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
+/** What every diff-consuming step must now name. */
+const PINNED_RANGE = `${PINNED_BASE_SHA}...HEAD`;
 
 // ── acceptance 1: every ci.yml job has a parity entry, mirrored or excluded-with-reason ─────
 
@@ -123,7 +135,7 @@ test("coverage-ratchet job: refreshes origin/main (git fetch) BEFORE computing t
   const fetchIdx = calls.findIndex((c) => c.file === "git" && c.args.join(" ") === "fetch origin main" && c.opts?.cwd === REPO_ROOT);
   assert.ok(fetchIdx >= 0, "expected a `git fetch origin main` call to refresh the base before any diff");
 
-  const diffIdx = calls.findIndex((c, i) => i > fetchIdx && c.file === "git" && c.args.includes("origin/main...HEAD"));
+  const diffIdx = calls.findIndex((c, i) => i > fetchIdx && c.file === "git" && c.args.includes(PINNED_RANGE));
   assert.ok(diffIdx >= 0, "expected a `git diff origin/main...HEAD` (three-dot) call AFTER the refresh");
 
   const twoDot = calls.some((c) => c.file === "git" && c.args.some((a) => /^origin\/main\.\.HEAD$/.test(a)));
@@ -134,7 +146,7 @@ test("coverage-ratchet job: the diff piped into diff-coverage.mjs is exactly wha
   const sentinelDiff = "diff --git a/x.ts b/x.ts\n+added line\n";
   const { spawn, calls } = recordingSpawn({
     "fetch origin main": { status: 0 },
-    "diff origin/main...HEAD": { status: 0, stdout: sentinelDiff },
+    [`diff ${PINNED_RANGE}`]: { status: 0, stdout: sentinelDiff },
   });
   runCiParity(REPO_ROOT, { spawn });
 
@@ -327,7 +339,14 @@ test("runCiParity: an entry whose run() ITSELF throws (not just a leaf's spawn i
 
   // The run did not abort — later table entries still ran and reported despite lint-plan's throw.
   assert.ok(result.steps.some((s) => s.name === "depcruise"));
-  assert.ok(result.steps.some((s) => s.name === "containment-probe:trigger"));
+  // W1-T3017 changed this entry's WITNESS, not this test's intent. A spawn that throws on
+  // `rev-parse` now denies every diff-consuming entry a pinned base, and refusing is the point:
+  // `containment-probe` derives its changed-file list from the base, so it reports `:error`
+  // where it once reported `:trigger`. Asserting the error NAME is strictly stronger than
+  // asserting the trigger was reached — it proves the entry both refused and reported.
+  const containment = result.steps.find((s) => s.name.startsWith("containment-probe:"));
+  assert.equal(containment?.name, "containment-probe:error", "the entry must report, not vanish");
+  assert.equal(containment?.ok, false, "and an unpinnable base must never read as a passing step");
 });
 
 // ── acceptance 7: `rmd preflight` with no flag is unchanged; `--ci-parity` is additive ──────
