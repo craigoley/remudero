@@ -1,0 +1,99 @@
+- id: W1-T3069
+  title: "THE DOCUMENTED READ-ONLY ESCAPE SILENTLY FAILS 46 TESTS — `RMD_SELF_SYNC_DONE=1` is what `rmd` itself tells an operator to set on a detached HEAD, and it flips `checkCliFreshness` from `assessed` to `guarded`, which 26 suites assert on: MEASURED 48 failures with it set against 2 without, and the failures read as ordinary assertion errors with nothing naming the cause"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 10.00
+  files: [test/setup/tmp-hygiene.ts, test/the-read-only-escape-cannot-silently-fail-the-suite.test.ts]
+  origin: "operator-session#false-pre-existing-failures-2026-09-07"
+  plan_refs: ["W1-T131", "W1-T79", "W1-T221"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07 at origin/main, over the 26 suites that reference `RMD_SELF_SYNC_DONE`,
+    `checkCliFreshness` or `checkServiceFreshness`:
+
+      RMD_SELF_SYNC_DONE=1   ->  644 tests, 596 pass, 48 FAIL
+      variable unset         ->  644 tests, 642 pass,  2 fail
+
+    46 failures, caused entirely by an environment variable, and NOTHING in the output says so. A
+    representative one reads `expected: 'assessed', actual: 'guarded'` — an ordinary assertion
+    error. `test/a-restart-is-only-warranted-by-a-material-advance.test.ts` goes 3/3 pass to 0/3
+    fail on that variable alone.
+
+    THE VARIABLE IS NOT AN ODDITY, IT IS WHAT THE TOOL TELLS YOU TO SET. `rmd`'s own refusal text on
+    a detached HEAD reads: "set `RMD_SELF_SYNC_DONE=1` to skip this check without moving anything --
+    the read-only escape". Every agent lane working in a detached worktree — which is every worktree
+    this fleet creates — is told to export it, and exporting it for the CLI leaks it into any test
+    run in the same shell.
+
+    OBSERVED COST, IN THIS SESSION, TO THE AGENT THAT FOUND IT. Three separate regression runs were
+    reported with "N pre-existing failures on main", verified against a checkout with the source
+    reverted — but not the environment. One of those attributions was false and reached a PR body as
+    "fails 3/3 on a pristine origin/main checkout". A control that reverts the code and keeps the
+    contaminated environment reproduces the contamination and calls it the baseline.
+
+    ⚠ THE OTHER ATTRIBUTIONS SURVIVED, WHICH IS WHY THIS IS A TRAP AND NOT A ROUT. `doctor-node-pin`
+    (2), `git-fixture-gc-hygiene` (3) and `serves-key-mount-is-a-snapshot-of-a-sibling-container` (6)
+    fail identically with and without the variable — genuinely red, unrelated to this. A guard must
+    not imply those were false too.
+
+    WHY THE SUITE IS THE RIGHT PLACE AND NOT THE VARIABLE. The variable is correct and load-bearing:
+    `deploy/verify-image.sh` sets it deliberately for `./bin/rmd --help`, with a comment recording
+    that it is "REQUIRED, not tidiness". Nothing should stop an operator setting it. What must stop
+    is a TEST RUN inheriting it and reporting 46 assertion failures that mean nothing.
+  design: |
+    (i) THE GUARD BELONGS IN `test/setup/tmp-hygiene.ts`, which every CI test run already imports
+    (`node --test --import tsx --import ./test/setup/tmp-hygiene.ts`, package.json's `test` and
+    `test:ci`). That file exists for exactly this class of problem — it was written after a leak
+    produced 202,830 dirs across the suite — so a second systemic-hazard guard is at home there and
+    needs no new wiring to reach every run.
+
+    (ii) FAIL LOUD AND EARLY, NEVER SILENTLY CORRECT. Do NOT delete the variable from `process.env`
+    and proceed: a run that quietly changes the environment it was given produces results that
+    cannot be reproduced by re-running the printed command. Print what is set, what it does, the 46
+    number and the fix, then exit non-zero before the first test executes.
+
+    (iii) NAME THE CAUSE, NOT THE SYMPTOM. The message must say that this variable makes
+    `checkCliFreshness` report `guarded` instead of `assessed`, that 26 suites assert on it, and
+    that the remedy is to unset it for the test run — not "unset it" alone. The whole defect is that
+    the existing failure output explains nothing.
+
+    (iv) ABSENT IS THE NORMAL PATH AND MUST BE UNTOUCHED. With the variable unset the guard does
+    nothing at all: no output, no cost, no behaviour change. CI never sets it, so CI never sees this.
+  acceptance:
+    - claim: "a test run with RMD_SELF_SYNC_DONE set refuses before any test executes, naming the variable, its effect and the remedy"
+      proof: "unit test: test/the-read-only-escape-cannot-silently-fail-the-suite.test.ts"
+    - claim: "a run without it is byte-identical to today: the guard produces no output and no effect"
+      proof: "unit test: test/the-read-only-escape-cannot-silently-fail-the-suite.test.ts"
+    - claim: "the guard refuses rather than deleting the variable, so the printed command reproduces the same result"
+      proof: "unit test: test/the-read-only-escape-cannot-silently-fail-the-suite.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF THE VARIABLE DOES NOT CHANGE OUTCOMES. Re-run the measurement
+    first: the 26 suites with the variable set, then unset. If the failure counts match, this was
+    measured against a contaminated shell in some other way and the task must be closed.
+
+    AND THE GUARD MUST NOT FIRE ON THE NORMAL PATH. Assert that with the variable ABSENT the guard
+    returns without printing or throwing — a guard that fires unconditionally would break every CI
+    run, which is far worse than the confusion it removes.
+
+    PROVE IT LOAD-BEARING: with the guard removed, the refusal row must redden while the
+    absent-variable row stays green. Both directions, because a test that only reddens on removal is
+    asserting the guard exists rather than that it discriminates.
+  note: |
+    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3069`.
+
+    FOUND BY BEING WRONG. The agent filing this reported three regression runs with "pre-existing
+    failures on main", one of which was its own environment, and only caught it by reading a failure
+    message closely enough to recognise `guarded` as a freshness state rather than a test fixture.
+    The guard exists so the next reader is told rather than having to notice.
+
+    risk:high — Rule 19 SPAN, not danger: two declared files (the guard and its suite) read as
+    two concerns, and `band_meaning: span` records that they are one change. The diff is small and
+    the normal path is untouched, but the file it edits is
+    imported by EVERY test run, so a mistake there fails the whole suite rather than one case. That
+    is also precisely why the guard is effective there.

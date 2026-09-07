@@ -388,6 +388,12 @@ export interface SweepPolicy {
    *  MAKES ADMITTING SAFE IS THE FENCE DOWNSTREAM: a wrong resolution mints a NEW HEAD and
    *  `remudero-review` is a required per-sha status, so the worst case is a red PR that escalates. */
   mergeConflictAdmissionEnabled: boolean;
+  /** W1-T2998 — may a red ratchet whose remedy is a RECORDED NUMBER be repaired deterministically
+   *  instead of spending an LLM fix round? DEFAULT FALSE, and deliberately the same shape as
+   *  {@link mergeConflictAdmissionEnabled} above: an unattended write to a contributor's branch is
+   *  an operator ratification, not a default. With it false the classifier still runs and still
+   *  NAMES the remedy on the disposition reason — only the automatic repair is withheld. */
+  recordableRatchetRepairEnabled?: boolean;
   /** W1-T2345 — THE UNBOUNDED-IDENTICAL-DISPOSITION BOUND: a repeated (disposition, head_sha) pair
    *  escalates once at this many consecutive rows; {@link repeatDispositionStreaksFromLedger} says
    *  why the key excludes the rendered `reason`. ONCE PER HEAD PER ROTATION WINDOW (W1-T2382):
@@ -1242,6 +1248,64 @@ export function isBlockedCi(pr: OpenPrView): boolean {
   return pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0; // W1-T2504
 }
 
+/** W1-T2998 — the ratchets whose ordinary remedy is a RECORDED NUMBER, DERIVED from
+ *  {@link REGENERABLE_ARTIFACT_GENERATORS} rather than hand-listed beside it. That registry already
+ *  answers "can a generator reproduce this artifact", which is precisely the property that makes a
+ *  deterministic repair safe, and the conflict rung already trusts it for the same reason. One
+ *  registry, not two lists (W1-T2548).
+ *
+ *  ⚠ THIS IS WHY `negative-reachability-ratchet` AND `catch-erasure-ratchet` CAN NEVER QUALIFY, and
+ *  it is structural rather than a remembered exception: neither owns a baseline artifact, so
+ *  neither appears in the registry at all. Their own text says "no allowlist to add it to" — a
+ *  recorded number there BANKS the debt instead of paying it. A classifier that had to REMEMBER to
+ *  exclude them would be one edit away from including them. */
+export function recordableRatchetScripts(
+  generators: Readonly<Record<string, string>> = REGENERABLE_ARTIFACT_GENERATORS,
+): ReadonlySet<string> {
+  return new Set(Object.values(generators));
+}
+
+/**
+ * W1-T2998 — the generator scripts that would repair this PR's red required checks, or `undefined`
+ * when even one red check is not of that class. PURE.
+ *
+ * ⚠ ALL-OR-NOTHING, AND THAT IS THE SAFETY PROPERTY. A PR red on `comment-load-ratchet` AND
+ * `negative-reachability-ratchet` is NOT partially repairable: recording the first would leave the
+ * second red, spend a push, and still need the fix rung — while making the PR look attended to. One
+ * unrecognised red name refuses the whole set, so the existing dispatch keeps it.
+ *
+ * ⚠ AND AN EMPTY RED SET IS NOT A REPAIRABLE ONE. Nothing red means nothing to record; returning a
+ * repair for it would push an empty commit on every green PR.
+ */
+export function recordableRatchetRepairFor(
+  pr: Pick<OpenPrView, "redRequiredChecks" | "ciFailures" | "mergeState">,
+  generators: Readonly<Record<string, string>> = REGENERABLE_ARTIFACT_GENERATORS,
+): string[] | undefined {
+  // A dirty PR runs no checks at all (W1-T106), so a red name on one is stale by construction.
+  if (pr.mergeState === "dirty") return undefined;
+  const red = [...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((f) => f.name)])].filter(Boolean);
+  if (red.length === 0) return undefined;
+  const admitted = recordableRatchetScripts(generators);
+  const scripts: string[] = [];
+  for (const name of red) {
+    const script = resolveRatchetScript(name, admitted);
+    if (script === undefined) return undefined;
+    if (!scripts.includes(script)) scripts.push(script);
+  }
+  return scripts.length > 0 ? scripts.sort() : undefined;
+}
+
+/** W1-T2998 — a CI check name to the npm script that regenerates its artifact. The registry keys on
+ *  SCRIPT names and CI names them jobs, so the two agree exactly (`comment-load-ratchet`) or the job
+ *  drops the suffix (`source-size` for `source-size-ratchet`). Both forms are matched EXPLICITLY
+ *  against the derived set — never by substring, which would let `source-size-signal` (the
+ *  `--no-record` twin that regenerates nothing) match `source-size-ratchet`. */
+function resolveRatchetScript(checkName: string, admitted: ReadonlySet<string>): string | undefined {
+  if (admitted.has(checkName)) return checkName;
+  const suffixed = `${checkName}-ratchet`;
+  return admitted.has(suffixed) ? suffixed : undefined;
+}
+
 /** W1-T3063 — the subject prefixes that FILE or AMEND a task rather than implementing it.
  *  Deliberately the vocabulary `lint-plan`'s failing-split already excludes, verbatim — "a filing
  *  cites a task; it does not implement it" — never a second list that could drift from it. */
@@ -1942,7 +2006,26 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // W1-T2452: denominator is {@link fixCeilingInForce}, not the bare `policy.strikeCap` — see
     // that function's own doc; keeps this ratio naming the SAME ceiling the dispatch site
     // (`dispatchFix`, run-task.ts) actually budgets against.
-    reason: (pr, policy) => `${pr.checksState === "red" ? "required checks red" : describeCiFailures(pr)} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`, // W1-T2504: "red" is byte-identical; else names the specific check.
+    reason: (pr, policy) => {
+      const base = `${pr.checksState === "red" ? "required checks red" : describeCiFailures(pr)}`;
+      // W1-T2998 — NAME THE DETERMINISTIC REMEDY WHENEVER ONE EXISTS, INDEPENDENTLY OF WHETHER IT
+      // MAY BE TAKEN. With `recordableRatchetRepairEnabled` false this sentence is the ONLY effect
+      // of the classifier, and it is not decoration: it tells the operator reading the ledger, and
+      // the worker reading the dispatch, that the whole fix is a recorded number and names the
+      // script that writes it. The strike ratio is unchanged either way.
+      const repair = recordableRatchetRepairFor(pr);
+      if (repair) {
+        const how = repair.map((r) => `npm run ${r}`).join(" && ");
+        const taken = policy.recordableRatchetRepairEnabled === true;
+        return (
+          `${base} — every red check is a RECORDABLE ratchet whose remedy is a recorded number (${how}) — ` +
+          (taken
+            ? "repairing deterministically instead of spending a fix round"
+            : `deterministic repair is available but DISABLED (recordableRatchetRepairEnabled) — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`)
+        );
+      }
+      return `${base} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`; // W1-T2504: "red" is byte-identical; else names the specific check.
+    },
   },
   {
     // W1-T1269 — AN EARLIER STOP, NEVER A LONGER LEASH. Ordered after row 4 (a PR at the cap
@@ -2860,6 +2943,17 @@ export interface SweepDeps {
   dispatchFix: (
     pr: OpenPrView,
     evidence: FixDispatchEvidence,
+  ) => boolean | void | Promise<boolean | void>;
+  /** W1-T2998 — repair a red RECORDABLE ratchet by re-running its generator and pushing the result,
+   *  instead of spending an LLM fix round on a number the failing script already printed. Consulted
+   *  ONLY when {@link SweepPolicy.recordableRatchetRepairEnabled} is true AND
+   *  {@link recordableRatchetRepairFor} admitted every red check. Returns whether it actually
+   *  repaired: ANY falsy answer falls through to {@link dispatchFix}, so a refusal inside the
+   *  executor costs the PR nothing but a pass. Absent by construction in every caller that has not
+   *  opted in, which is why the disabled path is the shipped one. */
+  repairRecordableRatchet?: (
+    pr: OpenPrView,
+    scripts: readonly string[],
   ) => boolean | void | Promise<boolean | void>;
   /** Escalate a BLOCKED-AMBIGUOUS PR. `question` is the rung's rendered
    *  {@link ClarificationQuestion}: the real wiring logs it to the §2 backlog AND uses `escalate()`
@@ -4393,6 +4487,38 @@ export async function runSweep(
                 acted = false;
                 standDownReason = terminalStandDown;
                 break;
+              }
+              // W1-T2998 — THE DETERMINISTIC REPAIR IS TRIED FIRST, AND ONLY UNDER THREE CONDITIONS
+              // AT ONCE: the operator enabled it, an executor was injected, and every red required
+              // check resolved to a registry-declared generator. Placed AFTER the terminal-state
+              // pre-flight above and BEFORE `claimFixDispatch` below — ORDER IS LOAD-BEARING: a
+              // repair that breaks out AFTER the claim leaks it, because the claim is released by
+              // `fixClaim.run` and a repaired PR never reaches that call. Measured as five tests
+              // that then saw ZERO dispatches for an unrelated task sharing the claim key.
+              //
+              // ⚠ ANY FALSY ANSWER FALLS THROUGH TO THE ORDINARY DISPATCH. The executor refuses on
+              // anything it did not expect — an unexpected changed path, no change at all, a failed
+              // push — and a refusal must cost the PR nothing but this pass. Never a stand-down:
+              // the fix rung is still the right instrument when the cheap repair declined.
+              const ratchetScripts =
+                policy.recordableRatchetRepairEnabled === true && deps.repairRecordableRatchet
+                  ? recordableRatchetRepairFor(pr)
+                  : undefined;
+              if (ratchetScripts && deps.repairRecordableRatchet) {
+                const repaired = await deps.repairRecordableRatchet(pr, ratchetScripts);
+                if (repaired) {
+                  log("sweep.ratchet_repaired", {
+                    pr_number: pr.prNumber,
+                    head_sha: pr.headSha,
+                    scripts: ratchetScripts,
+                  });
+                  break;
+                }
+                log("sweep.ratchet_repair_declined", {
+                  pr_number: pr.prNumber,
+                  head_sha: pr.headSha,
+                  scripts: ratchetScripts,
+                });
               }
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
               // alone, without the fresh re-read it also performs, would not have stopped the

@@ -50,6 +50,8 @@ import {
   type SweepDeps,
   type SweepPolicy,
   type SupersessionVerdict,
+  recordableRatchetRepairFor,
+  recordableRatchetScripts,
 } from "../src/lib/sweep.js";
 import { REVIEW_ENGINE_REVISION, reviewInputDigest, reviewLedgerReasons, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
@@ -4731,4 +4733,136 @@ test("W1-T3027: every Disposition the union declares appears in the rendered lin
   const zeroes = Object.fromEntries(all.map((d) => [d, 0])) as Record<Disposition, number>;
   const line = renderSweepSummary(summaryWith(zeroes, 0));
   for (const d of all) assert.match(line, new RegExp(`${d} 0`), `${d} must be rendered`);
+});
+
+// ══════════ W1-T2998: a red ratchet whose remedy is a RECORDED NUMBER ══════════════════════════
+// MEASURED at filing: of eight fleet builds, seven ended blocked_ci; FOUR needed nothing but a
+// recorded number and each cost a full LLM fix round to write a line the failing script printed.
+
+/** A PR red on exactly the checks named, nothing else. */
+function ratchetRedPr(checks: string[], over: Partial<OpenPrView> = {}): OpenPrView {
+  // Carries BOTH carriers the classifier unions, and `ciFailures` is what the ci-log dispatch path
+  // itself consumes — a fixture with only `redRequiredChecks` routes to blocked-fixable but never
+  // reaches `dispatchFix`, so the fall-through rows below would pass vacuously.
+  return pr({
+    prNumber: 4330,
+    prUrl: "url/4330",
+    taskId: "W1-TR",
+    // A UNIQUE head, and it is load-bearing: claimFixDispatch dedups per (task, head) across the
+    // whole process, and this file's default `aaaa111` has already been claimed by earlier tests.
+    // Sharing it made every fall-through row below pass vacuously with ZERO dispatches.
+    headSha: "ratchet-head-1",
+    reviewState: "failure",
+    checksState: "red",
+    redRequiredChecks: checks,
+    ciFailures: checks.map((name) => ({ name, logTail: `${name}: BLOCKED -- record it in the baseline` })),
+    ...over,
+  });
+}
+
+/** `fakeDeps` with a RECORDING logger: `runSweep`'s `log` is `deps.log ?? (() => {})`, so a step it
+ *  emits is invisible to a test that does not inject one — the ledger file carries only the rows
+ *  the sweep writes itself. */
+function ratchetDeps(overrides: Partial<SweepDeps> = {}) {
+  const steps: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const deps = fakeDeps({ log: (step, extra) => { steps.push({ step, extra }); }, ...overrides });
+  return Object.assign(deps, { steps });
+}
+
+test("W1-T2998: a recordable ratchet failure is repaired without dispatching a worker", async () => {
+  const repaired: Array<{ pr: number; scripts: readonly string[] }> = [];
+  const deps = ratchetDeps({
+    repairRecordableRatchet: (p2, scripts) => { repaired.push({ pr: p2.prNumber, scripts }); return true; },
+  });
+  await runSweep([ratchetRedPr(["comment-load-ratchet", "source-size"])], deps, {
+    ...DEFAULT_SWEEP_POLICY,
+    recordableRatchetRepairEnabled: true,
+  });
+  assert.deepEqual(repaired, [{ pr: 4330, scripts: ["comment-load-ratchet", "source-size-ratchet"] }]);
+  assert.deepEqual(deps.fixed, [], "a repaired ratchet must NOT also spend a fix dispatch");
+  assert.equal(deps.steps.filter((l) => l.step === "sweep.ratchet_repaired").length, 1, "the repair is ledgered so the digest can see it");
+});
+
+test("W1-T2998: a no-allowlist ratchet is refused and falls through to dispatch", async () => {
+  // negative-reachability and catch-erasure own NO baseline artifact, so they are absent from
+  // REGENERABLE_ARTIFACT_GENERATORS and the classifier cannot admit them. Their own text: a
+  // recorded number there BANKS the debt instead of paying it.
+  const repaired: number[] = [];
+  const deps = ratchetDeps({ repairRecordableRatchet: (p2) => { repaired.push(p2.prNumber); return true; } });
+  await runSweep([ratchetRedPr(["negative-reachability-ratchet"])], deps, {
+    ...DEFAULT_SWEEP_POLICY,
+    recordableRatchetRepairEnabled: true,
+  });
+  assert.deepEqual(repaired, [], "a no-allowlist ratchet must never be auto-recorded");
+  assert.equal(deps.fixed.length, 1, "and it must still reach the fix rung");
+});
+
+test("W1-T2998: an unrecognised gate failure falls through to dispatch", async () => {
+  const repaired: number[] = [];
+  const deps = ratchetDeps({ repairRecordableRatchet: (p2) => { repaired.push(p2.prNumber); return true; } });
+  await runSweep([ratchetRedPr(["some-future-gate"])], deps, {
+    ...DEFAULT_SWEEP_POLICY,
+    recordableRatchetRepairEnabled: true,
+  });
+  assert.deepEqual(repaired, [], "an unrecognised shape is never guessed at");
+  assert.equal(deps.fixed.length, 1);
+});
+
+test("W1-T2998 (falsifier): ALL-OR-NOTHING — one unrecognised red refuses the whole set", async () => {
+  // Recording the recordable half would leave the other red, spend a push, and still need the fix
+  // rung, while making the PR look attended to.
+  const repaired: number[] = [];
+  const deps = ratchetDeps({ repairRecordableRatchet: (p2) => { repaired.push(p2.prNumber); return true; } });
+  await runSweep([ratchetRedPr(["comment-load-ratchet", "catch-erasure-ratchet"])], deps, {
+    ...DEFAULT_SWEEP_POLICY,
+    recordableRatchetRepairEnabled: true,
+  });
+  assert.deepEqual(repaired, []);
+  assert.equal(deps.fixed.length, 1);
+});
+
+test("W1-T2998 (falsifier): the executor DECLINING costs the PR nothing but a pass", async () => {
+  // Any falsy answer falls through to the ordinary dispatch — never a stand-down.
+  const deps = ratchetDeps({ repairRecordableRatchet: () => false });
+  await runSweep([ratchetRedPr(["comment-load-ratchet"])], deps, {
+    ...DEFAULT_SWEEP_POLICY,
+    recordableRatchetRepairEnabled: true,
+  });
+  assert.equal(deps.fixed.length, 1, "a declined repair must still reach the fix rung");
+  assert.equal(deps.steps.filter((l) => l.step === "sweep.ratchet_repair_declined").length, 1, "and the decline is visible rather than silent");
+});
+
+test("W1-T2998 (falsifier): DISABLED is the shipped default — no repair is taken, and the reason says so", async () => {
+  const repaired: number[] = [];
+  const deps = ratchetDeps({ repairRecordableRatchet: (p2) => { repaired.push(p2.prNumber); return true; } });
+  await runSweep([ratchetRedPr(["comment-load-ratchet"])], deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(repaired, [], "the shipped default must not write to a branch unattended");
+  assert.equal(deps.fixed.length, 1);
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.match(String(disposed[0].reason), /RECORDABLE ratchet/);
+  assert.match(String(disposed[0].reason), /npm run comment-load-ratchet/, "the remedy is named even when it may not be taken");
+  assert.match(String(disposed[0].reason), /DISABLED \(recordableRatchetRepairEnabled\)/);
+});
+
+test("W1-T2998: the admitted set is DERIVED from the artifact registry, never hand-listed", () => {
+  const admitted = recordableRatchetScripts();
+  assert.ok(admitted.has("comment-load-ratchet"));
+  assert.ok(admitted.has("source-size-ratchet"));
+  // Structural, not remembered: these own no baseline artifact, so they are absent from the
+  // registry and cannot be admitted by forgetting to exclude them.
+  assert.equal(admitted.has("negative-reachability-ratchet"), false);
+  assert.equal(admitted.has("catch-erasure-ratchet"), false);
+  // The --no-record twin regenerates nothing and must never match by substring.
+  assert.equal(admitted.has("source-size-signal"), false);
+  assert.equal(recordableRatchetRepairFor({ redRequiredChecks: ["source-size-signal"] } as never), undefined);
+});
+
+test("W1-T2998 (falsifier): nothing to record is not a repair — empty and dirty both decline", () => {
+  assert.equal(recordableRatchetRepairFor({ redRequiredChecks: [] } as never), undefined);
+  assert.equal(recordableRatchetRepairFor({} as never), undefined);
+  // A dirty PR runs no checks at all, so a red name on one is stale by construction.
+  assert.equal(
+    recordableRatchetRepairFor({ redRequiredChecks: ["comment-load-ratchet"], mergeState: "dirty" } as never),
+    undefined,
+  );
 });
