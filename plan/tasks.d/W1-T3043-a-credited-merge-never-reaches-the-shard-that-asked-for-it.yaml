@@ -1,0 +1,109 @@
+- id: W1-T3043
+  title: "253 SHARDS ON DISK READ `status: queued` WHILE CARRYING A DURABLE MERGED CREDIT, AND NOTHING CAN CLOSE THEM — the credit projection is the only completion signal and it is never written back, so every file-level reader (a human opening the YAML, `lint-plan`'s open-task set) sees a 1,120-task queue whose genuinely-unbuilt remainder is three; give the control plane the reconcile verb it is documented to have"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/plan-reconcile.ts, test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts]
+  origin: "operator-request#clean-task-list-2026-09-07"
+  plan_refs: ["W1-T150", "W1-T2794", "W1-T75"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LIFECYCLE HAS NO CLOSING WRITE, AND CLAUDE.md SAYS SO IN AS MANY WORDS: "The credit
+    projection is the ONLY completion signal; `status:` is what the FILING wrote and nothing updates
+    it on merge." It cites #2476 — "a whole build discarded on two signals that agreed", a deleted
+    head and a stale `status:` both reading "not done".
+
+    MEASURED 2026-09-07 across the live ledger and all rotations, deduped:
+      - 1,186 shards; 1,120 read `status: queued` (94%).
+      - 255 distinct task ids carry a durable `verdict: merged` ledger row.
+      - 254 of those are shards. 253 of the 254 STILL READ `queued`. Exactly ONE is marked.
+      - only 22 shards carry any `retirement:` at all.
+
+    ⚠ AND THE DISPLAY SURFACES ARE ALREADY CORRECT, WHICH NARROWS THIS TASK SHARPLY. `deriveStatus`
+    (src/lib/status.ts) returns `{status: "merged", merged: true}` on a granted credit, and the
+    board and console render THAT projection, not the raw field. `lint-plan` likewise already splits
+    its own count — "171 open failing (168 with a merged implementation, 3 with none)". So the
+    console is not lying and the linter is not confused. WHAT IS STALE IS THE FILE ON DISK, and its
+    readers are a human opening `plan/tasks.d/`, and any future tool that reads the plan without the
+    projection. That is the #2476 shape exactly, and it is the only harm this task may claim.
+
+    THIS IS NOT A SECOND COMPLETION SIGNAL. `src/lib/plan.ts`'s own header states the division of
+    labour — "the plan/tasks.yaml loader and validator, read-only — THE CONTROL PLANE FLIPS
+    `status`". A control-plane write is the documented design; there simply is no verb that performs
+    it. This task supplies the verb, and the projection stays the authority: the write is DERIVED
+    from it every time and never consulted in preference to it.
+  design: |
+    (i) A PURE RECONCILER IN A NEW MODULE, NOT A DAEMON RUNG. `src/lib/plan-reconcile.ts` exports a
+    pure function taking (shard text, task id, credited-merged predicate) and returning the new text
+    or `undefined` when nothing should change. No I/O in the pure core, so the whole decision table
+    is testable without a repo.
+
+    (ii) OPERATOR-INVOKED AND REVIEWABLE, NEVER AN UNATTENDED WRITE. The fleet must not rewrite plan
+    files on a poll: a daemon that mutates the plan produces uncommitted state in the canonical
+    checkout, or PR churn on 253 files, and W1-T2794 has just made the sweep act on merged credits
+    already. The reconcile emits a diff an operator lands as one plan-only PR. DEFAULT DRY-RUN.
+
+    (iii) ONE-WAY ONLY, AND THAT IS THE SAFETY PROPERTY. `queued` -> `merged` on a positive credit.
+    NEVER the reverse, never `merged` -> `queued`, never touching a shard that carries `retirement:`
+    or any status other than `queued`. An absent, unreadable or negative credit leaves the shard
+    BYTE-IDENTICAL — a failed projection is indistinguishable from "not merged", and the safe
+    reading is to do nothing.
+
+    (iv) IT EDITS ONE FIELD AND NOTHING ELSE. Not `attempts:`, not the note, not a criterion — a
+    criterion edit here would trip Standing rule 15 on a 253-file diff. Assert byte-identity of the
+    rest of the shard, not merely that the status line changed.
+
+    (v) `merged`, NOT `done`. Both are legal in `TASK_STATUSES`, and `merged` is the word the
+    projection and the ledger verdict already use; introducing `done` here would add a third
+    vocabulary for one fact.
+  acceptance:
+    - claim: "a queued shard with a positive merged credit is rewritten to status: merged, with every other byte unchanged"
+      proof: "unit test: test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts"
+    - claim: "an absent, unreadable or negative credit leaves the shard byte-identical, so a failed projection can never mark a task done"
+      proof: "unit test: test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts"
+    - claim: "a shard that is already merged, blocked, or carries a retirement is never rewritten, and the reconcile is one-way"
+      proof: "unit test: test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts"
+    - claim: "the reconciler edits the status field alone: no acceptance criterion, note or attempts value moves"
+      proof: "unit test: test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts"
+  falsifier: |
+    THE ONE-WAY PROPERTY IS WHAT A RECONCILER CAN BREAK. Assert the reverse direction is impossible:
+    a shard reading `merged` with a NEGATIVE credit must not be rewritten to `queued`. If the
+    function is symmetric, a GitHub outage that reads every task as uncredited would silently reopen
+    the whole plan, which is far worse than the staleness being fixed.
+
+    AND DARKNESS MUST BE INERT. Assert that an undefined credit, a throwing predicate and a shard
+    whose id does not resolve each return "no change" rather than defaulting either way.
+
+    PROVE IT LOAD-BEARING: with the credited-merged guard forced true, the byte-identity and
+    already-merged rows must redden while the happy path stays green. A reconciler that rewrites
+    everything passes a test that only checks the happy path.
+  note: |
+    FILED 2026-09-07 on operator direction ("wire the closing write"), after a measurement pass that
+    NARROWED the original complaint. The operator's stated goal was a clean and clear task list; the
+    honest finding is that the CONSOLE was never unclear — `deriveStatus` already projects `merged`
+    and the board renders it — and that `lint-plan` already names the true remainder as three tasks.
+    Only the on-disk shard is stale. This task is scoped to that surface and must not claim more.
+
+    THE ONE lint-plan WARNING IS DELIBERATE AND IS THE KNOWN GATE CONFLICT. `[call-site]` asks for
+    a `grep: <symbol>( in <caller>` proof because this task creates a new module. That form CANNOT
+    be used: `remudero-review` EXECUTES a grep proof at review time, and on a not-yet-built task the
+    symbol does not exist, so it grades `executed_fail` — which overrides keyword coverage and fails
+    the PR outright. A `unit test:` proof naming a path this shard declares grades `not_yet_built`
+    instead, which the reviewer states is "not a failure". W1-T2716's own shard MEASURED both sides
+    of this exact trade: with the grep criterion lint-plan is silent and the review FAILS; with the
+    unit-test form the review passes and lint-plan warns ONCE. Taking the warning is the correct
+    side, and the wiring requirement is not waived — criterion 1 still demands the reconciler
+    actually rewrite a shard, asserted through the function rather than through a grep.
+
+    NOT A DAEMON RUNG, ON PURPOSE — see design (ii). W1-T2794 (in flight at filing) already teaches
+    the sweep to act on the merged credit for OPEN PRS; this is the plan-file half and belongs to an
+    operator-run verb, not to a poll loop.
+
+    risk:high — one field, one direction, no I/O in the core. The band is set by the blast radius of
+    getting the DIRECTION wrong: a symmetric reconciler run during a GitHub outage would reopen
+    every completed task in the plan. Design (iii) and the first falsifier arm exist for that.
