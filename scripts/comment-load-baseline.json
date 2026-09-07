@@ -35,6 +35,7 @@
   "hooks/deny-floor.sh": 60,
   "hooks/mkdtemp-allowlist.txt": 0,
   "hooks/pre-commit": 22,
+  "hooks/pre-push": 250,
   "scripts/acceptance-author-gate.mjs": 98,
   "scripts/assertion-discrimination-baseline.json": 0,
   "scripts/assertion-discrimination-check.mjs": 58,
