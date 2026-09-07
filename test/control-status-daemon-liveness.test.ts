@@ -199,11 +199,13 @@ function harness() {
   const pauseBtn = fakeButton();
   const resumeBtn = fakeButton();
   const stopBtn = fakeButton();
+  const quietHours = { checked: false, disabled: false, title: "" };
   const controlsStatus = { textContent: "" };
   const elements: Record<string, unknown> = {
     "pause-btn": pauseBtn,
     "resume-btn": resumeBtn,
     "stop-btn": stopBtn,
+    "quiet-hours": quietHours,
     "drain-now-btn": null, // never mounted in this sandbox -- applyControlStatus must tolerate that
     "controls-status": controlsStatus,
   };

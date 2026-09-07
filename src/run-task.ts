@@ -1048,6 +1048,7 @@ import {
   clearKick,
   consumeDrainNow,
   consumeStop,
+  isQuietHours,
   pauseDetail,
   pendingKicks,
   realSharedPauseGitDeps,
@@ -4860,7 +4861,14 @@ export function openTaskIdsFromPlan(plan: Plan, projection?: ReadonlyMap<string,
 
 interface GateOutcome {
   merged: boolean;
+  verdict?: "awaiting_merge" | "blocked_ci";
   reason: string;
+  headSha?: string;
+  checks?: string[];
+}
+
+function rollupCheckSummary(rollup: RollupEntry[] | undefined): string[] {
+  return (rollup ?? []).map((c) => `${c.name ?? c.context ?? "unknown"}:${c.conclusion ?? c.status ?? c.state ?? ""}`);
 }
 
 /**
@@ -5000,25 +5008,44 @@ export async function pollToGate(
     const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
     const state = prStateFromRest(row);
     if (state === "MERGED") return { merged: true, reason: "checks green" };
-    if (state === "CLOSED") return { merged: false, reason: "pr closed" };
+    if (state === "CLOSED") return { merged: false, verdict: "blocked_ci", reason: "pr closed" };
     const sha = mapRestPr(row).headRefOid;
     const roll = await restRollupFor(owner, repo, sha, read);
+    const checks = rollupCheckSummary(roll);
     const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
     if (red) {
-      log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown" });
-      return { merged: false, reason: `required check red: ${red.name ?? red.context ?? "unknown"}` };
+      log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown", head_sha: sha, checks });
+      return {
+        merged: false,
+        verdict: "blocked_ci",
+        reason: `required check red: ${red.name ?? red.context ?? "unknown"}`,
+        headSha: sha,
+        checks,
+      };
     }
     readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
     if (stall.stalled) {
-      log("pr.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
+      const verdict = stall.pending.length === 0 ? "awaiting_merge" : "blocked_ci";
+      const reason =
+        stall.pending.length > 0
+          ? `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
+          : `all observed checks terminal green for ${STALL_WINDOW} consecutive polls; awaiting GitHub merge`;
+      log("pr.stalled", {
+        pending: stall.pending,
+        identicalPolls: STALL_WINDOW,
+        verdict,
+        reason,
+        head_sha: sha,
+        checks,
+      });
       return {
         merged: false,
-        reason:
-          stall.pending.length > 0
-            ? `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
-            : `no progress for ${STALL_WINDOW} consecutive polls`,
+        verdict,
+        reason,
+        headSha: sha,
+        checks,
       };
     }
       // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
@@ -5029,7 +5056,7 @@ export async function pollToGate(
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
         state,
-        checks: roll.map((c) => `${c.name ?? c.context}:${c.conclusion ?? c.status ?? c.state}`),
+        checks,
       });
     }
     // W1-T463: see `waitForCiGreen`'s note — a timer, not a blocking child process.
@@ -14822,18 +14849,21 @@ async function runTask(
       return { taskId, runId, prUrl, merged: true, costUsd, verdict: "merged" };
     }
 
-    // Blocked: leave the PR open (auto-merge stays armed; it will land later if
-    // the check goes green) and the worktree for post-mortem.
+    // Blocked or awaiting merge: leave the PR open (auto-merge stays armed; it will land later if
+    // GitHub materializes it) and the worktree for post-mortem.
+    const terminalVerdict = outcome.verdict ?? "blocked_ci";
     log("verdict", {
-      verdict: "blocked_ci",
+      verdict: terminalVerdict,
       pr_url: prUrl,
       reason: outcome.reason,
+      ...(outcome.headSha ? { head_sha: outcome.headSha } : {}),
+      ...(outcome.checks ? { checks: outcome.checks } : {}),
       cost_usd: costUsd,
       billing_mode: billingMode(impl.childEnvKeys),
       account_label: impl.accountLabel,
     });
-    say(`verdict: blocked_ci (${outcome.reason}) — PR left OPEN: ${prUrl}`);
-    return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
+    say(`verdict: ${terminalVerdict} (${outcome.reason}) — PR left OPEN: ${prUrl}`);
+    return { taskId, runId, prUrl, merged: false, costUsd, verdict: terminalVerdict };
   } catch (err) {
     // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
     // and return a terminal verdict rather than falling through to the generic `run.error` +
@@ -18287,7 +18317,7 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
 }
 
 /**
- * `rmd census-membership [--base <ref>]` — W1-T2969: which population-walking suites does this diff
+ * `rmd census-membership [--base <ref>] [--files]` — W1-T2969: which population-walking suites does this diff
  * enter? `censusSuiteMembership` has answered that since W1-T2523 and nothing could ask it.
  * MEASURED 2026-09-06: four census-baseline CI failures across #4283/#4290, none naming a symbol
  * either diff touched, so the mandated caller sweep was blind to all four with the rule in context
@@ -18298,7 +18328,7 @@ export function censusMembershipCommand(
   rest: string[],
   deps: { repoRoot?: string; spawn?: PreflightSpawn; changedPaths?: readonly string[] } = {},
 ): number {
-  const badArg = unknownArgError("census-membership", rest, ["--base"], []);
+  const badArg = unknownArgError("census-membership", rest, ["--base"], ["--files"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -18330,6 +18360,29 @@ export function censusMembershipCommand(
   }
 
   const report = censusSuiteMembershipFor(changed, root, deps.spawn ?? defaultPreflightSpawn);
+  if (rest.includes("--files")) {
+    // W1-T3059 — ONE PREDICATE, NEVER TWO. The pre-push hook that RUNS these suites reads this
+    // list; it does not carry its own copy of the table. A second copy is the drift this repo has
+    // already paid for once (rule15-precheck imports the reviewer's own predicate for the same
+    // reason), and a hook whose table lags the model refuses the wrong diffs, silently.
+    const byJob = new Map(CENSUS_MEMBERSHIP_SUITES.map((s) => [s.job, s.testFile] as const));
+    const files = new Set<string>();
+    for (const e of report.entries) {
+      for (const suite of e.suites) {
+        const file = byJob.get(suite);
+        // A suite the table cannot map is NAMED, never dropped: silently shortening the list is
+        // how a caller comes to run a subset and read its pass as covering the whole set.
+        if (file === undefined) console.error(`unmapped: ${suite}`);
+        else files.add(file);
+      }
+    }
+    for (const file of [...files].sort()) console.log(file);
+    // STDOUT stays a clean file list a caller can splice; INCOMPLETENESS goes to stderr, so a
+    // partial enumeration cannot be mistaken for a complete one. An unmodelled census is a suite
+    // this diff may join and this cannot run — the caller must say so rather than imply coverage.
+    for (const unknown of report.unknownCoverage) console.error(`unmodelled: ${unknown}`);
+    return 0;
+  }
   console.log(`rmd census-membership — ${changed.length} changed path(s) against ${base}`);
   const joining = report.entries.filter((e) => e.suites.length > 0);
   if (joining.length === 0) {
@@ -20496,6 +20549,123 @@ export function creditedProofVisibility(
  * resolver): ~207ms per name-filtered proof — acceptable for an operator running this by hand,
  * which is the only place it is wired; nothing in the daemon/CI/arm path calls it.
  */
+/** Injectable seams for {@link planReconcileCommand} — every one has a real default, so the CLI
+ *  path stays argument-free while a test drives the whole verb without a repo, a plan or GitHub. */
+export interface PlanReconcileDeps {
+  /** Every shard on disk, as `{ taskId, path, text }`. */
+  readShards?: () => Array<{ taskId: string; path: string; text: string }>;
+  writeShard?: (path: string, text: string) => void;
+  /** The task ids the CREDIT PROJECTION reports merged. The real default reuses
+   *  `buildCreditCandidates` — the SAME projection the sweep's credit rung already trusts, never a
+   *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
+  creditedMergedIds?: () => Set<string>;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/** Read `plan/tasks.d/*.yaml` as `{ taskId, path, text }`, skipping anything without an `- id:`. */
+function readPlanShards(dir: string): Array<{ taskId: string; path: string; text: string }> {
+  const out: Array<{ taskId: string; path: string; text: string }> = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".yaml")) continue;
+    const path = join(dir, name);
+    const text = readFileSync(path, "utf8");
+    const id = text.match(/^- id: (\S+)/m)?.[1];
+    if (id) out.push({ taskId: id, path, text });
+  }
+  return out;
+}
+
+/**
+ * `rmd plan-reconcile [--plan <path>] [--write]` — flip `status: queued` to `merged` on every shard
+ * the credit projection reports merged. THE CONTROL-PLANE WRITE lib/plan.ts's own header says
+ * belongs here: that loader is "read-only — the control plane flips `status`", and until this verb
+ * nothing performed the flip. MEASURED at filing: 253 of 254 credited-merged shards still read
+ * `queued`.
+ *
+ * ⚠ DRY RUN BY DEFAULT. It prints what it would change and touches nothing without `--write`, and
+ * the two share ONE decision path ({@link reconcilePlan} is pure and returns the writes), so a
+ * preview cannot disagree with the apply.
+ *
+ * ⚠ IT DOES NOT COMMIT. The operator lands the result as one reviewable plan-only PR. A poll loop
+ * that rewrote plan files would leave uncommitted state in the canonical checkout or churn 253
+ * files (W1-T3043 design ii), which is why this is a verb and not a sweep rung.
+ *
+ * ⚠ AN UNREADABLE PROJECTION ABORTS, IT DOES NOT PROCEED. Treating a failed credit read as "nothing
+ * merged" would be silently correct here (the reconciler declines on a false credit), but it would
+ * report "0 to reconcile" as if it were a finding. Exit non-zero and say so instead.
+ */
+export async function planReconcileCommand(rest: string[], deps: PlanReconcileDeps = {}): Promise<number> {
+  const badArg = unknownArgError("plan-reconcile", rest, ["--plan"], ["--write"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const write = rest.includes("--write");
+  const shardDirArg = flagValue(rest, "--plan");
+  const shardDir = shardDirArg !== undefined ? resolve(shardDirArg) : join(repoRoot, "plan", "tasks.d");
+
+  let shards: Array<{ taskId: string; path: string; text: string }>;
+  try {
+    shards = (deps.readShards ?? (() => readPlanShards(shardDir)))();
+  } catch (e) {
+    console.error(`### rmd plan-reconcile: cannot read shards from ${shardDir}: ${String((e as Error)?.message ?? e)}`);
+    return 2;
+  }
+
+  let credited: Set<string>;
+  try {
+    credited = (deps.creditedMergedIds ?? (() => defaultCreditedMergedIds()))();
+  } catch (e) {
+    console.error(
+      `### rmd plan-reconcile: the credit projection is unreadable (${String((e as Error)?.message ?? e)}) — ` +
+        "refusing to report a reconcile count derived from a failed read",
+    );
+    return 1;
+  }
+
+  const { summary, writes } = reconcilePlan(shards, (id) => credited.has(id));
+  if (write) {
+    const byId = new Map(shards.map((sh) => [sh.taskId, sh.path]));
+    const put = deps.writeShard ?? ((p: string, t: string) => writeFileSync(p, t));
+    for (const w of writes) {
+      const path = byId.get(w.taskId);
+      if (path) put(path, w.text);
+    }
+  }
+  (deps.log ?? (() => {}))("plan.reconcile", {
+    mode: write ? "write" : "dry-run",
+    rewritten: summary.rewritten.length,
+    skipped: summary.skipped,
+  });
+  console.log(renderPlanReconcile(summary, write));
+  return 0;
+}
+
+/** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses. */
+function defaultCreditedMergedIds(): Set<string> {
+  const config = loadConfig();
+  const ledgerPath = ledgerPathFor(config);
+  const self = resolveOwnerRepo();
+  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  return new Set(
+    buildCreditCandidates(self.owner, self.repo, plan, ledgerPath).filter((c) => c.merged).map((c) => c.taskId),
+  );
+}
+
+/** The operator-facing summary. Names the mode FIRST, so a dry run can never be misread as applied. */
+export function renderPlanReconcile(summary: ReconcileSummary, write: boolean): string {
+  const skipped = Object.entries(summary.skipped)
+    .filter(([, n]) => n > 0)
+    .map(([k, n]) => `${k}=${n}`)
+    .join(" · ");
+  return (
+    `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
+    `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
+    (skipped ? `\nskipped: ${skipped}` : "") +
+    (summary.rewritten.length > 0 && !write ? "\nre-run with --write to apply, then land the diff as one plan-only PR" : "")
+  );
+}
+
 export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAuditDeps = {}): Promise<number> {
   const badArg = unknownArgError("proof-queue-audit", rest, ["--plan"], ["--credited"]);
   if (badArg) {
@@ -27205,6 +27375,8 @@ export async function daemonCommand(
         // 23-open-PR incident): the SAME `openPrCount` closure just defined above, never a second
         // GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
+        checkQuietHours: () =>
+          isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
         // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an
@@ -39099,6 +39271,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "§5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing",
   },
   {
+    name: "plan-reconcile",
+    syntax: "rmd plan-reconcile [--plan <path>] [--write]",
+    summary: "Flip status: queued to merged on shards the credit projection reports merged.",
+    detail: "W1-T3043: the control-plane write lib/plan.ts's header says belongs here — that loader is read-only and 'the control plane flips status', and until this verb nothing performed the flip, so 253 of 254 credited-merged shards still read queued. ONE-WAY (queued -> merged, never the reverse: a symmetric reconcile during a GitHub outage would reopen the whole plan) and DRY RUN by default; --write applies, and the two share one pure decision path so a preview cannot disagree with the apply. Reuses buildCreditCandidates, the same projection the sweep's credit rung trusts. A retirement is never overwritten, a negative/absent/throwing credit leaves the shard byte-identical, and only the status field moves. IT DOES NOT COMMIT: the operator lands the result as one plan-only PR.",
+  },
+  {
     name: "proof-queue-audit",
     syntax: "rmd proof-queue-audit [--plan <path>]",
     summary: "Report every open task's acceptance proof that can never resolve, split by cause.",
@@ -39175,9 +39353,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "census-membership",
-    syntax: "rmd census-membership [--base <ref>]",
+    syntax: "rmd census-membership [--base <ref>] [--files]",
     summary: "Name the population-walking census suites this diff enters.",
-    detail: "W1-T2969: the answer censusSuiteMembership (W1-T2523) has always been able to give and nothing could ask for. A census suite WALKS a population and asserts a property of the whole set, so it names none of a caller's symbols and `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is structurally blind to it. MEASURED 2026-09-06: four CI failures across #4283 and #4290 were census baselines, and a correctly-run symbol sweep found none of them. Models both halves: the fast-gate census members, DERIVED from CENSUS_ADMITTED_MEMBERS, and the registry-shaped suites (the COMMANDS name list, the policy key set, the source-text-read ratchet) that are not fast-gate members and must not become them. A suite the model cannot place is NAMED as unmodelled rather than dropped, so 'joins nothing' is never confused with 'the model does not know'. REPORT-ONLY: runs no suite, gates nothing, exits 0 whatever it finds.",
+    detail: "W1-T2969: the answer censusSuiteMembership (W1-T2523) has always been able to give and nothing could ask for. A census suite WALKS a population and asserts a property of the whole set, so it names none of a caller's symbols and `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is structurally blind to it. MEASURED 2026-09-06: four CI failures across #4283 and #4290 were census baselines, and a correctly-run symbol sweep found none of them. Models both halves: the fast-gate census members, DERIVED from CENSUS_ADMITTED_MEMBERS, and the registry-shaped suites (the COMMANDS name list, the policy key set, the source-text-read ratchet) that are not fast-gate members and must not become them. A suite the model cannot place is NAMED as unmodelled rather than dropped, so 'joins nothing' is never confused with 'the model does not know'. REPORT-ONLY: runs no suite, gates nothing, exits 0 whatever it finds. `--files` emits the same membership as the bare TEST FILE PATHS on stdout, one per line, so a caller can run them without carrying a second copy of the table; incompleteness (an unmodelled or unmappable suite) is named on stderr, never folded into the list, because a caller that cannot tell a partial enumeration from a complete one reads its own subset pass as covering the whole set.",
   },
   {
     name: "ci-learning",
@@ -39559,6 +39737,7 @@ function commandSyntax(name: string): string {
 // (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
+import { reconcilePlan, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 export { hashInstallInputs, installHashMarkerPath };
 
@@ -40093,6 +40272,10 @@ export async function main(
     process.exit(await lintPlanCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await proofQueueAuditCommand(rest)) cannot carry a DA hit without forking the process; proofQueueAuditCommand's own logic — arg validation, the open+unmerged population derivation, and the report render — is unit-tested in test/proof-queue-audit.test.ts (same irreducible-glue shape as the sibling lint-plan/emissions dispatch cases).
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await planReconcileCommand(rest)) cannot carry a DA hit without forking the process; planReconcileCommand's own logic is unit-tested in test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts (same irreducible-glue shape as the sibling proof-queue-audit dispatch case below).
+  if (cmd === "plan-reconcile") {
+    process.exit(await planReconcileCommand(rest));
+  }
   if (cmd === "proof-queue-audit") {
     process.exit(await proofQueueAuditCommand(rest));
   }

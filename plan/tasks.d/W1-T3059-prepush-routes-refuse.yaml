@@ -1,0 +1,96 @@
+- id: W1-T3059
+  title: "THE THREE PRE-PUSH ROUTES SHIPPED AS PROSE AND A PROSE RULE IS VIOLATED SILENTLY — census-membership, rule15-precheck and the ratchet contract all depend on a worker choosing to remember them, while spawnWorker already sets core.hooksPath on every worktree it makes: give the routes a refusal, behind a switch that ships OFF"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    (1) THE GAP, IN THE FILE'S OWN WORDS. Three checks shipped recently and not one of them can
+    refuse anything: `rmd census-membership` (W1-T2969) is REPORT-ONLY by contract, `rule15-precheck`
+    exits 1 but nothing runs it, and the ratchet-recording contract is a comment. CLAUDE.md's header
+    states the consequence without hedging: a rule stated ONLY in prose "can be violated silently and
+    repeatedly, which is why several of these bullets exist at all", and its standing instruction is
+    that when such a rule turns out to matter, "the fix is to make something refuse it -- file the
+    task; do not sharpen the wording and call it closed."
+
+    (2) THE MEASURED POPULATION IS THE CENSUS FAMILY. A census suite WALKS a population and asserts a
+    property of the whole set, so it names none of a caller's symbols and the mandated
+    `git grep -l <symbol>` sweep is structurally blind to it (CLAUDE.md clause (j)). MEASURED
+    2026-09-06 and recorded on W1-T2969: four census-baseline CI failures across #4283 and #4290,
+    and a correctly-run symbol sweep found NONE of them. These are precisely the failures an author
+    cannot reach by being careful.
+
+    (3) WHY THE HOOK ROUTE IS CHEAP NOW AND WAS NOT WHEN IT WAS LAST WEIGHED. W1-T221 considered a
+    git hook and deferred it, recording that "this repo currently ships no git hooks at all
+    (.git/hooks holds only samples, and hooks/deny-floor.sh is a worker sandbox tool, not a git
+    hook), so the hook route carries install machinery this task would also owe. Prefer the verb if
+    the hook's install path is not cheap." THAT RECORD IS NOW STALE, and the staleness is the whole
+    reason this is buildable: `hooks/commit-msg` and `hooks/pre-commit` both ship, and `spawnWorker`
+    (`src/lib/worker.ts`) runs `git config core.hooksPath hooks` on every worktree it creates. The
+    install machinery W1-T221 declined to owe is already built and already paid for. A file dropped
+    into `hooks/` reaches every worker with no new machinery at all.
+
+    (4) WHICH IS ALSO THE BLAST RADIUS, AND IT DECIDES THE SHAPE. Being picked up automatically by
+    every worker means a defect here does not redden one PR -- it stops the fleet pushing. So the
+    switch is the design, not a caveat: with `RMD_PREPUSH_GATES` unset the hook exits 0 before it
+    touches a file, a repo or a subprocess, and turning it on is a separate, watched decision. That
+    is the same shape as the ci-learning cadence switch (W1-T3052/#4459) and for the same reason.
+
+    (5) ONE PREDICATE, NEVER TWO. The hook does not carry its own copy of the census table; it reads
+    `rmd census-membership --files`, a new mode emitting the SAME membership as bare test-file paths.
+    A second copy is drift this repo has already paid for once, which is why `rule15-precheck`
+    imports the reviewer's own `criterionFieldTampered` rather than reimplementing it.
+
+    (6) EVERY ABSENCE IS NAMED RATHER THAN READ AS A PASS. A missing entry point is "skipped, NOT
+    passed"; rule15-precheck's exit 2 is honoured as an unreadable diff and does NOT block, because a
+    bound that fires on a healthy condition is this repo's recurring defect; a diff joining no
+    modelled census says so; and the count of suites the model cannot place is printed on every armed
+    run, so a partial enumeration can never be mistaken for coverage. That count is 119 at this head
+    -- COUNTED and not echoed, because 119 stderr lines per push is how a check earns its way into
+    being switched off.
+
+    (7) TWO REAL DEFECTS FOUND BY RUNNING IT ON ITS OWN DIFF, both recorded here because they are the
+    evidence the gate works rather than merely exists. The armed hook REFUSED this task's own first
+    push in 1.4 seconds, naming `docs/cli-reference.md` as stale against the COMMANDS registry this
+    task edits -- an invisible census failure that would otherwise have arrived as a red PR. And its
+    first runner used a bare `node --test`, under which `test/authority-ratchet.test.ts` reports a
+    failure it does not have (6/6 under the real invocation); a runner that manufactures failures is
+    worse than one that runs nothing, so the hook now uses package.json's own loaders and a test pins
+    that.
+
+    (8) A CONSTRAINT WORTH RECORDING, since it decides this shard's proofs and will decide the next
+    one's. A `grep:` proof cannot target `hooks/pre-push` at all: `grepProofTargetNamesNoFile`
+    (`src/lib/review.ts`) requires a `.` in the target's final path segment, and a git hook is
+    extensionless BY THE FORMAT -- git will not run `pre-push.sh`. `rmd check-proof` refuses both
+    such proofs with `parse: REFUSED`, which is the correct behaviour and not a defect to fix here.
+    Every claim about the hook's own behaviour is therefore proven BEHAVIOURALLY, by a test that
+    executes it, which is the stronger evidence anyway: the test runs the hook as a subprocess and
+    reads its exit code, rather than asserting that a phrase appears in a file.
+
+    ID PROVENANCE — RENUMBERED W1-T3057 -> W1-T3059 AFTER A COLLISION THIS FILING DID NOT CAUSE.
+    W1-T3057 was verified free at mint time, but open PR #4463 was mid-flight through the SAME
+    renumber under the same collision pressure (its own record documents two hops off W1-T3057
+    for this exact reason) and its PR body's prose mentions of "W1-T3057" register as a claim
+    under `task-id-existence`'s open-PR mention scan even though its declared plan id had already
+    moved on to W1-T3058. `rmd next-task-id --reserve` confirmed W1-T3059 free and reserved it
+    (`refs/rmd-id/W1-T3059`) before this record moved. ONLY the id line, filename and this note
+    change; acceptance and design are left byte-identical.
+
+  acceptance:
+    - claim: "the switch ships off, so an unset environment cannot block a push"
+      proof: "unit test: test/prepush-gates-refuse.test.ts"
+    - claim: "the hook can actually refuse a push when a check reports a violation"
+      proof: "unit test: test/prepush-gates-refuse.test.ts"
+    - claim: "an unreadable check is not treated as a violation"
+      proof: "unit test: test/prepush-gates-refuse.test.ts"
+    - claim: "the verb emits runnable test file paths so the hook carries no second copy of the table"
+      proof: "grep: byJob\\.get(suite) in src/run-task.ts"
+    - claim: "incompleteness is named rather than folded into the list a caller runs"
+      proof: "grep: unmodelled: in src/run-task.ts"
+  risk: high
+  origin: "session 2026-09-07 — recommendation (2) of the automation review; W1-T221's deferral record is stale"
+  plan_refs: ["W1-T221", "W1-T2969", "W1-T3052"]
+  files: [hooks/pre-push, src/run-task.ts, test/prepush-gates-refuse.test.ts, docs/cli-reference.md]
+  status: queued

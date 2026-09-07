@@ -15,7 +15,8 @@
     - test/a-filing-id-is-checked-against-work-in-flight.test.ts
   origin: "operator-session#four-id-collisions-in-one-evening-2026-09-07"
   plan_refs: ["W1-T2203", "W1-T1055", "W1-T2324", "W1-T509", "W1-T278"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     MEASURED 2026-09-06/07, FOUR COLLISIONS IN ONE EVENING ACROSS THREE LANES, EVERY ONE THE SAME
@@ -44,6 +45,35 @@
     main — by then the collision is merged and the repair is a renumber plus every inbound
     reference. `task-id-existence` resolves a TRAILER against the plan and says nothing about a
     newly ADDED id. `lint-plan` reads the plan, not GitHub. None of them can see an open PR.
+
+    ── CLOSED 2026-09-07: THE FALSIFIER ABOVE FIRED, AND HERE IS THE READING ───────────────────
+
+    This task's own falsifier says to close without implementation "if an existing gate already
+    refuses a newly added shard id that collides with an open PR's shard". One does.
+    `evaluateOpenPrIdCollisions` in scripts/task-id-existence-check.mjs (W1-T2324, Q3) refuses
+    exactly that and names the claiming PR by url; `evaluateAddedIdCollisions` covers the
+    already-on-main half; `addedIdsAtHead` judges only ADDED ids; an unreadable BASE already
+    refuses rather than passing clean. The `task-id-existence` job runs all of it on every PR.
+
+    THE DIAGNOSIS ABOVE WAS WRONG ON ONE POINT AND IT IS THE LOAD-BEARING ONE. This record says
+    "`task-id-existence` resolves a TRAILER against the plan and says nothing about a newly ADDED
+    id". That is false — it has judged added ids since W1-T2324 shipped. What is true, and what
+    this task was really detecting, is that the open-PR half has NEVER EXECUTED: it shells
+    `gh api` from the only `gh`-using job in ci.yml that passes no token, so it logs SKIPPED and
+    exits 0. MEASURED on this task's own filing PR (#4392, run 34118136551, job 101729656513,
+    head eb907a0b) — a PR that added three shards and so reached the half by construction — the
+    job printed "open-PR collision check SKIPPED -- could not read the open-PR list" and concluded
+    `success`.
+
+    So the defect is real and the remedy is not a new script. Building the
+    `scripts/filing-id-collision-check.mjs` this record specifies would place a second gate over
+    the identical surface, reading it through the identical uncredentialed `gh api` call.
+
+    CARRIED, NOT DROPPED. W1-T3058 wires the token and makes an unreadable surface REFUSE instead
+    of rendering as a clean gate — which is this record's own design (iv), the half that was never
+    the missing piece of code but is still the missing behaviour. The five acceptance criteria
+    below are preserved verbatim and unedited; W1-T3058 carries each one. Nothing here retires
+    anything else, and no criterion was rewritten to match a diff.
   design: |
     (i) ONE QUESTION, ASKED OF THE ONE SURFACE NOTHING ELSE READS: for each shard this PR ADDS,
     does its id also appear in a shard on another OPEN pull request? That is the in-flight

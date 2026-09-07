@@ -620,6 +620,12 @@
       "grepHint": "Mount Routing Probe — Deterministic Task-Class Routing (W1-T167)"
     },
     {
+      "path": "docs/proof-dialect.md",
+      "title": "The acceptance-proof dialect",
+      "summary": "Every acceptance criterion's `proof:` is EXECUTED by the reviewer against this grammar. This page renders it from the SAME constants the parser (`src/lib/revie…",
+      "grepHint": "The acceptance-proof dialect"
+    },
+    {
       "path": "docs/research/README.md",
       "title": "Recovered research artefacts",
       "summary": "Four agent-written reports, recovered and committed verbatim. They are dated artefacts: each records",

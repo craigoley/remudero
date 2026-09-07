@@ -1,0 +1,98 @@
+- id: W1-T3065
+  title: "THE TEMP SWEEP CANNOT SEE THE DEBRIS IT WAS BUILT FOR, AND NEVER RUNS WHERE THE OPERATOR WORKS — `sweepStaleTempDirs` skips every name not starting with `rmd-`, so the pre-W1-T2786 `remudero-*` dirs are unreapable BY CONSTRUCTION, and its only callers are daemon-boot rungs, so a machine with no daemon reclaims nothing: MEASURED 138 dirs and 11 GiB on the operator's Mac, which reached 100% full and blocked a session"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 15.00
+  files: [src/lib/tmp.ts, src/run-task.ts, test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts]
+  origin: "operator-session#disk-full-2026-09-07"
+  plan_refs: ["W1-T2786", "W1-T2775", "W1-T320"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07 ON THE OPERATOR'S MAC, which reached 100% of a 228 GiB volume and blocked an
+    agent session outright — every command failed at ENOSPC because the harness could not write its
+    own output file. Under `/private/tmp`: 138 directories, 11 GiB, named `remudero-task2802`,
+    `remudero-pr4388.hTdnyZ`, `remudero-w1-t3011.QDg17h`, dated 09-04 through 09-07. Nothing held
+    them open (`lsof` reported 0 handles).
+
+    (1) THE SWEEP CANNOT MATCH THEM. `sweepStaleTempDirs` (src/lib/tmp.ts) opens with
+    `if (!name.startsWith(RMD_TMP_PREFIX)) continue;` and `RMD_TMP_PREFIX = "rmd-"`. A `remudero-`
+    dir therefore fails the FIRST test in the loop and is never aged, never stat-ed, never removed.
+    Its own header calls it "the structural backstop for the 26,711-dir ENOSPC incident" — and it
+    is, for the prefix it knows. The debris measured above is the prefix it does not.
+
+    (2) THE PREFIX CHANGED AND THE REAPER DID NOT FOLLOW. `hooks/mkdtemp-allowlist.txt` still marks
+    `remudero-*` entries "pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending", so
+    the re-key is recorded and incomplete. W1-T2775 owns the CALLSITES (it migrates ~1015 of them,
+    `verify: human`, still queued); NOTHING owns the REAPER. Those are different halves: migrating
+    every callsite stops NEW legacy debris, and does nothing about the dirs already on disk or the
+    ones any not-yet-migrated callsite writes tomorrow.
+
+    (3) AND IT NEVER RUNS WHERE THIS WAS MEASURED. Both call sites are daemon rungs —
+    `src/run-task.ts:27006` (the boot sweep, reading `sweep.tmpMaxAgeMs` policy) and `:33861`
+    (`runTmpSweepRung` on the poll cadence). `bin/rmd` sweeps nothing and `main()` has no preamble
+    sweep. The fleet's daemon runs on the Azure box; the operator's Mac runs hand-invoked `rmd` and
+    no daemon, so on the machine that filled up the reaper has never executed once.
+
+    ⚠ WHY THE OBVIOUS SOURCE FOR THE PREFIX LIST IS THE WRONG ONE, MEASURED BEFORE PROPOSING. The
+    allowlist looks like the natural registry to derive from — one list, not two. It is not usable:
+    it carries 860 entries over 795 distinct prefixes, and the shortest are `acc-` and `kick-`.
+    Sweeping every allowlisted prefix would delete any 24-hour-old `/tmp/acc-*` or `/tmp/kick-*`
+    directory on the machine, whoever created it. The derived-registry instinct is right in general
+    and wrong here, and the measurement is what says so.
+  design: |
+    (i) ONE EXPLICIT LEGACY PREFIX, NOT A DERIVED SET. Add `LEGACY_TMP_PREFIXES = ["remudero-"]` —
+    the fleet's own pre-W1-T2786 prefix, 9 characters, unambiguous, and exactly the debris measured.
+    Match `RMD_TMP_PREFIX` OR a legacy prefix; every other guard (directory-only, age ceiling,
+    per-entry try/catch, best-effort throughout) stays untouched and applies to both.
+
+    (ii) THE AGE CEILING IS THE SAFETY PROPERTY AND IT DOES NOT MOVE. `DEFAULT_TEMP_SWEEP_MAX_AGE_MS`
+    stays 24h and the policy override (`sweep.tmpMaxAgeMs`, W1-T320) still wins. A legacy dir younger
+    than the ceiling is kept exactly as an `rmd-` one is — the widening is WHICH NAMES are
+    considered, never WHEN one is removed.
+
+    (iii) SWEEP ON THE HAND LANE TOO, ONCE PER INVOCATION, AND BOUND ITS COST. The reaper must run
+    where no daemon does. One `readdirSync(tmpdir())` plus a `statSync` per matching entry is the
+    whole cost, it is already best-effort and non-throwing, and it must stay that way: a CLI verb
+    that fails because a tmp sweep threw would be a far worse defect than the one being fixed.
+    MEASURE the added wall-clock in the test rather than asserting it is cheap.
+
+    (iv) NEVER WIDEN TO A BARE OR SHORT PREFIX. The rationale's measurement is the reason. Any future
+    addition to `LEGACY_TMP_PREFIXES` must be a fleet-owned, unambiguous prefix; the test must refuse
+    a member shorter than the shortest one shipped, so a careless addition of `acc-` fails loudly.
+  acceptance:
+    - claim: "a stale legacy-prefixed temp dir is reaped, and a fresh one is kept, on the same age rule as an rmd- dir"
+      proof: "unit test: test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts"
+    - claim: "an unrelated directory is never removed, whatever its age, and neither is a file"
+      proof: "unit test: test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts"
+    - claim: "the sweep runs once per CLI invocation on a machine with no daemon, and a failure inside it never fails the verb"
+      proof: "unit test: test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts"
+    - claim: "every shipped legacy prefix is long enough to be unambiguous, so a careless short addition is refused"
+      proof: "unit test: test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF THE SWEEP ALREADY REACHES THIS DEBRIS. Re-check both halves
+    before building: `grep -n "startsWith(RMD_TMP_PREFIX)" src/lib/tmp.ts` must still show the
+    single-prefix test, and `git grep -n "sweepStaleTempDirs(\|runTmpSweepRung(" -- src/` must still
+    show daemon-only callers. If either has moved, this was measured against a stale tree.
+
+    AND THE WIDENING MUST NOT BECOME A SHOTGUN. Assert directly that a directory named
+    `remudero-keep-me` is removed ONLY when older than the ceiling, that `acc-anything` is NEVER
+    removed at any age, and that a REGULAR FILE matching a swept prefix is left alone. A sweep that
+    passes its happy path while deleting a bystander is the failure this task would otherwise
+    introduce, and it is strictly worse than the disk filling.
+  note: |
+    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3065`.
+
+    THE 11 GiB ALREADY ON DISK IS NOT RECLAIMED BY THIS TASK AND CANNOT BE. Those dirs are owned by
+    the human account `craigoley` under a sticky `/private/tmp`, while the agent runs as
+    `craigoleyagent`; only that user or root can unlink them. This task stops the accumulation from
+    recurring — the existing debris needs one operator command.
+
+    risk:high is BLAST RADIUS, not size. The diff is small, but it grants a background sweep
+    permission to delete a NEW class of path, on a machine where the operator also keeps things in
+    /tmp. Design (iv) and the falsifier's bystander rows are the whole containment.

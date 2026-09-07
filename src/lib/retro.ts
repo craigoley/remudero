@@ -1577,7 +1577,9 @@ export function renderPlanHealth(report: PlanHealthReport): string {
  *  every non-merge terminal state EXCEPT the guard-fired classes, which catch a HOST condition —
  *  mining them would propose "decompose this task class" over a populated `~/.bashrc`. DATA, not
  *  hardcoded logic. `already_satisfied` and `task_already_merged` are deliberately ABSENT;
- *  {@link CREDITED_VERDICTS} covers both. Why: docs/forensics/retro.md. */
+ *  {@link CREDITED_VERDICTS} covers both. `awaiting_merge` is absent for the opposite reason:
+ *  it is not credited, but it is also not an overrun or blocked outcome to mine. Why:
+ *  docs/forensics/retro.md. */
 export const OVERRUN_VERDICTS: ReadonlySet<string> = new Set([
   "blocked",
   "blocked_ci",

@@ -53,15 +53,6 @@ function gitAdd(root: string) {
   execFileSync("git", ["-C", root, "add", "-A"], { encoding: "utf8" });
 }
 
-/** This task's own fork point, not `origin/main` itself -- `origin/main` keeps moving as OTHER
- *  PRs merge, so a literal `git diff origin/main` picks up every unrelated file every one of
- *  them touched and reads as a false "src/ added" the moment any of them lands. The merge-base
- *  is the one stable point that scopes the diff to what THIS task's own branch actually changed,
- *  same discipline as W1-T907's three-way dedupe-then-pull recipe. */
-function forkPoint(): string {
-  return execFileSync("git", ["merge-base", "HEAD", "origin/main"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-}
-
 /** W1-T2732's OWN merged diff (#4419, `03a9a68a`) — the range the two SCOPE FENCES below have
  *  always been about: "the detector script is byte-for-byte unedited" and "no src/ path is added".
  *  Both were constraints on THIS TASK'S diff, and `forkPoint()` expressed that correctly only
@@ -76,8 +67,10 @@ function forkPoint(): string {
  *
  *  Pinning to the fixed historical range keeps BOTH assertions verbatim and permanently
  *  checkable — they are claims about what W1-T2732 shipped, which is settled — while constraining
- *  nobody else. `forkPoint()` remains right for the live checks above, which are about the tree
- *  under test rather than about this task's own scope. Why: W1-T3040. */
+ *  nobody else. `forkPoint()` is REMOVED rather than kept: pinning left it with no callers, and an
+ *  earlier revision of this comment claimed it still served "the live checks above" — it did not.
+ *  W1-T3043's lane reached the identical pins independently (64565c6c..03a9a68a, verified equal to
+ *  `03a9a68a~1..03a9a68a`), which is corroboration, not coincidence. Why: W1-T3040 / W1-T3043. */
 const W1_T2732_DIFF = ["03a9a68a~1", "03a9a68a"];
 
 // ── acceptance 1: "the check runs in CI as a required gate ... named by the same script path
