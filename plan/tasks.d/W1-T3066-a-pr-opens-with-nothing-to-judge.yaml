@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 25.00
-  risk: medium
+  risk: high
   origin: "session 2026-09-07 — six PRs repaired by hand in one sitting, every one the same defect"
   plan_refs: ["W1-T1202", "W1-T2272", "W1-T2316"]
   rationale: |
