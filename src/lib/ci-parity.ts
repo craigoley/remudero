@@ -1747,6 +1747,17 @@ export interface FastGateStep {
   boundMs?: number;
   /** Retain bounded stdout on PASS. Only evidence-producing signals may opt in. */
   retainSuccessOutput?: boolean;
+  /**
+   * W1-T2653 — the path(s) THIS gate's own enforcing job (the ci.yml job named `job`, which may
+   * differ from this entry's local `--fast` `script`) prescribes as its remedy when it refuses —
+   * e.g. the `"path": N` line `source-size-ratchet.mjs` prints for `scripts/source-size-baseline.json`.
+   * Declared here, alongside the entry's own `reason`, so the pairing is a FACT ABOUT THE GATE
+   * rather than a hand-list living inside the scope guard (design note i). Read ONLY by
+   * {@link remedyFilesForFailingChecks} — never consulted for anything else, and never a blanket
+   * scope grant: a remedy file is reachable to a fix rung only while that rung addresses THIS
+   * job's own failure (design note ii), never unconditionally.
+   */
+  remedyFiles?: readonly string[];
 }
 
 export const FAST_GATE_STEPS: FastGateStep[] = [
@@ -1804,6 +1815,14 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "src/**/*.ts files from the merge base to HEAD, and publishes human plus schema-versioned JSON hotspot evidence. " +
       "Positive growth remains PASS because line count is a review-risk signal rather than a correctness verdict; only an " +
       "unreadable base or failed measurement refuses the step. The historical shared baseline is not read or written",
+    // W1-T2653: this entry's own `job` id ("source-size") is the SAME name the ci.yml enforcing
+    // job carries (the one that actually runs `source-size-ratchet`, not this signal's own
+    // `source-size-signal`) — so a failing "source-size" CHECK on a PR maps back to this row and
+    // its declared remedy, regardless of which local script this entry runs for `--fast`. The
+    // ratchet's own refusal prints the exact `"path": N` line for this file and states the edit is
+    // rule-25-safe (ENTANGLEMENT_EXEMPT_INSTRUMENTS, review.ts) in the same breath — a remedy this
+    // legible was still unreachable to the rung repairing it, which is the deadlock this field closes.
+    remedyFiles: ["scripts/source-size-baseline.json"],
   },
   // W1-T2643: the four census entries are no longer hand-written here — they are
   // CENSUS_ADMITTED_MEMBERS's own projection (see CENSUS_POPULATION above). Editing a census
@@ -1819,6 +1838,49 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "seven modules read for dispatch visibility and merge credit (scripts/worker-branch-shape.mjs)",
   },
 ];
+
+/** A single declared remedy path, paired with the gate `job` id that declares it — carried
+ *  together so a caller (the fix prompt, W1-T2653 design note iii) can name BOTH: which file, and
+ *  which gate says so, rather than a bare path a reader has to trace back to its own gate by hand. */
+export interface RemedyFileForGate {
+  path: string;
+  job: string;
+}
+
+/**
+ * W1-T2653 — the declared remedy file(s) for a set of CURRENTLY FAILING check names, read off
+ * {@link FAST_GATE_STEPS}'s own per-entry `remedyFiles` (never a second hand-list, design note i).
+ * A check that is not currently failing contributes nothing, even if it declares `remedyFiles` —
+ * this is the SCOPING half (design note ii): a strike addressing an unrelated failure must not
+ * inherit a remedy that belongs to a gate it is not repairing. Deduplicated by (path, job) pair
+ * and sorted for a deterministic result — callers pass this straight to both
+ * {@link "../run-task.js".fixRungScopeStandDownReason}'s 4th parameter (flattened to paths) and
+ * {@link "../run-task.js".renderFixPrompt}'s GATE REMEDY clause (which needs the job name too).
+ *
+ * PURE: reads only its own arguments — `steps` defaults to the real {@link FAST_GATE_STEPS} table,
+ * overridable so a caller/test never has to mutate module state to exercise this.
+ */
+export function remedyFilesForFailingChecks(
+  failingCheckNames: readonly string[],
+  steps: readonly FastGateStep[] = FAST_GATE_STEPS,
+): RemedyFileForGate[] {
+  const failing = new Set(failingCheckNames);
+  const seen = new Set<string>();
+  const out: RemedyFileForGate[] = [];
+  for (const step of steps) {
+    if (!failing.has(step.job) || !step.remedyFiles) continue;
+    for (const path of step.remedyFiles) {
+      // The separator is a NUL written as an ESCAPE, never a raw byte: a raw one in tracked
+      // source trips test/no-raw-nul.test.ts, and it is what makes this harness's grep skip a
+      // whole file silently (CLAUDE.md clause (b)). The value is identical either way.
+      const key = `${step.job}\u0000${path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ path, job: step.job });
+    }
+  }
+  return out.sort((a, b) => a.path.localeCompare(b.path) || a.job.localeCompare(b.job));
+}
 
 // ── W1-T2523: WHICH CENSUS SUITES DOES A CHANGED PATH JOIN? A REPORT, NEVER A GATE ────────────
 //

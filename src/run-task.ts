@@ -294,9 +294,11 @@ import {
   CENSUS_MEMBERSHIP_SUITES,
   preflightFailureNotice,
   preflightSummaryPath,
+  remedyFilesForFailingChecks,
   runCiParity,
   runPreflightCoverage,
   runPreflightFast,
+  type RemedyFileForGate,
 } from "./lib/ci-parity.js";
 import {
   consumeSourceSizeFollowup,
@@ -4668,17 +4670,34 @@ export function outOfDeclaredScopeFiles(
  * pre-strike check in this file) rather than refusing blind and stranding every red PR on a task
  * that simply predates the `files:` convention (design note v).
  *
- * PURE: no I/O — both file lists are the caller's own reads, never fetched here.
+ * `reachableRemedyFiles` (W1-T2653) — the declared remedy path(s) of the check(s) THIS strike is
+ * actually addressing (the caller's own {@link "./lib/ci-parity.js".remedyFilesForFailingChecks}
+ * result, flattened to paths), treated as IN SCOPE for this one call only. Never persisted, never
+ * a widening of `declaredFiles` itself (Standing rule 15 stays untouched — the task's own record
+ * is never edited to match its diff) and never applied on a plan-only task: that regime is graded
+ * by plan-scope membership ({@link outOfPlanScopeFiles}), which this registry was never wired into
+ * (design note iii — the same carve-out {@link renderFixPrompt}'s REGISTRY EXCEPTION clause
+ * already draws for `REGENERABLE_ARTIFACT_GENERATORS`). A caller with nothing reachable this round
+ * passes `[]` (the default) — behaviour is then BYTE-IDENTICAL to before this parameter existed.
+ *
+ * PURE: no I/O — every list is the caller's own read, never fetched here.
  */
 export function fixRungScopeStandDownReason(
   currentDiffFiles: readonly string[],
   baselineDiffFiles: readonly string[],
   declaredFiles: readonly string[] | undefined,
+  reachableRemedyFiles: readonly string[] = [],
 ): { reason: string; scopeKind: "files" | "plan"; newOutOfScopePaths: string[] } | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
   const planOnlyTask = declaredFiles.every(isInPlanScope);
-  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, declaredFiles));
-  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, declaredFiles).filter(
+  // W1-T2653: widen the comparison set for THIS call only — never plan-only (see doc above).
+  const effectiveDeclaredFiles = planOnlyTask
+    ? declaredFiles
+    : reachableRemedyFiles.length > 0
+    ? [...declaredFiles, ...reachableRemedyFiles]
+    : declaredFiles;
+  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles));
+  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles).filter(
     (f) => !alreadyOutOfScope.has(f),
   );
   if (newOutOfScopePaths.length === 0) return undefined;
@@ -6358,6 +6377,11 @@ export function renderFixPrompt(opts: {
   // simply undefined, matching that guard's own fail-OPEN contract for an unreadable baseline)
   // means no inherited-scope line renders at all, never a guessed baseline.
   baselineDiffFiles?: readonly string[];
+  // W1-T2653: the declared remedy file(s) of the check(s) THIS strike is addressing — the SAME
+  // list the caller passed {@link fixRungScopeStandDownReason}'s 4th parameter, so instruction and
+  // enforcement can never name a different set. Omitted (or empty) renders no GATE REMEDY line —
+  // never a guessed remedy.
+  reachableRemedyFiles?: readonly RemedyFileForGate[];
 }): string {
   const mode = deriveFixMode(opts.evidence);
   const header = `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.\nMODE: ${mode}.`;
@@ -6402,6 +6426,28 @@ export function renderFixPrompt(opts: {
             `yours to widen. A commit outside declared scope is PUSHED AND FLAGGED (\`scope_guard.overrun\`), ` +
             `not blocked — but the NEXT round's fix rung stands down on any NEW out-of-scope path THIS rung ` +
             `adds, so treat "do not push it" as the real rule, not a formality.`,
+          // W1-T2653: named EXPLICITLY per failing check — a fix worker told only "some registry
+          // permits some path" (the REGISTRY EXCEPTION line below) still has to trust that the gate
+          // it is looking at is one of the ones covered; this line removes that inference by naming
+          // the exact file AND the exact gate that declares it, scoped to what THIS strike is
+          // actually repairing (never every gate's remedy, only the ones currently failing).
+          // Rendered only for a NON-plan-only task, the SAME carve-out the REGISTRY EXCEPTION
+          // clause below draws: `fixRungScopeStandDownReason` never folds `reachableRemedyFiles`
+          // into a plan-only task's comparison set (design note iii), so promising the exception
+          // there would tell a worker something the pre-strike gate would still refuse.
+          ...(!planOnlyTask && (opts.reachableRemedyFiles ?? []).length > 0
+            ? [
+                `GATE REMEDY (W1-T2653): the failing check(s) this strike is addressing declare their own ` +
+                  `remedy file(s), reachable for THIS repair only: ` +
+                  (opts.reachableRemedyFiles ?? [])
+                    .map((r) => `${r.path} (gate: ${r.job})`)
+                    .join(", ") +
+                  `. You MAY commit it/them alongside the declared scope above — the fix rung will NOT stand ` +
+                  `down over it and no strike is spent for doing so. This is scoped to the check(s) actually ` +
+                  `failing this round: a remedy file for a gate that is NOT currently failing still follows ` +
+                  `the "do NOT push it" rule above verbatim.`,
+              ]
+            : []),
           ...(!planOnlyTask
             ? [
                 `REGISTRY EXCEPTION (W1-T2651): the one bounded exception to "do not push it" is a path this ` +
@@ -9635,6 +9681,14 @@ export async function runFixRung(opts: {
     // spending another strike. Best-effort (`deps.fetchPrDiffFiles` omitted or throwing skips this
     // round's check entirely, fail OPEN) and NEVER writes the PR body or the task record — it only
     // ledgers, says, and (like the rule-15/rule-25 refusals beside it) escalates.
+    //
+    // W1-T2653: this round's own declared remedy file(s) — the failing check(s) THIS strike is
+    // actually addressing, per `currentCiFailures`' own names, may each declare a remedy in
+    // FAST_GATE_STEPS (lib/ci-parity.ts). Computed here (rather than read from a module-scope
+    // global) so the coupling is visible at this call site and the scope gate stays PURE — this
+    // is the ONLY caller-side state it needs. Reused, unchanged, by the prompt render below so the
+    // gate and the instruction it dispatches can never name a different set (design note iii).
+    const reachableRemedyFiles = remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name));
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
       try {
@@ -9644,7 +9698,12 @@ export async function runFixRung(opts: {
       }
       const scopeStandDown =
         currentDiffFiles !== undefined
-          ? fixRungScopeStandDownReason(currentDiffFiles, baselineDiffFiles, opts.task.files)
+          ? fixRungScopeStandDownReason(
+              currentDiffFiles,
+              baselineDiffFiles,
+              opts.task.files,
+              reachableRemedyFiles.map((r) => r.path),
+            )
           : undefined;
       if (scopeStandDown) {
         const issueUrl = escalate(
@@ -10085,6 +10144,10 @@ export async function runFixRung(opts: {
       // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
       // which of its own branch's out-of-scope paths are inherited, not re-derived a second way.
       baselineDiffFiles,
+      // W1-T2653: the SAME list just computed above and already passed into
+      // `fixRungScopeStandDownReason` for this round's scope gate — instruction and enforcement
+      // read one shared value, never two independently derived ones.
+      reachableRemedyFiles,
     });
     // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
     // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
