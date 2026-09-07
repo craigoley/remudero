@@ -189,6 +189,16 @@ export interface PolicyValues {
    *  a band only through a merged plan PR, never measurement alone (test/arm-calibration-bands.test.ts).
    *  Why: docs/forensics/policy.md#policyvaluesarmcalibrationbands. */
   armCalibrationBands: ArmCalibrationBandRow[];
+  /** W1-T2761 — gates the `rule_headlines` implement-prompt part (`run-task.ts`'s
+   *  `buildRuleHeadlinesPart`): CLAUDE.md's headline-only index plus a pointer to its body on
+   *  disk, placed in the STABLE prefix right after the doctrine preamble. Same optional,
+   *  absent-means-off shape as {@link PolicyValues.autoTriage} — but this row ships absent from
+   *  `plan/policy.yaml` for this task on purpose (a verify:auto task never declares plan
+   *  config): with the row absent or `enabled: false`, the rendered prompt is byte-identical to
+   *  before this task. No cadence knobs — this gates a prompt PART, not a spend/mint rung. */
+  workerRuleHeadlines: {
+    enabled: boolean;
+  };
 }
 
 /** One field's provenance, as recorded on load — see this module's header. */
@@ -281,6 +291,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "worktreeReapBoot.enabled": "net-new",
   "githubEventWake.dedupCapacity": "net-new",
   "githubEventWake.checkSettleMs": "net-new",
+  "workerRuleHeadlines.enabled": "net-new",
 };
 
 /**
@@ -651,6 +662,14 @@ export function validatePolicy(raw: unknown): Policy {
   // this row is stricter-at-load/inert-at-consult rather than the triplet shape above.
   const armCalibrationBands = validateArmCalibrationBands(raw.armCalibrationBands);
 
+  // W1-T2761: optional, absent-means-off — same shape as autoTriage above, minus the cadence
+  // knobs (this gates a prompt PART, never a dispatch). Only a present block is validated, so a
+  // typo in an opted-in row still fails loud; the row ships absent from plan/policy.yaml today.
+  const workerRuleHeadlinesRaw = raw.workerRuleHeadlines as Record<string, unknown> | undefined;
+  const workerRuleHeadlines = workerRuleHeadlinesRaw
+    ? { enabled: booleanField("workerRuleHeadlines.enabled", workerRuleHeadlinesRaw.enabled, origin) }
+    : { enabled: false };
+
   return {
     values: {
       proofTimeoutMs,
@@ -694,6 +713,7 @@ export function validatePolicy(raw: unknown): Policy {
         checkSettleMs: githubEventWakeCheckSettleMs,
       },
       armCalibrationBands,
+      workerRuleHeadlines,
     },
     origin,
     bounds,

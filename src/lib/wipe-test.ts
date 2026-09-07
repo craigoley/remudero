@@ -37,12 +37,15 @@ export type WipeTestArm = "A" | "B";
 
 /** Which thing arm B masks (W1-T2512): `"learnings"` masks {@link
  *  computeMatchedLearningsForArm}'s injection; `"recon"` masks the recon worker spawn
- *  (`run-task.ts`'s `opts.maskRecon`). Why: docs/forensics/wipe-test.md#wipetestfactor. */
-export type WipeTestFactor = "learnings" | "recon";
+ *  (`run-task.ts`'s `opts.maskRecon`); `"rules"` (W1-T2761) masks the policy-gated
+ *  `rule_headlines` prompt part (`run-task.ts`'s `opts.maskRules`) — the first worker to ever
+ *  see CLAUDE.md's headline index is measured through this factor, never assumed helpful.
+ *  Why: docs/forensics/wipe-test.md#wipetestfactor. */
+export type WipeTestFactor = "learnings" | "recon" | "rules";
 
 /** Every factor `rmd wipe-test --factor <name>` accepts — the one source {@link
  *  resolveWipeTestFactor} validates against. Why: docs/forensics/wipe-test.md#wipe_test_factors. */
-export const WIPE_TEST_FACTORS: readonly WipeTestFactor[] = ["learnings", "recon"];
+export const WIPE_TEST_FACTORS: readonly WipeTestFactor[] = ["learnings", "recon", "rules"];
 
 /** True only for `factor: "learnings"`, arm `"B"` — the pure decision `run-task.ts`'s
  *  dispatch consults instead of hard-coding it. Why: docs/forensics/wipe-test.md#wipetestfactormaskslearnings. */
@@ -54,6 +57,13 @@ export function wipeTestFactorMasksLearnings(factor: WipeTestFactor, arm: WipeTe
  *  opposite masked thing. Why: docs/forensics/wipe-test.md#wipetestfactormasksrecon. */
 export function wipeTestFactorMasksRecon(factor: WipeTestFactor, arm: WipeTestArm): boolean {
   return factor === "recon" && arm === "B";
+}
+
+/** Sibling of {@link wipeTestFactorMasksLearnings}/{@link wipeTestFactorMasksRecon} for the
+ *  `"rules"` factor (W1-T2761) — same shape, masks ONLY the `rule_headlines` prompt part and
+ *  nothing else (`run-task.ts`'s `opts.maskRules`). Why: docs/forensics/wipe-test.md#wipetestfactormasksrules. */
+export function wipeTestFactorMasksRules(factor: WipeTestFactor, arm: WipeTestArm): boolean {
+  return factor === "rules" && arm === "B";
 }
 
 /** The load → select → render chain `runTaskBody` calls, as an injectable seam so a test
@@ -546,6 +556,7 @@ export interface WipeTestRunTaskOptions {
   skipGitSync?: boolean;
   maskLearnings?: boolean;
   maskRecon?: boolean;
+  maskRules?: boolean;
   noMerge?: boolean;
 }
 
@@ -665,6 +676,7 @@ export async function runWipeTestPair(
       skipGitSync: true,
       ...(wipeTestFactorMasksLearnings(factor, arm) ? { maskLearnings: true } : {}),
       ...(wipeTestFactorMasksRecon(factor, arm) ? { maskRecon: true } : {}),
+      ...(wipeTestFactorMasksRules(factor, arm) ? { maskRules: true } : {}),
       noMerge: true,
     });
   }

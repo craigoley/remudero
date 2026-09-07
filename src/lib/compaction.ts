@@ -467,10 +467,17 @@ export function outputContractLines(taskId: string): string[] {
  * context, so a `holdout: true` criterion belongs here exactly as little as
  * it belongs in the turn-0 prompt: never re-injected, never re-derived, never
  * shown, across a compaction any more than before one.
+ *
+ * `ruleHeadlinesPart` (W1-T2761, design (iii)): the SAME `rule_headlines` string
+ * `run-task.ts`'s `buildRuleHeadlinesPart` handed the turn-0 prompt — the headline index IS
+ * stable (§8A), unlike the volatile recon/matched-learnings pair this anchor otherwise excludes,
+ * so it is re-injected too, byte-identical to what turn 0 said (never re-derived here). Defaults
+ * to `""` — every existing 2-arg caller renders EXACTLY what it always has, with no new section.
  */
 export function renderAnchorBlock(
   task: Pick<Task, "id" | "title" | "prompt" | "acceptance">,
   runId: string,
+  ruleHeadlinesPart = "",
 ): string {
   const goal = (task.prompt ?? task.title).split("${RUN_ID}").join(runId).split("${TASK_ID}").join(task.id);
   const criteria = visibleCriteria(task.acceptance ?? [])
@@ -481,6 +488,9 @@ export function renderAnchorBlock(
     "",
     "# ANCHOR (re-injected verbatim after compaction — MASTER-PLAN §8B)",
     "",
+    // Empty (the row absent/off) contributes NOTHING, same discipline `renderImplementPrompt`
+    // keeps for this same string at turn 0.
+    ...(ruleHeadlinesPart ? ["## RULE HEADLINES (CLAUDE.md, re-injected unchanged)", ruleHeadlinesPart, ""] : []),
     "## GOAL",
     goal,
     "",

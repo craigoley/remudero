@@ -690,6 +690,7 @@ import {
   projectLearningsHome,
   renderDoctrinePreamble,
   renderExportBundle,
+  renderHeadlineOnlyIndex,
   retrieveRuleBodyOrDegrade,
   runPromotionPass,
   verifyBundlePin,
@@ -12271,6 +12272,10 @@ export function implementPromptParts(
   runId: string,
   matchedLearnings = "",
   operatorNotesBlock = "",
+  // W1-T2761: policy-gated headline index (`buildRuleHeadlinesPart`, below) — "" when the
+  // `workerRuleHeadlines.enabled` row is absent or off, the default for every existing caller
+  // that never passes this argument at all.
+  ruleHeadlinesPart = "",
 ): Array<{ name: string; value: string }> {
   const contextClaims = (task.context ?? [])
     .map((c) => `- ${c.claim} ${citation(c.src)}`)
@@ -12280,6 +12285,10 @@ export function implementPromptParts(
     .split("${TASK_ID}").join(task.id);
   return [
     { name: "doctrine", value: renderDoctrinePreamble() },
+    // W1-T2761, design (ii): directly after doctrine — the other STABLE half of the CONTEXT
+    // block. It changes only when CLAUDE.md's own headline set moves, never per-task/per-run,
+    // so it precedes every volatile/per-task part exactly as renderDoctrinePreamble does.
+    { name: "rule_headlines", value: ruleHeadlinesPart },
     { name: "task_claims", value: contextClaims },
     { name: "recon", value: reconContext },
     { name: "operator_notes", value: operatorNotesBlock },
@@ -12294,8 +12303,9 @@ export function renderImplementPrompt(
   runId: string,
   matchedLearnings = "",
   operatorNotesBlock = "",
+  ruleHeadlinesPart = "",
 ): string {
-  const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
+  const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart);
   const partValue = (name: string) => parts.find((p) => p.name === name)!.value;
 
   return [
@@ -12307,6 +12317,9 @@ export function renderImplementPrompt(
     "",
     "# CONTEXT",
     partValue("doctrine"),
+    // W1-T2761: an empty part (the row absent/off) contributes NOTHING — not even a blank line —
+    // so a disabled row renders BYTE-IDENTICAL to every render before this task existed.
+    ...(partValue("rule_headlines") ? [partValue("rule_headlines")] : []),
     partValue("task_claims"),
     partValue("recon"),
     partValue("operator_notes"),
@@ -12323,6 +12336,23 @@ export function renderImplementPrompt(
   ].join("\n");
 }
 
+/** Shared default `readFile` for a rule-source read ({@link retrieveRuleBodyOnDemand} and
+ *  {@link buildRuleHeadlinesPart} below both default to this ONE function, never a
+ *  copy-pasted second try/catch) — repo-relative FILE resolution `run-task.ts` already
+ *  centralises for every other repo-rooted read. */
+function readRuleSourceFileOrUndefined(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    // DELIBERATE ERASURE, and the one place it is correct here: `undefined` is this seam's
+    // OWN "the rule source could not be read" value, and every caller turns it into an
+    // explicit unreadable RuleHeadline that degrades to the FULL rule. Distinguishing a
+    // missing file from an unreadable one would change nothing at either call site — both
+    // must degrade, never withhold — so carrying the distinction would be dead information.
+    return undefined;
+  }
+}
+
 /**
  * W1-T2508: the ON-DEMAND half of the progressive-disclosure mechanism `learnings.ts` now
  * exposes — given a headline+body rule corpus's raw markdown (CLAUDE.md's own bullets, W1-T2507's
@@ -12334,28 +12364,18 @@ export function renderImplementPrompt(
  * file). `readFile` is injectable — default a real `readFileSync` — so a test can simulate an
  * unreadable source (the retrieval path failing) without touching disk.
  *
- * NOT wired into {@link implementPromptParts}/{@link renderImplementPrompt}: making a worker's
- * stable prefix carry headlines instead of CLAUDE.md's current whole-file inject is a follow-up
- * switch-over, not this task's acceptance — W1-T2508's rationale's own "NOT IN SCOPE" names "any
- * change to what a worker is permitted to do". What this proves is that the retrieval path exists
- * and degrades to the full rule (never to silence) BEFORE any body is ever withheld from a live
- * prompt — the ordering the rationale calls out as the hazard.
+ * STILL NOT WIRED INTO A LIVE CALL SITE, even after W1-T2761: this resolves ONE headline's body
+ * by name, for a future mid-run retrieval a worker asks for explicitly — that call site remains
+ * unbuilt, per W1-T2508's own "NOT IN SCOPE: any change to what a worker is permitted to do".
+ * What W1-T2761 DOES wire in is this function's SIBLING primitive, {@link
+ * retrieveRuleBodyOrDegrade}: {@link buildRuleHeadlinesPart} (below) reuses it to degrade the
+ * WHOLE headline index to a synthetic full-rule line when CLAUDE.md is unreadable, the same
+ * never-silence discipline this function already proved safe for one rule at a time.
  */
 export function retrieveRuleBodyOnDemand(
   headline: string,
   sourcePath: string,
-  readFile: (path: string) => string | undefined = (p) => {
-    try {
-      return readFileSync(p, "utf8");
-    } catch {
-      // DELIBERATE ERASURE, and the one place it is correct here: `undefined` is this seam's
-      // OWN "the rule source could not be read" value, and the sole caller below turns it into
-      // an explicit unreadable RuleHeadline that degrades to the FULL rule. Distinguishing a
-      // missing file from an unreadable one would change nothing at that call site — both must
-      // degrade, never withhold — so carrying the distinction would be dead information.
-      return undefined;
-    }
-  },
+  readFile: (path: string) => string | undefined = readRuleSourceFileOrUndefined,
 ): string {
   const raw = readFile(sourcePath);
   if (raw === undefined) {
@@ -12372,6 +12392,64 @@ export function retrieveRuleBodyOnDemand(
     body: ` (unavailable — no headline matches "${headline}" in ${sourcePath})`,
   };
   return retrieveRuleBodyOrDegrade(rule, (h) => index.get(h));
+}
+
+/** The one citation every `rule_headlines` line carries — the task that shipped the
+ *  parse/index/degrade primitives {@link buildRuleHeadlinesPart} is built from. Not a per-rule
+ *  citation (CLAUDE.md's individual headlines carry no per-line provenance of their own); this
+ *  cites the MECHANISM that makes surfacing them to a worker safe. */
+const RULE_HEADLINES_SRC = "plan#W1-T2508";
+
+/**
+ * W1-T2761, design (ii)/(iii) — build the `rule_headlines` prompt PART / anchor section: CLAUDE.md's
+ * headline-only index ({@link renderHeadlineOnlyIndex}, learnings.ts) plus one pointer line naming
+ * where a body is read from, gated by `policy.ts`'s `workerRuleHeadlines.enabled`. `enabled: false`
+ * (the row absent or off, the default) returns `""` — the ONE call both `implementPromptParts`
+ * (the turn-0 CONTEXT part) and `renderAnchorBlock` (the post-compaction re-injection) share, so
+ * "the index the worker was told at turn 0" and "the index re-injected after a compaction" can
+ * never drift apart (same discipline `outputContractLines` already keeps for the hard constraints).
+ *
+ * CITED PER LINE, NOT REUSING {@link renderHeadlineOnlyIndex}'s BARE OUTPUT DIRECTLY: this text
+ * lands inside a prompt's `# CONTEXT` block, and `assertProvenance` (provenance.ts) requires every
+ * claim there to carry a `[src:]` — its block grouping treats ANY line starting with a list marker
+ * as a NEW, separately-citeable claim, so a raw `- **headline**` per line would need its own
+ * citation, not one at the end. The fix keeps ONE bulleted opening line (cited) and renders every
+ * headline as a plain `**headline**` CONTINUATION line (no leading `-`, so the linter folds it into
+ * the same block) — {@link renderAnchorBlock} embeds this SAME string unchanged, where no linting
+ * ever applies, so the citation-safety cost is paid once and read everywhere.
+ *
+ * DEGRADES, NEVER GOES SILENT (the W1-T2508 hazard, honoured at the seam it names): an unreadable
+ * `sourcePath` builds a synthetic one-rule `RuleHeadline` and resolves it through {@link
+ * retrieveRuleBodyOrDegrade} — the SAME degrade primitive {@link retrieveRuleBodyOnDemand} uses —
+ * so the worker is told a headline that turned out unreadable, in full, rather than nothing at all.
+ */
+export function buildRuleHeadlinesPart(
+  enabled: boolean,
+  sourcePath: string,
+  readFile: (path: string) => string | undefined = readRuleSourceFileOrUndefined,
+): string {
+  if (!enabled) return "";
+  const introLine =
+    `- CLAUDE.md's rule headlines (progressive disclosure, W1-T2508) — headlines only, no ` +
+    `bodies, so you know what exists without paying for what you don't need yet. ` +
+    citation(RULE_HEADLINES_SRC);
+  const raw = readFile(sourcePath);
+  if (raw === undefined) {
+    const unreadable: RuleHeadline = {
+      headline: "CLAUDE.md rule index",
+      body: ` (unavailable — could not read rule source ${sourcePath})`,
+    };
+    return [introLine, `    ${retrieveRuleBodyOrDegrade(unreadable, () => undefined)}`].join("\n");
+  }
+  const rules = parseRuleHeadlines(raw);
+  const indexLines = renderHeadlineOnlyIndex(rules)
+    .split("\n")
+    .filter((l) => l.length > 0)
+    .map((l) => `    ${l.replace(/^- /, "")}`);
+  const pointer =
+    `    Read a headline's full body from ${sourcePath} in your own worktree when you need it — ` +
+    "this index carries headlines only.";
+  return [introLine, ...indexLines, pointer].join("\n");
 }
 
 /**
@@ -12595,6 +12673,18 @@ async function runTask(
      *  CONTEXT block; see {@link reconMaskedContextNote}) instead of whatever recon would have
      *  observed. Never set by any caller other than `wipeTestCommand`. */
     maskRecon?: boolean;
+    /** W1-T2761 (P12 wipe-test harness, RULES factor): arm B of a RULES-factor `rmd wipe-test`
+     *  pair — force the `rule_headlines` prompt part to `""` for this run REGARDLESS of the
+     *  `workerRuleHeadlines.enabled` policy row, masking the part and nothing else
+     *  ({@link wipeTestFactorMasksRules}, wipe-test.ts). Never set by any caller other than
+     *  `wipeTestCommand`. */
+    maskRules?: boolean;
+    /** Injectable override for the `workerRuleHeadlines.enabled` policy gate (design (i)) — the
+     *  SAME `?? loadDefaultPolicy()` seam every other opts-defaulted policy knob in this file
+     *  uses, so a test can drive the `rule_headlines` prompt part on/off without a real
+     *  `plan/policy.yaml` row. Default: `loadDefaultPolicy().values.workerRuleHeadlines.enabled`
+     *  (absent/off unless an operator commits the row). */
+    workerRuleHeadlinesEnabled?: boolean;
     /** Injectable containment-probe executor (W1-T91) — behavioral tests drive the REAL
      *  blocked_containment catch branch (the structured guard/check/observed fields on its
      *  ledger verdict line) through this seam, the SAME shape `defaultReconRunLens`'s own
@@ -13666,7 +13756,16 @@ async function runTask(
         : reconDegradedSubtype
           ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
           : reconObservedToContext(recon!, taskId, recordPath);
-    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
+    // W1-T2761: the `rule_headlines` part — "" (identical to every render before this task)
+    // unless `workerRuleHeadlines.enabled` is on AND this isn't a RULES-factor wipe-test arm B.
+    // Read from THIS dispatch's own worktree (W1-T501's "the worker's own tree, never the
+    // orchestrator's" discipline `recordPath` above already follows), never the orchestrator's
+    // own checkout, so a worker is only ever handed an index of the CLAUDE.md it can itself see.
+    const ruleHeadlinesEnabled = opts.maskRules
+      ? false
+      : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
+    const ruleHeadlinesPart = buildRuleHeadlinesPart(ruleHeadlinesEnabled, join(worktreePath, "CLAUDE.md"));
+    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -13686,7 +13785,9 @@ async function runTask(
     // `buildPromptManifest`'s own doc. A RECORD, never a gate: nothing reads this to decide
     // anything, so it is deliberately NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts).
     log("prompt.manifest", {
-      parts: buildPromptManifest(implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock)),
+      parts: buildPromptManifest(
+        implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart),
+      ),
     });
 
     // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
@@ -13695,8 +13796,10 @@ async function runTask(
     // repo-state fact, not a claim in a possibly-lossy REPORT. Live mid-stream
     // re-injection (a real compaction firing during THIS spawn) is W1-T12e's
     // operator-golden drill — this run-level wiring records the anchor that
-    // drill will send.
-    const anchor = renderAnchorBlock(task, runId);
+    // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
+    // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
+    // headline index that drifted from what turn 0 actually said.
+    const anchor = renderAnchorBlock(task, runId, ruleHeadlinesPart);
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -21676,6 +21779,14 @@ export const WIPE_TEST_CADENCE_CONTRACT_VERSION = "v1";
 export const HEADROOM_CONTRACT_VERSION = "v1";
 export const SCRATCH_REAP_CONTRACT_VERSION = "v1";
 export const WORKTREE_REAP_BOOT_CONTRACT_VERSION = "v1";
+// W1-T2761: `workerRuleHeadlines` joins GATED_RUNGS the moment its `.enabled` origin entry
+// lands in policy.ts, exactly as wipeTestCadence's own comment above describes. Its constant is
+// exported for that SAME enumeration but, like `headroom`'s, is deliberately NOT wired to a live
+// `ratificationPinCheck` call: unlike a spend/mint rung, "refuse ⇒ behave as disabled" here only
+// NARROWS what a worker's prompt carries (design (v)'s "can only refuse" direction, correctly
+// aligned) — wiring Law 5 for it is a separate operator decision this task's design never asked
+// for, not a call this diff makes on the design's behalf.
+export const WORKER_RULE_HEADLINES_CONTRACT_VERSION = "v1";
 
 /** Rung name (as {@link GATED_RUNGS} spells it) -> its contract-version constant above — the one
  *  registry `rmd ratify <rung>` and every `ratificationPinCheck(...)` call site resolve against,
@@ -21692,6 +21803,7 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   headroom: HEADROOM_CONTRACT_VERSION,
   scratchReap: SCRATCH_REAP_CONTRACT_VERSION,
   worktreeReapBoot: WORKTREE_REAP_BOOT_CONTRACT_VERSION,
+  workerRuleHeadlines: WORKER_RULE_HEADLINES_CONTRACT_VERSION,
 };
 
 /** Ledger one rung's refusal (design (ii): "a refusal ledgers `rung.unratified` with the diff").
