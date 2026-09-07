@@ -308,7 +308,17 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // The file set is UNCHANGED (`src/run-task.ts` already carried the other three), so the `files`
   // assertion below needed no edit — itself the check that this reader landed where its siblings
   // live rather than opening a new unredirectable surface.
-  assert.equal(readers.length, 26, `expected 26 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // TWENTY-SEVEN since `buildWipeTestCadenceDaemonHooks`'s own `policyFor` (run-task.ts, W1-T2659)
+  // landed — also SEAMED (`deps.policy ?? loadPolicy(policyPath(repoRoot))`), resolving the
+  // `wipeTestCadence` row that gives the wipe-test rung its own daemon schedule. It is the FIFTH
+  // structural sibling of that shape, not a new kind of thing: the same thunk, a sibling row, in the
+  // hook builder beside measurementCadence, digestCadence, boardReview and ciLearningCadence.
+  // IT PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this comment requires: the
+  // calibration failed at 27-vs-26 while test 2 stayed green, so the reader arrived already seamed
+  // and is NOT allowlisted — adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
+  // The file set is UNCHANGED (`src/run-task.ts` already carried the other four), so the `files`
+  // assertion below needed no edit.
+  assert.equal(readers.length, 27, `expected 27 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
