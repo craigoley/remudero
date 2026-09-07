@@ -2889,6 +2889,17 @@ export interface SweepDeps {
    *  merged mid-sweep, dispatched anyway). Omitted, or a failed read, behaves exactly as before —
    *  standing down fires ONLY on a positive, freshly observed terminal reading. */
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
+  /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
+   *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
+   *  surface's own live-state/claim checks. `buildSweepEffects` supplies it from the SAME
+   *  `terminalUncreditableHeads` cache W1-T2723's `dispatchFix` already consults internally — no
+   *  second cache, no GitHub read here. Returns a stable, explicit stand-down reason ONLY when the
+   *  exact `PR@head SHA` entry is present AND its escalation was already delivered; returns
+   *  `undefined` for every other case, including a cached entry whose delivery failed (design (iv)
+   *  — that one must still reach `dispatchFix` so the existing retry-on-failed-delivery path runs).
+   *  A caller that omits this dep (every existing test/fixture) sees dispatch behave byte-for-byte
+   *  as before. */
+  terminalFixStandDown?: (pr: OpenPrView) => string | undefined;
   /** W1-T2789 — fresh reversed-compare evidence for a checks-red PR that the strike table would
    *  otherwise make terminal. Optional or unreadable preserves the ordinary disposition. The
    *  decision itself is {@link decideRedBaseRefresh}, shared verbatim with the fix rung. */
@@ -4369,6 +4380,20 @@ export async function runSweep(
               const fixEvidence = isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
                 : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures };
+              // W1-T2752 — a delivered terminal decision for this EXACT PR@head is FINAL:
+              // `dispatchFix` already declines it internally (W1-T2723's `priorTerminal?.escalated`
+              // check), but only after being invoked, so an unmoved head still recorded a phantom
+              // `acted:true` on every poll after the one that delivered the escalation. This outer
+              // check stands the whole disposition down BEFORE the claim/invocation below —
+              // synchronous, read-only, no GitHub call — while a cached entry whose delivery
+              // FAILED falls through unchanged, exactly as {@link SweepDeps.terminalFixStandDown}'s
+              // own doc requires.
+              const terminalStandDown = deps.terminalFixStandDown?.(pr);
+              if (terminalStandDown) {
+                acted = false;
+                standDownReason = terminalStandDown;
+                break;
+              }
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
               // alone, without the fresh re-read it also performs, would not have stopped the
               // observed race. A refusal spends nothing and stands down like any declined lane.
@@ -4412,6 +4437,14 @@ export async function runSweep(
               // "conflicted" analogue of the blocked-fixable capture above — both are
               // dispatch-based repair surfaces, so both feed `spent` the same way.
               const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict };
+              // W1-T2752: the conflicted twin of the blocked-fixable terminal check above, same
+              // reasoning — see `SweepDeps.terminalFixStandDown`'s own doc.
+              const conflictedTerminalStandDown = deps.terminalFixStandDown?.(pr);
+              if (conflictedTerminalStandDown) {
+                acted = false;
+                standDownReason = conflictedTerminalStandDown;
+                break;
+              }
               // W1-T2520: the conflicted twin of the blocked-fixable claim above, same reasoning
               // — see `claimFixDispatch`'s own doc.
               const conflictedFixClaim = claimFixDispatch(pr);
