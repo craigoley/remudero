@@ -1435,8 +1435,60 @@ function latestActualPrUrl(
  *  run-task.ts's predicate is a boolean shape test with no capture group (W1-T453). */
 export function taskIdFromRunBranch(head: string | undefined): string | undefined {
   const m = /^run-(.+)-\d+$/.exec(head ?? "");
-  return m ? m[1] : undefined;
+  if (!m) return undefined;
+  // W1-T3042 — THE CAPTURE MUST LOOK LIKE A TASK ID, or this invents one.
+  //
+  // `(.+)` is greedy and the shape has no second anchor, so any extra hyphenated segment before the
+  // epoch is swallowed whole: `run-W1-T3030-build-1788796682000` yielded `W1-T3030-build`. That is
+  // not a failure to credit — it is a CREDIT FOR A TASK THAT DOES NOT EXIST, which is worse,
+  // because a phantom id enters the merged set while the real task stays uncredited and eligible
+  // for re-dispatch.
+  //
+  // MEASURED 2026-09-07 over 255 merged pull requests: 100 run-shaped heads, 92 extracting a valid
+  // id and 8 a phantom — five from a `-file-`/`-build-` pairing used that day. Returning `undefined`
+  // costs those five nothing: they never credited a real task, so no credit is lost, and a caller
+  // can now SAY the branch names no task instead of acting on an id nobody minted. (The other three
+  // of the 8, TRIAGE feedback branches, were never phantom in the first place — see `namesATask`.)
+  return namesATask(m[1]) ? m[1] : undefined;
 }
+
+/**
+ * Could this capture BE a task id, or is it an id with something stapled on?
+ *
+ * NOT a whitelist of id formats, deliberately. Anchoring on `W<n>-T<n>` — the only shape the plan
+ * currently mints — rejected the synthetic ids this repo's own fixtures use (`A`, `D`) and broke
+ * four suites, including the in-flight guard that stops a second dispatch onto a pushed branch.
+ * That failure was the useful one: it says the rule must be about the SHAPE OF THE SUFFIX, not
+ * about which workstream letters are in fashion. A second attempt — requiring a hyphen-free-or-
+ * canonical shape — was ALSO wrong: it rejected `TRIAGE-fb-<id>-<hex>`, a real id the auto-triage
+ * lane mints for its own runs, and broke that lane's in-flight guard too.
+ *
+ * So a capture with NO hyphen cannot be carrying a suffix and is taken as given, which keeps every
+ * synthetic and future id working. A capture WITH hyphens is tested for a STAPLED-ON suffix, not for
+ * looking canonical: `W1-T3030-build` strips to `W1-T3030`, which IS a whole task id, so the capture
+ * names no task; `TRIAGE-fb-1785792135748-755f93` strips to `TRIAGE-fb-1785792135748`, which is NOT,
+ * so the capture is taken as the id itself.
+ */
+function namesATask(capture: string): boolean {
+  // THE TEST IS "IS THIS AN ID WITH SOMETHING STAPLED ON", NOT "DOES THIS LOOK LIKE AN ID", and
+  // three failures taught that. A whitelist of id formats rejected the synthetic ids the fixtures
+  // use (`A`, `D`) and broke the in-flight dispatch guard; adding letter suffixes was still wrong
+  // for `W1-T12a`; and requiring a hyphen-free-or-canonical shape rejected `TRIAGE-fb-<id>-<hex>`,
+  // which IS a real task id — the auto-triage lane mints it — and broke that lane's own guard.
+  //
+  // So the rule targets the defect directly: strip a trailing `-<word>` and ask whether what
+  // remains is already a whole task id. `W1-T3030-build` leaves `W1-T3030`, which is — so the
+  // branch carries an id plus a suffix and names no task. `TRIAGE-fb-1785792135748-755f93` leaves
+  // `TRIAGE-fb-1785792135748`, which is not, so the capture is the id itself and is taken as given.
+  const suffixed = /^(.+)-[A-Za-z][A-Za-z0-9]*$/.exec(capture);
+  if (suffixed && TASK_ID_SHAPE.test(suffixed[1])) return false;
+  return true;
+}
+
+/** The canonical minted shape — `W<n>-T<n>` with an optional split-out letter (`W1-T12a`,
+ *  `W1-T1C`). Used ONLY to recognise an id that has had a suffix appended, never as a whitelist:
+ *  1457 of 1457 plan ids match it, and ids that do NOT (TRIAGE runs) are still real. */
+const TASK_ID_SHAPE = /^[A-Za-z]+\d*-T\d+[A-Za-z]*$/;
 
 /**
  * Extract the task id a SLUG branch declares in its own name — the shape {@link taskIdFromRunBranch} cannot
