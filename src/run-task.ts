@@ -21104,6 +21104,7 @@ export const MEASUREMENT_CADENCE_CONTRACT_VERSION = "v1";
 export const DIGEST_CADENCE_CONTRACT_VERSION = "v1";
 export const BOARD_REVIEW_CONTRACT_VERSION = "v1";
 export const CI_LEARNING_CADENCE_CONTRACT_VERSION = "v1";
+export const WIPE_TEST_CADENCE_CONTRACT_VERSION = "v1";
 export const HEADROOM_CONTRACT_VERSION = "v1";
 export const SCRATCH_REAP_CONTRACT_VERSION = "v1";
 export const WORKTREE_REAP_BOOT_CONTRACT_VERSION = "v1";
@@ -21117,6 +21118,9 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   digestCadence: DIGEST_CADENCE_CONTRACT_VERSION,
   boardReview: BOARD_REVIEW_CONTRACT_VERSION,
   ciLearningCadence: CI_LEARNING_CADENCE_CONTRACT_VERSION,
+  // W1-T2659's rung merged while this branch was open; the walk over GATED_RUNGS refused it as
+  // unpinnable, which is that guard working. v1 because it ships here for the first time.
+  wipeTestCadence: WIPE_TEST_CADENCE_CONTRACT_VERSION,
   headroom: HEADROOM_CONTRACT_VERSION,
   scratchReap: SCRATCH_REAP_CONTRACT_VERSION,
   worktreeReapBoot: WORKTREE_REAP_BOOT_CONTRACT_VERSION,
