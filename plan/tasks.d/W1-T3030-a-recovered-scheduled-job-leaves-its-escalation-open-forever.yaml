@@ -1,0 +1,116 @@
+- id: W1-T3030
+  title: "A RECOVERED SCHEDULED JOB LEAVES ITS ESCALATION OPEN FOREVER — `needs-human-issue.mjs` OPENS a delivery-of-record issue and appends to it by marker, but nothing anywhere closes one when the job goes green; the escalation reconciler cannot help because it requires a task referent and a cron job has none, so #3387 sat open across five consecutive passing nightlies"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files:
+    - scripts/needs-human-issue.mjs
+    - test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts
+    - .github/workflows/mutation-nightly.yml
+    - .github/workflows/fleet-heartbeat-watch.yml
+    - .github/workflows/clock-sweep.yml
+    - .github/workflows/recovery-drill.yml
+  origin: "operator-request#follow-up-work-2026-09-07"
+  plan_refs: ["W1-T2603", "W1-T2514"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LIFECYCLE HAS AN OPEN END. OBSERVED in scripts/needs-human-issue.mjs: the script is a
+    "delivery of record for UNATTENDED, SCHEDULED workflows" and is "IDEMPOTENT BY CONSTRUCTION"
+    — `decideDelivery` finds an open issue carrying `markerFor(source)` and COMMENTS on it,
+    otherwise CREATES one. Every path in that file either creates or comments. There is no close.
+
+    THE GENERAL RECONCILER STRUCTURALLY CANNOT COVER THIS CLASS. OBSERVED at src/run-task.ts
+    (~32524): `sweepEscalationReconcile` closes "stale needs-human issues whose referenced TASK has
+    since resolved", and `buildEscalationReconcileCandidates` drops what it cannot attribute
+    (`droppedNoTaskTrailer`, `droppedNoReferent`). A cron job has no task referent. W1-T2603 hit
+    exactly this wall for a different referent-less class and its own comment says so — "this class
+    carries no task referent, so `buildEscalationReconcileCandidates`/`runEscalationReconcile`
+    structurally never see it" — and it answered with a SEPARATE retirement path
+    (`retireRecoveredHeadroomEscalations`). That precedent is the shape; the job-shaped class simply
+    never got one.
+
+    MEASURED. Issue #3387 (`mutation-nightly`) was raised 2026-08-31 and was still open on
+    2026-09-07 after FIVE consecutive successful scheduled runs (09-03 33732061455, 09-04, 09-05,
+    09-06, 09-07 34101068822); its last actual failure was 09-02 (33606583520). Issue #3782
+    (`fleet-heartbeat`) accumulated failure comments through 2026-09-07T00:18:24Z and was still open
+    after four consecutive green runs. Both had to be closed BY HAND on operator direction on
+    2026-09-07. Nine `needs-human` issues were open at that moment; two of them — 22% — were records
+    that had outlived their cause with no mechanism able to notice.
+
+    WHY THIS IS THE RAISER'S JOB AND NOT THE SWEEP'S. Identity for this class lives in ONE place:
+    the HTML-comment marker `<!-- needs-human:<source> -->`, which the raiser's header says is
+    deliberately carried in the body rather than the title "so that a human retitling the issue
+    while triaging it does not fork a duplicate". Any closer living elsewhere would have to re-derive
+    that marker convention, which is the two-lists problem W1-T2548 already paid for once.
+  design: |
+    (i) ONE NEW MODE ON THE EXISTING SCRIPT, sharing the existing marker. Add `--resolved`. In that
+    mode the script finds the open issue whose body contains `markerFor(source)` and CLOSES it with
+    a comment naming the recovering run; with no such issue it is a silent, successful no-op. Do not
+    add a second identity mechanism and do not touch `decideDelivery`.
+
+    (ii) THE DECISION IS PURE, THE EFFECT IS INJECTED — the shape every function in this file already
+    has. Add `decideRecovery(openIssues, marker)` returning `{action:"close",number}` or
+    `{action:"none"}`, and a `resolve()` executor taking the same injected `exec` default as
+    `deliver()`. `main()` routes on the flag and returns an exit code rather than setting one.
+
+    (iii) FAIL-CLOSED ON IDENTITY, WHICH IS THE WHOLE RISK. This mode CLOSES issues, so a
+    marker mismatch must never close anything. `decideRecovery` matches ONLY on marker containment —
+    never on title, never on label alone, never "the only open issue". An issue that a human opened
+    by hand, or one belonging to a different source, must be untouchable.
+
+    (iv) A FAILED READ MUST NOT CLOSE. `deliver` already swallows a failed `gh issue list` and
+    proceeds, because an unnotified human is worse than an unlabelled issue. THE OPPOSITE POLARITY
+    APPLIES HERE: an empty list from a FAILED read is indistinguishable from "nothing to close", and
+    the safe reading is to do nothing — which the no-op already gives. Assert that a throwing read
+    closes nothing and still exits non-zero-free, rather than silently reporting success at closing.
+
+    (v) WIRE ALL FOUR CALLERS, ON SUCCESS ONLY. `mutation-nightly`, `fleet-heartbeat-watch`,
+    `clock-sweep` and `recovery-drill` each already call this script behind a `failure()` guard. Add
+    the mirror call behind a success guard in the same job. All four are one concern — the same new
+    call in the same shape — which is what `band_meaning: span` records here; this is not four
+    tasks.
+  acceptance:
+    - claim: "a success run closes the open issue carrying its own source marker, and says which run recovered it"
+      proof: "unit test: test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts"
+    - claim: "an issue whose body does not carry this source's marker is never closed, whatever its label or title"
+      proof: "unit test: test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts"
+    - claim: "a success run with no matching open issue is a silent successful no-op, so the mode is safe to call on every green run"
+      proof: "unit test: test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts"
+    - claim: "every workflow that raises a needs-human issue also resolves one, so no caller can raise without a recovery path"
+      proof: "unit test: test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts"
+  falsifier: |
+    THE FAILURE PATH IS WHAT A CLOSING MODE CAN BREAK. Assert the ordinary raise path is
+    byte-identical with the new flag ABSENT: `decideDelivery` still comments on a marker match and
+    still creates otherwise, and `buildBody` is unchanged. If adding a resolver moved the raiser at
+    all, the change is wrong however well the closer works.
+
+    AND IDENTITY IS THE SAFETY PROPERTY, NOT THE CLOSING. Assert `decideRecovery` returns `none` for:
+    an empty list; a list whose only issue carries a DIFFERENT source's marker; and an issue with a
+    matching TITLE but no marker in the body. That last case is the one a careless implementation
+    passes by falling back to title matching, and it is how a hand-written issue gets closed by a
+    cron job.
+
+    PROVE IT LOAD-BEARING: with the marker containment check replaced by "the first open issue", the
+    different-source and title-only rows must redden while the happy path stays green. A closer that
+    only reddens when it fails to close is asserting that it closes, not that it closes the RIGHT one.
+  note: |
+    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3030`.
+
+    FILED PLAN-ONLY, then built separately, so the shard does not trip Standing rule 15.
+
+    PROVENANCE: filed after closing #3387 and #3782 by hand on operator direction. The operator's
+    instruction was "fix the nightly process"; the nightly job itself was already green, and the
+    process defect was that nothing could say so.
+
+    risk:high — Rule 19: six declared files across five concerns (the raiser, its test, and four
+    workflow call sites), and multiple declared files read as multiple concerns. `band_meaning:
+    span` records that the four workflow edits are ONE change repeated, not four tasks. Beyond
+    the sizing band the diff is small and mostly additive, but this is the fleet's first code path
+    that CLOSES an operator-facing issue unattended. The band is set by that, not by the line count.
+    Design (iii) is the clause a reviewer should push on.
