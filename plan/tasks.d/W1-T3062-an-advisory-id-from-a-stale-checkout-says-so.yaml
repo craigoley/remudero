@@ -1,0 +1,98 @@
+- id: W1-T3062
+  title: "`next-task-id`'s ADVISORY ANSWER IS DERIVED FROM LOCAL SURFACES WITH NO STALENESS CHECK — a checkout 216 ids behind printed `W1-T2844` while `origin/main`'s shard ceiling was `W1-T3059`, and the DEGRADED line blamed the open-PR read rather than naming the divergence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files: [src/lib/task-id.ts, test/an-advisory-id-from-a-stale-checkout-says-so.test.ts]
+  origin: "operator-session#the-mint-printed-an-id-216-below-reality-2026-09-07"
+  plan_refs: ["W1-T509", "W1-T2203", "W1-T2324", "W1-T278", "W1-T3016"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07, FROM THE OPERATOR'S OWN THREE CONSECUTIVE MINTS. Each printed:
+
+      W1-T2844 (max 2843 across tasks.yaml 280, shards 2843, open PRs not enumerated, history 2843)
+        — DEGRADED: open-prs (read fine but uncorroborated: its highest mention leads the plan's
+        own ceiling by 216 (> 100), so it was dropped rather than used as the ceiling ...)
+
+    Against `origin/main` at the same moment: `plan/tasks.yaml` ceiling **280** (the mint agrees),
+    shard ceiling **3059** (the mint read **2843**), reservation ceiling **3065**. The mint's
+    shard surface was 216 ids behind, which is precisely the divergence its own DEGRADED line
+    reports — and then attributes to the OPEN-PR read.
+
+    THE CORROBORATION GUARD FIRED CORRECTLY AND STILL PRODUCED A MISLEADING REPORT. Dropping an
+    open-PR ceiling that leads the plan's by more than 100 is sound on its own terms: a mention is
+    prose and may name an id nothing has filed. But the guard compares the open-PR surface against
+    a LOCAL ceiling it never checks for freshness, so a stale checkout makes the guard fire every
+    single time, and the message names the wrong suspect. The open-PR read was not the problem; it
+    was the only surface that was CURRENT.
+
+    ONLY THE REMOTE NAMESPACE SAVED THE ANSWER. `--reserve` falls back to `refs/rmd-id/`, which is
+    read from origin and therefore cannot be stale — that is why the three reserved ids
+    (W1-T3060/3061/3062) are correct while the advisory answer was 216 low. The mint's own output
+    says so, in the parenthetical it prints after the reservation: "the advisory mint printed
+    W1-T2844; W1-T3060 is the id actually HELD."
+
+    THE ADVISORY ANSWER IS NOT DECORATIVE, WHICH IS WHY THIS IS WORTH FIXING. A lane that reads
+    the first line and skips `--reserve` — or that cannot reserve at all, the W1-T2203 class that
+    gets 403 from an agent container — takes the advisory number as its id. This session watched
+    exactly that produce two collisions in forty minutes: an id verified free against LOCAL
+    surfaces is not free, and nothing about the printed answer says which of its inputs it could
+    not vouch for.
+
+    THIS IS THE SAME FAMILY CLAUDE.md ALREADY RECORDS. Its investigation section names a gate run
+    from a checkout that is behind, answering about a file and a threshold that both moved, exit 0
+    and no warning — and prescribes printing `git rev-list --count HEAD..origin/main` beside any
+    verdict taken outside a fresh worktree. The mint prints its inputs but not their freshness.
+  design: |
+    (i) NAME THE STALENESS, DO NOT SILENTLY CORRECT IT. The mint must not start fetching: it is a
+    read-only verb that runs on hosts with no network and inside containers that 403 on the
+    namespace, and a fetch would change what it costs and when it can run. It should REPORT the
+    divergence between what it read locally and what the remote surface it already consults
+    (`refs/rmd-id/`) implies — the number is available at zero extra cost, because `--reserve`
+    already reads that namespace.
+
+    (ii) THE DEGRADED LINE MUST BLAME THE RIGHT SURFACE. Today an open-PR ceiling leading the
+    local ceiling produces "DEGRADED: open-prs ... dropped". When the reservation namespace ALSO
+    leads the local ceiling by a comparable margin, the local surface is the outlier and the
+    message should say so. Two surfaces disagreeing with a third is evidence about the third.
+
+    (iii) THE GUARD ITSELF STAYS. Dropping an uncorroborated open-PR mention is correct and must
+    keep working: a mention really can name an id nothing has filed. This task changes what is
+    REPORTED, not what is TRUSTED — the advisory ceiling is unchanged in every case where the
+    local surface is current.
+
+    (iv) THE ADVISORY ANSWER MUST CARRY ITS OWN WARNING. A lane that cannot reserve (W1-T2203's
+    403 class) has nothing but this line to act on, so the staleness must appear ON the advisory
+    answer, not only in a footnote after a successful reservation the lane never gets.
+
+    (v) THE FALSIFIER IS A PLANTED DIVERGENCE. Build a fixture whose local shard ceiling is far
+    below its reservation namespace and assert the report names the local surface; build one where
+    they agree and assert the message is unchanged. Asserting only the first would pass against a
+    mint that always cried stale.
+  acceptance:
+    - claim: when the reservation namespace leads the local shard ceiling, the advisory answer reports the local surface as the stale one and names the gap
+      proof: "unit test: test/an-advisory-id-from-a-stale-checkout-says-so.test.ts"
+    - claim: when the local surface is current, the reported ceiling and the DEGRADED text are unchanged, so a fresh checkout sees exactly what it sees today
+      proof: "unit test: test/an-advisory-id-from-a-stale-checkout-says-so.test.ts"
+    - claim: an open-PR mention that leads an otherwise-current local ceiling is STILL dropped, so the uncorroborated-mention guard is not weakened
+      proof: "unit test: test/an-advisory-id-from-a-stale-checkout-says-so.test.ts"
+    - claim: the staleness warning appears on the advisory answer itself, so a lane that cannot reserve still sees it
+      proof: "unit test: test/an-advisory-id-from-a-stale-checkout-says-so.test.ts"
+  falsifier: |
+    Close without implementation if the mint already names a stale local surface — run it in a
+    checkout deliberately held behind and read the first line. If it reports the divergence rather
+    than attributing it to the open-PR read, the premise is wrong.
+
+    A change that makes `next-task-id` FETCH does not satisfy this task. It must keep working on a
+    host with no network and in a container that cannot write the reservation namespace; a verb
+    that needs the network to answer is a different verb.
+
+    A change that stops dropping an uncorroborated open-PR ceiling does not satisfy it either:
+    that guard is correct, and the third criterion exists to pin it. The defect is the REPORT, not
+    the trust decision.
