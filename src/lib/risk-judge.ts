@@ -123,6 +123,41 @@ export function declaredFilesAbsentFromChange(
   return declared.filter((d) => !touched.has(d)).sort();
 }
 
+/** W1-T2371 — the subject prefixes that DECLARE a filing or amendment rather than an
+ *  implementation. Deliberately the SAME vocabulary `lint-plan`'s failing-split already excludes
+ *  ("a filing cites a task; it does not implement it"), not a second list that could drift from it. */
+export const PLAN_DECLARING_SUBJECT_RE = /^(?:chore\((?:plan|triage|feedback)\)|docs\(plan\)|plan:|docs:)/;
+
+/**
+ * W1-T2371 — is this an amendment PR: a plan-declaring subject over a change that touches ONLY
+ * `plan/`? PURE, and computed from data the judge is ALREADY handed — the bounded change view it
+ * renders anyway — so it costs no diff, no tool and no extra budget at the cheapest tier.
+ *
+ * ⚠ THE CONJUNCTION IS WHAT MAKES THIS A DISCRIMINATOR RATHER THAN AN EXEMPTION. A subject prefix
+ * alone is a string any author can type, and keying on it would sell a pass on a real scope
+ * mismatch. An author cannot make a source file appear as a `plan/` path in the REST-sourced list
+ * the judge is given, so the second half cannot be typed — only earned.
+ *
+ * ⚠ A TRUNCATED VIEW CANNOT PROVE PLAN-ONLY, so it returns false. The same reasoning
+ * {@link declaredFilesAbsentFromChange} already applies to a capped list: absence from a bounded
+ * enumeration is not absence from the change. Fail toward today's behaviour, never toward the
+ * carve-out.
+ *
+ * WHAT THIS DOES NOT CLAIM. It cannot tell a CORRECT amendment from a wrong one — an amendment that
+ * should never have been written is plan-only too. It says nothing about whether the amendment's
+ * CONTENT is honest, which is Standing rule 21's concern. The claim is narrow and exactly this: a
+ * plan-only diff under a plan-declaring subject is not EVIDENCE OF MISDECLARED SCOPE.
+ */
+export function isPlanOnlyAmendment(
+  subject: string | undefined,
+  changeView: RiskJudgeChangeView | undefined,
+): boolean {
+  if (!subject || !PLAN_DECLARING_SUBJECT_RE.test(subject.trim())) return false;
+  if (!changeView || changeView.truncated) return false;
+  if (changeView.files.length === 0) return false;
+  return changeView.files.every((f) => f.path.startsWith("plan/"));
+}
+
 /** File cap {@link boundRiskJudgeChangeView} enforces — sized well under the judge's
  *  cheapest-tier context floor; a PR touching more files just reads `truncated: true`.
  *  Why: docs/forensics/risk-judge.md#risk_judge_change_view_file_cap. */
@@ -207,6 +242,36 @@ function renderChangeViewLines(changeView: RiskJudgeChangeView | undefined): str
   return lines;
 }
 
+/**
+ * W1-T2371 — the ONE narrowing this task adds, and it is emitted only for the shape
+ * {@link isPlanOnlyAmendment} recognises. MEASURED at filing: of 776 merged PRs, 21 of 21
+ * resolvable amendments had a plan-only diff AND amended a shard declaring source paths — so the
+ * declared-versus-actual mismatch the judge reads is REAL for the whole class, and the inference it
+ * drew from it ("incomplete work or misdeclared scope") was wrong for the whole class.
+ *
+ * ⚠ IT NARROWS ONE INFERENCE, IT DOES NOT GRANT A PASS. The paragraph tells the judge that the
+ * mismatch is expected for this shape; it repeats that every other ground for HIGH still stands, so
+ * a concerning gates state or a genuine drift is classified exactly as before.
+ */
+function renderPlanOnlyAmendmentLines(input: RiskJudgeInput): string[] {
+  if (!isPlanOnlyAmendment(input.change.description, input.change.changeView)) return [];
+  return [
+    `THIS IS A PLAN-ONLY AMENDMENT (W1-T2371). The subject declares a filing or`,
+    `amendment, and every path in the REST-sourced ACTUAL CHANGE list below lies`,
+    `under plan/. An amendment EDITS A SHARD; it does not perform the work that`,
+    `shard declares. So the FILES TOUCHED (declared) list naming source paths while`,
+    `the actual change touches only plan/ is EXPECTED for this shape, and is NOT`,
+    `evidence of incomplete work or of misdeclared scope. Do not classify HIGH on`,
+    `that mismatch alone.`,
+    ``,
+    `THIS NARROWS ONE INFERENCE ONLY. It says nothing about whether the amendment is`,
+    `CORRECT or its content honest. If the GATES STATE is concerning, or the change`,
+    `drifts from the plan or established practice, classify HIGH exactly as you`,
+    `would otherwise.`,
+    ``,
+  ];
+}
+
 /** Render the risk judge's prompt: candidate change, gates state, plan context — never
  *  the static `risk:` field. */
 export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
@@ -250,6 +315,7 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
     `shape looks unusual, classify HIGH exactly as you would otherwise — regardless`,
     `of how the description reads.`,
     ``,
+    ...renderPlanOnlyAmendmentLines(input),
     `CANDIDATE CHANGE: ${input.change.description}`,
     `FILES TOUCHED (declared): ${filesLine}`,
     ``,
