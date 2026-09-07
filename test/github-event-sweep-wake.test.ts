@@ -353,6 +353,43 @@ test("timer expiry and shutdown are not mislabeled as GitHub event wakes", async
   assert.equal(await closing, "timeout");
 });
 
+test("W1-T2996: one clock timing out cannot strand a concurrent review-clock sleeper", async () => {
+  let nextHandle = 0;
+  const scheduled = new Map<number, () => void>();
+  const signal = createSweepWakeSignal(false, {
+    setTimer: (callback) => {
+      const handle = ++nextHandle;
+      scheduled.set(handle, callback);
+      return handle;
+    },
+    clearTimer: (handle) => {
+      scheduled.delete(handle as number);
+    },
+  });
+
+  const interphaseWait = signal.sleep(1_000);
+  const retroTickerWait = signal.sleep(60_000);
+  assert.equal(scheduled.size, 2, "each overlapping clock owns an independently cancellable timeout");
+
+  scheduled.get(1)!();
+  assert.equal(await interphaseWait, "timeout");
+  signal.wake();
+  assert.equal(
+    await Promise.race([
+      retroTickerWait,
+      new Promise<"stranded">((resolve) => setTimeout(() => resolve("stranded"), 25)),
+    ]),
+    "wake",
+    "the earlier clock's timeout must not erase the later clock's wake subscription",
+  );
+
+  const closingInterphase = signal.sleep(1_000);
+  const closingTicker = signal.sleep(60_000);
+  signal.close();
+  assert.deepEqual(await Promise.all([closingInterphase, closingTicker]), ["timeout", "timeout"]);
+  assert.equal(scheduled.size, 0, "shutdown cancels every overlapping clock's timeout");
+});
+
 test("a boot marker and a live marker interrupt polling but remain durable until the sweep gate acknowledges them", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-github-wiring-"));
   const path = sweepWakeMarkerPath(root);
