@@ -15,8 +15,9 @@ import {
   wipeTestCadenceMarkerPath,
 } from "../src/lib/measurement-cadence.js";
 import { runDaemon } from "../src/lib/daemon.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { runWipeTestPair, WIPE_TEST_PAIRING_FLOOR } from "../src/lib/wipe-test.js";
-import { buildWipeTestCadenceDaemonHooks } from "../src/run-task.js";
+import { buildWipeTestCadenceDaemonHooks, daemonCommand } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const NOW = new Date("2026-09-06T12:00:00Z");
@@ -386,8 +387,42 @@ test("runDaemon ledgers wipe-test cadence check and run failures", async () => {
   }
 });
 
-test("run-task.ts contains both wipe-test cadence production call sites", () => {
-  const src = readFileSync("src/run-task.ts", "utf8");
-  assert.match(src, /runWipeTestPair\(/);
-  assert.match(src, /wipeTestCadenceCheck\(/);
+// W1-T2905: this assertion used to READ src/run-task.ts AS TEXT and match two call-site regexes.
+// That passes when the prose is right and the behaviour is wrong, and breaks on a refactor that
+// moves the prose and nothing else -- the shape source-text-assertion-census.test.ts refuses. It
+// is replaced by the seam the repo already pins for exactly this class of rung, and NOT by calling
+// buildWipeTestCadenceDaemonHooks() directly: as the-daily-rung-only-fires-when-a-human-types-it
+// .test.ts states for its sibling rung, "a test that called [the builder] directly would pass just
+// as happily on the unwired code". Driving the real daemonCommand and asserting on the DaemonDeps
+// it hands runDaemon is what fails when the producer line in run-task.ts is deleted -- which is
+// what the deleted grep was standing in for, and is strictly stronger than it.
+test("W1-T2659 REACHABILITY: daemonCommand WIRES the wipe-test rung into the deps it hands runDaemon", async () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}wipetest-wiring-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n"); // an explicit --plan skips the git self-sync entirely
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    let captured: DaemonDeps | undefined;
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0, "the injected runDaemon returns a clean 'stopped' summary -> exit 0");
+    assert.ok(captured, "runDaemon was reached and its DaemonDeps captured");
+    // Without run-task.ts's producer line these are `undefined` and the whole rung is unreachable,
+    // however many unit tests the rung itself carries.
+    assert.equal(typeof captured.checkWipeTestCadence, "function", "a self-target daemon must wire the decision hook");
+    assert.equal(typeof captured.runWipeTestCadence, "function", "a self-target daemon must wire the runner");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
