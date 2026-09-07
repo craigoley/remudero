@@ -25,7 +25,7 @@ import {
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -55,7 +55,7 @@ import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
-import { readFileIfExists } from "./lib/fs-race-safe.js";
+import { isHolderStale, readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, IMPLEMENT_ROLE_LINES, outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
@@ -916,6 +916,7 @@ import {
   parseReport,
   pruneStaleRuns,
   reapStaleWorktrees,
+  removeWorktreeBase,
   removeRunLock,
   renderWorkerSettings,
   resolveClaudeExecutable,
@@ -980,6 +981,7 @@ import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
   acquireInflightLock,
   InflightLockError,
+  parseInflightLockInfo,
   readInflightLock,
   sweepStaleInflightLocks,
   type InflightLockHandle,
@@ -29912,6 +29914,273 @@ function boundedWorktreeOwnerPath(value: string): string {
   return value.replace(/[\r\n\0]/g, "?").slice(0, 512);
 }
 
+export type RegisteredFixOwnerSignal = "managed" | "foreign" | "unknown";
+
+export interface RegisteredFixOwnerSnapshot {
+  path: string;
+  pathState: RegisteredFixOwnerSignal;
+  attachmentState: "exact" | "detached_or_other" | "unknown";
+  treeState: "clean" | "dirty" | "unknown";
+  remoteState: "exact" | "changed" | "unknown";
+  historyState: "contained" | "ahead_or_diverged" | "unknown";
+  claimState: "clear" | "occupied" | "unknown";
+  processState: "clear" | "occupied" | "unknown";
+  ageMs: number | null;
+  localSha: string | null;
+  remoteSha: string | null;
+  processProbeReason?: string;
+  error?: string;
+}
+
+export type RegisteredFixOwnerRecoveryDecision =
+  | { kind: "reclaim" }
+  | {
+      kind: "keep";
+      reason:
+        | "foreign_worktree_path"
+        | "worktree_path_unreadable"
+        | "detached_or_wrong_branch"
+        | "branch_probe_unreadable"
+        | "dirty_worktree"
+        | "tree_probe_unreadable"
+        | "remote_head_changed"
+        | "remote_head_unreadable"
+        | "local_commit_not_contained"
+        | "history_probe_unreadable"
+        | "live_branch_claim"
+        | "branch_claim_unreadable"
+        | "process_cwd_owner"
+        | "process_cwd_probe_unreadable";
+    };
+
+export function decideRegisteredFixOwnerRecovery(
+  snapshot: RegisteredFixOwnerSnapshot,
+): RegisteredFixOwnerRecoveryDecision {
+  if (snapshot.pathState === "foreign") return { kind: "keep", reason: "foreign_worktree_path" };
+  if (snapshot.pathState !== "managed") return { kind: "keep", reason: "worktree_path_unreadable" };
+  if (snapshot.attachmentState === "detached_or_other")
+    return { kind: "keep", reason: "detached_or_wrong_branch" };
+  if (snapshot.attachmentState !== "exact") return { kind: "keep", reason: "branch_probe_unreadable" };
+  if (snapshot.treeState === "dirty") return { kind: "keep", reason: "dirty_worktree" };
+  if (snapshot.treeState !== "clean") return { kind: "keep", reason: "tree_probe_unreadable" };
+  if (snapshot.remoteState === "changed") return { kind: "keep", reason: "remote_head_changed" };
+  if (snapshot.remoteState !== "exact") return { kind: "keep", reason: "remote_head_unreadable" };
+  if (snapshot.historyState === "ahead_or_diverged")
+    return { kind: "keep", reason: "local_commit_not_contained" };
+  if (snapshot.historyState !== "contained") return { kind: "keep", reason: "history_probe_unreadable" };
+  if (snapshot.claimState === "occupied") return { kind: "keep", reason: "live_branch_claim" };
+  if (snapshot.claimState !== "clear") return { kind: "keep", reason: "branch_claim_unreadable" };
+  if (snapshot.processState === "occupied") return { kind: "keep", reason: "process_cwd_owner" };
+  if (snapshot.processState !== "clear") return { kind: "keep", reason: "process_cwd_probe_unreadable" };
+  return { kind: "reclaim" };
+}
+
+export interface ProcessCwdCensusDeps {
+  readNextPid?: () => string | null;
+  readCwd?: (pid: string) => string;
+  now?: () => number;
+  maxEntries?: number;
+  wallMs?: number;
+}
+
+export type ProcessCwdCensus =
+  | { state: "clear"; scanned: number }
+  | { state: "occupied"; scanned: number; pid: number }
+  | { state: "unknown"; scanned: number; reason: "proc_unavailable" | "cwd_unreadable" | "entry_bound" | "wall_bound" };
+
+const FIX_OWNER_PROC_ENTRY_BOUND = 4_096;
+const FIX_OWNER_PROC_WALL_MS = 100;
+
+function pathIsAtOrBelow(candidate: string, root: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+}
+
+export function readBoundedProcessCwdCensus(
+  ownerPath: string,
+  deps: ProcessCwdCensusDeps = {},
+): ProcessCwdCensus {
+  const now = deps.now ?? Date.now;
+  const maxEntries = deps.maxEntries ?? FIX_OWNER_PROC_ENTRY_BOUND;
+  const wallMs = deps.wallMs ?? FIX_OWNER_PROC_WALL_MS;
+  const started = now();
+  let procDir: ReturnType<typeof opendirSync> | undefined;
+  let readNextPid = deps.readNextPid;
+  try {
+    if (!readNextPid) {
+      try {
+        procDir = opendirSync("/proc");
+      } catch {
+        return { state: "unknown", scanned: 0, reason: "proc_unavailable" };
+      }
+      readNextPid = () => procDir!.readSync()?.name ?? null;
+    }
+    const readCwd = deps.readCwd ?? ((pid: string) => readlinkSync(join("/proc", pid, "cwd")));
+    let scanned = 0;
+    for (;;) {
+      if (now() - started > wallMs) return { state: "unknown", scanned, reason: "wall_bound" };
+      let entry: string | null;
+      try {
+        entry = readNextPid();
+      } catch {
+        return { state: "unknown", scanned, reason: "proc_unavailable" };
+      }
+      if (entry === null) return { state: "clear", scanned };
+      if (!/^\d+$/.test(entry)) continue;
+      if (scanned >= maxEntries) return { state: "unknown", scanned, reason: "entry_bound" };
+      scanned += 1;
+      let cwd: string;
+      try {
+        cwd = readCwd(entry);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+        return { state: "unknown", scanned, reason: "cwd_unreadable" };
+      }
+      if (pathIsAtOrBelow(cwd, ownerPath)) return { state: "occupied", scanned, pid: Number(entry) };
+    }
+  } finally {
+    try {
+      procDir?.closeSync();
+    } catch (e) {
+      const error = String(e);
+      void error;
+    }
+  }
+}
+
+export interface CaptureRegisteredFixOwnerDeps {
+  processCensus?: (ownerPath: string) => ProcessCwdCensus;
+  readClaim?: (inflightDir: string, claimKey: string) => "clear" | "occupied" | "unknown";
+  now?: () => number;
+}
+
+export function readRegisteredFixOwnerClaim(
+  inflightDir: string,
+  claimKey: string,
+): "clear" | "occupied" | "unknown" {
+  const raw = readFileIfExists(join(inflightDir, `${claimKey}.lock`));
+  if (raw === undefined) return "clear";
+  const holder = parseInflightLockInfo(raw);
+  if (!holder) return "unknown";
+  return isHolderStale(holder, { isPidAlive: defaultIsPidAlive }) ? "clear" : "occupied";
+}
+
+export function captureRegisteredFixOwnerSnapshot(
+  args: {
+    repoDir: string;
+    worktreesRoot: string;
+    ownerPath: string;
+    taskId: string;
+    branch: string;
+    expectedRemoteSha: string;
+    observedRemoteSha?: string;
+    inflightDir: string;
+    claimKey: string;
+  },
+  deps: CaptureRegisteredFixOwnerDeps = {},
+): RegisteredFixOwnerSnapshot {
+  const snapshot: RegisteredFixOwnerSnapshot = {
+    path: boundedWorktreeOwnerPath(args.ownerPath),
+    pathState: "unknown",
+    attachmentState: "unknown",
+    treeState: "unknown",
+    remoteState: "unknown",
+    historyState: "unknown",
+    claimState: "unknown",
+    processState: "unknown",
+    ageMs: null,
+    localSha: null,
+    remoteSha: args.observedRemoteSha ?? null,
+  };
+
+  let ownerPath: string;
+  try {
+    ownerPath = realpathSync(args.ownerPath);
+    const root = realpathSync(args.worktreesRoot);
+    const rel = relative(root, ownerPath);
+    const prefix = `sweep-${args.taskId}-`;
+    const suffix = basename(ownerPath).startsWith(prefix) ? basename(ownerPath).slice(prefix.length) : "";
+    snapshot.pathState = pathIsAtOrBelow(ownerPath, root) && !rel.includes(sep) && /^\d+$/.test(suffix)
+      ? "managed"
+      : "foreign";
+    snapshot.path = boundedWorktreeOwnerPath(ownerPath);
+    snapshot.ageMs = Math.max(0, (deps.now ?? Date.now)() - statSync(ownerPath).mtimeMs);
+  } catch (e) {
+    return { ...snapshot, error: String(e) };
+  }
+  if (snapshot.pathState !== "managed") return snapshot;
+
+  try {
+    const attached = execFileSync("git", ["-C", ownerPath, "symbolic-ref", "-q", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    snapshot.attachmentState = attached === `refs/heads/${args.branch}` ? "exact" : "detached_or_other";
+  } catch (e) {
+    return {
+      ...snapshot,
+      attachmentState: (e as { status?: number }).status === 1 ? "detached_or_other" : "unknown",
+      error: String(e),
+    };
+  }
+  if (snapshot.attachmentState !== "exact") return snapshot;
+
+  try {
+    const status = execFileSync("git", ["-C", ownerPath, "status", "--porcelain=v1", "--untracked-files=all"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    snapshot.treeState = status.length === 0 ? "clean" : "dirty";
+  } catch (e) {
+    return { ...snapshot, error: String(e) };
+  }
+  if (snapshot.treeState !== "clean") return snapshot;
+
+  if (!args.observedRemoteSha) return snapshot;
+  snapshot.remoteState = args.observedRemoteSha === args.expectedRemoteSha ? "exact" : "changed";
+  if (snapshot.remoteState !== "exact") return snapshot;
+
+  try {
+    snapshot.localSha = execFileSync("git", ["-C", ownerPath, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const contained = spawnSync(
+      "git",
+      ["-C", args.repoDir, "merge-base", "--is-ancestor", snapshot.localSha, args.observedRemoteSha],
+      { stdio: "ignore" },
+    );
+    snapshot.historyState = contained.status === 0
+      ? "contained"
+      : contained.status === 1
+        ? "ahead_or_diverged"
+        : "unknown";
+  } catch (e) {
+    return { ...snapshot, error: String(e) };
+  }
+  if (snapshot.historyState !== "contained") return snapshot;
+
+  try {
+    snapshot.claimState = (deps.readClaim ?? readRegisteredFixOwnerClaim)(args.inflightDir, args.claimKey);
+  } catch (e) {
+    return { ...snapshot, error: String(e) };
+  }
+  if (snapshot.claimState !== "clear") return snapshot;
+
+  const process = (deps.processCensus ?? readBoundedProcessCwdCensus)(ownerPath);
+  snapshot.processState = process.state;
+  if (process.state === "unknown") snapshot.processProbeReason = process.reason;
+  return snapshot;
+}
+
+export function removeAbandonedFixWorktreeOwner(repoDir: string, worktreePath: string): void {
+  execFileSync("git", ["-C", repoDir, "worktree", "remove", worktreePath], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  removeRunLock(worktreePath);
+  removeWorktreeBase(worktreePath);
+}
+
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {
   const recoveryRef = `refs/rmd-recovery/fix/${branch}/${localSha}`;
   let existing: string | null = null;
@@ -30528,6 +30797,11 @@ export function captureRepairFeedbackWithPriorVerdict(
   captureFeedback(root, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
 }
 
+export interface RegisteredFixOwnerRecoveryDeps {
+  capture: typeof captureRegisteredFixOwnerSnapshot;
+  remove: typeof removeAbandonedFixWorktreeOwner;
+}
+
 export function buildSweepEffects(
   owner: string,
   repo: string,
@@ -30640,6 +30914,10 @@ export function buildSweepEffects(
   // tests inject the read so they can prove admission stands down before the stale pid claim is
   // reclaimed, without touching a real shared clone.
   registeredWorktreeOwnerImpl: (repoDir: string, branchRef: string) => string | undefined = registeredFixWorktreeOwner,
+  registeredOwnerRecovery: RegisteredFixOwnerRecoveryDeps = {
+    capture: captureRegisteredFixOwnerSnapshot,
+    remove: removeAbandonedFixWorktreeOwner,
+  },
 ): Pick<
   SweepDeps,
   | "arm"
@@ -31201,8 +31479,9 @@ export function buildSweepEffects(
         // criteria from its `## Acceptance` block — see that function's doc for
         // why a hardcoded `[]` here made a `blocked_review` synthetic dispatch
         // permanently unjudgeable.
-        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName,body"]) as {
+        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body"]) as {
           headRefName?: string;
+          headRefOid?: string;
           body?: string;
         };
         const realBranch = headRef.headRefName;
@@ -31244,16 +31523,119 @@ export function buildSweepEffects(
           return;
         }
 
-        const registeredOwner = registeredWorktreeOwnerImpl(repoDir, `refs/heads/${realBranch}`);
-        if (registeredOwner) {
+        const branchRef = `refs/heads/${realBranch}`;
+        let registeredOwner: string | undefined;
+        try {
+          registeredOwner = registeredWorktreeOwnerImpl(repoDir, branchRef);
+        } catch (e) {
           log("sweep.fix.checkout_claim_declined", {
             reason: "registered_worktree_owner",
+            owner_recovery_reason: "worktree_registry_unreadable",
             pr_number: pr.prNumber,
             task_id: task.id,
             branch: realBranch,
-            worktree_path: boundedWorktreeOwnerPath(registeredOwner),
+            error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
           });
-          return;
+          throw e;
+        }
+        if (registeredOwner) {
+          let snapshot: RegisteredFixOwnerSnapshot;
+          try {
+            snapshot = registeredOwnerRecovery.capture({
+              repoDir,
+              worktreesRoot: worktreesDir(config),
+              ownerPath: registeredOwner,
+              taskId: task.id,
+              branch: realBranch,
+              expectedRemoteSha: pr.headSha,
+              observedRemoteSha: headRef.headRefOid,
+              inflightDir,
+              claimKey: fixBranchClaimKey(owner, repo, realBranch),
+            });
+          } catch (e) {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: "owner_snapshot_unreadable",
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: boundedWorktreeOwnerPath(registeredOwner),
+              error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+            });
+            return;
+          }
+          const recovery = decideRegisteredFixOwnerRecovery(snapshot);
+          if (recovery.kind === "keep") {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: recovery.reason,
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: snapshot.path,
+              process_probe_reason: snapshot.processProbeReason,
+            });
+            return;
+          }
+          try {
+            registeredOwnerRecovery.remove(repoDir, registeredOwner);
+          } catch (e) {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: "owner_remove_failed",
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: snapshot.path,
+              error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+            });
+            return;
+          }
+          let ownerAfterRemoval: string | undefined;
+          try {
+            ownerAfterRemoval = registeredWorktreeOwnerImpl(repoDir, branchRef);
+          } catch (e) {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: "worktree_registry_reread_failed",
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: snapshot.path,
+              error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+            });
+            return;
+          }
+          if (ownerAfterRemoval) {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason:
+                ownerAfterRemoval === registeredOwner ? "owner_registration_remained" : "owner_registration_changed",
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: boundedWorktreeOwnerPath(ownerAfterRemoval),
+            });
+            return;
+          }
+          log("sweep.fix.checkout_owner_reclaimed", {
+            pr_number: pr.prNumber,
+            task_id: task.id,
+            branch: realBranch,
+            worktree_path: snapshot.path,
+            local_sha_prefix: snapshot.localSha?.slice(0, 12),
+            remote_sha_prefix: snapshot.remoteSha?.slice(0, 12),
+            age_ms: snapshot.ageMs,
+            proof: {
+              managed_path: snapshot.pathState === "managed",
+              exact_branch: snapshot.attachmentState === "exact",
+              clean_tree: snapshot.treeState === "clean",
+              exact_remote_head: snapshot.remoteState === "exact",
+              local_contained_by_remote: snapshot.historyState === "contained",
+              no_live_claim: snapshot.claimState === "clear",
+              no_process_cwd: snapshot.processState === "clear",
+            },
+          });
         }
 
         // W1-T2609 (design ii): an EXCLUSIVE claim on this (repo, branch) pair, taken BEFORE any
