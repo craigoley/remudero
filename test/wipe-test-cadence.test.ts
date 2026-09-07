@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -244,6 +244,51 @@ test("runWipeTestPair materializes generated sandbox subjects and ledgers the pa
     ]);
     assert.match(readFileSync(join(repoDir, "plan", "tasks.d", "wt-sbx-9.yaml"), "utf8"), /src\/a\.ts/);
     assert.match(readFileSync(join(stateDir, "ledger.ndjson"), "utf8"), /"step":"wipetest\.pair"/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// W1-T2905 / diff-coverage: `ledgerPath` is a SEAM, and every other test in this file injects it,
+// so `runWipeTestPair`'s `deps.ledgerPath ?? ledgerPathForRoot(deps.config.root)` fallback never
+// ran and both lines of `ledgerPathForRoot` were added with zero covering tests -- the all-fakes
+// shape CLAUDE.md's coverage section names ("when every test injects a fake, the seam's DEFAULT
+// implementation is unreachable"). This test OMITS the seam so the default resolves for real, and
+// asserts WHERE it lands rather than merely that it ran: <config.root>/state/ledger.ndjson.
+test("runWipeTestPair ledgers to <root>/state/ledger.ndjson when no ledgerPath seam is injected", async () => {
+  const root = tmp("rmd-wipe-pair-default-ledger-");
+  try {
+    const repoDir = join(root, "repos", "remudero-sandbox");
+    mkdirSync(join(repoDir, "plan"), { recursive: true });
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(join(repoDir, "plan", "tasks.yaml"), "[]\n");
+    let runs = 0;
+    const result = await runWipeTestPair(
+      { id: "wt-sbx-default", files: ["src/a.ts"], selectedShards: ["a.yaml"] },
+      "learnings",
+      {
+        owner: "craigoley",
+        selfRepo: "remudero",
+        repoRoot: root,
+        config: { root } as Config,
+        // NO ledgerPath — that is the point of this test.
+        pairIndex: 0,
+        runId: "WIPETEST-DEFAULT",
+        now: () => NOW,
+        resolveMergedState: () => ({ merged: false }),
+        execFileSyncFn: (() => Buffer.from("")) as never,
+        runTaskFn: (async (taskId: string) => {
+          runs += 1;
+          return { taskId, runId: `RUN-${runs}`, merged: true, costUsd: runs, verdict: "merged" };
+        }) as never,
+      },
+    );
+
+    assert.equal(result.status, "measured");
+    // The default path, spelled out here so a change to ledgerPathForRoot reddens this test.
+    const defaulted = join(root, "state", "ledger.ndjson");
+    assert.ok(existsSync(defaulted), `the pair must ledger to ${defaulted} with no seam injected`);
+    assert.match(readFileSync(defaulted, "utf8"), /"step":"wipetest\.pair"/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
