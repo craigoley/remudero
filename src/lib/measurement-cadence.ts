@@ -17,6 +17,15 @@ import { proofQueueAudit, type ProofQueueAuditOffender, type ProofQueueAuditOpts
 import { attributeVerbs, deriveCliVerbs, deriveStepPrefixes, EMISSIONS_ALLOWLIST } from "./emissions.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
 import { loadPlanFromYaml, type Task } from "./plan.js";
+import {
+  classifyImprovementTier,
+  fetchMergedCoverageArtifact,
+  injectCoverageImprovementTask,
+  type FetchMergedCoverageArtifactDeps,
+  type FetchMergedCoverageArtifactResult,
+  type InjectCoverageImprovementDeps,
+  type InjectCoverageImprovementResult,
+} from "./coverage-improvement.js";
 import { lintTask } from "./task-linter.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 
@@ -582,6 +591,88 @@ export interface VerbCensusCadenceResult extends MeasurementCadenceVerbStatus {
   unmeasurableVerbs: string[];
 }
 
+export interface CoverageImprovementCadenceResult extends MeasurementCadenceVerbStatus {
+  workflowRunId?: number;
+  headSha?: string;
+  artifactId?: number;
+  prNumber?: number;
+  coverageTier?: ReturnType<typeof classifyImprovementTier>;
+  producerAction?: InjectCoverageImprovementResult["action"];
+  branchesPct?: number;
+}
+
+export interface CoverageImprovementCadenceOpts
+  extends Pick<
+    FetchMergedCoverageArtifactDeps,
+    | "owner"
+    | "repo"
+    | "artifactName"
+    | "aggregatorJobName"
+    | "ghJson"
+    | "ghBuffer"
+    | "extractLcovFromZip"
+    | "ledgerPath"
+    | "ledgerRunId"
+    | "writeLedgerLine"
+  > {
+  root: string;
+  stateDir: string;
+  producer?: (deps: InjectCoverageImprovementDeps) => InjectCoverageImprovementResult;
+  reader?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
+  capture?: InjectCoverageImprovementDeps["capture"];
+  ledgerUnion?: InjectCoverageImprovementDeps["ledgerUnion"];
+  land?: InjectCoverageImprovementDeps["land"];
+}
+
+export function runCoverageImprovementCadence(opts: CoverageImprovementCadenceOpts): CoverageImprovementCadenceResult {
+  const readerInput: FetchMergedCoverageArtifactDeps = {
+    owner: opts.owner,
+    repo: opts.repo,
+    artifactName: opts.artifactName,
+    aggregatorJobName: opts.aggregatorJobName,
+    ghJson: opts.ghJson,
+    ghBuffer: opts.ghBuffer,
+    extractLcovFromZip: opts.extractLcovFromZip,
+    ledgerPath: opts.ledgerPath,
+    ledgerRunId: opts.ledgerRunId,
+    writeLedgerLine: opts.writeLedgerLine,
+  };
+  const read = opts.reader ? opts.reader(readerInput) : fetchMergedCoverageArtifact(readerInput);
+  if (read.status === "refused") {
+    return {
+      status: "refused",
+      refusedReason: `${read.reason}: ${read.detail}`,
+      workflowRunId: read.workflowRunId,
+      headSha: read.headSha,
+      artifactId: read.artifactId,
+      prNumber: read.prNumber,
+    };
+  }
+
+  const producer = opts.producer ?? injectCoverageImprovementTask;
+  const produced = producer({
+    root: opts.root,
+    stateDir: opts.stateDir,
+    ledgerPath: opts.ledgerPath ?? join(opts.stateDir, "ledger.ndjson"),
+    runId: String(read.workflowRunId),
+    lcovText: read.lcovText,
+    capture: opts.capture,
+    ledgerUnion: opts.ledgerUnion,
+    writeLedgerLine: opts.writeLedgerLine,
+    land: opts.land,
+  });
+  return {
+    status: "measured",
+    workflowRunId: read.workflowRunId,
+    headSha: read.headSha,
+    artifactId: read.artifactId,
+    prNumber: read.prNumber,
+    coverageTier: classifyImprovementTier(produced.branchesPct),
+    producerAction: produced.action,
+    branchesPct: produced.branchesPct,
+  };
+}
+
 const VERB_CENSUS_SKIP_DIR_NAMES = new Set(["node_modules", ".git", "dist", "build", "coverage"]);
 
 /** The one `readdirSync` {@link walkVerbCensusSources} calls, injectable so its unreadable-
@@ -930,6 +1021,8 @@ export interface MeasurementCadenceRunResult {
   proofDebtMint?: ProofDebtMintCadenceResult;
   /** The verb census, run unconditionally needing no opt-in beyond `stateDir`/`checkoutDir`. */
   verbCensus?: VerbCensusCadenceResult;
+  /** The coverage-improvement rung, set when the daemon supplies the repo/artifact reader input. */
+  coverageImprovement?: CoverageImprovementCadenceResult;
 }
 
 /** The verdict-calibration/autonomy-rate git join's only I/O — same shallow-clone refusal as
@@ -989,6 +1082,9 @@ export interface MeasurementCadenceReportOpts {
      *  `taskRecordPath`. An id this can't resolve is simply never minted. */
     shardPathFor: (taskId: string) => string | undefined;
   };
+  /** coverage-improvement's CI artifact reader + producer input. Optional for old tests; the
+   *  daemon hook supplies it in production. */
+  coverageImprovement?: Omit<CoverageImprovementCadenceOpts, "stateDir">;
 }
 
 /**
@@ -1087,6 +1183,11 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
   });
 
+  // ── coverage-improvement: daemon-side reader for CI's merged coverage artifact ─────────────
+  const coverageImprovement = opts.coverageImprovement
+    ? runCoverageImprovementCadence({ ...opts.coverageImprovement, stateDir: opts.stateDir })
+    : undefined;
+
   // ── the adoption report's mint — gated on `opts.escalate` like rule-efficacy's write above;
   // off, it reports the measured status without touching the registry.
   const adoptionMint: AdoptionMintCadenceResult = opts.escalate
@@ -1139,6 +1240,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     boardReview,
     proofDebtReport,
     proofDebtMint,
+    ...(coverageImprovement ? { coverageImprovement } : {}),
     verbCensus,
   };
 }

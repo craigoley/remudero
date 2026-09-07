@@ -65,6 +65,64 @@ export interface RiskJudgeChangeView {
   truncated: boolean;
 }
 
+/**
+ * W1-T2991 — WHY A DECLARED FILE IS ABSENT FROM THE CHANGE, ANSWERED RATHER THAN INFERRED.
+ *
+ * MEASURED on #4316, 2026-09-06: the risk judge escalated at high risk / confidence 0.85 because
+ * "the declared FILES TOUCHED list names src/lib/task-linter.ts, but the ACTUAL CHANGE shows only
+ * [a test file] was modified ... represents both drift from plan and an unusual shape for an
+ * implementation task". Its own verdict text states the limit that made it wrong: "on the change's
+ * description/files alone, NO DIFF WAS READ". `ownFalsifierRenameCandidates` was already present in
+ * that file at the PR's merge base — landed by #4019 — so the only missing piece was the falsifier
+ * the PR added. A correct, green, review-passing PR was blocked and routed to a human.
+ *
+ * A declared source file absent from the changed set means ONE OF TWO THINGS — the work was not
+ * done, or it was ALREADY done — and no amount of reasoning over a file list separates them. This
+ * is the fact that does: the file EXISTS at the base, and the change's own tests REFERENCE it. That
+ * shape is a test-only completion of behaviour that already landed, not drift.
+ *
+ * THE ASYMMETRY DECIDES EVERY UNCERTAIN CASE, AND IT RUNS OPPOSITE TO MOST GATES HERE. A false
+ * negative costs one unimplemented task, which proof execution and the coverage gates already catch
+ * downstream. A false positive costs an operator's attention EVERY TIME and trains them to close
+ * escalations unread — strictly worse than not raising them. So absence of evidence is never
+ * treated as evidence: an unreadable base, an unknown reference set, or any declared file this
+ * cannot positively account for leaves the escalation exactly where the judge put it.
+ */
+export interface DeclaredFileBaseFact {
+  /** The declared path that the actual change does not touch. */
+  path: string;
+  /** Did the file exist at the PR's merge base? `undefined` when the read failed — never assumed. */
+  existsAtBase?: boolean;
+  /** Do any of the change's own changed test files reference this file? `undefined` when unknown. */
+  referencedByChangedTests?: boolean;
+}
+
+/**
+ * True only when EVERY declared source file the change does not touch is positively accounted for:
+ * present at the base and referenced by the change's own tests. Empty input is false — "nothing was
+ * declared missing" is a different fact from "every missing thing is explained", and only the second
+ * may suppress an escalation.
+ */
+export function isTestOnlyCompletionOfExistingBehaviour(facts: readonly DeclaredFileBaseFact[]): boolean {
+  if (facts.length === 0) return false;
+  return facts.every((f) => f.existsAtBase === true && f.referencedByChangedTests === true);
+}
+
+/**
+ * The declared paths the ACTUAL CHANGE does not touch. Pure set arithmetic over the two lists the
+ * judge is already given; a truncated change view yields no facts at all, because a path missing
+ * from a capped list is not a path missing from the change.
+ */
+export function declaredFilesAbsentFromChange(
+  declared: readonly string[] | undefined,
+  changeView: RiskJudgeChangeView | undefined,
+): string[] {
+  if (!declared || declared.length === 0) return [];
+  if (!changeView || changeView.truncated) return [];
+  const touched = new Set(changeView.files.map((f) => f.path));
+  return declared.filter((d) => !touched.has(d)).sort();
+}
+
 /** File cap {@link boundRiskJudgeChangeView} enforces — sized well under the judge's
  *  cheapest-tier context floor; a PR touching more files just reads `truncated: true`.
  *  Why: docs/forensics/risk-judge.md#risk_judge_change_view_file_cap. */

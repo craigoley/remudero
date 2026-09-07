@@ -1,0 +1,100 @@
+- id: W1-T2990
+  title: "WARN AT FILING TIME WHEN A GREP PROOF ONLY MATCHES ITS OWN PROOF LINE, AND STOP THAT SELF-MATCH HIDING THE SIBLING CHECK — W1-T2983 measured the defect and the operator ruled advisory; this builds the warn-only sibling of proofGrepUnmatchableViolations and the two-line carve-out that lets the existing check see the line-seams its own proof lines currently mask"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  rationale: |
+    **WHAT W1-T2983 ESTABLISHED, AND WHAT THE OPERATOR RULED.** A `grep:` proof's pattern is
+    everything before the trailing " in <path>" (`parseDialectGrep`), so when the target is the
+    shard's own record the pattern is a literal substring of the very proof line that carries it and
+    the criterion certifies itself. Measured plan-wide: 168 self-targeting proofs, 167 still matching
+    with their acceptance block deleted, 23 matching nothing but their own criterion. The operator's
+    ruling on 2026-09-06 was "lean into automation and not block unless required", so this ships
+    WARN-ONLY. No blocking gate, no severity override, no change to `proof-grep-safety`.
+
+    **THE SECOND HALF IS FREE AND COSTS AUTHORS NOTHING.** The self-match does not merely evade a
+    check, it SUPPRESSES one. `proofGrepUnmatchableViolations` already knows how to report a pattern
+    that can never match — including the line-seam case, where a wrap falls inside the phrase — but
+    the proof line supplies a match, so `classifyGrepZeroHit` concludes "matched" and it stays
+    silent. Stripping the task's own acceptance block before that classification unhides genuine
+    line-seams with no author change to any shard at all.
+
+    **WHY THE OBVIOUS RULE IS NOT THE ONE BEING BUILT.** "The pattern must not occur in the
+    acceptance block" has no compliant form: every anchoring mechanism that would let a self-target
+    pattern miss its own proof line — `^`, `$`, a bracket class — is already refused by
+    `proof-grep-safety`, and weakening that gate trades a silent false pass for a silent false fail.
+    The satisfiable restatement, and the one this task implements, is that such a pattern must match
+    at least one line OUTSIDE the record's own acceptance block.
+  design: |
+    OWNERSHIP IS DECIDED FROM THE TARGET FILE'S OWN TEXT, NEVER FROM `files:`. The tempting
+    conjunct — that the target also appears in `task.files` — is a silent total suppressor: Rule 15
+    forbids a `verify: auto` task from declaring its own plan record, and the self-targeting
+    population is overwhelmingly `verify: auto`, so gating on `files:` would yield approximately
+    nothing while looking correct. Ownership is instead: the path is `plan/tasks.yaml` or a
+    `plan/tasks.d/*.yaml`, AND the file carries this task's own YAML list-item id line. The list-item
+    form matters — a two-space anchor reads zero corpus-wide and would disable the check silently
+    while every fixture-supplied test still passed.
+
+    THE SLICE UNDER-STRIPS BY DESIGN. The helper removes only the task's OWN acceptance block,
+    bounded by the next top-level list item, so the monolith's several hundred records do not bleed
+    into one another. Where the boundary is ambiguous it keeps text rather than dropping it: an
+    over-strip invents warnings against prose that really exists, an under-strip merely stays quiet,
+    and for an advisory check silence is the cheaper error.
+
+    THE TWO CHECKS ARE KEPT DISJOINT. The new one cedes any criterion whose pattern is a line-seam
+    or case-only match outside the block, because that is the sibling's diagnosis and the sharper
+    one; it fires only where the pattern is genuinely absent outside the criterion. Both share one
+    helper so the ownership rule cannot drift between them.
+
+    WIRING, AND WHY IT IS NOT PLAN-WIDE. The check rides the existing injected file reader and is
+    appended at the one changed-tasks call site, alongside the aggregate rather than inside it.
+    Absent reader means silence, which gives whole-plan quiet for free. Running it over the whole
+    plan would surface every historical instance on every lint; scoped to changed tasks it fires
+    where it is wanted, on the record being filed.
+  acceptance:
+    - claim: "A grep proof whose target is the task's own plan record and whose pattern matches nothing outside that record's acceptance block yields exactly one warn-severity violation"
+      proof: "unit test: test/a-self-certifying-proof-warns-at-filing-time.test.ts"
+    - claim: "The same proof stays silent when its pattern also matches prose outside the acceptance block, and when the target is an ordinary source file"
+      proof: "unit test: test/a-self-certifying-proof-warns-at-filing-time.test.ts"
+    - claim: "Ownership is read from the record's own list-item id line, so a proof naming another task's shard is silent and the monolith strips only the task's own block"
+      proof: "unit test: test/a-self-certifying-proof-warns-at-filing-time.test.ts"
+    - claim: "The suppression carve-out lets proofGrepUnmatchableViolations report line-seams whose only single-line match was their own proof line, while a target outside plan/ behaves exactly as before"
+      proof: "unit test: test/a-self-certifying-proof-warns-at-filing-time.test.ts"
+    - claim: "The check never blocks: a task whose only violation is this one still lints ok, and the linter exposes no severity override for it"
+      proof: "unit test: test/a-self-certifying-proof-warns-at-filing-time.test.ts"
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/a-self-certifying-proof-warns-at-filing-time.test.ts, scripts/comment-load-baseline.json]
+  status: queued
+  attempts: 0
+  origin: "oper#plain-language-surfaces-2026-09-04"
+  plan_refs: ["W1-T2983", "W1-T1225", "W1-T2909", "W1-T1014", "W1-T2967"]
+  note: |
+    THE OPERATOR RULING THIS IMPLEMENTS, VERBATIM: "I'd prefer to lean into automation and not block
+    unless required." Recorded here because W1-T2983 deliberately left severity open and this task is
+    where that question was answered. Advisory is not a soft start toward blocking; nothing in this
+    task proposes a later flip, and the population it would refuse was never the argument for one.
+
+    THE FIVE CRITERIA SHARE ONE PROOF PATH, WHICH W1-T2967 RECORDS AS A DEFECT. A filing shard must
+    use the pure-path `unit test:` form or its criteria grade `no-match`, so all five name the one
+    falsifier file. That is the house form and it is also the shape W1-T2967 says cannot answer
+    several criteria separately. Named here rather than left for a reader to notice.
+
+    THE COMMENT-LOAD BASELINE IS IN SCOPE ON PURPOSE. The two comments this check needs — why
+    ownership cannot read `files:`, and why the id anchor must be the list-item form — push
+    src/lib/task-linter.ts past its recorded comment ceiling. The gate's own words are that
+    recording the growth is an ordinary, reviewed outcome rather than a defeat, so the baseline row
+    moves 884 -> 899 in the same diff and is declared here rather than riding in unnamed.
+
+    RISK IS HIGH FOR SPAN, NOT FOR DANGER — `band_meaning: span` SAYS WHICH. The task touches two
+    concerns, the linter rule and the one line that wires it, and Rule 19 refuses two concerns at
+    risk:medium. Dropping the call site to reach one concern would ship an export nothing calls,
+    which this repo has a separate ratchet for; so the span is declared rather than engineered away.
+    A warn-only advisory check is not dangerous, and nothing here should be read as saying it is.
+
+    EVERY NUMBER IN THE RATIONALE IS A QUERY TAKEN AT c51d944e AND THE TREE HAS MOVED SEVERAL TIMES
+    SINCE. Re-derive before acting on any of them; the design's own first draft carried a five-line
+    source-size headroom that was 337 by the time the work started.

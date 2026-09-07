@@ -51,6 +51,7 @@ export type LintCheck =
   | "proof-resolvability"
   | "proof-grep-safety"
   | "proof-grep-unmatchable"
+  | "proof-grep-self-certifying"
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-name-resolution"
@@ -864,6 +865,88 @@ function wrappedLineSpan(fileText: string, pattern: string): { startLine: number
   return { startLine, endLine };
 }
 
+/** `fileText` with THIS task's own `acceptance:` block removed, or `undefined` when `path` is not
+ *  this task's plan record. Ownership is read from the record's own YAML LIST-ITEM id line, never
+ *  from `files:`: Rule 15 forbids a `verify: auto` task from declaring its own record, so a
+ *  `files:` conjunct would silence this family almost entirely. UNDER-STRIPS on ambiguity — keeping
+ *  a line invents no warning, dropping one does — and strips only the ONE record, so the monolith's
+ *  several hundred siblings never bleed into each other. PURE. */
+function ownPlanRecordOutsideAcceptance(taskId: string, path: string, fileText: string): string | undefined {
+  const isRecord = path === "plan/tasks.yaml" || (path.startsWith("plan/tasks.d/") && /\.ya?ml$/.test(path));
+  if (!isRecord) return undefined;
+  const lines = fileText.split("\n");
+  const start = lines.findIndex((line) => {
+    if (!line.startsWith("- id:")) return false; // a two-space `  id:` anchor reads 0 corpus-wide
+    const rest = line.slice("- id:".length).trim();
+    return rest === taskId || rest === `"${taskId}"` || rest === `'${taskId}'`;
+  });
+  if (start === -1) return undefined;
+  let end = start + 1;
+  while (end < lines.length && !/^- \S/.test(lines[end])) end++;
+  const kept: string[] = [];
+  let dropIndent: number | undefined;
+  let stripped = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (i < start || i >= end) {
+      kept.push(line);
+      continue;
+    }
+    if (dropIndent !== undefined) {
+      if (line.trim() === "") continue;
+      if (line.length - line.trimStart().length > dropIndent) continue;
+      dropIndent = undefined;
+    }
+    const header = /^(\s*)acceptance:\s*$/.exec(line);
+    if (header) {
+      dropIndent = header[1].length;
+      stripped = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  return stripped ? kept.join("\n") : undefined;
+}
+
+/** Every `grep:` proof aimed at the task's OWN plan record whose pattern finds nothing there but the
+ *  criterion carrying it. A pattern is everything before `" in <path>"` (`parseDialectGrep`,
+ *  review.ts), so such a proof matches its own `proof:` line BY CONSTRUCTION and certifies its own
+ *  text rather than the record's. Cedes line-seam and case-only to {@link
+ *  proofGrepUnmatchableViolations}, whose diagnosis is the sharper one, so the two never both
+ *  report a criterion. WARN-only with no override, per the 2026-09-06 operator ruling (W1-T2983). */
+export function proofGrepSelfCertifyingViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const readGrepProofFile = opts.readGrepProofFile;
+  if (!readGrepProofFile) return [];
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to parse
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
+    const target = proofGrepPatternAndPath(whitelisted);
+    if (!target) return; // not a dialect grep proof (see the helper's own doc comment)
+    const fileText = readGrepProofFile(target.path);
+    if (fileText === undefined) return; // not on disk yet — a legitimate forward reference
+    const outside = ownPlanRecordOutsideAcceptance(task.id, target.path, fileText);
+    if (outside === undefined) return; // not this task's own record
+    if (classifyGrepZeroHit(target.pattern, fileText) !== "matched") return; // absent, or the sibling's
+    if (classifyGrepZeroHit(target.pattern, outside) !== "absent") return; // real evidence, or the sibling's
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    const patternHead = target.pattern.slice(0, 70);
+    violations.push({
+      check: "proof-grep-self-certifying",
+      severity: "warn",
+      message:
+        `criterion ${i + 1} ("${claimHead}") \`grep:\` pattern "${patternHead}" matches NOTHING in ` +
+        `${target.path} outside ${task.id}'s own \`acceptance:\` block — the only line it finds is the ` +
+        'proof that carries it. A pattern is everything before " in <path>", so a proof aimed at the ' +
+        "record it lives in matches ITSELF and pins nothing the record actually says. Re-anchor on a " +
+        "phrase from the rationale, design or note prose, then confirm it still reads a hit with the " +
+        "acceptance block deleted.",
+    });
+  });
+  return violations;
+}
+
 /** Every `grep:` proof whose named file exists and whose pattern is a POSITIVE detection of
  *  unmatchability: {@link classifyGrepZeroHit} returns "line-seam" or "case-only". Silent otherwise
  *  — not on disk yet, absent in every probed form (both legitimate forward references), or already
@@ -878,8 +961,12 @@ export function proofGrepUnmatchableViolations(task: Task, opts: LintOpts = {}):
     if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
     const target = proofGrepPatternAndPath(whitelisted);
     if (!target) return; // not a dialect grep proof (see the helper's own doc comment)
-    const fileText = readGrepProofFile(target.path);
-    if (fileText === undefined) return; // not on disk yet — a legitimate forward reference
+    const rawFileText = readGrepProofFile(target.path);
+    if (rawFileText === undefined) return; // not on disk yet — a legitimate forward reference
+    // W1-T2990: a proof aimed at its OWN record supplies its own match, so every line-seam in that
+    // family read "matched" here and this check stayed silent about it. Judge such a proof against
+    // the record MINUS its own acceptance block; every other target is unchanged.
+    const fileText = ownPlanRecordOutsideAcceptance(task.id, target.path, rawFileText) ?? rawFileText;
     const cause = classifyGrepZeroHit(target.pattern, fileText);
     if (cause !== "line-seam" && cause !== "case-only") return; // matched / absent: both silent
     const claimHead = (c.claim ?? "").slice(0, 60);
