@@ -1656,6 +1656,10 @@ export function recordCiLearningCadenceFire(root: string, at: Date): void {
  *  what stops one fire flooding the plan. {@link ADOPTION_MINT_CEILING}'s number, for its reason. */
 export const CI_LEARNING_MINT_CEILING = ADOPTION_MINT_CEILING;
 
+/** How many repeated repair files a draft names. Three: enough to show whether the repairs agree,
+ *  short enough that a reader takes it in — the flat union it replaces ran to 66 files. */
+export const CI_LEARNING_DOMINANT_FILE_COUNT = 3;
+
 /** The primary key: PR plus gate, never a similarity score — deterministic, so a rerun over an
  *  unchanged corpus recognises what it already filed ({@link adoptionProposalId}'s discipline). */
 export function ciLearningShardId(finding: Pick<CiFailurePair, "pr" | "gate">): string {
@@ -1681,8 +1685,12 @@ export interface CiLearningShardDraft {
    *  this is the evidence it was derived from: a draft that named only its first PR would be
    *  summarising away the very thing that makes the lesson worth carrying. */
   prs: number[];
-  /** The files the repair actually touched: the lesson is in the delta, not the red. */
+  /** The files the repairs touched, MOST-REPAIRED FIRST (W1-T3051). */
   repairFiles: string[];
+  /** The files this gate's repairs kept returning to, with how many of them touched each. Empty
+   *  when the repairs share no file more than once — an honest "no single subject" rather than a
+   *  manufactured one. */
+  dominantRepairFiles: { file: string; prs: number }[];
   /** LAW 5: the author class rides the record. */
   author_class: "machine";
   /** So `isDispatchEligible` refuses it and it PARKS for an operator. */
@@ -1751,12 +1759,21 @@ export function mintCiLearningShards(
    * list now names remaining CAUSES too, which is nineteen readable lines instead of a hundred and
    * sixteen.
    */
-  const clusters = new Map<string, { gate: string; prs: number[]; repairFiles: Set<string>; firstId: string }>();
+  const clusters = new Map<
+    string,
+    { gate: string; prs: number[]; repairFileHits: Map<string, number>; firstId: string }
+  >();
   for (const p of ordered) {
     const existing = clusters.get(p.gate);
-    const cluster = existing ?? { gate: p.gate, prs: [], repairFiles: new Set<string>(), firstId: ciLearningShardId(p) };
+    const cluster = existing ?? { gate: p.gate, prs: [], repairFileHits: new Map<string, number>(), firstId: ciLearningShardId(p) };
     cluster.prs.push(p.pr);
-    for (const f of p.repairFiles ?? []) cluster.repairFiles.add(f);
+    // COUNTED PER REPAIR, not unioned. W1-T3051: a set answered "which files were touched at all",
+    // which over a 26-pull-request cluster is 66 files in no order — a reader learns nothing from
+    // it. The lesson is in WHICH file the repairs kept coming back to. Deduped within one repair so
+    // a pair listing a file twice cannot inflate its share.
+    for (const f of new Set(p.repairFiles ?? [])) {
+      cluster.repairFileHits.set(f, (cluster.repairFileHits.get(f) ?? 0) + 1);
+    }
     if (!existing) clusters.set(p.gate, cluster);
   }
   // Most pull requests refused first; the gate name breaks ties so one window always ranks the same
@@ -1773,6 +1790,11 @@ export function mintCiLearningShards(
       continue;
     }
     const prList = c.prs.map((n) => `#${n}`).join(", ");
+    // Most-repaired first, file path breaking ties so one window ranks the same way twice.
+    const rankedFiles = [...c.repairFileHits.entries()].sort((a, b) =>
+      b[1] !== a[1] ? b[1] - a[1] : a[0].localeCompare(b[0]),
+    );
+    const dominant = rankedFiles.filter(([, n]) => n > 1).slice(0, CI_LEARNING_DOMINANT_FILE_COUNT);
     drafts.push({
       findingId: c.firstId,
       title:
@@ -1784,7 +1806,12 @@ export function mintCiLearningShards(
       // Every pull request in the cluster and every file their repairs touched: the per-instance
       // detail a lesson is derived FROM, carried rather than summarised away.
       prs: [...c.prs],
-      repairFiles: [...c.repairFiles],
+      repairFiles: rankedFiles.map(([f]) => f),
+      // THE SUBJECT OF THE LESSON, when the repairs agree on one. A file the repairs returned to
+      // again and again is what this gate is really about; a file touched once is noise, so a
+      // single hit never qualifies. Empty when the repairs share nothing, which is itself the
+      // honest answer: this cluster has no single subject and a reader should not be handed one.
+      dominantRepairFiles: dominant.map(([file, prs]) => ({ file, prs })),
       author_class: "machine",
       verify: "human",
       remedySurface: CI_LEARNING_REMEDY_SURFACE,
