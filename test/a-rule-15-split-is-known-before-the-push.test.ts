@@ -14,6 +14,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { judgeRule15 } = (await import(
@@ -81,4 +85,100 @@ test("W1-T3040: it uses the reviewer's own predicate, so the two cannot disagree
   };
   assert.equal(review.criterionFieldTampered(CRITERION_HUNK), true, "the reviewer sees the same tamper");
   assert.equal(judgeRule15(CRITERION_ADD, ["plan/tasks.d/W1-T1-x.yaml", "src/x.ts"]).ok, false, "and so does the check");
+});
+
+// ── THE CLI ITSELF, SHELLED OUT FOR REAL ─────────────────────────────────────────────────────
+// The tests above import `judgeRule15` and exercise the PREDICATE. Everything the CLI wraps around
+// it — reading the diff, reading the file list, the exit codes, and the refusal that CANNOT report
+// clean when git fails — carried no test at all, and diff-coverage refused the PR for it:
+//
+//   diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests
+//     - scripts/rule15-precheck.mjs:28 ... :67
+//
+// A directive cannot exempt this: `main()` is ~29 executable lines, and computeBoundaryRanges caps
+// a process-boundary exemption at MAX_BOUNDARY_EXEC_LINES = 15. So it is tested, by really running
+// it — the shape CLAUDE.md asks for ("write one test that really shells out"), and the shape 123
+// other suites here already use. NODE_V8_COVERAGE is inherited by the child, so these runs are what
+// give scripts/rule15-precheck.mjs its coverage.
+
+/** A fixture repo with a base commit and a HEAD commit, and the identity git demands. Without
+ *  the GIT_AUTHOR and GIT_COMMITTER variables a commit fails "Author identity unknown" on a CI runner while
+ *  passing on a dev machine (#1971), and an identity-less real-git test is what
+ *  test/host-capability-fixtures.test.ts calls an `unidentified-commit`. */
+const GIT_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_AUTHOR_NAME: "fixture",
+  GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+  GIT_COMMITTER_NAME: "fixture",
+  GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+};
+
+function fixtureRepo(head: Record<string, string>): { root: string; base: string } {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}rule15-cli-`));
+  const git = (...args: string[]): string =>
+    execFileSync("git", ["-C", root, ...args], { encoding: "utf8", env: GIT_ENV });
+  git("init", "--quiet", "-b", "main");
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.d", "W1-T1-x.yaml"), "- id: W1-T1\n  acceptance:\n");
+  git("add", "-A");
+  git("commit", "--quiet", "-m", "base");
+  const base = git("rev-parse", "HEAD").trim();
+  for (const [rel, body] of Object.entries(head)) {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), body);
+  }
+  git("add", "-A");
+  git("commit", "--quiet", "-m", "head");
+  return { root, base };
+}
+
+/** Run the CLI the way package.json does, in `cwd`. */
+function runPrecheck(cwd: string, base: string): { status: number; out: string } {
+  const r = spawnSync(process.execPath, [join(REPO_ROOT, "node_modules", ".bin", "tsx"), join(REPO_ROOT, "scripts/rule15-precheck.mjs"), "--base", base], {
+    cwd,
+    encoding: "utf8",
+    env: GIT_ENV,
+  });
+  return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+}
+
+test("the CLI REFUSES a diff that adds a criterion beside a non-plan file, naming both sides", () => {
+  const { root, base } = fixtureRepo({
+    "plan/tasks.d/W1-T1-x.yaml": '- id: W1-T1\n  acceptance:\n    - claim: "a thing"\n',
+    "src/x.ts": "export const x = 1;\n",
+  });
+  try {
+    const { status, out } = runPrecheck(root, base);
+    assert.equal(status, 1, "a refusal exits 1");
+    assert.match(out, /WILL BE REFUSED under Standing rule 15/);
+    assert.match(out, /plan\/tasks\.d\/W1-T1-x\.yaml/, "it names the plan path");
+    assert.match(out, /src\/x\.ts/, "and the path that must stay");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the CLI PASSES a diff that touches no criterion field", () => {
+  const { root, base } = fixtureRepo({ "src/x.ts": "export const x = 1;\n" });
+  try {
+    const { status, out } = runPrecheck(root, base);
+    assert.equal(status, 0, "no criterion change is a pass");
+    assert.match(out, /rule15-precheck: OK/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an UNREADABLE diff exits 2 and refuses to report clean — never a vacuous pass", () => {
+  const { root } = fixtureRepo({ "src/x.ts": "export const x = 1;\n" });
+  try {
+    const { status, out } = runPrecheck(root, "no-such-ref-xyzzy");
+    assert.equal(status, 2, "a check that could not look must not report OK");
+    assert.match(out, /REFUSING to report clean/);
+    assert.doesNotMatch(out, /rule15-precheck: OK/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
