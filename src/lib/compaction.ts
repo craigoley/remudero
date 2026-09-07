@@ -405,6 +405,21 @@ export function outputContractLines(taskId: string): string[] {
     "  proof and, when a proof is not executable, judges your body against that proof's own text —",
     "  a body that does not engage each proof is scored UNMET even when the work is correct.",
     ...bodyVsDiffContractLines(),
+    // W1-T2760: THE PRODUCER THE CITATION MINER WAS MISSING. `mineGitLogCitations` (retro.ts)
+    // scans commit history for `learnings#<id>` and finds effectively none, because no prompt
+    // — until this line — ever asked a worker to write one; so the retro's `cited_count` measured
+    // only INJECTION (was this fact put in the prompt?), never USE (did the worker act on it?),
+    // and the budget ratchet's compression order ranked on that same proxy. This is the other
+    // half of the same dialect PR_URL/Follow-ups already use: one more anchored REPORT line, no
+    // new vocabulary. `parseLearningsUsed` (worker.ts) reads it back; an id it names that was
+    // never injected is refused BY NAME rather than silently trusted — the same fabrication the
+    // PR-body keyword floor already catches on the other channel.
+    "- Your REPORT must ALSO include a line naming the learnings you actually ACTED ON this run —",
+    "  anchored to its own line start, exactly like PR_URL: `LEARNINGS_USED: learnings#<id>,",
+    "  learnings#<id>` for one or more, or `LEARNINGS_USED: none` if you used none. REQUIRED: a",
+    "  silent report must be distinguishable from one that explicitly claims none. Only cite an id",
+    "  that was actually injected into your CONTEXT above — an id you were never shown is refused",
+    "  by name and never counted as used.",
     "- End with a REPORT whose LAST line is exactly: PR_URL: <the pull request url>",
   ];
 }

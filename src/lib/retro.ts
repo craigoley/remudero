@@ -2910,7 +2910,7 @@ export function applyContradictionResolution(
   return updated;
 }
 
-// ── Citation mining (W1-T419) ──────────────────────────────────────────────
+// ── Citation mining (W1-T419, extended W1-T2760) ────────────────────────────
 //
 // `selectLearnings` already tiebreaks on `cited`, so this corpus has the RANKING half of the
 // Stack-Overflow-shaped loop. The signal feeding it was dead: hand-stamped dates, and effectively
@@ -2918,26 +2918,53 @@ export function applyContradictionResolution(
 // `learnings.injected` rows' `matched_ids`, and `learnings#<id>` mentions in git-log — and stamps
 // `cited` plus `cited_count` onto each ACTIVE entry. An id with no evidence is left untouched.
 // Why, measured: docs/forensics/retro.md.
+//
+// W1-T2760: BOTH of those sources measure INJECTION — was the fact put in a prompt? — never USE:
+// did a worker actually act on it? No prompt ever asked a worker to say, so `cited_count` was a
+// proxy standing in for a signal nothing produced, and compression ranked the least-INJECTED entry
+// as the least useful, feeding the next injection. `LEARNINGS_USED` (compaction.ts's contract) and
+// `parseLearningsUsed` (worker.ts) are the producer; `learnings.used` ledger rows are its evidence.
+// `mineLedgerCitations` now mines BOTH ledger steps, tagging each occurrence's `kind`; the two
+// counts are aggregated and stamped SEPARATELY and NEVER SUMMED (see `CitationStamp` below).
+// `mineGitLogCitations` is UNCHANGED (design v) and its evidence keeps aggregating as INJECTED
+// evidence exactly as it always has — `kind` defaults to `"injected"` when absent, so this stays a
+// pure addition with zero behaviour change for every existing caller of the git-log half.
 
-/** One evidence occurrence for a learning id — WHEN it was cited, regardless of source. */
+/** One evidence occurrence for a learning id — WHEN it was cited, regardless of source, and which
+ *  of the two things it is evidence OF. `kind` absent means `"injected"` — the default every
+ *  pre-W1-T2760 producer ({@link mineGitLogCitations}, and hand-built evidence in older tests)
+ *  keeps meaning without having to name it. */
 export interface CitationEvidence {
   id: string;
   /** ISO date (or full timestamp); only lexicographic ("latest wins") order matters. */
   date: string;
+  /** `"injected"` (the fact was PUT IN a prompt — a `learnings.injected` ledger row, or a
+   *  `learnings#<id>` git-log mention) or `"used"` (a worker's own `LEARNINGS_USED` claim, already
+   *  checked against injection by {@link parseLearningsUsed}). Absent means `"injected"`. */
+  kind?: "injected" | "used";
 }
 
-/** Mine `learnings.injected` rows for per-id citation evidence. A PRE-TASK row logs `matched` as a
- *  bare count and contributes NOTHING, never a throw: old-format rows are the expected majority
- *  of history, and a malformed `matched_ids` is skipped the same way. */
+/** Mine `learnings.injected` AND `learnings.used` ledger rows for per-id citation evidence
+ *  (W1-T2760 extends the W1-T419 injected-only miner with the used half). A PRE-TASK
+ *  `learnings.injected` row logs `matched` as a bare count and contributes NOTHING, never a throw:
+ *  old-format rows are the expected majority of history, and a malformed `matched_ids`/`used_ids`
+ *  is skipped the same way — an unrecognised `step` contributes nothing either. */
 export function mineLedgerCitations(records: LedgerRecord[]): CitationEvidence[] {
   const out: CitationEvidence[] = [];
   for (const r of records) {
-    if (r.step !== "learnings.injected") continue;
-    const ids = r.matched_ids;
-    if (!Array.isArray(ids)) continue; // pre-task row (count-only) or malformed — no evidence
     const date = typeof r.ts === "string" ? r.ts : "";
-    for (const id of ids) {
-      if (typeof id === "string" && id.length > 0) out.push({ id, date });
+    if (r.step === "learnings.injected") {
+      const ids = r.matched_ids;
+      if (!Array.isArray(ids)) continue; // pre-task row (count-only) or malformed — no evidence
+      for (const id of ids) {
+        if (typeof id === "string" && id.length > 0) out.push({ id, date, kind: "injected" });
+      }
+    } else if (r.step === "learnings.used") {
+      const ids = r.used_ids;
+      if (!Array.isArray(ids)) continue; // malformed — no evidence, never a throw
+      for (const id of ids) {
+        if (typeof id === "string" && id.length > 0) out.push({ id, date, kind: "used" });
+      }
     }
   }
   return out;
@@ -2967,43 +2994,68 @@ export function mineGitLogCitations(commits: GitLogCommit[]): CitationEvidence[]
   return out;
 }
 
-/** Per-entry mined evidence, reduced: total occurrences and the latest (max, lexicographic) date. */
+/** Per-entry mined evidence, reduced: total occurrences and the latest (max, lexicographic) date —
+ *  for EACH kind, SEPARATELY. W1-T2760: every field is now optional, because an id can carry
+ *  injected evidence with no used evidence, used evidence with no injected evidence, or both — the
+ *  two halves are never combined into one count. `citedCount`/`cited` are the INJECTED half
+ *  (unchanged name and meaning from W1-T419, so every pre-existing caller reading them keeps
+ *  reading exactly what it always did); `usedCount`/`used` are the new USED half. */
 export interface CitationStamp {
-  citedCount: number;
-  cited: string;
+  citedCount?: number;
+  cited?: string;
+  usedCount?: number;
+  used?: string;
 }
 
-/** Reduce raw {@link CitationEvidence} into ONE {@link CitationStamp} per id: `citedCount` sums
- *  occurrences, `cited` is the latest date. An id with zero evidence has no key in the map. */
+/** Reduce raw {@link CitationEvidence} into ONE {@link CitationStamp} per id: within EACH kind,
+ *  the count sums occurrences and the date is the latest — but the two kinds are accumulated on
+ *  INDEPENDENT fields and NEVER SUMMED into one another (W1-T2760 design iii). An id with zero
+ *  evidence of a kind carries no field for that kind at all — never a stamped zero. */
 export function aggregateCitationEvidence(evidence: CitationEvidence[]): Map<string, CitationStamp> {
   const out = new Map<string, CitationStamp>();
   for (const e of evidence) {
-    const prior = out.get(e.id);
-    if (!prior) {
-      out.set(e.id, { citedCount: 1, cited: e.date });
-      continue;
+    const prior = out.get(e.id) ?? {};
+    if (e.kind === "used") {
+      prior.usedCount = (prior.usedCount ?? 0) + 1;
+      if (prior.used === undefined || e.date > prior.used) prior.used = e.date;
+    } else {
+      prior.citedCount = (prior.citedCount ?? 0) + 1;
+      if (prior.cited === undefined || e.date > prior.cited) prior.cited = e.date;
     }
-    prior.citedCount += 1;
-    if (e.date > prior.cited) prior.cited = e.date;
+    out.set(e.id, prior);
   }
   return out;
 }
 
+/** {@link stampCitations}' return element: a {@link LearningEntry} plus the two USED fields, which
+ *  are not (yet) part of that type's own schema — declared locally rather than widening
+ *  `LearningEntry` itself, so this stays a `retro.ts`-only extension until a shard-persistence
+ *  caller needs the full round trip (W1-T2760). */
+export type StampedLearningEntry = LearningEntry & { used?: string; usedCount?: number };
+
 /** Stamp mined citation evidence onto every ACTIVE entry — pure, a NEW array. An entry absent from
- *  `evidence` keeps what it carried, so a pass that found nothing never blanks one back to
- *  unevidenced. A non-active entry is never stamped: it is never injected. */
-export function stampCitations(entries: LearningEntry[], evidence: Map<string, CitationStamp>): LearningEntry[] {
+ *  `evidence`, or whose stamp carries only ONE of the two kinds, keeps whatever it already carried
+ *  for the other kind — a pass that found nothing (of a given kind) never blanks that half back to
+ *  unevidenced. A non-active entry is never stamped: it is never injected. Writes BOTH halves
+ *  (W1-T2760 design iii) whenever the stamp carries them. */
+export function stampCitations(entries: LearningEntry[], evidence: Map<string, CitationStamp>): StampedLearningEntry[] {
   return entries.map((e) => {
     if (e.lifecycle !== "active") return e;
     const stamp = evidence.get(e.id);
     if (!stamp) return e;
-    return { ...e, cited: stamp.cited, citedCount: stamp.citedCount };
+    return {
+      ...e,
+      ...(stamp.citedCount !== undefined ? { cited: stamp.cited, citedCount: stamp.citedCount } : {}),
+      ...(stamp.usedCount !== undefined ? { used: stamp.used, usedCount: stamp.usedCount } : {}),
+    };
   });
 }
 
 /** W1-T1248: the write half of the four citation miners, which shipped with no production caller.
  *  Reports which ids' stamps actually MOVED — an unevidenced or non-active entry is byte-identical
- *  and never appears, so a pass that finds nothing new produces a NO-OP diff. */
+ *  and never appears, so a pass that finds nothing new produces a NO-OP diff. W1-T2760: moves on
+ *  EITHER half (cited/citedCount or used/usedCount) count, and the returned stamp names only the
+ *  half(s) that actually moved — never a phantom key for a half that stayed put. */
 export function changedCitationStamps(
   entries: LearningEntry[],
   evidence: Map<string, CitationStamp>,
@@ -3011,11 +3063,21 @@ export function changedCitationStamps(
   const stamped = stampCitations(entries, evidence);
   const out = new Map<string, CitationStamp>();
   for (let i = 0; i < entries.length; i++) {
-    const before = entries[i];
+    const before = entries[i] as StampedLearningEntry;
     const after = stamped[i];
-    if (after.cited !== before.cited || after.citedCount !== before.citedCount) {
-      out.set(after.id, { cited: after.cited as string, citedCount: after.citedCount as number });
+    const citedMoved = after.cited !== before.cited || after.citedCount !== before.citedCount;
+    const usedMoved = after.used !== before.used || after.usedCount !== before.usedCount;
+    if (!citedMoved && !usedMoved) continue;
+    const stamp: CitationStamp = {};
+    if (citedMoved) {
+      stamp.cited = after.cited;
+      stamp.citedCount = after.citedCount;
     }
+    if (usedMoved) {
+      stamp.used = after.used;
+      stamp.usedCount = after.usedCount;
+    }
+    out.set(after.id, stamp);
   }
   return out;
 }
@@ -3052,25 +3114,45 @@ export function extractEntryBlock(text: string, id: string): string | undefined 
   return locateEntryBlock(text, id)?.block;
 }
 
+/** Write ONE date/count pair (`cited`/`cited_count` or, W1-T2760, `used`/`used_count`) into `block`
+ *  — the single text-surgery move {@link stampCitationInShardText} now applies to either half,
+ *  parameterised by key name so the two stay byte-for-byte identical in shape. */
+function stampDateCountPair(block: string, dateKey: string, date: string, countKey: string, count: number): string {
+  const dateLine = `  ${dateKey}: "${date}"`;
+  const countLine = `  ${countKey}: ${count}`;
+  const dateLineRe = new RegExp(`^  ${dateKey}:.*$`, "m");
+  const countLineRe = new RegExp(`^  ${countKey}:.*$`, "m");
+  if (dateLineRe.test(block)) {
+    block = block.replace(dateLineRe, dateLine);
+  } else {
+    // No prior date line — append before the block's trailing whitespace, the same "no anchor to
+    // replace" fallback learnings-assert-check.mjs's quarantineEntryInText uses.
+    const trailingWs = /\s*$/.exec(block)?.[0] ?? "";
+    block = `${block.slice(0, block.length - trailingWs.length)}\n${dateLine}${trailingWs}`;
+  }
+  if (countLineRe.test(block)) {
+    block = block.replace(countLineRe, countLine);
+  } else {
+    block = block.replace(dateLine, `${dateLine}\n${countLine}`);
+  }
+  return block;
+}
+
+/** Text-surgery stamp of ONE entry's evidence fields within a shard's raw YAML — `cited`/
+ *  `cited_count` (the injected half) and, W1-T2760, `used`/`used_count` (the used half),
+ *  INDEPENDENTLY: a stamp carrying only one half writes only that half, leaving the other line (if
+ *  any) exactly as it was — the same "never blank what a pass found nothing new for" discipline
+ *  {@link stampCitations} keeps in memory. */
 export function stampCitationInShardText(text: string, id: string, stamp: CitationStamp): string {
   const loc = locateEntryBlock(text, id);
   if (!loc) return text; // id not in this shard — no-op
   const { start, end } = loc;
   let block = loc.block;
-  const citedLine = `  cited: "${stamp.cited}"`;
-  const countLine = `  cited_count: ${stamp.citedCount}`;
-  if (/^  cited:.*$/m.test(block)) {
-    block = block.replace(/^  cited:.*$/m, citedLine);
-  } else {
-    // No prior `cited:` line — append before the block's trailing whitespace, the same "no anchor
-    // to replace" fallback learnings-assert-check.mjs's quarantineEntryInText uses.
-    const trailingWs = /\s*$/.exec(block)?.[0] ?? "";
-    block = `${block.slice(0, block.length - trailingWs.length)}\n${citedLine}${trailingWs}`;
+  if (stamp.cited !== undefined && stamp.citedCount !== undefined) {
+    block = stampDateCountPair(block, "cited", stamp.cited, "cited_count", stamp.citedCount);
   }
-  if (/^  cited_count:.*$/m.test(block)) {
-    block = block.replace(/^  cited_count:.*$/m, countLine);
-  } else {
-    block = block.replace(citedLine, `${citedLine}\n${countLine}`);
+  if (stamp.used !== undefined && stamp.usedCount !== undefined) {
+    block = stampDateCountPair(block, "used", stamp.used, "used_count", stamp.usedCount);
   }
   return text.slice(0, start) + block + text.slice(end);
 }
@@ -3123,7 +3205,9 @@ export interface CitationBaselineRefusal {
   after: string;
 }
 
-const CITATION_STAMP_LINE_RE = /^ {2}(cited|cited_count):.*$/;
+// W1-T2760: `used`/`used_count` joins the two lines this stamping pass owns, so a baseline compare
+// ignores them exactly as it already ignores `cited`/`cited_count`.
+const CITATION_STAMP_LINE_RE = /^ {2}(cited|cited_count|used|used_count):.*$/;
 
 /** Strip the two lines {@link stampCitationInShardText} owns: a baseline-vs-fresh compare must
  *  judge everything ELSE about the entry, never the fields this pass is about to write. */
