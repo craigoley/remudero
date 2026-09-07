@@ -171,7 +171,7 @@
   "src/lib/learnings.ts": 339,
   "src/lib/ledger-grep.ts": 202,
   "src/lib/ledger-replay.ts": 86,
-  "src/lib/ledger.ts": 441,
+  "src/lib/ledger.ts": 444,
   "src/lib/live-write-guard.ts": 123,
   "src/lib/log-rotation.ts": 50,
   "src/lib/main-health-rung.ts": 10,
@@ -222,7 +222,7 @@
   "src/lib/repo-location.ts": 50,
   "src/lib/retro-preflight.ts": 83,
   "src/lib/retro-subprocess.ts": 8,
-  "src/lib/retro.ts": 890,
+  "src/lib/retro.ts": 936,
   "src/lib/review-capacity.ts": 46,
   "src/lib/review-provider-provenance.ts": 29,
   "src/lib/review.ts": 1980,
@@ -265,6 +265,6 @@
   "src/lib/worker.ts": 1136,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16219,
+  "src/run-task.ts": 16225,
   "src/spike.ts": 18
 }

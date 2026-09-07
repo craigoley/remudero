@@ -467,6 +467,7 @@ import {
   renderPromotionProposals,
   renderPlanStateTruth,
   resolveMarkerForGather,
+  escalateRetroPublicationFailure,
   retireSettledFollowups,
   routeFollowupsToRegistry,
   type FollowupReferentRead,
@@ -22168,6 +22169,19 @@ async function retroCommand(
           `evidence is in the ledger: retro.preflight_failed rows carry the exit class, elapsed_ms, ` +
           `suite count and bounded stdout/stderr excerpts`,
       );
+      // W1-T2988: the marker stays frozen above by design — that part is correct and unchanged.
+      // What was missing is that the SAME failure then repeated with nothing said: 172 fires against
+      // zero completions, a ~49-minute subprocess each time. This raises ONE needs-human notice per
+      // episode once the strike cap is met, and does not stop the retro.
+      try {
+        escalateRetroPublicationFailure(
+          { attempts: preflight.attempts },
+          { owner, repo, ledgerPath, runId, readLedger: readLedgerLines },
+        );
+      } catch {
+        // Best-effort by construction: failing to RAISE the notice must never change the retro's own
+        // exit path, which the next attempt depends on. The preflight rows still carry the evidence.
+      }
       return 1;
     }
 
