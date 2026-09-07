@@ -4950,6 +4950,14 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "its --check mode is not wired into any CI workflow — it reaches CI through `npm test` only, " +
     "the same route scripts/generate-cli-reference.mjs above takes, and the drift it gates is over " +
     "generated operator macro text rather than over any gate's own rule",
+  // W1-T2762 — THE SAME CLASSIFICATION AS generate-cli-reference.mjs above, whose wiring this generator copies.
+  // Its `--check` mode is no workflow `run:` step and has no npm alias at all (this PR dropped it, unwired-gate
+  // having refused it): it reaches CI only via test/proof-dialect-doc.test.ts inside `npm test`, so touching it
+  // cannot change what a workflow-level gate MEASURES; the drift it gates is over generated documentation.
+  "scripts/generate-proof-dialect.mjs":
+    "its --check mode is not wired into any CI workflow — it reaches CI through `npm test` only, " +
+    "the same route scripts/generate-cli-reference.mjs above takes, and the drift it gates is over " +
+    "generated dialect documentation rather than over any gate's own rule",
   "scripts/generate-docs-index.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-learnings-index.mjs": "its :check mode is not wired into any CI workflow",
   "scripts/generate-plan-index.mjs": "its :check mode is not wired into any CI workflow",

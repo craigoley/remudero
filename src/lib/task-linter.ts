@@ -622,7 +622,15 @@ const RESOLVABILITY_DIALECT_RE = /^(unit test|grep):\s*([\s\S]*)$/i;
  *  out to a named, exported constant (W1-T2762) so scripts/generate-proof-dialect.mjs can render them
  *  and test/proof-dialect-doc.test.ts can hold CLAUDE.md's proof section to these SAME numbers,
  *  instead of a second hand-typed "100 characters" / "one comma" copy drifting from the check below.
- *  {@link looksLikeScenarioNarrative} reads these fields; it does not restate the numbers. */
+ *  {@link looksLikeScenarioNarrative} reads these fields; it does not restate the numbers.
+ *
+ *  KIND: BACKSTOP (W1-T1266). It is not what normally admits a proof — {@link PROOF_PAYLOAD_SHAPES}
+ *  is, and a body matching one returns resolvable before these numbers are ever read. They run only
+ *  on the residue of a shape match that ALREADY failed, to separate a bare single test title (let
+ *  through) from a multi-clause narrative (reported). So a mis-size here cannot refuse a proof the
+ *  primary control would have admitted; it can only mis-sort proofs that control has already
+ *  rejected. Its second caller reads it the same way, to suppress a duplicate warning
+ *  proof-dialect has already issued. */
 export const SCENARIO_NARRATIVE_BOUNDS = {
   /** A body longer than this reads as prose regardless of punctuation. */
   maxBodyLength: 100,
