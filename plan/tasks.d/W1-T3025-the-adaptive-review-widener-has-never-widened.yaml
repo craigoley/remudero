@@ -1,0 +1,74 @@
+- id: W1-T3025
+  title: "THE ADAPTIVE REVIEW WIDENER HAS NEVER WIDENED — 718 decisions since 2026-09-05 and not one above base_width: it holds 53% of the time and NARROWS 47%, `healthy-window` fires 5 times in three days, and 59% of its refusals are missing telemetry rather than observed pressure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [src/lib/review-capacity.ts, test/adaptive-review-widener-can-widen.test.ts]
+  origin: "operator-session#why-are-reviews-slow-2026-09-07"
+  plan_refs: ["W1-T2853", "W1-T3024", "W1-T2931"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2853 shipped `selectRuntimeReviewWidth` (src/lib/review-capacity.ts, wired at
+    run-task.ts:31230) to EARN a third review lane on a sustained healthy window. Its own policy
+    prose calls lane three "temporary capacity earned by a sustained healthy window, not a new
+    default". MEASURED over every `review.capacity` row in the ledger union, 2026-09-05 .. 2026-09-07:
+
+      decisions                    : 718
+      effective_width ABOVE base   :   0   (0%)
+      effective_width AT base      : 382  (53%)
+      effective_width BELOW base   : 336  (47%)
+      max effective_width observed :   2   (max_width is 3)
+
+    THE EARNED LANE HAS NEVER BEEN EARNED. `reason: healthy-window` appears FIVE times in three
+    days, and on two of those it still returned width 1. So the mechanism is not merely
+    conservative — the widening arm has no observed successful case at all.
+
+    THE DOMINANT REFUSAL IS ABSENT TELEMETRY, NOT OBSERVED PRESSURE:
+
+      telemetry-unavailable          : 349  (218 -> width 2, 131 -> width 1)
+      backlog-not-sustained          : 125
+      cpu-pressure                   : 111  (all -> width 1)
+      provider-telemetry-unavailable :  74
+      host-worker-budget             :  43
+      review-latency-expanded        :   9
+
+    349 + 74 = 423 of 718 (59%) are the reader failing to observe, not the host being busy. A
+    representative row at 2026-09-07T13:38 carries `mem_available_mib: 29838`,
+    `cpu_psi_some_avg10_pct: 0`, `memory_psi_some_avg10_pct: 0`, `healthy_samples: 0` — an idle
+    host with 29 GiB free, refused for want of a provider reading.
+
+    NOT EVERY REFUSAL IS SPURIOUS, AND THE FILING SHOULD NOT PRETEND OTHERWISE. `cpu-pressure` was
+    checked and is real: the sampled row carries `cpu_psi_some_avg10_pct: 75.9`. That arm is
+    working. The defect is that a MISSING reading is treated the same as a BAD one, and
+    `healthy_samples` (needing 3 consecutive) can never accumulate across a stream where 59% of
+    samples are unreadable.
+
+    WHY IT MATTERS NOW: W1-T3024 raised the committed base 2 -> 3 on operator direction. That
+    raises what the widener HOLDS, but 47% of decisions narrow below base regardless, so the
+    committed value cannot deliver three lanes on its own while this stands.
+  acceptance:
+    - claim: "an unreadable telemetry sample is distinguished from an unhealthy one, so a stream of missing readings cannot masquerade as observed pressure"
+      proof: "unit test: test/adaptive-review-widener-can-widen.test.ts"
+    - claim: "a sustained window that is healthy on every reading the host CAN supply widens above base_width at least once, with a test that fails if the widening arm is unreachable"
+      proof: "unit test: test/adaptive-review-widener-can-widen.test.ts"
+    - claim: "genuine pressure still narrows — the cpu-pressure arm observed at 75.9% PSI keeps its current behaviour"
+      proof: "unit test: test/adaptive-review-widener-can-widen.test.ts"
+    - claim: "the decision row names whether a refusal came from an OBSERVED reading or an ABSENT one, so this measurement can be re-derived from the ledger without re-reading source"
+      proof: "unit test: test/adaptive-review-widener-can-widen.test.ts"
+  note: |
+    THE FALSIFIER IS THE ZERO. If a `review.capacity` row with `effective_width` greater than
+    `base_width` exists anywhere in the ledger union, the premise above is wrong and this closes
+    without implementation. Re-derive before building: the query is
+    `grep '"step":"review.capacity"'` across the live file plus every rotation, then compare
+    `effective_width` to `base_width` per row.
+
+    NOT IN SCOPE: raising `max_width` (W1-T3024's note explains why the host sum, not this reader,
+    governs that), and the host-worker-budget arm (W1-T2931 owns it).
+
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved refs/rmd-id/W1-T3025.
