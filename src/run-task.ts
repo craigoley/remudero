@@ -17299,17 +17299,28 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
 
 /**
  * FOLD ONE `state`/`merged_at!=null` ROW INTO THE MOST DECISIVE `prState` SEEN SO FAR for one
- * head — merged beats open beats closed, and this never downgrades. Shared by the bulk paginated
+ * head — OPEN beats merged beats closed, and this never downgrades. Shared by the bulk paginated
  * walk and the per-head follow-up (`perHeadPrState`) below it so the "most decisive wins" rule is
  * defined exactly once (W1-T2246).
+ *
+ * OPEN LEADS, AND W1-T3020 CORRECTED IT TO — the original order read `merged` as most decisive,
+ * which is right for a branch used ONCE and wrong for a REUSED NAME. `prState` decides whether a
+ * REF may be deleted, and merged/closed are statements about PAST pull requests on that name while
+ * `open` is a statement about the ref RIGHT NOW. MEASURED on the live repo: `claude/resolve-p27-
+ * findings-rnvu61` carries ten merged PRs and one open (#4392, filed hours earlier), and
+ * `claude/remudero-planning-clarify-142opb` the same shape (#4391) — under merged-leads both folded
+ * to `merged`, landed in `plan.deletable`, and a prune would have deleted the head of two live PRs.
+ * A stale branch whose old PR was never closed now HOLDS instead, which is the safe direction for a
+ * decision that removes a ref.
  */
-function foldPrState(
+export function foldPrState(
   cur: BranchFacts["prState"] | undefined,
   state: string,
   merged: string,
 ): BranchFacts["prState"] {
   const next: BranchFacts["prState"] = merged === "true" ? "merged" : state === "open" ? "open" : "closed";
-  if (cur === "merged" || (cur === "open" && next === "closed")) return cur;
+  if (cur === "open" || next === "open") return "open";
+  if (cur === "merged") return cur;
   return next;
 }
 

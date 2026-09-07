@@ -113,3 +113,38 @@ test("W1-T3020: the prune is operator-invoked — no daemon, sweep or cadence ru
       "gained the delete, which is the one thing W1-T447's design forbids",
   );
 });
+
+// ── the fold that decides whether a REF is live (W1-T3020) ──────────────────────────────────────
+
+/*
+ * FOUND BY CROSS-CHECKING THE DELETE SET AGAINST OPEN PR HEADS BEFORE RUNNING THE PRUNE, not by
+ * reading the code: two branches sat in `plan.deletable` while carrying an OPEN pull request.
+ * `foldPrState` ordered merged above open, which is correct for a name used once and wrong for a
+ * REUSED one — `claude/resolve-p27-findings-rnvu61` carries ten merged PRs and one open, and the
+ * merged rows won. The dry run had been mis-reporting those branches long before a prune existed;
+ * shipping the prune is what made it matter.
+ */
+
+test("W1-T3020: an open PR on a reused branch name dominates every merged PR that name ever carried", async () => {
+  const { foldPrState } = await import("../src/run-task.js");
+
+  // The live shape: many merged rows, then the open one, in either arrival order.
+  let mergedFirst: ReturnType<typeof foldPrState> | undefined;
+  for (let i = 0; i < 10; i++) mergedFirst = foldPrState(mergedFirst, "closed", "true");
+  assert.equal(foldPrState(mergedFirst, "open", "false"), "open", "an open PR must survive ten merged ones");
+
+  let openFirst: ReturnType<typeof foldPrState> | undefined = foldPrState(undefined, "open", "false");
+  for (let i = 0; i < 10; i++) openFirst = foldPrState(openFirst, "closed", "true");
+  assert.equal(openFirst, "open", "and must not be downgraded by merged rows arriving after it");
+});
+
+test("W1-T3020: merged still beats closed, so the fold did not simply become 'last row wins'", () => {
+  assert.equal(foldPrStateSync(undefined, "closed", "true"), "merged");
+  assert.equal(foldPrStateSync(foldPrStateSync(undefined, "closed", "true"), "closed", "false"), "merged");
+  assert.equal(foldPrStateSync(foldPrStateSync(undefined, "closed", "false"), "closed", "true"), "merged");
+  assert.equal(foldPrStateSync(undefined, "closed", "false"), "closed");
+});
+
+// Imported eagerly for the synchronous test above; the async import in the first test proves the
+// symbol is reachable from the CLI module itself rather than only through this alias.
+import { foldPrState as foldPrStateSync } from "../src/run-task.js";
