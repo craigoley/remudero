@@ -1138,7 +1138,8 @@ async function finishSelectedCapacityMeasurement(
  *    unsandboxed.
  *  - `env.home` — a worker-home dir UNIQUE to this call, reaped in a `finally` whatever the outcome (W1-T170, W1-T2463). */
 
-/** The `settingSources` every spawn passes below: `[]`, so `~/.claude/settings.json` and every
+/** The `settingSources` every spawn passes below (`settingSources: [],` in SDK option terms), so
+ *  `~/.claude/settings.json` and every
  *  other filesystem-settings source are never loaded. Exported (W1-T2766, design iv) so a caller
  *  measuring whether a repo-owned `.claude/skills/<name>/SKILL.md` reaches a worker reads the REAL
  *  value a spawn uses — see {@link import("./skill-workshop.js").describeWorkerSkillReachability}
