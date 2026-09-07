@@ -18,8 +18,7 @@
 //
 // Usage: node scripts/task-id-existence-check.mjs [--dir <path>]... [--plan-tasks-file <path>]
 //   [--plan-tasks-dir <path>] [--baseline <path>] [--remote <name>] [--base <ref>] [--cwd <path>]
-//   [--owner <name>] [--repo <name>] [--head-ref <ref>]. Defaults: src,deploy; plan/tasks.yaml;
-//   plan/tasks.d; origin.
+//   [--owner <name>] [--repo <name>] [--head-ref <ref>] [--require-open-prs]. Defaults: src,deploy; plan/tasks.yaml; plan/tasks.d; origin.
 //
 // Exported pure pieces let the fixture test drive each surface independently; main is exported so
 // the CLI itself (spawn + exit code) can be proved too.
@@ -245,7 +244,7 @@ export function currentBranch(cwd) {
 /** Every OPEN PR's number, url, head ref and mentionable text, via REST (never `gh pr list --json`
  *  / GraphQL) -- same discriminator as the mint's own `openPrMintTexts`. `reachable: false` covers
  *  `gh` failing or an unparsable response; degrades to a STATED SKIP, never a silent pass.
- *  Why: CI's job carries no `GH_TOKEN`. docs/forensics/task-id-existence-check.md#fetchopenprrows. */
+ *  Why: W1-T3055 gave CI's job a `GH_TOKEN`. docs/forensics/task-id-existence-check.md#fetchopenprrows. */
 export function fetchOpenPrRows(owner, repo, cwd) {
   const result = spawnSync("gh", ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`], {
     cwd,
@@ -287,6 +286,40 @@ export function addedIdsAtHead(occurrencesById, base) {
     if (newFiles.length > 0) ids.push(id);
   }
   return { readable: true, ids };
+}
+
+export const OPEN_PR_SURFACE_FAILURES = ["owner-repo", "open-pr-list", "no-base"];
+
+/** Unreadable open-PR surface: SKIP when best-effort (text byte-identical to before), REFUSE when `required`. Why: W1-T3055, docs/forensics/task-id-existence-check.md#the-half-that-never-ran. */
+export function classifyUnreadableOpenPrSurface(kind, ctx, required) {
+  const what =
+    kind === "owner-repo"
+      ? `could not resolve owner/repo from remote "${ctx.remote}"'s url`
+      : kind === "no-base"
+        ? "no readable base was given, so no added-id set could be computed"
+        : `could not read the open-PR list for ${ctx.owner}/${ctx.repo} (network blip, or \`gh\` has ` +
+          "no credentials in this environment)";
+  if (required !== true) {
+    const tail =
+      kind === "owner-repo"
+        ? ". Pass --owner/--repo to enable it."
+        : kind === "no-base"
+          ? ". Pass --base origin/main to enable it."
+          : ". An id claimed only by another still-open PR cannot be checked until this read " +
+            "succeeds; the base-collision check above already ran and is unaffected.";
+    return { refuse: false, message: `task-id-existence: open-PR collision check SKIPPED -- ${what}${tail}` };
+  }
+  return {
+    refuse: true,
+    message:
+      `task-id-existence: FAILED -- the open-PR collision check was REQUIRED (--require-open-prs) ` +
+      `but ${what}. REFUSING rather than reporting OK: an unreadable surface rendered as a clean ` +
+      `one is exactly how this check ran green and mute on every pull request from the day it ` +
+      `shipped. In CI the credentials are present by construction, so this is an anomaly to fix, ` +
+      `not a condition to pass through -- check that the step passes \`GH_TOKEN\` and that the ` +
+      `token can read pull requests. An id claimed only by another still-open PR is invisible ` +
+      `until this read succeeds.`,
+  };
 }
 
 /**
@@ -421,6 +454,7 @@ export function main(argv) {
       owner: { type: "string" },
       repo: { type: "string" },
       "head-ref": { type: "string" },
+      "require-open-prs": { type: "boolean", default: false },
     },
   });
 
@@ -496,25 +530,30 @@ export function main(argv) {
 
   // W1-T2324 (Q3, open-vs-open): what resolveBaseDeclaredIds cannot see -- another still-open PR
   // already claiming the id. Runs only when base was readable and this branch adds one.
-  if (base !== undefined && base.readable) {
+  const requireOpenPrs = values["require-open-prs"] === true;
+  const reportUnreadable = (kind, ctx) => {
+    const verdict = classifyUnreadableOpenPrSurface(kind, ctx, requireOpenPrs);
+    if (verdict.refuse) {
+      console.error(verdict.message);
+      process.exitCode = 1;
+    } else {
+      console.log(verdict.message);
+    }
+  };
+
+  if (base === undefined || !base.readable) {
+    reportUnreadable("no-base", {});
+  } else {
     const added = addedIdsAtHead(occurrencesById, base);
     if (added.ids.length > 0) {
       const ownerRepo = values.owner && values.repo ? { owner: values.owner, repo: values.repo } : resolveOwnerRepoFromGit(values.remote, cwd);
       if (ownerRepo === undefined) {
-        console.log(
-          `task-id-existence: open-PR collision check SKIPPED -- could not resolve owner/repo from remote ` +
-            `"${values.remote}"'s url. Pass --owner/--repo to enable it.`,
-        );
+        reportUnreadable("owner-repo", { remote: values.remote });
       } else {
         const ownHeadRef = values["head-ref"] ?? process.env.GITHUB_HEAD_REF ?? currentBranch(cwd);
         const openPrs = fetchOpenPrRows(ownerRepo.owner, ownerRepo.repo, cwd);
         if (!openPrs.reachable) {
-          console.log(
-            `task-id-existence: open-PR collision check SKIPPED -- could not read the open-PR list for ` +
-              `${ownerRepo.owner}/${ownerRepo.repo} (network blip, or \`gh\` has no credentials in this ` +
-              `environment). An id claimed only by another still-open PR cannot be checked until this ` +
-              "read succeeds; the base-collision check above already ran and is unaffected.",
-          );
+          reportUnreadable("open-pr-list", { owner: ownerRepo.owner, repo: ownerRepo.repo });
         } else {
           const openPrCollisions = evaluateOpenPrIdCollisions(added.ids, openPrs.rows, ownHeadRef);
           if (openPrCollisions.length > 0) {

@@ -123,6 +123,13 @@ else changed. Headings name the symbol or section the text explained; the code k
 
 ### Base lines 322-334 — REST vs GraphQL discriminator, and the measured CI GH_TOKEN absence
 
+> **SUPERSEDED IN PART BY W1-T3055 (2026-09-07).** The quoted docblock is the text as W1-T2324
+> shipped it and is preserved as the record. The token absence it measures is FIXED: ci.yml's
+> `task-id-existence` step now passes `GH_TOKEN: ${{ github.token }}` and `--require-open-prs`.
+> `reachable: false` still degrades to a stated SKIP for every caller that does NOT require the
+> read — the reasoning below is unchanged for them — but a REQUIRED read now refuses instead.
+> See [The half that never ran](#the-half-that-never-ran).
+
 ```
 /**
  * Every OPEN pull request's number, url, head ref and mention-scannable text, read over REST —
@@ -196,3 +203,56 @@ else changed. Headings name the symbol or section the text explained; the code k
     // fenced block identically -- so an author who backticked it and moved on had no sanctioned
     // way to write an example at all. Say the placeholder form here, where the refusal is read.
 ```
+
+## The half that never ran
+
+### W1-T3055 (2026-09-07) — the open-vs-open check was built, wired, required, and dark for its whole life
+
+**The blindness was known at build time, not overlooked.** The `fetchOpenPrRows` docblock above
+records it in as many words: *"MEASURED: CI's `task-id-existence` job carries no `GH_TOKEN` today,
+so `gh api` fails fast with 'gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN
+environment variable'."* W1-T2324 shipped the open-vs-open collision check knowing the surface it
+reads was unreachable in the only environment the gate runs in, and chose to degrade rather than
+refuse — a defensible call for a best-effort read, and the reason the degraded path is preserved
+byte for byte below. What was never done is supply the token, so the check answered nothing on
+every pull request between shipping and this task.
+
+**Measured, on the PR that filed the follow-up asking for a gate that already existed.** Run
+`34118136551`, job `101729656513`, head `eb907a0b` — a PR that ADDED three shards, so
+`addedIdsAtHead` produced a non-empty set and the half was reached by construction:
+
+```
+task-id-existence: open-PR collision check SKIPPED -- could not read the open-PR list for
+craigoley/remudero (network blip, or `gh` has no credentials in this environment). ...
+task-id-existence: OK -- every id cited under src, deploy resolves to a reservation or a plan
+record (7 baselined, 0 unknown), and no declared id collides with "origin/main".
+```
+
+Job conclusion: `success`. A green check whose own log says it could not perform the check.
+
+**What it cost.** W1-T3016 was filed off four id collisions in one evening. `W1-T2996` is the one
+this half exists to catch: it read "free on main" while an open `run-W1-T2996-*` head already held
+it. W1-T3016 then specified a NEW script to do what this one already did, and its own falsifier —
+*"Close without implementation if an existing gate already refuses a newly added shard id that
+collides with an open PR's shard"* — is what closed it. A gate reporting OK while blind does not
+merely fail to catch things; it causes duplicate work by looking healthy.
+
+### The remedy, and why each half is shaped the way it is
+
+| change | why |
+|---|---|
+| `env: GH_TOKEN: ${{ github.token }}` on the step | the same idiom the commitlint step has used all along; `gh api` is unauthenticated without it |
+| `--require-open-prs` on the step, **not** in the npm entry | `ci-parity` registers this job as `npmScriptEntry("task-id-existence", "task-id-existence:check")` and so runs the npm entry. W1-T2203 records a class of lane with no working `gh` at all; requiring the read there would refuse them for their environment rather than their diff |
+| an explicit flag, **never** `GITHUB_ACTIONS` | `scripts/comment-load-ratchet.mjs`'s sibling `scripts/coverage-ratchet.mjs` records the reason at its own opt-in: the suite spawns these scripts over fixtures with no `env` override, so an env-gated requirement fires inside the fixtures too |
+| the SKIP text preserved byte for byte | proved by running `origin/main`'s script and this one over one fixture with an unreadable surface and diffing the output: identical, both exit 0 |
+
+`classifyUnreadableOpenPrSurface(kind, ctx, required)` is the whole decision, extracted as a pure
+function so both arms are provable. Driving the refusal only through `main` would leave that arm
+reachable in exactly one environment — a CI runner whose token has been revoked — which is the
+environment a test cannot reproduce.
+
+**The discrimination is on the READ, not on the flag.** With the flag set and a readable surface
+naming no collision, the run passes; with the flag set and the surface unreadable, it refuses. A
+suite that only asserted "the flag refuses" would pass over a gate that blocks every PR.
+
+FALSIFIER: `test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts`.
