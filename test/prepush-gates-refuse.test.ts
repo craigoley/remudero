@@ -231,3 +231,16 @@ test("rule15-precheck is invoked through the tsx loader, or its exit code means 
   assert.ok(invocation, "the hook must run the precheck");
   assert.match(invocation[0], /--import tsx/, `bare node cannot load it: ${invocation[0]}`);
 });
+
+test("rule25-precheck is wired into the hook, with the same loader and exit-2 discipline", () => {
+  // W1-T3072. Both prechecks import from src/lib/review.js, which resolves only under tsx, and both
+  // treat exit 2 as "could not read the diff" rather than as a violation — a check that cannot run
+  // must never masquerade as one that failed. Pinned together so a later edit cannot fix one arm
+  // and leave the other reading an ERR_MODULE_NOT_FOUND exit 1 as a rule-25 refusal.
+  const hook = readFileSync(HOOK, "utf8");
+  const invocation = /node [^\n]*rule25-precheck\.mjs/.exec(hook);
+  assert.ok(invocation, "the hook must run the rule-25 precheck");
+  assert.match(invocation[0], /--import tsx/, `bare node cannot load it: ${invocation[0]}`);
+  assert.match(hook, /rule25-precheck could not read the diff/, "exit 2 must be named, not counted as a violation");
+  assert.match(hook, /rule25-precheck\.mjs absent — skipped, NOT passed/, "a missing check is skipped, never cleared");
+});

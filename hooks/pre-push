@@ -31,6 +31,21 @@ fail=0
 # checks below are skipped-with-a-name when their entry point is absent, and rule15-precheck's own
 # exit 2 (an unreadable diff) is honoured as unreadable. Blocking a push because a check was missing
 # would be this repo's recurring defect: a bound that fires on a healthy condition.
+# W1-T3072 — the SECOND author-time refusal, run the same way and for the same reason: rule 25's
+# entanglement verdict lands as a commit STATUS, not a check run, so after a push it reads as
+# green-but-stuck on the board rather than as a failure. Asking here costs milliseconds.
+if [ -f scripts/rule25-precheck.mjs ]; then
+  node --import tsx scripts/rule25-precheck.mjs
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "pre-push: rule25-precheck could not read the diff — not blocking on an unreadable check" >&2
+  elif [ "$rc" -ne 0 ]; then
+    fail=1
+  fi
+else
+  echo "pre-push: scripts/rule25-precheck.mjs absent — skipped, NOT passed" >&2
+fi
+
 if [ -f scripts/rule15-precheck.mjs ]; then
   # VIA THE LOADER, like every other entry point here: the script imports `src/lib/review.js`, a
   # path that exists only under tsx, so a bare `node` exits 1 with ERR_MODULE_NOT_FOUND — which the
