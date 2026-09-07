@@ -89,6 +89,25 @@ jobs:
             --title "recovery-drill: a recovery path stopped discriminating healthy from sabotaged" \
             --body-file drill-report.txt
 
+      # W1-T3030 — THE CLOSING HALF OF THE DELIVERY ABOVE. Without it a recovered job leaves its
+      # delivery-of-record open forever: the general escalation reconciler only closes issues with
+      # a TASK referent, and a cron job has none, so #3387 sat open across five consecutive passing
+      # nightlies until a human closed it by hand.
+      #
+      # ⚠ THIS IS NOT THE "notifier that also fires on success" the step above warns against. It
+      # posts nothing on a green run when there is no open issue for this source — `--resolved` is
+      # a silent no-op in that case, which is every ordinary night. It speaks only on the run that
+      # actually ends an escalation, which is the one green run a reader wants to hear about.
+      - name: Close this job's needs-human issue once it recovers
+        if: success() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_WHEN: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          node scripts/needs-human-issue.mjs --resolved --source recovery-drill
+
       - name: Upload the drill report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
