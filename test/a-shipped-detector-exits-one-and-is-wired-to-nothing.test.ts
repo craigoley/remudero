@@ -53,14 +53,17 @@ function gitAdd(root: string) {
   execFileSync("git", ["-C", root, "add", "-A"], { encoding: "utf8" });
 }
 
-/** This task's own fork point, not `origin/main` itself -- `origin/main` keeps moving as OTHER
- *  PRs merge, so a literal `git diff origin/main` picks up every unrelated file every one of
- *  them touched and reads as a false "src/ added" the moment any of them lands. The merge-base
- *  is the one stable point that scopes the diff to what THIS task's own branch actually changed,
- *  same discipline as W1-T907's three-way dedupe-then-pull recipe. */
-function forkPoint(): string {
-  return execFileSync("git", ["merge-base", "HEAD", "origin/main"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-}
+/** W1-T3043 CORRECTION: `merge-base(HEAD, origin/main)` is this task's own fork point only WHILE
+ *  this PR is still open. Once #4419 merged, `HEAD` in every LATER PR's CI run is that PR's own
+ *  tip and `origin/main` is current main -- so `merge-base` collapses to THAT PR's own fork point,
+ *  and the two tests below stop being "acceptance proof for W1-T2732" and become "no future PR may
+ *  ever touch src/", which read: it reddened the very first PR to re-run CI after #4419 landed
+ *  (W1-T3043, which had never touched this file). Pinning both endpoints to the two commits that
+ *  actually bound #4419's own diff (03a9a68a0's sole parent, and 03a9a68a0 itself) keeps the
+ *  historical fact the comments below assert -- permanently, since neither commit moves -- without
+ *  reading every later PR's own src/ changes as a violation of a task that already shipped. */
+const SHIPPED_TASK_BASE = "64565c6ca92905a450467faba065e71463ca6e51";
+const SHIPPED_TASK_HEAD = "03a9a68a04d74d173e7b9e7fe4309d66201840ef";
 
 // ── acceptance 1: "the check runs in CI as a required gate ... named by the same script path
 // the repository already uses for its sibling gates" ────────────────────────────────────────
@@ -191,15 +194,19 @@ test("both the clean run and a violation run still print the blind-spots stateme
 // deleted outright, and its full 25/25-passing suite is unaffected otherwise -- verified by
 // running it, not merely asserted here.
 test("the detector script itself is byte-for-byte unedited against this task's own fork point", () => {
-  const result = spawnSync("git", ["diff", "--quiet", forkPoint(), "--", "scripts/coverage-session-blanking-check.mjs"], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  });
+  const result = spawnSync(
+    "git",
+    ["diff", "--quiet", SHIPPED_TASK_BASE, SHIPPED_TASK_HEAD, "--", "scripts/coverage-session-blanking-check.mjs"],
+    { cwd: REPO_ROOT, encoding: "utf8" },
+  );
   assert.equal(result.status, 0, "scripts/coverage-session-blanking-check.mjs must not be edited by this task");
 });
 
 test("no src/ path is added to this diff", () => {
-  const result = spawnSync("git", ["diff", "--name-only", forkPoint()], { cwd: REPO_ROOT, encoding: "utf8" });
+  const result = spawnSync("git", ["diff", "--name-only", SHIPPED_TASK_BASE, SHIPPED_TASK_HEAD], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
   assert.equal(result.status, 0, result.stderr);
   const srcPaths = result.stdout.split("\n").filter((p) => p.startsWith("src/"));
   assert.deepEqual(srcPaths, [], `no src/ path may ride with this diff; found:\n${srcPaths.join("\n")}`);
