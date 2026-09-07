@@ -195,6 +195,17 @@ DAEMON_LAST_TS=""
 DAEMON_LAST_STEP=""
 DAEMON_BOOT_TS=""
 DAEMON_BOOT_SHA=""
+# W1-T494: initialised HERE, above the readability guard, so an unreadable ledger publishes
+# "unknown" rather than leaving the field unset — the same law the restart/build-sha probes state:
+# DEGRADE TO ABSENT, NEVER TO A LITERAL THAT READS AS HEALTHY.
+STALE_PIN_SHA=""
+STALE_PIN_NEW_SHA=""
+STALE_PIN_TS=""
+STALE_PIN_VERDICT="unknown — no readable ledger"
+TREE_DIRTY="unknown"
+STALE_LINE=""
+DIRTY_LINE=""
+BOOT_EPOCH_FOR_PIN=""
 LEDGER_STATE="ok"
 if [ ! -r "$LEDGER" ]; then
   LEDGER_STATE="unreadable — no ledger at ${LEDGER}"
@@ -213,6 +224,49 @@ else
   if [ -n "$BOOT_LINE" ]; then
     DAEMON_BOOT_TS="$(printf '%s' "$BOOT_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
     DAEMON_BOOT_SHA="$(printf '%s' "$BOOT_LINE" | grep -o '"head_sha":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+  fi
+
+  # ── probe: the STALE PIN (W1-T494) ───────────────────────────────────────────────────────────
+  # THE DAEMON ALREADY WRITES THIS DOWN AND NOTHING READS IT. `daemonFreshnessFromService`
+  # (src/lib/self-sync.ts) declines to restart on a DIRTY tree, and that guard is CORRECT — a
+  # restart would come back on the same sha, read the same staleness and exit again, which is a
+  # crash loop. So the daemon stays up, correctly, running old code, and logs `daemon.stale_code`
+  # (carrying BOTH old_sha and new_sha) plus `daemon.tree_dirty`. Neither step appears in any
+  # scripts/ or .github/ file, so the condition was invisible from off-host: on the commissioning
+  # host `daemon_boot_head_sha` and `install_head_sha` AGREED while both were ten commits behind,
+  # because the install itself is what failed to advance. Comparing those two can never catch it.
+  #
+  # NO FETCH, AND NO rev-list. Both shas are already in the row, so the distance needs no network
+  # call and no git plumbing — this reads a file the beat already opens, once more.
+  #
+  # NOT ADDED TO DECISION_RELEVANT_LEDGER_STEPS, deliberately: `rotateLedger` retains the 200
+  # newest lines PER STEP, and this reads the MOST RECENT matching line rather than a COUNT, so
+  # archiving cannot change the answer. `ABSENT_REPUSH_CAP` counts and therefore did have to join
+  # that list; this does not.
+  STALE_LINE="$(grep -F '"step":"daemon.stale_code"' "$LEDGER" 2>/dev/null | tail -n 1)"
+  DIRTY_LINE="$(grep -F '"step":"daemon.tree_dirty"' "$LEDGER" 2>/dev/null | tail -n 1)"
+  if [ -n "$STALE_LINE" ]; then
+    STALE_PIN_TS="$(printf '%s' "$STALE_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+    STALE_PIN_SHA="$(printf '%s' "$STALE_LINE" | grep -o '"old_sha":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+    STALE_PIN_NEW_SHA="$(printf '%s' "$STALE_LINE" | grep -o '"new_sha":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+  fi
+  # A row OLDER than the current boot describes a previous incarnation and must not be reported as
+  # the running one — the beat's whole purpose here is to say what THIS process is pinned to.
+  STALE_EPOCH="$(epoch_of "$STALE_PIN_TS")"
+  DIRTY_TS="$(printf '%s' "$DIRTY_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+  DIRTY_EPOCH="$(epoch_of "$DIRTY_TS")"
+  BOOT_EPOCH_FOR_PIN="$(epoch_of "$DAEMON_BOOT_TS")"
+  if [ -n "$STALE_EPOCH" ] && [ -n "$BOOT_EPOCH_FOR_PIN" ] && [ "$STALE_EPOCH" -ge "$BOOT_EPOCH_FOR_PIN" ]; then
+    STALE_PIN_VERDICT="STALE: running ${STALE_PIN_SHA:-unknown}, origin advanced to ${STALE_PIN_NEW_SHA:-unknown}"
+  elif [ -n "$DAEMON_BOOT_TS" ]; then
+    STALE_PIN_VERDICT="ok"
+  else
+    STALE_PIN_VERDICT="unknown — no daemon.boot line to date the pin against"
+  fi
+  if [ -n "$DIRTY_EPOCH" ] && [ -n "$BOOT_EPOCH_FOR_PIN" ] && [ "$DIRTY_EPOCH" -ge "$BOOT_EPOCH_FOR_PIN" ]; then
+    TREE_DIRTY="yes"
+  elif [ -n "$DAEMON_BOOT_TS" ]; then
+    TREE_DIRTY="no"
   fi
 fi
 
@@ -534,6 +588,11 @@ daemon_last_age_s=${DAEMON_AGE_S:-unknown}
 daemon_boot_ts=${DAEMON_BOOT_TS:-none}
 daemon_boot_age_s=${BOOT_AGE_S:-unknown}
 daemon_boot_head_sha=${DAEMON_BOOT_SHA:-none}
+stale_pin_verdict=${STALE_PIN_VERDICT}
+stale_pin_sha=${STALE_PIN_SHA:-none}
+stale_pin_new_sha=${STALE_PIN_NEW_SHA:-none}
+stale_pin_ts=${STALE_PIN_TS:-none}
+tree_dirty=${TREE_DIRTY}
 dispatch_verdict=${DISPATCH_VERDICT}
 dispatch_last_ts=${DISPATCH_LAST_TS:-none}
 dispatch_last_age_s=${DISPATCH_AGE_S:-unknown}
