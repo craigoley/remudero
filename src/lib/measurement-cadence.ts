@@ -1479,10 +1479,9 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string)
  *  degrade silently (CLAUDE.md's proof section). */
 export const CI_LEARNING_LESSONS_FILE = "learnings/ci-gate-lessons.yaml";
 
-/** Parse rendered shard bytes back and lint them — the whole of "validate before writing".
- *  EXPORTED so both arms are reachable: every draft the renderer produces takes the LINT arm, so
- *  the UNPARSEABLE arm is testable only here (the all-fakes/catch-arm trap — a catch no test can
- *  enter is a claim, not a guard). */
+/** Parse rendered shard bytes back and lint them. EXPORTED so BOTH arms are reachable: every draft
+ *  the renderer produces takes the LINT arm, so the UNPARSEABLE one is testable only here — a catch
+ *  no test can enter is a claim, not a guard (CI's diff-coverage caught exactly that). */
 export function ciLearningRecordVerdict(contents: string, label: string): { ok: boolean; reason: string } {
   try {
     const task = loadPlanFromYaml(contents, label).tasks[0];

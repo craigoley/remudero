@@ -176,7 +176,7 @@
   "src/lib/log-rotation.ts": 50,
   "src/lib/main-health-rung.ts": 10,
   "src/lib/managed-repos.ts": 20,
-  "src/lib/measurement-cadence.ts": 330,
+  "src/lib/measurement-cadence.ts": 333,
   "src/lib/merge-state.ts": 52,
   "src/lib/mount-recommender.ts": 195,
   "src/lib/mounts.ts": 194,
