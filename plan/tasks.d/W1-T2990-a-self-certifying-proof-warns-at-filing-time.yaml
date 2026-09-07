@@ -67,7 +67,7 @@
       proof: "unit test: test/a-self-certifying-proof-warns-at-filing-time.test.ts"
     - claim: "The check never blocks: a task whose only violation is this one still lints ok, and the linter exposes no severity override for it"
       proof: "unit test: test/a-self-certifying-proof-warns-at-filing-time.test.ts"
-  files: [src/lib/task-linter.ts, src/run-task.ts, test/a-self-certifying-proof-warns-at-filing-time.test.ts]
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/a-self-certifying-proof-warns-at-filing-time.test.ts, scripts/comment-load-baseline.json]
   status: queued
   attempts: 0
   origin: "oper#plain-language-surfaces-2026-09-04"
@@ -82,6 +82,12 @@
     use the pure-path `unit test:` form or its criteria grade `no-match`, so all five name the one
     falsifier file. That is the house form and it is also the shape W1-T2967 says cannot answer
     several criteria separately. Named here rather than left for a reader to notice.
+
+    THE COMMENT-LOAD BASELINE IS IN SCOPE ON PURPOSE. The two comments this check needs — why
+    ownership cannot read `files:`, and why the id anchor must be the list-item form — push
+    src/lib/task-linter.ts past its recorded comment ceiling. The gate's own words are that
+    recording the growth is an ordinary, reviewed outcome rather than a defeat, so the baseline row
+    moves 884 -> 899 in the same diff and is declared here rather than riding in unnamed.
 
     RISK IS HIGH FOR SPAN, NOT FOR DANGER — `band_meaning: span` SAYS WHICH. The task touches two
     concerns, the linter rule and the one line that wires it, and Rule 19 refuses two concerns at
