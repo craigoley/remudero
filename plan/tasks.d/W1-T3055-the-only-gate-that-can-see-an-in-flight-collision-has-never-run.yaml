@@ -8,11 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 30.00
-  files:
-    - .github/workflows/ci.yml
-    - scripts/task-id-existence-check.mjs
-    - test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts
-    - docs/forensics/task-id-existence-check.md
+  files: [.github/workflows/ci.yml, scripts/task-id-existence-check.mjs, test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts, docs/forensics/task-id-existence-check.md]
   origin: "operator-session#w1-t3016-falsifier-fired-2026-09-07"
   plan_refs: ["W1-T3016", "W1-T2324", "W1-T2203", "W1-T1048", "W1-T351"]
   status: queued
