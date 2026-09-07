@@ -249,6 +249,7 @@
   "src/lib/serve.ts": 2359,
   "src/lib/service.ts": 269,
   "src/lib/settings.ts": 50,
+  "src/lib/skill-workshop.ts": 250,
   "src/lib/skill.ts": 125,
   "src/lib/source-size-followup.ts": 4,
   "src/lib/spawn-guard.ts": 59,
