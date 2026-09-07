@@ -1,4 +1,4 @@
-- id: W1-T3058
+- id: W1-T3065
   title: "THE TEMP SWEEP CANNOT SEE THE DEBRIS IT WAS BUILT FOR, AND NEVER RUNS WHERE THE OPERATOR WORKS — `sweepStaleTempDirs` skips every name not starting with `rmd-`, so the pre-W1-T2786 `remudero-*` dirs are unreapable BY CONSTRUCTION, and its only callers are daemon-boot rungs, so a machine with no daemon reclaims nothing: MEASURED 138 dirs and 11 GiB on the operator's Mac, which reached 100% full and blocked a session"
   repo: remudero
   depends_on: []
@@ -86,7 +86,7 @@
     passes its happy path while deleting a bystander is the failure this task would otherwise
     introduce, and it is strictly worse than the disk filling.
   note: |
-    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3058`.
+    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3065`.
 
     THE 11 GiB ALREADY ON DISK IS NOT RECLAIMED BY THIS TASK AND CANNOT BE. Those dirs are owned by
     the human account `craigoley` under a sticky `/private/tmp`, while the agent runs as
