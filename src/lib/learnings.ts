@@ -647,12 +647,7 @@ function sourceClassMentioned(text: string, sourceClass: ExternalSourceClass): b
   ].some((re) => re.test(text));
 }
 
-/**
- * Refuse learnings promotion when the candidate's provenance says it was derived from external
- * prompt text (the classes W1-T2700 envelopes). This is provenance-only: the fact text is not
- * inspected, and an ordinary fleet-run `src` stays clean.
- */
-export function promotionTaint(candidate: PromotionTaintCandidate): PromotionTaintResult {
+export function promotionTaint(candidate: PromotionTaintCandidate): PromotionTaintResult { // provenance-only: refuses a candidate naming a W1-T2700 external-text source class.
   for (const value of [candidate.sourceClass, candidate.source_class]) {
     if (typeof value === "string" && EXTERNAL_SOURCE_CLASS_SET.has(value)) {
       return {
@@ -826,8 +821,7 @@ export interface PromotionResult {
   promoted: boolean;
   stage: PromotionStage;
   scrub: ScrubResult;
-  /** Set iff provenance taint was checked on this result. `tainted:true` blocks before scrub. */
-  taint?: PromotionTaintResult;
+  taint?: PromotionTaintResult; // set iff provenance taint was checked; tainted:true blocks before scrub.
   /** Set iff the judge was actually invoked (i.e. scrub passed and the entry was below the top layer). */
   verdict?: PromotionJudgeVerdict;
   /** Set iff `promoted`: the entry's next-layer shape, with `layer` bumped and `src` redacted. Not yet written to any home — see the module doc's transport note. */
@@ -943,8 +937,7 @@ export interface RevertRecallProposal {
 
 export interface RevertRecallResult {
   proposals: RevertRecallProposal[];
-  /** The unchanged input entries, surfaced so callers can prove recall never deletes. */
-  retained: LearningEntry[];
+  retained: LearningEntry[]; // unchanged input entries, surfaced so callers can prove recall never deletes.
 }
 
 function sourcePrRefs(src: string): number[] {
@@ -959,12 +952,10 @@ function sourcePrRefs(src: string): number[] {
   return [...refs].sort((a, b) => a - b);
 }
 
-/** Proposal-only recall: a learning whose source PR was reverted is proposed `contested`, never
- *  edited or removed here. The Architect/operator still owns the shard diff. */
 export function revertRecall(
   learnings: readonly LearningEntry[],
   revertedSources: readonly RevertedLearningSourcePr[],
-): RevertRecallResult {
+): RevertRecallResult { // proposal-only: a learning whose source PR was reverted is proposed `contested`, never edited/removed here.
   const bySourcePr = new Map<number, RevertedLearningSourcePr>();
   for (const reverted of revertedSources) {
     if (!bySourcePr.has(reverted.sourcePr)) bySourcePr.set(reverted.sourcePr, reverted);

@@ -2629,13 +2629,10 @@ export interface PromotionCandidateGateResult {
   refused: TaintedPromotionCandidate[];
 }
 
-/** Filter external-text-derived promotion candidates before the retro ranks the cycle's entries.
- *  Refusals become ordinary promotion results so the Architect report names them and writes
- *  nothing. */
 export function gatePromotionCandidatesBeforeRanking(
   entries: readonly LearningEntry[],
   log?: (event: string, data: Record<string, unknown>) => void,
-): PromotionCandidateGateResult {
+): PromotionCandidateGateResult { // filters external-text-derived candidates before ranking; refusals become ordinary promotion results, writing nothing.
   const accepted: LearningEntry[] = [];
   const refused: TaintedPromotionCandidate[] = [];
   for (const entry of entries) {
