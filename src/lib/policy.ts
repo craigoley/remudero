@@ -283,6 +283,19 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "githubEventWake.checkSettleMs": "net-new",
 };
 
+/**
+ * Every rung this fleet gates behind its own `enabled` row — walked STRUCTURALLY off {@link
+ * EXPECTED_ORIGIN_KIND}'s own keys rather than hand-listed a second time, so a new `<rung>.enabled`
+ * origin entry is the ONLY place an author must add it for it to appear here too (W1-T2694, design
+ * (iii)). `test/ratification-pin.test.ts` walks this list and fails any rung whose module has not
+ * exported a contract-version constant ({@link import("../run-task.js").RUNG_CONTRACT_VERSIONS}) —
+ * so a new gated rung cannot ship unpinnable. Order is `EXPECTED_ORIGIN_KIND`'s own insertion
+ * order, not alphabetical, and is not itself a contract — callers must never index positionally.
+ */
+export const GATED_RUNGS: readonly string[] = Object.keys(EXPECTED_ORIGIN_KIND)
+  .filter((path) => path.endsWith(".enabled"))
+  .map((path) => path.slice(0, -".enabled".length));
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }

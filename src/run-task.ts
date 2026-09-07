@@ -505,7 +505,14 @@ import {
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
-import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask, DECISION_RELEVANT_LEDGER_STEPS } from "./lib/ledger.js";
+import {
+  appendLedger,
+  appendProducerLedger,
+  isSpawnInfraBlockedError,
+  LEDGER_COST_TAG_INFRA,
+  matchesRepoScopedTask,
+  DECISION_RELEVANT_LEDGER_STEPS,
+} from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { gunzipSync } from "node:zlib";
 import {
@@ -623,6 +630,7 @@ import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount 
 import { mountRecommendationProposalCandidate, recommendMounts, type MountHeadroomCell } from "./lib/mount-recommender.js";
 import {
   DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS,
+  GATED_RUNGS,
   loadDefaultPolicy,
   loadPolicy,
   policyPath,
@@ -632,6 +640,14 @@ import {
   type Policy,
   type PolicyHeadroomRung,
 } from "./lib/policy.js";
+import {
+  buildRatificationRow,
+  loadRatifications,
+  ratificationPinCheck,
+  ratificationsPath,
+  renderRatificationRow,
+  type Ratifications,
+} from "./lib/ratification.js";
 import {
   attributeVerbs,
   deriveCliVerbs,
@@ -21071,6 +21087,94 @@ export function retroTriggerCheck(
  * everything the daemon loop needs (retro_triggered, retro_aborted_integrity, pr.opened,
  * retro.marker.advanced).
  */
+// ── W1-T2694: LAW 5'S SIGNATURE — EACH GATED RUNG'S CONTRACT VERSION ────────────────────────
+// Design (iii): every rung in `policy.ts`'s {@link GATED_RUNGS} exports a contract-version
+// constant here, beside its own entry point, DECLARED rather than inferred from a source hash —
+// an author bumps it only when the rung's OPERATION changes in a way a ratifier would want to
+// re-read (a comment edit or a refactor never moves it). `test/ratification-pin.test.ts` walks
+// `GATED_RUNGS` and fails any rung missing an entry in {@link RUNG_CONTRACT_VERSIONS}, so a new
+// gated rung cannot ship unpinnable. `headroom`'s constant is exported for that same enumeration
+// but is deliberately NOT wired to a live {@link ratificationPinCheck} call (see
+// `headroomPolicyFromCurve`'s neighbourhood): headroom's `enabled` flag ARMS a spend-protective
+// throttle, so "refuse ⇒ behave as disabled" would WIDEN what dispatch may do — backwards for
+// design (v)'s "can only refuse" invariant. Wiring a rung whose refusal direction is inverted is
+// this task's own follow-up, not a call this diff makes for it.
+export const AUTO_TRIAGE_CONTRACT_VERSION = "v1";
+export const MEASUREMENT_CADENCE_CONTRACT_VERSION = "v1";
+export const DIGEST_CADENCE_CONTRACT_VERSION = "v1";
+export const BOARD_REVIEW_CONTRACT_VERSION = "v1";
+export const CI_LEARNING_CADENCE_CONTRACT_VERSION = "v1";
+export const WIPE_TEST_CADENCE_CONTRACT_VERSION = "v1";
+export const HEADROOM_CONTRACT_VERSION = "v1";
+export const SCRATCH_REAP_CONTRACT_VERSION = "v1";
+export const WORKTREE_REAP_BOOT_CONTRACT_VERSION = "v1";
+
+/** Rung name (as {@link GATED_RUNGS} spells it) -> its contract-version constant above — the one
+ *  registry `rmd ratify <rung>` and every `ratificationPinCheck(...)` call site resolve against,
+ *  and the one thing test/ratification-pin.test.ts walks to prove every gated rung is pinnable. */
+export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
+  autoTriage: AUTO_TRIAGE_CONTRACT_VERSION,
+  measurementCadence: MEASUREMENT_CADENCE_CONTRACT_VERSION,
+  digestCadence: DIGEST_CADENCE_CONTRACT_VERSION,
+  boardReview: BOARD_REVIEW_CONTRACT_VERSION,
+  ciLearningCadence: CI_LEARNING_CADENCE_CONTRACT_VERSION,
+  // W1-T2659's rung merged while this branch was open; the walk over GATED_RUNGS refused it as
+  // unpinnable, which is that guard working. v1 because it ships here for the first time.
+  wipeTestCadence: WIPE_TEST_CADENCE_CONTRACT_VERSION,
+  headroom: HEADROOM_CONTRACT_VERSION,
+  scratchReap: SCRATCH_REAP_CONTRACT_VERSION,
+  worktreeReapBoot: WORKTREE_REAP_BOOT_CONTRACT_VERSION,
+};
+
+/** Ledger one rung's refusal (design (ii): "a refusal ledgers `rung.unratified` with the diff").
+ *  A PSEUDO-sender row (`appendProducerLedger`'s "daemon" registry entry, src/lib/producer-
+ *  identity.ts) — this is a daemon-tick consult, never a plan task — and best-effort: a ledger
+ *  write that itself throws must never be why a refusal is lost or a tick crashes. */
+function ledgerRungUnratified(ledgerPath: string, rung: string, diff: string): void {
+  try {
+    appendProducerLedger(ledgerPath, "daemon", { run_id: "RATIFICATION", step: "rung.unratified", rung, diff });
+  } catch {
+    // best-effort: the refusal itself (the caller's `{fire: false}`) is the enforcement; a
+    // ledger write hiccup must never turn a refusal into an unlogged one that also throws.
+  }
+}
+
+/**
+ * `rmd ratify <rung>` (design (i), W1-T2694): computes `<rung>`'s LIVE operation hash — its
+ * current `plan/policy.yaml` block plus its {@link RUNG_CONTRACT_VERSIONS} constant — and PRINTS
+ * the `plan/ratifications.yaml` row an operator commits, in a plan PR, to ratify it. Writes
+ * NOTHING itself (Rule 15: a ratification is an operator act, never a CLI side effect). Refuses
+ * (exit 2, spawns/writes nothing) for a missing or unrecognised rung — {@link GATED_RUNGS} is the
+ * only valid input, read structurally off `policy.ts`'s own schema, never hand-duplicated here.
+ */
+export function ratifyCommand(rest: string[], deps: { now?: () => Date; ratifiedBy?: string; policy?: Policy } = {}): number {
+  const rung = rest[0];
+  const badArg = unknownArgError("ratify", rest.slice(1), [], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  if (!rung || !GATED_RUNGS.includes(rung)) {
+    console.error(
+      `rmd ratify: <rung> must be one of policy.ts's gated rungs (${GATED_RUNGS.join(", ")}) — got '${rung ?? ""}'\n` +
+        USAGE,
+    );
+    return 2;
+  }
+  const contractVersion = RUNG_CONTRACT_VERSIONS[rung];
+  const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
+  const policyBlock = (policy.values as unknown as Record<string, unknown>)[rung];
+  const row = buildRatificationRow(rung, policyBlock, contractVersion, deps.ratifiedBy ?? process.env.USER ?? "operator", deps.now?.() ?? new Date());
+  console.log(
+    `### rmd ratify ${rung} — computed the live operation hash; wrote NOTHING.\n` +
+      `Commit this row into plan/ratifications.yaml yourself (Rule 15: a ratification is an operator act)` +
+      ` to ratify it — a drift in either the policy block above or the "${contractVersion}" contract` +
+      ` version will then refuse the rung and ledger the diff (ratificationPinCheck, src/lib/ratification.ts):\n\n` +
+      `${renderRatificationRow(row)}\n`,
+  );
+  return 0;
+}
+
 /**
  * The auto-triage rung's PRODUCER (impl-DM), mirroring {@link buildRetroDaemonHooks} exactly.
  *
@@ -21096,6 +21200,10 @@ export function buildAutoTriageDaemonHooks(deps: {
   /** Injected policy, forwarded to {@link autoTriageCheck} — see its doc for why this seam exists.
    *  Production passes none and the checked-in `plan/policy.yaml` governs, exactly as before. */
   policy?: Policy;
+  /** W1-T2694: injected ratification pins, forwarded to {@link autoTriageCheck} — same seam
+   *  shape as `policy` above. Production passes none and the checked-in (or absent)
+   *  `plan/ratifications.yaml` governs, exactly as before. */
+  ratifications?: Ratifications;
 } = {}): {
   checkAutoTriage: (signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) => AutoTriageDecision;
   runAutoTriage: (feedbackId: string) => Promise<void>;
@@ -21103,7 +21211,7 @@ export function buildAutoTriageDaemonHooks(deps: {
   const check =
     deps.check ??
     ((signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) =>
-      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, ...signals }));
+      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, ratifications: deps.ratifications, ...signals }));
   const runTriage = deps.runTriage ?? ((feedbackId: string) => triageCommand([feedbackId]));
   const configFor = () => deps.config ?? loadConfig();
   return {
@@ -21141,6 +21249,10 @@ export function autoTriageCheck(
     config?: Config;
     now?: Date;
     policy?: Policy;
+    /** W1-T2694: injected ratification pins — same seam shape as `policy` above (this
+     *  function's own doc). Production passes none and the checked-in (or absent)
+     *  `plan/ratifications.yaml` governs. */
+    ratifications?: Ratifications;
     deferralPending?: boolean;
     dispatchCount?: number;
     laneBudget?: number;
@@ -21148,6 +21260,15 @@ export function autoTriageCheck(
 ): AutoTriageDecision {
   const config = opts.config ?? loadConfig();
   const policy = opts.policy ?? loadPolicy(policyPath(repoRoot));
+  // W1-T2694 (design (ii)): consulted AFTER the `enabled` read above (it lives inside
+  // `policy.values.autoTriage`) and BEFORE the cadence check (`decideAutoTriage`) below — a
+  // refusal here never reaches the lock/marker/candidate reads that check performs.
+  const pins = opts.ratifications ?? loadRatifications(ratificationsPath(repoRoot));
+  const pin = ratificationPinCheck("autoTriage", policy.values.autoTriage, AUTO_TRIAGE_CONTRACT_VERSION, pins);
+  if (!pin.fire) {
+    ledgerRungUnratified(ledgerPathFor(config), "autoTriage", pin.diff);
+    return { fire: false, reason: pin.reason };
+  }
   const held = readDrainLock(triageLockPath(config.root));
   const now = opts.now ?? new Date();
   return decideAutoTriage({
@@ -21341,6 +21462,9 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
    *  doc for why this seam exists. Production passes none and the checked-in `plan/policy.yaml`
    *  governs, exactly as before. */
   policy?: Policy;
+  /** W1-T2694: injected ratification pins — same seam shape as `policy` above. Production
+   *  passes none and the checked-in (or absent) `plan/ratifications.yaml` governs. */
+  ratifications?: Ratifications;
   coverageImprovementReader?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
@@ -21350,12 +21474,22 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
   const check =
     deps.check ??
-    (() =>
-      measurementCadenceCheck({
+    (() => {
+      const policy = policyFor().values.measurementCadence;
+      // W1-T2694 (design (ii)): after the `enabled` read (inside `policy` above), before the
+      // cadence check (`measurementCadenceCheck`) below.
+      const pins = deps.ratifications ?? loadRatifications(ratificationsPath(repoRoot));
+      const pin = ratificationPinCheck("measurementCadence", policy, MEASUREMENT_CADENCE_CONTRACT_VERSION, pins);
+      if (!pin.fire) {
+        ledgerRungUnratified(ledgerPathFor(configFor()), "measurementCadence", pin.diff);
+        return { fire: false, reason: pin.reason };
+      }
+      return measurementCadenceCheck({
         root: configFor().root,
-        policy: policyFor().values.measurementCadence,
+        policy,
         now: deps.now?.(),
-      }));
+      });
+    });
   const run =
     deps.run ??
     (async () => {
@@ -21601,6 +21735,9 @@ export function buildDigestCadenceDaemonHooks(deps: {
   config?: Config;
   now?: () => Date;
   policy?: Policy;
+  /** W1-T2694: injected ratification pins — same seam shape as `policy` above. Production
+   *  passes none and the checked-in (or absent) `plan/ratifications.yaml` governs. */
+  ratifications?: Ratifications;
   channel?: NotifyChannel;
   /** W1-T3000: the SECOND delivery, defaulting to `emailChannel(notifyRecipient(config))`. */
   emailChannel?: NotifyChannel;
@@ -21612,12 +21749,21 @@ export function buildDigestCadenceDaemonHooks(deps: {
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
   const check =
     deps.check ??
-    (() =>
-      digestCadenceCheck({
+    (() => {
+      const policy = policyFor().values.digestCadence;
+      // W1-T2694 (design (ii)): after the `enabled` read, before the cadence check below.
+      const pins = deps.ratifications ?? loadRatifications(ratificationsPath(repoRoot));
+      const pin = ratificationPinCheck("digestCadence", policy, DIGEST_CADENCE_CONTRACT_VERSION, pins);
+      if (!pin.fire) {
+        ledgerRungUnratified(ledgerPathFor(configFor()), "digestCadence", pin.diff);
+        return { fire: false, reason: pin.reason };
+      }
+      return digestCadenceCheck({
         root: configFor().root,
-        policy: policyFor().values.digestCadence,
+        policy,
         now: deps.now?.(),
-      }));
+      });
+    });
   const run =
     deps.run ??
     (async () => {
@@ -21713,6 +21859,9 @@ export function buildBoardReviewDaemonHooks(deps: {
   config?: Config;
   now?: () => Date;
   policy?: Policy;
+  /** W1-T2694: injected ratification pins — same seam shape as `policy` above. Production
+   *  passes none and the checked-in (or absent) `plan/ratifications.yaml` governs. */
+  ratifications?: Ratifications;
   /** Injectable ONLY for tests — production takes {@link defaultBoardReviewItems}. */
   items?: () => BoardItem[];
   /** Injectable ONLY for tests — production takes the real {@link buildBoardReview}. */
@@ -21745,8 +21894,18 @@ export function buildBoardReviewDaemonHooks(deps: {
             items,
             registryPath: join(root, "state", "inbox-proposals.json"),
           });
+          const policy = policyFor().values.boardReview;
+          // W1-T2694 (design (ii)): after the `enabled` read, before the cadence check below.
+          // Reconciliation above is NOT gated — it is housekeeping tied to the check running at
+          // all (W1-T2464's own doc), not to the rung's operation, so a refusal never skips it.
+          const pins = deps.ratifications ?? loadRatifications(ratificationsPath(repoRoot));
+          const pin = ratificationPinCheck("boardReview", policy, BOARD_REVIEW_CONTRACT_VERSION, pins);
+          if (!pin.fire) {
+            ledgerRungUnratified(ledgerPathFor(configFor()), "boardReview", pin.diff);
+            return { fire: false as const, reason: pin.reason, retiredProposalIds };
+          }
           const decision = decideBoardReviewCadence({
-            policy: policyFor().values.boardReview,
+            policy,
             marker: readBoardReviewMarker(boardReviewMarkerPath(root)),
             now: deps.now?.() ?? new Date(),
             items,
@@ -25547,12 +25706,23 @@ export function logCloneReapSurvey(
     roots?: () => string[];
     reap?: typeof reapStaleClones;
     policy?: () => { enabled: boolean; maxAgeHours: number };
+    /** W1-T2694: injected ratification pins — same seam shape as `policy` above. */
+    ratifications?: Ratifications;
   } = {},
 ): CloneReapSummary | null {
   try {
     const readPolicy =
       deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.scratchReap);
-    const { enabled, maxAgeHours } = readPolicy();
+    const policyBlock = readPolicy();
+    // W1-T2694 (design (ii)): after the `enabled` read above, before this rung's own reap call
+    // below. A refusal forces `enabled: false` (dry-run only) rather than skipping the survey
+    // outright — the SAFE direction for a rung whose armed state DELETES, per design (v)'s "can
+    // only refuse, never widen".
+    const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
+    const pin = ratificationPinCheck("scratchReap", policyBlock, SCRATCH_REAP_CONTRACT_VERSION, pins);
+    if (!pin.fire) log("rung.unratified", { rung: "scratchReap", diff: pin.diff });
+    const enabled = pin.fire && policyBlock.enabled;
+    const { maxAgeHours } = policyBlock;
     const reap = deps.reap ?? reapStaleClones;
     const roots = (deps.roots ?? cloneReapRoots)();
     const summary = reap(roots, {
@@ -25611,12 +25781,20 @@ export function logWorktreeReapBootSurvey(
     reap?: typeof reapStaleWorktrees;
     policy?: () => { enabled: boolean };
     isPidAlive?: (pid: number, info: RunLockInfo) => boolean;
+    /** W1-T2694: injected ratification pins — same seam shape as `policy` above. */
+    ratifications?: Ratifications;
   } = {},
 ): WorktreeReapSummary | null {
   try {
     const readPolicy =
       deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.worktreeReapBoot);
-    const { enabled } = readPolicy();
+    const policyBlock = readPolicy();
+    // W1-T2694 (design (ii)): same "refuse forces dry-run, never widen" direction as
+    // {@link logCloneReapSurvey} — this rung can destroy uncommitted worktrees when armed.
+    const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
+    const pin = ratificationPinCheck("worktreeReapBoot", policyBlock, WORKTREE_REAP_BOOT_CONTRACT_VERSION, pins);
+    if (!pin.fire) log("rung.unratified", { rung: "worktreeReapBoot", diff: pin.diff });
+    const enabled = pin.fire && policyBlock.enabled;
     const reap = deps.reap ?? reapStaleWorktrees;
     const root = (deps.root ?? (() => worktreesDir(config)))();
     const summary = reap(root, {
@@ -25883,6 +26061,9 @@ function memoiseBoardSnapshotByRepo(
 export function buildCiLearningDaemonHooks(deps: {
   config?: Config;
   policy?: Policy;
+  /** W1-T2694: injected ratification pins — same seam shape as `policy` above. Production
+   *  passes none and the checked-in (or absent) `plan/ratifications.yaml` governs. */
+  ratifications?: Ratifications;
   now?: () => Date;
   /** Injected so a test drives the whole rung with ZERO network; production reads the real window. */
   loadWindow?: (days: number) => CiFailureCorpusInput;
@@ -25893,12 +26074,21 @@ export function buildCiLearningDaemonHooks(deps: {
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
   return {
-    checkCiLearningCadence: () =>
-      ciLearningCadenceCheck({
+    checkCiLearningCadence: () => {
+      const policy = policyFor().values.ciLearningCadence;
+      // W1-T2694 (design (ii)): after the `enabled` read, before the cadence check below.
+      const pins = deps.ratifications ?? loadRatifications(ratificationsPath(repoRoot));
+      const pin = ratificationPinCheck("ciLearningCadence", policy, CI_LEARNING_CADENCE_CONTRACT_VERSION, pins);
+      if (!pin.fire) {
+        ledgerRungUnratified(ledgerPathFor(configFor()), "ciLearningCadence", pin.diff);
+        return { fire: false, reason: pin.reason };
+      }
+      return ciLearningCadenceCheck({
         root: configFor().root,
-        policy: policyFor().values.ciLearningCadence,
+        policy,
         now: deps.now?.(),
-      }),
+      });
+    },
     runCiLearningCadence: async () => {
       const root = configFor().root;
       // THE FIRE FIRST — see this function's own doc for why the order is the safety property.
@@ -38693,6 +38883,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), GRILLS an ambiguous item by opening a needs-human GitHub issue with options + a recommendation (W1-T42, parks status 'grilling'), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else",
   },
   {
+    name: "ratify",
+    syntax: "rmd ratify <rung>",
+    summary: "Print a gated rung's live operation-hash row for the operator to commit; writes nothing.",
+    detail: "Law 5's signature (W1-T2694): computes <rung>'s live operation hash over its plan/policy.yaml block plus its declared contract-version constant and prints the plan/ratifications.yaml row an operator commits, in a plan PR, to ratify it -- this verb itself never writes the file (Rule 15: a ratification is an operator act). Absent a committed row, every gated rung fires exactly as before (byte-identical); once ratified, a later drift in either the policy block or the contract version makes ratificationPinCheck (src/lib/ratification.ts) refuse the rung and ledger the diff as rung.unratified, never widening what it may do.",
+  },
+  {
     name: "skill",
     syntax: "rmd skill list",
     summary: "List the skill registry: every .remudero/skills/<name>.yaml entry.",
@@ -39506,6 +39702,9 @@ export async function main(
   }
   if (cmd === "triage") {
     process.exit(await triageCommand(rest));
+  }
+  if (cmd === "ratify") {
+    process.exit(ratifyCommand(rest));
   }
   if (cmd === "digest") {
     process.exit(await digestCommand(rest));

@@ -318,7 +318,16 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // and is NOT allowlisted — adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
   // The file set is UNCHANGED (`src/run-task.ts` already carried the other four), so the `files`
   // assertion below needed no edit.
-  assert.equal(readers.length, 27, `expected 27 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // TWENTY-EIGHT since `ratifyCommand`'s own policy read (run-task.ts, W1-T2694, `rmd ratify
+  // <rung>`) landed — a TWENTY-SECOND consumer, also SEAMED (`deps.policy ?? loadPolicy(policyPath(
+  // repoRoot))`), resolving the live `plan/policy.yaml` block the operator's printed ratification
+  // row hashes. IT PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this comment
+  // requires: the seam was written from the start (so a test can inject a fixture policy rather
+  // than reading this checkout's own committed file), not added afterwards to quiet a red. So it
+  // is NOT allowlisted; adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5. The
+  // file set is UNCHANGED (`src/run-task.ts` already carried the other reads above), so the
+  // `files` assertion below needed no edit.
+  assert.equal(readers.length, 28, `expected 28 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

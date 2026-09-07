@@ -76,6 +76,7 @@ usage:
   rmd onboard <target-dir> --phase inventory|recon|session|synthesize [--owner <o> --repo <r>]   # The `rmd onboard` family: inventory, recon, session and synthesize phases.
   rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # Durable-inbox async capture: write a plan/feedback/<id>.yaml entry.
   rmd triage <feedback-id>   # The Architect intake worker: ground, research, then report, grill or propose.
+  rmd ratify <rung>   # Print a gated rung's live operation-hash row for the operator to commit; writes nothing.
   rmd skill list   # List the skill registry: every .remudero/skills/<name>.yaml entry.
   rmd learnings export <out> | rmd learnings import <file> --pin <hash>   # The knowledge-commons transport: export/import opted-in learnings, hash-pinned.
   rmd bundle export <path>   # Export one hash-pinned bundle of doctrine, budgeted learnings and worker-settings conventions.
@@ -707,6 +708,16 @@ rmd triage <feedback-id>
 ```
 
 the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), GRILLS an ambiguous item by opening a needs-human GitHub issue with options + a recommendation (W1-T42, parks status 'grilling'), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else
+
+### `rmd ratify`
+
+Print a gated rung's live operation-hash row for the operator to commit; writes nothing.
+
+```
+rmd ratify <rung>
+```
+
+Law 5's signature (W1-T2694): computes <rung>'s live operation hash over its plan/policy.yaml block plus its declared contract-version constant and prints the plan/ratifications.yaml row an operator commits, in a plan PR, to ratify it -- this verb itself never writes the file (Rule 15: a ratification is an operator act). Absent a committed row, every gated rung fires exactly as before (byte-identical); once ratified, a later drift in either the policy block or the contract version makes ratificationPinCheck (src/lib/ratification.ts) refuse the rung and ledger the diff as rung.unratified, never widening what it may do.
 
 ### `rmd skill`
 
