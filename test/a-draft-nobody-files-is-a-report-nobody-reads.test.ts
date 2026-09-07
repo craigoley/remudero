@@ -39,6 +39,7 @@ function draft(over: Partial<CiLearningShardDraft> = {}): CiLearningShardDraft {
       "that hit it, so the same gate does not refuse a second pull request for the same reason",
     gate: "coverage-ratchet",
     prs: [4283],
+    dominantRepairFiles: [],
     pr: 4283,
     repairFiles: ["src/lib/rule-efficacy.ts"],
     author_class: "machine",

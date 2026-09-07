@@ -1,0 +1,42 @@
+# COVERAGE-SESSION-BLANKING gate (W1-T2732).
+#
+# W1-T2292 built scripts/coverage-session-blanking-check.mjs (a `delete env.NODE_V8_COVERAGE`
+# reads as an opt-out and is not one -- node force-injects that variable into every spawned
+# child regardless of `env`, merging the child's coverage into the parent's report) and its own
+# falsifying test, but its own criterion 7 fenced it from wiring a caller. W1-T2732 is that
+# successor: it clears the population the script reports and wires the now-clean script here.
+#
+# ITS OWN FILE, NOT A ci.yml JOB: a new ci.yml job needs a src/lib/ci-parity.ts
+# CI_PARITY_TABLE entry (test/preflight-ci-parity.test.ts refuses one without it), and this
+# task is fenced from adding any src/ path -- same reasoning unwired-gate.yml already
+# documents for its own workflow file.
+#
+# Runs unconditionally on every PR (no path filter, no job `if:` beyond the PR trigger), the
+# same fail-closed shape as unwired-gate.yml's own job: a path-filtered REQUIRED check that can
+# go silently absent is the deadlock class ci-gate.yml exists to avoid. Named in ci-gate.yml's
+# REQUIRED list (this same PR) so a red run here actually blocks a merge.
+name: coverage-session-blanking
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage-session-blanking:
+    name: coverage-session-blanking
+    runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic. The check is a `git ls-files` plus a text scan of every
+    # tracked test/**/*.ts file, the same shape and order of magnitude as unwired-gate's ~0.2s.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Coverage-session-blanking check (no delete-is-noop, no unblanked NODE_TEST_CONTEXT strip)
+        run: npm run --silent coverage-session-blanking:check

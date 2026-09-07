@@ -22,6 +22,7 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
+import { splitInheritedViolations, inheritedNotice } from "./lib/inherited-violation.mjs";
 import { assertNoDuplicateKeys } from "./lib/json-duplicate-keys.mjs";
 
 export const DEFAULT_BASELINE_RELATIVE_PATH = "scripts/source-size-baseline.json";
@@ -198,6 +199,22 @@ function runLegacyRatchet(argv) {
     for (const v of verdict.violations) {
       console.error(`  - ${v.path}: ${v.lines} lines > baseline ${v.baseline} lines (+${v.overage} line(s) over)`);
     }
+    // W1-T3037 — whose red is this? A violation that already holds at the base is inherited: every
+    // open PR sees it and no diff avoids it. It still blocks; the author is simply told that
+    // recording it repairs the base rather than confessing to their own growth.
+    const notice = inheritedNotice(
+      splitInheritedViolations(verdict.violations, {
+        // maxBuffer raised deliberately: run-task.ts is over 1MB at the base and blows the 1MB default,
+        // which returns status null and used to read as "absent".
+        run: (cmd, args) => spawnSync(cmd, args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }),
+        ref: "origin/main",
+        measure: (text) => countLines(text),
+        baselineFor: (path) => baseline[path],
+      }).inherited,
+      "origin/main",
+      "source-size-ratchet",
+    );
+    if (notice) console.error(`  ${notice}`);
     // TRAP (W1-T2532): the remedy text must be followable by an agent, not only a human. Wording
     // that read "by hand" made a fix worker decline to touch the file, leaving PRs blocked on
     // nothing but this gate. What this gate refuses is unchanged; only that sentence is.
