@@ -108,7 +108,15 @@ export function checkDispatchGovernors(
   let quietHours: QuietHoursHoldResult | undefined;
   try {
     quietHours = deps.checkQuietHours?.();
-  } catch {
+  } catch (err) {
+    // FAIL OPEN, for the same reason the memory read above does, stated here rather than inherited:
+    // a quiet-hours window that cannot be READ is not a window that said HOLD, and treating an
+    // unreadable clock as a hold would stop dispatch on a telemetry fault. The error is bound and
+    // deliberately NOT propagated — this function's contract returns a hold or nothing and has no
+    // reason channel to carry it — but binding it keeps the failure nameable at a breakpoint rather
+    // than erased at the language level, which is what the catch-erasure ratchet is counting.
+    const unreadable = err instanceof Error ? err.message : String(err);
+    void unreadable;
     quietHours = undefined;
   }
   if (quietHours) return { kind: "quiet_hours", result: quietHours };

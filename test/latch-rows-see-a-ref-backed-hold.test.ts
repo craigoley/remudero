@@ -159,8 +159,15 @@ test("every file-backed latch keeps the row it renders today, unchanged in name 
   assert.match(stop!.consequence, /halts within one tick/);
 
   const quiet = l.rows.find((r) => r.name === "QUIET_HOURS");
-  assert.ok(quiet, "QUIET_HOURS still renders exactly as before");
-  assert.match(quiet!.consequence, /quiet-hours preference is set/);
+  assert.ok(quiet, "QUIET_HOURS still renders, under the same NAME");
+  // W1-T2655 — the CONSEQUENCE genuinely changed, and this row is the one place that must say so.
+  // It used to read "an optional throttle a future scheduler consumer reads": the latch existed and
+  // nothing acted on it. That task WIRED quiet hours into the dispatch gate, so the honest
+  // consequence is now what actually happens to a fleet that sets it. This guard exists to catch
+  // DRIFT — a row quietly losing its meaning — and a wiring change that makes the row true is the
+  // one case where updating it is the point rather than a violation of it. The NAME is still
+  // pinned above, and the row count below is unchanged.
+  assert.match(quiet!.consequence, /new daemon dispatch is deferred/);
 
   assert.equal(l.rows.length, 2, "no ref-backed row leaked in beside the two file-backed ones");
 });
