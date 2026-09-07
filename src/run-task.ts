@@ -30111,6 +30111,20 @@ export function buildOpenPrViews(
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
       strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
       supersededBy,
+      // W1-T2794 — DECLARED HERE, STAMPED LATER, and the two are not the same thing. The real
+      // writer is `projectMergedTaskCandidates` (lib/sweep.ts), which runs AFTER this producer
+      // because it needs the credit-candidate set this function has no access to; that ordering
+      // IS the fix, so it cannot be collapsed into this literal. The value is `undefined` because
+      // this producer genuinely cannot know it — and per OpenPrView.taskMergedBy's own doc, ABSENT
+      // MEANS UNKNOWN, NEVER "NOT MERGED", so the default is also the safe one.
+      //
+      // Assigned rather than omitted for the reason the comment above `isPlanFiling` already
+      // states: `producerAssignedKeys` (lib/producer-completeness.ts) recognises a producer only by
+      // its TOP-LEVEL KEYS, so a field written solely through a `{ ...pr, k }` transformer reads
+      // UNWIRED — #3127 hit the same wall from the conditional-spread side. This key is what makes
+      // the census's answer match the truth; it is NOT the guard on the projection itself, which
+      // is covered by test/merged-task-open-pr-supersession.test.ts's neutering arm.
+      taskMergedBy: undefined,
       lastActivityAt: pr.updatedAt,
       // W1-T1201: the age clamp's other half — see `RawOpenPr.createdAt`'s own doc for why this
       // is `undefined` in the real gateway today (no producer in lib/open-prs-rest.ts yet) and
@@ -34068,6 +34082,11 @@ export async function fixCommand(
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
     // same task) — out of scope for a single explicitly-named PR lookup.
     supersededBy: undefined,
+    // W1-T2794 — likewise, and PERMANENTLY so here: `taskMergedBy` is stamped by the sweep's
+    // `projectMergedTaskCandidates` pass over the whole open array. routeFix resolves ONE named PR
+    // and never runs that pass, so this stays `undefined` — which the field's own doc defines as
+    // UNKNOWN, leaving every disposition it feeds untouched.
+    taskMergedBy: undefined,
     lastActivityAt: raw.updatedAt,
     // W1-T1201: same age-clamp projection as buildOpenPrViews above — see RawOpenPr.createdAt's
     // doc for why this is `undefined` in the real gateway today.
