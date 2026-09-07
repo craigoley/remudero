@@ -19,6 +19,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { AcceptanceCriterion } from "./plan.js";
 import { acceptanceBlockDiagnostics } from "./review.js";
+import { emDashSeparatedProof } from "./body-repair.js";
 import {
   renderCommitNarrativeParagraphs,
   shapeCommitMessage,
@@ -91,9 +92,38 @@ const ACCEPTANCE_HEADER_RE = /^(\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\
 /** The suffix that demotes a superseded header. Prose, not a marker — nothing parses it. */
 export const SUPERSEDED_HEADER_SUFFIX = " (superseded — unparseable, see the repaired block below)";
 
+/**
+ * W1-T3038 — RECOVER BEFORE YOU REPLACE.
+ *
+ * MEASURED: a body carrying FOUR real criteria written `- <claim> — unit test: <title>` went in and
+ * ONE placeholder came out, silently. An em dash is not a separator, so each bullet parsed with an
+ * empty proof, `bodyNeedsAcceptanceRepair` called the body defective, and the fallback displaced
+ * the author's own criteria — which were one character from correct the whole time.
+ *
+ * `emDashSeparatedProof` (body-repair.ts, W1-T3028) already knew how to split those bullets; it
+ * fed the DIAGNOSER and nothing else, so the REPAIR could not use what the report had worked out.
+ * That is the gap this closes: the fallback is for a body with nothing recoverable in it, not for
+ * one whose criteria merely need their separator fixed.
+ *
+ * Returns `[]` when nothing is recoverable, which is exactly when the fallback is right.
+ */
+export function recoverableCriteria(body: string): AcceptanceCriterion[] {
+  const out: AcceptanceCriterion[] = [];
+  for (const raw of body.split("\n")) {
+    const m = /^\s*(?:[-*]|\d+[.)])\s+(.*)$/.exec(raw);
+    if (!m) continue;
+    const split = emDashSeparatedProof(m[1]);
+    if (split) out.push({ claim: split.claim, proof: split.proof });
+  }
+  return out;
+}
+
 export function ensureJudgeableBody(body: string, fallbackCriteria: AcceptanceCriterion[]): string {
   if (!bodyNeedsAcceptanceRepair(body)) return body;
-  const block = renderAcceptanceBlock(fallbackCriteria);
+  // The author's own criteria, where they are recoverable, ALWAYS beat a generic fallback: they say
+  // something about this diff and the fallback says only that the body parses.
+  const recovered = recoverableCriteria(body);
+  const block = renderAcceptanceBlock(recovered.length > 0 ? recovered : fallbackCriteria);
   // Demote only the first matching header; a body with no header is unaffected.
   let demoted = false;
   const lines = body.split("\n").map((line) => {
