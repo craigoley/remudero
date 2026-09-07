@@ -10,9 +10,10 @@
 //      value
 //   5. the spawn path routes through the boundary (grep: secretBoundaryEnv( in src/lib/worker.ts)
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { createConnection } from "node:net";
-import { readdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -32,6 +33,7 @@ import {
 import { buildWorkerEnv } from "../src/lib/env.js";
 import { mintScopedToken } from "../src/lib/github-app.js";
 import { ALLOWED_NETWORK_DOMAINS } from "../src/lib/settings.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
 
 function keyPair() {
   return generateKeyPairSync("rsa", {
@@ -153,6 +155,31 @@ test("W1-T2699 (2): a request bearing an undeclared credential is refused before
   }
 });
 
+test("W1-T2699 (2): an upstream fetch that throws refuses with a 502 and ledgers the error, never crashing the proxy", async () => {
+  const rows: BoundaryLedgerRow[] = [];
+  const sentinel = mintSentinel("model");
+  const destinations: BoundaryDestination[] = [
+    { host: MODEL_HOST_DEFAULT, sentinel, upstreamBaseUrl: "https://upstream.invalid", realValue: () => "REAL-SUBSCRIPTION-TOKEN" },
+  ];
+  const fakeFetch = (async () => {
+    throw new Error("simulated: upstream connection reset");
+  }) as unknown as typeof fetch;
+
+  const proxy = await startBoundaryProxy({ destinations, log: (r) => rows.push(r), fetchImpl: fakeFetch });
+  try {
+    const res = await fetch(proxy.url, { headers: { authorization: `Bearer ${sentinel}` } });
+    assert.equal(res.status, 502);
+    const row = rows.find((r) => r.decision === "refuse");
+    assert.ok(row, "an upstream throw must still ledger a refusal row");
+    assert.equal(row!.host, MODEL_HOST_DEFAULT);
+    assert.equal(row!.status, "error");
+    assert.match(row!.reason, /upstream request failed/);
+    assert.doesNotMatch(JSON.stringify(rows), /REAL-SUBSCRIPTION-TOKEN/, "the ledger must never carry the real credential, even on a thrown error");
+  } finally {
+    await proxy.close();
+  }
+});
+
 test("W1-T2699 (2): a declared destination with no real credential available refuses rather than substituting an empty one", async () => {
   const rows: BoundaryLedgerRow[] = [];
   const sentinel = mintSentinel("model");
@@ -239,10 +266,112 @@ test("W1-T2699 (3): a mint refusal is relayed and ledgered by reason, with no us
   }
 });
 
+test("W1-T2699 (3): a mint that THROWS (not a declared refusal) is caught, relayed as empty, and ledgered by its own reason", async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "rmd-secret-boundary-"));
+  const socketPath = join(scratch, "cred.sock");
+  const rows: BoundaryLedgerRow[] = [];
+  const handle = await startCredentialHelperSocket({
+    socketPath,
+    log: (r) => rows.push(r),
+    mint: async () => {
+      throw new Error("simulated: installation token endpoint unreachable");
+    },
+  });
+  try {
+    const reply = await socketRoundTrip(socketPath, "protocol=https\nhost=github.com\n\n");
+    assert.equal(reply, "", "an unexpected throw must never surface a partial/garbled credential reply");
+    assert.equal(rows[0]?.decision, "refuse");
+    assert.equal(rows[0]?.status, "error");
+    assert.match(rows[0]?.reason ?? "", /mint threw/);
+    assert.doesNotMatch(JSON.stringify(rows), /password=/, "the ledger row must never carry a credential value");
+  } finally {
+    await handle.close();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 test("W1-T2699 (3): repoFromCredentialRequest prefers path over host, and falls back to host alone", () => {
   assert.equal(repoFromCredentialRequest("protocol=https\nhost=github.com\npath=acme/widgets.git\n"), "acme/widgets");
   assert.equal(repoFromCredentialRequest("protocol=https\nhost=github.com\n"), "github.com");
   assert.equal(repoFromCredentialRequest(""), "unknown");
+});
+
+// ── (5) THE SPAWN PATH WIRES THE GIT-CREDENTIAL HALF (worker.ts) ────────────────────────────────
+
+/** A minimal stand-in for the SDK's `query()`, injected via `args.queryFn` so no worker process is
+ *  ever spawned. Never calls `options.spawnClaudeCodeProcess` — nothing here needs a pid, since the
+ *  credential-helper wiring under test runs BEFORE the SDK is invoked at all. */
+const fakeSuccessQuery = (() =>
+  (async function* () {
+    yield {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "done",
+      session_id: "s-1",
+      total_cost_usd: 0.01,
+      num_turns: 1,
+    };
+  })()) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
+
+function spawnWorkerBoundaryArgs(scratch: string, cwd: string, extra: Record<string, unknown>) {
+  // `config.root` (and so workerHomeDir) is `scratch`, a SIBLING of `cwd`, never `cwd` itself —
+  // `materializeWorkerHome` refuses to place a worker home inside a git work tree, and `cwd` here
+  // IS one (that is the whole point of this fixture).
+  const settingsFile = join(scratch, "worker.json");
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  return {
+    cwd,
+    permissionMode: "bypassPermissions" as const,
+    settingsFile,
+    prompt: "W1-T2699 credential-helper wiring fixture",
+    config: { claudeBin: "/unused", root: scratch },
+    claudeExecutable: {
+      cache: createClaudeExecutableCache(),
+      deps: { env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" }, home: scratch, exists: () => true, canExecute: () => true, locations: [] },
+    },
+    // Force past the darwin-only keychain gate the same way worker.test.ts's own e2e fixtures do —
+    // this test is about credential-helper wiring, not the keychain, which it declares as a dep.
+    keychain: { platform: "linux" as NodeJS.Platform, readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "stub", expiresAt: 4102444800000 } }) },
+    queryFn: fakeSuccessQuery,
+    ...extra,
+  };
+}
+
+test("W1-T2699 (5): spawnWorker points cwd's LOCAL git credential.helper at the socket-based helper when secretBoundary.credentialHelperSocketPath is set", async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "rmd-secret-boundary-cred-wire-"));
+  const cwd = join(scratch, "worktree");
+  mkdirSync(cwd);
+  execFileSync("git", ["init", "-q", cwd]);
+  const socketPath = join(scratch, "cred.sock");
+
+  const result = await spawnWorker(
+    spawnWorkerBoundaryArgs(scratch, cwd, {
+      secretBoundary: { modelSentinel: mintSentinel("model"), modelBaseUrl: "http://127.0.0.1:1", credentialHelperSocketPath: socketPath },
+    }) as Parameters<typeof spawnWorker>[0],
+  );
+
+  assert.equal(result.text, "done");
+  const helperConfig = execFileSync("git", ["-C", cwd, "config", "--local", "--get-all", "credential.helper"], { encoding: "utf8" });
+  assert.match(helperConfig, /git-credential-socket-helper\.mjs/, "the LOCAL helper must point at the socket-relaying script");
+  assert.ok(helperConfig.includes(socketPath), "the wired helper must carry THIS run's own socket path, not a hardcoded one");
+});
+
+test("W1-T2699 (5): a credential-helper wiring failure (no git repo at cwd) is swallowed on purpose — spawnWorker still resolves normally", async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "rmd-secret-boundary-cred-fail-"));
+  const cwd = join(scratch, "worktree");
+  mkdirSync(cwd);
+  // Deliberately NOT `git init`-ed: `git config --local` has nowhere to write and throws — proving
+  // the try/catch around the wiring call never turns a best-effort step into a run failure.
+  const socketPath = join(scratch, "cred.sock");
+
+  const result = await spawnWorker(
+    spawnWorkerBoundaryArgs(scratch, cwd, {
+      secretBoundary: { modelSentinel: mintSentinel("model"), modelBaseUrl: "http://127.0.0.1:1", credentialHelperSocketPath: socketPath },
+    }) as Parameters<typeof spawnWorker>[0],
+  );
+
+  assert.equal(result.text, "done", "the swallowed wiring failure must not surface as a spawnWorker rejection");
 });
 
 // ── mintScopedToken (github-app.ts): the smallest token the push needs, capped by ttlMs ─────────

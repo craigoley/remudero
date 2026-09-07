@@ -1387,19 +1387,26 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // Shell isolation, resolved from config and never hardcoded, so a worker sources no operator rc. HOME is redirected
     // above, so CLAUDE_CODE_SHELL's Bash-tool snapshot resolves to the scratch HOME's empty rc whatever the operator's
     // dotfiles contain. ZDOTDIR covers any direct zsh (W1-T1C).
-    // W1-T2699: every spawn's env now routes through secretBoundaryEnv, a no-op absent `args.secretBoundary` (see its doc).
-    const childEnv = secretBoundaryEnv(
-      buildWorkerEnv(args.env ?? {}, process.env, {
-        zdotdir: workerZdotdir(config),
-        shell: workerShell(config),
-        home: workerHome,
-        // Overflow valve: pass the operator's ANTHROPIC_API_KEY through to bill on API credits ONLY when `config.overflow ===
-        // "api_key"`, which validateConfig refuses without a paired dailyCapUsd — so an uncapped api run cannot even be
-        // configured. Otherwise ANTHROPIC_* is stripped as before (W1-T258).
-        allowApiKey: config.overflow === "api_key",
-      }),
-      args.secretBoundary,
-    );
+    const childEnv = buildWorkerEnv(args.env ?? {}, process.env, {
+      zdotdir: workerZdotdir(config),
+      shell: workerShell(config),
+      home: workerHome,
+      // Overflow valve: pass the operator's ANTHROPIC_API_KEY through to bill on API credits ONLY when `config.overflow ===
+      // "api_key"`, which validateConfig refuses without a paired dailyCapUsd — so an uncapped api run cannot even be
+      // configured. Otherwise ANTHROPIC_* is stripped as before (W1-T258).
+      allowApiKey: config.overflow === "api_key",
+    });
+    // W1-T2699: every spawn's env routes through secretBoundaryEnv, a no-op absent `args.secretBoundary` (see its doc).
+    // Applied by MUTATING `childEnv` in place rather than rebinding it: W1-T2800's own structural falsifier
+    // (test/codex-worker-home-redirection.test.ts) greps this file's source for the literal `const childEnv =
+    // buildWorkerEnv(...)` assignment above, so `childEnv` stays that exact declaration and the substitution below is a
+    // second, visible step over the SAME object every downstream read (options.env, collectWorkerResult's
+    // childEnvKeys) already closes over.
+    if (args.secretBoundary) {
+      const boundedEnv = secretBoundaryEnv(childEnv, args.secretBoundary);
+      delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
+      Object.assign(childEnv, boundedEnv);
+    }
     // Attribution markers merged in AFTER the allowlist and extras above, so they are authoritative whatever `args.env`
     // contains — no caller has a legitimate reason to set REMUDERO_RUN_ID/TASK_ID/SCOPE itself (W1-T117).
     Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)));

@@ -66,7 +66,7 @@ export function declaredHostsFromWorkerSettings(settings: unknown): string[] {
 }
 
 /** The one ledger step this module writes, so a reader has exactly one string to grep for. */
-export const BOUNDARY_REQUEST_STEP = "boundary.request";
+export const LEDGER_REQUEST_STEP = "boundary.request";
 
 /**
  * The value-free row every boundary decision ledgers: which host, whether it was allowed or
@@ -75,7 +75,7 @@ export const BOUNDARY_REQUEST_STEP = "boundary.request";
  * holds any other write path.
  */
 export interface BoundaryLedgerRow {
-  readonly step: typeof BOUNDARY_REQUEST_STEP;
+  readonly step: typeof LEDGER_REQUEST_STEP;
   readonly host: string;
   readonly decision: "allow" | "refuse";
   readonly status: string;
@@ -88,7 +88,7 @@ export function boundaryLedgerRow(
   status: string,
   reason: string,
 ): BoundaryLedgerRow {
-  return { step: BOUNDARY_REQUEST_STEP, host, decision, status, reason };
+  return { step: LEDGER_REQUEST_STEP, host, decision, status, reason };
 }
 
 export interface BoundaryProxyHandle {
