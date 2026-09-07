@@ -40,4 +40,4 @@
     - claim: "an edit to only the continuation lines of a block-scalar proof trips the tamper guard"
       proof: "unit test: test/rule15-block-scalar-proof.test.ts"
     - claim: "the guard's line selection documents that it follows a block scalar's continuation"
-      proof: "grep: block-scalar continuation in src/lib/review.ts"
+      proof: "grep: block-scalar CONTINUATION in src/lib/review.ts"
