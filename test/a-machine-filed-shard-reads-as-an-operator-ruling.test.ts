@@ -503,3 +503,85 @@ test("W1-T3032: an injected root alone keeps the run self-contained, so a suite 
   );
   assert.equal(filedInto, only, "an injected root must resolve the checkout to itself, never to repoRoot");
 });
+
+// ── W1-T3044: compact by cause, then cap ─────────────────────────────────────────────────────────
+
+/*
+ * The ceiling used to truncate a list of INSTANCES — one finding per (pull request, gate), first
+ * three win, the rest named and dropped.
+ *
+ * MEASURED over a real 14-day window: 119 findings across 36 pull requests but only 22 DISTINCT
+ * GATES. Truncating instances covered 3 of 119 — three per cent of what the window had to say, and
+ * WHICH three was an artifact of pull-request number order. Grouping by gate and ranking by how
+ * many pull requests it refused covers 65 of 119 from the SAME three-draft budget: ci-gate (26),
+ * ci (20), coverage-ratchet (19).
+ *
+ * A gate that refused twenty-six pull requests is ONE lesson, not twenty-six.
+ */
+
+function clusterPair(pr: number, gate: string, repairFiles: string[] = ["src/x.ts"]) {
+  return { pr, gate, state: "repaired" as const, repairFiles };
+}
+
+test("W1-T3044: one gate refusing many PRs is ONE draft, naming every PR it refused", () => {
+  const corpus = {
+    status: "measured" as const,
+    unreadableShas: [],
+    prsScanned: 3,
+    pairs: [clusterPair(1, "ci-gate"), clusterPair(2, "ci-gate"), clusterPair(3, "ci-gate")],
+  };
+  const r = mintCiLearningShards(corpus as never, []);
+  assert.equal(r.drafts.length, 1, "three instances of one cause are one lesson");
+  assert.deepEqual(r.drafts[0].prs, [1, 2, 3], "and the draft carries every PR it was derived from");
+  assert.match(r.drafts[0].title, /REFUSED 3 PULL REQUESTS/);
+  assert.deepEqual(r.excludedFindings, [], "nothing is excluded — one cause fits well inside the ceiling");
+});
+
+test("W1-T3044: the ceiling now spends its budget on the BIGGEST causes, not the lowest PR numbers", () => {
+  // The instance-truncating version took PRs 1, 2, 3 — all of `rare` — and never mentioned the
+  // gate that refused four. Ordering by cause is what makes the three drafts worth having.
+  const corpus = {
+    status: "measured" as const,
+    unreadableShas: [],
+    prsScanned: 9,
+    pairs: [
+      clusterPair(1, "rare-a"), clusterPair(2, "rare-b"), clusterPair(3, "rare-c"), clusterPair(4, "rare-d"),
+      clusterPair(5, "big"), clusterPair(6, "big"), clusterPair(7, "big"), clusterPair(8, "big"),
+      clusterPair(9, "medium"), clusterPair(10, "medium"),
+    ],
+  };
+  const r = mintCiLearningShards(corpus as never, []);
+  assert.equal(r.drafts.length, 3, "the ceiling still caps at three");
+  assert.equal(r.drafts[0].gate, "big", "the gate that refused the most comes first");
+  assert.deepEqual(r.drafts[0].prs, [5, 6, 7, 8]);
+  assert.equal(r.drafts[1].gate, "medium");
+  assert.ok(r.excludedFindings.length > 0, "the remaining CAUSES are named");
+  assert.ok(
+    r.excludedFindings.length < 4,
+    "and named as causes, not instances — four rare gates, not one line per PR",
+  );
+});
+
+test("W1-T3044: ranking is deterministic — an equal-sized tie breaks on the gate name", () => {
+  const corpus = {
+    status: "measured" as const,
+    unreadableShas: [],
+    prsScanned: 4,
+    pairs: [clusterPair(1, "zebra"), clusterPair(2, "zebra"), clusterPair(3, "alpha"), clusterPair(4, "alpha")],
+  };
+  const a = mintCiLearningShards(corpus as never, []);
+  const b = mintCiLearningShards(corpus as never, []);
+  assert.equal(a.drafts[0].gate, "alpha", "the same window must rank the same way twice");
+  assert.deepEqual(a.drafts.map((d) => d.gate), b.drafts.map((d) => d.gate));
+});
+
+test("W1-T3044: a cluster carries the UNION of the files its repairs touched", () => {
+  const corpus = {
+    status: "measured" as const,
+    unreadableShas: [],
+    prsScanned: 2,
+    pairs: [clusterPair(1, "g", ["src/a.ts"]), clusterPair(2, "g", ["src/b.ts", "src/a.ts"])],
+  };
+  const r = mintCiLearningShards(corpus as never, []);
+  assert.deepEqual([...r.drafts[0].repairFiles].sort(), ["src/a.ts", "src/b.ts"], "no repair evidence is lost");
+});
