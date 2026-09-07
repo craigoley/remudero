@@ -5048,15 +5048,46 @@ function oldestByKey<T extends { prNumber: number }>(
   return winner;
 }
 
+/**
+ * W1-T3027 — EVERY disposition, in a fixed order, so the counts SUM TO `total`.
+ *
+ * The five this line used to name are a SUBSET of the eight {@link Disposition} holds, and the
+ * three it omitted — `post-review`, `dep-review`, `wait` — are where a healthy board mostly SITS.
+ * MEASURED 2026-09-07 against the live repo: `rmd sweep --dry-run` reported "11 open PR(s) · 0
+ * action(s) taken · mergeable 0 · blocked-fixable 2 · conflicted 0 · stale 0 · blocked-ambiguous 0".
+ * Every number there is true and the line still cannot be read: nine of eleven PRs are in no bucket
+ * it prints, and an operator asking "is the review lane running, or has it stalled?" — the question
+ * this repo's own recurring `remudero-review` stall makes people ask — gets no answer from the one
+ * summary the verb emits.
+ *
+ * The same shape CLAUDE.md already names for `lint-plan`: a technically-true aggregate that
+ * misleads by omission. A reader cannot tell a subset from a total without being told which it is,
+ * so the fix is to print all of them and let the arithmetic be checkable.
+ */
+const DISPOSITION_RENDER_ORDER: readonly Disposition[] = [
+  "mergeable",
+  "blocked-fixable",
+  "conflicted",
+  "stale",
+  "blocked-ambiguous",
+  "dep-review",
+  "post-review",
+  "wait",
+];
+
 /** One-line human render of a sweep summary, for both callers' console output. */
 export function renderSweepSummary(s: SweepSummary): string {
   const b = s.byDisposition;
+  const counts = DISPOSITION_RENDER_ORDER.map((d) => `${d} ${b[d]}`).join(" · ");
+  // The buckets now cover every disposition, so anything left over is a counting defect rather than
+  // a rendering choice — say so instead of letting the reader do the subtraction and wonder.
+  const summed = DISPOSITION_RENDER_ORDER.reduce((n, d) => n + b[d], 0);
+  const residual = s.total - summed;
   return (
-    `sweep: ${s.total} open PR(s) · ${s.actionsTaken} action(s) taken · ` +
-    `mergeable ${b.mergeable} · blocked-fixable ${b["blocked-fixable"]} · conflicted ${b.conflicted} · ` +
-    `stale ${b.stale} · blocked-ambiguous ${b["blocked-ambiguous"]}` +
+    `sweep: ${s.total} open PR(s) · ${s.actionsTaken} action(s) taken · ${counts}` +
     (s.actionsFailed > 0 ? ` · ⚠️ ${s.actionsFailed} action(s) FAILED (see sweep.action_failed)` : "") +
-    (s.noneCount > 0 ? ` · ⚠️ ${s.noneCount} UNDISPOSED (invariant violated)` : "")
+    (s.noneCount > 0 ? ` · ⚠️ ${s.noneCount} UNDISPOSED (invariant violated)` : "") +
+    (residual !== 0 ? ` · ⚠️ ${residual} UNACCOUNTED (dispositions do not sum to the open count)` : "")
   );
 }
 
