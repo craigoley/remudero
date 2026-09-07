@@ -859,6 +859,7 @@ import {
   decideRedBaseRefresh,
   failingSourceFilesFromCiFailures,
   failingTestFilesFromCiFailures,
+  projectMergedTaskCandidates,
   REGENERABLE_ARTIFACT_GENERATORS,
   actionableGateFailuresFromReasons,
   armOutcomeArmed,
@@ -4691,19 +4692,105 @@ export function outOfDeclaredScopeFiles(
  *
  * PURE: no I/O — every list is the caller's own read, never fetched here.
  */
+export const FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION = "gate_remedy_scope_deadlock" as const;
+const FIX_RUNG_STOOD_DOWN_LEDGER_STEP = "fix.stood_down" as const;
+
+export interface FixRungGateRemedyScopeDeadlock {
+  disposition: typeof FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION;
+  gate: string;
+  file: string;
+  declaringEntry: string;
+  declaringEntryExists: boolean;
+  source: "registry" | "ci-output";
+}
+
+type ReachableRemedyFileInput = string | RemedyFileForGate;
+
+function remedyFilePath(remedy: ReachableRemedyFileInput): string {
+  return typeof remedy === "string" ? remedy : remedy.path;
+}
+
+function declaredGateRemedyEntry(gate: string, file: string): string {
+  return `FAST_GATE_STEPS[job="${gate}"].remedyFiles includes "${file}"`;
+}
+
+function missingGateRemedyEntry(gate: string, file: string): string {
+  return `MISSING FAST_GATE_STEPS remedyFiles entry for gate "${gate}" and file "${file}"`;
+}
+
+function failureOutputNamesRemedyPath(failure: Pick<CiFailure, "logTail">, path: string): boolean {
+  return failure.logTail
+    .split(/\r?\n/)
+    .some((line) => /\bTO FIX:/i.test(line) && /\bedit\b/i.test(line) && line.includes(path));
+}
+
+function gateRemedyScopeDeadlock(
+  newOutOfScopePaths: readonly string[],
+  reachableRemedyFiles: readonly ReachableRemedyFileInput[],
+  failingChecks: readonly Pick<CiFailure, "name" | "logTail">[],
+): FixRungGateRemedyScopeDeadlock | undefined {
+  const declaredRemedies = reachableRemedyFiles.filter((r): r is RemedyFileForGate => typeof r !== "string");
+  for (const file of newOutOfScopePaths) {
+    const declared = declaredRemedies.find((r) => r.path === file);
+    if (declared) {
+      return {
+        disposition: FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION,
+        gate: declared.job,
+        file,
+        declaringEntry: declaredGateRemedyEntry(declared.job, file),
+        declaringEntryExists: true,
+        source: "registry",
+      };
+    }
+  }
+  for (const file of newOutOfScopePaths) {
+    const failure = failingChecks.find((f) => failureOutputNamesRemedyPath(f, file));
+    if (failure) {
+      return {
+        disposition: FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION,
+        gate: failure.name,
+        file,
+        declaringEntry: missingGateRemedyEntry(failure.name, file),
+        declaringEntryExists: false,
+        source: "ci-output",
+      };
+    }
+  }
+  return undefined;
+}
+
+export function countGateRemedyScopeDeadlockLedgerMembers(lines: readonly Record<string, unknown>[]): number {
+  return lines.filter(
+    (line) =>
+      line.step === FIX_RUNG_STOOD_DOWN_LEDGER_STEP &&
+      line.disposition === FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION &&
+      typeof line.gate === "string" &&
+      typeof line.file === "string",
+  ).length;
+}
+
 export function fixRungScopeStandDownReason(
   currentDiffFiles: readonly string[],
   baselineDiffFiles: readonly string[],
   declaredFiles: readonly string[] | undefined,
-  reachableRemedyFiles: readonly string[] = [],
-): { reason: string; scopeKind: "files" | "plan"; newOutOfScopePaths: string[] } | undefined {
+  reachableRemedyFiles: readonly ReachableRemedyFileInput[] = [],
+  failingChecks: readonly Pick<CiFailure, "name" | "logTail">[] = [],
+):
+  | {
+      reason: string;
+      scopeKind: "files" | "plan";
+      newOutOfScopePaths: string[];
+      gateRemedyDeadlock?: FixRungGateRemedyScopeDeadlock;
+    }
+  | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
   const planOnlyTask = declaredFiles.every(isInPlanScope);
+  const reachableRemedyPaths = reachableRemedyFiles.map(remedyFilePath);
   // W1-T2653: widen the comparison set for THIS call only — never plan-only (see doc above).
   const effectiveDeclaredFiles = planOnlyTask
     ? declaredFiles
-    : reachableRemedyFiles.length > 0
-    ? [...declaredFiles, ...reachableRemedyFiles]
+    : reachableRemedyPaths.length > 0
+    ? [...declaredFiles, ...reachableRemedyPaths]
     : declaredFiles;
   const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles));
   const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles).filter(
@@ -4720,7 +4807,12 @@ export function fixRungScopeStandDownReason(
       : `a fix worker added path(s) outside the declared scope: ${newOutOfScopePaths.join(", ")} — declared ` +
         `files: ${declaredFiles.join(", ")} — dispatching another strike would compound on a PR the next ` +
         `round's rule-15/rule-25 refusal already can't recover from`;
-  return { reason, scopeKind, newOutOfScopePaths };
+  return {
+    reason,
+    scopeKind,
+    newOutOfScopePaths,
+    gateRemedyDeadlock: gateRemedyScopeDeadlock(newOutOfScopePaths, reachableRemedyFiles, failingChecks),
+  };
 }
 
 /**
@@ -9711,20 +9803,28 @@ export async function runFixRung(opts: {
               currentDiffFiles,
               baselineDiffFiles,
               opts.task.files,
-              reachableRemedyFiles.map((r) => r.path),
+              reachableRemedyFiles,
+              currentCiFailures ?? [],
             )
           : undefined;
       if (scopeStandDown) {
+        const gateRemedy = scopeStandDown.gateRemedyDeadlock;
+        const summary = gateRemedy
+          ? `fix rung standing down — gate-remedy scope deadlock: ${gateRemedy.gate} prescribes ${gateRemedy.file} (${gateRemedy.declaringEntryExists ? "declared" : "missing registry entry"}) — ${opts.prUrl}`
+          : `fix rung standing down — a fix worker's own repair left this PR out of scope (${scopeStandDown.scopeKind}) — ${opts.prUrl}`;
+        const gateRemedyDetail = gateRemedy
+          ? ` Observed blocker: failing gate ${gateRemedy.gate} prescribes ${gateRemedy.file} as its own remedy; declaring entry: ${gateRemedy.declaringEntry}.`
+          : "";
         const issueUrl = escalate(
           {
             class: "BLOCKED",
             taskId: opts.taskId,
             runId: opts.runId,
             headSha: review.headSha,
-            summary: `fix rung standing down — a fix worker's own repair left this PR out of scope (${scopeStandDown.scopeKind}) — ${opts.prUrl}`,
+            summary,
             detail:
               `The blocked_review FIX RUNG (W1-T76, W1-T1227) refused to dispatch strike ${strikes + 1}: ` +
-              `${scopeStandDown.reason}. Only a human can undo an already-pushed out-of-scope commit — the ` +
+              `${scopeStandDown.reason}.${gateRemedyDetail} Only a human can undo an already-pushed out-of-scope commit — the ` +
               `next round cannot, because the review verdict for this head is written once per sha (W1-T1227 ` +
               `rationale 8) and a fix worker may never edit the PR body or the task record to route around it ` +
               `(design note iv).`,
@@ -9748,6 +9848,16 @@ export async function runFixRung(opts: {
           reason: scopeStandDown.reason,
           scope_kind: scopeStandDown.scopeKind,
           out_of_scope_paths: scopeStandDown.newOutOfScopePaths,
+          ...(gateRemedy
+            ? {
+                disposition: gateRemedy.disposition,
+                gate: gateRemedy.gate,
+                file: gateRemedy.file,
+                declaring_entry: gateRemedy.declaringEntry,
+                declaring_entry_exists: gateRemedy.declaringEntryExists,
+                gate_remedy_source: gateRemedy.source,
+              }
+            : {}),
           issue_url: issueUrl,
         });
         deps.say(
@@ -18349,7 +18459,21 @@ export function ciLearningCommand(
   for (const d of result.drafts) {
     console.log(`  DRAFT ${d.findingId}  author_class=${d.author_class} verify=${d.verify}`);
     console.log(`    ${d.title}`);
-    console.log(`    remedy surface: ${d.remedySurface}  repair touched: ${d.repairFiles.join(",") || "(none recorded)"}`);
+    // W1-T3051 — the SUBJECT first, the full list second. A flat union ran to 66 files on a
+    // 26-pull-request cluster and told a reader nothing; what the repairs kept returning to is the
+    // lesson. When they agree on nothing, say that rather than promote an arbitrary first entry.
+    if (d.dominantRepairFiles.length > 0) {
+      const named = d.dominantRepairFiles
+        .map((r) => `${r.file} (${r.prs} of ${d.prs.length} repairs)`)
+        .join(", ");
+      console.log(`    the repairs kept returning to: ${named}`);
+    } else {
+      console.log(`    the repairs share no file — this gate reddened for unrelated reasons`);
+    }
+    console.log(
+      `    remedy surface: ${d.remedySurface}  repair touched: ${d.repairFiles.length} file(s)` +
+        `${d.repairFiles.length > 0 ? ` (most-repaired first: ${d.repairFiles.slice(0, 5).join(", ")})` : ""}`,
+    );
   }
   for (const e of result.excludedFindings) {
     console.log(`  EXCLUDED by the ceiling (named, not dropped): ${e}`);
@@ -30241,6 +30365,20 @@ export function buildOpenPrViews(
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
       strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
       supersededBy,
+      // W1-T2794 — DECLARED HERE, STAMPED LATER, and the two are not the same thing. The real
+      // writer is `projectMergedTaskCandidates` (lib/sweep.ts), which runs AFTER this producer
+      // because it needs the credit-candidate set this function has no access to; that ordering
+      // IS the fix, so it cannot be collapsed into this literal. The value is `undefined` because
+      // this producer genuinely cannot know it — and per OpenPrView.taskMergedBy's own doc, ABSENT
+      // MEANS UNKNOWN, NEVER "NOT MERGED", so the default is also the safe one.
+      //
+      // Assigned rather than omitted for the reason the comment above `isPlanFiling` already
+      // states: `producerAssignedKeys` (lib/producer-completeness.ts) recognises a producer only by
+      // its TOP-LEVEL KEYS, so a field written solely through a `{ ...pr, k }` transformer reads
+      // UNWIRED — #3127 hit the same wall from the conditional-spread side. This key is what makes
+      // the census's answer match the truth; it is NOT the guard on the projection itself, which
+      // is covered by test/merged-task-open-pr-supersession.test.ts's neutering arm.
+      taskMergedBy: undefined,
       lastActivityAt: pr.updatedAt,
       // W1-T1201: the age clamp's other half — see `RawOpenPr.createdAt`'s own doc for why this
       // is `undefined` in the real gateway today (no producer in lib/open-prs-rest.ts yet) and
@@ -32789,8 +32927,15 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // I/O `selectUpdateBranchTarget` performs itself.
   const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+  // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
+  // composition change, not a new read: the credit rung already built exactly this set, just
+  // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
+  // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
+  // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
+  // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
+  const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
   const summary = await runSweep(
-    prsForFixRung,
+    projectMergedTaskCandidates(prsForFixRung, creditCandidates),
     {
       ...effects,
       ledgerPath,
@@ -32808,7 +32953,6 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // the open-PR reconciliation above, but over every task's OWNED merge state
   // rather than open-PR pipeline state — the gate-side-merge fixture (0 of 195
   // runs ledgered a merge while GitHub showed 28) this rung exists to close.
-  const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
   const creditSummary = await runCreditBackfill(creditCandidates, { ledgerPath, runId, log, dryRun });
 
   // fb-1784756088300-6a481e — the escalation-lifecycle reconciler rung: close stale
@@ -33672,8 +33816,15 @@ export function buildSweepHook(
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
       const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+      // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
+      // composition change, not a new read: the credit rung already built exactly this set, just
+      // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
+      // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
+      // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
+      // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
+      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runSweep(
-        prsForFixRung,
+        projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         {
           ...effects,
           ledgerPath,
@@ -33697,7 +33848,6 @@ export function buildSweepHook(
       await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
-      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
       // W1-T175 — the worktree reaper rung, on the daemon's own poll cadence: the hole
       // this closes is specifically an IDLE fleet (no run dispatched, so pruneStaleRuns'
@@ -34197,6 +34347,11 @@ export async function fixCommand(
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
     // same task) — out of scope for a single explicitly-named PR lookup.
     supersededBy: undefined,
+    // W1-T2794 — likewise, and PERMANENTLY so here: `taskMergedBy` is stamped by the sweep's
+    // `projectMergedTaskCandidates` pass over the whole open array. routeFix resolves ONE named PR
+    // and never runs that pass, so this stays `undefined` — which the field's own doc defines as
+    // UNKNOWN, leaving every disposition it feeds untouched.
+    taskMergedBy: undefined,
     lastActivityAt: raw.updatedAt,
     // W1-T1201: same age-clamp projection as buildOpenPrViews above — see RawOpenPr.createdAt's
     // doc for why this is `undefined` in the real gateway today.

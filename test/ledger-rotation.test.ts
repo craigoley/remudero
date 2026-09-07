@@ -1040,6 +1040,9 @@ test("W1-T964: removing the pinning fails the idempotency test", () => {
     // skipped child looks identical to a clean exit).
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
+    // W1-T2732: blank the coverage session var too -- `delete` is a no-op on it, and an unblanked
+    // value would silently enrol this child in whatever coverage session is running this suite.
+    childEnv.NODE_V8_COVERAGE = undefined;
     // `cwd: sandbox` is the whole point: the child's `../src/lib/ledger.js` must resolve to the
     // MUTATED COPY, never to the checked-out file.
     childResult = spawnSync(process.execPath, args, { cwd: sandbox, encoding: "utf8", timeout: 90_000, env: childEnv });

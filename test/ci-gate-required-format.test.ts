@@ -27,7 +27,8 @@ const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 
 // The REQUIRED array exactly as it read before this PR (single-line JSON literal) — the
 // pre-reformat fixture. Order and membership must be byte-identical to what W1-T107 replaced,
-// PLUS every entry a later PR has appended since (most recently source-size, W1-T2883).
+// PLUS every entry a later PR has appended since (most recently coverage-session-blanking,
+// W1-T2732 — the convention this comment states: a PR that makes a check REQUIRED appends here too).
 const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "ci",
   "lint-plan",
@@ -50,6 +51,7 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "unwired-gate",
   "comment-load-ratchet",
   "source-size",
+  "coverage-session-blanking",
 ]);
 
 async function loadCiGate() {
@@ -97,7 +99,16 @@ test("ci-gate-required-format: the format is one entry per line, and the convent
       `expected exactly one quoted entry per line, got: ${JSON.stringify(line)}`,
     );
   }
-  assert.equal(entryLines.length, 21, "expected 21 one-per-line REQUIRED entries");
+  // DERIVED FROM THE FIXTURE, not hard-coded. A literal here means a PR that makes one more check
+  // required has to edit TWO places and gets a bare "expected 21, got 22" when it edits one — which
+  // says nothing about what changed. The fixture above is already the reviewed list, and test 1
+  // deep-equals the parsed set against it, so this count cannot drift away from it silently.
+  const expectedEntryCount = (JSON.parse(PRE_REFORMAT_REQUIRED_FIXTURE) as string[]).length;
+  assert.equal(
+    entryLines.length,
+    expectedEntryCount,
+    `expected ${expectedEntryCount} one-per-line REQUIRED entries, one per fixture entry`,
+  );
 
   // The comment immediately above the block must name the conflict class this format avoids —
   // concurrent PRs editing the same single line.

@@ -1,0 +1,97 @@
+- id: W1-T3056
+  title: "TWO RISK-JUDGE PREDICATES ARE EXPORTED, TESTED AND CALLED BY NOTHING — `declaredFilesAbsentFromChange` and `isTestOnlyCompletionOfExistingBehaviour` each appear exactly once outside their own tests, at their own definition, so the declared-versus-actual signal the judge acts on is an LLM inference over two rendered lists while the pure functions written to compute it sit inert"
+  repo: remudero
+  depends_on: []
+  type: investigate
+  verify: human
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [test/a-risk-judge-predicate-nothing-calls.test.ts]
+  origin: "operator-session#follow-up-2026-09-07"
+  plan_refs: ["W1-T2371", "W1-T2735", "W1-T454", "W1-T1031"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07 at origin/main. `git grep` over `src/ scripts/ bin/ .github/` returns
+    EXACTLY ONE line for each symbol — its own `export function` declaration:
+
+      src/lib/risk-judge.ts:106  export function isTestOnlyCompletionOfExistingBehaviour(
+      src/lib/risk-judge.ts:116  export function declaredFilesAbsentFromChange(
+
+    Neither is re-exported under another name. Both are exercised only by
+    `test/a-declared-file-absent-from-a-diff-is-not-proof-of-drift.test.ts`, which is why they read
+    as live code: the suite passes, so nothing says they are inert.
+
+    WHAT THIS MEANS FOR THE SIGNAL THEY WERE WRITTEN FOR. `buildRiskJudgePrompt` renders two lists —
+    `FILES TOUCHED (declared)` from the caller's shard, and the REST-sourced `ACTUAL CHANGE` view
+    (W1-T1031). The judge is an LLM, and the declared-versus-actual mismatch it reasons about is an
+    INFERENCE IT DRAWS from reading those two lists, not a fact any code computes and hands it.
+    `declaredFilesAbsentFromChange` computes exactly that fact — pure set arithmetic over the same
+    two inputs, with a documented refusal to speak on a truncated view — and no caller consumes it.
+
+    ⚠ THE GUARD THAT EXISTS DOES NOT COVER THIS CLASS, AND IS RIGHT NOT TO. `unwired-gate:check`
+    (W1-T2735) scans tracked `scripts/` executables and package.json scripts whose NAME claims to be
+    a gate, and proves each is invoked from a workflow or an npm script. An exported TypeScript
+    function is outside its stated scope by construction. So this is not a gate escaping its own
+    guard; it is a class that guard was never built to see.
+
+    HOW IT WAS FOUND, AND WHAT THAT SAYS ABOUT ITS COST. Discovered while building W1-T2371, whose
+    whole subject is that the judge misreads this very mismatch for plan-only amendments. Locating
+    the consumer of the mismatch signal turned up no consumer at all — the narrowing W1-T2371 ships
+    therefore had to be written against the PROMPT rather than against the predicate. That is the
+    measured cost: the next change to this signal will also be written against prose, because the
+    computed alternative is not wired.
+  design: |
+    (i) DECIDE BETWEEN TWO ENDINGS, DO NOT SPLIT THE DIFFERENCE. The first deliverable is a ruling,
+    not a patch, and the two candidates have different owners and different risks:
+
+      (a) WIRE THEM. Hand the judge a computed fact — a rendered line naming the declared paths the
+          actual change does not touch, and, where the base facts are available, whether the change
+          is a test-only completion of existing behaviour. This REPLACES an LLM inference with set
+          arithmetic, which is the direction this repo's own doctrine prefers. COST: it needs
+          `DeclaredFileBaseFact`s that nothing currently produces, so (a) is not one line.
+      (b) DELETE THEM. If the judge is meant to reason from the two lists — and W1-T454's no-diff
+          design says it reasons from rendered text by construction — then a pure predicate nothing
+          calls is a maintenance liability that reads like enforcement, exactly the shape W1-T2735's
+          header warns about. Its tests would go with it.
+
+    (ii) DO NOT WIRE THEM SPECULATIVELY. Wiring (a) adds a line to a prompt whose length is bounded
+    by the cheapest tier's context floor (W1-T2371 records the 40,000-token figure and the 60-file
+    cap chosen against it). A computed line is cheap, but it is NOT free, and it must be justified
+    against that budget rather than added because the function exists.
+
+    (iii) WHATEVER IS CHOSEN, THE JUDGE'S INPUTS MUST NOT GROW. `RISK_JUDGE_TOOLS` stays empty and
+    the judge stays diff-blind (W1-T454). Ending (a) is a rendering change over inputs it already
+    holds, or it is out of scope.
+
+    (iv) THE DETECTOR IS WORTH HAVING EITHER WAY. A test that fails when an exported symbol in
+    `src/lib/risk-judge.ts` has no non-test caller costs nothing and would have caught this at
+    write time. Scope it to that ONE module — a repo-wide unwired-export census is a different,
+    much larger task and is not this one.
+  acceptance:
+    - claim: "an exported risk-judge symbol with no caller outside its own tests is detected and named"
+      proof: "unit test: test/a-risk-judge-predicate-nothing-calls.test.ts"
+    - claim: "a symbol that IS called from production code does not trip the detector, so it discriminates rather than always firing"
+      proof: "unit test: test/a-risk-judge-predicate-nothing-calls.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF A CALLER EXISTS. Re-run the search before building:
+    `git grep -n '<symbol>' -- src/ scripts/ bin/ .github/`. If either symbol returns more than its
+    own declaration, this was measured wrongly and the task must be closed rather than built. NOTE
+    THE SPECIFIC TRAP: searching `src/` alone would miss a caller in `scripts/`, and searching the
+    repo root would count this shard and the test files as hits.
+
+    AND THE DETECTOR MUST DISCRIMINATE. It must PASS for a symbol with a real production caller and
+    FAIL for one without. A detector that fires on every export, or on none, proves nothing — and
+    `risk-judge.ts` exports many symbols that ARE wired, so the discriminating fixture is available
+    in the same file rather than needing invention.
+  note: |
+    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3056`.
+
+    type:investigate AND verify:human ON PURPOSE. The measurement is exact — one grep, reproducible
+    from the falsifier's own command — but the RULING between wiring and deleting is a design
+    decision with a cost argument on each side, and filing it as `implement` would invite a worker
+    to guess. Clause (iv)'s detector is buildable under either ruling.
+
+    risk:medium — nothing here changes behaviour and the diff is one test file. The band reflects
+    that the eventual ruling touches the dispatch-path risk judge, not that this filing does.

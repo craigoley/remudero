@@ -477,6 +477,9 @@ test("W1-T1020: reverting the reason change fails the partial reason test", () =
     // reason (test/task-id-reservation.test.ts's W1-T949 mutation test notes the same trap).
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
+    // W1-T2732: blank the coverage session var too -- `delete` is a no-op on it, and an unblanked
+    // value would silently enrol this child in whatever coverage session is running this suite.
+    childEnv.NODE_V8_COVERAGE = undefined;
     childResult = spawnSync(process.execPath, args, { cwd: isolatedRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
   } finally {
     // The isolated copy is disposable regardless of what the child run did — a throw, a

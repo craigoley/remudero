@@ -1022,8 +1022,23 @@ boardReview:
 # same number for a different reason (one digest a day is one message a day).
 ciLearningCadence:
   enabled:
-    value: false
-    origin: "net-new"   # NOT safe-on: this rung FILES — see the block comment above
+    # ON, by operator direction 2026-09-07 ("ensure tonight's daily will work"). The block comment
+    # above states the price of this switch and it has not changed: this rung FILES. What made the
+    # default OFF was that a machine writing records into an operator's plan is an opt-in — and this
+    # IS that opt-in, taken deliberately rather than inherited from a sibling's justification.
+    #
+    # THREE THINGS HAD TO BE TRUE FIRST, and each was measured rather than assumed:
+    #  1. It can file at all. W1-T3032 (#4438) — it joined `plan/` onto the STATE root, so every run
+    #     ended "NOT FILED ... ENOENT" and could not dedup either. Verified after: a 14-day run filed
+    #     three shards with real ids and no unreadable-plan line.
+    #  2. It files the RIGHT three. W1-T3044 — the ceiling truncated INSTANCES, so a real 14-day
+    #     window filed two records about one ancient PR and excluded the gate that had refused 28.
+    #     Compacting by cause first takes the same budget from 3% coverage to 55%.
+    #  3. Every record it writes still parks. author_class: machine + verify: human, which
+    #     isDispatchEligible refuses and machineAuthorVerifyViolation blocks at verify:auto. A
+    #     machine may propose into the plan; only an operator releases it.
+    value: true
+    origin: "net-new"   # this rung FILES — see the block comment above and the three checks here
   minIntervalMinutes:
     value: 1440
     origin: "net-new"

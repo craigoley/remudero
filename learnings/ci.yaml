@@ -100,3 +100,18 @@
   assertion: 'grep -q -- "--force-with-lease=" src/lib/git-push.ts'
   src: operator-report 2026-08-26; explicit-form precondition documented at git-push.ts gitPushEmptyCommit
   cited: "2026-08-26"
+- id: inherited-violation-not-authors
+  subsystem: ci
+  lifecycle: active
+  files: [scripts/lib/inherited-violation.mjs]
+  fact: >-
+    source-size-ratchet was BLOCKED on src/run-task.ts on a clean origin/main checkout, so every open
+    PR inherited the failure regardless of its own diff — it surfaced on a branch touching only
+    src/lib/review.ts, with no relationship to the violation. Nobody's individual mistake: several
+    PRs each grew that file within their own recorded ceiling, and the sum crossed a bucket boundary
+    after they merged; six PRs were red on it at once and nothing said why. Re-run the ratchet's
+    measure against the merge base (contentAtRef/splitInheritedViolations) and label a violation that
+    already reproduces there INHERITED rather than blaming the diff.
+  assertion: 'grep -q "splitInheritedViolations" scripts/lib/inherited-violation.mjs'
+  src: measured 2026-09-07 — source-size-ratchet BLOCKED on origin/main across six unrelated open PRs
+  cited: "2026-09-07"
