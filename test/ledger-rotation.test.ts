@@ -353,8 +353,15 @@ test("rotateLedger: every decision-relevant step survives into the live view, de
     const coreBytes = statSync(ledgerPath).size;
     const ceiling = coreBytes * 4;
 
-    // Pad with enough noise to force a real rotation.
-    for (let n = 0; n < 200; n++) {
+    // Pad with enough noise to force a real rotation. DERIVED from `ceiling` and the noise
+    // line's own measured size, not a fixed iteration count (W1-T2697: appendLedger grew every
+    // core line by its own `actor`/`actor_pid` stamp, and a hardcoded padding count sized for
+    // the smaller pre-stamp core silently stopped clearing a now-larger ceiling — the exact
+    // "stale hardcoded list" trap the ceiling comment above already warns against, just one
+    // level down). Comfortably past the ceiling, never merely at it.
+    const oneNoiseLine = noiseLine(0) + "\n";
+    const paddingIterations = Math.ceil(ceiling / oneNoiseLine.length) + 50;
+    for (let n = 0; n < paddingIterations; n++) {
       writeFileSync(ledgerPath, noiseLine(n) + "\n", { flag: "a" });
     }
 
