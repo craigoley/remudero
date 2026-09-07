@@ -17,7 +17,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkWaitStalled, STALL_WINDOW, waitForCiGreen } from "../src/run-task.js";
+import { checkWaitStalled, STALL_WINDOW, waitForCiGreen, ciGateState } from "../src/run-task.js";
 
 /** `STALL_WINDOW` identical copies of `reading` — the minimum a real caller would have
  *  accumulated before {@link checkWaitStalled} has enough evidence to conclude stalled. */
@@ -154,7 +154,7 @@ test("BEHAVIORAL (W1-T382): the real waitForCiGreen stalls on an unmoving rollup
       (step, extra) => logs.push({ step, extra }),
       0,
     );
-    assert.equal(outcome, "timeout", "an unmoving rollup must conclude timeout via the stall derivative");
+    assert.equal(ciGateState(outcome), "timeout", "an unmoving rollup must conclude timeout via the stall derivative");
     const stalledLog = logs.find((l) => l.step === "ci.stalled");
     assert.ok(stalledLog, "the stalled branch must log ci.stalled, not just return silently");
     assert.deepEqual(

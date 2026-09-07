@@ -1928,6 +1928,11 @@ interface RollupEntry {
   status?: string;
   conclusion?: string;
   state?: string;
+  /** W1-T2804 — when this ATTEMPT started. Already carried at runtime by every producer this
+   *  interface widens ({@link RestRollupEntry.startedAt}); declared here so the poll-loop readers
+   *  can hand these entries to {@link dedupeRollupByLatestAttempt}, which sorts on it, without
+   *  the type silently erasing the only field that distinguishes one attempt from its successor. */
+  startedAt?: string;
 }
 
 /**
@@ -4820,13 +4825,51 @@ export async function pollToGate(
  * is judged FRESH by `runReview` every strike, never trusted from the
  * rollup here.
  */
-export function ciGateFromRollup(rollup: RollupEntry[] | undefined): "green" | "red" | "pending" {
-  const roll = (rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX);
-  const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
+export function ciGateFromRollup(
+  rollup: RollupEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined = undefined,
+): "green" | "red" | "pending" {
+  // W1-T2804: DEDUPE BEFORE JUDGING, by CALLING the rule the siblings call. A sha accumulates one
+  // entry PER ATTEMPT, so without this a superseded CANCELLED/FAILURE attempt outvotes its own
+  // green successor and the run books `blocked_ci` while GitHub is merging the PR.
+  const roll = dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX));
+  // W1-T2804: the RED vote is cast only by REQUIRED contexts when the list is readable. The degrade
+  // is READ FROM the sibling (`checksStateFromRollup`), not re-decided: an empty/absent list means
+  // every reported context counts, because an unreadable protection rule (the container PAT's 403,
+  // the common case on this fleet) must never manufacture a false green. The GREEN verdict is
+  // deliberately unchanged and still requires a check named `ci` reporting SUCCESS — sharing the
+  // RULES with `checksStateFromRollup` must not collapse the two distinct VERDICTS.
+  const required = new Set(requiredContexts ?? []);
+  const voters = required.size > 0
+    ? roll.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? ""))
+    : roll;
+  const red = voters.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
   if (red) return "red";
   const ci = roll.find((c) => (c.name ?? c.context) === "ci");
   if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
   return "pending";
+}
+
+/**
+ * W1-T2804 — a CI gate verdict together with THE SHA IT WAS READ FOR. The parse fix above is only
+ * half the defect: the gate reader and the ci-log evidence miner each resolved their own head, so
+ * "the two readers disagree" could be asserted about two different commits. Carrying the sha the
+ * gate actually judged lets the miner be pinned to that same commit within one decision, and makes
+ * the shared subject OBSERVABLE in whatever that decision reports.
+ */
+export type CiGateOutcome = { state: "green" | "red" | "timeout"; sha?: string };
+
+/** W1-T2804: normalize a {@link CiGateOutcome} or a bare verdict (what a caller-supplied
+ *  `waitForCiGreen` stub returns) to the verdict. */
+export function ciGateState(r: CiGateOutcome | "green" | "red" | "timeout"): "green" | "red" | "timeout" {
+  return typeof r === "string" ? r : r.state;
+}
+
+/** W1-T2804: the sha a gate verdict was read for, or `undefined` when the reader did not report
+ *  one. Undefined PINS NOTHING and every consumer falls back to its own read — fail open, exactly
+ *  as before this task, so a stub that returns a bare verdict changes no behavior. */
+export function ciGateSha(r: CiGateOutcome | "green" | "red" | "timeout"): string | undefined {
+  return typeof r === "string" ? undefined : r.sha;
 }
 
 /**
@@ -4986,19 +5029,22 @@ async function waitForCiGreen(
   log: (step: string, extra?: Record<string, unknown>) => void,
   everySec = 6,
   deps: PollDeps = {},
-): Promise<"green" | "red" | "timeout"> {
+): Promise<CiGateOutcome> {
   const read = deps.readJson ?? ghJsonAsync;
   const sleep = deps.sleep ?? yieldingSleep;
   // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
   const { owner, repo, number } = pollRestTarget(prUrl, "waitForCiGreen");
   const readings: (RollupEntry[] | undefined)[] = [];
+  let sha = "";
   for (let i = 0; ; i++) {
     const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
-    const sha = mapRestPr(row).headRefOid;
+    sha = mapRestPr(row).headRefOid;
     const roll = await restRollupFor(owner, repo, sha, read);
     const state = ciGateFromRollup(roll);
-    if (state === "red") return "red";
-    if (state === "green") return "green";
+    // W1-T2804: the sha this iteration RESOLVED and judged rides out with the verdict. It is the
+    // already-resolved head, never a second read — a second read is a second chance to skew.
+    if (state === "red") return { state: "red", sha };
+    if (state === "green") return { state: "green", sha };
     readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
@@ -5010,8 +5056,8 @@ async function waitForCiGreen(
     if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "ci" });
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
     if (stall.stalled) {
-      log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
-      return "timeout";
+      log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW, sha });
+      return { state: "timeout", sha };
     }
     // W1-T463: `await` a TIMER, never `execFileSync("sleep", …)`. The cadence is byte-identical —
     // `everySec` seconds between polls, unchanged — but the thread is now RELEASED for the whole
@@ -6867,6 +6913,10 @@ export interface FixRungOutcome {
 }
 
 type CiEvidenceDisagreementObservation = {
+  /** W1-T2804 — the head sha BOTH readers resolved for within this one decision. Absent only when
+   *  no reader reported one, in which case the row asserts a disagreement without claiming a shared
+   *  subject. Never hand-authored: it is whatever the gate read actually judged. */
+  sha?: string;
   rollup: {
     checks_state: OpenPrView["checksState"];
     red_checks: string[];
@@ -6880,8 +6930,10 @@ function ciEvidenceDisagreementObservation(args: {
   checksState?: OpenPrView["checksState"];
   redChecks?: readonly string[];
   ciFailures: readonly CiFailure[];
+  sha?: string;
 }): CiEvidenceDisagreementObservation {
   return {
+    ...(args.sha ? { sha: args.sha } : {}),
     rollup: {
       checks_state: args.checksState ?? "red",
       red_checks: [...(args.redChecks ?? [])],
@@ -8634,10 +8686,16 @@ export async function runFixRung(opts: {
   actionableGateFailures?: ActionableGateFailure[];
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+    /**
+     * W1-T2804: the return is a UNION — a {@link CiGateOutcome} carrying the sha the gate was read
+     * for, or the bare verdict every pre-existing stub already returns. Read it through
+     * {@link ciGateState}/{@link ciGateSha}, never by comparing it to a string directly: a bare
+     * verdict pins nothing and each consumer falls back to its own read, exactly as before.
+     */
     waitForCiGreen: (
       prUrl: string,
       log: (step: string, extra?: Record<string, unknown>) => void,
-    ) => Promise<"green" | "red" | "timeout">;
+    ) => Promise<CiGateOutcome | "green" | "red" | "timeout">;
     /**
      * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh
      * re-read of THIS PR's live GitHub state, consulted at the top of every
@@ -8675,8 +8733,12 @@ export async function runFixRung(opts: {
      * the rung degrades to keeping whatever ci-log evidence it already had —
      * the MODE still corrects itself (see `noReviewYet` below), only the
      * failing-check CONTENT stays stale.
+     *
+     * W1-T2804: `sha` is APPENDED LAST with a default, so no positional caller shifts. When the
+     * round's gate read reported a sha, the miner is PINNED to it and both readers answer about
+     * ONE commit; omitted, the miner resolves its own head exactly as it always did.
      */
-    fetchCiFailures?: (prUrl: string) => Promise<CiFailure[]>;
+    fetchCiFailures?: (prUrl: string, sha?: string) => Promise<CiFailure[]>;
     /**
      * W1-T1278 (condition A): a FRESH read of THIS PR's current status-check rollup — the raw,
      * per-attempt entries `fetchCiFailures` above filters down to failing names only. Consulted
@@ -8869,6 +8931,10 @@ export async function runFixRung(opts: {
   // of targeting the check that is actually still red.
   let noReviewYet = opts.ciFailures !== undefined;
   let currentCiFailures = opts.ciFailures;
+  // W1-T2804: the head sha THIS rung's most recent gate read judged. Seeded from the dispatching
+  // sweep's own resolved head so round 1 is pinned too, then re-pinned by every gate read. It is
+  // never independently resolved here — a second read is a second chance to skew.
+  let currentPinnedSha: string | undefined = opts.ciEvidenceDisagreement?.sha;
   // W1-T2551: bounds the generator-fix short-circuit (site `rung.generator_fix`, below) to a
   // SMALL number of attempts per invocation — every attempt already re-verifies the regenerated
   // output against its OWN `:check` before committing anything, but this caps how many rounds a
@@ -9271,16 +9337,22 @@ export async function runFixRung(opts: {
         "blocked_ci dispatch with zero enumerable failing check(s) — the checks-red rollup and the ci-log " +
         "evidence miner disagree, so there is nothing to hand a fix worker; standing down rather than " +
         "spending a strike on empty evidence";
+      // W1-T2804: `pinnedSha` is the head THIS round's gate read resolved, falling back to the sha
+      // the dispatching sweep resolved. Reporting it is what turns "the two readers disagree" from
+      // an assertion about two possibly-different commits into a claim about one observable one.
+      const pinnedSha = currentPinnedSha ?? opts.ciEvidenceDisagreement?.sha;
       const disagreement = opts.ciEvidenceDisagreement
         ? {
+            ...(pinnedSha ? { sha: pinnedSha } : {}),
             rollup: opts.ciEvidenceDisagreement.rollup,
             miner: ciEvidenceDisagreementObservation({ ciFailures: currentCiFailures }).miner,
           }
-        : ciEvidenceDisagreementObservation({ ciFailures: currentCiFailures });
+        : ciEvidenceDisagreementObservation({ ciFailures: currentCiFailures, sha: pinnedSha });
       deps.log("fix.ci_evidence_disagreement", {
         site: "rung.empty_ci_failures",
         strike: strikes + 1,
         reason,
+        sha: disagreement.sha,
         rollup: disagreement.rollup,
         miner: disagreement.miner,
       });
@@ -9355,10 +9427,11 @@ export async function runFixRung(opts: {
           // above) stands this down cleanly with no strike spent; if something else is still red,
           // the next iteration re-derives from THAT — either another generator-fixable round, or a
           // real fall-through to the ordinary worker dispatch.
-          await deps.waitForCiGreen(opts.prUrl, deps.log);
+          const gated = await deps.waitForCiGreen(opts.prUrl, deps.log);
+          currentPinnedSha = ciGateSha(gated) ?? currentPinnedSha;
           if (deps.fetchCiFailures) {
             try {
-              currentCiFailures = await deps.fetchCiFailures(opts.prUrl);
+              currentCiFailures = await deps.fetchCiFailures(opts.prUrl, ciGateSha(gated));
               for (const f of currentCiFailures) everRedCiCheckNames.add(f.name);
             } catch (e) {
               deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
@@ -9651,7 +9724,7 @@ export async function runFixRung(opts: {
           });
           return escalateAndExhaust();
         }
-        const ciState = await deps.waitForCiGreen(prerequisiteUrl!, deps.log);
+        const ciState = ciGateState(await deps.waitForCiGreen(prerequisiteUrl!, deps.log));
         if (ciState !== "green") {
           // THE REFUSAL CONDITION, SECOND ARM: a prerequisite that CANNOT GO GREEN escalates
           // exactly as the rung does today (rationale (5)) — never merged, never rebased onto.
@@ -10068,8 +10141,11 @@ export async function runFixRung(opts: {
     );
 
     const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
-    if (ci !== "green") {
-      deps.log("fix.ci_not_green", { strike: strikes, ci });
+    // W1-T2804: one gate read, one sha, and the miner below is pinned to it — never a second
+    // independent head resolution between the two halves of a single decision.
+    currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
+    if (ciGateState(ci) !== "green") {
+      deps.log("fix.ci_not_green", { strike: strikes, ci: ciGateState(ci), sha: ciGateSha(ci) });
       // W1-T138 (the #303/#305/#292/#315 fix): no review ran for THIS push
       // either (review only ever runs once CI is green) — the NEXT strike
       // must target whatever is ACTUALLY still red now, never keep
@@ -10081,7 +10157,7 @@ export async function runFixRung(opts: {
       noReviewYet = true;
       if (deps.fetchCiFailures) {
         try {
-          currentCiFailures = await deps.fetchCiFailures(opts.prUrl);
+          currentCiFailures = await deps.fetchCiFailures(opts.prUrl, ciGateSha(ci));
           for (const f of currentCiFailures) everRedCiCheckNames.add(f.name);
         } catch (e) {
           deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
@@ -13816,7 +13892,7 @@ async function runTask(
     // lives here, before arming. A ci that never greens is blocked_ci (no review
     // over unproven code); a review=failure is blocked_review (the required check
     // is red and GitHub will not merge). Pending is never treated as pass.
-    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say("fallback: pushing branch already done; ci not green — skipping review, leaving PR open");
       log("verdict", {
@@ -13921,7 +13997,15 @@ async function runTask(
           // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
           // non-green — see runFixRung's own doc for why this must happen on
           // every strike, not just the first.
-          fetchCiFailures: async (prUrlArg) => {
+          // W1-T2804: when the round's gate read reported the sha it judged, mine THAT commit's
+          // rollup over `restRollupFor` — the same REST read the gate itself used — so the two
+          // readers cannot answer about different heads. No sha (a stub, or a gate that reported
+          // none) falls back to the pre-existing `gh pr view` read unchanged, fail open.
+          fetchCiFailures: async (prUrlArg, sha) => {
+            if (sha) {
+              const roll = await restRollupFor(owner, task.repo, sha, ghJsonAsync);
+              return fetchCiFailures(owner, task.repo, roll);
+            }
             const v = ghJson(["pr", "view", prUrlArg, "--json", "statusCheckRollup"]) as {
               statusCheckRollup?: RollupCheck[];
             };
@@ -22459,7 +22543,7 @@ async function retroCommand(
 
 
     // Gate: ci green → post remudero-review → arm auto-merge.
-    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
@@ -29555,6 +29639,9 @@ export function buildFixRungDispatchArgs(args: {
           checksState: pr.checksState,
           redChecks: pr.redRequiredChecks,
           ciFailures: evidence.ciFailures ?? [],
+          // W1-T2804: the sweep resolved this head and mined `evidence.ciFailures` from it, so both
+          // halves of THIS dispatch already share a subject — naming it is what makes that legible.
+          sha: pr.headSha,
         })
       : undefined,
     mergeConflict: evidence.mergeConflict,
@@ -33989,7 +34076,7 @@ async function triageCommandLocked(
 
     // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
     // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).
-    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
@@ -34430,7 +34517,7 @@ export async function planCommand(
 
     // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
     // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).
-    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
@@ -35468,7 +35555,7 @@ export async function approveCommand(
     log("pr.opened", { pr_url: result.prUrl, branch: result.branch, adopted: result.adopted === true });
     console.log(`rmd approve: ${proposalId} — plan PR ${result.adopted ? "adopted" : "opened"}: ${result.prUrl}`);
 
-    const ci = await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
       removeApproveWorktree();
@@ -35738,7 +35825,7 @@ async function approveBatchCommand(
     log("pr.opened", { pr_url: result.prUrl, branch: result.branch, accepted: result.accepted.map((p) => p.proposalId) });
     console.log(`rmd approve: batch of ${result.accepted.length} — plan PR opened: ${result.prUrl}`);
 
-    const ci = await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
       removeApproveWorktree();
