@@ -101,14 +101,26 @@ test("W1-T2849: no `git grep` pattern anywhere in the tree relies on a word boun
 
   const offenders: string[] = [];
   let gitGrepLines = 0;
+  // PROSE IS NOT A CALL SITE. A first draft flagged six lines, every one of them a comment or an
+  // assertion message in THIS task's own files describing the defect — the census was measuring
+  // "mentions of a word boundary near the word grep", not "a git grep pattern that carries one".
+  // Comment and assertion lines are skipped, and this file's own recogniser deliberately avoids
+  // the escape it looks for (a self-match would be the same error one level up).
+  const isComment = (t: string): boolean => t.startsWith("//") || t.startsWith("*") || t.startsWith("/*") || t.startsWith("#");
+  // AN INVOCATION IDIOM, NOT THE WORDS. Narrowing to prose-vs-code was not enough: three message
+  // STRINGS survived it, describing the very defect. A real call site is an argv array
+  // (`execFileSync("git", ["grep", …])`) or a shell `git grep`; a sentence about git grep is
+  // neither, however precisely it is worded.
+  const isCallSite = (line: string, file: string): boolean =>
+    /\["grep"/.test(line) || (file.endsWith(".sh") && /(^|[^A-Za-z])git grep(\s|$)/.test(line));
   for (const f of files) {
     readFileSync(join(REPO_ROOT, f), "utf8")
       .split("\n")
       .forEach((line, i) => {
-        const isGitGrep = /\bgrep\b/.test(line) && (/"git"/.test(line) || /git grep/.test(line) || /\["grep"/.test(line));
-        if (!isGitGrep) return;
+        const trimmed = line.trim();
+        if (isComment(trimmed) || !isCallSite(line, f)) return;
         gitGrepLines++;
-        if (/\\b/.test(line)) offenders.push(`${f}:${i + 1}  ${line.trim().slice(0, 120)}`);
+        if (/\\b/.test(line)) offenders.push(`${f}:${i + 1}  ${trimmed.slice(0, 120)}`);
       });
   }
   assert.ok(gitGrepLines > 10, `the census must actually be finding git grep call sites (found ${gitGrepLines})`);

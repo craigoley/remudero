@@ -1320,6 +1320,22 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // baseline; this entry is here because `censusPopulationDrift` REFUSES an undisclosed
   // census-shaped file, and that gate cannot be satisfied from inside the two declared paths. The
   // widening is one refusal row, no behaviour.
+  // W1-T2849: same shape as the entry below — this file's SUBJECT is the rule-citation gate's
+  // engine portability, and its criterion-3 assertion happens to walk the tree. It is here because
+  // `censusPopulationDrift` REFUSES an undisclosed census-shaped file and that gate cannot be
+  // satisfied from inside the task's declared paths. One refusal row, no behaviour.
+  refusedForPredicate(
+    "test/rule-citation-gate-engine-portable.test.ts",
+    "a",
+    "W1-T2849's engine-portability suite. Its `git ls-files -- *.ts *.mjs *.sh` does enumerate a set that includes " +
+      "src/, and its loop and assertion are in-file, so it satisfies (b). It fails (a) on WHAT IT ASSERTS OVER: the " +
+      "property is a fact about `git grep` CALL SITES — one line in the whole tree at the time of writing — not a " +
+      "property every enumerated file must hold, so the enumeration is a search for call sites rather than the " +
+      "population under test. The `src/` strings the recognizer sees are this file's own pathspec default and its " +
+      "assertion messages. NOTE FOR A LATER READER: admission is the defensible alternative and was NOT taken here — " +
+      "it is a measured cost decision that changes FAST_GATE_STEPS composition, which a build pass should not make " +
+      "unilaterally. If an operator judges (a) satisfied, this row becomes an ADMITTED entry with a measured ms.",
+  ),
   refusedForPredicate(
     "test/source-text-assertion-census.test.ts",
     "a",
