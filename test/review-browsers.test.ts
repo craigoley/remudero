@@ -149,16 +149,17 @@ test("pinnedPlaywrightCli: runs the CHECKOUT's own Playwright CLI, never a name 
   assert.equal(pinnedPlaywrightCli("/w/t"), "/w/t/node_modules/playwright/cli.js");
 });
 
-test("browser preflight is wired into the real proof-execution path, gated to test proofs", () => {
+test("browser preflight is wired into the real proof-execution path, gated to resolved browser-using test files", () => {
   // Structural guard: the value of this fix is entirely in it being CALLED before the
   // first browser proof. A refactor that drops the call site would leave every unit
   // test above passing while the incident silently returns.
   const src = readFileSync(new URL("../src/lib/review.ts", import.meta.url), "utf8");
-  const seam = /if \(whitelisted\.kind === "test"\) \{[\s\S]{0,400}?ensureBrowsersOnce\(cwd\);/;
-  assert.match(src, seam, "ensureBrowsersOnce must be invoked from execWhitelistedProof's test-proof branch");
+  const seam =
+    /if \(preflightFiles === undefined \|\| preflightFiles\.length === 0 \|\| resolvedTestFilesNeedBrowserPreflight\(cwd, preflightFiles\)\) \{[\s\S]{0,160}ensureBrowsersOnce/;
+  assert.match(src, seam, "ensureBrowsersOnce must be invoked through the resolved-file need gate");
   assert.equal(
-    /ensureBrowsersOnce\(cwd\);[\s\S]{0,200}?whitelisted\.kind === "grep"/.test(src),
+    /if \(whitelisted\.kind === "test"\) \{[\s\S]{0,400}?ensureBrowsersOnce\(cwd\);/.test(src),
     false,
-    "a grep proof must never pay for a browser install",
+    "a test proof must not unconditionally pay for a browser install",
   );
 });
