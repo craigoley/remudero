@@ -1,0 +1,100 @@
+- id: W1-T3013
+  title: "THE LOCAL COVERAGE GATE PASSES VACUOUSLY ON A DIFF IT FAILED TO COMPUTE — `mergeBaseDiffText` returns `res.stdout` without reading `res.status`, and `diff-coverage.mjs` prints OK on an empty diff, so `preflight --ci-parity` reports `diff-coverage: OK` for a PR CI then blocks; `runPreflightCoverage` ALREADY refuses that exact condition and the ci-parity entry does not"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files:
+    - src/lib/ci-parity.ts
+    - test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts
+  origin: "operator-request#follow-up-work-2026-09-07"
+  plan_refs: ["W1-T294", "W1-T1074", "W1-T338"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-07, THEN MEASURED. A session ran the shipped local gate, read
+    `diff-coverage: OK`, pushed, and CI's coverage-ratchet blocked the PR on uncovered added lines.
+    The cause was recorded as unestablished. It is establishable, and it is not a coverage bug.
+
+    THE TWO HALVES, EACH MEASURED SEPARATELY.
+
+    (1) `mergeBaseDiffText` (ci-parity.ts) is three lines: it spawns `git diff origin/main...HEAD`
+    and returns `res.stdout`. It NEVER READS `res.status`. Any failure of that git call — an
+    unresolvable `origin/main`, a fetch that did not land, a ref problem in a worktree — yields an
+    empty string with no error and no step marked not-ok.
+
+    (2) `diff-coverage.mjs` given an EMPTY diff prints
+    `diff-coverage: OK -- every added source line lcov instruments is covered.` and exits 0.
+    MEASURED directly, piping an empty stdin against a two-line lcov. It is right to: over an empty
+    added-line set the claim is vacuously true. Its `--diff` defaults to STDIN, so an empty stdin is
+    indistinguishable from a PR that adds nothing.
+
+    COMPOSED, THOSE TWO CORRECT-IN-ISOLATION BEHAVIOURS PRODUCE A GATE THAT CANNOT FAIL. The
+    ci-parity `coverage-ratchet` entry pipes (1) into (2) as `input:`, so a git failure renders as a
+    clean green `diff-coverage` step. This is the vacuous-pass family CLAUDE.md's own coverage
+    section already names — "not a coverage result" — reached here through the diff side rather
+    than the lcov side.
+
+    THE REPO ALREADY WROTE THE FIX AND PUT IT ON THE OTHER PATH. `runPreflightCoverage`
+    (`preflight --coverage`, W1-T1074) computes the same three-dot diff and refuses:
+    `coverage-mode:diff-scope: REFUSED — origin/main...HEAD (freshly refreshed) is an empty diff;
+    there is no diff to assert coverage over`. Same repo, same ref pair, same hazard, opposite
+    outcome — and the mode WITHOUT the guard is the one CLAUDE.md's "Before you push" rule sends
+    every author down.
+  design: |
+    (i) REFUSE, DO NOT REPAIR. The ci-parity `coverage-ratchet` entry gets a step that fails when
+    the diff cannot be trusted, on the SAME ground `runPreflightCoverage` already uses. Do not
+    retry the git call, do not fall back to another ref, do not synthesise a diff. A gate that
+    cannot measure must report that it could not, in its own step name and detail.
+
+    (ii) READ THE STATUS, AND ALSO THE EMPTINESS — THEY CATCH DIFFERENT FAULTS. A non-zero (or
+    null) `status` catches git erroring. An empty `stdout` on a zero status catches the case where
+    git succeeds and the PR genuinely diffs nothing — which is equally not a coverage result, and
+    is exactly what `coverage-mode:diff-scope` refuses today. Neither subsumes the other.
+
+    (iii) PREFER LIFTING THE EXISTING REFUSAL OVER WRITING A SECOND ONE. The wording, the ref pair
+    and the reasoning already exist in `runPreflightCoverage`. A second hand-written refusal is a
+    second thing to drift; factor the check so both modes reach the same one.
+
+    (iv) CHANGE NO VERDICT THIS GATE ALREADY REACHES CORRECTLY. On a real non-empty diff the
+    `diff-coverage` step must behave byte-identically — same step name, same detail, same ok. This
+    task adds a refusal on a path that today produces a FALSE GREEN; it must not add one anywhere
+    else, and it must not touch `diff-coverage.mjs`, whose empty-set answer is correct.
+
+    (v) THE OTHER UNCHECKED READER IS IN SCOPE TO NOTE, NOT TO CHANGE. `computeChangedFiles` has
+    the identical unchecked-status shape, but its caller converts empty into a refusal, so it is
+    already fail-closed end to end. Leave it alone and say why in the source comment.
+  acceptance:
+    - claim: "when the three-dot diff command fails, the ci-parity coverage-ratchet entry reports a not-ok step instead of a green diff-coverage"
+      proof: "unit test: test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts"
+    - claim: "when the diff command succeeds but yields nothing, the entry refuses on the same ground preflight --coverage already refuses"
+      proof: "unit test: test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts"
+    - claim: "a run with a real non-empty diff still reaches diff-coverage.mjs with that diff on stdin and reports exactly what it reported before"
+      proof: "unit test: test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts"
+    - claim: "the refusal names the diff as the thing that could not be measured, so a reader is not sent to look at coverage"
+      proof: "unit test: test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts"
+  falsifier: |
+    THE LOAD-BEARING FALSIFIER IS THE FALSE GREEN ITSELF. With the change reverted, a test driving
+    the ci-parity `coverage-ratchet` entry through a spawn seam that returns
+    `{ status: 1, stdout: "" }` for `git diff origin/main...HEAD` must observe the run reporting the
+    `diff-coverage` step OK. That is the defect, reproduced in-process; with the change applied the
+    same seam must produce a not-ok step. `# fail` moving between those two states is the evidence.
+
+    THE REGRESSION LOCK IS THE HONEST GREEN. A seam returning a real multi-file diff with a real
+    lcov must still produce the same OK step it produces today, with the diff text arriving on
+    stdin unchanged. If that moves, the task has made the gate stricter about something other than
+    its own blindness, and the fix is wrong however green it looks.
+
+    AND A CONTROL AGAINST PROVING NOTHING: assert the empty-stdin behaviour of `diff-coverage.mjs`
+    is UNCHANGED — it must still print OK over an empty added-line set. The bug is that the gate
+    ASKS it a question it cannot refuse, not that its answer is wrong.
+  note: |
+    FILED 2026-09-07 under an id the operator minted through `refs/rmd-id/`.
+
+    risk:medium — a local author-time gate becoming stricter. It cannot break CI and cannot merge
+    anything; the worst defect is refusing a run that could have measured, which the author sees
+    immediately in the step detail. Not band-worthy, and deliberately not routed through
+    `diff-coverage.mjs`, where a change WOULD be band-worthy because CI runs it.

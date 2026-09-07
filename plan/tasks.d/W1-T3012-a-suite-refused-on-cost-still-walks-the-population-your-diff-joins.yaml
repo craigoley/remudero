@@ -1,0 +1,84 @@
+- id: W1-T3012
+  title: "A SUITE REFUSED ON COST STILL WALKS THE POPULATION YOUR DIFF JOINS — `KNOWN_CENSUS_SUITES` derives from `CENSUS_ADMITTED_MEMBERS`, so a population member REFUSED by cost has its declared `walks:` discarded and `census-membership` reports it UNMODELLED; feed the membership half every member that declares walks, whatever the fast gate decided about running it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files:
+    - src/lib/ci-parity.ts
+    - test/a-suite-refused-on-cost-still-walks-the-population-your-diff-joins.test.ts
+  origin: "operator-request#follow-up-work-2026-09-07"
+  plan_refs: ["W1-T2969", "W1-T2523", "W1-T2478", "W1-T2809"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07, ON THE PR THAT HIT IT. #4366 added `plan/credit-overrides.yaml`, read by
+    name from `src/lib/status.ts`. `ci-shard (2/4)` went red on
+    `test/enforcement-data-carveout.test.ts` — a suite that WALKS `src/` and `scripts/` and asserts
+    a property over the whole set, so it names no symbol the diff touched. `rmd census-membership`,
+    the verb W1-T2969 shipped for exactly this class, listed it as UNMODELLED and named no suite to
+    run.
+
+    THE POPULATION ALREADY KNEW. That suite is IN `CENSUS_POPULATION`, carrying
+    `walks: ["src/", "scripts/"]`. Its verdict is `REFUSED` with `reason.kind: "cost"` (3755ms,
+    over `FAST_GATE_CENSUS_BOUND_MS`). `KNOWN_CENSUS_SUITES` is derived from
+    `CENSUS_ADMITTED_MEMBERS`, which filters `verdict.status === "ADMITTED"` — so the walks are
+    discarded and the membership answer is lost.
+
+    THE CONFLATION IS THE SAME ONE W1-T2969 ALREADY SPLIT, ONE LEVEL UP. That task separated
+    MEMBERSHIP ("which suites does this path join") from ADMISSION ("does this suite carry a
+    verdict row"). Cost-refusal is a third question again — "should the FAST GATE run it" — and it
+    is being allowed to answer the first. A suite too expensive to run in the fast gate is not a
+    suite a diff cannot join; it is precisely a suite an author needs NAMED so they can run it
+    deliberately.
+
+    SCOPE, MEASURED NOT ASSUMED: of 34 population members, 29 are REFUSED and exactly ONE of those
+    declares `walks:` today. So this changes one answer now — and the mechanism generalises, since
+    any future cost-refusal silently loses its membership answer the same way.
+  design: |
+    (i) FEED THE MEMBERSHIP HALF FROM THE POPULATION, NOT FROM THE ADMITTED PROJECTION. Every
+    member declaring `walks:` belongs in `CENSUS_MEMBERSHIP_SUITES`, whatever its verdict.
+    `KNOWN_CENSUS_SUITES` MUST NOT CHANGE — it is the ADMISSION set, `unknownCoverage` is computed
+    from it, and W1-T2523/W1-T2809 both assert on that. Changing it re-opens the exact conflict
+    W1-T2969 resolved.
+
+    (ii) THE FAST GATE MUST NOT MOVE. `CENSUS_FAST_GATE_STEPS` is projected from
+    `CENSUS_ADMITTED_MEMBERS` and stays projected from it. This task adds NO step, runs no refused
+    suite, and changes no bound — a cost-refused suite is still refused from the fast gate. Assert
+    the step list is byte-identical before and after.
+
+    (iii) A REFUSED MEMBER WITH NO `walks:` IS STILL SILENT. The map answers by prefix; a member
+    declaring none can answer nothing and must not appear.
+
+    (iv) THE VERB'S OUTPUT IS THE DELIVERABLE. `rmd census-membership` run over a `src/`-touching
+    diff must NAME the cost-refused suite. Assert on that, not only on the exported table.
+  acceptance:
+    - claim: "a diff touching a prefix a cost-refused population member walks is told it joins that member's suite"
+      proof: "unit test: test/a-suite-refused-on-cost-still-walks-the-population-your-diff-joins.test.ts"
+    - claim: "the admission set is unchanged, so the set of suites reported as unmodelled coverage moves for no task"
+      proof: "unit test: test/a-suite-refused-on-cost-still-walks-the-population-your-diff-joins.test.ts"
+    - claim: "the fast gate's step list is identical before and after, so no refused suite becomes something the gate runs"
+      proof: "unit test: test/a-suite-refused-on-cost-still-walks-the-population-your-diff-joins.test.ts"
+    - claim: "a population member that declares no walked prefix is still absent from the membership answer"
+      proof: "unit test: test/a-suite-refused-on-cost-still-walks-the-population-your-diff-joins.test.ts"
+  falsifier: |
+    THE REGRESSION THAT MATTERS IS THE ADMISSION SET. Assert `KNOWN_CENSUS_SUITES` and the
+    `unknownCoverage` answer for a fixed caller list are UNCHANGED by this task. If either moves,
+    W1-T2523's "no known suite is duplicated into unknownCoverage" and W1-T2809's "the canonical
+    instance stays visible" are back in conflict — the pair this repo has already resolved once.
+
+    AND THE FAST GATE: assert the projected step list is byte-identical. A change that quietly
+    admitted a cost-refused suite into the gate would spend the very cost the refusal recorded.
+
+    PROVE IT LOAD-BEARING: with the change reverted, a test asserting a `src/`-touching diff names
+    `enforcement-data-carveout-census` must redden. Reverting must not redden the two regression
+    locks above — that asymmetry is what shows the change is confined to the membership half.
+  note: |
+    FILED 2026-09-07 under an id the operator minted through `refs/rmd-id/`.
+
+    risk:medium — one derivation feeding a REPORT-ONLY verb. It gates nothing and refuses nothing;
+    a defect makes the verb name a suite it should not, which an author discovers by running it.
+    Not band-worthy: the fast gate and the admission set are both explicitly held still.
