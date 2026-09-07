@@ -9,6 +9,7 @@ import { WORKER_SETTING_SOURCES } from "../src/lib/worker.js";
 import {
   describeWorkerSkillReachability,
   proceduralCandidateHash,
+  READ_WRAPPER_RE,
   renderSkillDraft,
   renderSkillDrafts,
   scanSkillDraft,
@@ -223,6 +224,12 @@ test("describeWorkerSkillReachability: settingSources including 'project' makes 
 // (the grep proof `renderSkillDraft(` in src/lib/retro.ts is exercised directly in test/retro.test.ts
 // and by `git grep`; skill-workshop.test.ts owns the unit behaviour renderSkillDraft/renderSkillDrafts
 // implement, above.)
+
+test("READ_WRAPPER_RE: captures the path out of a Read(...) wrapper, and matches NOTHING for an unwrapped or differently-tooled deny entry", () => {
+  assert.equal(READ_WRAPPER_RE.exec("Read(~/../../.ssh/**)")?.[1], "~/../../.ssh/**");
+  assert.equal(READ_WRAPPER_RE.exec("Bash(rm -rf /)"), null);
+  assert.equal(READ_WRAPPER_RE.exec("~/../../.ssh/**"), null);
+});
 
 test("proceduralCandidateHash: stable for the same shape and run set, and differs when the run set differs", () => {
   const a = proceduralCandidateHash(candidate());
