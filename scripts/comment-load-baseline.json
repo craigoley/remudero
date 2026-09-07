@@ -213,6 +213,7 @@
   "src/lib/provenance.ts": 33,
   "src/lib/provider-routing-policy.ts": 26,
   "src/lib/provider-routing-status.ts": 12,
+  "src/lib/ratification.ts": 72,
   "src/lib/reachability.ts": 101,
   "src/lib/recap.ts": 48,
   "src/lib/receipt.ts": 135,

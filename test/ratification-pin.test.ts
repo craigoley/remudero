@@ -346,3 +346,54 @@ test("acceptance 4: RUNG_CONTRACT_VERSIONS carries no entry for a rung GATED_RUN
 test("ratificationsPath sits beside policyPath, under plan/", () => {
   assert.equal(ratificationsPath("/tmp/foo"), join("/tmp/foo", "plan", "ratifications.yaml"));
 });
+
+// ── the hash is over VALUES, not over the order plan/policy.yaml lists them in ────────────────
+// `computeOperationHash` originally hashed `JSON.stringify({policy, contractVersion})` directly.
+// JSON.stringify preserves INSERTION order, so a cosmetic reorder of a rung's block in
+// plan/policy.yaml — no value changed — computed a different hash and every pinned rung REFUSED:
+// autoTriage/measurementCadence/digestCadence/boardReview/ciLearningCadence skip their tick and
+// both reapers are forced to dry-run, until an operator notices and re-ratifies. Measured before
+// the fix. The doc claimed canonicalization the code did not do; computeArtifactHash, the model it
+// cites, really does sort. These lock BOTH directions: cosmetic reorder is ignored, and every real
+// change — including array order, which IS a value in a list — still moves the hash.
+test("W1-T2694: a cosmetic key reorder of a rung's policy block does NOT move its operation hash", () => {
+  const a = { enabled: true, minIntervalMinutes: 1440, nested: { a: 1, b: [1, 2] } };
+  const reordered = { minIntervalMinutes: 1440, nested: { b: [1, 2], a: 1 }, enabled: true };
+  assert.equal(
+    computeOperationHash(reordered, "v1"),
+    computeOperationHash(a, "v1"),
+    "same values in a different key order (top level AND nested) must ratify identically",
+  );
+});
+
+test("W1-T2694: a cosmetic reorder still FIRES against a pin ratified under the other order", () => {
+  const ratified = { enabled: true, minIntervalMinutes: 1440 };
+  const pins: Ratifications = new Map([
+    [
+      "digestCadence",
+      {
+        rung: "digestCadence",
+        operationHash: computeOperationHash(ratified, "v1"),
+        ratifiedAt: "2026-09-07T00:00:00.000Z",
+        ratifiedBy: "operator",
+      },
+    ],
+  ]);
+  const reordered = { minIntervalMinutes: 1440, enabled: true };
+  assert.equal(ratificationPinCheck("digestCadence", reordered, "v1", pins).fire, true);
+});
+
+test("W1-T2694: every REAL change still moves the operation hash — the fix narrows nothing", () => {
+  const base = { enabled: true, minIntervalMinutes: 1440, nested: { a: 1, b: [1, 2] } };
+  const h = computeOperationHash(base, "v1");
+  const changed: Array<[string, unknown, string]> = [
+    ["a boolean flipped", { enabled: false, minIntervalMinutes: 1440, nested: { a: 1, b: [1, 2] } }, "v1"],
+    ["a number moved", { enabled: true, minIntervalMinutes: 1441, nested: { a: 1, b: [1, 2] } }, "v1"],
+    ["an ARRAY reordered — order is a value in a list", { enabled: true, minIntervalMinutes: 1440, nested: { a: 1, b: [2, 1] } }, "v1"],
+    ["a key removed", { enabled: true, nested: { a: 1, b: [1, 2] } }, "v1"],
+    ["the contract version bumped", base, "v2"],
+  ];
+  for (const [why, block, version] of changed) {
+    assert.notEqual(computeOperationHash(block, version), h, `${why} must re-open ratification`);
+  }
+});

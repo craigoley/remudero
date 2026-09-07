@@ -87,12 +87,26 @@ export function loadRatifications(path: string): Ratifications {
   return rows;
 }
 
+/** Recursively key-sorted: the hash is over a policy block's VALUES, not the order its YAML lists
+ *  them in. `JSON.stringify` alone preserves insertion order, so without this a cosmetic reorder
+ *  refuses every pinned rung (measured). Arrays keep order — in a list, order IS a value. */
+function canonicalizeForHash(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeForHash);
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+    out[key] = canonicalizeForHash((value as Record<string, unknown>)[key]);
+  }
+  return out;
+}
+
 /** The operation hash a rung's ratification pins: sha256 over its live policy block (as
- *  `plan/policy.yaml` resolves it) plus its declared contract version, canonicalized through
- *  `JSON.stringify` — the same "hash the resolved value, not the source text" shape
- *  {@link import("./learnings.js").computeArtifactHash} uses. */
+ *  `plan/policy.yaml` resolves it) plus its declared contract version, canonicalized by
+ *  {@link canonicalizeForHash} — the same "hash the resolved value, not the source text" shape
+ *  {@link import("./learnings.js").computeArtifactHash} uses, which sorts for the same reason. */
 export function computeOperationHash(policyBlock: unknown, contractVersion: string): string {
-  return createHash("sha256").update(JSON.stringify({ policy: policyBlock, contractVersion })).digest("hex");
+  const canonical = JSON.stringify({ contractVersion, policy: canonicalizeForHash(policyBlock) });
+  return createHash("sha256").update(canonical).digest("hex");
 }
 
 /** The outcome of one {@link ratificationPinCheck} call. `diff` is populated only on refusal —
