@@ -35,8 +35,8 @@
     admission and coalescing semantics remain intact and overlapping clocks cannot strand each other.
   acceptance:
     - claim: "two concurrent sleepers retain independent timeout registrations"
-      proof: "unit test: test/github-event-sweep-wake.test.ts"
+      proof: "unit test: W1-T2996: one clock timing out cannot strand a concurrent review-clock sleeper"
     - claim: "after the earlier clock times out, a GitHub wake still resolves the later review ticker"
-      proof: "unit test: test/github-event-sweep-wake.test.ts"
+      proof: "unit test: W1-T2996: one clock timing out cannot strand a concurrent review-clock sleeper"
     - claim: "daemon shutdown resolves and cancels every concurrent sleeper"
-      proof: "unit test: test/github-event-sweep-wake.test.ts"
+      proof: "unit test: W1-T2996: one clock timing out cannot strand a concurrent review-clock sleeper"
