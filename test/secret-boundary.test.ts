@@ -346,7 +346,7 @@ test("W1-T2699 (5): spawnWorker points cwd's LOCAL git credential.helper at the 
   assert.ok(helperConfig.includes(socketPath), "the wired helper must carry THIS run's own socket path, not a hardcoded one");
 });
 
-test("W1-T2699 (5): a credential-helper wiring failure (no git repo at cwd) is swallowed on purpose — spawnWorker still resolves normally", async () => {
+test("W1-T2699 (5): a credential-helper wiring failure never rejects the spawn AND is reported, never silently discarded", async () => {
   const scratch = mkdtempSync(join(tmpdir(), "rmd-secret-boundary-cred-fail-"));
   const cwd = join(scratch, "worktree");
   mkdirSync(cwd);
@@ -360,7 +360,41 @@ test("W1-T2699 (5): a credential-helper wiring failure (no git repo at cwd) is s
     }) as Parameters<typeof spawnWorker>[0],
   );
 
-  assert.equal(result.text, "done", "the swallowed wiring failure must not surface as a spawnWorker rejection");
+  assert.equal(result.text, "done", "the wiring failure must not surface as a spawnWorker rejection");
+  // THE HALF THAT USED TO BE MISSING. The catch was empty, so a boundary that DID NOT APPLY left no
+  // trace: the worker's git silently fell back to the ambient `$GH_TOKEN` helper — the exposure this
+  // shard exists to close — on a boundary whose every other decision is ledgered. Now the failure
+  // rides the result and `workerLedgerFields` renders it as `credential_helper_unwired`.
+  assert.equal(
+    typeof result.credentialHelperUnwired,
+    "string",
+    "a boundary that did not apply must say so on the result, not vanish",
+  );
+  assert.ok(
+    (result.credentialHelperUnwired ?? "").length > 0,
+    "and the reason must be the real git failure, not an empty placeholder",
+  );
+});
+
+test("W1-T2699 (5): a spawn whose credential wiring LANDS reports no failure — the healthy row grows no field", async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "rmd-secret-boundary-cred-ok-"));
+  const cwd = join(scratch, "worktree");
+  mkdirSync(cwd);
+  execFileSync("git", ["-C", cwd, "init", "--quiet"], { stdio: "ignore" });
+  const socketPath = join(scratch, "cred.sock");
+
+  const result = await spawnWorker(
+    spawnWorkerBoundaryArgs(scratch, cwd, {
+      secretBoundary: { modelSentinel: mintSentinel("model"), modelBaseUrl: "http://127.0.0.1:1", credentialHelperSocketPath: socketPath },
+    }) as Parameters<typeof spawnWorker>[0],
+  );
+
+  assert.equal(result.text, "done");
+  assert.equal(
+    result.credentialHelperUnwired,
+    undefined,
+    "the field is the EXCEPTION, not a per-spawn constant — a healthy boundary must add nothing to the row",
+  );
 });
 
 // ── mintScopedToken (github-app.ts): the smallest token the push needs, capped by ttlMs ─────────

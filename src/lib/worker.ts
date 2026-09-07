@@ -204,6 +204,11 @@ export interface WorkerResult {
   /** Worker-home grants LOST or HEALED for this spawn (see {@link lostWorkerHomeGrants}). Absent when every grant landed, so a
    * healthy run's verdict row grows nothing. */
   lostGrants?: WorkerHomeGrantOutcome[];
+  /** W1-T2699: why the per-worktree git credential-helper wiring did NOT apply, when it did not.
+   * Absent on every healthy spawn, so a working boundary grows no field. Present means this worker's
+   * git fell back to the AMBIENT credential path and the boundary was not in force — the one
+   * outcome on this boundary that used to leave no trace anywhere. */
+  credentialHelperUnwired?: string;
   /** `true` the moment ONE compaction fired (`compactionEvents.length > 0`, MASTER-PLAN 8B). This call's acceptance proofs
    * must then be re-verified against repo state (W1-T3F), never trusted from a possibly-lossy REPORT. */
   qualitySuspect: boolean;
@@ -335,6 +340,8 @@ export function workerLedgerFields(r: WorkerResult): {
           ),
         }
       : {}),
+    // Omitted whenever the boundary applied — present only when a worker ran on ambient credentials.
+    ...(r.credentialHelperUnwired ? { credential_helper_unwired: r.credentialHelperUnwired } : {}),
     ...(r.provider ? { provider: r.provider } : {}),
     model: r.model,
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
@@ -1412,11 +1419,18 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)));
     // The git-credential half of the boundary (design (ii)): a LOCAL, per-worktree config write.
     // Best-effort and guarded, mirroring `lostWorkerHomeGrants`'s never-throw contract above.
+    // NOT SWALLOWED. A failure here means the boundary DID NOT APPLY and git falls back to the
+    // ambient `$GH_TOKEN` helper — the exposure this shard closes. Every other decision here is
+    // ledgered, so this one rides `lostGrants`' own channel: the result, rendered by
+    // `workerLedgerFields`, absent when the wiring landed. Still never throws.
+    let credentialHelperUnwired: string | undefined;
     if (args.secretBoundary?.credentialHelperSocketPath) {
       try {
         wireCredentialHelperSocket(args.cwd, args.secretBoundary.credentialHelperSocketPath);
-      } catch {
-        // Swallowed on purpose — see comment above.
+      } catch (e) {
+        // Not rethrown: a boundary that could not be wired must not fail the run, only be VISIBLE.
+        // The reason leaves this block on the result and is rendered as `credential_helper_unwired`.
+        credentialHelperUnwired = e instanceof Error ? e.message : String(e);
       }
     }
 
@@ -1518,6 +1532,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // WorkerResult.maxTurns}. `undefined`, never guessed, when no cap was set.
             maxTurns: args.maxTurns,
             lostGrants,
+            credentialHelperUnwired,
             // Read off THIS spawn's `options` by index access, never a property access the `Options` type does not declare,
             // and never written here. `options` sets this key nowhere today, so it is `false` on every real spawn — the
             // ledger row saying so explicitly is the point (W1-T2245).
@@ -1812,6 +1827,8 @@ export async function collectWorkerResult(
     maxTurns?: number;
     /** See {@link WorkerResult.lostGrants} — mirrored verbatim, never re-derived here. */
     lostGrants?: WorkerHomeGrantOutcome[];
+    /** See {@link WorkerResult.credentialHelperUnwired} — mirrored verbatim, never re-derived. */
+    credentialHelperUnwired?: string;
     /** Configured input, mirrored verbatim — see {@link WorkerResult.compactionConfigured}. Defaults to `false`, never guessed
      * `true`, for every caller that omits it (W1-T2245). */
     compactionConfigured?: boolean;
@@ -1985,6 +2002,7 @@ export async function collectWorkerResult(
 
   return {
     ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
+    ...(opts.credentialHelperUnwired ? { credentialHelperUnwired: opts.credentialHelperUnwired } : {}),
     sessionId,
     costUsd,
     numTurns,
