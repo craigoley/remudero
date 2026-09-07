@@ -8605,12 +8605,6 @@ export async function runFixRung(opts: {
    * review yet").
    */
   ciFailures?: CiFailure[];
-  /**
-   * W1-T2674: the two readers whose disagreement makes an empty ci-log dispatch terminal:
-   * the checks rollup says the PR is red, while the ci-log miner enumerates the fix evidence.
-   * Populated by cold dispatchers that already hold the rollup view; omitted callers still
-   * ledger the disagreement from the ci-log mode's own red implication.
-   */
   ciEvidenceDisagreement?: CiEvidenceDisagreementObservation;
   /**
    * W1-T106 (the #170 DIRTY strand): merge-conflict evidence for a
