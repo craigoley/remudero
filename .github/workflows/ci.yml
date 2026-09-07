@@ -1077,3 +1077,57 @@ jobs:
         run: npm ci
       - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
         run: npm run --silent comment-load-signal
+
+  main-ceiling-drift:
+    # W1-T3068 — THE ABSOLUTE CEILINGS ARE NEVER MEASURED AGAINST main, AND main CAN CROSS THEM WITH
+    # NO PULL REQUEST EVER GOING RED.
+    #
+    # Every ratchet job above carries `if: github.event_name == 'pull_request'`, so each one measures
+    # a PR head and nothing measures the branch those heads merge into. That is sound for a
+    # DIFF-SCOPED gate (lint-plan, task-id-existence): its question only exists relative to a base.
+    # It is NOT sound for an ABSOLUTE per-file ceiling, because two PRs can each sit under the
+    # ceiling, both go green, and their SUM cross it on merge. No PR is wrong; main is.
+    #
+    # MEASURED 2026-09-07. At c8a5c5e8e, `src/run-task.ts` was 40516 lines against a recorded ceiling
+    # of 40500, and ci.yml's push run for that same sha reported SUCCESS — because `source-size` did
+    # not run. The first symptom was four open pull requests red on a failure none of them caused;
+    # the ratchet's own message says it plainly ("INHERITED, not introduced by this diff. Every open
+    # pull request sees"). The cost lands on every author except the one who caused it, and it is
+    # only ever cleared by a human noticing.
+    #
+    # THIS JOB IS A SIGNAL, NOT A GATE, and the distinction is deliberate. It runs ONLY on push, so
+    # it blocks nothing — there is nothing left to block once a merge has landed. Its job is to fail
+    # at the merge that caused the drift, where the cause is still attributable, instead of surfacing
+    # later as N red PRs with no owner.
+    #
+    # IT MUST NEVER BECOME A REQUIRED CHECK. It is SKIPPED on every pull_request event, and this
+    # file's INVARIANT 2 says a required check that goes SKIPPED deadlocks merges just as hard as a
+    # failing one. Requiring this name would deadlock every PR permanently.
+    name: main-ceiling-drift
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Absolute ceilings, measured against main itself
+        run: |
+          # Each ratchet is run even if an earlier one fails, so one breach never hides another —
+          # a first-failure exit would report one file and leave the rest unmeasured.
+          rc=0
+          for gate in source-size-ratchet learnings-budget-ratchet claude-md-budget-ratchet; do
+            echo "::group::${gate}"
+            npm run --silent "${gate}" || { rc=1; echo "main-ceiling-drift: ${gate} BLOCKED on main itself"; }
+            echo "::endgroup::"
+          done
+          if [ "$rc" -ne 0 ]; then
+            echo "main-ceiling-drift: main is past a recorded ceiling. No pull request is wrong — main is."
+            echo "Every open PR touching a named file now inherits this and will report it as INHERITED."
+            echo "TO FIX: record the ceiling the failing gate prints, in a PR of its own, and merge it first."
+          fi
+          exit "$rc"
