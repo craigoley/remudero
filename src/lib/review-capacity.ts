@@ -103,6 +103,10 @@ export interface ReviewCapacityEvidence {
   cpuPsiSomeAvg10Pct?: number;
   /** W1-T2985 — PSI `full`: the starvation signal the CPU shed decides on. */
   cpuPsiFullAvg10Pct?: number;
+  /** W1-T3031 — which of the three host readings `hostTelemetryAvailable` conjoins were
+   *  non-finite at decision time. EMPTY when telemetry was complete. Diagnostic only: nothing
+   *  branches on this. */
+  absentHostReadings: readonly string[];
   memoryPsiSomeAvg10Pct?: number;
   providerFresh: boolean;
   providerReadable: boolean;
@@ -131,6 +135,26 @@ function clampedWidth(value: number, bounds: ReviewCapacityBounds): number {
 
 function finite(value: number | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+/** W1-T3031 — the names of whichever host readings are non-finite, in the fixed order
+ *  `hostTelemetryAvailable` conjoins them. PURE, and deliberately NOT derived from that boolean:
+ *  the whole defect being fixed is that one bit stood for three conditions.
+ *
+ *  ⚠ DIAGNOSTIC ONLY, AND THAT BOUNDARY IS THE POINT. Nothing branches on this list. It does not
+ *  change `hostTelemetryAvailable`, which PSI metric gates capacity, or any width. Whether the
+ *  widener should gate on cpu `full` — which the kernel documents as not meaningful at the root
+ *  cgroup on some configurations — rather than `some` is a live question this makes ANSWERABLE and
+ *  leaves to the operator; answering it here would be a policy change wearing an observability
+ *  label. Why: 441 of 753 capacity decisions shed for a telemetry reason (measured 2026-09-07). */
+export function absentHostReadings(
+  observation: Pick<ReviewCapacityObservation, "memAvailableMib" | "cpuPsiFullAvg10Pct" | "memoryPsiSomeAvg10Pct">,
+): readonly string[] {
+  const absent: string[] = [];
+  if (!finite(observation.memAvailableMib)) absent.push("mem_available_mib");
+  if (!finite(observation.cpuPsiFullAvg10Pct)) absent.push("cpu_psi_full_avg10_pct");
+  if (!finite(observation.memoryPsiSomeAvg10Pct)) absent.push("memory_psi_some_avg10_pct");
+  return absent;
 }
 
 /** Pure AIMD-like controller: additive recovery after hysteresis, one-lane decrease on pressure. */
@@ -199,6 +223,10 @@ export function selectAdaptiveReviewWidth(
     // is the LARGEST shed reason at 347 of 670 rows, ahead of cpu-pressure's 111, with
     // `effective_width` at the floor in 310 samples against 289 at base — while the rows themselves
     // show host telemetry perfectly readable (`cpu_psi 3.16`, `mem_available_mib 26516`).
+    // W1-T3031: the SAME three readings `hostTelemetryAvailable` conjoins, named individually so
+    // the row can say WHICH one was absent. Derived from the observation, never from the boolean —
+    // a list computed off `hostTelemetryAvailable` could only ever say "all" or "none".
+    const absentReadings = absentHostReadings(observation);
     const hostTelemetryAvailable =
       finite(observation.memAvailableMib) &&
       finite(observation.cpuPsiFullAvg10Pct) &&
@@ -279,6 +307,9 @@ export function selectAdaptiveReviewWidth(
     ...(finite(observation.cpuPsiSomeAvg10Pct) ? { cpuPsiSomeAvg10Pct: observation.cpuPsiSomeAvg10Pct } : {}),
     ...(finite(observation.cpuPsiFullAvg10Pct) ? { cpuPsiFullAvg10Pct: observation.cpuPsiFullAvg10Pct } : {}),
     ...(finite(observation.memoryPsiSomeAvg10Pct) ? { memoryPsiSomeAvg10Pct: observation.memoryPsiSomeAvg10Pct } : {}),
+    // W1-T3031: EMPTY on the healthy path (design iii), so a reader can filter on it directly
+    // rather than having to distinguish "complete" from "not recorded".
+    absentHostReadings: absentHostReadings(observation),
     providerFresh: observation.provider.fresh,
     providerReadable: observation.provider.readable,
     ...(finite(observation.provider.headroomPct) ? { providerHeadroomPct: observation.provider.headroomPct } : {}),
@@ -462,6 +493,15 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       mem_available_mib: result.decision.evidence.memAvailableMib ?? null,
       cpu_psi_some_avg10_pct: result.decision.evidence.cpuPsiSomeAvg10Pct ?? null,
       memory_psi_some_avg10_pct: result.decision.evidence.memoryPsiSomeAvg10Pct ?? null,
+      // W1-T3031 — THE FIELD THE DECISION ACTUALLY GATES ON. `hostTelemetryAvailable` requires
+      // `cpuPsiFullAvg10Pct` to be finite, and until this line the row recorded only the `some`
+      // metric — so the largest shed reason in the fleet (`telemetry-unavailable`, 349 of 753
+      // decisions measured 2026-09-07) could not be diagnosed from its own row. `some` is KEPT
+      // beside it: the `cpu-pressure` arm still consults it, and dropping it would trade one blind
+      // spot for another.
+      cpu_psi_full_avg10_pct: result.decision.evidence.cpuPsiFullAvg10Pct ?? null,
+      // Which host readings were non-finite. Empty whenever telemetry was complete.
+      telemetry_absent: result.decision.evidence.absentHostReadings,
       provider_fresh: result.decision.evidence.providerFresh,
       provider_readable: result.decision.evidence.providerReadable,
       provider_headroom_pct: result.decision.evidence.providerHeadroomPct ?? null,
