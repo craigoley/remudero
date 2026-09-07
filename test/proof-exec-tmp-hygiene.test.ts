@@ -97,6 +97,12 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
         return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
       }
     }
+    // W1-T3017: every diff-consuming entry now needs `origin/main` RESOLVED to a sha before it will
+    // run at all — an unpinnable base refuses rather than diffing against the moving ref. Real git
+    // answers this; an empty default would refuse the probe before it was ever spawned.
+    if (file === "git" && args[0] === "rev-parse") {
+      return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
+    }
     return { status: 0, stdout: "", stderr: "" };
   };
   return { spawn, calls };
