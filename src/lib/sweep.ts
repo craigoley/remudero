@@ -232,6 +232,23 @@ export function isPureConcurrentAddition(files: readonly ConflictFileDiff[]): bo
  *  value is the `package.json` script name — DATA (rule 2). // Why: docs/forensics/sweep.md. */
 export const REGENERABLE_ARTIFACT_GENERATORS: Readonly<Record<string, string>> = Object.freeze({
   "scripts/source-size-baseline.json": "source-size-ratchet",
+  // W1-T3015 — THE TWIN GATE, REGISTERED AT LAST. `comment-load-ratchet` prints
+  // "record it in scripts/comment-load-baseline.json" as its own remedy, exactly as the
+  // source-size gate above prints its own, but that path was absent here — so committing the edit
+  // the gate demanded read as an out-of-scope overrun, `renderFixPrompt` forbade it, and a
+  // conflict on it was refused. That is the W1-T2650/W1-T2651 trap, still open for the twin.
+  //
+  // THE RECORDING SCRIPT, NOT THE SIGNAL TWIN. `comment-load-signal` passes `--no-record` and by
+  // construction leaves the file byte-identical; registering it would declare a generator that
+  // regenerates nothing.
+  //
+  // THE REGENERATION CLAIM HOLDS IN THE SAME SENSE IT HOLDS FOR THE ENTRY ABOVE, and no stronger.
+  // `evaluateCommentLoadRatchet`'s `nextBaseline` is a function of the measured tree AND the
+  // incoming baseline — a path that GREW keeps `recorded` rather than advancing to today's count.
+  // The source-size generator has the identical shape (`nextBaseline[path] = recorded` on a
+  // violation), so this inherits an admitted member's semantics and introduces no new class of
+  // non-determinism. It is not pure over the tree alone, and neither is its twin.
+  "scripts/comment-load-baseline.json": "comment-load-ratchet",
   "plan/plan-index.json": "plan-index",
   "docs/docs-index.json": "docs-index",
   "learnings/index.json": "learnings-index",
