@@ -520,7 +520,12 @@ import {
   type CiFailureCorpusInput,
   type CorpusPr,
 } from "./lib/ci-failure-corpus.js";
-import { injectCoverageImprovementTask } from "./lib/coverage-improvement.js";
+import {
+  fetchMergedCoverageArtifact,
+  injectCoverageImprovementTask,
+  type FetchMergedCoverageArtifactDeps,
+  type FetchMergedCoverageArtifactResult,
+} from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import {
@@ -17743,7 +17748,7 @@ export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } 
 }
 
 /**
- * `rmd coverage-improve [--lcov <path>]` — TIER TWO of the absolute-threshold coverage gate
+ * `rmd coverage-improve [--lcov <path> | --from-ci]` — TIER TWO of the absolute-threshold coverage gate
  * (W1-T470): when this run's branch coverage sits in the 85-90 pass-with-debt band, name the
  * `src/` files that own the most uncovered branches and file ONE `plan/feedback/` entry about
  * them (never a shard written directly into `plan/tasks.d/` — no such minter exists — and never
@@ -17764,6 +17769,12 @@ export function coverageImproveCommand(
     stateDir?: string;
     ledgerPath?: string;
     runId?: string;
+    fetchCoverageArtifact?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
+    resolveOwnerRepo?: () => { owner: string; repo: string };
+    capture?: Parameters<typeof injectCoverageImprovementTask>[0]["capture"];
+    ledgerUnion?: Parameters<typeof injectCoverageImprovementTask>[0]["ledgerUnion"];
+    writeLedgerLine?: Parameters<typeof injectCoverageImprovementTask>[0]["writeLedgerLine"];
+    land?: Parameters<typeof injectCoverageImprovementTask>[0]["land"];
     /** Injectable ONLY so BOTH arms of the state-dir fallback below are reachable from a test —
      *  production always takes this module's own `loadConfig`. Appended LAST so no positional
      *  caller shifts. Without it the `catch` arm cannot be exercised: `loadConfig` reads the real
@@ -17771,28 +17782,24 @@ export function coverageImproveCommand(
     loadConfig?: () => { root: string };
   } = {},
 ): number {
-  const badArg = unknownArgError("coverage-improve", rest, ["--lcov"], []);
+  const badArg = unknownArgError("coverage-improve", rest, ["--lcov"], ["--from-ci"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
+  const fromCi = rest.includes("--from-ci");
   const lcovFlagIdx = rest.indexOf("--lcov");
   const lcovArg = lcovFlagIdx >= 0 ? rest[lcovFlagIdx + 1] : undefined;
+  if (fromCi && lcovFlagIdx >= 0) {
+    console.error("rmd coverage-improve: choose exactly one of --from-ci or --lcov\n" + USAGE);
+    return 2;
+  }
   if (lcovFlagIdx >= 0 && lcovArg === undefined) {
     console.error("rmd coverage-improve: --lcov requires a value\n" + USAGE);
     return 2;
   }
 
   const root = opts.root ?? repoRoot;
-  const lcovPath = lcovArg ? resolve(root, lcovArg) : join(root, "coverage", "lcov.info");
-  let lcovText: string;
-  try {
-    lcovText = readFileSync(lcovPath, "utf8");
-  } catch (e) {
-    console.error(`rmd coverage-improve: cannot read lcov report at ${lcovPath} (${(e as Error).message})`);
-    return 1;
-  }
-
   const resolveConfig = opts.loadConfig ?? loadConfig;
   const stateDir =
     opts.stateDir ??
@@ -17810,7 +17817,44 @@ export function coverageImproveCommand(
   const ledgerPath = opts.ledgerPath ?? join(stateDir, "ledger.ndjson");
   const runId = opts.runId ?? `COVERAGE-IMPROVE-${Date.now()}`;
 
-  const result = injectCoverageImprovementTask({ root, stateDir, ledgerPath, runId, lcovText });
+  let lcovText: string;
+  let producerRunId = runId;
+  if (fromCi) {
+    const { owner, repo } = (opts.resolveOwnerRepo ?? resolveOwnerRepo)();
+    const read = (opts.fetchCoverageArtifact ?? fetchMergedCoverageArtifact)({
+      owner,
+      repo,
+      ledgerPath,
+      ledgerRunId: runId,
+      writeLedgerLine: opts.writeLedgerLine,
+    });
+    if (read.status === "refused") {
+      console.error(`rmd coverage-improve: CI coverage artifact refused — ${read.reason}: ${read.detail}`);
+      return 1;
+    }
+    lcovText = read.lcovText;
+    producerRunId = String(read.workflowRunId);
+  } else {
+    const lcovPath = lcovArg ? resolve(root, lcovArg) : join(root, "coverage", "lcov.info");
+    try {
+      lcovText = readFileSync(lcovPath, "utf8");
+    } catch (e) {
+      console.error(`rmd coverage-improve: cannot read lcov report at ${lcovPath} (${(e as Error).message})`);
+      return 1;
+    }
+  }
+
+  const result = injectCoverageImprovementTask({
+    root,
+    stateDir,
+    ledgerPath,
+    runId: producerRunId,
+    lcovText,
+    capture: opts.capture,
+    ledgerUnion: opts.ledgerUnion,
+    writeLedgerLine: opts.writeLedgerLine,
+    land: opts.land,
+  });
 
   switch (result.action) {
     case "healthy":
@@ -20766,6 +20810,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
    *  doc for why this seam exists. Production passes none and the checked-in `plan/policy.yaml`
    *  governs, exactly as before. */
   policy?: Policy;
+  coverageImprovementReader?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -20789,6 +20834,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       // process dies mid-run, the marker has already advanced and the interval/cap bounds still
       // hold, so a failure costs one skipped period rather than an unbounded immediate retry.
       recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), deps.now?.() ?? new Date(), 24 * 60 * 60 * 1000);
+      const coverageRunId = `MEASUREMENT-CADENCE-${(deps.now?.() ?? new Date()).getTime()}`;
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
@@ -20802,6 +20848,13 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // and why this call is lazy here rather than hoisted to hook construction. Called only
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
         proofDebt: defaultProofDebtCadenceInput(repoRoot),
+        coverageImprovement: {
+          root: repoRoot,
+          ledgerPath: ledgerPathFor(configFor()),
+          ledgerRunId: coverageRunId,
+          reader: deps.coverageImprovementReader,
+          ...resolveOwnerRepo(),
+        },
       });
     });
   return { checkMeasurementCadence: check, runMeasurementCadence: run };
@@ -37385,9 +37438,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "coverage-improve",
-    syntax: "rmd coverage-improve [--lcov <path>]",
+    syntax: "rmd coverage-improve [--lcov <path> | --from-ci]",
     summary: "File one feedback entry ranking src/ files by uncovered branches (85-90% band).",
-    detail: "W1-T470 tier two of the absolute coverage gate: when this run's branch coverage (read from --lcov, default coverage/lcov.info) sits in the 85-90 pass-with-debt band, ranks the src/ files owning the most uncovered branches (a COUNT, never a percentage — computed fresh every run, lib/coverage-improvement.ts) and files ONE plan/feedback/ entry naming them via captureFeedback, never a shard written straight into plan/tasks.d/ (no such minter exists) and never one entry per file. Dedupes against the ledger UNION (lib/ledger-grep.ts, never the live file alone) keyed on the exact set of files currently owning the debt — a run whose top offenders are unchanged from the last filing is skipped; a shifted debt profile files again. >= 90% (healthy) and < 85% (tier three, a separate remediation loop) are both no-ops here. INERT until wired into the coverage CI job's own step, which is a separate PR (Rule 25 keeps this producer's diff free of any .github/workflows/ci.yml or scripts/coverage-ratchet.mjs edit).",
+    detail: "W1-T470/W1-T2661 tier two of the absolute coverage gate: when branch coverage (read from --lcov, default coverage/lcov.info, or --from-ci's newest merged coverage-merged workflow artifact) sits in the 85-90 pass-with-debt band, ranks the src/ files owning the most uncovered branches (a COUNT, never a percentage — computed fresh every run, lib/coverage-improvement.ts) and files ONE plan/feedback/ entry naming them via captureFeedback, never a shard written straight into plan/tasks.d/ (no such minter exists) and never one entry per file. Dedupes against the ledger UNION (lib/ledger-grep.ts, never the live file alone) keyed on the exact set of files currently owning the debt — a run whose top offenders are unchanged from the last filing is skipped; a shifted debt profile files again. >= 90% (healthy) and < 85% (tier three, a separate remediation loop) are both no-ops here. The daemon-side measurement cadence uses --from-ci's same reader/producer path and refuses by name until CI publishes coverage-merged.",
   },
   {
     name: "verdict-calibration",

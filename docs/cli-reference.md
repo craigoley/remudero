@@ -33,7 +33,7 @@ usage:
   rmd census-membership [--base <ref>]   # Name the population-walking census suites this diff enters.
   rmd ci-learning [--days N] [--force]   # Draft a marked, parked shard for each repaired CI failure in the window.
   rmd rule-efficacy [--no-escalate]   # Report each rule's post-citation repeat-incident rate over the ledger union.
-  rmd coverage-improve [--lcov <path>]   # File one feedback entry ranking src/ files by uncovered branches (85-90% band).
+  rmd coverage-improve [--lcov <path> | --from-ci]   # File one feedback entry ranking src/ files by uncovered branches (85-90% band).
   rmd verdict-calibration   # Join armed-merge review verdicts to post-merge revert/follow-up-fix rates.
   rmd autonomy-rate   # Report the zero-touch merge rate over every Remudero-Task-trailer merge.
   rmd replay-goldens --confirm-spend --ledger <path> [--limit N]   # Replay the seeded goldens and record what the retro's Self-Harness leg reads.
@@ -282,10 +282,10 @@ W1-T418: the corpus repeat-incident rate — for each rule in lib/rule-efficacy.
 File one feedback entry ranking src/ files by uncovered branches (85-90% band).
 
 ```
-rmd coverage-improve [--lcov <path>]
+rmd coverage-improve [--lcov <path> | --from-ci]
 ```
 
-W1-T470 tier two of the absolute coverage gate: when this run's branch coverage (read from --lcov, default coverage/lcov.info) sits in the 85-90 pass-with-debt band, ranks the src/ files owning the most uncovered branches (a COUNT, never a percentage — computed fresh every run, lib/coverage-improvement.ts) and files ONE plan/feedback/ entry naming them via captureFeedback, never a shard written straight into plan/tasks.d/ (no such minter exists) and never one entry per file. Dedupes against the ledger UNION (lib/ledger-grep.ts, never the live file alone) keyed on the exact set of files currently owning the debt — a run whose top offenders are unchanged from the last filing is skipped; a shifted debt profile files again. >= 90% (healthy) and < 85% (tier three, a separate remediation loop) are both no-ops here. INERT until wired into the coverage CI job's own step, which is a separate PR (Rule 25 keeps this producer's diff free of any .github/workflows/ci.yml or scripts/coverage-ratchet.mjs edit).
+W1-T470/W1-T2661 tier two of the absolute coverage gate: when branch coverage (read from --lcov, default coverage/lcov.info, or --from-ci's newest merged coverage-merged workflow artifact) sits in the 85-90 pass-with-debt band, ranks the src/ files owning the most uncovered branches (a COUNT, never a percentage — computed fresh every run, lib/coverage-improvement.ts) and files ONE plan/feedback/ entry naming them via captureFeedback, never a shard written straight into plan/tasks.d/ (no such minter exists) and never one entry per file. Dedupes against the ledger UNION (lib/ledger-grep.ts, never the live file alone) keyed on the exact set of files currently owning the debt — a run whose top offenders are unchanged from the last filing is skipped; a shifted debt profile files again. >= 90% (healthy) and < 85% (tier three, a separate remediation loop) are both no-ops here. The daemon-side measurement cadence uses --from-ci's same reader/producer path and refuses by name until CI publishes coverage-merged.
 
 ### `rmd verdict-calibration`
 

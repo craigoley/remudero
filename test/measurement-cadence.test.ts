@@ -373,7 +373,15 @@ test("THE WIRED HOOK, CALLED FOR REAL: check + run actually execute the producer
   const root = mkdtempSync(join(tmpdir(), "rmd-mc-hook-"));
   try {
     mkdirSync(join(root, "state"), { recursive: true });
-    const hooks = buildMeasurementCadenceDaemonHooks({ config: { root } as Config, now: () => NOW });
+    const hooks = buildMeasurementCadenceDaemonHooks({
+      config: { root } as Config,
+      now: () => NOW,
+      coverageImprovementReader: () => ({
+        status: "refused",
+        reason: "no_coverage_merged_artifact",
+        detail: "offline fixture",
+      }),
+    });
 
     const decision = hooks.checkMeasurementCadence();
     assert.equal(decision.fire, true, "no marker yet under this fresh root — must fire");
@@ -381,6 +389,7 @@ test("THE WIRED HOOK, CALLED FOR REAL: check + run actually execute the producer
     const result = await hooks.runMeasurementCadence();
     assert.equal(result.ruleEfficacy.status, "refused", "a freshly created state dir has no ledger at all");
     assert.equal(result.ruleEfficacy.escalated, false, "the shipped policy's escalate flag is off");
+    assert.equal(result.coverageImprovement?.status, "refused", "the daemon hook must include the coverage-improvement member");
 
     // THE MARKER-FIRST DISCIPLINE: runMeasurementCadence must have recorded the fire BEFORE (or
     // regardless of) the report body running, so an immediate re-check inside the interval refuses.
