@@ -1769,14 +1769,72 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
 export function machineAuthorVerifyViolation(task: Task): LintViolation | undefined {
   if (task.author_class !== "machine") return undefined;
   if (task.verify === "human") return undefined;
-  return {
-    check: "machine-author-verify",
-    severity: "block",
-    message:
-      `task ${task.id} is marked author_class: machine at verify:${task.verify} — ` +
-      "a machine-concluded shard must be verify: human so isDispatchEligible parks it for an " +
-      "operator. A machine may propose work into the plan; only a person releases it (Law 5).",
+
+  // W1-T2977 NARROWS THIS ARM; IT DOES NOT RELAX IT. Every refusal below the operator's ruling
+  // made before still happens — absent, drifted and escalated rulings all block, and only a
+  // `proceed` ruling PINNED to this exact record clears. Absence is never read as a pass.
+  const ruling = task.risk_ruling;
+  const unjudged =
+    `task ${task.id} is marked author_class: machine at verify:${task.verify} — ` +
+    "a machine-concluded shard must be verify: human so isDispatchEligible parks it for an " +
+    "operator, unless a recorded risk-judge ruling clears it. A machine may propose work into " +
+    "the plan; only a person, or a judge the operator ratified, releases it (Law 5).";
+
+  if (!ruling) return { check: "machine-author-verify", severity: "block", message: unjudged };
+
+  if (ruling.pin !== taskRulingPin(task)) {
+    // DRIFT. The record changed after it was judged, so the ruling describes text that is no
+    // longer here. Refusing is the whole reason the pin exists (W1-T2694).
+    return {
+      check: "machine-author-verify",
+      severity: "block",
+      message:
+        `task ${task.id} carries a risk ruling that does NOT match the record it rides on — ` +
+        "the pin is stale, so this shard was edited after it was judged. A ruling clears the " +
+        "record it judged and no other; re-judge the record as it now stands (Law 5, W1-T2977).",
+    };
+  }
+
+  if (ruling.action !== "proceed") {
+    // The judge's OWN words, verbatim (W1-T186): a refusal must be diagnosable without the ledger.
+    const reasons = ruling.reasons.length > 0 ? ruling.reasons.join("; ") : "(the judge recorded no reason)";
+    return {
+      check: "machine-author-verify",
+      severity: "block",
+      message:
+        `task ${task.id} was judged ${ruling.verdict} and the ruling is ${ruling.action}, not proceed — ` +
+        `it stays verify: human until an operator releases it. The judge's reasons: ${reasons} (Law 5, W1-T2977).`,
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * W1-T2977 — the digest a `risk_ruling` pins itself to: what the task may DO (`type`, `verify`,
+ * `risk`, `files`), must PROVE (`acceptance`), and TELLS a worker (`title`, `prompt`). Narrative
+ * fields are OUT, so editing prose forces no re-judgment; `risk_ruling` is out too, or the pin
+ * could never be recomputed for comparison. NUL-separated so `["a","b"]` and `["ab"]` differ.
+ */
+export function taskRulingPin(task: Task): string {
+  const h = createHash("sha256");
+  const field = (v: string): void => {
+    h.update(v);
+    h.update("\0");
   };
+  field(task.id);
+  field(task.title);
+  field(task.type);
+  field(task.verify);
+  field(task.risk ?? "");
+  field(task.prompt ?? "");
+  for (const f of [...(task.files ?? [])].sort()) field(f);
+  field("\x01acceptance");
+  for (const c of task.acceptance ?? []) {
+    field(c.claim);
+    field(c.proof);
+  }
+  return h.digest("hex");
 }
 
 // ── DECLARED SCOPE (W1-T504 — an undeclared files: lints clean and then serializes the fleet) ─
