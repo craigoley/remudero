@@ -209,10 +209,8 @@ jobs:
           echo "- W1-T2428 fast-lane: class=${CLASS} — ran **${COUNT} of ${TOTAL}** suites (the plan/docs-reading set), skipped the remainder" >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "$SUITES" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
           # THE SAME HARNESS IMPORTS `npm run test:ci` CARRIES — `--import tsx` and
-          # `--import ./test/setup/tmp-hygiene.ts`. W1-T1217 records that omitting the second
-          # is a real divergence rather than a saving, and W1-T1250's parity check refuses any
-          # node-test-runner invocation in a workflow that lacks it. The fast lane changes
-          # WHICH suites run, never the harness they run under.
+          # `--import ./test/setup/tmp-hygiene.ts`. The fast lane changes WHICH suites run,
+          # never the harness they run under.
           node --test --import tsx --import ./test/setup/tmp-hygiene.ts $SUITES
 
   ci-required:
@@ -226,17 +224,6 @@ jobs:
         env:
           SHARD_RESULT: ${{ needs.ci.result }}
         run: |
-          # W1-T3014 — NAME THE CASE IN THE FIRST CLAUSE. The old single `if` printed "did not
-          # succeed" for failure, cancellation and skip alike, burying the actual result in a
-          # parenthetical inside a sentence whose main clause asserted the wrong thing. MEASURED: of
-          # nine red collapsed checks in one session, SEVEN were `cancelled` (a superseded matrix)
-          # and two were real failures that nearly rode out because readers had learned to discount
-          # the sentence.
-          #
-          # ⚠ THE GATE DOES NOT MOVE. Every non-success value still exits 1, INCLUDING the `*)` arm:
-          # an unrecognised result is refused, never passed. A default arm that fell through to
-          # success would turn a novel GitHub result into a green required check — strictly worse
-          # than the defect this fixes, and invisible until it happened.
           case "$SHARD_RESULT" in
             success)
             echo "ci: all four test shards succeeded."
@@ -518,22 +505,8 @@ jobs:
         env:
           SHARD_RESULT: ${{ needs.coverage-ratchet.result }}
         run: |
-          # W1-T3014 — NAME THE CASE IN THE FIRST CLAUSE. The old single `if` printed "did not
-          # succeed" for failure, cancellation and skip alike, burying the actual result in a
-          # parenthetical inside a sentence whose main clause asserted the wrong thing. MEASURED: of
-          # nine red collapsed checks in one session, SEVEN were `cancelled` (a superseded matrix)
-          # and two were real failures that nearly rode out because readers had learned to discount
-          # the sentence.
-          #
-          # ⚠ THE GATE DOES NOT MOVE. Every non-success value still exits 1, INCLUDING the `*)` arm:
-          # an unrecognised result is refused, never passed. A default arm that fell through to
-          # success would turn a novel GitHub result into a green required check — strictly worse
-          # than the defect this fixes, and invisible until it happened.
           case "$SHARD_RESULT" in
             success)
-            # This job printed nothing on success before W1-T3014 and still prints nothing: the
-            # falsifier requires the happy path to be byte-identical, and a new line here would be a
-            # reporting change to every green PR in the fleet.
             :
               ;;
             failure)
