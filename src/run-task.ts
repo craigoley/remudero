@@ -40072,6 +40072,20 @@ export async function main(
   // See {@link installUnhandledRejectionGuard} — it is idempotent, so the in-process `main()`
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
+  // W1-T3058 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
+  // both daemon rungs, so a machine running `rmd` by hand and no daemon reclaimed NOTHING: the
+  // operator's Mac reached 100% of a 228 GiB volume with 138 stale dirs and 11 GiB of debris, and
+  // an agent session failed outright because the harness could not write its own output file.
+  //
+  // ⚠ IT CAN NEVER FAIL THE VERB. `sweepStaleTempDirs` is documented best-effort and non-throwing,
+  // and this call is wrapped anyway: a CLI command that died because a tmp sweep threw would be a
+  // far worse defect than the disk filling. The age ceiling is unchanged, so a dir a concurrent
+  // invocation is still using is never collateral.
+  try {
+    sweepStaleTempDirs();
+  } catch {
+    /* best-effort by contract — never let housekeeping fail the verb the operator asked for */
+  }
   // THE GITHUB APP IS THE FLEET HOST'S ONLY CREDENTIAL, and until now only `daemonCommand` and
   // `serveCommand` minted from it. `gh auth login` is never run there and the boot env deliberately
   // carries NO `GH_TOKEN` (deploy/recycle-container.sh, see github-app.ts's header), so every OTHER

@@ -97,6 +97,32 @@ export interface TempSweepOpts {
   root?: string;
 }
 
+/**
+ * W1-T3058 — the fleet's PRE-W1-T2786 temp prefix, still written by every callsite
+ * `hooks/mkdtemp-allowlist.txt` has not yet migrated (W1-T2775 owns that half). Without it
+ * {@link sweepStaleTempDirs} fails these names on the FIRST test in its loop, so they are never
+ * aged and never removed: MEASURED 138 dirs and 11 GiB on the operator's Mac, which reached 100%
+ * of a 228 GiB volume.
+ *
+ * ⚠ ONE EXPLICIT PREFIX, NEVER A DERIVED SET, AND THE MEASUREMENT IS THE REASON.
+ * `hooks/mkdtemp-allowlist.txt` is the instinctive registry to derive from — one list, not two.
+ * It carries 860 entries over 795 distinct prefixes and the shortest are `acc-` and `kick-`;
+ * sweeping those would delete any day-old `/tmp/acc-*` on the machine, whoever created it. Any
+ * future member must be fleet-owned and unambiguous, and {@link MIN_LEGACY_TMP_PREFIX_LENGTH}
+ * refuses a short one loudly rather than trusting that rule to be remembered.
+ */
+export const LEGACY_TMP_PREFIXES: readonly string[] = ["remudero-"];
+
+/** The shortest prefix {@link LEGACY_TMP_PREFIXES} may carry. A BACKSTOP, not a bound-shaped
+ *  constant to tune: it exists so a careless `acc-` addition fails a test instead of a bystander's
+ *  directory. Derived from the shortest member actually shipped. */
+export const MIN_LEGACY_TMP_PREFIX_LENGTH = 9;
+
+/** Does this entry name belong to rmd — under the current prefix or a declared legacy one? */
+export function isRmdOwnedTempName(name: string): boolean {
+  return name.startsWith(RMD_TMP_PREFIX) || LEGACY_TMP_PREFIXES.some((p) => name.startsWith(p));
+}
+
 /** Default age ceiling for {@link sweepStaleTempDirs}: 24 hours. */
 export const DEFAULT_TEMP_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -135,7 +161,10 @@ export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
   }
 
   for (const name of entries) {
-    if (!name.startsWith(RMD_TMP_PREFIX)) continue;
+    // W1-T3058: the current prefix OR a declared legacy one. WHICH NAMES are considered widened
+    // here; WHEN one is removed did not — the directory-only test, the age ceiling and the
+    // per-entry try/catch below all apply to a legacy name exactly as they do to an `rmd-` one.
+    if (!isRmdOwnedTempName(name)) continue;
     const full = join(root, name);
     let mtimeMs: number;
     let isDir: boolean;
