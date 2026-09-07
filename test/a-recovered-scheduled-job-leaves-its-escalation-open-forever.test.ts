@@ -94,24 +94,6 @@ test("W1-T3030 criterion 3: the CLI reports the no-op and exits 0, so every gree
   assert.deepEqual(calls, [["resolve", "mutation-nightly"]]);
 });
 
-test("W1-T3030: --resolved still requires --source, because the marker is the close identity", () => {
-  const errors: string[] = [];
-  const calls: string[][] = [];
-  const code = main({
-    argv: ["--resolved"],
-    env: {},
-    resolveFn: () => {
-      calls.push(["resolve"]);
-      return { action: "none", marker: "" };
-    },
-    log: () => {},
-    error: (m: string) => errors.push(m),
-  });
-  assert.equal(code, 1);
-  assert.deepEqual(calls, [], "must not resolve without the source marker identity");
-  assert.match(errors.join("\n"), /--source is required/);
-});
-
 test("W1-T3030: --resolved does not require --title, which a green run has no reason to pass", () => {
   const code = main({
     argv: ["--resolved", "--source", "clock-sweep"],
@@ -121,21 +103,6 @@ test("W1-T3030: --resolved does not require --title, which a green run has no re
     error: () => {},
   });
   assert.equal(code, 0);
-});
-
-test("W1-T3030: --resolved reports resolver failures loudly", () => {
-  const errors: string[] = [];
-  const code = main({
-    argv: ["--resolved", "--source", "mutation-nightly"],
-    env: {},
-    resolveFn: () => {
-      throw new Error("HTTP 500");
-    },
-    log: () => {},
-    error: (m: string) => errors.push(m),
-  });
-  assert.equal(code, 1);
-  assert.match(errors.join("\n"), /RESOLVE FAILED -- HTTP 500/);
 });
 
 test("W1-T3030 (falsifier): a FAILED issue read closes nothing", () => {
@@ -197,4 +164,48 @@ test("W1-T3030 criterion 4: every workflow that RAISES also RESOLVES", () => {
     assert.match(text, /if: success\(\)/, `${f}'s resolver must be gated on success`);
   }
   assert.equal(raisers.length, 4, "all four known raisers must be covered");
+});
+
+// ── the two refusal arms diff-coverage flagged ───────────────────────────────────────────────────
+
+/*
+ * scripts/needs-human-issue.mjs:237-238 and :259 — the missing-`--source` refusal and the catch
+ * around `resolveFn`. Every case above supplies a source and a resolver that returns, so neither
+ * arm ran: the shape where a suite exercises only the path it was written for. Both matter to a
+ * scheduled job, which calls this on EVERY green run — a wrong exit code there either spams a
+ * workflow red or hides a real failure.
+ */
+
+test("W1-T3030: --resolved without --source is refused, naming the missing flag", () => {
+  const errs: string[] = [];
+  let resolverCalled = false;
+  const code = main({
+    argv: ["--resolved"],
+    env: {},
+    resolveFn: () => {
+      resolverCalled = true;
+      return { action: "none", marker: "m" };
+    },
+    log: () => {},
+    error: (m: string) => void errs.push(m),
+  });
+  assert.equal(code, 1, "a resolve with no identity must not exit 0");
+  assert.match(errs.join("\n"), /--source is required/, "and must name the flag it wants");
+  assert.equal(resolverCalled, false, "the resolver must never run without an identity to resolve");
+});
+
+test("W1-T3030: a throwing resolver exits non-zero and names the failure, never a silent success", () => {
+  const errs: string[] = [];
+  const code = main({
+    argv: ["--resolved", "--source", "clock-sweep"],
+    env: {},
+    resolveFn: () => {
+      throw new Error("gh exploded");
+    },
+    log: () => {},
+    error: (m: string) => void errs.push(m),
+  });
+  assert.equal(code, 1, "a failed resolve must not read as a clean no-op");
+  assert.match(errs.join("\n"), /RESOLVE FAILED/);
+  assert.match(errs.join("\n"), /gh exploded/, "the underlying reason must reach the operator");
 });
