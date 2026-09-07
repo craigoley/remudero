@@ -94,6 +94,24 @@ test("W1-T3030 criterion 3: the CLI reports the no-op and exits 0, so every gree
   assert.deepEqual(calls, [["resolve", "mutation-nightly"]]);
 });
 
+test("W1-T3030: --resolved still requires --source, because the marker is the close identity", () => {
+  const errors: string[] = [];
+  const calls: string[][] = [];
+  const code = main({
+    argv: ["--resolved"],
+    env: {},
+    resolveFn: () => {
+      calls.push(["resolve"]);
+      return { action: "none", marker: "" };
+    },
+    log: () => {},
+    error: (m: string) => errors.push(m),
+  });
+  assert.equal(code, 1);
+  assert.deepEqual(calls, [], "must not resolve without the source marker identity");
+  assert.match(errors.join("\n"), /--source is required/);
+});
+
 test("W1-T3030: --resolved does not require --title, which a green run has no reason to pass", () => {
   const code = main({
     argv: ["--resolved", "--source", "clock-sweep"],
@@ -103,6 +121,21 @@ test("W1-T3030: --resolved does not require --title, which a green run has no re
     error: () => {},
   });
   assert.equal(code, 0);
+});
+
+test("W1-T3030: --resolved reports resolver failures loudly", () => {
+  const errors: string[] = [];
+  const code = main({
+    argv: ["--resolved", "--source", "mutation-nightly"],
+    env: {},
+    resolveFn: () => {
+      throw new Error("HTTP 500");
+    },
+    log: () => {},
+    error: (m: string) => errors.push(m),
+  });
+  assert.equal(code, 1);
+  assert.match(errors.join("\n"), /RESOLVE FAILED -- HTTP 500/);
 });
 
 test("W1-T3030 (falsifier): a FAILED issue read closes nothing", () => {
