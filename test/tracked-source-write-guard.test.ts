@@ -361,6 +361,9 @@ for (const { file, name } of MUTATION_DETECTORS) {
     // to a clean pass, which is exactly the failure mode this strip exists to rule out).
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
+    // W1-T2732: blank the coverage session var too -- `delete` is a no-op on it, and an unblanked
+    // value would silently enrol this child in whatever coverage session is running this suite.
+    childEnv.NODE_V8_COVERAGE = undefined;
     const result = spawnSync(process.execPath, args, { cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, env: childEnv });
     assert.equal(
       result.status,
