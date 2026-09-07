@@ -120,6 +120,13 @@ test("W1-T2794 criterion 1: merged evidence OUTRANKS the open-peer row when both
 });
 
 // ═════════ criteria 2 and 3: the composition ═══════════════════════════════════════════════════
+// @source-text-subject — W1-T2905's declared carve-out, and this is the case it exists for: the
+// SUBJECT of these assertions IS the source text. What they claim is a property of the composition
+// itself — that each body builds the candidates exactly once, and does it before dispatch — which
+// no behavioural test can express without a live GitHub gateway, a plan and a ledger. Asserting on
+// behaviour is the census's FIRST remedy and the better one wherever it fits; it does not fit here,
+// so the choice is declared rather than left as an unexplained read.
+//
 // ⚠ STRUCTURAL, NOT EXECUTIONAL, AND SAID SO PLAINLY. Driving `sweepCommand`/`buildSweepHook` end
 // to end needs a live GitHub gateway, a plan and a ledger; these assertions instead read the two
 // composition bodies out of run-task.ts and check ORDER and COUNT. That catches the regressions the
