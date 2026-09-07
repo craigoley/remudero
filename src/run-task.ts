@@ -18005,6 +18005,8 @@ export function ciLearningCommand(
   rest: string[],
   deps: CiFailuresCommandDeps & {
     root?: string;
+    /** The repo CHECKOUT, where `plan/` lives — distinct from `root`, which is the STATE root. */
+    checkoutRoot?: string;
     policy?: CiLearningCadencePolicy;
     /** W1-T2968 — every `origin:` the plan already holds. Injected so a test drives idempotency
      *  without a plan on disk; production reads the real plan. */
@@ -18033,11 +18035,34 @@ export function ciLearningCommand(
     return 1;
   }
 
+  /*
+   * W1-T3032 — TWO ROOTS, BECAUSE THIS VERB READS TWO DIFFERENT TREES. `config.root` is the STATE
+   * root: the cadence marker under `state/` belongs to it, and both marker calls below keep it.
+   * `plan/` does NOT live there — it lives in the CHECKOUT, which on a fleet host sits one level
+   * inside the state root (`<config.root>/remudero`). Every sibling verb reads its plan through
+   * `repoRoot`; this one alone joined `plan/` onto the state root.
+   *
+   * MEASURED 2026-09-07, the first real run of this rung over a 14-day window: 100 pull requests
+   * scanned, three drafts minted, and then
+   * "NOT FILED — the filer could not run (ENOENT ... '/Users/craigoleyagent/Remudero/plan/tasks.yaml')",
+   * preceded by "the plan could not be read for already-filed findings — proceeding without it".
+   * So the rung could neither FILE what it drafted nor DEDUP against what it had drafted before:
+   * enabled, it would re-draft the same findings every day and file none of them. The `--force`
+   * path hid the third instance, the policy read, which fails closed and would have refused the
+   * run outright.
+   */
+  // THE FALLBACK IS `deps.root`, NOT `repoRoot`, AND THAT ORDER IS LOAD-BEARING. An injected root
+  // means "run entirely against this tree" — every existing test passes a tmp root and asserts the
+  // command touches no plan. Defaulting straight to `repoRoot` would make those suites FILE INTO
+  // THE OPERATOR'S REAL PLAN the moment filing started working. In production `deps.root` is
+  // undefined, so this resolves to `repoRoot` and the two roots differ, which is the whole point.
+  const checkoutRoot = deps.checkoutRoot ?? deps.root ?? repoRoot;
+
   // The cadence bound, unless the operator overrides it for this one run.
   if (!rest.includes("--force")) {
     let policy: CiLearningCadencePolicy;
     try {
-      policy = deps.policy ?? loadPolicy(join(root, "plan", "policy.yaml")).values.ciLearningCadence;
+      policy = deps.policy ?? loadPolicy(join(checkoutRoot, "plan", "policy.yaml")).values.ciLearningCadence;
     } catch (e) {
       // An unreadable policy is not a permissive one: a rung that DRAFTS must never fire because
       // its own bound could not be read.
@@ -18067,7 +18092,7 @@ export function ciLearningCommand(
   // W1-T2968 — THE PLAN IS THE RECORD. This argument was hardcoded `[]`, so idempotency was inert:
   // every re-read of one window re-drafted everything it had already drafted. A filed record
   // carries its finding id as its `origin:`, which is what makes the plan answerable here.
-  const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(root);
+  const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(checkoutRoot);
   const result = mintCiLearningShards(corpus, planOrigins);
   console.log(`rmd ci-learning — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
   console.log(`  status: ${result.status}`);
@@ -18097,7 +18122,7 @@ export function ciLearningCommand(
     // MEASURED: without this, an unreadable plan under the run's root took the whole verb out with
     // ENOENT, reddening three of W1-T2959's tests, which pass a tmp root with no plan in it.
     try {
-      const filing = file(result.drafts, root, { mintTaskId: ciLearningTaskIdMinter(root), planOrigins });
+      const filing = file(result.drafts, checkoutRoot, { mintTaskId: ciLearningTaskIdMinter(checkoutRoot), planOrigins });
       for (const f of filing.filed) console.log(`  FILED ${f.taskId} -> ${f.relPath}`);
       for (const sk of filing.skipped) console.log(`  ALREADY IN THE PLAN (not re-filed): ${sk}`);
       // A refusal is NAMED. A rung that silently dropped what the linter would not accept would be
