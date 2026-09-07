@@ -12,6 +12,7 @@
     - .github/workflows/ci.yml
     - scripts/task-id-existence-check.mjs
     - test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts
+    - docs/forensics/task-id-existence-check.md
   origin: "operator-session#w1-t3016-falsifier-fired-2026-09-07"
   plan_refs: ["W1-T3016", "W1-T2324", "W1-T2203", "W1-T1048", "W1-T351"]
   status: queued
@@ -23,7 +24,14 @@
     `evaluateOpenPrIdCollisions` refuses and NAMES the claiming PR by url. The `task-id-existence`
     job in ci.yml runs it on every pull request. Nothing about it is missing.
 
-    IT HAS NEVER ONCE EXECUTED. `fetchOpenPrRows` shells `gh api`, and that job passes no token:
+    IT HAS NEVER ONCE EXECUTED, AND THAT WAS KNOWN WHEN IT SHIPPED — WHICH MAKES IT A SHARPER
+    FINDING, NOT A SOFTER ONE. `fetchOpenPrRows`'s own docblock records the measurement: "MEASURED:
+    CI's `task-id-existence` job carries no `GH_TOKEN` today, so `gh api` fails fast with 'gh: To
+    use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable'." W1-T2324
+    chose to degrade rather than refuse — defensible for a best-effort read, and the reason this
+    task preserves the degraded path byte for byte — but the token was never supplied, so a
+    required check answered nothing for its whole life. `fetchOpenPrRows` shells `gh api`, and that
+    job passes no token:
 
       grep -c 'GH_TOKEN\|GITHUB_TOKEN' .github/workflows/ci.yml   ->  1
 
