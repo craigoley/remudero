@@ -115,6 +115,13 @@ jobs:
             exit 0
           fi
           npx tsc -p tsconfig.json --noEmit
+      - name: Coverage-session-blanking check
+        run: |
+          if [ "${{ matrix.shard }}" != "1" ]; then
+            echo "CI sharding: coverage-session-blanking runs once on shard 1; shard ${{ matrix.shard }} skips the duplicate invocation."
+            exit 0
+          fi
+          npm run --silent coverage-session-blanking:check
       - name: Determine this diff's fast-lane class (W1-T2428 — the `ci` half)
         # A deliberate second copy of the `coverage-ratchet` job's classify step, never a shared
         # output: `needs:` would chain two parallel jobs and cost more than the skip saves.

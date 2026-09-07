@@ -75,8 +75,7 @@ jobs:
         "acceptance-author-gate",
         "unwired-gate",
         "comment-load-ratchet",
-        "source-size",
-        "coverage-session-blanking"
+        "source-size"
         ]
       # Never waited on, never failed for: ci-gate is self, and remudero-review is a separate
       # required context the orchestrator posts directly rather than a check-run.

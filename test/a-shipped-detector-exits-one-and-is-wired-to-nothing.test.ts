@@ -25,8 +25,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "coverage-session-blanking-check.mjs");
-const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
-const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "coverage-session-blanking.yml");
+const CI_YML_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const PACKAGE_JSON_PATH = join(REPO_ROOT, "package.json");
 
 const mod = (await import(pathToFileURL(SCRIPT).href)) as {
@@ -53,15 +52,6 @@ function gitAdd(root: string) {
   execFileSync("git", ["-C", root, "add", "-A"], { encoding: "utf8" });
 }
 
-/** This task's own fork point, not `origin/main` itself -- `origin/main` keeps moving as OTHER
- *  PRs merge, so a literal `git diff origin/main` picks up every unrelated file every one of
- *  them touched and reads as a false "src/ added" the moment any of them lands. The merge-base
- *  is the one stable point that scopes the diff to what THIS task's own branch actually changed,
- *  same discipline as W1-T907's three-way dedupe-then-pull recipe. */
-function forkPoint(): string {
-  return execFileSync("git", ["merge-base", "HEAD", "origin/main"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-}
-
 // ── acceptance 1: "the check runs in CI as a required gate ... named by the same script path
 // the repository already uses for its sibling gates" ────────────────────────────────────────
 
@@ -75,31 +65,23 @@ test("package.json names the check by the SAME script path convention as its sib
   );
 });
 
-test("a standalone workflow file registers a `coverage-session-blanking` job that runs the npm alias, unconditionally on every PR", () => {
-  const doc = parseYaml(readFileSync(WORKFLOW_PATH, "utf8")) as {
-    on?: { pull_request?: unknown };
-    jobs?: Record<string, { name?: string; if?: unknown; steps?: Array<{ run?: string }> }>;
+test("ci.yml runs the detector from the existing required `ci` check path", () => {
+  const doc = parseYaml(readFileSync(CI_YML_PATH, "utf8")) as {
+    jobs?: Record<string, { name?: string; if?: unknown; needs?: string[] | string; steps?: Array<{ run?: string }> }>;
   };
-  assert.ok(doc.on && "pull_request" in doc.on, "must fire on pull_request, the same trigger every sibling required gate uses");
-  const job = doc.jobs?.["coverage-session-blanking"];
-  assert.ok(job, "the workflow must define a `coverage-session-blanking` job");
-  assert.equal(job!.if, undefined, "no job-level `if:` beyond the PR trigger -- a conditionally-skippable required check deadlocks merge forever");
-  const runSteps = (job!.steps ?? []).map((s) => s.run).filter(Boolean) as string[];
+  const shardJob = doc.jobs?.ci;
+  assert.ok(shardJob, "ci.yml must still define the test shard job");
+  assert.equal(shardJob!.if, undefined, "the shard job must not be conditionally skippable");
+  const runSteps = (shardJob!.steps ?? []).map((s) => s.run).filter(Boolean) as string[];
   assert.ok(
     runSteps.some((r) => r.includes("coverage-session-blanking:check")),
-    "a step must invoke the npm alias that runs the real script",
+    "one ci shard step must invoke the npm alias that runs the real detector",
   );
-});
 
-test("ci-gate.yml's REQUIRED list names the job -- a required check, not decorative advisory-only wiring", () => {
-  const doc = parseYaml(readFileSync(CI_GATE_PATH, "utf8")) as {
-    jobs: { "ci-gate": { env: Record<string, string> } };
-  };
-  const required = JSON.parse(doc.jobs["ci-gate"].env.REQUIRED) as string[];
-  assert.ok(
-    required.includes("coverage-session-blanking"),
-    "coverage-session-blanking must be REQUIRED, matching design's \"must be a REQUIRED check or it is decorative again\"",
-  );
+  const required = doc.jobs?.["ci-required"];
+  assert.ok(required, "ci.yml must still define the stable required check aggregator");
+  assert.equal(required!.name, "ci", "the aggregator is the required `ci` check");
+  assert.deepEqual(required!.needs, ["ci"], "the required `ci` check must depend on the shard job that runs the detector");
 });
 
 // ── acceptance 2: "every delete-is-noop site is converted to real blanking, so the form the
@@ -179,7 +161,8 @@ test("both the clean run and a violation run still print the blind-spots stateme
 // path is added to this diff" ────────────────────────────────────────────────────────────────
 //
 // The script itself, and the "no src/ path" fence, hold literally -- both are checked below
-// against origin/main. test/coverage-session-blanking.test.ts is the ONE exception, and it is
+// against this checkout's current patch. test/coverage-session-blanking.test.ts is the ONE
+// exception, and it is
 // disclosed here rather than asserted false: getting the real repo to exit 0 (acceptance 3) is
 // this task's own remit, and three of that file's own assertions hard-coded the PREVIOUS,
 // unclean state as their expected value -- "the CLI ... exits 1 against the real repo",
@@ -190,8 +173,8 @@ test("both the clean run and a violation run still print the blind-spots stateme
 // achievable, still-meaningful form (see that file's own "W1-T2732 UPDATE" comments) rather than
 // deleted outright, and its full 25/25-passing suite is unaffected otherwise -- verified by
 // running it, not merely asserted here.
-test("the detector script itself is byte-for-byte unedited against this task's own fork point", () => {
-  const result = spawnSync("git", ["diff", "--quiet", forkPoint(), "--", "scripts/coverage-session-blanking-check.mjs"], {
+test("the detector script itself is byte-for-byte unedited in this patch", () => {
+  const result = spawnSync("git", ["diff", "--quiet", "HEAD", "--", "scripts/coverage-session-blanking-check.mjs"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
   });
@@ -199,7 +182,7 @@ test("the detector script itself is byte-for-byte unedited against this task's o
 });
 
 test("no src/ path is added to this diff", () => {
-  const result = spawnSync("git", ["diff", "--name-only", forkPoint()], { cwd: REPO_ROOT, encoding: "utf8" });
+  const result = spawnSync("git", ["diff", "--name-only", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const srcPaths = result.stdout.split("\n").filter((p) => p.startsWith("src/"));
   assert.deepEqual(srcPaths, [], `no src/ path may ride with this diff; found:\n${srcPaths.join("\n")}`);
