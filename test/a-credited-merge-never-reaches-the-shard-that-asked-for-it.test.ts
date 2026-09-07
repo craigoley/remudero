@@ -161,6 +161,22 @@ test("W1-T3043 (wiring): DRY RUN IS THE DEFAULT and writes nothing", async () =>
   assert.deepEqual(written, [], "no --write means no file is touched");
 });
 
+test("W1-T3043 (wiring): with NO projection injected, the REAL one runs — the default seam is not dead code", async () => {
+  // Every other case here injects `creditedMergedIds`, which is correct for them and left
+  // `defaultCreditedMergedIds` unreachable: diff-coverage blocked this PR on its six lines. This
+  // one omits ONLY that seam, so the real projection (loadConfig -> ledger -> plan ->
+  // buildCreditCandidates) executes. `readShards`/`writeShard` stay injected, so no shard is read
+  // from disk and nothing is written. A synthetic id cannot be credited by any real projection, so
+  // the assertion is about the DEFAULT having run and answered, never about today's credit set.
+  const written: string[] = [];
+  const code = await planReconcileCommand([], {
+    readShards: () => [{ taskId: "W1-T90909-synthetic", path: "/p/synthetic.yaml", text: shard() }],
+    writeShard: (path) => written.push(path),
+  });
+  assert.equal(code, 0, "the real credit projection must be readable; a throw here would exit 1");
+  assert.deepEqual(written, [], "no --write, and a synthetic id is credited by nothing");
+});
+
 test("W1-T3043 (wiring, falsifier): AN UNREADABLE PROJECTION ABORTS AND WRITES NOTHING", async () => {
   // Treating a failed credit read as "nothing merged" would be silently safe but would report a
   // count derived from a failed read as if it were a finding.
