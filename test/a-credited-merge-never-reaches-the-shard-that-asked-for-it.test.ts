@@ -14,6 +14,7 @@ import {
   reconcilePlan,
   reconcileShardStatus,
 } from "../src/lib/plan-reconcile.js";
+import { planReconcileCommand, renderPlanReconcile } from "../src/run-task.js";
 
 /** A shard with the real field order, so the byte-identity assertions mean something. */
 function shard(over: { status?: string; retirement?: string; extra?: string } = {}): string {
@@ -127,4 +128,69 @@ test("W1-T3043: the dry run and the real run share ONE decision path", () => {
   const second = reconcilePlan(shards, merged);
   assert.deepEqual(first.writes, second.writes);
   assert.deepEqual(first.summary, second.summary);
+});
+
+// ═══════════ THE VERB — the call site that makes the module above reachable ═══════════════════
+// An unwired module is dead code, and `lint-plan`'s own [call-site] check says so. These drive the
+// REAL command with injected seams, so no repo, plan or GitHub gateway is touched.
+
+test("W1-T3043 (wiring): the command CALLS the reconciler and rewrites only the credited queued shard", async () => {
+  const written: Array<{ path: string; text: string }> = [];
+  const code = await planReconcileCommand(["--write"], {
+    readShards: () => [
+      { taskId: "A", path: "/p/A.yaml", text: shard() },
+      { taskId: "B", path: "/p/B.yaml", text: shard() },
+      { taskId: "C", path: "/p/C.yaml", text: shard({ status: "merged" }) },
+    ],
+    creditedMergedIds: () => new Set(["A", "C"]),
+    writeShard: (path, text) => written.push({ path, text }),
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(written.map((w) => w.path), ["/p/A.yaml"], "only the credited QUEUED shard is written");
+  assert.match(written[0].text, /^ {2}status: merged$/m);
+});
+
+test("W1-T3043 (wiring): DRY RUN IS THE DEFAULT and writes nothing", async () => {
+  const written: string[] = [];
+  const code = await planReconcileCommand([], {
+    readShards: () => [{ taskId: "A", path: "/p/A.yaml", text: shard() }],
+    creditedMergedIds: () => new Set(["A"]),
+    writeShard: (path) => written.push(path),
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(written, [], "no --write means no file is touched");
+});
+
+test("W1-T3043 (wiring, falsifier): AN UNREADABLE PROJECTION ABORTS AND WRITES NOTHING", async () => {
+  // Treating a failed credit read as "nothing merged" would be silently safe but would report a
+  // count derived from a failed read as if it were a finding.
+  const written: string[] = [];
+  const code = await planReconcileCommand(["--write"], {
+    readShards: () => [{ taskId: "A", path: "/p/A.yaml", text: shard() }],
+    creditedMergedIds: () => { throw new Error("github unreachable"); },
+    writeShard: (path) => written.push(path),
+  });
+  assert.equal(code, 1, "a failed projection must exit non-zero");
+  assert.deepEqual(written, [], "and must write nothing");
+});
+
+test("W1-T3043 (wiring): a junk argument fails loud BEFORE any read", async () => {
+  let read = false;
+  const code = await planReconcileCommand(["--nope"], { readShards: () => { read = true; return []; } });
+  assert.equal(code, 2);
+  assert.equal(read, false, "arg validation precedes I/O");
+});
+
+test("W1-T3043 (wiring): the summary names the MODE first, so a dry run cannot read as applied", async () => {
+  const dry = renderPlanReconcile({ rewritten: ["A"], skipped: { "not-credited-merged": 2, "status-not-queued": 0, retired: 1, "no-status-field": 0, "credit-unreadable": 0 } }, false);
+  assert.match(dry, /dry run — nothing written/);
+  assert.match(dry, /would be reconciled/);
+  assert.match(dry, /not-credited-merged=2/);
+  assert.match(dry, /retired=1/);
+  assert.doesNotMatch(dry, /status-not-queued=0/, "a zero cause is not printed as noise");
+
+  const applied = renderPlanReconcile({ rewritten: ["A"], skipped: { "not-credited-merged": 0, "status-not-queued": 0, retired: 0, "no-status-field": 0, "credit-unreadable": 0 } }, true);
+  assert.match(applied, /--write/);
+  assert.match(applied, /1 shard\(s\) reconciled/);
+  assert.doesNotMatch(applied, /dry run/);
 });
