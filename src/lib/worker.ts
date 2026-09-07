@@ -42,6 +42,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { pgrepFailureMeansZero } from "./deployer.js";
 import { isHolderStale, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
+import { secretBoundaryEnv, type SecretBoundaryHandles } from "./secret-boundary.js";
 import {
   readClaudeModelHealth,
   resolveClaudeModelHealth,
@@ -845,6 +846,11 @@ export interface SpawnWorkerArgs {
     expectedRunMs: number | undefined,
     spawn: { runId?: string; taskId?: string },
   ) => void;
+  /** W1-T2699: the daemon-held secret boundary. Omitted, `secretBoundaryEnv` is a no-op — this
+   *  spawn's env stays byte-identical, opting in per call site rather than under every caller at
+   *  once. Set, `CLAUDE_CODE_OAUTH_TOKEN` is replaced by a sentinel and a loopback base URL, and
+   *  (with `credentialHelperSocketPath`) `args.cwd`'s local git config points at the socket helper. */
+  secretBoundary?: SecretBoundaryHandles;
 }
 
 let providerTieBreaker = 0;
@@ -1381,18 +1387,31 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // Shell isolation, resolved from config and never hardcoded, so a worker sources no operator rc. HOME is redirected
     // above, so CLAUDE_CODE_SHELL's Bash-tool snapshot resolves to the scratch HOME's empty rc whatever the operator's
     // dotfiles contain. ZDOTDIR covers any direct zsh (W1-T1C).
-    const childEnv = buildWorkerEnv(args.env ?? {}, process.env, {
-      zdotdir: workerZdotdir(config),
-      shell: workerShell(config),
-      home: workerHome,
-      // Overflow valve: pass the operator's ANTHROPIC_API_KEY through to bill on API credits ONLY when `config.overflow ===
-      // "api_key"`, which validateConfig refuses without a paired dailyCapUsd — so an uncapped api run cannot even be
-      // configured. Otherwise ANTHROPIC_* is stripped as before (W1-T258).
-      allowApiKey: config.overflow === "api_key",
-    });
+    // W1-T2699: every spawn's env now routes through secretBoundaryEnv, a no-op absent `args.secretBoundary` (see its doc).
+    const childEnv = secretBoundaryEnv(
+      buildWorkerEnv(args.env ?? {}, process.env, {
+        zdotdir: workerZdotdir(config),
+        shell: workerShell(config),
+        home: workerHome,
+        // Overflow valve: pass the operator's ANTHROPIC_API_KEY through to bill on API credits ONLY when `config.overflow ===
+        // "api_key"`, which validateConfig refuses without a paired dailyCapUsd — so an uncapped api run cannot even be
+        // configured. Otherwise ANTHROPIC_* is stripped as before (W1-T258).
+        allowApiKey: config.overflow === "api_key",
+      }),
+      args.secretBoundary,
+    );
     // Attribution markers merged in AFTER the allowlist and extras above, so they are authoritative whatever `args.env`
     // contains — no caller has a legitimate reason to set REMUDERO_RUN_ID/TASK_ID/SCOPE itself (W1-T117).
     Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)));
+    // The git-credential half of the boundary (design (ii)): a LOCAL, per-worktree config write.
+    // Best-effort and guarded, mirroring `lostWorkerHomeGrants`'s never-throw contract above.
+    if (args.secretBoundary?.credentialHelperSocketPath) {
+      try {
+        wireCredentialHelperSocket(args.cwd, args.secretBoundary.credentialHelperSocketPath);
+      } catch {
+        // Swallowed on purpose — see comment above.
+      }
+    }
 
     const stderrChunks: string[] = [];
     const blocks: string[] = [];
@@ -2262,6 +2281,20 @@ export const ADHOC_LANE_REAP_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
  * means this process could not have started. */
 function installRootDir(): string {
   return join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
+}
+
+/** W1-T2699: point `cwd`'s LOCAL git config at the socket-based credential helper, resetting any
+ *  accumulated `credential.helper` first — an empty value clears git's collected helper list
+ *  (MEASURED against git 2.39.5), so the local entry added right after is the only one git tries
+ *  in this worktree, superseding `deploy/entrypoint.sh`'s global `$GH_TOKEN`-reading helper. */
+function wireCredentialHelperSocket(cwd: string, socketPath: string): void {
+  const helperScript = join(installRootDir(), "scripts", "git-credential-socket-helper.mjs");
+  execFileSync("git", ["-C", cwd, "config", "--local", "credential.helper", ""], { stdio: "ignore" });
+  execFileSync(
+    "git",
+    ["-C", cwd, "config", "--local", "--add", "credential.helper", `!node "${helperScript}" "${socketPath}"`],
+    { stdio: "ignore" },
+  );
 }
 
 /** Which `node_modules` a fresh worktree resolves its dev CLIs from. Prefers the PARENT CLONE's own install, and falls back to
