@@ -110,3 +110,28 @@
     resolved: an App identity now demonstrably exists and posts the status, so that half of this
     shard's dependency has shipped; whether W1-T990 intended ONE fleet app or a distinct reviewer
     app is not settled by anything read here, and route (a) turns on exactly that.
+
+    OPERATOR RULING 2026-09-07, WHICH SETTLES THE REFUTATION RECORDED ABOVE: the workers all use
+    the same GitHub App auth ON PURPOSE. It is working. Do not change it.
+
+    THE CONSEQUENCE, STATED PLAINLY. The prior note observed that `remudero-review` is posted by
+    `remudero-fleet[bot]` while `github-app.ts:289` writes that same installation token to
+    `process.env.GH_TOKEN` and `env.ts:29` copies it into every worker — so an
+    `integration_id` binding is satisfied by the worker's own token. This ruling CONFIRMS the
+    shared identity is deliberate and forecloses route (a) (a distinct reviewer credential), which
+    was the only one of the three recorded routes that closes the threat this shard names.
+
+    SO THIS SHARD CANNOT BE BUILT AS SPECIFIED. Its rationale's claim — an app identity "one the
+    worker token cannot assume" — does not hold and, by ruling, will not be made to hold.
+
+    WHAT REMAINS WORTH DOING IS ROUTE (c), AND ONLY IF DESCRIBED HONESTLY: a ruleset requiring
+    `remudero-review` from the fleet App raises the floor against a HUMAN personal-access token
+    and does nothing about a prompt-injected worker holding the fleet's own token. That is real but
+    partial value. It must not be recorded as closing this shard, and `docs/review-gate.md` must
+    not claim provenance the ruleset does not deliver.
+
+    THE RESIDUAL EXPOSURE IS THEREFORE ACCEPTED, NOT CLOSED: a worker steered by hostile repository
+    content can post its own passing review status, and the only thing between it and that is
+    `hooks/deny-floor.sh` rule 4, whose own header calls it a tripwire rather than a boundary.
+    Recorded here so the acceptance is deliberate and dated, not an oversight. No forge was
+    attempted and no bypass constructed.

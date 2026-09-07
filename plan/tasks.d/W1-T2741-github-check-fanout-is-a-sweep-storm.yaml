@@ -17,7 +17,8 @@
     - test/policy.test.ts
   origin: "operator-session#github-event-review-throughput-2026-09-03"
   plan_refs: ["W1-T2568", "W1-T2656", "W1-T2582", "W1-T1272"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     OBSERVED ON THE LIVE AZURE DAEMON AFTER THE SIGNED WEBHOOK LANDED. The ledger recorded full
@@ -102,3 +103,22 @@
     suite fail (`githubEventWake.checkSettleMs should be lifted`, because omission falls into the
     complement). The path is therefore part of the implementation's mechanically required scope;
     this plan-only correction declares it before any implementation PR is opened.
+    OPERATOR RULING 2026-09-07: CLOSED — this shipped, and only `status:` said otherwise.
+
+    THE WIRING IS IN THE TREE (OBSERVED at origin/main): `plan/policy.yaml:1206` carries the
+    `githubEventWake` trailing-edge settle window with this task's id and its reasoning verbatim
+    ("the live 00:55 wave spanned about 26 seconds with no ten-second quiet gap; 10000 therefore
+    collapses that wave to one trailing wake"); `src/lib/policy.ts:176` declares the knob; and
+    `src/lib/github-event-wake.ts:477` holds the daemon-side scheduling policy and clock seams,
+    each citing W1-T2741 by name.
+
+    WHY IT WAS RE-EXAMINED AT ALL, recorded so the next reader does not repeat it: a month-long
+    ledger review measured ~15,000 accepted GitHub wakes/day, 45 of 46 of them `check_run`, and
+    proposed "the wake path does not coalesce" as a finding. That was WRONG — the coalescer exists
+    and is this task. The selector that surfaced it reads a declared file's absence and `status:`,
+    and `status: queued` on a shipped task is exactly the ~86%-stale field W1-T367 ruled
+    decorative. `retirement: closed` is the operator act the linter requires; nothing infers it.
+
+    NOT CLAIMED: no measurement here says the settle window is correctly SIZED. The wake volume
+    above is real and unexplained by this task. If it warrants attention it is a new filing against
+    the observed rate, not a reopening of this one.

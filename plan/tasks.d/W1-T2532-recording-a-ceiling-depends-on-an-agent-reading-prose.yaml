@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 14.00
-  files: [scripts/source-size-ratchet.mjs, package.json, test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts]
+  files: [scripts/comment-load-ratchet.mjs, package.json, test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts]
   origin: "operator-session#the-pr-board-is-very-red-2026-08-31"
   plan_refs: ["W1-T2488", "W1-T2521", "W1-T2526"]
   status: queued
@@ -146,3 +146,21 @@
     defect it names does, and that the cost has moved to a sibling. The wiring half is also still
     unresolved: the rationale's own trace — `runPreflightFast` has one call site and the fleet's
     workers do not run the fast gate — was not re-checked here.
+
+    OPERATOR RULING 2026-09-07: RE-AIMED, NOT CLOSED. The defect is real; it was pointed at the
+    wrong ratchet. `files:` now names scripts/comment-load-ratchet.mjs. The acceptance criteria are
+    deliberately UNCHANGED: every one is worded over "a ceiling" and "the CI assertion" rather than
+    over source-size specifically, so each survives the re-aim verbatim. The TITLE still says
+    SOURCE-SIZE and is left alone — retitling is a separate, reviewable edit and the note is the
+    authoritative record.
+
+    THE EVIDENCE FOR RE-AIMING (measured 2026-09-07 across five builds): source-size fired ZERO
+    times and comment-load fired THREE, each cleared by a session hand-editing
+    scripts/comment-load-baseline.json. Population re-derived the same day: source-size blocked
+    0 of 7 open PRs, against the 6 of 9 this shard was filed on.
+
+    WHAT W1-T3022 ALREADY TOOK OFF THIS TASK, AND WHAT IT DID NOT. W1-T3022 buckets the
+    comment-load ceiling, so most growing PRs no longer need to record anything at all — that
+    shrinks how OFTEN the manual step is reached. It does NOT remove the step: a file that crosses
+    a bucket still requires a human or an agent to read prose and edit JSON, which is precisely
+    what this task refuses. Re-price before building; the $14 was sized against the old population.
