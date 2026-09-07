@@ -423,6 +423,9 @@ test("alreadyProposedForSignature: true only for an exact signature match, ignor
 // ── W1-T2697 claim 4 (measurement-cadence.ts side): grep: handRunCensus( in
 // src/lib/measurement-cadence.ts, verified directly rather than re-implemented here ──────────
 
+// @source-text-subject — this test's SUBJECT genuinely is the source text: the task's own
+// acceptance criterion is `grep: handRunCensus( in src/lib/measurement-cadence.ts` (W1-T2905's
+// census would otherwise count this as a behaviour test standing in for a prose read).
 test("measurement-cadence.ts calls handRunCensus( — the wiring grep this task's acceptance names", () => {
   const src = readFileSync(new URL("../src/lib/measurement-cadence.ts", import.meta.url), "utf8");
   assert.match(src, /handRunCensus\(/);

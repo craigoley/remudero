@@ -93,6 +93,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   inbox: producer("inbox", "Inbox"),
   _ledger: producer("_ledger", "Ledger Internals"),
   "coverage-improve": producer("coverage-improve", "Coverage Improvement"),
+  "hand-run-census": producer("hand-run-census", "Hand-Run Census"),
 });
 
 /**

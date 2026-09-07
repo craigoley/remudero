@@ -17716,6 +17716,7 @@ export function handRunsCommand(rest: string[], opts: { stateDir?: string } = {}
       try {
         return join(loadConfig().root, "state");
       } catch {
+        // unreadable config — reported by name just below, never guessed at.
         return undefined;
       }
     })();

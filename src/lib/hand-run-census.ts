@@ -46,6 +46,8 @@ export function parseOperatorLedgerRows(rawLines: readonly string[]): HandRunLed
     try {
       parsed = JSON.parse(raw);
     } catch {
+      // torn or foreign line — never takes the whole read down, same discipline every other
+      // ledger reader in this codebase applies to a possibly-torn line.
       continue;
     }
     if (parsed === null || typeof parsed !== "object") continue;
@@ -231,6 +233,7 @@ export function parseFiledHandRunProposalLines(rawLines: readonly string[]): Fil
     try {
       parsed = JSON.parse(raw);
     } catch {
+      // torn or foreign line — never thrown on, mirroring coverage-improvement.ts's own reader.
       continue;
     }
     if (parsed === null || typeof parsed !== "object") continue;
