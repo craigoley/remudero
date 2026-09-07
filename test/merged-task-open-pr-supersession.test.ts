@@ -41,7 +41,16 @@ function openPr(over: Partial<OpenPrView> = {}): OpenPrView {
 
 /** The winner: W1-T2786, merged by #3874, as the credit rung's projection reports it. */
 const MERGED: CreditCandidate[] = [
-  { taskId: "W1-T2786", prNumber: 3874, prUrl: "https://github.com/craigoley/remudero/pull/3874", merged: true },
+  {
+    taskId: "W1-T2786",
+    prNumber: 3874,
+    prUrl: "https://github.com/craigoley/remudero/pull/3874",
+    merged: true,
+    // W1-T3063: #3874's real subject is `feat(sweep): ...` — an IMPLEMENTATION. This flag is now
+    // required for a close, because a credit earned by a `chore(plan)` filing closed the validated
+    // build in #4461. Without it these rows would (correctly) decline.
+    creditIsImplementation: true,
+  },
 ];
 
 /** END TO END, projection THEN disposition — the composition the sweep now performs. This is what

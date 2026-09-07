@@ -40,8 +40,8 @@ carried had gone stale. Each rule cites the PR that earned it.
   compare-both-sides discipline rather than being covered by it: comparing failure SETS instead of
   counts does not save you when one side is truncated, because the truncated set is a subset either
   way. Require `# tests`/`# pass`/`# fail` on BOTH sides before diffing, and normalise paths first
-  when the sides ran in different trees. *(2026-08-09 — truncated by the session's own `pkill -f`,
-  the self-match rule now in docs/operator-guide.md)*
+  when the sides ran in different trees. With `pkill -f`, excluding your own pid is not enough on a
+  shared host; discriminate by `/proc/<pid>/cwd`, not argv shape. *(2026-08-09)*
 
 ## Writing proofs and acceptance criteria
 
@@ -80,13 +80,13 @@ carried had gone stale. Each rule cites the PR that earned it.
   is prose and never executes."* It does not fail loudly; it silently contributes nothing and the
   verdict lands CAPPED at `proof_exec: 0/N`, which will not arm auto-merge. #1194 posted 0/3 that
   way, and **#1189 MERGED at 2/4** — only its two `grep:` proofs ever ran, and nothing said so.
-  Write `unit test: <exact-title substring>`: the prefix is required, and what follows it must be a
-  bare title, NOT the `test/foo.test.ts::title` form — that lint-passes but feeds the whole string
-  to `--test-name-pattern`. In a **plan shard** use ONLY the pure-path form
-  `unit test: test/foo.test.ts`: `judgeCriterion`'s `not_yet_built` carve-out needs `!nameFiltered`
-  AND that path in the shard's `files:` (`shardDeclaredFilesInDiff`), so a TITLE silently grades
-  `no-match` = TEST THEATRE. A plan-only PR hides it (W1-T205 runs 0 of N): it bites a filing
-  declaring a `src/` file. `rmd check-proof '<proof>'` — the second of the two verbs the bullet
+  Write `unit test: <exact-title substring>`: the prefix is required; `test/foo.test.ts::title`
+  feeds the whole string to `--test-name-pattern`. In a **plan shard** use ONLY the pure-path form
+  `unit test: test/foo.test.ts`: `judgeCriterion`'s `not_yet_built` carve-out has four conditions not two
+  (`kind === "test"`, `!nameFiltered`, path in flow-style single-line `files: [...]`, and the file
+  does NOT exist). The `existsSync` case is the silent bite: an existing test file runs, passes at
+  head and base, then grades stale. On a plan-only head, only unit test reaches forward; `grep:` can
+  prove only code already at that head or the shard text itself. `rmd check-proof '<proof>'` — the second of the two verbs the bullet
   above requires — is the reviewer's own parser AND executor (W1-T387: it judges the run through
   `execWhitelistedProof` itself, not a second hand-rolled exit-code check). Read its `verdict:`
   line, never the raw `exit:` — that same zero-match case exits 0 with `hits: 17` (MEASURED) while
@@ -190,8 +190,7 @@ carried had gone stale. Each rule cites the PR that earned it.
   `Remudero-Task:` lines** (`grep -acE '^Remudero-Task:'` on its body = 0) and W1-T444 is credited
   anyway, purely by its `run-W1-T444-1786560477` head. So union the two, or you will re-dispatch a
   task that shipped.
-- **THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.** They answer
-  DIFFERENT questions and neither substitutes for the other:
+- **THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.** a minted id is not evidence the work is unclaimed; these answer different questions:
   `git ls-remote --heads origin 'run-<id>-*'`   # is someone working on it RIGHT NOW
   `gh api "repos/<owner>/<repo>/pulls?state=closed&per_page=100" --jq '[.[]|select(.merged_at!=null)|select(.body//""|test("(?m)^Remudero-Task:[ \t]*<id>[ \t]*$"))|.number]'`   # has it ALREADY SHIPPED
   Anchor the trailer test exactly (`^Remudero-Task:\s*<id>\s*$`, multiline) — GitHub's search is NOT
@@ -278,13 +277,12 @@ carried had gone stale. Each rule cites the PR that earned it.
   operator out for ~90 minutes while single calls 403'd at 204 of 5000 used — the ceiling hit was
   the SECONDARY limit, counting RATE, NOT VOLUME. An hourly re-check keeps a watched PR watched;
   minutes apart is a poll. *(2026-08-20 lockout; "never arm a check-in" corrected 2026-09-06)*
-- **`gh pr create` is GraphQL and dies with "API rate limit already exceeded" when that budget is
-  spent** (frequent on this account while REST/core stays healthy). Open PRs via REST:
+- **`gh pr create` may die on API quota; git push is unaffected.** Open PRs via REST:
   `gh api --method POST repos/<owner>/<repo>/pulls -f title=… -f head=… -f base=main -F body=@<file>`.
-  Never read that budget from `gh api rate_limit` **on this host** — three calls in one second read
-  10383, 0, 10383 (2026-08-26). Use `gh api user -i`; match login AND reset at both ends.
-  `rmd review` and `gh pr view --json` are ALSO GraphQL, so a hand-opened PR can't be reviewed until
-  GraphQL resets. *(#766)*
+  The exhausted budget measured here was REST/core, and a budget read did not predict the next call:
+  one PR POST succeeded at remaining 0 and the next GET 403'd. attempt and handle one refusal; do
+  not poll or gate work on a budget reading. `rmd review` and `gh pr view --json` still need
+  GraphQL. *(#766; corrected 2026-09-07)*
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.** *(#1399 — a full CI cycle
   spent waiting on checks that were never going to start)*
@@ -480,14 +478,11 @@ carried had gone stale. Each rule cites the PR that earned it.
   added one seamed policy read and reddened `test/config-reader-seams.test.ts`, a file outside its
   `files:` that references nothing it touched. Also run any suite that enumerates a population your
   file joins, found by what it walks rather than by name. *(#2639, #2605)*
-- **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE VACUOUS ZEROS — including the
-  one you would report as real.** `postMergeAmendmentViolations` (`src/lib/review.ts`) returns `[]`
-  on its first two lines at `!ctx.statusResolvable` and `!ctx.merged`, so the real row, the vacuity
-  row and the trap row all read 0 FOR THE SAME REASON and the table looks correct. Pass
-  `statusResolvable: true`, `merged: true` and `baseAcceptance`. THE BLOCKING CONTROL — a row you
-  have deliberately made violate — IS THE ONLY THING SEPARATING A REAL ZERO FROM A DEAD CALL, and
-  it must run in the SAME call shape as the rows you report. *(#3211 — three zeros reported, then
-  withdrawn when the blocking control read 0 too)*
+- **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.**
+  `postMergeAmendmentViolations` (`src/lib/review.ts`) returns `[]` at `!ctx.statusResolvable`, at
+  `!ctx.merged`, and when the rule truly does not apply: a dead call and a real zero have the same
+  return value. Pass `statusResolvable: true`, `merged: true` and `baseAcceptance`; only a
+  deliberately violating row in the same call shape separates a real zero from a dead call. *(#3211)*
 
 ## Code traps
 

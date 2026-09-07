@@ -248,23 +248,64 @@
 - id: no-rewriting-proofs-on-verify-human
   subsystem: proofs
   lifecycle: active
-  files: [ src/lib/drain.ts ]
+  files: [ src/lib/drain.ts, src/lib/task-linter.ts, src/lib/review.ts ]
   fact: >-
     Do not rewrite proofs on `verify: human` tasks. `isDispatchEligible`
     (`src/lib/drain.ts`) returns false at `t.verify !== "auto"` before the
-    linter is consulted, so their dialect debt can never stall the queue.
+    linter is consulted, so they do not dispatch; the linter still blocks
+    invalid dialects because `proofDialectViolations` defaults to block in CI.
+    Use the existing `demonstration:` dialect for live/operator proof text:
+    `isDemonstrationProof` permits it only on `verify: human` and blocks it on
+    `verify: auto`.
     Forcing chaos drills, device recordings and live deploys into `unit test:`
     yields proofs that parse, match zero tests, and cap the review — the exact
-    theatre the dialect gate exists to stop. Report them as needing a proof kind
-    the dialect lacks. And before treating a `verify: human` shard's questions
-    as live, check whether a `verify: auto` sibling already merged their
-    substance — measured twice in two days, the queue held open operator
-    questions whose answers had shipped under a different id. The check: grep
+    theatre the dialect gate exists to stop. Before treating a `verify: human`
+    shard's questions as live, check whether a `verify: auto` sibling already
+    merged their substance — measured twice in two days. The check: grep
     the shard's load-bearing symbols across merged trailers/subjects before
     escalating its questions.
   src: '#984; siblings 2026-08-13/14; migrated from CLAUDE.md''s Writing-proofs
     section, W1-T2507'
   cited: "2026-08-31"
+- id: proof-weaker-than-claim
+  subsystem: proofs
+  lifecycle: active
+  files: [ src/lib/review.ts ]
+  fact: >-
+    A proof can execute and still be weaker than its claim. `no-match` and
+    `executed_stale` announce themselves, but this failure reports PASS with
+    `proof_exec N/N`; the check is observability: could the proof output differ
+    between a world where the claim holds and one where it does not? A `grep:`
+    proof naming only a symbol the diff introduces proves that symbol exists
+    and cannot by itself prove runtime behavior.
+  src: '#3887; W1-T2805'
+  cited: "2026-09-07"
+- id: a-roster-error-needs-a-second-derivation
+  subsystem: proofs
+  lifecycle: active
+  files: [ plan/tasks.yaml, plan/tasks.d ]
+  fact: >-
+    A hand-derived roster has no visible error signal unless a second
+    independent derivation checks it. Two censuses of the same wall-clock test
+    class on the same tree intersected in one file of seven because they keyed
+    on different spellings. This is the affirmative half of W1-T2790's ratified
+    ordering: self-declaring at the seam beats a roster because a declaration
+    has no such authoring degree of freedom.
+  src: 'W1-T2790; W1-T2805'
+  cited: "2026-09-07"
+- id: a-rigged-probe-measures-nothing
+  subsystem: proofs
+  lifecycle: active
+  files: [ src/lib/worker.ts, src/lib/containment.ts ]
+  fact: >-
+    A probe whose setup guarantees the outcome it tests for measures nothing.
+    This is the inverse of the positive-control discipline: positive controls
+    guard false negatives, while rigged setup creates false positives that look
+    confirmed. Before trusting a probe, name the outcome its setup makes
+    impossible; if there is one, use the invocation under test instead of one
+    chosen because it makes the effect appear.
+  src: 'W1-T2800 near-miss; W1-T2805'
+  cited: "2026-09-07"
 - id: operator-message-standard-is-tested-verbatim
   subsystem: docs
   lifecycle: active
