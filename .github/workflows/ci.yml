@@ -209,10 +209,8 @@ jobs:
           echo "- W1-T2428 fast-lane: class=${CLASS} — ran **${COUNT} of ${TOTAL}** suites (the plan/docs-reading set), skipped the remainder" >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "$SUITES" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
           # THE SAME HARNESS IMPORTS `npm run test:ci` CARRIES — `--import tsx` and
-          # `--import ./test/setup/tmp-hygiene.ts`. W1-T1217 records that omitting the second
-          # is a real divergence rather than a saving, and W1-T1250's parity check refuses any
-          # node-test-runner invocation in a workflow that lacks it. The fast lane changes
-          # WHICH suites run, never the harness they run under.
+          # `--import ./test/setup/tmp-hygiene.ts`. The fast lane changes WHICH suites run,
+          # never the harness they run under.
           node --test --import tsx --import ./test/setup/tmp-hygiene.ts $SUITES
 
   ci-required:
@@ -226,11 +224,27 @@ jobs:
         env:
           SHARD_RESULT: ${{ needs.ci.result }}
         run: |
-          if [ "$SHARD_RESULT" != "success" ]; then
-            echo "ci: one or more test shards did not succeed (matrix result: ${SHARD_RESULT})."
-            exit 1
-          fi
-          echo "ci: all four test shards succeeded."
+          case "$SHARD_RESULT" in
+            success)
+            echo "ci: all four test shards succeeded."
+              ;;
+            failure)
+              echo "ci: a test shard FAILED (matrix result: failure) — open the shard log; this is a real break until that log says otherwise."
+              exit 1
+              ;;
+            cancelled)
+              echo "ci: the shard matrix was CANCELLED (matrix result: cancelled) — usually a newer push superseded this head, so this is not by itself evidence of a test failure, and the current head's own run is the authoritative one. Still red on purpose: a cancelled matrix proves nothing about the tree. Open the shard log — a head sha tells you whether a failure is CURRENT, never whether it is REAL."
+              exit 1
+              ;;
+            skipped)
+              echo "ci: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it."
+              exit 1
+              ;;
+            *)
+              echo "ci: unrecognised matrix result '${SHARD_RESULT}' — refusing. A required check must never pass a state it does not understand."
+              exit 1
+              ;;
+          esac
 
   commitlint:
     # W1-T31 (MASTER-PLAN §6A), relocated by W1-T129 — the Conventional Commits gate. This repo
@@ -491,10 +505,27 @@ jobs:
         env:
           SHARD_RESULT: ${{ needs.coverage-ratchet.result }}
         run: |
-          if [ "$SHARD_RESULT" != "success" ]; then
-            echo "coverage-ratchet: one or more coverage shards did not succeed (matrix result: ${SHARD_RESULT})."
-            exit 1
-          fi
+          case "$SHARD_RESULT" in
+            success)
+            :
+              ;;
+            failure)
+              echo "coverage-ratchet: a coverage shard FAILED (matrix result: failure) — open the shard log; this is a real break until that log says otherwise."
+              exit 1
+              ;;
+            cancelled)
+              echo "coverage-ratchet: the shard matrix was CANCELLED (matrix result: cancelled) — usually a newer push superseded this head, so this is not by itself evidence of a test failure, and the current head's own run is the authoritative one. Still red on purpose: a cancelled matrix proves nothing about the tree. Open the shard log — a head sha tells you whether a failure is CURRENT, never whether it is REAL."
+              exit 1
+              ;;
+            skipped)
+              echo "coverage-ratchet: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it."
+              exit 1
+              ;;
+            *)
+              echo "coverage-ratchet: unrecognised matrix result '${SHARD_RESULT}' — refusing. A required check must never pass a state it does not understand."
+              exit 1
+              ;;
+          esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0

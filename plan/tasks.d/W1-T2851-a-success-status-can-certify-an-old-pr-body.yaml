@@ -13,7 +13,8 @@
     - test/review-input-changed-success.test.ts
   origin: "incident#3979-success-status-survives-body-repair-2026-09-04"
   plan_refs: ["W1-T225", "W1-T1018", "W1-T2299", "W1-T2793"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     OBSERVED ON PR #3979 AT HEAD 0ca3941 ON 2026-09-04. The daemon first posted a failure for
@@ -72,6 +73,24 @@
     the live ledger refute both: only the failure row admits changed input, and the newest #3979
     judgment is the older v1:5911... capped result.
   note: |
+
+    RETIRED 2026-09-07 ON OPERATOR DIRECTION, BY ITS OWN FALSIFIER. The falsifier reads: "Close
+    without implementation if the current sweep routes a SUCCESS status with a prior same-head,
+    different body digest and zero current-input attempts to post-review". IT DOES (OBSERVED,
+    src/lib/sweep.ts): DISPOSITION_RULES carries that row STRICTLY BEFORE the mergeable row —
+
+        disposition: "post-review",
+        when: (pr) =>
+          pr.checksState === "green" &&
+          pr.requiredContextsUnreadable !== true &&
+          pr.reviewState === "success" &&
+          pr.reviewInputDigest !== undefined &&
+          pr.priorReviewAttemptsForInput === 0 &&
+          pr.reviewPostRefused !== true,
+
+    This was recorded in a note during an earlier pass and NOT acted on, because retiring is an
+    operator act; the operator has now directed it. Closed-without-implementation is this shard's
+    own prescription for this reading, not a judgement that the #3979 incident was unreal.
     ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved W1-T2851 at
     `refs/rmd-id/W1-T2851` after observing W1-T2850 as the maximum across the plan, open PRs and
     history.
