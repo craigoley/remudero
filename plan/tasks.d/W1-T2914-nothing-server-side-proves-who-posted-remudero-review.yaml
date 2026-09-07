@@ -46,3 +46,67 @@
       proof: "grep: ruleset in docs/review-gate.md"
     - claim: "the operator guide carries the apply-and-verify steps, including the forged-status control"
       proof: "grep: github-ruleset-main in docs/operator-guide.md"
+  note: |
+    2026-09-07, SCHEDULED BUILD PASS. THE PREMISES ALL STILL HOLD; THE REMEDY AS SPECIFIED DOES
+    NOT SEPARATE THE TWO IDENTITIES IT NAMES. Recorded rather than built, because building it
+    would ship a control that reads as a boundary and is not one — the same failure this shard's
+    own title complains about in deny-floor rule 4.
+
+    PREMISES RE-MEASURED AT origin/main 0bab5f548, ALL FOUR CONFIRMED (OBSERVED):
+      - `src/lib/env.ts:29` — ALLOWLIST still contains `CLAUDE_CODE_OAUTH_TOKEN` and `GH_TOKEN`,
+        and its own doc calls them "ambient container identity — the only credentials a
+        container-based worker can hold".
+      - `settings/worker.json:47` — `"excludedCommands": ["gh *"]`, so `gh` still runs outside
+        the sandbox.
+      - `hooks/deny-floor.sh` rule 4 — still a `grep -Eq` over the command string, matching only
+        `gh api` + `(-X|--method) POST` + `repos/…/statuses`. Its own header still calls it a
+        tripwire, not a boundary.
+      - `docs/review-gate.md:3` — `remudero-review` is still a REQUIRED status check on `main`.
+        Confirmed server-side: branch protection's `required_status_checks.contexts` reads
+        exactly `["remudero-review","ci-gate"]`.
+    MECHANISM CONFIRMED ABSENT (OBSERVED): `deploy/github-ruleset-main.json` does not exist; the
+    string `integration_id` appears in no tracked file; no `docs/` file mentions a ruleset; and
+    `GET /repos/craigoley/remudero/rulesets` returns an EMPTY list, so there is no ruleset
+    server-side either. No other shard title names ruleset provenance (positive control: 96 shard
+    titles match "branch").
+
+    WHAT REFUTES THE REMEDY (OBSERVED, three independent facts):
+      1. `remudero-review` is ALREADY posted by a GitHub App, not a user. The status creator on
+         merged commits b46cdde9f and 7559bef82 is `remudero-fleet[bot]`, type `Bot`, id
+         318611788. So the "posted by a user token" case the acceptance criteria describe is not
+         today's forge path.
+      2. `src/lib/github-app.ts:289` writes the minted INSTALLATION token to
+         `process.env.GH_TOKEN` — that line's own comment says "every consumer reads process.env
+         at call/spawn time, so this line reaches all three".
+      3. `src/lib/env.ts:29` copies `GH_TOKEN` into every spawned worker's environment, and
+         `github-app.ts:12` records the consequence explicitly: "a worker's copy of `GH_TOKEN` is
+         fixed at spawn".
+    THEREFORE (INFERRED, but only one step from the three above): the reviewer and the worker
+    authenticate as the SAME GitHub App installation. A `required_status_checks` entry carrying
+    `integration_id: 318611788` is satisfied by the worker's own token, because that token IS
+    that app's token. The rationale's claim — "one the worker token cannot assume" — does not
+    hold on the current credential layout, and a ruleset built to it would block a human PAT
+    while leaving the prompt-injected-worker path this shard was filed about wide open.
+
+    WHAT WOULD ACTUALLY BIND IT — THREE ROUTES, NOT PICKED HERE, BECAUSE PICKING IS THE OPERATOR'S
+    (this shard is already `verify: human` for exactly that reason):
+      (a) Give the REVIEWER a credential no worker holds — a second GitHub App used only for
+          posting the status, or posting it from a host/CI process whose token never enters the
+          worker env. Then `integration_id` separates them and the ruleset does what it says.
+      (b) Take `GH_TOKEN` off the worker allowlist and thread scoped credentials per call.
+          `env.ts`'s own doc argues against this: "a missed opt-in call site would silently
+          produce an unauthenticated worker". That objection is about reliability, not security,
+          so it is a trade the operator should make knowingly rather than a settled question.
+      (c) Ship the ruleset anyway, but describe it accurately — it raises the floor against a
+          user PAT and does NOT address a worker holding the fleet app's token. Cheapest, and the
+          only one of the three that is honest about what it buys.
+    ROUTE (a) IS THE ONLY ONE THAT CLOSES THE NAMED THREAT. (c) is worth doing on its own terms
+    but must not be recorded as closing this shard.
+
+    WHAT IS NOT CLAIMED HERE. No forge was attempted, and no bypass of deny-floor rule 4 was
+    constructed or tested — the refutation above rests entirely on credential topology (who holds
+    which token), not on demonstrating an exploit. Whether rule 4's regex is evadable in practice
+    is untested and deliberately left so. The relationship to W1-T990 is also only partly
+    resolved: an App identity now demonstrably exists and posts the status, so that half of this
+    shard's dependency has shipped; whether W1-T990 intended ONE fleet app or a distinct reviewer
+    app is not settled by anything read here, and route (a) turns on exactly that.
