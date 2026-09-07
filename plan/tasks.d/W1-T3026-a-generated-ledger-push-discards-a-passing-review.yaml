@@ -10,7 +10,8 @@
   files: [test/a-generated-ledger-push-does-not-discard-a-review.test.ts]
   origin: "operator-session#why-are-reviews-slow-2026-09-07"
   plan_refs: ["W1-T230", "W1-T2851", "W1-T3022"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     MEASURED 2026-09-07 from `review.posted` rows: PR #4193 was reviewed NINE times, #4236 six,
@@ -97,6 +98,11 @@
     extraordinary (binomial p is around 0.06) — so the MEAN is suggestive rather than conclusive.
     The load-bearing observation is the MAX: every earlier cohort had a PR reviewed at least four
     times and this one has none above two. One more full day would settle it.
+
+    RETIRED 2026-09-07 ON OPERATOR DIRECTION, acting on the recommendation below. The mechanism is
+    NOT refuted: a verdict still binds to a head sha, so a generated-ledger push still discards a
+    passing review. What collapsed is how OFTEN, which is what this shard itself said to measure. If
+    the counts rebound, refile under a fresh id against the new number rather than un-retiring.
 
     RECOMMENDATION: re-price toward closure rather than build. The three designs (a)/(b)/(c) all
     trade review freshness against a throughput problem whose measured size has fallen by roughly an
