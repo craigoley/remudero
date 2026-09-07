@@ -20497,6 +20497,123 @@ export function creditedProofVisibility(
  * resolver): ~207ms per name-filtered proof — acceptable for an operator running this by hand,
  * which is the only place it is wired; nothing in the daemon/CI/arm path calls it.
  */
+/** Injectable seams for {@link planReconcileCommand} — every one has a real default, so the CLI
+ *  path stays argument-free while a test drives the whole verb without a repo, a plan or GitHub. */
+export interface PlanReconcileDeps {
+  /** Every shard on disk, as `{ taskId, path, text }`. */
+  readShards?: () => Array<{ taskId: string; path: string; text: string }>;
+  writeShard?: (path: string, text: string) => void;
+  /** The task ids the CREDIT PROJECTION reports merged. The real default reuses
+   *  `buildCreditCandidates` — the SAME projection the sweep's credit rung already trusts, never a
+   *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
+  creditedMergedIds?: () => Set<string>;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/** Read `plan/tasks.d/*.yaml` as `{ taskId, path, text }`, skipping anything without an `- id:`. */
+function readPlanShards(dir: string): Array<{ taskId: string; path: string; text: string }> {
+  const out: Array<{ taskId: string; path: string; text: string }> = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".yaml")) continue;
+    const path = join(dir, name);
+    const text = readFileSync(path, "utf8");
+    const id = text.match(/^- id: (\S+)/m)?.[1];
+    if (id) out.push({ taskId: id, path, text });
+  }
+  return out;
+}
+
+/**
+ * `rmd plan-reconcile [--plan <path>] [--write]` — flip `status: queued` to `merged` on every shard
+ * the credit projection reports merged. THE CONTROL-PLANE WRITE lib/plan.ts's own header says
+ * belongs here: that loader is "read-only — the control plane flips `status`", and until this verb
+ * nothing performed the flip. MEASURED at filing: 253 of 254 credited-merged shards still read
+ * `queued`.
+ *
+ * ⚠ DRY RUN BY DEFAULT. It prints what it would change and touches nothing without `--write`, and
+ * the two share ONE decision path ({@link reconcilePlan} is pure and returns the writes), so a
+ * preview cannot disagree with the apply.
+ *
+ * ⚠ IT DOES NOT COMMIT. The operator lands the result as one reviewable plan-only PR. A poll loop
+ * that rewrote plan files would leave uncommitted state in the canonical checkout or churn 253
+ * files (W1-T3043 design ii), which is why this is a verb and not a sweep rung.
+ *
+ * ⚠ AN UNREADABLE PROJECTION ABORTS, IT DOES NOT PROCEED. Treating a failed credit read as "nothing
+ * merged" would be silently correct here (the reconciler declines on a false credit), but it would
+ * report "0 to reconcile" as if it were a finding. Exit non-zero and say so instead.
+ */
+export async function planReconcileCommand(rest: string[], deps: PlanReconcileDeps = {}): Promise<number> {
+  const badArg = unknownArgError("plan-reconcile", rest, ["--plan"], ["--write"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const write = rest.includes("--write");
+  const shardDirArg = flagValue(rest, "--plan");
+  const shardDir = shardDirArg !== undefined ? resolve(shardDirArg) : join(repoRoot, "plan", "tasks.d");
+
+  let shards: Array<{ taskId: string; path: string; text: string }>;
+  try {
+    shards = (deps.readShards ?? (() => readPlanShards(shardDir)))();
+  } catch (e) {
+    console.error(`### rmd plan-reconcile: cannot read shards from ${shardDir}: ${String((e as Error)?.message ?? e)}`);
+    return 2;
+  }
+
+  let credited: Set<string>;
+  try {
+    credited = (deps.creditedMergedIds ?? (() => defaultCreditedMergedIds()))();
+  } catch (e) {
+    console.error(
+      `### rmd plan-reconcile: the credit projection is unreadable (${String((e as Error)?.message ?? e)}) — ` +
+        "refusing to report a reconcile count derived from a failed read",
+    );
+    return 1;
+  }
+
+  const { summary, writes } = reconcilePlan(shards, (id) => credited.has(id));
+  if (write) {
+    const byId = new Map(shards.map((sh) => [sh.taskId, sh.path]));
+    const put = deps.writeShard ?? ((p: string, t: string) => writeFileSync(p, t));
+    for (const w of writes) {
+      const path = byId.get(w.taskId);
+      if (path) put(path, w.text);
+    }
+  }
+  (deps.log ?? (() => {}))("plan.reconcile", {
+    mode: write ? "write" : "dry-run",
+    rewritten: summary.rewritten.length,
+    skipped: summary.skipped,
+  });
+  console.log(renderPlanReconcile(summary, write));
+  return 0;
+}
+
+/** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses. */
+function defaultCreditedMergedIds(): Set<string> {
+  const config = loadConfig();
+  const ledgerPath = ledgerPathFor(config);
+  const self = resolveOwnerRepo();
+  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  return new Set(
+    buildCreditCandidates(self.owner, self.repo, plan, ledgerPath).filter((c) => c.merged).map((c) => c.taskId),
+  );
+}
+
+/** The operator-facing summary. Names the mode FIRST, so a dry run can never be misread as applied. */
+export function renderPlanReconcile(summary: ReconcileSummary, write: boolean): string {
+  const skipped = Object.entries(summary.skipped)
+    .filter(([, n]) => n > 0)
+    .map(([k, n]) => `${k}=${n}`)
+    .join(" · ");
+  return (
+    `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
+    `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
+    (skipped ? `\nskipped: ${skipped}` : "") +
+    (summary.rewritten.length > 0 && !write ? "\nre-run with --write to apply, then land the diff as one plan-only PR" : "")
+  );
+}
+
 export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAuditDeps = {}): Promise<number> {
   const badArg = unknownArgError("proof-queue-audit", rest, ["--plan"], ["--credited"]);
   if (badArg) {
@@ -39102,6 +39219,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "§5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing",
   },
   {
+    name: "plan-reconcile",
+    syntax: "rmd plan-reconcile [--plan <path>] [--write]",
+    summary: "Flip status: queued to merged on shards the credit projection reports merged.",
+    detail: "W1-T3043: the control-plane write lib/plan.ts's header says belongs here — that loader is read-only and 'the control plane flips status', and until this verb nothing performed the flip, so 253 of 254 credited-merged shards still read queued. ONE-WAY (queued -> merged, never the reverse: a symmetric reconcile during a GitHub outage would reopen the whole plan) and DRY RUN by default; --write applies, and the two share one pure decision path so a preview cannot disagree with the apply. Reuses buildCreditCandidates, the same projection the sweep's credit rung trusts. A retirement is never overwritten, a negative/absent/throwing credit leaves the shard byte-identical, and only the status field moves. IT DOES NOT COMMIT: the operator lands the result as one plan-only PR.",
+  },
+  {
     name: "proof-queue-audit",
     syntax: "rmd proof-queue-audit [--plan <path>]",
     summary: "Report every open task's acceptance proof that can never resolve, split by cause.",
@@ -39562,6 +39685,7 @@ function commandSyntax(name: string): string {
 // (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
+import { reconcilePlan, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 export { hashInstallInputs, installHashMarkerPath };
 
@@ -40096,6 +40220,10 @@ export async function main(
     process.exit(await lintPlanCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await proofQueueAuditCommand(rest)) cannot carry a DA hit without forking the process; proofQueueAuditCommand's own logic — arg validation, the open+unmerged population derivation, and the report render — is unit-tested in test/proof-queue-audit.test.ts (same irreducible-glue shape as the sibling lint-plan/emissions dispatch cases).
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await planReconcileCommand(rest)) cannot carry a DA hit without forking the process; planReconcileCommand's own logic is unit-tested in test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts (same irreducible-glue shape as the sibling proof-queue-audit dispatch case below).
+  if (cmd === "plan-reconcile") {
+    process.exit(await planReconcileCommand(rest));
+  }
   if (cmd === "proof-queue-audit") {
     process.exit(await proofQueueAuditCommand(rest));
   }

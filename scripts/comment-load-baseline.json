@@ -208,6 +208,7 @@
   "src/lib/plan-coherence.ts": 70,
   "src/lib/plan-index.ts": 29,
   "src/lib/plan-pr-emitter.ts": 250,
+  "src/lib/plan-reconcile.ts": 250,
   "src/lib/plan.ts": 196,
   "src/lib/policy.ts": 250,
   "src/lib/producer-completeness.ts": 242,

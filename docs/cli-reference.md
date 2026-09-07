@@ -20,6 +20,7 @@ usage:
   rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text>   # Engage or release an attributable, durable PR or fleet auto-merge hold.
   rmd dep-review <pr-number> [--repo <name>]   # Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
   rmd lint-plan [--plan <path>] [--base <git-ref>]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
+  rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
   rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
   rmd next-task-id [--plan <path>] [--offline] [--reserve]   # Print (or --reserve atomically claim) the next free W1-T<n> task id.
@@ -149,6 +150,16 @@ rmd lint-plan [--plan <path>] [--base <git-ref>]
 ```
 
 §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing
+
+### `rmd plan-reconcile`
+
+Flip status: queued to merged on shards the credit projection reports merged.
+
+```
+rmd plan-reconcile [--plan <path>] [--write]
+```
+
+W1-T3043: the control-plane write lib/plan.ts's header says belongs here — that loader is read-only and 'the control plane flips status', and until this verb nothing performed the flip, so 253 of 254 credited-merged shards still read queued. ONE-WAY (queued -> merged, never the reverse: a symmetric reconcile during a GitHub outage would reopen the whole plan) and DRY RUN by default; --write applies, and the two share one pure decision path so a preview cannot disagree with the apply. Reuses buildCreditCandidates, the same projection the sweep's credit rung trusts. A retirement is never overwritten, a negative/absent/throwing credit leaves the shard byte-identical, and only the status field moves. IT DOES NOT COMMIT: the operator lands the result as one plan-only PR.
 
 ### `rmd proof-queue-audit`
 
