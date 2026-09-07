@@ -1445,10 +1445,10 @@ export function taskIdFromRunBranch(head: string | undefined): string | undefine
   // for re-dispatch.
   //
   // MEASURED 2026-09-07 over 255 merged pull requests: 100 run-shaped heads, 92 extracting a valid
-  // id and 8 a phantom — five from a `-file-`/`-build-` pairing used that day, three from TRIAGE
-  // feedback branches that name no task at all. Returning `undefined` costs those eight nothing:
-  // they never credited a real task, so no credit is lost, and a caller can now SAY the branch
-  // names no task instead of acting on an id nobody minted.
+  // id and 8 a phantom — five from a `-file-`/`-build-` pairing used that day. Returning `undefined`
+  // costs those five nothing: they never credited a real task, so no credit is lost, and a caller
+  // can now SAY the branch names no task instead of acting on an id nobody minted. (The other three
+  // of the 8, TRIAGE feedback branches, were never phantom in the first place — see `namesATask`.)
   return namesATask(m[1]) ? m[1] : undefined;
 }
 
@@ -1459,12 +1459,15 @@ export function taskIdFromRunBranch(head: string | undefined): string | undefine
  * currently mints — rejected the synthetic ids this repo's own fixtures use (`A`, `D`) and broke
  * four suites, including the in-flight guard that stops a second dispatch onto a pushed branch.
  * That failure was the useful one: it says the rule must be about the SHAPE OF THE SUFFIX, not
- * about which workstream letters are in fashion.
+ * about which workstream letters are in fashion. A second attempt — requiring a hyphen-free-or-
+ * canonical shape — was ALSO wrong: it rejected `TRIAGE-fb-<id>-<hex>`, a real id the auto-triage
+ * lane mints for its own runs, and broke that lane's in-flight guard too.
  *
- * So: a capture with NO hyphen cannot be carrying a suffix and is taken as given, which keeps every
- * synthetic and future id working. A capture WITH hyphens must be a whole task id — `W1-T3030`, `W1-T12a` and
- * `SBX-T4` are; `W1-T3030-build` and `TRIAGE-fb-repair-conflicted-2957` are not, and neither names
- * a task anything ever minted.
+ * So a capture with NO hyphen cannot be carrying a suffix and is taken as given, which keeps every
+ * synthetic and future id working. A capture WITH hyphens is tested for a STAPLED-ON suffix, not for
+ * looking canonical: `W1-T3030-build` strips to `W1-T3030`, which IS a whole task id, so the capture
+ * names no task; `TRIAGE-fb-1785792135748-755f93` strips to `TRIAGE-fb-1785792135748`, which is NOT,
+ * so the capture is taken as the id itself.
  */
 function namesATask(capture: string): boolean {
   // THE TEST IS "IS THIS AN ID WITH SOMETHING STAPLED ON", NOT "DOES THIS LOOK LIKE AN ID", and
