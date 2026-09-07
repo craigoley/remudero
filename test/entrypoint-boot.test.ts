@@ -105,6 +105,30 @@ function writeNpmStub(dir: string, rec: string): void {
 }
 
 /**
+ * W1-T2994 — THE AMBIENT ENVIRONMENT MINUS THE CONTROLS THIS SCRIPT OBEYS.
+ *
+ * These fixtures spawn the REAL `deploy/entrypoint.sh`, and that script branches on `RMD_*`
+ * variables. Inheriting `process.env` wholesale hands it whatever the SURROUNDING process was
+ * configured with — and that is not always a developer shell. The daemon's own retro runs the full
+ * suite INSIDE the daemon container, where `RMD_RESTART_THROTTLE_S=120` is set.
+ *
+ * With it set the script takes its supervised branch — `if [ "$RESTART_THROTTLE_S" -eq 0 ]; then
+ * exec "$@"; fi` falls through to `while :; do` — and NEVER RETURNS. `spawnSync` blocks forever and
+ * the suite is cancelled at the runner's timeout, which the retro's prepublish validation then
+ * reports as failing tests. MEASURED: the marker sat frozen at 2026-09-03T02:24:39 for three days,
+ * with 44 `retro.start` rows and ZERO `pr.opened` on 2026-09-06 and the trigger re-firing 60 times
+ * a day. It passes on a developer machine and in CI because neither sets the variable — the one
+ * corpus that could observe this failure was the one nobody ran the suite in.
+ *
+ * Scrubbing the whole `RMD_` prefix rather than that single name is deliberate: every one of them is
+ * a control this script or its children read, so a fixture inheriting any of them measures the
+ * host's configuration instead of its own. Each test still sets what it needs explicitly.
+ */
+function ambientWithoutRmdControls(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("RMD_")));
+}
+
+/**
  * Boot the real entrypoint against `home`, which persists across calls so a SECOND boot sees the
  * tree the first one left. That persistence is the whole point: three of the four defects only
  * appear on boot 2.
@@ -123,7 +147,7 @@ function boot(
     // spawnSync cannot chdir into it.
     cwd: opts.cwd ?? REPO_ROOT,
     env: {
-      ...process.env,
+      ...ambientWithoutRmdControls(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: home,
       RMD_REPO_URL: origin,
@@ -502,7 +526,7 @@ function bootTimed(
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
-      ...process.env,
+      ...ambientWithoutRmdControls(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: home,
       RMD_REPO_URL: origin,
@@ -601,7 +625,7 @@ function bootSeq(
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
-      ...process.env,
+      ...ambientWithoutRmdControls(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: home,
       RMD_REPO_URL: origin,
@@ -688,7 +712,7 @@ test("W1-T490: a freshness restart RE-RUNS the fetch/checkout, so the staleness 
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
-      ...process.env,
+      ...ambientWithoutRmdControls(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: home,
       RMD_REPO_URL: origin,
@@ -815,7 +839,7 @@ function bootSeqTimed(
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
-      ...process.env,
+      ...ambientWithoutRmdControls(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: home,
       RMD_REPO_URL: origin,
@@ -947,7 +971,7 @@ function bootSleepArgs(env: Record<string, string>, exitCode: number): { args: s
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
-      ...process.env,
+      ...ambientWithoutRmdControls(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: freshHome(),
       RMD_REPO_URL: makeOrigin(),
@@ -1181,4 +1205,51 @@ test("MUTANT (defect 4): skipping before the identity is written leaves the reco
   });
   assert.notEqual(run.status, 0, "the mutant must fail to commit — that is the defect being locked out");
   assert.match(`${run.stderr}${run.stdout}`, /identity unknown|empty ident|Please tell me who you are/i);
+});
+
+// ── W1-T2994: the fixture must control the environment it boots the real script in ──────────────
+
+test("W1-T2994: the entrypoint fixture does not inherit ambient RMD_ controls", () => {
+  const prior = process.env.RMD_RESTART_THROTTLE_S;
+  process.env.RMD_RESTART_THROTTLE_S = "120";
+  try {
+    const scrubbed = ambientWithoutRmdControls();
+    assert.equal(
+      scrubbed.RMD_RESTART_THROTTLE_S,
+      undefined,
+      "an RMD_ control set around the test process must not reach the script under test — that is " +
+        "the fixture measuring its host's configuration instead of its own",
+    );
+    assert.equal(
+      Object.keys(scrubbed).some((k) => k.startsWith("RMD_")),
+      false,
+      "the whole prefix goes, not one name: every RMD_ variable is a control this script or its children read",
+    );
+  } finally {
+    if (prior === undefined) delete process.env.RMD_RESTART_THROTTLE_S;
+    else process.env.RMD_RESTART_THROTTLE_S = prior;
+  }
+});
+
+test("W1-T2994: an ambient restart throttle does not put the fixture into supervised mode", () => {
+  // THE REGRESSION, AS A UNIT TEST. With the throttle set around this process, entrypoint.sh takes
+  // its supervised branch instead of the one-shot exec and never returns, so boot()'s spawnSync
+  // blocks until the runner cancels the whole file. That is exactly what the daemon container does
+  // to this suite, and why the retro could not publish for three days.
+  const prior = process.env.RMD_RESTART_THROTTLE_S;
+  process.env.RMD_RESTART_THROTTLE_S = "120";
+  try {
+    const home = freshHome();
+    const origin = makeOrigin();
+    const b = boot(home, origin);
+    assert.equal(b.status, 0, "the boot RETURNED — a supervised loop would never have got here");
+    assert.doesNotMatch(
+      b.stdout + b.stderr,
+      /restart throttle: a NON-ZERO exit will sleep/,
+      "and it took the one-shot exec branch, not the supervised one",
+    );
+  } finally {
+    if (prior === undefined) delete process.env.RMD_RESTART_THROTTLE_S;
+    else process.env.RMD_RESTART_THROTTLE_S = prior;
+  }
 });
