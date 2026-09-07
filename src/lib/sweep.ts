@@ -5377,6 +5377,34 @@ export interface CreditBackfillSummary {
   total: number;
   corrected: number;
   results: CreditBackfillResult[];
+  /**
+   * W1-T3019 — WAS THE "NOT CREDITED" ANSWER PROVEN, OR JUST NOT FOUND YET?
+   *
+   * {@link readMergeCreditedTaskIds} already returns `complete`, and this rung discarded it. The
+   * walk stops at {@link CREDIT_SCAN_MAX_ROTATIONS} rotations; when it runs out with candidates
+   * still unresolved it reports `complete: false`, and its own doc says those "get re-credited".
+   * A correction taken on an UNPROVEN absence is the re-credit loop the module header describes as
+   * closed — so the distinction has to be measurable before anyone can say whether it is.
+   */
+  creditScanComplete: boolean;
+  /**
+   * TRUE when the walk stopped because it ran out of BUDGET rather than out of CORPUS — i.e. it
+   * opened the cap's worth of files and still had candidates outstanding. This, not
+   * `creditScanComplete`, is the churn discriminator: `complete` is false for a genuinely NEW
+   * merge too (nothing has credited it yet, so it never resolves), and crediting that one is the
+   * rung working correctly.
+   */
+  creditScanExhaustedBudget: boolean;
+  /** Files the credit walk opened (live + rotations). Diagnostic only — see the discriminator's
+   *  own note for why this count cannot decide whether the budget was exhausted. */
+  creditScanFilesRead: number;
+  /**
+   * Candidates whose credit state is UNKNOWN — not found, on a walk that ran out of BUDGET. Always
+   * 0 when the walk exhausted the corpus instead, because reading every file and finding nothing IS
+   * a proven absence. A correction counted here was written without proof that the task was
+   * uncredited, and is the re-credit loop if it repeats for the same task.
+   */
+  creditScanUnknown: number;
 }
 
 /*
@@ -5405,12 +5433,29 @@ export async function runCreditBackfill(
   // `readLedgerLines`, which opens exactly ONE path, against a step whose rows rotation caps. Credit
   // older than the cap left the live file, this check said "not credited", the task was re-credited,
   // and the fresh row evicted another — self-sustaining. // Why: docs/forensics/sweep.md.
-  const credited = readMergeCreditedTaskIds(deps.ledgerPath, {
+  // W1-T3019: `complete` and `filesRead` are CARRIED, not discarded. See CreditBackfillSummary's
+  // own doc — an unfinished walk's "not credited" is an absence of evidence, and this rung acts on
+  // it. Measuring that is a precondition for changing it. TELEMETRY ONLY: nothing below branches on
+  // these, so every correction this rung would have made, it still makes.
+  const creditScan = readMergeCreditedTaskIds(deps.ledgerPath, {
     // Only the tasks this pass could ask about, so the walk stops as soon as they are all resolved
     // rather than reading to the cap. Measured: real plan ids resolve below depth 8.
     candidates: candidates.map((c) => c.taskId),
     readLive: deps.readLedger,
-  }).credited;
+  });
+  const credited = creditScan.credited;
+  // Computed BEFORE the loop's own `credited.add`, so this counts what the WALK could not prove,
+  // never what this pass then corrected.
+  // THE DISCRIMINATOR IS THE BUDGET, NOT `complete`. `complete` is false whenever ANY candidate is
+  // unresolved — including a brand-new merge nothing has credited yet, which this rung exists to
+  // credit. Only a walk that left files unopened has an absence it did not prove.
+  //
+  // READ FROM THE WALK, never re-derived from `filesRead` — that test was wrong in BOTH directions
+  // (measured): a corpus of exactly `cap` rotations, and a walk resolving its last candidate ON the
+  // final rotation, both reach `cap + 1` without the budget binding; and a corrupt rotation spends
+  // a slot without incrementing the count, hiding a genuinely exhausted walk.
+  const creditScanExhaustedBudget = creditScan.budgetExhausted;
+  const creditScanUnknown = creditScanExhaustedBudget ? candidates.filter((c) => !credited.has(c.taskId)).length : 0;
 
   const results: CreditBackfillResult[] = [];
   let corrected = 0;
@@ -5447,14 +5492,34 @@ export async function runCreditBackfill(
         pr_url: c.prUrl,
         corrected: acted,
         already_credited: alreadyCredited,
+        // W1-T3019: false ⇒ this correction was written on an absence the walk never proved. A row
+        // repeating for one task with this false is the re-credit loop, naming itself.
+        credit_scan_complete: creditScan.complete,
+        credit_scan_exhausted_budget: creditScanExhaustedBudget,
       });
     }
 
     results.push({ taskId: c.taskId, prNumber: c.prNumber, prUrl: c.prUrl, corrected: acted, alreadyCredited });
   }
 
-  const summary: CreditBackfillSummary = { total: candidates.length, corrected, results };
-  log("sweep.credit_backfill.summary", { total: summary.total, corrected: summary.corrected });
+  const summary: CreditBackfillSummary = {
+    total: candidates.length,
+    corrected,
+    results,
+    creditScanComplete: creditScan.complete,
+    creditScanExhaustedBudget,
+    creditScanFilesRead: creditScan.filesRead,
+    creditScanUnknown,
+  };
+  log("sweep.credit_backfill.summary", {
+    total: summary.total,
+    corrected: summary.corrected,
+    // W1-T3019 — the three figures that say whether `corrected` is repair or churn.
+    credit_scan_complete: summary.creditScanComplete,
+    credit_scan_exhausted_budget: summary.creditScanExhaustedBudget,
+    credit_scan_files_read: summary.creditScanFilesRead,
+    credit_scan_unknown: summary.creditScanUnknown,
+  });
   return summary;
 }
 
