@@ -861,6 +861,11 @@ export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
  *  pass/fail/no-match/throw without touching the filesystem. `"no-match"` (name-filtered proofs only) means the run
  *  completed but ZERO tests matched: NOT a failing test, so the caller degrades it to `not_executable`. */
 export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail" | "no-match";
+export type BrowserPreflightRunner = (cwd: string) => void;
+
+export interface ProofExecutionDeps {
+  preflightBrowsers?: BrowserPreflightRunner;
+}
 
 // The proof timeout is a POLICY READ (plan/policy.yaml's `proofTimeoutMs`), never a source literal (W1-T253, P37
 // CONSUMERS), floored at load by policy.ts's `numberField`, so a retune is a reviewed plan PR rather than a code edit
@@ -990,10 +995,19 @@ export function ensureBrowsers(deps: BrowserPreflightDeps): "ok" | "installed" |
   try {
     deps.install();
   } catch (e) {
-    deps.log?.(`(browser preflight: install FAILED — ${String((e as Error)?.message ?? e)}; browser proofs may report exec_error)`);
+    deps.log?.(`(browser preflight: install FAILED — ${oneLineErrorCause(e)}; browser proofs may report exec_error)`);
     return "failed";
   }
   return "installed";
+}
+
+function oneLineErrorCause(error: unknown): string {
+  const raw = String((error as Error | undefined)?.message ?? error);
+  const first = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  return first ?? "unknown error";
 }
 
 /** Production {@link ensureBrowsers} wiring, memoised per process — the browser cache is HOST-global (not per-checkout
@@ -1008,6 +1022,39 @@ function ensureBrowsersOnce(cwd: string): void {
     install: () => installPinnedChromium(cwd),
     log: (m) => console.log(m),
   });
+}
+
+const BROWSER_DRIVER_MODULES = new Set(["playwright", "playwright-core", "@playwright/test", "puppeteer", "puppeteer-core"]);
+
+/** Function-local (not module-scope) so no shared `g`-flag `lastIndex` leaks; covered via {@link resolvedTestFilesNeedBrowserPreflight}'s own fixtures (W1-T2317). */
+function importsBrowserDriver(sourceText: string): boolean {
+  const staticImportRe = /^\s*import\s+(?!type\b)(?:[\s\S]*?\s+from\s*)?["']([^"']+)["']/gm;
+  const dynamicImportRe = /\b(?:require|import)\(\s*["']([^"']+)["']\s*\)/g;
+  for (const re of [staticImportRe, dynamicImportRe]) {
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(sourceText))) {
+      if (BROWSER_DRIVER_MODULES.has(match[1])) return true;
+    }
+  }
+  return false;
+}
+
+function resolvedTestFilesNeedBrowserPreflight(cwd: string, files: readonly string[]): boolean {
+  for (const file of files) {
+    let source: string;
+    try {
+      source = readFileSync(join(cwd, file), "utf8");
+    } catch {
+      return true; // resolved-but-unreadable is still unknown; install is the safe direction
+    }
+    if (importsBrowserDriver(source)) return true;
+  }
+  return false;
+}
+
+function purePathTestFiles(whitelisted: WhitelistedProof): string[] {
+  if (whitelisted.kind !== "test" || whitelisted.nameFiltered) return [];
+  return whitelisted.args.filter((arg) => TEST_PATH_EXACT_RE.test(arg));
 }
 
 /** The checkout's OWN Playwright CLI entry. Deliberately not `npx playwright`: `npx` resolves a name and on a cache
@@ -1218,6 +1265,7 @@ export function execWhitelistedProof(
   cwd: string,
   timeoutMs = defaultProofTimeoutMs(),
   spawn: ProofSpawner = defaultProofSpawner,
+  deps: ProofExecutionDeps = {},
 ): "pass" | "fail" | "no-match" {
   // THE REAL PROOF EXECUTOR: run a {@link WhitelistedProof}'s argv, no shell, in `cwd`, under a hard per-proof timeout,
   // so a hanging test can never stall the required check into the absent-check deadlock class. `"pass"` on a clean
@@ -1229,6 +1277,8 @@ export function execWhitelistedProof(
   // real PR-head checkout, and narrow before spawning node (W1-T227). Not folded into parseWhitelistedProof: that is a
   // pure parse with no `cwd`, and the candidate set can only be known against a real checkout.
   let args = whitelisted.args as readonly string[];
+  let preflightFiles: readonly string[] | undefined =
+    whitelisted.kind === "test" && !whitelisted.nameFiltered ? purePathTestFiles(whitelisted) : undefined;
   if (whitelisted.nameFiltered) {
     const resolution = resolveNameFilteredCandidates(cwd, whitelisted.label);
     // FAIL FAST on positive evidence of absence: no test file contains this name and no interpolated title could
@@ -1236,15 +1286,17 @@ export function execWhitelistedProof(
     // files, hanging on the browser-driving ones until the timeout kills them and reporting `exec_error`.
     // `unresolvable` is NOT evidence and never lands here; it falls through to the full glob.
     if (resolution.status === "absent") return "no-match";
-    args = narrowNameFilteredArgs(whitelisted.args, resolution.status === "resolved" ? resolution.files : []);
+    preflightFiles = resolution.status === "resolved" ? resolution.files : undefined;
+    args = narrowNameFilteredArgs(whitelisted.args, preflightFiles ?? []);
   }
   // AFTER the fast path on purpose: priming a checkout's node_modules is only worth 120s of `npm ci` if we are
   // actually going to run node. `ensureDeps` is memoised per cwd, so a later proof in the same checkout still primes.
   if (whitelisted.kind === "test") {
     ensureDeps(cwd);
-    // Same "only when we are actually going to run node" placement as ensureDeps: a `grep` proof never launches a
-    // browser. See requiredChromiumDirs for the false-FAIL incident this closes (#892).
-    ensureBrowsersOnce(cwd);
+    // Same placement as ensureDeps: a `grep` proof never launches a browser; a resolved set with no browser import skips this CDN-facing step.
+    if (preflightFiles === undefined || preflightFiles.length === 0 || resolvedTestFilesNeedBrowserPreflight(cwd, preflightFiles)) {
+      (deps.preflightBrowsers ?? ensureBrowsersOnce)(cwd);
+    }
   }
   // R-18: BEFORE the spawn, and outside the try on purpose — a target outside the checkout is not an execution
   // outcome to be classified below, it is a refusal to run the proof at all.
@@ -4885,6 +4937,10 @@ export const ENFORCEMENT_DATA: Readonly<Record<string, string>> = {
   "plan/claims.yaml":
     "the falsifiable self-checks scripts/claims-check.mjs runs on every PR — blunting an assertion " +
     "here is the self-concealing edit this whole category exists to catch",
+  "plan/credit-overrides.yaml":
+    "the operator's credit rulings (W1-T2970) — deriveStatus consults it to SUBTRACT merge credit, so a " +
+    "row here changes what the fleet believes shipped and therefore what it dispatches; riding the " +
+    "plan-only carve-out past the proof floor is exactly the edit this category refuses",
   "plan/policy.yaml":
     "the fleet's operating constants AS DATA — src/lib/policy.ts's loadPolicy feeds dispatch lanes, " +
     "cost ceilings and cadence governors from it, so an edit changes what the fleet OBEYS",

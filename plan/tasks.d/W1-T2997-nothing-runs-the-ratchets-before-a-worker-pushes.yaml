@@ -1,0 +1,54 @@
+- id: W1-T2997
+  title: "NOTHING RUNS THE RATCHETS BEFORE A WORKER PUSHES, SO SEVEN OF EIGHT FLEET BUILDS ENDED blocked_ci ON GATES THAT PRINT THEIR OWN FIX — W1-T464 removed the preflight obligation from both worker prompts because the orchestrator never gated on it, and nothing bounded replaced it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: "operator-session#eight-fleet-prs-none-merging-2026-09-07"
+  plan_refs: ["W1-T464", "W1-T295", "W1-T2526"]
+  files: [src/run-task.ts, test/a-worker-runs-the-cheap-gates-before-it-pushes.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07, the eight open PRs on the board were ALL `run-W1-T*` fleet builds, opened
+    between 01:21 and 02:15. Verdicts for the window: `blocked_ci` 7, `blocked` 1, merged by the
+    fleet itself ZERO. The fleet builds, pushes, CI goes red, and the run stops.
+
+    THE REDS ARE MECHANICAL AND THE GATES PRINT THEIR OWN FIX. Repaired by hand this session:
+      #4330  comment-load, source-size, the `_RE` fixture census
+      #4324  a bare `catch {}`, and a latch row the change itself made stale
+      #4343  comment-load, source-size
+      #4333  comment-load
+    Every one is a ratchet the change moved and never recorded. `comment-load-ratchet` and
+    `source-size-ratchet` both print the exact line to write and call recording "an ordinary,
+    reviewed outcome, not a defeat".
+
+    W1-T464 REMOVED THE OBLIGATION FOR A GOOD REASON THAT LEFT A GAP. run-task.ts says it plainly:
+    the fix rung "used to spread ciParityContractLines() here — the same `rmd preflight --ci-parity`
+    obligation the implement contract carried (W1-T295) — but the orchestrator never gated on a
+    preflight failure ... so the ~15-17 minute step was paid on every fix round without ever blocking
+    one. Removed from BOTH prompts together." Paying 15 minutes for a check nobody read was waste.
+    Removing it entirely left workers pushing blind.
+
+    AND THE HOUSE RULE CANNOT REACH THEM. CLAUDE.md's first bullet is "run the shipped local gate
+    before your FIRST push" — and its own header says a DISPATCHED WORKER never sees the file,
+    because `spawnWorker` passes `settingSources: []`. The rule binds only the humans who already
+    know it.
+
+    BUILD A BOUNDED GATE, NOT THE FULL ONE BACK. `--ci-parity` is 15-17 minutes and its removal was
+    correct. The ratchets are SECONDS and deterministic, and they account for most of the observed
+    reds. THE SPLIT IS LOAD-BEARING AND MUST BE HONOURED: `comment-load` and `source-size` name
+    recording as the ordinary outcome, while `negative-reachability` and `catch-erasure` say in their
+    own words "no allowlist to add it to" — those demand a real fix (a fixture, a bound error) and a
+    recorded number would BANK the debt rather than pay it. A gate that cannot tell those apart is
+    worse than none.
+  acceptance:
+    - claim: "the worker contract names the cheap ratchets and requires them before the push"
+      proof: "unit test: W1-T2997: the implement contract names the ratchets it must run before pushing"
+    - claim: "it names recording as the ordinary outcome only for the ratchets that say so"
+      proof: "unit test: W1-T2997: the contract distinguishes a recordable ratchet from one with no allowlist"
+    - claim: "the full ci-parity obligation is not reinstated, so the 15-minute step stays removed"
+      proof: "unit test: W1-T2997: the contract does not reinstate the full ci-parity step"

@@ -591,6 +591,21 @@ jobs:
             exit 0
           fi
           node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
+      - name: Stage the merged lcov for the coverage-merged artifact # W1-T2662, for W1-T2661's reader
+        run: |
+          mkdir -p coverage-merged-artifact
+          if [ -s coverage/lcov.info ]; then
+            cp coverage/lcov.info coverage-merged-artifact/lcov.info
+          else
+            echo "skipped" > coverage-merged-artifact/skipped
+          fi
+      - name: Upload merged coverage artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-merged
+          path: coverage-merged-artifact
+          retention-days: 1
+          if-no-files-found: error
 
   mutation-ratchet:
     # §5 TIER 2, quality gate 2/4 (W1-T96) — green tests that kill no mutants are theatre; the

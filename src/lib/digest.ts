@@ -427,6 +427,136 @@ export interface DigestSummary {
   /** Count of `review.downgrade_suppressed` lines (W1-T178): a semantic-lane downgrade
    *  suppressed because the deterministic floor still passed on an unchanged head. */
   verdictDowngradesSuppressed: number;
+  /** W1-T2765: per-part prompt bytes over the window, or `undefined` when no `prompt.manifest`
+   *  row was read. Rendered as "not observed", never as a zero row. */
+  promptParts?: PromptPartsSummary;
+}
+
+/**
+ * W1-T2765 — ONE PART'S FIGURES OVER ONE WINDOW.
+ *
+ * `present` and `observed` are counted separately because they answer different questions: a part
+ * absent from every run (operator notes nobody wrote) is a real fact about the dialect, and folding
+ * it into a byte average would report a smaller prompt than the fleet actually sends.
+ */
+export interface PromptPartWindow {
+  name: string;
+  /** Manifest rows naming this part at all. */
+  observedRuns: number;
+  /** Rows carrying it with `present: true` — the only rows whose bytes are counted. */
+  presentRuns: number;
+  /** p50/p90 bytes over the PRESENT rows only. Both 0 when the part was never present. */
+  bytesP50: number;
+  bytesP90: number;
+}
+
+/** W1-T2765 — the digest's prompt-parts section, or `undefined` when the window carried no
+ *  `prompt.manifest` row at all. `undefined` rather than an empty summary is the P48 no-naked-zero
+ *  discipline: "not observed" and "observed, zero bytes" are different claims. */
+export interface PromptPartsSummary {
+  /** Manifest rows in the window. Never 0 — an empty window returns `undefined`. */
+  rows: number;
+  parts: PromptPartWindow[];
+  /** Manifest rows found BEFORE `sinceIso` in the same input. Usually 0 in the production path —
+   *  see {@link summarizePromptParts}'s own note on why. */
+  priorRows: number;
+  /** The part whose p50 grew most against the prior window. Absent when `priorRows` is 0, or when
+   *  nothing grew — never a zero-growth row standing in for "no comparison". */
+  grewMost?: { name: string; fromP50: number; toP50: number };
+}
+
+/**
+ * W1-T2765 — GIVE THE PROMPT MANIFEST A READER.
+ *
+ * W1-T2297 fingerprints every prompt part by name, sha256 and byte count into a `prompt.manifest`
+ * ledger row on every run. Nothing read one: across src/, scripts/ and docs/ the step name appeared
+ * only in its writer, its unit test and `buildBundle`'s independent producer. The fleet's own
+ * dialect had a meter with no dial, and a compaction decision taken without it is a guess.
+ *
+ * BYTES, NOT TOKENS, ON PURPOSE — the manifest's unit and the ratchets' unit. No tokenizer is
+ * added here.
+ *
+ * A NOTE ON THE PRIOR WINDOW, because it is weaker than it looks. `readDigestWindow` filters rows
+ * to the window BEFORE `summarize` sees them (a memory bound, not an optimisation — an earlier
+ * draft OOMed). So on the production path `priorRows` is 0 and `grewMost` is absent: growth is
+ * reported only when a caller passes lines reaching further back than `sinceIso`, which the tests
+ * do and `rmd digest` does not. Widening that reader is a memory decision and is not taken here.
+ */
+export function summarizePromptParts(lines: LedgerLine[], sinceIso: string): PromptPartsSummary | undefined {
+  const partsOf = (l: LedgerLine): PromptManifestRow[] =>
+    l.step === "prompt.manifest" && Array.isArray(l.parts) ? (l.parts as PromptManifestRow[]) : [];
+  const fold = (rows: LedgerLine[]): Map<string, { observed: number; present: number; bytes: number[] }> => {
+    const acc = new Map<string, { observed: number; present: number; bytes: number[] }>();
+    for (const l of rows) {
+      for (const p of partsOf(l)) {
+        if (typeof p?.name !== "string") continue;
+        const e = acc.get(p.name) ?? { observed: 0, present: 0, bytes: [] };
+        e.observed++;
+        if (p.present === true && typeof p.bytes === "number") {
+          e.present++;
+          e.bytes.push(p.bytes);
+        }
+        acc.set(p.name, e);
+      }
+    }
+    return acc;
+  };
+
+  const manifests = lines.filter((l) => l.step === "prompt.manifest" && typeof l.ts === "string");
+  const current = manifests.filter((l) => (l.ts as string) >= sinceIso);
+  if (current.length === 0) return undefined;
+  const prior = manifests.filter((l) => (l.ts as string) < sinceIso);
+
+  const currentFold = fold(current);
+  const parts: PromptPartWindow[] = [...currentFold.entries()]
+    .map(([name, e]) => ({
+      name,
+      observedRuns: e.observed,
+      presentRuns: e.present,
+      bytesP50: e.bytes.length ? percentile(e.bytes, 50) : 0,
+      bytesP90: e.bytes.length ? percentile(e.bytes, 90) : 0,
+    }))
+    .sort((a, b) => b.bytesP50 - a.bytesP50 || a.name.localeCompare(b.name));
+
+  let grewMost: PromptPartsSummary["grewMost"];
+  if (prior.length > 0) {
+    const priorFold = fold(prior);
+    let best = 0;
+    for (const p of parts) {
+      const before = priorFold.get(p.name);
+      if (!before || before.bytes.length === 0) continue; // no comparison, never a growth-from-zero
+      const fromP50 = percentile(before.bytes, 50);
+      const delta = p.bytesP50 - fromP50;
+      if (delta > best) {
+        best = delta;
+        grewMost = { name: p.name, fromP50, toP50: p.bytesP50 };
+      }
+    }
+  }
+  return { rows: current.length, parts, priorRows: prior.length, ...(grewMost ? { grewMost } : {}) };
+}
+
+/** W1-T2765 — the manifest row shape this reader consumes, structurally (never imported, so the
+ *  digest keeps its "ledger lines in, string out" contract). */
+interface PromptManifestRow {
+  name?: unknown;
+  present?: unknown;
+  bytes?: unknown;
+}
+
+/** W1-T2765 — the digest's PROMPT PARTS line(s). "not observed" when the window carried no
+ *  manifest row, never a zero row (P48). */
+export function renderPromptParts(s: PromptPartsSummary | undefined): string {
+  if (!s) return "prompt parts: (not observed this window)";
+  const body = s.parts
+    .map((p) => `${p.name} p50 ${p.bytesP50}B p90 ${p.bytesP90}B (present ${p.presentRuns}/${p.observedRuns})`)
+    .join("; ");
+  const growth = s.grewMost
+    ? `; grew most: ${s.grewMost.name} ${s.grewMost.fromP50}B -> ${s.grewMost.toP50}B`
+    : s.priorRows === 0
+    ? "; growth: (no prior window read)"
+    : "; growth: (none)";
+  return `prompt parts (${s.rows} run(s)): ${body}${growth}`;
 }
 
 /** Reduce the day's ledger lines to the counts a digest reports. Pure over its input. */
@@ -440,6 +570,10 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
     costUsd: 0,
     verdictDowngradesSuppressed: 0,
   };
+  // W1-T2765: folded over the FULL input, not `since` — the prior window it compares against is
+  // whatever the caller read before `sinceIso`, and `collectSince` would have removed it.
+  const promptParts = summarizePromptParts(lines, sinceIso);
+  if (promptParts) summary.promptParts = promptParts;
   for (const l of since) {
     if (l.step === "review.downgrade_suppressed") summary.verdictDowngradesSuppressed++;
     if (l.step === "verdict" && typeof l.task_id === "string") {
@@ -566,6 +700,10 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     ...(s.cacheHit ? [renderCacheHitLine("cache hit by run", s.cacheHit.byRun), renderCacheHitLine("cache hit by class", s.cacheHit.byClass)] : []),
     `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
+    // W1-T2765: ALWAYS rendered, unlike the soft-composed lines above — "not observed" is the
+    // answer this section owes, and an absent line would read as a quiet window rather than an
+    // unread meter.
+    renderPromptParts(s.promptParts),
   ];
   return lines.join("\n");
 }

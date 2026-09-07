@@ -132,7 +132,7 @@ test("commandHelp(spec) contains that command's full detail verbatim, for every 
 // this task changes the SHAPE of the record and the top-level rendering, never the set of
 // commands themselves.
 const BASELINE_COMMAND_NAMES = [
-  "alert-fix", "approve", "autonomy-rate", "away", "bundle", "check-acceptance", "check-proof",
+  "alert-fix", "approve", "authority", "autonomy-rate", "away", "bundle", "check-acceptance", "check-proof",
   "census-membership", "ci-failures", "ci-learning", "console-url", "correct", "coverage-improve", "daemon", "daemon-plist", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
   "emissions", "escalate", "feedback", "fix", "inbox", "init", "install-checkout", "issues",
@@ -144,10 +144,11 @@ const BASELINE_COMMAND_NAMES = [
 ].sort();
 
 // W1-T2580: `bundle` — the day-one knowledge bundle export verb — joins the registry.
+// W1-T2695: `authority` — the fleet-authority report verb — joins the registry.
 test("COMMANDS carries the established command names plus the operator merge-hold writer", () => {
-  assert.equal(BASELINE_COMMAND_NAMES.length, 69);
+  assert.equal(BASELINE_COMMAND_NAMES.length, 70);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
-  assert.equal(COMMANDS.length, 69);
+  assert.equal(COMMANDS.length, 70);
 });
 
 // ── Regression control: this test file is where a re-widened top-level listing would show up ──

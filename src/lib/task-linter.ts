@@ -39,7 +39,7 @@ import { classifyGrepZeroHit } from "./grep-zero-cause.js";
  *  this site holds a `--base` diff, so it alone supplies the diff-scoped contexts. (ii) PRE-DISPATCH
  *  — `assertLintClean` in `rmd run-task`, so a task failing a BLOCKING check is never dispatched.
  *  A BLOCK refuses dispatch; a WARN is visibility-only, and each check states its own severity and
- *  any knob that demotes it. Two are warn-only BY CONSTRUCTION, with no knob anywhere.
+ *  any knob that demotes it. Three are warn-only BY CONSTRUCTION, with no knob anywhere.
  *  Why: docs/forensics/task-linter.md#module-header holds the incidents each check was earned by
  *  (W1-T6/T9/T12, W1-T100/T101, W1-T180, W1-T246, W1-T310, W1-T326, W1-T519). */
 
@@ -51,6 +51,7 @@ export type LintCheck =
   | "proof-resolvability"
   | "proof-grep-safety"
   | "proof-grep-unmatchable"
+  | "proof-grep-self-certifying"
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-name-resolution"
@@ -73,7 +74,9 @@ export type LintCheck =
   | "duplicate-learning"
   | "dispatch-priority"
   | "declared-scope"
-  | "advisory-routing";
+  | "advisory-routing"
+  | "deferred-follow-up"
+  | "proof-base-discrimination";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -502,7 +505,7 @@ export function proofShapeViolations(task: Task): LintViolation[] {
  *  authoring typo rather than deliberate prose. None of these match {@link parseWhitelistedProof},
  *  so the proof still falls through to free prose. Checked at the START of the trimmed proof only,
  *  because a dialect label is how a proof begins (mirrors review.ts's `isDialectPrefixed`). */
-const NEAR_MISS_PREFIX_RE = /^(?:unit tests\s*:|unit test over\b|integration test\s*:)/i;
+export const NEAR_MISS_PREFIX_RE = /^(?:unit tests\s*:|unit test over\b|integration test\s*:)/i;
 
 /** True iff a `unit test:` body reads as a runtime narrative rather than a literal test-title
  *  substring. `--test-name-pattern` is a substring match against a real title, so a compound,
@@ -862,6 +865,88 @@ function wrappedLineSpan(fileText: string, pattern: string): { startLine: number
   return { startLine, endLine };
 }
 
+/** `fileText` with THIS task's own `acceptance:` block removed, or `undefined` when `path` is not
+ *  this task's plan record. Ownership is read from the record's own YAML LIST-ITEM id line, never
+ *  from `files:`: Rule 15 forbids a `verify: auto` task from declaring its own record, so a
+ *  `files:` conjunct would silence this family almost entirely. UNDER-STRIPS on ambiguity — keeping
+ *  a line invents no warning, dropping one does — and strips only the ONE record, so the monolith's
+ *  several hundred siblings never bleed into each other. PURE. */
+function ownPlanRecordOutsideAcceptance(taskId: string, path: string, fileText: string): string | undefined {
+  const isRecord = path === "plan/tasks.yaml" || (path.startsWith("plan/tasks.d/") && /\.ya?ml$/.test(path));
+  if (!isRecord) return undefined;
+  const lines = fileText.split("\n");
+  const start = lines.findIndex((line) => {
+    if (!line.startsWith("- id:")) return false; // a two-space `  id:` anchor reads 0 corpus-wide
+    const rest = line.slice("- id:".length).trim();
+    return rest === taskId || rest === `"${taskId}"` || rest === `'${taskId}'`;
+  });
+  if (start === -1) return undefined;
+  let end = start + 1;
+  while (end < lines.length && !/^- \S/.test(lines[end])) end++;
+  const kept: string[] = [];
+  let dropIndent: number | undefined;
+  let stripped = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (i < start || i >= end) {
+      kept.push(line);
+      continue;
+    }
+    if (dropIndent !== undefined) {
+      if (line.trim() === "") continue;
+      if (line.length - line.trimStart().length > dropIndent) continue;
+      dropIndent = undefined;
+    }
+    const header = /^(\s*)acceptance:\s*$/.exec(line);
+    if (header) {
+      dropIndent = header[1].length;
+      stripped = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  return stripped ? kept.join("\n") : undefined;
+}
+
+/** Every `grep:` proof aimed at the task's OWN plan record whose pattern finds nothing there but the
+ *  criterion carrying it. A pattern is everything before `" in <path>"` (`parseDialectGrep`,
+ *  review.ts), so such a proof matches its own `proof:` line BY CONSTRUCTION and certifies its own
+ *  text rather than the record's. Cedes line-seam and case-only to {@link
+ *  proofGrepUnmatchableViolations}, whose diagnosis is the sharper one, so the two never both
+ *  report a criterion. WARN-only with no override, per the 2026-09-06 operator ruling (W1-T2983). */
+export function proofGrepSelfCertifyingViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const readGrepProofFile = opts.readGrepProofFile;
+  if (!readGrepProofFile) return [];
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to parse
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
+    const target = proofGrepPatternAndPath(whitelisted);
+    if (!target) return; // not a dialect grep proof (see the helper's own doc comment)
+    const fileText = readGrepProofFile(target.path);
+    if (fileText === undefined) return; // not on disk yet — a legitimate forward reference
+    const outside = ownPlanRecordOutsideAcceptance(task.id, target.path, fileText);
+    if (outside === undefined) return; // not this task's own record
+    if (classifyGrepZeroHit(target.pattern, fileText) !== "matched") return; // absent, or the sibling's
+    if (classifyGrepZeroHit(target.pattern, outside) !== "absent") return; // real evidence, or the sibling's
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    const patternHead = target.pattern.slice(0, 70);
+    violations.push({
+      check: "proof-grep-self-certifying",
+      severity: "warn",
+      message:
+        `criterion ${i + 1} ("${claimHead}") \`grep:\` pattern "${patternHead}" matches NOTHING in ` +
+        `${target.path} outside ${task.id}'s own \`acceptance:\` block — the only line it finds is the ` +
+        'proof that carries it. A pattern is everything before " in <path>", so a proof aimed at the ' +
+        "record it lives in matches ITSELF and pins nothing the record actually says. Re-anchor on a " +
+        "phrase from the rationale, design or note prose, then confirm it still reads a hit with the " +
+        "acceptance block deleted.",
+    });
+  });
+  return violations;
+}
+
 /** Every `grep:` proof whose named file exists and whose pattern is a POSITIVE detection of
  *  unmatchability: {@link classifyGrepZeroHit} returns "line-seam" or "case-only". Silent otherwise
  *  — not on disk yet, absent in every probed form (both legitimate forward references), or already
@@ -876,8 +961,12 @@ export function proofGrepUnmatchableViolations(task: Task, opts: LintOpts = {}):
     if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
     const target = proofGrepPatternAndPath(whitelisted);
     if (!target) return; // not a dialect grep proof (see the helper's own doc comment)
-    const fileText = readGrepProofFile(target.path);
-    if (fileText === undefined) return; // not on disk yet — a legitimate forward reference
+    const rawFileText = readGrepProofFile(target.path);
+    if (rawFileText === undefined) return; // not on disk yet — a legitimate forward reference
+    // W1-T2990: a proof aimed at its OWN record supplies its own match, so every line-seam in that
+    // family read "matched" here and this check stayed silent about it. Judge such a proof against
+    // the record MINUS its own acceptance block; every other target is unchanged.
+    const fileText = ownPlanRecordOutsideAcceptance(task.id, target.path, rawFileText) ?? rawFileText;
     const cause = classifyGrepZeroHit(target.pattern, fileText);
     if (cause !== "line-seam" && cause !== "case-only") return; // matched / absent: both silent
     const claimHead = (c.claim ?? "").slice(0, 60);
@@ -1086,6 +1175,60 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
         "still absent when this is reviewed, the criterion grades executed_fail instead, which " +
         `overrides keyword coverage and fails the PR. Add "${path}" to files: or rewrite the proof ` +
         "to name a path already in scope.",
+    });
+  });
+  return violations;
+}
+
+// ── PROOF-BASE-DISCRIMINATION (W1-T2835 — the proof that cannot tell head from base) ─────────
+//
+// `proof-dialect` asks whether a proof PARSES, `proof-resolvability` whether it resolves TODAY, and
+// `proof-scope` whether its path is inside `files:`. None consults a BASE ref, so the fourth
+// question — can this proof tell head from base — is answered only at review, weeks later, by
+// `classifyBaseProofOutcome` re-running it at the merge-base. A pure-path `unit test:` proof naming
+// a file that ALREADY EXISTS at base passes on both trees, grades `executed_stale`, and the
+// criterion degrades to the keyword floor SILENTLY: no red check, no message, a green PR.
+//
+// WARN, NEVER BLOCK, and the reason is a false positive this check cannot rule out: "the file exists
+// at base" is a HEURISTIC for "the proof PASSES at base". A task REPAIRING a currently-RED test names
+// a file that exists at base and discriminates perfectly. Refusing that shape would be wrong, so the
+// severity default is "warn" and no call site passes "block".
+//
+// THE HEALTHY MAJORITY MUST STAY SILENT. A proof naming the test its own PR will create is the whole
+// point of the pure-path form and is the common case (measured 2026-09-06 over every filed shard at
+// its own filing base: 3582 forward references against 828 already-present). A check that fired on
+// those would train readers to ignore the row, which is worse than the gap it closes.
+
+/** W1-T2835 — every pure-path `unit test:` proof whose file ALREADY EXISTED at the base ref, and so
+ *  cannot discriminate head from base. Silent without {@link LintOpts.pathExistsAtBase} (the
+ *  whole-plan and pre-dispatch passes have no base), silent on a forward reference, and WARN-only. */
+export function proofBaseDiscriminationViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const pathExistsAtBase = opts.pathExistsAtBase;
+  if (!pathExistsAtBase) return []; // no base fact ⇒ no opinion (see the opt's own doc)
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to parse
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
+    // ONLY the pure-path test form. A name-filtered proof's discrimination turns on whether the
+    // TITLE matches at base, which a path predicate cannot answer, and a `grep:` proof's turns on
+    // the PATTERN — both are outside what this check can see, so both stay silent rather than guess.
+    if (whitelisted.kind !== "test" || whitelisted.nameFiltered) return;
+    const path = whitelisted.label;
+    if (!pathExistsAtBase(path)) return; // forward reference — the healthy TDD case, silent
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    violations.push({
+      check: "proof-base-discrimination",
+      severity: opts.proofBaseDiscrimination ?? "warn",
+      message:
+        `criterion ${i + 1} ("${claimHead}") proof names "${path}", which ALREADY EXISTS at the base ` +
+        "ref. At review time classifyBaseProofOutcome (review.ts) re-runs this proof against the " +
+        "merge-base: a proof that passes on BOTH trees discriminates nothing and grades " +
+        "executed_stale, and the criterion then falls back to the keyword floor SILENTLY — no red " +
+        "check names it and the PR can merge on prose. This is a WARN, not a refusal, because file " +
+        "presence at base is only a HEURISTIC for passing there: a task REPAIRING a currently-failing " +
+        `test legitimately names an existing file. If this criterion is proving NEW behaviour in ` +
+        `"${path}", prove it with a \`grep:\` on the changed line instead, which can miss at base.`,
     });
   });
   return violations;
@@ -1626,14 +1769,72 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
 export function machineAuthorVerifyViolation(task: Task): LintViolation | undefined {
   if (task.author_class !== "machine") return undefined;
   if (task.verify === "human") return undefined;
-  return {
-    check: "machine-author-verify",
-    severity: "block",
-    message:
-      `task ${task.id} is marked author_class: machine at verify:${task.verify} — ` +
-      "a machine-concluded shard must be verify: human so isDispatchEligible parks it for an " +
-      "operator. A machine may propose work into the plan; only a person releases it (Law 5).",
+
+  // W1-T2977 NARROWS THIS ARM; IT DOES NOT RELAX IT. Every refusal below the operator's ruling
+  // made before still happens — absent, drifted and escalated rulings all block, and only a
+  // `proceed` ruling PINNED to this exact record clears. Absence is never read as a pass.
+  const ruling = task.risk_ruling;
+  const unjudged =
+    `task ${task.id} is marked author_class: machine at verify:${task.verify} — ` +
+    "a machine-concluded shard must be verify: human so isDispatchEligible parks it for an " +
+    "operator, unless a recorded risk-judge ruling clears it. A machine may propose work into " +
+    "the plan; only a person, or a judge the operator ratified, releases it (Law 5).";
+
+  if (!ruling) return { check: "machine-author-verify", severity: "block", message: unjudged };
+
+  if (ruling.pin !== taskRulingPin(task)) {
+    // DRIFT. The record changed after it was judged, so the ruling describes text that is no
+    // longer here. Refusing is the whole reason the pin exists (W1-T2694).
+    return {
+      check: "machine-author-verify",
+      severity: "block",
+      message:
+        `task ${task.id} carries a risk ruling that does NOT match the record it rides on — ` +
+        "the pin is stale, so this shard was edited after it was judged. A ruling clears the " +
+        "record it judged and no other; re-judge the record as it now stands (Law 5, W1-T2977).",
+    };
+  }
+
+  if (ruling.action !== "proceed") {
+    // The judge's OWN words, verbatim (W1-T186): a refusal must be diagnosable without the ledger.
+    const reasons = ruling.reasons.length > 0 ? ruling.reasons.join("; ") : "(the judge recorded no reason)";
+    return {
+      check: "machine-author-verify",
+      severity: "block",
+      message:
+        `task ${task.id} was judged ${ruling.verdict} and the ruling is ${ruling.action}, not proceed — ` +
+        `it stays verify: human until an operator releases it. The judge's reasons: ${reasons} (Law 5, W1-T2977).`,
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * W1-T2977 — the digest a `risk_ruling` pins itself to: what the task may DO (`type`, `verify`,
+ * `risk`, `files`), must PROVE (`acceptance`), and TELLS a worker (`title`, `prompt`). Narrative
+ * fields are OUT, so editing prose forces no re-judgment; `risk_ruling` is out too, or the pin
+ * could never be recomputed for comparison. NUL-separated so `["a","b"]` and `["ab"]` differ.
+ */
+export function taskRulingPin(task: Task): string {
+  const h = createHash("sha256");
+  const field = (v: string): void => {
+    h.update(v);
+    h.update("\0");
   };
+  field(task.id);
+  field(task.title);
+  field(task.type);
+  field(task.verify);
+  field(task.risk ?? "");
+  field(task.prompt ?? "");
+  for (const f of [...(task.files ?? [])].sort()) field(f);
+  field("\x01acceptance");
+  for (const c of task.acceptance ?? []) {
+    field(c.claim);
+    field(c.proof);
+  }
+  return h.digest("hex");
 }
 
 // ── DECLARED SCOPE (W1-T504 — an undeclared files: lints clean and then serializes the fleet) ─
@@ -1891,6 +2092,106 @@ export function advisoryRoutingViolations(task: Task): LintViolation[] {
     ];
   }
   return [];
+}
+
+// ── DEFERRED FOLLOW-UP NAMES NO FILED ID (W1-T2687) ─────────────────────────
+// A shard's own prose says the rest of the work "lands in a follow-up" or "is left to a second
+// PR", and then no id is minted, no shard is filed, and the deferral survives only as a sentence
+// in a merged rationale that no selector, no linter and no census reads — the remainder becomes
+// indistinguishable from work nobody ever intended. MET THREE TIMES IN ONE SESSION: W1-T470's CI
+// wiring step deferred to a second PR that was never filed, a PR body carrying three prose
+// follow-ups with no shard behind any of them, and a coverage step left unwired for three weeks.
+// REPORT-ONLY, PERMANENTLY — NOT A ROLLOUT PHASE. This is a heuristic over PROSE: it cannot tell a
+// genuine unfiled deferral from a rationale merely discussing one, and a shard is often right to
+// describe scope it deliberately excluded. A blocking gate here would refuse honest filings for
+// their wording and teach authors to launder the sentence, which is precisely the failure this
+// check exists to name. WARN-only, with no override anywhere — matching {@link
+// advisoryRoutingViolations}'s construction, the prior REPORT-ONLY precedent in this file.
+
+export interface DeferredFollowUpMatcher {
+  /** Surfaced in the warn message — the phrase shape acceptance criterion 1 checks for
+   *  ("a second PR" / "a follow-up", the two shapes the commissioning session actually saw). */
+  category: string;
+  /** Matches a PREPOSITION immediately governing the deferred-to noun phrase ("in"/"to"/"as"/"via"
+   *  a follow-up or second PR) — never a bare mention of "follow-up" or "PR" on their own, which
+   *  this repo's own prose (including this section's comment) uses constantly and benignly.
+   *  PRECISION OVER RECALL: a shard that merely says "no follow-up task exists" or "the follow-up
+   *  escape" (case in point: this very file's `postMergeAmendmentViolations`) names no PREPOSITION
+   *  immediately before the noun phrase, and does not match. */
+  pattern: RegExp;
+}
+
+/** Two rows, one per phrase shape named in the task title. Each requires a preposition directly
+ *  governing the noun phrase, deliberately excluding the determiner "the": "to THE follow-up" more
+ *  often points at an already-known, already-filed thing ("the follow-up escape", "the follow-up
+ *  sweep") than at a fresh, unfiled promise, and narrowing recall here is the false-positive
+ *  measurement this check owes (see {@link deferredFollowUpViolations}'s doc). */
+export const DEFERRED_FOLLOW_UP_LEXICON: ReadonlyArray<DeferredFollowUpMatcher> = [
+  {
+    category: "a second PR",
+    pattern: /\b(?:in|to|as|via|for)\s+(?:a|another)\s+(?:second|later|next)\s+(?:PR|pull request)\b/i,
+  },
+  {
+    category: "a follow-up",
+    pattern: /\b(?:in|to|as|via)\s+(?:a|another)\s+follow-?up\b/i,
+  },
+];
+
+/** A task id already filed as a plan shard, named inline in prose — deliberately permissive (an
+ *  optional trailing lowercase letter, `W1-T12a`'s own shape per the sub-shard convention already
+ *  live in this plan) since this only detects PRESENCE of an id-shaped token, unlike {@link
+ *  citesTaskId}, which verifies a SPECIFIC id and needs the tighter non-alnum boundary. */
+export const FILED_TASK_ID_IN_TEXT_RE = /\bW\d+-T\d+[a-z]?\b/;
+
+/** The prose sentence surrounding `text[index]`, bounded by the nearest sentence-final punctuation
+ *  or paragraph break on each side, with internal whitespace/newlines collapsed to single spaces —
+ *  so an author's wrapped source line reads as one continuous sentence in a warn message rather
+ *  than replaying the file's own line breaks. Pure string slicing; never a regex over the whole
+ *  text, so it cannot mis-anchor on an unrelated period elsewhere in a long rationale. */
+export function sentenceAround(text: string, index: number): string {
+  const before = text.slice(0, index);
+  const after = text.slice(index);
+  const startBoundary = Math.max(before.lastIndexOf(". "), before.lastIndexOf(".\n"), before.lastIndexOf("\n\n"));
+  const start = startBoundary === -1 ? 0 : startBoundary + 1;
+  const endMatch = /[.!?](?:\s|$)/.exec(after);
+  const end = endMatch ? index + endMatch.index + 1 : text.length;
+  return text.slice(start, end).replace(/\s+/g, " ").trim();
+}
+
+/** `task`'s narrative text (title + rationale + note, {@link advisoryRoutingViolations}'s own
+ *  field set) matched against {@link DEFERRED_FOLLOW_UP_LEXICON}. For every sentence matching a
+ *  row, {@link FILED_TASK_ID_IN_TEXT_RE} decides the verdict: a filed id anywhere in that SAME
+ *  sentence means the deferral is complete and silent; its absence means the sentence is quoted
+ *  in full so the author sees the exact prose and can either mint an id or reword the exclusion as
+ *  a decision rather than a promise. Deduplicated by sentence text, so one long paragraph
+ *  repeating the same phrase (e.g. within a quoted proof) draws one warn, not several. WARN-only:
+ *  no severity here is ever `"block"`, on any input — see the section comment. */
+export function deferredFollowUpViolations(task: Task): LintViolation[] {
+  const text = [task.title, task.rationale, task.note].filter(Boolean).join("\n\n");
+  if (!text.trim()) return [];
+  const violations: LintViolation[] = [];
+  const seen = new Set<string>();
+  for (const entry of DEFERRED_FOLLOW_UP_LEXICON) {
+    const re = new RegExp(entry.pattern.source, entry.pattern.flags.includes("g") ? entry.pattern.flags : `${entry.pattern.flags}g`);
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const sentence = sentenceAround(text, m.index);
+      if (FILED_TASK_ID_IN_TEXT_RE.test(sentence)) continue; // cites an id — complete and silent
+      if (seen.has(sentence)) continue;
+      seen.add(sentence);
+      violations.push({
+        check: "deferred-follow-up",
+        severity: "warn",
+        message:
+          `task ${task.id}'s text defers work to ${entry.category} without naming a filed id in the ` +
+          `same sentence, so the deferred half is owned by nobody once this merges. Sentence: ` +
+          `"${sentence}"\nMint a task id for the deferred work and name it in this sentence, or ` +
+          "reword it to state the excluded scope as a decision rather than a promise. This is " +
+          "REPORT-ONLY, permanently: it never blocks dispatch or a filing, on any input.",
+      });
+    }
+  }
+  return violations;
 }
 
 // ── DUPLICATE-CLOSURE AT KNOWLEDGE INTAKE (W1-T420, narrowed W1-T2486) ───────
@@ -2292,6 +2593,16 @@ export interface LintOpts {
   /** Severity for {@link proofScopeViolations}. Default "warn" — see that check's section comment
    *  for the measured retrofit count driving the default. */
   proofScope?: LintSeverity;
+  /** W1-T2835 — did this repo-relative path exist at the BASE ref? The base-tree counterpart of
+   *  {@link LintOpts.moduleExists}, and the only way the base fact reaches this pure module: the
+   *  linter never reads disk and never shells git. ABSENT ⇒ {@link proofBaseDiscriminationViolations}
+   *  is SILENT, the same contract `blockedDisposition` and `newMonolithIds` already follow, and for
+   *  the same reason — a whole-plan run has no base and must not report the standing population. */
+  pathExistsAtBase?: (repoRelPath: string) => boolean;
+  /** Severity for {@link proofBaseDiscriminationViolations}. Default "warn", and NO call site wires
+   *  "block": path-presence at base is a HEURISTIC for "the proof passes at base", so a repair whose
+   *  target test is RED at base discriminates correctly and a blocking arm would refuse it wrongly. */
+  proofBaseDiscrimination?: LintSeverity;
   /** The reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to a real checkout, so
    *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations} is silent. */
   resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
@@ -2339,8 +2650,8 @@ export interface LintOpts {
  *  proof-shape, proof-dialect, proof-resolvability, provenance, ruling-verify — always run. Each
  *  injected-predicate check is a no-op absent its own `opts` field: post-merge-amendment,
  *  blocked-disposition, budget-sanity, duplicate-title and its narrow arm, proof-name-resolution.
- *  Dispatch-priority, advisory-routing and blocked-record-unruled always run with no `opts` field
- *  at all, and the last two can never block. */
+ *  Dispatch-priority, advisory-routing, deferred-follow-up and blocked-record-unruled always run
+ *  with no `opts` field at all, and the last three can never block. */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);
@@ -2352,6 +2663,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofGrepSafetyViolations(task));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofNameResolutionViolations(task, opts));
+  violations.push(...proofBaseDiscriminationViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
@@ -2372,6 +2684,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   if (declaredScope) violations.push(declaredScope);
   violations.push(...dispatchPriorityViolations(task));
   violations.push(...advisoryRoutingViolations(task));
+  violations.push(...deferredFollowUpViolations(task));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);

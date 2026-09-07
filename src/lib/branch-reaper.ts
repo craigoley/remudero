@@ -194,3 +194,92 @@ export function planReverseBranchDrift(
  * the run rather than being reported in passing, the `ci-parity:drift` shape.
  */
 
+// ── the orphaned-head COUNT (W1-T2690) ────────────────────────────────────────────────────────
+
+/**
+ * W1-T448 priced the REAP (~8 `gh api` `state=all` pages, 6.4s) and ruled — correctly, and this
+ * does not re-litigate it — that wiring it into every sweep pass costs too much for an answer
+ * that "only changes when a branch is created or merged." IT NEVER PRICED THE CHECK FOR WHETHER
+ * IT IS TIME TO RUN THE MANUAL VERB. Measured 2026-09-02: `remoteBranchNames`'s own
+ * `git ls-remote --heads origin` answers that in 670ms as ONE request, no `gh api` page at all.
+ * The count below is that cheap question, kept deliberately separate from `planBranchReap`
+ * (`lib/status.ts`): it counts, it classifies no guard, and it deletes nothing — same "reports
+ * only" position as `reapBranchesCommand` two doc-comments up.
+ *
+ * ANCESTRY ALONE OVERCOUNTS AS "SAFE" HERE, which is why it is a conjunct and never the whole
+ * test: `main` only squash-merges (measured: eight consecutive single-parent commits on it), so a
+ * genuinely merged branch is never `main`'s ancestor either — `git merge-base --is-ancestor`
+ * returns false for it exactly as it does for one still mid-flight. A head counts ORPHANED only
+ * when BOTH hold: no open PR (an in-flight or just-closed-without-merge branch keeps its credit
+ * path) AND absent from the base's history (the one thing ancestry legitimately answers: this
+ * ref's commits were never folded in by a non-squash path, e.g. a fast-forward).
+ */
+export interface OrphanedHeadCounts {
+  readonly kind: "counted";
+  /** Every name one `git ls-remote --heads origin` returned — guards, non-run branches, all of it. */
+  readonly totalHeads: number;
+  /** The subset matching the `run-<taskId>-<epochMs>` dispatch shape — the only shape this counts
+   *  as a candidate at all. `main`, the heartbeats and every other `DECLARED_BRANCH_GUARDS` entry
+   *  are excluded by the shape test itself; there is no second lookup against that list here. */
+  readonly runShapedHeads: number;
+  /** Run-shaped heads with no open PR AND absent from the base's history — the number this task
+   *  exists to make available; a manual verb with nothing bounding it is a decision that quietly
+   *  stops being executed. */
+  readonly orphanedHeads: number;
+}
+
+/** The one state a healthy-looking zero must never stand in for. An unreadable remote listing
+ *  reports its own reason and stops — {@link classifyReadFailure} (`lib/doctor.ts`) draws the same
+ *  line for the same reason: an absence of information is never counted as an absence of orphans. */
+export interface OrphanedHeadCountUnreadable {
+  readonly kind: "cannot-determine";
+  readonly reason: string;
+}
+
+export type OrphanedHeadReading = OrphanedHeadCounts | OrphanedHeadCountUnreadable;
+
+const RUN_TASK_BRANCH_TOKEN = new RegExp(`^${RUN_TASK_BRANCH_TOKEN_SRC}$`);
+
+/**
+ * PURE: given a remote listing already in hand, how many of its run-shaped heads are orphaned.
+ * `openPrHeads` and `isInBaseHistory` are both injected — like every export in this file, this
+ * performs no `exec` of its own — so a caller supplies `buildOpenPrViews`'s open heads and a
+ * `git merge-base --is-ancestor` probe (or fixtures of either) without this module importing
+ * either one.
+ */
+export function countOrphanedHeads(
+  remoteNames: readonly string[],
+  openPrHeads: ReadonlySet<string>,
+  isInBaseHistory: (name: string) => boolean,
+): OrphanedHeadCounts {
+  const runShaped = remoteNames.filter((n) => RUN_TASK_BRANCH_TOKEN.test(n));
+  const orphaned = runShaped.filter((n) => !openPrHeads.has(n) && !isInBaseHistory(n));
+  return {
+    kind: "counted",
+    totalHeads: remoteNames.length,
+    runShapedHeads: runShaped.length,
+    orphanedHeads: orphaned.length,
+  };
+}
+
+/**
+ * The end-to-end read: one `git ls-remote --heads origin` (via {@link remoteBranchNames}) plus the
+ * two injected predicates {@link countOrphanedHeads} takes. An `exec` failure — remote
+ * unreachable, auth stale, whatever the cause — resolves to `cannot-determine`, NEVER to
+ * `countOrphanedHeads([], ...)`'s healthy-looking zero: a manual verb with no signal is exactly
+ * the failure mode this task exists to fix, and a silently-false zero would recreate it.
+ */
+export function readOrphanedHeadCount(
+  exec: (cmd: string, args: string[]) => string,
+  openPrHeads: ReadonlySet<string>,
+  isInBaseHistory: (name: string) => boolean,
+): OrphanedHeadReading {
+  let remoteNames: string[];
+  try {
+    remoteNames = remoteBranchNames(exec);
+  } catch (e) {
+    return { kind: "cannot-determine", reason: e instanceof Error ? e.message : String(e) };
+  }
+  return countOrphanedHeads(remoteNames, openPrHeads, isInBaseHistory);
+}
+

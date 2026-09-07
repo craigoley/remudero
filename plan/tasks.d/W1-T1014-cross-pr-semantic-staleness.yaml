@@ -125,7 +125,7 @@
     - claim: "the shard records the inter-merge interval and the re-validation wall-clock against each other, so the deadlock question is answered from data rather than asserted"
       proof: "grep: sits at 0\\.97x the median in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
     - claim: "the shard records the serialised throughput ceiling turning strict on would impose, and how often observed demand already exceeds it"
-      proof: "grep: BELOW the observed rate on 4 of 11 days in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+      proof: "grep: observed rate on 4 of 11 days in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
     - claim: "the shard costs option (b) in CI-minutes at every measured concurrency rather than calling it expensive"
       proof: "grep: 43,100 in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
     - claim: "the merge queue is named as a third option with the repo-specific reason it cannot simply be switched on"

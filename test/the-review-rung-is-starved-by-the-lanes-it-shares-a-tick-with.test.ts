@@ -221,13 +221,13 @@ test("W1-T2519: STOP raised mid-lane halts the independent cadence exactly as it
   assert.ok(finalCount - sweepCallsAtStop! <= 1, `expected at most one more sweep after STOP was observed (an already-in-flight one), saw ${finalCount - sweepCallsAtStop!} more`);
 });
 
-test("W1-T2519: PAUSE gates the independent cadence identically to STOP — and identically to how quiet hours would, via the SAME generic checkPause predicate", async () => {
+test("W1-T2519: PAUSE gates the independent cadence identically to STOP, via the SAME generic checkPause predicate", async () => {
   // `checkPause` is the one generic per-tick hold hook `runDaemon` already reads for BOTH a
-  // literal operator PAUSE and (per fleet-control.ts's own doc: "quiet hours ... does not gate
+  // literal operator PAUSE and any future governor that returns a reason through the same
   // the drain loop by itself [today]; the scheduler that reads it ... is later work") whatever a
   // future caller composes into that same predicate. This daemon module stays pure — it never
   // knows or cares WHICH reason string it was handed — so proving the retrigger honours an
-  // arbitrary truthy `checkPause()` reason proves it would honour a quiet-hours-flavoured one
+  // arbitrary truthy `checkPause()` reason proves it would honour ANY governor's reason
   // exactly the same way, with no daemon.ts change required when that wiring lands.
   const plan = fixturePlan();
   const merged = new Set<string>();
@@ -259,10 +259,10 @@ test("W1-T2519: PAUSE gates the independent cadence identically to STOP — and 
         sweepCalls += 1;
       },
       sweepLight: async () => {},
-      // A quiet-hours-flavoured detail string on purpose — daemon.ts never inspects the content.
+      // An arbitrary detail string on purpose — daemon.ts never inspects the content.
       checkPause: () => {
         if (paused && sweepCallsAtPause === undefined) sweepCallsAtPause = sweepCalls;
-        return paused ? "QUIET_HOURS active — holding rather than dispatching" : undefined;
+        return paused ? "governor active — holding rather than dispatching" : undefined;
       },
       now: () => new Date(nowMs),
       sleep,

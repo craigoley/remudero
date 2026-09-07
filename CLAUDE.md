@@ -398,16 +398,15 @@ carried had gone stale. Each rule cites the PR that earned it.
   zero. `awk` is mawk: over a file containing `  let b = 2;`, `/^[[:space:]]+(let|const)/` matches 1
   and `/^\s+(let|const)/` matches 0 — one session's declaration scan used the `\s` form, reported an
   EMPTY declaration list and a row of zeros, and called a refactor scope-safe on no evidence
-  *(2026-08-09, twice)*. **`\b` IS A SEPARATE TRAP AND IT IS NOT AN ENGINE DIFFERENCE — `git grep -E`
-  DOES honour it.** MEASURED at 6e7d131: `git grep -lE '\bdate' -- src/` returns **21** and
-  `git grep -lE '\busr\b' -- src/` returns **4**, so a `\b` sweep that reads zero has NOT hit a
-  broken engine. What actually fails is `\b` ADJACENT TO A NON-WORD CHARACTER, which asserts a
-  boundary that is usually absent: `git grep -lE '/usr/bin/(date|security)' -- src/` returns **3**
-  while `\b/usr/bin/(date|security)\b` returns **0**, because the leading `\b` sits before `/` and
-  needs a word character to its left where the text has a space. **GNU `grep -E` SCORES THE IDENTICAL
-  PAIR 1 AND 0**, so this is portable regex semantics, not a harness quirk. Anchor on the non-word
-  character itself (`[[:space:]]/usr/bin/`), use `-w`, or
-  drop the `\b`. Never `\s` under `awk`. *(2026-08-12)*
+  *(2026-08-09, twice)*. **NEVER PUT `\b` IN A `git grep` PATTERN — WHETHER IT WORKS IS A GIT-VERSION FACT, NOT A
+  STANDING ONE.** Same tree, same commands, 2026-09-07: `git grep -lE '\bdate' -- src/` returns
+  **29** on git 2.39.5 (system grep agrees) and **0** on git 2.54.0; `criterionFieldTampered\b`
+  returns **49** and **0**. The older reading recorded here (**21** at 6e7d131) was real and is
+  SUPERSEDED, not deleted — CI runs the old engine and a workstation the new one, which is how a
+  citation gate read zero for every symbol locally while CI stayed green *(W1-T2849)*. A `\b`
+  adjacent to a NON-WORD character is a separate and CORRECT zero on every engine (`\b/usr/bin/`
+  needs a word char left of `/`). Anchor on the non-word character
+  (`[[:space:]]/usr/bin/`), use `-w`, or drop the `\b`. Never `\s` under `awk`. *(2026-08-12)*
 - **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
   absence.** **The tool is still blind**, so any UNTRACKED file reads as absent, and **BARE `rg` IS BLIND TOO**

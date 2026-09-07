@@ -13,7 +13,17 @@ import {
   type PanelActionDeps,
 } from "../src/lib/panel-actions.js";
 import type { GitHub } from "../src/lib/status.js";
-import { consumeDrainNow, isPaused, isQuietHours, isStopped, kickFilePath, pauseDetail, pendingKicks, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import {
+  consumeDrainNow,
+  isPaused,
+  isStopped,
+  kickFilePath,
+  pauseDetail,
+  pendingKicks,
+  requestPause,
+  requestStop,
+  stopDetail,
+} from "../src/lib/fleet-control.js";
 import { runDrain, type DrainDeps } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { RunResult } from "../src/lib/run-result.js";
@@ -125,7 +135,7 @@ function serveDepsFor(deps: PanelActionDeps): ServeDeps {
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
     // W1-T500: enforcement is ON in `buildServeServer` now, and the bearer token is PINNED to
     // `writeTier: "low"` (W1-T404's own ruling, deliberately not raised). These tests exercise
-    // MIDDLE-tier handlers (`/v1/control/*`, `/v1/quiet-hours`), so they must arrive the way the
+    // MIDDLE-tier handlers (`/v1/control/*`), so they must arrive the way the
     // operator actually reaches them — over the tailnet, whose grantor declares `writeTier: "high"`.
     // Asserting 403 here instead would delete the handler coverage these tests exist for.
     identity: { trustedLocalAddress: "127.0.0.1", capability: TAILNET_CAP },
@@ -238,7 +248,6 @@ test("every panel-actions.ts write route carries its design-(i)-ruled tier", () 
   assert.equal(tierOf("/v1/control/pause"), "middle");
   assert.equal(tierOf("/v1/control/resume"), "middle");
   assert.equal(tierOf("/v1/control/stop"), "middle");
-  assert.equal(tierOf("/v1/quiet-hours"), "middle");
   assert.equal(tierOf("/v1/questions/answer"), "low");
   assert.equal(tierOf("/v1/escalation/mark-handled"), "low");
   assert.equal(tierOf("/v1/drain/feedback"), "low");
@@ -368,49 +377,10 @@ test("POST /v1/control/stop: no body at all is valid (reason is optional)", asyn
   assert.equal(isStopped(root), true);
 });
 
-// ── POST /v1/quiet-hours ──────────────────────────────────────────────────────
 
-test("POST /v1/quiet-hours: {enabled:true} sets the flag, ledgers panel.quiet_hours_toggled", async () => {
-  const root = tmpRoot();
-  const deps = depsFor(root);
-  await withService(deps, async (base) => {
-    const res = await post(base, "/v1/quiet-hours", WRITE_TOKEN, { enabled: true });
-    assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { quietHours: true });
-  });
-  assert.equal(isQuietHours(root), true);
-  assert.equal(readLedgerLines(deps.ledgerPath)[0].step, "panel.quiet_hours_toggled");
-});
 
-test("POST /v1/quiet-hours: {enabled:false} clears the flag", async () => {
-  const root = tmpRoot();
-  requestPause(root); // unrelated flag — quiet-hours toggle must not touch PAUSE
-  await withService(depsFor(root), async (base) => {
-    const res = await post(base, "/v1/quiet-hours", WRITE_TOKEN, { enabled: false });
-    assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { quietHours: false });
-  });
-  assert.equal(isQuietHours(root), false);
-  assert.equal(isPaused(root), true, "quiet-hours toggle must not touch PAUSE");
-});
 
-test("POST /v1/quiet-hours: missing `enabled` -> 400, no side effect", async () => {
-  const root = tmpRoot();
-  await withService(depsFor(root), async (base) => {
-    const res = await post(base, "/v1/quiet-hours", WRITE_TOKEN, {});
-    assert.equal(res.status, 400);
-  });
-  assert.equal(isQuietHours(root), false);
-});
 
-test("POST /v1/quiet-hours: enabled as a string -> 400 (fail loud, not a truthy coerce)", async () => {
-  const root = tmpRoot();
-  await withService(depsFor(root), async (base) => {
-    const res = await post(base, "/v1/quiet-hours", WRITE_TOKEN, { enabled: "true" });
-    assert.equal(res.status, 400);
-  });
-  assert.equal(isQuietHours(root), false);
-});
 
 // ── POST /v1/questions/answer (acceptance criterion 1) ────────────────────────
 

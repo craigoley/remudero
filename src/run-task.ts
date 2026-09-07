@@ -25,7 +25,7 @@ import {
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -55,7 +55,7 @@ import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
-import { readFileIfExists } from "./lib/fs-race-safe.js";
+import { isHolderStale, readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, IMPLEMENT_ROLE_LINES, outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
@@ -246,7 +246,7 @@ import {
   type RestRollupEntry,
 } from "./lib/open-prs-rest.js";
 import { buildMainHealthRung } from "./lib/main-health-rung.js";
-import { imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
+import { emailChannel, imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
   alertTaskId,
@@ -467,6 +467,7 @@ import {
   renderPromotionProposals,
   renderPlanStateTruth,
   resolveMarkerForGather,
+  escalateRetroPublicationFailure,
   retireSettledFollowups,
   routeFollowupsToRegistry,
   type FollowupReferentRead,
@@ -514,19 +515,33 @@ import {
 } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import {
+  buildAuthorityReport,
+  authorityLedgerPattern,
+  loadRatificationPins,
+  renderAuthorityReport,
+  type AuthorityReport,
+} from "./lib/authority.js";
+import {
   collectCiFailureCorpus,
   rollupAtSha,
   type CiFailureCorpusInput,
   type CorpusPr,
 } from "./lib/ci-failure-corpus.js";
-import { injectCoverageImprovementTask } from "./lib/coverage-improvement.js";
+import {
+  fetchMergedCoverageArtifact,
+  injectCoverageImprovementTask,
+  type FetchMergedCoverageArtifactDeps,
+  type FetchMergedCoverageArtifactResult,
+} from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import {
   measurementCadenceCheck,
   ciLearningCadenceCheck,
   type CiLearningCadencePolicy,
+  type CiLearningCadenceRunResult,
   measurementCadenceMarkerPath,
+  fileCiLearningShards,
   mintCiLearningShards,
   recordCiLearningCadenceFire,
   recordMeasurementCadenceFire,
@@ -591,6 +606,7 @@ import {
   lintTask,
   planShardSlugCorpus,
   proofGrepUnmatchableViolations,
+  proofGrepSelfCertifyingViolations,
   shardSlugFromPath,
   TaskLintError,
   type LintOpts,
@@ -908,6 +924,7 @@ import {
   parseReport,
   pruneStaleRuns,
   reapStaleWorktrees,
+  removeWorktreeBase,
   removeRunLock,
   renderWorkerSettings,
   resolveClaudeExecutable,
@@ -972,6 +989,7 @@ import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
   acquireInflightLock,
   InflightLockError,
+  parseInflightLockInfo,
   readInflightLock,
   sweepStaleInflightLocks,
   type InflightLockHandle,
@@ -1920,6 +1938,11 @@ interface RollupEntry {
   status?: string;
   conclusion?: string;
   state?: string;
+  /** W1-T2804 — when this ATTEMPT started. Already carried at runtime by every producer this
+   *  interface widens ({@link RestRollupEntry.startedAt}); declared here so the poll-loop readers
+   *  can hand these entries to {@link dedupeRollupByLatestAttempt}, which sorts on it, without
+   *  the type silently erasing the only field that distinguishes one attempt from its successor. */
+  startedAt?: string;
 }
 
 /**
@@ -3953,12 +3976,63 @@ export function changeView(prUrl: string, fetch: (args: string[]) => unknown = g
 }
 
 /**
- * W1-T307: write a PR's body via gh — the mechanism {@link deriveChangesetClaimUpdate}'s narrow,
+ * W1-T2948 — THE ARGV EVERY PR-BODY WRITE IN THIS MODULE IS BUILT FROM, over REST.
+ *
+ * THE DEFECT THIS REPLACES, observed at the production effect twice. `gh pr edit --body` is
+ * implemented over GraphQL, and its query selects `repository.pullRequest.projectCards` —
+ * Projects Classic, which GitHub has deprecated. The whole command fails BEFORE the supplied edit
+ * reaches the pull request, so a deterministic, zero-model body repair that already had the
+ * complete replacement text in hand fell through to a model worker, a commit and an extra CI cycle
+ * (#4228). The same failure was reproduced from a container shell on 2026-09-07 against #4372.
+ *
+ * `-f` (--raw-field), NEVER `-F` (--field), and the distinction is load-bearing: `-F` reads a
+ * value beginning with `@` as a FILENAME and substitutes `{owner}`/`{repo}`/`{branch}`
+ * placeholders from the current checkout. A PR body legitimately contains both. Verified against
+ * the real `gh` with `--verbose`: `-f 'body=@/etc/hostname and {owner} literal'` puts that
+ * string in the request payload verbatim.
+ *
+ * A URL that does not resolve to owner/repo/number THROWS here, before any process is spawned —
+ * mirroring {@link changeView}'s own refusal. Guessing the target from the current checkout is how
+ * a body repair would land on the wrong pull request.
+ */
+export function prBodyRestArgs(prUrl: string, body: string): string[] {
+  const target = prUrlTarget(prUrl);
+  if (!target) {
+    throw new Error(
+      `pr body write: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to guess ` +
+        "a repository or PR number from the current checkout",
+    );
+  }
+  // PATCH against the SINGLE pull request — never an issue-wide, project, GraphQL, merge or branch
+  // endpoint — and the body as ONE argv value, never shell text.
+  return ["api", "-X", "PATCH", `repos/${target.owner}/${target.repo}/pulls/${target.number}`, "-f", `body=${body}`];
+}
+
+/**
+ * W1-T2948 — the single effect the three production PR-body writers in this module share, so the
+ * acceptance repair, the trailer stamp and the retro repair cannot drift back onto separate copies
+ * of a failing transport. TRANSPORT ONLY: `execFileSync("gh", …, { stdio: "pipe" })` is kept
+ * exactly as each caller had it, so a nonzero exit still THROWS and every existing
+ * fail-soft/fail-open contract and ledger row above these callers is unchanged.
+ */
+export function writePrBodyRest(
+  prUrl: string,
+  body: string,
+  exec: (args: string[]) => unknown = (args) => execFileSync("gh", args, { stdio: "pipe" }),
+): void {
+  exec(prBodyRestArgs(prUrl, body));
+}
+
+/**
+ * W1-T307: write a PR's body — the mechanism {@link deriveChangesetClaimUpdate}'s narrow,
  * mechanical edit is actually committed through. Injectable so a unit test can assert the UPDATE
  * ITSELF (what was written) rather than mocking a subprocess.
+ *
+ * W1-T2948: routed through {@link writePrBodyRest}. The name is kept — it is still `gh` — but the
+ * transport is the REST pulls endpoint, not `gh pr edit`, whose GraphQL query is the defect.
  */
 export async function updatePrBodyViaGh(prUrl: string, body: string): Promise<void> {
-  execFileSync("gh", ["pr", "edit", prUrl, "--body", body], { stdio: "pipe" });
+  writePrBodyRest(prUrl, body);
 }
 
 /**
@@ -4184,7 +4258,10 @@ export function ensureTaskTrailer(
     if (body.includes(trailer)) return;
     const newBody = body.trim().length > 0 ? `${body.trimEnd()}\n\n${trailer}\n` : `${trailer}\n`;
     phase = "write";
-    write(["pr", "edit", prUrl, "--body", newBody]);
+    // W1-T2948: the SHARED builder, so this stamp cannot retain its own copy of the failing
+    // transport. An unresolvable URL throws here and lands in the catch below with phase "write" —
+    // the same best-effort row this path already wrote, on a target it refused to guess.
+    write(prBodyRestArgs(prUrl, newBody));
   } catch (e) {
     log("trailer_stamp.failed", {
       task_id: taskId,
@@ -4812,13 +4889,51 @@ export async function pollToGate(
  * is judged FRESH by `runReview` every strike, never trusted from the
  * rollup here.
  */
-export function ciGateFromRollup(rollup: RollupEntry[] | undefined): "green" | "red" | "pending" {
-  const roll = (rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX);
-  const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
+export function ciGateFromRollup(
+  rollup: RollupEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined = undefined,
+): "green" | "red" | "pending" {
+  // W1-T2804: DEDUPE BEFORE JUDGING, by CALLING the rule the siblings call. A sha accumulates one
+  // entry PER ATTEMPT, so without this a superseded CANCELLED/FAILURE attempt outvotes its own
+  // green successor and the run books `blocked_ci` while GitHub is merging the PR.
+  const roll = dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX));
+  // W1-T2804: the RED vote is cast only by REQUIRED contexts when the list is readable. The degrade
+  // is READ FROM the sibling (`checksStateFromRollup`), not re-decided: an empty/absent list means
+  // every reported context counts, because an unreadable protection rule (the container PAT's 403,
+  // the common case on this fleet) must never manufacture a false green. The GREEN verdict is
+  // deliberately unchanged and still requires a check named `ci` reporting SUCCESS — sharing the
+  // RULES with `checksStateFromRollup` must not collapse the two distinct VERDICTS.
+  const required = new Set(requiredContexts ?? []);
+  const voters = required.size > 0
+    ? roll.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? ""))
+    : roll;
+  const red = voters.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
   if (red) return "red";
   const ci = roll.find((c) => (c.name ?? c.context) === "ci");
   if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
   return "pending";
+}
+
+/**
+ * W1-T2804 — a CI gate verdict together with THE SHA IT WAS READ FOR. The parse fix above is only
+ * half the defect: the gate reader and the ci-log evidence miner each resolved their own head, so
+ * "the two readers disagree" could be asserted about two different commits. Carrying the sha the
+ * gate actually judged lets the miner be pinned to that same commit within one decision, and makes
+ * the shared subject OBSERVABLE in whatever that decision reports.
+ */
+export type CiGateOutcome = { state: "green" | "red" | "timeout"; sha?: string };
+
+/** W1-T2804: normalize a {@link CiGateOutcome} or a bare verdict (what a caller-supplied
+ *  `waitForCiGreen` stub returns) to the verdict. */
+export function ciGateState(r: CiGateOutcome | "green" | "red" | "timeout"): "green" | "red" | "timeout" {
+  return typeof r === "string" ? r : r.state;
+}
+
+/** W1-T2804: the sha a gate verdict was read for, or `undefined` when the reader did not report
+ *  one. Undefined PINS NOTHING and every consumer falls back to its own read — fail open, exactly
+ *  as before this task, so a stub that returns a bare verdict changes no behavior. */
+export function ciGateSha(r: CiGateOutcome | "green" | "red" | "timeout"): string | undefined {
+  return typeof r === "string" ? undefined : r.sha;
 }
 
 /**
@@ -4978,19 +5093,22 @@ async function waitForCiGreen(
   log: (step: string, extra?: Record<string, unknown>) => void,
   everySec = 6,
   deps: PollDeps = {},
-): Promise<"green" | "red" | "timeout"> {
+): Promise<CiGateOutcome> {
   const read = deps.readJson ?? ghJsonAsync;
   const sleep = deps.sleep ?? yieldingSleep;
   // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
   const { owner, repo, number } = pollRestTarget(prUrl, "waitForCiGreen");
   const readings: (RollupEntry[] | undefined)[] = [];
+  let sha = "";
   for (let i = 0; ; i++) {
     const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
-    const sha = mapRestPr(row).headRefOid;
+    sha = mapRestPr(row).headRefOid;
     const roll = await restRollupFor(owner, repo, sha, read);
     const state = ciGateFromRollup(roll);
-    if (state === "red") return "red";
-    if (state === "green") return "green";
+    // W1-T2804: the sha this iteration RESOLVED and judged rides out with the verdict. It is the
+    // already-resolved head, never a second read — a second read is a second chance to skew.
+    if (state === "red") return { state: "red", sha };
+    if (state === "green") return { state: "green", sha };
     readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
@@ -5002,8 +5120,8 @@ async function waitForCiGreen(
     if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "ci" });
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
     if (stall.stalled) {
-      log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
-      return "timeout";
+      log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW, sha });
+      return { state: "timeout", sha };
     }
     // W1-T463: `await` a TIMER, never `execFileSync("sleep", …)`. The cadence is byte-identical —
     // `everySec` seconds between polls, unchanged — but the thread is now RELEASED for the whole
@@ -6543,6 +6661,62 @@ export function remedyGeneratorNamedInLog(logTail: string): string | undefined {
 }
 
 /**
+ * W1-T2733 — HOW MANY DISTINCT REMEDY LINES ARE CARRIED FORWARD FROM OUTSIDE THE TAIL.
+ * BACKSTOP, not the primary control: deduplication is what actually stops a repetitive log growing
+ * the fix prompt (one remedy repeated 3,000 times retains ONCE), and this catches only the residue
+ * that dedupe cannot — a log naming many DISTINCT generators, which no honest CI run does. Small
+ * because {@link allCiFailuresAreGeneratorFixable} needs one remedy per failing check, not a
+ * catalogue; a job naming more than this is not a case the deterministic rung should be reasoning
+ * about at all.
+ */
+export const MAX_RETAINED_REMEDY_LINES = 5;
+
+/** W1-T2733 — the marker that says these lines did not come from the tail. Present ONLY when
+ *  something was retained, so a log with no recognised remedy is byte-identical to before. */
+export const RETAINED_REMEDY_HEADER = "--- generator remedy line(s) retained from earlier in this job (W1-T2733) ---";
+
+/**
+ * W1-T2733 — KEEP A DECLARED GENERATOR REMEDY THAT THE TAIL SLICE WOULD HAVE THROWN AWAY.
+ *
+ * OBSERVED ON PR #3716 (head 2ff348e5). `ci-shard (3/4)` printed
+ * `Run 'npm run docs-index' and commit the result.` beside its one failing assertion, then ran on
+ * through 3,253 more tests and a retry. `fetchCiFailures` fetches the WHOLE
+ * `gh run view --log-failed` output and keeps only its final 60 lines, so the remedy sat thousands
+ * of lines before that slice. {@link allCiFailuresAreGeneratorFixable} therefore saw a tail with no
+ * remedy, the W1-T2551 pre-strike generator rung could not fire, and the sweep spent BOTH worker
+ * strikes plus escalation #3722 on a command it could have run deterministically in seconds.
+ *
+ * THE RECOGNIZER IS NOT WIDENED. This reuses {@link remedyGeneratorNamedInLog}'s existing grammar
+ * verbatim, and {@link declaredGeneratorScriptFor}'s package.json pairing remains the execution
+ * authority — retaining a line makes it VISIBLE, never runnable. A crafted log can therefore add
+ * at most {@link MAX_RETAINED_REMEDY_LINES} deduplicated lines naming scripts that must still exist
+ * in package.json before anything runs.
+ *
+ * BYTE-IDENTICAL WHEN THERE IS NOTHING TO RETAIN, which is the vast majority of CI failures (a real
+ * test failure, a lint error, a type error). The header and the retained block appear only when a
+ * remedy was found OUTSIDE the tail and is not already named inside it.
+ */
+export function retainGeneratorRemedyLines(fullLog: string, tailLines: number): string {
+  const lines = (fullLog ?? "").split("\n");
+  const tail = lines.slice(-tailLines);
+  const tailText = tail.join("\n");
+  // Seeded from the tail so a remedy already visible there is never repeated above it — the tail
+  // is the preferred evidence and this only ever supplements it.
+  const seen = new Set(tail.map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
+  const retained: string[] = [];
+  for (const line of lines.slice(0, Math.max(0, lines.length - tail.length))) {
+    if (remedyGeneratorNamedInLog(line) === undefined) continue;
+    const trimmed = line.trim();
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    retained.push(trimmed);
+    if (retained.length >= MAX_RETAINED_REMEDY_LINES) break;
+  }
+  if (retained.length === 0) return tailText;
+  return [RETAINED_REMEDY_HEADER, ...retained, "", tailText].join("\n");
+}
+
+/**
  * ONE failing check's declared generator fix, or `undefined` when this check is OUT of the class
  * this task targets (acceptance criterion 3: a check with no generator counterpart still reaches
  * the ordinary rung unchanged). Requires BOTH: the check's own log names a remedy generator (the
@@ -6856,6 +7030,38 @@ export interface FixRungOutcome {
    * {@link prerequisiteMerged} reads this PR as merged.
    */
   blockedOnPr?: number;
+}
+
+type CiEvidenceDisagreementObservation = {
+  /** W1-T2804 — the head sha BOTH readers resolved for within this one decision. Absent only when
+   *  no reader reported one, in which case the row asserts a disagreement without claiming a shared
+   *  subject. Never hand-authored: it is whatever the gate read actually judged. */
+  sha?: string;
+  rollup: {
+    checks_state: OpenPrView["checksState"];
+    red_checks: string[];
+  };
+  miner: {
+    enumerable_failures: Array<{ name: string }>;
+  };
+};
+
+function ciEvidenceDisagreementObservation(args: {
+  checksState?: OpenPrView["checksState"];
+  redChecks?: readonly string[];
+  ciFailures: readonly CiFailure[];
+  sha?: string;
+}): CiEvidenceDisagreementObservation {
+  return {
+    ...(args.sha ? { sha: args.sha } : {}),
+    rollup: {
+      checks_state: args.checksState ?? "red",
+      red_checks: [...(args.redChecks ?? [])],
+    },
+    miner: {
+      enumerable_failures: args.ciFailures.map((failure) => ({ name: failure.name })),
+    },
+  };
 }
 
 /**
@@ -8571,6 +8777,7 @@ export async function runFixRung(opts: {
    * review yet").
    */
   ciFailures?: CiFailure[];
+  ciEvidenceDisagreement?: CiEvidenceDisagreementObservation;
   /**
    * W1-T106 (the #170 DIRTY strand): merge-conflict evidence for a
    * `conflicted` dispatch — this PR's merge state is dirty, so no CI check
@@ -8599,10 +8806,16 @@ export async function runFixRung(opts: {
   actionableGateFailures?: ActionableGateFailure[];
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+    /**
+     * W1-T2804: the return is a UNION — a {@link CiGateOutcome} carrying the sha the gate was read
+     * for, or the bare verdict every pre-existing stub already returns. Read it through
+     * {@link ciGateState}/{@link ciGateSha}, never by comparing it to a string directly: a bare
+     * verdict pins nothing and each consumer falls back to its own read, exactly as before.
+     */
     waitForCiGreen: (
       prUrl: string,
       log: (step: string, extra?: Record<string, unknown>) => void,
-    ) => Promise<"green" | "red" | "timeout">;
+    ) => Promise<CiGateOutcome | "green" | "red" | "timeout">;
     /**
      * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh
      * re-read of THIS PR's live GitHub state, consulted at the top of every
@@ -8640,8 +8853,12 @@ export async function runFixRung(opts: {
      * the rung degrades to keeping whatever ci-log evidence it already had —
      * the MODE still corrects itself (see `noReviewYet` below), only the
      * failing-check CONTENT stays stale.
+     *
+     * W1-T2804: `sha` is APPENDED LAST with a default, so no positional caller shifts. When the
+     * round's gate read reported a sha, the miner is PINNED to it and both readers answer about
+     * ONE commit; omitted, the miner resolves its own head exactly as it always did.
      */
-    fetchCiFailures?: (prUrl: string) => Promise<CiFailure[]>;
+    fetchCiFailures?: (prUrl: string, sha?: string) => Promise<CiFailure[]>;
     /**
      * W1-T1278 (condition A): a FRESH read of THIS PR's current status-check rollup — the raw,
      * per-attempt entries `fetchCiFailures` above filters down to failing names only. Consulted
@@ -8834,6 +9051,10 @@ export async function runFixRung(opts: {
   // of targeting the check that is actually still red.
   let noReviewYet = opts.ciFailures !== undefined;
   let currentCiFailures = opts.ciFailures;
+  // W1-T2804: the head sha THIS rung's most recent gate read judged. Seeded from the dispatching
+  // sweep's own resolved head so round 1 is pinned too, then re-pinned by every gate read. It is
+  // never independently resolved here — a second read is a second chance to skew.
+  let currentPinnedSha: string | undefined = opts.ciEvidenceDisagreement?.sha;
   // W1-T2551: bounds the generator-fix short-circuit (site `rung.generator_fix`, below) to a
   // SMALL number of attempts per invocation — every attempt already re-verifies the regenerated
   // output against its OWN `:check` before committing anything, but this caps how many rounds a
@@ -9236,6 +9457,25 @@ export async function runFixRung(opts: {
         "blocked_ci dispatch with zero enumerable failing check(s) — the checks-red rollup and the ci-log " +
         "evidence miner disagree, so there is nothing to hand a fix worker; standing down rather than " +
         "spending a strike on empty evidence";
+      // W1-T2804: `pinnedSha` is the head THIS round's gate read resolved, falling back to the sha
+      // the dispatching sweep resolved. Reporting it is what turns "the two readers disagree" from
+      // an assertion about two possibly-different commits into a claim about one observable one.
+      const pinnedSha = currentPinnedSha ?? opts.ciEvidenceDisagreement?.sha;
+      const disagreement = opts.ciEvidenceDisagreement
+        ? {
+            ...(pinnedSha ? { sha: pinnedSha } : {}),
+            rollup: opts.ciEvidenceDisagreement.rollup,
+            miner: ciEvidenceDisagreementObservation({ ciFailures: currentCiFailures }).miner,
+          }
+        : ciEvidenceDisagreementObservation({ ciFailures: currentCiFailures, sha: pinnedSha });
+      deps.log("fix.ci_evidence_disagreement", {
+        site: "rung.empty_ci_failures",
+        strike: strikes + 1,
+        reason,
+        sha: disagreement.sha,
+        rollup: disagreement.rollup,
+        miner: disagreement.miner,
+      });
       deps.log("fix.stood_down", { site: "rung.empty_ci_failures", strike: strikes + 1, reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
       return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
@@ -9307,10 +9547,11 @@ export async function runFixRung(opts: {
           // above) stands this down cleanly with no strike spent; if something else is still red,
           // the next iteration re-derives from THAT — either another generator-fixable round, or a
           // real fall-through to the ordinary worker dispatch.
-          await deps.waitForCiGreen(opts.prUrl, deps.log);
+          const gated = await deps.waitForCiGreen(opts.prUrl, deps.log);
+          currentPinnedSha = ciGateSha(gated) ?? currentPinnedSha;
           if (deps.fetchCiFailures) {
             try {
-              currentCiFailures = await deps.fetchCiFailures(opts.prUrl);
+              currentCiFailures = await deps.fetchCiFailures(opts.prUrl, ciGateSha(gated));
               for (const f of currentCiFailures) everRedCiCheckNames.add(f.name);
             } catch (e) {
               deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
@@ -9603,7 +9844,7 @@ export async function runFixRung(opts: {
           });
           return escalateAndExhaust();
         }
-        const ciState = await deps.waitForCiGreen(prerequisiteUrl!, deps.log);
+        const ciState = ciGateState(await deps.waitForCiGreen(prerequisiteUrl!, deps.log));
         if (ciState !== "green") {
           // THE REFUSAL CONDITION, SECOND ARM: a prerequisite that CANNOT GO GREEN escalates
           // exactly as the rung does today (rationale (5)) — never merged, never rebased onto.
@@ -10020,8 +10261,11 @@ export async function runFixRung(opts: {
     );
 
     const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
-    if (ci !== "green") {
-      deps.log("fix.ci_not_green", { strike: strikes, ci });
+    // W1-T2804: one gate read, one sha, and the miner below is pinned to it — never a second
+    // independent head resolution between the two halves of a single decision.
+    currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
+    if (ciGateState(ci) !== "green") {
+      deps.log("fix.ci_not_green", { strike: strikes, ci: ciGateState(ci), sha: ciGateSha(ci) });
       // W1-T138 (the #303/#305/#292/#315 fix): no review ran for THIS push
       // either (review only ever runs once CI is green) — the NEXT strike
       // must target whatever is ACTUALLY still red now, never keep
@@ -10033,7 +10277,7 @@ export async function runFixRung(opts: {
       noReviewYet = true;
       if (deps.fetchCiFailures) {
         try {
-          currentCiFailures = await deps.fetchCiFailures(opts.prUrl);
+          currentCiFailures = await deps.fetchCiFailures(opts.prUrl, ciGateSha(ci));
           for (const f of currentCiFailures) everRedCiCheckNames.add(f.name);
         } catch (e) {
           deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
@@ -13768,7 +14012,7 @@ async function runTask(
     // lives here, before arming. A ci that never greens is blocked_ci (no review
     // over unproven code); a review=failure is blocked_review (the required check
     // is red and GitHub will not merge). Pending is never treated as pass.
-    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say("fallback: pushing branch already done; ci not green — skipping review, leaving PR open");
       log("verdict", {
@@ -13873,7 +14117,15 @@ async function runTask(
           // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
           // non-green — see runFixRung's own doc for why this must happen on
           // every strike, not just the first.
-          fetchCiFailures: async (prUrlArg) => {
+          // W1-T2804: when the round's gate read reported the sha it judged, mine THAT commit's
+          // rollup over `restRollupFor` — the same REST read the gate itself used — so the two
+          // readers cannot answer about different heads. No sha (a stub, or a gate that reported
+          // none) falls back to the pre-existing `gh pr view` read unchanged, fail open.
+          fetchCiFailures: async (prUrlArg, sha) => {
+            if (sha) {
+              const roll = await restRollupFor(owner, task.repo, sha, ghJsonAsync);
+              return fetchCiFailures(owner, task.repo, roll);
+            }
             const v = ghJson(["pr", "view", prUrlArg, "--json", "statusCheckRollup"]) as {
               statusCheckRollup?: RollupCheck[];
             };
@@ -14922,8 +15174,10 @@ function defaultRetroFetchBody(url: string): string {
   return view.body ?? "";
 }
 
+/** W1-T2948: the retro's repair goes through the SAME REST writer as the acceptance repair and the
+ *  trailer stamp — one transport, one place to fix. */
 function defaultRetroEditBody(url: string, body: string): void {
-  execFileSync("gh", ["pr", "edit", url, "--body", body], { stdio: "pipe" });
+  writePrBodyRest(url, body);
 }
 
 /**
@@ -16001,6 +16255,8 @@ export interface MintedTaskIdWithHistory {
   maxSeen: number;
   sources: MintSources;
   historyMax: number | null;
+  /** The reservation frontier that made a `--reserve` attempt advance beyond the raw mint. */
+  reservationMax?: number | null;
   degraded: MintDegradation[];
 }
 
@@ -16140,10 +16396,11 @@ export function mintNextTaskIdWithHistory(opts: {
 /** lib/task-id.ts's `describeMint`, plus the history source — one-line provenance for the
  *  layered mint. */
 export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
+  const reservation = mint.reservationMax == null ? "" : `, reservations ${mint.reservationMax}`;
   const src =
     `tasks.yaml ${mint.sources.monolith ?? "-"}, shards ${mint.sources.shards ?? "-"}, ` +
     `open PRs ${mint.sources.openPrs ?? "not enumerated"}, remote plan ${mint.sources.remotePlan ?? "-"}, ` +
-    `history ${mint.historyMax ?? "-"}`;
+    `history ${mint.historyMax ?? "-"}${reservation}`;
   const warn = mint.degraded.length
     ? ` — DEGRADED: ${mint.degraded.map((d) => `${d.source} (${d.reason})`).join("; ")}`
     : "";
@@ -16789,6 +17046,59 @@ export function replayCommand(
   }
   console.log(buildReplay(resolved.lines, { since, until, taskId, stepPrefix }));
   return 0;
+}
+
+/** Injectable seam for `authorityCommand` — same shape as `ReplayCommandOpts` above: a test
+ *  drives both the measured and refused (`ledger.ok === false`) paths without a real state root. */
+export interface AuthorityCommandDeps {
+  out?: (s: string) => void;
+  err?: (s: string) => void;
+  stateDir?: string;
+  loadPolicy?: () => Policy;
+  loadPins?: () => Record<string, string>;
+  resolveLedger?: (stateDir: string, pattern: RegExp) => ReturnType<typeof resolveLedgerUnion>;
+}
+
+/**
+ * `rmd authority [--json]` — W1-T2695: what the fleet may do without the operator, joined to
+ * plan/policy.yaml's values, plan/ratifications.yaml's pins (if any), and each action's last
+ * ledgered firing.
+ *
+ * READ-ONLY BY CONSTRUCTION: every input below is a tree read (policy.yaml, ratifications.yaml,
+ * the ledger union) — no `gh`/network call, no `execFileSync`, no write. See lib/authority.ts's
+ * `AUTHORITY_TABLE` for what is enumerated and `test/authority-ratchet.test.ts` for what refuses
+ * a new external write that names no gate here.
+ */
+export function authorityCommand(rest: string[], deps: AuthorityCommandDeps = {}): number {
+  const badArg = unknownArgError("authority", rest, [], ["--json"]);
+  const out = deps.out ?? console.log;
+  const err = deps.err ?? console.error;
+  if (badArg) {
+    err(`${badArg}\n${USAGE}`);
+    return 2;
+  }
+  const stateDir = deps.stateDir ?? dirname(ledgerPathFor(loadConfig()));
+  const loadPolicyFn = deps.loadPolicy ?? loadDefaultPolicy;
+  let policy: Policy | undefined;
+  try {
+    policy = loadPolicyFn();
+  } catch {
+    // A read-only report never crashes on an unparsable policy.yaml — every policy-gated row's
+    // policyValue simply reads "-" (undefined), same posture as statusCommand's "GitHub is
+    // decoration, never a gate" for its own network reads.
+    policy = undefined;
+  }
+  const loadPinsFn = deps.loadPins ?? (() => loadRatificationPins());
+  const pins = loadPinsFn();
+  const resolveLedgerFn = deps.resolveLedger ?? resolveLedgerUnion;
+  const ledger = resolveLedgerFn(stateDir, authorityLedgerPattern());
+  const report: AuthorityReport = buildAuthorityReport({ policy, pins, ledger });
+  if (rest.includes("--json")) {
+    out(JSON.stringify(report, null, 2));
+  } else {
+    out(renderAuthorityReport(report));
+  }
+  return report.status === "refused" ? 1 : 0;
 }
 
 /**
@@ -17538,7 +17848,15 @@ export function censusMembershipCommand(
  *  and a rung that both concluded and committed would be that argument's only weak point. */
 export function ciLearningCommand(
   rest: string[],
-  deps: CiFailuresCommandDeps & { root?: string; policy?: CiLearningCadencePolicy } = {},
+  deps: CiFailuresCommandDeps & {
+    root?: string;
+    policy?: CiLearningCadencePolicy;
+    /** W1-T2968 — every `origin:` the plan already holds. Injected so a test drives idempotency
+     *  without a plan on disk; production reads the real plan. */
+    planOrigins?: readonly string[];
+    /** W1-T2968 — the filer. Injected so a test writes nothing; production files for real. */
+    fileShards?: typeof fileCiLearningShards;
+  } = {},
 ): number {
   const badArg = unknownArgError("ci-learning", rest, ["--days"], ["--force"]);
   if (badArg) {
@@ -17591,7 +17909,11 @@ export function ciLearningCommand(
   }
 
   const corpus = collectCiFailureCorpus(input);
-  const result = mintCiLearningShards(corpus, []);
+  // W1-T2968 — THE PLAN IS THE RECORD. This argument was hardcoded `[]`, so idempotency was inert:
+  // every re-read of one window re-drafted everything it had already drafted. A filed record
+  // carries its finding id as its `origin:`, which is what makes the plan answerable here.
+  const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(root);
+  const result = mintCiLearningShards(corpus, planOrigins);
   console.log(`rmd ci-learning — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
   console.log(`  status: ${result.status}`);
   if (result.unreadableShas.length > 0) {
@@ -17606,8 +17928,61 @@ export function ciLearningCommand(
   for (const e of result.excludedFindings) {
     console.log(`  EXCLUDED by the ceiling (named, not dropped): ${e}`);
   }
+
+  // W1-T2968 — FILE THEM. W1-T2959's acceptance said "one firing FILES at most the ceiling many
+  // records" while this verb printed and wrote nothing; a draft nobody files is a report nobody
+  // reads. Each record lands MARKED (`author_class: machine`) and PARKED (`verify: human`), which
+  // `isDispatchEligible` refuses and `machineAuthorVerifyViolation` blocks if it ever reads `auto`.
+  if (result.drafts.length > 0) {
+    const file = deps.fileShards ?? fileCiLearningShards;
+    // FILING IS BEST-EFFORT AND MUST NEVER TAKE THE REPORT DOWN WITH IT. The minter fails CLOSED by
+    // inheritance — an unreachable origin or an unreadable plan throws rather than minting
+    // optimistically — and that is right for the CLAIM but wrong for the OPERATOR: the drafts above
+    // are already on screen and losing them to an exception turns a partial success into nothing.
+    // MEASURED: without this, an unreadable plan under the run's root took the whole verb out with
+    // ENOENT, reddening three of W1-T2959's tests, which pass a tmp root with no plan in it.
+    try {
+      const filing = file(result.drafts, root, { mintTaskId: ciLearningTaskIdMinter(root), planOrigins });
+      for (const f of filing.filed) console.log(`  FILED ${f.taskId} -> ${f.relPath}`);
+      for (const sk of filing.skipped) console.log(`  ALREADY IN THE PLAN (not re-filed): ${sk}`);
+      // A refusal is NAMED. A rung that silently dropped what the linter would not accept would be
+      // reporting a clean run over a record it could not write.
+      for (const rf of filing.refused) console.log(`  REFUSED by the task linter (${rf.reason}): ${rf.findingId}`);
+    } catch (e) {
+      // NAMED, never swallowed: "drafted but not filed" is a different outcome from "filed", and an
+      // operator reading this must be able to tell them apart.
+      console.error(`  NOT FILED — the filer could not run (${(e as Error).message}); the drafts above stand unfiled`);
+    }
+  }
+
   if (!rest.includes("--force")) recordCiLearningCadenceFire(root, new Date());
   return 0;
+}
+
+/** Every `origin:` the plan already holds — the idempotency surface {@link fileCiLearningShards}
+ *  consults. An unreadable plan yields `[]` and the linter-validated write still cannot duplicate a
+ *  record within one firing; it is a degraded read, and the verb says so rather than crashing. */
+export function ciLearningPlanOrigins(root: string): string[] {
+  try {
+    return loadPlan(join(root, "plan", "tasks.yaml"))
+      .tasks.map((t) => t.origin)
+      .filter((o): o is string => typeof o === "string" && o.length > 0);
+  } catch {
+    console.error("rmd ci-learning: the plan could not be read for already-filed findings — proceeding without it");
+    return [];
+  }
+}
+
+/** THE RESERVATION PATH, never a counter: the same `reserveTaskIdRemote` + `gitRemoteRefReserver`
+ *  pair `next-task-id --reserve` uses, so a machine-filed id races the fleet's own ids correctly.
+ *  FAIL-CLOSED by inheritance — an unreachable origin throws here rather than minting optimistically. */
+export function ciLearningTaskIdMinter(root: string): () => string {
+  return () => {
+    const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root });
+    const runGit = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+    const held = reserveTaskIdRemote(mint.n, gitRemoteRefReserver({ run: gitRunAdapter(runGit) }));
+    return held.taskId;
+  };
 }
 
 export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } = {}): number {
@@ -17676,7 +18051,7 @@ export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } 
 }
 
 /**
- * `rmd coverage-improve [--lcov <path>]` — TIER TWO of the absolute-threshold coverage gate
+ * `rmd coverage-improve [--lcov <path> | --from-ci]` — TIER TWO of the absolute-threshold coverage gate
  * (W1-T470): when this run's branch coverage sits in the 85-90 pass-with-debt band, name the
  * `src/` files that own the most uncovered branches and file ONE `plan/feedback/` entry about
  * them (never a shard written directly into `plan/tasks.d/` — no such minter exists — and never
@@ -17697,6 +18072,12 @@ export function coverageImproveCommand(
     stateDir?: string;
     ledgerPath?: string;
     runId?: string;
+    fetchCoverageArtifact?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
+    resolveOwnerRepo?: () => { owner: string; repo: string };
+    capture?: Parameters<typeof injectCoverageImprovementTask>[0]["capture"];
+    ledgerUnion?: Parameters<typeof injectCoverageImprovementTask>[0]["ledgerUnion"];
+    writeLedgerLine?: Parameters<typeof injectCoverageImprovementTask>[0]["writeLedgerLine"];
+    land?: Parameters<typeof injectCoverageImprovementTask>[0]["land"];
     /** Injectable ONLY so BOTH arms of the state-dir fallback below are reachable from a test —
      *  production always takes this module's own `loadConfig`. Appended LAST so no positional
      *  caller shifts. Without it the `catch` arm cannot be exercised: `loadConfig` reads the real
@@ -17704,28 +18085,24 @@ export function coverageImproveCommand(
     loadConfig?: () => { root: string };
   } = {},
 ): number {
-  const badArg = unknownArgError("coverage-improve", rest, ["--lcov"], []);
+  const badArg = unknownArgError("coverage-improve", rest, ["--lcov"], ["--from-ci"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
+  const fromCi = rest.includes("--from-ci");
   const lcovFlagIdx = rest.indexOf("--lcov");
   const lcovArg = lcovFlagIdx >= 0 ? rest[lcovFlagIdx + 1] : undefined;
+  if (fromCi && lcovFlagIdx >= 0) {
+    console.error("rmd coverage-improve: choose exactly one of --from-ci or --lcov\n" + USAGE);
+    return 2;
+  }
   if (lcovFlagIdx >= 0 && lcovArg === undefined) {
     console.error("rmd coverage-improve: --lcov requires a value\n" + USAGE);
     return 2;
   }
 
   const root = opts.root ?? repoRoot;
-  const lcovPath = lcovArg ? resolve(root, lcovArg) : join(root, "coverage", "lcov.info");
-  let lcovText: string;
-  try {
-    lcovText = readFileSync(lcovPath, "utf8");
-  } catch (e) {
-    console.error(`rmd coverage-improve: cannot read lcov report at ${lcovPath} (${(e as Error).message})`);
-    return 1;
-  }
-
   const resolveConfig = opts.loadConfig ?? loadConfig;
   const stateDir =
     opts.stateDir ??
@@ -17743,7 +18120,44 @@ export function coverageImproveCommand(
   const ledgerPath = opts.ledgerPath ?? join(stateDir, "ledger.ndjson");
   const runId = opts.runId ?? `COVERAGE-IMPROVE-${Date.now()}`;
 
-  const result = injectCoverageImprovementTask({ root, stateDir, ledgerPath, runId, lcovText });
+  let lcovText: string;
+  let producerRunId = runId;
+  if (fromCi) {
+    const { owner, repo } = (opts.resolveOwnerRepo ?? resolveOwnerRepo)();
+    const read = (opts.fetchCoverageArtifact ?? fetchMergedCoverageArtifact)({
+      owner,
+      repo,
+      ledgerPath,
+      ledgerRunId: runId,
+      writeLedgerLine: opts.writeLedgerLine,
+    });
+    if (read.status === "refused") {
+      console.error(`rmd coverage-improve: CI coverage artifact refused — ${read.reason}: ${read.detail}`);
+      return 1;
+    }
+    lcovText = read.lcovText;
+    producerRunId = String(read.workflowRunId);
+  } else {
+    const lcovPath = lcovArg ? resolve(root, lcovArg) : join(root, "coverage", "lcov.info");
+    try {
+      lcovText = readFileSync(lcovPath, "utf8");
+    } catch (e) {
+      console.error(`rmd coverage-improve: cannot read lcov report at ${lcovPath} (${(e as Error).message})`);
+      return 1;
+    }
+  }
+
+  const result = injectCoverageImprovementTask({
+    root,
+    stateDir,
+    ledgerPath,
+    runId: producerRunId,
+    lcovText,
+    capture: opts.capture,
+    ledgerUnion: opts.ledgerUnion,
+    writeLedgerLine: opts.writeLedgerLine,
+    land: opts.land,
+  });
 
   switch (result.action) {
     case "healthy":
@@ -18675,11 +19089,31 @@ export function printLaneOverlapAdvisory(
  *
  * PURE, so both arms and the unknown fallback are reachable from a test without a git remote.
  */
-export type ReservationHolder = "fleet" | "operator" | "unknown";
+export interface ReservationCallerIdentity {
+  pid: number;
+  host: string;
+}
 
-export function classifyReservationAnchor(message: string): ReservationHolder {
+export type ReservationHolder = "self" | "fleet" | "operator" | "unknown";
+
+function reservationCallerIdentity(): ReservationCallerIdentity {
+  return { pid: process.pid, host: hostname() };
+}
+
+function callerFromReservationAnchor(message: string): ReservationCallerIdentity | null {
+  const m = /^rmd-id reservation\s+([0-9]+)@([^ \t\r\n]+)\b/.exec(message.trim());
+  if (!m) return null;
+  return { pid: Number(m[1]), host: m[2] };
+}
+
+export function classifyReservationAnchor(message: string, caller?: ReservationCallerIdentity): ReservationHolder {
   const m = message.trim();
-  if (/^rmd-id reservation\b/.test(m)) return "fleet";
+  if (/^rmd-id reservation\b/.test(m)) {
+    const holder = callerFromReservationAnchor(m);
+    if (!caller) return "fleet";
+    if (!holder) return "unknown";
+    return holder.pid === caller.pid && holder.host === caller.host ? "self" : "fleet";
+  }
   if (/^reserve\s+W1-T\d+\b/.test(m)) return "operator";
   return "unknown";
 }
@@ -18688,7 +19122,9 @@ export function classifyReservationAnchor(message: string): ReservationHolder {
  *  taken id must be visible, because silently advancing is what let two collisions go unnoticed. */
 export function describeContestedId(taskId: string, holder: ReservationHolder): string {
   const who =
-    holder === "fleet"
+    holder === "self"
+      ? "HELD BY THIS CALLER (an `rmd-id reservation <pid>@<container>` anchor)"
+      : holder === "fleet"
       ? "HELD BY ANOTHER CALLER — the fleet (an `rmd-id reservation <pid>@<container>` anchor)"
       : holder === "operator"
         ? "HELD BY ANOTHER CALLER — an operator hand-mint (a `reserve W1-T#### <host>-<pid>-<nanotime>` anchor)"
@@ -18856,6 +19292,12 @@ export interface NextTaskIdReserveDeps {
   openPrTexts?: () => string[];
 }
 
+function mintForReservationAttempt(mint: MintedTaskIdWithHistory, heldId: number, heldTaskId: string): MintedTaskIdWithHistory {
+  if (heldTaskId === mint.id) return mint;
+  const maxSeen = heldId - 1;
+  return { ...mint, id: heldTaskId, n: heldId, maxSeen, reservationMax: maxSeen };
+}
+
 /**
  * W1-T2324 (Q2) — the ONE degradation that makes `next-task-id --reserve`'s ATOMIC CLAIM on
  * origin unsafe. `--reserve` is the one verb this binds: printing a degraded id (the unflagged
@@ -18915,48 +19357,49 @@ export async function nextTaskIdCommand(
     console.error(`### rmd next-task-id: ${(e as Error).message}`);
     return 2;
   }
-  console.log(describeMintWithHistory(mint));
-  // READS reservations, never TAKES one. This verb is advisory and spawns nothing, so an operator
-  // asking "what is next" a hundred times must not burn a hundred ids — and a reservation held by
-  // a process that exits microseconds later reserves nothing anyway. Reporting a number and
-  // claiming it are different acts; only the caller that will actually FILE should claim.
-  // BEST-EFFORT, unlike the triage path's loud reservation. This verb is a READ that spawns
-  // nothing, so an unreadable config or state dir must degrade to "no reservation notice" rather
-  // than crash the operator's query — `loadConfig()` throws on an absent/empty config file, which
-  // is the normal case in CI and in any fixture-only checkout. The LOUD-on-failure rule applies to
-  // the caller that is about to SPEND, not to the one that is about to PRINT.
-  try {
-    const free = firstUnreservedAtOrAbove(mint.n, taskIdReservationsDir(loadConfig().root));
-    if (free !== mint.n)
-      console.log(`(${mint.id} is RESERVED by a live minter — the next unreserved id is W1-T${free})`);
-  } catch {
-    /* no readable reservation store ⇒ report the mint alone, exactly as before this existed */
-  }
-  // THE SAME BLIND SPOT THE RESERVE PATH HAD, ON THE PATH A HUMAN READS. The mint's four surfaces
-  // (tasks.yaml, shards, open PRs, plan history) do not include `refs/rmd-id/`, so the number
-  // printed above can sit well below every id the fleet already holds — measured here, an advisory
-  // W1-T<n> against a namespace whose real floor was three higher. That number is what an operator
-  // COPIES into a new shard, so a silent understatement is a collision waiting to be filed, not a
-  // cosmetic gap. Best-effort and `--offline`-respecting, exactly like the local notice above: this
-  // verb PRINTS, so an unreadable namespace degrades to saying nothing.
-  if (!offline) {
+  const reserving = rest.includes("--reserve");
+  if (!reserving) console.log(describeMintWithHistory(mint));
+  if (!reserving) {
+    // READS reservations, never TAKES one. This verb is advisory and spawns nothing, so an operator
+    // asking "what is next" a hundred times must not burn a hundred ids — and a reservation held by
+    // a process that exits microseconds later reserves nothing anyway. Reporting a number and
+    // claiming it are different acts; only the caller that will actually FILE should claim.
+    // BEST-EFFORT, unlike the triage path's loud reservation. This verb is a READ that spawns
+    // nothing, so an unreadable config or state dir must degrade to "no reservation notice" rather
+    // than crash the operator's query — `loadConfig()` throws on an absent/empty config file, which
+    // is the normal case in CI and in any fixture-only checkout. The LOUD-on-failure rule applies to
+    // the caller that is about to SPEND, not to the one that is about to PRINT.
     try {
-      // `gitRunAdapter` is the SAME normaliser the reserve path below uses — `spawnSync` reports
-      // `status: null` for a signalled child, and a raw null would read as success here.
-      const advisoryRun = gitRunAdapter(deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
-      const floor = reservationFloorFrom(remoteReservedTaskIds(advisoryRun));
-      if (floor !== "unknown" && floor > mint.n)
-        console.log(`(origin's refs/rmd-id/ namespace already holds ids up to W1-T${floor - 1} — the first id no reservation holds is W1-T${floor})`);
+      const free = firstUnreservedAtOrAbove(mint.n, taskIdReservationsDir(loadConfig().root));
+      if (free !== mint.n)
+        console.log(`(${mint.id} is RESERVED by a live minter — the next unreserved id is W1-T${free})`);
     } catch {
-      /* unreadable namespace ⇒ report the mint alone */
+      /* no readable reservation store ⇒ report the mint alone, exactly as before this existed */
     }
+    // THE SAME BLIND SPOT THE RESERVE PATH HAD, ON THE PATH A HUMAN READS. The mint's four surfaces
+    // (tasks.yaml, shards, open PRs, plan history) do not include `refs/rmd-id/`, so the number
+    // printed above can sit below every id the fleet already holds. Best-effort and
+    // `--offline`-respecting, exactly like the local notice above: this verb PRINTS,
+    // so an unreadable namespace degrades to saying nothing.
+    if (!offline) {
+      try {
+        // `gitRunAdapter` is the SAME normaliser the reserve path below uses — `spawnSync` reports
+        // `status: null` for a signalled child, and a raw null would read as success here.
+        const advisoryRun = gitRunAdapter(deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
+        const floor = reservationFloorFrom(remoteReservedTaskIds(advisoryRun));
+        if (floor !== "unknown" && floor > mint.n)
+          console.log(`(origin's refs/rmd-id/ namespace already holds ids up to W1-T${floor - 1} — the first id no reservation holds is W1-T${floor})`);
+      } catch {
+        /* unreadable namespace ⇒ report the mint alone */
+      }
+    }
+    if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
+    // W1-T917 — the rare-overlap advisory. Printed AFTER the id, never instead of it: the mint's own
+    // output is byte-identical whether this warns, stays silent, or fails outright. `--offline`
+    // suppresses it for the same reason it suppresses the open-PR sweep above.
+    for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
+      (overlapDeps.say ?? console.log)(line);
   }
-  if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
-  // W1-T917 — the rare-overlap advisory. Printed AFTER the id, never instead of it: the mint's own
-  // output is byte-identical whether this warns, stays silent, or fails outright. `--offline`
-  // suppresses it for the same reason it suppresses the open-PR sweep above.
-  for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
-    (overlapDeps.say ?? console.log)(line);
   // ── W1-T1055 — `--reserve`: MAKE THE PUSH THE CLAIM ───────────────────────────────────────────
   // WITHOUT the flag, every line above is byte-identical to before this existed and nothing is
   // claimed — the 2026-08-01 author's line between PRINTING and SPENDING is honoured, not
@@ -18969,7 +19412,7 @@ export async function nextTaskIdCommand(
   // bounded by `maxScan`, and its handle already names the id it actually holds — so this prints
   // THAT id and never the one it first tried. Re-implementing the scan in this command is the
   // failure mode the shard asks review to refuse.
-  if (rest.includes("--reserve")) {
+  if (reserving) {
     // W1-T2324 (Q2) — see {@link openPrSurfaceOutage}'s doc for the full rationale. Printing a
     // degraded id costs nothing a caller cannot re-check; `--reserve` is what makes a collision
     // durable, so this is the one arm of this verb the gate binds.
@@ -19019,9 +19462,12 @@ export async function nextTaskIdCommand(
         }
       };
       const held = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(mint.n, reserver));
+      console.log(describeMintWithHistory(mintForReservationAttempt(mint, held.id, held.taskId)));
       for (const line of contested) console.log(line);
       console.log(`RESERVED ${held.taskId} on origin (${held.ref}) after ${held.attempts} attempt(s)`);
-      if (held.taskId !== mint.id) console.log(`(note: the advisory mint printed ${mint.id}; ${held.taskId} is the id actually HELD)`);
+      if (held.taskId !== mint.id) console.log(`(note: the reservation walk advanced from ${mint.id}; ${held.taskId} is the id actually HELD)`);
+      for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
+        (overlapDeps.say ?? console.log)(line);
     } catch (e) {
       for (const line of contested) console.log(line);
       const err = e as TaskIdReservationError;
@@ -19038,12 +19484,13 @@ export async function nextTaskIdCommand(
 export function readReservationHolder(
   taskId: string,
   run: (args: string[]) => { status: number | null; stdout: string; stderr: string },
+  caller: ReservationCallerIdentity = reservationCallerIdentity(),
 ): ReservationHolder {
   const fetched = run(["fetch", "origin", `${taskIdReservationRef(taskId)}`]);
   if ((fetched.status ?? 1) !== 0) return "unknown";
   const msg = run(["log", "-1", "--format=%s", "FETCH_HEAD"]);
   if ((msg.status ?? 1) !== 0) return "unknown";
-  return classifyReservationAnchor(msg.stdout ?? "");
+  return classifyReservationAnchor(msg.stdout ?? "", caller);
 }
 
 /** W1-T180: the post-merge-amendment status resolution's only I/O — loadConfig (reads $HOME),
@@ -19601,6 +20048,53 @@ export function surfaceCorpusFrom(plan: Plan): DuplicateSurfaceCorpusEntry[] {
   return plan.tasks.map((t) => ({ id: t.id, files: t.files, status: t.status }));
 }
 
+/**
+ * W1-T2736 — NAME THE RESIDUE THE SPLIT ALREADY FOUND.
+ *
+ * `classifyFailingMergeEvidence` computes both arrays and the headline used only `.length` on
+ * each, so the line could say the residue was three ids and never which three. W1-T1260 measured
+ * what that cost: the check name is not a locator either (57 tasks carry a blocking
+ * `[declared-scope]`, two of them the residue), so locating them meant re-implementing the verb's
+ * own split by hand. The ids are already in memory; this prints them.
+ *
+ * DISPLAY ONLY. The failing count, the exit code and every pre-existing summary substring are
+ * untouched — this appends inside the existing parenthesis and never alters what precedes it.
+ *
+ * THE IDS PRINT WITH THE COUNT, NOT BESIDE IT, and that is deliberate: the summary is one
+ * `console.log` (stdout) while every violation row goes to stderr, so `cmd 2>&1 > f` separates
+ * them. Ids carried inside the count's own string inherit the count's stream.
+ */
+function formatLintResidueIds(without: readonly string[]): string {
+  if (without.length === 0) return "";
+  const named = without.slice(0, LINT_RESIDUE_NAME_CAP);
+  const truncated = without.length - named.length;
+  return `: ${named.join(", ")}${truncated > 0 ? `, +${truncated} more` : ""}`;
+}
+
+/**
+ * How many residue ids the headline names before truncating. PRIMARY CONTROL — this is the only
+ * thing governing the printed list's length, not a backstop behind some other limit. Small on
+ * purpose: the residue is the SIGNAL in this report (measured 2026-09-02: 1 genuinely open and
+ * failing id out of 160 named rows), so a run whose residue does not fit in one line is itself the
+ * finding, and `+N more` says so rather than flooding the summary the operator reads.
+ */
+const LINT_RESIDUE_NAME_CAP = 12;
+
+/**
+ * W1-T2736 — THE LIST MUST CARRY ITS OWN UNRELIABILITY OR IT IS WORSE THAN NO LIST, which is the
+ * register the split's own code already sets ("a wrong split is worse than no split").
+ *
+ * The split reads TWO of the four credit paths — a commit-subject citation and a commit-body
+ * trailer — and misses the two W1-T1260 measured as load-bearing: the PR-body trailer and the
+ * `run-<id>-<epoch>` head ref. On the three ids it examined when that was measured it was wrong on
+ * two (W1-T2 and W1-T326 are both credited). So these ids are where to START a credit check, never
+ * a verdict that work remains, and the line says exactly that.
+ */
+const LINT_RESIDUE_CAVEAT_LINE =
+  "\n  the named ids are a STARTING POINT for a credit check, never a verdict that work remains: " +
+  "this split reads 2 of 4 credit paths (commit-subject citation, commit-body trailer) and misses " +
+  "the PR-body trailer and the run-<id>-<epoch> head ref";
+
 /** The ids CREDITED as merged, from `projectPlan`'s batched projection — the GitHub-derived
  *  signal, NOT a `status:` field read. A shard that shipped keeps `status: queued` (nothing updates
  *  it on merge), so `status:` alone reports landed work as a live duplicate.
@@ -19906,6 +20400,20 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           return undefined;
         }
       };
+      // W1-T2835: the BASE-tree counterpart of `opts.moduleExists` above, wired ONLY here — the
+      // `--base` pass — for the same reason `blockedDisposition` and `newMonolithIds` are: a
+      // whole-plan run has no base to compare against and must not report the standing population,
+      // and the PRE-DISPATCH site must never see it because a queued task's proof legitimately
+      // forward-references the test its own PR will create. One `cat-file -e` per pure-path proof
+      // over the handful of tasks a PR actually changes; no worktree, no network.
+      opts.pathExistsAtBase = (rel: string) => {
+        try {
+          execFileSync("git", ["-C", repoRoot, "cat-file", "-e", `${baseRef}:${rel}`], { stdio: "ignore" });
+          return true;
+        } catch {
+          return false; // absent at base, or ref/path unreadable — either way, no opinion
+        }
+      };
     }
     const { violations: lintViolations } = lintTask(task, opts);
     // W1-T1225: proofGrepUnmatchableViolations( is called HERE, directly, rather than folded into
@@ -19914,7 +20422,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // dormant, exactly the recorded failure W1-T488/W1-T497/W1-T1053 already paid for once each.
     // WARN-only (never blocks), so appending it here changes nothing about `assertLintClean` or
     // the pre-dispatch gate — it only ever adds to `warned` below, on this one changed-tasks pass.
-    const violations = scope ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts)] : lintViolations;
+    const violations = scope
+      ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts), ...proofGrepSelfCertifyingViolations(task, opts)]
+      : lintViolations;
     const blocking = violations.filter((v) => v.severity === "block");
     const soft = violations.filter((v) => v.severity === "warn");
     if (blocking.length) {
@@ -20001,11 +20511,14 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     try {
       const { dump, ref } = (deps.readMergeEvidenceLog ?? defaultMergeEvidenceLog)(repoRoot);
       const { withImpl, without } = classifyFailingMergeEvidence(failingTaskIds, dump);
-      failingSplit = ` (${withImpl.length} with a merged implementation, ${without.length} with none)`;
+      failingSplit =
+        ` (${withImpl.length} with a merged implementation, ${without.length} with none` +
+        `${formatLintResidueIds(without)})`;
       evidenceRuleLine =
         `\n  failing-split evidence: a Remudero-Task trailer or commit-subject citation on ${ref}, ` +
         `with chore(plan)/chore(triage)/chore(feedback)/docs(plan)/plan:/docs:/chore: filing ` +
-        `subjects excluded — a filing cites a task; it does not implement it`;
+        `subjects excluded — a filing cites a task; it does not implement it` +
+        (without.length > 0 ? LINT_RESIDUE_CAVEAT_LINE : "");
     } catch (e) {
       failingSplit = ` (merge-evidence unavailable: ${(e as Error).message})`;
     }
@@ -20685,6 +21198,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
    *  doc for why this seam exists. Production passes none and the checked-in `plan/policy.yaml`
    *  governs, exactly as before. */
   policy?: Policy;
+  coverageImprovementReader?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -20708,6 +21222,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       // process dies mid-run, the marker has already advanced and the interval/cap bounds still
       // hold, so a failure costs one skipped period rather than an unbounded immediate retry.
       recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), deps.now?.() ?? new Date(), 24 * 60 * 60 * 1000);
+      const coverageRunId = `MEASUREMENT-CADENCE-${(deps.now?.() ?? new Date()).getTime()}`;
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
@@ -20721,6 +21236,13 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // and why this call is lazy here rather than hoisted to hook construction. Called only
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
         proofDebt: defaultProofDebtCadenceInput(repoRoot),
+        coverageImprovement: {
+          root: repoRoot,
+          ledgerPath: ledgerPathFor(configFor()),
+          ledgerRunId: coverageRunId,
+          reader: deps.coverageImprovementReader,
+          ...resolveOwnerRepo(),
+        },
       });
     });
   return { checkMeasurementCadence: check, runMeasurementCadence: run };
@@ -20937,6 +21459,8 @@ export function buildDigestCadenceDaemonHooks(deps: {
   now?: () => Date;
   policy?: Policy;
   channel?: NotifyChannel;
+  /** W1-T3000: the SECOND delivery, defaulting to `emailChannel(notifyRecipient(config))`. */
+  emailChannel?: NotifyChannel;
 } = {}): {
   checkDigestCadence: () => MeasurementCadenceDecision;
   runDigestCadence: () => Promise<DigestCadenceRunResult>;
@@ -20972,13 +21496,14 @@ export function buildDigestCadenceDaemonHooks(deps: {
       // `config.root` are always THIS process's own checkout, never a drained target's.
       const verbCensus = runVerbCensus({ checkoutDir: repoRoot, stateDir: join(config.root, "state"), ledgerUnion: resolveLedgerUnion });
       const verbCensusSuggestion: GenerativeDigestItem = { kind: "generative", text: renderVerbCensusDigestLine(verbCensus) };
-      return runDigestCadenceReport({
+      const runId = `DIGEST-${now.getTime()}`;
+      const report = runDigestCadenceReport({
         ledgerPath,
         sinceIso: defaultDigestSinceIso(nowIso),
         deps: {
           channel: deps.channel ?? inboxNotifyChannel(config.root),
           ledgerPath,
-          runId: `DIGEST-${now.getTime()}`,
+          runId,
           taskId: "DIGEST",
           channelName: "inbox",
         },
@@ -20990,6 +21515,19 @@ export function buildDigestCadenceDaemonHooks(deps: {
         // rendered wrapper marks every entry here `[SUGGESTED]` regardless of origin.
         suggestions: [verbCensusSuggestion],
       });
+      // W1-T3000: THE SAME RENDERED TEXT, A SECOND TIME. Its OWN `notify` call, never a fan-out
+      // channel: one `notify.sent` row cannot carry two outcomes, and an inbox success beside an
+      // undeliverable email would collapse into one verdict — the shape notify.ts refuses by name.
+      // An unavailable channel degrades and ledgers its reason, so a host with no transport keeps
+      // its inbox digest and reports the gap.
+      notify(report.text, {
+        channel: deps.emailChannel ?? emailChannel(notifyRecipient(config)),
+        ledgerPath,
+        runId,
+        taskId: "DIGEST",
+        channelName: "email",
+      });
+      return report;
     });
   return { checkDigestCadence: check, runDigestCadence: run };
 }
@@ -22270,6 +22808,19 @@ async function retroCommand(
           `evidence is in the ledger: retro.preflight_failed rows carry the exit class, elapsed_ms, ` +
           `suite count and bounded stdout/stderr excerpts`,
       );
+      // W1-T2988: the marker stays frozen above by design — that part is correct and unchanged.
+      // What was missing is that the SAME failure then repeated with nothing said: 172 fires against
+      // zero completions, a ~49-minute subprocess each time. This raises ONE needs-human notice per
+      // episode once the strike cap is met, and does not stop the retro.
+      try {
+        escalateRetroPublicationFailure(
+          { attempts: preflight.attempts },
+          { owner, repo, ledgerPath, runId, readLedger: readLedgerLines },
+        );
+      } catch {
+        // Best-effort by construction: failing to RAISE the notice must never change the retro's own
+        // exit path, which the next attempt depends on. The preflight rows still carry the evidence.
+      }
       return 1;
     }
 
@@ -22369,7 +22920,7 @@ async function retroCommand(
 
 
     // Gate: ci green → post remudero-review → arm auto-merge.
-    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
@@ -25177,6 +25728,50 @@ function memoiseBoardSnapshotByRepo(
   };
 }
 
+/**
+ * W1-T2972: the CI-failure learning rung's PRODUCER, mirroring {@link buildDigestCadenceDaemonHooks}.
+ * THE HALF W1-T2959 DID NOT SHIP — it built the row, marker, decision and minter, all green, but
+ * only the CLI verb called them, so the "daily" loop ran by hand. RECORD THE FIRE FIRST, per
+ * {@link buildMeasurementCadenceDaemonHooks}'s crash-safety discipline: a throwing body costs one
+ * skipped period, never a re-fire on every poll forever. REPORT-ONLY — drafts MARKED, PARKED shards
+ * and writes no plan record; whether the rung FILES is W1-T2968's question, not reopened here.
+ */
+export function buildCiLearningDaemonHooks(deps: {
+  config?: Config;
+  policy?: Policy;
+  now?: () => Date;
+  /** Injected so a test drives the whole rung with ZERO network; production reads the real window. */
+  loadWindow?: (days: number) => CiFailureCorpusInput;
+} = {}): {
+  checkCiLearningCadence: () => MeasurementCadenceDecision;
+  runCiLearningCadence: () => Promise<CiLearningCadenceRunResult>;
+} {
+  const configFor = () => deps.config ?? loadConfig();
+  const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
+  return {
+    checkCiLearningCadence: () =>
+      ciLearningCadenceCheck({
+        root: configFor().root,
+        policy: policyFor().values.ciLearningCadence,
+        now: deps.now?.(),
+      }),
+    runCiLearningCadence: async () => {
+      const root = configFor().root;
+      // THE FIRE FIRST — see this function's own doc for why the order is the safety property.
+      recordCiLearningCadenceFire(root, deps.now?.() ?? new Date());
+      const input = deps.loadWindow ? deps.loadWindow(1) : loadCiFailureWindow(1);
+      const corpus = collectCiFailureCorpus(input);
+      const result = mintCiLearningShards(corpus, []);
+      return {
+        status: result.status,
+        draftCount: result.drafts.length,
+        excludedCount: result.excludedFindings.length,
+        unreadableCount: result.unreadableShas.length,
+      };
+    },
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -25799,6 +26394,11 @@ export async function daemonCommand(
   // its marker and ledger live under this harness checkout. The pair itself still targets the
   // sandbox by default through runWipeTestPair/resolveWipeTestTarget.
   const wipeTestCadenceHooks = target.isSelf ? buildWipeTestCadenceDaemonHooks({ config }) : undefined;
+  // W1-T2972: the CI-failure learning rung. SELF-TARGET ONLY, same reason as the rungs above — its
+  // marker and pull-request window both belong to THIS process's config.root, never a drained
+  // target's. WITHOUT THIS LINE the hooks are undefined and the rung is dead code — what W1-T2959
+  // shipped, after #1066 and #2952 each shipped it before that.
+  const ciLearningHooks = target.isSelf ? buildCiLearningDaemonHooks({ config }) : undefined;
   try {
     const summary = await runDaemonFn(
       plan,
@@ -26076,6 +26676,12 @@ export async function daemonCommand(
         runBoardReview: boardReviewHooks?.runBoardReview,
         checkWipeTestCadence: wipeTestCadenceHooks?.checkWipeTestCadence,
         runWipeTestCadence: wipeTestCadenceHooks?.runWipeTestCadence,
+        // CI-LEARNING RUNG (W1-T2972). Same shape as the three cadences above and gated the same
+        // way, with one deliberate difference: its `ciLearningCadence` policy row ships DEFAULT
+        // OFF, because unlike its read-only siblings this rung drafts records. Wiring it here is
+        // what makes that switch mean something; the operator throws it.
+        checkCiLearningCadence: ciLearningHooks?.checkCiLearningCadence,
+        runCiLearningCadence: ciLearningHooks?.runCiLearningCadence,
         // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
         // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
         // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once
@@ -28312,7 +28918,9 @@ export function fetchCiFailures(
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
         });
-        logTail = out.split("\n").slice(-tailLines).join("\n");
+        // W1-T2733: the tail, PLUS any declared generator remedy the slice would have discarded.
+        // Identical bytes to the plain slice whenever the log names no recognised remedy.
+        logTail = retainGeneratorRemedyLines(out, tailLines);
         // A read that SUCCEEDS but yields nothing is a genuinely quiet job, not a failed read —
         // the one case where an empty tail is the honest answer, and the one the other two
         // causes must stay distinguishable from.
@@ -29329,7 +29937,13 @@ export function buildFixRungDispatchArgs(args: {
   budgetUsd: number;
   strikeCap: number;
   evidence: FixDispatchEvidence;
-  pr: { headSha: string; reviewSummary?: string; pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean } };
+  pr: {
+    headSha: string;
+    reviewSummary?: string;
+    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
+    checksState?: OpenPrView["checksState"];
+    redRequiredChecks?: readonly string[];
+  };
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount };
 }): Omit<Parameters<typeof runFixRung>[0], "deps"> {
   const { evidence, pr } = args;
@@ -29405,6 +30019,16 @@ export function buildFixRungDispatchArgs(args: {
     initialReview,
     constraint: pr.pendingAnswer?.constraint,
     ciFailures: evidence.ciFailures,
+    ciEvidenceDisagreement: isCiLog
+      ? ciEvidenceDisagreementObservation({
+          checksState: pr.checksState,
+          redChecks: pr.redRequiredChecks,
+          ciFailures: evidence.ciFailures ?? [],
+          // W1-T2804: the sweep resolved this head and mined `evidence.ciFailures` from it, so both
+          // halves of THIS dispatch already share a subject — naming it is what makes that legible.
+          sha: pr.headSha,
+        })
+      : undefined,
     mergeConflict: evidence.mergeConflict,
     // W1-T2236: threaded through unconditionally, mirroring `ciFailures`/`mergeConflict` above —
     // `runFixRung`'s round-1 gate only reads this when it is ALSO a review-mode round (neither
@@ -29471,6 +30095,273 @@ function fixHeadHeldByWorktree(repoDir: string, branchRef: string): boolean {
 
 function boundedWorktreeOwnerPath(value: string): string {
   return value.replace(/[\r\n\0]/g, "?").slice(0, 512);
+}
+
+export type RegisteredFixOwnerSignal = "managed" | "foreign" | "unknown";
+
+export interface RegisteredFixOwnerSnapshot {
+  path: string;
+  pathState: RegisteredFixOwnerSignal;
+  attachmentState: "exact" | "detached_or_other" | "unknown";
+  treeState: "clean" | "dirty" | "unknown";
+  remoteState: "exact" | "changed" | "unknown";
+  historyState: "contained" | "ahead_or_diverged" | "unknown";
+  claimState: "clear" | "occupied" | "unknown";
+  processState: "clear" | "occupied" | "unknown";
+  ageMs: number | null;
+  localSha: string | null;
+  remoteSha: string | null;
+  processProbeReason?: string;
+  error?: string;
+}
+
+export type RegisteredFixOwnerRecoveryDecision =
+  | { kind: "reclaim" }
+  | {
+      kind: "keep";
+      reason:
+        | "foreign_worktree_path"
+        | "worktree_path_unreadable"
+        | "detached_or_wrong_branch"
+        | "branch_probe_unreadable"
+        | "dirty_worktree"
+        | "tree_probe_unreadable"
+        | "remote_head_changed"
+        | "remote_head_unreadable"
+        | "local_commit_not_contained"
+        | "history_probe_unreadable"
+        | "live_branch_claim"
+        | "branch_claim_unreadable"
+        | "process_cwd_owner"
+        | "process_cwd_probe_unreadable";
+    };
+
+export function decideRegisteredFixOwnerRecovery(
+  snapshot: RegisteredFixOwnerSnapshot,
+): RegisteredFixOwnerRecoveryDecision {
+  if (snapshot.pathState === "foreign") return { kind: "keep", reason: "foreign_worktree_path" };
+  if (snapshot.pathState !== "managed") return { kind: "keep", reason: "worktree_path_unreadable" };
+  if (snapshot.attachmentState === "detached_or_other")
+    return { kind: "keep", reason: "detached_or_wrong_branch" };
+  if (snapshot.attachmentState !== "exact") return { kind: "keep", reason: "branch_probe_unreadable" };
+  if (snapshot.treeState === "dirty") return { kind: "keep", reason: "dirty_worktree" };
+  if (snapshot.treeState !== "clean") return { kind: "keep", reason: "tree_probe_unreadable" };
+  if (snapshot.remoteState === "changed") return { kind: "keep", reason: "remote_head_changed" };
+  if (snapshot.remoteState !== "exact") return { kind: "keep", reason: "remote_head_unreadable" };
+  if (snapshot.historyState === "ahead_or_diverged")
+    return { kind: "keep", reason: "local_commit_not_contained" };
+  if (snapshot.historyState !== "contained") return { kind: "keep", reason: "history_probe_unreadable" };
+  if (snapshot.claimState === "occupied") return { kind: "keep", reason: "live_branch_claim" };
+  if (snapshot.claimState !== "clear") return { kind: "keep", reason: "branch_claim_unreadable" };
+  if (snapshot.processState === "occupied") return { kind: "keep", reason: "process_cwd_owner" };
+  if (snapshot.processState !== "clear") return { kind: "keep", reason: "process_cwd_probe_unreadable" };
+  return { kind: "reclaim" };
+}
+
+export interface ProcessCwdCensusDeps {
+  readNextPid?: () => string | null;
+  readCwd?: (pid: string) => string;
+  now?: () => number;
+  maxEntries?: number;
+  wallMs?: number;
+}
+
+export type ProcessCwdCensus =
+  | { state: "clear"; scanned: number }
+  | { state: "occupied"; scanned: number; pid: number }
+  | { state: "unknown"; scanned: number; reason: "proc_unavailable" | "cwd_unreadable" | "entry_bound" | "wall_bound" };
+
+const FIX_OWNER_PROC_ENTRY_BOUND = 4_096;
+const FIX_OWNER_PROC_WALL_MS = 100;
+
+function pathIsAtOrBelow(candidate: string, root: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+}
+
+export function readBoundedProcessCwdCensus(
+  ownerPath: string,
+  deps: ProcessCwdCensusDeps = {},
+): ProcessCwdCensus {
+  const now = deps.now ?? Date.now;
+  const maxEntries = deps.maxEntries ?? FIX_OWNER_PROC_ENTRY_BOUND;
+  const wallMs = deps.wallMs ?? FIX_OWNER_PROC_WALL_MS;
+  const started = now();
+  let procDir: ReturnType<typeof opendirSync> | undefined;
+  let readNextPid = deps.readNextPid;
+  try {
+    if (!readNextPid) {
+      try {
+        procDir = opendirSync("/proc");
+      } catch {
+        return { state: "unknown", scanned: 0, reason: "proc_unavailable" };
+      }
+      readNextPid = () => procDir!.readSync()?.name ?? null;
+    }
+    const readCwd = deps.readCwd ?? ((pid: string) => readlinkSync(join("/proc", pid, "cwd")));
+    let scanned = 0;
+    for (;;) {
+      if (now() - started > wallMs) return { state: "unknown", scanned, reason: "wall_bound" };
+      let entry: string | null;
+      try {
+        entry = readNextPid();
+      } catch {
+        return { state: "unknown", scanned, reason: "proc_unavailable" };
+      }
+      if (entry === null) return { state: "clear", scanned };
+      if (!/^\d+$/.test(entry)) continue;
+      if (scanned >= maxEntries) return { state: "unknown", scanned, reason: "entry_bound" };
+      scanned += 1;
+      let cwd: string;
+      try {
+        cwd = readCwd(entry);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+        return { state: "unknown", scanned, reason: "cwd_unreadable" };
+      }
+      if (pathIsAtOrBelow(cwd, ownerPath)) return { state: "occupied", scanned, pid: Number(entry) };
+    }
+  } finally {
+    try {
+      procDir?.closeSync();
+    } catch (e) {
+      const error = String(e);
+      void error;
+    }
+  }
+}
+
+export interface CaptureRegisteredFixOwnerDeps {
+  processCensus?: (ownerPath: string) => ProcessCwdCensus;
+  readClaim?: (inflightDir: string, claimKey: string) => "clear" | "occupied" | "unknown";
+  now?: () => number;
+}
+
+export function readRegisteredFixOwnerClaim(
+  inflightDir: string,
+  claimKey: string,
+): "clear" | "occupied" | "unknown" {
+  const raw = readFileIfExists(join(inflightDir, `${claimKey}.lock`));
+  if (raw === undefined) return "clear";
+  const holder = parseInflightLockInfo(raw);
+  if (!holder) return "unknown";
+  return isHolderStale(holder, { isPidAlive: defaultIsPidAlive }) ? "clear" : "occupied";
+}
+
+export function captureRegisteredFixOwnerSnapshot(
+  args: {
+    repoDir: string;
+    worktreesRoot: string;
+    ownerPath: string;
+    taskId: string;
+    branch: string;
+    expectedRemoteSha: string;
+    observedRemoteSha?: string;
+    inflightDir: string;
+    claimKey: string;
+  },
+  deps: CaptureRegisteredFixOwnerDeps = {},
+): RegisteredFixOwnerSnapshot {
+  const snapshot: RegisteredFixOwnerSnapshot = {
+    path: boundedWorktreeOwnerPath(args.ownerPath),
+    pathState: "unknown",
+    attachmentState: "unknown",
+    treeState: "unknown",
+    remoteState: "unknown",
+    historyState: "unknown",
+    claimState: "unknown",
+    processState: "unknown",
+    ageMs: null,
+    localSha: null,
+    remoteSha: args.observedRemoteSha ?? null,
+  };
+
+  let ownerPath: string;
+  try {
+    ownerPath = realpathSync(args.ownerPath);
+    const root = realpathSync(args.worktreesRoot);
+    const rel = relative(root, ownerPath);
+    const prefix = `sweep-${args.taskId}-`;
+    const suffix = basename(ownerPath).startsWith(prefix) ? basename(ownerPath).slice(prefix.length) : "";
+    snapshot.pathState = pathIsAtOrBelow(ownerPath, root) && !rel.includes(sep) && /^\d+$/.test(suffix)
+      ? "managed"
+      : "foreign";
+    snapshot.path = boundedWorktreeOwnerPath(ownerPath);
+    snapshot.ageMs = Math.max(0, (deps.now ?? Date.now)() - statSync(ownerPath).mtimeMs);
+  } catch (e) {
+    return { ...snapshot, error: String(e) };
+  }
+  if (snapshot.pathState !== "managed") return snapshot;
+
+  try {
+    const attached = execFileSync("git", ["-C", ownerPath, "symbolic-ref", "-q", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    snapshot.attachmentState = attached === `refs/heads/${args.branch}` ? "exact" : "detached_or_other";
+  } catch (e) {
+    return {
+      ...snapshot,
+      attachmentState: (e as { status?: number }).status === 1 ? "detached_or_other" : "unknown",
+      error: String(e),
+    };
+  }
+  if (snapshot.attachmentState !== "exact") return snapshot;
+
+  try {
+    const status = execFileSync("git", ["-C", ownerPath, "status", "--porcelain=v1", "--untracked-files=all"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    snapshot.treeState = status.length === 0 ? "clean" : "dirty";
+  } catch (e) {
+    return { ...snapshot, error: String(e) };
+  }
+  if (snapshot.treeState !== "clean") return snapshot;
+
+  if (!args.observedRemoteSha) return snapshot;
+  snapshot.remoteState = args.observedRemoteSha === args.expectedRemoteSha ? "exact" : "changed";
+  if (snapshot.remoteState !== "exact") return snapshot;
+
+  try {
+    snapshot.localSha = execFileSync("git", ["-C", ownerPath, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const contained = spawnSync(
+      "git",
+      ["-C", args.repoDir, "merge-base", "--is-ancestor", snapshot.localSha, args.observedRemoteSha],
+      { stdio: "ignore" },
+    );
+    snapshot.historyState = contained.status === 0
+      ? "contained"
+      : contained.status === 1
+        ? "ahead_or_diverged"
+        : "unknown";
+  } catch (e) {
+    return { ...snapshot, error: String(e) };
+  }
+  if (snapshot.historyState !== "contained") return snapshot;
+
+  try {
+    snapshot.claimState = (deps.readClaim ?? readRegisteredFixOwnerClaim)(args.inflightDir, args.claimKey);
+  } catch (e) {
+    return { ...snapshot, error: String(e) };
+  }
+  if (snapshot.claimState !== "clear") return snapshot;
+
+  const process = (deps.processCensus ?? readBoundedProcessCwdCensus)(ownerPath);
+  snapshot.processState = process.state;
+  if (process.state === "unknown") snapshot.processProbeReason = process.reason;
+  return snapshot;
+}
+
+export function removeAbandonedFixWorktreeOwner(repoDir: string, worktreePath: string): void {
+  execFileSync("git", ["-C", repoDir, "worktree", "remove", worktreePath], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  removeRunLock(worktreePath);
+  removeWorktreeBase(worktreePath);
 }
 
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {
@@ -30089,6 +30980,11 @@ export function captureRepairFeedbackWithPriorVerdict(
   captureFeedback(root, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
 }
 
+export interface RegisteredFixOwnerRecoveryDeps {
+  capture: typeof captureRegisteredFixOwnerSnapshot;
+  remove: typeof removeAbandonedFixWorktreeOwner;
+}
+
 export function buildSweepEffects(
   owner: string,
   repo: string,
@@ -30201,6 +31097,10 @@ export function buildSweepEffects(
   // tests inject the read so they can prove admission stands down before the stale pid claim is
   // reclaimed, without touching a real shared clone.
   registeredWorktreeOwnerImpl: (repoDir: string, branchRef: string) => string | undefined = registeredFixWorktreeOwner,
+  registeredOwnerRecovery: RegisteredFixOwnerRecoveryDeps = {
+    capture: captureRegisteredFixOwnerSnapshot,
+    remove: removeAbandonedFixWorktreeOwner,
+  },
 ): Pick<
   SweepDeps,
   | "arm"
@@ -30762,8 +31662,9 @@ export function buildSweepEffects(
         // criteria from its `## Acceptance` block — see that function's doc for
         // why a hardcoded `[]` here made a `blocked_review` synthetic dispatch
         // permanently unjudgeable.
-        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName,body"]) as {
+        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body"]) as {
           headRefName?: string;
+          headRefOid?: string;
           body?: string;
         };
         const realBranch = headRef.headRefName;
@@ -30805,16 +31706,119 @@ export function buildSweepEffects(
           return;
         }
 
-        const registeredOwner = registeredWorktreeOwnerImpl(repoDir, `refs/heads/${realBranch}`);
-        if (registeredOwner) {
+        const branchRef = `refs/heads/${realBranch}`;
+        let registeredOwner: string | undefined;
+        try {
+          registeredOwner = registeredWorktreeOwnerImpl(repoDir, branchRef);
+        } catch (e) {
           log("sweep.fix.checkout_claim_declined", {
             reason: "registered_worktree_owner",
+            owner_recovery_reason: "worktree_registry_unreadable",
             pr_number: pr.prNumber,
             task_id: task.id,
             branch: realBranch,
-            worktree_path: boundedWorktreeOwnerPath(registeredOwner),
+            error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
           });
-          return;
+          throw e;
+        }
+        if (registeredOwner) {
+          let snapshot: RegisteredFixOwnerSnapshot;
+          try {
+            snapshot = registeredOwnerRecovery.capture({
+              repoDir,
+              worktreesRoot: worktreesDir(config),
+              ownerPath: registeredOwner,
+              taskId: task.id,
+              branch: realBranch,
+              expectedRemoteSha: pr.headSha,
+              observedRemoteSha: headRef.headRefOid,
+              inflightDir,
+              claimKey: fixBranchClaimKey(owner, repo, realBranch),
+            });
+          } catch (e) {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: "owner_snapshot_unreadable",
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: boundedWorktreeOwnerPath(registeredOwner),
+              error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+            });
+            return;
+          }
+          const recovery = decideRegisteredFixOwnerRecovery(snapshot);
+          if (recovery.kind === "keep") {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: recovery.reason,
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: snapshot.path,
+              process_probe_reason: snapshot.processProbeReason,
+            });
+            return;
+          }
+          try {
+            registeredOwnerRecovery.remove(repoDir, registeredOwner);
+          } catch (e) {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: "owner_remove_failed",
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: snapshot.path,
+              error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+            });
+            return;
+          }
+          let ownerAfterRemoval: string | undefined;
+          try {
+            ownerAfterRemoval = registeredWorktreeOwnerImpl(repoDir, branchRef);
+          } catch (e) {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason: "worktree_registry_reread_failed",
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: snapshot.path,
+              error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+            });
+            return;
+          }
+          if (ownerAfterRemoval) {
+            log("sweep.fix.checkout_claim_declined", {
+              reason: "registered_worktree_owner",
+              owner_recovery_reason:
+                ownerAfterRemoval === registeredOwner ? "owner_registration_remained" : "owner_registration_changed",
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: boundedWorktreeOwnerPath(ownerAfterRemoval),
+            });
+            return;
+          }
+          log("sweep.fix.checkout_owner_reclaimed", {
+            pr_number: pr.prNumber,
+            task_id: task.id,
+            branch: realBranch,
+            worktree_path: snapshot.path,
+            local_sha_prefix: snapshot.localSha?.slice(0, 12),
+            remote_sha_prefix: snapshot.remoteSha?.slice(0, 12),
+            age_ms: snapshot.ageMs,
+            proof: {
+              managed_path: snapshot.pathState === "managed",
+              exact_branch: snapshot.attachmentState === "exact",
+              clean_tree: snapshot.treeState === "clean",
+              exact_remote_head: snapshot.remoteState === "exact",
+              local_contained_by_remote: snapshot.historyState === "contained",
+              no_live_claim: snapshot.claimState === "clear",
+              no_process_cwd: snapshot.processState === "clear",
+            },
+          });
         }
 
         // W1-T2609 (design ii): an EXCLUSIVE claim on this (repo, branch) pair, taken BEFORE any
@@ -32550,6 +33554,8 @@ export async function fixCommand(
   // checksStateFromRollup's doc.
   const requiredContexts = ghRequiredStatusCheckContexts(owner, repo);
   const checksState = checksStateFromRollup(raw.statusCheckRollup, requiredContexts);
+  const ciGateRequired = readCiGateRequiredChecks(repoRoot);
+  const redRequiredChecks = redQualityGateNames(raw.statusCheckRollup, ciGateRequired);
   const pr: OpenPrView = {
     prNumber: raw.number,
     prUrl: raw.url,
@@ -32575,6 +33581,7 @@ export async function fixCommand(
     reviewSummary: undefined,
     // W1-T100: the ci-log fix mode's input — see buildOpenPrViews.
     ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, raw.statusCheckRollup) : undefined,
+    redRequiredChecks,
   };
 
   const planPath =
@@ -33776,7 +34783,7 @@ async function triageCommandLocked(
 
     // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
     // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).
-    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
@@ -34217,7 +35224,7 @@ export async function planCommand(
 
     // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
     // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).
-    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
       worktreeRemove(repoDir, worktreePath);
@@ -35255,7 +36262,7 @@ export async function approveCommand(
     log("pr.opened", { pr_url: result.prUrl, branch: result.branch, adopted: result.adopted === true });
     console.log(`rmd approve: ${proposalId} — plan PR ${result.adopted ? "adopted" : "opened"}: ${result.prUrl}`);
 
-    const ci = await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
       removeApproveWorktree();
@@ -35525,7 +36532,7 @@ async function approveBatchCommand(
     log("pr.opened", { pr_url: result.prUrl, branch: result.branch, accepted: result.accepted.map((p) => p.proposalId) });
     console.log(`rmd approve: batch of ${result.accepted.length} — plan PR opened: ${result.prUrl}`);
 
-    const ci = await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra));
+    const ci = ciGateState(await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
       removeApproveWorktree();
@@ -37257,6 +38264,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2296: a deterministic, plain-text narration of a LEDGER WINDOW — between two ISO-8601 instants, what did the fleet decide, in what order, and for what recorded reasons. Reuses buildReceipt's discipline (src/lib/ledger-replay.ts's buildReplay) over a WINDOW instead of a run: reads the archive∪live UNION (lib/ledger-grep.ts's resolveLedgerUnion, never the live ledger.ndjson alone), filters to [since, until] inclusive, orders by each row's own ts, and renders every row's own outcome/reason fields — a field the row does not carry prints `absent (no \"<field>\" field on this row)`, never a fabricated value. --task narrows to one task id; --step narrows to one step-name prefix (a family, e.g. `automerge.`). A partial ledger corpus (zero archives, or a rotation found and unreadable) is REFUSED, never narrated as a shorter story. READ-ONLY: writes no ledger line, no state file, posts nothing.",
   },
   {
+    name: "authority",
+    syntax: "rmd authority [--json]",
+    summary: "Every external write the fleet may make without the operator, its gate, and its last firing.",
+    detail: "W1-T2695: derives one table from plan/policy.yaml's schema and the GitHub/git write surface (lib/authority.ts's AUTHORITY_TABLE) — for each external write: the module+symbol that performs it, its gate kind (policy row / ledger verdict / operator verb / always), the plan/policy.yaml value that governs it (when any), the plan/ratifications.yaml pin (when W1-T2694's file carries one), and the last time it fired in the ledger union. Joins the ledger archive+live union (lib/ledger-grep.ts's resolveLedgerUnion), never the live ledger.ndjson alone, and REFUSES the whole report — never blanking each row's last-fired column — when that union could not be read. --json prints the same rows as JSON instead of the formatted table. test/authority-ratchet.test.ts enumerates every tracked src file with a detectable external write (an assertLiveWriteAllowed call, a gh REST write-verb argv, a gh pr/issue create-merge-comment-close argv, or a raw git push argv) and fails naming any file missing from AUTHORITY_TABLE. READ-ONLY: no network call, no gh/git spawn, writes nothing.",
+  },
+  {
     name: "check-proof",
     syntax: "rmd check-proof <proof> [--allow-full-suite] [--base <ref>]",
     summary: "Run one acceptance proof through the reviewer's own executor and print its verdict.",
@@ -37300,9 +38313,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "coverage-improve",
-    syntax: "rmd coverage-improve [--lcov <path>]",
+    syntax: "rmd coverage-improve [--lcov <path> | --from-ci]",
     summary: "File one feedback entry ranking src/ files by uncovered branches (85-90% band).",
-    detail: "W1-T470 tier two of the absolute coverage gate: when this run's branch coverage (read from --lcov, default coverage/lcov.info) sits in the 85-90 pass-with-debt band, ranks the src/ files owning the most uncovered branches (a COUNT, never a percentage — computed fresh every run, lib/coverage-improvement.ts) and files ONE plan/feedback/ entry naming them via captureFeedback, never a shard written straight into plan/tasks.d/ (no such minter exists) and never one entry per file. Dedupes against the ledger UNION (lib/ledger-grep.ts, never the live file alone) keyed on the exact set of files currently owning the debt — a run whose top offenders are unchanged from the last filing is skipped; a shifted debt profile files again. >= 90% (healthy) and < 85% (tier three, a separate remediation loop) are both no-ops here. INERT until wired into the coverage CI job's own step, which is a separate PR (Rule 25 keeps this producer's diff free of any .github/workflows/ci.yml or scripts/coverage-ratchet.mjs edit).",
+    detail: "W1-T470/W1-T2661 tier two of the absolute coverage gate: when branch coverage (read from --lcov, default coverage/lcov.info, or --from-ci's newest merged coverage-merged workflow artifact) sits in the 85-90 pass-with-debt band, ranks the src/ files owning the most uncovered branches (a COUNT, never a percentage — computed fresh every run, lib/coverage-improvement.ts) and files ONE plan/feedback/ entry naming them via captureFeedback, never a shard written straight into plan/tasks.d/ (no such minter exists) and never one entry per file. Dedupes against the ledger UNION (lib/ledger-grep.ts, never the live file alone) keyed on the exact set of files currently owning the debt — a run whose top offenders are unchanged from the last filing is skipped; a shifted debt profile files again. >= 90% (healthy) and < 85% (tier three, a separate remediation loop) are both no-ops here. The daemon-side measurement cadence uses --from-ci's same reader/producer path and refuses by name until CI publishes coverage-merged.",
   },
   {
     name: "verdict-calibration",
@@ -37423,7 +38436,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "status",
     syntax: "rmd status [--json]",
     summary: "One verb for 'is it running' and 'why is it stalled' from one read model.",
-    detail: "W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
+    detail: "W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
   },
   {
     name: "sweep",
@@ -38185,6 +39198,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(replayCommand(arg, rest[1], rest.slice(2))) cannot carry a DA hit without forking the process; replayCommand's own logic — arg validation, the resolved/refused union branches, and the buildReplay print path — is unit-tested in test/ledger-replay.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/receipt/ledger-grep dispatch cases).
   if (cmd === "replay" && arg) {
     process.exit(replayCommand(arg, rest[1], rest.slice(2)));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(authorityCommand(rest)) cannot carry a DA hit without forking the process; authorityCommand's own logic — arg validation, the policy/pins/ledger join, the refused-union branch, and the JSON/table render — is unit-tested in test/authority-table.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/receipt/replay dispatch cases).
+  if (cmd === "authority") {
+    process.exit(authorityCommand(rest));
   }
   if (cmd === "lint-plan") {
     process.exit(await lintPlanCommand(rest));

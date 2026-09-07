@@ -284,6 +284,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T1082: `escalateDiskHeadroomBreach`'s (run-task.ts) dedup marker, compared against an
   // episode window; it is what stops a daemon RESTART mid-episode from re-opening the issue.
   "daemon.disk_headroom.escalated",
+  // W1-T2988: `escalateRetroPublicationFailure`'s (retro.ts) episode dedup marker, read back by
+  // THAT function — a rotation dropping it re-opens one duplicate needs-human issue on every retro
+  // fire while the condition persists, which is the very loop this step exists to stop.
+  "retro.publication.escalated",
   "dispatch.starvation.escalated",
   // `escalateStarvationCleared`'s (run-task.ts) referent boundary, read alongside
   // "dispatch.starvation.escalated"; losing it re-closes a stale issue or skips a new episode.

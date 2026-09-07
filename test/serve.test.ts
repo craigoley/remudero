@@ -1018,13 +1018,6 @@ test("dark theme is applied by default (no light-mode flash, no JS branch requir
   assert.match(html, /<meta name="color-scheme" content="dark"\s*\/>/);
 });
 
-test("fleet-control read-back: the shell reads GET /v1/control/status and derives Pause/Resume/STOP/quiet-hours state from it (never stateless buttons)", () => {
-  const html = renderShellHtml();
-  assert.match(html, /getJson\("\/v1\/control\/status"\)/);
-  assert.match(html, /applyControlStatus/);
-  assert.match(html, /aria-pressed/);
-  assert.match(html, /\.disabled\s*=/); // an active mode disables its own re-trigger, distinct from the others
-});
 
 test("STOP requires an explicit second ('Confirm STOP') click before it POSTs /v1/control/stop — never fires on the first click", () => {
   const html = renderShellHtml();
@@ -1047,7 +1040,7 @@ test("GET /v1/control/status (assembled server): reads back the REAL fleet-contr
     // fixture's ledger is a real, present, empty file, which is exactly `ledger-empty` — present
     // and readable with nothing to say either way, distinct from both a dead daemon and a missing
     // ledger. `daemonLive` itself stays absent, so the assembled body is otherwise unchanged.
-    assert.deepEqual(await before.json(), { paused: false, stopped: false, quietHours: false, daemonLiveReason: "ledger-empty" });
+    assert.deepEqual(await before.json(), { paused: false, stopped: false, daemonLiveReason: "ledger-empty" });
 
     await post(base, "/v1/control/pause", WRITE_TOKEN, { reason: "taste iteration" });
     const afterPause = (await (await get(base, "/v1/control/status", READ_TOKEN)).json()) as {

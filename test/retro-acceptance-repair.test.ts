@@ -151,7 +151,10 @@ test("the DEFAULT leaves really shell out to gh — argv, JSON parse and the edi
     assert.equal(outcome, "repaired", "the real default read + trigger + real default edit all ran");
     const argv = readFileSync(argvLog, "utf8");
     assert.match(argv, /pr view .*--json body/, "defaultRetroFetchBody issued the real view argv");
-    assert.match(argv, /pr edit .*--body/, "defaultRetroEditBody issued the real edit argv");
+    // W1-T2948: the real edit argv is now the REST pulls PATCH — `gh pr edit`'s GraphQL query
+    // selects deprecated Projects Classic metadata and fails before the edit reaches the PR.
+    assert.match(argv, /api -X PATCH repos\/[^/]+\/[^/]+\/pulls\/\d+ -f body=/, "defaultRetroEditBody issued the real edit argv");
+    assert.doesNotMatch(argv, /pr edit /, "and never the transport this task removed");
     assert.ok(logged.includes("acceptance.repaired"));
   } finally {
     process.env.PATH = oldPath;
@@ -314,7 +317,8 @@ test("W1-T908: the real default changed-files seam shells out to gh and its erro
     assert.equal(outcome, "repaired");
     const argv = readFileSync(argvLog, "utf8");
     assert.match(argv, /pr diff .*--name-only/, "the default seam issued the real diff argv");
-    assert.match(argv, /pr edit .*--body/, "and the real edit argv");
+    // W1-T2948: see the sibling assertion above — the edit is a REST pulls PATCH now.
+    assert.match(argv, /api -X PATCH repos\/[^/]+\/[^/]+\/pulls\/\d+ -f body=/, "and the real edit argv");
     assert.deepEqual(logged.at(-1)?.extra?.changed_files, RETRO_PATHS, "the shelled-out paths reached the row");
   } finally {
     process.env.PATH = oldPath;

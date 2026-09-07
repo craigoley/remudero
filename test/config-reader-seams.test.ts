@@ -295,7 +295,20 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // GREEN before this number moved, because the reader was written with its `opts.armAdhocLaneReap
   // ?? ` seam from the start rather than seamed afterwards to quiet a red. So it is NOT allowlisted;
   // adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
-  assert.equal(readers.length, 25, `expected 25 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // TWENTY-SIX since `buildCiLearningDaemonHooks`'s own `policyFor` (run-task.ts, W1-T2972) landed
+  // — also SEAMED (`deps.policy ?? loadPolicy(policyPath(repoRoot))`), resolving the
+  // `ciLearningCadence` row that gives the CI-failure learning rung its own daemon schedule. It is
+  // the FOURTH structural sibling of that shape, not a new kind of thing: the same thunk, a sibling
+  // row, in the hook builder next to the other three — measurementCadence, digestCadence,
+  // boardReview, and now ciLearningCadence. Four hook builders, four rows, four seamed reads, and
+  // the detector counts reads rather than builders.
+  // IT PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this comment requires: the
+  // calibration failed at 26-vs-25 while test 2 stayed green, so the reader arrived already seamed
+  // and is NOT allowlisted — adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
+  // The file set is UNCHANGED (`src/run-task.ts` already carried the other three), so the `files`
+  // assertion below needed no edit — itself the check that this reader landed where its siblings
+  // live rather than opening a new unredirectable surface.
+  assert.equal(readers.length, 26, `expected 26 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

@@ -16,6 +16,7 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import type {
+  CiLearningCadenceRunResult,
   MeasurementCadenceDecision,
   MeasurementCadenceRunResult,
   WipeTestCadenceDecision,
@@ -741,6 +742,14 @@ export interface DaemonDeps {
   runWipeTestCadence?: (
     decision: Extract<WipeTestCadenceDecision, { fire: true }>,
   ) => Promise<WipeTestCadenceRunResult>;
+  /** W1-T2972 — the daily CI-failure learning rung: own policy row, own marker, the shared
+   *  two-bound decision. Optional like its siblings. WITHOUT run-task.ts's producer line these are
+   *  undefined and the rung is dead code — the shape #1066 and #2952 shipped, W1-T2959 making three. */
+  checkCiLearningCadence?: () => MeasurementCadenceDecision;
+  /** Run one ci-learning tick, returning counts this loop logs. Report-only: it drafts MARKED,
+   *  PARKED shards and files nothing (Law 5). Best-effort — a throw is logged and the tick
+   *  continues. */
+  runCiLearningCadence?: () => Promise<CiLearningCadenceRunResult>;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
    * degraded read — and the loop only acts on an explicit fire. Optional (W1-T160). */
@@ -1963,6 +1972,36 @@ export async function runDaemon(
       }
     }
 
+    // W1-T2972: same tick discipline and best-effort contract as the two cadences above, on its own
+    // row and marker. DRAFTS marked, parked shards and files nothing — a fire spends no budget.
+    if (deps.checkCiLearningCadence) {
+      let ciLearningDecision: MeasurementCadenceDecision | undefined;
+      try {
+        ciLearningDecision = deps.checkCiLearningCadence();
+      } catch (e) {
+        log("ci_learning_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (ciLearningDecision?.fire) {
+        log("ci_learning_cadence.fired", { reason: ciLearningDecision.reason });
+        if (deps.runCiLearningCadence) {
+          try {
+            const result = await deps.runCiLearningCadence();
+            // The UNREADABLE count rides the row: a partial window must never read as a clean one (P48).
+            log("ci_learning_cadence.ran", {
+              status: result.status,
+              drafts: result.draftCount,
+              excluded: result.excludedCount,
+              unreadable: result.unreadableCount,
+            });
+          } catch (e) {
+            log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (ciLearningDecision) {
+        log("ci_learning_cadence.skipped", { reason: ciLearningDecision.reason });
+      }
+    }
+
     // Board review: the rung whose unit is the whole open board. Same shape and best-effort contract as the
     // two cadences above, on its own policy row and marker file. The ledger rows below are part of the fix:
     // board-review.ts has no log hook of its own, so before this block a fire wrote no row at all
@@ -2512,29 +2551,44 @@ export async function runDaemon(
             reason: "an open triage PR already carries this feedback id's provenance",
           });
         } else {
-          log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
           if (deps.runAutoTriage) {
             const fired = decision;
-            if (await stopInterphaseReviewClock()) continue;
-            try {
-              // The same wrapper, reused verbatim. Triage holds for minutes after opening its PR and this loop is
-              // single-threaded, so an unwrapped await would black out every reconciliation for that duration.
-              await sweepLightDuringRetro(
-                deps,
-                pollIntervalMs,
-                log,
-                () => deps.runAutoTriage!(fired.feedbackId),
-                diskHeadroomLatch,
-                sweepRetrigger,
+            // W1-T2986 — DETACHED, exactly as W1-T2981 detached the retro beside it. This rung sits
+            // between the dispatch-set computation and the idle branch and used to `await` an
+            // unbounded run wrapped in a light-sweep ticker, so a fired triage held the whole tick
+            // and dispatch was never reached — the shape that took the fleet down for two days, with
+            // the ticker keeping every liveness signal green throughout. MEASURED across the ledger
+            // union: 185 `auto_triage.fired` against 1241 `auto_triage.skipped`, so roughly one tick
+            // in eight would have stalled on it once the retro stopped doing so first.
+            //
+            // Triage gates nothing: it spends, which is why it stays below the headroom rung, but no
+            // rung downstream reads its result. It goes on the same registry the sweep's fix
+            // dispatches and the retro use, which `stopForFreshness` drains, so a restart still lets
+            // a running triage finish. A second concurrent triage is refused and the refusal named.
+            if (detachedActionInFlight("auto-triage")) {
+              log("auto_triage.already_detached", { feedback: fired.feedbackId, reason: fired.reason });
+            } else {
+              log("auto_triage.fired", { feedback: fired.feedbackId, reason: fired.reason });
+              detachSweepAction(
+                sweepLightDuringRetro(
+                  deps,
+                  pollIntervalMs,
+                  log,
+                  () => deps.runAutoTriage!(fired.feedbackId),
+                  diskHeadroomLatch,
+                  sweepRetrigger,
+                ).catch((e) => {
+                  log("auto_triage.run_failed", {
+                    feedback: fired.feedbackId,
+                    error: String((e as Error)?.message ?? e),
+                  });
+                }),
+                { actionKind: "auto-triage", taskId: "DAEMON" },
               );
-            } catch (e) {
-              log("auto_triage.run_failed", {
-                feedback: fired.feedbackId,
-                error: String((e as Error)?.message ?? e),
-              });
-            } finally {
-              restartInterphaseReviewClock();
+              log("auto_triage.detached", { feedback: fired.feedbackId });
             }
+          } else {
+            log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
           }
         }
       } else if (decision) {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { checkWaitStalled, rollupHasRunningCheck, STALL_WINDOW, waitForCiGreen } from "../src/run-task.js";
+import { checkWaitStalled, rollupHasRunningCheck, STALL_WINDOW, waitForCiGreen, ciGateState } from "../src/run-task.js";
 
 /**
  * A RUNNING CHECK IS MOTION. W1-T382 correctly replaced a DEADLINE with a DERIVATIVE, then
@@ -174,7 +174,7 @@ test("BEHAVIORAL: the real waitForCiGreen waits through a long-running ci and re
       (step, extra) => logs.push({ step, extra }),
       0,
     );
-    assert.equal(outcome, "green", "a long-running ci that eventually succeeds must return green, never timeout");
+    assert.equal(ciGateState(outcome), "green", "a long-running ci that eventually succeeds must return green, never timeout");
     assert.equal(
       logs.find((l) => l.step === "ci.stalled"),
       undefined,

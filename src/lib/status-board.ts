@@ -63,7 +63,6 @@ import {
   drainNowFilePath,
   pauseFilePath,
   pendingKicks,
-  quietHoursFilePath,
   readSharedPause,
   realSharedPauseGitDeps,
   sharedPauseRef,
@@ -873,11 +872,6 @@ const STATIC_LATCHES: readonly StaticLatchDef[] = [
       const reason = typeof json?.reason === "string" ? json.reason : undefined;
       return `no new task spawns until \`rmd resume\`${reason ? ` (${reason})` : ""} — any in-flight task still completes`;
     },
-  },
-  {
-    name: "QUIET_HOURS",
-    path: quietHoursFilePath,
-    consequence: () => "quiet-hours preference is set (an optional throttle a future scheduler consumer reads)",
   },
   {
     name: "DEPLOY_AUTO",
