@@ -39,6 +39,20 @@
     DO NOT "FIX" THIS BY MAKING THE SELECTOR SKIP OLD IDS. Age is not evidence of completion, and a
     rule that skipped low ids would hide genuinely unbuilt early tasks forever. The remedy must credit
     what is DONE, not filter what is OLD.
+    HEADLINE FALSIFIED BY OBSERVATION, 2026-09-07 — DO NOT BUILD THIS AS WRITTEN. The title claims
+    "the daemon's next four candidates are W1-T121, W1-T122, W1-T123 and W1-T126". That came from a
+    merged set this session reconstructed from squash-commit TRAILERS ALONE, which under-credits by
+    construction — the daemon's own `readMergeCreditedTaskIds` reads the ledger union AND branch
+    credit and is strictly better than that reconstruction. MEASURED once dispatch resumed: every
+    task the fleet actually dispatched was recent — W1-T2655, W1-T2673, W1-T2659, W1-T2687 — and NOT
+    ONE of the four this shard names was offered.
+
+    THE UNDERLYING COUNT MAY STILL BE REAL (586 of 1382 ids carry neither trailer nor `run-` branch
+    credit) but the CONSEQUENCE claimed here is not observed, so the task must first re-measure
+    through the daemon's own projection rather than a hand-built set. A task filed on a bad
+    measurement spends fleet capacity on a defect that may not exist, which is the specific harm the
+    "NAME THE QUERY, NEVER ITS ANSWER" rule exists to prevent — and this shard broke it.
+
   acceptance:
     - claim: "a task credited by the written-reason baseline is excluded from the runnable frontier"
       proof: "unit test: W1-T2963: a baselined pre-trailer task is not offered as runnable"

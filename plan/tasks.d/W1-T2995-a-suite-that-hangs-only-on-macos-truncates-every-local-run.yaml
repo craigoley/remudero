@@ -1,0 +1,40 @@
+- id: W1-T2995
+  title: "test/base-lint-attributes-pre-existing-violations.test.ts HANGS AT FILE SCOPE ON macOS AND PASSES IN THE CONTAINER — a developer full-suite run is therefore unreliable in a way CI cannot see, and its file-level red is indistinguishable from a batching artefact"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: medium
+  origin: "operator-session#a-second-suite-hangs-2026-09-07"
+  plan_refs: ["W1-T2994", "W1-T2993", "W1-T2597"]
+  files: [test/base-lint-attributes-pre-existing-violations.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07 on clean origin/main, the SAME command in two places:
+      macOS (developer):  node --test --test-timeout 25000 --import tsx <the suite>
+                          -> tests 1 | pass 0 | fail 0 | CANCELLED 1     (hangs at file scope)
+      daemon container:   the same command
+                          -> tests 6 | pass 6 | fail 0 | cancelled 0
+    It is the MIRROR of W1-T2994, which hung in the container and passed on macOS — so this is a
+    second instance of one family: a suite whose result depends on the host it runs on, in a
+    direction CI cannot observe because CI is Linux.
+
+    THE COST IS DIAGNOSTIC, NOT PRODUCTION. A cancelled file reports as `not ok <file>` with no
+    assertion, which is byte-identical to the batching artefact a large parallel run produces.
+    THIS SESSION DISMISSED IT AS EXACTLY THAT, more than once, before running it alone and finding a
+    real hang — the same conflation W1-T2597 names for CI shards ("a killed run's failure set is a
+    SUBSET BY CONSTRUCTION") and W1-T2993 names for the retro preflight. Every local full-suite run
+    a developer makes on macOS is silently truncated by it.
+
+    WHERE IT BLOCKS IS NOT YET ESTABLISHED, and this shard will not guess. W1-T2994's cause — the
+    fixture inheriting an ambient `RMD_` control — is NOT available here: the macOS shell sets none,
+    which is why that fix cannot be the fix for this. The build must establish the blocking call
+    before changing anything, and record it the way W1-T2994 records its own.
+  acceptance:
+    - claim: "the suite completes on macOS rather than being cancelled at file scope"
+      proof: "unit test: W1-T2995: the base-lint fixture completes without a file-scope hang"
+    - claim: "it still passes in the container, so the fix is not a host-specific skip"
+      proof: "unit test: W1-T2995: the base-lint fixture asserts its pre-existing-violation attribution unchanged"

@@ -46,6 +46,19 @@
     the ones that never got to run. A cancelled suite and a failed assertion are different facts and
     a preflight that cannot tell them apart sends every diagnosis to the wrong file, as it did here
     for three days.
+    ANSWERED BY W1-T2994, 2026-09-07 — THIS SHARD'S "WHICH CALL BLOCKS IS NOT YET ESTABLISHED" IS NO
+    LONGER TRUE AND MUST NOT BE READ AS OPEN. `deploy/entrypoint.sh` reads
+    `RESTART_THROTTLE_S="${RMD_RESTART_THROTTLE_S:-0}"` and takes `exec "$@"` only when it is zero;
+    non-zero falls through to a supervised `while :; do` that never returns. The daemon container
+    sets `RMD_RESTART_THROTTLE_S=120`, and the fixture spawned with `env: { ...process.env }` at six
+    sites, so inside the container the test booted the supervised loop and blocked forever. Fixed by
+    scrubbing the `RMD_` prefix from the fixture's spawn environment; verified in the same container
+    that hung, 45 pass / 0 cancelled against a prior `tests 1 | cancelled 1`.
+
+    WHAT REMAINS HERE IS THE SECOND DEFECT THIS SHARD NAMES, AND IT IS UNFIXED: the preflight folded
+    a CANCELLED suite into `failing_tests` beside genuine assertion failures, and never named the
+    file that actually hung. That is what sent three days of diagnosis to the wrong files.
+
   acceptance:
     - claim: "the suite no longer hangs when run inside the daemon container, or is refused there with a named reason"
       proof: "unit test: W1-T2993: the entrypoint boot fixture cannot block indefinitely"
