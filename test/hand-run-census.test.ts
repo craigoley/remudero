@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -488,5 +488,71 @@ test("handRunsCommand: a measured census exits 0 and prints each recurrence's se
   } finally {
     console.log = realLog;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── the stateDir seam's DEFAULT arm, which every other test bypasses ─────────────────────────────
+
+/*
+ * diff-coverage flagged run-task.ts:17829-17833 — the `opts.stateDir ?? (…loadConfig()…)` default
+ * and its catch. Every test above supplies `opts.stateDir`, so the arm that runs IN PRODUCTION was
+ * the one arm nothing drove: exactly the seam pattern CLAUDE.md names, where a deps object
+ * supplying the fake leaves the real default unreachable. Both arms are reached here by redirecting
+ * HOME, which is what `loadConfig` resolves its config path from — the same idiom
+ * test/a-github-check-fanout-is-a-sweep-storm.test.ts uses.
+ */
+
+function withHome<T>(home: string, run: () => T): T {
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    return run();
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
+}
+
+test("handRunsCommand: with no stateDir supplied it resolves one from the config's own root", () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-runs-default-statedir-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const errs: string[] = [];
+  const realErr = console.error;
+  const realLog = console.log;
+  console.error = (...a: unknown[]) => void errs.push(a.map(String).join(" "));
+  console.log = () => {};
+  try {
+    // The state dir exists but holds no archives, so the census refuses — which is the point: the
+    // refusal proves the DEFAULT resolution ran and handed it a real path, rather than the
+    // "cannot resolve a state dir" the catch arm below produces.
+    const code = withHome(home, () => handRunsCommand([]));
+    assert.equal(code, 1);
+    assert.match(errs.join("\n"), /refused/, "the census must have been reached with a resolved dir");
+    assert.doesNotMatch(errs.join("\n"), /cannot resolve a state dir/, "the catch arm must NOT have fired");
+  } finally {
+    console.error = realErr;
+    console.log = realLog;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("handRunsCommand: an unreadable config is reported by name, never guessed at", () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-runs-bad-config-`));
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  // Malformed JSON: loadConfig throws rather than returning a root to join onto.
+  writeFileSync(join(home, ".config", "remudero", "config.json"), "{ not json\n");
+  const errs: string[] = [];
+  const realErr = console.error;
+  console.error = (...a: unknown[]) => void errs.push(a.map(String).join(" "));
+  try {
+    const code = withHome(home, () => handRunsCommand([]));
+    assert.equal(code, 1);
+    assert.match(errs.join("\n"), /cannot resolve a state dir/, "the catch arm must name the failure");
+  } finally {
+    console.error = realErr;
+    rmSync(home, { recursive: true, force: true });
   }
 });
