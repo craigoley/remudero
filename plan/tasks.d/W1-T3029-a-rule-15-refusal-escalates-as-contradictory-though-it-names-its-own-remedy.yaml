@@ -1,0 +1,120 @@
+- id: W1-T3029
+  title: "A STANDING-RULE-15 REFUSAL ESCALATES AS `contradictory` THOUGH IT NAMES ITS OWN REMEDY — `failSummary` emits a fixed rule-15 literal that states the PR shape to change, but `reviewLedgerReasons` rescues only `changesetContradictions` into the `reasons` array, so a tampered verdict arrives at the sweep with an empty unmet set and lands on the arm whose text asserts the review was contradictory; measured 784 such verdicts across 15 PRs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 8.00
+  files:
+    - src/lib/sweep.ts
+    - test/a-rule-15-refusal-escalates-as-contradictory-though-it-names-its-own-remedy.test.ts
+  origin: "operator-request#follow-up-work-2026-09-07"
+  plan_refs: ["W1-T440", "W1-T923", "W1-T58", "W1-T399", "W1-T400", "W1-T2692"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LAST ARM OF THE DISPOSITION TABLE NAMES A PROPERTY THE VERDICT DOES NOT HAVE. OBSERVED at
+    src/lib/sweep.ts:1888: when `reviewState === "failure"` and `criteriaRecoverable` is not false,
+    the reason is the literal `review failing with no actionable unmet criteria (contradictory) —
+    escalating`. That text is correct for a verdict that genuinely returned nothing unmet. It is
+    FALSE for a Standing rule 15 refusal, which is fully diagnosed: OBSERVED at
+    src/lib/review.ts:3774, `failSummary` returns a FIXED literal — `Standing rule 15: a criterion
+    was added/edited beside non-plan files — file the shard in its own plan-only PR` — whose own
+    comment records it as "MEASURED: 133 characters" and notes "Five suites pin `Standing rule 15`".
+    The remedy is stated in the summary the operator is shown, while the ledger row beside it says
+    the failure was contradictory and unactionable.
+
+    WHY THE UNMET SET IS EMPTY, AND WHY THAT IS NOT A CONTRADICTION. OBSERVED at
+    src/lib/review.ts:2709, `criteriaTampered = !planOnly && criterionFieldTampered(evidence.diff)`
+    is STRUCTURAL and diff-derived: it binds the floor (review.ts:2753, 2776) without unmet-ing any
+    named criterion. `failSummary`'s own header says so — rule 15 "comes first ... since a diff can
+    trip the rule-15 guard alone with every named criterion still met."
+
+    THE ROUTING RESCUE EXISTS AND COVERS ONLY THE SIBLING. OBSERVED at src/lib/review.ts:3699,
+    `reviewLedgerReasons` pushes `verdict.summary` when `reasons.length === 0` AND
+    `changesetContradictions` is non-empty — its doc names exactly this defect ("the
+    changeset-contradiction path fails the verdict WITHOUT unmet-ing any NAMED criterion, so the
+    per-criterion rule alone returns `[]` ... and fell to `blocked-ambiguous`"). `criteriaTampered`
+    has the identical shape and is absent from that condition, so it still falls through.
+
+    MEASURED, not inferred. Across the live ledger and all 364 rotations (traversal verified with a
+    positive control: 1,151,673 `sweep.disposed` rows read; zero permission denials): 12,498 failing
+    review verdicts, 1,117 with `criteriaTampered: true`, of which 784 had zero unmet criteria, no
+    test theater and no changeset contradiction — the exact unroutable population — spread over 15
+    distinct PRs on 2026-09-02, 09-03, 09-05 and 09-07. LIVE INSTANCE at filing: #4413 sits BLOCKED
+    on `remudero-review` with every criterion met, `criteriaTampered: true`, and the ledger reason
+    "no actionable unmet criteria (contradictory)".
+  design: |
+    (i) THIS IS W1-T440'S SHAPE, EXTENDED BY ONE CAUSE. That task split the same empty-unmet reason
+    into two causes because "the reason used to name the wrong one unconditionally", and its arm
+    already derives and names a repair. Add a THIRD cause ahead of the contradictory wording. Do not
+    restructure the table; the two existing arms must keep their text byte-identical.
+
+    (ii) DETECT ON THE SUMMARY TEXT, WHICH IS THE PRECEDENT IN THIS FILE. `ReviewVerdict.criteriaTampered`
+    is NOT carried on `OpenPrView`; `reviewSummary` IS (src/lib/sweep.ts:635). `namesUnsatisfiableGate`
+    (sweep.ts, ~1279) already matches Standing rule 25 as TEXT for exactly this reason and documents
+    the tradeoff. Follow it: one exported marker constant beside `UNSATISFIABLE_GATE_MARKER`, matched
+    against `reviewSummary`. The rule-15 string is a fixed literal with no interpolation, which is
+    what makes the match safe — say that where the marker is defined.
+
+    (iii) DIAGNOSTIC ONLY — IT MUST NOT ROUTE TO THE FIX RUNG. The tempting change is to add
+    `criteriaTampered` to `reviewLedgerReasons`'s fallback so the summary becomes an
+    `actionableGateFailure` and the PR reaches `blocked-fixable`. REFUSE THAT HERE. Rule 15's remedy
+    is a PR SPLIT ("file the shard in its own plan-only PR, then build it in a second PR") — a shape
+    change no in-place fix rung can perform, so routing it would spend strikes that cannot succeed
+    and would convert a correct escalation into a burnt budget. The disposition stays
+    `blocked-ambiguous`; only the reason text changes. State this refusal in the source.
+
+    (iv) NAME THE REMEDY, NOT ONLY THE CAUSE. W1-T440's arm appends a derived repair; this one must
+    too. The remedy sentence is already fixed by `failSummary`, so quote the PR-shape half rather
+    than inventing wording.
+
+    (v) NO OTHER ARM MOVES. `criteriaRecoverable === false` still wins where it applies — a PR with
+    no trailer is unrecoverable whatever else is true — so the new cause is tested strictly after it.
+  acceptance:
+    - claim: "a review failure whose summary carries the Standing rule 15 refusal escalates with a reason naming rule 15 and the PR-shape remedy, instead of asserting the verdict was contradictory"
+      proof: "unit test: test/a-rule-15-refusal-escalates-as-contradictory-though-it-names-its-own-remedy.test.ts"
+    - claim: "the disposition is unchanged at blocked-ambiguous, so no fix strike is dispatched for a remedy the fix rung cannot perform"
+      proof: "unit test: test/a-rule-15-refusal-escalates-as-contradictory-though-it-names-its-own-remedy.test.ts"
+    - claim: "a review failure with an empty unmet set and no rule-15 summary keeps the contradictory wording byte-identical"
+      proof: "unit test: test/a-rule-15-refusal-escalates-as-contradictory-though-it-names-its-own-remedy.test.ts"
+    - claim: "an unrecoverable-criteria PR keeps the W1-T440 wording and its derived repair even when a rule-15 summary is also present, so the earlier arm still wins"
+      proof: "unit test: test/a-rule-15-refusal-escalates-as-contradictory-though-it-names-its-own-remedy.test.ts"
+  falsifier: |
+    THE TWO EXISTING EMPTIES ARE WHAT A THIRD ARM CAN BREAK. Assert BOTH survive byte-identical: a
+    plain empty-unmet failure still reads "review failing with no actionable unmet criteria
+    (contradictory) — escalating", and an unrecoverable one still reads the W1-T440 sentence WITH its
+    derived repair. If adding a cause changed either string, the change is wrong however well the new
+    arm reads.
+
+    AND THE DISPOSITION IS THE SAFETY PROPERTY, NOT THE TEXT. Assert the rule-15 row still
+    dispositions `blocked-ambiguous` and that `actionableGateFailures` is untouched — if this task
+    ever routes a tampered PR to `blocked-fixable`, it has spent a strike on a PR split no worker can
+    make, which is strictly worse than today's unhelpful message.
+
+    PROVE IT LOAD-BEARING: with the marker match removed, the rule-15 row must fall back to the
+    contradictory wording and redden, while the two existing-empty rows and the disposition row all
+    stay green. A test that reddens everywhere is pinning the table, not the behaviour.
+  note: |
+    FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3029`.
+
+    NOT W1-T2692, WHICH FIXED THE OTHER SURFACE AND IS WHAT MAKES THIS ONE POSSIBLE. That task
+    found the rule-15 refusal "named no remedy" because \`failSummary\`'s branch rendered at 145 chars
+    against the commit-status API's 140-char cap and was sliced mid-word; it fixed the AUTHOR-FACING
+    surfaces — the capped status line now states the PR shape to change, and the uncapped two-part
+    remedy rides \`checkSatisfiedByGuard\`'s advisory. It did not touch the SWEEP. This task is the
+    operator-facing half: the ledger reason and escalation beside that summary still assert the
+    verdict was contradictory. W1-T2692 is a DEPENDENCY in substance — its fixed literal is exactly
+    what makes a text match here safe — not an overlap.
+
+    FILED PLAN-ONLY ON PURPOSE. Building this beside its own shard would trip the very guard it
+    describes, which is the cleanest available demonstration that the rule is working as designed.
+    The defect is not that rule 15 fires; it is that the ledger row beside it mis-describes the
+    firing.
+
+    risk:low — the diff changes ONE reason string on an arm whose disposition does not move, adds no
+    dispatch, and is gated behind a fixed literal. The band is set by that containment; design (iii)
+    is the part a reviewer should push on, because the appealing "improvement" is the one that would
+    do harm.
