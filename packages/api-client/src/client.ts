@@ -9,7 +9,7 @@
 // W3-T2 v0 shipped the read-only board's ONE route pair: `getStatus()` (GET /v1/status) and
 // `subscribeStatus()` (GET /v1/status/stream, SSE). W3-T5 (MASTER-PLAN §7, human-in-the-loop
 // panel actions) adds the write side over the SAME client: `pauseFleet`/`resumeFleet`/
-// `stopFleet`, `setQuietHours`, `answerQuestion`, `approveManualItem` — one typed method per
+// `stopFleet`, `answerQuestion`, `approveManualItem` — one typed method per
 // write route src/lib/panel-actions.ts registers, calling `postJson` (this file's one write
 // helper, mirroring `getStatus`'s GET). Every OTHER daemon route a later task adds gets its
 // own typed method here, never a second ad-hoc fetch call in a consumer — this file is the
@@ -45,7 +45,6 @@ export type StatusSnapshot = components["schemas"]["StatusSnapshot"];
 export type PauseResult = components["schemas"]["PauseResult"];
 export type ResumeResult = components["schemas"]["ResumeResult"];
 export type StopResult = components["schemas"]["StopResult"];
-export type QuietHoursResult = components["schemas"]["QuietHoursResult"];
 export type AnswerQuestionResult = components["schemas"]["AnswerQuestionResult"];
 export type ApproveManualResult = components["schemas"]["ApproveManualResult"];
 export type FeedbackEntry = components["schemas"]["FeedbackEntry"];
@@ -82,8 +81,6 @@ export interface DaemonClient {
   resumeFleet(): Promise<ResumeResult>;
   /** POST /v1/control/stop — the hard kill (write-scoped, W3-T5). */
   stopFleet(reason?: string): Promise<StopResult>;
-  /** POST /v1/quiet-hours — toggle the scheduler's quiet-hours preference (write-scoped, W3-T5). */
-  setQuietHours(enabled: boolean): Promise<QuietHoursResult>;
   /** POST /v1/questions/answer — answer a QUESTION-contract entry (write-scoped, W3-T5). */
   answerQuestion(taskId: string, answer: string): Promise<AnswerQuestionResult>;
   /** POST /v1/manual/approve — check off a MANUAL-queue item (write-scoped, W3-T5). */
@@ -259,9 +256,6 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
       return postJson<StopResult>("/v1/control/stop", reason === undefined ? {} : { reason });
     },
 
-    setQuietHours(enabled) {
-      return postJson<QuietHoursResult>("/v1/quiet-hours", { enabled });
-    },
 
     answerQuestion(taskId, answer) {
       return postJson<AnswerQuestionResult>("/v1/questions/answer", { taskId, answer });

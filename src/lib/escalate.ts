@@ -51,7 +51,6 @@ export const ESCALATION_OPTION_ROUTES = {
   "/v1/control/pause": "middle",
   "/v1/control/resume": "middle",
   "/v1/control/stop": "middle",
-  "/v1/quiet-hours": "middle",
   "/v1/escalation/mark-handled": "low",
   "/v1/questions/answer": "low",
   "/v1/drain/feedback": "low",
@@ -400,7 +399,7 @@ export const FLEET_NOTICE_LABEL = "fleet-notice";
 export type PresenceMode = "attended" | "away";
 
 /** `<root>/state/AWAY` — the same existence-gated flag idiom as fleet-control.ts's
- *  STOP/PAUSE/QUIET_HOURS: a corrupt/unreadable state dir still fails to the SAFE default
+ *  STOP/PAUSE: a corrupt/unreadable state dir still fails to the SAFE default
  *  (`"attended"`, i.e. deliver exactly as today), never silently goes quiet. */
 export function awayFilePath(root: string): string {
   return join(root, "state", "AWAY");

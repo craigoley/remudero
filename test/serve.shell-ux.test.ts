@@ -547,7 +547,6 @@ test("a console loaded with the READ token alone renders the board fully and sho
         resumeDisabled: (document.getElementById("resume-btn") as HTMLButtonElement)?.disabled,
         stopDisabled: (document.getElementById("stop-btn") as HTMLButtonElement)?.disabled,
         stopTitle: (document.getElementById("stop-btn") as HTMLButtonElement)?.title ?? "",
-        quietHoursDisabled: (document.getElementById("quiet-hours") as HTMLInputElement)?.disabled,
         drainDisabled: (document.getElementById("drain-now-btn") as HTMLButtonElement)?.disabled,
         writeTokenStatus: document.getElementById("write-token-status")?.textContent ?? "",
         writeTokenFormHidden: (document.getElementById("write-token-form") as HTMLElement)?.hidden,
@@ -558,7 +557,6 @@ test("a console loaded with the READ token alone renders the board fully and sho
       assert.equal(state.resumeDisabled, true);
       assert.equal(state.stopDisabled, true);
       assert.match(state.stopTitle, /read-only/i);
-      assert.equal(state.quietHoursDisabled, true);
       assert.equal(state.drainDisabled, true);
       assert.match(state.writeTokenStatus, /read-only/i);
       assert.equal(state.writeTokenFormHidden, false, "the read-only state offers the write-token entry form");
@@ -623,14 +621,12 @@ test("clearing the stored write token returns the console to the read-only rende
       const state = await page.evaluate(() => ({
         marker: (window as unknown as { __t202Marker?: string }).__t202Marker,
         stopDisabled: (document.getElementById("stop-btn") as HTMLButtonElement).disabled,
-        quietHoursDisabled: (document.getElementById("quiet-hours") as HTMLButtonElement).disabled,
         storedToken: window.sessionStorage.getItem("rmd-console-write-token"),
         clearBtnHidden: (document.getElementById("write-token-clear-btn") as HTMLElement).hidden,
         formHidden: (document.getElementById("write-token-form") as HTMLElement).hidden,
       }));
       assert.equal(state.marker, "still-here", "clearing the token must never reload/navigate the page");
       assert.equal(state.stopDisabled, true);
-      assert.equal(state.quietHoursDisabled, true);
       assert.equal(state.storedToken, null, "the token must actually be removed from sessionStorage, not just hidden");
       assert.equal(state.clearBtnHidden, true);
       assert.equal(state.formHidden, false);
