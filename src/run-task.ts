@@ -16049,6 +16049,8 @@ export interface MintedTaskIdWithHistory {
   maxSeen: number;
   sources: MintSources;
   historyMax: number | null;
+  /** The reservation frontier that made a `--reserve` attempt advance beyond the raw mint. */
+  reservationMax?: number | null;
   degraded: MintDegradation[];
 }
 
@@ -16188,10 +16190,11 @@ export function mintNextTaskIdWithHistory(opts: {
 /** lib/task-id.ts's `describeMint`, plus the history source — one-line provenance for the
  *  layered mint. */
 export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
+  const reservation = mint.reservationMax == null ? "" : `, reservations ${mint.reservationMax}`;
   const src =
     `tasks.yaml ${mint.sources.monolith ?? "-"}, shards ${mint.sources.shards ?? "-"}, ` +
     `open PRs ${mint.sources.openPrs ?? "not enumerated"}, remote plan ${mint.sources.remotePlan ?? "-"}, ` +
-    `history ${mint.historyMax ?? "-"}`;
+    `history ${mint.historyMax ?? "-"}${reservation}`;
   const warn = mint.degraded.length
     ? ` — DEGRADED: ${mint.degraded.map((d) => `${d.source} (${d.reason})`).join("; ")}`
     : "";
@@ -18827,11 +18830,31 @@ export function printLaneOverlapAdvisory(
  *
  * PURE, so both arms and the unknown fallback are reachable from a test without a git remote.
  */
-export type ReservationHolder = "fleet" | "operator" | "unknown";
+export interface ReservationCallerIdentity {
+  pid: number;
+  host: string;
+}
 
-export function classifyReservationAnchor(message: string): ReservationHolder {
+export type ReservationHolder = "self" | "fleet" | "operator" | "unknown";
+
+function reservationCallerIdentity(): ReservationCallerIdentity {
+  return { pid: process.pid, host: hostname() };
+}
+
+function callerFromReservationAnchor(message: string): ReservationCallerIdentity | null {
+  const m = /^rmd-id reservation\s+([0-9]+)@([^ \t\r\n]+)\b/.exec(message.trim());
+  if (!m) return null;
+  return { pid: Number(m[1]), host: m[2] };
+}
+
+export function classifyReservationAnchor(message: string, caller?: ReservationCallerIdentity): ReservationHolder {
   const m = message.trim();
-  if (/^rmd-id reservation\b/.test(m)) return "fleet";
+  if (/^rmd-id reservation\b/.test(m)) {
+    const holder = callerFromReservationAnchor(m);
+    if (!caller) return "fleet";
+    if (!holder) return "unknown";
+    return holder.pid === caller.pid && holder.host === caller.host ? "self" : "fleet";
+  }
   if (/^reserve\s+W1-T\d+\b/.test(m)) return "operator";
   return "unknown";
 }
@@ -18840,7 +18863,9 @@ export function classifyReservationAnchor(message: string): ReservationHolder {
  *  taken id must be visible, because silently advancing is what let two collisions go unnoticed. */
 export function describeContestedId(taskId: string, holder: ReservationHolder): string {
   const who =
-    holder === "fleet"
+    holder === "self"
+      ? "HELD BY THIS CALLER (an `rmd-id reservation <pid>@<container>` anchor)"
+      : holder === "fleet"
       ? "HELD BY ANOTHER CALLER — the fleet (an `rmd-id reservation <pid>@<container>` anchor)"
       : holder === "operator"
         ? "HELD BY ANOTHER CALLER — an operator hand-mint (a `reserve W1-T#### <host>-<pid>-<nanotime>` anchor)"
@@ -19008,6 +19033,12 @@ export interface NextTaskIdReserveDeps {
   openPrTexts?: () => string[];
 }
 
+function mintForReservationAttempt(mint: MintedTaskIdWithHistory, heldId: number, heldTaskId: string): MintedTaskIdWithHistory {
+  if (heldTaskId === mint.id) return mint;
+  const maxSeen = heldId - 1;
+  return { ...mint, id: heldTaskId, n: heldId, maxSeen, reservationMax: maxSeen };
+}
+
 /**
  * W1-T2324 (Q2) — the ONE degradation that makes `next-task-id --reserve`'s ATOMIC CLAIM on
  * origin unsafe. `--reserve` is the one verb this binds: printing a degraded id (the unflagged
@@ -19067,48 +19098,49 @@ export async function nextTaskIdCommand(
     console.error(`### rmd next-task-id: ${(e as Error).message}`);
     return 2;
   }
-  console.log(describeMintWithHistory(mint));
-  // READS reservations, never TAKES one. This verb is advisory and spawns nothing, so an operator
-  // asking "what is next" a hundred times must not burn a hundred ids — and a reservation held by
-  // a process that exits microseconds later reserves nothing anyway. Reporting a number and
-  // claiming it are different acts; only the caller that will actually FILE should claim.
-  // BEST-EFFORT, unlike the triage path's loud reservation. This verb is a READ that spawns
-  // nothing, so an unreadable config or state dir must degrade to "no reservation notice" rather
-  // than crash the operator's query — `loadConfig()` throws on an absent/empty config file, which
-  // is the normal case in CI and in any fixture-only checkout. The LOUD-on-failure rule applies to
-  // the caller that is about to SPEND, not to the one that is about to PRINT.
-  try {
-    const free = firstUnreservedAtOrAbove(mint.n, taskIdReservationsDir(loadConfig().root));
-    if (free !== mint.n)
-      console.log(`(${mint.id} is RESERVED by a live minter — the next unreserved id is W1-T${free})`);
-  } catch {
-    /* no readable reservation store ⇒ report the mint alone, exactly as before this existed */
-  }
-  // THE SAME BLIND SPOT THE RESERVE PATH HAD, ON THE PATH A HUMAN READS. The mint's four surfaces
-  // (tasks.yaml, shards, open PRs, plan history) do not include `refs/rmd-id/`, so the number
-  // printed above can sit well below every id the fleet already holds — measured here, an advisory
-  // W1-T<n> against a namespace whose real floor was three higher. That number is what an operator
-  // COPIES into a new shard, so a silent understatement is a collision waiting to be filed, not a
-  // cosmetic gap. Best-effort and `--offline`-respecting, exactly like the local notice above: this
-  // verb PRINTS, so an unreadable namespace degrades to saying nothing.
-  if (!offline) {
+  const reserving = rest.includes("--reserve");
+  if (!reserving) console.log(describeMintWithHistory(mint));
+  if (!reserving) {
+    // READS reservations, never TAKES one. This verb is advisory and spawns nothing, so an operator
+    // asking "what is next" a hundred times must not burn a hundred ids — and a reservation held by
+    // a process that exits microseconds later reserves nothing anyway. Reporting a number and
+    // claiming it are different acts; only the caller that will actually FILE should claim.
+    // BEST-EFFORT, unlike the triage path's loud reservation. This verb is a READ that spawns
+    // nothing, so an unreadable config or state dir must degrade to "no reservation notice" rather
+    // than crash the operator's query — `loadConfig()` throws on an absent/empty config file, which
+    // is the normal case in CI and in any fixture-only checkout. The LOUD-on-failure rule applies to
+    // the caller that is about to SPEND, not to the one that is about to PRINT.
     try {
-      // `gitRunAdapter` is the SAME normaliser the reserve path below uses — `spawnSync` reports
-      // `status: null` for a signalled child, and a raw null would read as success here.
-      const advisoryRun = gitRunAdapter(deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
-      const floor = reservationFloorFrom(remoteReservedTaskIds(advisoryRun));
-      if (floor !== "unknown" && floor > mint.n)
-        console.log(`(origin's refs/rmd-id/ namespace already holds ids up to W1-T${floor - 1} — the first id no reservation holds is W1-T${floor})`);
+      const free = firstUnreservedAtOrAbove(mint.n, taskIdReservationsDir(loadConfig().root));
+      if (free !== mint.n)
+        console.log(`(${mint.id} is RESERVED by a live minter — the next unreserved id is W1-T${free})`);
     } catch {
-      /* unreadable namespace ⇒ report the mint alone */
+      /* no readable reservation store ⇒ report the mint alone, exactly as before this existed */
     }
+    // THE SAME BLIND SPOT THE RESERVE PATH HAD, ON THE PATH A HUMAN READS. The mint's four surfaces
+    // (tasks.yaml, shards, open PRs, plan history) do not include `refs/rmd-id/`, so the number
+    // printed above can sit below every id the fleet already holds. Best-effort and
+    // `--offline`-respecting, exactly like the local notice above: this verb PRINTS,
+    // so an unreadable namespace degrades to saying nothing.
+    if (!offline) {
+      try {
+        // `gitRunAdapter` is the SAME normaliser the reserve path below uses — `spawnSync` reports
+        // `status: null` for a signalled child, and a raw null would read as success here.
+        const advisoryRun = gitRunAdapter(deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
+        const floor = reservationFloorFrom(remoteReservedTaskIds(advisoryRun));
+        if (floor !== "unknown" && floor > mint.n)
+          console.log(`(origin's refs/rmd-id/ namespace already holds ids up to W1-T${floor - 1} — the first id no reservation holds is W1-T${floor})`);
+      } catch {
+        /* unreadable namespace ⇒ report the mint alone */
+      }
+    }
+    if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
+    // W1-T917 — the rare-overlap advisory. Printed AFTER the id, never instead of it: the mint's own
+    // output is byte-identical whether this warns, stays silent, or fails outright. `--offline`
+    // suppresses it for the same reason it suppresses the open-PR sweep above.
+    for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
+      (overlapDeps.say ?? console.log)(line);
   }
-  if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
-  // W1-T917 — the rare-overlap advisory. Printed AFTER the id, never instead of it: the mint's own
-  // output is byte-identical whether this warns, stays silent, or fails outright. `--offline`
-  // suppresses it for the same reason it suppresses the open-PR sweep above.
-  for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
-    (overlapDeps.say ?? console.log)(line);
   // ── W1-T1055 — `--reserve`: MAKE THE PUSH THE CLAIM ───────────────────────────────────────────
   // WITHOUT the flag, every line above is byte-identical to before this existed and nothing is
   // claimed — the 2026-08-01 author's line between PRINTING and SPENDING is honoured, not
@@ -19121,7 +19153,7 @@ export async function nextTaskIdCommand(
   // bounded by `maxScan`, and its handle already names the id it actually holds — so this prints
   // THAT id and never the one it first tried. Re-implementing the scan in this command is the
   // failure mode the shard asks review to refuse.
-  if (rest.includes("--reserve")) {
+  if (reserving) {
     // W1-T2324 (Q2) — see {@link openPrSurfaceOutage}'s doc for the full rationale. Printing a
     // degraded id costs nothing a caller cannot re-check; `--reserve` is what makes a collision
     // durable, so this is the one arm of this verb the gate binds.
@@ -19171,9 +19203,12 @@ export async function nextTaskIdCommand(
         }
       };
       const held = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(mint.n, reserver));
+      console.log(describeMintWithHistory(mintForReservationAttempt(mint, held.id, held.taskId)));
       for (const line of contested) console.log(line);
       console.log(`RESERVED ${held.taskId} on origin (${held.ref}) after ${held.attempts} attempt(s)`);
-      if (held.taskId !== mint.id) console.log(`(note: the advisory mint printed ${mint.id}; ${held.taskId} is the id actually HELD)`);
+      if (held.taskId !== mint.id) console.log(`(note: the reservation walk advanced from ${mint.id}; ${held.taskId} is the id actually HELD)`);
+      for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
+        (overlapDeps.say ?? console.log)(line);
     } catch (e) {
       for (const line of contested) console.log(line);
       const err = e as TaskIdReservationError;
@@ -19190,12 +19225,13 @@ export async function nextTaskIdCommand(
 export function readReservationHolder(
   taskId: string,
   run: (args: string[]) => { status: number | null; stdout: string; stderr: string },
+  caller: ReservationCallerIdentity = reservationCallerIdentity(),
 ): ReservationHolder {
   const fetched = run(["fetch", "origin", `${taskIdReservationRef(taskId)}`]);
   if ((fetched.status ?? 1) !== 0) return "unknown";
   const msg = run(["log", "-1", "--format=%s", "FETCH_HEAD"]);
   if ((msg.status ?? 1) !== 0) return "unknown";
-  return classifyReservationAnchor(msg.stdout ?? "");
+  return classifyReservationAnchor(msg.stdout ?? "", caller);
 }
 
 /** W1-T180: the post-merge-amendment status resolution's only I/O — loadConfig (reads $HOME),
