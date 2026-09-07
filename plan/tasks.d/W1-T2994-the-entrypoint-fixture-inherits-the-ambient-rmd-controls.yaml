@@ -1,0 +1,53 @@
+- id: W1-T2994
+  title: "THE ENTRYPOINT FIXTURE INHERITS THE AMBIENT RMD_ CONTROLS, SO INSIDE THE DAEMON CONTAINER IT BOOTS THE SUPERVISED LOOP AND NEVER RETURNS — the retro runs the full suite there, so its prepublish validation has failed since 2026-09-03 and the self-improvement loop has published nothing since"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: "operator-session#the-self-improvement-loop-has-been-dead-since-09-03"
+  plan_refs: ["W1-T2993", "W1-T2988", "W1-T2875", "W1-T490", "W1-T1134"]
+  files: [test/entrypoint-boot.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SELF-IMPROVEMENT LOOP HAS BEEN DEAD FOR THREE DAYS AND THIS IS WHY. `state/last-retro.json`
+    reads 2026-09-03T02:24:39.835Z. On 2026-09-06 the retro lane had 44 `retro.start` rows and ZERO
+    `pr.opened`, and the trigger re-fired 60 times with `merges_since_marker` pinned at 446.
+
+    THE MECHANISM, IN THE SCRIPT'S OWN WORDS. `deploy/entrypoint.sh`:
+        RESTART_THROTTLE_S="${RMD_RESTART_THROTTLE_S:-0}"
+        if [ "$RESTART_THROTTLE_S" -eq 0 ]; then exec "$@"; fi     # one-shot: returns
+        ...
+        while :; do                                                # supervised: NEVER returns
+    `boot()` and five sibling spawn sites in test/entrypoint-boot.test.ts pass
+    `env: { ...process.env, ... }`. The daemon container sets `RMD_RESTART_THROTTLE_S=120`
+    (docker inspect), so inside it the fixture's own `spawnSync` enters the supervised loop and
+    blocks forever. The runner cancels the suite at its timeout and the retro's prepublish
+    validation reports the cancellation as failing tests.
+
+    THE CORPUS THAT COULD SEE IT WAS THE ONE NOBODY RAN IT IN. The suite passes on a developer
+    machine and in CI because neither sets the variable — `ci` is `completed/success` on main
+    throughout — and it fails only where the retro runs. REPRODUCED both ways:
+      before: docker exec ... node --test --test-timeout 45000 ... entrypoint-boot.test.ts
+              -> test at test/entrypoint-boot.test.ts:1:1, 'test timed out after 45000ms',
+                 tests 1 | pass 0 | fail 0 | CANCELLED 1
+      after:  the same command in the same container -> tests 45 | pass 45 | fail 0 | cancelled 0
+
+    TWO HYPOTHESES WERE FORMED AND DISPROVED FIRST and must not be re-litigated: a missing git
+    identity (the container has `remudero-worker` configured globally, and worker HOMEs carry their
+    own `.gitconfig`), and dependency drift from the 49-commit canonical-checkout gap
+    (`package.json` and the lockfile are unchanged across it, as the warning itself states).
+
+    SCRUB THE PREFIX, NOT THE ONE NAME. Every `RMD_` variable is a control this script or its
+    children read, so a fixture inheriting any of them measures the host's configuration instead of
+    its own. Each test still sets what it needs explicitly. THIS IS THE FIXTURE'S BUG, NOT THE
+    SCRIPT'S: supervised mode is correct behaviour for a container boot, and a test that boots the
+    real entrypoint must control the environment it boots it in.
+  acceptance:
+    - claim: "the fixture no longer inherits the RMD_ controls the booted script branches on"
+      proof: "unit test: W1-T2994: the entrypoint fixture does not inherit ambient RMD_ controls"
+    - claim: "a throttle set in the ambient environment no longer reaches the booted script"
+      proof: "unit test: W1-T2994: an ambient restart throttle does not put the fixture into supervised mode"
