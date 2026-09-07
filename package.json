@@ -55,7 +55,6 @@
     "cli-reference": "tsx scripts/generate-cli-reference.mjs",
     "cli-reference:check": "tsx scripts/generate-cli-reference.mjs --check",
     "proof-dialect": "tsx scripts/generate-proof-dialect.mjs",
-    "proof-dialect:check": "tsx scripts/generate-proof-dialect.mjs --check",
     "macro-skills": "node --import tsx scripts/generate-macro-skills.mjs",
     "macro-skills:check": "node --import tsx scripts/generate-macro-skills.mjs --check",
     "capability-snapshot": "tsx scripts/generate-capability-snapshot.mjs",

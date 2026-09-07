@@ -5,8 +5,9 @@ own parser reads: ACCEPTANCE_PROOF_GRAMMAR (src/lib/proof-grammar.ts),
 ACCEPTANCE_HEADER_RE / ACCEPTANCE_BULLET_RE / PROOF_DIALECT (src/lib/review.ts),
 SCENARIO_NARRATIVE_BOUNDS (src/lib/task-linter.ts) and CHECK_PROOF_EXIT
 (src/run-task.ts). Run `npm run proof-dialect` to regenerate after changing any of
-those. `npm run proof-dialect:check` (part of `npm test`, W1-T2762) fails CI if this
-file has drifted from a fresh regeneration.
+those. `tsx scripts/generate-proof-dialect.mjs --check`, spawned by
+`test/proof-dialect-doc.test.ts` (part of `npm test`, W1-T2762), fails CI if this file
+has drifted from a fresh regeneration.
 -->
 
 # The acceptance-proof dialect

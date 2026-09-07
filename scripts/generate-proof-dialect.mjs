@@ -2,33 +2,25 @@
 //
 // Proof-dialect reference page generator + drift gate (W1-T2762).
 //
-// The acceptance-proof dialect is taught THREE times: `ACCEPTANCE_PROOF_GRAMMAR`
-// (src/lib/proof-grammar.ts, the ONE copy both filing lanes read and the only one
-// test/proof-grammar.test.ts already runs through the real parser), CLAUDE.md's "Writing proofs
-// and acceptance criteria" section (hand-written prose, six bullets), and `rmd check-proof`'s
-// `detail` string (src/run-task.ts, also hand-written). Only the first is tested against the
-// parser. This script closes that gap the way scripts/generate-cli-reference.mjs (W1-T48) already
-// closed it for docs/cli-reference.md: render docs/proof-dialect.md from the SAME constants the
-// parser, the filing-time linter and `rmd check-proof` all read --
-// `ACCEPTANCE_PROOF_GRAMMAR` (src/lib/proof-grammar.ts), `ACCEPTANCE_HEADER_RE` /
-// `ACCEPTANCE_BULLET_RE` / `PROOF_DIALECT` (src/lib/review.ts), `SCENARIO_NARRATIVE_BOUNDS`
-// (src/lib/task-linter.ts) and `CHECK_PROOF_EXIT` (src/run-task.ts) -- so a committed page cannot
-// drift from what the reviewer actually enforces, and `test/proof-dialect-doc.test.ts` can hold
-// CLAUDE.md's prose copy to these same values.
-//
-// The generated file is content-only (no timestamp, no invocation-environment data) so it is
-// byte-stable across runs when none of those constants changed -- that is what makes `--check` a
-// meaningful staleness gate rather than a permanent false positive (same discipline as
-// scripts/generate-cli-reference.mjs / scripts/generate-learnings-index.mjs).
+// The acceptance-proof dialect is taught THREE times -- `ACCEPTANCE_PROOF_GRAMMAR` (the one copy
+// test/proof-grammar.test.ts runs through the real parser), CLAUDE.md's prose, and `rmd
+// check-proof`'s `detail` string -- but only the first is tested. This closes that gap the way
+// scripts/generate-cli-reference.mjs (W1-T48) already closed it for docs/cli-reference.md: render
+// docs/proof-dialect.md from the SAME live constants the parser, the filing-time linter and
+// `rmd check-proof` read (`ACCEPTANCE_PROOF_GRAMMAR`, `ACCEPTANCE_HEADER_RE`/`ACCEPTANCE_BULLET_RE`/
+// `PROOF_DIALECT`, `SCENARIO_NARRATIVE_BOUNDS`, `CHECK_PROOF_EXIT`), so the page cannot drift from
+// what the reviewer enforces, and `test/proof-dialect-doc.test.ts` can hold CLAUDE.md's prose to
+// these same values. The output is content-only (no timestamp) so `--check` is a real staleness
+// gate, not a permanent false positive.
 //
 // Usage:
-//   npm run proof-dialect          # regenerate docs/proof-dialect.md
-//   npm run proof-dialect:check    # exit 1 if the committed file is stale (run in `npm test`,
-//                                  # so CI's `ci` job -- already a REQUIRED check -- byte-compares
-//                                  # it on every PR; see test/proof-dialect-doc.test.ts)
+//   npm run proof-dialect                            # regenerate docs/proof-dialect.md
+//   tsx scripts/generate-proof-dialect.mjs --check    # exit 1 if stale; spawned directly (no
+//     "proof-dialect:check" npm alias -- unwired-gate-check.mjs owns that wiring decision) by
+//     test/proof-dialect-doc.test.ts, which `npm test`'s REQUIRED `ci` job runs on every PR.
 //
-// Run directly with `tsx` (not plain `node`): the source constants live in `.ts` modules, and only
-// tsx's loader can import those from this script.
+// Run with `tsx`, not plain `node`: the source constants live in `.ts` modules only its loader
+// can import here.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -97,8 +89,9 @@ export function renderProofDialectPage(grammar, headerRe, bulletRe, dialect, nar
   lines.push("ACCEPTANCE_HEADER_RE / ACCEPTANCE_BULLET_RE / PROOF_DIALECT (src/lib/review.ts),");
   lines.push("SCENARIO_NARRATIVE_BOUNDS (src/lib/task-linter.ts) and CHECK_PROOF_EXIT");
   lines.push("(src/run-task.ts). Run `npm run proof-dialect` to regenerate after changing any of");
-  lines.push("those. `npm run proof-dialect:check` (part of `npm test`, W1-T2762) fails CI if this");
-  lines.push("file has drifted from a fresh regeneration.");
+  lines.push("those. `tsx scripts/generate-proof-dialect.mjs --check`, spawned by");
+  lines.push("`test/proof-dialect-doc.test.ts` (part of `npm test`, W1-T2762), fails CI if this file");
+  lines.push("has drifted from a fresh regeneration.");
   lines.push("-->");
   lines.push("");
   lines.push("# The acceptance-proof dialect");
