@@ -151,11 +151,10 @@ export function readBaseline(text, path) {
  * last ceiling before this gate notices. That is the coarseness the bucket trades for, and it is
  * the same trade W1-T2526 records for the size ledger -- this gate is a REVIEW SIGNAL about
  * volume, and grades no falsifier.
- *
- * Migration is lazy: an existing exact entry stays valid until its file next grows past it, at
- * which point the refusal prints the bucketed value to record.
  */
 export const CEILING_BUCKET_COMMENTS = 250;
+// Migration is lazy: an existing exact entry stays valid until its file next grows past it, at
+// which point the refusal prints the bucketed value to record.
 
 /** The ceiling a file of `comments` comment lines records: rounded UP to the next
  *  {@link CEILING_BUCKET_COMMENTS}. Never 0 -- a comment-free file still gets one full bucket. */
