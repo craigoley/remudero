@@ -602,6 +602,8 @@ import {
   DUPLICATE_SLUG_SHINGLE_K,
   followUpCarriesCriteria,
   formatReadIdentity,
+  GENERATED_LEDGER_CLASSES,
+  isCompanionPath,
   isPathOutsideRoot,
   lintTask,
   planShardSlugCorpus,
@@ -4420,10 +4422,22 @@ export function checkPrOwnership(
  * named in {@link "./run-task.js".renderFixPrompt}'s DECLARED SCOPE carve-out (W1-T2651) with the
  * identical set, so a worker told it MAY commit a registry path is never the one this guard then
  * refuses. A sixth (or Nth) regenerable artifact registered there inherits the carve-out with no
- * second table to keep in sync. The exemption is only ever consulted ALONGSIDE a task's own
- * declared scope (the `!declaredFiles || declaredFiles.length === 0` branch above already
- * returned): an undeclared task still has every non-empty diff refused, registry artifact or not,
- * so this never widens the fail-closed default.
+ * second table to keep in sync.
+ *
+ * W1-T2672 adds a SECOND, independent discount: {@link GENERATED_LEDGER_CLASSES}
+ * (lib/companion-paths.ts) — the table `subsystemsOf`/`checkDocsAwareness` already read to say a
+ * generated measurement file (a size ledger, a knowledge-budget derivation) is not a user-visible
+ * concern. `REGENERABLE_ARTIFACT_GENERATORS` answers "can this be reproduced by a generator" and
+ * happens to name `scripts/source-size-baseline.json`; it does NOT name
+ * `scripts/knowledge-budget-baseline.json`, which `GENERATED_LEDGER_CLASSES` also covers — so a
+ * task whose only out-of-scope path is that second ledger was still flagged before this change.
+ * Consulting `isCompanionPath` against the shared table (rather than copying its regex here) means
+ * a later row added to `GENERATED_LEDGER_CLASSES` is discounted here with no second edit.
+ *
+ * The exemptions are only ever consulted ALONGSIDE a task's own declared scope (the
+ * `!declaredFiles || declaredFiles.length === 0` branch above already returned): an undeclared
+ * task still has every non-empty diff refused, ledger or registry path or not, so this never
+ * widens the fail-closed default.
  */
 export function scopeGuardOutOfScopeFiles(
   diffFiles: readonly string[],
@@ -4432,7 +4446,12 @@ export function scopeGuardOutOfScopeFiles(
   if (diffFiles.length === 0) return [];
   if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
   const declared = new Set(declaredFiles);
-  return diffFiles.filter((f) => !declared.has(f) && !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, f));
+  return diffFiles.filter(
+    (f) =>
+      !declared.has(f) &&
+      !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, f) &&
+      !isCompanionPath(f, GENERATED_LEDGER_CLASSES),
+  );
 }
 
 /** The `git ls-remote --exit-code` probe's OWN failure evidence — captured from the `catch`
