@@ -1,30 +1,17 @@
 /**
- * lib/hand-run-census.ts — W1-T2697: THE OPERATOR TEACHES BY DOING.
+ * lib/hand-run-census.ts — W1-T2697: the ledger's `actor` field (ledger.ts) finally tells an
+ * OPERATOR row (a bare `./bin/rmd` invocation) apart from a worker or the daemon's own loop. The
+ * inverse of `rmd emissions`'s `attributeVerbs` (what the fleet never does): this asks what the
+ * operator keeps doing BY HAND.
  *
- * A ledger row now carries `actor` (`src/lib/ledger.ts`, design note i), so an OPERATOR row —
- * one written from a bare `./bin/rmd` invocation, neither a worker subprocess nor the daemon's
- * own in-process loop — is finally distinguishable from the fleet's own traffic. This module is
- * the INVERSE of `rmd emissions` (`lib/emissions.ts`'s `attributeVerbs`), which asks "what does
- * the fleet never do"; this asks "what does the OPERATOR keep doing BY HAND".
- *
- * THE ALGORITHM (design note ii). Over the ledger union (`resolveLedgerUnion`, never the live
- * file alone — W1-T1013), group operator rows by their writing process (`actor_pid`), split each
- * pid's rows into SESSIONS wherever the gap between consecutive rows exceeds
- * {@link HAND_RUN_SESSION_GAP_MS} (a real invocation is short-lived, so this mostly guards
- * against OS pid reuse across two unrelated invocations days apart sharing a number), and reduce
- * each session to its ordered STEP SEQUENCE. Grouping sessions by that exact sequence and
- * counting the DISTINCT CALENDAR DAYS it recurs on — never session count, which one long night
- * could inflate on its own — yields a RECURRENCE once a sequence clears
- * {@link HAND_RUN_RECURRENCE_DAY_FLOOR}: the same multi-step invocation, hand-typed on separate
- * days, is a routine the operator is teaching by repetition.
- *
- * RULE 15, BY CONSTRUCTION (design note iii, rationale (3)). A recurrence becomes ONE
- * `plan/feedback/` entry via `captureFeedback` — the established inbox-write path
- * (`coverage-improvement.ts`, `issues-intake.ts`, `ops.ts`, `panel-actions.ts`,
- * `source-size-followup.ts` all use it identically) — naming the sequence, the days it recurred,
- * and the evidence rows. Deduped against the ledger union by signature before filing, the exact
- * W1-T470 discipline `coverage-improvement.ts`'s `alreadyFiledForSignature` established. NOTHING
- * HERE SCHEDULES ANYTHING: no rung is created, no verb's behaviour changes.
+ * Invariant: over the ledger union (never the live file alone — W1-T1013), operator rows group
+ * into SESSIONS by writing process (`actor_pid`) and a gap under {@link HAND_RUN_SESSION_GAP_MS}
+ * (guards OS pid reuse across unrelated invocations days apart), each session reduces to its
+ * ordered STEP SEQUENCE, and a sequence recurring on at least
+ * {@link HAND_RUN_RECURRENCE_DAY_FLOOR} DISTINCT DAYS (never raw session count) is a RECURRENCE.
+ * Trap: a recurrence becomes exactly ONE `plan/feedback/` entry via `captureFeedback`, deduped by
+ * signature against the ledger union first (the W1-T470 discipline coverage-improvement.ts's
+ * `alreadyFiledForSignature` established) — never a rung, never a behaviour change.
  *
  * Falsifier: test/hand-run-census.test.ts.
  */
