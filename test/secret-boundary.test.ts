@@ -534,3 +534,40 @@ test("W1-T2699 (5): an ordinary path on the declared host still forwards, so the
     await proxy.close();
   }
 });
+
+/*
+ * THE STRUCTURAL HALF. The refusal above rejects an off-origin target; this asserts the property
+ * that holds even without it — the forwarded URL's ORIGIN is rebuilt from the declared base, so
+ * only path and query ever cross over from the request. Both guards are deliberate: the refusal is
+ * the behaviour (a caller gets a 403, not a silent rewrite), the rebuild is the guarantee that
+ * survives someone later reordering or dropping the comparison. It is also what a taint analysis
+ * can see — CodeQL kept the SSRF alert while the host came from the compared URL.
+ */
+test("W1-T2699 (5): only path and query cross over — the forwarded origin is always the declared one", async () => {
+  const rows: BoundaryLedgerRow[] = [];
+  const sentinel = mintSentinel("model");
+  const destinations: BoundaryDestination[] = [
+    { host: MODEL_HOST_DEFAULT, sentinel, upstreamBaseUrl: "https://upstream.invalid", realValue: () => "REAL" },
+  ];
+  const seen: string[] = [];
+  const fetchImpl = (async (url: unknown) => {
+    seen.push(String(url));
+    return new Response("ok", { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const proxy = await startBoundaryProxy({ destinations, log: (r) => rows.push(r), fetchImpl });
+  try {
+    // A path that CONTAINS a host-looking segment: it is still just a path, and must be forwarded
+    // as one to the declared host rather than treated as a destination.
+    const res = await fetch(`${proxy.url}/v1//evil.invalid/messages?q=1`, {
+      headers: { authorization: `Bearer ${sentinel}` },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(seen.length, 1);
+    assert.equal(new URL(seen[0]).origin, "https://upstream.invalid", "the origin must come from the declared base");
+    assert.equal(new URL(seen[0]).pathname, "/v1//evil.invalid/messages", "the path must survive verbatim");
+    assert.equal(new URL(seen[0]).search, "?q=1", "and so must the query");
+  } finally {
+    await proxy.close();
+  }
+});

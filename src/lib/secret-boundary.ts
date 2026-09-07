@@ -141,20 +141,28 @@ export async function startBoundaryProxy(opts: StartBoundaryProxyOpts): Promise<
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const body = Buffer.concat(chunks);
-    const target = new URL(req.url ?? "/", destination.upstreamBaseUrl);
     // THE REQUEST TARGET IS WORKER-CONTROLLED AND `new URL(target, base)` IS NOT A JOIN: an
     // absolute-form target ("http://evil/x"), a protocol-relative one ("//evil/x") and a
     // backslash path ("/\\evil/x") each DISCARD the base and resolve to another origin. The real
-    // credential is attached below, so without this check the one request a prompt-injected
-    // worker can already make — it holds the sentinel by design — exfiltrates the real token to
-    // a host of its choosing, through the boundary built to prevent exactly that. Compare the
-    // RESOLVED origin, never the raw string: every shape above is normalised by then.
-    if (target.origin !== new URL(destination.upstreamBaseUrl).origin) {
+    // credential is attached below, so without this the one request a prompt-injected worker can
+    // already make — it holds the sentinel by design — exfiltrates the real token to a host of its
+    // choosing, through the boundary built to prevent exactly that.
+    const declared = new URL(destination.upstreamBaseUrl);
+    const requested = new URL(req.url ?? "/", declared);
+    if (requested.origin !== declared.origin) {
       log(boundaryLedgerRow(destination.host, "refuse", "refused", "request target resolves off the declared destination"));
       res.writeHead(403, { "content-type": "text/plain" });
       res.end("boundary: request target is not on the declared destination");
       return;
     }
+    // REBUILT FROM THE DECLARED BASE, not from `requested`, so the forwarded HOST is structurally
+    // incapable of coming from the request: only the path and query cross over. The refusal above
+    // already covers every shape, and this makes the guarantee hold by CONSTRUCTION rather than by
+    // a comparison someone could later reorder or drop — which is also what lets a taint analysis
+    // see it. CodeQL kept the SSRF alert on the compared-origin form for exactly that reason.
+    const target = new URL(declared.toString());
+    target.pathname = requested.pathname;
+    target.search = requested.search;
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) {
       if (!v || k.toLowerCase() === "host" || k.toLowerCase() === "authorization") continue;
