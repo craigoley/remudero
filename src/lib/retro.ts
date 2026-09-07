@@ -26,6 +26,7 @@ import { utcWeekWindowMs } from "./sweep.js";
 import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
+import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-workshop.js";
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
 export interface LedgerRecord {
@@ -1204,6 +1205,10 @@ export interface RetroGather {
   /** W1-T87/P13: the other half of the flywheel — merged-run shapes shared by two or more runs,
    *  mined as procedural-learning candidates for the Architect to phrase and ratify. */
   proceduralCandidates: ProceduralCandidate[];
+  /** W1-T2766: a drafted SKILL.md beside each `proceduralCandidates` entry that cleared the
+   *  two-run floor — the flywheel's other half, a procedure the runtime EXECUTES rather than a
+   *  fact line it only recalls. Rendering never writes; `rmd approve` is the only ratifying path. */
+  skillDrafts: SkillDraft[];
   learningsNow: number;
   learningsAtMarker: number;
   /** W1-T132: present ONLY when `opts.github.unavailable()` named a reason. `renderGather` refuses
@@ -1289,6 +1294,9 @@ export function buildGather(opts: {
   // Computed once, shared by the events list and its recurrence trend — never two reads.
   const mapping = opts.mastMapping ?? { rows: [] };
   const infraEvents = infrastructureEvents(scoped, mapping);
+  // Mined ONCE, read by both `proceduralCandidates` and `skillDrafts` below — a draft with no
+  // matching candidate in the gather would be a procedure the gather never actually observed.
+  const proceduralCandidates = mineProceduralCandidates(merged, records);
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
@@ -1309,7 +1317,9 @@ export function buildGather(opts: {
     // re-surfaces for a run the marker has moved past (W1-T73).
     degradedSuccess: mineDegradedSuccess(merged, records),
     // Same marker-scoped window as degradedSuccess above (W1-T87/P13).
-    proceduralCandidates: mineProceduralCandidates(merged, records),
+    proceduralCandidates,
+    // Drafted from the SAME candidates above, never re-mined (W1-T2766).
+    skillDrafts: proceduralCandidates.map((c) => renderSkillDraft(c)).filter((d): d is SkillDraft => d !== undefined),
     learningsNow: learningsCount(opts.learningsMd),
     learningsAtMarker: opts.learningsAtMarker ?? 0,
     ...(githubUnavailable ? { githubUnavailable } : {}),
@@ -1463,6 +1473,8 @@ export function renderGather(g: RetroGather): string {
     renderDegradedSuccess(g.degradedSuccess),
     "",
     renderProceduralCandidates(g.proceduralCandidates),
+    "",
+    renderSkillDrafts(g.skillDrafts),
     "",
     renderFollowupCandidates(g.followups),
     // W1-T2642: ALWAYS printed — `g.planCoherence` is never undefined (see its own field doc).

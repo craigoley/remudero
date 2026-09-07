@@ -21,7 +21,7 @@ import fs from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
+import { query, type Options, type PermissionMode, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { detectUsageLimitRefusal } from "./classify.js";
 import {
   loadConfig,
@@ -1137,6 +1137,14 @@ async function finishSelectedCapacityMeasurement(
  *    loaded. `sandbox` is parsed from that file and passed validated, so a malformed block fails loud instead of running
  *    unsandboxed.
  *  - `env.home` — a worker-home dir UNIQUE to this call, reaped in a `finally` whatever the outcome (W1-T170, W1-T2463). */
+
+/** The `settingSources` every spawn passes below: `[]`, so `~/.claude/settings.json` and every
+ *  other filesystem-settings source are never loaded. Exported (W1-T2766, design iv) so a caller
+ *  measuring whether a repo-owned `.claude/skills/<name>/SKILL.md` reaches a worker reads the REAL
+ *  value a spawn uses — see {@link import("./skill-workshop.js").describeWorkerSkillReachability}
+ *  — never a value asserted independently of it. */
+export const WORKER_SETTING_SOURCES: SettingSource[] = [];
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   try {
@@ -1454,7 +1462,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       pathToClaudeCodeExecutable: claudeBin,
       env: childEnv,
       settings: args.settingsFile,
-      settingSources: [],
+      settingSources: WORKER_SETTING_SOURCES,
       // Run the CLI DETACHED into its own process group and session, so teardown reaches every descendant — including one
       // outliving the CLI's own exit — with a single group signal. This REPLACES the SDK's default local spawn, so
       // `stderrChunks` is fed from THIS closure rather than an `Options.stderr` callback, which the SDK never invokes for a
