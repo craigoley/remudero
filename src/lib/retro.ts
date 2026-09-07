@@ -9,6 +9,7 @@ import fsMarker from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { updateProposalRegistry, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
+import { tryEscalate } from "./escalate.js";
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD } from "./learnings.js";
 import type { Lifecycle, LearningEntry, PromotionResult } from "./learnings.js";
@@ -3856,4 +3857,172 @@ export function renderPlanCoherence(report: PlanCoherenceReport): string {
     "",
     ...report.findings.map(renderPlanCoherenceFinding),
   ].join("\n");
+}
+
+
+// ── RETRO PUBLICATION ESCALATION (W1-T2988) ──────────────────────────────────────────────────
+//
+// Withholding the marker when publication fails is CORRECT and this task does not change it: the
+// runs the retro was meant to read must stay in scope for the next attempt. What was wrong is that
+// the same failure then repeated forever with nothing said. MEASURED 2026-09-06: the marker frozen
+// at 2026-09-03T02:24:39, 172 `retro.triggered` rows against ZERO `retro.done`, and a ~49-minute
+// subprocess burned per attempt.
+//
+// THIS IS NOT A RETRY CAP. A cap that silently stopped the retro would move the invisibility rather
+// than remove it (the shard says so in as many words). The retro still returns its failure and the
+// trigger still fires; what changes is that a REPEATED failure now reaches the operator once per
+// episode, carrying the exit class that makes the next occurrence diagnosable.
+
+/** How long one publication-failure EPISODE lasts. A second escalation inside this window is
+ *  suppressed, so a daemon restart mid-episode cannot re-open the same needs-human issue — the
+ *  identical guard {@link DISK_HEADROOM_EPISODE_MS} exists for in run-task.ts. */
+export const RETRO_PUBLICATION_EPISODE_MS = 6 * 60 * 60 * 1000;
+
+/** Consecutive failures before the operator is told. ONE failure is ordinary — a flake, a transient
+ *  suite failure, a repair that will succeed next pass — and escalating it would train the operator
+ *  to ignore the notice. TWO in an episode is a pattern the retro cannot repair itself. */
+export const RETRO_PUBLICATION_STRIKE_CAP = 2;
+
+/** The only two fields this decision reads. Deliberately STRUCTURAL rather than `LedgerLine`: the
+ *  shipped reader (status.ts's `readLedgerLines`) returns `Record<string, unknown>[]`, and widening
+ *  to that shape here is what lets the real reader be injected without a cast at the call site. */
+export interface RetroLedgerRowView {
+  readonly step?: unknown;
+  readonly ts?: unknown;
+}
+
+/** What {@link decideRetroPublicationEscalation} concluded, and why — the reason travels with the
+ *  decision so the caller never re-derives it and the two cannot disagree. */
+export interface RetroPublicationEscalationDecision {
+  escalate: boolean;
+  strikes: number;
+  reason: string;
+}
+
+/**
+ * PURE. Given the ledger rows and the current instant, decide whether a repeated publication
+ * failure has earned an escalation. Reads two steps and nothing else: `retro.preflight_failed`
+ * (the strikes) and `retro.publication.escalated` (the episode dedup).
+ */
+export function decideRetroPublicationEscalation(
+  lines: readonly RetroLedgerRowView[],
+  nowMs: number,
+  opts: { episodeMs?: number; strikeCap?: number } = {},
+): RetroPublicationEscalationDecision {
+  const episodeMs = opts.episodeMs ?? RETRO_PUBLICATION_EPISODE_MS;
+  const strikeCap = opts.strikeCap ?? RETRO_PUBLICATION_STRIKE_CAP;
+  const inEpisode = (l: RetroLedgerRowView): boolean => {
+    const ms = Date.parse(String((l as { ts?: unknown }).ts ?? ""));
+    return Number.isFinite(ms) && nowMs - ms <= episodeMs && nowMs - ms >= 0;
+  };
+  const alreadyEscalated = lines.some((l) => l.step === "retro.publication.escalated" && inEpisode(l));
+  const strikes = lines.filter((l) => l.step === "retro.preflight_failed" && inEpisode(l)).length;
+  if (alreadyEscalated) {
+    return { escalate: false, strikes, reason: "an escalation for this episode is already open" };
+  }
+  if (strikes < strikeCap) {
+    return {
+      escalate: false,
+      strikes,
+      reason: `${strikes} failure(s) in this episode is below the strike cap of ${strikeCap}`,
+    };
+  }
+  return {
+    escalate: true,
+    strikes,
+    reason: `${strikes} consecutive publication failures in one episode, at or above the strike cap of ${strikeCap}`,
+  };
+}
+
+/** Context {@link escalateRetroPublicationFailure} needs. `issues` is injected so the decision and
+ *  the ledger write are testable with no network. */
+export interface RetroPublicationEscalationCtx {
+  owner: string;
+  repo: string;
+  ledgerPath: string;
+  runId: string;
+  issues?: Parameters<typeof tryEscalate>[1]["issues"];
+  episodeMs?: number;
+  strikeCap?: number;
+  nowMs?: number;
+  /** REQUIRED, and injected rather than imported: the reader lives in status.ts, and importing that
+   *  here would pull the console's whole read model into the retro module for one function. The
+   *  caller already holds it (run-task.ts), so it passes it in and this module stays cycle-free. */
+  readLedger: (path: string) => readonly RetroLedgerRowView[];
+}
+
+/**
+ * Escalate a REPEATED retro publication failure once per episode. Returns the decision so a caller
+ * (and a test) can see why nothing was raised. NEVER touches the marker — the marker stays frozen
+ * on failure by design, and advancing it here would discard the runs the retro exists to read.
+ */
+export function escalateRetroPublicationFailure(
+  info: { attempts: number },
+  ctx: RetroPublicationEscalationCtx,
+): RetroPublicationEscalationDecision {
+  const nowMs = ctx.nowMs ?? Date.now();
+  const lines = ctx.readLedger(ctx.ledgerPath);
+  const decision = decideRetroPublicationEscalation(lines, nowMs, {
+    episodeMs: ctx.episodeMs,
+    strikeCap: ctx.strikeCap,
+  });
+  if (!decision.escalate) return decision;
+  // The exit class and failing tests come from the NEWEST retro.preflight_failed row rather than
+  // from the caller: RetroPrepublishResult carries neither (retro-preflight.ts), and the row is the
+  // same source of truth the notice sends the reader to. No new plumbing, and they cannot disagree.
+  const newestFailure = lines.filter((l) => l.step === "retro.preflight_failed").pop() as
+    | (RetroLedgerRowView & { exit_class?: unknown; failing_tests?: unknown })
+    | undefined;
+  const exitClass = typeof newestFailure?.exit_class === "string" ? newestFailure.exit_class : undefined;
+  const rawFailing = newestFailure?.failing_tests;
+  const failing = (Array.isArray(rawFailing) ? rawFailing.map(String) : typeof rawFailing === "string" ? rawFailing.split(",") : [])
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: "RETRO",
+      runId: ctx.runId,
+      summary: `retro cannot publish: ${decision.strikes} consecutive prepublish failures`,
+      detail:
+        `W1-T2988: the retro's prepublish gate has failed ${decision.strikes} time(s) in this episode ` +
+        `(newest run exited with class \`${exitClass ?? "unknown"}\` after ${info.attempts} attempt(s)). ` +
+        "The marker is deliberately NOT advanced on failure, so every fire re-reads the same runs and " +
+        "re-runs the same suite — a full LLM run and a multi-minute suite each time — and until now said " +
+        "nothing. This notice does not stop the retro; it makes the repetition visible.\n\n" +
+        (failing.length > 0
+          ? `Failing tests reported by the newest attempt:\n- ${failing.join("\n- ")}`
+          : "The newest attempt parsed no failing test names; see the retro.preflight_failed row for the bounded stdout/stderr excerpts.") +
+        "\n\nWHY THE SUITE FAILS IN THE RETRO WORKTREE WHILE CI IS GREEN is the question to answer " +
+        "first; the ledger rows carry the exit class, elapsed_ms, suite count and excerpts.",
+      options: [
+        {
+          label: "fix the failing suite",
+          detail:
+            "The retro runs the full suite in its own worktree. A test that passes in CI and fails there is an " +
+            "environment divergence, not a flake — reproduce it in that worktree before changing the test.",
+        },
+        {
+          label: "narrow what the retro's prepublish gate runs",
+          detail:
+            "If the gate is broader than what the retro's own diff can break, the retro pays a full-suite " +
+            "failure for a change it did not make.",
+        },
+      ],
+      recommendation: "fix the failing suite",
+    },
+    { issues: ctx.issues ?? undefined, ledgerPath: ctx.ledgerPath, runId: ctx.runId } as Parameters<typeof tryEscalate>[1],
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "RETRO",
+    step: "retro.publication.escalated",
+    strikes: decision.strikes,
+    attempts: info.attempts,
+    exit_class: exitClass ?? null,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+  return decision;
 }
