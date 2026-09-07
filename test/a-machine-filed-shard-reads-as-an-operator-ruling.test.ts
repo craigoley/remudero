@@ -367,8 +367,14 @@ test("W1-T2959 bad arguments are refused with exit 2, never a silent default", (
 test("W1-T2959 an ABSENT ciLearningCadence row defaults DISABLED — the only cadence row that does", () => {
   // Every sibling cadence defaults enabled by being read-only; this rung drafts records, so
   // inheriting a safe-on default would set it without anyone deciding it.
+  //
+  // THE SHIPPED VALUE IS NO LONGER PINNED HERE, and the DEFAULT still is. The row was switched ON
+  // by operator direction (2026-09-07), which is a decision this suite must not veto — but the
+  // reason it shipped off is unchanged, so the property that actually protects the plan is the
+  // ABSENT-ROW default below: delete the row and the rung goes quiet, never safe-on by inheritance.
+  // Pinning the shipped value too would have made an operator's own switch look like a regression.
   const shipped = loadPolicy("plan/policy.yaml").values.ciLearningCadence;
-  assert.equal(shipped.enabled, false, "the SHIPPED row is off");
+  assert.equal(typeof shipped.enabled, "boolean", "the shipped row still declares the switch explicitly");
   assert.equal(shipped.minIntervalMinutes, 1440, "daily, the operator's own word");
   assert.equal(shipped.maxPerDay, 1);
 
@@ -382,6 +388,7 @@ test("W1-T2959 an ABSENT ciLearningCadence row defaults DISABLED — the only ca
   const p = join(dir, "policy.yaml");
   writeFileSync(p, stripped);
   const absent = loadPolicy(p).values.ciLearningCadence;
+  // THE INVARIANT THIS TEST EXISTS FOR, untouched: no row means NO firing.
   assert.deepEqual(absent, { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 });
 });
 
