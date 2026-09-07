@@ -1,0 +1,117 @@
+- id: W1-T3017
+  title: "THE LOCAL GATE FETCHES THE BASE IT THEN DIFFS AGAINST BY NAME — `refreshOriginMain` moves `origin/main` and every one of six diff sites re-reads that same moving ref, so a concurrent fetch by any other worktree sharing the clone silently changes what counts as an added line MID-RUN, and the run's own verdict stamp records a `behind` count but never the base sha it measured against"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 25.00
+  files:
+    - src/lib/ci-parity.ts
+    - test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts
+  origin: "operator-session#ci-parity-base-drift-2026-09-07"
+  plan_refs: ["W1-T294", "W1-T2810", "W1-T2854", "W1-T405"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE REPO ALREADY NAMES THIS MECHANISM, IN A TEST FILE, AND THEN LEAVES THE GATE EXPOSED TO IT.
+    test/moving-base-changed-files.test.ts:17 states it outright:
+
+      "a git worktree shares refs with its parent clone, so any fetch anywhere moves `origin/main`
+       for every worktree at once — and `refreshOriginMain` (`src/lib/ci-parity.ts`) runs
+       `git fetch origin main` INSIDE the worker's own `preflight --ci-parity`. The fleet moves the
+       ref on itself."
+
+    That file fixed the THIRD form of the defect in `worktreeChangedFiles`. The gate that supplies
+    the quoted mechanism was not itself fixed, and is the FOURTH.
+
+    MEASURED AT origin/main 84553dd7. `refreshOriginMain` IS memoized per (spawn, repoRoot), so the
+    claim that it re-fetches per step is FALSE and is not the defect — one fetch per process. The
+    defect is what the six diff sites then do with the result: every one of them names the REF, not
+    the sha the fetch resolved.
+
+      src/lib/ci-parity.ts:270    git diff origin/main...HEAD
+      src/lib/ci-parity.ts:284    git diff --name-only origin/main...HEAD
+      src/lib/ci-parity.ts:882    diff-coverage.mjs, over that same list
+      src/lib/ci-parity.ts:1857   git diff --name-only origin/main...HEAD
+      src/lib/ci-parity.ts:1922   coverage-mode:diff-scope, over that same list
+      src/lib/ci-parity.ts:1982   diff-coverage.mjs, over that same list
+
+    MEMOIZATION PINS NOTHING ACROSS PROCESSES, WHICH IS THE ONLY PLACE IT MATTERS. Refs are clone-
+    scoped, not process-scoped. Worker B's memoized fetch happens once at minute 3; worker A's own
+    `refreshOriginMain` at minute 40 moves the shared `origin/main` out from under B; every B diff
+    from minute 40 onward is computed against a base B never fetched and cannot name. A ~90-minute
+    run on this fleet is ordinary, and so is a sibling worker fetching inside it.
+
+    THE FAILURE IS SILENT AND POINTS AT THE WRONG SUSPECT. What moves is what counts as an ADDED
+    line, so `diff-coverage` gains or loses lines it must cover — and the resulting red names the
+    author's own file. `#585` is the incident the header invariant already cites for a stale base;
+    this is the same consequence reached from the opposite direction, a base that is too NEW rather
+    than too old, and nothing reports either.
+
+    THE VERDICT STAMP CANNOT SETTLE IT AFTERWARDS, WHICH IS WHY THE STAMP IS PART OF THIS TASK.
+    W1-T2810 added `RunContext` with `behindCount` and `originFetchedAt` — genuinely useful and the
+    reason this was diagnosable at all. But `detectRunContext` runs AFTER the whole run and is
+    documented `INVARIANT — NEVER FETCHES`, so it reports `HEAD..origin/main` against whatever the
+    ref points at when the run ENDS. If a sibling moved it at minute 40, the stamp describes a base
+    that only the run's last steps used. `behind=11` on a run whose early steps diffed against a
+    base 4 commits back is a true number about the wrong moment, and no field in `PreflightSummary`
+    records the sha any step actually used.
+
+    AND THE HEADER INVARIANT MISDESCRIBES ITS OWN CODE. `src/lib/ci-parity.ts:19` reads "Every
+    diff-consuming step refreshes `origin/main` before diffing three-dot against it". Memoization
+    means exactly one step fetches and the rest reuse. Prose that overstates its enforcement is the
+    class CLAUDE.md's own opening warns about; it is corrected here because this task rewrites the
+    mechanism the sentence describes.
+  design: |
+    (i) RESOLVE ONCE, DIFF AGAINST A SHA. `refreshOriginMain` fetches (unchanged, still memoized)
+    and then runs `git rev-parse origin/main`, caching THE SHA. Every one of the six diff sites
+    takes `<sha>...HEAD`. A sha cannot be moved by another process, so the run becomes internally
+    consistent BY CONSTRUCTION rather than by timing — the property memoization cannot supply.
+
+    (ii) THE PIN IS RUN-SCOPED AND SHARED, matching the existing memo's (spawn, repoRoot) key so
+    `runCiParity` and `runPreflightCoverage` invoked from the same `preflight` process pin the SAME
+    base. Two modes in one command reporting against two different bases would be the same defect
+    in a smaller window.
+
+    (iii) A FAILED RESOLVE REFUSES; IT DOES NOT FALL BACK TO THE REF. Falling back would restore
+    exactly today's behaviour at the moment the pin was most needed, and would do it silently —
+    the vacuous-degrade shape this repo has paid for. `runPreflightCoverage` already REFUSES on a
+    base-refresh failure (test/preflight-coverage-mode.test.ts:87 locks that in); this follows the
+    precedent already set beside it rather than inventing a policy.
+
+    (iv) THE STAMP NAMES THE BASE. `RunContext` gains the pinned base sha, and `runContextLine`
+    prints it beside `behind=`. This is hazard (h)'s remedy completed: the count says how far, the
+    sha says from WHERE, and only the second is stable enough to reproduce a verdict with. When no
+    diff-consuming step ran, the field is absent rather than a guess — an unfetched run must not
+    claim a pin it never took.
+
+    (v) DRIFT IS REPORTED AS ITS OWN OUTCOME, NEVER AS A STEP FAILURE. At the end of a run,
+    comparing the pinned sha against the ref's CURRENT value detects that a sibling moved the base
+    mid-run. That is information about the run's conditions, exactly like `behind` and load — so it
+    lands on the context line and changes NO verdict. A gate that failed because someone else
+    fetched would be a bound firing on a healthy condition, the recurring defect this repo already
+    tracks under that name.
+
+    (vi) CORRECT THE HEADER INVARIANT to describe the memoized fetch and the pinned sha, so the
+    file's own contract and its code agree.
+  acceptance:
+    - claim: every diff-consuming step diffs against the resolved base SHA, so a concurrent fetch moving origin/main mid-run cannot change what counts as an added line
+      proof: "unit test: test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts"
+    - claim: the base is resolved once per run and shared, so two modes in one preflight process pin the same sha
+      proof: "unit test: test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts"
+    - claim: a failed rev-parse refuses rather than falling back to the moving ref, so the pin never degrades silently into today's behaviour
+      proof: "unit test: test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts"
+    - claim: the run context carries the pinned base sha and the verdict line prints it, and the field is absent rather than guessed when no step pinned a base
+      proof: "unit test: test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts"
+    - claim: a base moved by another process mid-run is reported on the context line as its own outcome and fails no step
+      proof: "unit test: test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts"
+  falsifier: |
+    Close without implementation if the diff sites already name a resolved sha rather than
+    `origin/main` — measured at 84553dd7 all six name the ref. Memoization of the FETCH does not
+    satisfy this task and must not be offered as satisfying it: refs are clone-scoped, so a memo
+    inside one process cannot stop another process moving the ref. A change that keeps the ref name
+    and merely widens the reporting fails the first criterion. A pin that falls back to the ref on
+    a failed rev-parse fails the third.
