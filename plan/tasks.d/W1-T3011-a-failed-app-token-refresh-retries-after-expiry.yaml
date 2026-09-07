@@ -1,0 +1,74 @@
+- id: W1-T3011
+  title: "A SINGLE GITHUB APP TOKEN-REFRESH TIMEOUT OPENS A DETERMINISTIC EXPIRED-CREDENTIAL WINDOW — the healthy timer fires five minutes before expiry, but the failure arm waits that same five minutes again, so its retry begins after the token has expired and live review posts fail 401"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  origin: "fleet-lifeguard#expired-installation-token-window-2026-09-07"
+  plan_refs: ["W1-T1024", "W1-T1068", "W1-T2311", "W1-T2554"]
+  files: [src/lib/github-app.ts, test/github-app.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET 2026-09-07, from the complete three-form ledger union and
+    timestamped daemon output. The daemon minted at 10:33:03.213Z with `expires_at`
+    11:33:03Z. Its scheduled refresh failed `exchange timed out` at 11:28:45.030Z. The next
+    refresh succeeded at 11:33:47.022Z — 44.022 seconds AFTER the credential expired. A live
+    review for PR #4351 then emitted `gh: Bad credentials (HTTP 401)` at 11:33:44.285Z and
+    11:33:46.959Z. The existing loop recovered without a restart and the review later passed;
+    recovery does not erase the outage window.
+
+    W1-T1024 built the installation-token mint and healthy pre-expiry schedule; it did not retain
+    that expiry across a failed scheduled mint or constrain the failure timer against it. This task
+    closes only that second-attempt timing gap and leaves W1-T1024's authentication seam intact.
+
+    THE MECHANISM IS DIRECT. `nextRefreshDelayMs` schedules a healthy refresh at
+    `expiresAtMs - REFRESH_MARGIN_MS`. Both non-success outcomes in
+    `startInstallationTokenRefresh` then discard that known expiry and call
+    `rearm(REFRESH_MARGIN_MS)`. `REFRESH_MARGIN_MS` is five minutes and the failed exchange can
+    itself consume `EXCHANGE_TIMEOUT_MS` before its failure is observed. Therefore one failure at
+    the safety margin schedules the retry after the current token's expiry by construction. This
+    is not W1-T1068's dead-loop defect: the loop survives exactly as built there. It is not
+    W1-T2311's personal-token fallback defect: production correctly has no PAT to mask the gap.
+
+    THIS FALSIFIES TWO SHIPPED COMMENTS AND ONE TEST DESCRIPTION that call the five-minute failure
+    cadence "well inside" the token life or say one timeout never misses refresh. The margin is
+    inside the life only on the successful schedule; reusing the entire margin after that attempt
+    fails crosses the edge. The fix must correct the executable schedule and its claims together,
+    not merely reword the evidence.
+  design: |
+    RETAIN THE LAST SUCCESSFUL `expiresAtMs` IN THE REFRESH LOOP. After any later resolved failure
+    or rejected refresh, derive the retry timer from BOTH the failure cadence and that retained
+    expiry. The retry must start early enough that one full `EXCHANGE_TIMEOUT_MS` attempt can
+    settle before the old token expires, with a positive safety guard for scheduler delay. Clamp
+    stale or already-too-late expiry to an immediate retry. Before the first successful mint there
+    is no retained expiry, so preserve the existing bounded failure cadence rather than inventing
+    an expiry.
+
+    KEEP W1-T1068'S FAIL-CLOSED SURVIVAL CONTRACT. A failed refresh leaves `GH_TOKEN` untouched;
+    there is no PAT fallback, no token clearing, no refusal to boot, and both resolved-failure and
+    rejected-promise arms still rearm even if the ledger writer throws. Do not increase the
+    exchange timeout or create an unbounded tight loop.
+
+    ADD A DETERMINISTIC CLOCK/TIMER TEST FOR THE OBSERVED TIMELINE CLASS. First return a successful
+    token with a one-hour expiry, advance to its healthy refresh point, then return a timeout-style
+    failure. Assert the next scheduled attempt plus one full exchange timeout remains strictly
+    before the retained expiry. Cover the rejected-promise arm with the same invariant, the
+    no-prior-expiry fallback, and an already-expired clamp. Prove the new test load-bearing by
+    restoring the old `rearm(REFRESH_MARGIN_MS)` behavior and observing `# fail` increase.
+  acceptance:
+    - claim: "a failed scheduled refresh retries early enough for one bounded exchange to settle before the retained token expiry"
+      proof: "unit test: W1-T3011: a failed scheduled refresh cannot rearm beyond the retained token expiry"
+    - claim: "a rejected refresh promise obeys the same retry-before-expiry invariant while preserving W1-T1068 loop survival"
+      proof: "unit test: W1-T3011: a rejected scheduled refresh cannot rearm beyond the retained token expiry"
+    - claim: "a failure before any successful mint keeps a bounded retry and does not invent an expiry"
+      proof: "unit test: W1-T3011: a first-mint failure retains the existing bounded retry cadence"
+    - claim: "an already-expired retained credential causes an immediate retry rather than a negative or delayed timer"
+      proof: "unit test: W1-T3011: an expired retained token clamps the failure retry to immediate"
+  falsifier: |
+    If head already retains the last successful installation-token expiry and bounds BOTH failure
+    arms so one complete exchange can finish before that expiry, this task is already built and
+    must be closed rather than implemented.
