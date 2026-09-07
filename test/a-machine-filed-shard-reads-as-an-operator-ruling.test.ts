@@ -394,3 +394,112 @@ test("W1-T2959 an UNREADABLE policy fails CLOSED — a rung that drafts never fi
   assert.equal(r.code, 1);
   assert.match(r.out, /failing closed/);
 });
+
+// ── W1-T3032: the state root and the checkout are two different trees ────────────────────────────
+
+/*
+ * MEASURED on the rung's first real run, a 14-day window over 100 pull requests: three drafts
+ * minted and then "NOT FILED — the filer could not run (ENOENT ... '<config.root>/plan/tasks.yaml')",
+ * preceded by "the plan could not be read for already-filed findings — proceeding without it".
+ *
+ * `config.root` is the STATE root; `plan/` lives in the CHECKOUT, which on a fleet host sits one
+ * level inside it. Every sibling verb reads its plan through `repoRoot`; this one alone joined
+ * `plan/` onto the state root, so it could neither FILE what it drafted nor DEDUP against what it
+ * had filed before. Enabled, it would have re-drafted the same findings every day and filed none.
+ * The `--force` path hid the third instance — the policy read, which fails closed.
+ */
+
+test("W1-T3032: the plan is read from the CHECKOUT, while the cadence marker stays on the state root", () => {
+  const stateRoot = tmpRoot();
+  const checkoutRoot = tmpRoot();
+  mkdirSync(join(checkoutRoot, "plan"), { recursive: true });
+  // A plan holding one origin, so a hit proves the read landed HERE and not on the state root.
+  writeFileSync(
+    join(checkoutRoot, "plan", "tasks.yaml"),
+    [
+      "- id: W1-T1",
+      '  title: "a record whose origin is the finding under test"',
+      "  repo: remudero",
+      "  depends_on: []",
+      "  type: implement",
+      "  verify: auto",
+      "  principles: {tdd: strict}",
+      "  budget_usd: 1.00",
+      "  files: [src/x.ts]",
+      '  origin: "operator-session#unrelated"',
+      "  status: queued",
+      "  attempts: 0",
+      "",
+    ].join("\n"),
+  );
+
+  let filedInto: string | undefined;
+  const r = captured(() =>
+    ciLearningCommand(["--force"], {
+      root: stateRoot,
+      checkoutRoot,
+      loadWindow: () => repairedWindow() as never,
+      fileShards: ((_d: unknown, where: string) => {
+        filedInto = where;
+        return { filed: [], skipped: [], refused: [] };
+      }) as never,
+    }),
+  );
+
+  assert.equal(r.code, 0);
+  assert.doesNotMatch(r.out, /could not be read for already-filed findings/, "the plan must be readable");
+  assert.equal(filedInto, checkoutRoot, "filing targets the checkout, never the state root");
+  assert.notEqual(filedInto, stateRoot);
+});
+
+test("W1-T3032: an origin already in the checkout's plan is not re-drafted — dedup needs the right tree", () => {
+  const stateRoot = tmpRoot();
+  const checkoutRoot = tmpRoot();
+  mkdirSync(join(checkoutRoot, "plan"), { recursive: true });
+  writeFileSync(
+    join(checkoutRoot, "plan", "tasks.yaml"),
+    [
+      "- id: W1-T1",
+      '  title: "a record whose origin is the finding under test"',
+      "  repo: remudero",
+      "  depends_on: []",
+      "  type: implement",
+      "  verify: auto",
+      "  principles: {tdd: strict}",
+      "  budget_usd: 1.00",
+      "  files: [src/x.ts]",
+      '  origin: "ci-learning:42:coverage-ratchet"',
+      "  status: queued",
+      "  attempts: 0",
+      "",
+    ].join("\n"),
+  );
+
+  const r = captured(() =>
+    ciLearningCommand(["--force"], {
+      root: stateRoot,
+      checkoutRoot,
+      loadWindow: () => repairedWindow() as never,
+      fileShards: (() => ({ filed: [], skipped: [], refused: [] })) as never,
+    }),
+  );
+  assert.doesNotMatch(r.out, /DRAFT ci-learning:42:coverage-ratchet/, "an already-filed finding must not re-draft");
+});
+
+test("W1-T3032: an injected root alone keeps the run self-contained, so a suite cannot file into the real plan", () => {
+  // The fallback order. Every pre-existing test passes ONLY `root` and asserts the command touches
+  // no plan; defaulting the checkout to `repoRoot` would have made them write into the real one.
+  const only = tmpRoot();
+  let filedInto: string | undefined;
+  captured(() =>
+    ciLearningCommand(["--force"], {
+      root: only,
+      loadWindow: () => repairedWindow() as never,
+      fileShards: ((_d: unknown, where: string) => {
+        filedInto = where;
+        return { filed: [], skipped: [], refused: [] };
+      }) as never,
+    }),
+  );
+  assert.equal(filedInto, only, "an injected root must resolve the checkout to itself, never to repoRoot");
+});
