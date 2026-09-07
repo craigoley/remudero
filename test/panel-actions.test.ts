@@ -16,12 +16,14 @@ import type { GitHub } from "../src/lib/status.js";
 import {
   consumeDrainNow,
   isPaused,
+  isQuietHours,
   isStopped,
   kickFilePath,
   pauseDetail,
   pendingKicks,
   requestPause,
   requestStop,
+  setQuietHours,
   stopDetail,
 } from "../src/lib/fleet-control.js";
 import { runDrain, type DrainDeps } from "../src/lib/drain.js";
@@ -375,6 +377,45 @@ test("POST /v1/control/stop: no body at all is valid (reason is optional)", asyn
     assert.equal(res.status, 200);
   });
   assert.equal(isStopped(root), true);
+});
+
+// ── POST /v1/quiet-hours ────────────────────────────────────────────────────
+
+test("POST /v1/quiet-hours: toggles QUIET_HOURS synchronously, ledgered with origin", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  assert.equal(isQuietHours(root), false);
+
+  await withService(deps, async (base) => {
+    const on = await post(base, "/v1/quiet-hours", WRITE_TOKEN, { enabled: true });
+    assert.equal(on.status, 200);
+    assert.deepEqual(await on.json(), { quietHours: true });
+
+    const off = await post(base, "/v1/quiet-hours", WRITE_TOKEN, { enabled: false });
+    assert.equal(off.status, 200);
+    assert.deepEqual(await off.json(), { quietHours: false });
+  });
+
+  assert.equal(isQuietHours(root), false);
+  const lines = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "panel.quiet_hours_toggled");
+  assert.deepEqual(lines.map((l) => l.enabled), [true, false]);
+  assert.equal(lines[0].task_id, "PANEL");
+  assert.ok(typeof lines[0].origin === "string" && (lines[0].origin as string).length > 0);
+});
+
+test("POST /v1/quiet-hours: missing boolean enabled -> 400, no side effect", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  setQuietHours(root, false);
+
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/quiet-hours", WRITE_TOKEN, {});
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.equal(body.error, "invalid_request");
+  });
+  assert.equal(isQuietHours(root), false);
+  assert.equal(readLedgerLines(deps.ledgerPath).length, 0);
 });
 
 

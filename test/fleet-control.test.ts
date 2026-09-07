@@ -9,17 +9,20 @@ import {
   consumeStop,
   drainNowFilePath,
   isPaused,
+  isQuietHours,
   isSafeTaskId,
   isStopped,
   kickFilePath,
   pauseDetail,
   pauseFilePath,
   pendingKicks,
+  quietHoursFilePath,
   requestDrainNow,
   requestKick,
   requestPause,
   requestStop,
   resumeFleet,
+  setQuietHours,
   stopDetail,
   stopFilePath,
 } from "../src/lib/fleet-control.js";
@@ -90,8 +93,30 @@ test("a garbage/unreadable STOP file still gates as stopped (fails closed)", () 
 test("stopFilePath/pauseFilePath are distinct paths under <root>/state", () => {
   const root = tmpRoot();
   assert.notEqual(stopFilePath(root), pauseFilePath(root));
+  assert.notEqual(quietHoursFilePath(root), pauseFilePath(root));
   assert.match(stopFilePath(root), /state[\\/]STOP$/);
   assert.match(pauseFilePath(root), /state[\\/]PAUSE$/);
+  assert.match(quietHoursFilePath(root), /state[\\/]QUIET_HOURS$/);
+});
+
+// ── QUIET HOURS ──────────────────────────────────────────────────────────
+
+test("setQuietHours flips the QUIET_HOURS flag without resume clearing it", () => {
+  const root = tmpRoot();
+  assert.equal(isQuietHours(root), false);
+
+  assert.equal(setQuietHours(root, true), true);
+  assert.equal(isQuietHours(root), true);
+  assert.ok(existsSync(quietHoursFilePath(root)));
+
+  requestStop(root, "halt");
+  requestPause(root, "hold");
+  const r = resumeFleet(root);
+  assert.deepEqual(r, { clearedStop: true, clearedPause: true });
+  assert.equal(isQuietHours(root), true, "quiet hours is a schedule preference, not a pause/stop latch");
+
+  assert.equal(setQuietHours(root, false), false);
+  assert.equal(isQuietHours(root), false);
 });
 
 // ── STOP is ONE-SHOT (fix/cli-safe-control-surface): the halted run consumes it so a

@@ -1048,6 +1048,7 @@ import {
   clearKick,
   consumeDrainNow,
   consumeStop,
+  isQuietHours,
   pauseDetail,
   pendingKicks,
   realSharedPauseGitDeps,
@@ -27205,6 +27206,8 @@ export async function daemonCommand(
         // 23-open-PR incident): the SAME `openPrCount` closure just defined above, never a second
         // GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
+        checkQuietHours: () =>
+          isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
         // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an

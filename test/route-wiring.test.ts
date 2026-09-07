@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { declaredConsoleRoutes } from "./helpers/declared-routes.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
-import { drainNowFilePath, kickFilePath, pauseFilePath, stopFilePath } from "../src/lib/fleet-control.js";
+import { drainNowFilePath, kickFilePath, pauseFilePath, quietHoursFilePath, stopFilePath } from "../src/lib/fleet-control.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -104,6 +104,7 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/control/stop",
   "POST /v1/control/resume",
   "POST /v1/control/pause",
+  "POST /v1/quiet-hours",
   "POST /v1/escalation/mark-handled",
   "POST /v1/drain/kick",
   "POST /v1/drain/run",
@@ -306,6 +307,22 @@ test("POST /v1/control/resume clears the pause flag under fleetControlRoot", asy
 
     const steps = ledgerSteps(h.ledgerPath).map((s) => s.step);
     assert.ok(steps.includes("panel.pause_requested") && steps.includes("panel.resume_requested"));
+  });
+});
+
+test("POST /v1/quiet-hours writes the quiet-hours flag under fleetControlRoot, not questionsRoot", async () => {
+  await withProductionServer(async (h) => {
+    const res = await post(h.base, "/v1/quiet-hours", { enabled: true });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { quietHours: true });
+
+    assert.ok(existsSync(quietHoursFilePath(h.fleetRoot)), "quiet-hours must write under fleetControlRoot");
+    assert.ok(!existsSync(quietHoursFilePath(h.questionsRoot)), "quiet-hours must NOT write under questionsRoot");
+    assertNothingUnder(h.questionsRoot, "questionsRoot");
+
+    const steps = ledgerSteps(h.ledgerPath).filter((s) => s.step === "panel.quiet_hours_toggled");
+    assert.equal(steps.length, 1);
+    assert.equal(steps[0].enabled, true);
   });
 });
 
