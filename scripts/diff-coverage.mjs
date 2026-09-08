@@ -269,12 +269,27 @@ export const MIN_RELOCATION_RUN = 5;
  * @param {Array<[number, string]>} R
  * @param {Set<number>} consumed
  */
+/**
+ * The form a line is COMPARED in when hunting for a relocation: `trim()` as always, plus
+ * template-literal unescaping (W1-T3189). Code inside a `...` literal carries a backslash before
+ * every backtick and `${`; lifting it into a real module strips them, so raw comparison read a
+ * move as a rewrite. The costly part is second-order: an unmatched line SPLITS the run around it,
+ * so a few escaped lines disqualified the unescaped ones beside them once either piece fell under
+ * {@link MIN_RELOCATION_RUN} -- on #4522, 293 escape-affected lines cost 486 (3229 -> 3715).
+ * Applied to BOTH sides, so a move INTO a literal normalises identically. Admits nothing new in
+ * principle: a relocation is still a contiguous run of >= MIN_RELOCATION_RUN, consumed once.
+ * @param {string} text
+ */
+export function relocationKey(text) {
+  return text.replace(/\\`/g, "`").replace(/\\\$\{/g, "${").replace(/\\\\/g, "\\").trim();
+}
+
 function bestRunAt(A, i, R, consumed) {
   let bestJ = -1;
   let bestLen = 0;
   for (let j = 0; j < R.length; j++) {
     if (consumed.has(j)) continue;
-    if (R[j][1].trim() !== A[i][1].trim()) continue;
+    if (R[j][1] !== A[i][1]) continue;
     let len = 1;
     while (
       i + len < A.length &&
@@ -282,7 +297,7 @@ function bestRunAt(A, i, R, consumed) {
       !consumed.has(j + len) &&
       A[i + len][0] === A[i + len - 1][0] + 1 && // added run stays contiguous in the new file
       R[j + len][0] === R[j + len - 1][0] + 1 && // removed run stays contiguous in the old file
-      R[j + len][1].trim() === A[i + len][1].trim()
+      R[j + len][1] === A[i + len][1]
     ) {
       len++;
     }
@@ -305,14 +320,14 @@ export function computeRelocatedLines(added, removed, { minRun = MIN_RELOCATION_
     if (e === undefined) {
       const lines = removed.get(file);
       if (!lines) return undefined;
-      e = { R: [...lines.entries()].sort((a, b) => a[0] - b[0]), consumed: new Set() };
+      e = { R: [...lines.entries()].map(([n, t]) => [n, relocationKey(t)]).sort((a, b) => a[0] - b[0]), consumed: new Set() };
       sources.set(file, e);
     }
     return e;
   };
 
   for (const [file, addedLines] of added) {
-    const A = [...addedLines.entries()].sort((a, b) => a[0] - b[0]);
+    const A = [...addedLines.entries()].map(([n, t]) => [n, relocationKey(t)]).sort((a, b) => a[0] - b[0]);
     const fileMap = new Map();
     let i = 0;
     while (i < A.length) {
