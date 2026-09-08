@@ -83,6 +83,7 @@ function listedLedgerFiles(stateDir: string, fsDeps: Pick<LedgerGrepFsDeps, "rea
   try {
     names = fsDeps.readdirSync(stateDir);
   } catch {
+    // deliberate: an absent or unreadable state directory is an empty corpus for best-effort readers.
     names = [];
   }
   const rotations = ledgerRotationEntries(names, stateDir);
@@ -164,11 +165,13 @@ export async function* openLedgerUnion(
         try {
           parsed = parseObject(line);
         } catch {
+          // deliberate: a torn ledger line is dropped without aborting the stream.
           continue;
         }
         if (parsed !== undefined && recordMatchesFilters(parsed, opts, minimumTs)) yield parsed;
       }
     } catch {
+      // deliberate: an unreadable file costs that file, not the whole best-effort stream.
       // Console-style readers are best effort; audit-style refusal is handled by resolveLedgerUnion.
     }
   }
@@ -247,6 +250,7 @@ export function readLedgerUnionRawLinesSync(
       filesRead += 1;
       addText((entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf).toString("utf8"));
     } catch {
+      // deliberate: archive read failures are reported through unread rather than thrown.
       unread.push(entry.path);
     }
   };
@@ -257,6 +261,7 @@ export function readLedgerUnionRawLinesSync(
       filesRead += 1;
       addText(fsDeps.readFileSync(livePath).toString("utf8"));
     } catch {
+      // deliberate: an unreadable live file is not an unread rotation and does not make the archive corpus partial.
       // Best-effort live read, matching the prior union readers' behavior.
     }
   };
@@ -332,6 +337,7 @@ export function readLedgerUnionRecordsSync(
         const parsed = parseObject(line);
         if (parsed !== undefined) addRecord(parsed, line);
       } catch {
+        // deliberate: a malformed row increments torn and the remaining corpus still parses.
         torn += 1;
       }
     }
@@ -351,6 +357,7 @@ export function readLedgerUnionRecordsSync(
       addText(fsDeps.readFileSync(livePath).toString("utf8"));
       return opts.satisfied?.(stepsSeen) ?? false;
     } catch {
+      // deliberate: an unreadable live file degrades to whatever rotations already supplied.
       return false;
     }
   };
@@ -363,6 +370,7 @@ export function readLedgerUnionRecordsSync(
       addText((entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf).toString("utf8"));
       return opts.satisfied?.(stepsSeen) ?? false;
     } catch {
+      // deliberate: archive read failures are surfaced in unread for callers that refuse partial coverage.
       unread.push(entry.path);
       return false;
     }
