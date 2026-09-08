@@ -1,0 +1,109 @@
+- id: W1-T3109
+  title: "THE BOARD-REVIEW CADENCE CHECK REBUILDS THE OPEN BOARD AFTER THE SAME DAEMON TICK ALREADY PROJECTED AND SWEPT IT — A SKIPPED REPORT HELD BOOT ADMISSION FOR ABOUT 110 SECONDS"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 22.00
+  files: [src/run-task.ts, test/board-review-shared-sweep-snapshot.test.ts]
+  origin: "operator-session#boot-maintenance-critical-path-2026-09-08"
+  plan_refs: ["W1-T77", "W1-T468", "W1-T2304", "W1-T2453", "W1-T2464", "W1-T2465", "W1-T2466", "W1-T2794"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE LIVE AZURE FLEET, READ-ONLY. The daemon booted at
+    2026-09-08T01:15:59.902Z. After the full sweep and its in-flight ticker settled, the
+    orphan-sweep row landed at 01:21:36.778Z; `board_review.skipped` did not land until
+    01:23:27.429Z. The decision was a no-op — only 109 minutes had elapsed against the
+    120-minute minimum — yet the board-review check occupied the main admission sequence for
+    about 110 seconds. Task selection and lane admission completed in under four seconds once
+    the remaining cadence checks finished. More lanes cannot recover time spent before lanes
+    exist.
+
+    THE SOURCE EXPLAINS THE DUPLICATE WORK. In each daemon cycle, `refreshMerged` first calls
+    `projectPlan` and retains its `Map<string, StatusProjection>` as `lastProj`. The full sweep
+    then calls `buildOpenPrViews`, which fetches every open PR and hydrates its rollup. Later in
+    that same cycle, `checkBoardReview` calls `defaultBoardReviewItems`; that function starts over
+    with `fetchOpenPrsRest`, loads the plan, constructs another batched gateway and calls
+    `projectPlan` again. The third derivation is paid even when cadence says `fire: false`.
+    Verified at origin/main `fb7506e24d4da63442e979eb08af0752e41a0b6f` in
+    `src/lib/daemon.ts`'s cycle ordering and `src/run-task.ts`'s `refreshMerged`,
+    `buildSweepHook`, `defaultBoardReviewItems` and `buildBoardReviewDaemonHooks`.
+
+    W1-T2464 MAKES A NAIVE EARLY RETURN WRONG. The check also retires proposal referents on every
+    poll, including polls whose board-review cadence does not fire. Moving the cadence decision
+    ahead of `itemsFor()` would strand cleared proposals again. The optimization must preserve
+    that reconciler while changing the item source from a new network projection to material
+    state the current cycle already proved.
+
+    THE TWO EXISTING SNAPSHOTS CONTAIN THE REQUIRED FACTS. The sweep's raw `OpenPrRest[]` carries
+    PR identity, created time, draft state and the exact status-check rollup that
+    `boardItemsFromOpenPrs` already maps. `lastProj` carries current needs-human escalation fields;
+    the loaded plan carries proposal origin. Reusing those inputs preserves the current mapper's
+    semantics, including non-required red checks, without adding a weaker second derivation from
+    `OpenPrView.checksState`.
+  design: |
+    (i) ADD ONE PROCESS-LOCAL, GENERATION-BOUND ITEM SOURCE. Each `refreshMerged` call advances a
+    cycle generation and clears the prior sweep rows. After `buildOpenPrViews` has completed, its
+    existing raw `OpenPrRest[]` is published against that generation. The source may serve shared
+    items only when both the raw rows and `lastProj` belong to the current generation. There is no
+    disk cache, TTL guess or cross-process state.
+
+    (ii) PRESERVE THE EXISTING MAPPER. Expose an optional `onOpenPrRows` observation seam on
+    `buildOpenPrViews`, invoked once after a successful build, and compose those rows through
+    `boardItemsFromOpenPrs`. Extract the escalation and proposal-origin maps from the current
+    `StatusProjection`/plan join so both the fresh reader and shared reader use the same code.
+    Do not derive `redCheckCount` from the required-check-only `OpenPrView.checksState`; that would
+    silently narrow the board-review trigger.
+
+    (iii) SHARE ONLY THE QUIET CHECK. Extend `buildBoardReviewDaemonHooks` with a check-only item
+    source. `checkBoardReview` uses the current-cycle snapshot for both
+    `reconcileBoardReviewReferents` and `decideBoardReviewCadence`. On a firing tick,
+    `runBoardReview` retains its deliberate fresh `defaultBoardReviewItems` read so the report
+    describes the board at execution time, not merely the board that qualified it.
+
+    (iv) FALL BACK, NEVER GUESS. If the full sweep failed before publishing, the generation does
+    not match, or no projection exists, the check calls `defaultBoardReviewItems` exactly as it
+    does today. A GitHub outage keeps that function's current fail-soft empty-board direction.
+    A previous cycle's snapshot is never served as current.
+
+    (v) WIRE THE SHARED SOURCE AT THE ONE SELF-TARGET DAEMON COMPOSITION SITE. Direct CLI sweep,
+    light sweep, non-self daemon targets and tests that omit the new optional seams remain
+    byte-for-byte on their current behavior. No change belongs in `src/lib/daemon.ts`; its cycle
+    ordering is already sufficient.
+
+    (vi) MEASURE THE SOURCE, NOT WALL CLOCK IN A UNIT TEST. Emit one bounded source diagnostic on
+    the existing board-review decision path (`shared-sweep` or `fresh-fallback`) with generation
+    and item count. Tests prove request counts with throwing spies; production latency remains an
+    operational SLO, not a flaky timer assertion.
+  acceptance:
+    - claim: "a normal self-target daemon cycle uses the same raw open-PR rows and StatusProjection built earlier in that cycle for `checkBoardReview`, issuing zero new GitHub reads and zero new plan projections"
+      proof: "unit test: test/board-review-shared-sweep-snapshot.test.ts"
+    - claim: "the shared source produces the same BoardItem fields as the existing fresh reader, including all-rollup red checks, escalation details and proposal origin"
+      proof: "unit test: test/board-review-shared-sweep-snapshot.test.ts"
+    - claim: "proposal referent reconciliation still runs on a non-firing cadence decision and consumes the shared current-cycle items"
+      proof: "unit test: test/board-review-shared-sweep-snapshot.test.ts"
+    - claim: "a firing check still performs a fresh read for the report body rather than reusing the qualifying snapshot"
+      proof: "unit test: test/board-review-shared-sweep-snapshot.test.ts"
+    - claim: "a missing, failed or prior-generation sweep snapshot invokes the existing fresh fail-soft reader and never serves stale rows"
+      proof: "unit test: test/board-review-shared-sweep-snapshot.test.ts"
+    - claim: "direct sweep, light sweep and non-self daemon composition do not acquire a new board-review read or mutable cache"
+      proof: "unit test: test/board-review-shared-sweep-snapshot.test.ts"
+  falsifier: |
+    Close without implementation if the self-target daemon already hands `checkBoardReview` the
+    current cycle's sweep/projection rows, or if a production-shaped request recorder shows no
+    additional GitHub or `projectPlan` call between the sweep and `board_review.skipped`. Both were
+    checked at `fb7506e24`: `boardReviewHooks` receives only `{ config }`, its `itemsFor` defaults
+    to `defaultBoardReviewItems`, and that reader independently calls both `fetchOpenPrsRest` and
+    `projectPlan`. Also close if the live trace no longer places meaningful time in that interval;
+    the cited boot placed about 110 seconds there. Do not falsify by moving cadence ahead of
+    reconciliation — W1-T2464 requires retirement on non-firing polls.
+  note: |
+    `W1-T3109` was atomically reserved at `refs/rmd-id/W1-T3109` before this file was written; the
+    reservation walk skipped W1-T3105 through W1-T3108 because those ids were already held. One
+    concern only: remove the board-review check's duplicate same-cycle board derivation while
+    preserving referent retirement and fresh firing reports. The full-sweep ticker stop wait,
+    admission reactor and local CI-parity mismatch remain separate tasks.
