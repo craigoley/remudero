@@ -220,7 +220,9 @@ test("preflight outcomes receive distinct ledger vocabulary with the old head an
 });
 
 test("production realArmDeps wires both fresh REST facts and the guarded update-branch write", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  // W1-T2887: realArmDeps moved to src/lib/arm-auto-merge.ts with the rest of the arm cluster;
+  // run-task.ts now only imports and re-exports it.
+  const source = readFileSync(new URL("../src/lib/arm-auto-merge.ts", import.meta.url), "utf8");
   const start = source.indexOf("export function realArmDeps(");
   const end = source.indexOf("\n}\n\n/** Terminal outcome", start);
   const body = source.slice(start, end);

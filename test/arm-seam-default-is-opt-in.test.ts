@@ -32,7 +32,11 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const RUN_TASK_SRC = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
+// W1-T2887: the arm cluster (armAutoMergeDetailed/armAutoMergeAtOpen/disarmAutoMerge/
+// requireExplicitArmSeam among them) moved to src/lib/arm-auto-merge.ts; run-task.ts now only
+// imports and re-exports these names, so the one structural check below (which scans for each
+// entry point's own `export function` declaration) reads the lib file, where they actually live.
+const RUN_TASK_SRC = readFileSync(join(REPO_ROOT, "src/lib/arm-auto-merge.ts"), "utf8");
 
 const PR = "https://github.com/o/r/pull/1";
 const TASK_ID = "W1-T2347";
