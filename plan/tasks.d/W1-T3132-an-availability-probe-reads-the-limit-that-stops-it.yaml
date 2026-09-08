@@ -1,0 +1,91 @@
+- id: W1-T3132
+  title: "THE RETRO'S GITHUB-AVAILABILITY PROBE IS BLIND TO THE LIMIT THAT ACTUALLY STOPS IT — `probeGithubThrottle` reads `.rate.remaining` from `gh api rate_limit` and calls GitHub available whenever it is above zero, but a SECONDARY rate limit 403s every real call while `/rate_limit` still reports 5000/5000, so the retro labels its census `source: github` and prints a merge-state join built from three failed fetches"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 1
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 16.00
+  files: [src/lib/retro.ts, test/an-availability-probe-reads-the-limit-that-stops-it.test.ts]
+  origin: "operator-session#daemon-telemetry-2026-09-08"
+  plan_refs: ["W1-T132", "W1-T2305", "W1-T89"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED, MEASURED BY HAND 2026-09-08T07:26Z on the mini, in this exact order:
+
+      gh api rate_limit --jq '.resources | to_entries[]'
+        -> core: 5000/5000, audit_log: 1750/1750, code_search: 10/10 ... EVERY BUCKET FULL
+      gh api user --jq .login
+        -> HTTP 403  "API rate limit exceeded for user ID 4397075"
+      gh api "repos/craigoley/remudero/pulls?state=open&per_page=100"
+        -> HTTP 403  same message
+
+    `/rate_limit` reports the PRIMARY buckets. A SECONDARY (abuse/concurrency) limit does not
+    appear there and refuses calls anyway. The probe cannot see the condition that is stopping it.
+
+    THE PROBE. `probeGithubThrottle` (src/lib/retro.ts:414-429) is the whole of `unavailable()`:
+
+      const out = execFileSync("gh", ["api", "rate_limit", "--jq", ".rate.remaining"], ...)
+      if (Number.isFinite(remaining) && remaining <= 0) return "GitHub API rate limit exhausted (0 remaining)";
+      return undefined;
+
+    Under a secondary limit `remaining` is 5000, so it returns `undefined` — available.
+
+    WHAT THAT MISLABELS. `retroShippedGithubGateway` (src/run-task.ts:21664) wires
+    `unavailable: () => probeGithubThrottle()`. `censusMergeStateFrom` (src/lib/retro.ts:1004-1009)
+    then reads `githubUnavailable` falsy and stamps `source: "github"`.
+
+    THE FALSE-CONFIDENT LINE, OBSERVED IN A REAL RUN. `/tmp/retro-dry.md` from 2026-09-08 prints:
+
+      Merge-state join: github — 0 verdict-blocked run(s) merged gate-side and are excluded above
+
+    while that same run's stderr carries THREE rate-limit failures — the open-PR fetch, the
+    closed-PR fetch, and the needs-human issue fetch. A zero built from three failed fetches and a
+    genuine zero render identically. The doc for `probeGithubThrottle` says the probe exists so
+    "a throttle is NAMED rather than read as 'GitHub has no evidence' (W1-T132)"; under a secondary
+    limit it does exactly the thing it was written to prevent.
+
+    THIS IS NOT A TIMING BUG. The probe runs once before any merge is credited, which is a real
+    second-order weakness, but it is not the defect: even re-probed immediately before each fetch,
+    `.rate.remaining` would still read 5000 while the fetch 403s.
+  design: |
+    (i) READ THE FAILURE, NOT THE FORECAST. The authoritative signal that GitHub is unavailable is
+    a call that failed. The gateway's own fetches already know; `unavailable()` does not consult
+    them. Fold observed 403/429 rate-limit refusals into the availability verdict.
+    (ii) KEEP THE PRE-FLIGHT PROBE as the cheap early warning it is. It correctly catches primary
+    exhaustion before work starts. It becomes one input, not the only one.
+    (iii) FAIL CLOSED ON THE JOIN. When any fetch backing `shipped` refused, `censusMergeStateFrom`
+    must produce `source: "unavailable"` with the reason, so `mastCategoryDistribution` routes
+    members to `unconfirmed` — its existing degrade — instead of printing a confident zero.
+    (iv) DISTINGUISH "NO MERGES" FROM "NO ANSWER" IN THE RENDERED LINE. The current wording cannot
+    express the difference, and that is why the defect was invisible from the output alone.
+  acceptance:
+    - claim: "a 403 rate-limit refusal from a board fetch makes the census source read unavailable, even when /rate_limit reports every bucket full"
+      proof: "unit test: test/an-availability-probe-reads-the-limit-that-stops-it.test.ts"
+    - claim: "the rendered merge-state line distinguishes a measured zero from an unanswered join"
+      proof: "unit test: test/an-availability-probe-reads-the-limit-that-stops-it.test.ts"
+    - claim: "primary exhaustion (remaining 0) still reports unavailable, so the existing W1-T132 behaviour is preserved"
+      proof: "unit test: test/an-availability-probe-reads-the-limit-that-stops-it.test.ts"
+    - claim: "a healthy run with all fetches succeeding still reports source github, so the fix does not make every join unavailable"
+      proof: "unit test: test/an-availability-probe-reads-the-limit-that-stops-it.test.ts"
+  falsifier: |
+    CLOSE IF the probe already sees secondary limits: read src/lib/retro.ts:414-429. MEASURED
+    2026-09-08: it reads `.rate.remaining` and nothing else.
+    CLOSE ALSO IF a secondary limit does raise `/rate_limit`'s buckets. Reproduce it: hit the API
+    hard enough to trigger a 403, then compare `gh api rate_limit` against a real call. This shard
+    ran exactly that comparison and got 5000/5000 beside a 403 on `gh api user`.
+    DO NOT satisfy this by re-probing more often. The probe reads a signal that does not move under
+    the failure it must detect; calling it ten times gives ten wrong answers.
+    DO NOT satisfy it by treating every fetch error as a rate limit. A 404 or a network drop is a
+    different condition and must keep whatever handling it has today.
+  note: |
+    Rule 25 CHECKED BEFORE FILING: `src/lib/retro.ts` is ordinary src, so the build PR is a
+    src+test pair.
+    THIS CLOSES AN OPEN CAVEAT FROM THE SAME SESSION. A prior RECON reported the `0 merged
+    gate-side` line as "unconfirmed — I cannot tell whether the union was complete". The mechanism
+    above is why it could not be told from the output, and it is a defect rather than a limitation
+    of the reader.
