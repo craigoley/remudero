@@ -1,0 +1,105 @@
+- id: W1-T3177
+  title: "THE FIRST SCREEN ON THE NEW STACK — stand up `apps/dashboard` as React 19 + Vite + TypeScript with its OWN tsconfig, and land ONE screen (NOW + a bounded time series) end-to-end, so the toolchain is proven by a thing the operator can open rather than by a scaffold"
+  repo: remudero
+  depends_on: [W1-T3174, W1-T3175, W1-T3176, W1-T3178]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 60.00
+  files: [apps/dashboard/package.json, apps/dashboard/tsconfig.json, apps/dashboard/vite.config.ts, apps/dashboard/src, tsconfig.json, package.json, .github/workflows/ci.yml, test/the-dashboard-has-its-own-toolchain.test.ts]
+  origin: "operator-session#console-architecture-2026-09-08"
+  plan_refs: ["W1-T3173", "W1-T3174", "W1-T3175", "W1-T3176", "W1-T3178", "W1-T3159", "W1-T3158"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR DECISIONS, 2026-09-08, all six approved and recorded here so a builder does not
+    re-open them: React 19 with the React Compiler ON from day one · Vite · Recharts · TanStack
+    Query · shadcn/ui · Vitest scoped to the dashboard · strangler migration (the existing console
+    stays reachable until parity) · contract paths documented PER SCREEN (W1-T3174).
+
+    WHY ONE SCREEN AND NOT A SCAFFOLD. A toolchain that builds an empty page proves nothing about
+    the four integration points that actually carry risk: the generated api-client in a browser
+    bundle, the SSE stream feeding a component, the asset route serving a real hashed bundle, and
+    the build reaching the deployed checkout. One real screen crosses all four.
+
+    THE TSCONFIG CONFLICT IS REAL AND MEASURED. The root `tsconfig.json` is Node-shaped —
+    `"module": "nodenext"`, `"types": ["node"]`, `"lib": ["ES2023","DOM"]`, no `"jsx"` — and its
+    `include` already globs `apps/*/src/**/*.ts`. A browser SPA needs `moduleResolution: "bundler"`,
+    `jsx: "react-jsx"` and `types: ["vite/client"]`. These cannot both be one config.
+
+    NO GATE COLLISION, MEASURED, so a builder does not fear the ratchets:
+      - `source-size-ratchet` walks `join(root, "src")` only — apps/ is outside it.
+      - `comment-load-ratchet` is keyed on src/ paths — apps/ is outside it.
+      - `npm test` globs `"test/**/*.test.ts"` — dashboard tests are never picked up by the
+        existing runner, so Vitest is a SECOND job, not a competing one.
+      - the fixture-copy census walks `test/` non-recursively.
+    What DOES apply is `no-hand-rolled-fetch-check.mjs`, which walks `apps` — deliberately, and
+    W1-T3174 is the reason this screen's routes are documented first.
+  design: |
+    (i) THE SCREEN IS "NOW + ONE SERIES", chosen because it exercises both read shapes the console
+    needs: a live projection over SSE (`/v1/status/stream`, already in the contract) and a bounded
+    historical series rendered as a chart. A screen that only polls proves half the stack.
+    (ii) THE SERIES CONTRACT IS W1-T3159's, INHERITED NOT REINVENTED: a stated window, a stated
+    bucket fine enough to show a sub-hourly repeat, and ABSENT rendered as absent rather than as a
+    flat zero line. W1-T3159 wrote that contract to survive a renderer swap; this is the swap.
+    (iii) EVERY READ GOES THROUGH `@remudero/api-client`. Not because the gate says so, but because
+    the gate says so FOR A REASON — a hand-rolled fetch is an undocumented route, which is exactly
+    the debt W1-T3174 measures at 27 routes.
+    (iv) THE OLD CONSOLE STAYS REACHABLE AND UNTOUCHED. `renderShellHtml` is not modified by this
+    task. The strangler only works if the thing being strangled still runs; a builder who "tidies"
+    the old shell here has removed the operator's fallback while the replacement has one screen.
+    (v) THE DARK, DENSE, OPERATOR-FIRST DIRECTION carries over from W1-T153 and is not re-derived:
+    operator-priority order, readable density, phone-first responsive. "Beautiful" is the operator's
+    judgement on the rendered result and NO criterion here claims it.
+  acceptance:
+    - claim: "the root tsconfig no longer globs apps/*/src and the dashboard carries its own browser-shaped config — the two typecheck independently, neither borrowing the other's module resolution"
+      proof: "unit test: test/the-dashboard-has-its-own-toolchain.test.ts"
+    - claim: "no direct fetch/axios/XHR exists anywhere under apps/dashboard — every read goes through @remudero/api-client"
+      proof: "grep: no-hand-rolled-fetch:check in package.json"
+    - claim: "the dashboard's own suite runs as its own CI job and the existing node --test invocation is byte-identical"
+      proof: "unit test: test/the-dashboard-has-its-own-toolchain.test.ts"
+    - claim: "the shipped screen's series states its window and bucket, and renders an unreadable or empty series as ABSENT rather than as a flat zero line"
+      proof: "unit test: apps/dashboard/src/__tests__/series.test.tsx"
+    - claim: "the bucket is fine enough that a repeating sub-hourly event is visible rather than averaged away — the same fixture under a daily bucket is not"
+      proof: "unit test: apps/dashboard/src/__tests__/series.test.tsx"
+  falsifier: |
+    CLOSE IF the dashboard already has a component model or a build:
+      `cat apps/dashboard/package.json` · `ls apps/dashboard/src`
+    MEASURED 2026-09-08: dependencies are exactly `{"@remudero/api-client": "0.1.0"}`; the tree is
+    `index.html` + a 410-line `src/main.ts`; there is no bundler, no React and no test.
+    PROVE THE SERIES LOAD-BEARING (W1-T3159's own falsifier, carried forward): a fixture series
+    containing a repeating sub-hourly spike must be VISIBLE in the rendered output, and the SAME
+    series under a daily bucket must NOT be. If both render alike, the bucket is decorative.
+    DO NOT satisfy this by scaffolding the toolchain with a placeholder screen. A `create-vite`
+    default page passes "it builds" and proves nothing about the api-client in a bundle, the SSE
+    wiring, the asset route or the deploy path — the four things that can actually fail.
+    DO NOT modify `renderShellHtml` or delete any part of the old console here. The strangler needs
+    the strangled thing alive; parity is a later, operator-judged event, not a side effect of this
+    task.
+    DO NOT add a direct `fetch` "just for this screen". `no-hand-rolled-fetch-check.mjs` will refuse
+    it, and it should — the route it would call is by definition undocumented.
+  note: |
+    Rule 25 CHECKED: `apps/` and `tsconfig.json`/`package.json` are ordinary project surfaces.
+    `.github/workflows/ci.yml` is touched ONLY to add the dashboard's own test job; no existing gate,
+    shard or census invocation is edited, and the `node --test` line is left byte-identical.
+    SIZING: `risk: high` with `band_meaning: span` — this genuinely spans a toolchain, a tsconfig
+    split, a CI job and a screen. That breadth is admitted rather than hidden, per W1-T2503; the
+    alternative (four shards that each cannot be demonstrated alone) is worse, because none of them
+    would produce something the operator can open.
+    PROOF-DIALECT DEPENDENCY, FOUND BY THE LINTER ON THIS SHARD. `lint-plan` warned that
+    "apps/dashboard/src/__tests__/series.test.tsx" resolves to ZERO tests. That is not a forward
+    reference that clears on its own: `TEST_PATH_EXACT_RE` (src/lib/review.ts:568) is anchored
+    `^test/` and `TEST_GLOB` (:607) is `test/**/*.test.ts`, so such a path falls through to the
+    bare-TITLE arm and can NEVER match — and W1-T72's `nameFiltered` guard would then BLOCK, not
+    pass vacuously. W1-T3178 fixes the dialect; the three criteria above that can be proven under
+    today's dialect are stated as `test/` proofs, and only the two SCREEN-SPECIFIC ones name the
+    dashboard suite, deliberately, because they cannot honestly be asserted anywhere else.
+    CAVEAT WITH EQUAL WEIGHT: this proves the stack works for ONE screen. It establishes nothing
+    about the other ~11 sections of the current console, nor about whether the result meets the
+    operator's bar — that judgement is his, on the rendered page, and is the reason the old console
+    stays reachable until he says otherwise.
+    SECOND CAVEAT: React 19 + the React Compiler at 1.0 are current-stable as researched on
+    2026-09-08. Version currency is a fact with a shelf life; a builder starting this months later
+    should re-check rather than trust this line.

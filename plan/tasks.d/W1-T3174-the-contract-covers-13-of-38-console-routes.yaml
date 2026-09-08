@@ -1,0 +1,92 @@
+- id: W1-T3174
+  title: "THE API CONTRACT COVERS 13 OF THE 38 ROUTES ITS OWN CONSOLE CALLS — `openapi/daemon.yaml` declares 13 paths, `renderShellHtml`'s client calls 38, and `no-hand-rolled-fetch-check.mjs` (CI-gated, walks `apps` and `packages`) forbids `apps/dashboard` from reaching the other 27 any other way"
+  repo: remudero
+  depends_on: [W1-T3173]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/the-contract-covers-its-own-console.test.ts]
+  origin: "operator-session#console-architecture-2026-09-08"
+  plan_refs: ["W1-T3173", "W3-T1a", "W1-T3175"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08. THIS, NOT REACT, IS THE CRITICAL PATH for W1-T3173's rebuild.
+
+    THE GATE THAT MAKES IT ONE. `scripts/no-hand-rolled-fetch-check.mjs` is a real npm script
+    (`no-hand-rolled-fetch:check`), wired into `.github/workflows/ci.yml:980` and listed in
+    `ci-gate.yml:69`. Its own comment says it "walks `apps` and `packages`". `apps/dashboard`
+    therefore CANNOT call a route the generated client does not expose — by CI, not by convention.
+    That is the correct rule (MASTER-PLAN §7A) and this shard does not propose relaxing it.
+
+    THE THREE COUNTS, each with its command:
+      routes the console's inline client calls, `awk 'NR>=1522 && NR<=5286' src/lib/serve.ts |
+        grep -oE '/v1/[a-zA-Z0-9/_-]+' | sort -u | wc -l`                                -> 38
+      paths in the source of truth, `grep -cE '^  /v1/' openapi/daemon.yaml`              -> 13
+      paths in the generated client, `grep -cE '^\s+"/v1' packages/api-client/src/schema.d.ts` -> 13
+    The generated client and the OpenAPI doc AGREE. Neither is stale. The contract is simply at
+    34% coverage of the console that the same repo ships.
+
+    THE 27 MISSING ROUTES, named so this is a work list rather than a complaint:
+      /v1/account-usage · /v1/auth/scope · /v1/confirm · /v1/console/write-grant ·
+      /v1/control/status · /v1/daemon-health · /v1/drain/feedback · /v1/drain/kick ·
+      /v1/drain/preview · /v1/drain/run · /v1/escalation/reply · /v1/feedback/preview ·
+      /v1/inbox · /v1/inbox/approve · /v1/inbox/reframe · /v1/merge-hold · /v1/plan/view ·
+      /v1/policy/daily-cost-ceiling · /v1/policy/daily-cost-ceiling/clear ·
+      /v1/policy/provider-routing · /v1/policy/provider-routing/clear · /v1/provider-routing ·
+      /v1/quiet-hours · /v1/recent · /v1/self-measurement · /v1/status-failure · /v1/task
+
+    WHY THE CURRENT CONSOLE DOES NOT TRIP THE GATE: it lives in `src/lib/serve.ts`, which the
+    checker does not walk, and its client is a STRING, so no static analysis sees a fetch at all.
+    The undocumented surface has been invisible precisely because the console was built the way
+    W1-T3173 reverses.
+  design: |
+    (i) PER-SCREEN, NEVER ALL-27-UP-FRONT. The operator's ruling on sequencing (2026-09-08) is a
+    strangler: each screen's routes are documented as that screen is built, so contract work is
+    reviewed against a consumer that exists rather than against a guess. A shard that lands 27
+    speculative path definitions has written a schema nobody has read.
+    (ii) THE SHAPES COME FROM THE HANDLERS, NOT FROM THE CONSOLE'S USAGE. What the inline client
+    happens to read is a lower bound on a response, never its contract. Each path's schema is
+    derived from the route handler in `src/lib/service.ts`/`serve.ts` and must describe what the
+    handler can actually return, INCLUDING its error and degraded shapes.
+    (iii) A REGRESSION GATE, or this recurs. The measurable property is a census: every `/v1/` route
+    a first-party client calls is declared in `openapi/daemon.yaml`. Recorded as a ratchet — the
+    uncovered count may FALL and never RISE — matching this repo's own baseline discipline, so the
+    remaining gap is legible rather than forgotten.
+    (iv) THE RATCHET MUST SEE THE STRING CONSOLE TOO, for as long as it exists. Counting only
+    `apps/` would report a clean sheet while 27 undeclared routes are in daily use.
+  acceptance:
+    - claim: "a census enumerates every /v1/ route a first-party client calls and every path openapi/daemon.yaml declares, and reports the uncovered set"
+      proof: "unit test: test/the-contract-covers-its-own-console.test.ts"
+    - claim: "the uncovered count is recorded as a ratchet that may fall and never rise"
+      proof: "unit test: test/the-contract-covers-its-own-console.test.ts"
+    - claim: "the census reads the string console (src/lib/serve.ts) as well as apps/, so the gap cannot be hidden by looking only where the fetch gate looks"
+      proof: "unit test: test/the-contract-covers-its-own-console.test.ts"
+    - claim: "a synthetic client calling an undeclared route is REPORTED, and the same client calling a declared one is not — the census discriminates"
+      proof: "unit test: test/the-contract-covers-its-own-console.test.ts"
+  falsifier: |
+    CLOSE IF the contract already covers the console:
+      `grep -cE '^  /v1/' openapi/daemon.yaml` versus
+      `awk 'NR>=1522 && NR<=5286' src/lib/serve.ts | grep -oE '/v1/[a-zA-Z0-9/_-]+' | sort -u | wc -l`
+    MEASURED 2026-09-08: 13 versus 38.
+    POSITIVE CONTROL, required because a route grep that finds nothing may simply be broken: the
+    same extraction against `openapi/daemon.yaml` must return the 13 KNOWN paths, beginning
+    /v1/control/pause and ending /v1/trace. MEASURED 2026-09-08: it does.
+    PROVE IT LOAD-BEARING: the census must REPORT a synthetic client that calls an undeclared route
+    and stay silent for one that calls a declared route. If both behave alike, it is counting files
+    rather than discriminating coverage.
+    DO NOT satisfy this by relaxing `no-hand-rolled-fetch-check.mjs` or exempting `apps/dashboard`
+    from it. That gate is the reason the contract has a consumer at all; exempting the console
+    converts a measured 34% into an unmeasured 0% and deletes §7A's only enforcement.
+    DO NOT declare paths the handlers do not implement. A schema entry with no route behind it is
+    worse than an absent one — the generated client compiles and the call 404s at runtime.
+  note: |
+    Rule 25 CHECKED: `openapi/` and `packages/api-client/` are contract surfaces, not instruments.
+    SIZING: one concern — the contract does not cover its console — with a per-screen delivery
+    discipline rather than a single 27-path landing. The budget is set for the census plus its
+    ratchet, NOT for documenting all 27 paths, which arrives with the screens that consume them.
+    CAVEAT WITH EQUAL WEIGHT: 38 is what the console's client calls TODAY. A rebuilt console may
+    need fewer routes (some are one-off diagnostics) or more (a chart may want a series endpoint
+    that does not exist). The number is a measured starting point, not a specification.
