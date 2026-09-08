@@ -41,6 +41,7 @@ import { test } from "node:test";
 import { fixRungScopeStandDownReason, outOfDeclaredScopeFiles, renderFixPrompt } from "../src/run-task.js";
 import { FAST_GATE_STEPS, remedyFilesForFailingChecks, type FastGateStep } from "../src/lib/ci-parity.js";
 
+const FIXTURE_REMEDY = "remedy/a.json";
 const SOURCE_SIZE_REMEDY = "scripts/source-size-baseline.json";
 const ROGUE_PATH = "src/lib/rogue.ts";
 
@@ -56,12 +57,12 @@ const FIXTURE_STEPS: FastGateStep[] = [
   { job: "gate-c", script: "gate-c:check", reason: "fixture reason c (no remedy declared)" },
 ];
 
-// ── SANITY: the registry really carries the source-size entry's own remedy, per-entry ───────────
+// ── SANITY: the source-size signal no longer exposes its retired baseline as a remedy ──────────
 
-test("sanity: FAST_GATE_STEPS declares scripts/source-size-baseline.json as the source-size gate's own remedy", () => {
+test("W1-T3140: the source-size signal has no baseline remedy metadata", () => {
   const entry = FAST_GATE_STEPS.find((s) => s.job === "source-size");
   assert.ok(entry, "the source-size gate must still exist in the registry");
-  assert.deepEqual(entry?.remedyFiles, [SOURCE_SIZE_REMEDY]);
+  assert.equal(entry?.remedyFiles, undefined);
   assert.ok(entry?.reason && entry.reason.length > 0, "the entry carries its own reason, never a borrowed one");
 });
 
@@ -96,9 +97,9 @@ test("remedyFilesForFailingChecks: no failing checks at all returns empty — ne
   assert.deepEqual(remedyFilesForFailingChecks([], FIXTURE_STEPS), []);
 });
 
-test("remedyFilesForFailingChecks: against the REAL table, only a failing source-size check surfaces its remedy", () => {
+test("W1-T3140: a failing source-size sensor cannot surface the retired baseline as a remedy", () => {
   const got = remedyFilesForFailingChecks(["source-size"]);
-  assert.deepEqual(got, [{ path: SOURCE_SIZE_REMEDY, job: "source-size" }]);
+  assert.deepEqual(got, []);
 });
 
 // ── ACCEPTANCE 1 — reachable: a fix rung repairing THAT gate's failure may write its remedy ─────
@@ -106,13 +107,13 @@ test("remedyFilesForFailingChecks: against the REAL table, only a failing source
 test("acceptance 1: fixRungScopeStandDownReason does not stand the rung down over a reachable remedy file", () => {
   const declared = ["src/lib/worker.ts"];
   const baseline = [...declared];
-  const current = [...declared, SOURCE_SIZE_REMEDY];
-  const reachable = remedyFilesForFailingChecks(["source-size"]).map((r) => r.path);
+  const current = [...declared, FIXTURE_REMEDY];
+  const reachable = remedyFilesForFailingChecks(["gate-a"], FIXTURE_STEPS).map((r) => r.path);
   assert.equal(fixRungScopeStandDownReason(current, baseline, declared, reachable), undefined);
 });
 
 test("acceptance 1: outOfDeclaredScopeFiles agrees once the remedy path is folded into the declared set", () => {
-  const declared = ["src/lib/worker.ts", SOURCE_SIZE_REMEDY];
+  const declared = ["src/lib/worker.ts", FIXTURE_REMEDY];
   const diff = [...declared];
   assert.deepEqual(outOfDeclaredScopeFiles(diff, declared), []);
 });
@@ -122,8 +123,8 @@ test("acceptance 1: outOfDeclaredScopeFiles agrees once the remedy path is folde
 test("acceptance 2 (falsifier): a genuinely unrelated out-of-scope path still stands the rung down, reachable remedy present or not", () => {
   const declared = ["src/lib/worker.ts"];
   const baseline = [...declared];
-  const current = [...declared, ROGUE_PATH, SOURCE_SIZE_REMEDY];
-  const reachable = remedyFilesForFailingChecks(["source-size"]).map((r) => r.path);
+  const current = [...declared, ROGUE_PATH, FIXTURE_REMEDY];
+  const reachable = remedyFilesForFailingChecks(["gate-a"], FIXTURE_STEPS).map((r) => r.path);
   const got = fixRungScopeStandDownReason(current, baseline, declared, reachable);
   assert.ok(got, "the rogue path must still stand the rung down");
   assert.deepEqual(got?.newOutOfScopePaths, [ROGUE_PATH]);
@@ -169,8 +170,8 @@ test("acceptance 3: the SAME failing check's own remedy IS reachable — the pos
 test("acceptance 3 (falsifier, plan-only): a plan-only task's rung still stands down over a reachable remedy — never wired into plan scope", () => {
   const declared = ["plan/tasks.d/foo.yaml"];
   const baseline = [...declared];
-  const current = [...declared, SOURCE_SIZE_REMEDY];
-  const reachable = remedyFilesForFailingChecks(["source-size"]).map((r) => r.path);
+  const current = [...declared, FIXTURE_REMEDY];
+  const reachable = remedyFilesForFailingChecks(["gate-a"], FIXTURE_STEPS).map((r) => r.path);
   const got = fixRungScopeStandDownReason(current, baseline, declared, reachable);
   assert.ok(got, "a plan-only task's rung must stand down even for a reachable remedy path");
   assert.equal(got?.scopeKind, "plan");
@@ -180,17 +181,17 @@ test("acceptance 3 (falsifier, plan-only): a plan-only task's rung still stands 
 
 test("acceptance 4: renderFixPrompt names the reachable remedy file and its gate alongside declared scope", () => {
   const task = { id: "W1-T2653X", title: "some task", files: ["src/lib/worker.ts"] };
-  const reachableRemedyFiles = remedyFilesForFailingChecks(["source-size"]);
+  const reachableRemedyFiles = remedyFilesForFailingChecks(["gate-a"], FIXTURE_STEPS);
   const prompt = renderFixPrompt({ task, round: 1, branch: "run-W1-T2653X-1", evidence: ciEvidence(), reachableRemedyFiles });
   assert.match(prompt, /GATE REMEDY/);
-  assert.match(prompt, new RegExp(SOURCE_SIZE_REMEDY.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(prompt, /gate: source-size/);
+  assert.match(prompt, new RegExp(FIXTURE_REMEDY.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(prompt, /gate: gate-a/);
   assert.match(prompt, /MAY commit it\/them alongside the declared scope/);
 });
 
 test("acceptance 4: the ORIGINAL declared-scope sentence still renders verbatim alongside the new GATE REMEDY clause", () => {
   const task = { id: "W1-T2653X", title: "some task", files: ["src/lib/worker.ts"] };
-  const reachableRemedyFiles = remedyFilesForFailingChecks(["source-size"]);
+  const reachableRemedyFiles = remedyFilesForFailingChecks(["gate-a"], FIXTURE_STEPS);
   const prompt = renderFixPrompt({ task, round: 1, branch: "run-W1-T2653X-1", evidence: ciEvidence(), reachableRemedyFiles });
   assert.ok(
     prompt.includes(
@@ -210,14 +211,14 @@ test("acceptance 4: with no reachable remedy files, no GATE REMEDY clause render
 
 test("acceptance 4: a plan-only task's prompt renders no GATE REMEDY clause even when a remedy is reachable", () => {
   const task = { id: "W1-T2653X", title: "some task", files: ["plan/tasks.d/foo.yaml"] };
-  const reachableRemedyFiles = remedyFilesForFailingChecks(["source-size"]);
+  const reachableRemedyFiles = remedyFilesForFailingChecks(["gate-a"], FIXTURE_STEPS);
   const prompt = renderFixPrompt({ task, round: 1, branch: "run-W1-T2653X-1", evidence: ciEvidence(), reachableRemedyFiles });
   assert.match(prompt, /DECLARED SCOPE/);
   assert.doesNotMatch(prompt, /GATE REMEDY/);
 });
 
 test("acceptance 4: a task declaring no files renders neither DECLARED SCOPE nor GATE REMEDY", () => {
-  const reachableRemedyFiles = remedyFilesForFailingChecks(["source-size"]);
+  const reachableRemedyFiles = remedyFilesForFailingChecks(["gate-a"], FIXTURE_STEPS);
   const prompt = renderFixPrompt({
     task: { id: "W1-T2653X", title: "some task" },
     round: 1,

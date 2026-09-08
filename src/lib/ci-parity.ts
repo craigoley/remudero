@@ -1161,7 +1161,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   // W1-T1048: the task-id existence gate is exactly the shared npm-script shape — deterministic,
   // unconditional on every PR, and measured at ~1.1s, so it is mirrored rather than excluded.
   npmScriptEntry("task-id-existence", "task-id-existence:check"),
-  // W1-T2883: the source-size ceiling, mirrored. Written in the EXPLICIT object form rather than
+  // W1-T2883/W1-T3140: the stable source-size context, mirrored. Written in the EXPLICIT object form rather than
   // through npmScriptEntry because Standing rule 25's introducing-commit carve-out
   // (isIntroducingCiYmlJob, review.ts) keys on an ADDED line carrying `job: "<name>"` beside the
   // added ci.yml job key — the helper's shorthand emits no such line, so the same PR would read
@@ -1171,7 +1171,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
     mirrored: true,
     run: (repoRoot, spawn) => [
       runStep("source-size", () =>
-        shellOut(spawn, "npm run --silent source-size-ratchet", "npm", ["run", "--silent", "source-size-ratchet"], { cwd: repoRoot }),
+        shellOut(spawn, "npm run --silent source-size-signal", "npm", ["run", "--silent", "source-size-signal"], { cwd: repoRoot }),
       ),
     ],
   },
@@ -1861,6 +1861,7 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "node --test) and refuses a file whose comment-line count grew past scripts/comment-load-baseline.json or an added " +
       "comment block over 40 lines. Run locally it also records a shrink DOWN into that baseline, which is where an author " +
       "wants that edit made — see docs/comment-standard.md",
+    remedyFiles: ["scripts/comment-load-baseline.json"],
   },
   {
     job: "depcruise",
@@ -1885,15 +1886,10 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "same-class (W1-T2488/W1-T2734) — a deterministic npm-script signal: refreshes origin/main, measures only changed " +
       "src/**/*.ts files from the merge base to HEAD, and publishes human plus schema-versioned JSON hotspot evidence. " +
       "Positive growth remains PASS because line count is a review-risk signal rather than a correctness verdict; only an " +
-      "unreadable base or failed measurement refuses the step. The historical shared baseline is not read or written",
-    // W1-T2653: this entry's own `job` id ("source-size") is the SAME name the ci.yml enforcing
-    // job carries (the one that actually runs `source-size-ratchet`, not this signal's own
-    // `source-size-signal`) — so a failing "source-size" CHECK on a PR maps back to this row and
-    // its declared remedy, regardless of which local script this entry runs for `--fast`. The
-    // ratchet's own refusal prints the exact `"path": N` line for this file and states the edit is
-    // rule-25-safe (ENTANGLEMENT_EXEMPT_INSTRUMENTS, review.ts) in the same breath — a remedy this
-    // legible was still unreachable to the rung repairing it, which is the deadlock this field closes.
-    remedyFiles: ["scripts/source-size-baseline.json"],
+      "unreadable base or failed measurement refuses the step. The historical shared baseline is not read or written. " +
+      "W1-T3140: deliberately no `remedyFiles` — a red here means the base was unreadable or the measurement failed, " +
+      "neither of which a baseline edit can repair, so this step must never enter the recordable-ratchet auto-repair rung. " +
+      "The absence is a decision, not an omission",
   },
   // W1-T2643: the four census entries are no longer hand-written here — they are
   // CENSUS_ADMITTED_MEMBERS's own projection (see CENSUS_POPULATION above). Editing a census
