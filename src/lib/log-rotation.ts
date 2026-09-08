@@ -26,7 +26,6 @@
 
 import { join } from "node:path";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-
 /**
  * Every log file this policy rotates, EXPLICITLY named — see this module's header for why a
  * directory sweep is never acceptable here. `digest.*.log` and `supervisor.*.log` are the same
