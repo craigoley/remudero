@@ -122,7 +122,7 @@ test("W1-T3092: a malformed or absent policy block refuses at LOAD, never defaul
 
   // POSITIVE CONTROL FIRST: the unmutated copy loads, so a throw below is the mutation talking.
   writeFileSync(p, shipped);
-  assert.equal(loadPolicy(p).values.objectReap.enabled, false);
+  assert.equal(loadPolicy(p).values.objectReap.enabled, true, "the shipped, now-armed value");
 
   const withoutBlock = shipped.replace(/^objectReap:\n(?:[ \t].*\n|\n)*/m, "");
   assert.notEqual(withoutBlock, shipped, "the removal must actually have removed something");
@@ -137,9 +137,15 @@ test("W1-T3092: a malformed or absent policy block refuses at LOAD, never defaul
   assert.throws(() => loadPolicy(p), /objectReap/, "a non-boolean must throw");
 });
 
-test("W1-T3092: the shipped policy.yaml has the rung OFF", () => {
-  // The posture plan/policy.yaml's own comment prescribes for rungs that delete. If this ever
-  // reads true, arming happened in a commit whose diff must show it.
+test("W1-T3092: the shipped policy.yaml matches the ARMED state the operator authorised", () => {
+  // This test shipped asserting `false` — the survey-only posture plan/policy.yaml prescribes for
+  // rungs that delete — so that arming could not happen without a diff a reviewer sees. It has now
+  // happened: the operator instructed it in-session ("arm 4532"), which is the exact condition
+  // W1-T3092's falsifier requires before this flag may ship true.
+  //
+  // THE GUARD IS NOT REMOVED, ONLY RE-POINTED. A silent flip in EITHER direction still fails here,
+  // which is the property worth keeping: the value a destructive rung ships with is a decision, and
+  // a decision that changes without a diff is the thing this test exists to prevent.
   const shipped = loadPolicy(join(import.meta.dirname, "..", "plan", "policy.yaml"));
-  assert.equal(shipped.values.objectReap.enabled, false, "a destructive rung does not ship armed");
+  assert.equal(shipped.values.objectReap.enabled, true, "armed on the operator's explicit instruction");
 });
