@@ -45,6 +45,7 @@
   "src/lib/drain.ts": 2000,
   "src/lib/emissions.ts": 205,
   "src/lib/env.ts": 500,
+  "src/lib/errors.ts": 500,
   "src/lib/escalate.ts": 1500,
   "src/lib/escalation-catalogue.ts": 1000,
   "src/lib/feedback-docket.ts": 334,
