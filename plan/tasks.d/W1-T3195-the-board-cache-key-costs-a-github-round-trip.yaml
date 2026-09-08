@@ -1,0 +1,96 @@
+- id: W1-T3195
+  title: "THE BOARD CACHE KEY COSTS A GITHUB ROUND-TRIP ON EVERY REQUEST — `createBoardSnapshotCache.get` calls `readPrQueueIndex(deps.github)` -> `github.listOpenHeadBranches()` BEFORE comparing the key, so a cache HIT still pays a network read, synchronously, on the request path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/board.ts, test/a-cache-hit-costs-no-network-read.test.ts]
+  origin: "operator-session#console-read-model-2026-09-08"
+  plan_refs: ["W1-T3192", "W1-T2919", "W1-T3196"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08 at `ec3c69d9a`, and provable from the source alone.
+
+    `createBoardSnapshotCache().get(deps)` (src/lib/board.ts) does this, IN ORDER:
+      1. fold the decision fingerprint over newly-appended ledger lines   (cheap, incremental)
+      2. `const prQueueIndex = readPrQueueIndex(deps.github);`            <-- NETWORK
+      3. `const ghFailed = safeReadFailed(deps.github);`
+      4. compare all four key components against `cached`
+      5. return `cached.snapshot` on a match
+    Step 2 calls `github.listOpenHeadBranches()`. So the CACHE KEY is computed by hitting GitHub,
+    and a hit — the path that exists to be cheap — still pays a synchronous network round-trip.
+
+    THE REST OF THE CACHE IS GOOD, AND THIS SHARD SHOULD NOT BE READ AS DISPUTING IT. It is
+    content-addressed rather than TTL'd (an FNV-1a fold over decision-relevant rows), the fold is
+    incremental across requests (W1-T2919: "a cache hit costs one pass over the lines appended since
+    the last one, never a re-walk"), and it keeps a persistent tail cursor precisely so a hit does
+    not re-read the ledger. Every one of those decisions is right. The network read in the key is
+    the one thing out of place, and it defeats the others.
+
+    WHY IT IS LOAD-BEARING RATHER THAN A NICETY. The console's client fans four parallel fetches per
+    refresh and holds an SSE stream, on a single-threaded runtime. W1-T3192 measured the same
+    319 418-byte shell at 0.022s, 3.0s, 9.9s, 32.7s, 53.3s, 85.1s and once past a 60s cap — and
+    `/v1/recent` returning in 0.009s on one sample and 71.562s on another, for identical bytes.
+    A per-request network read inside the cache key is one of the few things that can produce that
+    distribution: it is unbounded, it is on the hot path, and it runs even when nothing changed.
+
+    THE COMMENT ALREADY NAMES THE TRADE and this shard does not overturn its intent: "The queue's
+    live identity can change before sweep appends anything. Read the batched open half once for the
+    cache key, then hand this same capture to the recompute below." Wanting the PR queue's liveness
+    reflected without waiting for a ledger append is legitimate. Paying for it on every read,
+    synchronously, is what must change.
+  design: |
+    (i) A CACHE HIT MUST COST NO NETWORK READ. That is the whole property, and it is checkable: with
+    the ledger unchanged and the cache warm, a request performs ZERO calls on the GitHub gateway.
+    (ii) THE PR QUEUE'S LIVENESS IS PUSHED, NOT PULLED. The daemon already observes queue changes —
+    it appends `sweep.*` rows continuously and receives GitHub webhook wakes. The read side should
+    learn the queue moved from something that already knows, rather than asking GitHub on the
+    operator's request path.
+    (iii) A BOUNDED STALENESS, STATED. If the queue's identity is refreshed on a cadence rather than
+    per request, the snapshot says how old that component is. An operator reading a queue that is up
+    to N seconds behind, and told so, is better served than one waiting an unbounded time for
+    freshness he did not ask for.
+    (iv) FAILURE POLARITY UNCHANGED. `safeReadFailed`'s existing contract — an unreadable health
+    signal reads as an outage, never a silent "GitHub is fine" (W1-T184) — survives exactly. A
+    change that makes an unknown queue state look healthy has traded a latency defect for a
+    correctness one.
+  acceptance:
+    - claim: "with the ledger unchanged and the cache warm, a /v1/status request performs ZERO calls on the GitHub gateway — a counting fake records none"
+      proof: "unit test: test/a-cache-hit-costs-no-network-read.test.ts"
+    - claim: "a cache MISS still produces a byte-identical snapshot to today's for the same inputs — the fix changes when the queue is read, never what the board says"
+      proof: "unit test: test/a-cache-hit-costs-no-network-read.test.ts"
+    - claim: "a change in the PR queue is still reflected, within its stated bound, without a ledger append"
+      proof: "unit test: test/a-cache-hit-costs-no-network-read.test.ts"
+    - claim: "an unreadable queue read still reads as an outage, never as a healthy queue — W1-T184's polarity is preserved"
+      proof: "unit test: test/a-cache-hit-costs-no-network-read.test.ts"
+  falsifier: |
+    CLOSE IF the cache key already avoids the network: read `createBoardSnapshotCache().get` and
+    confirm `readPrQueueIndex` is not called before the key comparison.
+    MEASURED 2026-09-08: it is called at step 2 of 5, unconditionally, and calls
+    `github.listOpenHeadBranches()`.
+    POSITIVE CONTROL, required because "zero gateway calls" is also what a test with no gateway
+    reports: the same fixture must show a cache MISS making exactly the calls it makes today. A
+    suite where both hit and miss record zero has stubbed the gateway out of existence.
+    PROVE IT LOAD-BEARING: the hit fixture must be a genuine hit — same ledger, same fingerprint —
+    and must still return the SAME snapshot object the miss produced. A "hit" that returns a
+    different or empty board is not a hit.
+    DO NOT satisfy this by dropping `prQueueIndexKey` from the cache key. That makes the board stale
+    against a queue that moved and reports it as current — a correctness regression traded for a
+    latency win, and the exact conflation design (iv) refuses.
+    DO NOT satisfy this by wrapping the call in a short TTL and calling it fixed. A TTL still blocks
+    synchronously on expiry, which is the 71-second case; the read has to leave the request path,
+    not merely become less frequent.
+  note: |
+    Rule 25 CHECKED: `src/lib/board.ts` is ordinary src.
+    THIS IS THE SMALL, INDEPENDENT HALF of the question W1-T3196 rules on. It is worth shipping on
+    its own and first: it is one call site, its property is trivially testable, and it removes an
+    unbounded network read from the hot path without waiting for any architectural change.
+    CAVEAT WITH EQUAL WEIGHT: this shard does NOT establish that the GitHub read in the key is THE
+    cause of the measured 85-second tail. W1-T3192's census found 12 synchronous fs/exec calls in
+    serve.ts and 21 in status.ts; this is one candidate among many, distinguished by being (a) a
+    network call and (b) on the cache-HIT path where nothing should be. Attribution still needs a
+    profile, and a builder should take one rather than assume this closes it.
