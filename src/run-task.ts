@@ -1058,6 +1058,7 @@ import {
   stillRedRequiredNames,
   terminalStateReason,
   toQuestionEntry,
+  usableInstrumentEntanglementPaths,
   type ActionableGateFailure,
   type ArmedStalledPr,
   type CancelledRequiredCheck,
@@ -1073,6 +1074,7 @@ import {
   type EscalationReconcileSummary,
   type FixClass,
   type FixDispatchEvidence,
+  type InstrumentEntanglementPaths,
   type LiveStateResult,
   type MemoryGovernorResult,
   type MergeConflictEvidence,
@@ -27589,6 +27591,43 @@ function actionableGateFailuresFromLedger(lines: Array<Record<string, unknown>>,
   return actionableGateFailuresFromReasons(reasons);
 }
 
+function instrumentEntanglementFromLedger(
+  lines: Array<Record<string, unknown>>,
+  key: string,
+  prUrl: string,
+  headSha: string,
+  inputDigest: string,
+): InstrumentEntanglementPaths | undefined {
+  let result: InstrumentEntanglementPaths | undefined;
+  for (const line of lines) {
+    if (
+      line.step !== "review.posted" ||
+      line.task_id !== key ||
+      line.pr_url !== prUrl ||
+      line.head_sha !== headSha ||
+      line.review_input_digest !== inputDigest
+    ) {
+      continue;
+    }
+    result = undefined;
+    if (line.state !== "failure" || line.failure_class !== "instrument_entangled") continue;
+    const verdict = line.decision_verdict;
+    if (verdict === null || typeof verdict !== "object") continue;
+    const structured = verdict as { instrumentEntangled?: unknown; instrumentEntanglementPaths?: unknown };
+    if (
+      structured.instrumentEntangled !== true ||
+      !usableInstrumentEntanglementPaths(structured.instrumentEntanglementPaths)
+    ) {
+      continue;
+    }
+    result = {
+      instrumentPaths: [...structured.instrumentEntanglementPaths.instrumentPaths],
+      srcPaths: [...structured.instrumentEntanglementPaths.srcPaths],
+    };
+  }
+  return result;
+}
+
 /**
  * Fix strikes already attempted for a PR. W1-T78 fixed the cold-dispatch `log` wrapper (`buildSweepEffects`'s
  * `dispatchFix`) to stamp the REAL `task.id` on every `fix.dispatch`/`fix.review`
@@ -27987,6 +28026,9 @@ export function buildOpenPrViews(
     // `DECISIONS.md` PR, not a filing. This widens WHERE a gate failure's remedy can be READ
     // FROM; it does not touch `unmetKey`/`criteriaRecoverable` or what either means.
     const gateFailureKey = taskId ?? `PR-${pr.number}`;
+    const instrumentEntanglement = reviewState === "failure"
+      ? instrumentEntanglementFromLedger(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest)
+      : undefined;
     return {
       prNumber: pr.number,
       prUrl: pr.url,
@@ -28021,6 +28063,8 @@ export function buildOpenPrViews(
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
       actionableGateFailures: reviewState === "failure" ? actionableGateFailuresFromLedger(ledger, gateFailureKey) : [],
+      instrumentEntangled: instrumentEntanglement === undefined ? undefined : true,
+      instrumentEntanglementPaths: instrumentEntanglement,
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
       strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
       supersededBy,
@@ -28521,6 +28565,14 @@ export function buildFixRungDispatchArgs(args: {
         capped: false,
         keywordOnly: false,
         planOnly: false,
+        instrumentEntangled:
+          evidence.instrumentEntangled === true && usableInstrumentEntanglementPaths(evidence.instrumentEntanglementPaths)
+            ? true
+            : undefined,
+        instrumentEntanglementPaths:
+          evidence.instrumentEntangled === true && usableInstrumentEntanglementPaths(evidence.instrumentEntanglementPaths)
+            ? evidence.instrumentEntanglementPaths
+            : undefined,
         headSha: pr.headSha,
         reviewerOutcome: "sweep-reconstructed",
       };
@@ -32151,7 +32203,12 @@ export async function routeFix(
       pr,
       isBlockedCi(pr)
         ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
-        : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures },
+        : {
+            unmetCriteria: pr.unmetCriteria,
+            actionableGateFailures: pr.actionableGateFailures,
+            instrumentEntangled: pr.instrumentEntangled,
+            instrumentEntanglementPaths: pr.instrumentEntanglementPaths,
+          },
     );
     return { outcome: "fixed", reason };
   }
