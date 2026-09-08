@@ -15,10 +15,14 @@
  * INVARIANT — HEALTH-CHECK + ROLLBACK: a bad merge degrades to "last-good daemon running
  * + alert", never a restart storm. After kickstart, an unhealthy boot rolls the checkout
  * back to a known-good sha and alerts.
+ * INVARIANT — THE RESTART SEAM ADAPTS TO ITS HOST (W1-T3200): the kickstart step selects a
+ * {@link RestartBackend} by PROBED capability, never a hard-coded platform string — launchctl on
+ * a host that has it, `deploy/recycle-container.sh` on a host that only has docker + the
+ * checkout. A host with neither refuses loudly and reports it; see {@link selectRestartBackend}.
  *
- * Every side effect (git, launchctl, process probes, clock, fs) is injected via
- * {@link DeployDeps}, so the whole sequence is unit-testable without a live daemon; the
- * real kickstart is additionally gated behind `dryRun`.
+ * Every side effect (git, launchctl/recycle-container, process probes, clock, fs) is injected
+ * via {@link DeployDeps}, so the whole sequence is unit-testable without a live daemon; the real
+ * restart is additionally gated behind `dryRun`.
  */
 // Why: the full design rationale and every measured incident this module was built to
 // fix — docs/forensics/deployer.md#file-header
@@ -210,15 +214,70 @@ export function evaluateIdleGate(
   return { idle: false, proceed: forced, forced, waitedMs };
 }
 
-/** The two ways a deploy can fail and poison the auto-retry — a checkout-state problem the
- *  operator fixes locally, versus bad code that was rolled back — never interchangeable. */
-export type DeployFailureKind = "dirty-tree-conflict" | "health-check-rollback";
+/**
+ * ONE WAY THIS HOST MIGHT RESTART THE DAEMON — launchd's `launchctl kickstart -k` on macOS,
+ * `deploy/recycle-container.sh` on the container fleet, or any future mechanism. Declared so
+ * {@link selectRestartBackend} can pick between them WITHOUT ever reading `process.platform`
+ * (W1-T3200 design (i)): what a host CAN DO decides, not what it calls itself.
+ */
+export interface RestartBackend {
+  /** Stable, human-legible name for logs/alerts (e.g. "launchctl", "recycle-container"). */
+  name: string;
+  /** Is this backend usable on THIS host, right now? MUST NOT throw — an unusable backend
+   *  probes false, it does not except; a throwing probe would wrongly abort selection over
+   *  every backend declared after it. */
+  probe: () => boolean;
+  /** What a restart via this backend would do, in words. Dry-run calls this — NEVER `restart()`
+   *  — on every registered backend, so dry-run means "describe, change nothing" identically
+   *  whichever backend would have been selected live (design (v)). */
+  describe: () => string;
+  /** Perform the real restart. A script's own refusal (workers past the wait, a failed pull, an
+   *  image-id mismatch) THROWS; the caller reports it verbatim and never retries past it,
+   *  suppresses it, or falls back to a different backend or a bare `docker restart`
+   *  (design (iii)). */
+  restart: () => void;
+}
+
+/** The outcome of probing a set of {@link RestartBackend}s: which one (if any) is usable, and
+ *  why — so an unsupported host can SAY SO on the surface an operator reads (design (ii))
+ *  instead of declining invisibly, which is today's actual defect on a launchctl-less host. */
+export interface RestartSelection {
+  backend?: RestartBackend;
+  reason: string;
+}
+
+/**
+ * Pick the first backend that PROBES available, in declaration order — CAPABILITY decides,
+ * never `process.platform` or any other host label (design (i); the falsifier explicitly refuses
+ * a platform-string branch). No usable backend is itself a loud, reported outcome (design (ii)),
+ * never a silent no-op: the caller logs/alerts `reason` and the cycle reports it as a refusal
+ * rather than pretending nothing needed restarting.
+ */
+export function selectRestartBackend(backends: readonly RestartBackend[]): RestartSelection {
+  for (const backend of backends) {
+    if (backend.probe()) return { backend, reason: `${backend.name} probed available` };
+  }
+  const tried = backends.map((b) => b.name);
+  return {
+    backend: undefined,
+    reason:
+      tried.length > 0
+        ? `no usable restart backend on this host — probed and unavailable: ${tried.join(", ")}`
+        : "no restart backends registered",
+  };
+}
+
+/** The three ways a deploy can fail and poison the auto-retry — a checkout-state problem the
+ *  operator fixes locally, bad code that was rolled back, or a pull that landed with no usable
+ *  way to restart onto it — never interchangeable. */
+export type DeployFailureKind = "dirty-tree-conflict" | "health-check-rollback" | "restart-refused";
 
 /** Render a recorded failure kind for the skip line. An unrecorded kind is stated as unknown
  *  rather than assumed — assuming is exactly the defect this replaced. */
 export function describeFailureKind(kind: DeployFailureKind | undefined): string {
   if (kind === "dirty-tree-conflict") return "dirty-tree conflict — local files block the fast-forward";
   if (kind === "health-check-rollback") return "failed health-check, rolled back";
+  if (kind === "restart-refused") return "pulled but not restarted — no usable restart backend, or the backend refused";
   return "reason not recorded";
 }
 
@@ -394,8 +453,15 @@ export interface DeployDeps {
    *  falls back to `installHead()`, the previous behaviour, never to no rollback at all. */
   lastGoodBootSha?: (excludeSha: string) => string | undefined;
   probeIdle: () => IdleProbe;
-  /** launchctl kickstart -k the daemon job. */
+  /** launchctl kickstart -k the daemon job. RETAINED as the fallback backend when
+   *  `restartBackends` below is omitted, and for direct callers/tests that already exercise it. */
   kickstart: () => void;
+  /** OPTIONAL — the restart backends usable on THIS host, tried in probe order (see
+   *  {@link RestartBackend}, {@link selectRestartBackend}; W1-T3200). Omitted ⇒ a single
+   *  fallback backend wrapping `kickstart` above, unconditionally "available" — today's
+   *  launchctl-only behaviour, unchanged. Scoped to the DAEMON restart only: the console
+   *  kickstart below is a separate concern this task leaves untouched. */
+  restartBackends?: () => readonly RestartBackend[];
   /** Poll for boot health for the configured window; returns what was observed. */
   waitBootHealth: (sinceMs: number) => HealthInputs;
   /** Record a failure for the operator (state/DEPLOY_FAILED) + the failed HEAD. */
@@ -605,22 +671,69 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   if (gate2.forced) {
     deps.log("deploy.idle_ceiling_forced", { phase: "pre-kickstart", ...gate2Fields });
   }
+
+  // THE RESTART SEAM (W1-T3200): probed CAPABILITIES decide which backend restarts the daemon,
+  // never a hard-coded platform string — a host with launchctl uses it, a host with only the
+  // container scripts uses those, and either can be the sole backend a caller registers. Omitted
+  // ⇒ a single fallback wrapping `kickstart` below, unconditionally "available" — today's
+  // launchctl-only behaviour, unchanged (Rule 25: this supplies a second implementation of the
+  // existing seam, not a rewrite of every caller).
+  const restartBackends: readonly RestartBackend[] = deps.restartBackends?.() ?? [
+    {
+      name: "kickstart",
+      probe: () => true,
+      describe: () => "the injected kickstart() dependency",
+      restart: deps.kickstart,
+    },
+  ];
+
   // W1-T380: a deferral episode ends ONLY on a cycle that actually restarts, so this branch
   // keeps the persisted clock INTACT — clearing it here once let a forced dry-run reset the
   // clock while the daemon sat stale for over an hour (docs/forensics/deployer.md#rundeploycycle--the-dry-run-deferral-bug).
   if (opts.dryRun) {
-    deps.log("deploy.dry_run", { would_kickstart: true, to: short(toHead), retained_wait_ms: gate2.waitedMs });
+    // DRY-RUN SURVIVES ON EVERY BACKEND (design (v)): `describe()` is read from EACH registered
+    // backend — `restart()` is called on NONE of them — so a dry run means the same thing
+    // whichever backend would have been selected live.
+    deps.log("deploy.dry_run", {
+      would_kickstart: true,
+      to: short(toHead),
+      retained_wait_ms: gate2.waitedMs,
+      restart_backends: restartBackends.map((b) => ({ name: b.name, available: b.probe(), description: b.describe() })),
+    });
     return { deployed: false, reason: "dry-run (pulled; kickstart skipped)", fromHead, toHead };
   }
 
   // Genuinely idle, or the ceiling carried it — and THIS cycle is restarting, so the episode
-  // ends. Kept ABOVE `deps.kickstart()`: a real cycle must clear unconditionally, or the clock
+  // ends. Kept ABOVE the restart call: a real cycle must clear unconditionally, or the clock
   // never resets and every later tick forces a SIGKILL restart.
   deps.clearDeferredSince?.();
 
+  const selection = selectRestartBackend(restartBackends);
+  if (!selection.backend) {
+    // NO USABLE BACKEND: refuse LOUDLY (design (ii)) rather than the silent decline this
+    // replaces — today, an absent launchctl just never restarts, indistinguishable from "nothing
+    // needed restarting". The pull already happened and is inert on disk; the marker is left in
+    // place (never consumed) so a later tick — on this host or once a backend becomes usable —
+    // retries automatically, exactly like the idle-gate deferrals above.
+    deps.log("deploy.no_restart_backend", { to: short(toHead), reason: selection.reason });
+    deps.alert(`deploy of ${toHead} was pulled but could not be restarted: ${selection.reason}`, toHead, "restart-refused");
+    return { deployed: false, reason: `restart-refused: ${selection.reason}`, fromHead, toHead, pulledPendingRestart: true };
+  }
+
   const kickstartAt = deps.now();
-  deps.kickstart();
-  deps.log("deploy.kickstart", { to: short(toHead) });
+  try {
+    selection.backend.restart();
+  } catch (err) {
+    // A BACKEND'S OWN REFUSAL IS AUTHORITATIVE AND NEVER SECOND-GUESSED (design (iii)) —
+    // recycle-container.sh refusing on workers past its wait, a failed pull, or an image-id
+    // mismatch throws exactly like this. Reported verbatim; never retried past, suppressed, or
+    // replaced by a different backend or a bare `docker restart`.
+    const message = err instanceof Error ? err.message : String(err);
+    deps.log("deploy.restart_refused", { to: short(toHead), backend: selection.backend.name, message });
+    deps.alert(`deploy of ${toHead} was pulled but ${selection.backend.name} refused the restart: ${message}`, toHead, "restart-refused");
+    return { deployed: false, reason: `restart-refused: ${message}`, fromHead, toHead, pulledPendingRestart: true };
+  }
+  deps.log("deploy.kickstart", { to: short(toHead), backend: selection.backend.name });
 
   const health = assessBootHealth(deps.waitBootHealth(kickstartAt), opts.health);
   if (health.healthy) {
@@ -653,7 +766,11 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     anchor: bootedSha ? "booted" : "install-head",
   });
   deps.resetHard(rollbackTo);
-  deps.kickstart();
+  // The SAME backend selected above, not the raw `kickstart` field — this host may have no
+  // launchctl at all, and the rollback restart must use whichever backend just proved itself
+  // usable (design (i)/(iii): capability decided once this cycle, and a script's earlier success
+  // is never second-guessed by falling back to a different mechanism here).
+  selection.backend.restart();
   deps.alert(`deploy of ${toHead} failed health-check (${health.reason}); rolled back to ${rollbackTo}`, toHead, "health-check-rollback");
   deps.clearMarker();
   return { deployed: false, reason: `health-check-failed-rolled-back: ${health.reason}`, fromHead, toHead, rolledBackTo: rollbackTo };
@@ -764,6 +881,58 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
 
   const countBootsAfter = (sinceMs: number): number => countLedgerBootsAfter(o.ledgerPath, sinceMs);
 
+  // ── THE RESTART SEAM'S TWO REAL BACKENDS (W1-T3200) ── selected by PROBED capability, never by
+  // `process.platform`: a host with launchctl uses it (today's only path, macOS); a host with only
+  // `deploy/recycle-container.sh` on its checkout and a docker client on PATH uses that instead
+  // (the fleet's only host, Linux, has no launchctl at all — see this module's file header). See
+  // {@link selectRestartBackend} for the probe-in-order selection itself.
+  const isBinaryAbsent = (err: unknown): boolean =>
+    typeof err === "object" && err !== null && (err as { code?: unknown }).code === "ENOENT";
+  const kickstartDaemon = () => {
+    exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.daemonLabel}`]);
+  };
+  const launchctlBackend: RestartBackend = {
+    name: "launchctl",
+    // Probes the BINARY, not this particular job: `launchctl list` (no label) runs cleanly on any
+    // macOS host regardless of whether THIS job happens to be loaded right now, so only ENOENT —
+    // the binary genuinely absent, as measured on this task's Linux fleet host — reads as
+    // unavailable. Any other failure still means launchctl ran, which is all "usable" asks here.
+    probe: () => {
+      try {
+        exec("launchctl", ["list"]);
+        return true;
+      } catch (err) {
+        // Anything OTHER than ENOENT still means launchctl RAN (a bad arg, a permission error,
+        // whatever it was) — "present but errored" and "present" coincide for this probe's only
+        // consumer, which asks nothing finer than usable/not; only genuine absence reads false.
+        return !isBinaryAbsent(err);
+      }
+    },
+    describe: () => `launchctl kickstart -k gui/${o.uid}/${o.daemonLabel}`,
+    restart: kickstartDaemon,
+  };
+  const recycleContainerScript = join(o.installPath, "deploy", "recycle-container.sh");
+  const recycleContainerBackend: RestartBackend = {
+    name: "recycle-container",
+    // Usable only when the SCRIPT is on this checkout AND a docker client is on PATH — everything
+    // past that is the script's own authority (design (iii)): a daemon it cannot reach, a failed
+    // pull, an image-id mismatch all surface as ITS OWN refusal (a thrown, non-zero exit), never
+    // second-guessed here.
+    probe: () => {
+      if (!existsSync(recycleContainerScript)) return false;
+      try {
+        exec("docker", ["version", "--format", "{{.Client.Version}}"]);
+        return true;
+      } catch {
+        return false; // docker absent, or unreachable — the script needs a working docker to run
+      }
+    },
+    describe: () => `${recycleContainerScript} (pause, drain, pull and replace the ${o.daemonLabel} container)`,
+    restart: () => {
+      exec("bash", [recycleContainerScript]);
+    },
+  };
+
   return {
     log: o.log ?? buildDeployLogger(o.ledgerPath),
     now: () => Date.now(),
@@ -784,7 +953,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     lastFailedKind: () => {
       try {
         const k = (JSON.parse(readFileSync(deployFailedAlertPath(o.stateRoot), "utf8")) as { kind?: string }).kind;
-        return k === "dirty-tree-conflict" || k === "health-check-rollback" ? k : undefined;
+        return k === "dirty-tree-conflict" || k === "health-check-rollback" || k === "restart-refused" ? k : undefined;
       } catch {
         return undefined; // absent/legacy/corrupt ⇒ "reason not recorded", never a guess
       }
@@ -920,9 +1089,8 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         JSON.stringify({ message, scope: "console", at: new Date().toISOString() }, null, 2),
       );
     },
-    kickstart: () => {
-      exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.daemonLabel}`]);
-    },
+    kickstart: kickstartDaemon,
+    restartBackends: () => [launchctlBackend, recycleContainerBackend],
     waitBootHealth: (sinceMs) => {
       let waited = 0;
       let boots = 0;
