@@ -3230,9 +3230,10 @@ function isRetryableReviewThrow(reason: unknown): boolean {
 
 export function isPostReviewDiffCeilingRefusal(reason: unknown): boolean {
   if (!isRetryableReviewThrow(reason)) return false;
-  const text = reason.toLowerCase();
+  const raw = String(reason);
+  const text = raw.toLowerCase();
   return (
-    /pullrequest\.diff\s+too_large/i.test(String(reason)) ||
+    /pullrequest\.diff\s+too_large/i.test(raw) ||
     (text.includes("http 406") &&
       text.includes("diff exceeded") &&
       text.includes("maximum number of files") &&
