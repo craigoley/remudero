@@ -19,10 +19,10 @@
 // Why: the cap's zero-headroom history and the 2026-08-22 raise are archived in
 //   docs/forensics/claude-md-budget-ratchet.md#module-header.
 
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
+import { git as spawnGit } from "./lib/git.mjs";
 
 /** The injected weight of `path`, in bytes (not characters) — a raw `Buffer.length`, so multi-byte
  *  UTF-8 content counts its real injected weight instead of undercounting as one "character". */
@@ -96,7 +96,13 @@ export function measureBytesAtRef(file, ref, deps = {}) {
  *  without a repo, and this default is still exercised by a test that really shells out — a seam
  *  every test fakes is a seam nothing covers. */
 export function defaultGit(args) {
-  return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  // NEVER `gitOrThrow` here: it trims stdout, and this reads a file's CONTENT for an exact
+  // `Buffer.byteLength` measurement -- a trimmed trailing newline would silently undercount.
+  const result = spawnGit(args, { stdio: ["ignore", "pipe", "ignore"] });
+  if (result.error || result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.error?.message || `exit ${result.status}`}`);
+  }
+  return result.stdout;
 }
 
 /**
@@ -211,6 +217,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/claude-md-budget-ratchet.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

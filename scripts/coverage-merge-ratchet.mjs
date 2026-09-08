@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
-import { pathToFileURL } from 'node:url';
+import { isMainModule } from "./lib/argv.mjs";
 
 const RAW_COVERAGE_FILE = /^coverage-\d+-\d{13}-\d+\.json$/;
 const COMPACT_COVERAGE_FILE = /^coverage-bundle-\d+-\d{13}-\d+\.json$/;
@@ -238,7 +238,7 @@ function main(argv) {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isMainModule(import.meta.url)) {
   try {
     main(process.argv.slice(2));
   } catch (error) {

@@ -203,7 +203,13 @@ test("W1-T2715 (acceptance 4a): with git unreadable the check is SILENT — it n
 test("W1-T2715 (acceptance 4b): the check WRITES NOTHING — its own source spawns one read-only git and creates no fixture", () => {
   const src = readFileSync(WRAPPER, "utf8");
   const added = src.slice(src.indexOf("W1-T2715"));
-  assert.match(added, /execFileSync\("git", \["status", "--porcelain"\]/, "one read-only git call");
+  // W1-T2907 moved the spawn itself into scripts/lib/git.mjs's `gitOrThrow`, so the wrapper now
+  // NAMES the git it runs rather than spawning it inline. The claim is unchanged and still the
+  // point of this test: exactly one git call, and it is `status --porcelain`, which writes
+  // nothing. `gitOrThrow` itself only reads — it runs the argv it is given and throws on a
+  // non-zero exit.
+  assert.match(added, /gitOrThrow\(\["status", "--porcelain"\]/, "one read-only git call");
+  assert.doesNotMatch(added, /execFileSync\("git"/, "and the inline spawn it replaced is gone, not merely unused");
   assert.doesNotMatch(added, /writeFileSync|mkdirSync|renameSync|rmSync/, "and no write of any kind");
   assert.doesNotMatch(added, /"-uno"/, "and NOT -uno, which would be blind to instance 2's untracked leak");
 });

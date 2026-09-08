@@ -24,7 +24,8 @@
 import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
+import { isMainModule } from "./lib/argv.mjs";
+import { parseLcovRecords } from './lib/lcov.mjs';
 
 // W1-T2570: esbuild is CJS-only here; `createRequire` is how an .mjs module reaches it.
 const require = createRequire(import.meta.url);
@@ -42,42 +43,32 @@ export function parseLcovHitsByFile(lcovText) {
   const files = new Map();
   const fnLines = new Map();
   const fnHits = new Map();
-  let current = null;
-  let currentPath = null;
-  for (const line of lcovText.split('\n')) {
-    if (line.startsWith('SF:')) {
-      currentPath = line.slice(3).trim();
-      current = files.get(currentPath);
-      if (!current) {
-        current = new Map();
-        files.set(currentPath, current);
-      }
-    } else if (line.startsWith('FN:') && current) {
-      // FN:<line>,<name> — a declared function; FNDA is the truth for whether it ran, not DA.
-      // A LIST: one line can declare several (W1-T481). Why: docs/forensics/diff-coverage.md#fn-record-parsing.
-      const [ln, name] = line.slice(3).split(',');
+  for (const record of parseLcovRecords(lcovText)) {
+    const currentPath = record.sourceFile;
+    let current = files.get(currentPath);
+    if (!current) {
+      current = new Map();
+      files.set(currentPath, current);
+    }
+    // FN:<line>,<name> — a declared function; FNDA is the truth for whether it ran, not DA. A
+    // LIST: one line can declare several (W1-T481). Why: docs/forensics/diff-coverage.md#fn-record-parsing.
+    for (const { line: declLine, names } of record.fn) {
       if (!fnLines.has(currentPath)) fnLines.set(currentPath, new Map());
       const namesByLine = fnLines.get(currentPath);
-      const declLine = Number(ln);
       if (!namesByLine.has(declLine)) namesByLine.set(declLine, []);
-      namesByLine.get(declLine).push(name);
-    } else if (line.startsWith('FNDA:') && current) {
-      // ANY-NON-ZERO, never last-wins, so a later FNDA:0 for a duplicate pair can't erase a real
-      // call count. Why: docs/forensics/diff-coverage.md#fnda-record-parsing.
-      const [hits, name] = line.slice(5).split(',');
+      namesByLine.get(declLine).push(...names);
+    }
+    // ANY-NON-ZERO, never last-wins, so a later FNDA:0 for a duplicate pair can't erase a real
+    // call count. Why: docs/forensics/diff-coverage.md#fnda-record-parsing.
+    for (const { name, hits } of record.fnda) {
       if (!fnHits.has(currentPath)) fnHits.set(currentPath, new Map());
       const enteredByName = fnHits.get(currentPath);
-      enteredByName.set(name, (enteredByName.get(name) ?? false) || Number(hits) > 0);
-    } else if (line.startsWith('DA:') && current) {
-      // ANY-HIGHER-WINS, never last-wins (W1-T2276, same reasoning as FNDA: above): a duplicate
-      // DA: from another SF: block is only ever real evidence, so the larger count wins.
-      const [lineNoStr, hitsStr] = line.slice(3).split(',');
-      const ln = Number(lineNoStr);
-      const hits = Number(hitsStr);
+      enteredByName.set(name, (enteredByName.get(name) ?? false) || hits > 0);
+    }
+    // ANY-HIGHER-WINS, never last-wins (W1-T2276, same reasoning as FNDA: above): a duplicate
+    // DA: from another SF: block is only ever real evidence, so the larger count wins.
+    for (const { line: ln, hits } of record.da) {
       current.set(ln, Math.max(current.get(ln) ?? 0, hits));
-    } else if (line.startsWith('end_of_record')) {
-      current = null;
-      currentPath = null;
     }
   }
   reconcileDuplicateFunctionDeclarations(fnLines);
@@ -266,44 +257,101 @@ export function findMissingSourceCoverage(diffText, lcov, isTypeOnly = isTypeOnl
  * @returns {Map<string, Map<number, {counterpartLine: number, runLength: number}>>}
  */
 export const MIN_RELOCATION_RUN = 5;
+
+/**
+ * Longest contiguous run of `A` starting at `i` that matches a contiguous, unconsumed run of `R`.
+ * Greedy longest-first so the result is deterministic. Returns `{ j: -1, len: 0 }` when nothing
+ * matches. Extracted by W1-T3138 only so the SAME matching rule can be applied to one candidate
+ * source file at a time -- the comparison itself (trimmed text, contiguity on both sides,
+ * consume-once) is unchanged from W1-T2325.
+ * @param {Array<[number, string]>} A
+ * @param {number} i
+ * @param {Array<[number, string]>} R
+ * @param {Set<number>} consumed
+ */
+function bestRunAt(A, i, R, consumed) {
+  let bestJ = -1;
+  let bestLen = 0;
+  for (let j = 0; j < R.length; j++) {
+    if (consumed.has(j)) continue;
+    if (R[j][1].trim() !== A[i][1].trim()) continue;
+    let len = 1;
+    while (
+      i + len < A.length &&
+      j + len < R.length &&
+      !consumed.has(j + len) &&
+      A[i + len][0] === A[i + len - 1][0] + 1 && // added run stays contiguous in the new file
+      R[j + len][0] === R[j + len - 1][0] + 1 && // removed run stays contiguous in the old file
+      R[j + len][1].trim() === A[i + len][1].trim()
+    ) {
+      len++;
+    }
+    if (len > bestLen) {
+      bestLen = len;
+      bestJ = j;
+    }
+  }
+  return { j: bestJ, len: bestLen };
+}
+
 export function computeRelocatedLines(added, removed, { minRun = MIN_RELOCATION_RUN } = {}) {
   const relocated = new Map();
+  // Sorted once per SOURCE file and shared across destinations, with `consumed` keyed by that file
+  // so one removed run can never be spent twice -- W1-T2325's consume-once bound, now across files.
+  /** @type {Map<string, {R: Array<[number, string]>, consumed: Set<number>}>} */
+  const sources = new Map();
+  const sourceFor = (file) => {
+    let e = sources.get(file);
+    if (e === undefined) {
+      const lines = removed.get(file);
+      if (!lines) return undefined;
+      e = { R: [...lines.entries()].sort((a, b) => a[0] - b[0]), consumed: new Set() };
+      sources.set(file, e);
+    }
+    return e;
+  };
+
   for (const [file, addedLines] of added) {
-    const removedLines = removed.get(file);
-    if (!removedLines) continue;
     const A = [...addedLines.entries()].sort((a, b) => a[0] - b[0]);
-    const R = [...removedLines.entries()].sort((a, b) => a[0] - b[0]);
-    const consumed = new Set();
     const fileMap = new Map();
     let i = 0;
     while (i < A.length) {
-      let bestJ = -1;
-      let bestLen = 0;
-      for (let j = 0; j < R.length; j++) {
-        if (consumed.has(j)) continue;
-        if (R[j][1].trim() !== A[i][1].trim()) continue;
-        let len = 1;
-        while (
-          i + len < A.length &&
-          j + len < R.length &&
-          !consumed.has(j + len) &&
-          A[i + len][0] === A[i + len - 1][0] + 1 && // added run stays contiguous in the new file
-          R[j + len][0] === R[j + len - 1][0] + 1 && // removed run stays contiguous in the old file
-          R[j + len][1].trim() === A[i + len][1].trim()
-        ) {
-          len++;
-        }
-        if (len > bestLen) {
-          bestLen = len;
-          bestJ = j;
+      // (iii) THE DESTINATION FILE'S OWN REMOVED LINES ARE SEARCHED FIRST, so a within-file move
+      // keeps exactly the pairing it had before W1-T3138 and today's verdicts are a strict subset
+      // of tomorrow's. A cross-file source is consulted ONLY when the same-file search finds no run
+      // long enough -- never to win a tie against it.
+      let chosenFile = file;
+      let own = sourceFor(file);
+      let best = own === undefined ? { j: -1, len: 0 } : bestRunAt(A, i, own.R, own.consumed);
+      if (best.len < minRun) {
+        // (i) Then every OTHER file that lost lines in this same diff. The added run must map onto a
+        // contiguous run within ONE source file: each candidate is scored on its own, so a
+        // "relocation" can never be stitched together out of fragments of two different files.
+        for (const [candidate] of removed) {
+          if (candidate === file) continue;
+          const src = sourceFor(candidate);
+          if (src === undefined) continue;
+          const r = bestRunAt(A, i, src.R, src.consumed);
+          if (r.len > best.len) {
+            best = r;
+            chosenFile = candidate;
+          }
         }
       }
-      if (bestJ !== -1 && bestLen >= minRun) {
-        for (let k = 0; k < bestLen; k++) {
-          consumed.add(bestJ + k);
-          fileMap.set(A[i + k][0], { counterpartLine: R[bestJ + k][0], runLength: bestLen });
+      if (best.j !== -1 && best.len >= minRun) {
+        const src = sourceFor(chosenFile);
+        for (let k = 0; k < best.len; k++) {
+          src.consumed.add(best.j + k);
+          fileMap.set(A[i + k][0], {
+            counterpartLine: src.R[best.j + k][0],
+            runLength: best.len,
+            // (iv) NAMED so the exemption is auditable: a reviewer can open that file and check the
+            // claim instead of taking it. For a same-file move this is the destination itself,
+            // which is what the report already printed.
+            counterpartFile: chosenFile,
+          });
         }
-        i += bestLen;
+        i += best.len;
       } else {
         i += 1;
       }
@@ -587,7 +635,7 @@ function main(argv) {
     if (reloc) {
       exempt.push({
         v,
-        reason: `relocated from ${file}:${reloc.counterpartLine} (${reloc.runLength}-line contiguous match against the diff's removed lines)`,
+        reason: `relocated from ${reloc.counterpartFile}:${reloc.counterpartLine} (${reloc.runLength}-line contiguous match against the diff's removed lines)`,
         kind: 'relocated',
       });
       continue;
@@ -619,6 +667,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/diff-coverage.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

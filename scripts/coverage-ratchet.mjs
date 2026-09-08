@@ -22,7 +22,8 @@
 
 import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { pathToFileURL } from 'node:url';
+import { isMainModule } from "./lib/argv.mjs";
+import { parseLcovRecords } from './lib/lcov.mjs';
 
 /**
  * Sum LF/LH/BRF/BRH across every record in an lcov report and derive overall percentages.
@@ -44,19 +45,16 @@ export function parseLcovTotals(lcovText) {
   // flushed before exit), which flaked the aggregate branch percentage by a few
   // hundredths of a point and false-blocked test-only/plan-only PRs. Only the
   // repo's own `src/**` should gate.
-  let inRepo = true;
-  for (const line of lcovText.split('\n')) {
-    if (line.startsWith('SF:')) {
-      const path = line.slice(3).trim();
-      inRepo = !(path.startsWith('../') || path.startsWith('/'));
-      if (!inRepo) skippedRecords += 1;
+  for (const record of parseLcovRecords(lcovText)) {
+    const inRepo = !(record.sourceFile.startsWith('../') || record.sourceFile.startsWith('/'));
+    if (!inRepo) {
+      skippedRecords += 1;
       continue;
     }
-    if (!inRepo) continue;
-    if (line.startsWith('LF:')) lf += Number(line.slice(3));
-    else if (line.startsWith('LH:')) lh += Number(line.slice(3));
-    else if (line.startsWith('BRF:')) brf += Number(line.slice(4));
-    else if (line.startsWith('BRH:')) brh += Number(line.slice(4));
+    lf += record.lf;
+    lh += record.lh;
+    brf += record.brf;
+    brh += record.brh;
   }
   return {
     linesPct: lf > 0 ? (100 * lh) / lf : 100,
@@ -298,6 +296,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/coverage-ratchet.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

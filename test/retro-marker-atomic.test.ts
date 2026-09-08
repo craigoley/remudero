@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 // intercepts the REAL fs.writeFileSync/fs.renameSync calls saveMarker makes, never a
 // reimplementation.
 import fsDefault from "node:fs";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -580,6 +580,7 @@ function setupFakeRetroFixture(
     mkdirSync(join(seed, "scripts"), { recursive: true });
     // The REAL generator script (self-contained: no src/ imports) -- never a reimplementation.
     copyFileSync(join(process.cwd(), "scripts", "generate-plan-index.mjs"), join(seed, "scripts", "generate-plan-index.mjs"));
+    cpSync(join(process.cwd(), "scripts", "lib"), join(seed, "scripts", "lib"), { recursive: true });
   }
   execFileSync("git", ["-C", seed, "add", "-A"]);
   execFileSync("git", ["-C", seed, "commit", "-q", "-m", "chore: fixture seed"]);

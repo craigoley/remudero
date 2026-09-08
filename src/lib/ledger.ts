@@ -330,6 +330,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // baseline a restarted process cannot carry; archived away, a rotation un-trips a tripped breaker.
   "dispatch.circuit_broken",
   "dispatch.circuit_broken.escalated",
+  // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
+  // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
+  // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
+  // as if it had never failed — the exact "derived from consumers, not hardcoded" case this set exists for.
+  "dispatch.blocked_independent",
   // W1-T316: `escalateLifetimeCapExceeded`'s (run-task.ts) dedup marker, written whether or not
   // delivery succeeds; dropping it re-opens a duplicate lifetime-cap escalation.
   "dispatch.lifetime_capped.escalated",
@@ -362,6 +367,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "correction.provenance",
   "sweep.disposed",
   "escalation.issue_opened",
+  // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
+  // W1-T3167's re-judge rung, which must not re-ask a settled question. "escalation.demoted" was
+  // ALREADY absent here: a demotion is the one outcome invisible on the needs-human board, so
+  // rotating it away loses the only evidence the judge acted.
+  "escalation.judged",
+  "escalation.demoted",
   // impl-FL: daemon.ts counts these back to decide whether a reset string was already announced,
   // so the line IS the dedup key. Registered by exact name — a dotted child inherits nothing.
   "daemon.usage_reset_unrecognised",

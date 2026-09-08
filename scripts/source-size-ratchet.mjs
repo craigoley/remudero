@@ -24,6 +24,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { splitInheritedViolations, inheritedNotice } from "./lib/inherited-violation.mjs";
 import { assertNoDuplicateKeys } from "./lib/json-duplicate-keys.mjs";
+import { git as spawnGit } from "./lib/git.mjs";
 
 export const DEFAULT_BASELINE_RELATIVE_PATH = "scripts/source-size-baseline.json";
 
@@ -292,7 +293,7 @@ function runLegacyRatchet(argv) {
 export const SOURCE_SIZE_SIGNAL_SCHEMA_VERSION = 1;
 
 function gitResult(root, args) {
-  return spawnSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  return spawnGit(args, { cwd: root });
 }
 
 function runGit(root, args, stage) {

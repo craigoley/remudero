@@ -33,11 +33,11 @@
 //   node scripts/tracked-source-write-check.mjs
 // Exits 1 and names every file:line/call/target it found; exits 0 ("clean") otherwise.
 
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { isMainModule } from "./lib/argv.mjs";
+import { REPO_ROOT } from "./lib/repo-root.mjs";
+import { git } from "./lib/git.mjs";
 
 /** Exactly the six mutating fs calls design note (i) names — never grown ad hoc. */
 export const MUTATING_CALLS = ["writeFileSync", "appendFileSync", "rmSync", "unlinkSync", "cpSync", "renameSync"];
@@ -387,7 +387,7 @@ export function scanSource(source, relPath) {
  *  filtered to `.ts`. Throws if the read itself fails (not a git repo, `git` unavailable) —
  *  distinct from a repo that legitimately tracks nothing under `test/`, which returns `[]`. */
 export function listTrackedTestFiles(repoRoot) {
-  const result = spawnSync("git", ["-C", repoRoot, "ls-files", "-z", "--", "test"], { encoding: "utf8" });
+  const result = git(["ls-files", "-z", "--", "test"], { cwd: repoRoot });
   if (result.error || result.status !== 0) {
     throw new Error(
       `tracked-source-write-check: \`git ls-files\` failed in ${repoRoot}: ` +
@@ -421,7 +421,7 @@ export function scanRepo(repoRoot) {
  * below assigns `process.exitCode`, and only when this file is actually run as the CLI.
  */
 export function main({
-  repoRoot = join(dirname(fileURLToPath(import.meta.url)), ".."),
+  repoRoot = REPO_ROOT,
   scan = scanRepo,
   log = console.log,
   error = console.error,
@@ -444,6 +444,6 @@ export function main({
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   process.exitCode = main();
 }

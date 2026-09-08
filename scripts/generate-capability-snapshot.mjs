@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 // scripts/generate-capability-snapshot.mjs
 //
 // CAPABILITY SNAPSHOT generator + drift gate (W1-T383), the generate-cli-reference.mjs (W1-T48)
@@ -41,7 +41,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { parse as parseYaml } from "yaml";
 import { RECON_MAX_TURNS } from "../src/run-task.ts";
 import { loadPolicy, policyPath, resolveDailyCostCeiling } from "../src/lib/policy.ts";
@@ -275,6 +275,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`tsx scripts/generate-capability-snapshot.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

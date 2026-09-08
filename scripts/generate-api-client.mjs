@@ -27,7 +27,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { parse as parseYaml } from "yaml";
 
 const GENERATED_BANNER = (sourceLabel) =>
@@ -244,6 +244,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/generate-api-client.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

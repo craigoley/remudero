@@ -22,7 +22,7 @@
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { parse as parseYaml } from "yaml";
 
 const REQUIRED_FIELDS = ["id", "fact", "src"];
@@ -157,6 +157,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/generate-learnings-index.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

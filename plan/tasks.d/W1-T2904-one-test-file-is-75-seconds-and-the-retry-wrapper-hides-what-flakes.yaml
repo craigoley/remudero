@@ -9,7 +9,26 @@
   risk: high
   origin: retro#recon-2026-09-05
   plan_refs: ["§5", "§9", "W1-T255"]
-  files: [scripts/test-with-retry.mjs, scripts/test-tier-manifest.json, scripts/flake-retry-aggregate.mjs, .github/workflows/ci.yml, src/lib/ci-parity.ts, package.json, test/test-tier-manifest.test.ts, test/flake-retry-aggregate.test.ts]
+  files:
+    - .github/workflows/ci-gate.yml
+    - .github/workflows/ci.yml
+    - package.json
+    - scripts/comment-load-baseline.json
+    - scripts/flake-retry-aggregate.mjs
+    - scripts/test-duration-reporter.mjs
+    - scripts/test-tier-manifest.json
+    - scripts/test-tier-manifest.mjs
+    - scripts/test-with-retry.mjs
+    - src/lib/ci-parity.ts
+    - src/lib/review.ts
+    - test/ci-sharding.test.ts
+    - test/fast-lane-classifier.test.ts
+    - test/flake-retry-aggregate.test.ts
+    - test/push-ci-on-main.test.ts
+    - test/test-duration-reporter.test.ts
+    - test/test-tier-manifest.test.ts
+    - test/test-with-retry.test.ts
+    - test/workflow-playwright-install.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -26,9 +45,10 @@
     (`test/serve.live-state.test.ts:472`) and 34 elapsed-time assertions are what the retry
     wrapper is masking.
 
-    THE FIX: (1) `scripts/test-tier-manifest.json` records each test file's last measured
-    duration (captured by the retry wrapper from the TAP summary it already parses and
-    committed like a baseline); the CI matrix shards by cumulative duration rather than file
+    THE FIX: (1) `scripts/test-tier-manifest.json` records each test file's measured duration
+    from Node's structured `test:complete` event stream, merged into a deterministic proposal
+    artifact without dirtying the runner checkout and committed like a baseline; the CI matrix
+    shards by cumulative duration rather than file
     count, and files over a stated threshold form a `test:slow` tier (`package.json` script)
     that runs as its own job so the fast tier's wall-clock is bounded. (2)
     `scripts/flake-retry-aggregate.mjs` reads every `FLAKE-RETRY:` line a run emitted and

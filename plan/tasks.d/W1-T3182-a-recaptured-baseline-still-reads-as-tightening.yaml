@@ -1,0 +1,66 @@
+- id: W1-T3182
+  title: "W1-T3133's TIGHTENING CARVE-OUT CANNOT FIRE ON A HONESTLY RE-CAPTURED BASELINE — `classifyInstrumentChange` returns `undetermined` for ANY added line carrying no `\"key\": <number>` pair, so refreshing the `capturedAt` a correct re-capture MUST update defeats the exemption; 8 of 19 `scripts/*-baseline.json` carry such a field, and #4620 is blocked by exactly this today"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/lib/review.ts, test/a-recaptured-baseline-still-reads-as-tightening.test.ts]
+  origin: "operator-session#board-pass-2026-09-08"
+  plan_refs: ["W1-T3133", "W1-T3072", "W1-T2895"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3133 built the right idea: an instrument change that only TIGHTENS is not Rule 25
+    entanglement, so a PR may cut something and lower the ceiling that measured it in one diff.
+    `INSTRUMENT_STRICTER_DIRECTION` already declares `scripts/*-baseline.json` as `stricter:
+    "lower"`, which is correct for the cycle ceiling.
+
+    It cannot fire in practice. `classifyInstrumentChange` walks the diff's ADDED lines and, per
+    line, calls `numericRowsOn`, whose regex is `"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)`. Then:
+
+      if (rows.length === 0) return "undetermined"; // a hunk this parser cannot account for
+
+    A string-valued row such as `"capturedAt": "2026-09-08"` yields NO numeric pair, so a single
+    refreshed provenance line collapses the whole classification to `undetermined` — and
+    `undetermined` falls through to entangled.
+
+    MEASURED 2026-09-08 by calling the shipped function three ways on real input:
+
+      #4620's REAL diff, cycle-baseline.json    -> undetermined     (blocked today)
+      the numeric hunk ALONE (13 -> 0)          -> tightening       (the carve-out works)
+      that hunk PLUS a refreshed "capturedAt"   -> undetermined     (the carve-out is lost)
+
+    The middle row proves the mechanism is sound; the third isolates the single line that defeats
+    it. THE POPULATION IS NOT AN EDGE CASE: 8 of 19 `scripts/*-baseline.json` carry a
+    `capturedAt`/`capturedAtSha` provenance field (bound-kind, claude-md-budget, clock-sweep,
+    coverage, cycle, knowledge-budget, learnings-budget, mutation), and 15 of 19 carry some
+    string-valued field. Those fields are not decoration — `cycle-baseline.json`'s own
+    `_methodology` says the number is re-derived at `capturedAtSha`, so a re-capture that did NOT
+    move them would be recording a false provenance. The gate therefore asks the author to choose
+    between an honest baseline and a passing review.
+
+    THE LIVE INSTANCE. #4620 (W1-T2895) cuts all thirteen tolerated import cycles and lowers
+    `maxCycles` 13 -> 0. Rule 25 refuses it as entangled. The task's OWN criterion 1 is
+    `grep: "maxCycles": 0 in scripts/cycle-baseline.json`, so the criterion requires the very
+    hunk the gate refuses: the PR cannot satisfy both, and no operator override exists for
+    entanglement.
+
+    REMEDY. Judge the added line's NON-numeric rows instead of bailing on them: a row whose value
+    is a string is not an allowance and cannot loosen a ceiling, so it should be ignored rather
+    than treated as unaccountable. Keep `undetermined` for a hunk that genuinely carries no
+    parseable row at all (a structural rewrite), so the conservative default survives where it
+    earns its keep. The distinction to encode is "no rows the parser understands" vs "rows the
+    parser understands, none of which are numeric".
+
+    NOT IN SCOPE: widening `INSTRUMENT_STRICTER_DIRECTION`, and any exemption list. This is a
+    parser gap inside a carve-out that is already ratified, not a new tolerance.
+  acceptance:
+    - claim: "a numeric tightening stays a tightening when the baseline's own capture-provenance line is honestly refreshed alongside it"
+      proof: "unit test: test/a-recaptured-baseline-still-reads-as-tightening.test.ts"
+    - claim: "a string-valued row is ignored rather than collapsing the classification to undetermined"
+      proof: "grep: stringRows in src/lib/review.ts"
+    - claim: "a hunk carrying no parseable row at all is still undetermined, so the conservative default is not traded away"
+      proof: "grep: MUTANT in test/a-recaptured-baseline-still-reads-as-tightening.test.ts"

@@ -23,14 +23,15 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { ARCHITECT_LANE_STEPS, gatherRuns } from "../src/lib/retro.ts";
 import { SYNTHESIS_ROLES } from "../src/lib/mounts.ts";
 import { ledgerRotationEntries } from "../src/lib/ledger-grep.ts";
+import { REPO_ROOT } from "./lib/repo-root.mjs";
 
-export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+export { REPO_ROOT };
 
 export class MountHeadroomSweepError extends Error {
   constructor(message) {
@@ -821,6 +822,6 @@ export function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/mount-headroom-sweep.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

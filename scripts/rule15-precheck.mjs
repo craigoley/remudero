@@ -20,19 +20,20 @@
  * REPORTS, NEVER REWRITES. It prints the split and exits non-zero; it moves no file. Which shard
  * belongs in which PR is the author's call, and a script that guessed would be editing the plan.
  */
-import { execFileSync } from "node:child_process";
 import { criterionFieldTampered, planOnlyDiff } from "../src/lib/review.js";
+import { isMainModule } from "./lib/argv.mjs";
+import { gitOrThrow } from "./lib/git.mjs";
 
 const BASE = process.argv.includes("--base") ? process.argv[process.argv.indexOf("--base") + 1] : "origin/main";
 
 function diffAgainstBase(base) {
   // Three-dot: the merge base, so a moving base never makes this read another branch's work as
   // this diff's. Same boundary every other gate here measures against.
-  return execFileSync("git", ["diff", `${base}...HEAD`], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return gitOrThrow(["diff", `${base}...HEAD`]);
 }
 
 function changedFiles(base) {
-  return execFileSync("git", ["diff", "--name-only", `${base}...HEAD`], { encoding: "utf8" })
+  return gitOrThrow(["diff", "--name-only", `${base}...HEAD`])
     .split("\n")
     .filter(Boolean);
 }
@@ -77,4 +78,4 @@ function main() {
   return 1;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) process.exit(main());
+if (isMainModule(import.meta.url)) process.exit(main());

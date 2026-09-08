@@ -595,6 +595,8 @@ export interface DaemonDeps {
   /** True when a task's own read is indeterminate — a genuine read failure rather than a clean
    *  absence of evidence — re-derived from the same projection. Optional (W1-T119). */
   isIndeterminate?: (taskId: string) => boolean;
+  /** True when status.ts derives a durable independent-failure block from the ledger. */
+  isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
@@ -815,6 +817,22 @@ function isSpawnInfraBlocked(err: unknown): err is { reasonClass: "blocked_toolc
   return typeof err === "object" && err !== null && (err as { reasonClass?: unknown }).reasonClass === "blocked_toolchain";
 }
 
+/** A rejected worker may be reporting GitHub backpressure from its post-run PR/check polling rather
+ * than a software crash. Keep this carve-out deliberately narrower than {@link classifyFailure}:
+ * the command evidence must name `gh`, and the joined message/stderr/code must positively classify
+ * transient. This prevents arbitrary worker prose such as "internal server error" from being
+ * swallowed while retaining the stderr/code fields Node does not always copy into Error.message. */
+function transientGhDispatchFailure(err: unknown): { detail: string } | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const failure = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
+  const message = String(failure.message ?? "");
+  if (!/(?:^|\s)gh(?:\s|$)/i.test(message)) return undefined;
+  const detail = [message, failure.stderr == null ? "" : String(failure.stderr), failure.code ?? ""]
+    .filter((part) => part.length > 0)
+    .join("\n");
+  return classifyFailure({ text: detail }) === "transient" ? { detail } : undefined;
+}
+
 /** BACKSTOP — the maximum time the inter-phase review clock's stop may wait for an idle wait to notice its phase
  * ended. The wait seam is deliberately promise-only with no cancellation handle, so waiting out the whole poll
  * interval would add up to 60 seconds to every phase transition. The clock therefore subdivides only its in-process
@@ -922,10 +940,19 @@ async function sweepLightDuringRetro(
  *  rung could be blocked at once, so overlap was impossible by construction. A detached retro keeps
  *  its ticker while the tick proceeds into dispatch, which starts its own — and two tickers each run
  *  `sweepLight` on the poll cadence, doubling GitHub calls exactly when the fleet is busiest. This
- *  repo has already lost 90 minutes to a secondary rate limit, so the second ticker is an inert stub
- *  rather than a second caller. The FIRST holder keeps the clock; the loser's `stop()` still
- *  resolves, so every call site stays symmetric. */
-let inFlightTickerActive = false;
+ *  repo has already lost 90 minutes to a secondary rate limit, so unrelated contenders receive an
+ *  inert stub. A same-tick dispatch is different: it takes over the retro runner atomically, without
+ *  overlapping a light pass, and the retro handle loses stop authority. */
+interface InFlightTickerOwner {
+  active: boolean;
+  generation: number;
+  phase: "dispatch" | "retro" | "sweep";
+  headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean };
+  ticker?: Promise<void>;
+  stop(generation: number): Promise<void>;
+}
+
+let inFlightTickerOwner: InFlightTickerOwner | undefined;
 
 /** The most stale the account-headroom reading may be before the in-flight ticker takes its own. The
  * governor sampled on the loop whose duration it was meant to bound: the reading is written once per
@@ -948,10 +975,29 @@ function startInFlightTicker(
   // cannot double-read. Optional and trailing, so every existing call site is unchanged (W1-T2565).
   headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean },
 ): { stop: () => Promise<void> } {
-  // W1-T2981: a second concurrent ticker would double every light sweep — hand back an inert one.
-  if (inFlightTickerActive) return { stop: async () => {} };
-  inFlightTickerActive = true;
-  let active = true;
+  // W1-T3181: dispatch takes over a same-tick retro's ONE runner. Incrementing the generation makes
+  // the retro's eventual stop inert, so it cannot turn off the dispatch clock after the handoff.
+  if (inFlightTickerOwner) {
+    if (phase !== "dispatch" || inFlightTickerOwner.phase !== "retro") return { stop: async () => {} };
+    inFlightTickerOwner.phase = "dispatch";
+    inFlightTickerOwner.headroomSampler = headroomSampler;
+    const generation = ++inFlightTickerOwner.generation;
+    const owner = inFlightTickerOwner;
+    return { stop: () => owner.stop(generation) };
+  }
+  const owner: InFlightTickerOwner = {
+    active: true,
+    generation: 0,
+    phase,
+    headroomSampler,
+    stop: async (generation) => {
+      if (inFlightTickerOwner !== owner || owner.generation !== generation) return;
+      owner.active = false;
+      inFlightTickerOwner = undefined;
+      if (owner.ticker) await owner.ticker;
+    },
+  };
+  inFlightTickerOwner = owner;
   // Reads through the Clock port (W1-T2897) rather than the `() => Date` shape directly, so every
   // projection this function needs — millis, Date, ISO — comes from one adapted instant.
   const daemonClock = clockFromDateFn(deps.now);
@@ -959,27 +1005,27 @@ function startInFlightTicker(
   // gate accepts a pass. Retain that intent across a hold or an older still-settling pass, and retry
   // once per ordinary cadence, never as a zero-delay loop.
   let eventWakePending = false;
-  const ticker = deps.sweepLight
+  owner.ticker = deps.sweepLight
     ? (async () => {
-        while (active) {
+        while (owner.active) {
           // Dispatch and retro can hold the loop for tens of minutes, so let an event wake this wait only
           // when the ticker owns the retrigger. The nested ticker inside a full pass stays on the ordinary
           // clock, so an event arriving then remains pending for one later accepted pass (W1-T2568).
           const waitResult = await (sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
           if (waitResult === "wake") eventWakePending = true;
-          if (!active) break;
+          if (!owner.active) break;
           // The acknowledgement gap (W1-T1065 part iv). The pause row is written only inside the branch that acts
           // on a hold, so a hold created mid-drain was invisible: no row distinguished "seen, draining to
           // completion" from "not seen at all", and the operator escalated to a container stop. A re-check here
           // can never abort the batch already in flight; it only makes the two cases distinguishable.
-          const holdSeen = phase === "dispatch" ? Boolean(deps.checkPause?.()) : undefined;
+          const holdSeen = owner.phase === "dispatch" ? Boolean(deps.checkPause?.()) : undefined;
           // Pre-judged by the CLI wiring against the same definition `rmd doctor` reports, so this pure
           // module never re-derives the boundary. A reading back at OK re-arms the latch, so a genuinely new
           // episode escalates again (W1-T1082).
           const diskHeadroom = deps.readDiskHeadroom?.();
           if (diskHeadroom?.verdict === "OK") diskHeadroomLatch.escalated = false;
           log("daemon.alive", {
-            phase,
+            phase: owner.phase,
             poll_interval_ms: pollIntervalMs,
             // W1-T2744: bounded cardinality on the existing heartbeat, never a promise-poll row.
             // This distinguishes a live review clock plus settling fix from the measured wedge.
@@ -991,21 +1037,21 @@ function startInFlightTicker(
           // this tick's heartbeat is already on the ledger before the probe is awaited, so a slow probe can delay the
           // next heartbeat but never swallow this one. Telemetry, not enforcement — a reading taken here cannot abort
           // work in flight, and the main loop remains the single place that decides to idle (W1-T2565).
-          if (headroomSampler && deps.readUsage) {
-            const nowMs = headroomSampler.clock.now();
-            if (nowMs - headroomSampler.lastSampleMs >= HEADROOM_SAMPLE_MAX_AGE_MS) {
-              headroomSampler.lastSampleMs = nowMs;
+          if (owner.headroomSampler && deps.readUsage) {
+            const nowMs = owner.headroomSampler.clock.now();
+            if (nowMs - owner.headroomSampler.lastSampleMs >= HEADROOM_SAMPLE_MAX_AGE_MS) {
+              owner.headroomSampler.lastSampleMs = nowMs;
               try {
                 const snap = await deps.readUsage();
-                const reading = snap ? resolveHeadroomWindows(snap, new Date(nowMs), headroomSampler.policy)[0] : undefined;
+                const reading = snap ? resolveHeadroomWindows(snap, new Date(nowMs), owner.headroomSampler.policy)[0] : undefined;
                 if (reading) {
                   log("daemon.headroom", {
-                    phase,
+                    phase: owner.phase,
                     window: reading.window,
                     percent_used: reading.percentUsed,
                     limit_pct: reading.limitPct,
                     resets_at: reading.resetsAtDisplay,
-                    enforced: headroomSampler.enforced,
+                    enforced: owner.headroomSampler.enforced,
                     over_ceiling: reading.percentUsed >= reading.limitPct,
                     poll_interval_ms: pollIntervalMs,
                     source: "in-flight",
@@ -1045,12 +1091,12 @@ function startInFlightTicker(
             if (eventWakePending || last === undefined || nowMs - last >= sweepRetrigger.intervalMs) {
               const halt = deps.checkStop?.() ?? deps.checkPause?.();
               if (halt) {
-                log("daemon.sweep.retrigger_held", { phase, detail: halt, trigger });
+                log("daemon.sweep.retrigger_held", { phase: owner.phase, detail: halt, trigger });
               } else {
                 const accepted = sweepRetrigger.liveness?.inFlight !== true;
                 sweepRetrigger.state.lastRunAtMs = nowMs;
                 log("daemon.sweep.retriggered", {
-                  phase,
+                  phase: owner.phase,
                   trigger,
                   poll_interval_ms: pollIntervalMs,
                   interval_ms: sweepRetrigger.intervalMs,
@@ -1068,20 +1114,8 @@ function startInFlightTicker(
         }
       })()
     : undefined;
-  // Cleared on every exit path by the caller; a light pass already in flight is allowed to finish
-  // rather than aborted (W1-T254).
-  return {
-    stop: async () => {
-      active = false;
-      // W1-T2981: release the process-wide holder BEFORE awaiting, so a slow or throwing pass can
-      // never strand the flag and leave every later ticker inert for the life of the process.
-      inFlightTickerActive = false;
-      if (ticker) await ticker;
-      // Stop owns this clock, not every process-global action a light pass ever detached. sweep.ts
-      // retains each fix until it settles; awaiting that registry here turned the full-pass bound into an
-      // unbounded phase exit. Awaiting the ticker still lets its current pass finish (W1-T2744).
-    },
-  };
+  const generation = owner.generation;
+  return { stop: () => owner.stop(generation) };
 }
 
 /** The shared config the dispatch and retro call sites pass so they can also re-fire the full
@@ -1565,6 +1599,11 @@ export async function runDaemon(
   // daemon-lifetime state: sweeps keep owning the open PR, and a restart may safely reconstruct the
   // same fact from the status projection rather than introducing another durable queue.
   const parkedBlockers = new Map<string, { prUrl?: string; dependents: string[] }>();
+  // Library fallback for callers that do not wire the status projection: independent failures are
+  // still recorded in the ledger, but the same in-process loop must not re-spend on the id before a
+  // projection reader has a chance to observe that row. Not a Task mutation, so plan reloads cannot
+  // erase it.
+  const independentFailureBlocksThisRun = new Set<string>();
   // The cross-task counterpart to the map above — content-keyed on whether the last transient verdict
   // was a different task id, never on one task's own retry budget (W1-T2517).
   let apiWindowHoldState: ApiWindowHoldState = INITIAL_API_WINDOW_HOLD_STATE;
@@ -1583,6 +1622,10 @@ export async function runDaemon(
   // CONSECUTIVE spawn-infra failures — backs the backoff below; reset by any
   // runOne call that does NOT throw this class (success or an unrelated verdict).
   let consecutiveSpawnInfraFailures = 0;
+  // The GitHub-transport counterpart to the spawn-infra streak. A worker can finish useful work,
+  // push a PR, and then lose its post-run rollup read; that must slow dispatch without exiting the
+  // scheduler that owns every review and repair lane (W1-T3165).
+  let consecutiveDispatchTransportFailures = 0;
   // Headroom reserve escalation dedup — the same per-episode bound as the breaker above. A sustained
   // breach is read fresh every tick, so without this the hook would fire on every idle poll. Cleared
   // the moment a read reports the window back under the reserve (P34 (c), W1-T249).
@@ -1757,9 +1800,16 @@ export async function runDaemon(
 
       if (disposition.kind === "independent_failure") {
         // Independent failure: nothing in the plan transitively depends on this task, so skipping it cannot
-        // leave a dependent building on a gap. Flag it, so selection never reconsiders it this run, and
-        // keep draining everything else.
-        task.status = "blocked";
+        // leave a dependent building on a gap. Record the block in the ledger, so a plan reload or daemon
+        // restart derives the same skip instead of trusting this tick's Task object.
+        independentFailureBlocksThisRun.add(task.id);
+        log("dispatch.blocked_independent", {
+          task_id: task.id,
+          task: task.id,
+          verdict: result.verdict,
+          pr_url: result.prUrl,
+          run_id: result.runId,
+        });
         log("daemon.block.independent_failure", {
           task: task.id,
           verdict: result.verdict,
@@ -2534,6 +2584,8 @@ export async function runDaemon(
           }
         }
       },
+      isIndependentFailureBlocked: (taskId) =>
+        independentFailureBlocksThisRun.has(taskId) || deps.isIndependentFailureBlocked?.(taskId) === true,
     };
 
     // The dispatch set, adopting drain.ts's lane machinery rather than a second implementation. A console
@@ -2859,22 +2911,32 @@ export async function runDaemon(
     await stopTicker();
     restartInterphaseReviewClock();
 
-    // Classify every lane's settlement before this tick decides anything, mirroring `runDrainLanes`. A
-    // genuine, non-spawn-infra throw is fatal for the whole daemon, exactly as it always was for a lone
-    // dispatch; a spawn-infra throw degrades into backoff; a normal settlement is queued for the same
-    // block reasoning every dispatch has always gone through.
+    // Classify every lane's settlement before this tick decides anything, mirroring `runDrainLanes`.
+    // A positively transient gh transport failure and a spawn-infra failure degrade into their bounded
+    // backoffs; every other throw stays fatal. A normal settlement enters the existing block reasoning.
     let fatalError: { taskId: string; message: string } | undefined;
     let spawnInfraSeenThisTick = false;
+    let dispatchTransportSeenThisTick = false;
     const toProcess: Array<{ task: Task; result: RunResult }> = [];
     for (let i = 0; i < admitted.length; i++) {
       const t = admitted[i];
       const outcome = settled[i];
       if (outcome.status === "rejected") {
         const err = outcome.reason;
-        if (!isSpawnInfraBlocked(err)) {
+        const transientTransport = transientGhDispatchFailure(err);
+        if (!isSpawnInfraBlocked(err) && transientTransport === undefined) {
           // First observed wins the summary detail, mirroring `runDrainLanes`' identical choice. Every other
           // already-settled lane is still classified and processed before this tick returns.
           if (!fatalError) fatalError = { taskId: t.id, message: String((err as Error)?.message ?? err) };
+          continue;
+        }
+        if (transientTransport !== undefined) {
+          dispatchTransportSeenThisTick = true;
+          log("daemon.dispatch_transport_deferred", {
+            task: t.id,
+            consecutive: consecutiveDispatchTransportFailures + 1,
+            error: transientTransport.detail,
+          });
           continue;
         }
         // Degrade, do not die: a spawn-infrastructure failure is never a fatal crash. The pre-fix shape was
@@ -2906,7 +2968,10 @@ export async function runDaemon(
 
     // A successful lane — including one returning a non-spawn-infra blocked verdict — clears the backoff
     // streak, exactly as the lone dispatch always did.
-    if (toProcess.length > 0) consecutiveSpawnInfraFailures = 0;
+    if (toProcess.length > 0) {
+      consecutiveSpawnInfraFailures = 0;
+      consecutiveDispatchTransportFailures = 0;
+    }
 
     // Block reasoning, per lane. Every genuine blocker is parked only after all admitted siblings
     // settle, so one blocked subtree can neither abort useful work already in flight nor restart the
@@ -2967,6 +3032,23 @@ export async function runDaemon(
       consecutiveSpawnInfraFailures++;
       const backoffMs = Math.min(pollIntervalMs * 2 ** (consecutiveSpawnInfraFailures - 1), maxSpawnInfraBackoffMs);
       log("daemon.spawn_infra_backoff", { tick: ticks, backoff_ms: backoffMs, consecutive: consecutiveSpawnInfraFailures });
+      if (await stopInterphaseReviewClock()) continue;
+      await sleepUntilSweepWake(backoffMs);
+    }
+
+    if (dispatchTransportSeenThisTick && !spawnInfraSeenThisTick && toProcess.length === 0) {
+      ticks++;
+      consecutiveDispatchTransportFailures++;
+      const backoffMs = Math.min(
+        pollIntervalMs * 2 ** (consecutiveDispatchTransportFailures - 1),
+        maxApiWindowHoldMs,
+      );
+      log("daemon.dispatch_transport_backoff", {
+        tick: ticks,
+        backoff_ms: backoffMs,
+        consecutive: consecutiveDispatchTransportFailures,
+        reason: "transient gh transport refusal after worker dispatch — holding in process",
+      });
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(backoffMs);
     }

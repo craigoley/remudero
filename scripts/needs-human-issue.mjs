@@ -29,7 +29,7 @@
 
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { isMainModule } from "./lib/argv.mjs";
 import { parseArgs } from 'node:util';
 
 // GitHub rejects an issue body over 65536 chars. A Stryker log or a sweep report can exceed that,
@@ -300,4 +300,4 @@ export function main({
 // purpose: the guard's body can only execute in a child process, so splitting it across lines
 // leaves an permanently-uncovered added line (the same shape scripts/clock-sweep.mjs uses).
 // `process.exitCode` rather than `process.exit()` so a piped stdout is never truncated mid-write.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) process.exitCode = main();
+if (isMainModule(import.meta.url)) process.exitCode = main();

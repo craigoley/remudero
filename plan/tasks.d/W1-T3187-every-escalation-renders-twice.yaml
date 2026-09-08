@@ -1,0 +1,86 @@
+- id: W1-T3187
+  title: "EVERY ESCALATION RENDERS TWICE ON ONE PAGE, UNDER TWO RESOLUTION VOCABULARIES — the Mailbox predicate is `needsHuman` plus two fields, a strict SUBSET of NEEDS ME's, so five live items appeared in both sections at once, one offering `Mark handled` (a server POST) and the other `Open`/`Resolve` (localStorage only), neither reflecting the other"
+  repo: remudero
+  depends_on: [W1-T3186]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/serve.ts, test/an-escalation-renders-once.test.ts]
+  origin: "operator-session#console-ia-2026-09-08"
+  plan_refs: ["W1-T3186", "W1-T3183", "W1-T153"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08 against the live console at `ec3c69d9a`, and provable from the source alone.
+
+    THE TWO PREDICATES, verbatim from `src/lib/serve.ts`:
+      renderNeedsMe:        `if (!t.needsHuman) continue;`
+      buildMailboxThreads:  `if (!t || !t.needsHuman || !t.escalationTitle || !t.taskId) continue;`
+    The second is the first PLUS two non-null field checks. Every task the Mailbox shows, NEEDS ME
+    shows too. That is not an overlap to be tuned — it is containment, by construction.
+
+    MEASURED CONSEQUENCE: five items — MAIN-HEALTH, W1-T2902, W1-T2904, W1-T3102, W1-T3131 —
+    rendered in NEEDS ME and again in the Mailbox on one screenshot, at one moment.
+
+    AND THE TWO COPIES DISAGREE ABOUT WHAT "DONE" MEANS:
+      NEEDS ME  offers "Mark handled" -> POST /v1/escalation/mark-handled  (server state)
+      Mailbox   offers "Open"/"Resolve" -> mailboxState.read/.resolved     (localStorage, per browser)
+    So an operator who resolves a thread in the Mailbox still sees it in NEEDS ME; one who marks it
+    handled in NEEDS ME still sees an unread thread in the Mailbox; and the Mailbox's own state does
+    not survive a different browser, because it never leaves the client.
+
+    WHY THIS IS ITS OWN SHARD RATHER THAN PART OF THE IA RULING. W1-T3186 decides the SHAPE of the
+    console. This is a defect that is wrong under ANY shape: even if the operator had chosen to keep
+    NEEDS ME exactly as it is, one item rendering twice with two dispositions that cannot see each
+    other would still be a bug. It should land early and small, before any re-homing work moves the
+    markup around underneath it.
+  design: |
+    (i) ONE ITEM, ONE RENDER. An escalation appears in exactly one place. Which place is
+    W1-T3186's ruling to make (the Inbox); this shard's testable property is that the count of
+    rendered instances for a given taskId is ONE, whatever the section is called.
+    (ii) ONE DISPOSITION, SERVER-SIDE. `Mark handled` already writes to the server; the Mailbox's
+    read/resolved state does not. The surviving verb must be the one that persists beyond a single
+    browser — an operator who triages on his phone and opens his laptop must not see the work again.
+    (iii) THE CLIENT-SIDE STATE THAT IS GENUINELY PER-VIEWER MAY STAY per-viewer, and the shard must
+    not conflate the two: "I have READ this thread" is reasonably a browser preference; "this
+    escalation is HANDLED" is fleet state and never was.
+    (iv) MIGRATION IS NOT A SILENT DROP. Anything currently marked resolved only in a browser's
+    localStorage is either carried over or explicitly reported as un-migrated. Quietly resurfacing
+    twenty threads an operator already dismissed is a worse first impression than the duplicate.
+  acceptance:
+    - claim: "a task carrying needsHuman with an escalation title renders EXACTLY ONE instance across the whole page — the measured five-in-both-sections shape yields five rendered rows, not ten"
+      proof: "unit test: test/an-escalation-renders-once.test.ts"
+    - claim: "an escalation has exactly one disposition control, and it writes to the SERVER — no rendered path resolves an escalation into localStorage alone"
+      proof: "unit test: test/an-escalation-renders-once.test.ts"
+    - claim: "dispositioning an escalation removes it from the operator's ask count immediately, and it does not reappear from a second feed"
+      proof: "unit test: test/an-escalation-renders-once.test.ts"
+    - claim: "per-viewer read state is preserved as per-viewer and is NOT conflated with handled state"
+      proof: "unit test: test/an-escalation-renders-once.test.ts"
+  falsifier: |
+    CLOSE IF the two feeds are already disjoint: read both predicates and confirm one is not a
+    superset of the other.
+    MEASURED 2026-09-08: `buildMailboxThreads`' predicate is `renderNeedsMe`'s plus two field
+    checks — strict containment — and five live items rendered in both.
+    POSITIVE CONTROL, required because "renders once" is also what a broken renderer that draws
+    NOTHING reports: the fixture must assert the five rows ARE present, then that each appears
+    exactly once. A test that only counts duplicates passes on an empty page.
+    PROVE THE DISPOSITION CLAIM LOAD-BEARING: dispositioning in the fixture must make the item
+    disappear from the ask count AND stay gone across a simulated fresh client with empty
+    localStorage. If it returns, the disposition never left the browser.
+    DO NOT satisfy this by removing the Mailbox. Its threading, its digests and its reply boxes are
+    the only conversational surface the console has, and W1-T3186 makes it the front door.
+    DO NOT satisfy this by keeping both renders and merely hiding one with CSS. A hidden duplicate
+    is still in the accessibility tree, still in the count, and still divergent.
+  note: |
+    Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src.
+    THIS IS A CORRECTNESS DEFECT, NOT A TASTE ONE, which is why it is `verify: auto` while its
+    parent ruling is `verify: human`. "One item renders once" and "a disposition persists" are both
+    checkable without any judgement about what the console should look like.
+    CAVEAT WITH EQUAL WEIGHT: the five-in-both measurement is one page load. The CONTAINMENT is
+    structural and holds always; the number five is whatever the board held at 2026-09-08. A quiet
+    hour would have shown one in both, which is the same defect at lower volume.
+    SECOND CAVEAT: this shard does not decide WHERE the surviving render lives — W1-T3186 does. If
+    that ruling changes destination, every criterion here still holds unchanged, which is the point
+    of stating them as counts and persistence rather than as sections.

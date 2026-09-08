@@ -1,0 +1,96 @@
+- id: W1-T3173
+  title: "DESIGN RULING: the operator console is a BUNDLED REACT SPA in `apps/dashboard`, served by `rmd serve` — reversing `apps/dashboard/index.html`'s 'No bundler by design (the W3-T2 decision)', because 58.4% of the console's code (2 515 lines) is browser JavaScript inside a TypeScript template literal where the typechecker is measurably blind"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 2.00
+  files: [DECISIONS.md]
+  origin: "operator-session#console-architecture-2026-09-08"
+  plan_refs: ["W3-T2", "W1-T139", "W1-T153", "W1-T3159"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR DIRECTION 2026-09-08, verbatim: "the console should be built using react ... I'm worried
+    that without react and a good coding framework for the console, it will never hit the bar I have
+    for it." This shard exists to RECORD that ruling with its measurement, not to re-open it.
+
+    WHAT IS BEING REVERSED, PRECISELY — ONE CLAUSE, NOT A WHOLE DECISION. `apps/dashboard/index.html`
+    states "No bundler by design (the W3-T2 decision): src/main.ts is plain TypeScript, typechecked
+    and compiled by the repo's existing `tsc -p tsconfig.json` build". That clause is reversed. NOT
+    reversed, and re-affirmed here: DECISIONS.md's "W12-T1: THE SITE IS A SEPARATE REPOSITORY. THE
+    CONSOLE IS NOT" and MASTER-PLAN.md's D-5 monorepo resolution, which already names
+    `apps/dashboard` (web) as a member. THE CONSOLE STAYS IN THIS REPO.
+
+    THE MEASUREMENT, at 6 927 lines of `src/lib/serve.ts`:
+      server-side TS (routes, data shaping)      1 041 code lines   24.2%
+      BROWSER JS inside one template literal      2 515 code lines   58.4%
+      HTML + CSS prelude                            754 code lines   17.5%
+    `<script type="module">` opens at serve.ts:1522 and closes at :5286.
+
+    THE TYPECHECKER IS MEASURABLY BLIND TO THE MAJORITY OF IT. The IDENTICAL line
+    `const x: number = "not a number";`
+      - appended at file scope        -> `src/lib/serve.ts(6928,7): error TS2322`
+      - inserted at line 2500, inside the script template literal -> NO OUTPUT AT ALL.
+    That is the whole argument. 58.4% of the console's code is invisible to `tsc`, to lint, and to
+    every test in this repo.
+
+    AND THE DUPLICATION IS ALREADY DRIFTING, which is the falsifiable part. `src/lib/console-freshness.ts`
+    exports a tested four-tier `formatAge` (s / m / h / d) and its own header claims "the shell
+    (renderShellHtml) mirrors them so the browser renders the SAME tested logic — never a second,
+    drifting copy". The browser's actual copy is `serve.ts:4936`:
+      `el.textContent = secs < 2 ? "updated just now" : \`updated \${secs}s ago\`;`
+    ONE tier. An idle console renders "updated 3600s ago" where the tested function says "1h ago".
+    The second copy exists and it has already diverged from the one with tests.
+
+    WHY A BUNDLER RATHER THAN THE W3-T2 SHAPE. W3-T2 was not "no tooling" — plain `.ts` compiled by
+    `tsc` and loaded as ES modules would already have fixed the typecheck hole. What it cannot give
+    is a component model, JSX, npm resolution in the browser, or a chart library, and those are the
+    distance between this console and the operator's stated bar. A second consideration is decisive
+    for THIS deployment: the console is served over a private tailnet with no CDN reachability, so a
+    Vite build (self-contained, local assets) works where an import-map/esm.sh approach needs the
+    public internet at page load.
+  design: |
+    (i) RECORD THE RULING IN DECISIONS.md, naming the reversed clause verbatim and the measurement
+    above. A reversal whose record does not quote what it reversed cannot be re-litigated honestly.
+    (ii) THE RULING MUST STATE WHAT IS NOT REVERSED — the console stays in `remudero` (DECISIONS.md
+    W12-T1), and Vercel/Astro Starlight remains WS-12, the SEPARATE marketing site
+    (`remudero-site`), never the console. These were conflated in conversation and the record must
+    make the next reader unable to repeat that.
+    (iii) NAME THE COSTS ADMITTED, not just the benefits: this introduces the FIRST build artifact
+    the system has ever had (W1-T3176), and a second test runner (Vitest) alongside `node --test`.
+    A ruling that records only the upside is a sales document.
+    (iv) NAME THE OPERATOR AS THE DECIDER, with the date and the quoted direction. This is a
+    `verify: human` ruling precisely because no test can establish that a taste bar was met.
+  acceptance:
+    - claim: "DECISIONS.md records the ruling, quoting the reversed 'No bundler by design (the W3-T2 decision)' clause verbatim"
+      proof: "grep: No bundler by design in DECISIONS.md"
+    - claim: "the record states what is NOT reversed — the console stays in remudero, and the Vercel/Astro Starlight decision is WS-12, the separate marketing site"
+      proof: "grep: WS-12 IS THE SITE, NOT THE CONSOLE in DECISIONS.md"
+    - claim: "the record carries the measurement that motivated it, including the typecheck-blindness control"
+      proof: "grep: 2515 in DECISIONS.md"
+  falsifier: |
+    CLOSE IF the console already has a component model or a build step:
+      `node -e 'console.log(Object.keys(require("./package.json").dependencies))'`
+      `grep -c 'react' package.json`
+    MEASURED 2026-09-08: runtime dependencies are exactly @anthropic-ai/claude-agent-sdk, tsx,
+    typescript, yaml. No React anywhere. The only build script is `tsc -p tsconfig.json`, and CI
+    runs it only as `--noEmit`; there is no `dist/` and `bin/rmd` execs `tsx src/run-task.ts`.
+    DO NOT satisfy this by recording a ruling with no measurement in it. The reversal is only
+    defensible BECAUSE of the typecheck control and the formatAge divergence; a record that asserts
+    "React is better" has reversed a recorded decision on taste alone.
+    DO NOT let this ruling widen into "the console moves to its own repository". DECISIONS.md
+    already refuses that and this shard re-affirms it; a reader who takes the bundler reversal as
+    licence to split the repo has inverted the ruling.
+  note: |
+    Rule 25 CHECKED: `DECISIONS.md` is documentation; no instrument path is touched.
+    THE PLAN CORPUS IS WRONG ABOUT THIS TODAY and the ruling should say so: `plan/tasks.yaml:7584`
+    calls the console "a tailnet/localhost-served React web app" and `:1524` calls apps/dashboard
+    "the React app". Neither contains React. `:1524` already warns its own reader — "VERIFY where
+    the console frontend actually lives ... (distrust this note)" — and was right to.
+    CAVEAT WITH EQUAL WEIGHT: this ruling establishes the DIRECTION. It does not establish that the
+    rebuild will meet the operator's bar — "beautiful" is not testable and no criterion here claims
+    it. What is measured is that the current shape cannot be typechecked, and that its one
+    hand-copied function has already drifted from the tested original.

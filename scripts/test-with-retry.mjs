@@ -39,10 +39,11 @@
 // via that one env var; when it is unset, behavior is byte-for-byte unchanged from before this
 // task (the retry always fires on a non-zero first attempt, same as today).
 
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { gitOrThrow } from "./lib/git.mjs";
 
 /**
  * W1-T2715 — A TEST THAT WRITES INTO THE TRACKED TREE IS OBSERVED BY EVERY OTHER WORKER, and the
@@ -93,7 +94,7 @@ function defaultStatusReader(cwd) {
   // UNTRACKED ENTRIES INCLUDED (no `-uno`): instance 2 was an untracked probe shard and it still
   // broke the next run. Measured cost of the two forms here: 52ms with untracked, 9ms without —
   // and the cheap one is blind to the instance that cost the most diagnosis.
-  return execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  return gitOrThrow(["status", "--porcelain"], { cwd, stdio: ["ignore", "pipe", "ignore"] });
 }
 
 /** Porcelain lines present after the suite and absent before it. `null` on either side ⇒ `[]`:

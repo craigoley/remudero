@@ -25,7 +25,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { COMMANDS, USAGE } from "../src/run-task.ts";
 
 const DEFAULT_OUT = join("docs", "cli-reference.md");
@@ -151,6 +151,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`tsx scripts/generate-cli-reference.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

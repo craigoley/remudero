@@ -38,10 +38,13 @@ import test from "node:test";
 import {
   FixRungCheckoutRefusedError,
   buildSweepEffects,
+  captureRegisteredFixOwnerSnapshot,
   decideRegisteredFixOwnerRecovery,
   checkoutFixHeadRef,
   createFixRungWorktree,
   fixBranchClaimKey,
+  preserveAbandonedFixOwnerDivergence,
+  publishAbandonedFixOwnerAhead,
   readBoundedProcessCwdCensus,
   readRegisteredFixOwnerClaim,
   registeredFixWorktreeOwner,
@@ -479,7 +482,7 @@ const SAFE_OWNER_SNAPSHOT: RegisteredFixOwnerSnapshot = {
 };
 
 test("W1-T2952: only a clean, exact, unowned managed fix worktree is reclaimable", () => {
-  assert.deepEqual(decideRegisteredFixOwnerRecovery(SAFE_OWNER_SNAPSHOT), { kind: "reclaim" });
+  assert.deepEqual(decideRegisteredFixOwnerRecovery(SAFE_OWNER_SNAPSHOT), { kind: "reclaim-contained" });
 
   const unsafe: Array<[Partial<RegisteredFixOwnerSnapshot>, string]> = [
     [{ pathState: "foreign" }, "foreign_worktree_path"],
@@ -490,7 +493,6 @@ test("W1-T2952: only a clean, exact, unowned managed fix worktree is reclaimable
     [{ treeState: "unknown" }, "tree_probe_unreadable"],
     [{ remoteState: "changed" }, "remote_head_changed"],
     [{ remoteState: "unknown" }, "remote_head_unreadable"],
-    [{ historyState: "ahead_or_diverged" }, "local_commit_not_contained"],
     [{ historyState: "unknown" }, "history_probe_unreadable"],
     [{ claimState: "occupied" }, "live_branch_claim"],
     [{ claimState: "unknown" }, "branch_claim_unreadable"],
@@ -502,6 +504,379 @@ test("W1-T2952: only a clean, exact, unowned managed fix worktree is reclaimable
       kind: "keep",
       reason,
     });
+  }
+});
+
+test("W1-T3170 ancestry continues through abandonment probes", () => {
+  assert.deepEqual(
+    decideRegisteredFixOwnerRecovery({ ...SAFE_OWNER_SNAPSHOT, historyState: "ahead" }),
+    { kind: "publish-ahead" },
+  );
+  assert.deepEqual(
+    decideRegisteredFixOwnerRecovery({ ...SAFE_OWNER_SNAPSHOT, historyState: "diverged" }),
+    { kind: "preserve-diverged" },
+  );
+  for (const historyState of ["ahead", "diverged"] as const) {
+    assert.deepEqual(
+      decideRegisteredFixOwnerRecovery({ ...SAFE_OWNER_SNAPSHOT, historyState, claimState: "occupied" }),
+      { kind: "keep", reason: "live_branch_claim" },
+    );
+    assert.deepEqual(
+      decideRegisteredFixOwnerRecovery({ ...SAFE_OWNER_SNAPSHOT, historyState, processState: "occupied" }),
+      { kind: "keep", reason: "process_cwd_owner" },
+    );
+  }
+});
+
+test("W1-T3170 falsifier deletes salvage and restores permanent stand-down", () => {
+  assert.notEqual(
+    decideRegisteredFixOwnerRecovery({ ...SAFE_OWNER_SNAPSHOT, historyState: "ahead" }).kind,
+    "keep",
+  );
+  assert.notEqual(
+    decideRegisteredFixOwnerRecovery({ ...SAFE_OWNER_SNAPSHOT, historyState: "diverged" }).kind,
+    "keep",
+  );
+});
+
+test("W1-T3170 real owner census distinguishes ahead from diverged and preserves the exact divergent object", () => {
+  const root = tmp("rmd-fbcs-owner-ancestry-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const branch = "run-W1-T3170-1785600000012";
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const remoteBase = sha(repoDir, branch);
+    const worktreesRoot = join(root, "worktrees");
+    const ownerPath = join(worktreesRoot, "sweep-W1-T3170-1785600000012");
+    mkdirSync(worktreesRoot, { recursive: true });
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+    commit(ownerPath, "local.txt", "local owner commit");
+    const localSha = sha(ownerPath, "HEAD");
+    let claimReads = 0;
+    let processReads = 0;
+    const capture = (remoteSha: string) => captureRegisteredFixOwnerSnapshot({
+      repoDir,
+      worktreesRoot,
+      ownerPath,
+      taskId: "W1-T3170",
+      branch,
+      expectedRemoteSha: remoteSha,
+      observedRemoteSha: remoteSha,
+      inflightDir: join(root, "inflight"),
+      claimKey: "fixture",
+    }, {
+      readClaim: () => { claimReads += 1; return "clear"; },
+      processCensus: () => { processReads += 1; return { state: "clear", scanned: 1 }; },
+    });
+    assert.equal(capture(remoteBase).historyState, "ahead");
+
+    const advancer = join(root, "advancer");
+    cloneOf(upstream, advancer);
+    execFileSync("git", ["-C", advancer, "checkout", "--quiet", branch]);
+    commit(advancer, "remote.txt", "remote competing commit");
+    execFileSync("git", ["-C", advancer, "push", "--quiet", "origin", branch]);
+    const remoteDiverged = sha(advancer, "HEAD");
+    execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin", branch]);
+    assert.equal(capture(remoteDiverged).historyState, "diverged");
+    assert.equal(claimReads, 2, "both non-contained states reach the claim proof");
+    assert.equal(processReads, 2, "both non-contained states reach the process-cwd proof");
+    const recoveryRef = preserveAbandonedFixOwnerDivergence(repoDir, branch, localSha);
+    assert.equal(sha(repoDir, recoveryRef), localSha);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** The two history arms the ancestry census above never reaches. `ahead`/`diverged` both come
+ *  back from `merge-base --is-ancestor` exiting 1; these two are the OTHER exits — 0 (the owner
+ *  is already contained by the remote, so there is nothing to salvage) and anything else, which
+ *  is git failing to answer at all. They are split from the census test rather than folded into
+ *  it because each needs a repository the other cannot be in: `contained` needs an owner that
+ *  never committed, and the unreadable arm needs a remote SHA that names no object. */
+test("W1-T3170 an owner already contained by the remote is a salvage no-op, not an abandonment", () => {
+  const root = tmp("rmd-fbcs-owner-contained-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const branch = "run-W1-T3170-1785600000013";
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const worktreesRoot = join(root, "worktrees");
+    const ownerPath = join(worktreesRoot, "sweep-W1-T3170-1785600000013");
+    mkdirSync(worktreesRoot, { recursive: true });
+    // NO local commit: the owner's HEAD stays where the branch was, so advancing the remote
+    // below leaves the owner strictly BEHIND — an ancestor, which is the `contained` arm.
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+    const localSha = sha(ownerPath, "HEAD");
+
+    const advancer = join(root, "advancer");
+    cloneOf(upstream, advancer);
+    execFileSync("git", ["-C", advancer, "checkout", "--quiet", branch]);
+    commit(advancer, "remote.txt", "remote commit the owner never saw");
+    execFileSync("git", ["-C", advancer, "push", "--quiet", "origin", branch]);
+    const remoteAhead = sha(advancer, "HEAD");
+    execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin", branch]);
+    assert.notEqual(localSha, remoteAhead, "the fixture is only meaningful if the two SHAs differ");
+
+    const snapshot = captureRegisteredFixOwnerSnapshot({
+      repoDir,
+      worktreesRoot,
+      ownerPath,
+      taskId: "W1-T3170",
+      branch,
+      expectedRemoteSha: remoteAhead,
+      observedRemoteSha: remoteAhead,
+      inflightDir: join(root, "inflight"),
+      claimKey: "fixture",
+    }, {
+      readClaim: () => "clear",
+      processCensus: () => ({ state: "clear", scanned: 1 }),
+    });
+
+    assert.equal(snapshot.historyState, "contained");
+    // Nothing is at risk, so the decision must be to reclaim rather than stand down -- the
+    // whole point of telling this arm apart from `ahead`/`diverged`.
+    assert.deepEqual(decideRegisteredFixOwnerRecovery(snapshot), { kind: "reclaim-contained" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3170 a remote SHA git cannot resolve reads unknown and stands the salvage down", () => {
+  const root = tmp("rmd-fbcs-owner-unreadable-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const branch = "run-W1-T3170-1785600000014";
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const worktreesRoot = join(root, "worktrees");
+    const ownerPath = join(worktreesRoot, "sweep-W1-T3170-1785600000014");
+    mkdirSync(worktreesRoot, { recursive: true });
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+
+    // Well-formed but nameless: `merge-base --is-ancestor` exits 128 rather than 0 or 1, which
+    // is the arm that must NOT be read as "not an ancestor". Observed === expected so the probe
+    // reaches the ancestry question at all instead of short-circuiting on remoteState.
+    const nonexistent = "0".repeat(39) + "1";
+    assert.throws(
+      () => execFileSync("git", ["-C", repoDir, "cat-file", "-e", nonexistent], { stdio: "ignore" }),
+      "the fixture SHA must genuinely name no object",
+    );
+
+    let claimReads = 0;
+    let processReads = 0;
+    const snapshot = captureRegisteredFixOwnerSnapshot({
+      repoDir,
+      worktreesRoot,
+      ownerPath,
+      taskId: "W1-T3170",
+      branch,
+      expectedRemoteSha: nonexistent,
+      observedRemoteSha: nonexistent,
+      inflightDir: join(root, "inflight"),
+      claimKey: "fixture",
+    }, {
+      readClaim: () => { claimReads += 1; return "clear"; },
+      processCensus: () => { processReads += 1; return { state: "clear", scanned: 1 }; },
+    });
+
+    assert.equal(snapshot.historyState, "unknown");
+    assert.equal(snapshot.remoteState, "exact", "the probe reached the ancestry question, not a remote mismatch");
+    assert.equal(snapshot.error, undefined, "an unreadable ancestry is a STATE, not a thrown probe error");
+    assert.equal(claimReads, 0, "an unreadable history returns before the claim proof");
+    assert.equal(processReads, 0, "an unreadable history returns before the process-cwd proof");
+    assert.deepEqual(decideRegisteredFixOwnerRecovery(snapshot), {
+      kind: "keep",
+      reason: "history_probe_unreadable",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3170 ahead publish fails closed", () => {
+  const localSha = "c".repeat(40);
+  const remoteSha = "b".repeat(40);
+  const ref = "refs/heads/run-W1-T3170-fixture";
+
+  const changedCalls: string[][] = [];
+  assert.throws(() => publishAbandonedFixOwnerAhead("/repo", "run-W1-T3170-fixture", localSha, remoteSha, {
+    runGit: (args) => {
+      changedCalls.push(args);
+      return `${"d".repeat(40)}\t${ref}\n`;
+    },
+  }), /changed before publish/);
+  assert.equal(changedCalls.length, 1, "a changed precondition reaches no push");
+
+  const pushCalls: string[][] = [];
+  assert.throws(() => publishAbandonedFixOwnerAhead("/repo", "run-W1-T3170-fixture", localSha, remoteSha, {
+    runGit: (args) => {
+      pushCalls.push(args);
+      if (args[0] === "push") throw new Error("push refused");
+      return `${remoteSha}\t${ref}\n`;
+    },
+  }), /push refused/);
+  assert.deepEqual(pushCalls[1], ["push", "origin", `${localSha}:${ref}`]);
+  assert.ok(pushCalls.flat().every((arg) => !arg.includes("force")), "the publish is never force-capable");
+
+  let reads = 0;
+  assert.throws(() => publishAbandonedFixOwnerAhead("/repo", "run-W1-T3170-fixture", localSha, remoteSha, {
+    runGit: (args) => {
+      if (args[0] === "push") return "";
+      reads += 1;
+      return `${reads === 1 ? remoteSha : "e".repeat(40)}\t${ref}\n`;
+    },
+  }), /did not publish exact local SHA/);
+});
+
+test("W1-T3170 ahead publisher fast-forwards the exact object on a real remote", () => {
+  const root = tmp("rmd-fbcs-owner-publish-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const branch = "run-W1-T3170-1785600000013";
+    execFileSync("git", ["-C", repoDir, "checkout", "--quiet", "-b", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const remoteSha = sha(repoDir, "HEAD");
+    commit(repoDir, "ahead.txt", "ahead owner commit");
+    const localSha = sha(repoDir, "HEAD");
+    publishAbandonedFixOwnerAhead(repoDir, branch, localSha, remoteSha);
+    const published = execFileSync("git", ["-C", repoDir, "ls-remote", "origin", `refs/heads/${branch}`], {
+      encoding: "utf8",
+    }).trim().split(/\s+/)[0];
+    assert.equal(published, localSha);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3170 unsafe owner salvage refuses effects", async () => {
+  for (const historyState of ["ahead", "diverged"] as const) {
+    const root = tmp(`rmd-fbcs-owner-effect-fail-${historyState}-`);
+    const branch = `run-W1-T500-${historyState === "ahead" ? "1785600000014" : "1785600000015"}`;
+    const ownerPath = join(root, "worktrees", `sweep-W1-T500-${historyState === "ahead" ? "1785600000014" : "1785600000015"}`);
+    let removed = false;
+    try {
+      mkdirSync(join(root, "repos"), { recursive: true });
+      const { logs, threw } = await driveDispatchFix(root, branch, ownerPath, {
+        capture: () => ({ ...SAFE_OWNER_SNAPSHOT, path: ownerPath, historyState }),
+        publishAhead: () => { throw new Error("publish failed"); },
+        preserveDiverged: () => { throw new Error("preserve failed"); },
+        remove: () => { removed = true; },
+      });
+      assert.equal(threw, undefined);
+      assert.equal(removed, false);
+      assert.ok(!logs.some((entry) => entry.step === "fix.dispatch"));
+      assert.equal(
+        logs.find((entry) => entry.step === "sweep.fix.checkout_claim_declined")?.extra?.owner_recovery_reason,
+        historyState === "ahead" ? "owner_ahead_publish_failed" : "owner_divergence_preserve_failed",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("W1-T3170 ahead owner is published before reclaim; W1-T3170 salvage telemetry and dispatch are single-path", async () => {
+  const root = tmp("rmd-fbcs-owner-ahead-");
+  const branch = "run-W1-T500-1785600000010";
+  const ownerPath = join(root, "worktrees", "sweep-W1-T500-1785600000010");
+  const localSha = "c".repeat(40);
+  const remoteSha = "b".repeat(40);
+  const order: string[] = [];
+  let registeredOwner: string | undefined = ownerPath;
+  try {
+    mkdirSync(join(root, "repos"), { recursive: true });
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repos", "scratch-fbcs-repo");
+    cloneOf(upstream, repoDir);
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    mkdirSync(join(root, "worktrees"), { recursive: true });
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+    const worker = { sessionId: "W1-T3170-AHEAD", costUsd: 0, text: "REPORT\nfixed\n", blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, verdict: "success", tokens: {}, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult;
+    const { logs, threw } = await driveDispatchFix(
+      root,
+      branch,
+      () => registeredOwner,
+      {
+        capture: () => ({ ...SAFE_OWNER_SNAPSHOT, path: ownerPath, historyState: "ahead", localSha, remoteSha }),
+        publishAhead: (_repo, seenBranch, seenLocal, seenRemote) => {
+          assert.deepEqual([seenBranch, seenLocal, seenRemote], [branch, localSha, remoteSha]);
+          order.push("publish");
+        },
+        preserveDiverged: () => { throw new Error("divergence effect must not run"); },
+        remove: (canonical, owner) => {
+          order.push("remove");
+          removeAbandonedFixWorktreeOwner(canonical, owner);
+          registeredOwner = undefined;
+        },
+      },
+      async () => worker,
+      { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "fixture failure" }] },
+    );
+    assert.equal(threw, undefined);
+    assert.deepEqual(order, ["publish", "remove"]);
+    assert.equal(logs.filter((entry) => entry.step === "sweep.fix.checkout_owner_ahead_published").length, 1);
+    assert.equal(logs.filter((entry) => entry.step === "fix.dispatch").length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3170 diverged owner is preserved before reclaim", async () => {
+  const root = tmp("rmd-fbcs-owner-diverged-");
+  const branch = "run-W1-T500-1785600000011";
+  const ownerPath = join(root, "worktrees", "sweep-W1-T500-1785600000011");
+  const localSha = "c".repeat(40);
+  const remoteSha = "b".repeat(40);
+  const recoveryRef = `refs/rmd-recovery/fix/${branch}/${localSha}`;
+  const order: string[] = [];
+  let registeredOwner: string | undefined = ownerPath;
+  try {
+    mkdirSync(join(root, "repos"), { recursive: true });
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repos", "scratch-fbcs-repo");
+    cloneOf(upstream, repoDir);
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    mkdirSync(join(root, "worktrees"), { recursive: true });
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+    const worker = { sessionId: "W1-T3170-DIVERGED", costUsd: 0, text: "REPORT\nfixed\n", blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, verdict: "success", tokens: {}, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult;
+    const { logs, threw } = await driveDispatchFix(
+      root,
+      branch,
+      () => registeredOwner,
+      {
+        capture: () => ({ ...SAFE_OWNER_SNAPSHOT, path: ownerPath, historyState: "diverged", localSha, remoteSha }),
+        publishAhead: () => { throw new Error("publish effect must not run"); },
+        preserveDiverged: (_repo, seenBranch, seenLocal) => {
+          assert.deepEqual([seenBranch, seenLocal], [branch, localSha]);
+          order.push("preserve");
+          return recoveryRef;
+        },
+        remove: (canonical, owner) => {
+          order.push("remove");
+          removeAbandonedFixWorktreeOwner(canonical, owner);
+          registeredOwner = undefined;
+        },
+      },
+      async () => worker,
+      { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "fixture failure" }] },
+    );
+    assert.equal(threw, undefined);
+    assert.deepEqual(order, ["preserve", "remove"]);
+    assert.equal(logs.filter((entry) => entry.step === "sweep.fix.checkout_owner_divergence_preserved").length, 1);
+    assert.equal(logs.filter((entry) => entry.step === "fix.dispatch").length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

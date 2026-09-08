@@ -26,7 +26,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { join } from "node:path";
 
 const DEFAULT_DIRS = ["apps", "packages"];
@@ -117,6 +117,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/no-hand-rolled-fetch-check.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

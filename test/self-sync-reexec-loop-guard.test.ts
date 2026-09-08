@@ -105,7 +105,7 @@ test("defaultReexec itself refuses to spawn inside a re-exec child — the secon
   // replays process.argv, which under `node --test` is the runner itself.
   const src = readFileSync(join(import.meta.dirname, "..", "src", "lib", "self-sync.ts"), "utf8");
   const body = src.slice(src.indexOf("function defaultReexec("));
-  const spawnAt = body.indexOf("spawnSync(");
+  const spawnAt = body.indexOf("spawn(");
   assert.ok(spawnAt > 0, "sanity: defaultReexec must still spawn");
   assert.ok(
     body.slice(0, spawnAt).includes("process.env[SELF_SYNC_GUARD_ENV]"),
