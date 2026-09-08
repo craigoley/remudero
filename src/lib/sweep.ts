@@ -3143,6 +3143,13 @@ interface PriorActions {
    *  matching row is undated. Unlike {@link reviewRefused}, this is a bounded retry clock, not a
    *  semantic or lifecycle decision about the PR (W1-T2753). */
   reviewRetryableThrows: Map<string, number | undefined>;
+  /** Exact-input keys where the thrown post-review attempt hit GitHub's permanent PR diff ceiling.
+   *  The remedy is a new head with a smaller diff, so this is a terminal marker for the current
+   *  key, not another entry in the timed retry bucket. */
+  reviewDiffCeilingRefused: Set<string>;
+  /** Exact-input retryable throw counts. The first throw may be a hiccup; repeated throws are
+   *  bounded by the existing strike cap so an unknown failure class cannot loop forever. */
+  reviewRetryableThrowCounts: Map<string, number>;
   /** W1-T970 — keys built off the risk judge's OWN step, never from `sweep.disposed`.
    *  PR-NUMBER-KEYED, deliberately unlike the review sets: the producer emits the number, so there is
    *  no `??` fallback and #1931's matching-nothing collapse has no equivalent. A refusal expires on a
@@ -3221,6 +3228,55 @@ function isRetryableReviewThrow(reason: unknown): boolean {
   return typeof reason === "string" && reason.startsWith(RETRYABLE_REVIEW_THROW_PREFIX);
 }
 
+export function isPostReviewDiffCeilingRefusal(reason: unknown): boolean {
+  if (!isRetryableReviewThrow(reason)) return false;
+  const text = reason.toLowerCase();
+  return (
+    /pullrequest\.diff\s+too_large/i.test(String(reason)) ||
+    (text.includes("http 406") &&
+      text.includes("diff exceeded") &&
+      text.includes("maximum number of files") &&
+      text.includes("300"))
+  );
+}
+
+function postReviewFailureHistoryDisposition(
+  pr: OpenPrView,
+  prior: Pick<PriorActions, "reviewDiffCeilingRefused" | "reviewRetryableThrowCounts">,
+  policy: SweepPolicy,
+  now: number,
+): DispositionResult | undefined {
+  const eligible =
+    pr.checksState === "green" &&
+    pr.requiredContextsUnreadable !== true &&
+    (pr.reviewState === "none" ||
+      (pr.reviewState === "pending" &&
+        (pr.reviewPendingOwnerDead === true || reviewPendingIsStale(pr, policy, now))));
+  if (!eligible) return undefined;
+
+  const reviewKey = reviewOutcomeKeyForPr(pr);
+  if (prior.reviewDiffCeilingRefused.has(reviewKey)) {
+    return {
+      disposition: "blocked-ambiguous",
+      reason:
+        `post-review cannot read GitHub's PR diff for ${reviewKey}: the diff exceeds GitHub's ` +
+        `300-file ceiling — split the PR under 300 files or push a smaller head before retrying`,
+    };
+  }
+
+  const thrownAttempts = prior.reviewRetryableThrowCounts.get(reviewKey) ?? 0;
+  if (thrownAttempts > policy.strikeCap) {
+    return {
+      disposition: "blocked-ambiguous",
+      reason:
+        `post-review attempts for ${reviewKey} have thrown ${thrownAttempts} time(s), exceeding ` +
+        `the ${policy.strikeCap}-strike retry cap for this unchanged review input — escalating`,
+    };
+  }
+
+  return undefined;
+}
+
 function retryableReviewThrowBackoffReason(
   retryableThrows: ReadonlyMap<string, number | undefined>,
   reviewKey: string,
@@ -3250,6 +3306,8 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const reviewDelivered = new Set<string>();
   const reviewRefused = new Set<string>();
   const reviewRetryableThrows = new Map<string, number | undefined>();
+  const reviewDiffCeilingRefused = new Set<string>();
+  const reviewRetryableThrowCounts = new Map<string, number>();
   const riskRefused = new Map<string, string | undefined>();
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   for (const line of lines) {
@@ -3265,9 +3323,13 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
         );
         if (line.step === "review.posted") {
           reviewDelivered.add(key);
+        } else if (isPostReviewDiffCeilingRefusal(line.reason)) {
+          reviewDiffCeilingRefused.add(key);
+          reviewRefused.add(key);
         } else if (isRetryableReviewThrow(line.reason)) {
           const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
           const existing = reviewRetryableThrows.get(key);
+          reviewRetryableThrowCounts.set(key, (reviewRetryableThrowCounts.get(key) ?? 0) + 1);
           if (!reviewRetryableThrows.has(key)) reviewRetryableThrows.set(key, undefined);
           if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
             reviewRetryableThrows.set(key, parsed);
@@ -3350,6 +3412,8 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
     reviewDelivered,
     reviewRefused,
     reviewRetryableThrows,
+    reviewDiffCeilingRefused,
+    reviewRetryableThrowCounts,
     riskRefused,
     absentRepushes,
   };
@@ -4065,7 +4129,7 @@ export async function runSweep(
 
   for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
     const pr = openPrs[prIndex];
-    const { disposition, reason } = deriveDisposition(pr, policy, now);
+    const { disposition, reason } = postReviewFailureHistoryDisposition(pr, prior, policy, now) ?? deriveDisposition(pr, policy, now);
     byDisposition[disposition]++;
 
     // W1-T2345 — computed for EVERY disposition, never only blocked-ambiguous, and BEFORE the
