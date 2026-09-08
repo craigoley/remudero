@@ -1,0 +1,74 @@
+- id: W1-T3158
+  title: "NO SURFACE SAYS WHICH MODEL AND EFFORT ACTUALLY RAN A TASK, OR WHEN — the console shows `selected.model` / `selected.effort` for the routing decision it is ABOUT to make, and nothing anywhere shows what DID run; the ledger holds the answer in `run.start`'s `mount.model`/`effort` and `implement.done`, `runModelIndex` already joins them, and the retro's own lane table attributes only 98 of 200 implement rows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files: [src/lib/serve.ts, test/no-surface-says-which-model-ran-a-task.test.ts]
+  origin: "operator-session#console-visibility-2026-09-08"
+  plan_refs: ["W1-T2239", "W1-T3080", "W1-T2559"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08.
+
+    WHAT THE CONSOLE SHOWS TODAY IS THE ROUTING DECISION, NOT THE HISTORY. serve.ts's routing panel
+    renders `selected.provider`, `selected.model`, `selected.effort`, the per-provider identities and
+    `codexModelPreference` — all of it about the mount a NEXT dispatch would take. The operator's
+    own console text carries `routing …`, `selected …`, `providers …` and no row anywhere saying
+    which model ran W1-T2887, or when.
+
+    THE LEDGER ALREADY HOLDS IT, IN TWO PLACES. `run.start` rows carry
+    `mount:{model,effort,max_turns,context_budget}` — a real one reads
+    `{"model":"sonnet","effort":"high","max_turns":120,"context_budget":200000}` — and
+    `implement.done` carries the run's own model. `runModelIndex` (src/lib/retro.ts:683) already
+    folds both into one map, `new Map([...fromStart, ...fromDone])`, and `architectLaneShare`
+    already renders a per-lane models column from it.
+
+    SO THIS IS A SURFACE, NOT A DERIVATION. The join exists, is tested and is used once a retro; the
+    console has no access to it.
+
+    THE ATTRIBUTION GAP IS REAL AND MUST BE SHOWN, NOT HIDDEN. MEASURED over the retro's own window:
+    `implement (verdict) | 200 rows | default×1, haiku×15, sonnet×157 (98 via run join),
+    unattributed×27`. Over the full deduped ledger union the same instrument attributes 593 of 613.
+    So roughly half of one window's rows are attributed only BY JOIN, and 13.5% not at all —
+    W1-T3080 ("the terminal `verdict` row carries no `model`") is the filed cause. A panel that
+    printed a model per task without saying which came from the row and which from a join would be
+    asserting a precision the ledger does not have.
+  design: |
+    (i) READ THE EXISTING JOIN, do not re-derive one. `runModelIndex` is the producer; a second
+    notion of "which model ran this" would drift from the retro's.
+    (ii) EVERY VALUE CARRIES ITS PROVENANCE: from the row, via `implement.done`, via
+    `run.start.mount`, or UNATTRIBUTED. Unattributed is rendered as unattributed, never blank and
+    never guessed — the 27-of-200 case is the one the panel exists to make visible.
+    (iii) EFFORT AND MAX-TURNS RIDE ALONG. `mount` carries `effort`, `max_turns` and
+    `context_budget`; the operator asked for thinking modes, and effort is where that lives.
+    (iv) TIME-ORDERED, BOUNDED, and stating its window — this is a history panel, and an unbounded
+    scan of the ledger union on every console poll is a cost the console has not paid before.
+    (v) OUT OF SCOPE: fixing the attribution gap. That is W1-T3080. This surfaces the gap; it does
+    not close it, and a builder who starts stamping `model` onto verdict rows has taken that task.
+  acceptance:
+    - claim: "a console section lists recent runs with the model and effort that ran them, in time order"
+      proof: "unit test: test/no-surface-says-which-model-ran-a-task.test.ts"
+    - claim: "each value states its provenance — row, implement.done, run.start.mount, or unattributed — so a joined value is never shown as a recorded one"
+      proof: "unit test: test/no-surface-says-which-model-ran-a-task.test.ts"
+    - claim: "a run with no attributable model renders as unattributed rather than blank or guessed"
+      proof: "unit test: test/no-surface-says-which-model-ran-a-task.test.ts"
+    - claim: "the section states the window it covers and is bounded, so the console does not scan the whole union per poll"
+      proof: "unit test: test/no-surface-says-which-model-ran-a-task.test.ts"
+  falsifier: |
+    CLOSE IF the console already shows run history by model: read serve.ts's routing panel and check
+    whether any row is keyed on a PAST run rather than the next routing decision. MEASURED
+    2026-09-08: every `selected.model`/`selected.effort` hit is the forward decision.
+    CLOSE ALSO IF `runModelIndex` cannot be reached from the console without a cycle — read the
+    import graph before assuming it can, and if it cannot, say so rather than copying the join.
+    DO NOT satisfy this by printing a model with no provenance. Half of one measured window is
+    attributed only by join and 13.5% not at all; a bare model column would be a confident answer
+    the ledger cannot support.
+    DO NOT fix the attribution gap here. W1-T3080 owns it.
+  note: |
+    Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src.
