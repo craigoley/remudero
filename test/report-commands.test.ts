@@ -14,6 +14,7 @@
  * itself works end to end for every moved verb, which is what a `lib -> run-task` regression
  * would break first.
  */
+// @source-text-subject — the production-wiring assertions below intentionally inspect module boundaries.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -47,6 +48,17 @@ function tmpDir(prefix: string): string {
 function fakeConfig(root: string): Config {
   return { claudeBin: "/bin/true", root } as Config;
 }
+
+test("run-task supplies its resolved repository context without report-commands importing argv-sensitive repo-location", () => {
+  const reportSource = readFileSync(new URL("../src/lib/report-commands.ts", import.meta.url), "utf8");
+  const cliSource = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(reportSource, /from ["']\.\/repo-location\.js["']/);
+  assert.match(cliSource, /receiptCommand\(arg, rest\.slice\(1\), \{ repoRoot, resolveOwnerRepo \}\)/);
+  assert.match(cliSource, /doctorCommand\(rest, \{ repoRoot \}\)/);
+  assert.match(cliSource, /statusCommand\(rest, \{ usage: USAGE, repoRoot, resolveOwnerRepo \}\)/);
+  assert.match(cliSource, /learningsCommand\(rest, \{ usage: USAGE, repoRoot, resolveOwnerRepo \}\)/);
+  assert.match(cliSource, /traceCommand\(rest, \{ usage: USAGE, commandSyntax: commandSyntax\("trace"\), repoRoot, resolveOwnerRepo \}\)/);
+});
 
 /** Points `$HOME` at a synthetic `~/.config/remudero/config.json` for the duration of `fn` —
  *  the seam `learningsImportCommand`/`digestCommand` read `loadConfig()` through (neither takes
@@ -182,6 +194,19 @@ test("digestPlistCommand: print mode (no --write) prints the plist text and the 
   const out = printed.join("\n");
   assert.match(out, /com\.remudero\.digest/);
   assert.match(out, /launchctl load/);
+});
+
+test("digestPlistCommand: an unknown argument refuses before config or filesystem access", async () => {
+  const errors: string[] = [];
+  const origError = console.error;
+  console.error = (line: string) => errors.push(line);
+  try {
+    assert.equal(await digestPlistCommand(["--bogus"], { usage: "USAGE-STUB" }), 2);
+  } finally {
+    console.error = origError;
+  }
+  assert.match(errors.join("\n"), /unexpected argument '--bogus'/);
+  assert.match(errors.join("\n"), /USAGE-STUB/);
 });
 
 // ── doctorCommand ────────────────────────────────────────────────────────────────────────────

@@ -81,7 +81,6 @@ import {
 } from "./doctor.js";
 import { readInflightLock } from "./inflight-lock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { repoRoot, resolveOwnerRepo } from "./repo-location.js";
 import { loadPlan, type Plan } from "./plan.js";
 import { buildDigest, buildMarkerAwareDigest, sendDigest, sendMarkerAwareDigest } from "./digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./last-seen.js";
@@ -100,6 +99,29 @@ import { extractTaskTrailerId } from "./review.js";
 import { mapRestPr, singlePrRestArgs, type RestPullRow } from "./open-prs-rest.js";
 import { ghJson, GH_RATE_LIMIT_BUCKET_UNKNOWN } from "./github-transport.js";
 import { worktreesDir, readWorktreeBase } from "./worker.js";
+
+/** Repository facts are resolved once by the CLI entrypoint and passed across this module
+ * boundary. Keeping this seam optional preserves direct library use; its fallback is deliberately
+ * lazy, so importing report commands never reads process.argv or executes git. */
+export interface ReportRepoContext {
+  repoRoot?: string;
+  resolveOwnerRepo?: () => { owner: string; repo: string };
+}
+
+function reportRepoRoot(context: ReportRepoContext): string {
+  return context.repoRoot ?? process.cwd();
+}
+
+function reportOwnerRepo(context: ReportRepoContext, root = reportRepoRoot(context)): { owner: string; repo: string } {
+  if (context.resolveOwnerRepo) return context.resolveOwnerRepo();
+  const url = execFileSync("git", ["-C", root, "config", "--get", "remote.origin.url"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  const match = url.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
+  if (!match) throw new Error("could not parse owner/repo from origin url");
+  return { owner: match[1], repo: match[2] };
+}
 
 // ── launchd query cluster (statusCommand's `queryService`, shared with up/down's own queries) ──
 //
@@ -388,7 +410,7 @@ function defaultIsWorktreeBaseAncestor(worktreePath: string, base: string, head:
 
 /** Injectable seams for {@link doctorCommand} — every reader it drives, so the whole command is
  *  exercisable without a real /proc, a real ledger, or a live daemon. */
-export interface DoctorDeps {
+export interface DoctorDeps extends ReportRepoContext {
   out?: (line: string) => void;
   err?: (line: string) => void;
   loadConfig?: () => Config;
@@ -433,6 +455,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     return DOCTOR_USAGE_EXIT;
   }
   const config = (deps.loadConfig ?? loadConfig)();
+  const repoDir = reportRepoRoot(deps);
   const nowMs = deps.nowMs ?? Date.now();
   const root = config.root;
   const ledgerLines = (deps.readLedgerLines ?? ((pth: string) => readLedgerLines(pth) as Array<Record<string, unknown>>))(ledgerPathFor(config));
@@ -480,14 +503,14 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     totalLocks: lockFiles.length,
     ...(lockRead.unreadableReason === undefined ? {} : { locksUnreadableReason: lockRead.unreadableReason }),
     deadLocks: dead,
-    gitLocks: (deps.readGitLocks ?? readGitLocks)(repoRoot, nowMs),
+    gitLocks: (deps.readGitLocks ?? readGitLocks)(repoDir, nowMs),
     workerCount: 0,
-    ...(((v) => (v === undefined ? {} : { checkoutDepth: v }))((deps.readCheckoutDepth ?? readCheckoutDepth)(repoRoot))),
+    ...(((v) => (v === undefined ? {} : { checkoutDepth: v }))((deps.readCheckoutDepth ?? readCheckoutDepth)(repoDir))),
     worktreeBases,
     // R-49: THIS process's own running interpreter, measured here — the caller — exactly like
     // every other injected reading above, never read inside buildDoctorReport itself.
     runningNodeVersion: process.versions.node,
-    ...(((v) => (v === undefined ? {} : { nvmrcVersion: v }))((deps.readNvmrcVersion ?? readNvmrcVersion)(repoRoot))),
+    ...(((v) => (v === undefined ? {} : { nvmrcVersion: v }))((deps.readNvmrcVersion ?? readNvmrcVersion)(repoDir))),
   });
 
   if (rest.includes("--json")) out(JSON.stringify({ worst: report.worst, checks: report.checks }, null, 2));
@@ -555,13 +578,11 @@ export function renderGhBucketsSection(refusals: ReadonlyArray<GhBucketRefusalSt
  *  a test overrides just enough to avoid `loadConfig()`'s `which claude` shell-out and any real
  *  launchd query. `usage` is the ONLY exception to "every default is real": see this file's
  *  header for why it is injected rather than imported. */
-export interface StatusDeps {
+export interface StatusDeps extends ReportRepoContext {
   loadConfig?: () => Config;
   queryService?: (service: ServiceName) => { running: boolean; pid: number | null; lastExitCode?: number; sensed?: boolean };
   resolveSupervisorIntervalS?: () => number | undefined;
   ledgerPathFor?: (config: Config) => string;
-  repoRoot?: string;
-  resolveOwnerRepo?: () => { owner: string; repo: string };
   buildBatchedGithub?: typeof buildBatchedGithub;
   github?: GitHub | null;
   buildStatusBoard?: typeof buildStatusBoard;
@@ -619,14 +640,14 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   const buildBoard = deps.buildStatusBoard ?? buildStatusBoard;
   const render = deps.renderStatusBoardText ?? renderStatusBoardText;
   const ledgerPath = (deps.ledgerPathFor ?? ledgerPathFor)(config);
-  const repoDir = deps.repoRoot ?? repoRoot;
+  const repoDir = reportRepoRoot(deps);
   // GITHUB IS DECORATION, NEVER A GATE: `resolveOwnerRepo`/`buildBatchedGithub` can themselves
   // fail (no `git` remote, no network) — caught here so a status read NEVER throws on a bad
   // network day; the board degrades the rows that needed it to a stated unknown instead.
   let github: GitHub | undefined;
   if (deps.github === undefined) {
     try {
-      const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+      const { owner, repo } = reportOwnerRepo(deps, repoDir);
       github = (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo);
     } catch {
       // Deliberate degrade, documented above the try: no git remote / no network reads exactly
@@ -712,7 +733,7 @@ export function reviewViewArgs(owner: string, repo: string, prArg: string): stri
 
 /** Seams for {@link receiptCommand} — defaulted to the real gateways; a test injects fakes so
  *  the command's own PR/task-id resolution + print path is exercisable with zero network. */
-export interface ReceiptCommandDeps {
+export interface ReceiptCommandDeps extends ReportRepoContext {
   gh?: (args: string[]) => unknown;
   config?: Config;
   /** W1-T2257: defaults to the real {@link resolveReceiptLedgerLines} — the archive∪live UNION,
@@ -745,7 +766,7 @@ export async function receiptCommand(prArg: string, rest: string[] = [], deps: R
     console.error(badArg);
     return 2;
   }
-  const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
+  const { owner, repo } = resolveReviewTarget(reportOwnerRepo(deps), rest);
   const gh = deps.gh ?? ghJson;
   const args = reviewViewArgs(owner, repo, prArg);
   const raw = gh(args);
@@ -1025,9 +1046,13 @@ export async function digestCommand(
  * privacy/pin logic and are unit-tested independently (same split as
  * `rmd correct`'s wrapper over `applyCorrection`).
  */
-export function learningsCommand(rest: string[], opts: { usage?: string } = {}): number {
+export interface LearningsCommandOpts extends ReportRepoContext {
+  usage?: string;
+}
+
+export function learningsCommand(rest: string[], opts: LearningsCommandOpts = {}): number {
   const sub = rest[0];
-  if (sub === "export") return learningsExportCommand(rest.slice(1), { usage: opts.usage });
+  if (sub === "export") return learningsExportCommand(rest.slice(1), opts);
   if (sub === "import") return learningsImportCommand(rest.slice(1), { usage: opts.usage });
   console.error(
     `rmd learnings: unknown subcommand '${sub ?? ""}' — usage: rmd learnings export <out> | rmd learnings import <file> --pin <hash>\n` +
@@ -1056,7 +1081,7 @@ export function learningsCommand(rest: string[], opts: { usage?: string } = {}):
  */
 export function learningsExportCommand(
   rest: string[],
-  opts: { projectDir?: string; headSha?: () => string; usage?: string } = {},
+  opts: LearningsCommandOpts & { projectDir?: string; headSha?: () => string } = {},
 ): number {
   const out = rest[0];
   const badArg = unknownArgError("learnings export", rest.slice(1), [], []);
@@ -1068,16 +1093,17 @@ export function learningsExportCommand(
     console.error(`rmd learnings export: <out> is required — usage: rmd learnings export <out>\n` + (opts.usage ?? ""));
     return 2;
   }
-  const entries = loadLearningsCorpus(opts.projectDir ?? projectLearningsHome(repoRoot));
+  const repoDir = reportRepoRoot(opts);
+  const entries = loadLearningsCorpus(opts.projectDir ?? projectLearningsHome(repoDir));
   let sourceRepo = "unknown";
   try {
-    const { owner, repo } = resolveOwnerRepo();
+    const { owner, repo } = reportOwnerRepo(opts, repoDir);
     sourceRepo = `${owner}/${repo}`;
   } catch {
     // no origin remote configured — provenance degrades to "unknown", never a crash.
   }
   const readHeadSha =
-    opts.headSha ?? (() => execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim());
+    opts.headSha ?? (() => execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim());
   let sourceSha = "unknown";
   try {
     sourceSha = readHeadSha() || "unknown";
@@ -1166,7 +1192,7 @@ export function learningsImportCommand(rest: string[], opts: { usage?: string } 
  */
 export async function traceCommand(
   rest: string[],
-  opts: { usage?: string; commandSyntax?: string } = {},
+  opts: ReportRepoContext & { usage?: string; commandSyntax?: string } = {},
 ): Promise<number> {
   const id = rest[0];
   const badArg = id?.startsWith("--")
@@ -1181,10 +1207,11 @@ export async function traceCommand(
     return 2;
   }
 
-  const planPath = join(repoRoot, "plan", "tasks.yaml");
+  const repoDir = reportRepoRoot(opts);
+  const planPath = join(repoDir, "plan", "tasks.yaml");
   const plan = loadPlan(planPath);
   const config = loadConfig();
-  const { owner, repo: defaultRepo } = resolveOwnerRepo();
+  const { owner, repo: defaultRepo } = reportOwnerRepo(opts, repoDir);
   const ledgerPath = ledgerPathFor(config);
   const ledgerLines = readLedgerLines(ledgerPath);
 
@@ -1195,7 +1222,7 @@ export async function traceCommand(
     if (task.origin?.startsWith("feedback#")) {
       const feedbackId = task.origin.slice("feedback#".length);
       try {
-        feedbackEntry = readFeedbackEntry(repoRoot, feedbackId);
+        feedbackEntry = readFeedbackEntry(repoDir, feedbackId);
       } catch (e) {
         console.error(`### rmd trace — note: ${task.id} names origin: ${task.origin}, but ${String((e as Error)?.message ?? e)}`);
       }
@@ -1208,7 +1235,7 @@ export async function traceCommand(
 
   let entry: FeedbackEntry;
   try {
-    entry = readFeedbackEntry(repoRoot, id);
+    entry = readFeedbackEntry(repoDir, id);
   } catch {
     console.error(
       `rmd trace: '${id}' is neither a known task id (${planPath}) nor a feedback entry (plan/feedback/${id}.yaml)`,
