@@ -51,6 +51,10 @@ import {
   workerZdotdir,
   type Config,
 } from "./lib/config.js";
+// W1-T2884: this compatibility surface imports from the lib/ledger-path" module; NodeNext keeps
+// the runtime specifier below on its emitted `.js` form.
+import { ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
+export { ledgerPathFor, nextLaneEpochMs };
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
@@ -1135,19 +1139,6 @@ export function defaultBinaryPinDeps(claudeBin: string): Parameters<typeof readB
  */
 export function writeSyncLine(fd: 1 | 2, line: string): void {
   writeSync(fd, line.endsWith("\n") ? line : line + "\n");
-}
-
-/**
- * W1-T143 (DAEMON OBSERVABILITY): the ONE canonical ledger path, a PURE function of
- * `config.root` — DOCUMENTED (docs/operator-guide.md) and named aloud at the daemon's
- * own boot (`daemonCommand`'s `daemon.paths` ledger line) so it is provably
- * deterministic, never folklore. Every call site in this file that used to inline
- * `join(config.root, "state", "ledger.ndjson")` routes through this single function now
- * — mechanical, behavior-preserving (the expression was already byte-identical at every
- * site), so a future rename/relocation of the ledger changes exactly one line.
- */
-export function ledgerPathFor(config: Config): string {
-  return join(config.root, "state", "ledger.ndjson");
 }
 
 // ── WORKER STATE SENSOR (W1-T942) ───────────────────────────────────────────────────────────
@@ -12594,20 +12585,6 @@ export function resolveRunMounts(
     taskClass,
     mountClass: mountResolution.resolvedClass,
   };
-}
-
-// W1-T2528 — module-scoped so it's monotonic across every lane runId this ONE process mints
-// (retro/triage/plan): `Date.now()`'s 1ms resolution let two rungs collide (OBSERVED: identical
-// epoch logged twice, then `fatal: a branch ... already exists`). Bumps only off the PRECEDING
-// raw reading (never an ever-growing peak), so a differing reading passes through unchanged,
-// keeping this repo's widespread `Date.now` mocks exact.
-let lastRawNowMs = -1;
-let lastLaneEpochMs = -1;
-export function nextLaneEpochMs(): number {
-  const now = Date.now();
-  if (now === lastRawNowMs) return ++lastLaneEpochMs;
-  lastRawNowMs = now;
-  return (lastLaneEpochMs = now);
 }
 
 /**
