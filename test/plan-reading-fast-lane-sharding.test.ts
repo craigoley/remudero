@@ -65,6 +65,10 @@ test("recorded durations drive deterministic longest-processing-time assignment"
 });
 
 test("unsafe, duplicate, unknown, untiered, empty, and under-width candidate sets all fail closed", () => {
+  assert.throws(
+    () => selectPlanReadingShard(candidates, files, manifest, { index: 0, count: 4 }),
+    /valid shard index\/count/,
+  );
   const invalid = [
     "",
     "../escape.test.ts\n",
@@ -117,6 +121,23 @@ test("the candidate runner spawns exactly its selected shard and never spawns af
   });
   assert.notEqual(refused, 0);
   assert.equal(invalidSpawns, 0);
+
+  assert.equal(
+    main(["--root", REPO_ROOT, "--select-candidates", candidatePath]),
+    2,
+    "candidate mode without an explicit shard must refuse",
+  );
+
+  const priorLog = console.log;
+  const selected: string[] = [];
+  console.log = (value?: unknown) => selected.push(String(value ?? ""));
+  try {
+    assert.equal(main(["--root", REPO_ROOT, "--select-candidates", candidatePath, "--shard", "2/4"]), 0);
+  } finally {
+    console.log = priorLog;
+  }
+  assert.equal(selected.length, 1);
+  assert.match(selected[0] ?? "", /^test\/.*\.test\.ts$/);
 });
 
 test("the workflow uses all four paid shards, names fallback telemetry, and preserves source CI", () => {

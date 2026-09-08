@@ -168,9 +168,6 @@ export function selectPlanReadingShard(candidateText, testFiles, manifest, shard
     );
   }
   const balanced = balanceFilesByDuration(candidates, manifest, shard.count);
-  if (balanced.some((files) => files.length === 0)) {
-    throw new Error("plan-reading candidate balancing produced an empty shard");
-  }
   const files = balanced[shard.index - 1];
   return {
     candidates,
