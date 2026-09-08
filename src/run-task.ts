@@ -53,8 +53,8 @@ import {
 } from "./lib/config.js";
 // W1-T2884: this compatibility surface imports from the lib/ledger-path" module; NodeNext keeps
 // the runtime specifier below on its emitted `.js` form.
-import { ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
-export { ledgerPathFor, nextLaneEpochMs };
+import { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
+export { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs };
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
@@ -476,6 +476,7 @@ import {
   renderPromotionProposals,
   renderPlanStateTruth,
   resolveMarkerForGather,
+  readRetroLedgerNdjson,
   escalateRetroPublicationFailure,
   retireSettledFollowups,
   routeFollowupsToRegistry,
@@ -17076,11 +17077,11 @@ export function ledgerCorpusFiles(stateDir: string): LedgerCorpusEntry[] {
   } catch {
     return [];
   }
-  const live = join(stateDir, "ledger.ndjson");
+  const live = join(stateDir, LEDGER_FILENAME);
   const entries = ledgerRotationEntries(names, stateDir);
   // The live file is not a rotation, so the shared helper excludes it by construction — appended
   // here because THIS caller's corpus is "everything", unlike the union's "archives + live" split.
-  return names.includes("ledger.ndjson") ? [...entries, { path: live, form: "plain" as const }] : entries;
+  return names.includes(LEDGER_FILENAME) ? [...entries, { path: live, form: "plain" as const }] : entries;
 }
 
 /**
@@ -18862,7 +18863,7 @@ export function coverageImproveCommand(
     console.error("rmd coverage-improve: cannot resolve a state dir — unreadable config");
     return 1;
   }
-  const ledgerPath = opts.ledgerPath ?? join(stateDir, "ledger.ndjson");
+  const ledgerPath = opts.ledgerPath ?? join(stateDir, LEDGER_FILENAME);
   const runId = opts.runId ?? `COVERAGE-IMPROVE-${Date.now()}`;
 
   let lcovText: string;
@@ -23309,7 +23310,7 @@ async function retroCommand(
   const ledgerPath = ledgerPathFor(config);
   const markerPath = join(config.root, "state", "last-retro.json");
   const learningsPath = join(repoRoot, "LEARNINGS.md");
-  const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+  const ledgerNdjson = await readRetroLedgerNdjson(dirname(ledgerPath));
   // W1-T1013: the follow-up harvest's OWN corpus — the archive∪live union, resolved
   // separately from `ledgerNdjson` above so every OTHER miner buildGather runs keeps
   // reading the single-file corpus it always has (see buildGather's `followupLedgerNdjson`

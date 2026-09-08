@@ -25,6 +25,7 @@
  */
 
 import { join } from "node:path";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 
 /**
  * Every log file this policy rotates, EXPLICITLY named — see this module's header for why a
@@ -50,7 +51,7 @@ export const ROTATED_LOG_FILES: readonly string[] = [
  * {@link ROTATED_LOG_FILES} never contains it, belt-and-suspenders against a future edit
  * accidentally enrolling the dispatch breaker's backing store into log hygiene.
  */
-export const NEVER_ROTATE_FILENAME = "ledger.ndjson";
+export const NEVER_ROTATE_FILENAME = LEDGER_FILENAME;
 
 /** Size ceiling per log, in KB, before newsyslog rotates it. ~85x the largest log at intake (117 KB). */
 export const LOG_SIZE_CEILING_KB = 10 * 1024;

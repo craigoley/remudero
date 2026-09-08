@@ -33,7 +33,7 @@
  * PR's branch, never a guess.
  */
 
-import { resolveLedgerUnion, type LedgerGrepFsDeps } from "./ledger-grep.js";
+import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps } from "./ledger-union.js";
 
 const IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1" as const;
 const REMUDERO_RECEIPT_PREDICATE_TYPE = "https://remudero.dev/attestations/run-receipt/v1" as const;
@@ -177,7 +177,11 @@ const RECEIPT_LEDGER_STEP_REGEXP = new RegExp(RECEIPT_LEDGER_STEP_PATTERN);
  * into a leaf.
  */
 export function resolveReceiptLedgerLines(stateDir: string, fsDeps?: LedgerGrepFsDeps): ReceiptLedgerRead {
-  const result = resolveLedgerUnion(stateDir, RECEIPT_LEDGER_STEP_REGEXP, fsDeps);
+  const result = readLedgerUnionRecordsSync(
+    stateDir,
+    { pattern: RECEIPT_LEDGER_STEP_REGEXP, requireArchives: true, refuseIncomplete: true },
+    fsDeps,
+  );
   if (!result.ok) {
     const reason =
       result.archiveCount === 0
@@ -187,19 +191,7 @@ export function resolveReceiptLedgerLines(stateDir: string, fsDeps?: LedgerGrepF
           result.unread.join(", ");
     return { ok: false, reason };
   }
-  const lines: ReceiptLedgerLine[] = [];
-  for (const raw of result.matches) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      continue; // Not valid JSON — never guessed into a leaf, just dropped.
-    }
-    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-      lines.push(parsed as ReceiptLedgerLine);
-    }
-  }
-  return { ok: true, lines };
+  return { ok: true, lines: result.rows as ReceiptLedgerLine[] };
 }
 
 /**

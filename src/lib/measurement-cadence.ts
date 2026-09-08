@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport } from "./rule-efficacy.js";
 import { mineVerdictRows, verdictCalibrationReport } from "./verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./autonomy.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { resolveLedgerUnion, type LedgerUnionResult } from "./ledger-grep.js";
 import {
   buildBoardReview,
@@ -739,7 +740,7 @@ export function runCoverageImprovementCadence(opts: CoverageImprovementCadenceOp
   const produced = producer({
     root: opts.root,
     stateDir: opts.stateDir,
-    ledgerPath: opts.ledgerPath ?? join(opts.stateDir, "ledger.ndjson"),
+    ledgerPath: opts.ledgerPath ?? join(opts.stateDir, LEDGER_FILENAME),
     runId: String(read.workflowRunId),
     lcovText: read.lcovText,
     capture: opts.capture,

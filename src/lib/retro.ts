@@ -27,6 +27,7 @@ import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
 import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-workshop.js";
+import { openLedgerUnion } from "./ledger-union.js";
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
 export interface LedgerRecord {
@@ -50,6 +51,12 @@ export function parseLedger(ndjson: string): LedgerRecord[] {
     }
   }
   return out;
+}
+
+export async function readRetroLedgerNdjson(stateDir: string): Promise<string> {
+  const lines: string[] = [];
+  for await (const row of openLedgerUnion(stateDir)) lines.push(JSON.stringify(row));
+  return lines.join("\n");
 }
 
 /** The reduced summary of ONE run (all lines sharing a run_id). */
