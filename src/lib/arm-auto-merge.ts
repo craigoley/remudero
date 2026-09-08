@@ -114,6 +114,9 @@ function fixRebaseMergeFactsFromRest(
     const compare = base && head ? fetch(["api", `repos/${owner}/${repo}/compare/${base}...${head}`]) : undefined;
     return mergeFactsFromRest(pr, compare);
   } catch {
+    // fails soft: readMergeFacts is optional on ArmDeps, and an unreadable read must degrade to
+    // "no facts" (directMergePreflight then refuses on the missing MERGEABLE reading) rather than
+    // crash the arm attempt that called it.
     return {};
   }
 }
@@ -207,6 +210,8 @@ export function isPrMergedNow(prUrl: string, fetch: GhApiFetcher = ghJson): bool
   try {
     return liveStateFromRest(target.owner, target.repo, target.number, fetch) === "MERGED";
   } catch {
+    // fail-closed: a read failure must never report an unconfirmed merge as one — see this
+    // function's own doc above for why `false` here costs nothing beyond the status quo.
     return false;
   }
 }
@@ -314,6 +319,8 @@ export function realArmDeps(
       try {
         return readLedgerLines(ledgerPathFor(loadConfigImpl()));
       } catch {
+        // an unreadable ledger is read as "no hold is RECORDED", which is what an empty line set
+        // already means to automergeHoldFromLedger — never a crash on a host with no hold ledger.
         return [];
       }
     },
@@ -422,6 +429,7 @@ export function armAutoMergeDetailed(
   try {
     headSha = deps.headSha(prUrl);
   } catch (e) {
+    // recorded via deps.say below, not swallowed silently — the outcome itself also names why.
     deps.say(
       `automerge.head_sha_unavailable (W1-T230): ${String((e as Error)?.message ?? e)} — arm withheld: ${prUrl}`,
     );
@@ -758,6 +766,7 @@ export function disarmAutoMerge(
     deps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
     return "disarmed";
   } catch (e) {
+    // recorded via deps.say below and classified into the return shape, not swallowed silently.
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
     deps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
     return classifyDisarmFailure(msg, deps.isMerged?.(prUrl));
