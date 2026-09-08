@@ -108,7 +108,7 @@
     - claim: "the existing deploy-run and sync carve-outs keep behaving exactly as they do today"
       proof: "unit test: W1-T1134: the existing deploy-run and sync carve-outs are unchanged"
   files: [src/run-task.ts, test/deploy-run-freshness-exempt.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#freshness-gate-refuses-read-only-verbs-2026-08-22"
   plan_refs: ["W1-T445", "W1-T446", "W1-T907", "W1-T1010", "W1-T924"]

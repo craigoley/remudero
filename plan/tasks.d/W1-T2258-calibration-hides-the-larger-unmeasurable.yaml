@@ -10,7 +10,7 @@
   files: [src/run-task.ts, src/lib/verdict-calibration.ts, test/verdict-calibration-join-fraction.test.ts]
   origin: oper#calibration-hides-the-larger-unmeasurable-2026-08-25
   plan_refs: ["W1-T424", "W1-T1259"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main c67af25c IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

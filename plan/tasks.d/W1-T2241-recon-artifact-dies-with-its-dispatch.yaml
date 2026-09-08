@@ -110,7 +110,7 @@
     - claim: "a reused artifact is offered as evidence to verify and extend, never as an authority the next dispatch may build on unchecked"
       proof: "unit test: test/recon-artifact-reuse.test.ts"
   files: [src/run-task.ts, src/lib/worker.ts, test/recon-artifact-reuse.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#recon-artifact-dies-with-its-dispatch-2026-08-24"
   plan_refs: ["W1-T2237"]

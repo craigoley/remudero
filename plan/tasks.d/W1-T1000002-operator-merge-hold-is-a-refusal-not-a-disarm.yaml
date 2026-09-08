@@ -153,7 +153,7 @@
   origin: feedback#fb-1785792944591-e0473c
   plan_refs: ["W1-T970", "W1-T947", "W1-T125"]
   files: [src/lib/sweep.ts, src/run-task.ts, src/lib/review.ts, src/lib/ledger.ts, src/lib/feedback-landing.ts, test/automerge-hold.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk: high IS SET UP FRONT, on Rule 19's SPAN rather than blast radius: the arming dedup, the

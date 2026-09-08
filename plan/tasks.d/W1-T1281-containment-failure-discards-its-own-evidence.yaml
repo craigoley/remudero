@@ -10,7 +10,7 @@
   files: [src/lib/containment.ts, test/containment.test.ts]
   origin: oper#containment-unproven-evidence-2026-08-23
   plan_refs: ["W1-T91", "W1-T237", "W1-T1265"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE BRIEFING'S RATE FIGURES COULD NOT BE RE-DERIVED HERE, AND THAT IS STATED RATHER THAN

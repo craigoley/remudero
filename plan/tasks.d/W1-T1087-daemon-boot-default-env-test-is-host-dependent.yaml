@@ -78,7 +78,7 @@
   origin: feedback#fb-1785849890442-f20963
   plan_refs: ["W1-T499", "W1-T258", "W1-T12b"]
   files: [test/daemon.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the whole change is inside one test file and the proof is that file going
     green; no human ruling is pending (rationale (3) settles the deliberate-vs-oversight question

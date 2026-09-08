@@ -186,7 +186,7 @@
     - claim: "the token file's mode is unchanged and nothing in this change rotates a token"
       proof: "unit test: test/settings.test.ts"
   files: [settings/worker.json, src/lib/containment.ts, test/containment.test.ts, test/settings.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#worker-can-read-console-write-token-2026-08-24"
   plan_refs: ["W1-T404", "W1-T1265", "W1-T18", "W1-T203"]

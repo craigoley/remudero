@@ -128,7 +128,7 @@
     - claim: "an ordinary successful withdrawal costs no extra request and is unchanged"
       proof: "unit test: test/disarm-lost-race-hard-stop.test.ts"
   files: [src/run-task.ts, test/disarm-lost-race-hard-stop.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#refused-verdict-merged-unattended-2026-08-22"
   plan_refs: ["W1-T125", "W1-T947", "W1-T970", "W1-T975", "W1-T1050", "W1-T1052", "W1-T1056"]

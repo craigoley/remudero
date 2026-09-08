@@ -108,7 +108,7 @@
     - claim: "the existing per-host lock still refuses a hand-run racing the daemon"
       proof: "unit test: test/feedback-triage-claim.test.ts"
   files: [src/lib/auto-triage.ts, src/run-task.ts, test/feedback-triage-claim.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#feedback-triage-no-cross-host-claim-2026-08-22"
   plan_refs: ["W1-T300", "W1-T1019", "W1-T509", "W1-T1067", "W1-T1110", "W1-T1076"]

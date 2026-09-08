@@ -88,7 +88,7 @@
   origin: "issue#2032"
   plan_refs: ["W1-T1105"]
   files: [scripts/clock-sweep.mjs, test/clock-sweep.test.ts, test/cost-governor.test.ts, test/fleet-heartbeat.test.ts, test/worktree-reap-liveness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `files:` NAMES THE HARNESS PLUS THE THREE SUITES RE-DERIVED ON THIS HOST, not all nine. The

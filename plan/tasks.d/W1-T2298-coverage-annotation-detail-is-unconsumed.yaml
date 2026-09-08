@@ -122,7 +122,7 @@
     - claim: "the producer still never throws and still names the same failing checks it names today"
       proof: "unit test: test/ci-failure-annotations.test.ts"
   files: [src/run-task.ts, src/lib/sweep.ts, test/ci-failure-annotations.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#coverage-annotation-unconsumed-2026-08-26"
   plan_refs: ["W1-T100", "W1-T457", "W1-T474", "W1-T94", "W1-T123"]

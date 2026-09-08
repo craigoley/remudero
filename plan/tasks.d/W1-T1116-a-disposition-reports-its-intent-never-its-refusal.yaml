@@ -111,7 +111,7 @@
   origin: "recon#disposition-reports-intent-never-refusal-2026-08-22"
   plan_refs: ["W1-T970", "W1-T1110", "W1-T1061", "W1-T1052", "W1-T114"]
   files: [src/lib/sweep.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a tag per declared

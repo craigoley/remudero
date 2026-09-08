@@ -139,7 +139,7 @@
   origin: feedback#fb-1785899307058-60fbcf
   plan_refs: ["W1-T903", "W1-T372", "W1-T327", "W1-T529", "W1-T511", "W1-T999"]
   files: [src/run-task.ts, test/pr-create-rest-transport.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify:auto — every claim is an assertion over an injected exec seam and a fixture git

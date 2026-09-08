@@ -124,7 +124,7 @@
     - claim: "a red trunk does not by itself stop dispatch of unrelated tasks absent an operator ruling"
       proof: "unit test: test/main-health-watch.test.ts"
   files: [src/lib/sweep.ts, test/main-health-watch.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#nothing-reads-mains-own-check-state-2026-08-24"
   plan_refs: ["W1-T1282", "W1-T1275", "W1-T1033", "W1-T1272", "W1-T1274"]

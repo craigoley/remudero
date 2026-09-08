@@ -70,7 +70,7 @@
   origin: architect
   plan_refs: ["§4", "§7B"]
   files: [src/lib/sweep.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "THIRD FACE of the impoverished-observed-state family, and deliberately the narrowest: W1-T176 fixed WHEN
     to escalate, W1-T177 fixed WHETHER to spend, this fixes WHAT THE ESCALATION SAYS. The first two change fleet

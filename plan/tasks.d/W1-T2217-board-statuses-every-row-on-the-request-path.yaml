@@ -149,7 +149,7 @@
     - claim: "the poll interval and the call timeout are unchanged"
       proof: "unit test: test/board-status-per-row.test.ts"
   files: [src/lib/status.ts, test/board-status-per-row.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#board-status-per-row-request-path-2026-08-24"
   plan_refs: ["W1-T181", "W1-T265", "W1-T914", "W1-T999"]

@@ -90,7 +90,7 @@
   origin: "issue#2360"
   plan_refs: ["W1-T1051", "W1-T1104"]
   files: [test/plan-pr-emitter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: medium` IS THE HONEST BAND — one test file, two assertions, no product code. Rule 19

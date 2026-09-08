@@ -96,7 +96,7 @@
   origin: "oper#declared-scope-manual-exemption-2026-08-19"
   plan_refs: ["W1-T504", "W1-T476", "W1-T1029", "W1-T12d"]
   files: [src/lib/task-linter.ts, test/declared-scope-unreachable-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     #2213 IS BLOCKED ON THIS AND IS CITED, NOT ABSORBED. That PR carries three operator rulings, a

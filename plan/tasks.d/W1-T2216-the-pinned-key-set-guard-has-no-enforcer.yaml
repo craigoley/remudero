@@ -115,7 +115,7 @@
     - claim: "the pin marker records what was verified and when, not a bare version"
       proof: "unit test: test/settings.test.ts"
   files: [src/lib/settings.ts, test/settings.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#pinned-key-set-guard-has-no-enforcer-2026-08-24"
   plan_refs: ["W1-T1289", "W1-T2201"]

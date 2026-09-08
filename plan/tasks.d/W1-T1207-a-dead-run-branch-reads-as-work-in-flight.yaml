@@ -140,7 +140,7 @@
     - claim: "no dispatch path deletes or rewrites a run branch"
       proof: "unit test: test/run-branch-pr-state.test.ts"
   files: [src/lib/drain.ts, src/run-task.ts, test/run-branch-pr-state.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#dead-run-branch-reads-as-in-flight-2026-08-22"
   plan_refs: ["W1-T534", "W1-T1201"]

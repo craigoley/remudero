@@ -111,7 +111,7 @@
   origin: "oper#github-side-posture-unread-2026-08-19"
   plan_refs: ["W1-T1038", "W1-T352", "W1-T402", "W1-T27"]
   files: [src/lib/github-posture.ts, src/lib/daemon.ts, src/run-task.ts, test/github-posture.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     DESIGN, IN THE ORDER AN IMPLEMENTER MEETS IT.

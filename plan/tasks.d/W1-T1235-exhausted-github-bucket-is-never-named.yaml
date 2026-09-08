@@ -110,7 +110,7 @@
     - claim: "a call that was never rate limited records no such row, so the row marks real refusals only"
       proof: "unit test: test/rate-limit-bucket-surface.test.ts"
   files: [src/lib/worker.ts, src/lib/ledger.ts, src/run-task.ts, test/rate-limit-bucket-surface.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#exhausted-github-bucket-is-never-named-2026-08-23"
   plan_refs: ["W1-T511", "W1-T1095", "W1-T1208", "W1-T528", "W1-T203"]

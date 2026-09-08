@@ -106,7 +106,7 @@
     - claim: "both failure steps keep logging with their classified reason"
       proof: "unit test: test/read-failed-not-attempted.test.ts"
   files: [src/lib/status.ts, test/read-failed-not-attempted.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#read-failed-no-not-attempted-2026-08-24"
   plan_refs: ["W1-T119", "W1-T181", "W1-T306", "W1-T2212", "W1-T2215", "W1-T2218"]

@@ -117,7 +117,7 @@
     - claim: "the check completes without shifting a clock, running a suite or spawning"
       proof: "unit test: W1-T1206: the completeness check spawns nothing and shifts no clock"
   files: [scripts/clock-sweep.mjs, test/clock-sweep-effect-completeness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#close-is-not-a-live-write-boundary-2026-08-22"
   plan_refs: ["W1-T920", "W1-T921", "W1-T1201", "W1-T1134", "W1-T402", "W1-T919"]

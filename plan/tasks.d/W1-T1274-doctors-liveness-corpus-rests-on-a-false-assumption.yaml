@@ -228,7 +228,7 @@
     - claim: "doctor stays read-only and network-free, --fix stays refused by name, and the exit codes are unchanged"
       proof: "unit test: test/doctor.test.ts"
   files: [src/lib/daemon.ts, src/lib/daemon-health.ts, src/lib/doctor.ts, test/doctor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#doctor-liveness-corpus-false-assumption-2026-08-23"
   plan_refs: ["W1-T1047", "W1-T1099", "W1-T1272", "W1-T513"]

@@ -124,7 +124,7 @@
     - claim: "the cap is still pinned to its declared value and its raise still carries a dated written reason"
       proof: "unit test: test/claude-md-budget-ratchet.test.ts"
   files: [scripts/claude-md-budget-baseline.json, test/claude-md-budget-ratchet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#derive-the-claude-md-measurement-stop-storing-it-2026-08-23"
   plan_refs: ["W1-T1231", "W1-T1227", "W1-T297", "W1-T503"]

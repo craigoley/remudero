@@ -10,7 +10,7 @@
   files: [src/lib/learnings.ts, src/lib/status-board.ts, test/learnings-layers.test.ts, test/learnings-injection-status.test.ts]
   origin: oper#global-artifact-absence-vocabulary-2026-08-23
   plan_refs: ["W1-T145", "W1-T425", "W1-T940"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     FIRST, AND BEFORE ANY OTHER CLAIM: THE MISSING GLOBAL ARTIFACT IS A DESIGNED SOFT-FAIL, NOT

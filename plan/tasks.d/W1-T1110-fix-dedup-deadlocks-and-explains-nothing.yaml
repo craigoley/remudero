@@ -111,7 +111,7 @@
   origin: "recon#fix-dedup-deadlocks-2026-08-21"
   plan_refs: ["W1-T465", "W1-T514", "W1-T1095"]
   files: [src/lib/sweep.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT AND RULE 19 DOES **NOT** FORCE IT — MEASURED: this shard lints

@@ -166,7 +166,7 @@
   origin: "oper#console-decision-queue-2026-08-18"
   plan_refs: ["W1-T999", "W1-T996", "W1-T983", "W1-T507", "W1-T306", "W1-T283", "W1-T186"]
   files: [src/lib/board.ts, src/lib/serve.ts, test/console-blocked-pr-queue.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — the declared paths reach

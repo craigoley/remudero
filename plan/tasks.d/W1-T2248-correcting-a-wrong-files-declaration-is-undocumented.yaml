@@ -111,7 +111,7 @@
     - claim: "the guide records that no rung applies a correction to its own declaration"
       proof: "unit test: test/declared-files-correction-exit.test.ts"
   files: [docs/operator-guide.md, test/declared-files-correction-exit.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#files-declaration-correction-exit-2026-08-24"
   plan_refs: ["W1-T171", "W1-T180", "W1-T2237"]

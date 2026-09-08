@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, src/run-task.ts, test/cancelled-check-arm-can-see-it.test.ts]
   origin: oper#requeue-arm-names-only-ci-gate-2026-08-25
   plan_refs: ["W1-T1066", "W1-T1223", "W1-T1282", "W1-T2274", "W1-T2280"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main f3109443 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

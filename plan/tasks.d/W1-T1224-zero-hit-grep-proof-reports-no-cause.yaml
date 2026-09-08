@@ -109,7 +109,7 @@
   origin: "feedback#fb-1785931037801-843083"
   plan_refs: ["W1-T219", "W1-T287", "W1-T387", "W1-T488", "W1-T912", "W1-T1053", "§5C"]
   files: [src/lib/grep-zero-cause.ts, src/run-task.ts, test/grep-zero-cause.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high IS SET UP FRONT. `files:` spans src/ and test/ and `sizingViolation`

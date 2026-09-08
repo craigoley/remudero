@@ -182,7 +182,7 @@
     - claim: "the poll loops read the same conclusion sets the sweep reads"
       proof: "unit test: test/check-conclusion-vocabulary.test.ts"
   files: [src/run-task.ts, src/lib/sweep.ts, test/check-conclusion-vocabulary.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#concluded-check-read-as-pending-2026-08-25"
   plan_refs: ["W1-T103", "W1-T382", "W1-T457", "W1-T1223", "W1-T1278"]

@@ -158,7 +158,7 @@
     - claim: "the unflagged verb reserves nothing and its output is unchanged"
       proof: "unit test: test/next-task-id-reserve.test.ts"
   files: [src/run-task.ts, test/next-task-id-reserve.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: recon#mint-holds-nothing-2026-08-20
   plan_refs: ['W1-T1039', 'W1-T1048', 'W1-T949', 'W1-T471']

@@ -107,7 +107,7 @@
       proof: "unit test: entrypoint: an unreadable incoming blob refuses instead of clearing"
   origin: "oper#untracked-file-blocks-every-boot-2026-08-20"
   plan_refs: ["W1-T1036", "W1-T1047", "W1-T907", "W1-T446"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RULE 25 RE-DERIVED BY RUNNING THE REAL `INSTRUMENT_SURFACE` EXPORT, NOT BY READING IT, WITH FOUR

@@ -99,7 +99,7 @@
     - claim: "the triage rung reports its cause as data rather than as prose alone"
       proof: "unit test: test/unparseable-verdict-third-state.test.ts"
   files: [src/lib/risk-judge.ts, src/lib/triage.ts, test/unparseable-verdict-third-state.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#unparseable-verdict-third-state-2026-08-24"
   plan_refs: ["W1-T2201"]

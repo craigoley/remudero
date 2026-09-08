@@ -111,7 +111,7 @@
     - claim: "the clean-status completion still routes to a direct merge"
       proof: "unit test: test/arm-failure-classification.test.ts"
   files: [src/run-task.ts, src/lib/sweep.ts, test/arm-failure-classification.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#arm-error-classification-2026-08-22"
   plan_refs: ["W1-T1079", "W1-T1110", "W1-T1111", "W1-T970", "W1-T527"]

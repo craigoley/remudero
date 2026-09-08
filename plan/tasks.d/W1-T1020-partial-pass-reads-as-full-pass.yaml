@@ -114,7 +114,7 @@
   origin: "recon#partial-pass-reads-as-full-2026-08-19"
   plan_refs: ["W1-T185", "W1-T305", "W1-T125", "W1-T975"]
   files: [src/lib/review.ts, src/lib/autonomy.ts, test/unexecutable-proof-visibility.test.ts, test/autonomy-ratchet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`

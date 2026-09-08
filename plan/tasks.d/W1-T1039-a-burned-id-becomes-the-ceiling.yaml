@@ -91,7 +91,7 @@
   origin: "oper#allocator-ceiling-burned-by-prose-2026-08-19"
   plan_refs: ["W1-T1011", "W1-T278", "W1-T509"]
   files: [src/lib/task-id.ts, test/task-id-allocation-bound.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     NO OUT-OF-RANGE ID IS WRITTEN ANYWHERE IN THIS SHARD, DELIBERATELY. Every reference to one is

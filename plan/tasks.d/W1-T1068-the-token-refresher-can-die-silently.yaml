@@ -116,7 +116,7 @@
   origin: "recon#token-refresher-dies-silently-2026-08-20"
   plan_refs: ["W1-T1024", "W1-T1047"]
   files: [src/lib/github-app.ts, test/github-app.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: medium` — the declared paths reach ONE concern (the installation-token refresh loop) plus
