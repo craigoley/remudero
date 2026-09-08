@@ -6,10 +6,13 @@
 // The falsifier the shard names: with the population seed removed from `guardFireCounts`, the
 // three-guard mapping below lists ONE guard (the one that fired) instead of three.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { configPath } from "../src/lib/config.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   CLOSURE_POPULATION_FLOOR,
   GUARD_RETIREMENT_ZERO_STREAK,
@@ -32,6 +35,8 @@ import {
   resolveGuardCheck,
   type RetroMarker,
 } from "../src/lib/retro.js";
+import { retroCommand } from "../src/run-task.js";
+import { offlineGithub } from "./setup/offline-github.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -271,4 +276,54 @@ test("renderGather prints both tables and the marker carries the guard zero-stre
     "containment",
     "isolation",
   ], "with no mapping the fallback table still names the two shipped guards");
+});
+
+test("retroCommand --dry-run prints the two operator tables and carries the prior guard streak into them", async (t) => {
+  const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-closure-home-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-retro-closure-root-"));
+  const savedHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  try {
+    const state = join(root, "state");
+    mkdirSync(state, { recursive: true });
+    mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
+    writeFileSync(configPath(), JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+    writeFileSync(
+      join(state, "ledger.ndjson"),
+      [
+        { ts: ts(2), run_id: "cmd-1", task_id: "W1-T-CMD1", step: "run.start", type: "implement", task_class: "retro-dry-run-fixture" },
+        { ts: ts(3), run_id: "cmd-1", task_id: "W1-T-CMD1", step: "verdict", verdict: "blocked_isolation", guard: "isolation", check: "inherited-functions", cost_usd: 0.5 },
+      ]
+        .map((l) => JSON.stringify(l))
+        .join("\n") + "\n",
+    );
+    writeFileSync(
+      join(state, "last-retro.json"),
+      JSON.stringify(
+        {
+          ts: ts(1),
+          learnings_count: 0,
+          runs_seen: 0,
+          guard_zero_streak: { containment: 9 },
+        } satisfies RetroMarker,
+        null,
+        2,
+      ) + "\n",
+    );
+
+    const logSpy = t.mock.method(console, "log", () => {});
+    const code = await withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github: offlineGithub() }));
+    assert.equal(code, 0);
+    const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+    assert.match(printed, /## Closure by task class/);
+    assert.match(printed, /\| retro-dry-run-fixture \| not supplied \| 0 \| 0 \| REFUSED \(population 0 below floor 5, P48\) \| n\/a \(0 merged\) \| \(none\) \|/);
+    assert.match(printed, /## Guard fire counts since marker/);
+    assert.match(printed, /\| containment \| 0 \| \(none\) \| \(none\) \| 10 \| candidate for retirement/);
+    assert.match(printed, /\| isolation \| 1 \| inherited-functions \| W1-T-CMD1 \| 0 \|/);
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
 });
