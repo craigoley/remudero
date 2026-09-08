@@ -73,6 +73,7 @@ import type { StatusProjection } from "./status.js";
 import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
 import type { OrphanSweepReport } from "./worker-containment.js";
+import { activeWorkerCount } from "./worker.js";
 // Type-only — shapes the feedback-landing injection points below (W1-T530).
 import type { LandFeedbackResult } from "./feedback-landing.js";
 // Type-only — github-posture.ts owns this shape; the real read lives in run-task.ts (W1-T1040).
@@ -760,6 +761,9 @@ export interface DaemonDeps {
    *  PARKED shards and files nothing (Law 5). Best-effort — a throw is logged and the tick
    *  continues. */
   runCiLearningCadence?: () => Promise<CiLearningCadenceRunResult>;
+  /** One cheap-first Git object-maintenance cadence check. The only production caller is the idle
+   * boundary after useful admission; `activeLaneCount` includes still-settling review/fix work. */
+  runRepositoryMaintenance?: (activeLaneCount: number) => Promise<void>;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
    * degraded read — and the loop only acts on an explicit fire. Optional (W1-T160). */
@@ -2722,6 +2726,30 @@ export async function runDaemon(
         }
       }
 
+      // W1-T3116: this is the ONE repository-maintenance boundary. It is reached only after the
+      // board reconciler and candidate selection have had their chance and found no task to admit.
+      // The hook only schedules a single-flight background run, so this await resolves immediately;
+      // its own cheap state gate keeps ordinary idle polls free of a Git census.
+      if (deps.runRepositoryMaintenance) {
+        // `activeWorkerCount` is the shared build-and-review occupancy. The sweep counters cover
+        // non-worker detached actions and the sweep itself; `Math.max` avoids double-counting the
+        // workers a detached action owns while preserving the only destructive decision here:
+        // maintenance is eligible iff every independent signal is zero.
+        const activeLaneCount = Math.max(
+          activeWorkerCount(),
+          detachedSweepActionCount(),
+          sweepLiveness.inFlight ? 1 : 0,
+        );
+        try {
+          await deps.runRepositoryMaintenance(activeLaneCount);
+        } catch (e) {
+          log("repository.maintenance.failed", {
+            reason: "cadence wrapper threw",
+            error: String((e as Error)?.message ?? e),
+            active_lane_count: activeLaneCount,
+          });
+        }
+      }
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(pollIntervalMs);
       continue;

@@ -729,6 +729,12 @@ import {
   type PolicyHeadroomRung,
 } from "./lib/policy.js";
 import {
+  repositoryMaintenanceStatePath,
+  runRepositoryMaintenanceCadence,
+  type RepositoryMaintenanceCadenceResult,
+  type RepositoryMaintenancePolicy,
+} from "./lib/object-reaper.js";
+import {
   buildRatificationRow,
   loadRatifications,
   ratificationPinCheck,
@@ -12606,12 +12612,9 @@ async function runTask(
   // so the decision had nowhere to live and the pass was permanently survey-only. Every refusal
   // underneath is unchanged — live pid, live upstream branch, incomplete probe, 14-day ceiling.
   runAdhocLaneReapRung(config, log, { repoDir, enabled: () => opts.armAdhocLaneReap ?? loadDefaultPolicy().values.sweep.armAdhocLaneReap });
-  // W1-T411: three MORE sweeps with call sites only inside daemonCommand — stale rmd temp
-  // dirs, abandoned review clones, and per-spawn worker homes — get the SAME start-of-run
-  // reclaim rung pruneStaleRuns and logWorktreeReapBootSurvey already occupy. Unlike the
-  // worktree reaper above, all three already run ARMED wherever they run today, so this needs
-  // no dry-run flag of its own — see logDiskReclaimRung.
-  logDiskReclaimRung(config, log);
+  // W1-T3116: no general disk/object maintenance at task admission. The daemon already owns the
+  // tmp/clone/home sweeps, while Git object maintenance now has one cheap-first idle cadence.
+  // Keeping those filesystem walks here made every useful start pay for yesterday's debris.
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
@@ -25157,6 +25160,71 @@ export function logDiskReclaimRung(
 }
 
 /**
+ * W1-T3116 — the production adapter for the one daemon-lifetime repository-maintenance cadence.
+ * It owns no scheduler: `runDaemon` calls it only after reconciliation and admission found no task
+ * to start. The small durable-state read gates the object census inside the controller module.
+ */
+export async function runRepositoryMaintenanceRung(input: {
+  repoDir: string;
+  stateDir: string;
+  activeLaneCount: number;
+  diskVerdict: string | (() => string);
+  policy: RepositoryMaintenancePolicy;
+  log: (step: string, fields?: Record<string, unknown>) => void;
+}): Promise<RepositoryMaintenanceCadenceResult> {
+  return await runRepositoryMaintenanceCadence(
+    {
+      repoDir: input.repoDir,
+      statePath: repositoryMaintenanceStatePath(input.stateDir),
+      activeLaneCount: input.activeLaneCount,
+      diskVerdict: input.diskVerdict,
+      policy: input.policy,
+    },
+    { log: input.log },
+  );
+}
+
+/**
+ * Build the daemon's non-blocking, single-flight maintenance hook. Scheduling the controller is
+ * intentionally distinct from awaiting it: queue admission resumes immediately, while the child,
+ * post-survey and durable write finish in the background. A second idle tick observes the local
+ * in-flight promise and performs no duplicate state read, census or spawn.
+ */
+export function buildRepositoryMaintenanceDaemonHook(input: {
+  repoDir: string;
+  stateDir: string;
+  diskVerdict: string | (() => string);
+  policy: RepositoryMaintenancePolicy;
+  log: (step: string, fields?: Record<string, unknown>) => void;
+  run?: typeof runRepositoryMaintenanceRung;
+}): (activeLaneCount: number) => Promise<void> {
+  let inFlight: Promise<void> | undefined;
+  return async (activeLaneCount: number): Promise<void> => {
+    if (inFlight) return;
+    const run = input.run ?? runRepositoryMaintenanceRung;
+    inFlight = run({
+      repoDir: input.repoDir,
+      stateDir: input.stateDir,
+      activeLaneCount,
+      diskVerdict: input.diskVerdict,
+      policy: input.policy,
+      log: input.log,
+    })
+      .then(() => undefined)
+      .catch((error) => {
+        input.log("repository.maintenance.failed", {
+          reason: "background cadence threw",
+          error: String((error as Error)?.message ?? error),
+          active_lane_count: activeLaneCount,
+        });
+      })
+      .finally(() => {
+        inFlight = undefined;
+      });
+  };
+}
+
+/**
  * impl-FZ — build the daemon's plan re-reader, or `undefined` when this invocation must keep the
  * frozen-at-boot behaviour (an explicit `--plan`, or a non-self target).
  *
@@ -25974,6 +26042,15 @@ export async function daemonCommand(
   // target's. WITHOUT THIS LINE the hooks are undefined and the rung is dead code — what W1-T2959
   // shipped, after #1066 and #2952 each shipped it before that.
   const ciLearningHooks = target.isSelf ? buildCiLearningDaemonHooks({ config }) : undefined;
+  const repositoryMaintenanceHook = target.isSelf
+    ? buildRepositoryMaintenanceDaemonHook({
+        repoDir: effectiveRepoRoot,
+        stateDir: join(config.root, "state"),
+        diskVerdict: () => judgeDiskHeadroom(readDiskFreeBytes(config.root)).verdict,
+        policy: policy.values.repositoryMaintenance,
+        log,
+      })
+    : undefined;
   try {
     const summary = await runDaemonFn(
       plan,
@@ -26259,6 +26336,10 @@ export async function daemonCommand(
         // what makes that switch mean something; the operator throws it.
         checkCiLearningCadence: ciLearningHooks?.checkCiLearningCadence,
         runCiLearningCadence: ciLearningHooks?.runCiLearningCadence,
+        // W1-T3116: SELF-TARGET ONLY — this daemon owns only its installed checkout's object
+        // store. The loop calls this at its idle boundary; the rung's durable state makes an
+        // ordinary poll a small JSON/gc.log read, not a Git census or subprocess.
+        runRepositoryMaintenance: repositoryMaintenanceHook,
         // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
         // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
         // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once
@@ -27730,6 +27811,16 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
     github,
     resolveHeadroomEnabled: () => resolveHeadroomEnabled(config),
     resolveSupervisorIntervalS,
+    // The status board is an offline diagnostic and must survive a missing/malformed checkout.
+    // Its builder falls back to the shipped defaults when this optional read cannot be proven.
+    repositoryMaintenancePolicy: (() => {
+      try {
+        return loadPolicy(policyPath(repoDir)).values.repositoryMaintenance;
+      } catch {
+        // Offline status must remain available when the checkout or policy cannot be read.
+        return undefined;
+      }
+    })(),
   });
   // W1-T1235: GITHUB BUCKETS, read BESIDE the board's own HEADROOM section rather than folded
   // into it (design (v)) — a local ledger fold of `automerge.rate_limit_refused` rows, never a

@@ -103,6 +103,14 @@ import {
 } from "./status.js";
 import { taskCardRuns } from "./task-card.js";
 import { colourEnabled, paint, sectionRule } from "./tty.js";
+import {
+  DEFAULT_REPOSITORY_MAINTENANCE_POLICY,
+  projectRepositoryMaintenanceStatus,
+  readRepositoryMaintenanceState,
+  repositoryMaintenanceStatePath,
+  type RepositoryMaintenancePolicy,
+  type RepositoryMaintenanceStatus,
+} from "./object-reaper.js";
 
 // ── The model ────────────────────────────────────────────────────────────────────────────────
 
@@ -507,6 +515,12 @@ export interface NeedsMeSection {
   tokenFallback?: TokenFallbackRow;
 }
 
+export interface RepositoryMaintenanceSection {
+  status?: RepositoryMaintenanceStatus;
+  unknownReason?: string;
+  nextAction?: string;
+}
+
 export interface StatusBoardModel {
   generatedAt: string;
   liveness: LivenessSection;
@@ -518,6 +532,7 @@ export interface StatusBoardModel {
   headroom: HeadroomSection;
   cacheHit: CacheHitSection;
   learningsInjection: LearningsInjectionSection;
+  repositoryMaintenance?: RepositoryMaintenanceSection;
   needsMe: NeedsMeSection;
 }
 
@@ -545,6 +560,7 @@ export interface StatusBoardDeps {
   crashLoopWindow?: CrashLoopWindow;
   /** Pid-liveness probe for inflight-lock rows; defaults to drain-lock.ts's real check. */
   isPidAlive?: (pid: number) => boolean;
+  repositoryMaintenancePolicy?: RepositoryMaintenancePolicy;
 
   // ── W1-T280 (DERIVED half) ────────────────────────────────────────────────────────────────
 
@@ -2010,7 +2026,33 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     headroom,
     cacheHit,
     learningsInjection,
+    repositoryMaintenance: deriveRepositoryMaintenanceSection(
+      root,
+      deps.repositoryMaintenancePolicy ?? DEFAULT_REPOSITORY_MAINTENANCE_POLICY,
+      new Date(nowMs),
+    ),
     needsMe,
+  };
+}
+
+export function deriveRepositoryMaintenanceSection(
+  root: string,
+  policy: RepositoryMaintenancePolicy,
+  now: Date = new Date(),
+): RepositoryMaintenanceSection {
+  const read = readRepositoryMaintenanceState(repositoryMaintenanceStatePath(join(root, "state")));
+  if (read.kind === "corrupt") {
+    return {
+      unknownReason: `durable maintenance state is unreadable (${read.reason})`,
+      nextAction: "repair state/repository-maintenance.json before automatic Git maintenance can resume",
+    };
+  }
+  const status = projectRepositoryMaintenanceStatus(read.state, policy, now);
+  return {
+    status,
+    ...(status.verdict === "escalate"
+      ? { nextAction: "automatic Git maintenance exhausted its retry bound — inspect repository.maintenance.failed" }
+      : {}),
   };
 }
 
@@ -2226,6 +2268,23 @@ function renderHeadroomBlock(h: HeadroomSection): string[] {
     out.push(`age         : ${formatAgeMs(h.ageMs)} ago`);
   }
   if (h.nextAction) out.push(`next action: ${h.nextAction}`);
+  return out;
+}
+
+function renderRepositoryMaintenanceBlock(section: RepositoryMaintenanceSection): string[] {
+  const out = [sectionRule("REPOSITORY MAINTENANCE", SECTION_RULE_WIDTH)];
+  if (!section.status) {
+    out.push(`unknown — ${section.unknownReason ?? "no readable maintenance state"}`);
+  } else {
+    const s = section.status;
+    out.push(`verdict     : ${s.verdict}`);
+    out.push(`last success: ${s.lastSuccessIso ?? "never"}`);
+    if (s.lastAttemptIso) out.push(`last attempt: ${s.lastAttemptIso}`);
+    out.push(`failures    : ${s.consecutiveFailures}`);
+    out.push(`retry pending: ${s.retryPending ? "yes" : "no"}`);
+    if (s.nextEligibleIso) out.push(`next eligible: ${s.nextEligibleIso}`);
+  }
+  if (section.nextAction) out.push(`next action: ${section.nextAction}`);
   return out;
 }
 
@@ -2456,6 +2515,13 @@ export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEna
       section: model.learningsInjection,
       rendered: renderLearningsInjectionBlock(model.learningsInjection),
     },
+    ...(model.repositoryMaintenance
+      ? [{
+          label: "repository maintenance",
+          section: model.repositoryMaintenance,
+          rendered: renderRepositoryMaintenanceBlock(model.repositoryMaintenance),
+        }]
+      : []),
     { label: "needs me", section: model.needsMe, rendered: renderNeedsMeBlock(model.needsMe) },
   ];
   const lines: string[] = [`### rmd status — ${model.generatedAt}`, ""];

@@ -1,17 +1,12 @@
 /**
- * test/one-shot-disk-reclaim-rung.test.ts — W1-T411's headline claim: a ONE-SHOT `rmd
- * run-task` dispatch reclaims stale rmd temp dirs, abandoned review clones and per-spawn
- * worker homes at the SAME start-of-run moment `pruneStaleRuns` and W1-T406's
- * `logWorktreeReapBootSurvey` already occupy — three sweeps (`sweepStaleTempDirs`,
- * `reapStaleClones` via `logCloneReapSurvey`, `sweepStaleWorkerHomes`) whose only pre-existing
- * call sites are inside `daemonCommand`'s boot/poll dispatch, unreachable from a one-shot
- * container.
+ * test/one-shot-disk-reclaim-rung.test.ts — W1-T3116 supersedes W1-T411's placement decision:
+ * a one-shot `rmd run-task` now starts useful work without first walking stale temp directories,
+ * abandoned review clones and worker homes. The rung remains independently tested for callers
+ * that explicitly invoke it, but task admission no longer owns routine fleet maintenance.
  *
  * FIVE HALVES, one per acceptance criterion:
- *  1. WIRING (source-grep, mirrors test/worktree-reap-boot-rung.test.ts's own technique): the
- *     one-shot dispatch body (`runTaskBody`) really calls `logDiskReclaimRung` — after
- *     `logWorktreeReapBootSurvey` (its sibling debris-reclaim rung) and before this run's own
- *     `worktreeAdd`.
+ *  1. WIRING: the one-shot dispatch body does not call `logDiskReclaimRung` before its own
+ *     `worktreeAdd`; the stale-worktree safety survey remains in place.
  *  2. NO NEW PREDICATE: source-grep the function body for the absence of any age/liveness
  *     arithmetic of its own, PLUS a behavioral proof that whatever an injected sweep decides is
  *     exactly what the rung reports — it never re-filters or re-judges a sweep's own verdict.
@@ -54,21 +49,22 @@ function cloneSummary(over: Partial<CloneReapSummary> = {}): CloneReapSummary {
   return { candidates: [], reaped: [], bytesReclaimed: 0, dryRun: true, ...over };
 }
 
-// ── 1. WIRING: the one-shot dispatch body really calls the rung ────────────────────────────
+// ── 1. WIRING: routine maintenance no longer taxes every one-shot dispatch ─────────────────
 
-test("runTaskBody calls logDiskReclaimRung — AFTER logWorktreeReapBootSurvey, BEFORE this run's OWN worktreeAdd", () => {
+test("W1-T3116 supersedes W1-T411: runTaskBody does not run the disk-reclaim census before useful admission", () => {
   const bodyIdx = runTaskSrc.indexOf("async function runTaskBody(");
   assert.ok(bodyIdx >= 0, "run-task.ts must define runTaskBody — the one-shot dispatch's own body");
 
   const reapBootIdx = runTaskSrc.indexOf("logWorktreeReapBootSurvey(", bodyIdx);
   assert.ok(reapBootIdx > bodyIdx, "runTaskBody must call logWorktreeReapBootSurvey — its sibling debris-reclaim rung");
 
-  const diskReclaimIdx = runTaskSrc.indexOf("logDiskReclaimRung(", bodyIdx);
-  assert.ok(diskReclaimIdx > bodyIdx, "runTaskBody must call logDiskReclaimRung — the W1-T411 rung");
-  assert.ok(diskReclaimIdx > reapBootIdx, "the disk-reclaim rung must run AFTER logWorktreeReapBootSurvey");
-
   const worktreeAddIdx = runTaskSrc.indexOf("worktreeAdd(", bodyIdx);
-  assert.ok(worktreeAddIdx > diskReclaimIdx, "the disk-reclaim rung must run BEFORE this run's own worktreeAdd");
+  const diskReclaimIdx = runTaskSrc.indexOf("logDiskReclaimRung(", bodyIdx);
+  assert.ok(
+    diskReclaimIdx === -1 || diskReclaimIdx > worktreeAddIdx,
+    "one daemon cadence, not every task start, owns routine housekeeping",
+  );
+  assert.ok(worktreeAddIdx > reapBootIdx, "the separate stale-worktree safety rung remains before worktree creation");
 });
 
 // ── 2. NO NEW PREDICATE: no age/liveness arithmetic of its own, full delegation ────────────

@@ -239,7 +239,11 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
     "keychainProvisionLockWaitMs",
+<<<<<<< HEAD
     "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "ciLearningCadence", "wipeTestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "objectReap", "githubEventWake",
+=======
+    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "ciLearningCadence", "wipeTestCadence", "repositoryMaintenance", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "githubEventWake",
+>>>>>>> de8c8a6ed (feat(maintenance): automate Git object hygiene)
     "armCalibrationBands", "workerRuleHeadlines",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
@@ -542,6 +546,12 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "wipeTestCadence.enabled",
     "wipeTestCadence.minIntervalMinutes",
     "wipeTestCadence.maxPerDay",
+    // W1-T3116: no production object-maintenance cadence existed before this controller.
+    "repositoryMaintenance.incrementalIntervalMs",
+    "repositoryMaintenance.timeoutMs",
+    "repositoryMaintenance.retryBaseMs",
+    "repositoryMaintenance.retryMaxMs",
+    "repositoryMaintenance.escalationThreshold",
     // W1-T943: `workerStall` joins them too — no prior literal ever measured a worker-quiet
     // threshold before this task's own filing verified plan/policy.yaml carried zero rows for it.
     "workerStall",

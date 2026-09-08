@@ -3,6 +3,10 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import {
+  DEFAULT_REPOSITORY_MAINTENANCE_POLICY,
+  type RepositoryMaintenancePolicy,
+} from "./object-reaper.js";
 
 /**
  * The fleet's operating-constants policy, loaded as data rather than scattered source literals
@@ -156,6 +160,7 @@ export interface PolicyValues {
     minIntervalMinutes: number;
     maxPerDay: number;
   };
+  repositoryMaintenance: RepositoryMaintenancePolicy;
   headroom: {
     curve: PolicyHeadroomRung[];
     reservePct: number;
@@ -287,6 +292,11 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "wipeTestCadence.enabled": "net-new",
   "wipeTestCadence.minIntervalMinutes": "net-new",
   "wipeTestCadence.maxPerDay": "net-new",
+  "repositoryMaintenance.incrementalIntervalMs": "net-new",
+  "repositoryMaintenance.timeoutMs": "net-new",
+  "repositoryMaintenance.retryBaseMs": "net-new",
+  "repositoryMaintenance.retryMaxMs": "net-new",
+  "repositoryMaintenance.escalationThreshold": "net-new",
   "retro.mergesThreshold": "lifted",
   "retro.daysThreshold": "lifted",
   "headroom.curve": "lifted",
@@ -632,6 +642,24 @@ export function validatePolicy(raw: unknown): Policy {
         maxPerDay: numberField("wipeTestCadence.maxPerDay", wipeTestRaw.maxPerDay, origin),
       }
     : { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 };
+  const repositoryMaintenanceRaw = raw.repositoryMaintenance as Record<string, unknown> | undefined;
+  const repositoryMaintenance = repositoryMaintenanceRaw
+    ? {
+        incrementalIntervalMs: numberField(
+          "repositoryMaintenance.incrementalIntervalMs",
+          repositoryMaintenanceRaw.incrementalIntervalMs,
+          origin,
+        ),
+        timeoutMs: numberField("repositoryMaintenance.timeoutMs", repositoryMaintenanceRaw.timeoutMs, origin),
+        retryBaseMs: numberField("repositoryMaintenance.retryBaseMs", repositoryMaintenanceRaw.retryBaseMs, origin),
+        retryMaxMs: numberField("repositoryMaintenance.retryMaxMs", repositoryMaintenanceRaw.retryMaxMs, origin),
+        escalationThreshold: numberField(
+          "repositoryMaintenance.escalationThreshold",
+          repositoryMaintenanceRaw.escalationThreshold,
+          origin,
+        ),
+      }
+    : { ...DEFAULT_REPOSITORY_MAINTENANCE_POLICY };
   const retroMergesThreshold = numberField("retro.mergesThreshold", retroRaw.mergesThreshold, origin);
   const retroDaysThreshold = numberField("retro.daysThreshold", retroRaw.daysThreshold, origin);
 
@@ -721,6 +749,7 @@ export function validatePolicy(raw: unknown): Policy {
       boardReview,
       ciLearningCadence,
       wipeTestCadence,
+      repositoryMaintenance,
       headroom: { curve, reservePct, enabled: headroomEnabled },
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },

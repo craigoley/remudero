@@ -1075,6 +1075,38 @@ wipeTestCadence:
     min: 1
     max: 24
 
+# W1-T3116: one autonomous daemon-lifetime Git object-maintenance cadence. There is deliberately
+# no enabled switch: a switch would turn routine hygiene back into an operator ceremony. Safety is
+# enforced by the controller instead — cheap state reads before any census, full GC only at a quiet
+# boundary, Git's own object-database lock, a process-group timeout, verified post-state and durable
+# bounded backoff. These figures are net-new because no production object-maintenance owner existed.
+repositoryMaintenance:
+  incrementalIntervalMs:
+    value: 86400000
+    origin: "net-new"
+    min: 3600000
+    max: 604800000
+  timeoutMs:
+    value: 600000
+    origin: "net-new"
+    min: 60000
+    max: 3600000
+  retryBaseMs:
+    value: 3600000
+    origin: "net-new"
+    min: 60000
+    max: 86400000
+  retryMaxMs:
+    value: 28800000
+    origin: "net-new"
+    min: 3600000
+    max: 604800000
+  escalationThreshold:
+    value: 3
+    origin: "net-new"
+    min: 1
+    max: 10
+
 retro:
   mergesThreshold:
     value: 25
