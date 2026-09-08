@@ -24619,6 +24619,8 @@ async function drainCommand(
   // "no credit exists" from "the credit read failed"; `indeterminate` is the field that can, and
   // `StatusProjection`'s own doc requires a dispatch gate to treat it as DO NOT ACT.
   const isCreditIndeterminate = (id: string): boolean => lastProj?.get(id)?.indeterminate === true;
+  const isIndependentFailureBlocked = (id: string): boolean =>
+    lastProj?.get(id)?.independentFailureBlocked === true;
   // W1-T2397: the observation, built ONCE for both lanes — see {@link openSiblingObservation}.
   const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("drain", () => lastProj, log);
   // W1-T3144: the queue governor counts the COMPLETE open-board batch `projectPlan` already read,
@@ -24768,6 +24770,7 @@ async function drainCommand(
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(owner, repo, prNumber),
         isIndeterminate,
+        isIndependentFailureBlocked,
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across drain/daemon process restarts,
         // unlike the daemon's in-memory per-tick block flag. W1-T206: routed through
@@ -25636,6 +25639,8 @@ export async function daemonCommand(
   // "no credit exists" from "the credit read failed"; `indeterminate` is the field that can, and
   // `StatusProjection`'s own doc requires a dispatch gate to treat it as DO NOT ACT.
   const isCreditIndeterminate = (id: string): boolean => lastProj?.get(id)?.indeterminate === true;
+  const isIndependentFailureBlocked = (id: string): boolean =>
+    lastProj?.get(id)?.independentFailureBlocked === true;
   // W1-T2397: the SAME observation drainCommand builds, on the lane that carries the dispatches —
   // `daemon.boot` 347 and `run.start` 558 against `drain.start` 16, and the motivating instance
   // (W1-T2387 dispatched while #3102 was open, producing #3109) came through HERE. Reads
@@ -26040,6 +26045,7 @@ export async function daemonCommand(
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
         isIndeterminate,
+        isIndependentFailureBlocked,
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across daemon restarts, unlike this
         // loop's own in-memory per-tick block-reasoning flag. W1-T206: routed through

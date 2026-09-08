@@ -168,6 +168,8 @@ export interface StatusProjection {
   creditOverride?: { reason: string; pr: number };
   /** An OPEN escalation no LATER `run.start` has superseded. Omitted, not `false`, once superseded or merged. */
   needsHuman?: true;
+  /** An independent-failure block, derived from `dispatch.blocked_independent` and cleared by a later dispatch. */
+  independentFailureBlocked?: true;
   /** The escalation issue's own URL (W1-T182), so NEEDS ME renders a direct link rather than soliciting one. */
   escalationIssueUrl?: string;
   /** The escalation's one-line ask (W1-T182) — the live issue's title, off the same batched gateway. */
@@ -2355,6 +2357,24 @@ export interface EscalationState {
   openedAt?: string;
 }
 
+/** The latest independent-failure block if no later dispatch superseded it. */
+export function latestIndependentFailureBlock(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+): boolean {
+  let last: "run" | "blocked" | undefined;
+  for (const line of indexedTaskRows(lines, taskId, index)) {
+    if (line.task_id !== taskId && line.task !== taskId) continue;
+    if (line.step === "run.start") {
+      last = "run";
+    } else if (line.step === "dispatch.blocked_independent") {
+      last = "blocked";
+    }
+  }
+  return last === "blocked";
+}
+
 /** JOIN LIVE STATE, DO NOT PATCH THE HISTORY SCAN (W1-T182). Returns `undefined` ONLY when the issue is
  *  CONFIRMED closed; every other outcome FAILS CLOSED, keeping the row and marking it unverified, because
  *  hiding a possibly-open escalation is the more dangerous direction — the inverse of W1-T181's fail-direction,
@@ -2412,9 +2432,14 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   const now = deps.now ?? (() => Date.now());
   const projection: StatusProjection = { ...base };
 
+  if (latestIndependentFailureBlock(ledgerLines, task.id, deps.ledgerIndex)) {
+    projection.status = "blocked";
+    projection.independentFailureBlocked = true;
+  }
+
   // IN-FLIGHT + PHASE: never overrides an already-definitive `blocked` — a closed PR is stronger GitHub
   // evidence than an unresolved ledger scan reaching a stale run.start.
-  if (base.status !== "blocked") {
+  if (projection.status !== "blocked") {
     const runState = deriveRunState(ledgerLines, task.id, deps.ledgerIndex);
     if (runState.inFlight && runState.phase) {
       // LIVENESS BOUND (W1-T179 design (ii), W1-T155's amended criterion): a ledger-only in-flight trace is only

@@ -124,6 +124,7 @@ export interface NextRunnableOpts {
    *  (rate limit, network, auth), never a clean "no evidence". Dispatching then risks re-running
    *  merged work, the throttle-reads-as-not-merged spend event this guard prevents. Optional. */
   isIndeterminate?: (taskId: string) => boolean;
+  isIndependentFailureBlocked?: (taskId: string) => boolean;
   /** Called once per task excluded for an indeterminate read, in place of dispatching it —
    *  mirrors `onSkip`/`onCircuitBreak`'s legibility contract. */
   onIndeterminate?: (task: Task) => void;
@@ -423,6 +424,10 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     // ruling (plan.ts's `RETIREMENT_REASONS`, W1-T1287) will never be built, rather than being
     // dependency-stalled. Both refuse identically; only the NAME reported to `onFiltered` differs.
     opts.onFiltered?.(t, t.retirement !== undefined ? "retired" : "blocked");
+    return false;
+  }
+  if (opts.isIndependentFailureBlocked?.(t.id)) {
+    opts.onFiltered?.(t, "blocked");
     return false;
   }
   // W1-T988: BEFORE the dependency walk, so a task that is not this daemon's is refused without
@@ -938,6 +943,7 @@ export interface DrainDeps {
   /** W1-T119: true when a task's own GitHub read is INDETERMINATE, re-derived from the SAME
    *  projection `refreshMerged` just built — the same freshness contract as `isOpenPr`. Optional. */
   isIndeterminate?: (taskId: string) => boolean;
+  isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
@@ -1152,6 +1158,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
           reason: "credit projection was stale — the live merge already credits this task",
         }),
       isIndeterminate: deps.isIndeterminate,
+      isIndependentFailureBlocked: deps.isIndependentFailureBlocked,
       // INDETERMINATE (W1-T119): a legible ledger line every tick it is consulted, then the drain
       // proceeds — a throttled read on one task must not stall everything else dispatchable.
       onIndeterminate: (t) => {
@@ -1444,6 +1451,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
           reason: "credit projection was stale — the live merge already credits this task",
         }),
       isIndeterminate: deps.isIndeterminate,
+      isIndependentFailureBlocked: deps.isIndependentFailureBlocked,
       onIndeterminate: (t) => {
         log("dispatch.indeterminate", { task: t.id, ...deps.breakerDetail?.(t.id) });
         // COUNTED, not merely logged. This ledger line has always existed; what did not exist was
