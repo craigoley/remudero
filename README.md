@@ -69,9 +69,11 @@ is real code: run-task/drain/daemon/review/sweep/fix/serve and the rest of the
 - **[docs/architecture.md](./docs/architecture.md)** — the conceptual map: the three planes, and which of them a merge reaches before a restart.
 - **[docs/operator-guide.md](./docs/operator-guide.md)** — the day-to-day view: what to type, what to watch.
 - **[docs/open-decisions.md](./docs/open-decisions.md)** — the rulings that are open, and how to check whether they still are.
-- **[FINDINGS.md](./FINDINGS.md)** — the WS-0 spike's per-verdict proofs, a dated snapshot (its
-  version table is from the spike; the pins that matter today are `package.json`, `.nvmrc` and
-  `deploy/Dockerfile`'s `ARG`s).
+- **[docs/archive/FINDINGS.md](./docs/archive/FINDINGS.md)** — the WS-0 spike's per-verdict proofs, a
+  dated snapshot (its version table is from the spike; the pins that matter today are
+  `package.json`, `.nvmrc` and `deploy/Dockerfile`'s `ARG`s).
+- **[docs/archive/DIAGNOSIS.md](./docs/archive/DIAGNOSIS.md)** — the P6+P5 terminal-cause triage, a
+  dated snapshot from the first diagnosis pass; no gate reads it.
 - **[docs/audits/](./docs/audits/README.md)** — dated production-readiness reviews, kept
   byte-identical as fixtures for the audit rung.
 - **[DECISIONS.md](./DECISIONS.md)** — auto-choose decision log (append-only).

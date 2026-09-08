@@ -5,7 +5,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 
 /**
- * PER-TASK IN-FLIGHT LOCK (DIAGNOSIS.md, diag/drain-sequential-await).
+ * PER-TASK IN-FLIGHT LOCK (docs/archive/DIAGNOSIS.md, diag/drain-sequential-await).
  *
  * The proven root cause was TWO concurrent `rmd drain` processes both selecting the
  * still-unmerged W1-T7 and running it. A drain-only lock (PR #50) stops two drains —

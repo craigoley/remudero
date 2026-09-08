@@ -11016,7 +11016,7 @@ async function runTask(
     throw e;
   }
 
-  // ── PER-TASK IN-FLIGHT LOCK (guard 1, DIAGNOSIS.md diag/drain-sequential-await).
+  // ── PER-TASK IN-FLIGHT LOCK (guard 1, docs/archive/DIAGNOSIS.md diag/drain-sequential-await).
   // No two runs of the SAME task may overlap — whatever launched them (two drains, or a
   // manual run-task beside a running drain). A LIVE holder ⇒ REFUSE this run (naming the
   // holder); a stale (dead-pid) lock ⇒ reclaim.
@@ -11059,7 +11059,7 @@ async function runTask(
   // ── MOUNT RESOLUTION (§9; class axis W1-T167). The (task_type × risk × class)
   // routing table OWNS the model/effort/max_turns a run rides — never a
   // hardcoded literal (the W1-T6 defect: a dead mounts.yaml + a hardcoded
-  // 60-turn ceiling, see DIAGNOSIS.md). Resolve ONCE here and FAIL LOUD on a
+  // 60-turn ceiling, see docs/archive/DIAGNOSIS.md). Resolve ONCE here and FAIL LOUD on a
   // type/risk miss: a missing route is a config gap, never a silent fallback
   // to some default number. loadMounts throws on a bad/absent table;
   // resolveMountForClass throws on an unrouted (type × risk); an unrouted
@@ -11450,7 +11450,7 @@ async function runTask(
   // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
   // lock is a SIBLING file (never inside the worktree ⇒ never committed into the PR),
   // written now and removed on terminal verdict (the finally below). If the process
-  // crashes, the lock's pid goes dead and prune reclaims it. (DIAGNOSIS.md)
+  // crashes, the lock's pid goes dead and prune reclaims it. (docs/archive/DIAGNOSIS.md)
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   try {
@@ -11826,7 +11826,7 @@ async function runTask(
           // model/effort/max_turns come from the MOUNT (task_type × risk, §9), never a
           // hardcoded literal. max_turns is the runaway-LOOP guard; dollars (maxBudgetUsd)
           // are the real backstop. Recalibrated in mounts.yaml from OBSERVED runs (W1-T6
-          // needed >61 turns — DIAGNOSIS.md), an order of magnitude above expected.
+          // needed >61 turns — docs/archive/DIAGNOSIS.md), an order of magnitude above expected.
           model: mount.model,
           effort: mount.effort,
           maxTurns: mount.maxTurns,
@@ -23480,7 +23480,7 @@ async function drainCommand(
   const isIndeterminate = (id: string) =>
     lastProj?.get(id)?.indeterminate === true || breakerGate.isIndeterminate(id);
 
-  // SINGLE-INSTANCE GUARD (DIAGNOSIS.md, diag/drain-concurrency): two concurrent
+  // SINGLE-INSTANCE GUARD (docs/archive/DIAGNOSIS.md, diag/drain-concurrency): two concurrent
   // `rmd drain` processes both selected the still-unmerged W1-T7 and ran it. Refuse
   // to start if a LIVE drain already holds the lock; reclaim a stale (dead-pid) lock.
   const drainLockPath = join(config.root, "state", "drain.lock");
@@ -24497,7 +24497,7 @@ export async function daemonCommand(
     );
   }
 
-  // SINGLE-INSTANCE GUARD, shared with `rmd drain` (same lock file/DIAGNOSIS.md
+  // SINGLE-INSTANCE GUARD, shared with `rmd drain` (same lock file/docs/archive/DIAGNOSIS.md
   // diag/drain-concurrency): refuse to start a daemon while a drain (or another
   // daemon) already holds it; reclaim a stale (dead-pid) lock.
   const drainLockPath = join(config.root, "state", "drain.lock");

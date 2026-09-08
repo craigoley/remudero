@@ -74,6 +74,18 @@
       "grepHint": "Architecture"
     },
     {
+      "path": "docs/archive/DIAGNOSIS.md",
+      "title": "DIAGNOSIS — P6+P5 triage: the `failed`×4 and `incomplete` (×1 this cycle, ×2 prior) terminal causes",
+      "summary": "> Archived W1-T2918. Moved here from the repo root, where it sat as a dated snapshot no gate",
+      "grepHint": "DIAGNOSIS — P6+P5 triage: the `failed`×4 and `incomplete` (×1 this cycle, ×2 prior) terminal causes"
+    },
+    {
+      "path": "docs/archive/FINDINGS.md",
+      "title": "WS-0 Spike — FINDINGS",
+      "summary": "> Archived W1-T2918. Moved here from the repo root, where it sat as a dated snapshot no gate",
+      "grepHint": "WS-0 Spike — FINDINGS"
+    },
+    {
       "path": "docs/audits/README.md",
       "title": "Audit fixtures",
       "summary": "Golden inputs for the `rmd audit` rung (MASTER-PLAN §6 process proposals, P36).",

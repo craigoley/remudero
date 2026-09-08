@@ -1,5 +1,11 @@
 # DIAGNOSIS — P6+P5 triage: the `failed`×4 and `incomplete` (×1 this cycle, ×2 prior) terminal causes
 
+> **Archived W1-T2918.** Moved here from the repo root, where it sat as a dated snapshot no gate
+> reads and five source comments cited by bare filename; those comments now cite this path. The
+> triage below is historical record from W1-T52's read-only pass — the code paths it diagnosed
+> have since changed, and current behaviour is authoritative over this page, not the other way
+> round. Read it for the reasoning trail, not for present-day state.
+
 **Task:** W1-T52 · **Mandate:** read-only evidence (ledger + transcripts + prior diag branches +
 git history), **no patch, no golden minted (P6a)**. **Verdict:** `failed` and `incomplete` are
 **NOT one hole**. `failed` is a real, structured verdict class (worker returned a terminal ERROR

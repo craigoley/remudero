@@ -29,6 +29,6 @@
   },
   {
     "id": "W1-T12",
-    "reason": "Pre-schema bootstrap task (\"Daemonize\"), retired without ever getting its own `- id:` plan record. src/lib/daemon.ts:4 says it plainly: \"W1-T12 (Daemonize) was split along the machine/human boundary (DIAGNOSIS.md, Rule 16)\" into W1-T12a/b/c; src/run-task.ts:5890 and src/lib/task-linter.ts:21 cite it alongside W1-T6/W1-T9 as one of the three malformed pre-schema tasks that motivated the task linter. It was retired in place, not filed, so it never held a plan record or a reservation ref and never will."
+    "reason": "Pre-schema bootstrap task (\"Daemonize\"), retired without ever getting its own `- id:` plan record. src/lib/daemon.ts:4 says it plainly: \"W1-T12 (Daemonize) was split along the machine/human boundary (docs/archive/DIAGNOSIS.md, Rule 16)\" into W1-T12a/b/c; src/run-task.ts:5890 and src/lib/task-linter.ts:21 cite it alongside W1-T6/W1-T9 as one of the three malformed pre-schema tasks that motivated the task linter. It was retired in place, not filed, so it never held a plan record or a reservation ref and never will."
   }
 ]

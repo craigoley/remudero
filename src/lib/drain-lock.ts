@@ -6,7 +6,7 @@ import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 /**
  * Single-instance guard for `rmd drain`.
  *
- * ROOT CAUSE this addresses (DIAGNOSIS.md, diag/drain-concurrency): two `rmd drain`
+ * ROOT CAUSE this addresses (docs/archive/DIAGNOSIS.md, diag/drain-concurrency): two `rmd drain`
  * processes ran concurrently — nothing stopped a second invocation — and, because
  * task readiness is re-derived from GitHub each iteration, BOTH independently selected
  * the still-unmerged W1-T7 and launched workers. A lockfile makes "two drains at once"

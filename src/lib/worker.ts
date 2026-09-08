@@ -3250,7 +3250,7 @@ export function reclaimStaleConfigLock(repoDir: string, opts: ConfigLockReclaimO
  * about-to-be-created branch does not exist yet, so it is safe. LIVENESS GUARD: a worktree whose sibling {@link runLockPath}
  * names a LIVE pid is SKIPPED. A CORRUPT lock is treated the SAME as an ABSENT one, never as proof of death — both go through
  * the age and grace guard, which is what makes a torn read survivable.
- * Why: force-removing any `run-*` worktree once destroyed a successful 65-turn implement mid-run (DIAGNOSIS.md
+ * Why: force-removing any `run-*` worktree once destroyed a successful 65-turn implement mid-run (docs/archive/DIAGNOSIS.md
  *      diag/drain-concurrency; W1-T208). */
 export function pruneStaleRuns(
   repoDir: string,

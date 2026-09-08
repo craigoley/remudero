@@ -42,7 +42,7 @@ const ENABLED = {
 const OBSERVED_EXPIRED_TEXT =
   "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue";
 
-// FINDINGS.md's verified ground truth (SDK 0.3.209 / CLI 2.1.209) for a
+// docs/archive/FINDINGS.md's verified ground truth (SDK 0.3.209 / CLI 2.1.209) for a
 // headless spawn with no usable OAuth token at all — a DIFFERENT credential-
 // dead shape from the expired-token one above (never logged in, vs. a copied
 // token that has since expired).
