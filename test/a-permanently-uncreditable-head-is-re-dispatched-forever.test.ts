@@ -33,7 +33,7 @@ const headAcceptable = (RT as unknown as Record<string, unknown>)[["fixHead", "A
 interface Harness {
   cleanup(): void;
   createdIssues: OpenIssue[];
-  dispatch(headSha: string): Promise<unknown>;
+  dispatch(headSha: string, prState?: { reviewState: string; checksState: string }): Promise<unknown>;
   failNextEscalation(): void;
   ghViewCount(): number;
   ledgerRows(): Array<Record<string, unknown>>;
@@ -148,7 +148,7 @@ function makeHarness(): Harness {
       );
       writeFileSync(ledgerPath, "");
     },
-    dispatch: async (headSha) => {
+    dispatch: async (headSha, prState) => {
       const log = (step: string, extra: Record<string, unknown> = {}): void => {
         appendLedger(ledgerPath, { run_id: `SWEEP-${headSha}`, task_id: "SWEEP", step, ...extra });
       };
@@ -172,8 +172,8 @@ function makeHarness(): Harness {
         headSha,
         headRefName: "snapshot-only",
         taskId: TASK_ID,
-        reviewState: "failure",
-        checksState: "green",
+        reviewState: prState?.reviewState ?? "failure",
+        checksState: prState?.checksState ?? "green",
         unmetCriteria: ["manual branch cannot be amended"],
         priorStrikes: 0,
         lastActivityAt: new Date().toISOString(),
@@ -272,6 +272,56 @@ test("a failed human delivery retries without re-reading the unchanged head, the
       1,
       "the delivered marker is written only after the external issue exists",
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+// W1-T3168 — the healthy-head arm of `escalateTerminalHead`. Every test above drives a STUCK PR
+// (reviewState "failure"), so the branch that DECLINES to escalate had no coverage at all:
+// diff-coverage flagged src/run-task.ts:29803-29809, the log-and-return itself. The ownership fact
+// alone is not an ask — a foreign head on a PR that is not stuck needs no decision from anyone
+// today, and the point of the rung is that it is LEDGERED rather than silently dropped.
+test("W1-T3168: a foreign head on a PR that is NOT stuck is ledgered, never escalated", async () => {
+  const h = makeHarness();
+  try {
+    h.setHead("codex/manual-fix");
+    await h.dispatch("sha-healthy", { reviewState: "success", checksState: "green" });
+
+    const rows = h.ledgerRows();
+    const notStuck = rows.filter((r) => r.step === "sweep.terminal_head.not_stuck");
+    assert.equal(notStuck.length, 1, "the healthy decision is recorded exactly once");
+    assert.equal(notStuck[0].pr_number, 4242);
+    assert.equal(notStuck[0].head_sha, "sha-healthy");
+    assert.equal(notStuck[0].review_state, "success", "the row carries the evidence it decided on");
+    assert.equal(notStuck[0].checks_state, "green");
+
+    assert.equal(h.createdIssues.length, 0, "a healthy head pages nobody");
+    assert.equal(
+      rows.filter((r) => r.step === "sweep.fix.uncreditable_head_escalated").length,
+      0,
+      "and no escalation is recorded either",
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("W1-T3168 MUTANT: the same head on a STUCK PR still escalates — the carve-out is narrow", async () => {
+  // The falsifier for the test above: identical fixture, only the PR's health differs. If the
+  // healthy arm ever swallowed the stuck case too, this is what would go red.
+  const h = makeHarness();
+  try {
+    h.setHead("codex/manual-fix");
+    await h.dispatch("sha-stuck", { reviewState: "failure", checksState: "green" });
+
+    const rows = h.ledgerRows();
+    assert.equal(
+      rows.filter((r) => r.step === "sweep.terminal_head.not_stuck").length,
+      0,
+      "a stuck head is never recorded as healthy",
+    );
+    assert.ok(h.createdIssues.length >= 1, "a stuck foreign head still pages a human");
   } finally {
     h.cleanup();
   }
