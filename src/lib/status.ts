@@ -2065,7 +2065,11 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     const cands = deps.openHeadBranches?.(task.id) ?? deps.github.listOpenHeadBranches?.();
     if (!cands) return undefined; // null (read failed → W1-T119) or method absent (fixture) — skip
     const hit = cands
-      .filter((pr) => pr.state.toUpperCase() === "OPEN" && ownsBranch(pr.headRefName, task.id))
+      .filter(
+        (pr) =>
+          pr.state.toUpperCase() === "OPEN" &&
+          (ownsBranch(pr.headRefName, task.id) || hasAnchoredTrailer(pr.body, task.id)),
+      )
       .sort((a, b) => b.number - a.number)[0];
     return hit
       ? { taskId: task.id, source: "head-branch", ...fromPrState(hit.state), prNumber: hit.number, prUrl: hit.url, prState: hit.state }
@@ -2856,10 +2860,16 @@ export function projectPlan(
       openByTask = new Map<string, PrRef[]>();
       for (const pr of allOpen) {
         const owner = taskIdFromRunBranch(pr.headRefName);
-        if (owner === undefined) continue;
-        const existing = openByTask.get(owner);
-        if (existing) existing.push(pr);
-        else openByTask.set(owner, [pr]);
+        if (owner !== undefined) {
+          const existing = openByTask.get(owner);
+          if (existing) existing.push(pr);
+          else openByTask.set(owner, [pr]);
+        }
+        const trailerOwner = (pr.body ?? "").match(TRAILER_RE)?.[1];
+        if (!trailerOwner || !TASK_ID_TRAILER_RE.test(trailerOwner) || trailerOwner === owner) continue;
+        const trailerOwned = openByTask.get(trailerOwner);
+        if (trailerOwned) trailerOwned.push(pr);
+        else openByTask.set(trailerOwner, [pr]);
       }
     }
     const capturedOpen = openByTask;
@@ -2876,7 +2886,7 @@ export function projectPlan(
     const p = deriveStatus(task, effectiveDeps);
     // W1-T2397: computed HERE rather than inside `deriveStatus` so it can never be mistaken for a precedence
     // input — attached after the projection is decided, and read only by a log.
-    if (!p.merged) {
+    if (!p.merged && p.prState !== "OPEN") {
       const sib = openSiblingBuild(task.id, task.files, openForSiblings, effectiveDeps.github.changedFiles?.bind(effectiveDeps.github));
       if (sib) p.openSiblingBuild = sib;
     }
