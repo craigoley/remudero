@@ -1006,8 +1006,13 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   function renderSelfMeasurement(v) {
     const list = document.getElementById("self-measurement-list");
     if (!list) return;
-    if (!v || v.status === "unreadable") {
-      const reason = v && v.reason ? v.reason : "no response from GET /v1/self-measurement";
+    if (!v) {
+      list.innerHTML = `<li class="empty self-measurement-unreadable" data-self-measurement="unreadable">UNREADABLE — the measurement ledger union could not be read (no response from GET /v1/self-measurement)</li>`;
+      setGlanceValue("self-measurement-summary", "unreadable");
+      return;
+    }
+    if (v.status === "unreadable") {
+      const reason = v.reason ? v.reason : "no response from GET /v1/self-measurement";
       list.innerHTML = `<li class="empty self-measurement-unreadable" data-self-measurement="unreadable">UNREADABLE — the measurement ledger union could not be read (${escapeHtml(reason)})</li>`;
       setGlanceValue("self-measurement-summary", "unreadable");
       return;
@@ -2018,9 +2023,28 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     const base = TASK_STATUSES.indexOf(a.status) - TASK_STATUSES.indexOf(b.status);
     return dir === "desc" ? -base : base;
   }
-  const FIND_COMPARATORS = { id: cmpById, status: cmpByStatus, recency: cmpByRecency, age: cmpByAge };
+  function findSortComparator(sort) {
+    switch (sort) {
+      case "status": return cmpByStatus;
+      case "recency": return cmpByRecency;
+      case "age": return cmpByAge;
+      case "id":
+      default: return cmpById;
+    }
+  }
+  function normalizeFindSort(sort) {
+    switch (sort) {
+      case "status":
+      case "recency":
+      case "age":
+      case "id":
+        return sort;
+      default:
+        return "id";
+    }
+  }
   function sortFindRows(rows) {
-    const cmp = FIND_COMPARATORS[findState.sort] ?? cmpById;
+    const cmp = findSortComparator(findState.sort);
     return rows.slice().sort((a, b) => cmp(a, b, findState.dir) || cmpById(a, b, "asc"));
   }
 
@@ -2037,7 +2061,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     findState.facets.risk = p.get("risk") || null;
     findState.facets.hasPr = p.get("hasPr") === "1";
     findState.facets.needsMe = p.get("needsMe") === "1";
-    findState.sort = p.get("sort") || "id";
+    findState.sort = normalizeFindSort(p.get("sort"));
     findState.dir = p.get("dir") === "desc" ? "desc" : "asc";
   }
   function writeFindStateToUrl() {
@@ -2159,7 +2183,8 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   document.getElementById("find-sort").addEventListener("click", (e) => {
     const btn = e.target.closest(".sort-header");
     if (!btn) return;
-    const key = btn.dataset.sort;
+    const key = normalizeFindSort(btn.dataset.sort);
+    if (key !== btn.dataset.sort) return;
     if (findState.sort === key) findState.dir = findState.dir === "asc" ? "desc" : "asc";
     else { findState.sort = key; findState.dir = key === "recency" || key === "age" ? "desc" : "asc"; }
     applyFindState();
