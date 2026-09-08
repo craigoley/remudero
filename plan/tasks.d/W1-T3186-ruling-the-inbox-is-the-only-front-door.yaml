@@ -1,0 +1,107 @@
+- id: W1-T3186
+  title: "DESIGN RULING: THE INBOX IS THE ONLY FRONT DOOR FOR AN ASK, CHANGE MANAGEMENT IS ITS OWN AREA, AND `NEEDS ME` IS DISSOLVED — one section currently emits EIGHT row kinds across four unrelated concerns, and every real escalation renders TWICE on one page under two different resolution vocabularies"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 2.00
+  files: [DECISIONS.md]
+  origin: "operator-session#console-ia-2026-09-08"
+  plan_refs: ["W1-T153", "W1-T507", "W1-T110", "W1-T2718", "W1-T3183", "W1-T3187", "W1-T3188"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR DIRECTION 2026-09-08, verbatim: "There is something weird between the NEEDS ME board
+    and the Inbox. The Needs Me items should probably be rebranded or removed. Anything that truly
+    needs me should come in through the inbox. ... Maybe we need a separate area for pr management
+    that is not NEEDS ME or Inbox. That feels like a specific area of focus, like change
+    management."
+
+    THE WEIRDNESS IS MEASURABLE, and it is three separate things.
+
+    (1) `renderNeedsMe` EMITS EIGHT ROW KINDS ACROSS FOUR CONCERNS (src/lib/serve.ts):
+          key `task:`                    needsMeTaskRowHtml            an escalation
+          key `verify:`                  needsMeVerifyRowHtml          a queued verify:human shard
+          key `blocked-pr:`              needsMeBlockedPrRowHtml       PR LIFECYCLE (prNumber, mergeHold)
+                                         needsMeBlockedPrUnverifiedHtml
+          key `inbox:` / `inbox-drafting:` needsMeInboxHtml/Drafting   a ratification proposal
+          key `fba:`/`fbg:`/`fbp:`       needsMeGrillHtml/ProposedHtml feedback grills and proposals
+        Escalations, a plan backlog, pull-request management and two proposal queues share one
+        heading, one badge and one count.
+
+    (2) THE MAILBOX IS A STRICT SUBSET OF NEEDS ME, so every real escalation renders TWICE on one
+        page. The two predicates, verbatim:
+          renderNeedsMe:        `if (!t.needsHuman) continue;`
+          buildMailboxThreads:  `if (!t || !t.needsHuman || !t.escalationTitle || !t.taskId) continue;`
+        MEASURED on the live console 2026-09-08: the same five items — MAIN-HEALTH, W1-T2902,
+        W1-T2904, W1-T3102, W1-T3131 — appear in NEEDS ME and again in the Mailbox. And they carry
+        DIFFERENT VERBS: "Mark handled" (POST /v1/escalation/mark-handled) in NEEDS ME versus
+        "Open" / "Resolve" (client-side, localStorage) in the Mailbox. Two resolution vocabularies
+        for one item, neither of which tells the operator what the other did.
+
+    (3) THE WORD "INBOX" IS ALREADY TAKEN BY THE WRONG SURFACE. `GET /v1/inbox` returns
+        `{ ready, drafting }` — RATIFICATION PROPOSALS (W1-T110) — and those render INSIDE NEEDS ME.
+        The surface that actually behaves like an inbox (threads, unread badge, reply boxes, a
+        read/resolved state) is called the MAILBOX. So the operator's "Inbox" and the code's
+        "inbox" are different things, which is exactly why the relationship reads as weird.
+
+    W1-T507 AND W1-T110 ARE NOT WRONG. Each added a legitimate row to the only board that existed.
+    The defect is cumulative: no ruling ever said what NEEDS ME is FOR, so every new "the operator
+    should see this" landed in it.
+  design: |
+    (i) ONE FRONT DOOR. Anything that requires an operator DECISION arrives in the INBOX and
+    nowhere else — escalations, ratification proposals, feedback grills, and the verify:human items
+    a judge has ruled genuinely need him (W1-T3188). One place to look, one unread count, one
+    resolution vocabulary. THE COUNT AN OPERATOR SEES IS THE COUNT OF THINGS HE MUST DECIDE.
+    (ii) CHANGE MANAGEMENT IS A SEPARATE AREA, not an inbox item. Pull-request lifecycle — blocked
+    heads, merge holds, review state, sweep disposition — is a place the operator GOES TO WORK, not
+    a queue that interrupts him. The `blocked-pr:` rows leave NEEDS ME for it, and W1-T2718's
+    whole-PR-queue cockpit is the same area rather than a ninth row kind somewhere else.
+    (iii) `NEEDS ME` IS DISSOLVED, NOT RENAMED. Renaming keeps the mixing and merely relabels it.
+    Every one of its eight row kinds is REHOMED EXPLICITLY — to the Inbox, to Change Management, or
+    to the backlog view W1-T3183 defines — and the ruling must name the destination of each, so no
+    kind is lost in the move.
+    (iv) NOTHING BECOMES INVISIBLE. W1-T507 exists because a queue nobody could see was the prior
+    defect. Every row that renders today still renders after the split; what changes is WHERE and
+    what it is counted as.
+    (v) ONE RESOLUTION VOCABULARY PER ITEM. The "Mark handled" / "Open" / "Resolve" triple is
+    settled by this ruling, not left for the implementer: an item has exactly one way to be
+    dispatched, and whatever the operator does to it is visible wherever it appears.
+  acceptance:
+    - claim: "DECISIONS.md records the ruling: the Inbox is the only front door for an ask, Change Management is a separate area, NEEDS ME is dissolved"
+      proof: "grep: THE INBOX IS THE ONLY FRONT DOOR in DECISIONS.md"
+    - claim: "the record names the destination of every one of the eight row kinds NEEDS ME emits today, so none is lost in the move"
+      proof: "grep: needsMeBlockedPrRowHtml in DECISIONS.md"
+    - claim: "the record states the duplicate-render measurement and rules on the competing resolution vocabularies"
+      proof: "grep: Mark handled in DECISIONS.md"
+  falsifier: |
+    CLOSE IF the surfaces are already separated: read `renderNeedsMe`'s row kinds and compare
+    `buildMailboxThreads`' predicate with it.
+    MEASURED 2026-09-08: eight row kinds in one section; the Mailbox predicate is `needsHuman`
+    PLUS two fields, i.e. a strict subset; five items render in both.
+    POSITIVE CONTROL for "eight kinds", because a grep that finds nothing looks the same as a clean
+    board: the enumeration must return the eight `needsMe*Html` emitters by name —
+    TaskRow, VerifyRow, BlockedPrRow, BlockedPrUnverified, Inbox, Drafting, Grill, Proposed.
+    DO NOT satisfy this by renaming NEEDS ME. Design (iii) exists because a rename preserves the
+    mixing; a ruling that ends in a new heading over the same eight kinds has changed nothing an
+    operator can feel.
+    DO NOT satisfy this by deleting the verify:human rows or the blocked-PR rows. Each has a
+    destination named in the ruling; a row that renders today and renders nowhere afterwards is the
+    invisible-queue defect W1-T507 was filed to end.
+    DO NOT let this ruling decide the JUDGE's polarity for verify:human items. That is W1-T3188's,
+    and folding it in here would settle a demote-only safety question inside an IA record.
+  note: |
+    Rule 25 CHECKED: `DECISIONS.md` is documentation.
+    THIS IS `verify: human` BECAUSE IT IS A TASTE-AND-PRIORITY RULING. No test can establish that
+    "one front door" is the right model; what tests CAN establish is that the split happened and
+    nothing was lost, which is W1-T3187's and W1-T3183's work.
+    SEQUENCING, so a builder does not start at the wrong end: this ruling first, then W1-T3187 (the
+    duplicate render, which is a defect in its own right and small), then W1-T3188 (the verify:human
+    judge), then W1-T3183 (ask-vs-backlog separation) and W1-T2718 (the change-management cockpit).
+    CAVEAT WITH EQUAL WEIGHT: the operator named "change management" as a FEELING about shape —
+    "that feels like a specific area of focus". This ruling records it as a decision and should not
+    pretend it was derived from measurement. What IS measured is that PR-lifecycle rows currently
+    sit in a section with escalations and a plan backlog; that they deserve their own area is a
+    judgement, and it is his to make.
