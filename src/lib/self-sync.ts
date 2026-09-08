@@ -314,6 +314,58 @@ function exitCodeForSignal(signal: NodeJS.Signals | null): number {
   return signalNumber === undefined ? 1 : 128 + signalNumber;
 }
 
+export function reexecExitCode(status: number | null, signal: NodeJS.Signals | null): number {
+  return status ?? exitCodeForSignal(signal);
+}
+
+interface ReexecChild {
+  kill(signal: NodeJS.Signals): boolean;
+  once(event: "error", listener: (err: Error) => void): this;
+  once(event: "exit", listener: (status: number | null, signal: NodeJS.Signals | null) => void): this;
+}
+
+interface ReexecSignalSource {
+  once(signal: NodeJS.Signals, listener: () => void): this;
+  removeListener(signal: NodeJS.Signals, listener: () => void): this;
+}
+
+export interface ReexecChildSupervisorDeps {
+  exit: (code: number) => void;
+  reportError?: (message: string) => void;
+  signalSource?: ReexecSignalSource;
+  signals?: readonly NodeJS.Signals[];
+}
+
+export function superviseReexecChild(child: ReexecChild, deps: ReexecChildSupervisorDeps): void {
+  const signalSource = deps.signalSource ?? process;
+  const signals = deps.signals ?? REEXEC_FORWARDED_SIGNALS;
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  let exitStarted = false;
+
+  const exitOnce = (code: number): void => {
+    if (exitStarted) return;
+    exitStarted = true;
+    for (const [signal, handler] of handlers) signalSource.removeListener(signal, handler);
+    deps.exit(code);
+  };
+
+  for (const signal of signals) {
+    const handler = () => {
+      child.kill(signal);
+    };
+    handlers.set(signal, handler);
+    signalSource.once(signal, handler);
+  }
+
+  child.once("error", (err) => {
+    deps.reportError?.(`### rmd self-sync: re-exec failed: ${String(err)}`);
+    exitOnce(1);
+  });
+  child.once("exit", (status, signal) => {
+    exitOnce(reexecExitCode(status, signal));
+  });
+}
+
 // diff-cov: process-boundary — re-execs process.execArgv and exits with the child's code; a real
 // re-exec cannot carry a coverage hit without forking the suite (W1-T221, see docs/review-gate.md).
 function defaultReexec(env: NodeJS.ProcessEnv | Record<string, string | undefined>): void {
@@ -324,30 +376,9 @@ function defaultReexec(env: NodeJS.ProcessEnv | Record<string, string | undefine
     stdio: "inherit",
     env: { ...(env as NodeJS.ProcessEnv), [SELF_SYNC_GUARD_ENV]: "1" },
   });
-  const handlers = new Map<NodeJS.Signals, () => void>();
-  let exitStarted = false;
-
-  const exitOnce = (code: number): void => {
-    if (exitStarted) return;
-    exitStarted = true;
-    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
-    process.exit(code);
-  };
-
-  for (const signal of REEXEC_FORWARDED_SIGNALS) {
-    const handler = () => {
-      child.kill(signal);
-    };
-    handlers.set(signal, handler);
-    process.once(signal, handler);
-  }
-
-  child.once("error", (err) => {
-    console.error(`### rmd self-sync: re-exec failed: ${String(err)}`);
-    exitOnce(1);
-  });
-  child.once("exit", (status, signal) => {
-    exitOnce(status ?? exitCodeForSignal(signal));
+  superviseReexecChild(child, {
+    exit: (code) => process.exit(code),
+    reportError: (message) => console.error(message),
   });
 }
 

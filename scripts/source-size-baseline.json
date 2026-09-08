@@ -155,7 +155,7 @@
   "src/lib/run-result.ts": 500,
   "src/lib/runbook-coverage.ts": 129,
   "src/lib/secret-boundary.ts": 500,
-  "src/lib/self-sync.ts": 500,
+  "src/lib/self-sync.ts": 1000,
   "src/lib/serve.ts": 7000,
   "src/lib/service.ts": 1000,
   "src/lib/settings.ts": 194,

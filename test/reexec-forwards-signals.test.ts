@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,11 +8,27 @@ import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 
+import { reexecExitCode, superviseReexecChild } from "../src/lib/self-sync.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SELF_SYNC_IMPORT = pathToFileURL(join(REPO_ROOT, "src", "lib", "self-sync.ts")).href;
 type ReexecParentProcess = ChildProcessByStdio<null, Readable, Readable>;
+
+class FakeReexecChild extends EventEmitter {
+  readonly killedSignals: NodeJS.Signals[] = [];
+
+  kill(signal: NodeJS.Signals): boolean {
+    this.killedSignals.push(signal);
+    return true;
+  }
+}
+
+class FakeSignalSource extends EventEmitter {
+  override removeListener(eventName: string | symbol, listener: (...args: unknown[]) => void): this {
+    return super.removeListener(eventName, listener);
+  }
+}
 
 // W1-T2903's shared fixture, not a hand-rolled `git init`. It already pins the identity env the
 // runner needs (CLAUDE.md's #1971 class: `commit-tree` refuses `Author identity unknown` on a CI
@@ -135,6 +152,63 @@ function killIfAlive(pidFile: string): void {
     // already exited
   }
 }
+
+test("re-exec supervision forwards parent termination signals until the child exits", () => {
+  const child = new FakeReexecChild();
+  const signalSource = new FakeSignalSource();
+  const exits: number[] = [];
+  superviseReexecChild(child, {
+    exit: (code) => {
+      exits.push(code);
+    },
+    signalSource,
+    signals: ["SIGTERM", "SIGHUP"],
+  });
+
+  signalSource.emit("SIGTERM");
+  assert.deepEqual(child.killedSignals, ["SIGTERM"]);
+  assert.deepEqual(exits, [], "parent exit waits for the re-exec child's own status");
+
+  child.emit("exit", 42, null);
+  assert.deepEqual(exits, [42]);
+  assert.equal(signalSource.listenerCount("SIGTERM"), 0);
+  assert.equal(signalSource.listenerCount("SIGHUP"), 0);
+
+  child.emit("exit", 17, null);
+  assert.deepEqual(exits, [42], "a second child event must not exit twice");
+});
+
+test("re-exec supervision reports spawn errors and removes signal handlers before exit", () => {
+  const child = new FakeReexecChild();
+  const signalSource = new FakeSignalSource();
+  const exits: number[] = [];
+  const reports: string[] = [];
+  superviseReexecChild(child, {
+    exit: (code) => {
+      exits.push(code);
+    },
+    reportError: (message) => {
+      reports.push(message);
+    },
+    signalSource,
+    signals: ["SIGINT"],
+  });
+
+  child.emit("error", new Error("spawn failed"));
+  assert.deepEqual(exits, [1]);
+  assert.match(reports[0] ?? "", /re-exec failed: Error: spawn failed/);
+  assert.equal(signalSource.listenerCount("SIGINT"), 0);
+
+  signalSource.emit("SIGINT");
+  assert.deepEqual(child.killedSignals, [], "signal listeners are gone after the parent exits");
+});
+
+test("re-exec exit-code translation preserves status and maps signal-only exits", () => {
+  assert.equal(reexecExitCode(0, "SIGTERM"), 0);
+  assert.equal(reexecExitCode(23, null), 23);
+  assert.equal(reexecExitCode(null, "SIGTERM"), 143);
+  assert.equal(reexecExitCode(null, null), 1);
+});
 
 test("default re-exec passes through the fresh child's ordinary exit code", async () => {
   const { localDir } = gitFixture();
