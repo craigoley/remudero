@@ -61,7 +61,7 @@
   "scripts/cycle-baseline.json": 0,
   "scripts/cycle-ratchet.mjs": 44,
   "scripts/diff-class.mjs": 100,
-  "scripts/diff-coverage.mjs": 147,
+  "scripts/diff-coverage.mjs": 171,
   "scripts/error-subclass-baseline.json": 250,
   "scripts/fixture-copy-baseline.json": 250,
   "scripts/fleet-heartbeat.sh": 320,
