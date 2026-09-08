@@ -1096,10 +1096,10 @@ jobs:
           # a first-failure exit would report one file and leave the rest unmeasured.
           rc=0
           run_gate() {
-            label="$1"
+            gate="$1"
             shift
-            echo "::group::${label}"
-            npm run --silent "$@" || { rc=1; echo "main-ceiling-drift: ${label} BLOCKED on main itself"; }
+            echo "::group::${gate}"
+            npm run --silent "$@" || { rc=1; echo "main-ceiling-drift: ${gate} BLOCKED on main itself"; }
             echo "::endgroup::"
           }
           run_gate source-size-ratchet source-size-ratchet
