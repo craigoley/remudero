@@ -189,6 +189,30 @@ jobs:
               echo "::error::ci-shard ${{ matrix.shard }}/4 exited ${CODE} with NO node-test-runner summary ('# tests'/'# pass'/'# fail') anywhere in its output. A killed or timed-out run prints only the assertions it reached and no totals, so its failure set is a SUBSET BY CONSTRUCTION — this red is UNVERIFIED, not a diagnosed failure set (W1-T2597)."
               echo "- **W1-T2597: NO-SUMMARY SHARD** — ci-shard (${{ matrix.shard }}/4) exited ${CODE} with no trailing \`# tests\` summary. Its failure set is UNVERIFIED (truncated evidence), distinct from a shard that reported a complete, genuine failure set." >> "$GITHUB_STEP_SUMMARY"
             fi
+            if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${{ matrix.shard }}" = "1" ]; then
+              # W1-T3068: absolute ceilings can be crossed by a merge on main, after every PR stayed
+              # under the per-PR ratchet. Measure them on main's push lane under the existing `ci`
+              # check name, so no skipped push-only PR context is introduced.
+              run_main_ceiling_gate() {
+                gate="$1"
+                shift
+                echo "::group::main-ceiling-drift:${gate}"
+                npm run --silent "$@" || {
+                  CODE=1
+                  echo "main-ceiling-drift: ${gate} BLOCKED on main itself"
+                }
+                echo "::endgroup::"
+              }
+              run_main_ceiling_gate source-size-ratchet source-size-ratchet
+              run_main_ceiling_gate learnings-budget-ratchet learnings-budget-ratchet
+              run_main_ceiling_gate claude-md-budget-ratchet claude-md-budget-ratchet
+              run_main_ceiling_gate comment-load-signal comment-load-signal -- --base HEAD^
+              if [ "$CODE" -ne 0 ]; then
+                echo "main-ceiling-drift: main may be past a recorded ceiling or the test shard failed."
+                echo "If a grouped ceiling above is BLOCKED, no pull request is wrong — main is."
+                echo "TO FIX a blocked ceiling: record the ceiling the failing gate prints, in a PR of its own, and merge it first."
+              fi
+            fi
             exit "$CODE"
           fi
           SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites)" || SUITES=""
@@ -1074,41 +1098,3 @@ jobs:
         run: npm ci
       - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
         run: npm run --silent comment-load-signal
-
-  main-ceiling-drift:
-    # W1-T3068: push-only signal for absolute ceilings crossed by merged growth on main.
-    # SIGNAL, NOT GATE: requiring this skipped-on-PR check would deadlock every PR.
-    name: main-ceiling-drift
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Absolute ceilings, measured against main itself
-        run: |
-          # Each ratchet is run even if an earlier one fails, so one breach never hides another —
-          # a first-failure exit would report one file and leave the rest unmeasured.
-          rc=0
-          run_gate() {
-            gate="$1"
-            shift
-            echo "::group::${gate}"
-            npm run --silent "$@" || { rc=1; echo "main-ceiling-drift: ${gate} BLOCKED on main itself"; }
-            echo "::endgroup::"
-          }
-          run_gate source-size-ratchet source-size-ratchet
-          run_gate learnings-budget-ratchet learnings-budget-ratchet
-          run_gate claude-md-budget-ratchet claude-md-budget-ratchet
-          run_gate comment-load-signal comment-load-signal -- --base HEAD^
-          if [ "$rc" -ne 0 ]; then
-            echo "main-ceiling-drift: main is past a recorded ceiling. No pull request is wrong — main is."
-            echo "Every open PR touching a named file now inherits this and will report it as INHERITED."
-            echo "TO FIX: record the ceiling the failing gate prints, in a PR of its own, and merge it first."
-          fi
-          exit "$rc"

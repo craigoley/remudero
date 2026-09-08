@@ -28,8 +28,10 @@ function jobs(): Record<string, Job> {
   return (parseYaml(readFileSync(WORKFLOW, "utf8")) as { jobs: Record<string, Job> }).jobs;
 }
 
-function runScript(job: Job): string {
-  return (job.steps ?? []).map((s) => s.run ?? "").join("\n");
+function stepScript(job: Job, stepName: string): string {
+  const step = (job.steps ?? []).find((s) => s.name === stepName);
+  assert.ok(step?.run, `ci.yml must carry a ${stepName} step with a run body`);
+  return step.run;
 }
 
 /** The ceilings this job exists to measure — absolute, so a merge can cross one with no PR red. */
@@ -40,14 +42,17 @@ const ABSOLUTE_CEILING_GATES = [
   "comment-load-signal",
 ];
 
-test("a job measures the absolute ceilings against main itself, on push", () => {
-  const job = jobs()["main-ceiling-drift"];
-  assert.ok(job, "ci.yml must carry a job that measures main, or nothing does");
-  assert.equal(job.if, "github.event_name == 'push'", "it must run on the event that produced the drift");
+test("the ci push lane measures the absolute ceilings against main itself", () => {
+  const ci = jobs().ci;
+  assert.ok(ci, "ci.yml must carry the ci job that runs on main pushes");
+  assert.equal(ci.if, undefined, "the ci job must stay ungated so it runs on both PRs and main pushes");
+  const script = stepScript(ci, "Test");
+  assert.match(script, /\$\{GITHUB_EVENT_NAME\}" = "push"/, "the ceiling signal must run on the push event");
+  assert.match(script, /\$\{\{ matrix\.shard \}\}" = "1"/, "one shard must own the non-sharded ceiling checks");
 });
 
 test("it runs EVERY absolute ceiling, so one breach cannot hide behind another's absence", () => {
-  const script = runScript(jobs()["main-ceiling-drift"]);
+  const script = stepScript(jobs().ci, "Test");
   for (const gate of ABSOLUTE_CEILING_GATES) {
     assert.ok(script.includes(gate), `main is unmeasured against ${gate}`);
   }
@@ -61,17 +66,17 @@ test("it runs EVERY absolute ceiling, so one breach cannot hide behind another's
 test("a failing ceiling does not short-circuit the rest — one breach must never mask another", () => {
   // The failure mode this pins is a `set -e`/`&&` chain: the first breach exits, the remaining
   // ceilings are never measured, and the report names one file when several are over.
-  const script = runScript(jobs()["main-ceiling-drift"]);
-  assert.match(script, /\|\|\s*\{\s*rc=1/, "each gate's failure must be recorded and the loop continue");
-  assert.match(script, /exit "\$rc"/, "and the accumulated result must still fail the job");
+  const script = stepScript(jobs().ci, "Test");
+  assert.match(script, /npm run --silent "\$@" \|\| \{[\s\S]*CODE=1/, "each gate's failure must be recorded and the loop continue");
+  assert.match(script, /exit "\$CODE"/, "and the accumulated result must still fail the job");
 });
 
-test("it is a SIGNAL, never a gate: push-only, so requiring it would deadlock every PR", () => {
+test("it adds no skipped PR check context", () => {
   // ci.yml's INVARIANT 2 — a required check that goes SKIPPED deadlocks merges as hard as a failing
-  // one. This job is SKIPPED on every pull_request, so its name must never enter branch protection.
-  const job = jobs()["main-ceiling-drift"];
-  assert.doesNotMatch(job.if ?? "", /pull_request/, "it must not claim to run on PRs");
-  assert.equal(job.name, "main-ceiling-drift", "the check name is the job name; a rename silently orphans it");
+  // one. The signal rides inside `ci`, which already registers on PRs, instead of adding a
+  // push-only job that the PR check census would have to classify.
+  assert.equal(jobs()["main-ceiling-drift"], undefined, "the main signal must not be a separate PR-visible job");
+  assert.equal(jobs()["ci-required"]?.name, "ci", "main push failures still surface under the existing stable ci name");
 });
 
 test("every ceiling main is measured against is one a PR is ALSO measured against", () => {
@@ -79,10 +84,9 @@ test("every ceiling main is measured against is one a PR is ALSO measured agains
   // this defect, and one measured on main but not on PRs would red the branch with no way to fix it
   // before merging. Derived from the workflow, never a second hand-kept roster.
   const all = jobs();
-  const mainScript = runScript(all["main-ceiling-drift"]);
+  const mainScript = stepScript(all.ci, "Test");
   const prScripts = Object.entries(all)
-    .filter(([id]) => id !== "main-ceiling-drift")
-    .map(([, j]) => runScript(j))
+    .map(([, j]) => (j.steps ?? []).map((s) => s.run ?? "").join("\n"))
     .join("\n");
   for (const gate of ABSOLUTE_CEILING_GATES) {
     assert.ok(mainScript.includes(gate), `${gate} must be measured on main`);
