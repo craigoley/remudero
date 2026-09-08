@@ -678,6 +678,8 @@ export function readMergeCreditedTaskIds(
 
   const cap = opts.maxRotations ?? CREDIT_SCAN_MAX_ROTATIONS;
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
+  // ledger-read-intent: live — this function's own seed, extended with rotations below.
+  const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path, ledgerFs);
   const read = readLedgerUnionRecordsSync(
     dirname(path),
     {
@@ -685,7 +687,7 @@ export function readMergeCreditedTaskIds(
       order: "newest-first",
       maxRotations: cap,
       dedupe: false,
-      readLiveRecords: opts.readLive,
+      readLiveRecords: () => live,
       onRecord: take,
       satisfied: done,
     },

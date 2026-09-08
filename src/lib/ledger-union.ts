@@ -312,45 +312,44 @@ export function readLedgerUnionRecordsSync(
   let torn = 0;
   let filesRead = 0;
 
-  const addRecord = (row: Record<string, unknown>, raw: string): boolean => {
-    if (!recordMatchesFilters(row, opts, minimumTs)) return false;
+  const addRecord = (row: Record<string, unknown>, raw: string): void => {
+    if (!recordMatchesFilters(row, opts, minimumTs)) return;
     if (opts.dedupe !== false) {
-      if (seen.has(raw)) return false;
+      if (seen.has(raw)) return;
       seen.add(raw);
     }
     opts.onRecord?.(row);
     rows.push(row);
     if (typeof row.step === "string") stepsSeen.add(row.step);
-    return opts.satisfied?.(stepsSeen) ?? false;
   };
 
-  const addText = (text: string): boolean => {
+  const addText = (text: string): void => {
     for (const raw of text.split("\n")) {
       const line = raw.trim();
       if (!line) continue;
       if (opts.pattern && !opts.pattern.test(line)) continue;
       try {
         const parsed = parseObject(line);
-        if (parsed !== undefined && addRecord(parsed, line)) return true;
+        if (parsed !== undefined) addRecord(parsed, line);
       } catch {
         torn += 1;
       }
     }
-    return false;
   };
 
   const readLive = (): boolean => {
     if (opts.readLiveRecords !== undefined) {
       filesRead += 1;
       for (const row of opts.readLiveRecords(livePath)) {
-        if (addRecord(row, JSON.stringify(row))) return true;
+        addRecord(row, JSON.stringify(row));
       }
-      return false;
+      return opts.satisfied?.(stepsSeen) ?? false;
     }
     if (!liveFileRead) return false;
     try {
       filesRead += 1;
-      return addText(fsDeps.readFileSync(livePath).toString("utf8"));
+      addText(fsDeps.readFileSync(livePath).toString("utf8"));
+      return opts.satisfied?.(stepsSeen) ?? false;
     } catch {
       return false;
     }
@@ -361,7 +360,8 @@ export function readLedgerUnionRecordsSync(
     try {
       const buf = fsDeps.readFileSync(entry.path);
       filesRead += 1;
-      return addText((entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf).toString("utf8"));
+      addText((entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf).toString("utf8"));
+      return opts.satisfied?.(stepsSeen) ?? false;
     } catch {
       unread.push(entry.path);
       return false;
