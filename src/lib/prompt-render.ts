@@ -27,7 +27,9 @@ import { envelope } from "./untrusted-envelope.js";
  * rather than waving it through — a task with no declared scope can never
  * legitimize an out-of-scope push. An empty `diffFiles` is always clean
  * (nothing staged, nothing to refuse) regardless of the declared scope.
- *
+ */
+
+/**
  * W1-T2650 admitted ONE hand-enumerated path (`scripts/source-size-baseline.json`, then
  * `lib/review.ts`'s `SCOPE_EXEMPT_GENERATED_ARTIFACTS`) so that gate's own printed remedy stopped
  * being refused by this guard. W1-T2651 generalizes the SOURCE of that admission: rather than a
@@ -38,7 +40,9 @@ import { envelope } from "./untrusted-envelope.js";
  * identical set, so a worker told it MAY commit a registry path is never the one this guard then
  * refuses. A sixth (or Nth) regenerable artifact registered there inherits the carve-out with no
  * second table to keep in sync.
- *
+ */
+
+/**
  * W1-T2672 adds a SECOND, independent discount: {@link GENERATED_LEDGER_CLASSES}
  * (lib/companion-paths.ts) — the table `subsystemsOf`/`checkDocsAwareness` already read to say a
  * generated measurement file (a size ledger, a knowledge-budget derivation) is not a user-visible
@@ -48,7 +52,9 @@ import { envelope } from "./untrusted-envelope.js";
  * task whose only out-of-scope path is that second ledger was still flagged before this change.
  * Consulting `isCompanionPath` against the shared table (rather than copying its regex here) means
  * a later row added to `GENERATED_LEDGER_CLASSES` is discounted here with no second edit.
- *
+ */
+
+/**
  * The exemptions are only ever consulted ALONGSIDE a task's own declared scope (the
  * `!declaredFiles || declaredFiles.length === 0` branch above already returned): an undeclared
  * task still has every non-empty diff refused, ledger or registry path or not, so this never
@@ -142,7 +148,9 @@ export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-con
  * `routeFix`/`runSweep`) still constructs them mutually exclusively as a
  * matter of caller discipline, but the mode table's own correctness no
  * longer depends on that discipline holding.
- *
+ */
+
+/**
  * W1-T2236: `actionableGateFailures` carries the SAME structured, single-form remedy
  * {@link OpenPrView.actionableGateFailures} already names on the sweep side (W1-T923) — a
  * review can FAIL with `review.unmetCriteria` empty (every named criterion passed, or none
@@ -183,7 +191,9 @@ interface FixModeRule {
  * measured `reviewer-unmet` dispatches carried zero unmet criteria). `deriveFixMode`
  * below still returns SOME mode for any input (its own total-function fallback), but
  * the TABLE itself no longer claims "unconditional" as a virtue.
- *
+ */
+
+/**
  *   1. merge-conflict  — `evidence.mergeConflict` is set (W1-T106, the #170
  *                        DIRTY strand): the PR's merge state itself is dirty,
  *                        which precedes EVERYTHING else — no CI check even
@@ -191,6 +201,9 @@ interface FixModeRule {
  *                        CI log can exist yet either. Checked FIRST so it is
  *                        never misclassified as ci-log (both leave `review`
  *                        undefined).
+ */
+
+/**
  *   2. ci-log         — W1-T226 (corrects W1-T224/W1-T94's original row):
  *                        gated on PRESENCE of `evidence.ciFailures`, never on
  *                        ABSENCE of `evidence.review`. A required check red is
@@ -218,6 +231,9 @@ interface FixModeRule {
  *                        CI-red PR, PR 479's shape in the W1-T226 rationale)
  *                        rather than by any caller relying on that discipline
  *                        forever holding.
+ */
+
+/**
  *   3. gate-fix        — W1-T2236: `evidence.actionableGateFailures` is non-empty — a
  *                        review FAILED with `unmetCriteria` empty (design note i: every
  *                        named criterion may already read MET) while the reviewer's own
@@ -230,6 +246,9 @@ interface FixModeRule {
  *                        non-empty `review.unmetCriteria`, so its ordering relative to
  *                        body-coverage below is inert — placed first because it is the
  *                        more specific, structured shape.
+ */
+
+/**
  *   4. body-coverage   — every unmet criterion's reason is a keyword-coverage
  *                        gap ("matched N/M proof keywords") and NONE was an
  *                        OBSERVED `executed_fail` (an actual failed run always
@@ -237,6 +256,9 @@ interface FixModeRule {
  *                        the #157/#143 lesson). Reached only when ci-log's row
  *                        above also missed (no `ciFailures`) — a red required
  *                        check outranks a body-coverage-shaped review too.
+ */
+
+/**
  *   5. reviewer-unmet  — a real reviewer-computed unmet set (W1-T76, unchanged):
  *                        `evidence.review.unmetCriteria` is non-empty. W1-T2236: NAMED,
  *                        not unconditional — see this doc block's own header, above. An
@@ -312,14 +334,18 @@ export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule
  * or `noCriteria` alone fails the state even when every named criterion is
  * met); `evidence.review.summary` is what keeps the prompt from going out with
  * nothing to act on in that case.
- *
+ */
+
+/**
  * W1-T1227: `task.files` (W1-T322's widening of `runFixRung`'s own opts type) is now SURFACED
  * here too — every prior version of this prompt carried only `id`/`title`, so a fix worker had
  * no way to learn the PR's declared scope from its own instructions and could only infer it (or
  * not) from a failing check. See {@link fixRungScopeStandDownReason} for the belt-and-suspenders
  * half of this fix: a worker that ignores this line and pushes outside scope anyway is caught at
  * the NEXT pre-strike gate, before another strike compounds on top of it.
- *
+ */
+
+/**
  * W1-T2651: before this, the DECLARED SCOPE sentence forbade EVERY path outside `task.files`,
  * mode-agnostically — including the one edit a failing gate had itself just printed as the fix
  * (`scripts/source-size-ratchet.mjs`'s own remedy for the source-size ceiling it enforces). A
@@ -705,33 +731,12 @@ export function renderPrerequisitePrPrompt(args: {
 }
 
 /**
- * Render the RECON worker's prompt (W1-T37, MASTER-PLAN §8A Tier 2): the fixed read-only recon
- * instructions, plus the generated PLAN INDEX in place of the plan body. The plan (MASTER-PLAN.md)
- * is NOT shipped to workers — `planIndexBlock` (from {@link renderPlanIndex}) is a compact list of
- * section headings + one-line summaries + a grep hint, so a recon worker that needs a specific
- * section's detail can retrieve it itself (`grep -n '<heading>' MASTER-PLAN.md`) instead of every
- * run paying to carry the whole ~1900-line document. `planIndexBlock` is `""` when no index is
- * committed yet (a fresh checkout before the first `npm run plan-index`) — recon still runs, just
- * without the pointer; correctness never depends on the index being present.
+ * Render the RECON worker's prompt (W1-T37, W1-T2632): fixed read-only instructions, optional
+ * task identity, optional task-record pointer, the generated PLAN INDEX, and operator notes.
  *
- * `operatorNotesBlock` (W1-T164, `lib/operator-notes.ts`'s `renderOperatorNotes`) carries THIS
- * task's console-authored, provenance-stamped guidance — feedback INTO the task before it runs,
- * scoped strictly to this task's own id. `""` (the default) when the task carries no notes.
- */
-/**
- * W1-T2632 — RECON IS NOW TOLD WHICH TASK IT IS RECONNING. `task` and `recordPath` are both
- * OPTIONAL (and default to absent) so every pre-existing call site that only ever passed
- * `planIndexBlock`/`operatorNotesBlock` — the whole `test/*.test.ts` corpus at this sha — keeps
- * rendering byte-identical output; only the real recon spawn (below) supplies them.
- *
- * `recordPath` is {@link workerVisibleRecordPath}'s output, NEVER {@link taskRecordPath}'s raw
- * absolute answer (W1-T501) — the caller is responsible for that re-anchoring, exactly as the
- * implement-prompt path already is. When it is `undefined` (unresolvable or tree-escaping
- * record), the pointer line is OMITTED and recon still runs with just the `TASK:` line —
- * fail-soft, never a failed dispatch over one malformed plan file.
- *
- * NAMED, NOT INLINED: the record's design/rationale/criteria stay one `Read` away, the same
- * retrieve-don't-inject discipline `planIndexBlock` already observes for MASTER-PLAN.
+ * The plan body is not shipped to workers; `planIndexBlock` names retrievable headings. `task` and
+ * `recordPath` default to absent so older callers stay byte-identical, and an unresolvable record
+ * path omits only the pointer.
  */
 export function renderReconPrompt(
   planIndexBlock: string,
@@ -792,35 +797,12 @@ export function renderDiagnosePrompt(task: Pick<Task, "id" | "title">, failureEv
 /**
  * Render the implement prompt: cited CONTEXT + TASK + explicit output contract.
  *
- * CACHE-AWARE ASSEMBLY (MASTER-PLAN §8A / W1-T35): the Anthropic prompt cache
- * keys on EXACT PREFIX BYTES — any early edit invalidates the cache for
- * everything after it, and a cache READ prices at ~1/10th of fresh input. So
- * the CONTEXT block is ordered STABLE-FIRST, VOLATILE-LAST:
- *   1. `renderDoctrinePreamble()` — Tier 0, the distrust rule + the autonomy
- *      clause. Invariant; changes rarely (MASTER-PLAN §8A: "line-capped
- *      ~150, must change RARELY"). This is the cacheable prefix.
- *   2. `contextClaims` / `reconContext` — per-task, fixed for the life of a
- *      run once recon has completed (recon never re-runs mid-run).
- *   3. `matchedLearnings` (Tier 1, W1-T19/W1-T33) — the task-matched LEARNINGS
- *      facts. VOLATILE: the corpus grows every retro, so it goes LAST, never
- *      ahead of the stable prefix — a corpus edit can never bust the cache for
- *      the doctrine/task/recon bytes that precede it.
- * Every line is already provenance-tagged, so the whole CONTEXT block still
- * lints clean regardless of ordering.
+ * Cache-aware assembly keeps stable doctrine/rule headlines before per-task context, recon,
+ * operator notes and matched learnings. Every line in the CONTEXT block is already
+ * provenance-tagged, so the whole block still lints clean regardless of ordering.
  *
- * `operatorNotesBlock` (W1-T164, `lib/operator-notes.ts`'s `renderOperatorNotes`) carries THIS
- * task's console-authored, provenance-stamped guidance, scoped strictly to `task.id` — placed
- * after the task/recon context and before the volatile learnings corpus: it is per-task and
- * per-run stable (never grows mid-run), so it need not trail behind everything the way the
- * ever-growing learnings corpus must (cache-aware ordering, W1-T35). `""` (the default) when the
- * task carries no notes.
- */
-/**
- * The named parts `renderImplementPrompt` assembles into its `# CONTEXT` + `# TASK` blocks, ONE
- * derivation shared by the renderer below and by the W1-T2297 `prompt.manifest` call site
- * (`runTask`, further down) — so "what the manifest fingerprints" can never drift from "what the
- * worker actually received": both read this exact array, never two independently-maintained
- * copies of the same five expressions.
+ * `implementPromptParts` is shared with the prompt manifest call site, so the fingerprinted parts
+ * cannot drift from the bytes the worker actually receives.
  */
 export function implementPromptParts(
   task: Task,
