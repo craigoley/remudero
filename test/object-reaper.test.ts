@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
+  defaultLooseObjectCount,
   LOOSE_OBJECT_FLOOR,
   OBJECT_PRUNE_EXPIRY,
   defaultListInflightLocks,
@@ -193,4 +194,35 @@ test("W1-T3090: against a REAL git repo the default probes agree it is quiet and
   assert.equal(r.refusedBecause, undefined, "a real quiet repo is not refused");
   assert.equal(existsSync(join(repoDir, ".git")), true, "and the repo survives its own reap");
   execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], { env, stdio: "ignore" });
+});
+
+// ── W1-T3090: the UN-INJECTED default, which every other test in this file replaces ─────────
+//
+// `defaultLooseObjectCount` is the real leaf: it shells `git count-objects -v`. Every test above
+// supplies its own counter, so the default and its catch arm were never executed and `diff-coverage`
+// named them as added-and-uncovered. That is the shape CLAUDE.md records — "when every test injects
+// a fake, the seam's DEFAULT implementation and each catch arm are unreachable" — so these two
+// exercise the real thing against a real repository and a real non-repository.
+
+test("W1-T3090: the default counter reads a REAL repository rather than being replaced by a fake", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}loose-count-`));
+  const git = (...args: string[]): string =>
+    execFileSync("git", ["-C", dir, ...args], {
+      encoding: "utf8",
+      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.invalid" },
+    });
+  git("init", "--quiet", "-b", "main");
+  writeFileSync(join(dir, "a.txt"), "one\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "seed");
+  // A fresh commit leaves loose objects (blob, tree, commit) — unpacked until a gc runs.
+  assert.ok(defaultLooseObjectCount(dir) > 0, "a just-committed repo has loose objects to count");
+});
+
+test("W1-T3090: an unreadable count reads as 0, which can only ever cause a SKIP", () => {
+  // The catch arm, and its direction is the safety property: 0 is BELOW the prune floor, so an
+  // unreadable count can never authorise a prune. A throw here would fail the whole rung instead.
+  const notARepo = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}loose-count-norepo-`));
+  assert.equal(defaultLooseObjectCount(notARepo), 0);
+  assert.equal(defaultLooseObjectCount("/no/such/path/at/all"), 0, "a missing path is unreadable, not a throw");
 });
