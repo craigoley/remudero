@@ -1,0 +1,55 @@
+- id: W1-T3072
+  title: "STANDING RULE 25 IS ANSWERED ONLY AFTER A FULL CI CYCLE, AND ITS REFUSAL LANDS AS A COMMIT STATUS THAT READS AS GREEN-BUT-STUCK — detectInstrumentEntanglement is already exported and pure: give it the same author-time call site rule15-precheck already has"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  origin: "session 2026-09-07 — diagnosed while clearing #4493, the last red on the board"
+  plan_refs: ["W1-T297", "W1-T3040", "W1-T2521"]
+  rationale: |
+    (1) THE GAP, AND IT IS THE SAME ONE W1-T3040 CLOSED FOR RULE 15. Standing rule 25 keeps the
+    measurement INSTRUMENT isolated from the PRODUCT it measures: a diff touching both an
+    INSTRUMENT_SURFACE path and a `src/` product path is refused. The predicate that decides it,
+    `detectInstrumentEntanglement` (`src/lib/review.ts`), is ALREADY EXPORTED AND PURE. Nothing calls
+    it before a push, so the question is asked only by `remudero-review`, only after a full CI cycle.
+
+    (2) MEASURED 2026-09-07. #4493 carried a new `scripts/clock-signature-baseline.json` beside
+    `src/lib/clock.ts` and `src/lib/daemon.ts`. It was refused as `entangled`. Two costs, and the
+    second is the expensive one: the CI cycle, and then the fact that a rule-25 refusal lands as a
+    COMMIT STATUS rather than a check run -- so every board read showed `red=[]` and the pull request
+    sat looking green-but-stuck until someone thought to ask the commit for its status directly.
+
+    (3) ONE PREDICATE, NEVER TWO. This imports the reviewer's own function rather than re-deriving
+    it, exactly as `rule15-precheck.mjs` imports `criterionFieldTampered`. A local check that
+    DISAGREED with the gate would be worse than none: it would send an author to split a PR the
+    reviewer would have passed, or clear one it is about to refuse.
+
+    (4) THE `diff` IS PASSED, NOT JUST THE FILE LIST, and a test pins it. With the diff the detector
+    requires the `src/` half to carry EXECUTABLE content and can apply W1-T2521's introduced-census-
+    gate carve-out; with paths alone it reports entanglement on diffs the gate itself clears. That is
+    precisely the second-opinion failure (3) exists to avoid, so it is falsified rather than trusted.
+
+    (5) IT REPORTS BOTH REMEDIES AND PERFORMS NEITHER. A split is the usual one. It is NOT the only
+    one: a baseline that is a per-file LEDGER rather than a score FLOOR belongs in
+    `ENTANGLEMENT_EXEMPT_INSTRUMENTS` with a named reason -- the distinction the source-size entry
+    already records, and the one #4493 turned out to need, because that census's own falsifiers read
+    the MEASURED tree and cannot pass before the migration they measure. Which remedy applies is a
+    reviewed decision; a script that guessed would be editing the isolation rule itself.
+
+    (6) AN UNREADABLE DIFF EXITS 2, NEVER 0, and that arm has its own test rather than riding on the
+    pure ones. MEASURED while building: changing the `return 2` to `return 0` left every other
+    assertion in the suite passing, so the vacuous-pass this repo keeps naming was reachable and
+    invisible until the exit path was exercised through the real script.
+
+  acceptance:
+    - claim: "the entanglement question is answered against the local diff before the push"
+      proof: "unit test: test/rule25-precheck-refuses-before-the-push.test.ts"
+    - claim: "the check reuses the reviewer's own predicate rather than a second derivation"
+      proof: "grep: detectInstrumentEntanglement in scripts/rule25-precheck.mjs"
+    - claim: "an unreadable diff refuses rather than reporting clean"
+      proof: "grep: REFUSING to report clean in scripts/rule25-precheck.mjs"
+  files: [scripts/rule25-precheck.mjs, test/rule25-precheck-refuses-before-the-push.test.ts, hooks/pre-push, package.json]
+  status: queued

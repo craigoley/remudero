@@ -1,0 +1,125 @@
+- id: W1-T3089
+  title: "EVERY SUCCESSFUL LEAF CHECK IS TREATED AS AN ACTIONABLE QUEUE WAKE — the signed webhook accepts all completed check runs using only event and action, so one PR's matrix and scanner fan-out repeatedly wakes whole-board reconciliation even though the stable ci-gate completion is the state transition the PR governor needs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  band_meaning: span
+  origin: "fleet-lifeguard#daily-pr-retro-event-amplification-2026-09-07"
+  files: [src/lib/github-event-wake.ts, src/lib/policy.ts, src/lib/serve.ts, src/run-task.ts, plan/policy.yaml, test/a-successful-leaf-check-is-not-a-full-sweep.test.ts, test/policy.test.ts]
+  rationale: |
+    OBSERVED ON THE AZURE FLEET over the complete rotating-ledger union for the 24 hours beginning
+    2026-09-07T00:44:00Z. The corpus control found 447 compressed rotations, two plain rotations
+    and the live ledger. It contains 17,012 distinct `github.wake.accepted` rows for
+    `check_run:completed`, versus 380 status events and 625 structural PR/review events. The same
+    window contains 1,568 `github.wake.check_settled` bursts and 3,225 `sweep.pass` rows. The pass
+    count includes ordinary timer work and is not attributed one-for-one to webhooks; the code path
+    establishes the narrower causal claim: every accepted check-run marker reaches the settle
+    scheduler, whose completed burst calls `signal.wake()` and advances the same whole-board loop.
+
+    OBSERVED IN CURRENT CODE at d8c05cf. `isAllowlistedGithubEvent` accepts every
+    `check_run:completed`. `createGitHubEventWakeHandler` extracts only repository and action; it
+    never reads `check_run.name`, `check_run.conclusion` or `check_suite.head_branch`. The durable
+    marker consequently cannot distinguish a failing required transition from a successful leaf
+    scanner. W1-T2741 correctly added a ten-second trailing-edge settle, but it explicitly changed
+    timing rather than discarding deliveries. The live rate now proves that temporal coalescing is
+    not semantic reduction.
+
+    THE REPOSITORY ALREADY HAS AN AGGREGATION CONTRACT. Branch protection requires `ci-gate` plus
+    the orchestrator's `remudero-review` status. `ci-gate` waits for the PR's required check runs and
+    reports once. On a push to main, the PR-only ci-gate does not run; `.github/workflows/ci.yml`'s
+    stable `ci` aggregate is the terminal main-health signal. A completed failing/cancelled/timed-
+    out/action-required/stale/startup-failure leaf check remains immediately useful because it can
+    start diagnosis before the aggregate finishes. A successful/neutral/skipped NON-aggregate leaf
+    check cannot independently make a PR mergeable or main unhealthy.
+
+    THIS TASK DOES NOT ASSUME THE SAVINGS BEFORE MEASURING THEM. The existing ledger omits check
+    name and conclusion, so the 17,012-row corpus cannot prove how many are suppressible. Per the
+    pipeline debugging rule, the filter ships in SHADOW mode first and emits bounded class counts.
+    Enforcement is a later one-row policy change only after a complete daily window proves the
+    aggregate signals are present and quantifies the suppressible population. This task builds and
+    tests both modes; it does not turn enforcement on.
+
+    DUPLICATE-SURFACE ADVISORY, ANSWERED. W1-T139 owns the original console front door; W1-T164
+    owns operator notes; W1-T252 owns the policy substrate; W1-T264 owns retro cadence values; and
+    W1-T516 owns session-PR auto-merge. They share generic wiring files with this task but none
+    classifies webhook check runs or reduces successful leaf-check wakes. Current `status:` is not
+    completion evidence, so this task cites rather than edits or retires those records.
+
+    PRIMARY CONTRACTS VERIFIED 2026-09-07: GitHub documents `check_run.completed` with `name`,
+    `conclusion`, `head_sha` and `check_suite`; it documents terminal conclusion values including
+    success, neutral, skipped and the failure classes above. GitHub also warns that a check payload's
+    `pull_requests` list can be empty for fork pushes, so that list is never the sole relevance
+    predicate. Sources: https://docs.github.com/en/webhooks/webhook-events-and-payloads#check_run
+    and https://docs.github.com/en/rest/checks/runs.
+  design: |
+    Add one pure, exhaustive check-wake classifier used by the existing signed route after HMAC,
+    JSON and repository validation. Structural pull-request/review events and every legacy status
+    event remain actionable. A completed check run is actionable when its conclusion is a failure
+    class or its name is in committed policy's `githubEventWake.aggregateCheckNames`; configure
+    `ci-gate` for PR reconciliation and `ci` for default-branch health. A successful, neutral or
+    skipped check whose name is not in that bounded list is `successful_leaf`. Missing or unknown
+    names/conclusions classify `unknown` and WAKE: an optimisation may spend extra work but may
+    never hide a state transition.
+
+    Add a committed `githubEventWake.semanticCheckMode` enum with `shadow` and `enforce`, shipping
+    as `shadow`, plus the non-empty `aggregateCheckNames` list. Parse and validate both at policy
+    load; typoed modes, empty lists and non-string names fail loud. Thread the values through the
+    existing serve command into `createGitHubEventWakeHandler`; Serve still makes zero GitHub API
+    calls and remains only an authenticated event reducer.
+
+    In shadow mode, every delivery keeps today's marker/wake behaviour. Accumulate classification
+    counts in the route closure, including one counter for each configured aggregate name, and
+    attach one bounded summary to the next ordinary
+    `github.wake.accepted` row, resetting after emission; do not write one extra ledger row per
+    leaf, persist bodies, or retain unbounded check names. The summary carries actionable-failure,
+    actionable-aggregate, successful-leaf and unknown counts, plus the configured mode. A process
+    restart may lose an unflushed observational count; it must not change wake correctness.
+
+    In enforce mode, `successful_leaf` returns HTTP 202 without writing the durable marker. Fold
+    its count into the next accepted summary. Actionable and unknown events preserve HMAC, replay
+    dedup, marker atomicity, trailing settlement, ordinary-poll recovery, main-health callback and
+    STOP/PAUSE ownership byte-for-byte. Do not add `check_suite`, depend on `pull_requests`, call
+    GitHub from Serve, change review capacity, or alter any sweep disposition in this task.
+
+    The activation follow-up is mechanically constrained: after at least one complete UTC day in
+    shadow mode, the daily PR lifecycle retro reports counts by class and confirms that every
+    merged PR had an actionable `ci-gate` or status transition and every observed main CI wave had
+    an actionable `ci` transition. Only then may a separate plan-only PR set mode to `enforce`.
+  acceptance:
+    - claim: "the pure classifier keeps structural and status events actionable, wakes for aggregate or failing check runs, suppresses only successful non-aggregate leaves, and wakes on every unknown payload"
+      proof: "unit test: test/a-successful-leaf-check-is-not-a-full-sweep.test.ts"
+    - claim: "shadow mode writes a marker for every currently accepted event while emitting bounded per-class counts instead of one additional ledger row per classified leaf"
+      proof: "unit test: test/a-successful-leaf-check-is-not-a-full-sweep.test.ts"
+    - claim: "enforce mode returns 202 for a successful leaf without writing a marker, while aggregate, failure, status and unknown controls still write exactly one marker"
+      proof: "unit test: test/a-successful-leaf-check-is-not-a-full-sweep.test.ts"
+    - claim: "a fork-shaped check payload with an empty pull_requests array is classified from name and conclusion rather than dropped"
+      proof: "unit test: test/a-successful-leaf-check-is-not-a-full-sweep.test.ts"
+    - claim: "policy rejects an unknown semantic mode, an empty aggregate-name list and a non-string name, and ships shadow with ci-gate and ci configured"
+      proof: "unit test: test/a-successful-leaf-check-is-not-a-full-sweep.test.ts"
+    - claim: "production Serve receives the committed semantic mode and aggregate names without adding a GitHub client or changing the webhook secret boundary"
+      proof: "unit test: test/a-successful-leaf-check-is-not-a-full-sweep.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if current ingress already reads `check_run.name` and conclusion,
+    or if a successful non-aggregate check independently changes any sweep disposition before the
+    configured aggregate/status arrives. The source check above falsifies the first alternative.
+    For the second, trace every field consumed by `checksStateFromRollup`, main health and merge
+    arming, then plant a route fixture containing a successful leaf beside an otherwise unchanged
+    rollup; if removing that leaf changes the disposition, report the consumer and stop rather than
+    filtering it.
+
+    PROVE THE TEST LOAD-BEARING in both directions. With enforce mode forced to today's accept-all
+    branch, the successful-leaf marker assertion must fail while the aggregate/failure controls
+    remain green. With unknown changed from wake to suppress, the malformed-payload control must
+    fail. Report both `# fail` movements.
+  status: queued
+  attempts: 0
+  plan_refs: ["W1-T139", "W1-T164", "W1-T252", "W1-T264", "W1-T516", "W1-T2568", "W1-T2741", "W1-T2787", "W1-T1033"]
+  note: |
+    W1-T3089 was atomically reserved at `refs/rmd-id/W1-T3089` before this file was written. This is
+    one concern: reducing semantically redundant check-run wakes. The policy and production wiring
+    are mechanically required parts of the same classifier; no PR decision or GitHub read moves
+    into Serve.

@@ -558,3 +558,17 @@
     change.
   src: '#777; migrated from CLAUDE.md''s Code-traps section, W1-T2507'
   cited: "2026-08-31"
+- id: implement-lane-model-lives-on-the-run-not-the-verdict-row
+  subsystem: retro
+  lifecycle: active
+  files: [ src/lib/retro.ts, src/run-task.ts ]
+  fact: >-
+    No `log("verdict", …)` site in `src/run-task.ts` writes a `model` key (23 sites,
+    measured at b8892bc4), yet the retro buckets the implement lane on the `verdict`
+    step — so "model absent on 91% of implement rows" (P53) was a KEY PLACEMENT, not
+    a missing emission. The model rides `implement.done` (via `workerLedgerFields`,
+    not retained through rotation) and `run.start`'s nested `mount.model` (retained).
+    Attribute a `verdict` row through `runModelIndex` (retro.ts) before reading it as
+    unattributed; a writer-side `model` on the verdict row is the filed complement.
+  src: 'operator-session#deep-research-2026-09-07; docs/forensics/retro.md "P53"'
+  cited: "2026-09-07"

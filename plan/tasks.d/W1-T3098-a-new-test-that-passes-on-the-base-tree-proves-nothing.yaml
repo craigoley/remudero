@@ -1,0 +1,92 @@
+- id: W1-T3098
+  title: "A NEW TEST THAT WOULD PASS ON THE BASE IMPLEMENTATION IS CERTIFIED AS DISCRIMINATING — `classifyBaseProofOutcome` re-runs a `unit test:` proof inside the R-11 base worktree, but that worktree is a checkout of the merge-base and therefore does not CONTAIN the PR's added test file; `node --test` finds nothing, exits non-zero, the executor reports \"fail\", and the classifier reads that as `discriminates`, so the one proof shape the judge cannot actually evaluate is the one it grades most confidently"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 1
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [src/lib/review.ts, test/a-new-test-that-passes-on-the-base-tree-proves-nothing.test.ts]
+  origin: "operator-session#next-wave-2026-09-08"
+  plan_refs: ["W1-T362", "W1-T460", "W1-T3073"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at a0b6ba81e. The staleness check has a hole exactly the shape of the proof it was
+    extended to cover.
+
+    `classifyBaseProofOutcome` (src/lib/review.ts:1616) grades a head-passing proof by re-running it
+    at the merge-base, and its own doc names the four outcomes: `"stale"` when the base run ALSO
+    passes, `"discriminates"` for anything else. The decision is one line (:1631):
+
+      return exec(whitelisted, baseCwd) === "pass" ? "stale" : "discriminates";
+
+    R-11 already found and fixed HALF of this. `buildBaseProofDir` (src/run-task.ts:15162) now does
+    `git worktree add --detach <dir> <merge-base>` rather than materialising blobs, and its comment
+    states the defect verbatim: in the blob-only directory "`node --test` there exits 1 with empty
+    stdout, the executor reports 'fail', and `classifyBaseProofOutcome` (review.ts) graded that
+    'discriminates': a test passing identically at both commits was certified `executed_pass` with a
+    reason asserting it told done from not-done." The guard added was
+    `if (whitelisted.kind === "test" && baseIsCheckout !== true) return "base_unknown";` (:1625-1628).
+
+    THAT GUARD ANSWERS "IS THERE A TREE", NOT "IS THE TEST IN IT". A real base checkout is still a
+    checkout of the MERGE-BASE, and a PR that ADDS `test/foo.test.ts` has no such file there. The
+    identical sequence then runs inside the sanctioned worktree: node finds no file, exits non-zero,
+    `exec` returns "fail", and the ternary above grades `discriminates`. The proof is certified as
+    telling done from not-done on the strength of the file being ABSENT.
+
+    NOTHING COPIES THE HEAD'S TEST FILES INTO THE BASE TREE. MEASURED: `grep -rnE
+    "copyFileSync|cpSync" src/lib/review.ts src/run-task.ts` filtered for base/test returns NOTHING.
+    The diff's own file list is already computed — `changedFiles` (src/lib/review.ts:4668), called at
+    :2645 and :2707 — so the input this needs is present and unused.
+
+    WHY THIS IS THE EXPENSIVE DIRECTION. Every other outcome fails safe: `base_unknown` and
+    `base_unreadable` both decline to credit. This one CREDITS. A worker that writes a test which
+    passes against the unmodified implementation — the commonest way a TDD-strict task goes wrong —
+    gets `executed_pass` and a reason asserting discrimination, and the keyword floor never runs.
+  design: |
+    (i) THE DIFFERENTIAL RUN, not a new grader. Before classifying a `unit test:` proof, copy the
+    diff's ADDED and CHANGED `test/**` files from the head checkout into the base worktree at the
+    same repo-relative paths, then run the proof there. The classifier's existing ternary is
+    unchanged; only the tree it runs against is completed.
+    (ii) A PASS THERE IS `executed_stale`, and the reason NAMES THE FILE: the test passed against
+    the base implementation, so it discriminates nothing. This is the whole point — today that same
+    run cannot happen at all.
+    (iii) A BASE RUN THAT CANNOT HOST THE FILE GRADES `base_unknown`, NEVER `pass` AND NEVER
+    `discriminates`. A copied test importing a symbol that exists only on the head throws at import;
+    that is an environment gap, exactly the case the R-11 guard already routes to `base_unknown`
+    (:1625-1628), and it must route there too rather than being read as evidence in either
+    direction.
+    (iv) COPY, NEVER CHECKOUT. Writing the files in rather than `git checkout <head> -- test/`
+    keeps the base tree's own history untouched and keeps the operation to the files the diff
+    actually names, so a test the PR did not touch is never re-run.
+    (v) THE HEAD-ONLY-IMPORT ARM IS THE ONE A FAKE EXECUTOR HIDES. Every W1-T362 test injected a
+    fake `exec`, which is why the R-11 shape survived so long; this suite must drive the real
+    copy-and-run against a temp git repo with a real merge-base, no network.
+  acceptance:
+    - claim: "a PR-added test that passes against the base implementation grades executed_stale, with a reason naming the file"
+      proof: "unit test: test/a-new-test-that-passes-on-the-base-tree-proves-nothing.test.ts"
+    - claim: "a PR-added test that genuinely fails against the base implementation still grades discriminates, so the fix narrows the grade rather than emptying it"
+      proof: "unit test: test/a-new-test-that-passes-on-the-base-tree-proves-nothing.test.ts"
+    - claim: "a copied test that cannot run on the base at all (a head-only import) grades base_unknown, never pass and never discriminates"
+      proof: "unit test: test/a-new-test-that-passes-on-the-base-tree-proves-nothing.test.ts"
+    - claim: "only the diff's added and changed test files are copied, so a test the PR never touched is not re-run in the base tree"
+      proof: "unit test: test/a-new-test-that-passes-on-the-base-tree-proves-nothing.test.ts"
+  falsifier: |
+    CLOSE IF the base worktree already receives the head's test files: read `buildBaseProofDir`
+    (src/run-task.ts:15162) and grep `src/lib/review.ts` and `src/run-task.ts` for `copyFileSync`
+    and `cpSync`. MEASURED 2026-09-08 at a0b6ba81e: no such copy exists, and the base tree is
+    `git worktree add --detach <dir> <merge-base>` and nothing more.
+    PROVE IT LOAD-BEARING: with the copy step removed, the planted probe — a PR-added test that
+    passes against base — must be graded `discriminates` (the gate goes blind), while the
+    genuinely-failing probe stays `discriminates` either way, so the suite discriminates the COPY
+    and not merely the classifier.
+    DO NOT satisfy this by widening the R-11 `baseIsCheckout` guard to send every `unit test:` proof
+    to `base_unknown`. That would stop the false credit by ending the check, which is the outcome
+    W1-T362 and R-11 both refused; the differential run is the point.
+  note: |
+    Rule 25 CHECKED BEFORE FILING: `src/lib/review.ts` is judge source, not an instrument path, so
+    the build PR is an ordinary src+test pair and must not also carry a plan record.

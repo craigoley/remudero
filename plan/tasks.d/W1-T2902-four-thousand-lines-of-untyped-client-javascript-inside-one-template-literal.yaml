@@ -39,7 +39,7 @@
     dashboard that cannot load is not an option to leave.
   acceptance:
     - claim: "the shell client is a TypeScript module the server inlines rather than a string literal"
-      proof: "grep: console-shell-client\" in src/lib/serve.ts"
+      proof: "grep: consoleShellClientSource in src/lib/serve.ts"
     - claim: "the client module is exercised directly under the DOM harness"
       proof: "unit test: test/console-shell-client.test.ts"
     - claim: "the server inlines the client module through one named source seam"

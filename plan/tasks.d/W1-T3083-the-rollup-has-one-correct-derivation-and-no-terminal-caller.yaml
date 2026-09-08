@@ -1,0 +1,55 @@
+- id: W1-T3083
+  title: "THE ROLLUP HAS ONE CORRECT DERIVATION AND NO TERMINAL CALLER, SO EVERY SHELL HAND-ROLLS THE QUERY AND TWO FAILURE MODES READ AS CONFIDENT WRONG ANSWERS — rollupFromRest and dedupeRollupByLatestAttempt already answer it: give them a verb"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  origin: "session 2026-09-07 — two false board reads in one session, in opposite directions"
+  plan_refs: ["W1-T2300", "W1-T181"]
+  rationale: |
+    (1) THE ANSWER EXISTS AND HAS NO CALLER AT A TERMINAL. `rollupFromRest` (unions `/check-runs`
+    with the COMBINED STATUS) and `dedupeRollupByLatestAttempt` (keeps the latest attempt per name)
+    already decide "is this pull request green" correctly, and `src/lib/ci-failure-corpus.ts` states
+    the first half's reason in its own words: "never from `/check-runs` alone: that endpoint cannot
+    see". Both are reachable only from the sweep and the HTTP console. `rmd --help` lists no verb
+    that renders a pull request's rollup, so anyone at a shell writes a `gh pr view --json
+    statusCheckRollup` query by hand instead.
+
+    (2) THE TWO WRONG ANSWERS, BOTH MEASURED 2026-09-07 FROM REAL HAND-ROLLED QUERIES, IN OPPOSITE
+    DIRECTIONS. (a) A COMMIT STATUS IS NOT A CHECK RUN: `remudero-review` carries `state` where a
+    run carries `conclusion`, so a query reading `conclusion` alone drops it silently -- #4493 was
+    refused under Standing rule 25 and every board read reported `red=[]` until someone asked the
+    commit for its status directly. (b) A SHA ACCUMULATES ONE ENTRY PER ATTEMPT: without the
+    latest-attempt dedupe a superseded FAILURE outranks its own later SUCCESS forever -- #4485 read
+    red on `source-size` whose only completed run had passed.
+
+    (3) A FALSE GREEN AND A FALSE RED ARE BOTH EXPENSIVE, and this is why one verb is worth building
+    rather than a convention. The false red sends someone to diagnose a defect that is not there.
+    The false green is worse: it reports a queue as clear while a pull request sits refused, which is
+    the state #4493 was in for an hour.
+
+    (4) FAIL CLOSED ON A WORD IT CANNOT NAME. Anything neither known-OK (SUCCESS/SKIPPED/NEUTRAL) nor
+    known-FAIL is PENDING, never green. A conclusion GitHub adds that this repo has not seen must not
+    read as a pass; the sets are imported from `src/lib/sweep.ts` rather than restated, so this
+    cannot drift into a second opinion about what "green" means.
+
+    (5) THE EXIT CODE IS THE ANSWER, so the verb is scriptable: 0 when nothing is red, 1 when
+    something is, 2 when a read FAILED. A failed read is never 0 -- reporting "no red checks" because
+    the fetch died is the vacuous pass this repo keeps naming.
+
+  acceptance:
+    - claim: "a commit status reaches the verdict, so a rule 25 refusal cannot read as no red checks"
+      proof: "unit test: test/a-commit-status-is-not-a-check-run.test.ts"
+    - claim: "a superseded attempt does not outrank its own later success"
+      proof: "unit test: test/a-commit-status-is-not-a-check-run.test.ts"
+    - claim: "the verb unions both halves rather than re-deriving either"
+      proof: "grep: rollupFromRest in src/lib/pr-checks.ts"
+    - claim: "the verb is the module's call site, so the derivation is reachable from a terminal"
+      proof: "grep: reportPrChecks( in src/run-task.ts"
+    - claim: "an outcome the classifier cannot name is pending rather than green"
+      proof: "grep: fail closed on a word we cannot name in test/a-commit-status-is-not-a-check-run.test.ts"
+  files: [src/lib/pr-checks.ts, src/run-task.ts, test/a-commit-status-is-not-a-check-run.test.ts, test/help-renders-a-summary-not-a-paragraph.test.ts, docs/cli-reference.md]
+  status: queued

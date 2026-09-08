@@ -182,7 +182,7 @@ test("plan/mast-mapping.yaml (the real committed file) parses cleanly and every 
 });
 
 test("mastDistributionTable: renders a trend column against a prior cycle's counts, and '(none)' when nothing is unmapped", () => {
-  const dist = { byCategory: { specification: 2, verification: 1 }, unmapped: {} };
+  const dist = { byCategory: { specification: 2, verification: 1 }, unmapped: {}, reconciled: [], unconfirmed: {}, mergeStateSource: "ledger-only" as const };
   const rendered = mastDistributionTable(dist, { specification: 1, verification: 1, "inter-agent": 3 });
   assert.match(rendered, /\| specification \| 2 \| \+1 \|/);
   assert.match(rendered, /\| verification \| 1 \| ±0 \|/);

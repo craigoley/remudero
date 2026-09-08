@@ -2,7 +2,9 @@ import { execFileSync } from "node:child_process";
 import { closeSync, mkdirSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { validateConfigShape, type Config } from "./config-schema.js";
 import { createOrReadExclusive } from "./fs-race-safe.js";
+export type { Config } from "./config-schema.js";
 
 /**
  * Instance configuration for a Remudero install. Machine-specific paths live ONLY in
@@ -10,106 +12,8 @@ import { createOrReadExclusive } from "./fs-race-safe.js";
  * absolute machine path. The control plane resolves the claude binary and workspace root from
  * this file, never from PATH (the shell `claude` function isn't the real binary).
  */
-export interface Config {
-  /** Absolute path to the real claude CLI binary (never the shell function). */
-  claudeBin: string;
-  /** Workspace root; everything the fleet touches lives under it (§4A). */
-  root: string;
-  // Why: the deploy-supervisor incident this field replaced — docs/forensics/config.md#installroot.
-  /** The daemon's OWN git checkout — the tree the deploy supervisor may fast-forward (W1-T924).
-   *  Optional; defaults to `join(config.root, "daemon-install")` (see {@link resolveInstallRoot}),
-   *  derived from `config.root`, never a hardcoded absolute path. */
-  installRoot?: string;
-  /** Isolated ZDOTDIR handed to every worker shell (see {@link workerZdotdir}). Optional;
-   *  defaults to `<root>/../.config/remudero/zdotdir`. */
-  zdotdir?: string;
-  /** Shell Claude Code uses for worker Bash tools (see {@link workerShell}). Optional; defaults to `/bin/bash`. */
-  workerShell?: string;
-  /** Scratch HOME every worker is redirected into (see {@link workerHomeDir}, W1-T18).
-   *  Optional; defaults to `<root>/worker-home`. */
-  workerHomeRoot?: string;
-  /**
-   * SOFT budget threshold (notional $): past this, a run ledgers a warning and continues — a
-   * visibility tripwire, never a kill. Defaults to 25.00; the hard `budget_usd` cap (default
-   * 100) is the runaway backstop. See {@link softBudgetThreshold}.
-   */
-  softBudgetThresholdUsd?: number;
-  /** Model implement/recon workers ride. Optional; defaults to `sonnet`. */
-  workerModel?: string;
-  /** Model the retro Architect rides — MUST outrank workerModel (G-17). Default `opus`. */
-  architectModel?: string;
-  // Why: why this is per-install config, not a plan constant — docs/forensics/config.md#accessteamdomain.
-  /** The operator's Cloudflare Access team domain (W1-T996), e.g. `https://example.cloudflareaccess.com`.
-   *  Must be present together with {@link Config.accessAudience} or neither — composing with
-   *  only one authenticates nothing. */
-  accessTeamDomain?: string;
-  /** W1-T996 — the Access application's AUD tag, checked against the JWT's `aud` claim. See
-   *  {@link Config.accessTeamDomain}: absent EITHER value and the provider is not composed. */
-  accessAudience?: string;
-  /** iMessage buddy identifier real-time escalation pings go to (W1-T8, notify.ts). Defaults
-   *  to the operator's Apple ID email. */
-  notifyRecipient?: string;
-  /**
-   * Overflow valve (operator opt-in, §9): `"none"` (default) never routes off the subscription;
-   * `"api_key"` bills a run via `ANTHROPIC_API_KEY` once the window is exhausted. See
-   * {@link validateConfig} for the invariant this pairs with.
-   */
-  overflow?: "none" | "api_key";
-  /** Hard daily dollar cap for `api`-mode billing. `undefined`/`null` means no cap — valid only
-   *  under subscription billing; see {@link validateConfig}'s conditional cap guard. */
-  dailyCapUsd?: number | null;
-  /** Strike cap for the blocked_review fix rung (W1-T76). Defaults to 2 — see
-   *  {@link fixStrikeCap}. */
-  fixStrikeCap?: number;
-  /** Base URL the operator console (`rmd serve`) is reachable at (W1-T144) — "localhost"
-   *  resolves to nothing from a phone. Defaults to `http://localhost:4317`; see {@link consoleUrl}. */
-  consoleUrl?: string;
-  // Why: the precedence derivation and the tailnet-identity design — docs/forensics/config.md#serve.
-  /** Where the operator console binds (W1-T152) — per-install, outside the git tree, for the same
-   *  reason `root`/`claudeBin` are. Precedence: CLI flag > `RMD_SERVE_HOST` env > this field >
-   *  loopback default. `identityCapability` (W1-T371) opts into additive tailnet-identity auth in
-   *  place of a bearer token; it REQUIRES `trustedProxy` (today only `"tailscale"`) — set one
-   *  without the other and startup refuses. */
-  serve?: { host?: string; port?: number; identityCapability?: string; trustedProxy?: string };
-  // Why: the Tier-2 relay design (D-11 distribution architecture) — docs/forensics/config.md#relay.
-  /** W1-T431 — where `rmd relay` dials out to, and the short-lived credential it presents. `url`/
-   *  `token` both absent (default): `rmd relay` refuses to start; `rmd serve` is unaffected.
-   *  Rotation is re-enrollment (replace this field), never a runtime call. */
-  relay?: { url?: string; token?: string };
-  // Why: the ruling history and this host's own opt-out — docs/forensics/config.md#headroom.
-  /** Headroom governor switch. `enabled: false` turns off all headroom-based dispatch gating —
-   *  still read and ledgered every cycle, just not enforced — leaving the per-run turn limit and
-   *  `budget_usd` tripwire as the runaway guards. Default **true**. See {@link resolveHeadroomEnabled}. */
-  headroom?: { enabled?: boolean };
-  /**
-   * Worker backends the dispatcher may use. Absent means Claude only; Codex is opt-in since it
-   * needs its own authenticated subscription. `reservePercent` is held back in every reported
-   * window — a provider is eligible only below `100 - reservePercent`.
-   */
-  workerProviders?: {
-    enabled?: Array<"claude" | "codex">;
-    reservePercent?: number;
-    capacityCacheMs?: number;
-    /** Absolute Codex CLI path. When absent, the live PATH is resolved for each cache fill. */
-    codexBin?: string;
-    /** Codex state/auth home. Defaults to `$CODEX_HOME`, then `~/.codex`. */
-    codexHome?: string;
-    /** Codex model override. Absent lets the authenticated Codex install choose its default. */
-    codexModel?: string;
-    /** Ordered, account-checked Codex model preferences per mount tier — only models
-     *  `model/list` returns are eligible. `codexModel` above remains a hard override. */
-    codexModels?: {
-      economy?: string[];
-      balanced?: string[];
-      frontier?: string[];
-    };
-  };
-  // Why: the D-11 cell-splitting incident this field closes — docs/forensics/config.md#learningshomes-field.
-  /** Explicit override for the shared-knowledge homes (the "org brain") — see {@link learningsHomes}.
-   *  Absent: each home defaults to its historic `config.root`-derived path. Set both to the same
-   *  path across multiple `config.root`s so same-machine cells share one corpus. */
-  learningsHomes?: { userOverall?: string; global?: string };
-}
+// The field shape lives in src/lib/config-schema.ts; this module keeps the semantic resolvers and
+// cross-field validation that operate on a typed Config.
 
 /**
  * Resolve the headroom-governor switch. Precedence: `RMD_HEADROOM_ENABLED` env (overrides
@@ -154,6 +58,7 @@ export class ConfigValidationError extends Error {
  * so that pairing with no `dailyCapUsd` is rejected. Throws {@link ConfigValidationError}.
  */
 export function validateConfig(config: Config): void {
+  validateConfigShape(config, "validateConfig input");
   const dailyCapIsNone = config.dailyCapUsd === undefined || config.dailyCapUsd === null;
   if (config.overflow === "api_key" && dailyCapIsNone) {
     throw new ConfigValidationError(
@@ -518,19 +423,31 @@ export function loadConfig(): Config {
   const result = createOrReadExclusive(p, 0o600);
   if (result.created) {
     try {
-      const created: Config = {
-        claudeBin: resolveClaudeBin("config creation was entered"),
-        root: join(homedir(), "Remudero"),
-      };
+      const created = validateConfigShape(
+        {
+          claudeBin: resolveClaudeBin("config creation was entered"),
+          root: join(homedir(), "Remudero"),
+        },
+        `${p} (created defaults)`,
+      );
+      validateConfig(created);
       writeSync(result.fd, JSON.stringify(created, null, 2) + "\n");
       return created;
     } finally {
       closeSync(result.fd);
     }
   }
-  const parsed = JSON.parse(result.raw) as Partial<Config>;
-  if (!parsed.claudeBin) parsed.claudeBin = resolveClaudeBin("existing config is missing claudeBin");
-  if (!parsed.root) parsed.root = join(homedir(), "Remudero");
-  validateConfig(parsed as Config);
-  return parsed as Config;
+  const parsed = JSON.parse(result.raw) as unknown;
+  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    const config = parsed as Record<string, unknown>;
+    if (config.claudeBin === undefined || config.claudeBin === null || config.claudeBin === "") {
+      config.claudeBin = resolveClaudeBin("existing config is missing claudeBin");
+    }
+    if (config.root === undefined || config.root === null || config.root === "") {
+      config.root = join(homedir(), "Remudero");
+    }
+  }
+  const shaped = validateConfigShape(parsed, p);
+  validateConfig(shaped);
+  return shaped;
 }

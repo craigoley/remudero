@@ -190,12 +190,25 @@ test("fillDerivedBody: AN UNREADABLE GIT HISTORY (not a repo at all) yields an e
   }
 });
 
-test("ghPrCreateFillCommand: the body field in the built argv IS fillDerivedBody's own output — never invented separately", () => {
+test("ghPrCreateFillCommand: the body field in the built argv OPENS WITH fillDerivedBody's own output — never invented separately", () => {
+  // W1-T3066 NARROWED THIS, and the narrowing is deliberate rather than a concession. The invariant
+  // design (iii) protects is that the derived body is never REPLACED by something invented; it was
+  // tested as byte equality, which also forbade APPENDING. Since W1-T3066 the seam appends an
+  // auto-authored Acceptance block, because a commit message carries none and the PR would
+  // otherwise reach `acceptance-author-gate` with nothing to judge and fail closed.
+  // This form is STRICTER about the thing that matters: it pins the derived text verbatim AND
+  // bounds what may follow it, where byte equality bounded the addition only by forbidding it.
   const dir = makeFixtureRepo();
   try {
     commit(dir, "a.txt", "feat(x): the real change", "the real body");
     const built = withLiveWritesAllowed(() => ghPrCreateFillCommand(dir, "acme", "remudero", "run-T1-1", "feat(x): the real change"));
-    assert.ok(built.args.includes("body=the real body"), "the argv's body= field is the local derivation, verbatim");
+    const at = built.args.findIndex((a) => a.startsWith("body="));
+    assert.notEqual(at, -1, "the create argv must carry a body");
+    const body = built.args[at].slice("body=".length);
+    assert.ok(body.startsWith("the real body"), `the local derivation must open the body verbatim; got:\n${body}`);
+    const appended = body.slice("the real body".length);
+    // The ONLY thing allowed to follow it is the auto-authored block — nothing else may be invented.
+    assert.match(appended, /^\s*(?:#{0,6}\s*Acceptance\b[\s\S]*)?$/i, `only an Acceptance block may follow; got:\n${appended}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

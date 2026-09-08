@@ -88,6 +88,7 @@ function runScript(opts: {
       PATH: `${dockerDir}:${process.env.PATH}`,
       HOME: process.env.HOME ?? "/tmp",
       RMD_STATE_DIR: stateDir,
+      RMD_SERVE_DOCKERENV_PATH: join(stateDir, "no-dockerenv-marker"),
       GH_TOKEN: "not-a-real-token-fixture",
       ...(opts.shellEnv ?? {}),
     },
@@ -99,7 +100,12 @@ function runScript(opts: {
 function keyFile(cleanup: string[]): string {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t2834-key-`));
   cleanup.push(dir);
-  const p = join(dir, "rmd-app.pem");
+  // W1-T3087: basename MATCHES the container path the fallback-hint test translates. The daemon
+  // mount table maps <keydir> -> /home/node/.claude, so the two must agree or that arm resolves
+  // nothing. Named "-not-on-this-host" because the fixture must NOT exist at its container path:
+  // the fleet host really does carry /home/node/.claude/rmd-app.pem, and the degrade arms assert
+  // the script does NOT find it.
+  const p = join(dir, "rmd-app-not-on-this-host.pem");
   writeFileSync(p, "-----BEGIN RSA PRIVATE KEY-----\nfixture\n");
   return p;
 }
@@ -113,7 +119,7 @@ test("W1-T2834: an unresolvable key is never exported as an unmountable path, an
       // The race, reproduced: `docker inspect` answers with NO mounts, exactly as a container
       // inspected mid-creation does.
       daemonMounts: [],
-      shellEnv: { GH_APP_PRIVATE_KEY_PATH: "/home/node/.claude/rmd-app.pem" },
+      shellEnv: { GH_APP_PRIVATE_KEY_PATH: "/home/node/.claude/rmd-app-not-on-this-host.pem" },
       cleanup,
     });
     assert.equal(r.status, 0, "a degrade is not a refusal — GH_TOKEN is a working fallback");
@@ -123,13 +129,13 @@ test("W1-T2834: an unresolvable key is never exported as an unmountable path, an
     assert.match(r.out, /RMD_GH_APP_PRIVATE_KEY_HOST_PATH=<host path to the pem>/);
 
     // AND THE WRONG HALF IS GONE: no bind of a path that was never resolved.
-    assert.doesNotMatch(r.out, /-v [^ ]*\/home\/node\/\.claude\/rmd-app\.pem/, "no mount is invented");
+    assert.doesNotMatch(r.out, /-v [^ ]*\/home\/node\/\.claude\/rmd-app-not-on-this-host\.pem/, "no mount is invented");
     // THE BEHAVIOUR, NOT THE PROSE. `-e NAME` passes the name only, so the value the container
     // receives is invisible in the printed `docker run`; the script now states it, and a test can
     // read it. The path is RETAINED — W1-T2778's tests assert "the refresher retains the unreadable
     // path so its existing telemetry names the failure", and blanking it was tried here and
     // reverted rather than overturning that ruling from inside a task that never argued for it.
-    assert.match(r.out, /GH_APP_PRIVATE_KEY_PATH -> \/home\/node\/\.claude\/rmd-app\.pem/,
+    assert.match(r.out, /GH_APP_PRIVATE_KEY_PATH -> \/home\/node\/\.claude\/rmd-app-not-on-this-host\.pem/,
       "the declared path rides through, so the refresher's telemetry still names the failure");
   } finally {
     for (const d of cleanup) rmSync(d, { recursive: true, force: true });
@@ -144,7 +150,7 @@ test("W1-T2834: an explicitly declared HOST path resolves with the daemon's moun
     const key = keyFile(cleanup);
     const r = runScript({
       daemonMounts: [], // the daemon tells us nothing, and it no longer matters
-      shellEnv: { GH_APP_PRIVATE_KEY_PATH: "/home/node/.claude/rmd-app.pem", RMD_GH_APP_PRIVATE_KEY_HOST_PATH: key },
+      shellEnv: { GH_APP_PRIVATE_KEY_PATH: "/home/node/.claude/rmd-app-not-on-this-host.pem", RMD_GH_APP_PRIVATE_KEY_HOST_PATH: key },
       cleanup,
     });
     assert.equal(r.status, 0);
@@ -171,7 +177,7 @@ test("W1-T2834: the daemon mount table still works as a FALLBACK HINT when no ho
     const r = runScript({
       // The translation W1-T2778 shipped, kept: source<TAB>destination.
       daemonMounts: [`${dirname(key)}\\t/home/node/.claude`],
-      shellEnv: { GH_APP_PRIVATE_KEY_PATH: "/home/node/.claude/rmd-app.pem" },
+      shellEnv: { GH_APP_PRIVATE_KEY_PATH: "/home/node/.claude/rmd-app-not-on-this-host.pem" },
       cleanup,
     });
     assert.equal(r.status, 0);
@@ -189,7 +195,7 @@ test("W1-T2834: the declared HOST path WINS over the sibling's mount table, so a
     const decoy = keyFile(cleanup);
     const r = runScript({
       daemonMounts: [`${dirname(decoy)}\\t/home/node/.claude`],
-      shellEnv: { GH_APP_PRIVATE_KEY_PATH: "/home/node/.claude/rmd-app.pem", RMD_GH_APP_PRIVATE_KEY_HOST_PATH: key },
+      shellEnv: { GH_APP_PRIVATE_KEY_PATH: "/home/node/.claude/rmd-app-not-on-this-host.pem", RMD_GH_APP_PRIVATE_KEY_HOST_PATH: key },
       cleanup,
     });
     assert.equal(r.status, 0);

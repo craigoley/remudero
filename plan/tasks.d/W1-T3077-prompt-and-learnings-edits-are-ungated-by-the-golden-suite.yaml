@@ -1,0 +1,73 @@
+- id: W1-T3077
+  title: "A PROMPT OR LEARNINGS EDIT SHIPS WITH NO EVIDENCE IT DID NOT REGRESS THE FLEET — MASTER-PLAN's RSI-safety rule gates every knowledge and prompt change behind the golden suite, but `test/golden-verdicts.test.ts` exercises `judgeReview` only, so a diff to `implementPromptParts`, `renderDoctrinePreamble`, `renderReconPrompt` or `learnings/*.yaml` changes what every worker is told and touches no fixture, and the corpus README says the growth rule is enforced socially"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [scripts/prompt-surface-gate.mjs, .github/workflows/ci.yml, .github/workflows/ci-gate.yml, test/a-prompt-surface-edit-carries-its-own-fixture.test.ts]
+  origin: "operator-session#deep-research-2026-09-07"
+  plan_refs: ["W1-T423", "W1-T2689", "W1-T2424", "W1-T297"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MASTER-PLAN §Self-improvement, "Knowledge system (the RSI-safety rule)": knowledge and prompt
+    changes ARE CODE and are "gated behind the golden-task suite — a prompt change that regresses
+    a planted-violation catch or loop completion goes red before it can poison the fleet."
+
+    OBSERVED at b8892bc4:
+      - `test/golden-verdicts.test.ts` drives `judgeReview` + `decideAutoMergeArm` over six
+        fixtures. It never renders a worker prompt and never reads `learnings/`.
+      - The prompt surface is `src/run-task.ts`'s `implementPromptParts`, `renderImplementPrompt`,
+        `renderReconPrompt`, `renderFixPrompt`, and `src/lib/learnings.ts`'s
+        `renderDoctrinePreamble` / `renderMatchedLearnings`; `learnings/*.yaml` is what they inject.
+      - `test/fixtures/golden-verdicts/README.md`: the corpus growth rule is "enforced socially".
+      - The only gates that see `learnings/**` are byte budgets (`learnings-budget-ratchet`) and the
+        assertion quarantine (`learnings-assert-check`). Neither asks whether a change helped.
+      - `src/lib/replay.ts`'s `replayGoldens` (loop completion, cost) has a producer since W1-T2689
+        and no CI or daemon caller, so it cannot gate anything.
+
+    So the harness's most consequential self-modification surface — the words every worker reads —
+    is the one surface with no pre-merge signal, which is the exact gap the plan's own prior-art
+    note says most self-improving setups skip.
+  design: |
+    (i) INSTRUMENT-ONLY, per Standing rule 25: a new `scripts/prompt-surface-gate.mjs` reads the
+    PR diff against the base ref and REFUSES when a hunk touches a PROMPT-SURFACE path or symbol
+    (a declared list: the five render functions above by name, `learnings/*.yaml`,
+    `settings/macros.yaml`) and the same diff touches NEITHER `test/fixtures/golden-verdicts/**`
+    nor a `test/**` file that renders the changed function. The refusal prints the surface it
+    matched and the two ways to satisfy it.
+    (ii) THE SYMBOL MATCH IS ON THE HUNK HEADER AND BODY, not on file path alone — `src/run-task.ts`
+    is touched by 37% of all shards and a path-level rule would fire on every one of them (the
+    healthy-condition hazard). A hunk that changes a line inside one of the named functions is the
+    unit.
+    (iii) WIRE IT AS A `ci.yml` JOB AND ADD IT TO `ci-gate.yml`'s `REQUIRED` roster in the same
+    change; a required check that is not in the roster is not required (W1-T24, `docs/review-gate.md`).
+    (iv) PLANTED-PROBE FALSIFIER IN THE SUITE: a synthetic diff editing `renderDoctrinePreamble`
+    with no fixture must be REFUSED; the same diff plus a fixture file must PASS; a diff to an
+    unrelated function in `src/run-task.ts` must PASS. All three run in-process against a temp git
+    repo, no network.
+    (v) OUT OF SCOPE: scheduling `replayGoldens` (loop completion). That is a spend and belongs to a
+    separate task with an opt-in flag; this gate asks only for a fixture.
+  acceptance:
+    - claim: "a diff that edits a named prompt-surface function and adds no golden fixture is refused with the surface named"
+      proof: "unit test: test/a-prompt-surface-edit-carries-its-own-fixture.test.ts"
+    - claim: "the same diff plus a fixture under test/fixtures/golden-verdicts passes, and a diff to an unrelated run-task.ts function passes"
+      proof: "unit test: test/a-prompt-surface-edit-carries-its-own-fixture.test.ts"
+    - claim: "the new job is a member of ci-gate's REQUIRED roster"
+      proof: "grep: prompt-surface-gate in .github/workflows/ci-gate.yml"
+  falsifier: |
+    CLOSE IF a gate already ties prompt or learnings edits to the goldens: grep `.github/workflows/`
+    and `scripts/` for `golden` and read each hit. MEASURED 2026-09-07: `golden` appears in no
+    workflow and in no script; only `test/golden-verdicts.test.ts` and `replay*.ts` name it.
+    PROVE IT LOAD-BEARING: with the symbol match disabled, the planted probe (edit
+    `renderDoctrinePreamble`, no fixture) must pass — i.e. the gate must go blind — and the
+    unrelated-function probe must still pass either way, so the test discriminates the match.
+  note: |
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (credential-scoped session; see
+    W1-T3088's note). Rule 25 CHECKED BEFORE FILING: every declared file is an instrument path or
+    a test, so the build PR is the sanctioned instrument-only shape and must stay that way — a
+    worker that finds it needs a `src/` change files a companion task instead.

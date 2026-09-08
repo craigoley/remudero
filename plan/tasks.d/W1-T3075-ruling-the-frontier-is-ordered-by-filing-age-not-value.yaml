@@ -1,0 +1,72 @@
+- id: W1-T3075
+  title: "DESIGN RULING: the dispatch frontier is ordered by FILING AGE — `compareDispatch` sorts by `priority`, then undeclared-scope-last, then lowest id, and only 5 of 1,204 shards carry `priority:`, so with about 969 locally eligible tasks and 2 lanes the head of the queue has been the 2026-07-21 cohort for seven weeks and a shard filed today enters at position ~1,200 — which ordering term should the selector carry, and who sets it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 2.00
+  files: [DECISIONS.md]
+  origin: "operator-session#deep-research-2026-09-07"
+  plan_refs: ["W1-T476", "W1-T2575", "W1-T167", "P48"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at b8892bc4. `src/lib/drain.ts`'s `dispatchOrder` -> `compareDispatch` is a strict
+    three-key order: `priority` ascending with absent sorting LAST, then `undeclaredScopeLast`
+    (W1-T476), then `idOrdinal` (workstream, then ordinal). `packDisjointFirst` then fills `limit`
+    slots preferring the earliest candidate whose `files:` are disjoint from the set collected.
+
+    MEASURED 2026-09-07 over `plan/tasks.d/`:
+      - 1,204 shards; `priority:` present on 5 (W1-T418, W1-T419, W1-T420, W1-T2276, W1-T2862);
+      - a local approximation of `isDispatchEligible` (verify:auto, not blocked, no deps, empty
+        merged set) admits ~969 shards against `sweep.dispatchLanes: 2` and `drain.max: 10`;
+      - after the five priority holders the order is pure id order and the head reads W1-T221,
+        T225, T226, T234, T236, T237, T238, T258, T259, T260 — the 2026-07-21 filing tranche;
+      - `src/lib/routing-prior.ts`'s `pooledPriorFor` computes per-class outcome evidence and has
+        ONE consumer, `mount-recommender.ts`; nothing about a task's class, age, cost history or
+        dependency fan-out reaches `compareDispatch`.
+
+    The consequence is not that old tasks are wrong to run. It is that VALUE never enters the
+    order: a task unblocking twelve dependents, a class merging at 80% for $3, and a July filing
+    whose premise rotted (P46) are indistinguishable to the selector. Industry practice orders by
+    cost of delay over size (WSJF) or by measured expected value; the ledger already carries the
+    per-class merge rate and cost this would need (`aggregateByClass`).
+  design: |
+    THIS IS A QUESTION, NOT A BUILD. The operator picks ONE of the following, or names a fourth,
+    and the record goes in DECISIONS.md under `W1-T3075 chosen ordering`. A build task follows.
+
+    (a) OPERATOR TIERS ONLY: keep `compareDispatch` as is; add a `plan/policy.yaml` row of
+    class-level priority tiers and a lint that every new shard states its tier. Cheapest; puts
+    the whole decision on the filer.
+    (b) MEASURED EXPECTED VALUE: a term `mergeRate(class) / costPerMerge(class)` from the ledger
+    (`aggregateByClass` over the union) with a population floor (P48), applied AFTER `priority`
+    and BEFORE id order, so a class that never merges sinks and one that merges cheaply rises.
+    Requires W1-T3074's table to exist so the term is auditable.
+    (c) DEPENDENCY FAN-OUT FIRST: order by the number of open tasks whose `depends_on` names this
+    id (descending), then id. Pure plan data, no ledger; rewards unblocking.
+    (d) AGE DECAY ON PREMISES: a task older than N days without a run is re-linted for premise
+    rot (P46) and pushed behind fresher work until it re-passes.
+
+    RECOMMENDATION (agent, not a ruling): (b) with (c) as its tie-break, gated by W1-T3074's
+    visible table — because the order should be falsifiable from the same artifact the operator
+    reads, and (a) alone reproduces today's 5-of-1,204 adoption.
+  acceptance:
+    - claim: "a decision is recorded in DECISIONS.md under this task id naming which ordering term the selector carries"
+      proof: "grep: W1-T3075 chosen ordering in DECISIONS.md"
+    - claim: "the entry states who sets the term and where it lives, policy row or ledger measurement"
+      proof: "grep: ordering term lives in DECISIONS.md"
+    - claim: "the entry disposes of the five-of-1,204 priority adoption figure rather than leaving option (a) as the silent default"
+      proof: "grep: five-of-1,204 priority in DECISIONS.md"
+  falsifier: |
+    This task is falsified as WRITTEN if the frontier is NOT id-ordered in practice: re-run the
+    approximation (dispatchOrder over every shard with verify:auto, status not blocked, empty
+    depends_on) and read the first ten ids. If they are not the lowest ids present, the premise is
+    wrong and the entry should say why. MEASURED 2026-09-07: they are.
+  note: |
+    `verify: human` on purpose: a grep confirms a decision was written, never that it is sound.
+    The proofs are the three phrases a thin ruling would omit, each absent from DECISIONS.md at
+    filing (checked with grep). FILED 2026-09-07 without a `refs/rmd-id/` reservation from a
+    credential-scoped session; see W1-T3088's note.

@@ -1,0 +1,86 @@
+- id: W1-T3102
+  title: "RULING — ARE RETRO PROPOSALS RECORDS OR PROSE? Thirty-one live proposals are ranked in one MASTER-PLAN paragraph with no machine-readable status and no falsifier, while `retroPrompt` instructs the Architect 'PROPOSALS ONLY ... Do NOT edit plan/tasks.yaml' and MASTER-PLAN itself records that 'rule 27 now permits automatic filing' — so the corpus that feeds the plan is the one corpus no instrument can read, retire, or refute"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 2.00
+  files: [DECISIONS.md]
+  origin: "operator-session#next-wave-2026-09-08"
+  plan_refs: ["P47", "W1-T3088"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at a0b6ba81e. This is a RULING, not a build: it asks the operator to decide a shape,
+    and its only artifact is the decision record.
+
+    THE CORPUS IS EXACTLY 31 AND IT IS ONE PARAGRAPH. MASTER-PLAN.md:1774-1777 holds the LIVE
+    RANKING — "the ONE place open proposals are ordered — and since R42 the ONLY one" — as a single
+    run of ids: `P47 > P67 > P68 > P65 > P66 > P64 > P63 > P62 > P57 > P60 > P61 > P56 > P58 > P59 >
+    P40 > P43 > P53 > P54 > P48 > P50 > P52 > P38 > P49 > P55 > P33 > P42 > P46 > P39 > P45 > P44 >
+    P26`. Counted with `grep -oE "\bP[0-9]+\b" | sort -u | wc -l`: THIRTY-ONE.
+
+    NONE OF THEM HAS A STATUS FIELD OR A FALSIFIER. They are prose entries under
+    `## Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)` (:1772). A shard carries
+    `status:`, `acceptance:` and `falsifier:` and is linted by `rmd lint-plan`; a proposal carries a
+    rank in a sentence. Nothing can ask whether P44 is still true.
+
+    THE DOCTRINE CONTRADICTS ITSELF IN THE SAME REPOSITORY. `retroPrompt` (src/run-task.ts:24028)
+    instruction 4 reads: "Mine FAILURES (blocked_* verdicts) into PROPOSED golden/new tasks —
+    PROPOSALS ONLY, in a 'Retro proposals' note. Do NOT edit plan/tasks.yaml." MASTER-PLAN.md:2602
+    reads: "doctrine, mis-cited as a §12 rule number; **rule 27 now permits automatic filing.**"
+    So the prompt enforces a prohibition the plan has already lifted, and :4009 records the same
+    correction a second time. Whichever is right, both cannot be.
+
+    THE COST IS A CORPUS THAT ONLY GROWS. There is no retirement path a machine can run: a proposal
+    leaves the ranking when a human edits the sentence, which is how P17 and P29 left (:1789-1790).
+    Ranking arguments are re-litigated in prose each cycle — R44-1, R44-7 and R44-8 (:621-628) each
+    re-register a bar "VERBATIM" because there is no record to point at.
+  design: |
+    THE OPERATOR RULES BETWEEN THREE SHAPES. This task builds none of them; it records the choice.
+
+    (a) `plan/proposals.d/*.yaml`, ONE FILE PER PROPOSAL, carrying `status:` and an EXECUTABLE
+    falsifier in the shard dialect. The retro writes them instead of prose; `rmd lint-plan` ranks
+    and retires them the way it already lints shards. Cost: a second record type beside
+    `plan/tasks.d/`, and every existing proposal needs migrating or grandfathering.
+
+    (b) PROPOSALS GO STRAIGHT TO THE INBOX REGISTRY via `updateProposalRegistry` — the mechanism
+    already exists and already has a consumer (`src/lib/feedback-docket.ts:29` names it as the
+    filing route for its candidates; `src/run-task.ts:421` imports it). Cost: proposals become
+    inbox items and lose the standing ranking that MASTER-PLAN calls "the ONE place".
+
+    (c) STATUS QUO — prose, ranked by hand, retired by hand.
+
+    RECOMMENDED: (a) THEN (b). (a) first because a status and a falsifier are what make a proposal
+    refutable, and refutability is the thing entirely absent today; (b) second because once
+    proposals are records, routing them through the registry is a wiring change rather than a
+    redesign. Taking (b) alone would give proposals a queue before it gives them a falsifier, which
+    is the wrong order: it would make them easier to act on without making them easier to be wrong
+    about.
+
+    WHATEVER IS RULED, THE `retroPrompt`/rule-27 CONTRADICTION IS SETTLED IN THE SAME ENTRY. Leaving
+    it costs another cycle of a worker obeying a prohibition the plan has lifted.
+  acceptance:
+    - claim: "DECISIONS.md records whether proposals become records under plan/proposals.d/ with a status and an executable falsifier"
+      proof: "grep: proposals.d in DECISIONS.md"
+    - claim: "the entry states whether a proposal must carry an executable falsifier, which is the property no live proposal has today"
+      proof: "grep: executable falsifier in DECISIONS.md"
+    - claim: "the entry settles the retroPrompt PROPOSALS-ONLY instruction against rule 27's permission to file automatically"
+      proof: "grep: proposal registry is the docket in DECISIONS.md"
+  falsifier: |
+    CLOSE IF the ruling is already recorded: `grep -c "proposals.d" DECISIONS.md`,
+    `grep -c "executable falsifier" DECISIONS.md`, `grep -c "proposal registry is the docket"
+    DECISIONS.md`. MEASURED 2026-09-08 at a0b6ba81e: 0, 0 and 0 — no entry exists.
+    CLOSE ALSO IF the count is wrong: re-run
+    `sed -n '1774,1777p' MASTER-PLAN.md | grep -oE "\bP[0-9]+\b" | sort -u | wc -l`. If it is not
+    31, the premise has moved and the ruling should be re-argued on the current number.
+    A RULING IS NOT SATISFIED BY BUILDING (a). This task's `files:` is `DECISIONS.md` alone; the
+    migration is a separate task that cites the ruling, and a builder who ships `plan/proposals.d/`
+    here has decided the question the operator was asked.
+  note: |
+    verify: human because no test can establish that a shape is the right one — only that an entry
+    exists. The three grep proofs are absent TODAY by construction (each measured at 0 above), so
+    they discriminate: they can only pass once the ruling is written.

@@ -1,0 +1,110 @@
+- id: W1-T3086
+  title: "NO MECHANISM EVER RE-CHECKS AN UNCHANGED SHARD, so `lint-plan` violations accumulate invisibly until something unrelated touches the file — six shards on `main` carry sixteen violations today, and they were discovered only because a 930-shard status reconcile made them 'changed' and turned a PR red for debt it did not create"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files:
+    - test/every-shard-on-main-is-lintable.test.ts
+  origin: "operator-session#reconcile-930-blocked-by-latent-shard-debt-2026-09-07"
+  plan_refs: ["W1-T1033", "W1-T491", "W1-T3043"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS TASK DOES NOT ARGUE THAT `lint-plan` SHOULD GATE `main`. W1-T1033 made that job PR-only on
+    purpose and that ruling is correct — see the objection section. The claim is narrower: NOTHING
+    RE-READS A SHARD ONCE IT HAS LANDED, so a violation acquired at merge time, or acquired later
+    when a rule tightens, is invisible for as long as nobody edits the file.
+
+    OBSERVED, .github/workflows/ci.yml — the `on:` block is `pull_request:` AND `push: branches:
+    [main]`, so the workflow does run on main. The `lint-plan` job then opts itself out by name:
+
+        lint-plan:
+          if: github.event_name == 'pull_request'   # W1-T1033: PR-only; see the `on:` block above.
+          ...
+          run: npm run --silent lint-plan -- --base "$BASE_SHA"
+
+    Two independent narrowings, and BOTH are needed for the gap: PR-only means main is never linted,
+    and `--base` means even in a PR only CHANGED tasks are read.
+
+    OBSERVED, .github/workflows/main-plan-guard.yml — the one push-triggered plan check. Its own
+    header states the scope it deliberately does NOT cover: "WHY `loadPlan` AND NOT `rmd lint-plan`.
+    `lintPlanCommand` returns 1 for ORDINARY violations". So it answers "does the plan still LOAD"
+    and nothing about per-task rules. That is the right question for that guard; it simply leaves
+    this one unasked.
+
+    MEASURED 2026-09-07 at origin/main 36c360006. A reconcile flipping `status: queued` ->
+    `status: merged` on 930 shards made those shards "changed", which forced them through the linter
+    for the first time since they landed. Six failed, carrying sixteen violations between them, and
+    `lint-plan` itself annotated every one as PRE-EXISTING ON BASE:
+
+        W1-T174: 2 violation(s) (2 pre-existing on base origin/main)
+        W1-T175: 4 violation(s) (4 pre-existing on base origin/main)
+        W1-T176: 4 violation(s) (4 pre-existing on base origin/main)
+        W1-T196: 4 violation(s) (4 pre-existing on base origin/main)
+        W1-T198: 4 violation(s) (4 pre-existing on base origin/main)
+        W1-T289: 2 violation(s) (2 pre-existing on base origin/main)
+
+    By class: 9 proof-resolvability, 7 proof-dialect, 1 proof-scope, 1 proof-grep-safety. None was
+    caused by the status flip — the linter says so itself, and the count is unchanged with the flip
+    reverted.
+
+    THE COST IS NOT THE SIX SHARDS. It is that an unrelated PR pays for them. A plan-wide operation —
+    a reconcile, a schema migration, a bulk retitle — turns latent debt into a red check on the
+    change that merely touched the file, and the author's only options are to fix records they did
+    not write or to carve those shards out. This shard's own filing session carved out six, which is
+    a workaround, not a fix.
+
+    WHAT WOULD ANSWER IT, AND WHAT WOULD NOT. A COUNT, ratcheted, is enough: a test that lints every
+    shard on `main` and asserts the number of violating shards does not EXCEED a recorded baseline.
+    That makes existing debt visible and frozen without demanding it be paid, and it reddens the PR
+    that ADDS a violating shard, which is the moment the author can actually act. Six is the number
+    to record today.
+
+    NO STANDING MECHANISM REACHES IT, each read rather than assumed: `main-plan-guard` runs
+    `loadPlan` only (its header says so); ci.yml's `lint-plan` job is `if: github.event_name ==
+    'pull_request'`; and no scheduled workflow runs it — `grep -rln "lint-plan" .github/workflows/`
+    returns exactly ci.yml, ci-gate.yml and main-plan-guard.yml, and ci-gate only lists the job name
+    as a required-check string.
+
+    THE OBJECTION, STATED AT FULL STRENGTH. Making `main` red for pre-existing plan debt is exactly
+    what W1-T1033 was right to avoid: it would fail every open PR for a defect none of them
+    introduced, which is the outage shape main-plan-guard's own header describes at length. This
+    task therefore proposes a RATCHET, not a gate — the number may not grow, and today's six are
+    recorded rather than demanded. If a builder finds even a ratchet too strong, a non-blocking
+    scheduled report is an acceptable weaker answer and should be argued for explicitly, not
+    substituted silently.
+
+    The weaker half is real and is not argued away: linting 1186 shards on every run costs time this
+    repo has been careful about, and the measured wall clock for the 930-shard run was several
+    minutes. A builder must measure the full-plan cost and say the number; if it is prohibitive, the
+    honest outcome is the scheduled report rather than a per-PR test.
+  acceptance:
+    - claim: every shard on main is linted and the count of violating shards is asserted against a recorded baseline, so latent plan debt is visible and frozen rather than invisible
+      proof: "unit test: test/every-shard-on-main-is-lintable.test.ts::the violating-shard count does not exceed its baseline"
+    - claim: adding a shard that carries a violation reddens this test, so the ratchet bites at the moment an author can act on it
+      proof: "unit test: test/every-shard-on-main-is-lintable.test.ts::a newly violating shard reddens the ratchet"
+    - claim: the existing six are RECORDED, not demanded, so no unrelated PR is made to pay for debt it did not create
+      proof: "unit test: test/every-shard-on-main-is-lintable.test.ts::the recorded baseline names its six members"
+    - claim: the measured wall-clock cost of linting the full plan is stated, so the ratchet-versus-scheduled-report choice is made on a number rather than a guess
+      proof: "unit test: test/every-shard-on-main-is-lintable.test.ts::the full-plan lint completes within its stated bound"
+  falsifier: |
+    Close without implementation if some mechanism already re-reads unchanged shards. Look for it
+    rather than trusting this shard: `grep -rln "lint-plan" .github/workflows/`, then read each hit's
+    trigger and any `if:` guard on the job. If a scheduled or push-triggered run already lints the
+    whole plan, this finding is wrong and the shard is void.
+
+    Close it also if the six violations turn out to be caused by the status flip after all. Verify by
+    linting those six shards at origin/main UNCHANGED — if they are clean there, the debt is not
+    latent and this task is measuring its own instrument.
+
+    Turning `lint-plan` into a required check on `main` does NOT satisfy this task, and a builder who
+    does it has read the objection section and ignored it: it reddens `main` for debt no open PR
+    introduced, which is the failure W1-T1033 avoided deliberately.
+
+    REWRITING THE SIX SHARDS' PROOFS DOES NOT SATISFY IT EITHER. Their criteria belong to tasks
+    completed long ago, and inventing resolvable proof strings for them would fabricate provenance
+    this repo cannot check — a worse outcome than recorded debt. Record them; do not launder them.

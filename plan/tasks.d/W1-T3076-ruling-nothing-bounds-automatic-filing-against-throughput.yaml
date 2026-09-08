@@ -1,0 +1,84 @@
+- id: W1-T3076
+  title: "DESIGN RULING: Standing rule 27 permits the fleet to file its own work and nothing bounds the rate — the shard corpus doubled from 601 to 1,204 in fourteen days with 605 files added and 2 deleted while 680 ship-class commits landed, so most ships close no shard, retirement is a field on a file that stays, and the only WIP limit in policy (`sweep.wipLimit: 10`) governs dispatch, never filing — should a filing governor exist, and what does it read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 2.00
+  files: [DECISIONS.md]
+  origin: "operator-session#deep-research-2026-09-07"
+  plan_refs: ["W1-T2456", "W1-T1287", "W1-T2657", "P46"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07 on `origin/main` (3,586 commits, history deepened to 2026-07-01):
+
+      week      filed  ship  filed/ship        corpus size (git ls-tree plan/tasks.d)
+      2026-W31    25   193   0.13              2026-08-25   601
+      2026-W33   157   213   0.74              2026-08-31   793
+      2026-W34   225   188   1.20              2026-09-05 1,128
+      2026-W35   259   252   1.03              2026-09-07 1,204
+      2026-W36   293   390   0.75
+
+    `filed` = commits whose subject starts `chore(plan)`; `ship` = feat/fix/test/refactor/perf.
+    One filing commit adds several shards, which is why 540 filing commits over fourteen days
+    produced +605 files. Deletions: 2 in the window, 35 all-time against 1,239 additions. The 31
+    `retirement:` fields are the only closure mechanism and they leave the file in place.
+
+    THE CORPUS CANNOT STATE ITS OWN SIZE. `status:` is decorative by documented design
+    (CLAUDE.md, W1-T367), so "how much is open" needs a GitHub round-trip, and the 2026-09-04
+    ruling on W1-T1260 withdrew the archive-from-location shape (W1-T2657/W1-T2658) as
+    unauthorised. So the population the selector walks grows monotonically and the retro's
+    plan-health sweep re-lints it every cycle.
+
+    WHAT EXISTS AND DOES NOT BOUND FILING: `sweep.wipLimit` (dispatch WIP), `drain.max`,
+    `planFilingAdmissionBound = 3` in `sweep.ts` (per-pass admission of plan-filing PRs into the
+    fix rung, not a rate), `TRIAGE_MAX_NEW_TASKS` and `PLAN_MAX_NEW_TASKS` (per-run block sizes,
+    not a rate). Rule 27 (2026-08-29) affirmatively permits automatic filing; it does not bound it.
+
+    THE REPO'S OWN WARNING APPLIES TO ANY BOUND HERE: "a bound that fires on a healthy condition
+    is this repo's recurring defect" (CLAUDE.md). The series above shows the ratio moving 0.13 ->
+    1.20 -> 0.75 in five weeks, so a fixed ratio threshold would have fired in W34 and been silent
+    in W36 on a corpus that doubled either way. The governor, if any, must read the CORPUS
+    (open-unmerged count against trailing merged throughput), not the commit ratio.
+  design: |
+    THIS IS A QUESTION, NOT A BUILD. The operator picks ONE and the record goes in DECISIONS.md
+    under `W1-T3076 chosen bound`.
+
+    (a) NO GOVERNOR: filing is free; instead make the corpus SHRINK by giving retirement a real
+    effect (a retired shard leaves the selector's population and the plan-health sweep) — the
+    W1-T1287 line. Bounds nothing, but stops the append-only reading.
+    (b) A FILING GOVERNOR ON THE CORPUS: refuse an AUTOMATIC filing (triage, plan, ci-learning,
+    follow-up router) when `open_unmerged > k x trailing_14d_merged`, k a `plan/policy.yaml` row
+    with bounds; hand filings are never refused. The refusal is ledgered and rendered on the
+    console, the same shape as the cost ceiling. Requires the credit projection at filing time.
+    (c) CLOSURE-RATE ADMISSION: automatic filing into a task class whose W1-T3074 closure rate is
+    zero over N cycles is refused until a human files into it — the gh-aw pattern. Narrower than
+    (b); retires dead classes rather than throttling everything.
+    (d) FILING REQUIRES A RETIREMENT: every automatic filing PR must retire or supersede at least
+    one existing shard (a net-zero rule), enforced by `lint-plan`'s changed-tasks pass.
+
+    RECOMMENDATION (agent, not a ruling): (a) first — it is a precondition for measuring (b) or
+    (c) honestly, since today's "open" count includes shipped work — then (c), because it
+    targets the population that never closes instead of taxing the classes that do.
+  acceptance:
+    - claim: "a decision is recorded in DECISIONS.md under this task id naming which bound, if any, governs automatic filing"
+      proof: "grep: W1-T3076 chosen bound in DECISIONS.md"
+    - claim: "the entry states what the governor reads, the corpus or the commit ratio, and why"
+      proof: "grep: filing governor reads in DECISIONS.md"
+    - claim: "the entry disposes of the healthy-condition hazard for whatever bound it chooses"
+      proof: "grep: healthy-condition hazard in DECISIONS.md"
+  falsifier: |
+    This task is falsified as WRITTEN if the corpus is NOT append-only: count `git log
+    --diff-filter=D --name-only -- plan/tasks.d` against `--diff-filter=A` over the same window.
+    MEASURED 2026-09-07: 2 deletions against 605 additions in fourteen days. It is also weakened
+    if a governor already exists: grep `src/` for a refusal keyed on open-shard count — none found.
+  note: |
+    `verify: human` on purpose; the three grep phrases are the parts a thin ruling would omit and
+    are absent from DECISIONS.md at filing. FILED 2026-09-07 without a `refs/rmd-id/` reservation
+    from a credential-scoped session; see W1-T3088's note. NOT a re-filing of W1-T2657/W1-T2658:
+    the 2026-09-04 ruling withdrew archive-from-location; option (a) here is the RETIREMENT-effect
+    line that ruling left open, not an archive.

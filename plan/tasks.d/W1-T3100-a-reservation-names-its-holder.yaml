@@ -1,0 +1,86 @@
+- id: W1-T3100
+  title: "A RESERVATION ANCHOR NAMES A PROCESS, NOT A PURPOSE — `mintAnchor` writes `rmd-id reservation <pid>@<host> <iso>` into the `refs/rmd-id/` commit, so a held id carries no lane, no PR and no operator hand-off, and `next-task-id` never prints who holds one; PR #4513 filed W1-T3073 two minutes before #4516, whose body names the same id, and nothing in the mechanism could have told either author the other existed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 16.00
+  files: [src/lib/task-id-reservation.ts, scripts/task-id-existence-check.mjs, test/a-reservation-names-its-holder.test.ts]
+  origin: "operator-session#next-wave-2026-09-08"
+  plan_refs: ["P66", "W1-T3070"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at a0b6ba81e.
+
+    THE ANCHOR CARRIES A PROCESS AND A CLOCK. `gitRemoteRefReserver.mintAnchor`
+    (src/lib/task-id-reservation.ts:362) builds the reservation commit message as:
+
+      `rmd-id reservation ${process.pid}@${hostname()} ${new Date().toISOString()}`
+
+    and the local record `TaskIdReservationInfo` (:25-26) is `{ pid, host, id }`. Neither carries a
+    LANE, a PR, a branch, or a note that an operator reserved it on someone's behalf. A live
+    reservation from `reserve W1-T3073 Craigs-Mac-mini-99577-...` — the real anchor, read back with
+    `git log -1 --format=%s refs/rmd-id/W1-T3073` — tells a second author that SOME process on some
+    mac held it, which is exactly as much as it tells them if that process was their own.
+
+    `liveReservedIds` (:83-95) then decides holding by `isAlive(held.pid)`. A pid is a liveness
+    signal, not an identity: it answers "is anyone there", never "is it me".
+
+    THE COLLISION IS OBSERVED, NOT HYPOTHESISED. #4513 (`chore(plan): file W1-T3073 invalid
+    path-title proof grammar`, created 09-08T00:33) and #4516 (`chore(plan): file W1-T3074..W1-T3082
+    and W1-T3088`, created 09-08T00:35) BOTH name W1-T3073 — two minutes apart, both merged. It did
+    not land as a duplicate declaration (`grep -rl "^- id: W1-T3073$" plan/` returns exactly one
+    file), so this is a near miss, and the near miss is the finding: the id gate caught the shape it
+    catches, and the RESERVATION — the mechanism whose entire job is to prevent two authors reaching
+    for one id — contributed nothing, because it had nothing to say.
+
+    WHY A NEAR MISS IS WORTH A TASK. W1-T3070 removed a false collision from the id gate by asking
+    the authority (does that PR DECLARE the id?) rather than reading a string. This is the mirror
+    defect on the reservation side: the authority exists, is queried, and answers with a pid.
+  design: |
+    (i) A PARSEABLE HOLDER LINE, written by BOTH mint paths. `mintAnchor` and the hand-mint form
+    must emit the same grammar — one key/value line a reader can parse — carrying at minimum the
+    lane or branch and, when an operator reserves for someone else, the intended PR or author. Two
+    grammars would mean the check below can read one holder and not the other.
+    (ii) `next-task-id` PRINTS THE HOLDER FOR EVERY HELD ID it reports. Today it prints the ceiling
+    and the id it took; the whole cost of this defect is that a human looking at a held id learns
+    nothing about it.
+    (iii) `task-id-existence-check.mjs` REFUSES a filing whose id's holder differs from the filer,
+    UNLESS the shard's `note:` records the hand-off. The escape is deliberate and must be a written
+    one — an operator reserving an id for a worker is the normal case, and a check with no escape
+    would refuse it.
+    (iv) FAIL CLOSED ON AN UNREADABLE HOLDER, matching the gate's own doctrine that an unreadable
+    surface is never an empty one (scripts/task-id-existence-check.mjs's base-read refusal). An
+    anchor written before this task lands has no holder line; those must be treated as UNKNOWN and
+    exempt, not as "holder differs", or every pre-existing reservation becomes a refusal.
+    (v) THE HAND-OFF ESCAPE IS READ FROM THE SHARD, not from a flag. A flag is available to the
+    thing being checked; a `note:` line is a written record a reviewer sees.
+  acceptance:
+    - claim: "both the automatic and the hand-mint reservation paths write the same parseable holder line into the anchor"
+      proof: "unit test: test/a-reservation-names-its-holder.test.ts"
+    - claim: "next-task-id prints the holder for every held id it reports, so a human reading a held id learns who holds it"
+      proof: "unit test: test/a-reservation-names-its-holder.test.ts"
+    - claim: "a filing whose id is held by a different holder is refused, and the same filing passes when the shard note records the hand-off"
+      proof: "unit test: test/a-reservation-names-its-holder.test.ts"
+    - claim: "an anchor with no holder line at all is UNKNOWN and exempt, so reservations minted before this task are not retroactively refused"
+      proof: "unit test: test/a-reservation-names-its-holder.test.ts"
+  falsifier: |
+    CLOSE IF the anchor already names a lane: run `git log -1 --format=%s refs/rmd-id/<any held id>`
+    and read it. MEASURED 2026-09-08: `reserve W1-T3073 Craigs-Mac-mini-99577-2026-09-08T00:25:37Z`
+    — host, pid and clock, nothing else. Read `mintAnchor` at src/lib/task-id-reservation.ts:362 to
+    confirm the producer.
+    PROVE IT LOAD-BEARING: with the holder comparison disabled, the differing-holder probe must PASS
+    the id gate — it must go blind — while the recorded-hand-off probe passes either way, so the
+    suite discriminates the comparison rather than the fixture.
+    DO NOT satisfy this by refusing on a pid or host mismatch alone. Two lanes on one host share a
+    host, and one lane re-run twice has two pids; both would be wrong in opposite directions, which
+    is the whole reason the anchor needs a purpose and not a stronger process fingerprint.
+  note: |
+    Rule 25 CHECKED BEFORE FILING: `scripts/task-id-existence-check.mjs` IS an instrument path, so
+    the build PR is instrument+src+test and Standing rule 25's entanglement bar applies to it. If a
+    builder finds the src half cannot ride with the instrument half, the split is a companion task,
+    not a widened `files:` list.

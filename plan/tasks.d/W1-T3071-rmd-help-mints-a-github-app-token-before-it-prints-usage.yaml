@@ -1,0 +1,120 @@
+- id: W1-T3071
+  title: "`rmd --help` MINTS A GITHUB APP INSTALLATION TOKEN BEFORE IT PRINTS USAGE — main()'s credential mint sits above the help arms that `process.exit(0)` without ever shelling `gh`, so the one verb guaranteed never to need a credential performs a network token exchange, logs the installation id and expiry to stderr on every invocation, and inherits a 20-second abort ceiling; the stderr line is what reddens doctor-node-pin's two assertions on the fleet host itself"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - src/run-task.ts
+    - test/cli-verbs-mint-the-app-token.test.ts
+  origin: "operator-session#doctor-node-pin-red-on-the-fleet-host-2026-09-07"
+  plan_refs: ["W1-T3065", "W1-T477", "W1-T1134"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THIS IS A PLACEMENT DEFECT, NOT A CREDENTIAL DEFECT, AND THE DISTINCTION IS THE WHOLE TASK.
+    Nothing here argues about which credential the fleet uses, how it is configured, or that the
+    GitHub App is the right mechanism. #4298 was right to mint at CLI entry: 32 verbs that shell to
+    `gh` were failing on the one host the fleet runs on. The only claim is that the mint sits four
+    statements too high.
+
+    OBSERVED, src/run-task.ts:40261-40265, inside `main()`:
+
+        if (!process.env.GH_TOKEN) {
+          await refreshInstallationToken({ log: (step, extra) => console.error(...) });
+        }
+        const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
+        logCliInvocation(cmd, rest);
+        if (cmd === "--help" || cmd === "-h" || cmd === "help") { console.log(USAGE); process.exit(0); }
+        const helpSpec = COMMANDS.find((c) => c.name === cmd);
+        if (helpSpec && (rest.includes("--help") || rest.includes("-h"))) { ...; process.exit(0); }
+
+    The mint runs BEFORE argv is even destructured. Both help arms then `process.exit(0)` without
+    reaching any dispatch, so `rmd --help`, `rmd -h`, `rmd help` and `rmd <cmd> --help` each perform
+    a token exchange for a code path that cannot use one.
+
+    NOTHING BETWEEN THE MINT AND THOSE ARMS NEEDS A TOKEN, each read rather than assumed:
+    `stripRepoRootFlag` (src/run-task.ts:1609-1613) is a pure array splice, and `logCliInvocation`
+    (:40077-40089) appends one local ledger row inside a swallowing try. So the move is available
+    with no reordering hazard.
+
+    THREE MEASURED COSTS, on the fleet host 2026-09-07 at origin/main 7fe6ec697:
+
+      1. THE STDERR LINE, which is the one that already bites. Running `bin/rmd --help` emits
+         `rmd: github_app.token_refreshed {"installation_id":"...","expires_at":"..."}` to stderr.
+         test/doctor-node-pin.test.ts asserts `stderrLines.length === 1` (:168) and
+         `result.stderr === ""` (:181). Both fail here — 6 pass / 2 fail — because rmd's stderr
+         contract is polluted by a credential line the invocation never needed. This is not a
+         hypothetical: those two rows are RED on the fleet host right now, and this shard's author
+         spent three turns misattributing them, first to a missing docker, then to git's `gc.log`
+         warning, before reading the actual failure text.
+
+      2. LATENCY, on a healthy network. `rmd --help` with the app configured: 700 / 723 / 734 ms.
+         The same command with `GH_TOKEN` preset, so the guard skips the mint: 592 / 615 / 592 ms.
+         About 120 ms, every help invocation. Small, and named as small.
+
+      3. THE OFFLINE CEILING. `EXCHANGE_TIMEOUT_MS = 20 * 1000` (src/lib/github-app.ts:66), armed at
+         :240-241, and the mint is AWAITED. LABELLED INFERRED, NOT MEASURED: this shard did not
+         reproduce an unreachable network — a probe via `GITHUB_API_URL` did not reach the code path
+         and the mint still succeeded, so no offline timing is claimed. What is OBSERVED is an
+         awaited call with a 20s abort ceiling standing between the operator and `usage:`.
+
+    A CREDENTIAL MINTED AND NEVER USED IS ALSO ITS OWN SMALL COST. Every `rmd --help` on the fleet
+    host asks GitHub for an installation token that is discarded microseconds later. Not a security
+    finding and not argued as one; issuance that buys nothing is simply waste.
+
+    NO STANDING MECHANISM ALREADY REACHES THIS, confirmed by reading the instrument at 7fe6ec697
+    rather than inferring: there is no help fast path, no verb exemption and no skip anywhere near
+    the mint (the six lines above the call are the guard on `GH_TOKEN` and the comment explaining
+    it). `RMD_CLI_EXEMPT_VERBS` (:40091-40099) exists but gates `checkCliFreshness`, a DIFFERENT and
+    LATER gate, and its three members are read-only verbs, not help.
+
+    THE OBJECTION, STATED AT FULL STRENGTH. The mint's position is not accidental: #4298's comment
+    argues for entry precisely so that no verb can be forgotten, and moving it down re-opens the
+    question "which paths are exempt?" that placing it first was meant to close. That objection is
+    correct and this task does not dismiss it. The answer is that the exemption is not a LIST to
+    curate but the two arms that already terminate the process — a path that calls `process.exit(0)`
+    before dispatch cannot shell `gh` by construction, so the exemption cannot silently grow. An
+    UNKNOWN verb still mints, because it matches neither arm and falls through, which is what keeps
+    test/cli-verbs-mint-the-app-token.test.ts:48's `--no-such-verb` assertion green untouched.
+
+    The weaker half is real and is not argued away: this edits credential-adjacent code while the
+    operator's standing instruction is not to change anything about credentials. Nothing about the
+    credential, its scope, its configuration or its consumers changes, and every non-help verb
+    behaves byte-identically — but a reviewer who reads the instruction more broadly than that
+    should say so, and the change is a four-line move that reverts trivially.
+  acceptance:
+    - claim: every help invocation (`rmd --help`, `rmd -h`, `rmd help`, `rmd <cmd> --help`) completes without minting a token, so the one path that cannot use a credential no longer asks for one
+      proof: "unit test: test/cli-verbs-mint-the-app-token.test.ts::every help arm completes without minting"
+    - claim: an UNKNOWN verb still mints before dispatch, so the exemption is the two terminating arms and not a curatable list
+      proof: "unit test: test/cli-verbs-mint-the-app-token.test.ts::an unknown verb still mints"
+    - claim: the existing mint assertions in test/cli-verbs-mint-the-app-token.test.ts pass UNEDITED, so this moves the call rather than weakening the guarantee #4298 established
+      proof: "unit test: test/cli-verbs-mint-the-app-token.test.ts::CLI entry MINTS before dispatch"
+    - claim: with the app configured, a help invocation emits NOTHING on stderr, which is the property doctor-node-pin's two assertions actually require
+      proof: "unit test: test/cli-verbs-mint-the-app-token.test.ts::a help invocation emits nothing on stderr"
+  falsifier: |
+    Close without implementation if the mint is not actually reached on a help invocation. Measure
+    it, do not read it: with `GH_APP_ID`/`GH_APP_INSTALLATION_ID`/`GH_APP_PRIVATE_KEY_PATH` set and
+    `GH_TOKEN` unset, run `bin/rmd --help 2>&1 >/dev/null`. If no `github_app` line appears, the
+    finding is wrong and this shard is void.
+
+    Close it also if any statement between the mint and the two help arms turns out to need a token
+    after all — re-read `stripRepoRootFlag` and `logCliInvocation` rather than trusting this shard's
+    reading of them, because if either shells `gh` the move is unsafe and the honest outcome is to
+    leave the mint where it is and fix doctor-node-pin's assertions instead.
+
+    Editing test/doctor-node-pin.test.ts does NOT satisfy this task. Loosening `stderrLines.length
+    === 1` to tolerate a credential line would bank the defect as a permanently weaker assertion,
+    and that suite is not in this task's declared files for exactly that reason.
+
+    Adding a VERB EXEMPTION LIST does not satisfy it either. The point of the fix is that the two
+    arms already `process.exit(0)`, so no list is needed and none can drift; a list would recreate
+    the curation burden #4298's placement was right to avoid.
+
+    If a builder finds that help should mint — the argument being that `rmd <cmd> --help` ought to
+    warm a token for the command the operator is about to run — then the honest outcome is to say so
+    and close this, not to half-apply it.

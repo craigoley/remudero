@@ -16,6 +16,7 @@
         "grep-in-path-lazy-split-hazard",
         "hand-mint-uses-the-plain-refspec",
         "harness-assumptions-stale",
+        "implement-lane-model-lives-on-the-run-not-the-verdict-row",
         "ledger-corpus-needs-the-resolver",
         "ledger-query-anchors-on-the-step-field",
         "ledger-step-name-is-a-claim-not-evidence",

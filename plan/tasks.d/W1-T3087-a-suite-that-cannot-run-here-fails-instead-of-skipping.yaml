@@ -1,0 +1,108 @@
+- id: W1-T3087
+  title: "SIX TESTS FAIL ON THE FLEET HOST FOR TWO ENVIRONMENT REASONS, BOTH ALREADY SOLVED ELSEWHERE — the suite never sets `RMD_SERVE_DOCKERENV_PATH`, a seam `serve-container.sh:141` already offers and four other suites already use, and its fixture declares `/home/node/.claude/rmd-app.pem`, a path the degrade arms need ABSENT but which really exists on the host that carries the GitHub App key"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  files:
+    - test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts
+  origin: "operator-session#three-misattributions-of-one-environment-refusal-2026-09-07"
+  plan_refs: ["W1-T2834", "W1-T2778"]
+  status: queued
+  attempts: 0
+  rationale: |
+    NEITHER THE SCRIPT NOR THE SUITE IS WRONG. THE FIXTURE IS, IN TWO PLACES, AND BOTH REMEDIES
+    ALREADY EXIST IN THIS REPO.
+
+    CAUSE ONE — THE SEAM THAT IS NOT USED. OBSERVED, deploy/serve-container.sh:141:
+
+        DOCKERENV_PATH="${RMD_SERVE_DOCKERENV_PATH:-/.dockerenv}"
+
+    and :159-160 refuse when that file exists. The suite's `runScript` builds an explicit `env` and
+    never sets the override, so inside the daemon container the script refuses and all six tests
+    fail on `assert.equal(r.status, 0)` at :119 and :150. FOUR OTHER SUITES ALREADY DO THIS for the
+    sibling script's identical `RMD_RECYCLE_DOCKERENV_PATH`
+    (a-lock-whose-container-is-gone-is-reclaimed-not-waited-on:146,
+    a-recycle-refuses-a-state-dir-that-is-not-a-checkout:121,
+    app-auth-satisfies-the-recycle-credential-refusal:96, container-config-mount:85). This suite is
+    the outlier, not the precedent.
+
+    CAUSE TWO — A FIXTURE PATH THAT DEFEATS ITS OWN PREMISE. The degrade arms declare
+    `GH_APP_PRIVATE_KEY_PATH: "/home/node/.claude/rmd-app.pem"` and assert the script does NOT
+    resolve it. But serve-container.sh:324-327 accepts a declared path that exists on the host:
+
+        if [ -f "${APP_KEY_DECLARED}" ] && [ -s ... ] && [ -r ... ]; then
+          APP_KEY_SOURCE="GH_APP_PRIVATE_KEY_PATH (already a host path)"
+
+    and on the FLEET HOST that file really is there — `-rw------- 1 node node 1675 Aug 19 11:57
+    /home/node/.claude/rmd-app.pem`, the actual GitHub App key. So the script takes the host-path
+    branch and the degrade never happens. The fixture chose the one path guaranteed to exist on the
+    machine the fleet runs on.
+
+    MEASURED 2026-09-07 inside the daemon container, run exactly as CI invokes it:
+
+        as shipped                                   0 pass / 6 fail
+        + RMD_SERVE_DOCKERENV_PATH set               4 pass / 2 fail
+        + fixture path renamed to an absent one      6 pass / 0 fail
+
+    The middle row is why both causes are named: fixing either alone leaves the suite red, and a
+    task that fixed only the first would have shipped a partial remedy and called it done.
+
+    THE COST IS MISDIAGNOSIS, AND IT IS NOT HYPOTHETICAL. These six rows were attributed, in order,
+    to: (1) `docker` being absent — WRONG, the suite supplies its own fake `docker` on PATH
+    (`fakeDockerDir`, :44-66); (2) a pre-existing defect verified against "a pristine origin/main
+    checkout" — WRONG, that control reverted the source and kept the container; (3)
+    genuinely-red-and-unrelated, carried into three PR bodies (#4457, #4494, #4495) and retracted by
+    comment on all three. A permanent red is indistinguishable from a new red, which is what trains
+    a reader to stop looking.
+
+    A SKIP WOULD HAVE BEEN THE WRONG FIX, and this shard records that it was the first idea. Guarding
+    the suite with `existsSync("/.dockerenv")` and skipping would have left six assertions dead on the
+    machine the fleet's own agents work on, to avoid reading two lines of the script. The seam was
+    one `grep` away. Do not reintroduce a skip.
+
+    NO STANDING MECHANISM REACHES IT: there is no environment-skip helper in test/setup/
+    (tmp-hygiene.ts guards `RMD_SELF_SYNC_DONE` and git config, nothing container-shaped), and the
+    suite carries no conditional today.
+
+    THE OBJECTION, STATED AT FULL STRENGTH. Renaming the declared path weakens the fixture's realism:
+    `/home/node/.claude/rmd-app.pem` is the daemon's REAL container path, and W1-T2834 chose it so
+    the test reads as the incident it came from. That is a genuine loss and it is not argued away.
+    The answer is that a fixture asserting a path is UNRESOLVABLE cannot use a path that resolves;
+    realism that inverts the assertion is not realism. The replacement keeps the directory and the
+    shape and changes only the basename, so the incident is still legible.
+
+    The weaker half: this makes the suite pass in one more environment, not in all. A host where
+    `/home/node/.claude/rmd-app-not-on-this-host.pem` somehow exists would fail the same way, and
+    nothing here detects that class in general.
+  acceptance:
+    - claim: the suite sets RMD_SERVE_DOCKERENV_PATH so the script proceeds under test, using the seam it already offers rather than skipping the tests
+      proof: "grep: RMD_SERVE_DOCKERENV_PATH in test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts"
+    - claim: the declared key path is one that does not exist on the fleet host, so the degrade arms actually reach the degrade instead of the already-a-host-path branch
+      proof: "grep: rmd-app-not-on-this-host in test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts"
+    - claim: all six tests pass inside the daemon container and remain unchanged in behaviour on CI, so this fixes the environment dependency without weakening an assertion
+      proof: "unit test: test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts"
+    - claim: no test is skipped or deleted, so the six assertions still execute everywhere they executed before
+      proof: "unit test: test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts"
+  falsifier: |
+    Close without implementation if the suite does not actually fail in-container. Measure it: inside
+    the daemon container run
+    `node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts`
+    and read the count. If it is not 0 pass / 6 fail, the finding is wrong and this shard is void.
+
+    A SKIP DOES NOT SATISFY THIS TASK. Guarding on `/.dockerenv` and skipping leaves six assertions
+    dead on the machine the fleet runs on, when a documented seam makes them runnable. That was the
+    first idea here and it was rejected on evidence, not taste.
+
+    Fixing only the seam does not satisfy it either — that measured 4 pass / 2 fail. Both causes
+    must be addressed, and a builder who reports green after one change has not run it on the fleet
+    host.
+
+    Changing `deploy/serve-container.sh` does NOT satisfy it. Its container refusal is load-bearing
+    (the Dockerfile copies the script in incidentally and that copy must never be the invocation
+    path), and its already-a-host-path branch is correct. Weakening production code to make a
+    fixture green is the inversion this repo refuses.

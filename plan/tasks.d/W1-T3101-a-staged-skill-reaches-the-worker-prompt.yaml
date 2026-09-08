@@ -1,0 +1,85 @@
+- id: W1-T3101
+  title: "THE SKILL WORKSHOP HAS NO ROUTE TO A WORKER — `stageSkillDraft` has ZERO production callers (its only references are test/skill-workshop.test.ts), and `spawnWorker` passes `settingSources: []` so no dispatched worker reads `~/.claude` or `CLAUDE.md` at all, which means a drafted, scanned, allowlisted skill is staged into a registry that nothing downstream consults and reaches no lane by any path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [src/lib/skill-workshop.ts, src/run-task.ts, test/a-staged-skill-reaches-the-worker-prompt.test.ts]
+  origin: "operator-session#next-wave-2026-09-08"
+  plan_refs: ["W1-T2959", "W1-T2761", "W1-T2297"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at a0b6ba81e.
+
+    THE PRODUCER IS UNCALLED. `grep -rn "stageSkillDraft" src/ test/` returns hits only in
+    `src/lib/skill-workshop.ts` itself and in `test/skill-workshop.test.ts` (:17, :167, :172, :184).
+    There is no production caller. The module is well tested — the suite drives staging, the
+    single-proposal shape, and the no-re-stage property — and none of that is at issue: what is
+    absent is the CALL.
+
+    THE OBVIOUS ROUTE IS CLOSED, AND CORRECTLY SO. A skill could in principle reach a worker through
+    `~/.claude`, and it cannot: `spawnWorker` passes `settingSources: []`. That is stated in three
+    places in this tree — src/lib/worker.ts:201 ("`spawnWorker` always passes `settingSources: []`.
+    So it reads `false` on every call today"), src/lib/worker.ts:1136, and src/lib/compaction.ts:238
+    ("A rule only humans read cannot bind the lane"). docs/operator-guide.md:60 makes the operational
+    consequence explicit for a sibling rung: "A remedy names `learnings/*.yaml`, never `CLAUDE.md`,
+    because `spawnWorker` passes `settingSources: []` and no dispatched worker reads it."
+
+    SO WIDENING `settingSources` IS NOT THE FIX AND THIS TASK DOES NOT PROPOSE IT. That isolation is
+    load-bearing: `hooks/deny-floor.sh` describes itself as "a tripwire, NOT a sandbox — the OS
+    sandbox (§4A) is the real boundary", and the worker's settings isolation is part of what that
+    boundary is worth. A skill must arrive the way knowledge already arrives.
+
+    KNOWLEDGE ALREADY HAS A ROUTE, AND IT IS THE PROMPT. `implementPromptParts` (src/run-task.ts:12304)
+    is the ONE derivation of the `# CONTEXT` + `# TASK` blocks, shared with the W1-T2297
+    `prompt.manifest` call site so "what the manifest fingerprints" cannot drift from "what the
+    worker received". `matchedLearnings` is already a parameter of it, and injection is already
+    ledgered — `log("learnings.injected", {...})` at src/run-task.ts:13766, with the retro reading
+    those rows' `matched_ids` (src/lib/retro.ts:3128). W1-T2761 added a policy-gated headline part
+    to the same array, so the shape for adding one more part under a flag is established.
+  design: |
+    (i) `retroCommand` (src/run-task.ts:23245) CALLS `stageSkillDraft` ON RATIFIED DRAFTS. The retro
+    is where drafts are produced and judged; staging there gives the producer the caller it lacks
+    without inventing a new rung.
+    (ii) `renderImplementPrompt`'s CONTEXT GAINS A SKILLS PART, added to `implementPromptParts`'s
+    array so the manifest fingerprints it automatically — never assembled separately, which is the
+    exact drift that array exists to prevent.
+    (iii) SELECTED BY TASK CLASS, and UNDER THE EXISTING BYTE BUDGET. `DEFAULT_KNOWLEDGE_BUDGET_CHARS
+    = 8148` (src/lib/learnings.ts:41) already bounds injected knowledge; the skills part spends from
+    that same budget rather than adding a second one, so the worst case is unchanged and no task
+    needs to re-measure a prompt ceiling.
+    (iv) LEDGERED LIKE LEARNINGS: one row in the shape of `learnings.injected` (:13766), naming what
+    was selected, so the retro can ask whether a staged skill was ever actually used — the question
+    that is unanswerable today because nothing is ever selected.
+    (v) `settingSources` IS NOT TOUCHED. A builder who finds the prompt route insufficient files a
+    companion task arguing the isolation change on its own terms; it does not ride in here.
+  acceptance:
+    - claim: "retroCommand stages a ratified draft, so stageSkillDraft has a production caller and a staged skill exists to select"
+      proof: "unit test: test/a-staged-skill-reaches-the-worker-prompt.test.ts"
+    - claim: "a staged skill matching the task class appears in the rendered implement prompt's CONTEXT block"
+      proof: "unit test: test/a-staged-skill-reaches-the-worker-prompt.test.ts"
+    - claim: "the skills part spends from the existing knowledge budget, so a prompt with skills is not larger than the budget already allows"
+      proof: "unit test: test/a-staged-skill-reaches-the-worker-prompt.test.ts"
+    - claim: "selection is ledgered in the shape of learnings.injected, so the retro can ask whether a staged skill was used"
+      proof: "unit test: test/a-staged-skill-reaches-the-worker-prompt.test.ts"
+    - claim: "spawnWorker still passes settingSources: [], so the isolation the deny-floor and the operator guide rely on is untouched"
+      proof: "unit test: test/a-staged-skill-reaches-the-worker-prompt.test.ts"
+  falsifier: |
+    CLOSE IF a production caller already exists: `grep -rn "stageSkillDraft" src/ test/` and read
+    every hit. MEASURED 2026-09-08 at a0b6ba81e: the only references outside the module are in
+    test/skill-workshop.test.ts.
+    CLOSE ALSO IF a worker can already read a skill by some other route — read `spawnWorker`'s
+    `settingSources` argument (src/lib/worker.ts:1136) before concluding it cannot.
+    PROVE IT LOAD-BEARING: with the CONTEXT part removed, the prompt probe must lose the skill while
+    the staging probe still passes, so the suite separates "it was staged" from "it arrived" — the
+    exact distinction this whole task is about, and the one a staging-only test cannot make.
+    DO NOT satisfy this by widening `settingSources`. Three sites in this tree state that isolation
+    as load-bearing; overturning it from inside a delivery task is the shape this repo refuses.
+  note: |
+    Rule 25 CHECKED BEFORE FILING: every declared file is src or test, so the build PR is an
+    ordinary src+test pair and must not carry a plan record.

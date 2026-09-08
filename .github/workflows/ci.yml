@@ -23,13 +23,8 @@ name: CI
 
 on:
   pull_request:
-  # W1-T1033: nothing ran the suite against `main`. The `ci` matrix and its stable aggregator now
-  # run on a push, so a broken merge is observable without an unrelated PR failing first; the
-  # coverage matrix registers and shell-skips its PR-specific work, and every other job is PR-only.
-  #
-  # TRAP: `ci-gate.yml` must NEVER gain this trigger — its `SHA` env reads
-  # `github.event.pull_request.head.sha`, empty on a push, and its `concurrency.group` collapses
-  # every push into one cancel-in-progress group. Falsifier: test/push-ci-on-main.test.ts.
+  # W1-T1033: `ci` runs on main pushes; PR-only jobs below shell-skip or event-guard their work.
+  # TRAP: `ci-gate.yml` must not gain this trigger; test/push-ci-on-main.test.ts pins why.
   push:
     branches: [main]
 
@@ -193,6 +188,30 @@ jobs:
             if [ "$CODE" -ne 0 ] && ! grep -qE '^# tests [0-9]+' test-shard-output.log; then
               echo "::error::ci-shard ${{ matrix.shard }}/4 exited ${CODE} with NO node-test-runner summary ('# tests'/'# pass'/'# fail') anywhere in its output. A killed or timed-out run prints only the assertions it reached and no totals, so its failure set is a SUBSET BY CONSTRUCTION — this red is UNVERIFIED, not a diagnosed failure set (W1-T2597)."
               echo "- **W1-T2597: NO-SUMMARY SHARD** — ci-shard (${{ matrix.shard }}/4) exited ${CODE} with no trailing \`# tests\` summary. Its failure set is UNVERIFIED (truncated evidence), distinct from a shard that reported a complete, genuine failure set." >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${{ matrix.shard }}" = "1" ]; then
+              # W1-T3068: absolute ceilings can be crossed by a merge on main, after every PR stayed
+              # under the per-PR ratchet. Measure them on main's push lane under the existing `ci`
+              # check name, so no skipped push-only PR context is introduced.
+              run_main_ceiling_gate() {
+                gate="$1"
+                shift
+                echo "::group::main-ceiling-drift:${gate}"
+                npm run --silent "$@" || {
+                  CODE=1
+                  echo "main-ceiling-drift: ${gate} BLOCKED on main itself"
+                }
+                echo "::endgroup::"
+              }
+              run_main_ceiling_gate source-size-ratchet source-size-ratchet
+              run_main_ceiling_gate learnings-budget-ratchet learnings-budget-ratchet
+              run_main_ceiling_gate claude-md-budget-ratchet claude-md-budget-ratchet
+              run_main_ceiling_gate comment-load-signal comment-load-signal -- --base HEAD^
+              if [ "$CODE" -ne 0 ]; then
+                echo "main-ceiling-drift: main may be past a recorded ceiling or the test shard failed."
+                echo "If a grouped ceiling above is BLOCKED, no pull request is wrong — main is."
+                echo "TO FIX a blocked ceiling: record the ceiling the failing gate prints, in a PR of its own, and merge it first."
+              fi
             fi
             exit "$CODE"
           fi
@@ -732,6 +751,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc

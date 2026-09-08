@@ -1,0 +1,76 @@
+- id: W1-T3088
+  title: "THE RETRO'S RUN REDUCTION IGNORES THE LEDGER'S OWN MERGE-CREDIT ROWS — the sweep's credit backfill appends a `verdict.merged` row for every gate-side merge it observes, but it keys that row on the SWEEP'S run id, and `gatherRuns` reads only the `verdict` step of the task's own run, so a run that merged gate-side still reduces to `blocked_ci` in every calibration table, `mergedSince`, `degradedSuccess` and the credit union's own denominator, and the retro pays a REST read to rediscover a fact its ledger already holds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 15.00
+  files: [src/lib/retro.ts, test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts]
+  origin: "operator-session#deep-research-2026-09-07"
+  plan_refs: ["P47", "W1-T976", "W1-T3019", "W1-T2723"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at b8892bc4. `src/lib/sweep.ts`'s credit backfill (`readMergeCreditedTaskIds` callers,
+    the `sweep.credit_backfill` step) appends:
+
+      { run_id: <the SWEEP's runId>, task_id: <task>, step: "verdict.merged", verdict: "merged",
+        pr_number, pr_url, source: "sweep.credit_backfill" }
+
+    `status.ts`'s `isMergeCreditLine` treats that row as a merge credit, and `verdict.merged` is in
+    `DECISION_RELEVANT_LEDGER_STEPS`, so rotation retains it. The retro never reads it: `gatherRuns`
+    (`src/lib/retro.ts`) groups lines by `run_id`, finds `lines.find((l) => l.step === "verdict")`,
+    and the `verdict.merged` row lives under a DIFFERENT run_id (`DAEMON-*`), so it is grouped into a
+    run with no `run.start` and dropped as a torn fragment.
+
+    THE COST, ALREADY MEASURED BY THE RETRO ITSELF. R44 (RETRO-1788374498685) read eight `blocked_ci`
+    verdicts of which seven had merged; R45 read five of which four had. Every table `buildGather`
+    derives from `RunSummary.verdict` inherits the error: `aggregateByType` and `aggregateByClass`
+    merge counts, `verdictDistribution`, `mergedSince`, and `mineDegradedSuccess`'s population.
+    `shippedSince` recovers the truth ONLY by a live REST read (`findMergedByTrailer`), which
+    degrades to nothing when the gateway is throttled — while the ledger row that would answer sits
+    one file away. P47 has held rank 1 since R20 on exactly this: credit resolution is unowned.
+
+    The DR-28 census join shipped beside this filing (`censusMergeStateFrom`) makes the FAILURE
+    census correct from the SHIPPED union. It does not make the RUN correct: a run's own summary
+    still says `blocked_ci`, so the calibration rows P47's remedy prints still divide by a merge
+    count the ledger undercounts.
+  design: |
+    (i) IN `gatherRuns`, BEFORE REDUCING, INDEX EVERY `verdict.merged` ROW BY `pr_url` (and by
+    `task_id` as a secondary key when `pr_url` is absent). When a run's terminal verdict is not a
+    credited verdict and a `verdict.merged` row names that run's own `pr_url`, the run reduces to
+    `verdict: "merged"` with a new `verdictSource: "ledger-credit"` field carrying the backfill row's
+    `ts`. The original verdict is kept as `observedVerdict` so the discrepancy remains printable.
+    (ii) MATCH ON `pr_url`, NEVER ON `task_id` ALONE, when both exist: a task can have several runs
+    and only the one whose PR merged earns the credit — the same P9 ownership discipline
+    `shippedSince` applies through `ownBranchOf`. Fall back to `task_id` only for a backfill row
+    with no `pr_url`, and label that arm.
+    (iii) `shippedSince` MUST STILL RUN ITS HEAD-BRANCH ASSERT on a ledger-credited merge — the
+    row asserts the merge, not the ownership. A ledger-credited run enters the `r.verdict ===
+    "merged"` arm with `source: "ledger"` and an annotation naming `verdictSource`.
+    (iv) NO WRITER CHANGES. The backfill row's shape is what it is; this task teaches the reader.
+    (v) RENDER THE DISCREPANCY ONCE: `renderGather`'s Discrepancies section lists each run whose
+    observed verdict differs from its reduced verdict, so the operator can see the credit came from
+    the ledger and not from GitHub.
+  acceptance:
+    - claim: "a run whose own verdict row reads blocked_ci and whose pr_url is named by a later verdict.merged backfill row reduces to merged, with the observed verdict retained"
+      proof: "unit test: test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts"
+    - claim: "a verdict.merged row naming a different pr_url for the same task does not credit this run"
+      proof: "unit test: test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts"
+    - claim: "the calibration tables and mergedSince count the ledger-credited run as merged without any GitHub gateway supplied"
+      proof: "unit test: test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF the backfill row already carries the crediting run's own
+    `run_id`: read `src/lib/sweep.ts`'s `verdict.merged` append and confirm `run_id: deps.runId` is
+    the sweep's id. If it is the task run's id, `gatherRuns` already sees it and this task is moot.
+    PROVE IT LOAD-BEARING: with the pr_url index removed, the first criterion's fixture must reduce
+    to `blocked_ci` again while the second criterion's negative case stays unchanged.
+  note: |
+    FILED 2026-09-07 from a session whose push credential is scoped to one branch: the id carries NO
+    `refs/rmd-id/W1-T3088` reservation. Open PRs were read through the GitHub API at filing time and
+    held ids up to W1-T3071; the fleet minted W1-T3072 at 23:56:56Z. If `task-id-existence` refuses
+    this id at CI, renumber this shard — never delete the contesting reservation (CLAUDE.md).
+    risk:high is Rule 19 SPAN (a src file and its suite), not blast radius; `band_meaning: span`.

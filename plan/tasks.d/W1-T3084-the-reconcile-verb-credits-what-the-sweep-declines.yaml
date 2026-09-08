@@ -1,0 +1,116 @@
+- id: W1-T3084
+  title: "THE RECONCILE VERB CREDITS 83 SHARDS THE SWEEP'S OWN CREDIT RUNG DECLINES — `defaultCreditedMergedIds` filters `buildCreditCandidates` on `.merged` ALONE while `sweep.ts:1347` additionally declines any candidate whose `creditIsImplementation !== true`, so the one verb that WRITES `status: merged` into the plan is strictly more permissive than the read-only rung it says it mirrors, and its own doc comment calls them the same"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - src/run-task.ts
+    - test/plan-reconcile-credit-parity.test.ts
+  origin: "operator-session#reconcile-1036-vs-953-2026-09-07"
+  plan_refs: ["W1-T3043", "W1-T3063", "W1-T3067"]
+  status: queued
+  attempts: 0
+  rationale: |
+    TWO RUNGS READ ONE PROJECTION AND APPLY DIFFERENT FILTERS TO IT. Only one of them writes.
+
+    OBSERVED, src/lib/sweep.ts:1347 — the sweep's credit rung, after W1-T3063:
+
+        if (c.creditIsImplementation !== true) continue;
+
+    OBSERVED, src/run-task.ts:20652 — `defaultCreditedMergedIds`, which is what `rmd
+    plan-reconcile` uses to decide what to flip:
+
+        buildCreditCandidates(self.owner, self.repo, plan, ledgerPath).filter((c) => c.merged).map((c) => c.taskId)
+
+    The producer IS shared, and the doc line directly above says so: "The default credit projection:
+    the SAME `buildCreditCandidates` the sweep's credit rung uses." That sentence is TRUE OF THE
+    PRODUCER AND FALSE OF THE FILTER, which is the whole defect — it reads as a parity claim and is
+    only a provenance one. `creditIsImplementation` is computed for every candidate
+    (src/run-task.ts:30781) and then simply not consulted here.
+
+    MEASURED 2026-09-07 at origin/main 36c360006, by running the real verb both ways on the real
+    plan:
+
+        rmd plan-reconcile --write, as shipped        1036 shard(s) would flip
+        the same run, with the sweep's filter added    953 shard(s) would flip
+        difference                                      83 shards
+
+    83 shards would be written `status: merged` by the verb that WRITES, having been declined by the
+    rung that only READS. The direction matters: W1-T3063 added that filter because a filing subject
+    (`chore(plan):`, `docs(plan):`, `chore(triage):`) is not an implementation, and `undefined`
+    declines by design when the merge subject falls outside the scanned window.
+
+    THE WRITE IS THE EXPENSIVE DIRECTION, WHICH IS WHY THE PERMISSIVE HALF BEING THE WRITING HALF IS
+    THE WRONG WAY ROUND. A shard wrongly left `queued` is re-picked-up: wasteful, and VISIBLE. A
+    shard wrongly written `merged` stops being picked up at all, and the work disappears from the
+    queue silently. W1-T3043 built this verb deliberately one-way and dry-run-by-default for exactly
+    that asymmetry; the filter gap undoes part of that care.
+
+    THE FILTER IS NOT SUFFICIENT EITHER, AND THIS SHARD DOES NOT PRETEND IT IS. An independent check
+    over the same 1036 — does ANY commit on origin/main that mentions the id touch a NON-plan file?
+    — found 35 with none at all, i.e. no implementation exists anywhere in history. The sweep's
+    filter catches only 19 of those 35. SIXTEEN SHARDS PASS BOTH `.merged` AND
+    `creditIsImplementation === true` AND STILL HAVE NO IMPLEMENTING COMMIT: W1-T443, W1-T976,
+    W1-T983, W1-T2370, W1-T2381, W1-T2384, W1-T2678, W1-T2718, W1-T2737, W1-T2753, W1-T2823,
+    W1-T2837, W1-T2842, W1-T2843, W1-T2855, W1-T2913.
+
+    THE MECHANISM BEHIND THOSE SIXTEEN, traced on two of them rather than assumed:
+      - W1-T2823 is credited to #3957, subject `fix(review): read the shared companion table in the
+        one-concern arm` — a genuine implementation subject whose diff genuinely touches src. But its
+        SQUASHED COMMIT on main cites only W1-T2525 and W1-T2547. W1-T2823 appears solely in the PR
+        BODY, as related context.
+      - W1-T443 is credited to #1654, subject `fix(status): describe the deploy failure that
+        happened, not a rollback that did not`, whose body cites W1-T356, W1-T442 and W1-T443.
+    So the residual path is a PR-BODY MENTION being read as a claim on the id — the same shape
+    W1-T3070 just removed from the id-collision gate, surviving here on the credit side. W1-T3063
+    filtered the SUBJECT and W1-T3067 checked the DIFF; neither asks whether the id the credit is
+    being assigned to is the id that PR actually implemented.
+
+    THIS TASK FIXES THE FIRST GAP AND FILES THE SECOND. Bringing `defaultCreditedMergedIds` into
+    parity with sweep.ts:1347 is a one-line change with a measured 83-shard effect and an obvious
+    correctness argument. The sixteen-shard body-mention path is a DIFFERENT and harder question —
+    it needs a rule for which of several mentioned ids a PR actually implements — and inventing that
+    rule inside this task would be exactly the overreach this repo files separately. It is recorded
+    here so it is not lost, not scoped here.
+
+    THE OBJECTION, STATED AT FULL STRENGTH. Making the writer stricter means shards that ARE done
+    keep reading `queued`, and the 86%-stale plan this verb exists to fix stays 7% staler. That is a
+    real cost and it is the operator's to weigh, not this task's to dismiss. The answer is that the
+    two errors are not symmetric — `queued`-when-done is re-work, `merged`-when-not is silent loss —
+    and that a verb which disagrees with the read-only rung auditing it cannot be reasoned about at
+    all. The weaker half: nothing here proves all 83 are wrong. They are UNVERIFIED, which is a
+    different claim from incorrect, and a follow-up that verifies them individually could legitimately
+    return most of them to the reconciled set.
+  acceptance:
+    - claim: defaultCreditedMergedIds declines a candidate whose creditIsImplementation is not exactly true, so the writing rung is never more permissive than the reading one
+      proof: "unit test: test/plan-reconcile-credit-parity.test.ts::the writing rung is not more permissive than the reading one"
+    - claim: undefined and false both decline, so a merge subject outside the scanned window is not silently credited
+      proof: "unit test: test/plan-reconcile-credit-parity.test.ts::undefined and false both decline"
+    - claim: a candidate that IS an implementation still reconciles, so the fix narrows the set rather than emptying it
+      proof: "unit test: test/plan-reconcile-credit-parity.test.ts::an implementation credit still reconciles"
+    - claim: the one-way, retirement-safe and dry-run-by-default guarantees W1-T3043 established are untouched, re-asserted against the stricter credit set rather than assumed to survive it
+      proof: "unit test: test/plan-reconcile-credit-parity.test.ts::the W1-T3043 guarantees survive the stricter credit set"
+  falsifier: |
+    Close without implementation if the two filters do not actually disagree. Measure it, do not read
+    it: run `rmd plan-reconcile` as shipped, then again with `&& c.creditIsImplementation === true`
+    added at src/run-task.ts:20652, and compare the two shard counts. If they match, the finding is
+    wrong and this shard is void.
+
+    Close it also if the sweep's filter turns out to be the WRONG side of the disagreement — if
+    W1-T3063's decline is itself over-strict, the honest outcome is to argue that on its own terms
+    and change BOTH rungs together, not to leave them disagreeing.
+
+    Making the SWEEP more permissive to match does not satisfy this task. That resolves the
+    disagreement in the direction of the silent-loss error and would undo W1-T3063 as a side effect
+    of a parity task, which is the overturning-a-ruling-from-inside-an-unrelated-task shape this repo
+    refuses.
+
+    Widening scope to the sixteen body-mention shards does not satisfy it either. They are recorded
+    in the rationale so the finding survives; deciding which of several ids a PR body actually claims
+    is a separate rule needing its own argument, and bolting a heuristic onto this one-line parity
+    fix would bank that debt rather than pay it.

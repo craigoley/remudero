@@ -1,0 +1,45 @@
+- id: W1-T3085
+  title: "THE COMMENT-LOAD RATCHET MEASURES THE COMMITTED DIFF AND SAYS SO NOWHERE, SO A FIX AND A RE-RUN PRODUCE THE IDENTICAL REFUSAL — name the uncommitted edit that was not measured"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "session 2026-09-07 — hit twice in one session, on two unrelated PRs"
+  plan_refs: ["W1-T3022"]
+  rationale: |
+    (1) THE DEFECT IS IN WHAT THE REFUSAL DOES NOT SAY. `readBaseDiff` reads
+    `git diff --unified=0 <base>...HEAD`, so the ratchet measures the COMMITTED diff. An edit sitting
+    in the working tree is not measured at all. The refusal text is otherwise excellent -- it names
+    the file, the block, the line, and both remedies -- and never states which tree it read.
+
+    (2) THE FAILURE MODE IS A LOOP, NOT A WRONG ANSWER. The author reads the refusal, splits the
+    block, re-runs, and gets the IDENTICAL verdict, because the fix is uncommitted. Nothing in the
+    output distinguishes "your fix is wrong" from "your fix was not measured". MEASURED 2026-09-07:
+    this happened TWICE in one session, on `scripts/rule25-precheck.mjs` and on
+    `src/lib/ledger-steps.ts`, and each time was resolved only by `git commit --amend` rather than by
+    any change to the prose the refusal was about.
+
+    (3) NAMED, NEVER ASSUMED. The note is printed only for paths `git status --porcelain` reports
+    dirty AMONG THE REFUSED ONES. A clean tree prints nothing -- silence rather than a reassuring
+    line -- so the note can never mislead an author whose fix IS committed, and an unrelated dirty
+    file elsewhere is never swept in.
+
+    (4) THE EMPTY PATH LIST IS ITS OWN GUARD, and it has a test. `git status --porcelain --` with no
+    pathspec lists the WHOLE tree, so without an early return a refusal naming nothing would still
+    print a note about unrelated work. That is the shape where a helpful message becomes a false one.
+
+    (5) IT STATES WHAT WAS MEASURED, so the remedy is derivable rather than guessed: the note names
+    the actual base sha and the `<base>...HEAD` range, not a generic "commit your work" line.
+
+  acceptance:
+    - claim: "an uncommitted edit to a refused path is named, since it is not what the ratchet measured"
+      proof: "unit test: test/a-ratchet-measures-the-committed-diff.test.ts"
+    - claim: "a committed edit and a clean tree print nothing at all"
+      proof: "unit test: test/a-ratchet-measures-the-committed-diff.test.ts"
+    - claim: "the note is emitted from the ratchet's single refusal exit rather than duplicated per reporter"
+      proof: "grep: reportUncommitted( in scripts/comment-load-ratchet.mjs"
+  files: [scripts/comment-load-ratchet.mjs, test/a-ratchet-measures-the-committed-diff.test.ts]
+  status: queued
