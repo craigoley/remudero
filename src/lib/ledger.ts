@@ -330,6 +330,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // baseline a restarted process cannot carry; archived away, a rotation un-trips a tripped breaker.
   "dispatch.circuit_broken",
   "dispatch.circuit_broken.escalated",
+  // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
+  // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
+  // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
+  // as if it had never failed — the exact "derived from consumers, not hardcoded" case this set exists for.
+  "dispatch.blocked_independent",
   // W1-T316: `escalateLifetimeCapExceeded`'s (run-task.ts) dedup marker, written whether or not
   // delivery succeeds; dropping it re-opens a duplicate lifetime-cap escalation.
   "dispatch.lifetime_capped.escalated",
