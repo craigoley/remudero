@@ -481,7 +481,7 @@ export interface ConsoleBlockingRequestPathViolation {
 export const CONSOLE_READ_ROUTE_BUDGET_MS = 750;
 export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
 const CONSOLE_STALENESS_FIELD = "staleness";
-const CONSOLE_CACHED_READ_PATHS = new Set(["/", "/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health"]);
+const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health"]);
 const BLOCKING_REQUEST_PATH_SYMBOLS = [
   "readFileSync",
   "writeFileSync",
@@ -779,18 +779,23 @@ export const DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS: Record<string, number> = {
 };
 
 /**
- * PRE-WARM (W1-T154, MASTER-PLAN §7/§7B): call `github.warm()` (if it has one — status.ts's
- * `buildBatchedGithub` does) SYNCHRONOUSLY, before {@link buildServeServer}'s caller ever
- * `.listen()`s — so the board's underlying `gh pr list` fetch has already happened by BOOT,
- * and the FIRST `GET /v1/status` a real client sends resolves against an already-warm in-memory
- * index with zero additional GitHub fetches on the request path (the task's own falsifier: "a
- * first request that triggers the cold fetch FAILS"). Then schedules a background timer that
- * calls `warm()` again every `refreshMs` — the gateway never goes cold again waiting on a
- * request to trigger its own refetch. `.unref()`'d so this never keeps a short-lived process
- * (a test, a one-shot script) alive; {@link buildServeServer} wires the returned `stop` function
- * to the server's own `close` event so the timer doesn't outlive it.
+ * PRE-WARM (W1-T154, revised by the connected-client gate): schedule `github.warm()` (if it has
+ * one — status.ts's `buildBatchedGithub` does) on a background tick, then every `refreshMs`. The
+ * raw helper is timer-only by default so direct callers never warm synchronously on construction;
+ * {@link gatePrewarmOnClients} opts into one synchronous first warm only at the 0 -> 1 viewer
+ * transition. `.unref()`'d so this never keeps a short-lived process (a test, a one-shot script)
+ * alive; {@link buildServeServer} wires the returned `stop` function to the server's own `close`
+ * event so the timer doesn't outlive it.
  */
-export function prewarmBoardGithub(github: GitHub, refreshMs: number = DEFAULT_BOARD_PREWARM_MS): () => void {
+interface BoardGithubPrewarmOptions {
+  immediate?: boolean;
+}
+
+export function prewarmBoardGithub(
+  github: GitHub,
+  refreshMs: number = DEFAULT_BOARD_PREWARM_MS,
+  options: BoardGithubPrewarmOptions = {},
+): () => void {
   const warm = (): void => {
     try {
       github.warm?.();
@@ -798,10 +803,13 @@ export function prewarmBoardGithub(github: GitHub, refreshMs: number = DEFAULT_B
       // The gateway records its own failure state; prewarming must never break stream open.
     }
   };
-  warm();
+  const first = options.immediate ? undefined : setTimeout(warm, 0);
+  first?.unref?.();
+  if (options.immediate) warm();
   const timer = setInterval(warm, refreshMs);
   timer.unref?.();
   return () => {
+    if (first) clearTimeout(first);
     clearInterval(timer);
   };
 }
@@ -865,7 +873,7 @@ export function gatePrewarmOnClients(
         clients += 1;
         // 0 -> 1 ONLY. A second viewer must not start a second timer (which would double the
         // very call rate this exists to bound) and must not re-warm off-cadence.
-        if (clients === 1) stopPrewarm = prewarmBoardGithub(github, refreshMs);
+        if (clients === 1) stopPrewarm = prewarmBoardGithub(github, refreshMs, { immediate: true });
         let released = false;
         return () => {
           // service.ts invokes this exactly once per connection, but a defensive latch keeps a
@@ -2220,9 +2228,8 @@ export function buildShellRoute(
       let panel: string;
       if (idle.readLedger && idle.ledgerPath) {
         try {
-          // Tests may inject a pure reader for this fragment. The production shell path leaves it
-          // unknown until the JSON endpoints refresh; it must not parse the live ledger while a
-          // browser navigation is waiting for the document.
+          // Tests and production use the same ledger reader for this server-rendered fragment; an
+          // unreadable ledger must render UNKNOWN with the read failure's own reason.
           const lines = idle.readLedger(idle.ledgerPath);
           panel = renderIdleReasonsHtml(readIdleReasons(lines, idle.now?.() ?? new Date()));
         } catch (e) {
@@ -2898,7 +2905,7 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
     buildShellRoute(
       deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS,
       consoleSha,
-      deps.resolveCurrentSha ? { ledgerPath: deps.ledgerPath, readLedger: readLedgerLines } : { ledgerPath: deps.ledgerPath },
+      { ledgerPath: deps.ledgerPath, readLedger: readLedgerLines },
       githubCredential.state,
       // W1-T2562: threaded from ServeDeps so a test observes the staleness chip without shelling
       // to git, exactly as `gateStaleCodeExit`'s own `resolveCurrentSha` seam already allows.
