@@ -70,6 +70,161 @@ nodeTest("bootConsoleShellClient's own body carries no TypeScript syntax — it 
   assert.doesNotThrow(() => new Function(src), "a type annotation leaking into the body would make this a SyntaxError");
 });
 
+nodeTest("bootConsoleShellClient renders account usage and provider routing through the imported module under a DOM shim", async () => {
+  await withStubbedBoot(
+    {
+      accountUsage: {
+        accountEmail: "operator@example.com",
+        fiveHour: { percentUsed: 12, resetsAt: "2026-09-08T03:00:00.000Z" },
+        sevenDay: { percentUsed: 34, resetsAt: "2026-09-13T03:00:00.000Z" },
+        governor: "armed",
+        governorAsOf: "2026-09-08T01:00:00.000Z",
+        governorAgeMs: 90_000,
+        costGovernor: "deferred",
+        costGovernorObservedUsd: 19.25,
+        costGovernorCeilingUsd: 18,
+        costGovernorAgeMs: 120_000,
+        queueGovernor: "deferred",
+        queueGovernorObservedOpenCount: 7,
+        queueGovernorWipLimit: 5,
+        queueGovernorAgeMs: 180_000,
+        dailyCostCeilingUsd: 20,
+        dailyCostCeilingProvenance: "overridden",
+        dailyCostCeilingDefaultUsd: 15,
+        dailyCostCeilingFallbackReason: "env default unavailable",
+        dailyCostCeilingAuditAsOf: "2026-09-08T00:45:00.000Z",
+        dailyCostCeilingAuditWho: "ops@example.com",
+        dailyCostCeilingAuditFromUsd: 15,
+        dailyCostCeilingAuditToUsd: 20,
+        dailyCostCeilingAuditEffectiveUsd: 20,
+        usageAsOf: "2026-09-08T00:30:00.000Z",
+        measures: "cachedUsageUtilization",
+      },
+      providerRouting: {
+        version: 1,
+        state: "selected",
+        freshness: "fresh",
+        reservePercent: 5,
+        enabledProviders: ["claude", "codex"],
+        observedAt: "2026-09-08T01:00:00.000Z",
+        selected: {
+          provider: "codex",
+          accountLabel: "ops",
+          model: "gpt-5.6-terra",
+          effort: "high",
+          tightestRemainingPercent: 24,
+          allocationSharePercent: 40.6,
+        },
+        providers: [
+          {
+            provider: "claude",
+            accountLabel: "primary",
+            model: "opus",
+            effort: "high",
+            readable: true,
+            windows: [{ name: "5h", usedPercent: 28, resetsAt: "2026-09-08T04:00:00.000Z" }],
+          },
+          {
+            provider: "codex",
+            accountLabel: "ops",
+            model: "gpt-5.6-terra",
+            effort: "high",
+            readable: true,
+            windows: [{ name: "1d", usedPercent: 75, resetsAt: "2026-09-09T04:00:00.000Z" }],
+            allocationWindows: [{ name: "provider", usedPercent: 76, resetsAt: "2026-09-09T04:00:00.000Z" }],
+            modelDecision: {
+              requestedCapability: "code",
+              requestedEffort: "high",
+              preferenceBypass: "fallback-to-default",
+              options: [
+                {
+                  id: "gpt-5.6-terra",
+                  selected: true,
+                  eligible: true,
+                  mapped: true,
+                  accountDefault: true,
+                  windows: [{ name: "1d", usedPercent: 76 }],
+                },
+                { id: "gpt-5.4-mini", selected: false, eligible: false, reason: "unmapped", windows: [] },
+              ],
+            },
+          },
+        ],
+        policy: {
+          provenance: "overridden",
+          preference: "codex",
+          reservePercent: 5,
+          enabledProviders: ["claude", "codex"],
+          routableProviders: ["claude", "codex"],
+          codexModelPreference: { capability: "code", effort: "high", model: "gpt-5.6-terra" },
+          overrideExpiresAt: "2026-09-08T02:00:00.000Z",
+          committed: { enabledProviders: ["claude", "codex"] },
+        },
+        preferenceBypass: { provider: "claude", reason: "parked" },
+      },
+    },
+    async (elements) => {
+      await waitForStubValue(elements, "pr-selected", (value) => value.includes("gpt-5.6-terra"));
+      assert.match(elements.get("au-cost-ceiling")?.textContent ?? "", /\$20\.000 \(overridden, default \$15\.000\) — env default unavailable/);
+      assert.match(elements.get("au-cost-ceiling-audit")?.textContent ?? "", /ops@example\.com set \$15\.000 -> \$20\.000 \(effective \$20\.000\)/);
+      assert.match(elements.get("pr-selected")?.textContent ?? "", /40\.6% explicit target share/);
+      assert.match(elements.get("pr-providers")?.textContent ?? "", /provider allocation provider 76% reset/);
+      assert.match(elements.get("pr-codex-models")?.textContent ?? "", /gpt-5\.4-mini unmapped · headroom unknown · promotion requires \.remudero\/mounts\.yaml PR/);
+      assert.match(elements.get("pr-policy")?.textContent ?? "", /overridden · codex · 5% reserve/);
+      assert.equal(elements.get("pr-bypass")?.textContent, "claude · parked");
+    },
+  );
+
+  await withStubbedBoot(
+    {
+      accountUsage: {
+        accountUuid: "acct-uuid",
+        usageUnknownReason: "no-cache",
+        governor: "unknown",
+        costGovernor: "unknown",
+        queueGovernor: "unknown",
+        usageAsOf: null,
+      },
+      providerRouting: {
+        version: 1,
+        state: "not-probed",
+        freshness: "unknown",
+        enabledProviders: ["codex"],
+        reservePercent: 10,
+        observedAt: "2026-09-08T01:00:00.000Z",
+        providers: [],
+      },
+    },
+    async (elements) => {
+      await waitForStubValue(elements, "pr-state", (value) => value === "not probed");
+      assert.equal(elements.get("au-cost-ceiling")?.textContent, "unknown");
+      assert.equal(elements.get("au-cost-ceiling-audit")?.textContent, "no override written");
+      assert.equal(elements.get("au-five-hour")?.textContent, "unknown (no-cache)");
+      assert.equal(elements.get("pr-providers")?.textContent, "enabled codex · not probed");
+    },
+  );
+
+  await withStubbedBoot(
+    {
+      providerRouting: {
+        version: 1,
+        state: "blocked",
+        freshness: "fresh",
+        enabledProviders: ["claude", "codex"],
+        reservePercent: 5,
+        observedAt: "2026-09-08T01:00:00.000Z",
+        providers: [],
+        blockedReason: "no-provider-headroom",
+      },
+    },
+    async (elements) => {
+      await waitForStubValue(elements, "pr-state", (value) => value.includes("no-provider-headroom"));
+      assert.equal(elements.get("pr-selected")?.textContent, "none (headroom refusal)");
+      assert.equal(elements.get("pr-providers")?.textContent, "enabled claude, codex");
+    },
+  );
+});
+
 // ── (2) bootConsoleShellClient exercised directly, under the real DOM harness ───────────────
 
 function task(over: Partial<Task> = {}): Task {
@@ -106,6 +261,221 @@ function fakeTraceGithub(): TraceGithub {
 
 function fakeIssueCloser(): IssueCloser {
   return { close() {} };
+}
+
+class StubClassList {
+  private readonly names = new Set<string>();
+
+  add(...names: string[]): void {
+    for (const name of names) this.names.add(name);
+  }
+
+  remove(...names: string[]): void {
+    for (const name of names) this.names.delete(name);
+  }
+
+  contains(name: string): boolean {
+    return this.names.has(name);
+  }
+
+  toggle(name: string, force?: boolean): boolean {
+    const next = force ?? !this.names.has(name);
+    if (next) this.names.add(name);
+    else this.names.delete(name);
+    return next;
+  }
+}
+
+class StubElement {
+  readonly classList = new StubClassList();
+  readonly dataset: Record<string, string> = {};
+  readonly attributes = new Map<string, string>();
+  readonly children: StubElement[] = [];
+  options: StubElement[] = [];
+  textContent = "";
+  hidden = false;
+  disabled = false;
+  checked = false;
+  value = "";
+  title = "";
+  className = "";
+  nextSibling: StubElement | null = null;
+  firstChild: StubElement | null = null;
+  firstElementChild: StubElement | null = null;
+
+  constructor(readonly id = "") {}
+
+  private inner = "";
+
+  get innerHTML(): string {
+    return this.inner;
+  }
+
+  set innerHTML(value: string) {
+    this.inner = value;
+  }
+
+  addEventListener(): void {}
+
+  setAttribute(name: string, value: unknown): void {
+    this.attributes.set(name, String(value));
+  }
+
+  hasAttribute(name: string): boolean {
+    return this.attributes.has(name);
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attributes.get(name) ?? null;
+  }
+
+  removeAttribute(name: string): void {
+    this.attributes.delete(name);
+  }
+
+  replaceChildren(...children: StubElement[]): void {
+    this.children.length = 0;
+    this.children.push(...children);
+    this.options = children;
+    this.firstChild = children[0] ?? null;
+    this.firstElementChild = children[0] ?? null;
+  }
+
+  add(child: StubElement): void {
+    this.options.push(child);
+    this.children.push(child);
+  }
+
+  insertBefore(child: StubElement, anchor: StubElement | null): void {
+    const existing = this.children.indexOf(child);
+    if (existing !== -1) this.children.splice(existing, 1);
+    const at = anchor ? this.children.indexOf(anchor) : -1;
+    this.children.splice(at === -1 ? this.children.length : at, 0, child);
+    this.firstChild = this.children[0] ?? null;
+    this.firstElementChild = this.children[0] ?? null;
+  }
+
+  remove(): void {}
+  contains(): boolean { return false; }
+  querySelector(): StubElement | null { return null; }
+  querySelectorAll(): StubElement[] { return []; }
+  closest(): StubElement | null { return null; }
+  click(): void {}
+  focus(): void {}
+  scrollIntoView(): void {}
+}
+
+function makeStubDocument(): { document: unknown; elements: Map<string, StubElement> } {
+  const elements = new Map<string, StubElement>();
+  const get = (id: string): StubElement => {
+    let el = elements.get(id);
+    if (!el) {
+      el = new StubElement(id);
+      elements.set(id, el);
+    }
+    return el;
+  };
+  const body = get("body");
+  const document = {
+    title: "Remudero",
+    body,
+    getElementById: get,
+    createElement: (tag: string) => new StubElement(tag),
+    querySelector: (selector: string) => (selector === "main" ? get("main") : null),
+    querySelectorAll: () => [],
+    addEventListener: () => {},
+  };
+  return { document, elements };
+}
+
+function jsonResponse(body: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  } as Response;
+}
+
+async function waitForStubValue(elements: Map<string, StubElement>, id: string, predicate: (value: string) => boolean): Promise<void> {
+  for (let i = 0; i < 50; i += 1) {
+    const value = elements.get(id)?.textContent ?? "";
+    if (predicate(value)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`timed out waiting for ${id}`);
+}
+
+async function withStubbedBoot(
+  payloads: { accountUsage?: unknown; providerRouting?: unknown },
+  fn: (elements: Map<string, StubElement>) => Promise<void>,
+): Promise<void> {
+  const { document, elements } = makeStubDocument();
+  const original = {
+    window: globalThis.window,
+    document: globalThis.document,
+    localStorage: globalThis.localStorage,
+    fetch: globalThis.fetch,
+    history: globalThis.history,
+    CSS: globalThis.CSS,
+    Option: globalThis.Option,
+    setInterval: globalThis.setInterval,
+  };
+  const storage = new Map<string, string>();
+  const storageApi = {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => { storage.set(key, value); },
+    removeItem: (key: string) => { storage.delete(key); },
+  };
+  const windowStub = {
+    location: { search: "?token=stub-read", hash: "", pathname: "/" },
+    sessionStorage: storageApi,
+    localStorage: storageApi,
+    matchMedia: () => ({ matches: true }),
+    addEventListener: () => {},
+    open: () => null,
+    confirm: () => false,
+  };
+  const endpointBodies: Record<string, unknown> = {
+    "/v1/status": { generated_at: "2026-09-08T01:00:00.000Z", tasks: [], counts: {}, spend: null },
+    "/v1/recent": { entries: [] },
+    "/v1/drain/preview?max=5": { cards: [] },
+    "/v1/feedback": { entries: [] },
+    "/v1/inbox": { ready: [], drafting: [] },
+    "/v1/control/status": { paused: false, stopped: false, quietHours: false },
+    "/v1/daemon-health": null,
+    "/v1/account-usage": payloads.accountUsage ?? null,
+    "/v1/provider-routing": payloads.providerRouting ?? { version: 1, state: "unknown", freshness: "unknown" },
+    "/v1/plan/view": null,
+    "/v1/self-measurement": null,
+  };
+
+  try {
+    Object.assign(globalThis, {
+      window: windowStub,
+      document,
+      localStorage: storageApi,
+      history: { replaceState: () => {} },
+      CSS: { escape: (value: unknown) => String(value) },
+      Option: class OptionStub extends StubElement {
+        constructor(text: string, value = "") {
+          super("option");
+          this.textContent = text;
+          this.value = value;
+        }
+      },
+      setInterval: (() => 0) as unknown as typeof setInterval,
+      fetch: ((input: unknown) => {
+        const path = typeof input === "string" ? input : String(input);
+        if (path === "/v1/status/stream") return new Promise<Response>(() => {});
+        return Promise.resolve(jsonResponse(endpointBodies[path] ?? {}));
+      }) as typeof fetch,
+    });
+    bootConsoleShellClient({ default: 1 }, resolveFreshness);
+    await fn(elements);
+  } finally {
+    Object.assign(globalThis, original);
+  }
 }
 
 const READ_TOKEN = "cs-client-read-token";
