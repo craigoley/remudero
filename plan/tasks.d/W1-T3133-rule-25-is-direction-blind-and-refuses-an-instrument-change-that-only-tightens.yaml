@@ -1,0 +1,149 @@
+- id: W1-T3133
+  title: "RULE 25 IS DIRECTION-BLIND — `detectInstrumentEntanglement` refuses an instrument+product mixture that only TIGHTENS the instrument, and the only escape is `ENTANGLEMENT_EXEMPT_INSTRUMENTS`, a per-FILE permanent exemption that also blesses every future LOOSENING of that same file"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/review.ts, test/an-instrument-change-that-only-tightens-is-not-entanglement.test.ts]
+  origin: "operator-session#board-clearing-2026-09-08"
+  plan_refs: ["W1-T297", "W1-T402", "W1-T941", "W1-T2521", "W1-T2526", "W1-T2896"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RULE 25 GRADES THE FILE, NEVER THE CHANGE. `detectInstrumentEntanglement` (src/lib/review.ts)
+    refuses a diff that touches both an INSTRUMENT_SURFACE path and a product `src/` path, because an
+    instrument edit can weaken the very gate that would have caught the product regression riding
+    beside it. That reason is sound and must be kept. But the predicate reads only PATHS: it cannot
+    tell a baseline being loosened from the same baseline being tightened, and it refuses both
+    identically. A change that makes a gate STRICTER cannot hide a regression behind itself — there is
+    no weakening for the product half to slip through.
+
+    MEASURED 2026-09-08 ON #4558 (`run-W1-T2896-1788841173870`), the gh-CLI-transport centralisation.
+    `detectInstrumentEntanglement(files, diff)` at origin/main 30a4a2e9a returns `entangled: true` with
+    `instrumentPaths: ["scripts/bound-kind-baseline.json", "scripts/gh-transport-baseline.json"]`
+    against 22 product paths. A BLOCKING CONTROL run in the same call shape with the `scripts/` half
+    removed returns `entangled: false`, so this is a live refusal and not a dead call. Both instrument
+    edits are, on inspection, incapable of hiding anything:
+      - `scripts/bound-kind-baseline.json` — the diff contains REMOVALS ONLY (three grandfathered
+        entries deleted, none added). Strictly fewer exemptions is strictly stricter.
+      - `scripts/gh-transport-baseline.json` — a file ADDED in this diff, whose entire content is
+        `{"directGhSpawnsOutsideTransport": 0}`, the strictest value the instrument can hold. It had no
+        prior version, so there is no prior bound it could have relaxed.
+
+    A SECOND, INDEPENDENT INSTANCE ON THE SAME BOARD THE SAME DAY. #4566
+    (`run-W1-T2901-1788848487982`) adds `scripts/error-subclass-baseline.json` — status `A`, a brand
+    new file whose whole content is a ceiling of 59 — beside `src/lib/errors.ts`, `src/lib/plan.ts`
+    and `src/run-task.ts`, and reads `entangled: true` on that one instrument. Its ceiling arrives
+    with its own new reader, `test/error-subclass-census.test.ts`, which resolves the baseline path
+    and refuses a count above it; #4558's new baseline likewise arrives with `test/gh-transport-
+    census.test.ts`. A SWEEP OF ALL TWELVE OPEN PRs AT 30a4a2e9a, with #4558 as the blocking control,
+    returned `entangled: true` for exactly these two and false for the other ten — so this is not one
+    awkward PR but a recurring shape, and both instances are the SAME arm of the carve-out below.
+
+    THE EXISTING ESCAPE HATCH IS THE WRONG SHAPE FOR THIS. `ENTANGLEMENT_EXEMPT_INSTRUMENTS` is
+    documented as EXACT PATHS, HAND-ENUMERATED, NEVER A PATTERN, and it is keyed on the FILE. Adding an
+    entry to clear one tightening change also permanently blesses every future LOOSENING of that file,
+    which is the opposite of what rule 25 wants. It is also unavailable to a NEW instrument by
+    construction — its own doc comment says "a new baseline gets full entanglement blocking" — so
+    `gh-transport-baseline.json` could never be cleared that way without first shipping the exemption in
+    a separate PR. That list should stay what it is (a narrow, reviewed, per-file statement about
+    instruments CI does not ratchet); this task adds a different axis beside it.
+
+    THE PRECEDENT FOR A PER-CHANGE CARVE-OUT ALREADY EXISTS IN THIS FUNCTION. W1-T2521's
+    `isIntroducingCensusGate` subtracts a newly introduced census gate (its script plus its own first
+    registration, BOTH new in this diff) from the `entangled` VERDICT ONLY, deliberately leaving
+    `instrumentPaths` and `srcPaths` as raw, unedited evidence. This task follows that shape exactly:
+    same subtraction point, same evidence preservation, a different admissible reason.
+
+    WHY THIS IS NOT A COSMETIC UNBLOCK. Direction-blindness makes the rule UNSATISFIABLE for a whole
+    legitimate class — any refactor that both moves product code and ratchets a ledger down to match
+    it. W1-T2526's entry for `source-size-baseline.json` records that exact unsatisfiability being hit
+    on five consecutive merges and leaving `main` itself red (#3352); the fix chosen then was another
+    permanent per-file exemption. Two of the four baselines #4558 touches are already on that list for
+    that reason. Repeating it a third and fourth time is how a hand-enumerated list goes stale, which
+    is the failure mode W1-T402 already recorded for INSTRUMENT_SURFACE.
+  design: |
+    (i) DERIVE THE DIRECTION FROM THE DIFF, PER INSTRUMENT PATH, AND SUBTRACT ONLY AT THE VERDICT.
+    Add a predicate beside `isIntroducingCensusGate` that classifies ONE instrument path's change in
+    THIS diff as `tightening`, `loosening`, `introduced`, or `undetermined`. Subtract only the
+    `tightening` and `introduced` paths from `effectiveInstrumentPaths`, exactly where the census
+    carve-out already subtracts. `instrumentPaths` and `srcPaths` keep every path unedited, so the
+    evidence a reviewer reads is unchanged and only the verdict moves.
+
+    (ii) THE STRICTER DIRECTION IS DECLARED, NEVER INFERRED — AND AN UNDECLARED INSTRUMENT FAILS
+    CLOSED. This is the crux and the whole risk of the task. For a SIZE LEDGER (source-size,
+    comment-load) a LOWER number is stricter; for a SCORE FLOOR (mutation-baseline, the coverage
+    floors) a HIGHER number is stricter. Guessing wrong INVERTS the carve-out and admits precisely the
+    loosening rule 25 exists to refuse. So the direction is a declared property of each instrument,
+    carried in one table beside the predicate, and any instrument with no declaration classifies
+    `undetermined` and stays fully blocking. The default must be refusal, never admission.
+
+    (iii) ONLY THREE EDIT SHAPES MAY CLASSIFY `tightening`, ALL DERIVED FROM THE DIFF TEXT: a removed
+    grandfather entry; a numeric value moved in that instrument's declared stricter direction; and
+    nothing else in the same file. ANY added entry, ANY value moved the other way, or ANY hunk the
+    parser cannot account for makes the whole file `undetermined` — one unreadable hunk must not be
+    silently skipped while the rest of the file grades tightening.
+
+    (iv) AN ADDED ENTRY FOR A FILE ADDED IN THE SAME DIFF IS ADMISSIBLE, SEPARATELY AND NARROWLY. A new
+    key naming a source file that this same diff ADDS has no prior bound to loosen. It must be admitted
+    under its own name (not folded into `tightening`) and only when the named path is genuinely added
+    in this diff — never for a pre-existing file, which is the loophole where a generous new ceiling
+    would hide real growth.
+
+    (v) `introduced` REQUIRES THE READER TO ARRIVE WITH IT, MIRRORING W1-T2521. An instrument file
+    added in this diff counts only when something that READS it is added or changed in the same diff.
+    A baseline nothing reads has no grading power (the `ENTANGLEMENT_EXEMPT_INSTRUMENTS` doc makes this
+    same point), and a lone new JSON must not become a way to pre-place a lax bound for a later PR.
+
+    (vi) THE EXISTING LIST IS NOT TOUCHED. `ENTANGLEMENT_EXEMPT_INSTRUMENTS` keeps its four entries,
+    its exact-path discipline and both tripwires. This is an additional, per-CHANGE axis; nothing about
+    the per-FILE axis changes, and no entry is migrated or removed by this task.
+  acceptance:
+    - claim: "a diff whose only instrument edits remove grandfathered entries, alongside product src/ changes, is not entangled, while the same diff with one entry ADDED instead is"
+      proof: "unit test: test/an-instrument-change-that-only-tightens-is-not-entanglement.test.ts"
+    - claim: "a numeric bound moved in the declared stricter direction is not entangled and the same bound moved the other way is, for a size LEDGER and a score FLOOR independently, so an inverted direction table reddens"
+      proof: "unit test: test/an-instrument-change-that-only-tightens-is-not-entanglement.test.ts"
+    - claim: "an instrument path with no declared direction, and a file with one unparseable hunk beside otherwise-tightening hunks, both stay fully blocking rather than being skipped"
+      proof: "unit test: test/an-instrument-change-that-only-tightens-is-not-entanglement.test.ts"
+    - claim: "an instrument file introduced in the diff is admitted only when a reader of it is added or changed in the same diff, and a lone new baseline with no reader stays blocking"
+      proof: "unit test: test/an-instrument-change-that-only-tightens-is-not-entanglement.test.ts"
+    - claim: "a new baseline entry naming a source file this diff ADDS is admitted, and the identical entry naming a pre-existing file is refused"
+      proof: "unit test: test/an-instrument-change-that-only-tightens-is-not-entanglement.test.ts"
+    - claim: "instrumentPaths and srcPaths still report every path unedited when the verdict is subtracted, and ENTANGLEMENT_EXEMPT_INSTRUMENTS retains its exact membership"
+      proof: "unit test: test/an-instrument-change-that-only-tightens-is-not-entanglement.test.ts"
+  falsifier: |
+    Close without implementation if `detectInstrumentEntanglement` already admits a tightening-only
+    instrument change. MEASURED at origin/main 30a4a2e9a against #4558's real diff
+    (`git diff origin/main...origin/run-W1-T2896-1788841173870`): `entangled: true`,
+    `instrumentPaths: ["scripts/bound-kind-baseline.json", "scripts/gh-transport-baseline.json"]`,
+    22 srcPaths — while `bound-kind-baseline.json` contains removals only and
+    `gh-transport-baseline.json` is a new file pinned at 0. The blocking control (same call, `scripts/`
+    paths removed) returned `entangled: false`, proving the refusal live.
+
+    Also close if `ENTANGLEMENT_EXEMPT_INSTRUMENTS` already covers those two paths — it does not; its
+    four entries are knowledge-budget, source-size, comment-load and clock-signature, and its own doc
+    comment states that a new baseline gets full entanglement blocking, so the newly added instrument
+    is unreachable by that mechanism by design.
+
+    DO NOT falsify this from W1-T2521. `isIntroducingCensusGate` admits a new CENSUS GATE SCRIPT plus
+    its first registration; it does not read numeric direction, does not apply to a baseline JSON, and
+    left #4558 refused in the measurement above. It is the PRECEDENT for the subtraction point, not a
+    prior implementation of this rule.
+  note: |
+    `W1-T3133` is the id actually held by `refs/rmd-id/W1-T3133`, reserved from this host at
+    2026-09-08T07:55:04Z. An earlier draft of this filing used W1-T3123; that id was ALREADY RESERVED
+    by another lane when the ref was read back, so this filing renumbered rather than contesting it —
+    W1-T3123..W1-T3132 are held and must not be reused.
+
+    ONE CONCERN ONLY: make rule 25 read the DIRECTION of an instrument change instead of only its path.
+    Not in scope: adding, removing or migrating any `ENTANGLEMENT_EXEMPT_INSTRUMENTS` entry; changing
+    `INSTRUMENT_SURFACE`; changing what counts as a product path; and unblocking #4558 by hand — that
+    PR is the evidence this task was derived from, and it is expected to clear on its own once this
+    ships, with no edit of its own.
+
+    The declared-direction table in design (ii) is the dangerous half. A wrong entry does not fail
+    loudly; it quietly admits a loosening. Acceptance criterion 2 exists to redden on an inverted
+    table, and it must be verified by actually inverting one entry and watching it fail.
