@@ -940,10 +940,19 @@ async function sweepLightDuringRetro(
  *  rung could be blocked at once, so overlap was impossible by construction. A detached retro keeps
  *  its ticker while the tick proceeds into dispatch, which starts its own — and two tickers each run
  *  `sweepLight` on the poll cadence, doubling GitHub calls exactly when the fleet is busiest. This
- *  repo has already lost 90 minutes to a secondary rate limit, so the second ticker is an inert stub
- *  rather than a second caller. The FIRST holder keeps the clock; the loser's `stop()` still
- *  resolves, so every call site stays symmetric. */
-let inFlightTickerActive = false;
+ *  repo has already lost 90 minutes to a secondary rate limit, so unrelated contenders receive an
+ *  inert stub. A same-tick dispatch is different: it takes over the retro runner atomically, without
+ *  overlapping a light pass, and the retro handle loses stop authority. */
+interface InFlightTickerOwner {
+  active: boolean;
+  generation: number;
+  phase: "dispatch" | "retro" | "sweep";
+  headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean };
+  ticker?: Promise<void>;
+  stop(generation: number): Promise<void>;
+}
+
+let inFlightTickerOwner: InFlightTickerOwner | undefined;
 
 /** The most stale the account-headroom reading may be before the in-flight ticker takes its own. The
  * governor sampled on the loop whose duration it was meant to bound: the reading is written once per
@@ -966,10 +975,29 @@ function startInFlightTicker(
   // cannot double-read. Optional and trailing, so every existing call site is unchanged (W1-T2565).
   headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean },
 ): { stop: () => Promise<void> } {
-  // W1-T2981: a second concurrent ticker would double every light sweep — hand back an inert one.
-  if (inFlightTickerActive) return { stop: async () => {} };
-  inFlightTickerActive = true;
-  let active = true;
+  // W1-T3181: dispatch takes over a same-tick retro's ONE runner. Incrementing the generation makes
+  // the retro's eventual stop inert, so it cannot turn off the dispatch clock after the handoff.
+  if (inFlightTickerOwner) {
+    if (phase !== "dispatch" || inFlightTickerOwner.phase !== "retro") return { stop: async () => {} };
+    inFlightTickerOwner.phase = "dispatch";
+    inFlightTickerOwner.headroomSampler = headroomSampler;
+    const generation = ++inFlightTickerOwner.generation;
+    const owner = inFlightTickerOwner;
+    return { stop: () => owner.stop(generation) };
+  }
+  const owner: InFlightTickerOwner = {
+    active: true,
+    generation: 0,
+    phase,
+    headroomSampler,
+    stop: async (generation) => {
+      if (inFlightTickerOwner !== owner || owner.generation !== generation) return;
+      owner.active = false;
+      inFlightTickerOwner = undefined;
+      if (owner.ticker) await owner.ticker;
+    },
+  };
+  inFlightTickerOwner = owner;
   // Reads through the Clock port (W1-T2897) rather than the `() => Date` shape directly, so every
   // projection this function needs — millis, Date, ISO — comes from one adapted instant.
   const daemonClock = clockFromDateFn(deps.now);
@@ -977,27 +1005,27 @@ function startInFlightTicker(
   // gate accepts a pass. Retain that intent across a hold or an older still-settling pass, and retry
   // once per ordinary cadence, never as a zero-delay loop.
   let eventWakePending = false;
-  const ticker = deps.sweepLight
+  owner.ticker = deps.sweepLight
     ? (async () => {
-        while (active) {
+        while (owner.active) {
           // Dispatch and retro can hold the loop for tens of minutes, so let an event wake this wait only
           // when the ticker owns the retrigger. The nested ticker inside a full pass stays on the ordinary
           // clock, so an event arriving then remains pending for one later accepted pass (W1-T2568).
           const waitResult = await (sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
           if (waitResult === "wake") eventWakePending = true;
-          if (!active) break;
+          if (!owner.active) break;
           // The acknowledgement gap (W1-T1065 part iv). The pause row is written only inside the branch that acts
           // on a hold, so a hold created mid-drain was invisible: no row distinguished "seen, draining to
           // completion" from "not seen at all", and the operator escalated to a container stop. A re-check here
           // can never abort the batch already in flight; it only makes the two cases distinguishable.
-          const holdSeen = phase === "dispatch" ? Boolean(deps.checkPause?.()) : undefined;
+          const holdSeen = owner.phase === "dispatch" ? Boolean(deps.checkPause?.()) : undefined;
           // Pre-judged by the CLI wiring against the same definition `rmd doctor` reports, so this pure
           // module never re-derives the boundary. A reading back at OK re-arms the latch, so a genuinely new
           // episode escalates again (W1-T1082).
           const diskHeadroom = deps.readDiskHeadroom?.();
           if (diskHeadroom?.verdict === "OK") diskHeadroomLatch.escalated = false;
           log("daemon.alive", {
-            phase,
+            phase: owner.phase,
             poll_interval_ms: pollIntervalMs,
             // W1-T2744: bounded cardinality on the existing heartbeat, never a promise-poll row.
             // This distinguishes a live review clock plus settling fix from the measured wedge.
@@ -1009,21 +1037,21 @@ function startInFlightTicker(
           // this tick's heartbeat is already on the ledger before the probe is awaited, so a slow probe can delay the
           // next heartbeat but never swallow this one. Telemetry, not enforcement — a reading taken here cannot abort
           // work in flight, and the main loop remains the single place that decides to idle (W1-T2565).
-          if (headroomSampler && deps.readUsage) {
-            const nowMs = headroomSampler.clock.now();
-            if (nowMs - headroomSampler.lastSampleMs >= HEADROOM_SAMPLE_MAX_AGE_MS) {
-              headroomSampler.lastSampleMs = nowMs;
+          if (owner.headroomSampler && deps.readUsage) {
+            const nowMs = owner.headroomSampler.clock.now();
+            if (nowMs - owner.headroomSampler.lastSampleMs >= HEADROOM_SAMPLE_MAX_AGE_MS) {
+              owner.headroomSampler.lastSampleMs = nowMs;
               try {
                 const snap = await deps.readUsage();
-                const reading = snap ? resolveHeadroomWindows(snap, new Date(nowMs), headroomSampler.policy)[0] : undefined;
+                const reading = snap ? resolveHeadroomWindows(snap, new Date(nowMs), owner.headroomSampler.policy)[0] : undefined;
                 if (reading) {
                   log("daemon.headroom", {
-                    phase,
+                    phase: owner.phase,
                     window: reading.window,
                     percent_used: reading.percentUsed,
                     limit_pct: reading.limitPct,
                     resets_at: reading.resetsAtDisplay,
-                    enforced: headroomSampler.enforced,
+                    enforced: owner.headroomSampler.enforced,
                     over_ceiling: reading.percentUsed >= reading.limitPct,
                     poll_interval_ms: pollIntervalMs,
                     source: "in-flight",
@@ -1063,12 +1091,12 @@ function startInFlightTicker(
             if (eventWakePending || last === undefined || nowMs - last >= sweepRetrigger.intervalMs) {
               const halt = deps.checkStop?.() ?? deps.checkPause?.();
               if (halt) {
-                log("daemon.sweep.retrigger_held", { phase, detail: halt, trigger });
+                log("daemon.sweep.retrigger_held", { phase: owner.phase, detail: halt, trigger });
               } else {
                 const accepted = sweepRetrigger.liveness?.inFlight !== true;
                 sweepRetrigger.state.lastRunAtMs = nowMs;
                 log("daemon.sweep.retriggered", {
-                  phase,
+                  phase: owner.phase,
                   trigger,
                   poll_interval_ms: pollIntervalMs,
                   interval_ms: sweepRetrigger.intervalMs,
@@ -1086,20 +1114,8 @@ function startInFlightTicker(
         }
       })()
     : undefined;
-  // Cleared on every exit path by the caller; a light pass already in flight is allowed to finish
-  // rather than aborted (W1-T254).
-  return {
-    stop: async () => {
-      active = false;
-      // W1-T2981: release the process-wide holder BEFORE awaiting, so a slow or throwing pass can
-      // never strand the flag and leave every later ticker inert for the life of the process.
-      inFlightTickerActive = false;
-      if (ticker) await ticker;
-      // Stop owns this clock, not every process-global action a light pass ever detached. sweep.ts
-      // retains each fix until it settles; awaiting that registry here turned the full-pass bound into an
-      // unbounded phase exit. Awaiting the ticker still lets its current pass finish (W1-T2744).
-    },
-  };
+  const generation = owner.generation;
+  return { stop: () => owner.stop(generation) };
 }
 
 /** The shared config the dispatch and retro call sites pass so they can also re-fire the full
