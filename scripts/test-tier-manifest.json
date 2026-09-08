@@ -575,6 +575,7 @@
     "test/inflight-sweep-rung.test.ts": 3494,
     "test/infrastructure-classification.test.ts": 780,
     "test/infrastructure-fault-has-a-disposition.test.ts": 1051,
+    "test/inherited-growth-records-the-base-count.test.ts": 0,
     "test/init.test.ts": 274,
     "test/install-checkout-command.test.ts": 1877,
     "test/install-root.test.ts": 2185,
