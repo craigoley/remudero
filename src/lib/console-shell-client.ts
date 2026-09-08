@@ -430,7 +430,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
           // client threw it away, so a refusal on a valid token read as a missing token.
           needsTrusted = (j && j.required_tier) ? String(j.required_tier) : "";
         }
-        catch (e) { detail = String(raw || "").slice(0, 200); }
+        catch (e) { detail = String(raw || "").slice(0, 200); /* not JSON -- fall back to the raw response text */ }
         showWriteError(path, res.status, detail, needsTrusted);
         return res;
       }, function () { showWriteError(path, res.status, ""); return res; });
@@ -736,7 +736,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
       const raw = localStorage.getItem(SECTION_PREFS_KEY);
       return raw ? JSON.parse(raw) : {};
     } catch {
-      return {};
+      return {}; // storage disabled/blocked or the stored value is corrupt JSON -- default to no persisted prefs
     }
   }
   let sectionPrefs = loadSectionPrefs(); // {sectionId: collapsed:boolean} -- ONLY ever written by an explicit operator toggle, below
@@ -2562,7 +2562,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
           expansion = previewBody.expansion ?? null;
         }
       } catch {
-        expansion = null;
+        expansion = null; // preview fetch/parse failed -- fall open to the plain (no-preview) submit path below
       } finally {
         answerPending.delete(replyTo);
         setAnswerPending(submitBtn, false);
@@ -3163,7 +3163,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
         const res = await fetch("/v1/auth/scope", { headers: writeAuthHeaders() });
         hasWriteScope = res.ok;
       } catch {
-        hasWriteScope = false;
+        hasWriteScope = false; // probe failed -- default to the safe (no write affordance) state, never guess yes
       }
     }
     document.body.dataset.writeScopeResolved = "1";
@@ -3476,6 +3476,8 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
             if (!res.ok) feedbackWrap.querySelectorAll(".drain-feedback-btn").forEach((b) => (b.disabled = false));
           })
           .catch(() => {
+            // a network failure re-arms the buttons the SAME way a failed-but-answered write does,
+            // just above -- either way a transient failure must never be a dead end.
             feedbackWrap.querySelectorAll(".drain-feedback-btn").forEach((b) => (b.disabled = false));
           });
       }
@@ -3630,7 +3632,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
         extraHeaders: recapRendered ? undefined : { "x-rmd-recap-ack": "1" },
       });
     } catch (e) {
-      handlePollFailure();
+      handlePollFailure(); // the recorded escalation path (pollFailures/stale-banner state), not a silent drop
       return;
     }
     pollFailures = 0;
@@ -3658,20 +3660,25 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     }
 
     try {
+      // EVERY fetch in this Promise.all shares ONE convention: a per-endpoint failure degrades
+      // to a last-known/empty shape and is isolated from every sibling -- it never breaks the
+      // rest of this refresh (each `.catch` below carries its own one-line reminder of that,
+      // rather than only this paragraph above them, so the reason travels with the code that
+      // actually swallows the error).
       const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth, accountUsage, providerRouting, planView, selfMeasurement] = await Promise.all([
-        getJson("/v1/recent").catch(() => ({ entries: [] })),
-        getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
-        getJson("/v1/feedback").catch(() => ({ entries: [] })),
-        getJson("/v1/inbox").catch(() => ({ ready: [], drafting: [] })),
-        getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false, quietHours: false })),
+        getJson("/v1/recent").catch(() => ({ entries: [] /* degrade to empty, isolated from every sibling */ })),
+        getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] /* degrade to empty, isolated from every sibling */ })),
+        getJson("/v1/feedback").catch(() => ({ entries: [] /* degrade to empty, isolated from every sibling */ })),
+        getJson("/v1/inbox").catch(() => ({ ready: [], drafting: [] /* degrade to empty, isolated from every sibling */ })),
+        getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false, quietHours: false /* degrade to the safe default, isolated from every sibling */ })),
         // W1-T159: the daemon-health widget's own fetch -- a fetch failure here must never break
         // the rest of the refresh (same catch-and-degrade convention as every sibling above); the
         // widget just keeps showing its last-known values (or "…" pre-first-success).
-        getJson("/v1/daemon-health").catch(() => null),
+        getJson("/v1/daemon-health").catch(() => null /* keep the widget's last-known values */),
         // The ACCOUNT strip's own fetch, on the SAME refresh cycle and under the SAME
         // catch-and-degrade convention as every sibling above: a failure here leaves the strip
         // showing its last-known values (or "…" pre-first-success) and never breaks the refresh.
-        getJson("/v1/account-usage").catch(() => null),
+        getJson("/v1/account-usage").catch(() => null /* keep the strip's last-known values */),
         // Routing is a daemon-written projection. A read failure is isolated from every sibling
         // panel and leaves the last decision visible rather than inventing fresh headroom.
         getJson("/v1/provider-routing").catch(() => ({
@@ -3683,7 +3690,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
         // W1-T315: the Plan tab's one fetch -- same catch-and-degrade convention as every
         // sibling above; a failure here leaves the tab showing its last-known values (or "…"
         // pre-first-success) and never breaks the rest of the refresh.
-        getJson("/v1/plan/view").catch(() => null),
+        getJson("/v1/plan/view").catch(() => null /* keep the Plan tab's last-known values */),
         // W1-T2660: the self-measurement panel's own fetch -- same catch-and-degrade convention
         // as every sibling above; a failure here leaves the panel showing its last-known values
         // (or empty pre-first-success) and never breaks the rest of the refresh. A SUCCESSFUL
@@ -3748,7 +3755,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
         controlStatus,
       });
     } catch (e) {
-      handlePollFailure();
+      handlePollFailure(); // the recorded escalation path (pollFailures/stale-banner state), not a silent drop
     }
   }
 
@@ -3773,6 +3780,8 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
       try {
         res = await fetch("/v1/status/stream", { headers: authHeaders, signal: controller.signal });
       } catch {
+        // connection failed before it opened -- report it through the SAME onState lifecycle a
+        // dropped stream reports through, never a silent drop.
         if (!stopped) onState("disconnected");
         return;
       }
@@ -3856,7 +3865,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     const hash = window.location.hash || "";
     const m = hash.match(/^#task=(.+)$/);
     if (m) {
-      try { return decodeURIComponent(m[1]); } catch { return m[1]; }
+      try { return decodeURIComponent(m[1]); } catch { return m[1]; /* malformed percent-encoding -- use the raw hash text rather than nothing */ }
     }
     return params.get("task");
   }
