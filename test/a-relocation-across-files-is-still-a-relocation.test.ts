@@ -19,7 +19,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { MIN_RELOCATION_RUN, computeRelocatedLines } from "../scripts/diff-coverage.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// `scripts/**` sits OUTSIDE tsconfig's `include`, so a STATIC import of this module is a TS7016
+// ("could not find a declaration file"). A dynamic specifier is not statically resolved, so this
+// loads the REAL module with no shadow copy and no ambient declaration — the same idiom
+// test/comment-load-ratchet.test.ts uses for the same reason.
+const SCRIPT = fileURLToPath(new URL("../scripts/diff-coverage.mjs", import.meta.url));
+const { MIN_RELOCATION_RUN, computeRelocatedLines } = (await import(pathToFileURL(SCRIPT).href)) as {
+  MIN_RELOCATION_RUN: number;
+  computeRelocatedLines: (
+    added: Map<string, Map<number, string>>,
+    removed: Map<string, Map<number, string>>,
+    opts?: { minRun?: number },
+  ) => Map<string, Map<number, { counterpartLine: number; runLength: number; counterpartFile: string }>>;
+};
 
 /** A body long enough to clear MIN_RELOCATION_RUN, as `[line, text]` pairs from `start`. */
 const body = (n: number, prefix = "const v"): string[] =>
