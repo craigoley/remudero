@@ -5162,6 +5162,27 @@ export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
   // is a diff MOVING the instrument that judges it; here the instrument is introduced WITH the product it was
   // written to measure, and its ceiling only ever ratchets debt down from that first recording.
   "scripts/clock-signature-baseline.json",
+  // W1-T2901's sibling of the clock-signature entry, and it earns that entry's SECOND argument, not
+  // just its first. LEDGER, NOT FLOOR: a per-population CEILING on classes extending the built-in
+  // error type directly; raising a row records debt and cannot make a failing falsifier pass, which
+  // is the source-size argument. UNSATISFIABLE WITHOUT THE MIXTURE is the one that actually forces
+  // this entry: test/error-subclass-census.test.ts re-measures the REAL tree every run, so a PR that
+  // migrates one class onto the shared envelope changes the measured count in the same diff that
+  // moves the ceiling. The instrument-only PR rule 25 normally prescribes cannot exist here — it
+  // would record a count the tree does not have, and redden on its own.
+  "scripts/error-subclass-baseline.json",
+  // W1-T2896, same two arguments. This one is a GRANDFATHER LIST rather than a number: the
+  // bound-shaped constants not yet declaring BACKSTOP or PRIMARY CONTROL. Entries can only be
+  // REMOVED as constants are declared, so an edit here is monotonically tightening and cannot hide a
+  // product regression behind itself. Its census reads the measured tree, so the removal and the
+  // declaration that earns it are necessarily one diff.
+  "scripts/bound-kind-baseline.json",
+  // W1-T2896's second instrument, and the clearest case of the pair. It is a COUNT PINNED AT ZERO --
+  // direct gh spawns outside the one transport module -- so there is no direction in which it could
+  // be loosened without the number ceasing to be zero, which its own census would refuse. It is NEW
+  // in the diff that achieves zero: the centralisation IS what makes the count true, so the
+  // instrument cannot precede the product change even in principle.
+  "scripts/gh-transport-baseline.json",
 ]);
 
 /** DECLARATIONS WHOSE DATA HAS GRADING POWER OVER OTHER PRs. A changed line inside one counts as EXECUTABLE even when
