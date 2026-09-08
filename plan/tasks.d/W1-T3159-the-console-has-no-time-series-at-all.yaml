@@ -15,8 +15,15 @@
   attempts: 0
   rationale: |
     OBSERVED 2026-09-08. `grep -cE "<svg|sparkline|chart|polyline" src/lib/serve.ts` returns **0**.
-    There is no charting of any kind in the console, and no external chart library is available to
-    it — so this is inline SVG or nothing.
+    There is no charting of any kind in the console.
+
+    CORRECTION 2026-09-08, SAME SESSION, BY THE AUTHOR OF THIS SHARD. An earlier revision of this
+    record asserted that "no external chart library is available to it — so this is inline SVG or
+    nothing". THAT WAS FALSE and it was never measured. What is true and measured: `rmd serve` sets
+    only `application/json` content types today (`src/lib/serve.ts`), so there is no static-asset
+    route — but that is a route this repo does not have YET, not a route it cannot have. A vendored
+    UMD library served from disk is entirely viable. The restriction below is therefore a SCOPE
+    boundary with an argument behind it, not a technical impossibility, and it is labelled as one.
 
     EVERY HEALTH FIELD IS A SCALAR. From the operator's own console: `last poll …`, `next poll …`,
     `disk free …`, `rate limit …`, `spend today $198.831`, `spend this week $389.029`, `running 2`,
@@ -35,8 +42,13 @@
     a steady 2.5-minute cadence, and loose objects climbing 13 870 -> 19 049 in six hours. Each read
     as an unremarkable current value at every single instant.
   design: |
-    (i) INLINE SVG, NO DEPENDENCY. The console has no chart library and cannot fetch one; a
-    hand-rolled polyline over a bounded series is the whole mechanism.
+    (i) INLINE SVG, NO NEW DEPENDENCY — A CHOICE, NOT A CONSTRAINT. A hand-rolled polyline over a
+    bounded series is the whole mechanism HERE, because adding a charting dependency is a decision
+    that belongs to the console-architecture question (see `note:`), and this shard must not settle
+    that question as a side effect of wanting a trend line. If that question resolves toward a
+    bundled front end, the SERIES CONTRACT below survives the move unchanged and only the renderer
+    is replaced — which is the point of stating it as window/bucket/absent-vs-zero rather than as
+    pixels.
     (ii) A SMALL, NAMED SET OF SERIES, chosen because each has a decision attached: spend per day,
     queue depth, sweep dispositions per pass, and wake volume. Not "graphs" in general — a panel
     that renders whatever it finds is a panel nobody can review.
@@ -61,13 +73,28 @@
     PROVE IT LOAD-BEARING: a fixture series containing a repeating sub-hourly spike must be visible
     in the rendered output; the same series under a daily bucket must not be. If both render the
     same, the bucket is decorative and design (iii) is unmet.
-    DO NOT satisfy this by adding a chart library. The console cannot fetch one, and a vendored
-    library is a dependency decision with its own argument, not a side effect of wanting a graph.
+    DO NOT satisfy this by adding a chart library IN THIS SHARD — not because one is impossible
+    (it is not; see the CORRECTION in `rationale`), but because a vendored library is a dependency
+    decision with its own argument and its own record, and it is not carried by this task's own
+    falsifier.
     DO NOT render a series with no stated window. A trend line whose span is unknown is a shape, not
     a measurement — and the operator's existing complaint is that the console is hard to READ, not
     that it is short of pixels.
   note: |
     Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src.
+    ARCHITECTURE QUESTION THIS SHARD DELIBERATELY DOES NOT SETTLE, recorded so the next reader does
+    not mistake silence for a finding. OBSERVED 2026-09-08: there are TWO console front ends.
+    `apps/dashboard` is a real npm workspace (`workspaces: ["packages/*", "apps/*"]`, shipped in
+    #294/#300/#302) holding `index.html` + a 410-line `src/main.ts`, and NOTHING SERVES IT —
+    `src/lib/serve.ts:559` says so outright ("NOT apps/dashboard's full SPA — that page's own header
+    already documents why it stays a separate, later-wired artifact"). The console the operator
+    actually reads is `renderShellHtml` in `src/lib/serve.ts` (6 926 lines). Neither contains React,
+    contrary to `plan/tasks.yaml:7584` ("the console is a tailnet/localhost-served React web app")
+    and `:1524` ("the apps/dashboard React app") — and `:1524` itself already says "VERIFY where the
+    console frontend actually lives ... (distrust this note)". Whether to collapse that fork onto a
+    bundled `apps/dashboard` is a separate decision with its own reversal to record
+    (`apps/dashboard/index.html`: "No bundler by design (the W3-T2 decision)"). THIS SHARD IS
+    DELIBERATELY NEUTRAL ON IT: it lands a series contract that holds under either outcome.
     SCOPE HONESTY: "beautiful" is not a testable property and this shard does not claim it. What is
     testable is bounded, provenance-stating, absent-vs-zero-distinguishing series with a bucket fine
     enough to show the defects that actually occurred. Visual polish beyond that is the operator's
