@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 
+import { fixedClock, type Clock } from "../src/lib/clock.js";
 import {
   decideRepositoryMaintenance,
   projectRepositoryMaintenanceStatus,
@@ -18,6 +19,7 @@ import { loadPolicy } from "../src/lib/policy.js";
 import { buildRepositoryMaintenanceDaemonHook } from "../src/run-task.js";
 
 const NOW = new Date("2026-09-08T12:00:00.000Z");
+const NOW_CLOCK = fixedClock(NOW.getTime());
 const POLICY = {
   incrementalIntervalMs: 24 * 60 * 60 * 1_000,
   timeoutMs: 10 * 60 * 1_000,
@@ -56,13 +58,23 @@ function exitingProcess(code: number) {
   return child;
 }
 
+function sequenceClock(instants: Date[]): Clock {
+  let index = 0;
+  const last = instants.at(-1) ?? NOW;
+  return {
+    now: () => last.getTime(),
+    iso: () => last.toISOString(),
+    date: () => instants[index++] ?? last,
+  };
+}
+
 test("W1-T3116: unreadable or busy repository state defers without spawning and preserves the due episode", async () => {
   const dueState = state({ nextEligibleIso: "2026-09-08T11:00:00.000Z" });
   for (const observed of [survey({ readable: false }), survey({ gcLogPresent: true, activeLaneCount: 1 })]) {
     let spawned = false;
     const result = await runRepositoryMaintenanceController(
       { repoDir: "/repo", survey: observed, state: dueState, policy: POLICY },
-      { now: () => NOW, spawn: (() => { spawned = true; throw new Error("must not spawn"); }) as never },
+      { clock: NOW_CLOCK, spawn: (() => { spawned = true; throw new Error("must not spawn"); }) as never },
     );
     assert.equal(result.decision.verdict, "deferred");
     assert.equal(result.state.nextEligibleIso, dueState.nextEligibleIso);
@@ -73,7 +85,7 @@ test("W1-T3116: unreadable or busy repository state defers without spawning and 
 test("W1-T3116: ordinary due work uses only Git's incremental maintenance tasks", async () => {
   const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
   const surveys = [survey(), survey({ looseCount: 40, looseBytes: 163_840 })];
-  const clock = [NOW, new Date(NOW.getTime() + 1_234)];
+  const instants = [NOW, new Date(NOW.getTime() + 1_234)];
   let completeRow: Record<string, unknown> | undefined;
   const result = await runRepositoryMaintenanceController(
     {
@@ -84,7 +96,7 @@ test("W1-T3116: ordinary due work uses only Git's incremental maintenance tasks"
       policy: POLICY,
     },
     {
-      now: () => clock.shift() ?? NOW,
+      clock: sequenceClock(instants),
       log: (step, fields) => {
         if (step === "repository.maintenance.complete") completeRow = fields;
       },
@@ -123,7 +135,7 @@ test("W1-T3116: a failed-GC marker selects full GC only at a proven quiet bounda
       policy: POLICY,
     },
     {
-      now: () => NOW,
+      clock: NOW_CLOCK,
       spawn: ((options: { args: string[] }) => {
         calls.push(options);
         return { pid: 42, process: exitingProcess(0) };
@@ -147,7 +159,7 @@ test("W1-T3116: zero exit with a surviving marker is failure, backs off durably,
       policy: POLICY,
     },
     {
-      now: () => NOW,
+      clock: NOW_CLOCK,
       jitter: () => 0,
       spawn: (() => {
         spawnCount++;
@@ -179,7 +191,7 @@ test("W1-T3116: a maintenance timeout tears down the process group and records m
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
-  const clock = [NOW, new Date(NOW.getTime() + 25)];
+  const instants = [NOW, new Date(NOW.getTime() + 25)];
   const teardowns: number[] = [];
   let failureRow: Record<string, unknown> | undefined;
   const result = await runRepositoryMaintenanceController(
@@ -191,7 +203,7 @@ test("W1-T3116: a maintenance timeout tears down the process group and records m
       policy: { ...POLICY, timeoutMs: 5 },
     },
     {
-      now: () => clock.shift() ?? NOW,
+      clock: sequenceClock(instants),
       jitter: () => 0,
       spawn: (() => ({ pid: 91, process: child })) as never,
       teardown: (pgid) => teardowns.push(pgid),
@@ -220,7 +232,7 @@ test("W1-T3116: the Git child receives process location/config only, never provi
       policy: POLICY,
     },
     {
-      now: () => NOW,
+      clock: NOW_CLOCK,
       env: {
         PATH: "/bin",
         HOME: "/home/rmd",
@@ -285,7 +297,7 @@ test("W1-T3116: the durable cadence skips the object census until due, then pers
         policy: POLICY,
       },
       {
-        now: () => NOW,
+        clock: NOW_CLOCK,
         readState: () => ({
           kind: "readable",
           state: state({
@@ -321,7 +333,7 @@ test("W1-T3116: the durable cadence skips the object census until due, then pers
         policy: POLICY,
       },
       {
-        now: () => NOW,
+        clock: NOW_CLOCK,
         readState: () => ({ kind: "absent", state: state() }),
         gcLogPresent: () => false,
         survey: () => {
@@ -367,7 +379,7 @@ test("W1-T3116: corrupt durable state fails closed before any survey or maintena
       policy: POLICY,
     },
     {
-      now: () => NOW,
+      clock: NOW_CLOCK,
       readState: () => ({ kind: "corrupt", reason: "bad json" }),
       survey: () => {
         surveyed = true;
@@ -397,7 +409,7 @@ test("W1-T3116: a failed-GC marker waiting on active lanes performs no census, d
       policy: POLICY,
     },
     {
-      now: () => NOW,
+      clock: NOW_CLOCK,
       readState: () => ({ kind: "readable", state: state() }),
       gcLogPresent: () => true,
       survey: () => {
@@ -454,7 +466,7 @@ test("W1-T3116: the status projection names success, failure/backoff and escalat
         nextEligibleIso: "2026-09-09T11:00:00.000Z",
       }),
       POLICY,
-      NOW,
+      NOW.getTime(),
     ),
     {
       verdict: "healthy",
@@ -469,12 +481,12 @@ test("W1-T3116: the status projection names success, failure/backoff and escalat
     projectRepositoryMaintenanceStatus(
       state({ consecutiveFailures: 2, nextEligibleIso: "2026-09-08T16:00:00.000Z" }),
       POLICY,
-      NOW,
+      NOW.getTime(),
     ).verdict,
     "backoff",
   );
   assert.equal(
-    projectRepositoryMaintenanceStatus(state({ consecutiveFailures: 3 }), POLICY, NOW).verdict,
+    projectRepositoryMaintenanceStatus(state({ consecutiveFailures: 3 }), POLICY, NOW.getTime()).verdict,
     "escalate",
   );
 });

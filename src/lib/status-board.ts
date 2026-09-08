@@ -38,6 +38,7 @@ import {
   type DaemonBootTimestamp,
 } from "./daemon.js";
 import { COST_ANOMALY_STEP } from "./cost-anomaly.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { IMAGE_DRIFT_STEP } from "./image-drift.js";
 import { TOKEN_REFRESHED_STEP, TOKEN_REFRESH_FAILED_STEP } from "./github-app.js";
 import {
@@ -2016,7 +2017,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const needsMe = deriveNeedsMe(lines, projections);
 
   return {
-    generatedAt: new Date(nowMs).toISOString(),
+    generatedAt: fixedClock(nowMs).iso(),
     liveness,
     latches: latchesSection,
     lastCycle,
@@ -2029,7 +2030,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     repositoryMaintenance: deriveRepositoryMaintenanceSection(
       root,
       deps.repositoryMaintenancePolicy ?? DEFAULT_REPOSITORY_MAINTENANCE_POLICY,
-      new Date(nowMs),
+      nowMs,
     ),
     needsMe,
   };
@@ -2038,7 +2039,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 export function deriveRepositoryMaintenanceSection(
   root: string,
   policy: RepositoryMaintenancePolicy,
-  now: Date = new Date(),
+  nowMs: number = systemClock.now(),
 ): RepositoryMaintenanceSection {
   const read = readRepositoryMaintenanceState(repositoryMaintenanceStatePath(join(root, "state")));
   if (read.kind === "corrupt") {
@@ -2047,7 +2048,7 @@ export function deriveRepositoryMaintenanceSection(
       nextAction: "repair state/repository-maintenance.json before automatic Git maintenance can resume",
     };
   }
-  const status = projectRepositoryMaintenanceStatus(read.state, policy, now);
+  const status = projectRepositoryMaintenanceStatus(read.state, policy, nowMs);
   return {
     status,
     ...(status.verdict === "escalate"

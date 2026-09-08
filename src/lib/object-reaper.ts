@@ -11,6 +11,7 @@ import type { EventEmitter } from "node:events";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { PassThrough } from "node:stream";
 
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
   spawnDetachedGroup,
   teardownProcessGroup,
@@ -114,7 +115,7 @@ type SpawnedChild = EventEmitter & {
 };
 
 export interface RepositoryMaintenanceDeps {
-  now?: () => Date;
+  clock?: Clock;
   jitter?: () => number;
   /** Injection seam for proving the maintenance child receives no provider credentials. */
   env?: NodeJS.ProcessEnv;
@@ -412,23 +413,23 @@ export function decideRepositoryMaintenance(input: {
   return {
     verdict: "healthy",
     reason: "incremental cadence has not elapsed",
-    nextEligibleIso: new Date(nextIncrementalMs).toISOString(),
+    nextEligibleIso: fixedClock(nextIncrementalMs).iso(),
   };
 }
 
 export function projectRepositoryMaintenanceStatus(
   state: RepositoryMaintenanceState,
   policy: RepositoryMaintenancePolicy,
-  now: Date = new Date(),
+  nowMs: number = systemClock.now(),
 ): RepositoryMaintenanceStatus {
   const nextEligibleMs = parsedIso(state.nextEligibleIso);
   const retryPending = state.consecutiveFailures > 0 && state.consecutiveFailures < policy.escalationThreshold;
   let verdict: RepositoryMaintenanceStatus["verdict"];
   if (state.consecutiveFailures >= policy.escalationThreshold) verdict = "escalate";
-  else if (state.consecutiveFailures > 0 && nextEligibleMs !== undefined && now.getTime() < nextEligibleMs) verdict = "backoff";
+  else if (state.consecutiveFailures > 0 && nextEligibleMs !== undefined && nowMs < nextEligibleMs) verdict = "backoff";
   else if (state.consecutiveFailures > 0) verdict = "retry-due";
   else if (!state.lastSuccessIso) verdict = "never-run";
-  else if (nextEligibleMs === undefined || now.getTime() >= nextEligibleMs) verdict = "due";
+  else if (nextEligibleMs === undefined || nowMs >= nextEligibleMs) verdict = "due";
   else verdict = "healthy";
   return {
     verdict,
@@ -487,7 +488,8 @@ export async function runRepositoryMaintenanceController(
   input: RepositoryMaintenanceInput,
   deps: RepositoryMaintenanceDeps = {},
 ): Promise<RepositoryMaintenanceResult> {
-  const now = (deps.now ?? (() => new Date()))();
+  const clock = deps.clock ?? systemClock;
+  const now = clock.date();
   const decision = decideRepositoryMaintenance({
     survey: input.survey,
     state: input.state,
@@ -568,13 +570,13 @@ export async function runRepositoryMaintenanceController(
     stderr.push(`post-maintenance survey failed: ${reason}`);
     postSurvey = undefined;
   }
-  const finishedAt = (deps.now ?? (() => new Date()))();
+  const finishedAt = clock.date();
   const postVerified =
     postSurvey?.readable === true &&
     (decision.verdict !== "full-gc-due" || postSurvey.gcLogPresent === false);
   const succeeded = exitCode === 0 && !timedOut && postVerified;
   if (succeeded) {
-    const nextEligibleIso = new Date(finishedAt.getTime() + input.policy.incrementalIntervalMs).toISOString();
+    const nextEligibleIso = fixedClock(finishedAt.getTime() + input.policy.incrementalIntervalMs).iso();
     const nextState: RepositoryMaintenanceState = {
       lastAttemptIso: finishedAt.toISOString(),
       lastSuccessIso: finishedAt.toISOString(),
@@ -598,7 +600,7 @@ export async function runRepositoryMaintenanceController(
   const boundedBackoff = Math.min(input.policy.retryMaxMs, rawBackoff);
   const jitterRatio = Math.max(0, Math.min(1, (deps.jitter ?? Math.random)()));
   const jitterMs = Math.floor(boundedBackoff * 0.1 * jitterRatio);
-  const nextEligibleIso = new Date(finishedAt.getTime() + boundedBackoff + jitterMs).toISOString();
+  const nextEligibleIso = fixedClock(finishedAt.getTime() + boundedBackoff + jitterMs).iso();
   const nextState: RepositoryMaintenanceState = {
     ...input.state,
     lastAttemptIso: finishedAt.toISOString(),
@@ -638,7 +640,7 @@ export async function runRepositoryMaintenanceCadence(
     policy: RepositoryMaintenancePolicy;
   },
   deps: {
-    now?: () => Date;
+    clock?: Clock;
     readState?: (path: string) => RepositoryMaintenanceStateRead;
     writeState?: (path: string, state: RepositoryMaintenanceState) => void;
     gcLogPresent?: (repoDir: string) => boolean | undefined;
@@ -647,8 +649,8 @@ export async function runRepositoryMaintenanceCadence(
     log?: (step: string, fields: Record<string, unknown>) => void;
   } = {},
 ): Promise<RepositoryMaintenanceCadenceResult> {
-  const nowFn = deps.now ?? (() => new Date());
-  const now = nowFn();
+  const clock = deps.clock ?? systemClock;
+  const now = clock.date();
   const log = deps.log ?? (() => {});
   const stateRead = (deps.readState ?? readRepositoryMaintenanceState)(input.statePath);
   if (stateRead.kind === "corrupt") {
@@ -664,12 +666,12 @@ export async function runRepositoryMaintenanceCadence(
   const backoffHeld =
     state.consecutiveFailures > 0 && nextEligibleMs !== undefined && now.getTime() < nextEligibleMs;
   if (backoffHeld || state.escalationRecordedIso) {
-    return { kind: "not-due", status: projectRepositoryMaintenanceStatus(state, input.policy, now) };
+    return { kind: "not-due", status: projectRepositoryMaintenanceStatus(state, input.policy, now.getTime()) };
   }
 
   const gcLogPresent = (deps.gcLogPresent ?? readGcLogPresent)(input.repoDir);
   if (nextEligibleMs !== undefined && now.getTime() < nextEligibleMs && gcLogPresent !== true) {
-    return { kind: "not-due", status: projectRepositoryMaintenanceStatus(state, input.policy, now) };
+    return { kind: "not-due", status: projectRepositoryMaintenanceStatus(state, input.policy, now.getTime()) };
   }
   if (gcLogPresent === true && input.activeLaneCount > 0) {
     const reason = "full GC requires zero active RMD lanes";
@@ -704,12 +706,12 @@ export async function runRepositoryMaintenanceCadence(
       state,
       policy: input.policy,
     },
-    { now: nowFn, log },
+    { clock, log },
   );
   (deps.writeState ?? writeRepositoryMaintenanceState)(input.statePath, result.state);
   return {
     kind: "ran",
     result,
-    status: projectRepositoryMaintenanceStatus(result.state, input.policy, now),
+    status: projectRepositoryMaintenanceStatus(result.state, input.policy, now.getTime()),
   };
 }
