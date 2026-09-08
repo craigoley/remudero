@@ -1,6 +1,13 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { bodyContradictsDiff, failSummary, recognizeChangesetClaims } from "../src/lib/review.js";
+import {
+  ATTRIBUTIVE_SUBJECT_RE,
+  CONDITIONAL_CLAUSE_RE,
+  SELF_REFERENTIAL_SUBJECT_RE,
+  bodyContradictsDiff,
+  failSummary,
+  recognizeChangesetClaims,
+} from "../src/lib/review.js";
 
 /**
  * W1-T3061 — `recognizeChangesetClaims` read two shapes as this changeset's own assertion that are
@@ -149,4 +156,48 @@ test("W1-T3061 criterion 4: the remedy survives the 140-char commit-status cap",
   ]);
   assert.ok(summary.length > 140, "sanity: this case really is truncated, so the assertion below is not vacuous");
   assert.match(summary.slice(0, 140), /backtick a mention to quote it/, "the remedy must survive the slice");
+});
+
+// ── each new surface driven by identifier, both arms ───────────────────────────────────────────
+//
+// `negative-reachability-ratchet` (W1-T2317) counts a module-scope `_RE` that no fixture ACCEPTS
+// AND REJECTS directly as fixture-less debt, and reaching one only through its caller satisfies
+// nothing: a distinction dying at a seam is the defect that ratchet exists for. Same shape as
+// W1-T2533's two denial regexes, which are exported for the same reason.
+
+test("W1-T3061: CONDITIONAL_CLAUSE_RE fires only on an ENUMERATED subordinator governing this clause", () => {
+  // The unhealthy arm: the clause is a rule, a condition or a hypothetical, so there is no claim.
+  assert.equal(CONDITIONAL_CLAUSE_RE.test("a shard is refused unless the PR is "), true);
+  assert.equal(CONDITIONAL_CLAUSE_RE.test("the gate blocks if the diff is "), true);
+  assert.equal(CONDITIONAL_CLAUSE_RE.test("skipped when the change is "), true);
+  assert.equal(CONDITIONAL_CLAUSE_RE.test("the fast lane fires only when the diff is "), true);
+  // The healthy arm: a bare assertion, a subordinator OUTSIDE the list, and a conditional
+  // governing a DIFFERENT clause all leave the copular arm's verdict exactly where it was.
+  assert.equal(CONDITIONAL_CLAUSE_RE.test("this PR is "), false);
+  assert.equal(CONDITIONAL_CLAUSE_RE.test("the gate blocks because the diff is "), false, "`because` is not enumerated");
+  assert.equal(CONDITIONAL_CLAUSE_RE.test("unless the linter is upgraded, this PR is "), false, "governs another clause");
+});
+
+test("W1-T3061: ATTRIBUTIVE_SUBJECT_RE matches the copular frame and captures its subject", () => {
+  // The unhealthy arm for the caller: a frame IS readable, so the subject can be judged.
+  assert.equal(ATTRIBUTIVE_SUBJECT_RE.exec("1020 files is a very large ")?.[1], "1020 files");
+  assert.equal(ATTRIBUTIVE_SUBJECT_RE.exec("This is a ")?.[1], "This");
+  assert.equal(ATTRIBUTIVE_SUBJECT_RE.exec("The diff is a ")?.[1], "The diff");
+  // The healthy arm: NO readable frame, which is the fail-closed path — the caller then keeps
+  // refusing rather than guessing, so a null here is what preserves today's verdict.
+  assert.equal(ATTRIBUTIVE_SUBJECT_RE.test("This ships a "), false, "no copula");
+  assert.equal(ATTRIBUTIVE_SUBJECT_RE.test("this is not a "), false, "a negator breaks the frame; W1-T2533 owns that case");
+  assert.equal(ATTRIBUTIVE_SUBJECT_RE.test("Forty shards would be a big "), false, "`would be` is outside the frame");
+});
+
+test("W1-T3061: SELF_REFERENTIAL_SUBJECT_RE tells THIS changeset from any other subject", () => {
+  // The unhealthy arm for the caller: the subject IS this changeset, so the claim stands.
+  assert.equal(SELF_REFERENTIAL_SUBJECT_RE.test("This"), true);
+  assert.equal(SELF_REFERENTIAL_SUBJECT_RE.test("It"), true);
+  assert.equal(SELF_REFERENTIAL_SUBJECT_RE.test("The diff"), true);
+  assert.equal(SELF_REFERENTIAL_SUBJECT_RE.test("the commit"), true);
+  // The healthy arm: a subject naming something else, which is what releases the claim.
+  assert.equal(SELF_REFERENTIAL_SUBJECT_RE.test("1020 files"), false);
+  assert.equal(SELF_REFERENTIAL_SUBJECT_RE.test("Forty shards"), false);
+  assert.equal(SELF_REFERENTIAL_SUBJECT_RE.test("the linter"), false, "`the` alone is not self-referential");
 });

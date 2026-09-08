@@ -2151,6 +2151,10 @@ export function noClaimIsAboutChangeset(rest: string): boolean {
 const SELF_REFERENTIAL_CLAIM_RE =
   /\b(?:this|these|it|the)(?:\s+(?:pr|diff|changeset|changes|change|commit|patch|revert))?\s+(?:is|are|was|were)\s+[*_`]*$/i;
 
+/** EXPORTED, like W1-T2533's two denial regexes beside them, so test/a-described-rule-is-not-a-claim.test.ts
+ *  can drive BOTH ARMS of each by identifier. `negative-reachability-ratchet` counts a module-scope `_RE` that
+ *  no fixture accepts AND rejects directly as fixture-less debt, and reaching one only through its caller
+ *  satisfies nothing — a distinction dying at a seam is the defect that ratchet exists for (W1-T2317). */
 /** (W1-T3061) A QUALIFIER IN FRONT OF THE CLAUSE IS NOT AN ASSERTION, and W1-T2533's two denial arms are the
  *  precedent rather than a second mechanism: a negator in that position turns a claim into a denial, and a
  *  SUBORDINATOR turns it into a rule, a condition or a hypothetical. "A shard is refused unless the PR is plan-only."
@@ -2160,7 +2164,7 @@ const SELF_REFERENTIAL_CLAIM_RE =
  *  that refuses today silently stops refusing. It carries the SAME self-referential subject and linking verb {@link
  *  SELF_REFERENTIAL_CLAIM_RE} matches, anchored at the same `$`, so it can only ever cancel THAT arm — never the
  *  label arm, never the attributive one. */
-const CONDITIONAL_CLAUSE_RE =
+export const CONDITIONAL_CLAUSE_RE =
   /\b(?:unless|if|when|whenever|provided|only\s+when)\s+(?:this|these|it|the)(?:\s+(?:pr|diff|changeset|changes|change|commit|patch|revert))?\s+(?:is|are|was|were)\s+[*_`]*$/i;
 
 /** The word a shorthand MODIFIES, if it modifies one: `[ \t]+` and never `\s+`, because a word on the NEXT line
@@ -2173,12 +2177,12 @@ const SHORTHAND_HEAD_NOUN_RE = /^[*_`]*[ \t]+([A-Za-z][A-Za-z0-9_-]*)/;
  *  real changeset word, but the subject is a run the author is DECLINING to produce. Bounded to a few words either
  *  side, like every other arm here. FAIL-CLOSED BY CONSTRUCTION: no match is no opinion, and the arm then refuses
  *  exactly as it does today — a false refusal costs a cycle, a false pass costs the guarantee. */
-const ATTRIBUTIVE_SUBJECT_RE = /([A-Za-z0-9][\w'-]*(?:\s+[\w'-]+){0,3})\s+(?:is|are|was|were)\s+(?:a|an|the)\s+(?:[\w'-]+\s+){0,3}[*_`]*$/i;
+export const ATTRIBUTIVE_SUBJECT_RE = /([A-Za-z0-9][\w'-]*(?:\s+[\w'-]+){0,3})\s+(?:is|are|was|were)\s+(?:a|an|the)\s+(?:[\w'-]+\s+){0,3}[*_`]*$/i;
 
 /** Is a captured {@link ATTRIBUTIVE_SUBJECT_RE} subject THIS changeset? The same vocabulary {@link
  *  SELF_REFERENTIAL_CLAIM_RE} treats as self-referential, matched at the subject's END so "the diff" counts and
  *  "1020 files" does not. */
-const SELF_REFERENTIAL_SUBJECT_RE = /(?:^|\s)(?:this|these|it)$|(?:^|\s)the\s+(?:pr|diff|changeset|changes|change|commit|patch|revert)$/i;
+export const SELF_REFERENTIAL_SUBJECT_RE = /(?:^|\s)(?:this|these|it)$|(?:^|\s)the\s+(?:pr|diff|changeset|changes|change|commit|patch|revert)$/i;
 
 /** (W1-T2533) A DENIED CLAIM IS NOT A CLAIM. {@link shorthandIsAboutChangeset}'s label arm decides on the COLON alone,
  *  so a body answering the scope question HONESTLY IN THE NEGATIVE was refused for the claim it just denied — #3373's
