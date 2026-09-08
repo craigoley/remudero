@@ -29,6 +29,27 @@ const GROWN_SRC = "src/lib/review.ts";
 /** A patch whose `src/` half carries real executable content, so the `diff`-aware arm of
  *  detectInstrumentEntanglement cannot exempt it for being comment-only (W1-T2884's carve-out).
  *  Both arms of every comparison below use THIS SAME patch, so the only variable is the path. */
+/** W1-T3133: the LOOSENING patch for a SCORE FLOOR, which is the mirror of `patchGrowing`'s
+ *  loosening of a size LEDGER. A floor's hazard is lowering it (a weakened suite then passes); a
+ *  ledger's is raising it. Both arms below must be loosening for the path discriminator to be the
+ *  only variable — before W1-T3133 the floor arm reused the RAISING patch, which reads as loosening
+ *  only if direction is ignored, and this test's own NAME already said "lowering". */
+function patchShrinking(instrumentPath: string): string {
+  return [
+    `diff --git a/${instrumentPath} b/${instrumentPath}`,
+    `--- a/${instrumentPath}`,
+    `+++ b/${instrumentPath}`,
+    "@@ -1,3 +1,3 @@",
+    `-  "${GROWN_SRC}": 8209,`,
+    `+  "${GROWN_SRC}": 8178,`,
+    `diff --git a/${GROWN_SRC} b/${GROWN_SRC}`,
+    `--- a/${GROWN_SRC}`,
+    `+++ b/${GROWN_SRC}`,
+    "@@ -1,2 +1,3 @@",
+    "+export const somethingExecutable = 1;",
+  ].join("\n");
+}
+
 function patchGrowing(instrumentPath: string): string {
   return [
     `diff --git a/${instrumentPath} b/${instrumentPath}`,
@@ -57,7 +78,7 @@ test("a diff raising the source-size ledger beside the src file whose growth it 
 // ── acceptance 2: the exemption is a PATH, never the `-baseline.json` pattern ──────────────────
 
 test("a diff lowering a SCORE floor beside src code is still refused, so the exemption is a path and not the pattern", () => {
-  const verdict = detectInstrumentEntanglement([MUTATION_FLOOR, GROWN_SRC], patchGrowing(MUTATION_FLOOR));
+  const verdict = detectInstrumentEntanglement([MUTATION_FLOOR, GROWN_SRC], patchShrinking(MUTATION_FLOOR));
   assert.equal(verdict.entangled, true, "a score floor beside src/ is exactly the hazard rule 25 exists for");
   assert.deepEqual(verdict.instrumentPaths, [MUTATION_FLOOR], "and it is named as the evidence");
   // THE DISCRIMINATOR: identical call shape, identical patch shape, one path exempt and one not.
