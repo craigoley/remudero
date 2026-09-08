@@ -565,7 +565,9 @@ test("console renders provenance and exposes bounded next-dispatch controls with
   assert.match(html, /\/v1\/policy\/provider-routing/);
   assert.match(html, /\/v1\/policy\/provider-routing\/clear/);
 
-  const source = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
+  // W1-T2902: HIGH_TIER_WRITE_PATHS (and the rest of the client script) moved out of serve.ts's
+  // template literal into lib/console-shell-client.ts, a real module — see that file's header.
+  const source = readFileSync(new URL("../src/lib/console-shell-client.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /readCodexCapacity|readClaudeProviderCapacity/);
   assert.doesNotMatch(source, /OPENAI_API_KEY|ANTHROPIC_API_KEY|CODEX_HOME/);
   assert.match(source, /HIGH_TIER_WRITE_PATHS[\s\S]*\/v1\/policy\/provider-routing[\s\S]*\/v1\/policy\/provider-routing\/clear/);

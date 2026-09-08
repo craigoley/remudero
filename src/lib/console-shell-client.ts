@@ -1,81 +1,25 @@
-// @ts-nocheck -- see "ON TYPE-CHECKING" below: this file is TRANSCRIBED, not rewritten, and
-// `tsc --strict` fixing all ~150 previously-untyped DOM-driving functions in one pass is out of
-// this task's one concern (moving the code into a real, testable, greppable module boundary).
+// @ts-nocheck -- see the file doc below ("untyped by necessity"): the BODY START/END-bracketed
+// body must stay plain, unannotated browser JS, or it ships to the browser as a syntax error.
 /**
- * lib/console-shell-client.ts — W1-T2902. THE CONSOLE SHELL'S DOM-DRIVING CLIENT CODE, AS A
- * REAL MODULE.
+ * lib/console-shell-client.ts — W1-T2902. The console shell's DOM-driving client code (event
+ * wiring, `fetch("/v1/…")` calls, DOM rendering), moved out of a raw string inside
+ * `renderShellHtml`'s template literal (invisible to `tsc`/eslint/coverage, per W1-T2731's own
+ * header) into `bootConsoleShellClient`, a real, exported, directly-callable function.
  *
- * `renderShellHtml` (lib/serve.ts) used to return ONE template literal whose `<script
- * type="module">` block was two things concatenated: `console-shell-script.ts`'s PURE helpers
- * (W1-T2731/#4073, unit-tested and spliced in via `Function.prototype.toString()`), and — until
- * this task — roughly 3,755 more lines of event wiring, `fetch("/v1/…")` calls and DOM rendering
- * as a raw, unparsed string. That string was invisible to `tsc`, eslint, the coverage instrument
- * and the `no-hand-rolled-fetch` gate for exactly the reason W1-T2731's own header names: a
- * template literal has no branches a static tool can see.
+ * INVARIANT: `bootConsoleShellClient`'s own body, when this module loads normally, IS what runs
+ * in the browser. `consoleShellClientSource()` (bottom of this file) does NOT embed it via
+ * `Function.prototype.toString()` (the technique `renderConsoleShellScript`/console-shell-
+ * script.ts uses) — this repo's `tsx`/esbuild collapses a transpiled function's `.toString()`
+ * onto one line, which would break the dozens of existing tests that regex-extract a function
+ * like `applyControlStatus` out of the rendered shell HTML by its original whitespace. Instead
+ * it slices the body verbatim off THIS FILE'S OWN SOURCE TEXT, between the `BODY START`/`BODY
+ * END` markers below — untyped BY NECESSITY, not oversight: any TS annotation inside them ships
+ * unstripped. `resolveFreshness` keeps its original `.toString()` embedding (W1-T281) —
+ * unaffected, since nothing greps its shape.
  *
- * THIS MODULE GENERALISES W1-T2731'S TECHNIQUE TO THE STATEFUL, DOM-DRIVING REMAINDER it
- * explicitly deferred ("the 109 DOM-driving functions and the 41 that read live shell state …
- * need a different technique (a DOM harness), not this one"). The DOM harness is
- * `bootConsoleShellClient` itself: a single real, exported function whose body is EXACTLY the
- * code that used to sit directly inside the `<script>` tag. Because a `<script>` tag's top level
- * and a function body are the same kind of scope for closure purposes (`let`/`const`
- * block-scoped, `function` declarations hoisted, no reordering), wrapping every top-level
- * statement inside this one function changes NOTHING about how the code runs — the shared
- * mutable state (`writeToken`, `hasWriteScope`, `lastControlStatus`, …) and the ~150 functions
- * that close over it and over each other keep exactly the closures they had inline.
- *
- * THE SEAM, AND WHY IT IS NOT `.toString()`. `renderConsoleShellScript()` (the pure-helper seam,
- * console-shell-script.ts) embeds its functions via `Function.prototype.toString()` off the real
- * function objects. This module's seam, `consoleShellClientSource()` below, does NOT use that
- * technique for `bootConsoleShellClient` itself, for a reason measured while building this task:
- * this repo's `tsx`/esbuild toolchain reprints a transpiled function's source on `.toString()`
- * with all whitespace collapsed onto one line (verified against `console-shell-script.ts`'s own
- * `escapeHtml.toString()`, which already ships that way — harmless for a function nobody greps
- * by shape). Dozens of existing tests (test/serve.test.ts, test/control-status-daemon-
- * liveness.test.ts, and others) DO regex-extract an individual function like
- * `applyControlStatus`/`needsMeTaskRowHtml` out of the rendered shell HTML by a whitespace-
- * anchored pattern (`\n  }` — two-space indent, real newlines) — a shape only a STRING LITERAL
- * (never a `.toString()`'d one) had ever guaranteed before this task. Collapsing that
- * whitespace would have silently broken every one of them.
- *
- * So instead: `bootConsoleShellClient`'s body is bracketed by two comment markers
- * (`BODY_START_MARKER`/`BODY_END_MARKER`, below), and `consoleShellClientSource()` reads THIS
- * MODULE'S OWN SOURCE FILE off disk (`fileURLToPath(import.meta.url)` — the same primitive
- * `resolveConsoleSha`, lib/serve.ts, already uses to locate itself) and slices out the text
- * between them, ONCE, at module load. Because the body is already plain browser JS (no type
- * annotations anywhere inside it — the one thing this file's `// @ts-nocheck` buys it room for),
- * that slice is valid, whitespace-preserved, ready-to-serve JS with no stripping step at all —
- * BYTE-IDENTICAL to what `renderShellHtml` shipped before this task, because it is the exact
- * same bytes, just sourced from a real file instead of copy-pasted into one enormous template
- * literal. `resolveFreshness` keeps the ORIGINAL `.toString()` embedding technique (W1-T281) —
- * nothing greps its shape, so nothing here needed to change.
- *
- * WHY THIS IS TESTABLE IN A WAY THE OLD STRING NEVER WAS: `bootConsoleShellClient` is a REAL
- * function this module exports, callable directly (its body's own text is *also* its runtime
- * behaviour — the source-slice technique above only changes how `renderShellHtml` embeds it, not
- * how it runs when this module is imported normally). test/console-shell-client.test.ts calls it
- * directly against a DOM harness — no regex-extraction of a `<script>` block, no `eval` of a
- * hand-copied string.
- *
- * ITS DEPENDENCY ON `console-shell-script.ts`'S PURE HELPERS (`escapeHtml`, `costLabel`,
- * `formatTimestamp`, …) IS REAL BUT NOT A RUNTIME IMPORT INSIDE THE SERVED SCRIPT: at runtime the
- * flattened script always places `renderConsoleShellScript()`'s output before
- * `consoleShellClientSource()`'s (see `renderShellHtml`), so those names already exist as
- * function declarations in the SAME `<script>` scope by the time this module's body references
- * them bare — exactly how they resolved when both were inline in one string. The `import` below
- * exists so this file's true dependency graph is visible to `tsc`/dependency-cruiser/a reader.
- *
- * ON TYPE-CHECKING: `// @ts-nocheck` above is a DELIBERATE, REVIEWED, NAMED exception, not a
- * silent one. `tsc --strict` on the un-transcribed body throws ~900 errors (mostly missing
- * parameter/variable type annotations and strict-null-check assertions across ~150 functions
- * ported verbatim from a context where none of that was ever checked, PLUS the constraint above
- * that its body must stay annotation-free so the source-slice technique needs no stripping
- * step). Retyping all of it in this pass risks the ONE thing this task's own rationale asks it
- * not to risk — a behavior change to code with no other test coverage yet — for a benefit (type
- * *safety*, as opposed to type *visibility*) no acceptance criterion here measures. `tsc` still
- * parses this file, still emits it on every `npm run build`, and it is now a real module the
- * coverage instrument and a DOM-harness unit test can both see — the three-of-four win this task
- * asks for. Retyping this function body incrementally is this task's own named follow-up.
+ * FALSIFIER: test/console-shell-client.test.ts (parses the seam's output; calls the real
+ * function under a DOM harness). Full design rationale and the incremental-retyping follow-up:
+ * this task's own PR body.
  */
 
 import { readFileSync } from "node:fs";

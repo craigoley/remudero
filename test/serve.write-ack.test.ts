@@ -295,7 +295,9 @@ test("POLICY acknowledge-and-name-where-to-look: a control whose effect never sh
     assert.doesNotMatch(a.text, /next refresh/, "it must not promise a refresh that changes nothing");
 
     // The contrast case: a control that DOES change the board is allowed to say so.
-    const markHandled = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
+    // W1-T2902: WRITE_ACK (and postJson, and every /v1/… call site below) moved out of serve.ts's
+    // template literal into lib/console-shell-client.ts, a real module — see that file's header.
+    const markHandled = readFileSync(new URL("../src/lib/console-shell-client.ts", import.meta.url), "utf8");
     assert.match(markHandled, /Marked handled — the escalation issue is closed\. The row clears on the next refresh\./);
     await page.close();
   });
@@ -384,7 +386,9 @@ test("W1-T364: Clear override is arm-then-confirm and reverts the rendered curre
 // ── the shared-helper contract: one place covers all twelve ──────────────────────────
 
 test("the acknowledgement lives in the shared postJson helper so every write control inherits it", () => {
-  const src = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
+  // W1-T2902: postJson/WRITE_ACK moved out of serve.ts's template literal into lib/console-
+  // shell-client.ts, a real module — see that file's own header.
+  const src = readFileSync(new URL("../src/lib/console-shell-client.ts", import.meta.url), "utf8");
   // PR #1003 put `.ok` checking in postJson precisely so twelve call sites did not need twelve
   // patches; the acknowledgement rides the same contract. If a future edit moves it out to the
   // call sites, this fails and says why.
@@ -556,7 +560,9 @@ test("W1-T2301 acceptance 3: a filing that fails after its preview succeeded lea
   // The second half of the claim: suppressAck is a single, narrow opt-out, not a mechanism that
   // spread — every OTHER of the dozen-plus postJson call sites still fires the shared ok-path ack
   // unconditionally, exactly as before this task.
-  const src = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
+  // W1-T2902: every postJson call site moved out of serve.ts's template literal into lib/
+  // console-shell-client.ts, a real module — see that file's own header.
+  const src = readFileSync(new URL("../src/lib/console-shell-client.ts", import.meta.url), "utf8");
   const suppressingCallSites = src.match(/suppressAck:\s*true/g) ?? [];
   assert.equal(suppressingCallSites.length, 1, "suppressAck must opt out exactly one call site — the fail-open leg's shared preview call");
 });

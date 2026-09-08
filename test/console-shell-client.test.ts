@@ -206,3 +206,17 @@ test("bootConsoleShellClient's write-scope gating (writeGateAttrs/probeWriteScop
     await writable.close();
   });
 });
+
+test("bootConsoleShellClient's GLANCE strip actually USES isBlockedRow (test/console-stopped-counts.test.ts's behavioural half, kept here so that suite needs no second readFileSync-as-text check — test/source-text-assertion-census.test.ts's own ratchet)", async () => {
+  const deps = fixtureDeps([task({ id: "W1-T9" }), task({ id: "W1-T10" })]);
+  // W1-T10 is escalated (needsHuman: true) -- isBlockedRow's OTHER arm, beside status === "blocked"
+  // (board.ts's own definition) -- so a strip that only counted status==="blocked" would read 0.
+  appendFileSync(deps.board.ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T10", step: "escalation.issue_opened" }) + "\n");
+  await withShell(deps, async (base) => {
+    const page = await openShell(base);
+    await page.waitForFunction(() => document.getElementById("glance-blocked")?.textContent !== "…");
+    const blocked = await page.evaluate(() => document.getElementById("glance-blocked")?.textContent ?? "");
+    assert.equal(blocked, "1", "the one escalated (needsHuman) task must count as blocked on the glance strip");
+    await page.close();
+  });
+});
