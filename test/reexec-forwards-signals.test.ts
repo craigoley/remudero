@@ -1,15 +1,33 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync, type ChildProcessByStdio } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import {
+  exitCodeForSignal,
+  forwardSignalsAndExitWithChildStatus,
+} from "../src/lib/self-sync.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SELF_SYNC_IMPORT = pathToFileURL(join(REPO_ROOT, "src", "lib", "self-sync.ts")).href;
 type ReexecParentProcess = ChildProcessByStdio<null, Readable, Readable>;
+type ReexecChildBoundary = Parameters<typeof forwardSignalsAndExitWithChildStatus>[0];
+type ReexecSignalTarget = NonNullable<
+  NonNullable<Parameters<typeof forwardSignalsAndExitWithChildStatus>[1]>["signalTarget"]
+>;
+
+class FakeReexecChild extends EventEmitter {
+  readonly killedSignals: NodeJS.Signals[] = [];
+
+  kill(signal: NodeJS.Signals): boolean {
+    this.killedSignals.push(signal);
+    return true;
+  }
+}
 
 function gitFixture(): { originDir: string; localDir: string } {
   const root = mkdtempSync(join(tmpdir(), "rmd-reexec-signal-"));
@@ -137,6 +155,58 @@ function killIfAlive(pidFile: string): void {
     // already exited
   }
 }
+
+test("signal-forwarding helper forwards configured signals and maps signal exits", () => {
+  const child = new FakeReexecChild();
+  const signalTarget = new EventEmitter() as ReexecSignalTarget & EventEmitter;
+  const exits: number[] = [];
+
+  forwardSignalsAndExitWithChildStatus(child as unknown as ReexecChildBoundary, {
+    signals: ["SIGTERM", "SIGINT"],
+    signalTarget,
+    exit: (code) => exits.push(code),
+  });
+
+  signalTarget.emit("SIGTERM");
+  child.emit("exit", null, "SIGTERM");
+  signalTarget.emit("SIGINT");
+
+  assert.deepEqual(child.killedSignals, ["SIGTERM"]);
+  assert.deepEqual(exits, [128 + 15]);
+  assert.equal(exitCodeForSignal(null), 1);
+});
+
+test("signal-forwarding helper reports child spawn errors once", () => {
+  const child = new FakeReexecChild();
+  const errors: string[] = [];
+  const exits: number[] = [];
+
+  forwardSignalsAndExitWithChildStatus(child as unknown as ReexecChildBoundary, {
+    signals: [],
+    error: (message) => errors.push(message),
+    exit: (code) => exits.push(code),
+  });
+
+  child.emit("error", new Error("boom"));
+  child.emit("exit", 99, null);
+
+  assert.deepEqual(exits, [1]);
+  assert.match(errors[0] ?? "", /re-exec failed: Error: boom/);
+});
+
+test("signal-forwarding helper passes through ordinary child status", () => {
+  const child = new FakeReexecChild();
+  const exits: number[] = [];
+
+  forwardSignalsAndExitWithChildStatus(child as unknown as ReexecChildBoundary, {
+    signals: [],
+    exit: (code) => exits.push(code),
+  });
+
+  child.emit("exit", 23, null);
+
+  assert.deepEqual(exits, [23]);
+});
 
 test("default re-exec passes through the fresh child's ordinary exit code", async () => {
   const { localDir } = gitFixture();
