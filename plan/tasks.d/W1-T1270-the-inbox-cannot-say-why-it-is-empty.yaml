@@ -10,7 +10,7 @@
   files: [src/lib/inbox.ts, test/inbox-registry-absence.test.ts]
   origin: oper#ratification-inbox-never-fired-2026-08-23
   plan_refs: ["W1-T110", "W1-T111", "W1-T240"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE LEDGER SURFACE IS DISQUALIFIED IN THE ENVIRONMENT THIS WAS FILED FROM, AND NO LEDGER FIGURE

@@ -149,7 +149,7 @@
   origin: recon#stale-credit-admission-2026-08-19
   plan_refs: ["W1-T177", "W1-T476", "W1-T471", "W1-T1013"]
   files: [src/lib/drain.ts, test/drain.test.ts, test/drain-stale-credit-admission.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) exempts only
     `risk === 'high'` and `files:` spans `src/` and `test/`. Rule 19's band is SPAN, not blast radius —

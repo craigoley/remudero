@@ -162,7 +162,7 @@
   origin: "oper#container-recycle-procedure-2026-08-18"
   plan_refs: ["W1-T978", "W1-T213", "W1-T490", "W1-T498", "W1-T404"]
   files: [deploy/recycle-container.sh, docs/operator-guide.md, src/lib/runbook-coverage.ts, test/runbook-coverage.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` WAS SET BY THE LINTER, NOT ASSERTED BY THE AUTHOR. A first draft filed at

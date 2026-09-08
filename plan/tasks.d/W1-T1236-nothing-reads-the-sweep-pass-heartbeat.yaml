@@ -122,7 +122,7 @@
   origin: feedback#fb-1785937739950-070a87
   plan_refs: ["W1-T468", "W1-T1209", "W1-T275", "W1-T1237", "W1-T1238"]
   files: [src/lib/doctor.ts, test/doctor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RULE 19 / #588 MERITS TEST, RECORDED. The one-record filing spanned five concerns (doctor,

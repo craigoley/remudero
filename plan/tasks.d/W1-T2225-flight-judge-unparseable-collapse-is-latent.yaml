@@ -10,7 +10,7 @@
   files: [src/lib/flight-judge.ts, test/flight-judge-unparseable-third-state.test.ts]
   origin: oper#flight-judge-unparseable-collapse-2026-08-24
   plan_refs: ["W1-T2212", "W1-T2215", "W1-T360", "W1-T478"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-08-24 in a scratch worktree proved equal to `origin/main` BY SHA

@@ -76,7 +76,7 @@
   origin: architect
   plan_refs: ["§5C", "§12"]
   files: [src/lib/task-linter.ts, src/run-task.ts, test/task-linter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "EXTENDED 2026-07-20 with a proof-parseability WARNING (see acceptance): the same linter pass that
     catches a post-merge amendment is the cheapest place to catch a proof the executor can never run. Folded

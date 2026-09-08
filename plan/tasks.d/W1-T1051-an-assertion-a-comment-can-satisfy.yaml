@@ -108,7 +108,7 @@
       proof: "unit test: discrimination: an unconditional ci job runs the check on every pull request"
   origin: "oper#assertion-a-comment-can-satisfy-2026-08-20"
   plan_refs: ["W1-T133", "W1-T402", "W1-T1027"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RULE 25 RE-DERIVED WITH FOUR CONTROLS, RUN AGAINST THE REAL `INSTRUMENT_SURFACE` EXPORT RATHER

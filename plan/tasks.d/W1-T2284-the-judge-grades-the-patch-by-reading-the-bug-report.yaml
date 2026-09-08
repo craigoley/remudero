@@ -212,7 +212,7 @@
     - claim: "the task title is not delivered to the judge twice under two different labels"
       proof: "unit test: test/risk-judge-description-is-the-defect.test.ts"
   files: [src/lib/risk-judge.ts, src/run-task.ts, test/risk-judge-description-is-the-defect.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#judge-grades-the-patch-by-reading-the-bug-report-2026-08-25"
   plan_refs: ["W1-T454", "W1-T970", "W1-T1031", "W1-T2212", "W1-T2244", "W1-T2263", "W1-T2276"]

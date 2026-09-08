@@ -108,7 +108,7 @@
   origin: "oper#advisory-rotation-gap-2026-08-18"
   plan_refs: ["W1-T323", "W1-T322", "W1-T1013", "W1-T316", "W1-T244"]
   files: [src/lib/ledger.ts, test/ledger-rotation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` WAS SET BY THE LINTER, NOT ASSERTED. A first draft at `medium` was refused,

@@ -10,7 +10,7 @@
   files: [test/catch-erasure-ratchet.test.ts]
   origin: "operator-brief#a-failure-and-an-absence-2026-08-25"
   plan_refs: ["W1-T438", "W1-T2266", "W1-T2260"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CENSUS, MEASURED 2026-08-25 AT 4381f5bb OVER 135 src FILES (brace-matched extraction of

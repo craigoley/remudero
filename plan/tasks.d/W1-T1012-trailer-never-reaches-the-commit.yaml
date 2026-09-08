@@ -102,7 +102,7 @@
   origin: "oper#trailer-never-reaches-the-commit-2026-08-18"
   plan_refs: ["W1-T1004", "W1-T437", "W1-T485", "W1-T327"]
   files: [src/run-task.ts, src/lib/compaction.ts, test/commit-trailer-survives-squash.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL

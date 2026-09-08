@@ -91,7 +91,7 @@
     - claim: "the layering rule still refuses a core module that reaches back to the entrypoint, and the cycle count does not rise"
       proof: "unit test: test/cli-plumbing-extraction.test.ts"
   files: [src/run-task.ts, test/cli-plumbing-extraction.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#locally-declared-cli-plumbing-2026-08-25"
   note: |

@@ -10,7 +10,7 @@
   files: [src/lib/digest.ts, src/run-task.ts, plan/policy.yaml, test/fleet-digest-cadence.test.ts]
   origin: oper#recurring-fleet-digest-2026-08-25
   plan_refs: ["W1-T8", "W1-T12", "W1-T1259", "W1-T2266", "W1-T2257"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main 145099d4 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

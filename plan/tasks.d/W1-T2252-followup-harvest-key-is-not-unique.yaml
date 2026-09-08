@@ -10,7 +10,7 @@
   files: [src/lib/retro.ts, test/followup-entry-key-collision.test.ts]
   origin: oper#followup-harvest-key-collides-2026-08-25
   plan_refs: ["W1-T105", "W1-T1013"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main 6a9aaac2 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

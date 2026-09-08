@@ -10,7 +10,7 @@
   files: [scripts/coverage-session-blanking-check.mjs, test/coverage-session-blanking.test.ts]
   origin: oper#a-spawned-child-inherits-the-coverage-session-2026-08-25
   plan_refs: ["W1-T964", "W1-T951", "W1-T2276", "W1-T2266"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (0) THE BEHAVIOUR, MEASURED HERE, AND ONE CORRECTION TO THE BRIEF THAT COMMISSIONED THIS.

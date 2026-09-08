@@ -109,7 +109,7 @@
     - claim: "the run still deletes nothing and still prints the manifest with sha and name on stdout"
       proof: "unit test: test/hold-set-adjudication-residue.test.ts"
   files: [src/lib/status.ts, test/hold-set-adjudication-residue.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#hold-set-never-read-2026-08-24"
   plan_refs: ["W1-T447", "W1-T119", "W1-T2246"]

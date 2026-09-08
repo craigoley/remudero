@@ -91,7 +91,7 @@
   origin: "oper#hand-filed-pr-should-not-need-my-merge-2026-08-19"
   plan_refs: ["W1-T1020", "W1-T516", "W1-T975", "W1-T125", "W1-T230"]
   files: [src/lib/sweep.ts, src/lib/review.ts, test/handfiled-arm-handoff.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL

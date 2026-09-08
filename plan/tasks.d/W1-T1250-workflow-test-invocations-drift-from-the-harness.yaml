@@ -10,7 +10,7 @@
   files: [.github/workflows/ci.yml, test/workflow-harness-import-parity.test.ts]
   origin: oper#workflow-harness-import-2026-08-23
   plan_refs: ["W1-T1217"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ORIGINALLY-REPORTED SITE IS ALREADY FIXED, AND THIS SHARD IS NOT IT. `coverage-ratchet`'s

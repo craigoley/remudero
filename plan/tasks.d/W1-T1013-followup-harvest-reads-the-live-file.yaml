@@ -85,7 +85,7 @@
   origin: "oper#followup-harvest-corpus-2026-08-18"
   plan_refs: ["W1-T105", "W1-T160", "W1-T437", "W1-T444"]
   files: [src/run-task.ts, src/lib/retro.ts, test/followup-harvest-corpus.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL

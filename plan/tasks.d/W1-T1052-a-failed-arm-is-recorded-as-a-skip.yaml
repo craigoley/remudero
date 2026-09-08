@@ -99,7 +99,7 @@
   origin: "oper#failed-arm-recorded-as-skip-2026-08-20"
   plan_refs: ["W1-T1050", "W1-T449", "W1-T453", "W1-T975", "W1-T471"]
   files: [src/run-task.ts, test/arm-on-passing-verdict.test.ts, test/arm-ordering.test.ts, test/arm-outcome-five-sites.test.ts, test/capped-verdict-never-arms.test.ts, test/policy.test.ts, test/run-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `files:` WAS DERIVED BY WORD-BOUNDED INVOCATION COUNT, NOT GUESSED. `logArmAttribution` reads 5

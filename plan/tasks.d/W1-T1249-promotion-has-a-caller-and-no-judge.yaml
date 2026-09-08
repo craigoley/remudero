@@ -145,7 +145,7 @@
     - claim: "an injected judge still overrides the supplied default"
       proof: "unit test: test/promotion-judge-supplied.test.ts"
   files: [src/run-task.ts, test/promotion-judge-supplied.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#promotion-has-a-caller-and-no-judge-2026-08-23"
   plan_refs: ["W1-T1059", "W1-T146", "W1-T1248", "W1-T1019", "W1-T1053", "W1-T1118"]

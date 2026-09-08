@@ -92,7 +92,7 @@
   origin: "oper#filing-pr-credits-own-task-2026-08-18"
   plan_refs: ["W1-T453", "W1-T471"]
   files: [src/lib/status.ts, test/status.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE SEVEN WRONGLY CREDITED RECORDS ARE NAMED AND NOT TOUCHED. W1-T403, W1-T478, W1-T968, W1-T971,

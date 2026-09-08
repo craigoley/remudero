@@ -135,7 +135,7 @@
     - claim: "no claim that fails today passes after the change"
       proof: "unit test: test/claims-harness-third-state.test.ts"
   files: [scripts/claims-check.mjs, plan/claims.yaml, test/claims-harness-third-state.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#claims-harness-third-state-2026-08-24"
   plan_refs: ["W1-T29", "W1-T2212"]

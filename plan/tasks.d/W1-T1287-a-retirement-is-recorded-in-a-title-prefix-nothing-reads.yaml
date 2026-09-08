@@ -10,7 +10,7 @@
   files: [src/lib/plan.ts, src/lib/status-board.ts, test/task-retirement-reason.test.ts]
   origin: oper#retirement-reason-is-a-title-prefix-2026-08-23
   plan_refs: ["W1-T229", "W1-T280", "W1-T324", "W1-T1257", "W1-T1261", "W1-T1273"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL COUNTS BELOW RE-DERIVED AT origin/main b49d951b IN A SCRATCH WORKTREE PROVEN EQUAL TO IT.

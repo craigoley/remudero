@@ -196,7 +196,7 @@
     - claim: "no value that can change while a PR is open is served past the poll TTL"
       proof: "unit test: test/board-index-walk-bounds.test.ts"
   files: [src/lib/open-prs-rest.ts, src/lib/status.ts, test/board-index-walk-bounds.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#board-index-walk-rereads-the-corpus-2026-08-24"
   plan_refs: ["W1-T2217", "W1-T181", "W1-T914"]

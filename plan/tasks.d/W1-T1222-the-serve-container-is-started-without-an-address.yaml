@@ -96,7 +96,7 @@
   origin: "oper#serve-container-started-without-an-address-2026-08-22"
   plan_refs: ["W1-T915", "W1-T531", "W1-T507", "W1-T1006", "W1-T283"]
   files: [deploy/host-update.sh, deploy/runtime-env-vars.sh, test/host-update-reclaim.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` names two deploy

@@ -147,7 +147,7 @@
     - claim: "the review budget and its floor are unchanged"
       proof: "unit test: test/review-lane-fairness.test.ts"
   files: [src/lib/sweep.ts, test/review-lane-fairness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#review-lane-order-starves-older-prs-2026-08-22"
   plan_refs: ["W1-T476", "W1-T473", "W1-T1049", "W1-T513", "W1-T526", "W1-T913", "W1-T1201"]

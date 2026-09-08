@@ -93,7 +93,7 @@
     - claim: "the recoverable-class census keeps its existing membership unchanged"
       proof: "unit test: test/queue-head-dispatch-parity.test.ts"
   files: [src/lib/status-board.ts, src/lib/drain.ts, test/queue-head-dispatch-parity.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#queue-head-advertises-undispatchables-2026-08-22"
   plan_refs: ["W1-T507", "W1-T298", "W1-T1201"]

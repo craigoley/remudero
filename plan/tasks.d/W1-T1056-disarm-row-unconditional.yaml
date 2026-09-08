@@ -100,7 +100,7 @@
   origin: recon#disarm-row-unconditional-2026-08-20
   plan_refs: ["W1-T125", "W1-T970", "W1-T975", "W1-T1052"]
   files: [src/run-task.ts, test/arm-at-open.test.ts, test/disarm-on-capped-verdict.test.ts, test/disarm-outcome-recorded.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) exempts only
     `risk === 'high'` and returns clean only below two subsystems; `files:` spans `src/` and

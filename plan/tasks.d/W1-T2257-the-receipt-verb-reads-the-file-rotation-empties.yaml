@@ -166,7 +166,7 @@
     - claim: "the receipt still carries no signature key"
       proof: "unit test: test/receipt-reads-the-live-file.test.ts"
   files: [src/lib/receipt.ts, test/receipt-reads-the-live-file.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#receipt-reads-the-rotated-file-2026-08-25"
   plan_refs: ["W1-T71", "W1-T244", "W1-T1097"]

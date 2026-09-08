@@ -115,7 +115,7 @@
       proof: "unit test: worker home reap: a pass that removes nothing still reports"
   origin: "oper#worker-homes-filled-the-disk-2026-08-20"
   plan_refs: ["W1-T170", "W1-T411", "W1-T18"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RULE 25 RE-DERIVED BY RUNNING THE REAL `INSTRUMENT_SURFACE` EXPORT WITH FOUR CONTROLS.

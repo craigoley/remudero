@@ -99,7 +99,7 @@
   origin: "oper#nothing-tests-main-2026-08-19"
   plan_refs: ["W1-T1014", "W1-T312", "W1-T1027"]
   files: [.github/workflows/ci.yml, test/push-ci-on-main.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THIS RIDES ALONE — NO `src/` PATH MAY ENTER THE IMPLEMENTING DIFF, AND THAT IS A GATE. Rule 25

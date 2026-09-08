@@ -86,7 +86,7 @@
     - claim: "the strike ceiling and its escalation at the cap are unchanged"
       proof: "unit test: W1-T1210: the strike ceiling is unchanged by the clearing path"
   files: [src/lib/sweep.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#gate-with-no-owning-dispatch-2026-08-22"
   plan_refs: ["W1-T1110", "W1-T1127", "W1-T1129", "W1-T1067", "W1-T1209"]

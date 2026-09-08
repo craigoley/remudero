@@ -10,7 +10,7 @@
   files: [src/lib/proof-queue-audit.ts, src/run-task.ts, test/credited-task-proof-visibility.test.ts]
   origin: oper#credited-and-unsatisfied-is-invisible-2026-08-25
   plan_refs: ["W1-T150", "W1-T180", "W1-T506", "W1-T1053", "W1-T1076", "W1-T1223"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main f3109443 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

@@ -96,7 +96,7 @@
   origin: "recon#failing-split-misses-older-filing-convention-2026-08-21"
   plan_refs: ["W1-T413", "W1-T324"]
   files: [src/run-task.ts, test/lint-plan-merge-evidence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE TWO MUST NOT BE CONFUSED HERE.

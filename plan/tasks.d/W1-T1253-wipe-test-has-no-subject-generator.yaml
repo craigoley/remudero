@@ -10,7 +10,7 @@
   files: [src/lib/wipe-test.ts, test/sandbox-subject-generator.test.ts]
   origin: oper#wipe-test-subject-generator-2026-08-23
   plan_refs: ["W1-T1252"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE DESIGN REQUIRES AN AGGREGATE AND NAMES ITS INPUT "SEEDED". `src/lib/wipe-test.ts`'s own
