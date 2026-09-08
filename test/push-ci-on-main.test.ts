@@ -68,8 +68,8 @@ test("W1-T1033: the ci workflow runs the suite on a push to main", async () => {
 
   const runs = (ci!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
   assert.ok(
-    runs.some((r) => /node scripts\/test-with-retry\.mjs\s+\\\s+node --test --test-shard=\$\{\{ matrix\.shard \}\}\/4/.test(r)),
-    "the `ci` matrix must put the shard option before the positional test glob while retaining the existing retry harness — that is what a push run observes",
+    runs.some((r) => /node scripts\/test-with-retry\.mjs\s+\\\s+node scripts\/test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/4 --base "\$TIER_BASE"/.test(r)),
+    "the `ci` matrix must run the duration-balanced fast shard through the retry harness on both PR and push events",
   );
 
   // The job body itself must stay push-safe: zero references to PR-scoped context that would be
@@ -195,7 +195,7 @@ test("W1-T1033: the pull request trigger is byte-for-byte unchanged", async () =
     // its job body carries no `if:` at all — see the next test) carry no gate; every other job
     // does. Either way nothing here narrows what a pull_request event registers.
     if (job.if === undefined) continue;
-    if (jobId === "ci-required" || jobId === "coverage-ratchet-required") {
+    if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "flake-retry-aggregate") {
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must register even when its shards fail`);
     } else {
       assert.equal(
