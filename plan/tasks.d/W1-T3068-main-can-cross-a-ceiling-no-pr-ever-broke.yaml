@@ -48,6 +48,28 @@
     not on PRs would red the branch with no way to fix it before merging. Both lists are derived from
     the workflow itself rather than a second hand-kept roster.
 
+    (7) WHAT SHIPPED IS NOT THE JOB (4) AND (5) DESCRIBE, recorded here because the shard is the
+    record and Rule 21 freezes the criteria, not the prose. W1-T3068 merged as #4505 (5a691095) with
+    NO `main-ceiling-drift` job: the four ceilings run inside the existing `ci` matrix, on shard 1
+    only, behind `[ "${GITHUB_EVENT_NAME}" = "push" ]`. Criterion 3's wording ("the job is
+    push-only") and (5)'s "a push-only job" therefore describe a shape that was not built, and the
+    falsifier that proves criterion 3 now asserts the opposite fact -- that no such job exists.
+
+    THE INVARIANT SURVIVED THE REDESIGN; ONLY THE MECHANISM CHANGED, and it survived more directly.
+    (5)'s requirement is that this measurement can never become a required check that goes SKIPPED
+    on a pull request. A push-only JOB satisfies that by registering a skipped check nobody may
+    require -- which is why the first draft needed a CI_PARITY_TABLE entry, a ci-gate ADVISORY
+    entry, and two job-level `if:` guards taught a new shape before it could pass. Riding inside
+    `ci` satisfies it by registering NO new check at all, so there is nothing to mis-require and
+    none of those three registrations is needed. The ceilings measured, the accumulate-then-exit
+    behaviour, and the derived-not-hand-kept lists of (6) are all unchanged.
+
+    LEFT DELIBERATELY UNAMENDED: the acceptance criteria. Standing rule 21 makes MERGED terminal --
+    the drain skips a merged id and the retro sweep skips a closed one -- so rewording a criterion
+    now would orphan it rather than correct it, and `postMergeAmendmentViolations` blocks exactly
+    that unless a follow-up task carries it. There is no follow-up to file: nothing is left to
+    build. This note is the correction, in the field an amendment is expected to touch.
+
   acceptance:
     - claim: "the absolute ceilings are measured against main on the event that produced the drift"
       proof: "unit test: test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts"

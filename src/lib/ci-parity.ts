@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
+// W1-T3099: the judge's own two primitives, imported rather than re-derived.
+import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
 /**
  * lib/ci-parity.ts — `rmd preflight --ci-parity` (W1-T294, MASTER-PLAN §5/§5C): a second,
@@ -2310,4 +2312,64 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
   steps.push(diffCoverage);
 
   return { steps, ok: steps.every((s) => s.ok) };
+}
+
+// ── W1-T3099: Standing rule 15, at author time ────────────────────────────────────────────────
+
+/**
+ * THE JUDGE'S REMEDY, COPIED VERBATIM from `checkSatisfiedByGuard` (review.ts). An author who reads
+ * one sentence at preflight and another at review must reconcile two texts to learn one rule.
+ * review.ts's own comment records why BOTH halves are needed: telling an author only to SPLIT
+ * converts one refusal into another (#3626, #3631, #3636, #3669 each split correctly and were
+ * refused anyway).
+ */
+export const RULE_15_SPLIT_REMEDY =
+  "REMEDY: file the shard in its own plan-only PR (no src/ or test/ file in that diff), then build " +
+  "it in a second PR. In the filing PR's body, substantiate each criterion by NAMING the proof that " +
+  "will carry it.";
+
+/** The verdict {@link rule15SplitViolation} returns. `refused: false` carries no reason. */
+export interface Rule15SplitVerdict {
+  refused: boolean;
+  reason?: string;
+}
+
+/**
+ * W1-T3099 — Standing rule 15 evaluated on a LOCAL diff, so `rmd preflight` and `lint-plan --base`
+ * refuse before a push what the judge refuses after a full CI cycle.
+ *
+ * ONE PREDICATE, TWO VERBS, consuming the JUDGE'S OWN primitives rather than a second notion of
+ * either half: {@link criterionFieldTampered} decides "a criterion moved" and {@link planOnlyDiff}
+ * decides "this diff is a filing". A local re-implementation of either could disagree with review,
+ * and an author-time check that refuses what the judge allows is worse than no check.
+ *
+ * DELIBERATELY WEAKER THAN THE JUDGE, IN THE SAFE DIRECTION. `checkSatisfiedByGuard` carves out
+ * `planOnly && humanAuthored`; authorship is not knowable from a diff, so this carves out
+ * `planOnly` alone. Stated rather than hidden: a plan-only WORKER-authored diff passes here and may
+ * still be refused at review. That is an UNDER-refusal — it never blocks work the judge would have
+ * allowed, which is the only direction an early warning may err in.
+ */
+export function rule15SplitViolation(diff: string): Rule15SplitVerdict {
+  if (!criterionFieldTampered(diff)) return { refused: false };
+  // The filing PR's own shape — the judge's derivation, not "no src/ file" spelled a second time.
+  if (planOnlyDiff(diff)) return { refused: false };
+  return {
+    refused: true,
+    reason:
+      "Standing rule 15: plan/tasks.yaml's (or a plan/tasks.d/ shard's) acceptance criteria were " +
+      "added/edited in a diff that also touches non-plan files. " +
+      RULE_15_SPLIT_REMEDY,
+  };
+}
+
+/**
+ * The preflight step. REFUSES rather than warns: `rmd preflight` already exits non-zero for parity
+ * failures and this joins them, because a warning at author time is a line in a scroll-back and the
+ * failure it prevents costs a full CI cycle.
+ */
+export function rule15SplitStep(diff: string): CiParityStepResult {
+  const verdict = rule15SplitViolation(diff);
+  return verdict.refused
+    ? { name: "rule-15-split", ok: false, detail: verdict.reason ?? "Standing rule 15 violation" }
+    : { name: "rule-15-split", ok: true, detail: "no acceptance criterion added or edited beside a non-plan file" };
 }

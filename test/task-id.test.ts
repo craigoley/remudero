@@ -71,7 +71,9 @@ test("mintNextTaskId: every source is folded with max — the highest wins where
   const planPath = planFixture([300, 12], { "a.yaml": "- id: W1-T7\n", "b.yaml": "- id: W1-T290\n" });
   const mint = mintNextTaskId({ planPath, openPrTexts: () => ["nothing minted here"] });
   assert.equal(mint.id, "W1-T301");
-  assert.deepEqual(mint.sources, { monolith: 300, shards: 290, openPrs: null, remotePlan: null });
+  // W1-T3062 added `reservations`; null here for the same reason `remotePlan` is — no reader was
+  // injected. Kept EXHAUSTIVE rather than partial so a new source cannot slip in unasserted.
+  assert.deepEqual(mint.sources, { monolith: 300, shards: 290, openPrs: null, remotePlan: null, reservations: null });
 });
 
 test("mintNextTaskId: an unsharded plan is EMPTY shards, not a degradation (back-compat)", () => {
@@ -108,7 +110,9 @@ test("describeMint names the id, the max, and every source it derived from", () 
   const line = describeMint(mintNextTaskId({ planPath, openPrTexts: () => ["W1-T10"] }));
   // W1-T2710 added the `remote plan` term. `-` is the UNMEASURED reading: no reader was injected
   // here, so the line must say the comparison never happened rather than imply a current ceiling.
-  assert.match(line, /^W1-T12 \(max 11 across tasks\.yaml 9, shards 11, open PRs 10, remote plan -\)$/);
+  // W1-T3062: `reservations -` joins `remote plan -` under W1-T2710's own rule — a dash says the
+  // comparison never ran, a number says it ran. Still anchored `^…$`, so the line is pinned whole.
+  assert.match(line, /^W1-T12 \(max 11 across tasks\.yaml 9, shards 11, open PRs 10, remote plan -, reservations -\)$/);
 });
 
 test("describeMint says 'not enumerated' when the open-PR source was never consulted (offline mint)", () => {
