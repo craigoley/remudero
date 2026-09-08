@@ -1,0 +1,85 @@
+- id: W1-T3103
+  title: "RULING — SHOULD A WORKTREE BE TWO-PHASE: INSTALL ONLINE WITH CREDENTIALS, IMPLEMENT WITH THE NETWORK NAMESPACE REMOVED AND NO TOKEN IN ENV? Today one phase holds both: W1-T2914 records that the worker env allowlist carries `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` and that `gh` runs OUTSIDE the sandbox via `excludedCommands`, while `hooks/deny-floor.sh` says of itself 'a tripwire, NOT a sandbox — the OS sandbox (§4A) is the real boundary'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 2.00
+  files: [DECISIONS.md]
+  origin: "operator-session#next-wave-2026-09-08"
+  plan_refs: ["W1-T2914", "W1-T496"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at a0b6ba81e. This is a RULING, not a build.
+
+    THE CREDENTIAL AND THE IMPLEMENT PHASE SHARE ONE ENVIRONMENT. W1-T2914's title states it:
+    "the worker env allowlist carries GH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN, gh runs outside the
+    sandbox via excludedCommands". So the phase that writes code is the phase that holds a token
+    which can push, comment and merge, and the tool that uses it is the tool exempted from the
+    sandbox.
+
+    THE ENFORCEMENT FLOOR SAYS IT IS NOT THE BOUNDARY. `hooks/deny-floor.sh:5-9`, verbatim: "This is
+    the deterministic floor that must hold even under bypassPermissions. It is a tripwire, NOT a
+    sandbox — the OS sandbox (§4A) is the real boundary; this catches a small, explicit set of
+    never-do operations". MASTER-PLAN.md:131 names that boundary: "workers are OS-sandboxed to their
+    worktrees".
+
+    THE SANDBOX BINARIES ARE PRESENT AND BAKED. `deploy/Dockerfile:106` — "REQ 8: the sandbox
+    binaries — bubblewrap and socat" — installs `bubblewrap socat procps lsof jq` (:116) and
+    verifies with `bwrap --version` (:118). CORRECTING A LIKELY MIS-CITATION: `bubblewrap` appears
+    ZERO times in `hooks/deny-floor.sh` (`grep -cin "bubblewrap\|bwrap"` -> 0); the floor is the
+    Dockerfile's REQ 8, not the hook. Anyone citing a bubblewrap floor in the deny-hook is reading
+    the wrong file, and this shard says so rather than repeating it.
+
+    SO THE MATERIAL EXISTS AND THE PHASE SPLIT DOES NOT. `bwrap` can remove a network namespace;
+    nothing today asks it to, because install and implement are one phase and install genuinely
+    needs the network.
+  design: |
+    THE OPERATOR RULES BETWEEN THREE SHAPES. This task builds none of them; it records the choice.
+
+    (a) NETWORK OFF DURING IMPLEMENT. Phase 1 installs online with credentials present; phase 2
+    re-enters the worktree with the network namespace removed and NO token in env. Strongest: an
+    implement turn cannot exfiltrate, cannot push, and cannot silently depend on a fetch. Cost: any
+    legitimate mid-implement network need becomes a hard failure, and `gh`-shaped steps must be
+    hoisted out of the implement phase or fail — which is a real behaviour change for every lane
+    that shells `gh` today via `excludedCommands`.
+
+    (b) ALLOWLIST PROXY ONLY. Both phases keep a network, but egress is confined to an allowlist.
+    Weaker than (a) — a compromised turn can still reach an allowlisted host — but it does not
+    require classifying which steps need the network, and it degrades to a diagnosable proxy denial
+    rather than an ENETUNREACH deep inside a tool.
+
+    (c) STATUS QUO — one phase, token in env, `gh` outside the sandbox.
+
+    NO RECOMMENDATION IS OFFERED, DELIBERATELY. (a) and (b) trade a real capability against a real
+    exposure, and this shard has NOT measured how many implement turns actually touch the network —
+    that measurement is the first thing whoever takes this should produce, because it converts the
+    trade from a preference into a number. A recommendation made without it would be a guess wearing
+    a rank.
+  acceptance:
+    - claim: "DECISIONS.md records whether the implement phase runs with the network namespace removed"
+      proof: "grep: network namespace in DECISIONS.md"
+    - claim: "the entry rules on the allowlist-proxy alternative rather than leaving it implied"
+      proof: "grep: allowlist proxy in DECISIONS.md"
+    - claim: "the entry names the two-phase shape it is ruling on, so a later reader can tell which question was settled"
+      proof: "grep: two-phase worktree in DECISIONS.md"
+  falsifier: |
+    CLOSE IF the ruling is already recorded: `grep -c "network namespace" DECISIONS.md`,
+    `grep -c "allowlist proxy" DECISIONS.md`, `grep -c "two-phase worktree" DECISIONS.md`.
+    MEASURED 2026-09-08 at a0b6ba81e: 0, 0 and 0 — no entry exists.
+    CLOSE ALSO IF the premise has moved: re-read W1-T2914's title and
+    `grep -n "excludedCommands" src/` — if the token no longer rides in the worker env, or `gh` is
+    no longer sandbox-exempt, the exposure this rules on is gone.
+    A RULING IS NOT SATISFIED BY BUILDING (a) OR (b). This task's `files:` is `DECISIONS.md` alone.
+    Shipping a bwrap flag here decides the question the operator was asked, and does it without the
+    network-touch measurement the design section says must come first.
+  note: |
+    verify: human because the trade is a judgment about acceptable exposure, not a property a test
+    can establish. The three grep proofs are absent TODAY by construction (each measured at 0), so
+    they discriminate: they can only pass once the ruling is written.
+    THIS SHARD CORRECTS ITS OWN BRIEF: the bubblewrap floor is `deploy/Dockerfile` REQ 8, NOT
+    `hooks/deny-floor.sh`, which contains no such string.
