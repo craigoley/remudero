@@ -620,6 +620,9 @@ export interface OpenPrView {
   actionableGateFailures?: ActionableGateFailure[];
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
   priorStrikes: number;
+  /** W1-T3130 — post-review failures for THIS pr at THIS head, and whether they are permanent.
+   *  Absent reads as "none attempted", never as blocked. See {@link postReviewRefusalAtHead}. */
+  postReviewRefusal?: PostReviewRefusal;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
    *  credit projection ({@link CreditCandidate} with `merged: true`). STRICTLY STRONGER EVIDENCE
    *  than {@link supersededBy}, which means only that a higher-numbered OPEN peer shares the
@@ -2219,6 +2222,19 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // W1-T225 also routes a review ORPHANED BY A PUSH here — identical dispatch, different reason,
     // prior verdict never carried forward. W1-T913/W1-T2844: `"pending"` matches once the owner is
     // proven dead or the pending is stale; a FRESH pending is EXCLUDED, claimed as `wait` below.
+    // W1-T3130 — A STOOD-DOWN POST-REVIEW IS ESCALATED, NEVER SILENT. THE ORDER IS THE MECHANISM:
+    // this row is the ONLY thing keeping an exhausted PR out of the post-review arm below, so a
+    // reorder re-opens the 143-dispatch loop. A duplicate `!postReviewIsExhausted` guard on that
+    // arm was written first and DELETED: no test could tell it from dead code, because this row
+    // catches every case it would have. A test pins the order instead. Ordered STRICTLY BEFORE
+    // the post-review row below, whose `when` also excludes these: without this row an exhausted
+    // PR would fall through to `wait` and sit green-and-unreviewed with no signal at all, which is
+    // the same invisibility the loop had, only quieter.
+    disposition: "blocked-ambiguous",
+    when: (pr) => pr.checksState === "green" && postReviewIsExhausted(pr),
+    reason: (pr) => postReviewExhaustedReason(pr),
+  },
+  {
     disposition: "post-review",
     when: (pr, policy, _ageDays, now) =>
       pr.checksState === "green" &&
@@ -4064,7 +4080,15 @@ export async function runSweep(
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
   for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
-    const pr = openPrs[prIndex];
+    // W1-T3130 — decorate with this PR's OWN head-keyed post-review refusal, off the SAME
+    // `ledgerLines` this pass already read. No extra read, and no run-task change: the identical
+    // discipline `requeuedCheckKeysFromLedger` follows above. A caller that supplied the field
+    // itself is respected; only an ABSENT one is derived, so an injected test view stays honest.
+    const base = openPrs[prIndex];
+    const pr: OpenPrView =
+      base.postReviewRefusal !== undefined
+        ? base
+        : { ...base, postReviewRefusal: postReviewRefusalAtHead(ledgerLines, base.prNumber, base.headSha) };
     const { disposition, reason } = deriveDisposition(pr, policy, now);
     byDisposition[disposition]++;
 
@@ -6415,4 +6439,92 @@ export async function runPostFixReverification(
   const summary: PostFixReverificationSummary = { total: openPrs.length, redriven, results };
   log("sweep.post_fix_reverification.summary", { total: summary.total, redriven: summary.redriven });
   return summary;
+}
+
+// ── W1-T3130: a permanent post-review refusal is not retried forever ─────────────────────────
+
+/**
+ * GitHub refuses to serve a diff above 300 changed files. This is a CONSTANT OF THE API, not a
+ * transient: no retry at the same head can succeed. OBSERVED verbatim on PR #4510:
+ *   "could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of
+ *    files (300)."
+ * Matched on the STABLE half — the status and the ceiling sentence — never on the PR number or the
+ * URL, which differ per PR and would split one systematic refusal into many.
+ */
+export const POST_REVIEW_PERMANENT_DIFF_RE = /406[\s\S]*diff exceeded the maximum number of files/i;
+
+/** Attempts at ONE head, and why they can never succeed. See {@link postReviewRefusalAtHead}. */
+export interface PostReviewRefusal {
+  /** Consecutive `sweep.post_review.failed` rows for THIS pr at THIS head, `.done` resetting. */
+  attempts: number;
+  /** Present when the newest failure is provably permanent — the diff ceiling. */
+  permanentReason?: string;
+}
+
+/** How many same-head post-review failures mean this head will not post.
+ *
+ *  A BACKSTOP, not a primary control. The PRIMARY CONTROL for this defect is
+ *  {@link POST_REVIEW_PERMANENT_DIFF_RE}, which recognises the refusal that provably cannot
+ *  succeed; this cap exists only for the failures classification does NOT recognise, so it can be
+ *  small. Stopping one pass early costs a re-derivation; stopping late costs a loop that runs for
+ *  days (#4510: 143 dispatches over three days). */
+export const POST_REVIEW_ATTEMPT_CAP = 3;
+
+/**
+ * W1-T3130 — post-review failures for ONE pr at ONE head.
+ *
+ * WHY THIS IS NOT {@link detectPostReviewStall}. That detector is real, wired
+ * (`run-task.ts`'s post-review catch) and correct for what it does — it NOTIFIES an operator that
+ * the post-review path has stalled. Two things keep it from bounding this loop:
+ *   (1) IT NOTIFIES, IT DOES NOT STOP. Its caller re-throws and the disposition arm re-derives on
+ *       the next pass, unchanged.
+ *   (2) IT IS GLOBAL, NOT PER-PR. Its run resets on ANY `sweep.post_review.done`, from any PR.
+ *       MEASURED over the 2026-09-05..09-08 corpus: 11 `.failed` against 230 `.done`, and ZERO
+ *       stall rows — while #4510 was re-dispatched 143 times. One permanently-stuck PR is
+ *       arithmetically invisible to a global run while any other PR is succeeding.
+ * So this counts the same events, keyed the way the decision needs them. `detectPostReviewStall`
+ * is left exactly as it is; its escalation is still the right signal for a fleet-wide stall.
+ *
+ * HEAD-KEYED, so a new push is a new chance: a split or amended PR is retried from zero.
+ */
+export function postReviewRefusalAtHead(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prNumber: number,
+  headSha: string | undefined,
+): PostReviewRefusal {
+  if (headSha === undefined) return { attempts: 0 };
+  const run: Record<string, unknown>[] = [];
+  for (const l of lines) {
+    if (l.pr_number !== prNumber || l.head_sha !== headSha) continue;
+    if (l.step === "sweep.post_review.done") run.length = 0;
+    else if (l.step === "sweep.post_review.failed") run.push(l);
+  }
+  if (run.length === 0) return { attempts: 0 };
+  const newestError = String(run[run.length - 1]?.error ?? "");
+  return POST_REVIEW_PERMANENT_DIFF_RE.test(newestError)
+    ? {
+        attempts: run.length,
+        permanentReason:
+          "GitHub will not serve this PR's diff: it exceeds the 300-file ceiling, so no retry at " +
+          "this head can succeed. Split it into PRs of at most 300 files.",
+      }
+    : { attempts: run.length };
+}
+
+/** Should the post-review arm stand down for this PR at this head? PERMANENT wins immediately;
+ *  otherwise the attempt cap does. `undefined` refusal reads as "no attempts", never as blocked. */
+export function postReviewIsExhausted(pr: OpenPrView): boolean {
+  const r = pr.postReviewRefusal;
+  if (r === undefined) return false;
+  return r.permanentReason !== undefined || r.attempts >= POST_REVIEW_ATTEMPT_CAP;
+}
+
+/** The operator-facing sentence for a stood-down post-review. Names the cause AND the remedy — a
+ *  loop that goes quiet without saying why is the same defect wearing a different face. */
+export function postReviewExhaustedReason(pr: OpenPrView): string {
+  const r = pr.postReviewRefusal;
+  return r?.permanentReason !== undefined
+    ? `post-review stood down on #${pr.prNumber}: ${r.permanentReason}`
+    : `post-review stood down on #${pr.prNumber}: ${r?.attempts ?? 0} consecutive failures at this head ` +
+      `(cap ${POST_REVIEW_ATTEMPT_CAP}) — a new push resets it`;
 }
