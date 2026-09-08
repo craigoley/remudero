@@ -110,6 +110,14 @@ test("W1-T3207: a PUSH to main still runs the ci harness — the skip is event-c
     /single instrumented full-suite run/,
     "the coverage-owns-the-run skip must not fire on a push, where coverage-ratchet does not run",
   );
+
+  const mixedEnv = runBash(runnable("ci", "Test"), { GITHUB_EVENT_NAME: "push", GITHUB_BASE_REF: "main" });
+  assert.match(
+    mixedEnv.stdout,
+    /class=SOURCE — running test shard/,
+    "the skip must be keyed to the event, not merely a non-empty base ref inherited by a workflow test",
+  );
+  assert.match(mixedEnv.calls, /scripts\/test-with-retry\.mjs/, "a push must keep invoking the ci harness");
 });
 
 test("W1-T3207: the full test glob appears only in the instrumented coverage run", () => {

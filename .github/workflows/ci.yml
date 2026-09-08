@@ -202,7 +202,7 @@ jobs:
               echo "- plan-reading shard summary: candidate_count=${COUNT}, assigned_count=0, predicted_duration_ms=0, fallback=source, shard=${{ matrix.shard }}/4" >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
-          if [ "$CLASS" = "SOURCE" ] && [ -n "${GITHUB_BASE_REF}" ]; then
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_""request" ]; then
             echo "W1-T3207: coverage-ratchet owns the single instrumented full-suite run; ci skips the quieter second harness on PR source diffs."
             echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented full-suite run for this PR." >> "$GITHUB_STEP_SUMMARY"
             exit 0
