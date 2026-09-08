@@ -80,13 +80,13 @@
 - id: control-proves-reach-not-window
   subsystem: evidence
   lifecycle: active
-  files: [src/lib/ledger-grep.ts, scripts, test]
+  files: [src/lib/ledger-union.ts, scripts, test]
   fact: >-
     A positive control proves the query can SEE its corpus; it does NOT prove the corpus COVERS the
     window asked about. Measured: resolveLedgerUnion returned archiveCount 0 / ok false against a
     state dir whose live ledger read fine — the reader worked and the corpus was simply the wrong one.
     Qualify a control for the WINDOW — date range, surface, tree — as well as for readability.
-  assertion: 'grep -q "archiveCount" src/lib/ledger-grep.ts'
+  assertion: 'grep -q "archiveCount" src/lib/ledger-union.ts'
   src: measured 2026-08-23 — 126-line live ledger, one distinct step, zero archives
   cited: "2026-08-23"
 
