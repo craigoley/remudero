@@ -7,6 +7,10 @@ FINDINGS-local*
 dist/
 *.tsbuildinfo
 
+# W1-T2902: apps/dashboard's own package-local build (its tsconfig.json emits beside
+# index.html, deliberately NOT into the shared dist/ above — see that tsconfig's own comment)
+apps/dashboard/build/
+
 # generated coverage reports (W1-T25 coverage-ratchet gate consumes coverage/lcov.info,
 # regenerated fresh every run — never committed)
 coverage/
