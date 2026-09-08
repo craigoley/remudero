@@ -10,7 +10,7 @@
   files: [src/lib/drain.ts, src/lib/daemon.ts, test/a-retired-task-is-not-a-recoverable-blocker.test.ts]
   origin: "operator-brief#go-with-the-recommendations-2026-08-30"
   plan_refs: ["W1-T1287", "W1-T391", "W1-T314", "W1-T280", "W1-T2473"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ESCALATION IS NOT DESCRIBING REALITY. Issue #3207 has sat open since 2026-08-28 telling the

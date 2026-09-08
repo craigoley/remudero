@@ -10,7 +10,7 @@
   files: [deploy/recycle-container.sh, test/the-recovery-path-merges-into-a-shared-checkout.test.ts]
   origin: "operator-brief#recovery-blocked-by-shared-checkout-2026-09-01"
   plan_refs: ["W1-T1010", "W1-T2555", "W1-T191"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── WHAT HAPPENED, AND WHY THE TIMING IS THE POINT ──────────────────────────────────────────

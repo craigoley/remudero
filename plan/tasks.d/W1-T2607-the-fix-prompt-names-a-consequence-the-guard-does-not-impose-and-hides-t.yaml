@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/fix-prompt-inherited-scope.test.ts]
   origin: "followup:DAEMON-1788016810368:2026-08-29T15:26:29.026Z:1"
   plan_refs: ["W1-T1227", "W1-T2287", "W1-T2286", "W1-T2248", "W1-T434", "W1-T105"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE TWO SITES, READ AT HEAD RATHER THAN RECALLED.

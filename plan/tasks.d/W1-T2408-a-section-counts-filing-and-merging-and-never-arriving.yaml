@@ -10,7 +10,7 @@
   files: [src/lib/producer-completeness.ts, test/runtime-adoption-is-reported-not-gated.test.ts]
   origin: "operator-brief#section-counts-filing-not-arriving-2026-08-27"
   plan_refs: ["W1-T2266", "W1-T322", "W1-T997", "W1-T2273"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces, anchored `W1-T2408([^0-9]|$)` with a `[0-9]` class and never `\d`,

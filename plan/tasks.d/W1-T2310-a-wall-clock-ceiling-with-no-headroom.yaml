@@ -10,7 +10,7 @@
   files: [test/w1-t187-benchmark.test.ts]
   origin: oper#a-wall-clock-ceiling-with-no-headroom-2026-08-26
   plan_refs: ["W1-T187", "W1-T220", "W1-T1128", "W1-T1266"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL FIGURES BELOW WERE MEASURED IN A WORKTREE AT /Users/craigoleyagent/Remudero/t2310, SHA

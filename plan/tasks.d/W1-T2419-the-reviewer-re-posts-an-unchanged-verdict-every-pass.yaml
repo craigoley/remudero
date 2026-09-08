@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/review-verdict-repost-is-deduped.test.ts]
   origin: "operator-brief#reviewer-reposts-unchanged-verdict-2026-08-27"
   plan_refs: ["W1-T1213", "W1-T195", "W1-T2382", "W1-T176"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces, anchored `W1-T2419([^0-9]|$)` with a `[0-9]` class and never `\d`,

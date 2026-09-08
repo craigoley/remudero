@@ -10,7 +10,7 @@
   files: [deploy/entrypoint.sh, test/an-operator-stop-is-undone-by-the-restart-policy.test.ts]
   origin: "operator-brief#stop-does-not-stop-2026-09-01"
   plan_refs: ["W1-T1067", "W1-T2537", "W1-T1010"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE MECHANISM, FROM THE ENTRYPOINT'S OWN OUTPUT ──────────────────────────────────────────

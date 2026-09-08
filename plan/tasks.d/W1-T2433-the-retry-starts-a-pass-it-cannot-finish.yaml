@@ -10,7 +10,7 @@
   files: [scripts/test-with-retry.mjs, test/retry-does-not-start-a-pass-it-cannot-finish.test.ts]
   origin: "operator-brief#retry-cannot-finish-so-a-flake-is-a-cancellation-2026-08-28"
   plan_refs: ["W1-T1009", "W1-T459", "W1-T1041", "W1-T1074", "W1-T1075", "W1-T2430", "W1-T2431", "W1-T312"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base 49b4b18b, anchored `W1-T2433([^0-9]|$)` with a `[0-9]`

@@ -10,7 +10,7 @@
   files: [src/lib/bundle.ts, src/run-task.ts, test/bundle-export.test.ts]
   origin: "operator-brief#direction-refresh-2026-08-27"
   plan_refs: ["W1-T992", "W1-T425", "W1-T86", "W1-T2297"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE RULING CREATES THE CONSUMER. W1-T992 records the operator's decision: bring-your-own

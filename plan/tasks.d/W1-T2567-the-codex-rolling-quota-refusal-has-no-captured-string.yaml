@@ -10,7 +10,7 @@
   files: [src/lib/classify.ts, test/codex-quota-window-refusal.test.ts]
   origin: "operator-brief#codex-quota-window-coverage-2026-09-01"
   plan_refs: ["W1-T2564", "W1-T2565"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE GAP, STATED PRECISELY ────────────────────────────────────────────────────────────────

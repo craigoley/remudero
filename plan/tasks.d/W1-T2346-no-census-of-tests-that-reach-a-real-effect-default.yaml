@@ -122,7 +122,7 @@
     - claim: "the check completes without running a suite spawning a process or touching the network"
       proof: "unit test: test/operator-gated-default-reachability.test.ts"
   files: [test/operator-gated-default-reachability.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: feedback#fb-1786025201466-7081b2
   plan_refs: ["W1-T1206", "W1-T1000002", "W1-T515", "W1-T402", "W1-T2232", "W1-T1087"]

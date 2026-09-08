@@ -10,7 +10,7 @@
   files: [scripts/mutation-ratchet.mjs, test/a-test-outside-strykers-command-is-invisible.test.ts]
   origin: "operator-session#mutation-ratchet-collapsed-2026-08-30"
   plan_refs: ["W1-T2521", "W1-T133"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED, 2026-08-30, ON A REAL PR. A change added 87 lines to `src/lib/classify.ts` with a

@@ -10,7 +10,7 @@
   files: [src/lib/retro.ts, src/run-task.ts, test/followup-routing-has-a-consumer.test.ts]
   origin: "recon#followup-harvest-terminates-in-prose-2026-08-29"
   plan_refs: ["W1-T2455", "W1-T2451", "W1-T2456", "W1-T2457", "W1-T105"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces at base 9613225b, anchored `W1-T2458([^0-9]|$)` with a `[0-9]` class and

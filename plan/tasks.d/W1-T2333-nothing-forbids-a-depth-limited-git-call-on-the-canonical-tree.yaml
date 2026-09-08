@@ -109,7 +109,7 @@
     - claim: "a clean result is reported only when the scan proves it read the known call sites, and an unreadable input fails instead of reporting clean"
       proof: "unit test: test/no-shallowing-of-the-canonical-checkout.test.ts"
   files: [test/no-shallowing-of-the-canonical-checkout.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "feedback#fb-1786001088591-dbf763"
   plan_refs: ["W1-T2332", "W1-T2317", "W1-T2291", "W1-T1258"]

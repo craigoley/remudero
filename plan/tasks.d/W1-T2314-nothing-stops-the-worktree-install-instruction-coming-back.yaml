@@ -101,7 +101,7 @@
   origin: "feedback#fb-1785982194342-bb9d81"
   plan_refs: ["W1-T2312", "W1-T2313", "W1-T65", "W1-T151", "W1-T384"]
   files: [test/plan-contract-no-worktree-install.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     PROVENANCE IS W1-T2312'S, UNCHANGED — one third of a single filing from

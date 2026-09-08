@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/blocked-record-without-a-ruling-is-named.test.ts]
   origin: followup#W1-T2474-1788101371246
   plan_refs: ["W1-T1287", "W1-T2474", "W1-T2481", "W1-T391", "§5C"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE FIELD BECAME LOAD-BEARING AND NOTHING REPORTS ITS ABSENCE. W1-T2474 shipped: drain.ts now

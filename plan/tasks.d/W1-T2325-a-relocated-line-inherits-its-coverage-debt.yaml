@@ -123,7 +123,7 @@
   origin: "feedback#fb-1785984602111-18ffd8"
   plan_refs: ["W1-T212", "W1-T221", "W1-T481", "W1-T421", "W1-T1075"]
   files: [scripts/diff-coverage.mjs, test/diff-coverage.test.ts, test/fixtures/diff-coverage/relocated-block.diff, test/fixtures/diff-coverage/relocated-block.lcov, test/fixtures/diff-coverage/relocated-duplicate.diff, test/fixtures/diff-coverage/relocated-duplicate.lcov]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT, for the same reason W1-T481 sets it: `sizingViolation`

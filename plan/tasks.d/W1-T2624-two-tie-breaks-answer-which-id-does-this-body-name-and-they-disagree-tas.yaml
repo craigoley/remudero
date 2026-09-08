@@ -10,7 +10,7 @@
   origin: followup#W1-T2462-trailer-tiebreak-divergence
   plan_refs: ["W1-T70", "W1-T2432", "W1-T2297", "W1-T2315"]
   files: [src/lib/review.ts, src/run-task.ts, test/trailer-tiebreak-one-spelling.test.ts, test/acceptance-author-gate.test.ts, test/acceptance-gate-plan-resolver.test.ts, test/review-resolves-criteria-at-the-prs-own-head.test.ts, test/trailer-exemption-must-resolve.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     HARVESTED FROM W1-T2462 (run W1-T2462-1788054829616, PR #3285), whose own `note` forbade editing

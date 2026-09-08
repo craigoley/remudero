@@ -10,7 +10,7 @@
   files: [src/lib/serve.ts, test/console-write-entry.test.ts]
   origin: "operator-brief#console-write-surface-unused-2026-08-27"
   plan_refs: ["W1-T202", "W1-T2211", "W1-T2273", "W1-T333", "W1-T371", "W1-T404"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID, AND THE ORDINAL READING RECORDED RATHER THAN ASSUMED. Eight surfaces swept, anchored

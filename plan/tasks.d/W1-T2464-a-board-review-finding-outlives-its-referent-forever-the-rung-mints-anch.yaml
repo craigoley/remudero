@@ -10,7 +10,7 @@
   origin: "board-review:escalation:#3227"
   plan_refs: ["W1-T2304", "W1-T110", "W1-T240", "W1-T77", "W1-T162", "W1-T130", "§7B", "§5D"]
   files: [src/lib/board-review.ts, src/run-task.ts, src/lib/daemon.ts, test/board-review.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     FILED FROM THE PROPOSAL IT IS ABOUT. `board-review:escalation:#3227` is a per-PR operational

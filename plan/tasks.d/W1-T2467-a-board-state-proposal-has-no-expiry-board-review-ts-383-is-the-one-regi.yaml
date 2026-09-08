@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§7B", "P25"]
   files: [src/lib/inbox.ts, src/run-task.ts, test/inbox.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A DIVERGENCE FROM AN ESTABLISHED CONVENTION, NOT AN OPEN QUESTION. Four sites mint into the proposal

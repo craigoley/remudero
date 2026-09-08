@@ -10,7 +10,7 @@
   files: [deploy/recycle-container.sh, test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts]
   origin: "operator-session#the-github-auth-outage-2026-09-01"
   plan_refs: ["W1-T1010", "W1-T2553"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS THE ONE RECYCLE DEFECT THAT FAILS IN THE DANGEROUS DIRECTION. Every other refusal in this

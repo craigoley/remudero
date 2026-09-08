@@ -10,7 +10,7 @@
   files: [src/lib/onboard/synthesize.ts, src/lib/learnings.ts, test/an-onboarded-repo-has-a-learnings-home.test.ts]
   origin: "operator-brief#each-repos-learnings-live-in-that-repo-2026-08-30"
   plan_refs: ["W1-T145", "W1-T146", "W1-T425", "W1-T2492"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE READER EXISTS AND HAS NOTHING TO READ. The worker injection already resolves three layer

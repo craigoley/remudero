@@ -10,7 +10,7 @@
   files: [src/lib/inbox.ts, src/lib/daemon.ts, src/run-task.ts, test/draft-batches-cannot-overlap.test.ts]
   origin: "operator-brief#live-draft-leak-2026-09-01"
   plan_refs: ["W1-T1067", "W1-T1044", "W1-T2561", "W1-T2564", "W1-T193"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE MECHANISM, CONFIRMED NOT ASSUMED ─────────────────────────────────────────────────────

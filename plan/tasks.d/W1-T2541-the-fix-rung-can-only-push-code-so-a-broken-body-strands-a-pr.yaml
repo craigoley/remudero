@@ -71,7 +71,7 @@
   origin: incident
   plan_refs: ["W1-T76", "W1-T94", "W1-T230", "W1-T453", "W1-T2542"]
   files: [src/lib/body-repair.ts, src/lib/sweep.ts, test/a-broken-body-is-repairable-not-ambiguous.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning: blast-radius — a rung that edits pull request bodies automatically is

@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/rule-19-sizing-counts-a-test-as-a-concern.test.ts]
   origin: "operator-session#four-sizing-raises-in-one-session-2026-08-30"
   plan_refs: ["W1-T2520", "W1-T2523", "W1-T2524"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED IN ONE SESSION, FOUR TIMES, VERBATIM FROM THE LINTER:

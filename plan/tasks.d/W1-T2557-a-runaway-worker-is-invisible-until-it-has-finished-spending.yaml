@@ -10,7 +10,7 @@
   files: [src/run-task.ts, src/lib/worker.ts, test/a-runaway-worker-is-visible-before-it-finishes.test.ts]
   origin: "operator-session#the-spend-census-2026-09-01"
   plan_refs: ["W1-T931", "W1-T942", "W1-T2520"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     COST IS LINEAR IN TURNS, AND TURNS ARE THE ENTIRE VARIANCE. Deduped by `run_id` over the

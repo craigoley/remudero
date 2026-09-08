@@ -10,7 +10,7 @@
   origin: recon#w1-t2474-recon-confirmed-repo-state-not-task-content-2026-08-30
   plan_refs: ["§8B", "§2", "W1-T501", "W1-T2241", "W1-T37"]
   files: [src/run-task.ts, test/recon-mount-routing.test.ts, test/recon-names-its-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE RECON DID NOT FAIL. IT OBEYED. A recon on run W1-T2474-1788101371246 filed the follow-up

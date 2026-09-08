@@ -10,7 +10,7 @@
   files: [src/lib/measurement-cadence.ts, src/lib/daemon.ts, test/adoption-debt-becomes-a-proposal.test.ts]
   origin: "operator-brief#plan-debt-has-no-proposal-producer-2026-08-30"
   plan_refs: ["W1-T2266", "W1-T2289", "W1-T2304", "W1-T2451", "W1-T2455", "W1-T2458", "W1-T2471", "W1-T2472", "W1-T322", "W1-T494"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     WHEN THE OPERATOR IS QUIET AND THE BOARD IS CLEAN THE ENTIRE INTAKE LAYER HAS NOTHING TO LOOK

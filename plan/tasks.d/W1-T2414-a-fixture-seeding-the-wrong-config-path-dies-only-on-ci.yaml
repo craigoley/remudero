@@ -10,7 +10,7 @@
   files: [src/lib/config.ts, test/config-fixture-path-parity.test.ts]
   origin: "operator-brief#fixture-config-path-dies-only-on-ci-2026-08-27"
   plan_refs: ["W1-T2397", "W1-T464", "W1-T472", "W1-T1074", "W1-T1041", "W1-T2408", "W1-T294"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept before a byte of this file was written, each against a control drawn

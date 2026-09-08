@@ -10,7 +10,7 @@
   files: [src/lib/escalate.ts, src/lib/inbox-thread.ts, test/an-escalation-and-its-reply-are-one-thread.test.ts]
   origin: "operator-brief#make-the-inbox-feel-like-emailing-a-colleague-2026-08-30"
   plan_refs: ["W1-T182", "W1-T41", "W1-T77"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE EXPENSIVE HALVES ARE BUILT AND THE CHEAP MIDDLE IS MISSING, WHICH IS WHY THIS IS WORTH

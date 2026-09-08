@@ -10,7 +10,7 @@
   files: [src/run-task.ts, src/lib/daemon.ts, test/the-proof-debt-producer-reaches-production.test.ts]
   origin: "followup#W1-T2477"
   plan_refs: ["W1-T2477", "W1-T2502", "W1-T2485", "W1-T1053", "§4B"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ AT HEAD BEFORE FILING, NOT INFERRED FROM THE HARVEST LINE. W1-T2477 built the second

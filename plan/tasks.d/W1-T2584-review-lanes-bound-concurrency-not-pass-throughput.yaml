@@ -18,7 +18,7 @@
     - test/event-review-backlog-drain.test.ts
   origin: "operator-session#github-event-review-backlog-drain-2026-09-01"
   plan_refs: ["W1-T473", "W1-T513", "W1-T1049", "W1-T1218", "W1-T2568"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED AT ORIGIN/MAIN 4d14fc5. `runSweep` orders every pending review, then executes

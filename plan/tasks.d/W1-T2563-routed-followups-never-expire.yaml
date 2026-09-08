@@ -10,7 +10,7 @@
   files: [src/lib/retro.ts, test/routed-followups-retire.test.ts]
   origin: "operator-brief#seven-hour-daemon-review-2026-09-01"
   plan_refs: ["W1-T2561", "W1-T2470", "W1-T2464", "W1-T2451", "W1-T2458"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE SOURCE, NOT THE DRAIN ────────────────────────────────────────────────────────────────

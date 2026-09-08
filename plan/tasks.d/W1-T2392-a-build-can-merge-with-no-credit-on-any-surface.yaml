@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, test/uncredited-build-detection.test.ts]
   origin: "operator-brief#uncredited-build-2026-08-27"
   plan_refs: ["W1-T2387", "W1-T256", "W1-T2370", "W1-T2318", "W1-T2323", "W1-T2379"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-08-27 at origin/main c77bb12d, over the 268 pull requests merged between

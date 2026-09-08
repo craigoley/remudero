@@ -111,7 +111,7 @@
       proof: "unit test: test/slug-branch-task-resolution.test.ts"
     - claim: "the resolver is the ONE new extractor and planBranchReap stays pure — the credited fact arrives through the caller's existing readMergeCreditedTaskIds read, never a new git or network call inside the classifier"
       proof: "grep: taskIdFromSlugBranch in src/lib/status.ts"
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED 2026-09-01 from follow-up harvest `followup:W1-T2463-1788065942887:2026-08-30T05:01:42.981Z:0`

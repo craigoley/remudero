@@ -95,7 +95,7 @@
   origin: incident
   plan_refs: ["W1-T490", "W1-T126", "W1-T12b", "W1-T1067"]
   files: [src/lib/daemon.ts, deploy/entrypoint.sh, test/daemon.test.ts, test/entrypoint-boot.test.ts, scripts/source-size-baseline.json]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning: blast-radius — NOT Rule 19 span. This governs whether the fleet comes

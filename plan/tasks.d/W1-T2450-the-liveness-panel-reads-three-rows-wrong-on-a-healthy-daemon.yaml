@@ -10,7 +10,7 @@
   files: [src/lib/status-board.ts, src/run-task.ts, src/lib/daemon.ts, test/liveness-distinguishes-absent-sensor-from-dead-service.test.ts]
   origin: "operator-brief#liveness-panel-reads-wrong-on-healthy-daemon-2026-08-28"
   plan_refs: ["W1-T126", "W1-T2440", "W1-T396", "W1-T301", "W1-T215"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept before a byte of this file was written, anchored

@@ -83,7 +83,7 @@
   origin: "followup#W1-T2460-1788054755234"
   plan_refs: ["W1-T405", "W1-T197", "W1-T181", "§4B", "§9"]
   files: [src/lib/worker.ts, src/run-task.ts, test/worktree-base-observability.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED 2026-09-01 alongside W1-T2625 from the same follow-up harvest, but justified INDEPENDENTLY

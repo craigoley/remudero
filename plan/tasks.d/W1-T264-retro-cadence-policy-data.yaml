@@ -46,7 +46,7 @@
   origin: architect
   plan_refs: ["§8", "§4"]
   files: [plan/policy.yaml, src/lib/policy.ts, src/run-task.ts, test/policy.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-07-31 as the residual of W1-T201's already-satisfied closure (see DECISIONS.md, the
     2026-07-31 W1-T201 entry). NOT an amendment to W1-T252 or W1-T253: both are already merged (#901 and #921,

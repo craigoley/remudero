@@ -51,7 +51,7 @@
   origin: incident
   plan_refs: ["W1-T308", "W1-T395", "W1-T2533", "W1-T2534"]
   files: [src/lib/review.ts, test/the-quotation-guard-covers-one-arm-of-four.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `isInsideInlineQuote` already exists (W1-T2534, src/lib/review.ts) and is called from one arm.

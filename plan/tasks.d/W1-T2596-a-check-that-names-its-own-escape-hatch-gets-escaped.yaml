@@ -10,7 +10,7 @@
   files: [test/config-reader-seams.test.ts, test/a-check-that-names-its-own-escape-hatch-gets-escaped.test.ts]
   origin: "operator-brief#printed-escape-hatch-2026-09-01"
   plan_refs: ["W1-T493", "W1-T2595"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE MEASURED INSTANCE ───────────────────────────────────────────────────────────────────

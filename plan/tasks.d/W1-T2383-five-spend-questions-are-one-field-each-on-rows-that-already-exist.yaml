@@ -10,7 +10,7 @@
   files: [src/lib/risk-judge.ts, src/run-task.ts, test/spend-observability-fields.test.ts]
   origin: "operator-brief#fleet-spend-observability-2026-08-27"
   plan_refs: ["W1-T2344", "W1-T2238", "W1-T458", "W1-T1066"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-08-27 over 499 verdict rows, 544 run.start rows and 1,103 phase rows spanning

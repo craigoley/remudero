@@ -10,7 +10,7 @@
   files: [src/lib/panel-actions.ts, src/lib/feedback.ts, test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts]
   origin: "operator-brief#make-the-inbox-feel-like-emailing-a-colleague-2026-08-30"
   plan_refs: ["W1-T2494", "W1-T182", "W1-T41"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     DISMISSING IS NOT ANSWERING, AND THE DIFFERENCE IS THE WHOLE ASK. `mark-handled` records that a
