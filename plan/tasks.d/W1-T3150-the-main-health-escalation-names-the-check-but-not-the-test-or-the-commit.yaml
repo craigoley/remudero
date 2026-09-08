@@ -1,0 +1,99 @@
+- id: W1-T3150
+  title: "THE MAIN-HEALTH ESCALATION NAMES THE FAILING CHECK AND STOPS — `[MANUAL] MAIN-HEALTH` reports `ci-shard (4/4)`, which is a SHARD NUMBER, not a defect; the operator still has to open the log to learn WHICH TEST failed and bisect main to learn WHICH MERGE introduced it, and both are mechanically derivable at escalation time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 16.00
+  files: [src/lib/sweep.ts, test/a-main-health-escalation-names-the-defect.test.ts]
+  origin: "operator-session#root-cause-pass-2026-09-08"
+  plan_refs: ["W1-T1033", "W1-T2498"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DETECTION CHAIN ALREADY WORKS, AND THIS TASK MUST NOT BE READ AS CLAIMING OTHERWISE.
+    W1-T1033 gave `ci.yml` its `push: branches: [main]` trigger, the main-health rung observes the
+    resulting rollup every sweep, and `tryEscalate` opens one `[MANUAL] MAIN-HEALTH` issue. All three
+    fired correctly on 2026-09-08. The gap is entirely in WHAT THE ISSUE SAYS.
+
+    MEASURED 2026-09-08, END TO END. `main` went red at `12ead908a` (#4552) at 09:27:43Z and stayed
+    red through `41231c670` (#4538) at 09:36:35Z. Issue #4605 opened at 09:58:09Z and said, in full:
+    `required check(s) concluded failing on main: ci-shard (4/4)`. That is a shard INDEX. It does not
+    name a test, a file, or a commit. An operator reading it at 09:58 knows only that one quarter of
+    the suite is red somewhere.
+
+    WHAT IT COST. Recovering the two real defects by hand took: opening the shard log to find
+    `PROPERTY no tracked src/**/*.ts file's baseline allowance sits slack above its actual bare-catch
+    count` and `the REAL test/ population is at or under the recorded baseline`; then running the
+    census's own `[Ll]edger` recogniser across five consecutive commits to attribute the second one
+    (50 at `~5`, `~4`, `~3`, `~2`, then 51 at `~1` = `12ead908a`). Every step of that is mechanical.
+    The escalation had already fetched the rollup that names the failing check; the log and the run
+    history were one API call further.
+
+    THE SHARD INDEX IS THE WORST POSSIBLE IDENTIFIER, because it is UNSTABLE. `ci-shard (4/4)` names
+    a slice of a suite that is re-partitioned as tests are added; the same defect surfaces under a
+    different shard number on a different day, so the string cannot be searched for, correlated
+    across incidents, or deduplicated against a prior issue.
+
+    THIS IS ABOUT ATTRIBUTION, NOT AUTO-REPAIR. The issue's own Recommendation ("let automatic repair
+    continue") and its MANUAL class are deliberate and stay as they are. A human decides; this task
+    only ensures the human is told what to decide ABOUT.
+  design: |
+    (i) NAME THE FAILING TEST, NOT ONLY THE CHECK. The rung already holds the failing check's
+    identity. Extend the observation to carry the failing TEST TITLES parsed from that check's log —
+    the `not ok <n> - <title>` lines the node test runner emits — capped at a small number with an
+    explicit "+N more", never silently truncated.
+
+    (ii) NAME THE FIRST RED COMMIT. `main`'s own push-run history is an ordered list of
+    (head_sha, conclusion). The first run whose conclusion is `failure` after a `success` is the
+    commit that introduced the break. Report that sha and the PR that merged it. Report the
+    BOUNDARY, never a guess: if the newest green run cannot be found in the fetched window, say the
+    window was exhausted rather than naming the oldest observed failure as the cause.
+
+    (iii) FAIL SOFT AND SAY SO. An unreadable log or an unreadable run history degrades to today's
+    message plus one line naming which half could not be read. A main-health escalation must never be
+    blocked by its own enrichment — a red main reported thinly beats a red main reported not at all.
+
+    (iv) DO NOT CHANGE THE TAXONOMY. The class stays MANUAL, the options and the recommendation stay
+    as they are, and `docs/operator-message-standard.md` conformance is not this task's concern —
+    note that #4605 was already flagged `missing consequenceOfInaction` and leave that alone.
+
+    (v) THE ENRICHMENT IS DERIVED, NEVER CACHED. It is computed from the same rollup the rung already
+    fetches plus the run history; nothing is stored, so a re-observation of a repaired main cannot
+    report a stale defect.
+  acceptance:
+    - claim: "an escalation for a red main names the failing TEST TITLES from the check's log, not only the check name, and caps the list with an explicit +N more"
+      proof: "unit test: test/a-main-health-escalation-names-the-defect.test.ts"
+    - claim: "it names the first-red commit by finding the failure that follows the newest success in main's own push-run history"
+      proof: "unit test: test/a-main-health-escalation-names-the-defect.test.ts"
+    - claim: "a run history whose window contains no success reports the window as exhausted rather than blaming its oldest observed failure"
+      proof: "unit test: test/a-main-health-escalation-names-the-defect.test.ts"
+    - claim: "an unreadable log or unreadable run history still escalates, degrading to the current message plus a line naming the half that could not be read"
+      proof: "unit test: test/a-main-health-escalation-names-the-defect.test.ts"
+    - claim: "the escalation class stays MANUAL with its existing options and recommendation, so this changes what the operator is told and not who decides"
+      proof: "unit test: test/a-main-health-escalation-names-the-defect.test.ts"
+  falsifier: |
+    Close without implementation if the escalation already names a test or a commit. MEASURED: issue
+    #4605's body, opened 2026-09-08T09:58:09Z for head `41231c67`, reads `required check(s) concluded
+    failing on main: ci-shard (4/4)` and contains no test title, no file path, and no sha other than
+    the head it is reporting.
+
+    Close also if this is really the detection gap. It is NOT: `ci` has run on main pushes since
+    W1-T1033, the two failing main runs are in the API (`12ead908a` and `41231c670`, both
+    `conclusion: failure`), the rung observed them, and the issue was opened 30 minutes later. Every
+    part of that chain worked. Do not re-file detection.
+
+    DO NOT falsify this from the MANUAL class being correct. It is correct, and design (iv) keeps it.
+    A well-attributed manual escalation is the deliverable, not automatic repair.
+  note: |
+    ONE CONCERN: say WHICH TEST and WHICH COMMIT in the escalation that already fires. Not in scope:
+    auto-repairing a red main, changing the escalation taxonomy or recommendation, the
+    operator-message-standard conformance warning already attached to these issues, or the CI
+    sharding that makes `ci-shard (N/4)` unstable in the first place.
+
+    Design (ii) is the half that can mislead. A first-red attribution that silently falls back to
+    "the oldest failure I happened to fetch" would blame an innocent commit with full confidence,
+    which is worse than naming none — hence criterion 3, which must be verified against a window
+    containing no success at all.
