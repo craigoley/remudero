@@ -181,6 +181,8 @@ function makeFixtureRepo(files: Record<string, string>): string {
 function makePreCommitFixtureRepo(): string {
   const root = makeFixtureRepo({
     "scripts/mkdtemp-callsite-check.mjs": readFileSync(SCRIPT, "utf8"),
+    "scripts/lib/repo-root.mjs": readFileSync(join(REPO_ROOT, "scripts", "lib", "repo-root.mjs"), "utf8"),
+    "scripts/lib/argv.mjs": readFileSync(join(REPO_ROOT, "scripts", "lib", "argv.mjs"), "utf8"),
     "hooks/pre-commit": readFileSync(join(REPO_ROOT, "hooks", "pre-commit"), "utf8"),
     "hooks/mkdtemp-allowlist.txt": "# fixture starts with no exemptions\n",
     "test/seed.test.ts": "const seed = true;\n",

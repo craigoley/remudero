@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 // scripts/plan-state-claims.mjs — the plan-state self-consistency gate (W1-T409, MASTER-PLAN
 // §8A/§12A). Refuses a task id that MASTER-PLAN.md's "## SHIPPED log" section records as landed
 // while another line elsewhere asserts it "not shipped" / "unbuilt" / "did not ship" (the
@@ -26,7 +26,7 @@
 
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { join } from "node:path";
 import { loadPlan } from "../src/lib/plan.ts";
 import { extractAssertedUnbuiltTaskIds } from "../src/lib/retro.ts";
@@ -262,6 +262,6 @@ function main(argv) {
 }
 
 // Only run when executed directly, never on import (same convention as scripts/claims-check.mjs).
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

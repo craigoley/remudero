@@ -35,6 +35,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const SCRIPT_PATH = join(REPO_ROOT, "scripts", "worker-branch-shape.mjs");
 const SCRIPT_SOURCE = readFileSync(SCRIPT_PATH, "utf8");
+// W1-T2907: the script no longer spawns git directly -- it calls the shared git()/gitOrThrow()
+// wrapper (scripts/lib/git.mjs), so acceptance 7 below also reads THAT module's own spawn call to
+// keep proving the end-to-end property its title states.
+const GIT_LIB_SOURCE = readFileSync(join(REPO_ROOT, "scripts", "lib", "git.mjs"), "utf8");
 // Acceptance 7 is about what the CODE does, not what its own prose says about itself (the file's
 // banner comment names "node --test" and "gh api"/"gh pr" IN ORDER TO DISCLAIM them — a bare text
 // grep over the whole file would fail on its own honesty). Strip `//` line comments and `/* */`
@@ -254,9 +258,22 @@ test("acceptance 7: the script's own CODE (comments stripped) never fetches or o
 });
 
 test("acceptance 7: the only child process this script ever spawns, anywhere in its code, is git", () => {
-  const spawns = [...SCRIPT_CODE_ONLY.matchAll(/execFileSync\s*\(\s*(["'])(.*?)\1/g)].map((m) => m[2]);
-  assert.ok(spawns.length > 0, "sanity: the script does spawn something (git) — this is not a vacuous pass");
-  for (const bin of spawns) assert.equal(bin, "git", `unexpected non-git spawn target: ${bin}`);
+  // The script itself now spawns NOTHING directly (no execFileSync/spawnSync/spawn call site) —
+  // every git invocation goes through the shared scripts/lib/git.mjs wrapper. That is checked on
+  // both ends: the script calls only that wrapper, and the wrapper's own (single) spawn target is
+  // literally "git".
+  const directSpawns = [...SCRIPT_CODE_ONLY.matchAll(/\b(?:execFileSync|spawnSync|spawn)\s*\(\s*(["'])(.*?)\1/g)].map(
+    (m) => m[2],
+  );
+  for (const bin of directSpawns) assert.equal(bin, "git", `unexpected non-git spawn target in the script itself: ${bin}`);
+  assert.match(
+    SCRIPT_CODE_ONLY,
+    /\bgit(?:OrThrow)?\s*\(/,
+    "sanity: the script does call the shared git wrapper — this is not a vacuous pass",
+  );
+  const wrapperSpawns = [...GIT_LIB_SOURCE.matchAll(/spawnSync\s*\(\s*(["'])(.*?)\1/g)].map((m) => m[2]);
+  assert.ok(wrapperSpawns.length > 0, "sanity: the shared wrapper does spawn something (git) — this is not a vacuous pass");
+  for (const bin of wrapperSpawns) assert.equal(bin, "git", `unexpected non-git spawn target in the shared wrapper: ${bin}`);
 });
 
 test("acceptance 7: the npm script itself is a plain node invocation of the file above, not a wrapper that could shell out further", () => {

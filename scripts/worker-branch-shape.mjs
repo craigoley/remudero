@@ -17,11 +17,11 @@
 // to origin/main (skips, not fails, the shard check when unresolvable); --head-ref defaults to
 // $GITHUB_HEAD_REF, then the current branch.
 
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
+import { git, gitOrThrow } from "./lib/git.mjs";
 
 /** Escape `s` for literal use inside a `RegExp` — the same escaping `src/lib/status.ts`'s own
  *  `escapeRegExp` performs, restated here (design note above) rather than imported. */
@@ -156,7 +156,7 @@ export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles,
  */
 export function resolveMergeBase(worktreePath, baseRef) {
   try {
-    return execFileSync("git", ["-C", worktreePath, "merge-base", baseRef, "HEAD"], { encoding: "utf8" }).trim();
+    return gitOrThrow(["merge-base", baseRef, "HEAD"], { cwd: worktreePath });
   } catch {
     return undefined;
   }
@@ -169,13 +169,13 @@ export function resolveMergeBase(worktreePath, baseRef) {
  */
 export function commitMessagesSinceBase(worktreePath, mergeBase) {
   if (mergeBase === undefined) return "";
-  try {
-    // `%x00` separates each commit's message so concatenation can never accidentally splice one
-    // commit's trailing partial line into the next commit's leading one.
-    return execFileSync("git", ["-C", worktreePath, "log", "--format=%B%x00", `${mergeBase}..HEAD`], { encoding: "utf8" });
-  } catch {
-    return "";
-  }
+  // `%x00` separates each commit's message so concatenation can never accidentally splice one
+  // commit's trailing partial line into the next commit's leading one. Raw `git()`, never
+  // `gitOrThrow`, because that trims stdout and a trimmed trailing `%x00` would change what the
+  // NUL-split below sees as the final (empty) segment.
+  const result = git(["log", "--format=%B%x00", `${mergeBase}..HEAD`], { cwd: worktreePath });
+  if (result.error || result.status !== 0) return "";
+  return result.stdout;
 }
 
 /** The current head ref: --head-ref, then $GITHUB_HEAD_REF, then the worktree's current branch
@@ -188,7 +188,7 @@ export function resolveHeadRef(flagValue, worktreePath, env = process.env) {
   if (flagValue) return flagValue;
   if (env.GITHUB_HEAD_REF) return env.GITHUB_HEAD_REF;
   try {
-    const branch = execFileSync("git", ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
+    const branch = gitOrThrow(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktreePath });
     return branch.length > 0 && branch !== "HEAD" ? branch : undefined;
   } catch {
     return undefined;
@@ -203,11 +203,7 @@ export function resolveHeadRef(flagValue, worktreePath, env = process.env) {
 export function addedFilesSinceBase(worktreePath, mergeBase) {
   if (mergeBase === undefined) return [];
   try {
-    const out = execFileSync(
-      "git",
-      ["-C", worktreePath, "diff", "--name-status", "--diff-filter=A", mergeBase, "HEAD"],
-      { encoding: "utf8" },
-    );
+    const out = gitOrThrow(["diff", "--name-status", "--diff-filter=A", mergeBase, "HEAD"], { cwd: worktreePath });
     return out
       .split("\n")
       .map((line) => line.trim())
@@ -227,7 +223,7 @@ export function addedFilesSinceBase(worktreePath, mergeBase) {
 export function changedFilesSinceBase(worktreePath, mergeBase) {
   if (mergeBase === undefined) return [];
   try {
-    const out = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", mergeBase, "HEAD"], { encoding: "utf8" });
+    const out = gitOrThrow(["diff", "--name-only", mergeBase, "HEAD"], { cwd: worktreePath });
     return out
       .split("\n")
       .map((line) => line.trim())
@@ -274,6 +270,6 @@ export function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/worker-branch-shape.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

@@ -22,10 +22,11 @@
 // Usage: node scripts/coverage-session-blanking-check.mjs. Exits 1 and names every finding; 0
 // ("clean") otherwise.
 
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { isMainModule } from "./lib/argv.mjs";
+import { REPO_ROOT } from "./lib/repo-root.mjs";
+import { git } from "./lib/git.mjs";
 
 /** The variable node re-injects into every spawned child — deleting it from a child env is
  *  always a no-op. */
@@ -179,7 +180,7 @@ export function scanSource(source, relPath) {
  *  tracked-source-write-check.mjs's own listTrackedTestFiles, so untracked scratch stays out of
  *  scope for free. */
 export function listTrackedTestFiles(repoRoot) {
-  const result = spawnSync("git", ["-C", repoRoot, "ls-files", "-z", "--", "test"], { encoding: "utf8" });
+  const result = git(["ls-files", "-z", "--", "test"], { cwd: repoRoot });
   if (result.error || result.status !== 0) {
     throw new Error(
       `coverage-session-blanking-check: \`git ls-files\` failed in ${repoRoot}: ` +
@@ -226,7 +227,7 @@ export const BLIND_SPOTS = [
  *  collaborator carries a real default, so a bare `main()` call is the real entry point while a
  *  test can drive both the clean and finding-found paths in-process. */
 export function main({
-  repoRoot = join(dirname(fileURLToPath(import.meta.url)), ".."),
+  repoRoot = REPO_ROOT,
   scan = scanRepo,
   log = console.log,
   error = console.error,
@@ -266,6 +267,6 @@ export function main({
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   process.exitCode = main();
 }

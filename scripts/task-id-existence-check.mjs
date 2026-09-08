@@ -26,8 +26,9 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { join, relative } from "node:path";
+import { git } from "./lib/git.mjs";
 
 const TASK_ID_RE = /\bW1-T[0-9]+\b/g;
 // DECLARED_ID_LINE_RE matches the WHOLE line after `- id:` (`^...$`, not a character class), so a
@@ -137,10 +138,7 @@ export function scanDeclaredPlanIds(cwd, opts = {}) {
  *  READ). `reachable: false` means the read failed -- treat as a STATED UNKNOWN, never "nothing
  *  reserved". `remote` may be a local/bare path, for offline fixture tests. */
 export function resolveReservedIds(remote, cwd) {
-  const result = spawnSync("git", ["ls-remote", remote, "refs/rmd-id/W1-T*"], {
-    cwd,
-    encoding: "utf8",
-  });
+  const result = git(["ls-remote", remote, "refs/rmd-id/W1-T*"], { cwd });
   if (result.error || result.status !== 0) {
     return { reachable: false, ids: new Set() };
   }
@@ -198,10 +196,9 @@ export function scanDeclaredPlanIdOccurrences(cwd, opts = {}) {
  *  sides is a carried-along shard, different a re-issue. `readable: false` is the read FAILING,
  *  never "declares nothing" (W1-T2316). docs/forensics/task-id-existence-check.md#resolvebasedeclaredids. */
 export function resolveBaseDeclaredIds(baseRef, cwd) {
-  const result = spawnSync(
-    "git",
+  const result = git(
     ["grep", "-lE", "^[[:space:]]*-[[:space:]]*id:[[:space:]]*W[0-9]+-T[0-9]+", baseRef, "--", "plan/tasks.yaml", "plan/tasks.d/"],
-    { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+    { cwd },
   );
   // git grep exits 1 for "ref resolved, no matches" — a real answer. 128 (bad revision) is not.
   if (result.error || (result.status !== 0 && result.status !== 1)) return { readable: false, byId: new Map() };
@@ -210,7 +207,7 @@ export function resolveBaseDeclaredIds(baseRef, cwd) {
     const line = raw.trim();
     if (!line) continue;
     const file = line.startsWith(`${baseRef}:`) ? line.slice(baseRef.length + 1) : line;
-    const show = spawnSync("git", ["show", `${baseRef}:${file}`], { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    const show = git(["show", `${baseRef}:${file}`], { cwd });
     if (show.error || show.status !== 0) return { readable: false, byId: new Map() };
     for (const l of show.stdout.split("\n")) {
       const m = DECLARED_ID_LINE_RE.exec(l);
@@ -226,7 +223,7 @@ export function resolveBaseDeclaredIds(baseRef, cwd) {
  *  not imported: a plain `.mjs` outside tsconfig's build. `undefined` on an unparsable/unreadable
  *  url -- never guessed, which would send the open-PR read below to the wrong repo. */
 export function resolveOwnerRepoFromGit(remote, cwd) {
-  const result = spawnSync("git", ["config", "--get", `remote.${remote}.url`], { cwd, encoding: "utf8" });
+  const result = git(["config", "--get", `remote.${remote}.url`], { cwd });
   if (result.error || result.status !== 0) return undefined;
   const m = /[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/.exec(result.stdout.trim());
   return m ? { owner: m[1], repo: m[2] } : undefined;
@@ -235,7 +232,7 @@ export function resolveOwnerRepoFromGit(remote, cwd) {
 /** The checked-out branch at `cwd`, or `undefined` on a detached HEAD (a PR checkout in CI) --
  *  callers prefer `--head-ref`/`GITHUB_HEAD_REF` first for exactly that reason. */
 export function currentBranch(cwd) {
-  const result = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, encoding: "utf8" });
+  const result = git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
   if (result.error || result.status !== 0) return undefined;
   const branch = result.stdout.trim();
   return branch === "" || branch === "HEAD" ? undefined : branch;
@@ -721,6 +718,6 @@ export function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/task-id-existence-check.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

@@ -25,7 +25,7 @@
 import { readFileSync, readdirSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join, relative, resolve as resolvePath } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 
 /** Max rendered length of a doc's one-line summary (chars); longer text is ellipsized. */
 const SUMMARY_MAX_CHARS = 160;
@@ -236,6 +236,6 @@ export function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/generate-docs-index.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

@@ -32,10 +32,11 @@
  */
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { isMainModule } from "./lib/argv.mjs";
+import { REPO_ROOT } from "./lib/repo-root.mjs";
 
-const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO = REPO_ROOT;
 const TEST_DIR = join(REPO, "test");
 const BASELINE_PATH = join(REPO, "scripts", "clock-sweep-baseline.json");
 
@@ -321,4 +322,4 @@ export function main({
   return 1;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) process.exit(main());
+if (isMainModule(import.meta.url)) process.exit(main());

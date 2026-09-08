@@ -28,7 +28,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve as pathResolve, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 
 // ── Comment stripping ────────────────────────────────────────────────────────
 
@@ -518,6 +518,6 @@ function main(argv) {
   process.exitCode = 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

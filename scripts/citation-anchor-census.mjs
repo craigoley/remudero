@@ -25,7 +25,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { parse as parseYaml } from "yaml";
 
 /** Characters of prose inspected on EACH side of a `#NNNN` citation for an anchor. See the
@@ -254,6 +254,6 @@ export function main(argv) {
   process.exitCode = 0; // REPORTS, NEVER GATES -- unconditional, however many are anchorless.
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

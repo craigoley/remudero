@@ -23,6 +23,8 @@
  * Not a required check and not a PR trigger — see .github/workflows/recovery-drill.yml.
  */
 import { execFileSync, spawn } from "node:child_process";
+import { isMainModule } from "./lib/argv.mjs";
+import { gitOrThrow } from "./lib/git.mjs";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -143,7 +145,7 @@ export function exerciseCircuitBreakerReset(mode, opts = {}) {
 // ── 3. Deploy rollback (deployer.ts) ────────────────────────────────────────────────────────
 
 function git(cwd, args) {
-  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return gitOrThrow(args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /**
@@ -159,8 +161,8 @@ export function exerciseDeployRollback(mode) {
     try {
       const originDir = join(dir, "origin.git");
       const seedDir = join(dir, "seed");
-      execFileSync("git", ["init", "--quiet", "--bare", originDir], { stdio: ["ignore", "pipe", "pipe"] });
-      execFileSync("git", ["init", "--quiet", "-b", "main", seedDir], { stdio: ["ignore", "pipe", "pipe"] });
+      gitOrThrow(["init", "--quiet", "--bare", originDir], { stdio: ["ignore", "pipe", "pipe"] });
+      gitOrThrow(["init", "--quiet", "-b", "main", seedDir], { stdio: ["ignore", "pipe", "pipe"] });
       git(seedDir, ["config", "user.email", "recovery-drill@example.invalid"]);
       git(seedDir, ["config", "user.name", "recovery-drill"]);
       git(seedDir, ["remote", "add", "origin", originDir]);
@@ -176,7 +178,7 @@ export function exerciseDeployRollback(mode) {
       badSha = git(seedDir, ["rev-parse", "HEAD"]);
 
       installDir = join(dir, "install");
-      execFileSync("git", ["clone", "--quiet", "-b", "main", originDir, installDir], { stdio: ["ignore", "pipe", "pipe"] });
+      gitOrThrow(["clone", "--quiet", "-b", "main", originDir, installDir], { stdio: ["ignore", "pipe", "pipe"] });
       git(installDir, ["config", "user.email", "recovery-drill@example.invalid"]);
       git(installDir, ["config", "user.name", "recovery-drill"]);
       if (mode === "healthy") {
@@ -474,9 +476,9 @@ export function exerciseDirtyTreeProceeds(mode) {
     let localDir;
     try {
       const originDir = join(dir, "origin.git");
-      execFileSync("git", ["init", "--quiet", "--bare", originDir], { stdio: ["ignore", "pipe", "pipe"] });
+      gitOrThrow(["init", "--quiet", "--bare", originDir], { stdio: ["ignore", "pipe", "pipe"] });
       const seedDir = join(dir, "seed");
-      execFileSync("git", ["init", "--quiet", "-b", "main", seedDir], { stdio: ["ignore", "pipe", "pipe"] });
+      gitOrThrow(["init", "--quiet", "-b", "main", seedDir], { stdio: ["ignore", "pipe", "pipe"] });
       git(seedDir, ["config", "user.email", "recovery-drill@example.invalid"]);
       git(seedDir, ["config", "user.name", "recovery-drill"]);
       git(seedDir, ["remote", "add", "origin", originDir]);
@@ -486,7 +488,7 @@ export function exerciseDirtyTreeProceeds(mode) {
       git(seedDir, ["push", "--quiet", "origin", "main"]);
 
       localDir = join(dir, "local");
-      execFileSync("git", ["clone", "--quiet", "-b", "main", originDir, localDir], { stdio: ["ignore", "pipe", "pipe"] });
+      gitOrThrow(["clone", "--quiet", "-b", "main", originDir, localDir], { stdio: ["ignore", "pipe", "pipe"] });
       git(localDir, ["config", "user.email", "recovery-drill@example.invalid"]);
       git(localDir, ["config", "user.name", "recovery-drill"]);
       // Dirty ONE tracked file — the one shape checkServiceFreshness's `-uno` scan counts.
@@ -712,4 +714,4 @@ export function main({ log = console.log } = {}) {
   return outcome.ok ? 0 : 1;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) process.exit(main());
+if (isMainModule(import.meta.url)) process.exit(main());

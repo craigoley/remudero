@@ -29,11 +29,12 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
+import { REPO_ROOT } from "./lib/repo-root.mjs";
 import { parseArgs } from "node:util";
 import { parse } from "yaml";
 
-export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+export { REPO_ROOT };
 export const MACRO_TABLE_PATH = join(REPO_ROOT, "settings", "macros.yaml");
 export const SKILLS_DIR = join(REPO_ROOT, ".claude", "skills");
 export const CLAUDE_MD_PATH = join(REPO_ROOT, "CLAUDE.md");
@@ -202,6 +203,6 @@ export function main(argv, deps = {}) {
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   process.exitCode = main(process.argv.slice(2));
 }

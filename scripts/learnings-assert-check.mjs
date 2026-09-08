@@ -33,7 +33,7 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { parse as parseYaml } from "yaml";
 
 // W1-T88/P14: "contested" is a fourth valid lifecycle (a consolidation-detected
@@ -244,6 +244,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/learnings-assert-check.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

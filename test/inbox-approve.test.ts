@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -478,6 +478,9 @@ function makeApproveFixtureRepo(): string {
 
   mkdirSync(join(dir, "scripts"), { recursive: true });
   copyFileSync(GENERATE_PLAN_INDEX_SCRIPT, join(dir, "scripts", "generate-plan-index.mjs"));
+  // W1-T2907: generate-plan-index.mjs now imports `./lib/argv.mjs`, so a fixture that copies the
+  // script alone leaves an unresolvable import and the whole test FILE fails to load.
+  cpSync(join(REPO_ROOT, "scripts", "lib"), join(dir, "scripts", "lib"), { recursive: true });
   mkdirSync(join(dir, "plan"), { recursive: true });
   writeFileSync(join(dir, "plan", "tasks.yaml"), "- id: W1-T1\n  title: existing task\n  repo: remudero\n");
   writeFileSync(

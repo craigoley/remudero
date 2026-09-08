@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -255,6 +255,10 @@ function makeBareWorktree(masterPlanText: string): string {
   git("config", "user.name", "t");
   mkdirSync(join(dir, "scripts"), { recursive: true });
   copyFileSync(GENERATE_PLAN_INDEX_SCRIPT, join(dir, "scripts", "generate-plan-index.mjs"));
+  // W1-T2907: the script now imports `./lib/argv.mjs`, so the fixture must carry scripts/lib with
+  // it. Copying the script alone leaves a temp tree where the import cannot resolve, and the whole
+  // FILE fails to load — which reads as four unrelated plan-index tests breaking at once.
+  cpSync(join(REPO_ROOT, "scripts", "lib"), join(dir, "scripts", "lib"), { recursive: true });
   mkdirSync(join(dir, "plan"), { recursive: true });
   writeFileSync(join(dir, "MASTER-PLAN.md"), masterPlanText);
   git("add", "-A");

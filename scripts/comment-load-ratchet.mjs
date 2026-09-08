@@ -25,11 +25,11 @@
 //   node scripts/comment-load-ratchet.mjs --json | --print | --check | --no-record
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { assertNoDuplicateKeys } from "./lib/json-duplicate-keys.mjs";
+import { git as spawnGit } from "./lib/git.mjs";
 
 /** The tracked directories a comment in this repo is measured in. `test/` is excluded: a test
  *  file's prose is read by whoever debugs that one suite, not by every session opening src/. */
@@ -86,7 +86,7 @@ export function countCommentLines(text, path) {
 }
 
 function git(root, args, stage) {
-  const res = spawnSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const res = spawnGit(args, { cwd: root });
   if (res.status !== 0) {
     throw new Error(`${stage}: ${(res.stderr || res.stdout || "git returned no diagnostic").trim()}`);
   }
@@ -311,7 +311,7 @@ export function splitBaseInheritedViolations(violations, baseComments) {
 function commentCountsAtBase(root, base, paths) {
   const counts = {};
   for (const path of paths) {
-    const res = spawnSync("git", ["show", `${base}:${path}`], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    const res = spawnGit(["show", `${base}:${path}`], { cwd: root });
     if (res.status === 0) counts[path] = countCommentLines(res.stdout, path).comments;
   }
   return counts;
@@ -485,4 +485,4 @@ export function main(argv) {
 }
 
 // Only run when executed directly, never on import -- the idiom every ratchet sibling here uses.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) process.exit(main(process.argv.slice(2)));
+if (isMainModule(import.meta.url)) process.exit(main(process.argv.slice(2)));

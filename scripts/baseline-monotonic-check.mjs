@@ -19,10 +19,10 @@
 // report OK.
 
 import { readFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
+import { git } from "./lib/git.mjs";
 
 export const DEFAULT_BASE_REF = "origin/main";
 
@@ -96,7 +96,7 @@ export function evaluateRow(entry, oldJson, newJson) {
 }
 
 function readJsonAtRef(root, ref, path) {
-  const res = spawnSync("git", ["show", `${ref}:${path}`], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const res = git(["show", `${ref}:${path}`], { cwd: root });
   if (res.status !== 0) return undefined; // absent at ref -- a brand-new baseline file, nothing to regress against
   try {
     return JSON.parse(res.stdout);
@@ -179,4 +179,4 @@ export function main(argv) {
 }
 
 // Only run when executed directly, never on import -- the idiom every ratchet sibling here uses.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) process.exit(main(process.argv.slice(2)));
+if (isMainModule(import.meta.url)) process.exit(main(process.argv.slice(2)));
