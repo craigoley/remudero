@@ -1,0 +1,75 @@
+- id: W1-T3181
+  title: "A DETACHED RETRO STEALS THE DISPATCH REVIEW CLOCK — `sweepLightDuringRetro` claims the process-wide ticker before the same tick reaches dispatch, so dispatch receives an inert stub; when retro settles, ownership is cleared rather than transferred and reviews stay dark until the worker finishes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files:
+    - src/lib/daemon.ts
+    - test/a-detached-retro-does-not-steal-the-dispatch-ticker.test.ts
+  origin: "operator-session#queue-lag-2026-09-08"
+  plan_refs: ["W1-T254", "W1-T2852", "W1-T2981", "W1-T2996"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON AZURE RUN DAEMON-1788875235003. `retro_triggered` and
+    `daemon.retro_trigger.detached` landed at 13:59:33Z. Dispatch admitted W1-T3156 at
+    13:59:39Z and its worker ran from 14:01:23Z until 14:38:56Z. The retro subprocess failed at
+    14:01:23Z, but there was no `daemon.alive`, review-capacity row, or light/full sweep after
+    13:58:12Z until 14:41:15Z. Green PRs accumulated without reviews throughout that interval.
+
+    THE SOURCE EXPLAINS THE TRACE. The detached W1-T2981 path calls `sweepLightDuringRetro`, which
+    starts `startInFlightTicker(..., "retro", ...)` before control reaches dispatch. The same
+    process-wide `inFlightTickerActive` boolean makes dispatch's later call return an inert stub.
+    When retro settles its stop clears the boolean, but the already-created dispatch stub cannot
+    become active. The worker therefore owns no review clock for the remainder of its 39-minute
+    lifetime. This is not W1-T2996's concurrent wake-sleeper defect: every sleeper may now settle;
+    the dispatch ticker was never a sleeper at all.
+
+    W1-T2981's own design said the detached path must NOT keep `sweepLightDuringRetro`, because the
+    interphase clock already covers the pre-dispatch interval and dispatch takes ownership at the
+    handoff. Its implementation comment repeats that invariant, then invokes the forbidden wrapper
+    on the next line. The task's two tests proved that dispatch ran and duplicate retros were
+    refused; neither proved that the dispatch review clock remained live.
+  design: |
+    Replace the boolean refusal with an explicit, atomic owner handoff on the one existing ticker.
+    Retro retains the clock before dispatch so an idle tick cannot recreate W1-T276's blind window;
+    when the same tick admits work, dispatch takes that clock's phase and stop authority without
+    starting a second runner. The stale retro handle must become inert, so retro settling first cannot
+    stop dispatch's clock. Retain the existing daemon-lifetime action registry, failure logging, and
+    duplicate-retro guard.
+
+    Prove the real overlap: hold both a detached retro and an admitted run open, settle the retro
+    first, and show event and interval wakes still enter the restricted light sweep while the run
+    remains unresolved. The test must fail against the current boolean's inert dispatch stub, not
+    merely assert that `runOne` was reached. Existing retro-only liveness must stay green. Preserve
+    STOP/PAUSE admission, detached-action drain, full-sweep retrigger, and the one-at-a-time
+    `sweepLight` invariant. Do not widen actions allowed in a light pass and do not raise a timeout or
+    worker count.
+  acceptance:
+    - claim: "a fired detached retro and a same-tick dispatch leave the dispatch review ticker live while both actions are unresolved"
+      proof: "unit test: test/a-detached-retro-does-not-steal-the-dispatch-ticker.test.ts"
+    - claim: "after the retro settles first, an event wake still starts the restricted light sweep before the dispatched worker settles"
+      proof: "unit test: test/a-detached-retro-does-not-steal-the-dispatch-ticker.test.ts"
+    - claim: "the same overlap emits daemon.alive on the configured cadence with phase dispatch rather than going telemetry-dark"
+      proof: "unit test: test/a-detached-retro-does-not-steal-the-dispatch-ticker.test.ts"
+    - claim: "retro remains detached, a second concurrent retro remains refused, and its failure remains handled and attributable"
+      proof: "unit test: test/a-detached-retro-does-not-steal-the-dispatch-ticker.test.ts"
+    - claim: "the repair never overlaps two sweepLight calls and STOP or PAUSE still withholds new review admission"
+      proof: "unit test: test/a-detached-retro-does-not-steal-the-dispatch-ticker.test.ts"
+  falsifier: |
+    Close without implementation if the deployed source does not call `sweepLightDuringRetro` from
+    the detached W1-T2981 path, or if DAEMON-1788875235003 contains a `daemon.alive` or sweep row
+    between the retro terminal row at 14:01:23Z and W1-T3156's settlement at 14:38:56Z. Both were
+    checked before filing: the call is at `src/lib/daemon.ts`, and the ledger union contains no such
+    row. The daemon process and worker staying alive do not falsify a missing review-clock owner.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` reported RESERVED W1-T3181 and created
+    `refs/rmd-id/W1-T3181`. Its advisory first line named W1-T3181 as well.
+
+    One concern only: ticker ownership across the detached-retro to dispatch handoff. Retro memory
+    use, review-lane width, and the independent PR-check history issue are outside this shard.
