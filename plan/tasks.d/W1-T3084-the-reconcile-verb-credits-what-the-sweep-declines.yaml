@@ -88,13 +88,13 @@
     return most of them to the reconciled set.
   acceptance:
     - claim: defaultCreditedMergedIds declines a candidate whose creditIsImplementation is not exactly true, so the writing rung is never more permissive than the reading one
-      proof: "unit test: test/plan-reconcile-credit-parity.test.ts::the writing rung is not more permissive than the reading one"
+      proof: "unit test: test/plan-reconcile-credit-parity.test.ts"
     - claim: undefined and false both decline, so a merge subject outside the scanned window is not silently credited
-      proof: "unit test: test/plan-reconcile-credit-parity.test.ts::undefined and false both decline"
+      proof: "unit test: test/plan-reconcile-credit-parity.test.ts"
     - claim: a candidate that IS an implementation still reconciles, so the fix narrows the set rather than emptying it
-      proof: "unit test: test/plan-reconcile-credit-parity.test.ts::an implementation credit still reconciles"
+      proof: "unit test: test/plan-reconcile-credit-parity.test.ts"
     - claim: the one-way, retirement-safe and dry-run-by-default guarantees W1-T3043 established are untouched, re-asserted against the stricter credit set rather than assumed to survive it
-      proof: "unit test: test/plan-reconcile-credit-parity.test.ts::the W1-T3043 guarantees survive the stricter credit set"
+      proof: "unit test: test/plan-reconcile-credit-parity.test.ts"
   falsifier: |
     Close without implementation if the two filters do not actually disagree. Measure it, do not read
     it: run `rmd plan-reconcile` as shipped, then again with `&& c.creditIsImplementation === true`
