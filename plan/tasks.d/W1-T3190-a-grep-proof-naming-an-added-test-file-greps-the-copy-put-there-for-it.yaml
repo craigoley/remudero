@@ -1,0 +1,65 @@
+- id: W1-T3190
+  title: "THE BASE WORKTREE COPIES THIS DIFF'S ADDED test/** FILES IN SO A `unit test:` PROOF CAN RE-RUN THERE, AND A `grep:` PROOF NAMING THE SAME NEW FILE THEN FINDS ITS OWN TEXT AT THE MERGE-BASE — graded `executed_stale`, positive override withdrawn, keyword floor applied, on a proof whose target did not exist at base at all; the code comment asserts `only files a unit test: proof could ever name are ever copied` and 75 `grep:` proofs in the plan name a `test/` path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/lib/review.ts, test/a-grep-proof-naming-an-added-test-file-greps-the-copy-put-there-for-it.test.ts]
+  origin: "operator-session#board-pass-2026-09-08"
+  plan_refs: ["W1-T3098", "W1-T273", "W1-T362", "W1-T1071"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3098 fixed a real thing. A `unit test:` proof naming a test file this diff ADDS could not
+    be re-run at the merge-base, because the file is not there — `node --test` found nothing, and
+    the classifier read that as `discriminates` without having measured anything. The remedy was to
+    copy the diff's added `test/**` files into the base worktree so the same proof can genuinely be
+    re-run, and it is guarded by a pathspec whose comment states the assumption plainly:
+
+      // The pathspec restricts the walk to `test/` itself, matching design (iv): only files a
+      // `unit test:` proof could ever name are ever copied.
+
+    THAT ASSUMPTION IS FALSE. A `grep:` proof names a path too, and naming a `test/` path is this
+    repo's own idiom for a falsifier criterion — `grep: MUTANT in test/<the new suite>.test.ts`.
+    MEASURED on origin/main: **75** `grep:` proofs across `plan/tasks.d/` name a `test/` path.
+
+    THE CONSEQUENCE IS SILENT AND INVERTS THE VERDICT. For such a proof the copy puts the HEAD's
+    file into the base tree, the base grep finds the very text the proof looks for, and
+    `classifyBaseProofOutcome` returns `stale` — so `judgeCriterion` reports
+
+      NOTE: proof also matches the PR's merge-base (...); non-discriminating,
+      positive override withdrawn, keyword floor applied
+
+    about a file that DID NOT EXIST at the merge-base. A forward reference — the strongest
+    discrimination a proof can have — is graded as the weakest.
+
+    MEASURED 2026-09-08, live, on PR #4661 (which builds W1-T3182):
+
+      criterion 3 proof   grep: MUTANT in test/a-recaptured-baseline-still-reads-as-tightening.test.ts
+      merge-base 41015aa  the file is ABSENT (`git show` fails; `grep` exits 2)
+      execWhitelistedProof against a tree without the file   THROWS  (=> base_unknown)
+      execWhitelistedProof against the head tree             pass
+      the review's own verdict                               executed_stale, 4/8 keywords, FAIL
+
+    The third and fourth rows are the proof that the executor is not at fault and the classifier is
+    not at fault: both behave correctly given their inputs. The base TREE is wrong — it contains a
+    file the base never had.
+
+    REMEDY. Decide discrimination by PROOF KIND, not by what happens to be on disk: a `grep:` proof
+    whose target path is a file this diff ADDS discriminates by construction, because the path did
+    not exist at the base whatever the `unit test:` copy put there. Key it on the added-file set
+    that is already computed for the copy, so the two cannot drift. Leave the `unit test:` re-run
+    exactly as W1-T3098 built it — this must narrow nothing it fixed.
+
+    NOT IN SCOPE: removing the copy (it would re-open W1-T3098's false `discriminates`), and
+    per-proof base trees (correct, far more expensive, and unnecessary once the kind is consulted).
+  acceptance:
+    - claim: "a grep proof whose target is a file this diff adds is graded as discriminating, not as matching the merge-base"
+      proof: "unit test: test/a-grep-proof-naming-an-added-test-file-greps-the-copy-put-there-for-it.test.ts"
+    - claim: "the decision reads the added-file set the copy itself uses, so the two cannot drift apart"
+      proof: "grep: addedTestFiles in src/lib/review.ts"
+    - claim: "a grep proof naming a test file that ALREADY existed at the base still degrades as stale, so the fix narrows nothing"
+      proof: "grep: still-stale in test/a-grep-proof-naming-an-added-test-file-greps-the-copy-put-there-for-it.test.ts"
