@@ -365,6 +365,18 @@ test("daemonCommand supplies the real REST and issue gateways to the one event-a
   assert.doesNotMatch(requeueBody, /rerun-failed-jobs/);
   assert.match(call, /onCheckBurstSettled:\s*\(\)\s*=>\s*void mainHealthRung\(\)/);
   assert.match(call, /buildSweepHook\([\s\S]*?mainHealthRung[\s\S]*?\)/);
+  const serveStart = source.indexOf("export async function serveCommand(");
+  const serveCommand = source.slice(serveStart, source.indexOf("export async function relayConnectCommand(", serveStart));
+  assert.doesNotMatch(
+    serveCommand,
+    /buildMainHealthRung|mainHealthRung/,
+    "Serve must not construct or import the daemon's main-health observer",
+  );
+  assert.doesNotMatch(
+    serveCommand,
+    /actions\/jobs\/[^\s`'"]+\/rerun|rerun-failed-jobs/,
+    "Serve must not acquire an Actions rerun mutation while the daemon owns recovery",
+  );
 });
 
 // W1-T3194 — the PRODUCTION `requeueCheck`, which no test above reaches: every one of them
