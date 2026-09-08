@@ -5588,24 +5588,11 @@ export function deriveWindowCostUsd(
   return total;
 }
 
-/** `[start, end)` of `now`'s UTC calendar day, in epoch ms — the day-cost window boundary, factored
- *  out so {@link deriveDayCostUsd} and a "merged today" tally (lib/glance.ts, W1-T159) agree on
- *  exactly what "today" means rather than each computing its own midnight. */
-export function utcDayWindowMs(now: number): [start: number, end: number] {
-  const day = new Date(now).toISOString().slice(0, 10); // "YYYY-MM-DD", UTC
-  const start = Date.parse(`${day}T00:00:00.000Z`);
-  return [start, start + 24 * 60 * 60 * 1000];
-}
-
-/** `[start, end)` of the CURRENT UTC ISO week (Monday 00:00 UTC through the following Monday
- *  00:00 UTC) containing `now`, in epoch ms — the week-to-date spend window (W1-T159). */
-export function utcWeekWindowMs(now: number): [start: number, end: number] {
-  const [dayStart] = utcDayWindowMs(now);
-  const dayOfWeek = new Date(dayStart).getUTCDay(); // 0=Sun..6=Sat
-  const daysSinceMonday = (dayOfWeek + 6) % 7; // Mon=0, Tue=1, ..., Sun=6
-  const weekStart = dayStart - daysSinceMonday * 24 * 60 * 60 * 1000;
-  return [weekStart, weekStart + 7 * 24 * 60 * 60 * 1000];
-}
+// W1-T2895: `utcDayWindowMs`/`utcWeekWindowMs` moved to the leaf module `time-window.ts` — this
+// was the `retro.ts` -> `sweep.ts` edge in the `cost-anomaly.ts -> retro.ts -> sweep.ts` cycle.
+// Re-exported here unchanged for `deriveDayCostUsd`/`deriveWeekCostUsd` below and for `glance.ts`.
+export { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
+import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 
 /** The day's ledgered cost — `now`'s UTC calendar day, per-run (see {@link deriveWindowCostUsd}).
  *  BEHAVIOR UNCHANGED from this function's pre-W1-T159 form: same window, same verdict-preferred

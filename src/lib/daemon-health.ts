@@ -44,7 +44,7 @@ import { statfsSync } from "node:fs";
 import { ghExec } from "./github-transport.js";
 import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";
-import { DEFAULT_POLL_INTERVAL_MS } from "./daemon.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import type { Route } from "./service.js";
 import { parseGhRateLimitHeaders } from "./worker.js";
 

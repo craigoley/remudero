@@ -27,23 +27,21 @@ module.exports = {
       to: { path: "^src/(spike|run-task)\\.ts$|^src/cli/" },
     },
     {
-      // WHY `warn` AND NOT `error`. Fifteen cycles already exist, fourteen of them entirely
-      // inside `src/lib`, knotting twenty-two modules around
-      // worker/worker-home/review/plan-architect/plan-pr-emitter/open-prs-rest/sweep/
-      // cost-anomaly/retro/task-linter/escalate/status. `error` would turn a REQUIRED check red
-      // on day one over pre-existing structure and force either a large refactor or an
-      // exclusion list, and this repo ships against these files daily. `warn` makes the count
-      // OBSERVABLE and stops it growing silently, which is the whole point: before this rule the
-      // cruise reported "no dependency violations found" over all fifteen, because nothing asked.
-      //
-      // RAISING THIS TO `error` IS A SEPARATE, REVIEWED DECISION and belongs with the work that
-      // actually cuts the cycles — the cheapest first cut is `open-prs-rest` <-> `sweep`, where
-      // the edge one way is `import type` only and therefore erased at runtime.
+      // WHY `error` NOW, 2026-09-08 (W1-T2895). This rule ran as `warn` from its introduction
+      // (thirteen tolerated cycles, `scripts/cycle-baseline.json`'s prior `maxCycles: 13`) until
+      // this task cut every one of them: six single-symbol edges each moved to a leaf module
+      // (`isInPlanScope`, `ghJson`, `readLedgerLines`, `playwrightCacheRoot`, `utcWeekWindowMs`,
+      // `DEFAULT_POLL_INTERVAL_MS`) plus one `import type { BoardDeps }` edge that dependency-
+      // cruiser's `swc` parser counted as circular exactly like a value import. `npm run
+      // cycle-ratchet -- --print` reports 0 at this sha, so `error` no longer turns a REQUIRED
+      // check red over pre-existing structure — it holds the zero rather than merely observing
+      // whatever count exists. `scripts/cycle-ratchet.mjs` still separately ratchets the COUNT
+      // (net growth only); this rule is the hard floor under it.
       name: "no-circular",
-      severity: "warn",
+      severity: "error",
       comment:
         "A cycle between modules makes load order significant and blocks extraction: neither " +
-        "end can move without the other. Reported, never blocking — see the severity note above.",
+        "end can move without the other. Zero tolerated as of W1-T2895 — see the severity note above.",
       from: {},
       to: { circular: true },
     },

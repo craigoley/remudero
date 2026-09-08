@@ -29,9 +29,8 @@
  */
 
 import type { ServerResponse } from "node:http";
-import type { BoardDeps } from "./board.js";
 import { projectPlan, readLedgerLines } from "./status.js";
-import type { StatusProjection } from "./status.js";
+import type { BoardDeps, StatusProjection } from "./status.js";
 import type { AcceptanceCriterion, Task, TaskStatus } from "./plan.js";
 import type { Route } from "./service.js";
 

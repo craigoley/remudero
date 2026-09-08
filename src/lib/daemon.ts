@@ -90,10 +90,11 @@ import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
  * a supervisor restart is the only way a long-running daemon gets off the code it loaded at boot (W1-T126). */
 export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale";
 
-/** Default idle-poll pace: check back once a minute while nothing is runnable. The literal stays
- *  here because this module never touches the filesystem; `daemonCommand` threads the policy value
- *  on every real invocation, so this is provably dead for the operating path (W1-T253). */
-export const DEFAULT_POLL_INTERVAL_MS = 60_000;
+// W1-T2895: `DEFAULT_POLL_INTERVAL_MS` moved to the leaf module `poll-interval.ts` — it was the
+// value edge `daemon-health.ts` imported, which is what made its own `import type { GhRateLimitBuckets }`
+// edge back into this file a genuine two-module cycle. Re-exported here unchanged.
+export { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 
 /** Default wall-clock bound on the full reconciliation pass, mirroring `plan/policy.yaml`'s
  *  `sweepWallClockBoundMs` row, which carries the healthy-versus-hung derivation. Same fs-free

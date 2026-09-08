@@ -17,7 +17,6 @@ import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
 
 import { workerHomeDir, type Config } from "../src/lib/config.js";
-import { playwrightCacheRoot } from "../src/lib/review.js";
 import {
   CLAUDE_CONFIG_BACKUP_PREFIX,
   CLAUDE_CONFIG_REL,
@@ -31,6 +30,7 @@ import {
   materializeWorkerHome,
   perRunWorkerHomeDir,
   playwrightCacheRelPath,
+  playwrightCacheRoot,
   sweepClaudeConfigBackups,
   workerHomePlan,
   workerKeychainPaths,

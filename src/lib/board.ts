@@ -22,12 +22,15 @@ import {
   projectPlan,
   readLedgerLines,
   readLedgerTail,
-  type DeriveDeps,
+  type BoardDeps,
   type LedgerTailCache,
   type StatusProjection,
   type PrRef,
   taskIdFromRunBranch,
 } from "./status.js";
+// W1-T2895: `BoardDeps` re-exported unchanged for every existing consumer of `board.js`'s own
+// `BoardDeps` — moving the DEFINITION to `status.ts`, never the public surface.
+export type { BoardDeps };
 import type { Route, SseRoute, SseSend } from "./service.js";
 import { bearerTokenId } from "./panel-actions.js";
 import type { LastSeenStore } from "./last-seen.js";
@@ -113,10 +116,6 @@ export interface BoardSnapshot {
   /** Set only when live GitHub state could not be checked this render (W1-T1006). When set,
    *  {@link blockedPrs} is empty — withheld, never replayed as current and read as "nothing blocked". */
   blockedPrsUnverifiedReason?: string;
-}
-
-export interface BoardDeps extends DeriveDeps {
-  plan: Plan;
 }
 
 export type PrQueueClass = "actionable" | "active" | "ready-held" | "waiting" | "unknown";

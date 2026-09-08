@@ -1,26 +1,26 @@
 import { execFileSync } from "node:child_process";
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
-import { isInPlanScope } from "./plan-architect.js";
+import { isInPlanScope } from "./plan-scope.js";
 import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerLines } from "./status.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { playwrightCacheRoot } from "./worker-home.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
   GENERATED_LEDGER_CLASSES,
   isCompanionPath,
 } from "./companion-paths.js";
-import { ghJson } from "./worker.js";
 
 /** The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; W1-T1C) — the second half of the merge contract. Standing rule 4:
  * green checks are NOT evidence, so after `ci` goes green a fresh-context REVIEW worker (never the implementer's
@@ -128,6 +128,20 @@ export function lastReviewDecisionTerminal(
   return terminal;
 }
 
+/**
+ * The live ledger file's lines, as plain records — this module's own reader, routed through
+ * {@link readLedgerUnionRecordsSync} (`ledger-union.ts`, W1-T2898) rather than `status.ts`'s
+ * `readLedgerLines` (W1-T2895): `review.ts` importing a VALUE from `status.ts` closed three of
+ * the thirteen import cycles `npm run cycle-ratchet` tolerated. `maxRotations: 0` reads the live
+ * file alone, never rotations — identical scope to `readLedgerLines`; `dedupe: false` keeps every
+ * line exactly as ledgered, matching `readLedgerLines`' own no-dedup behaviour byte for byte. Only
+ * the array of records is used here — never `readLedgerLines`' `.torn`/`.present` metadata, which
+ * none of this module's three call sites read.
+ */
+function readLiveLedgerRecords(ledgerPath: string): Array<Record<string, unknown>> {
+  return readLedgerUnionRecordsSync(dirname(ledgerPath), { maxRotations: 0, dedupe: false }).rows;
+}
+
 export type ReviewDecisionClaim =
   | { kind: "owned"; release: () => void }
   | { kind: "in_flight" }
@@ -149,7 +163,7 @@ export async function claimReviewDecision(opts: {
     if (error instanceof ReviewStatusLockTimeoutError) return { kind: "in_flight" };
     throw error;
   }
-  const terminal = lastReviewDecisionTerminal(readLedgerLines(opts.ledgerPath), opts.taskId, opts.prUrl, opts.digest);
+  const terminal = lastReviewDecisionTerminal(readLiveLedgerRecords(opts.ledgerPath), opts.taskId, opts.prUrl, opts.digest);
   if (terminal) {
     handle.release();
     return { kind: "replay", terminal };
@@ -1117,21 +1131,6 @@ function installPinnedChromium(cwd: string): void {
     stdio: "pipe",
     timeout: 600_000,
   });
-}
-
-/** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real path, which is how CI
- *  images relocate the cache; the literal `"0"` means "inside node_modules" and is NOT a directory, so it falls
- *  through to the platform default exactly as Playwright's own resolution does. */
-export function playwrightCacheRoot(
-  env: NodeJS.ProcessEnv = process.env,
-  platform: string = process.platform,
-  home: string = homedir(),
-): string {
-  const override = env.PLAYWRIGHT_BROWSERS_PATH;
-  if (override !== undefined && override !== "" && override !== "0") return override;
-  if (platform === "darwin") return join(home, "Library", "Caches", "ms-playwright");
-  if (platform === "win32") return join(env.LOCALAPPDATA ?? join(home, "AppData", "Local"), "ms-playwright");
-  return join(home, ".cache", "ms-playwright");
 }
 
 /** The three genuinely different answers to "which test file(s) could this name-filtered proof's raw name live in?",
@@ -6468,7 +6467,7 @@ export async function postReviewStatusGuarded(
   try {
     // READ BEFORE WRITE, INSIDE THE LOCK — a read taken before acquiring the
     // lock would leave open exactly the TOCTOU gap the lock exists to close.
-    const lines = readLedgerLines(opts.ledgerPath);
+    const lines = readLiveLedgerRecords(opts.ledgerPath);
     const prior =
       opts.prUrl !== undefined && opts.reviewInputDigest !== undefined
         ? lastPostedReviewStatusForInput(lines, opts.taskId, opts.prUrl, opts.sha, opts.reviewInputDigest)
@@ -6594,7 +6593,7 @@ export interface PostReviewPendingResult {
  * The posted status carries the posting `run_id`, which is what sweep.ts's `OpenPrView.reviewPendingSince` producer
  * derives its staleness clock from. */
 export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
-  const lines = readLedgerLines(opts.ledgerPath);
+  const lines = readLiveLedgerRecords(opts.ledgerPath);
   const hasInputIdentity = opts.prUrl !== undefined && opts.reviewInputDigest !== undefined;
   const priorTerminal = hasInputIdentity
     ? lastPostedReviewStatusForInput(lines, opts.taskId, opts.prUrl!, opts.sha, opts.reviewInputDigest!)
