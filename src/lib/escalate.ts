@@ -792,17 +792,10 @@ export interface EscalationDedupKey {
   cause?: EscalationCause;
 }
 
-/** Search OPEN `needs-human` issues for a duplicate of `e` — extracted from {@link escalate} so
- *  {@link escalateWithJudge} runs the IDENTICAL search once, up front, and never judges a duplicate.
- *  Returns `undefined` for no `listOpen`, a failed read, or no match. */
-export function findDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): OpenIssue | undefined {
-  if (!deps.issues.listOpen) return undefined;
-  let open: OpenIssue[];
-  try {
-    open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
-  } catch {
-    return undefined; // best-effort dedup: a failed read must never block the escalation itself
-  }
+/** Scan an already-fetched OPEN-issue list for a duplicate of `e` — the pure matching predicate
+ *  {@link findDuplicateEscalation} and {@link lookupDuplicateEscalation} both apply to whatever
+ *  `listOpen` returned, so a change to the matching rule can never drift between the two callers. */
+function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): OpenIssue | undefined {
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
   const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
   return open.find((issue) => {
@@ -829,6 +822,71 @@ export function findDuplicateEscalation(e: EscalationDedupKey, deps: Pick<Escala
     }
     return (issue.title ?? "") === title;
   });
+}
+
+/** Search OPEN `needs-human` issues for a duplicate of `e` — extracted from {@link escalate} so
+ *  {@link escalateWithJudge} runs the IDENTICAL search once, up front, and never judges a duplicate.
+ *  Returns `undefined` for no `listOpen`, a failed read, or no match — DELIBERATELY UNCHANGED by
+ *  W1-T2912: this is also the pre-strike false-block probe's own predicate (run-task.ts, design
+ *  comment at the `openEscalation` stand-down gate), which relies on a throwing `listOpen` staying
+ *  fail-open so an unreadable surface never itself manufactures a stand-down. {@link escalate} and
+ *  {@link escalateWithJudge} do NOT call this any more — see {@link lookupDuplicateEscalation}, which
+ *  tells "unreadable" apart from "no match" for the one caller (issue creation) where collapsing the
+ *  two is the bug W1-T2912 exists to fix. */
+export function findDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): OpenIssue | undefined {
+  if (!deps.issues.listOpen) return undefined;
+  let open: OpenIssue[];
+  try {
+    open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
+  } catch {
+    return undefined; // best-effort dedup: a failed read must never block the PROBE itself
+  }
+  return matchDuplicateEscalation(e, open);
+}
+
+/** The three-way outcome {@link escalate}/{@link escalateWithJudge} need but {@link
+ *  findDuplicateEscalation} cannot give them (W1-T2912): a `listOpen` that THROWS — a REST outage
+ *  while GraphQL `create` still works, say — is not "no match". Collapsing the two into `undefined`
+ *  is exactly the bug: every tick during the outage reads "no duplicate found" and files a fresh
+ *  `needs-human` issue, flooding the operator's inbox with one copy per tick for the length of the
+ *  outage. `unreadable` lets the caller refuse to create instead, and retry the read next tick —
+ *  the condition being escalated is durable and will still be there. */
+export type DedupLookup =
+  | { kind: "none" }
+  | { kind: "found"; issue: OpenIssue }
+  | { kind: "unreadable"; error: unknown };
+
+/** {@link findDuplicateEscalation}'s outcome-preserving twin — same search, same predicate, but a
+ *  throwing `listOpen` reports `{ kind: "unreadable" }` instead of silently degrading to "no match".
+ *  Used ONLY by {@link escalate}/{@link escalateWithJudge}, the one caller that turns "no match" into
+ *  CREATING a new issue; every other reader of the dedup search (the pre-strike probe) keeps calling
+ *  {@link findDuplicateEscalation} itself, unchanged. */
+function lookupDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): DedupLookup {
+  if (!deps.issues.listOpen) return { kind: "none" };
+  let open: OpenIssue[];
+  try {
+    open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
+  } catch (error) {
+    return { kind: "unreadable", error };
+  }
+  const match = matchDuplicateEscalation(e, open);
+  return match ? { kind: "found", issue: match } : { kind: "none" };
+}
+
+/** Ledger the `escalation.dedup_unreadable` step and return WITHOUT creating an issue (W1-T2912): a
+ *  failed dedup read must refuse to create, not report no match. Returns `""` (never a real issue
+ *  URL — none was opened) so {@link escalate}/{@link escalateWithJudge} keep their `string` return
+ *  type; every caller only logs/interpolates it, and the ledger row (not the return value) is the
+ *  durable record a human or the next tick reads. */
+function recordUnreadableDedup(e: Escalation, error: unknown, deps: EscalateDeps): string {
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: e.taskId,
+    step: "escalation.dedup_unreadable",
+    class: e.class,
+    error: String((error as Error)?.message ?? error),
+  });
+  return "";
 }
 
 /** Append the dedup comment and the `escalation.deduped` ledger line for an already-found duplicate —
@@ -963,8 +1021,11 @@ function recordThreadMessage(e: Escalation, deps: EscalateDeps): void {
  * escalation's own text: PR-KEYED (taskId, PR, plus headSha/cause when set, matched permissively) and
  * REFERENT-LESS (taskId, class, cause, with the rendered title as fallback discriminator — W1-T345).
  * Both search OPEN issues only, because a closed one recorded a human's resolution and must not
- * silence a recurrence; a duplicate takes the second observer's context as a comment, and an absent or
- * failed `listOpen` falls through to create. Why: docs/forensics/escalate.md.
+ * silence a recurrence; a duplicate takes the second observer's context as a comment. An absent
+ * `listOpen` falls through to create (no surface to search), but a `listOpen` that THROWS refuses to
+ * create instead (W1-T2912): an unreadable surface is not a "no match", and treating it as one during
+ * a REST outage (while GraphQL `create` still works) files one duplicate issue per tick for the
+ * length of the outage. Why: docs/forensics/escalate.md.
  */
 export function escalate(e: Escalation, deps: EscalateDeps): string {
   if (e.options.length === 0) {
@@ -973,8 +1034,9 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
   validateEscalationOptionKinds(e);
   const resolved = refuseUnlessResolvable(e);
   recordThreadMessage(resolved, deps);
-  const dup = findDuplicateEscalation(resolved, deps);
-  if (dup) return recordDuplicateEscalation(resolved, dup, deps);
+  const dedup = lookupDuplicateEscalation(resolved, deps);
+  if (dedup.kind === "found") return recordDuplicateEscalation(resolved, dedup.issue, deps);
+  if (dedup.kind === "unreadable") return recordUnreadableDedup(resolved, dedup.error, deps);
   const messageCheck = checkOperatorMessageSafe(resolved);
   return createEscalationIssue(resolved, deps, {
     queueLabel: NEEDS_HUMAN_LABEL,
@@ -986,9 +1048,10 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
 /** THE JUDGED CHOKE POINT (W1-T349) — {@link escalate} plus the residual escalation judge. Producers
  *  opt in; anyone still calling {@link escalate}/{@link tryEscalate} gets today's unjudged
  *  needs-human behaviour. ORDER MATTERS: dedup runs FIRST, through the exact same {@link
- *  findDuplicateEscalation} search, so the judge never sees a duplicate. A `demote` opens the issue
- *  fleet-notice-labelled with the judge's reason as the first comment; anything else — deliver, an
- *  exempt class, or a judge failure — opens it needs-human-labelled. */
+ *  lookupDuplicateEscalation} search, so the judge never sees a duplicate (and never runs at all on
+ *  an unreadable surface — W1-T2912). A `demote` opens the issue fleet-notice-labelled with the
+ *  judge's reason as the first comment; anything else — deliver, an exempt class, or a judge failure
+ *  — opens it needs-human-labelled. */
 export async function escalateWithJudge(
   e: Escalation,
   deps: EscalateDeps & EscalationJudgeDeps,
@@ -999,8 +1062,9 @@ export async function escalateWithJudge(
   validateEscalationOptionKinds(e);
   const resolved = refuseUnlessResolvable(e);
   recordThreadMessage(resolved, deps);
-  const dup = findDuplicateEscalation(resolved, deps);
-  if (dup) return recordDuplicateEscalation(resolved, dup, deps);
+  const dedup = lookupDuplicateEscalation(resolved, deps);
+  if (dedup.kind === "found") return recordDuplicateEscalation(resolved, dedup.issue, deps);
+  if (dedup.kind === "unreadable") return recordUnreadableDedup(resolved, dedup.error, deps);
 
   const verdict = await judgeEscalation(resolved, deps);
   // W1-T3166, BOTH arms: a judge that only leaves a trace when it demotes cannot be calibrated.
@@ -1035,11 +1099,15 @@ export async function escalateWithJudge(
  *  on any nonzero `gh` exit, right for a one-shot command and wrong inside `rmd daemon`'s `for(;;)` —
  *  an uncaught escalation ends the PROCESS, launchd reads the exit as a crash, and the fresh process
  *  re-selects the same circuit-broken task and throws again. This also catches the zero-options
- *  programming error deliberately. */
+ *  programming error deliberately. Also normalizes `escalate()`'s `""` (W1-T2912: an unreadable dedup
+ *  read refuses to create WITHOUT throwing, so its own `escalation.dedup_unreadable` ledger row is
+ *  the only record) to `null` — every caller keying `delivered`/`issue_url` off this function's
+ *  return via `!== null` (e.g. escalation-catalogue.ts) must read "refused to create" identically to
+ *  "create() itself failed", not as a phantom successful delivery. */
 // Why: the 2026-07-21 daemon boot loop this wrapper ended (W1-T197's sibling) — docs/forensics/escalate.md.
 export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
   try {
-    return escalate(e, deps);
+    return escalate(e, deps) || null;
   } catch (err) {
     appendLedger(deps.ledgerPath, {
       run_id: deps.runId,
