@@ -24,6 +24,7 @@ import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 
@@ -79,9 +80,6 @@ function task(over: Partial<Task> = {}): Task {
 }
 function planOf(tasks: Task[]): Plan {
   return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
-}
-function fakeGitHub(): GitHub {
-  return { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
 }
 function fakeTraceGithub(): TraceGithub {
   return { prView: () => null };

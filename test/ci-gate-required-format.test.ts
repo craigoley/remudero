@@ -27,8 +27,8 @@ const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 
 // The REQUIRED array exactly as it read before this PR (single-line JSON literal) — the
 // pre-reformat fixture. Order and membership must be byte-identical to what W1-T107 replaced,
-// PLUS every entry a later PR has appended since (most recently coverage-session-blanking,
-// W1-T2732 — the convention this comment states: a PR that makes a check REQUIRED appends here too).
+// PLUS every entry a later PR has appended since (most recently baseline-monotonic, W1-T2906 —
+// the convention this comment states: a PR that makes a check REQUIRED appends here too).
 const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "ci",
   "lint-plan",
@@ -52,6 +52,7 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "comment-load-ratchet",
   "source-size",
   "coverage-session-blanking",
+  "baseline-monotonic",
 ]);
 
 async function loadCiGate() {

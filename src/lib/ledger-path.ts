@@ -2,6 +2,8 @@ import { join } from "node:path";
 
 import type { Config } from "./config.js";
 
+export const LEDGER_FILENAME = "ledger.ndjson";
+
 /**
  * W1-T143 (DAEMON OBSERVABILITY): the ONE canonical ledger path, a PURE function of
  * `config.root` — DOCUMENTED (docs/operator-guide.md) and named aloud at the daemon's
@@ -12,7 +14,7 @@ import type { Config } from "./config.js";
  * site), so a future rename/relocation of the ledger changes exactly one line.
  */
 export function ledgerPathFor(config: Config): string {
-  return join(config.root, "state", "ledger.ndjson");
+  return join(config.root, "state", LEDGER_FILENAME);
 }
 
 // W1-T2528 — module-scoped so it's monotonic across every lane runId this ONE process mints

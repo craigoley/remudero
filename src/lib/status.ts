@@ -8,11 +8,11 @@ import { Worker, isMainThread, parentPort, workerData } from "node:worker_thread
 // Default export, never named bindings: those are non-configurable, so a spy cannot intercept one. Every call
 // is a property access AT CALL TIME, never destructured. Why: W1-T115's proof shape — docs/forensics/status.md
 import fs from "node:fs";
-import { readdirSync as nodeReaddirSync, readFileSync as nodeReadFileSync } from "node:fs";
+import { readFileSync as nodeReadFileSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { ledgerRotationEntries } from "./ledger-grep.js";
+import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps } from "./ledger-union.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./escalate.js";
@@ -399,6 +399,23 @@ const realLedgerFs: LedgerFsDeps = {
   readFileSync: (path, encoding) => fs.readFileSync(path, encoding),
 };
 
+function statusLedgerUnionFsDeps(
+  ledgerFs: LedgerFsDeps,
+  opts: {
+    readdirSync?: (dir: string) => string[];
+    gunzipSync?: (buf: Buffer) => Buffer;
+    readFileBuffer?: (p: string) => Buffer;
+  },
+): LedgerGrepFsDeps | undefined {
+  if (!opts.readdirSync && !opts.gunzipSync && !opts.readFileBuffer && ledgerFs === realLedgerFs) return undefined;
+  return {
+    readdirSync: opts.readdirSync ?? ((dir) => fs.readdirSync(dir)),
+    existsSync: (path) => ledgerFs.existsSync(path),
+    readFileSync: opts.readFileBuffer ?? ((path) => nodeReadFileSync(path)),
+    gunzipSync: opts.gunzipSync ?? ((buf) => nodeGunzipSync(buf)),
+  };
+}
+
 // ── W1-T951: DURABLE MERGE CREDIT ───────────────────────────────────────────────────────────
 // DESIGN DECISION (i), RECORDED per the shard's requirement: the durable record belongs at THIS layer,
 // inside `derivePrPrecedence`. Every site that reads `projection.merged` goes through
@@ -661,55 +678,34 @@ export function readMergeCreditedTaskIds(
   };
   const done = (): boolean => wanted.size > 0 && outstanding <= 0;
 
-  // ledger-read-intent: live — this function's own seed, extended with rotations below.
-  const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path, opts.ledgerFs ?? realLedgerFs);
-  for (const l of live) take(l);
-  let filesRead = 1;
-  if (done()) return { credited, filesRead, complete: true, budgetExhausted: false };
-
-  let names: string[];
-  try {
-    names = (opts.readdirSync ?? nodeReaddirSync)(dirname(path));
-  } catch {
-    // An unreadable state dir degrades to the live answer, never to a throw. W1-T119: a read that failed is not
-    // a read that said no.
-    // W1-T3019: the corpus was never enumerated, so an outstanding candidate's absence is UNPROVEN
-    // here for the same reason the cap makes it unproven — files that were never opened.
-    return { credited, filesRead, complete: false, budgetExhausted: wanted.size > 0 && outstanding > 0 };
-  }
-  const rotations = ledgerRotationEntries(names, dirname(path)).sort((a, b) =>
-    a.path < b.path ? 1 : a.path > b.path ? -1 : 0,
-  );
   const cap = opts.maxRotations ?? CREDIT_SCAN_MAX_ROTATIONS;
-  // W1-T3019: files this walk never opens — past the cap, plus any that fail to read below. It
-  // separates "the corpus ran out" (an absence PROVED) from "the budget ran out" (merely not
-  // found). `filesRead` cannot: a corrupt rotation spends a slot without incrementing it.
-  let unopened = Math.max(0, rotations.length - cap);
-  for (const entry of rotations.slice(0, cap)) {
-    let text: string;
-    try {
-      const buf = (opts.readFileBuffer ?? ((p: string) => nodeReadFileSync(p)))(entry.path);
-      text = (entry.form === "gzip" ? (opts.gunzipSync ?? nodeGunzipSync)(buf) : buf).toString("utf8");
-    } catch {
-      unopened += 1;
-      continue; // a corrupt rotation costs its rows, never the answer
-    }
-    filesRead += 1;
-    for (const raw of text.split("\n")) {
-      const l = raw.trim();
-      if (!l) continue;
-      try {
-        take(JSON.parse(l) as Record<string, unknown>);
-      } catch {
-        // a torn line costs its own credit, never the walk
-      }
-    }
-    if (done()) return { credited, filesRead, complete: true, budgetExhausted: false };
-  }
+  const ledgerFs = opts.ledgerFs ?? realLedgerFs;
+  // ledger-read-intent: live — this function's own seed, extended with rotations below.
+  const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path, ledgerFs);
+  const read = readLedgerUnionRecordsSync(
+    dirname(path),
+    {
+      liveFirst: true,
+      order: "newest-first",
+      maxRotations: cap,
+      dedupe: false,
+      readLiveRecords: () => live,
+      onRecord: take,
+      satisfied: done,
+    },
+    statusLedgerUnionFsDeps(ledgerFs, opts),
+  );
   // `complete: false` means the cap or the corpus ran out with candidates unresolved — those get re-credited,
   // which is today's behaviour, not a regression.
   const complete = wanted.size === 0 ? true : outstanding <= 0;
-  return { credited, filesRead, complete, budgetExhausted: !complete && unopened > 0 };
+  // W1-T3019: `budgetExhausted` separates "the BUDGET ran out" (the rotation cap hid files we never
+  // opened, so an outstanding candidate's absence is UNPROVEN) from "the CORPUS ran out" (every file
+  // that exists was opened and the id was not there, so the absence IS proven). The discriminator is
+  // therefore whether the cap actually hid anything -- `archiveCount > cap` -- and NOT whether
+  // candidates remain outstanding: `!complete` already means they do, so testing `wanted.size > 0`
+  // here reports every proven absence as a budget exhaustion and erases the distinction the field
+  // exists for. A corpus of EXACTLY the cap, or one rotation short of it, is fully read and proven.
+  return { credited, filesRead: read.filesRead, complete, budgetExhausted: !complete && read.archiveCount > cap };
 }
 
 /** The ledger union a RENDERING surface needs: the live file plus dated rotations, NEWEST FIRST, stopping at
@@ -730,53 +726,19 @@ export function readLedgerUnionBounded(
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   // ledger-read-intent: live — this function's own seed, extended with rotations below.
   const live = readLedgerLines(path, ledgerFs);
-  const satisfied = opts.satisfied;
-  // O(1) per line, accumulated ONCE. An earlier revision re-scanned 173k lines nine times and cost ~2s of board
-  // wall time — a bounded read is only cheap if the stop test is cheap too.
-  const stepsSeen = new Set<string>();
-  for (const l of live) {
-    const s0 = l.step;
-    if (typeof s0 === "string") stepsSeen.add(s0);
-  }
-  if (satisfied?.(stepsSeen)) return live;
-
-  const stateDir = dirname(path);
-  let names: string[];
-  try {
-    names = (opts.readdirSync ?? nodeReaddirSync)(stateDir);
-  } catch {
-    return live; // an unreadable state dir degrades to exactly today's answer, never to a throw
-  }
-  // NEWEST FIRST. The rotation stamp is an ISO instant, so a descending lexicographic sort IS chronological —
-  // the property `rmd ledger-grep`'s own sort relies on.
-  const rotations = ledgerRotationEntries(names, stateDir).sort((a, b) => (a.path < b.path ? 1 : a.path > b.path ? -1 : 0));
-
-  const out: Array<Record<string, unknown>> = [...live];
-  let torn = live.torn ?? 0;
-  const cap = opts.maxRotations ?? STATUS_BOARD_MAX_ROTATIONS;
-  for (const entry of rotations.slice(0, cap)) {
-    let text: string;
-    try {
-      const buf = (opts.readFileBuffer ?? ((p: string) => nodeReadFileSync(p)))(entry.path);
-      text = (entry.form === "gzip" ? (opts.gunzipSync ?? nodeGunzipSync)(buf) : buf).toString("utf8");
-    } catch {
-      continue; // a corrupt rotation is skipped, never fatal — the live answer still renders
-    }
-    for (const raw of text.split("\n")) {
-      const l = raw.trim();
-      if (!l) continue;
-      try {
-        const parsed = JSON.parse(l) as Record<string, unknown>;
-        out.push(parsed);
-        const s1 = parsed.step;
-        if (typeof s1 === "string") stepsSeen.add(s1);
-      } catch {
-        torn++;
-      }
-    }
-    if (satisfied?.(stepsSeen)) break;
-  }
-  return withReadMeta(out, torn, live.present);
+  const read = readLedgerUnionRecordsSync(
+    dirname(path),
+    {
+      liveFirst: true,
+      order: "newest-first",
+      maxRotations: opts.maxRotations ?? STATUS_BOARD_MAX_ROTATIONS,
+      dedupe: false,
+      readLiveRecords: () => live,
+      satisfied: opts.satisfied,
+    },
+    statusLedgerUnionFsDeps(ledgerFs, opts),
+  );
+  return withReadMeta(read.rows, (live.torn ?? 0) + read.torn, live.present);
 }
 
 /**
