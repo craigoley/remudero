@@ -688,7 +688,13 @@ export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: n
         writeBufferedResponse(res, cached, responseStaleness(systemClock.now(), cached.generatedAtMs, refreshing, budgetMs, lastError));
         return;
       }
-      const staleness = responseStaleness(systemClock.now(), cached?.generatedAtMs, refreshing, budgetMs, lastError);
+      // Reaching this branch means the live refresh missed its response budget. Even a cache entry
+      // generated exactly one budget window ago is therefore a stale fallback for this response;
+      // deriving only from age made the boundary millisecond nondeterministically report `fresh`.
+      const staleness = {
+        ...responseStaleness(systemClock.now(), cached?.generatedAtMs, refreshing, budgetMs, lastError),
+        stale: true,
+      };
       if (cached) {
         writeBufferedResponse(res, cached, staleness);
         return;

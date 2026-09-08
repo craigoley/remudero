@@ -284,6 +284,25 @@ test("cached console read routes reuse buffered bodies when a later refresh miss
   assert.equal(typeof body.staleness?.ageMs, "number");
 });
 
+test("a malformed cached JSON body is preserved while cache headers still report staleness", async () => {
+  const deps = depsFor(tmpRoot());
+  const source: Route = {
+    method: "GET",
+    path: "/v1/recent",
+    scope: "read",
+    handler: (_req, res) => {
+      res.setHeader("content-type", "application/json; charset=utf-8");
+      res.end("{malformed");
+    },
+  };
+  const [route] = boundConsoleReadRoutes([source], deps, 20);
+  const response = await serveRoute(route);
+
+  assert.equal(await response.text(), "{malformed");
+  assert.equal(response.headers.get("x-rmd-cache-state"), "fresh");
+  assert.ok(Number.isFinite(Number(response.headers.get("x-rmd-cache-age-ms"))));
+});
+
 test("a throwing cached JSON route returns its stale fallback with the failure reason", async () => {
   const deps = depsFor(tmpRoot());
   const source: Route = {
