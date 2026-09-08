@@ -566,6 +566,16 @@ export interface WhitelistedProof {
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
 const TEST_PATH_EXACT_RE = /^test\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
+/** W1-T3073 — a body shaped `<exact test path>::<suffix>`. THIS GRAMMAR DOES NOT EXIST. `unit test:`
+ *  has exactly two forms, and this is neither: the `::` makes it fail {@link TEST_PATH_EXACT_RE},
+ *  so it used to fall through to the bare-TITLE arm, where the WHOLE string — path, separator and
+ *  title together — was escaped into one `--test-name-pattern`. No test is named that, so it matched
+ *  zero and the criterion degraded silently to the keyword floor. MEASURED: W1-T3071's four proofs
+ *  all resolved `not_executable` while its filing still merged green. Refusing it here is what makes
+ *  the changed-task lint path block it at authoring time, since `proofDialectViolations` grades a
+ *  `null` from the shared parser as a blocking `proof-dialect` violation. */
+const TEST_PATH_TITLE_SEPARATOR_RE = /^(test\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?)::([\s\S]*)$/;
 const GREP_FENCE_RE = /`(grep\s+[^`]+)`/;
 const UNSAFE_FENCE_CHARS_RE = /[;&`$<>\n]/;
 /** The house-dialect PREFIXES a proof is WRITTEN in when it is meant to be mechanically checked (W1-T72). Matched
@@ -682,6 +692,31 @@ export function explainGrepProofRefusal(proof: string): string | undefined {
   return grepProofTargetNamesNoFile(path);
 }
 
+/** WHY a `unit test:` proof body failed to parse, as one sentence for a human — `undefined` when it
+ *  parses or is not a `unit test:` proof. The `grep:` sibling of this is {@link
+ *  explainGrepProofRefusal}; both exist so `rmd check-proof` and the task linter print the SAME
+ *  sentence the parser actually decided on, rather than each hand-rolling an interpretation
+ *  (W1-T3073's design says so in as many words). */
+export function explainUnitTestProofRefusal(proof: string): string | undefined {
+  const m = proof.trim().match(/^unit test:\s*([\s\S]*)$/i);
+  if (!m) return undefined;
+  const trimmed = m[1].trim();
+  if (!trimmed) return "empty `unit test:` body — nothing to run";
+  const split = trimmed.match(TEST_PATH_TITLE_SEPARATOR_RE);
+  if (split) {
+    const [, path, title] = split;
+    const named = title.trim();
+    return (
+      `\`${path}::${named}\` is not a supported \`unit test:\` form — there are exactly two, and this is ` +
+      `neither. Use the WHOLE FILE, \`unit test: ${path}\`, or the exact test TITLE on its own, ` +
+      `\`unit test: ${named || "<the test's title>"}\`. Written together they are escaped into ONE ` +
+      "--test-name-pattern, which no test is named, so the proof matches zero tests and the criterion " +
+      "degrades to the keyword floor without saying so"
+    );
+  }
+  return undefined;
+}
+
 function parseDialectGrep(body: string): WhitelistedProof | null {
   const trimmed = body.trim();
   if (!trimmed) return null;
@@ -734,6 +769,9 @@ function dialectGrepTargetPath(w: WhitelistedProof): string | undefined {
 function parseTestTarget(body: string): WhitelistedProof | null {
   const trimmed = body.trim();
   if (!trimmed) return null;
+  // Refused BEFORE either supported arm: falling through to the bare-title arm is precisely the
+  // silent zero-match this refusal exists to stop (W1-T3073).
+  if (TEST_PATH_TITLE_SEPARATOR_RE.test(trimmed)) return null;
   if (TEST_PATH_EXACT_RE.test(trimmed)) {
     if (trimmed.includes("..")) return null; // no path traversal out of the checkout
     return {
@@ -775,6 +813,15 @@ function grepRefusalExample(when: string, proof: string): { when: string; proof:
   return { when, proof, message };
 }
 
+/** The `unit test:` sibling of {@link grepRefusalExample} — same contract, same reason: the page and
+ *  CLAUDE.md quote the sentence {@link explainUnitTestProofRefusal} really returns, so the fixture
+ *  cannot drift from the parser (W1-T3073). */
+function unitTestRefusalExample(when: string, proof: string): { when: string; proof: string; message: string } {
+  const message = explainUnitTestProofRefusal(proof);
+  if (!message) throw new Error(`PROOF_DIALECT: example ${JSON.stringify(proof)} did not refuse — fixture is stale`);
+  return { when, proof, message };
+}
+
 /** The `grep:`/`unit test:` dialect's PARSE SHAPE, machine-readable — the two forms, their prefix and body regexes, and every refusal with the SAME message
  *  the parser (or, for `grep:`, {@link explainGrepProofRefusal}) actually produces. Consumed by scripts/generate-proof-dialect.mjs to render
  *  docs/proof-dialect.md and by test/proof-dialect-doc.test.ts to hold CLAUDE.md's proof section to these same values (W1-T2762). DERIVATION ONLY: every
@@ -804,6 +851,12 @@ export const PROOF_DIALECT = {
         when: "an exact test-file path escaping the checkout (`..`)",
         message: "no path traversal out of the checkout",
       },
+      // W1-T3073. The example is W1-T3071's REAL shape, not invented punctuation: those four proofs
+      // are what resolved `not_executable` on a filing that still merged green.
+      unitTestRefusalExample(
+        "a test-file path and a title joined by `::` — a THIRD form that does not exist",
+        "unit test: test/cli-verbs-mint-the-app-token.test.ts::every help arm carries the token",
+      ),
     ],
   },
 } as const;

@@ -6372,7 +6372,10 @@ const LINT_DI_BASE_YAML = readFileSync(LINT_DI_FIXTURE, "utf8");
 const LINT_DI_AMENDED_YAML =
   LINT_DI_BASE_YAML +
   '    - claim: "the fixture\'s amended criterion"\n' +
-  '      proof: "unit test: test/run-task.test.ts::LINTDI-1 amended criterion proof"\n';
+  // W1-T3073: was `test/run-task.test.ts::LINTDI-1 amended criterion proof`, the path-plus-title
+  // grammar the shared parser now REFUSES. This fixture is about Rule 21 status resolution, not
+  // about proof grammar, so it takes the supported whole-file form and the assertion is unchanged.
+  '      proof: "unit test: test/run-task.test.ts"\n';
 
 /** Runs `lintPlanCommand(["--plan", LINT_DI_FIXTURE, "--base", "HEAD"], deps)` with the fixture's
  *  on-disk copy temporarily amended (an added criterion vs the committed HEAD blob), console

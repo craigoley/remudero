@@ -780,7 +780,7 @@ test("ACCEPTANCE 1: the W1-T100 regression corpus — all three verbatim proofs 
 test("ACCEPTANCE 2: a resolvable unit test: proof (path + ::test-name), a resolvable grep: proof (pattern + in <path>), and an unprefixed prose proof all pass clean", () => {
   const resolvableTest = task({
     id: "FIX-RESOLVABLE-TEST",
-    acceptance: [{ claim: "routes ci-red to blocked-fixable", proof: "unit test: test/sweep.test.ts::routes ci-red to blocked-fixable" }],
+    acceptance: [{ claim: "routes ci-red to blocked-fixable", proof: "unit test: routes ci-red to blocked-fixable" }],
   });
   assert.deepEqual(proofResolvabilityViolations(resolvableTest), []);
 
@@ -1366,7 +1366,7 @@ test("W1-T180 ACCEPTANCE 1: a plan PR that ADDS a criterion to an already-merged
     id: "W1-T155",
     acceptance: [
       ...W1_T155_BASE_CRITERIA,
-      { claim: "monotonic under darkness: status never regresses across an unobservable gap", proof: "unit test: test/status.test.ts::monotonic under darkness" },
+      { claim: "monotonic under darkness: status never regresses across an unobservable gap", proof: "unit test: monotonic under darkness" },
     ],
   });
   const res = lintTask(amended, {
@@ -1388,7 +1388,7 @@ test("W1-T180 ACCEPTANCE 1: a plan PR that ADDS a criterion to an already-merged
 test("W1-T180 ACCEPTANCE 1 (helper): criteriaAdded reports the gained entry vs the base ref, and NOTHING when the set is unchanged", () => {
   const current = [
     ...W1_T155_BASE_CRITERIA,
-    { claim: "liveness bound: a stale in-flight trace is never reported running forever", proof: "unit test: test/status.test.ts::liveness bound" },
+    { claim: "liveness bound: a stale in-flight trace is never reported running forever", proof: "unit test: liveness bound" },
   ];
   const added = criteriaAdded(W1_T155_BASE_CRITERIA, current);
   assert.equal(added.length, 1);
@@ -1407,7 +1407,7 @@ test("W1-T180 ACCEPTANCE 1: reword/reorder-only changes (SAME set, different ord
 });
 
 test("W1-T180 ACCEPTANCE 2: the SAME PR filing a follow-up task carrying the amended criteria PASSES — the check gates the orphaning, not the amending", () => {
-  const addedCriterion = { claim: "monotonic under darkness", proof: "unit test: test/status.test.ts::monotonic under darkness" };
+  const addedCriterion = { claim: "monotonic under darkness", proof: "unit test: monotonic under darkness" };
   // W1-T2375: the escape now also requires the parent's disposition to be stated. The parent is
   // fully superseded here, so it moves out of dispatch; the assertions below are unchanged.
   const amended = task({ id: "W1-T155", status: "blocked", files: ["src/lib/status.ts"], acceptance: [...W1_T155_BASE_CRITERIA, addedCriterion] });
@@ -1432,7 +1432,7 @@ test("W1-T180 ACCEPTANCE 2: the SAME PR filing a follow-up task carrying the ame
 });
 
 test("W1-T180 ACCEPTANCE 2 (helper): followUpCarriesCriteria is FALSE with no escape hatch, TRUE once a candidate task carries the added criterion, and vacuously TRUE for an empty added set", () => {
-  const addedCriterion = { claim: "monotonic under darkness", proof: "unit test: test/status.test.ts::monotonic under darkness" };
+  const addedCriterion = { claim: "monotonic under darkness", proof: "unit test: monotonic under darkness" };
   assert.equal(followUpCarriesCriteria([addedCriterion], []), false);
   assert.equal(followUpCarriesCriteria([addedCriterion], [task({ id: "OTHER", acceptance: [{ claim: "unrelated", proof: "unit test: test/other.test.ts" }] })]), false);
   assert.equal(followUpCarriesCriteria([addedCriterion], [task({ id: "W1-T179", acceptance: [addedCriterion] })]), true);
@@ -1443,7 +1443,7 @@ test("W1-T180 ACCEPTANCE 4: an UNREADABLE derived status fails OPEN — a status
   const amended = task({
     id: "W1-T155",
     files: ["src/lib/status.ts"],
-    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: test/status.test.ts::brand new" }],
+    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: brand new" }],
   });
   const res = lintTask(amended, {
     postMergeAmendment: {
@@ -1461,7 +1461,7 @@ test("W1-T180: absent LintOpts.postMergeAmendment entirely is a no-op (the pre-d
   const amended = task({
     id: "W1-T155",
     files: ["src/lib/status.ts"],
-    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: test/status.test.ts::brand new" }],
+    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: brand new" }],
   });
   assert.deepEqual(postMergeAmendmentViolations(amended), []);
   assert.equal(lintTask(amended).ok, true);
@@ -1471,7 +1471,7 @@ test("W1-T180: an amended task whose derived status is NOT merged (still open/qu
   const amended = task({
     id: "W1-T155",
     files: ["src/lib/status.ts"],
-    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: test/status.test.ts::brand new" }],
+    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: brand new" }],
   });
   const res = lintTask(amended, {
     postMergeAmendment: { statusResolvable: true, merged: false, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
@@ -1501,7 +1501,7 @@ test("W1-T1098 ACCEPTANCE 1: a criterion whose claim is unchanged and whose proo
   // into a different (still valid) dialect string. Claim-only keying must
   // treat this as unchanged, not as a newly added criterion.
   const reworkedProof = [
-    { claim: "status regresses to queued on a read failure is fixed", proof: "unit test: test/status.test.ts::regression" },
+    { claim: "status regresses to queued on a read failure is fixed", proof: "unit test: regression" },
   ];
   assert.deepEqual(criteriaAdded(W1_T155_BASE_CRITERIA, reworkedProof), []);
 
@@ -1516,7 +1516,7 @@ test("W1-T1098 ACCEPTANCE 1: a criterion whose claim is unchanged and whose proo
 test("W1-T1098 ACCEPTANCE 2 (control): a criterion with a genuinely new claim on a merged task is still refused", () => {
   const genuinelyNew = [
     ...W1_T155_BASE_CRITERIA,
-    { claim: "a brand new promise this task never made before", proof: "unit test: test/status.test.ts::brand new" },
+    { claim: "a brand new promise this task never made before", proof: "unit test: brand new" },
   ];
   const added = criteriaAdded(W1_T155_BASE_CRITERIA, genuinelyNew);
   assert.equal(added.length, 1);
@@ -1536,7 +1536,7 @@ test("W1-T1098 ACCEPTANCE 4: the check stays silent when the derived status cann
   const amended = task({
     id: "W1-T155",
     files: ["src/lib/status.ts"],
-    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a genuinely new claim", proof: "unit test: test/status.test.ts::new" }],
+    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a genuinely new claim", proof: "unit test: new" }],
   });
   const res = lintTask(amended, {
     postMergeAmendment: {
@@ -1551,7 +1551,7 @@ test("W1-T1098 ACCEPTANCE 4: the check stays silent when the derived status cann
 });
 
 test("W1-T1098 ACCEPTANCE 5: the follow-up escape hatch keeps working for a real (claim-level) amendment under claim-only keying", () => {
-  const addedCriterion = { claim: "a brand new promise carried by the follow-up", proof: "unit test: test/status.test.ts::carried" };
+  const addedCriterion = { claim: "a brand new promise carried by the follow-up", proof: "unit test: carried" };
   // W1-T2375: parent disposition stated (fully superseded) — assertions below unchanged.
   const amended = task({ id: "W1-T155", status: "blocked", files: ["src/lib/status.ts"], acceptance: [...W1_T155_BASE_CRITERIA, addedCriterion] });
   // The follow-up task carries the SAME claim with a DIFFERENT proof wording —
@@ -1559,7 +1559,7 @@ test("W1-T1098 ACCEPTANCE 5: the follow-up escape hatch keeps working for a real
   const followUp = task({
     id: "W1-T179",
     files: ["src/lib/status.ts"],
-    acceptance: [{ claim: addedCriterion.claim, proof: "unit test: test/status.test.ts::carried (follow-up wording)" }],
+    acceptance: [{ claim: addedCriterion.claim, proof: "unit test: carried (follow-up wording)" }],
   });
   const changedSet = [amended, followUp];
   for (const t of changedSet) {
@@ -1613,7 +1613,7 @@ test("W1-T1098 ACCEPTANCE 3: the proof-weakening case the rule no longer sees is
   const reallyAmended = task({
     id: "W1-T155",
     files: ["src/lib/status.ts"],
-    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a genuinely new promise", proof: "unit test: test/status.test.ts::new" }],
+    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a genuinely new promise", proof: "unit test: new" }],
   });
   const control = lintTask(reallyAmended, {
     postMergeAmendment: { statusResolvable: true, merged: true, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
