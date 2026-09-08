@@ -16,6 +16,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -103,7 +104,7 @@ function defaultGit(root: string): GitExec {
 }
 
 function defaultGh(): GhExec {
-  return (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return (args) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /** Remove only redundant untracked queue copies whose exact bytes are already readable from

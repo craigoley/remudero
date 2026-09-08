@@ -1,5 +1,6 @@
 import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
 import { execFileSync } from "node:child_process";
+import { ghExec } from "../github-transport.js";
 // Imported as the module's DEFAULT export (a plain, mutable object), never as named
 // bindings (`import { existsSync } from "node:fs"`) — the same W1-T115 "assert via
 // injected fs" discipline src/lib/status.ts and src/lib/ledger.ts already follow (see
@@ -209,12 +210,12 @@ export interface OnboardGhGateway {
 
 /** Injectable stand-in for the raw `gh api <args>` invocation — mirrors `opts.exec` on
  *  `ghGateway()` in status.ts (W1-T119): real callers omit it and get the actual
- *  `execFileSync("gh", ["api", ...args], ...)` call; unit tests inject a fake that returns
+ *  `ghExec(["api", ...args], ...)` call; unit tests inject a fake that returns
  *  canned JSON or throws a `{stderr}`-shaped error to exercise the 404-vs-unknown split
  *  deterministically, WITHOUT shelling out to a real `gh` binary or hitting the network. */
 export type GhExec = (args: string[]) => string;
 
-const defaultGhExec: GhExec = (args) => execFileSync("gh", ["api", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const defaultGhExec: GhExec = (args) => ghExec(["api", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 /** `gh api <args>` -> parsed JSON, classifying the failure mode (HTTP status parsed off
  *  `gh`'s own "gh: <message> (HTTP <code>)" stderr format when present) so callers can

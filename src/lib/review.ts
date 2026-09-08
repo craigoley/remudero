@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -5870,7 +5871,7 @@ export interface PostReviewStatusRetryOpts {
   backoffMs?: (failedAttempt: number) => number;
   /** Injectable sleep (tests skip real waiting). Default: a real `setTimeout`. */
   sleep?: (ms: number) => Promise<void>;
-  /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the real `execFileSync("gh", ...)` POST below. */
+  /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the real `ghExec(...)` POST below. */
   exec?: (args: string[], env: NodeJS.ProcessEnv) => void;
 }
 
@@ -5878,7 +5879,7 @@ export interface PostReviewStatusRetryOpts {
  *  same temp-dir fake-gh pattern `realArmDeps` tests use — rather than only exercising it through {@link
  *  postReviewStatus}'s injectable `exec`, which would leave this wrapper uncovered by the diff-coverage ratchet. */
 export function execGhStatusPost(args: string[], env: NodeJS.ProcessEnv): void {
-  execFileSync("gh", args, { stdio: "pipe", env, encoding: "utf8" });
+  ghExec(args, { stdio: "pipe", env, encoding: "utf8" });
 }
 
 /** The text a thrown `gh`/execFileSync error carries — stderr first, where `gh api`'s own "gh: <message> (HTTP
@@ -6201,11 +6202,11 @@ export interface PostReviewCommentDeps {
 /** Exported so a unit test can PATH-stub `gh` and drive this exact real invocation directly, mirroring {@link
  * execGhStatusPost}'s own reasoning: it keeps this one-line real wrapper covered by the diff-coverage ratchet. */
 export function execGhPrComment(prUrl: string, body: string): void {
-  execFileSync("gh", ["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
+  ghExec(["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
 }
 
 /** THE ONE POST SITE for a review-verdict PR comment (W1-T2419) — `runReview`'s only call path from here on,
- * replacing a bare `execFileSync("gh", ["pr", "comment", ...])`. Refuses to append when `body` is byte-identical to
+ * replacing a bare `ghExec(["pr", "comment", ...])`. Refuses to append when `body` is byte-identical to
  * the newest standing comment ({@link isDuplicateReviewComment}). Otherwise it posts exactly as the old call did,
  * best-effort failure contract included: a `gh` error is swallowed, status and ledger already carrying the verdict. */
 export function postReviewCommentGuarded(

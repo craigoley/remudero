@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import type { FeedbackEntry } from "./feedback.js";
 import type { Plan, Task } from "./plan.js";
 
@@ -48,9 +48,7 @@ export function ghTraceGateway(owner: string, repo: string): TraceGithub {
   return {
     prView(ref) {
       try {
-        const raw = execFileSync(
-          "gh",
-          ["pr", "view", String(ref), "--repo", slug, "--json", "number,url,state,mergeCommit"],
+        const raw = ghExec(["pr", "view", String(ref), "--repo", slug, "--json", "number,url,state,mergeCommit"],
           { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
         );
         const parsed = JSON.parse(raw) as {

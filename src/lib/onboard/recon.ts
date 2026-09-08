@@ -1,5 +1,5 @@
 import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
-import { execFileSync } from "node:child_process";
+import { ghExec } from "../github-transport.js";
 // Imported ADDITIONALLY as the module's DEFAULT export (a plain, mutable object) for the
 // SAME reason inventory.ts's header comment gives: ESM named bindings off `node:fs` are
 // non-configurable, so a test that wants to assert "no writes land outside
@@ -175,7 +175,7 @@ export interface ReconGhGateway {
 }
 
 const defaultReconGhExec: GhExec = (args) =>
-  execFileSync("gh", ["api", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  ghExec(["api", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 /** Real gateway — `gh api`, never Octokit (matches inventory.ts/ops.ts/status.ts). Filters
  *  pull requests out of the issues-list response, the SAME contract issues-intake.ts's

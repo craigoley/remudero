@@ -88,7 +88,7 @@ test("GH_CALL_TIMEOUT_MS cannot fire on a healthy call — it is orders of magni
 // disappearing from the census.
 const GH_BIN_EXPR = String.raw`(?:"gh"|[A-Za-z_$][\w$]*\.ghBin(?:\s*\?\?\s*"gh")?)`;
 
-test("EVERY gh exec site in lib/status.ts bounds its child — a fix applied to one leaves the others able to park the daemon", () => {
+test("EVERY gh exec site in lib/status.ts routes through the bounded transport", () => {
   const src = readFileSync(new URL("../src/lib/status.ts", import.meta.url), "utf8");
   // Source only — the doc comments in this file spell `execFileSync("gh", args, ...)` in prose,
   // and counting those would inflate the census with text that executes nothing.
@@ -97,27 +97,26 @@ test("EVERY gh exec site in lib/status.ts bounds its child — a fix applied to 
     .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
     .join("\n");
 
-  const loose = [...code.matchAll(new RegExp(String.raw`execFileSync\(${GH_BIN_EXPR},`, "g"))];
-  const execSites = [...code.matchAll(new RegExp(String.raw`execFileSync\(${GH_BIN_EXPR}, args, \{[^}]*\}\)`, "g"))].map((m) => m[0]);
+  const direct = [...code.matchAll(new RegExp(String.raw`execFileSync\(${GH_BIN_EXPR},`, "g"))];
+  const transportSites = [...code.matchAll(/\bghExec(?:File)?\([^)]*\{[^}]*\}/g)].map((m) => m[0]);
 
   assert.equal(
-    execSites.length,
-    loose.length,
-    `a gh exec site exists that this matcher cannot parse — loose scan found ${loose.length}, strict found ${execSites.length}. ` +
-      `Widen the pattern rather than letting the site drop out of the census.`,
+    direct.length,
+    0,
+    `a direct gh exec site bypasses the shared timeout transport: ${direct.map((m) => m[0]).join("\n")}`,
   );
   assert.equal(
-    execSites.length,
-    3,
-    `exactly three real gh exec sites are expected here (ghGateway's default, the prewarm worker's, ` +
-      `and buildBatchedGithub's default): ${execSites.length} found`,
+    transportSites.length,
+    4,
+    `exactly four status.ts gh transport sites are expected here (required checks, ghGateway's default, prewarm worker, ` +
+      `and buildBatchedGithub's default): ${transportSites.length} found`,
   );
-  for (const site of execSites) {
-    assert.match(site, /timeout: GH_CALL_TIMEOUT_MS/, `an unbounded gh exec site survives: ${site}`);
+  for (const site of transportSites) {
+    assert.match(site, /\bghExec(?:File)?\(/, `a status GitHub call bypasses the transport: ${site}`);
   }
   // NEGATIVE CONTROL: this file also shells `git`, and those calls are deliberately unbounded.
   // A matcher that swept them in would report a false violation on the very next assertion.
-  for (const site of execSites) {
+  for (const site of transportSites) {
     assert.doesNotMatch(site, /execFileSync\("git"/, `the git exec sites must stay outside this census: ${site}`);
   }
   assert.ok(

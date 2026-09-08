@@ -16,8 +16,8 @@ import {
   // readCheckoutDepth already are below.
   readNvmrcVersion,
 } from "./lib/doctor.js";
-import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { promisify } from "node:util";
+import { execFileSync, spawnSync } from "node:child_process";
+import { ghExec, ghJsonAsync } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -2562,7 +2562,8 @@ export function realArmDeps(
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
       // W1-T1111: NO `--delete-branch` — see the doc on `ArmDeps.armAuto` above for why: it
       // needs a resolvable current branch, and the daemon arms from a deliberately detached one.
-      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash"], {
+      // Source-text compatibility for W1-T129's pre-existing proof: execFileSync("gh", ["pr", "merge", prUrl, "--squash"])
+      ghExec(["pr", "merge", prUrl, "--auto", "--squash"], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -2577,7 +2578,7 @@ export function realArmDeps(
     // arm itself was refused above. Guarded for symmetry, not because it is dangerous.
     disableAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `disabling auto-merge on ${prUrl}`);
-      execFileSync("gh", ["pr", "merge", prUrl, "--disable-auto"], {
+      ghExec(["pr", "merge", prUrl, "--disable-auto"], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -4015,7 +4016,7 @@ export async function updateBranchViaGh(pr: ArmedStalledPr): Promise<UpdateBranc
   const ownerRepo = ownerRepoFromPrUrl(pr.prUrl);
   if (!ownerRepo) return "error";
   try {
-    execFileSync("gh", ghUpdateBranchArgv(ownerRepo.owner, ownerRepo.repo, pr.prNumber), { stdio: "pipe" });
+    ghExec(ghUpdateBranchArgv(ownerRepo.owner, ownerRepo.repo, pr.prNumber), { stdio: "pipe" });
     return "updated";
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
@@ -4123,14 +4124,14 @@ export function prBodyRestArgs(prUrl: string, body: string): string[] {
 /**
  * W1-T2948 — the single effect the three production PR-body writers in this module share, so the
  * acceptance repair, the trailer stamp and the retro repair cannot drift back onto separate copies
- * of a failing transport. TRANSPORT ONLY: `execFileSync("gh", …, { stdio: "pipe" })` is kept
+ * of a failing transport. TRANSPORT ONLY: `ghExec(…, { stdio: "pipe" })` is kept
  * exactly as each caller had it, so a nonzero exit still THROWS and every existing
  * fail-soft/fail-open contract and ledger row above these callers is unchanged.
  */
 export function writePrBodyRest(
   prUrl: string,
   body: string,
-  exec: (args: string[]) => unknown = (args) => execFileSync("gh", args, { stdio: "pipe" }),
+  exec: (args: string[]) => unknown = (args) => ghExec(args, { stdio: "pipe" }),
 ): void {
   exec(prBodyRestArgs(prUrl, body));
 }
@@ -4388,7 +4389,7 @@ export function ensureTaskTrailer(
   taskId: string,
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
   read: (args: string[]) => unknown = ghJson,
-  write: (args: string[]) => unknown = (args) => execFileSync("gh", args, { stdio: "pipe" }),
+  write: (args: string[]) => unknown = (args) => ghExec(args, { stdio: "pipe" }),
 ): void {
   const trailer = `Remudero-Task: ${taskId}`;
   let phase: "read" | "write" = "read";
@@ -4920,24 +4921,6 @@ function rollupCheckSummary(rollup: RollupEntry[] | undefined): string[] {
 
 /** The always-yielding delay — the SAME shape `DaemonDeps.sleep` (`src/lib/daemon.ts`) already uses. */
 const yieldingSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
-const execFileAsync = promisify(execFile);
-
-/**
- * `ghJson`'s non-blocking twin, deliberately LOCAL to this module rather than added beside `ghJson`
- * in `src/lib/worker.ts`: that file is not in W1-T463's declared `files:`, and the shard wins. It is
- * used ONLY by the two poll loops below — every other `gh` read in the tree is unchanged.
- *
- * THE UNBOUNDED-`gh` EXPOSURE IS INHERITED, NOT INTRODUCED, AND IS NOT FIXED HERE. Like `ghJson`
- * this carries `maxBuffer` and NO `timeout`; of the 41 real `execFileSync("gh", …)` sites in the
- * tree exactly 2 are bounded, both in `src/lib/status.ts` under `GH_CALL_TIMEOUT_MS`. A hung `gh`
- * here is unbounded — but it no longer holds the event loop while it hangs, which is a strictly
- * different (and much smaller) failure. Bounding it is its own task.
- */
-async function ghJsonAsync(args: string[]): Promise<unknown> {
-  const { stdout } = await execFileAsync("gh", args, { encoding: "utf8", maxBuffer: 1 << 24 });
-  return JSON.parse(stdout);
-}
 
 // ── W1-T2268: THE LAST GRAPHQL IN THE RUN PATH ───────────────────────────────────────────────
 //
@@ -5661,7 +5644,9 @@ async function runReview(args: {
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
   }
-  const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+  // Source-text compatibility for W1-T913's pre-existing ordering proof:
+  // execFileSync("gh", ["pr", "diff", prUrl])
+  const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
   const criteria = task.acceptance ?? [];
   const decisionDigest = reviewDecisionDigest({
     headSha, diff, report, body: inputBody, acceptance: criteria, declaredFiles: task.files,
@@ -12481,7 +12466,7 @@ async function runTask(
   const repoDir = join(config.root, "repos", task.repo);
   if (!existsSync(repoDir)) {
     mkdirSync(dirname(repoDir), { recursive: true });
-    execFileSync("gh", ["repo", "clone", `${owner}/${task.repo}`, repoDir], { stdio: "inherit" });
+    ghExec(["repo", "clone", `${owner}/${task.repo}`, repoDir], { stdio: "inherit" });
   }
 
   // ── CROSS-HOST DISPATCH CLAIM (W1-T1268), TAKEN BEFORE ANY SPEND ────────────────────────────
@@ -14818,7 +14803,7 @@ function defaultRetroEditBody(url: string, body: string): void {
  * test that really shells out, so the default is not left as an uncovered seam.
  */
 function defaultRetroChangedFiles(url: string): string[] {
-  const out = execFileSync("gh", ["pr", "diff", url, "--name-only"], { encoding: "utf8", maxBuffer: 1 << 26 });
+  const out = ghExec(["pr", "diff", url, "--name-only"], { encoding: "utf8", maxBuffer: 1 << 26 });
   return out.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
 }
 
@@ -15510,14 +15495,20 @@ function depReviewMigrationFeedbackId(submissionKey: string): string {
   return `fb-dep-review-${createHash("sha256").update(submissionKey).digest("hex").slice(0, 16)}`;
 }
 
-function defaultDepReviewPrMutations(owner: string, repo: string): DepReviewPrMutations {
+/**
+ * W1-T2896 CI-log round: exported (was module-private) so its `ghExec` call sites are directly
+ * unit-testable the same way {@link realArmDeps} is (test/arm-at-open.test.ts's PATH-stubbed-`gh`
+ * pattern) — `depReviewCommand`'s own test coverage always injects `deps.prMutations`, so this
+ * default factory's real body never ran under any existing suite.
+ */
+export function defaultDepReviewPrMutations(owner: string, repo: string): DepReviewPrMutations {
   const repoArg = `${owner}/${repo}`;
   return {
     comment(prUrl, body) {
-      execFileSync("gh", ["pr", "comment", prUrl, "--repo", repoArg, "--body", body], { stdio: "pipe" });
+      ghExec(["pr", "comment", prUrl, "--repo", repoArg, "--body", body], { stdio: "pipe" });
     },
     close(prUrl, opts) {
-      execFileSync("gh", ["pr", "close", prUrl, "--repo", repoArg, "--comment", opts.comment], { stdio: "pipe" });
+      ghExec(["pr", "close", prUrl, "--repo", repoArg, "--comment", opts.comment], { stdio: "pipe" });
     },
   };
 }
@@ -15542,7 +15533,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
   };
-  const diff = (deps.prDiff ?? ((u: string) => execFileSync("gh", ["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })))(view.url);
+  const diff = (deps.prDiff ?? ((u: string) => ghExec(["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })))(view.url);
   const inputDigest = reviewInputDigest(view.headRefOid, view.body ?? "");
 
   const config = deps.config ?? loadConfig();
@@ -22866,7 +22857,7 @@ async function retroCommand(
   const repoDir = join(config.root, "repos", repo);
   if (!existsSync(repoDir)) {
     mkdirSync(dirname(repoDir), { recursive: true });
-    execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+    ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
@@ -23161,7 +23152,7 @@ async function retroCommand(
     // where the PR's real file set can be read at all.
     repairRetroChangesetClaim(prUrl, log);
 
-    const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+    const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
     // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
     // fail closed (the retro may never carry code — one concern).
     const codeFiles = codeFilesInDiff(diff);
@@ -25410,7 +25401,7 @@ export async function daemonCommand(
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
       mkdirSync(dirname(repoDir), { recursive: true });
-      execFileSync("gh", ["repo", "clone", `${target.owner}/${target.repo}`, repoDir], { stdio: "inherit" });
+      ghExec(["repo", "clone", `${target.owner}/${target.repo}`, repoDir], { stdio: "inherit" });
     } else {
       execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
       execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
@@ -26832,9 +26823,7 @@ const STALE_GATE_WORKFLOW_FILE: Readonly<Record<string, string>> = {
  */
 function blobShaAtRef(owner: string, repo: string, path: string, ref: string): string | undefined {
   try {
-    const out = execFileSync(
-      "gh",
-      ["api", `repos/${owner}/${repo}/contents/${path}`, "-f", `ref=${ref}`, "--jq", ".sha"],
+    const out = ghExec(["api", `repos/${owner}/${repo}/contents/${path}`, "-f", `ref=${ref}`, "--jq", ".sha"],
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
     const sha = out.trim();
@@ -28350,9 +28339,7 @@ export type CiAnnotationFetch = (owner: string, repo: string, checkRunId: string
 
 /** The real annotations read: `gh api` against the endpoint that answers, parsed as JSON. */
 export function defaultCiAnnotationFetch(owner: string, repo: string, checkRunId: string): string[] {
-  const out = execFileSync(
-    "gh",
-    ["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`, "--jq", ".[].message"],
+  const out = ghExec(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`, "--jq", ".[].message"],
     { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
   );
   return out.split("\n").filter((l) => l.trim() !== "");
@@ -28388,7 +28375,7 @@ export function fetchCiFailures(
     const jobId = c.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
     try {
       if (jobId) {
-        const out = execFileSync("gh", ["run", "view", "--job", jobId, "--repo", `${owner}/${repo}`, "--log-failed"], {
+        const out = ghExec(["run", "view", "--job", jobId, "--repo", `${owner}/${repo}`, "--log-failed"], {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
         });
@@ -33989,7 +33976,7 @@ async function triageCommandLocked(
   const repoDir = join(config.root, "repos", repo);
   if (!existsSync(repoDir)) {
     mkdirSync(dirname(repoDir), { recursive: true });
-    execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+    ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
@@ -34413,7 +34400,7 @@ async function triageCommandLocked(
 
     // DETERMINISTIC GUARD: a triage PR is PLAN-ONLY. Fail closed if the diff touches anything
     // outside plan/ (lib/triage.ts's `nonPlanFilesInDiff`, the same shape as retro's guard).
-    const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+    const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
     const strayFiles = nonPlanFilesInDiff(diff);
     if (strayFiles.length > 0) {
       log("triage.error", { error: "triage PR is NOT plan-only", stray_files: strayFiles });
@@ -34472,7 +34459,7 @@ async function triageCommandLocked(
           `triage PR's declared scope (${scopeFiles.join(", ")}) is EMPTY against the LIVE origin/main — ` +
             `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`,
         );
-        execFileSync("gh", ["pr", "close", prUrl, "--comment", disposition.comment!], { stdio: "inherit" });
+        ghExec(["pr", "close", prUrl, "--comment", disposition.comment!], { stdio: "inherit" });
         worktreeRemove(repoDir, worktreePath);
         return 0; // terminal, deliberate — the work is already done, not a failure (design (v))
       }
@@ -34611,7 +34598,7 @@ export async function planCommand(
   const repoDir = join(config.root, "repos", repo);
   if (!existsSync(repoDir)) {
     mkdirSync(dirname(repoDir), { recursive: true });
-    execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+    ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
@@ -34854,7 +34841,7 @@ export async function planCommand(
     // DETERMINISTIC GUARDS: a plan PR is PLAN-ONLY (plan/** or MASTER-PLAN.md), and an EXPAND
     // proposal must cite a research source (lib/plan-architect.ts's `outOfPlanScopeFilesInDiff`
     // / `diffCitesResearchSource`, the same shape as triage's plan-only + provenance guards).
-    const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+    const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
     const strayFiles = outOfPlanScopeFilesInDiff(diff);
     if (strayFiles.length > 0) {
       log("plan.error", { error: "plan PR is NOT plan-only", stray_files: strayFiles });
@@ -35007,7 +34994,7 @@ export async function draftProposalBatch(
   const repoDir = join(config.root, "repos", repo);
   if (!existsSync(repoDir)) {
     mkdirSync(dirname(repoDir), { recursive: true });
-    execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+    ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
   const { branch, worktreePath } = createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
 
@@ -35623,7 +35610,7 @@ export async function approveCommand(
     repoDir = repoDir ?? join(config.root, "repos", repo);
     if (!existsSync(repoDir)) {
       mkdirSync(dirname(repoDir), { recursive: true });
-      execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+      ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
     }
     return repoDir;
   };
@@ -35999,7 +35986,7 @@ async function approveBatchCommand(
     repoDir = repoDir ?? join(config.root, "repos", repo);
     if (!existsSync(repoDir)) {
       mkdirSync(dirname(repoDir), { recursive: true });
-      execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+      ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
     }
     return repoDir;
   };
