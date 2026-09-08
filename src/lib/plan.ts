@@ -155,6 +155,39 @@ export interface Task {
 }
 
 /**
+ * W1-T3206 — THE LEDGER STEP THAT RELEASES A PARKED TASK.
+ *
+ * `verify: human` was a ONE-WAY PARK: `isDispatchEligible` refuses it (drain.ts) and
+ * {@link assertRunnable} throws, and NOTHING converted an operator's decision back into dispatch.
+ * MEASURED 2026-09-08: 45 such shards queued, the oldest filed 2026-07-21 — seven weeks — and a
+ * grep across src/ for any approve/release/unblock path keyed on `verify: human` returned zero.
+ *
+ * THE RELEASE IS NOT A PLAN EDIT. It is the row `rmd approve` ALREADY writes when an operator
+ * spends his bit, so the plan record stays byte-identical, the decision is auditable, and no worker
+ * ever rewrites a `verify:` field (which Standing rule 15 forbids anyway).
+ */
+export const RELEASE_LEDGER_STEP = "ratify.approved";
+
+/** Task ids released by an operator, read from {@link RELEASE_LEDGER_STEP} rows. Pure over the
+ *  lines it is handed — the caller owns the read, so no dispatch path gains file I/O. */
+export function releasedTaskIds(ledgerLines: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  for (const line of ledgerLines) {
+    if (!line.includes(RELEASE_LEDGER_STEP)) continue; // cheap reject before the parse
+    let row: { step?: unknown; task_id?: unknown };
+    try {
+      row = JSON.parse(line) as typeof row;
+    } catch {
+      continue; // an unparseable line releases nothing — the safe direction
+    }
+    if (row.step === RELEASE_LEDGER_STEP && typeof row.task_id === "string" && row.task_id) {
+      out.add(row.task_id);
+    }
+  }
+  return out;
+}
+
+/**
  * W1-T2901: the best-behaved of this repo's ~55 hand-rolled `Error` subclasses, now adopting the
  * shared envelope (`./errors.ts`) first. `kind: "plan"` and `exitCode: 1` reproduce today's
  * observed behaviour exactly (uncaught, it already fell through `main()`'s outer catch to exit
@@ -637,11 +670,14 @@ export function assertRunnable(
   plan: Plan,
   task: Task,
   isMerged: MergedResolver = yamlStatusMerged,
+  /** W1-T3206: task ids an operator has RELEASED through the ratification pipeline. Absent or
+   *  empty means today's behaviour exactly — a `verify: human` task is refused. */
+  releasedIds?: ReadonlySet<string>,
 ): void {
   if (task.status === "blocked") {
     throw new PlanError(`task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`);
   }
-  if (task.verify === "human") {
+  if (task.verify === "human" && !releasedIds?.has(task.id)) {
     throw new PlanError(`task ${task.id} is verify:human — not auto-runnable by the proto-runner`);
   }
   const unmet = unmetDependencies(plan, task, isMerged);

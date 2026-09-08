@@ -150,6 +150,9 @@ export interface NextRunnableOpts {
   /** Called once per task declined by one of the formerly-silent conditions, with the first-match
    *  reason (see {@link tallyDispatchFilters}). Observation only: it changes no task's eligibility. */
   onFiltered?: (task: Task, reason: DispatchFilterReason) => void;
+  /** W1-T3206 — ids an operator RELEASED via `rmd approve`'s `ratify.approved` rows
+   *  ({@link releasedTaskIds}). Absent = today's behaviour: adds a door, never removes the wall. */
+  releasedIds?: ReadonlySet<string>;
   /** W1-T988 — the repo this daemon targets (`DaemonTarget.repo`). Optional by design: omitted, the
    *  guard does not fire. {@link normalizeRepoName} reduces a slug to its bare name before comparing. */
   targetRepo?: string;
@@ -415,7 +418,7 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     opts.onFiltered?.(t, "continued-this-pass");
     return false;
   }
-  if (t.verify !== "auto") {
+  if (t.verify !== "auto" && !opts.releasedIds?.has(t.id)) {
     opts.onFiltered?.(t, "verify-not-auto");
     return false;
   }
