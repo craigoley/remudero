@@ -771,21 +771,25 @@ export const DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS: Record<string, number> = {
 
 /**
  * PRE-WARM (W1-T154, revised by the connected-client gate): schedule `github.warm()` (if it has
- * one — status.ts's `buildBatchedGithub` does) on a background tick, then every `refreshMs`. The
- * raw helper is timer-only by default so direct callers never warm synchronously on construction;
- * {@link gatePrewarmOnClients} opts into one synchronous first warm only at the 0 -> 1 viewer
- * transition. `.unref()`'d so this never keeps a short-lived process (a test, a one-shot script)
- * alive; {@link buildServeServer} wires the returned `stop` function to the server's own `close`
- * event so the timer doesn't outlive it.
+ * one — status.ts's `buildBatchedGithub` does) on a background tick, then every `refreshMs`.
+ * `.unref()`'d so this never keeps a short-lived process (a test, a one-shot script) alive;
+ * {@link buildServeServer} wires the returned `stop` function to the server's own `close` event
+ * so the timer doesn't outlive it.
+ *
+ * THE FIRST WARM IS SCHEDULED FOR EVERY CALLER, WITH NO OPT-OUT (W1-T3192). `github.warm()`
+ * resolves to a BLOCKING `gh pr list`, and this helper's ONLY production caller is
+ * {@link gatePrewarmOnClients}, which invokes it from the 0 -> 1 viewer edge — an SSE request's
+ * own handler. A synchronous warm there does not merely delay the connection that triggered it:
+ * it holds the event loop for the whole round-trip to GitHub, so every concurrent request pays
+ * too. That is the request-path block this task exists to remove, which is why the immediacy is
+ * not a per-caller choice. `setTimeout(warm, 0)` keeps the warm immediate in background terms —
+ * it lands well before the interval's first tick, so nothing goes colder than it was — while
+ * handing the stream-open path straight back to the event loop. `stop()` cancels it, so a server
+ * that closes before the warm fires never issues the fetch at all.
  */
-interface BoardGithubPrewarmOptions {
-  immediate?: boolean;
-}
-
 export function prewarmBoardGithub(
   github: GitHub,
   refreshMs: number = DEFAULT_BOARD_PREWARM_MS,
-  options: BoardGithubPrewarmOptions = {},
 ): () => void {
   const warm = (): void => {
     try {
@@ -794,13 +798,12 @@ export function prewarmBoardGithub(
       // The gateway records its own failure state; prewarming must never break stream open.
     }
   };
-  const first = options.immediate ? undefined : setTimeout(warm, 0);
-  first?.unref?.();
-  if (options.immediate) warm();
+  const first = setTimeout(warm, 0);
+  first.unref?.();
   const timer = setInterval(warm, refreshMs);
   timer.unref?.();
   return () => {
-    if (first) clearTimeout(first);
+    clearTimeout(first);
     clearInterval(timer);
   };
 }
@@ -829,10 +832,11 @@ export function prewarmBoardGithub(
  *
  * THE CONTRACT, precisely:
  *   - zero clients            -> no timer, and `warm()` is never called at all
- *   - 0 -> 1 clients          -> warm ONCE immediately, then every `refreshMs`
+ *   - 0 -> 1 clients          -> warm ONCE on the next tick (never on the subscriber's own
+ *                                stack — see {@link prewarmBoardGithub}), then every `refreshMs`
  *   - 1 -> 2 clients          -> nothing changes; ONE timer serves every viewer
  *   - last client disconnects -> `clearInterval`, no dangling handle
- *   - reconnect after idle    -> warms immediately again, exactly like the first connect
+ *   - reconnect after idle    -> warms again on the next tick, exactly like the first connect
  *
  * DELIBERATE BEHAVIOUR CHANGE, stated rather than hidden: the BOOT-time warm is gone. A
  * `GET /v1/status` that arrives before any SSE client has connected now pays its own fetch on
@@ -864,7 +868,7 @@ export function gatePrewarmOnClients(
         clients += 1;
         // 0 -> 1 ONLY. A second viewer must not start a second timer (which would double the
         // very call rate this exists to bound) and must not re-warm off-cadence.
-        if (clients === 1) stopPrewarm = prewarmBoardGithub(github, refreshMs, { immediate: true });
+        if (clients === 1) stopPrewarm = prewarmBoardGithub(github, refreshMs);
         let released = false;
         return () => {
           // service.ts invokes this exactly once per connection, but a defensive latch keeps a
