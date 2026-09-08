@@ -763,7 +763,8 @@ import {
   loadInjectableSkills,
   renderSkillsPart,
   selectSkillsForTask,
-  stageSkillDraft,
+  skillsInjectedEvent,
+  stageSkillDrafts,
   workerAllowlistFromSettings,
 } from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
@@ -12974,14 +12975,8 @@ async function runTask(
     );
     const skillsPart = renderSkillsPart(injectableSkills);
     // Same shape as learnings.injected above, and same status: analytics, never a decision input.
-    if (injectableSkills.length > 0) {
-      log("skills.injected", {
-        selected: injectableSkills.length,
-        selected_names: injectableSkills.map((s) => s.name),
-        task_type: task.type,
-        budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-      });
-    }
+    const skillsEvent = skillsInjectedEvent(injectableSkills, task.type, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
+    if (skillsEvent) log("skills.injected", skillsEvent);
     const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
@@ -22870,19 +22865,13 @@ async function retroCommand(
   // PROPOSAL and nothing else: the operator still releases it with `rmd approve`, and only that
   // writes under .claude/skills/. Best-effort — a throw here must never fail the retro, whose
   // report is the thing the operator actually came for.
-  for (const draft of gather.skillDrafts) {
-    try {
-      const r = stageSkillDraft(
-        followupRegistryPath,
-        draft,
-        workerAllowlistFromSettings(undefined),
-        describeWorkerSkillReachability([]),
-      );
-      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, refused: r.refused, reason: r.reason });
-    } catch (e) {
-      log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
-    }
-  }
+  stageSkillDrafts(
+    followupRegistryPath,
+    gather.skillDrafts,
+    workerAllowlistFromSettings(undefined),
+    describeWorkerSkillReachability([]),
+    log,
+  );
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its

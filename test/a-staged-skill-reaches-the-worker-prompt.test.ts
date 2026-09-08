@@ -11,9 +11,15 @@ import {
   loadInjectableSkills,
   renderSkillsPart,
   selectSkillsForTask,
+  skillsInjectedEvent,
   stageSkillDraft,
+  stageSkillDrafts,
   workerAllowlistFromSettings,
   describeWorkerSkillReachability,
+  type InjectableSkill,
+  type SkillDraft,
+  type StageSkillDraftResult,
+  type WorkerAllowlist,
 } from "../src/lib/skill-workshop.js";
 import { implementPromptParts, renderImplementPrompt } from "../src/lib/prompt-render.js";
 import type { Task } from "../src/lib/plan.js";
@@ -134,4 +140,67 @@ test("W1-T3101: staging writes a PROPOSAL — approval, not staging, is what mak
   // AND THE SKILL IS STILL NOT INJECTABLE: nothing wrote under .claude/skills/, so the loader —
   // which reads ONLY the approved tree — still finds nothing. That gap is the operator's release.
   assert.deepEqual(loadInjectableSkills(join(dir, "skills")), []);
+});
+
+// ── W1-T3101: the two seams the command bodies hid ────────────────────────────────────────────
+// `diff-coverage` blocked #4611 on 14 added source lines with zero covering tests — five in the
+// implement path's `skills.injected` branch, nine in retroCommand's staging loop. Both sat inside
+// command functions no test drives, so the logic moved into skill-workshop.ts and these cover it.
+
+const injectable = (name: string): InjectableSkill => ({ name, appliesTo: ["implement"], body: name });
+const allowlist = workerAllowlistFromSettings(undefined);
+const reachable = describeWorkerSkillReachability([]);
+const draft = (name: string): SkillDraft => ({ name, candidateHash: `hash-${name}` }) as SkillDraft;
+
+test("W1-T3101: skillsInjectedEvent returns undefined for an empty selection — no row, never a zero-count row", () => {
+  assert.equal(skillsInjectedEvent([], "implement", DEFAULT_KNOWLEDGE_BUDGET_CHARS), undefined);
+});
+
+test("W1-T3101: skillsInjectedEvent names every selected skill, its task type and the budget it spent from", () => {
+  assert.deepEqual(skillsInjectedEvent([injectable("b-skill"), injectable("a-skill")], "implement", 8000), {
+    selected: 2,
+    selected_names: ["b-skill", "a-skill"],
+    task_type: "implement",
+    budget_chars: 8000,
+  });
+});
+
+test("W1-T3101: stageSkillDrafts logs one skill.staged per draft, carrying the stager's own verdict", () => {
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [];
+  const stub = (_p: string, d: SkillDraft): StageSkillDraftResult =>
+    d.name === "one"
+      ? { staged: true, alreadyStaged: false, refused: false }
+      : { staged: false, alreadyStaged: false, refused: true, reason: "not allowlisted" };
+  stageSkillDrafts("/registry.json", [draft("one"), draft("two")], allowlist, reachable, (step, extra) => rows.push([step, extra]), stub as typeof stageSkillDraft);
+  assert.deepEqual(rows.map(([step]) => step), ["skill.staged", "skill.staged"]);
+  assert.equal(rows[0][1]?.staged, true);
+  assert.equal(rows[1][1]?.refused, true);
+  assert.equal(rows[1][1]?.reason, "not allowlisted");
+});
+
+test("W1-T3101: a THROW on one draft is logged and the loop continues — a bad draft never fails the retro", () => {
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [];
+  const stub = (_p: string, d: SkillDraft): StageSkillDraftResult => {
+    if (d.name === "explodes") throw new Error("registry unwritable");
+    return { staged: true, alreadyStaged: false, refused: false };
+  };
+  stageSkillDrafts("/registry.json", [draft("explodes"), draft("survives")], allowlist, reachable, (step, extra) => rows.push([step, extra]), stub as typeof stageSkillDraft);
+  // THE FALSIFIER: a loop that rethrew would never reach the second draft, and a loop that
+  // swallowed silently would log nothing for the first.
+  assert.deepEqual(rows.map(([step]) => step), ["skill.stage_failed", "skill.staged"]);
+  assert.equal(rows[0][1]?.name, "explodes");
+  assert.match(String(rows[0][1]?.error), /registry unwritable/);
+  assert.equal(rows[1][1]?.name, "survives");
+});
+
+test("W1-T3101: no drafts means no staging call and no rows at all", () => {
+  const rows: string[] = [];
+  let calls = 0;
+  const stub = (): StageSkillDraftResult => {
+    calls += 1;
+    return { staged: true, alreadyStaged: false, refused: false };
+  };
+  stageSkillDrafts("/registry.json", [], allowlist, reachable, (step) => rows.push(step), stub as typeof stageSkillDraft);
+  assert.deepEqual(rows, []);
+  assert.equal(calls, 0);
 });

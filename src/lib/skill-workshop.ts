@@ -409,3 +409,50 @@ export function renderSkillsPart(selected: readonly InjectableSkill[]): string {
   if (selected.length === 0) return "";
   return selected.map((s) => `## skill: ${s.name}\n\n${s.body}`).join("\n\n");
 }
+
+/** The `skills.injected` payload, or `undefined` when nothing was selected — the caller logs only
+ *  when this returns a value, so "no applicable skill" leaves no row rather than a zero-count one.
+ *  Extracted as a seam because the caller is inside the implement command, where the branch was
+ *  reachable by no test and `diff-coverage` named all five of its lines. ANALYTICS ONLY: nothing
+ *  reads this row to make a decision, exactly like `learnings.injected` beside it. */
+export function skillsInjectedEvent(
+  selected: readonly InjectableSkill[],
+  taskType: string,
+  budgetChars: number,
+): { selected: number; selected_names: string[]; task_type: string; budget_chars: number } | undefined {
+  if (selected.length === 0) return undefined;
+  return {
+    selected: selected.length,
+    selected_names: selected.map((s) => s.name),
+    task_type: taskType,
+    budget_chars: budgetChars,
+  };
+}
+
+/**
+ * Stage every draft the retro gathered, BEST-EFFORT: a throw on one draft must never fail the
+ * retro, whose report is the thing the operator actually came for. Extracted as a seam for the
+ * same reason as {@link skillsInjectedEvent} — the loop lived inside `retroCommand`, so its catch
+ * arm was unreachable by any test and `diff-coverage` named nine of its lines.
+ *
+ * STAGING WRITES A PROPOSAL AND NOTHING ELSE. The operator still releases it with `rmd approve`,
+ * and only that writes under `.claude/skills/` — so nothing here can put machine-authored text in
+ * front of a worker.
+ */
+export function stageSkillDrafts(
+  registryPath: string,
+  drafts: readonly SkillDraft[],
+  allowlist: WorkerAllowlist,
+  reachability: { reachable: boolean; reason: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  stageOne: typeof stageSkillDraft = stageSkillDraft,
+): void {
+  for (const draft of drafts) {
+    try {
+      const r = stageOne(registryPath, draft, allowlist, reachability);
+      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, refused: r.refused, reason: r.reason });
+    } catch (e) {
+      log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
+    }
+  }
+}
