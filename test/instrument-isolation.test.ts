@@ -266,13 +266,24 @@ diff --git a/test/knowledge-budget-derivation.test.ts b/test/knowledge-budget-de
 // in CI, but each is a size LEDGER and not a score FLOOR, so raising an entry cannot make a failing
 // falsifier pass), and test/a-size-ledger-is-not-a-score-floor.test.ts /
 // test/comment-load-baseline-is-exempt.test.ts pin that the reasons stay distinct.
-test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the three named, reviewed paths — no blanket widening", () => {
+test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the four named, reviewed paths — no blanket widening", () => {
+  // W1-T2897 raised this from three to four. The list is deepEqual'd rather than counted precisely
+  // so a widening must NAME its path here, and this is the second of two tripwires on the same set
+  // (test/a-size-ledger-is-not-a-score-floor.test.ts holds the other) — both had to be edited, which
+  // is the friction working rather than duplication to remove.
+  //
+  // The fourth, scripts/clock-signature-baseline.json, earns the same LEDGER/FLOOR reason as the two
+  // above it — per-file counts enforced as a ceiling, where raising a row records debt and cannot
+  // make a failing falsifier pass — plus one they do not need: its census is UNSATISFIABLE without
+  // it, because that suite's own falsifiers read the MEASURED tree and assert post-migration counts,
+  // so the instrument cannot land alone in the instrument-only PR rule 25 normally prescribes.
   assert.deepEqual(
     [...ENTANGLEMENT_EXEMPT_INSTRUMENTS],
     [
       "scripts/knowledge-budget-baseline.json",
       "scripts/source-size-baseline.json",
       "scripts/comment-load-baseline.json",
+      "scripts/clock-signature-baseline.json",
     ],
   );
 });
