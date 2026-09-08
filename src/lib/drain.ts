@@ -124,7 +124,6 @@ export interface NextRunnableOpts {
    *  (rate limit, network, auth), never a clean "no evidence". Dispatching then risks re-running
    *  merged work, the throttle-reads-as-not-merged spend event this guard prevents. Optional. */
   isIndeterminate?: (taskId: string) => boolean;
-  /** True when `deriveStatus` sees an open `dispatch.blocked_independent` row for this task. */
   isIndependentFailureBlocked?: (taskId: string) => boolean;
   /** Called once per task excluded for an indeterminate read, in place of dispatching it —
    *  mirrors `onSkip`/`onCircuitBreak`'s legibility contract. */
@@ -944,7 +943,6 @@ export interface DrainDeps {
   /** W1-T119: true when a task's own GitHub read is INDETERMINATE, re-derived from the SAME
    *  projection `refreshMerged` just built — the same freshness contract as `isOpenPr`. Optional. */
   isIndeterminate?: (taskId: string) => boolean;
-  /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
