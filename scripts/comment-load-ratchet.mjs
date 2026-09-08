@@ -317,6 +317,39 @@ function commentCountsAtBase(root, base, paths) {
   return counts;
 }
 
+/**
+ * W1-T3085 — NAME THE UNCOMMITTED EDIT, because this ratchet measures the COMMITTED diff.
+ *
+ * `baseDiff` reads `<base>...HEAD`, so an edit sitting in the working tree is not measured at all.
+ * The failure mode is quiet and costs a full cycle of confusion: an author reads the refusal, fixes
+ * the file, re-runs, and gets the IDENTICAL verdict — because the fix is uncommitted. MEASURED
+ * 2026-09-07: this happened twice in one session, on scripts/rule25-precheck.mjs and on
+ * src/lib/ledger-steps.ts, each time resolved only by `git commit --amend` rather than by any
+ * change to the prose the refusal was about.
+ *
+ * NAMED, NEVER ASSUMED: this reports only paths git says are actually dirty, so a clean tree gets
+ * no line and the note can never mislead an author whose fix IS committed.
+ */
+export function uncommittedAmong(root, paths) {
+  if (paths.length === 0) return [];
+  const res = spawnSync("git", ["status", "--porcelain", "--", ...paths], { cwd: root, encoding: "utf8" });
+  if (res.status !== 0 || typeof res.stdout !== "string") return [];
+  return res.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.slice(3).trim())
+    .filter(Boolean);
+}
+
+/** The one line both refusals print when a named path has uncommitted work. */
+export function reportUncommitted(dirty, base) {
+  if (dirty.length === 0) return;
+  console.error(
+    `  NOTE: uncommitted change(s) in ${dirty.join(", ")}. This measures the COMMITTED diff ` +
+      `(${base}...HEAD), so an edit you have not committed is NOT being measured — commit (or amend) and re-run.`,
+  );
+}
+
 function reportGrowth(violations, baselineRelPath) {
   console.error(`comment-load-ratchet: BLOCKED -- ${violations.length} file(s) carry more comment lines than their recorded ceiling:`);
   for (const v of violations) {
@@ -444,7 +477,14 @@ export function main(argv) {
   }
   if (causedViolations.length > 0) reportGrowth(causedViolations, baselineRelPath);
   if (blocks.length > 0) reportBlocks(blocks);
-  if (causedViolations.length > 0 || blocks.length > 0) return 1;
+  if (causedViolations.length > 0 || blocks.length > 0) {
+    // W1-T3085: printed ONCE for the union of both refusals, and only for paths git reports dirty.
+    reportUncommitted(
+      uncommittedAmong(root, [...new Set([...causedViolations.map((v) => v.path), ...blocks.map((b) => b.file)])]),
+      base,
+    );
+    return 1;
+  }
 
   const pct = (100 * measured.totals.comments) / (measured.totals.comments + measured.totals.code);
   console.log(
