@@ -625,6 +625,7 @@ import {
   readBlobsAtRef,
   mergePlanBlobs,
 } from "./lib/plan.js";
+import { exitCodeFor } from "./lib/errors.js";
 import {
   DEFAULT_OVERLAP_WARNING_POLICY,
   declarationCountsByPath,
@@ -39989,7 +39990,10 @@ export async function main(
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((err) => {
     console.error("\n### RUN-TASK ERROR\n" + (err?.stack ?? String(err)));
-    process.exit(1);
+    // W1-T2901: the process boundary asks the error its own exit code (an `RmdError` such as
+    // `PlanError` answers with its declared code) instead of hardcoding the generic one for
+    // every uncaught throw — a foreign `Error` still falls through to the same code as before.
+    process.exit(exitCodeFor(err));
   });
 }
 
