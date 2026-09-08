@@ -5507,6 +5507,43 @@ export type InstrumentChangeDirection = "tightening" | "loosening" | "introduced
 
 /** Every `"key": <number>` pair on one diff line, as [key, value]. A line carrying no such pair
  *  yields nothing, which is what makes an unparseable hunk fall through to `undetermined` below. */
+/**
+ * Keys whose value is PROVENANCE or PROSE — when, where, by what command and why a number was
+ * captured. None of them is an allowance, so refreshing one cannot loosen the ceiling the number
+ * sets, and an HONEST re-capture is obliged to move them: `cycle-baseline.json`'s own
+ * `_methodology` says its count is re-derived AT `capturedAtSha`.
+ *
+ * Deliberately narrow, and the exclusions are the point. Across `scripts/*-baseline.json` the
+ * other string-valued keys are `path`, `reason`, `id`, `testFile`, `target`, `literal` and
+ * `scopeConfig` — every one of them NAMES AN EXEMPTED ENTRY or repoints the scope being measured,
+ * so adding one IS a loosening. Those stay unaccountable, which is what stops a diff from
+ * lowering one ceiling while quietly adding an exemption beside it and still reading `tightening`.
+ */
+const INSTRUMENT_CAPTURE_KEYS: ReadonlySet<string> = new Set([
+  "capturedAt",
+  "capturedAtSha",
+  "capturedAgainst",
+  "captureCommand",
+  "bumpRationale",
+  "priorBumpRationale",
+]);
+
+/** True for a provenance/prose key: `_`-prefixed by this repo's baseline convention (`_comment`,
+ *  `_methodology`, `_history`), or one of the capture fields above. */
+function isInstrumentProvenanceKey(key: string): boolean {
+  return key.startsWith("_") || INSTRUMENT_CAPTURE_KEYS.has(key);
+}
+
+/** The keys of every `"key": "string"` row on one line. Companion to {@link numericRowsOn}, which
+ *  sees only numeric values and therefore cannot tell prose from an exemption entry. */
+function stringRows(text: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]+)"\s*:\s*"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) out.push(m[1]);
+  return out;
+}
+
 function numericRowsOn(text: string): Array<[string, number]> {
   const out: Array<[string, number]> = [];
   const re = /"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)/g;
@@ -5560,7 +5597,15 @@ export function classifyInstrumentChange(diff: string, diffFiles: string[], file
     }
     if (l.kind !== "add") continue;
     const rows = numericRowsOn(l.text);
-    if (rows.length === 0) return "undetermined"; // a hunk this parser cannot account for
+    if (rows.length === 0) {
+      // W1-T3182. A line carrying ONLY provenance/prose rows is skipped rather than treated as
+      // unaccountable: bailing here made this whole carve-out unreachable for the 8 of 19
+      // baselines that record a `capturedAt`, because a correct re-capture must refresh it.
+      // Anything else — including a line with no parseable row at all — still refuses.
+      const keys = stringRows(l.text);
+      if (keys.length > 0 && keys.every(isInstrumentProvenanceKey)) continue;
+      return "undetermined"; // a hunk this parser cannot account for
+    }
     for (const [key, value] of rows) {
       const before = removedByKey.get(key);
       if (before === undefined) {
