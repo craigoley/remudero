@@ -21123,6 +21123,10 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   scratchReap: SCRATCH_REAP_CONTRACT_VERSION,
   worktreeReapBoot: WORKTREE_REAP_BOOT_CONTRACT_VERSION,
   workerRuleHeadlines: WORKER_RULE_HEADLINES_CONTRACT_VERSION,
+  // W1-T3092: GATED_RUNGS is DERIVED from EXPECTED_ORIGIN_KIND, so adding `objectReap.enabled`
+  // to the policy schema enrols the rung here automatically and the walk over GATED_RUNGS then
+  // refuses it as unpinnable until this entry exists. That guard working is what caught it.
+  objectReap: OBJECT_REAP_CONTRACT_VERSION,
 };
 
 /** Ledger one rung's refusal (design (ii): "a refusal ledgers `rung.unratified` with the diff").
