@@ -24108,10 +24108,9 @@ export function dailyCostCeilingReloader(deps: { policy?: Policy; env?: NodeJS.P
  * and never invoked from any dispatch path; this supplies that call site for `drainCommand`'s and
  * `daemonCommand`'s `DrainDeps`/`DaemonDeps.checkQueueGovernor` fields (drain.ts/daemon.ts).
  * Mirrors {@link costGovernorGateFor} immediately above: `openPrCount` is a caller-supplied
- * closure (drainCommand's own `openPrCount`, already re-derived fresh from the SAME
- * `refreshMerged` projection each call for the W1-T172 lanes budget; daemonCommand's own
- * equivalent, added by this task) rather than a ledger read — the governor's input is the LIVE
- * open-PR count, never a ledgered figure.
+ * closure over the COMPLETE open-board batch already read by `projectPlan`, rather than a second
+ * GitHub request or a ledger read. The governor therefore sees PRs whose task shard is not yet on
+ * main while drain and daemon retain one coherent observation per projection (W1-T3144).
  *
  * A deferred consultation LEDGERS ITSELF (`logQueueGovernorDeferral`, sweep.ts) before returning,
  * so drain.ts/daemon.ts never need `ledgerPath`/`runId`/`appendLedger` just to report it — the
@@ -24135,6 +24134,34 @@ function queueGovernorGateFor(
     if (!result.deferred) return undefined;
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
+  };
+}
+
+/** W1-T3144 — bridge the complete open-board observation already made inside `projectPlan` to the
+ * dispatch governor. Gateways without the optional batch method retain the historical projection
+ * fallback; a batch method that ran and failed throws so W1-T342's existing governor wrapper fails
+ * admission closed. One helper serves drain and daemon so their queue definitions cannot drift. */
+function createOpenPrCountObservation(): {
+  reset: () => void;
+  observe: (count: number | undefined) => void;
+  read: (projectionCount: () => number) => number;
+} {
+  let observed = false;
+  let count: number | undefined;
+  return {
+    reset: () => {
+      observed = false;
+      count = undefined;
+    },
+    observe: (next) => {
+      observed = true;
+      count = next;
+    },
+    read: (projectionCount) => {
+      if (!observed) return projectionCount();
+      if (count === undefined) throw new Error("open PR board count is unreadable");
+      return count;
+    },
   };
 }
 
@@ -24568,14 +24595,16 @@ async function drainCommand(
   // construction in `daemonCommand` (its own doc carries the full argument, and the two must not
   // drift apart again — #1532).
   const projectionGithub = githubFactory(owner, repo);
+  const boardOpenPrCount = createOpenPrCountObservation();
   const refreshMerged: () => MergedSet = () => {
     // R-24: the ONE thing a per-tick instance used to buy, bought without the cold walk that came
     // with it — see `GitHub.resetFailureFlags`. A gateway that omits the method (`ghGateway`, every
     // pre-existing fixture) no-ops here and keeps exactly the verdict lifetime it already had.
     projectionGithub.resetFailureFlags?.();
+    boardOpenPrCount.reset();
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: projectionGithub },
+      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe },
       statusPath,
     );
     lastProj = proj;
@@ -24592,14 +24621,14 @@ async function drainCommand(
   const isCreditIndeterminate = (id: string): boolean => lastProj?.get(id)?.indeterminate === true;
   // W1-T2397: the observation, built ONCE for both lanes — see {@link openSiblingObservation}.
   const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("drain", () => lastProj, log);
-  // W1-T172: the queue governor's other input (alongside DrainOpts.wipLimit) —
-  // OPEN entries in the SAME projection `isOpenPr` just read, never a second
-  // GitHub read path. Only consulted by the multi-lane path.
-  const openPrCount = () => {
-    let n = 0;
-    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") n++;
-    return n;
-  };
+  // W1-T3144: the queue governor counts the COMPLETE open-board batch `projectPlan` already read,
+  // including PRs whose task shard is not yet on main. A gateway without that optional batch keeps
+  // the prior projection fallback; a failed batch throws into W1-T342's fail-closed wrapper.
+  const openPrCount = () => boardOpenPrCount.read(() => {
+    let projected = 0;
+    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
+    return projected;
+  });
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -25584,13 +25613,15 @@ export async function daemonCommand(
   // delta cache alongside it — see that method's own doc for why a failed half's EMPTY rows are
   // dropped WITH its verdict rather than left behind under a healthy label.
   const projectionGithub = githubFactory(target.owner, target.repo);
+  const boardOpenPrCount = createOpenPrCountObservation();
   const refreshMerged: () => MergedSet = () => {
     // R-24: called once per tick, because `refreshMerged` is called once per tick — `runDaemon`'s
     // loop body opens with `deps.refreshMerged()` (lib/daemon.ts) exactly as `runDrain`'s two do.
     projectionGithub.resetFailureFlags?.();
+    boardOpenPrCount.reset();
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: projectionGithub },
+      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe },
       statusPath,
     );
     lastProj = proj;
@@ -25611,13 +25642,13 @@ export async function daemonCommand(
   // `lastProj`, the same projection `isOpenPr` just above and `openPrCount` just below read, so it
   // adds no fetch of its own.
   const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("daemon", () => lastProj, log);
-  // W1-T321: the queue governor's live input, mirroring drainCommand's identical `openPrCount` —
-  // OPEN entries in the SAME projection `refreshMerged` just read, never a second GitHub read path.
-  const openPrCount = () => {
-    let n = 0;
-    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") n++;
-    return n;
-  };
+  // W1-T3144: identical to drainCommand — complete board depth from the projection's existing
+  // batch read, with the old projection count retained only for gateways that omit that method.
+  const openPrCount = () => boardOpenPrCount.read(() => {
+    let projected = 0;
+    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
+    return projected;
+  });
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
