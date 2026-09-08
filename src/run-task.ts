@@ -24161,6 +24161,39 @@ export function buildCiLearningDaemonHooks(deps: {
   };
 }
 
+/**
+ * Re-run ONE Actions job for a positively classified CI-infrastructure failure (W1-T3194), the
+ * main-health rung's `requeueCheck`.
+ *
+ * Extracted from `daemonCommand`'s inline closure so the real body is reachable: every existing
+ * main-health test supplies its OWN `requeueCheck`, so the production one was never executed and
+ * diff-coverage flagged all three of its arms. `exec` is injectable and trailing, so no positional
+ * caller shifts and a recorder can prove the argv without a real POST.
+ *
+ * Returns false rather than throwing on BOTH failure modes — no resolvable job id, and a refused
+ * API call — because a rerun that cannot happen must never take down the health rung asking for it.
+ */
+export function requeueActionsJob(
+  owner: string,
+  repo: string,
+  failure: { name: string; jobId?: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: (args: string[]) => unknown = ghExec,
+): boolean {
+  if (!failure.jobId) return false;
+  try {
+    exec(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${failure.jobId}/rerun`]);
+    return true;
+  } catch (error) {
+    log("main.health.ci_requeue.error", {
+      check_name: failure.name,
+      job_id: failure.jobId,
+      error: String((error as Error)?.message ?? error),
+    });
+    return false;
+  }
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -24547,20 +24580,7 @@ export async function daemonCommand(
     log,
     freshMs: policy.values.githubEventWake.checkSettleMs,
     readCiFailures: (rollup) => fetchCiFailures(target.owner, target.repo, [...(rollup ?? [])]),
-    requeueCheck: (failure) => {
-      if (!failure.jobId) return false;
-      try {
-        ghExec(["api", "-X", "POST", `repos/${target.owner}/${target.repo}/actions/jobs/${failure.jobId}/rerun`]);
-        return true;
-      } catch (error) {
-        log("main.health.ci_requeue.error", {
-          check_name: failure.name,
-          job_id: failure.jobId,
-          error: String((error as Error)?.message ?? error),
-        });
-        return false;
-      }
-    },
+    requeueCheck: (failure) => requeueActionsJob(target.owner, target.repo, failure, log),
   });
   // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
   // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the

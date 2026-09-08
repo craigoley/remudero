@@ -164,3 +164,41 @@ test("mixed PR evidence reruns only the proven infrastructure job and keeps genu
   assert.equal(f.fixed.length, 1);
   assert.deepEqual(f.fixed[0]?.ciFailures?.map((failure) => failure.name), ["test-slow (4/4)"]);
 });
+
+// W1-T3194 — the `missing-job-id` arm. A failure can classify as proven infrastructure and still
+// carry no resolvable Actions job id (the rollup entry had no `databaseId`), and there is then
+// nothing to rerun. diff-coverage flagged src/lib/sweep.ts:4623-4624 because every test above
+// supplies a job id. The outcome must be RECORDED rather than silently dropped: a rerun that
+// never happened for a reason nobody can see is the failure mode this rung exists to end.
+test("a proven infrastructure failure with no resolvable job id is recorded, never silently dropped", async () => {
+  const ledgerPath = join(mkdtempSync(join(tmpdir(), "rmd-ci-infra-nojob-")), "ledger.ndjson");
+  const f = deps(ledgerPath);
+  const withoutJobId = { ...infra(), jobId: undefined } as CiFailure;
+
+  await runSweep([subject({ ciFailures: [withoutJobId] })], f.d, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(f.requeued.length, 0, "nothing can be rerun without a job id");
+  assert.equal(f.fixed.length, 0, "and it still spends no worker strike — the classification stands");
+  const rows = readLedgerLines(ledgerPath);
+  const outcome = rows.find((line) => line.step === "sweep.ci_infrastructure_requeue");
+  assert.equal(outcome?.outcome, "missing-job-id", "the arm names itself on the ledger");
+  assert.equal(
+    rows.filter((line) => line.step === "sweep.check_requeued").length,
+    0,
+    "and no bounded-retry record is written for a retry that never happened",
+  );
+  // The REASON rides the escalation, not the ledger row — so the arm is not merely recorded, it
+  // reaches a human with the sentence that explains why nothing was rerun.
+  assert.equal(f.escalated.length, 1, "a classified failure nobody can rerun is escalated, not dropped");
+  assert.equal(f.escalated[0].name, withoutJobId.name);
+});
+
+test("MUTANT: the same failure WITH a job id still reruns — the missing-id arm is narrow", async () => {
+  // The falsifier for the test above: identical fixture, only `jobId` differs.
+  const ledgerPath = join(mkdtempSync(join(tmpdir(), "rmd-ci-infra-nojob-control-")), "ledger.ndjson");
+  const f = deps(ledgerPath);
+  await runSweep([subject({ ciFailures: [infra()] })], f.d, DEFAULT_SWEEP_POLICY);
+  assert.equal(f.requeued.length, 1, "a resolvable job id still takes the dispatch arm");
+  const outcome = readLedgerLines(ledgerPath).find((l) => l.step === "sweep.ci_infrastructure_requeue");
+  assert.equal(outcome?.outcome, "dispatched");
+});

@@ -10,6 +10,7 @@ import {
   MAIN_HEALTH_TASK_ID,
   type MainHealthRungDeps,
 } from "../src/lib/main-health-rung.js";
+import { requeueActionsJob } from "../src/run-task.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { buildSweepHook } from "../src/run-task.js";
@@ -353,8 +354,62 @@ test("daemonCommand supplies the real REST and issue gateways to the one event-a
   assert.match(call, /fetch: ghJson/);
   assert.match(call, /issues: ghIssueGateway\(target\.owner, target\.repo\)/);
   assert.match(call, /readCiFailures:\s*\(rollup\)\s*=>\s*fetchCiFailures/);
-  assert.match(call, /actions\/jobs\/\$\{failure\.jobId\}\/rerun/);
-  assert.doesNotMatch(call, /rerun-failed-jobs/);
+  // W1-T3194: the endpoint literal moved into `requeueActionsJob` when it was extracted so its
+  // three arms could be unit-tested. The INVARIANT is unchanged and still asserted, one hop over:
+  // the wiring delegates to that function, and that function targets ONE job by id, never the
+  // whole-run `rerun-failed-jobs` endpoint.
+  assert.match(call, /requeueCheck:\s*\(failure\)\s*=>\s*requeueActionsJob\(target\.owner, target\.repo, failure, log\)/);
+  const requeueFn = source.slice(source.indexOf("export function requeueActionsJob("));
+  const requeueBody = requeueFn.slice(0, requeueFn.indexOf("\nexport "));
+  assert.match(requeueBody, /actions\/jobs\/\$\{failure\.jobId\}\/rerun/);
+  assert.doesNotMatch(requeueBody, /rerun-failed-jobs/);
   assert.match(call, /onCheckBurstSettled:\s*\(\)\s*=>\s*void mainHealthRung\(\)/);
   assert.match(call, /buildSweepHook\([\s\S]*?mainHealthRung[\s\S]*?\)/);
+});
+
+// W1-T3194 — the PRODUCTION `requeueCheck`, which no test above reaches: every one of them
+// supplies its own, so `daemonCommand`'s real closure was unreachable and diff-coverage flagged
+// all three of its arms. Extracted to `requeueActionsJob` with an injectable `exec` so the real
+// body runs here against a recorder rather than a real POST.
+test("requeueActionsJob: a resolvable job id reruns exactly that job, by its own id", () => {
+  const calls: string[][] = [];
+  const logged: Array<[string, Record<string, unknown> | undefined]> = [];
+  const ok = requeueActionsJob(
+    "acme",
+    "scratch",
+    { name: "ci-shard (2/4)", jobId: "34249290033" },
+    (step: string, extra?: Record<string, unknown>) => logged.push([step, extra]),
+    (args: string[]) => calls.push(args),
+  );
+  assert.equal(ok, true);
+  assert.deepEqual(calls, [["api", "-X", "POST", "repos/acme/scratch/actions/jobs/34249290033/rerun"]]);
+  assert.equal(logged.length, 0, "a clean rerun says nothing — the caller ledgers the outcome");
+});
+
+test("requeueActionsJob: no resolvable job id reruns nothing and never throws", () => {
+  const calls: string[][] = [];
+  const ok = requeueActionsJob("acme", "scratch", { name: "ci-shard (2/4)" }, () => {}, (args: string[]) => calls.push(args));
+  assert.equal(ok, false);
+  assert.deepEqual(calls, [], "there is nothing to address the API call to");
+});
+
+test("requeueActionsJob: a refused API call is ledgered and returns false, never thrown", () => {
+  // The arm that matters most: a rerun that cannot happen must not take down the health rung
+  // that asked for it.
+  const logged: Array<[string, Record<string, unknown> | undefined]> = [];
+  const ok = requeueActionsJob(
+    "acme",
+    "scratch",
+    { name: "ci-shard (4/4)", jobId: "999" },
+    (step: string, extra?: Record<string, unknown>) => logged.push([step, extra]),
+    () => {
+      throw new Error("403 rate limited");
+    },
+  );
+  assert.equal(ok, false);
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0][0], "main.health.ci_requeue.error");
+  assert.equal(logged[0][1]?.check_name, "ci-shard (4/4)");
+  assert.equal(logged[0][1]?.job_id, "999");
+  assert.match(String(logged[0][1]?.error), /403 rate limited/);
 });
