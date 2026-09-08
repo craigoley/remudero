@@ -1,0 +1,92 @@
+- id: W1-T3178
+  title: "THE PROOF DIALECT CANNOT NAME A DASHBOARD TEST — `TEST_PATH_EXACT_RE` is anchored `^test/`, and every `unit test:` proof spawns `node --test ... test/**/*.test.ts`, so a Vitest suite under `apps/dashboard` silently falls through to the bare-TITLE arm and resolves to ZERO tests forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/review.ts, test/a-proof-can-name-a-second-runners-suite.test.ts]
+  origin: "operator-session#console-architecture-2026-09-08"
+  plan_refs: ["W1-T3177", "W1-T3073", "W1-T72", "W1-T128"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08, and CAUGHT BY THE LINTER ON THE SHARD THAT NEEDED IT. Filing W1-T3177 (the
+    first React screen) produced four `lint-plan` warnings of the form: proof
+    "apps/dashboard/src/__tests__/series.test.tsx" "resolves to ZERO tests today". That warning is a
+    forward-reference allowance by design — but here it would NEVER clear, because the path can
+    never resolve, not merely does not yet.
+
+    THE TWO MECHANISMS, both in `src/lib/review.ts`:
+      `TEST_PATH_EXACT_RE = /^test\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/`   (:568)
+      `TEST_GLOB = "test/**/*.test.ts"`                                        (:607)
+    `parseTestTarget` tries the exact-path arm first; a path not starting `test/` fails it and falls
+    through to the bare-TITLE arm, which spawns
+      `node --test --import tsx --import <tmp-hygiene> --test-name-pattern <escaped literal> test/**/*.test.ts`
+    So `apps/dashboard/src/__tests__/series.test.tsx` is passed as a NAME PATTERN, matched literally
+    (the dialect escapes it — W1-T112 round 3), against a glob that cannot contain the file. Zero
+    matches, permanently.
+
+    AND THE RUNNER IS HARDCODED, which is the deeper half. Even a path the regex accepted would be
+    spawned under `node --test`. The operator approved Vitest for the dashboard on 2026-09-08
+    (node:test cannot do DOM component testing); a Vitest suite under `node --test` does not run.
+
+    WHY THIS IS NOT MERELY A LINT WARNING. W1-T72's `nameFiltered` guard treats a named test that
+    matches nothing as test theater and FAILS the review. So W1-T3177's criteria would not pass
+    vacuously — they would BLOCK, permanently, with no author action able to clear them. The first
+    React screen cannot be merged until this is fixed.
+  design: |
+    (i) THE DIALECT LEARNS A SECOND SUITE ROOT AND ITS RUNNER, together. Splitting them is the trap:
+    accepting the PATH without teaching the runner produces a proof that resolves and then executes
+    under the wrong tool, which is a worse failure than refusing — it reports a red suite as the
+    author's defect.
+    (ii) THE SET OF ROOTS IS CLOSED AND DECLARED, never a wildcard. `test/` runs under `node --test`;
+    the dashboard's suite root runs under its own runner. An unknown root is REFUSED with the
+    dialect's own explainer, exactly as `::` is refused today (W1-T3073) — a new arm must not
+    reintroduce the silent fall-through that task removed.
+    (iii) NO PATH TRAVERSAL, on either root. The existing arm refuses `..` before spawning; the new
+    arm inherits that refusal rather than re-deriving it, and it is tested on the new root too.
+    (iv) THE BARE-TITLE ARM IS UNCHANGED. It is the fallback for every existing proof in the corpus
+    and this task must not alter what it matches or how it escapes; a regression there re-grades
+    every shard in the plan.
+  acceptance:
+    - claim: "a proof naming a dashboard suite path resolves to that suite and spawns ITS runner, not node --test"
+      proof: "unit test: test/a-proof-can-name-a-second-runners-suite.test.ts"
+    - claim: "a proof naming a test/ path still resolves exactly as it does today, under node --test with the tmp-hygiene import — byte-identical argv"
+      proof: "unit test: test/a-proof-can-name-a-second-runners-suite.test.ts"
+    - claim: "a path under NEITHER declared root is REFUSED with the dialect's own explainer, never silently fallen through to the title arm"
+      proof: "unit test: test/a-proof-can-name-a-second-runners-suite.test.ts"
+    - claim: "a `..` segment is refused on the new root as well as the old — traversal is not reintroduced by the second arm"
+      proof: "unit test: test/a-proof-can-name-a-second-runners-suite.test.ts"
+    - claim: "the bare-TITLE arm's argv and escaping are unchanged, so no existing proof in the corpus re-grades"
+      proof: "unit test: test/a-proof-can-name-a-second-runners-suite.test.ts"
+  falsifier: |
+    CLOSE IF the dialect already accepts a non-`test/` suite path:
+      `grep -n 'TEST_PATH_EXACT_RE\s*=' src/lib/review.ts` and
+      `grep -n 'const TEST_GLOB' src/lib/review.ts`
+    MEASURED 2026-09-08: `/^test\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/` and `"test/**/*.test.ts"`.
+    Both anchored to `test/`; no second root and no second runner exists.
+    PROVE IT LOAD-BEARING: the fixture must show a dashboard path producing a spawn whose COMMAND is
+    the dashboard runner, while a `test/` path in the same suite still produces `node --test` with
+    the identical argv it produces today. If both spawn the same command, the second arm has been
+    described rather than added.
+    DO NOT satisfy this by widening `TEST_PATH_EXACT_RE` alone. A path that resolves and then runs
+    under the wrong runner reports a passing suite as failing and blames the author.
+    DO NOT satisfy this by relaxing W1-T72's `nameFiltered` guard so unmatched names stop failing.
+    That guard is the only thing standing between the review rung and test theater; loosening it to
+    admit one legitimate case admits every illegitimate one.
+    DO NOT move the dashboard's tests under `test/` to dodge this. The existing `node --test` glob
+    would then pick up `.tsx` component suites it cannot run, breaking the main suite to avoid
+    touching the dialect.
+  note: |
+    Rule 25 CHECKED: `src/lib/review.ts` is ordinary src. NOTE that this file is the PROOF DIALECT
+    itself, so a change here re-grades how every criterion in the plan is executed — the second
+    criterion (byte-identical argv for the existing arm) exists precisely to bound that blast radius
+    and must not be dropped as redundant.
+    W1-T3177 DEPENDS ON THIS. It was filed before this defect was found; its four dashboard-suite
+    proofs are unresolvable until this ships, and W1-T72 would BLOCK rather than pass them.
+    CAVEAT WITH EQUAL WEIGHT: this shard makes a dashboard proof NAMEABLE and RUNNABLE. It does not
+    decide the dashboard's suite root or runner invocation — those are W1-T3177's to establish, and
+    this task must take them as inputs rather than inventing a layout the screen then has to match.
