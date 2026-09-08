@@ -200,6 +200,15 @@ export class PlanError extends RmdError {
   }
 }
 
+/** A current-plan refusal at the final admission gate. Unlike a generic {@link PlanError}, this
+ *  means the task is valid but is no longer runnable, so a caller may safely stand that task down. */
+export class TaskAdmissionError extends PlanError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, details);
+    this.name = "TaskAdmissionError";
+  }
+}
+
 export interface Plan {
   tasks: Task[];
   byId: Map<string, Task>;
@@ -675,13 +684,13 @@ export function assertRunnable(
   releasedIds?: ReadonlySet<string>,
 ): void {
   if (task.status === "blocked") {
-    throw new PlanError(`task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`);
+    throw new TaskAdmissionError(`task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`);
   }
   if (task.verify === "human" && releasedIds?.has(task.id) !== true) {
-    throw new PlanError(`task ${task.id} is verify:human — not auto-runnable by the proto-runner`);
+    throw new TaskAdmissionError(`task ${task.id} is verify:human — not auto-runnable by the proto-runner`);
   }
   const unmet = unmetDependencies(plan, task, isMerged);
   if (unmet.length > 0) {
-    throw new PlanError(`task ${task.id} has unmerged dependencies: ${unmet.join(", ")}`);
+    throw new TaskAdmissionError(`task ${task.id} has unmerged dependencies: ${unmet.join(", ")}`);
   }
 }
