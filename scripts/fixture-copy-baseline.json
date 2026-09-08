@@ -1,9 +1,9 @@
 {
-  "gitInitSites": 214,
-  "gitInitFiles": 140,
-  "repoBuilderFunctionNames": 67,
-  "fakeGithubBuilderNames": 36,
-  "fakeGithubBuilderFiles": 84,
-  "ghPathShimFiles": 85,
+  "gitInitSites": 218,
+  "gitInitFiles": 142,
+  "repoBuilderFunctionNames": 70,
+  "fakeGithubBuilderNames": 37,
+  "fakeGithubBuilderFiles": 85,
+  "ghPathShimFiles": 86,
   "ledgerHelperNames": 50
 }
