@@ -1169,7 +1169,9 @@ export async function traceCommand(
   opts: { usage?: string; commandSyntax?: string } = {},
 ): Promise<number> {
   const id = rest[0];
-  const badArg = unknownArgError("trace", rest.slice(1), [], []);
+  const badArg = id?.startsWith("--")
+    ? `rmd trace: unexpected argument '${id}' — see \`rmd --help\``
+    : unknownArgError("trace", rest.slice(1), [], []);
   if (badArg) {
     console.error(badArg + "\n" + (opts.usage ?? ""));
     return 2;

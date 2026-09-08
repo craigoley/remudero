@@ -111,6 +111,7 @@ test("receiptCommand: a resolvable trailer + a fixed ledger prints a determinist
 
 test("replayCommand: a refused ledger union (ok:false) exits 1, never narrating a partial corpus", () => {
   const rc = replayCommand("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", [], {
+    stateDir: "/nonexistent/state/for/tests",
     resolveReplayLedgerLines: () => ({ ok: false, reason: "ZERO archives" }),
   });
   assert.equal(rc, 1);
@@ -127,6 +128,7 @@ test("replayCommand: a fixed in-window ledger narrates the window's rows determi
   let rc: number;
   try {
     rc = replayCommand("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", [], {
+      stateDir: "/nonexistent/state/for/tests",
       resolveReplayLedgerLines: () => ({ ok: true, lines }),
     });
   } finally {
@@ -322,6 +324,7 @@ test("traceCommand: no <id> refuses (exit 2), touching no plan/ledger/GitHub rea
 });
 
 test("traceCommand: an unrecognized flag refuses (exit 2)", async () => {
-  const rc = await traceCommand(["--bogus"]);
+  const root = tmpDir("report-commands-trace-root-");
+  const rc = await withFakeHome(root, () => traceCommand(["--bogus"]));
   assert.equal(rc, 2);
 });
