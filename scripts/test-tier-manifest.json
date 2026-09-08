@@ -397,6 +397,7 @@
     "test/deny-floor-probe.test.ts": 861,
     "test/deny-floor.test.ts": 1056,
     "test/dep-review.test.ts": 1409,
+    "test/dependency-declarations-match-use.test.ts": 0,
     "test/dependency-licence-policy.test.ts": 739,
     "test/deploy-cycle-console.test.ts": 196,
     "test/deploy-failed-consequence-kind.test.ts": 1074,
