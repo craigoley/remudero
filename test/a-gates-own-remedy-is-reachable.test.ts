@@ -57,12 +57,12 @@ const FIXTURE_STEPS: FastGateStep[] = [
   { job: "gate-c", script: "gate-c:check", reason: "fixture reason c (no remedy declared)" },
 ];
 
-// ── SANITY: the registry really carries the source-size entry's own remedy, per-entry ───────────
+// ── SANITY: the source-size signal no longer exposes its retired baseline as a remedy ──────────
 
-test("W1-T3140: the source-size signal retains baseline remedy metadata for deadlock visibility", () => {
+test("W1-T3140: the source-size signal has no baseline remedy metadata", () => {
   const entry = FAST_GATE_STEPS.find((s) => s.job === "source-size");
   assert.ok(entry, "the source-size gate must still exist in the registry");
-  assert.deepEqual(entry?.remedyFiles, [SOURCE_SIZE_REMEDY]);
+  assert.equal(entry?.remedyFiles, undefined);
   assert.ok(entry?.reason && entry.reason.length > 0, "the entry carries its own reason, never a borrowed one");
 });
 
@@ -97,9 +97,9 @@ test("remedyFilesForFailingChecks: no failing checks at all returns empty — ne
   assert.deepEqual(remedyFilesForFailingChecks([], FIXTURE_STEPS), []);
 });
 
-test("W1-T3140: a failing source-size sensor surfaces legacy remedy metadata only", () => {
+test("W1-T3140: a failing source-size sensor cannot surface the retired baseline as a remedy", () => {
   const got = remedyFilesForFailingChecks(["source-size"]);
-  assert.deepEqual(got, [{ path: SOURCE_SIZE_REMEDY, job: "source-size" }]);
+  assert.deepEqual(got, []);
 });
 
 // ── ACCEPTANCE 1 — reachable: a fix rung repairing THAT gate's failure may write its remedy ─────

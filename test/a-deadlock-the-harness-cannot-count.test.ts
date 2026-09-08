@@ -25,7 +25,7 @@ import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
-const SOURCE_SIZE_REMEDY = "scripts/source-size-baseline.json";
+const COMMENT_LOAD_REMEDY = "scripts/comment-load-baseline.json";
 const UNDECLARED_REMEDY = "scripts/unregistered-ratchet-baseline.json";
 const PLAN_FILE = "plan/tasks.d/W1-T2654-fixture.yaml";
 const SOURCE_FILE = "src/run-task.ts";
@@ -126,27 +126,27 @@ function diffFileSequence(sequence: string[][]): () => Promise<string[]> {
   return async () => sequence[Math.min(i++, sequence.length - 1)];
 }
 
-function sourceSizeFailure(path = SOURCE_SIZE_REMEDY): CiFailure {
+function commentLoadFailure(path = COMMENT_LOAD_REMEDY): CiFailure {
   return {
-    name: "source-size",
-    logTail: `source grew past its recorded bucket\nTO FIX: record the reviewed result; edit ${path} and commit it`,
+    name: "comment-load-ratchet",
+    logTail: `comment load grew past its recorded bucket\nTO FIX: record the reviewed result; edit ${path} and commit it`,
   };
 }
 
 test("acceptance 1: a declared gate remedy that still stands down is classified under the gate-remedy class", () => {
   const got = fixRungScopeStandDownReason(
-    [PLAN_FILE, SOURCE_SIZE_REMEDY],
+    [PLAN_FILE, COMMENT_LOAD_REMEDY],
     [PLAN_FILE],
     [PLAN_FILE],
-    remedyFilesForFailingChecks(["source-size"]),
-    [sourceSizeFailure()],
+    remedyFilesForFailingChecks(["comment-load-ratchet"]),
+    [commentLoadFailure()],
   );
 
   assert.ok(got);
   assert.equal(got.scopeKind, "plan");
   assert.equal(got.gateRemedyDeadlock?.disposition, FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION);
-  assert.equal(got.gateRemedyDeadlock?.gate, "source-size");
-  assert.equal(got.gateRemedyDeadlock?.file, SOURCE_SIZE_REMEDY);
+  assert.equal(got.gateRemedyDeadlock?.gate, "comment-load-ratchet");
+  assert.equal(got.gateRemedyDeadlock?.file, COMMENT_LOAD_REMEDY);
   assert.equal(got.gateRemedyDeadlock?.declaringEntryExists, true);
 });
 
@@ -156,8 +156,8 @@ test("acceptance 2: an ordinary out-of-scope path keeps the generic stand-down r
     [SOURCE_FILE, "scripts/ordinary.json"],
     [SOURCE_FILE],
     [SOURCE_FILE],
-    remedyFilesForFailingChecks(["source-size"]),
-    [sourceSizeFailure()],
+    remedyFilesForFailingChecks(["comment-load-ratchet"]),
+    [commentLoadFailure()],
   );
 
   assert.ok(withoutFailures);
@@ -170,20 +170,20 @@ test("acceptance 3: the scope escalation names the gate, file, and existing decl
   const spawnCalls: SpawnWorkerArgs[] = [];
   const issues = fakeIssueStore();
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const failing = fakeReview("failure", [criterion({ claim: "source-size is green", met: false, reason: "red" })]);
+  const failing = fakeReview("failure", [criterion({ claim: "comment load is green", met: false, reason: "red" })]);
 
   const outcome = await runFixRung({
-    ...fixRungBaseOpts({ id: "W1-T2654X", title: "fix plan-only source-size", files: [PLAN_FILE] }),
+    ...fixRungBaseOpts({ id: "W1-T2654X", title: "fix plan-only comment load", files: [PLAN_FILE] }),
     strikeCap: 3,
     initialReview: failing,
-    ciFailures: [sourceSizeFailure()],
+    ciFailures: [commentLoadFailure()],
     deps: {
       spawn: async (args) => {
         spawnCalls.push(args);
         return workerResult({ sessionId: `fix-session-${spawnCalls.length}` });
       },
       waitForCiGreen: async () => "red",
-      fetchCiFailures: async () => [sourceSizeFailure()],
+      fetchCiFailures: async () => [commentLoadFailure()],
       runReview: async () => failing,
       push: () => {},
       issues,
@@ -191,21 +191,21 @@ test("acceptance 3: the scope escalation names the gate, file, and existing decl
       log: (step, extra) => logs.push({ step, extra }),
       say: () => {},
       account: (r) => r,
-      fetchPrDiffFiles: diffFileSequence([[PLAN_FILE], [PLAN_FILE], [PLAN_FILE, SOURCE_SIZE_REMEDY]]),
+      fetchPrDiffFiles: diffFileSequence([[PLAN_FILE], [PLAN_FILE], [PLAN_FILE, COMMENT_LOAD_REMEDY]]),
     },
   });
 
   assert.equal(spawnCalls.length, 1, "the refusal still stands down before spending strike 2");
   assert.equal(outcome.outcome, "stood_down");
   assert.equal(issues.calls.length, 1);
-  assert.match(issues.calls[0].body, /failing gate source-size prescribes scripts\/source-size-baseline\.json/);
-  assert.match(issues.calls[0].body, /FAST_GATE_STEPS\[job="source-size"\]\.remedyFiles includes/);
+  assert.match(issues.calls[0].body, /failing gate comment-load-ratchet prescribes scripts\/comment-load-baseline\.json/);
+  assert.match(issues.calls[0].body, /FAST_GATE_STEPS\[job="comment-load-ratchet"\]\.remedyFiles includes/);
 
   const stoodDown = logs.find((l) => l.step === "fix.stood_down" && l.extra?.site === "rung.scope");
   assert.ok(stoodDown);
   assert.equal(stoodDown.extra?.disposition, FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION);
-  assert.equal(stoodDown.extra?.gate, "source-size");
-  assert.equal(stoodDown.extra?.file, SOURCE_SIZE_REMEDY);
+  assert.equal(stoodDown.extra?.gate, "comment-load-ratchet");
+  assert.equal(stoodDown.extra?.file, COMMENT_LOAD_REMEDY);
   assert.equal(stoodDown.extra?.declaring_entry_exists, true);
 });
 
@@ -214,13 +214,13 @@ test("acceptance 4: an output-named remedy with no registry entry is still the c
     [SOURCE_FILE, UNDECLARED_REMEDY],
     [SOURCE_FILE],
     [SOURCE_FILE],
-    remedyFilesForFailingChecks(["source-size"]),
-    [sourceSizeFailure(UNDECLARED_REMEDY)],
+    remedyFilesForFailingChecks(["comment-load-ratchet"]),
+    [commentLoadFailure(UNDECLARED_REMEDY)],
   );
 
   assert.ok(got);
   assert.equal(got.gateRemedyDeadlock?.disposition, FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION);
-  assert.equal(got.gateRemedyDeadlock?.gate, "source-size");
+  assert.equal(got.gateRemedyDeadlock?.gate, "comment-load-ratchet");
   assert.equal(got.gateRemedyDeadlock?.file, UNDECLARED_REMEDY);
   assert.equal(got.gateRemedyDeadlock?.declaringEntryExists, false);
   assert.match(got.gateRemedyDeadlock?.declaringEntry ?? "", /MISSING FAST_GATE_STEPS remedyFiles entry/);
@@ -228,10 +228,10 @@ test("acceptance 4: an output-named remedy with no registry entry is still the c
 
 test("acceptance 5: the class is countable from seeded ledger rows alone", () => {
   const lines: Array<Record<string, unknown>> = [
-    { step: "fix.stood_down", disposition: FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION, gate: "source-size", file: SOURCE_SIZE_REMEDY },
+    { step: "fix.stood_down", disposition: FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION, gate: "source-size", file: "scripts/source-size-baseline.json" },
     { step: "fix.stood_down", disposition: FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION, gate: "comment-load-ratchet", file: "scripts/comment-load-baseline.json" },
     { step: "fix.stood_down", site: "rung.scope", reason: "ordinary scope drift" },
-    { step: "fix.dispatch", disposition: FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION, gate: "source-size", file: SOURCE_SIZE_REMEDY },
+    { step: "fix.dispatch", disposition: FIX_RUNG_GATE_REMEDY_SCOPE_DEADLOCK_DISPOSITION, gate: "source-size", file: "scripts/source-size-baseline.json" },
   ];
 
   assert.equal(countGateRemedyScopeDeadlockLedgerMembers(lines), 2);

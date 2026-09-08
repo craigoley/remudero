@@ -1877,9 +1877,6 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "src/**/*.ts files from the merge base to HEAD, and publishes human plus schema-versioned JSON hotspot evidence. " +
       "Positive growth remains PASS because line count is a review-risk signal rather than a correctness verdict; only an " +
       "unreadable base or failed measurement refuses the step. The historical shared baseline is not read or written",
-    // W1-T3140: retained for gate-remedy observability when an already-red legacy source-size
-    // context names its own ledger. Sweep repair no longer maps `source-size` to this baseline.
-    remedyFiles: ["scripts/source-size-baseline.json"],
   },
   // W1-T2643: the four census entries are no longer hand-written here — they are
   // CENSUS_ADMITTED_MEMBERS's own projection (see CENSUS_POPULATION above). Editing a census
