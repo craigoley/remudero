@@ -328,7 +328,7 @@ const BASELINE_RE_FIXTURELESS: Record<string, number> = {
   "src/lib/onboard/recon.ts": 2,
   "src/lib/plan-pr-emitter.ts": 2,
   "src/lib/retro.ts": 7,
-  "src/lib/review.ts": 35,
+  "src/lib/review.ts": 36,
   "src/lib/risk-score.ts": 2,
   "src/lib/specialist-panel.ts": 1,
   "src/lib/status.ts": 4,

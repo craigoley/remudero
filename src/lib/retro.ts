@@ -420,22 +420,54 @@ export function ownBranchOf(runId: string): string {
  *  throttle is NAMED rather than read as "GitHub has no evidence" (W1-T132). Never throws. TRAP:
  *  the `<= 0` threshold is COPIED from `isBucketExhausted`, because importing it would close a
  *  dependency cycle. Why: docs/forensics/retro.md (W1-T2305). */
-export function probeGithubThrottle(): string | undefined {
+/** A GitHub call, for {@link probeGithubThrottle}. Injected only so a test can drive the arms;
+ *  the real one shells `gh` through {@link ghExec} exactly as the probe always did. */
+export type ThrottleProbeRun = (args: readonly string[]) => { ok: boolean; stdout: string; stderr: string };
+
+const defaultThrottleProbeRun: ThrottleProbeRun = (args) => {
   try {
-    const out = ghExec(["api", "rate_limit", "--jq", ".rate.remaining"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    const remaining = Number(out);
-    if (Number.isFinite(remaining) && remaining <= 0) {
-      return "GitHub API rate limit exhausted (0 remaining)";
-    }
-    return undefined;
+    return { ok: true, stdout: ghExec([...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), stderr: "" };
   } catch (e) {
     const err = e as { stderr?: Buffer | string; message?: string };
-    const stderr = String(err.stderr ?? err.message ?? "").trim();
-    return `gh rate_limit probe failed: ${stderr || "unknown error"}`;
+    return { ok: false, stdout: "", stderr: String(err.stderr ?? err.message ?? "").trim() };
   }
+};
+
+/** A refusal whose body says the request was rate limited. GitHub uses the SAME wording for the
+ *  primary and the secondary limit, which is why matching the TEXT is the discriminator and the
+ *  status is not: a 403 is also how an ordinary permissions failure reads. */
+export const GITHUB_THROTTLE_REFUSAL_RE = /rate limit|secondary rate|abuse detection/i;
+
+/**
+ * Is GitHub usable? Checked once per retro, before any merge is credited (W1-T132).
+ *
+ * TWO SIGNALS, BECAUSE ONE OF THEM CANNOT SEE THE FAILURE THAT MATTERS.
+ *
+ *   (1) THE BUCKETS — `gh api rate_limit`, the PRIMARY quota, which is all this probe used to read.
+ *   (2) A REAL CALL, because a SECONDARY (abuse/concurrency) limit does not appear in
+ *       `/rate_limit` and refuses calls anyway. MEASURED 2026-09-08T07:26Z: every bucket full
+ *       (core 5000/5000) while `gh api user` and the open-PR fetch both returned 403 "API rate
+ *       limit exceeded". On (1) alone the probe said "available" and the retro stamped
+ *       `source: github` on a census built from three refused fetches. W1-T3132.
+ */
+export function probeGithubThrottle(run: ThrottleProbeRun = defaultThrottleProbeRun): string | undefined {
+  // (1) the primary buckets, unchanged in behaviour.
+  const buckets = run(["api", "rate_limit", "--jq", ".rate.remaining"]);
+  if (!buckets.ok) {
+    return `gh rate_limit probe failed: ${buckets.stderr || "unknown error"}`;
+  }
+  const remaining = Number(buckets.stdout.trim());
+  if (Number.isFinite(remaining) && remaining <= 0) {
+    return "GitHub API rate limit exhausted (0 remaining)";
+  }
+  // (2) the call the buckets cannot speak for. ONLY a refusal that NAMES rate limiting counts: a
+  // 404, a network drop or a permissions error is a different condition and keeps whatever handling
+  // it has, rather than being relabelled a throttle.
+  const live = run(["api", "user", "--jq", ".login"]);
+  if (!live.ok && GITHUB_THROTTLE_REFUSAL_RE.test(live.stderr)) {
+    return `GitHub is refusing calls as rate-limited while /rate_limit still reports quota (secondary limit): ${live.stderr.slice(0, 200)}`;
+  }
+  return undefined;
 }
 
 /** One credited SHIPPED entry — either a ledger-native merge or a GitHub-discovered gate-side merge. */

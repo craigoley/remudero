@@ -10,7 +10,7 @@
   budget_usd: 2.00
   files: [DECISIONS.md]
   origin: "operator-session#next-wave-2026-09-08"
-  plan_refs: ["W1-T2914", "W1-T496"]
+  plan_refs: ["W1-T2914", "W1-T496", "W1-T1289"]
   status: queued
   attempts: 0
   rationale: |
@@ -78,6 +78,16 @@
     Shipping a bwrap flag here decides the question the operator was asked, and does it without the
     network-touch measurement the design section says must come first.
   note: |
+    PRIOR ART, FOUND BY AUDIT 2026-09-08 AND NOT KNOWN WHEN THIS WAS FILED. Option (b) — "allowlist
+    proxy only" — is NOT greenfield: W1-T1289 ("A DECLARED SECURITY BOUNDARY HAS NO ENFORCEMENT
+    OWNER IN THIS TREE") is already filed at `status: blocked`, and its subject is exactly this —
+    `settings/worker.json` declares four allowlisted domains under a sandbox marked `enabled` and
+    `failIfUnavailable`, and nothing in the tree enforces them. Its declared files are
+    `src/lib/containment.ts`, `settings/worker.json` and `test/egress-enforcement-owner.test.ts`.
+
+    WHOEVER TAKES THIS RULING MUST READ W1-T1289 FIRST. Ruling for (b) is partly a decision to
+    UNBLOCK an existing task rather than to start a new one, and ruling for (a) has to say what
+    becomes of it. A ruling written without that is deciding half a question.
     verify: human because the trade is a judgment about acceptable exposure, not a property a test
     can establish. The three grep proofs are absent TODAY by construction (each measured at 0), so
     they discriminate: they can only pass once the ruling is written.
