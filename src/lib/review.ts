@@ -782,6 +782,45 @@ function dialectGrepTargetPath(w: WhitelistedProof): string | undefined {
   return w.args[3];
 }
 
+/** (W1-T3208) A dialect `grep:` proof's PATTERN is, BY CONSTRUCTION, a literal substring of the
+ *  criterion line that carries it — `parseDialectGrep` takes everything before the trailing
+ *  ` in <path>` as the pattern, so the compiled proof text `<pattern> in <path>` sits verbatim in
+ *  whatever line declared it. When the proof's own TARGET is the file holding that declaration (a
+ *  plan shard grepping itself), the pattern's first — and sometimes only — match is its own
+ *  criterion line, before it ever matches anything the proof was written to pin (167 of 168
+ *  measured by W1-T2983). Matches ONLY the exact reconstructed `<pattern> in <path>` text for THIS
+ *  proof, never a line merely SHAPED like a `grep:`/criterion declaration — a sibling criterion
+ *  citing a different pattern or path is left alone, so a shard cannot self-certify by quoting a
+ *  neighbour instead of itself (design (ii): "identified by position, not by shape"). */
+function dialectGrepSelfLineRe(pattern: string, path: string): RegExp {
+  return new RegExp(`${escapeRegExp(pattern)}\\s+in\\s+${escapeRegExp(path)}`, "i");
+}
+
+/** W1-T3208 is the plan-shard self-certification hazard W1-T2983 measured. The public proof
+ *  executor does not know the criterion's source position, and existing callers still use it to
+ *  assert legacy monolith retirement records in `plan/tasks.yaml`. Keep the runtime exclusion on
+ *  the shard population that owns this defect until a wider position-aware proof context exists. */
+function dialectGrepSelfLineFilteringApplies(path: string): boolean {
+  return /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path);
+}
+
+/** (W1-T3208) Re-read a PASSING dialect `grep:` proof's own already-clean stdout (`-arn` gives
+ *  `<lineno>:<content>` for a single-file target) and drop the ONE line that carries this proof's
+ *  own declaration ({@link dialectGrepSelfLineRe}) before deciding pass/fail. A proof whose only
+ *  match WAS that line now has nothing left and FAILS, loudly and by name, exactly like an
+ *  ordinary zero-match proof (design (iii)); a proof with a genuine match anywhere else keeps its
+ *  `"pass"` (design (ii)). No new metacharacter, no change to the compiled argv or to
+ *  `proof-grep-safety` (task-linter.ts, untouched by this file): this only re-classifies the
+ *  matcher's own already-clean exit-0 output. */
+function dialectGrepOutcomeExcludingSelfLine(pattern: string, path: string, stdout: string): "pass" | "fail" {
+  const selfLine = dialectGrepSelfLineRe(pattern, path);
+  const genuine = stdout
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => !selfLine.test(line.replace(/^\d+:/, "")));
+  return genuine.length > 0 ? "pass" : "fail";
+}
+
 /** Compile a `unit test:` dialect body — either a literal test-file path (reusing the exact-file
  *  shape verbatim) or a bare TEST NAME, name-filtered across the whole suite glob. */
 function parseTestTarget(body: string): WhitelistedProof | null {
@@ -1407,6 +1446,15 @@ export function execWhitelistedProof(
   try {
     const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
     if (whitelisted.nameFiltered) return nameFilteredOutcome(stdout);
+    // W1-T3208: a dialect grep's own compiled pattern/path names the exact self-declaration text to
+    // exclude — see dialectGrepOutcomeExcludingSelfLine. `dialectGrepTargetPath` returning a path
+    // confirms both the dialect shape (not the legacy fenced, author-selected argv) AND that
+    // `args[2]` is the compiled pattern, so the two are read together rather than re-deriving one
+    // shape check twice.
+    const dialectPath = dialectGrepTargetPath(whitelisted);
+    if (whitelisted.kind === "grep" && dialectPath !== undefined && dialectGrepSelfLineFilteringApplies(dialectPath)) {
+      return dialectGrepOutcomeExcludingSelfLine(whitelisted.args[2]!, dialectPath, stdout);
+    }
     return "pass";
   } catch (e) {
     const err = e as NodeJS.ErrnoException & { status?: number | null; stdout?: string | Buffer | null };
