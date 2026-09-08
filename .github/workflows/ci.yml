@@ -202,6 +202,11 @@ jobs:
               echo "- plan-reading shard summary: candidate_count=${COUNT}, assigned_count=0, predicted_duration_ms=0, fallback=source, shard=${{ matrix.shard }}/4" >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" != "push" ]; then
+            echo "W1-T3207: coverage-ratchet owns the single instrumented full-suite run; ci skips the quieter second harness on PR source diffs."
+            echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented full-suite run for this PR." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$CLASS" = "SOURCE" ]; then
             echo "CI sharding: class=SOURCE — running test shard ${{ matrix.shard }}/4."
             set +e
@@ -428,6 +433,7 @@ jobs:
           git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
           git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > changed-files.txt 2>/dev/null || : > changed-files.txt
           CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           case "$CLASS" in
             PLAN_ONLY|DOCS_ONLY) ;;
             *)
@@ -454,6 +460,11 @@ jobs:
           if [ "${{ steps.plan-reading.outputs.established }}" = "true" ]; then
             echo "W1-T3191: exact plan-reading matrix established — slow-tier files are already distributed across its four shards; suppressing duplicate execution."
             echo "- plan-reading matrix established: test-slow registered successfully and suppressed duplicate execution" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "${{ steps.plan-reading.outputs.class }}" = "SOURCE" ]; then
+            echo "W1-T3207: coverage-ratchet owns the single instrumented full-suite run; test-slow skips the duplicate slow-tier harness on source diffs."
+            echo "- W1-T3207: skipped duplicate slow-tier execution on SOURCE; coverage-ratchet owns the single instrumented full-suite run." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           npm run --silent test:slow -- --base "origin/${GITHUB_BASE_REF}"
@@ -643,19 +654,18 @@ jobs:
           # instead of being papered over. The `ci` job still retries, so a flake that reproduces
           # in both harnesses is still caught there; a flake unique to instrumentation is not.
           #
-          # ── OPERATOR RULING 2: THIS STEP IS NO LONGER A TEST VERDICT. ─────────────────────
-          # `ci` owns correctness — it runs the same glob on the quieter harness AND runs on main.
-          # This job owns COVERAGE. The duplication is inherent (lcov cannot be produced without
-          # running the suite instrumented), so what is removed is the duplicated VERDICT, not the
-          # duplicated run.
+          # ── OPERATOR RULING 2 (W1-T3207, 2026-09-08): THIS IS THE TEST VERDICT NOW. ────────
+          # The suite runs once per PR, under instrumentation, because coverage cannot be rebuilt
+          # from the quieter harness. This gives up the second harness's independent signal: W1-T1041
+          # measured 12 of 600 runs where one harness caught what the other missed. The operator
+          # accepted that loss to remove the duplicated full-suite run.
           #
           # A STEP-LEVEL SHELL GUARD, NEVER A YAML CONDITIONAL AND NEVER A `paths:` FILTER.
           # test/diff-coverage.test.ts asserts this job body carries no line beginning with a YAML
           # conditional (the #729 skipped-check-deadlock discipline), and this job STAYS REQUIRED in
           # ci-gate's list — it must still register and still fail on a coverage regression. The
-          # comment two blocks below is what makes a plain `exit 0` here safe: no step in this job
-          # carries a YAML conditional, so a FAILING step skips every step after it. Swallowing the
-          # test exit code is therefore the only way to keep the coverage gates running at all.
+          # comment two blocks below is what makes artifact absence fail closed: no step in this job
+          # carries a YAML conditional, so a failing shard makes the stable aggregator refuse.
           mkdir -p coverage/raw
           set +e
           NODE_V8_COVERAGE=coverage/raw node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
@@ -665,8 +675,8 @@ jobs:
           TEST_EXIT=$?
           set -e
           if [ "$TEST_EXIT" -ne 0 ]; then
-            echo "coverage-ratchet: the instrumented suite exited ${TEST_EXIT}. THIS JOB NO LONGER TREATS THAT AS ITS VERDICT (operator ruling, 2026-08-28) — \`ci\` owns test correctness. The coverage gates below still run and still block."
-            echo "- coverage-ratchet: instrumented suite exited **${TEST_EXIT}** — not this job's verdict; see the \`ci\` job for the test result. Coverage gates below still ran." >> "$GITHUB_STEP_SUMMARY"
+            echo "coverage-ratchet: the instrumented suite exited ${TEST_EXIT}. W1-T3207 makes this the surviving test harness; lcov/raw coverage are still checked before the shard fails."
+            echo "- coverage-ratchet: instrumented suite exited **${TEST_EXIT}** — W1-T3207 makes this the surviving test harness; lcov/raw coverage were still checked before failing the shard." >> "$GITHUB_STEP_SUMMARY"
           fi
           # THE ONE THING THIS STEP STILL FAILS ON: no lcov. Without it the coverage gates below
           # have nothing to read, and a green job would then mean "coverage was never checked" —
@@ -679,10 +689,15 @@ jobs:
             echo "coverage-ratchet: no raw V8 coverage produced — cross-shard branch identities could not be merged. FAILING."
             exit 1
           fi
+          if [ "$TEST_EXIT" -ne 0 ]; then
+            echo "coverage-ratchet: the single instrumented suite exited ${TEST_EXIT}; failing the PR from the surviving harness."
+            exit "$TEST_EXIT"
+          fi
           exit 0
       - name: Stage this coverage shard for the required-check aggregator
         run: |
           mkdir -p coverage-artifact
+          printf '%s\n' "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/class
           if [ -s coverage/lcov.info ]; then
             # The raw process reports were 514 MB for ONE shard on this PR's first live run.
             # Deduplicate repeated source maps locally while retaining every process boundary and
@@ -742,33 +757,44 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
-          cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Determine this diff's fast-lane class for the coverage aggregator
-        id: classify
-        run: |
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            git diff --name-only HEAD^1...HEAD > changed-files.txt || true
-          else
-            : > changed-files.txt
-          fi
-          CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
-          case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
-            *) CLASS="SOURCE" ;;
-          esac
-          cat diff-class.log || true
-          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
       - name: Download coverage shards
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: coverage-shard-*
           path: coverage-shards
+      - name: Require downloaded coverage shard artifacts
+        id: coverage-artifact
+        run: |
+          EXPECTED=""
+          for SHARD in 1 2 3 4; do
+            CLASS_FILE="coverage-shards/coverage-shard-${SHARD}/class"
+            if [ ! -s "$CLASS_FILE" ]; then
+              echo "coverage-ratchet: expected coverage-shard-${SHARD} artifact metadata; refusing a missing or partial artifact."
+              exit 1
+            fi
+            VALUE="$(cat "$CLASS_FILE")"
+            case "$VALUE" in
+              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:SOURCE|push:SOURCE) ;;
+              *)
+                echo "coverage-ratchet: coverage-shard-${SHARD} carried unrecognised class metadata '${VALUE}'."
+                exit 1
+                ;;
+            esac
+            if [ -z "$EXPECTED" ]; then
+              EXPECTED="$VALUE"
+            elif [ "$VALUE" != "$EXPECTED" ]; then
+              echo "coverage-ratchet: coverage shards disagree on fast-lane class (${EXPECTED} vs ${VALUE})."
+              exit 1
+            fi
+          done
+          EVENT="${EXPECTED%%:*}"
+          CLASS="${EXPECTED#*:}"
+          echo "event=${EVENT}" >> "$GITHUB_OUTPUT"
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
       - name: Merge raw V8 coverage shards before assigning LCOV branch indexes
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "coverage-ratchet: push event — no PR coverage merge required."; exit 0; }
-          CLASS="${{ steps.classify.outputs.class }}"
+          CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — no coverage shards were collected."
             exit 0
@@ -793,7 +819,7 @@ jobs:
       - name: Compute this PR's base...head diff (for the per-diff coverage check below)
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event — HEAD is no merge commit here and HEAD^1 would not resolve."; exit 0; }
-          CLASS="${{ steps.classify.outputs.class }}"
+          CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping the base...head diff computation (Diff coverage below has nothing to check)."
             echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Compute this PR's base...head diff**" >> "$GITHUB_STEP_SUMMARY"
@@ -809,7 +835,7 @@ jobs:
           RMD_CI_REPORT: "1"
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event (no pr.diff was computed above)."; exit 0; }
-          CLASS="${{ steps.classify.outputs.class }}"
+          CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping Diff coverage (no pr.diff was computed above; no src/**/test/** path in this diff to check)."
             echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Diff coverage**" >> "$GITHUB_STEP_SUMMARY"
@@ -821,7 +847,7 @@ jobs:
           RMD_CI_REPORT: "1"
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event (no coverage/lcov.info was collected above)."; exit 0; }
-          CLASS="${{ steps.classify.outputs.class }}"
+          CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping Coverage ratchet (no coverage/lcov.info was collected above; no src/** path in this diff can move the aggregate)."
             echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Coverage ratchet**" >> "$GITHUB_STEP_SUMMARY"
