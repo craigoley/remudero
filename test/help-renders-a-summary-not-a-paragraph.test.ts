@@ -137,7 +137,7 @@ const BASELINE_COMMAND_NAMES = [
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
   "emissions", "escalate", "feedback", "fix", "hand-runs", "inbox", "init", "install-checkout", "issues",
   "learnings", "ledger-grep", "lint-plan", "merge-hold", "next-task-id", "notify", "onboard", "ops", "pause",
-  "peek", "plan", "plan-reconcile", "preflight", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
+  "peek", "plan", "plan-reconcile", "pr-checks", "preflight", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "reframe", "relay", "replay", "replay-goldens", "resume", "retro", "review", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "up",
   "verdict-calibration", "wipe-test",
@@ -152,7 +152,10 @@ const BASELINE_COMMAND_NAMES = [
 test("COMMANDS carries the established command names plus the operator merge-hold writer", () => {
   // ONE literal, deliberately: this is the reviewed count, and a verb joining the registry should
   // cost exactly one considered edit here beside its line above.
-  assert.equal(BASELINE_COMMAND_NAMES.length, 73);
+  // W1-T3083 raised this from 73 to 74 for `pr-checks`. The roster is a reviewed list, not a
+  // count to bump: the name is added in sorted position above, so the deepEqual below is what
+  // actually says which verb joined rather than only that one did.
+  assert.equal(BASELINE_COMMAND_NAMES.length, 74);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
   // DERIVED from that list, not a second literal. Two copies of the same number meant a new verb
   // reddened this twice and reported "expected 71, got 72", which names nothing about what changed;

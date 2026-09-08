@@ -33,6 +33,7 @@ usage:
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
+  rmd pr-checks <n>   # Read one pull request's check rollup the way the sweep reads it.
   rmd census-membership [--base <ref>] [--files]   # Name the population-walking census suites this diff enters.
   rmd ci-learning [--days N] [--force]   # Draft a marked, parked shard for each repaired CI failure in the window.
   rmd rule-efficacy [--no-escalate]   # Report each rule's post-citation repeat-incident rate over the ledger union.
@@ -280,6 +281,16 @@ rmd ci-failures [--days N]
 ```
 
 W1-T2957: the one failure corpus that arrives with its own fix. For every pull request touched in the window, reads the gate rollup at each commit as the UNION of check runs and commit STATUSES (never /check-runs alone, which cannot see remudero-review) and pairs each red gate with the LATER commit on the SAME pull request that turned that SAME gate green, retaining the repair delta. A red with no observed repair is kept OPEN, never dropped and never reported repaired; a rollup that could not be read is named UNREADABLE, never counted as green, so an empty window and a blind one are distinguishable. Deduped per sha by latest attempt, so a superseded CANCELLED entry never outvotes its own SUCCESS successor. REPORT-ONLY: files nothing, mints no id, writes no guidance (Law 5).
+
+### `rmd pr-checks`
+
+Read one pull request's check rollup the way the sweep reads it.
+
+```
+rmd pr-checks <n>
+```
+
+W1-T3083: the answer to 'is this PR green' had one correct derivation (rollupFromRest plus dedupeRollupByLatestAttempt) and no terminal caller, so anyone at a shell hand-rolled a `gh pr view --json statusCheckRollup` query instead. That query has two failure modes that both read as a confident wrong answer, and both were MEASURED in one session on 2026-09-07: a COMMIT STATUS carries `state` where a check run carries `conclusion`, so a query reading `conclusion` alone silently drops remudero-review and showed #4493 as having no red checks while it was refused under Standing rule 25; and a sha accumulates one entry PER ATTEMPT, so without the latest-attempt dedupe a superseded FAILURE outranks its own later SUCCESS forever, which showed #4485 red on a check whose only completed run had passed. This unions /check-runs with the combined status, dedupes per name, and classifies anything neither known-OK nor known-FAIL as PENDING rather than green. EXIT CODE IS THE ANSWER: 0 when nothing is red, 1 when something is, 2 when a read failed — a failed read is never 0.
 
 ### `rmd census-membership`
 

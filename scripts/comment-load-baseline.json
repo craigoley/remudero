@@ -213,6 +213,7 @@
   "src/lib/plan-reconcile.ts": 250,
   "src/lib/plan.ts": 196,
   "src/lib/policy.ts": 500,
+  "src/lib/pr-checks.ts": 250,
   "src/lib/producer-completeness.ts": 242,
   "src/lib/producer-identity.ts": 70,
   "src/lib/project-init.ts": 176,

@@ -1086,6 +1086,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+import { reportPrChecks, type PrChecksReport } from "./lib/pr-checks.js";
 export { resolveRepoRoot };
 // `unknownArgError` MOVED to ./lib/cli-args.ts — its sibling `commandSyntax` stays here,
 // anchored to the `commandSpec`/`COMMANDS` registry it reads. Re-exported below for
@@ -18463,6 +18464,62 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
  * throughout — CLAUDE.md's own header says prose-only rules are "violated silently and repeatedly".
  * REPORT-ONLY: names suites, runs none, gates nothing, exits 0 whatever it finds.
  */
+/**
+ * `rmd pr-checks <n>` — W1-T3083: one pull request's check rollup, read the way the sweep reads it.
+ *
+ * EXIT CODE IS THE ANSWER, so this is scriptable: 0 when nothing is red, 1 when something is, 2 when
+ * a read failed. A failed read is NEVER 0 — reporting "no red checks" because the fetch died is the
+ * vacuous pass this repo keeps naming.
+ *
+ * ONE DERIVATION. It unions `/check-runs` with the COMBINED STATUS and dedupes to the latest attempt
+ * per name, because a hand-rolled query that skips either half answers confidently and wrongly —
+ * see src/lib/pr-checks.ts for the two measured cases.
+ */
+export function prChecksCommand(rest: string[], deps: { fetch?: (args: string[]) => unknown } = {}): number {
+  // NOT `unknownArgError`: that helper is for FLAGS-ONLY subcommands and refuses any bare
+  // positional, which is this verb's only argument. Strictness is kept rather than dropped — an
+  // unknown flag and a missing or malformed number are each refused by name.
+  const flags = rest.filter((a) => a.startsWith("-"));
+  if (flags.length > 0) {
+    console.error(`rmd pr-checks: unexpected flag '${flags[0]}' — this verb takes a pull request number and nothing else`);
+    return 2;
+  }
+  const positionals = rest.filter((a) => !a.startsWith("-"));
+  if (positionals.length !== 1 || !/^\d+$/.test(positionals[0])) {
+    console.error("rmd pr-checks: needs exactly one pull request number, e.g. `rmd pr-checks 4507`");
+    return 2;
+  }
+  const number = positionals[0];
+  const fetch = deps.fetch ?? ((args: string[]) => ghJson(args));
+  const self = resolveOwnerRepo();
+  let report: PrChecksReport;
+  let headSha: string;
+  try {
+    const pr = fetch(["api", `repos/${self.owner}/${self.repo}/pulls/${number}`]) as { head?: { sha?: string } } | undefined;
+    const sha = pr?.head?.sha;
+    if (!sha) throw new Error("the pull request payload carried no head sha");
+    headSha = sha;
+    const runs = (fetch(checkRunsRestArgs(self.owner, self.repo, sha)) ?? {}) as { check_runs?: unknown[] };
+    const status = (fetch(combinedStatusRestArgs(self.owner, self.repo, sha)) ?? {}) as { statuses?: unknown[] };
+    report = reportPrChecks(
+      (runs.check_runs ?? []) as Parameters<typeof reportPrChecks>[0],
+      (status.statuses ?? []) as Parameters<typeof reportPrChecks>[1],
+    );
+  } catch (e) {
+    console.error(`rmd pr-checks: could not read #${number} (${(e as Error).message}) — REFUSING to report it green`);
+    return 2;
+  }
+  console.log(`#${number} @ ${headSha.slice(0, 9)} — ${report.checks.length} check(s)`);
+  for (const c of report.checks.filter((x) => x.outcome === "red")) {
+    console.log(`  RED      ${c.name} (${c.raw ?? "no verdict"})${c.url ? ` ${c.url}` : ""}`);
+  }
+  for (const c of report.checks.filter((x) => x.outcome === "pending")) {
+    console.log(`  PENDING  ${c.name} (${c.raw ?? "no verdict yet"})`);
+  }
+  console.log(`  green ${report.green.length}  red ${report.red.length}  pending ${report.pending.length}`);
+  return report.red.length > 0 ? 1 : 0;
+}
+
 export function censusMembershipCommand(
   rest: string[],
   deps: { repoRoot?: string; spawn?: PreflightSpawn; changedPaths?: readonly string[] } = {},
@@ -39633,6 +39690,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2957: the one failure corpus that arrives with its own fix. For every pull request touched in the window, reads the gate rollup at each commit as the UNION of check runs and commit STATUSES (never /check-runs alone, which cannot see remudero-review) and pairs each red gate with the LATER commit on the SAME pull request that turned that SAME gate green, retaining the repair delta. A red with no observed repair is kept OPEN, never dropped and never reported repaired; a rollup that could not be read is named UNREADABLE, never counted as green, so an empty window and a blind one are distinguishable. Deduped per sha by latest attempt, so a superseded CANCELLED entry never outvotes its own SUCCESS successor. REPORT-ONLY: files nothing, mints no id, writes no guidance (Law 5).",
   },
   {
+    name: "pr-checks",
+    syntax: "rmd pr-checks <n>",
+    summary: "Read one pull request's check rollup the way the sweep reads it.",
+    detail: "W1-T3083: the answer to 'is this PR green' had one correct derivation (rollupFromRest plus dedupeRollupByLatestAttempt) and no terminal caller, so anyone at a shell hand-rolled a `gh pr view --json statusCheckRollup` query instead. That query has two failure modes that both read as a confident wrong answer, and both were MEASURED in one session on 2026-09-07: a COMMIT STATUS carries `state` where a check run carries `conclusion`, so a query reading `conclusion` alone silently drops remudero-review and showed #4493 as having no red checks while it was refused under Standing rule 25; and a sha accumulates one entry PER ATTEMPT, so without the latest-attempt dedupe a superseded FAILURE outranks its own later SUCCESS forever, which showed #4485 red on a check whose only completed run had passed. This unions /check-runs with the combined status, dedupes per name, and classifies anything neither known-OK nor known-FAIL as PENDING rather than green. EXIT CODE IS THE ANSWER: 0 when nothing is red, 1 when something is, 2 when a read failed — a failed read is never 0.",
+  },
+  {
     name: "census-membership",
     syntax: "rmd census-membership [--base <ref>] [--files]",
     summary: "Name the population-walking census suites this diff enters.",
@@ -40604,6 +40667,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(censusMembershipCommand(rest)) cannot carry a DA hit without forking the process; censusMembershipCommand's own logic — arg validation, the --base bound, the unreadable-diff arm, and every render path (joining, none, unmodelled) — is unit-tested in test/the-census-map-names-four-suites-and-no-verb-reads-it.test.ts (same irreducible-glue shape as the sibling ci-learning/ci-failures/rule-efficacy dispatch cases).
   if (cmd === "census-membership") {
     process.exit(censusMembershipCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(prChecksCommand(rest)) cannot carry a DA hit without forking the runner.
+  if (cmd === "pr-checks") {
+    process.exit(prChecksCommand(rest));
   }
   if (cmd === "ci-learning") {
     process.exit(ciLearningCommand(rest));

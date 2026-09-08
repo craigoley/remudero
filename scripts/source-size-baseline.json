@@ -111,6 +111,7 @@
   "src/lib/plan-reconcile.ts": 500,
   "src/lib/plan.ts": 795,
   "src/lib/policy.ts": 1000,
+  "src/lib/pr-checks.ts": 500,
   "src/lib/producer-completeness.ts": 578,
   "src/lib/producer-identity.ts": 500,
   "src/lib/project-init.ts": 991,
