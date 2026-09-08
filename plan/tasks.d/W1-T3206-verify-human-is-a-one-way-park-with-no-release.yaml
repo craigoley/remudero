@@ -1,0 +1,97 @@
+- id: W1-T3206
+  title: "`verify: human` IS A ONE-WAY PARK WITH NO RELEASE — `isDispatchEligible` refuses it, NOTHING converts an operator's decision back into dispatch, so 45 shards are queued forever, the oldest filed 2026-07-21, and the operator asked where he was supposed to verify them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/drain.ts, src/lib/plan.ts, test/an-operator-verdict-releases-a-parked-task.test.ts]
+  origin: "operator-session#verify-human-deadend-2026-09-08"
+  plan_refs: ["W1-T507", "W1-T3183", "W1-T3188"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OPERATOR, 2026-09-08, verbatim: "i'm the human. i'm verifying. what am i missing here? I also
+    don't understand why these ideas are verify human or where i would verify them if inbox isn't
+    working well yet."
+
+    HE IS NOT MISSING ANYTHING. There is no such surface, and there never was.
+
+    MEASURED at origin/main 2026-09-08:
+      `src/lib/drain.ts:418`      `if (t.verify !== "auto")` — refuses dispatch outright
+      `src/lib/task-linter.ts:426` "only an auto-verify task is dispatched headless"
+      `src/lib/measurement-cadence.ts:1881` says it plainly, in the code:
+          "PARKED: isDispatchEligible refuses `verify !== \"auto\"`, so this record waits for a person."
+      A grep across all of `src/` for any approve / release / unblock / promote / flip path keyed on
+      `verify: human` returns ZERO matches.
+    So the label does not mean "a human verifies it, then it runs". It means THE FLEET WILL NEVER
+    TOUCH IT, and no mechanism exists to change that — not a CLI verb, not a console action, not a
+    ledger row. A decision made by the operator cannot reach the dispatcher by any route.
+
+    THE POPULATION THAT PROVES IT. 60 `verify: human` shards exist; 45 are queued; the oldest still
+    queued was filed 2026-07-21, seven weeks before this measurement. Every one of them renders on
+    the operator's NEEDS ME board (W1-T3183 measured 53 such rows against ~5 real escalations) with,
+    by `needsMeVerifyRowHtml`'s own comment, "no issue to view and no PR to point at ... nothing
+    exists yet to click".
+
+    THE ONLY WORKING PATTERN IS UNDOCUMENTED AND MANUAL: the operator rules, and someone hand-files
+    a NEW `verify: auto` shard carrying the decision. That is what W1-T3173/3186/3196/3199 do. It
+    works, but nothing says so, nothing enforces it, and the parked original stays queued forever
+    afterwards — so the board grows monotonically even when every decision has been made.
+  design: |
+    (i) A VERDICT IS A RECORDED EVENT, NOT A CONVERSATION. The operator's decision on a parked task
+    must land somewhere the dispatcher can read. What that surface is — a CLI verb, a console
+    action, a ledger row — is the builder's call; that it must EXIST is not.
+    (ii) A RELEASED TASK BECOMES DISPATCHABLE WITHOUT EDITING ITS `verify:` FIELD. Flipping the
+    field would erase the record that a human was required, and rule 15 forbids a worker editing
+    plan criteria anyway. The release is a separate fact ABOUT the task, not a rewrite OF it.
+    (iii) AN UNRELEASED TASK IS STILL REFUSED, EXACTLY AS TODAY. This adds a door; it does not
+    remove the wall. A `verify: human` task with no recorded verdict must remain undispatchable, or
+    the whole class silently becomes auto.
+    (iv) THE VERDICT NAMES ITS AUTHOR AND ITS REASON, and is durable. "Someone said yes once" is not
+    a record an operator can audit six weeks later, which is precisely the position this task is
+    filed from.
+    (v) A DECIDED TASK LEAVES THE ASK SURFACE. Whatever W1-T3183 separates asks from backlog, a task
+    whose verdict is recorded is no longer an ask. Without this the board keeps growing after every
+    decision, which is today's behaviour and half the complaint.
+  acceptance:
+    - claim: "a verify:human task with a recorded operator verdict becomes dispatch-eligible, while the identical task without one is still refused"
+      proof: "unit test: test/an-operator-verdict-releases-a-parked-task.test.ts"
+    - claim: "release does not edit the task's verify: field — the plan record is byte-identical before and after"
+      proof: "unit test: test/an-operator-verdict-releases-a-parked-task.test.ts"
+    - claim: "the verdict is durable and names its author and reason, so it is auditable weeks later"
+      proof: "unit test: test/an-operator-verdict-releases-a-parked-task.test.ts"
+    - claim: "a released task no longer renders as an outstanding ask"
+      proof: "unit test: test/an-operator-verdict-releases-a-parked-task.test.ts"
+  falsifier: |
+    CLOSE IF a release path already exists:
+      `grep -rniE "verify.?human" src/ --include=*.ts | grep -iE "approve|release|unblock|promote|flip"`
+    MEASURED 2026-09-08: ZERO matches.
+    POSITIVE CONTROL, because a grep finding nothing looks the same as a broken grep: the same
+    expression WITHOUT the second filter must find the refusal sites — `drain.ts:418`,
+    `task-linter.ts:426`, `plan.ts:644`, `status.ts:2536`. MEASURED: it does. The refusals exist;
+    only the release is missing.
+    PROVE IT LOAD-BEARING: the fixture needs the SAME task twice — once with a recorded verdict and
+    once without — and dispatch eligibility must differ. A suite testing only the released case
+    proves nothing about the wall still standing.
+    DO NOT satisfy this by flipping `verify:` to `auto` on release. That erases the record that a
+    human was required, and a worker editing a plan criterion is exactly what rule 15 refuses.
+    DO NOT satisfy this by making `verify: human` dispatchable by default with an opt-out. The 45
+    parked shards were parked for reasons nobody has re-read; releasing them wholesale is not a fix,
+    it is the largest unreviewed dispatch in this repo's history.
+  note: |
+    Rule 25 CHECKED: `src/lib/drain.ts` and `src/lib/plan.ts` are ordinary src.
+    THIS IS THE MECHANISM W1-T3188 ASSUMED EXISTED. That shard proposes judging the verify:human
+    backlog so only the real ones reach the operator — but a judged verdict has nowhere to land
+    either. Without this task, W1-T3188 can demote a shard off the board and STILL leave it
+    undispatchable forever. They should ship together or this one first.
+    CAVEAT WITH EQUAL WEIGHT: this makes a verdict RELEASABLE. It does not decide any of the 45
+    parked tasks, and it must not be read as licence to sweep them. Several are genuinely stale —
+    W1-T926 wants a live launchd restart on a host that has no launchctl — and deciding them is
+    W1-T3188's job or the operator's, one at a time.
+    SECOND CAVEAT: no measurement here establishes that a release surface would be USED. The
+    operator has been deciding in conversation and the decisions have been landing as hand-filed
+    auto shards; a verb nobody invokes is the same dead end wearing a different label.

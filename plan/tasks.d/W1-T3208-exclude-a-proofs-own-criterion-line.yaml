@@ -1,0 +1,98 @@
+- id: W1-T3208
+  title: "EXCLUDE A GREP PROOF'S OWN CRITERION LINE FROM ITS MATCH SET — 167 of 168 self-naming proofs certify themselves because the pattern is by construction a substring of the line carrying it, and the anchoring fixes are all blocked by proof-grep-safety"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/review.ts, test/a-proof-cannot-certify-its-own-line.test.ts]
+  origin: "operator-session#verify-human-deadend-2026-09-08"
+  plan_refs: ["W1-T2983"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    W1-T2983 measured this and DELIBERATELY left remediation open — its last criterion reads "The
+    shard leaves severity and remediation to the operator". OPERATOR RULING 2026-09-08: fix it. This
+    shard carries that decision into something a worker can build, because a `verify: human` shard
+    can never dispatch (W1-T3206).
+
+    THE MECHANISM IS CONSTRUCTION, NOT CARELESSNESS, in W1-T2983's own words: "parseDialectGrep
+    takes a grep proof's pattern as everything before the trailing ' in <path>', so the pattern is by
+    definition a literal substring of the proof line that carries it. When the target path is the
+    shard's own yaml, that proof line lives inside the file the pattern searches. The proof therefore
+    matches itself, and it does so before it matches anything it was written to pin."
+
+    MEASURED BY W1-T2983: 167 of 168 such proofs certify themselves; 23 of them pin NOTHING BUT
+    their own text.
+
+    THIS IS NOT THEORETICAL AND THE AUTHOR OF THIS SHARD HIT IT TWICE IN ONE SESSION. On 2026-09-08,
+    filing W1-T3196, two criteria used `grep: MONOTONIC UNDER DARKNESS` and `grep: W1-T187` against
+    DECISIONS.md; both strings ALREADY existed there, so both would have graded green while proving
+    nothing. One was caught by `lint-plan`, the other only by hand-checking. The defect is live and
+    it is easy to walk into.
+
+    WHY THE OBVIOUS FIX IS UNAVAILABLE, which is the part that makes this task non-trivial and is
+    already recorded in W1-T2983: "the naive rule is unsatisfiable because proof-grep-safety blocks
+    every anchoring mechanism, and refuses to weaken that". A pattern cannot use `^`, `$` or a group
+    to exclude itself, because the safety check refuses regex metacharacters in a proof body — and
+    that refusal is correct and must survive.
+
+    SO THE FIX BELONGS IN THE MATCHER, NOT THE PATTERN. The proof cannot describe what to skip; the
+    executor can simply not count the line that carries the proof.
+  design: |
+    (i) A PROOF NEVER COUNTS THE CRITERION LINE THAT CARRIES IT. When a grep proof targets a file,
+    the line holding that proof's own text is excluded from the match set. This needs no change to
+    the proof dialect and no new metacharacter, so `proof-grep-safety` is untouched.
+    (ii) THE EXCLUSION IS EXACTLY ONE LINE, NOT A PATTERN. Excluding "any line that looks like a
+    proof" would let a shard cite a sibling criterion and still self-certify. The line removed is
+    the one this proof was read from, identified by position, not by shape.
+    (iii) A PROOF THAT NOW MATCHES NOTHING FAILS, LOUDLY AND BY NAME. That is the whole point: the
+    23 proofs pinning nothing but their own text must become visibly unmet rather than quietly
+    passing. Their shards then get real proofs.
+    (iv) EVERY PROOF TARGETING A DIFFERENT FILE IS UNAFFECTED, byte-identically. The overwhelming
+    majority of grep proofs point at `src/` or `DECISIONS.md`; none of them should re-grade.
+    (v) THE EXISTING WARNINGS STAY. #4354 shipped a linter warning for this class and #4369
+    re-anchored four proofs; this task makes the EXECUTION correct and must not remove the
+    authoring-time signal that catches it earlier.
+  acceptance:
+    - claim: "a grep proof whose only match in the target file is its own criterion line grades UNMET, naming the proof"
+      proof: "unit test: test/a-proof-cannot-certify-its-own-line.test.ts"
+    - claim: "the same proof, when the file also contains a genuine match elsewhere, still PASSES — the exclusion removes one line, not the proof"
+      proof: "unit test: test/a-proof-cannot-certify-its-own-line.test.ts"
+    - claim: "a grep proof targeting any OTHER file grades byte-identically to today"
+      proof: "unit test: test/a-proof-cannot-certify-its-own-line.test.ts"
+    - claim: "proof-grep-safety is unchanged — no metacharacter becomes newly permitted"
+      proof: "unit test: test/a-proof-cannot-certify-its-own-line.test.ts"
+  falsifier: |
+    CLOSE IF the matcher already excludes the carrying line: read `parseDialectGrep` and the grep
+    execution path in `src/lib/review.ts`.
+    MEASURED by W1-T2983: the pattern is by construction a substring of its own proof line, and 167
+    of 168 self-naming proofs match themselves.
+    POSITIVE CONTROL, because "the proof now fails" is also what a broken matcher reports: a proof
+    with a genuine match elsewhere in the same file must STILL PASS in the same suite. If both cases
+    fail, the exclusion is removing more than one line.
+    PROVE IT LOAD-BEARING: the fixture needs BOTH a self-only proof and a self-plus-real proof in
+    the same target file. A suite with only the first cannot distinguish "excluded the right line"
+    from "broke grep".
+    DO NOT satisfy this by weakening proof-grep-safety to allow anchors. W1-T2983 states the naive
+    rule is unsatisfiable precisely because that check refuses metacharacters, and it "refuses to
+    weaken that". Relaxing it trades a self-certifying proof for an injectable one.
+    DO NOT satisfy this by excluding every line that resembles a proof. A shard could then cite a
+    SIBLING criterion's text and self-certify through the back door; the removed line is the one the
+    proof was read from, identified by position.
+  note: |
+    Rule 25 CHECKED: `src/lib/review.ts` is ordinary src. NOTE it is the PROOF DIALECT itself, so a
+    change here re-grades how every criterion in the plan executes — the third criterion (other
+    files byte-identical) exists to bound that blast radius and must not be dropped as redundant.
+    PARTIAL PRIOR ART, deliberately preserved: #4354 shipped an authoring-time WARNING for this
+    class (it fired on this session's own proofs) and #4369 re-anchored four. This task fixes
+    EXECUTION; both of those stay.
+    CAVEAT WITH EQUAL WEIGHT: this will turn ~23 currently-green criteria red. That is the intended
+    outcome — they were never proving anything — but it lands as a batch of newly-failing shards,
+    and whoever ships this should expect to re-anchor them rather than be surprised by them.
+    SECOND CAVEAT: W1-T2983 itself stays `verify: human` and undispatchable. This does not close it;
+    it carries the ruling. W1-T3206 is what would let the original be released rather than left
+    queued beside its own implementation forever.
