@@ -1,0 +1,87 @@
+- id: W1-T3202
+  title: "THE FULL SWEEP AWAITS EACH REPAIR BEFORE STARTING ITS REVIEW POOL — one slow CI-log or conflict worker holds every later green PR behind it, GitHub wakes are coalesced as skipped-concurrent, and queue latency becomes the duration of the oldest repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  origin: "operator-session#queue-lag-full-sweep-head-of-line-2026-09-08"
+  plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T1049", "W1-T2379", "W1-T2584", "W1-T2744", "W1-T2931"]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/full-sweep-fix-head-of-line.test.ts
+    - scripts/test-tier-manifest.json
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT origin/main 77f1fe8e6. `runSweep` walks `openPrs` with a sequential `for` loop.
+    Both `blocked-fixable` and `conflicted` call `await fixClaim.run(() =>
+    deps.dispatchFix(...))` unless `deps.detachFixWait` is true. Only `runSweepLightPass` sets that
+    flag. Green PRs are merely appended to `pendingReviews` during the walk; the bounded review
+    pool is created only after the loop. A single ten-minute repair encountered first therefore
+    delays the first review by ten minutes even when review capacity is idle.
+
+    OBSERVED ON AZURE, daemon run DAEMON-1788886376307. A full pass enumerated seven PRs at
+    2026-09-08T17:32:08Z. Its W1-T3140 repair remained in the pass until 17:41, while a GitHub wake
+    at 17:41:03Z wrote `daemon.sweep.skipped_concurrent`. The next full seven-PR pass began at
+    17:42:54Z. The daemon and its event receiver were alive; the accepted event could not start a
+    new full pass because the old one still owned the gate. This is head-of-line blocking, not a
+    missing webhook and not a review-lane throughput cap.
+
+    PRIOR WORK NARROWS THE FIX. W1-T2584 already makes `reviewLanes` a concurrency ceiling rather
+    than a per-pass throughput cap. W1-T2379 already detaches a light-pass repair from its ticker,
+    and W1-T2744 keeps the review clock alive after an abandoned sweep. W1-T2931 already defines
+    one host worker budget and makes light-pass reviews reserve capacity before repair. Do not
+    reopen those decisions, add another ticker, raise lane values, or allow unbounded fan-out.
+    The older W1-T77/W1-T78/W1-T100/W1-T150/W1-T168/W1-T176 shards share the central sweep files
+    because they define its core dispositions, CI repair, clarification and credit behavior. They
+    are not superseded here: W1-T3202 changes only when an already-selected repair is awaited and
+    leaves every one of those disposition rules and effects intact.
+
+    THE FIX: give the full pass the same detach-with-ownership behavior as the light pass, behind
+    one shared admission helper. Before any repair is admitted, derive the exact number of review
+    slots this snapshot can use and reserve those slots from `reviewCapacity.hostWorkerBudget`;
+    subtract `activeWorkerCount()` once; admit no more fixes than the remainder. An admitted repair
+    enters the existing process-lifetime `detachedSweepActions` registry and retains the existing
+    PR/head claim until it settles. A refused repair writes a named capacity stand-down and owns no
+    strike or outcome key, so the next level-triggered pass may re-derive it. The review pool then
+    starts without waiting for those repairs; the full pass may still await reviews and every
+    non-detached effect exactly as it does today.
+
+    ACCOUNTING AND CONTROL STAY FAIL-CLOSED. STOP/PAUSE and the existing continuation gate stop new
+    review admissions. The full-sweep wall-clock bound remains authoritative. A detached repair is
+    never killed mid-write and is still drained by the existing bounded process-lifetime owner.
+    Emit bounded telemetry naming `surface: full|light`, queue depth, host budget, active workers,
+    review reservations, fixes admitted/refused, and whether a review began while a repair was
+    still pending. No prompt, provider/model selector, merge rule, strike cap, branch-protection
+    rule, manual squash path, or operator hold changes in this task.
+  acceptance:
+    - claim: "a never-settling first repair does not delay a later green PR's first postReview call, and runSweep returns after the review without waiting for that repair"
+      proof: "unit test: test/full-sweep-fix-head-of-line.test.ts"
+    - claim: "full-pass fixes plus reserved reviews never exceed reviewCapacity.hostWorkerBudget after current active workers are subtracted"
+      proof: "unit test: test/full-sweep-fix-head-of-line.test.ts"
+    - claim: "a capacity-refused repair spends no strike or durable outcome key and is eligible on the next pass"
+      proof: "unit test: test/full-sweep-fix-head-of-line.test.ts"
+    - claim: "the same PR/head cannot be double-dispatched by overlapping light and full passes while its detached repair remains active"
+      proof: "unit test: test/full-sweep-fix-head-of-line.test.ts"
+    - claim: "the existing oldest-first bounded review pool still drains every eligible review and stops on provider-headroom refusal"
+      proof: "unit test: test/full-sweep-fix-head-of-line.test.ts"
+    - claim: "production full sweeps opt into detached, host-budgeted repair admission and ledger the full/light capacity telemetry without changing configured lane values"
+      proof: "unit test: test/full-sweep-fix-head-of-line.test.ts"
+  falsifier: |
+    Before implementation, run a deterministic `runSweep` fixture with a blocked-fixable PR first,
+    a checks-green unreviewed PR second, and a `dispatchFix` promise that never resolves. If
+    `postReview` is invoked and `runSweep` resolves without releasing that promise on current main,
+    this defect is already fixed and W1-T3202 must be withdrawn. Merely observing that the light
+    pass posts a review does not falsify the full-pass ordering shown above.
+
+    Reject the detach design if a four-slot fixture with two active workers, one reviewable PR and
+    three fixable PRs can start more than one fix beside the reserved reviewer, or if a second pass
+    can dispatch the same PR/head while the first detached promise remains unresolved. Either result
+    would trade queue latency for unbounded host pressure or duplicate spend and is not acceptable.
+  note: |
+    W1-T3202 was atomically reserved at `refs/rmd-id/W1-T3202`. The allocator advanced past three
+    concurrent reservations and reported W1-T3202 as the id actually held.
