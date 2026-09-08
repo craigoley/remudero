@@ -367,7 +367,7 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Check every test file is tiered (W1-T2904 unwired-gate wiring — `test:tier:check` refuses an untiered file so the fast/slow split can trust scripts/test-tier-manifest.json before either tier runs)
-        run: node scripts/test-tier-manifest.mjs --check --base "origin/${GITHUB_BASE_REF}"
+        run: npm run --silent test:tier:check -- --base "origin/${GITHUB_BASE_REF}"
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: npm run --silent test:slow -- --base "origin/${GITHUB_BASE_REF}"
 
