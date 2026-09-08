@@ -98,6 +98,40 @@ export interface AddedExport {
   symbol: string;
 }
 
+const ADDED_EXPORT_RE = /^\s*export\s+(?:function|const|class)\s+([A-Za-z_$][\w$]*)\b/;
+
+export function addedExportsFromPatch(
+  diffText: string,
+  pathExistsAtBase: (repoRelPath: string) => boolean = () => true,
+): AddedExport[] {
+  const out = new Map<string, AddedExport>();
+  let path = "";
+  let newFile = false;
+  for (const raw of diffText.split("\n")) {
+    if (raw.startsWith("diff --git")) {
+      const m = raw.match(/\sb\/(\S+)\s*$/);
+      path = m ? m[1] : "";
+      newFile = false;
+      continue;
+    }
+    if (raw.startsWith("new file mode") || raw.startsWith("--- /dev/null")) {
+      newFile = true;
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      const plusPath = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      path = plusPath === "/dev/null" ? "" : plusPath;
+      continue;
+    }
+    if (!raw.startsWith("+") || raw.startsWith("+++") || !path) continue;
+    if (!path.startsWith("src/") || !path.endsWith(".ts") || newFile || !pathExistsAtBase(path)) continue;
+    const m = ADDED_EXPORT_RE.exec(raw.slice(1));
+    if (!m) continue;
+    out.set(`${path}\0${m[1]}`, { path, symbol: m[1] });
+  }
+  return [...out.values()];
+}
+
 // ── SIZING (Rule 19) ─────────────────────────────────────────────────────────
 // Rule 19 counts DISTINCT SUBSYSTEMS/CONCERNS, never the raw criterion count: concerns are inferred
 // from the `files:` list plus criteria naming modules outside it. Many criteria over one module

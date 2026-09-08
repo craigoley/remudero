@@ -747,6 +747,7 @@ import {
 } from "./lib/dispatch-overlap.js";
 import type { DuplicateCorpusEntry } from "./lib/knowledge-dedup.js";
 import {
+  addedExportsFromPatch,
   assertLintClean,
   breMetacharsIn,
   changedTaskIds,
@@ -764,6 +765,7 @@ import {
   TaskLintError,
   // Source-text compatibility: GENERATED_LEDGER_CLASSES and isCompanionPath moved with
   // scopeGuardOutOfScopeFiles into lib/prompt-render.ts.
+  type AddedExport,
   type LintOpts,
   type DuplicateSurfaceCorpusEntry,
 } from "./lib/task-linter.js";
@@ -18959,8 +18961,25 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let oldById: Map<string, Task> | undefined;
   let newTaskIds: Set<string> | undefined;
   let newMonolithIds: Set<string> | undefined;
+  let addedExports: AddedExport[] = [];
+  let pathExistsAtBase: ((repoRelPath: string) => boolean) | undefined;
   if (baseRef) {
     const relPath = relative(repoRoot, planPath);
+    const basePathCache = new Map<string, boolean>();
+    pathExistsAtBase = (rel: string) => {
+      const cached = basePathCache.get(rel);
+      if (cached !== undefined) return cached;
+      let exists = false;
+      try {
+        execFileSync("git", ["-C", repoRoot, "cat-file", "-e", `${baseRef}:${rel}`], { stdio: "ignore" });
+        exists = true;
+      } catch (e) {
+        void e;
+        exists = false; // absent at base, or ref/path unreadable — either way, no opinion
+      }
+      basePathCache.set(rel, exists);
+      return exists;
+    };
     // W1-T246 (recon): a plain `git show <base>:<relPath>` only ever materializes the MONOLITH
     // — every `plan/tasks.d/*.yaml` shard is invisible to it, so every shard-only task looked
     // "new/changed" on EVERY `lint-plan --base` run regardless of whether the PR touched it (the
@@ -19046,6 +19065,16 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         [headMonolithRaw, ...readShardTexts(join(dirname(planPath), "tasks.d"))],
       );
       for (const id of rawChanged) scope.add(id);
+      try {
+        const diffText = execFileSync("git", ["-C", repoRoot, "diff", "--no-ext-diff", "--unified=0", `${baseRef}...HEAD`, "--", "src"], {
+          encoding: "utf8",
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        addedExports = addedExportsFromPatch(diffText, pathExistsAtBase);
+      } catch (e) {
+        void e;
+        addedExports = [];
+      }
     } catch (e) {
       console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
       return 2;
@@ -19174,6 +19203,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         mergedTaskIds: creditedMergedIds,
         // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
         newMonolithIds,
+        // W1-T3218: added exported functions/consts/classes in existing src modules, derived
+        // once from the --base diff and consumed by callSiteViolations without git I/O.
+        addedExports,
         // W1-T1076: `scope` is populated iff `--base` was given, so this branch IS the
         // changed-tasks pass and `duplicateCorpusOpts`' scoped arm is the right one here.
         ...duplicateCorpusOpts(true, task.id, openShardCorpus, shardSlugById),
@@ -19206,20 +19238,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           return undefined;
         }
       };
-      // W1-T2835: the BASE-tree counterpart of `opts.moduleExists` above, wired ONLY here — the
-      // `--base` pass — for the same reason `blockedDisposition` and `newMonolithIds` are: a
-      // whole-plan run has no base to compare against and must not report the standing population,
-      // and the PRE-DISPATCH site must never see it because a queued task's proof legitimately
-      // forward-references the test its own PR will create. One `cat-file -e` per pure-path proof
-      // over the handful of tasks a PR actually changes; no worktree, no network.
-      opts.pathExistsAtBase = (rel: string) => {
-        try {
-          execFileSync("git", ["-C", repoRoot, "cat-file", "-e", `${baseRef}:${rel}`], { stdio: "ignore" });
-          return true;
-        } catch {
-          return false; // absent at base, or ref/path unreadable — either way, no opinion
-        }
-      };
+      if (pathExistsAtBase) {
+        // W1-T2835: the BASE-tree counterpart of `opts.moduleExists` above, wired ONLY here —
+        // the `--base` pass — for the same reason `blockedDisposition` and `newMonolithIds` are.
+        opts.pathExistsAtBase = pathExistsAtBase;
+      }
     }
     const { violations: lintViolations } = lintTask(task, opts);
     // W1-T1225: proofGrepUnmatchableViolations( is called HERE, directly, rather than folded into
