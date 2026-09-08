@@ -274,6 +274,11 @@
     "legacy": 0,
     "newDate": 0
   },
+  "src/lib/report-commands.ts": {
+    "dateNow": 3,
+    "legacy": 0,
+    "newDate": 2
+  },
   "src/lib/retro-preflight.ts": {
     "dateNow": 3,
     "legacy": 2,
@@ -380,9 +385,9 @@
     "newDate": 2
   },
   "src/run-task.ts": {
-    "dateNow": 59,
+    "dateNow": 54,
     "legacy": 19,
-    "newDate": 43
+    "newDate": 41
   },
   "src/spike.ts": {
     "dateNow": 1,

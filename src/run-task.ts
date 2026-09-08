@@ -37090,7 +37090,7 @@ export async function main(
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await receiptCommand(arg, rest.slice(1))) cannot carry a DA hit without forking the process; receiptCommand's own logic — the unknown-arg refusal, the trailer resolution/refusal, and the buildReceipt print path — is unit-tested in test/receipt.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
   if (cmd === "receipt" && arg) {
-    process.exit(await receiptCommand(arg, rest.slice(1)));
+    process.exit(await receiptCommand(arg, rest.slice(1), { repoRoot, resolveOwnerRepo }));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(replayCommand(arg, rest[1], rest.slice(2))) cannot carry a DA hit without forking the process; replayCommand's own logic — arg validation, the resolved/refused union branches, and the buildReplay print path — is unit-tested in test/ledger-replay.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/receipt/ledger-grep dispatch cases).
   if (cmd === "replay" && arg) {
@@ -37229,10 +37229,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await statusCommand(rest)) cannot carry a DA hit without forking the process; statusCommand's own logic (arg validation, the queryService closure, --json vs text) plus the read model it calls (buildStatusBoard/renderStatusBoardText) are unit-tested in test/status-board.test.ts (same irreducible-glue shape as the sibling console-url/away/down/up dispatch cases).
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await doctorCommand(rest)) cannot carry a DA hit without forking the process; doctorCommand's own logic (arg refusal, the reader wiring, the exit-code translation) and every judgement it composes (buildDoctorReport and the pure judge* arms) are unit-tested in test/doctor.test.ts (same irreducible-glue shape as the sibling status/console-url dispatch cases).
   if (cmd === "doctor") {
-    process.exit(await doctorCommand(rest));
+    process.exit(await doctorCommand(rest, { repoRoot }));
   }
   if (cmd === "status") {
-    process.exit(await statusCommand(rest, { usage: USAGE }));
+    process.exit(await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo }));
   }
   if (cmd === "sweep") {
     process.exit(await sweepCommand(rest));
@@ -37262,6 +37262,7 @@ export async function main(
   if (cmd === "notify") {
     process.exit(await notifyCommand(rest));
   }
+  // diff-cov: process-boundary — main() only translates feedbackCommand's tested return into a process exit; capture, validation, append and notification behavior are unit-tested through feedbackCommand directly.
   if (cmd === "feedback") {
     process.exit(await feedbackCommand(rest));
   }
@@ -37300,7 +37301,7 @@ export async function main(
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(learningsCommand(rest)) cannot carry a DA hit without forking the process; learningsCommand's own logic — the export/import subcommand routing, arg validation, the privacy/tripwire refusals, and the pin-verified write — is unit-tested directly in test/learnings-commons.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
   if (cmd === "learnings") {
-    process.exit(learningsCommand(rest, { usage: USAGE }));
+    process.exit(learningsCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo }));
   }
   // diff-cov: process-boundary — same irreducible-glue shape as the `learnings` dispatch just
   // above: bundleCommand's own subcommand routing, arg validation, and the pure-builder call are
@@ -37309,7 +37310,7 @@ export async function main(
     process.exit(bundleCommand(rest));
   }
   if (cmd === "trace") {
-    process.exit(await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace") }));
+    process.exit(await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo }));
   }
   if (cmd === "peek") {
     process.exit(await peekCommand(rest));
