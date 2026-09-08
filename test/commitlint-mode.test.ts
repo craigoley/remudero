@@ -93,10 +93,14 @@ test("commitlint CI wiring: the checkout no longer requests full git history -- 
 });
 
 test("commitlint CI wiring: no gh pr merge --squash call site overrides --subject away from the PR title", async () => {
-  const runTaskTs = await readFile(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   const workerTs = await readFile(join(REPO_ROOT, "src", "lib", "worker.ts"), "utf8");
+  // W1-T2887 relocated the auto-merge arm cluster, and the `gh pr merge --squash` call went with
+  // it. Reading run-task.ts alone would now find nothing and this guard would pass VACUOUSLY on the
+  // one file that still matters, so the cluster's new home is read here instead. The assertion
+  // itself is unchanged: wherever the call lives, it may not override --subject.
+  const armAutoMergeTs = await readFile(join(REPO_ROOT, "src", "lib", "arm-auto-merge.ts"), "utf8");
   for (const [name, src] of [
-    ["src/run-task.ts", runTaskTs],
+    ["src/lib/arm-auto-merge.ts", armAutoMergeTs],
     ["src/lib/worker.ts", workerTs],
   ] as const) {
     const squashCalls = src.match(/execFileSync\("gh",\s*\[[^\]]*"--squash"[^\]]*\]/g) ?? [];
