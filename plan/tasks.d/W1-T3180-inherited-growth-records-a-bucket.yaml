@@ -1,0 +1,70 @@
+- id: W1-T3180
+  title: "W1-T3022 BUCKETED EVERY COMMENT-LOAD RECORDING PATH BUT ONE, AND THE ONE IT MISSED FIRES MOST OFTEN — the base-inherited write is `nextBaseline[v.path] = v.comments`, an EXACT count that never passes through `ceilingForComments`, so any branch behind main that merely RUNS the gate rewrites the ledger to an interpolated number that conflicts with main on that line: W1-T3022's own failure, on the very key its incident table named"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 8.00
+  files: [scripts/comment-load-ratchet.mjs, test/inherited-growth-records-a-bucket.test.ts]
+  origin: "operator-session#board-pass-2026-09-08"
+  plan_refs: ["W1-T3022", "W1-T2539", "W1-T3015"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3022 ended a four-for-four conflict incident by bucketing the comment-load ceiling, and
+    its own table names the key that conflicted every time: `src/run-task.ts`. That fix is real,
+    and it holds on all three recording paths inside the judge's switch:
+
+      recorded === undefined          -> nextBaseline[path] = ceilingForComments(comments)   BUCKET
+      comments > recorded (violation) -> nextBaseline[path] = recorded                       UNCHANGED
+      ceilingForComments < recorded   -> nextBaseline[path] = ceilingForComments(comments)   BUCKET
+      otherwise                       -> nextBaseline[path] = recorded                       UNCHANGED
+
+    A FOURTH path is applied AFTER that switch, in the block that computes `inheritedAtBase`, and
+    it is the only one that writes a fresh EXACT count:
+
+      for (const v of split.inherited) verdict.nextBaseline[v.path] = v.comments;
+
+    `v.comments` is the count measured in THIS working tree, never passed through
+    `ceilingForComments`. So the ledger is rewritten to a number that is neither the branch's old
+    value nor main's current one.
+
+    MEASURED 2026-09-08, three times, on two independent branches, on the key W1-T3022 named:
+
+      origin/main                       "src/run-task.ts": 15603
+      PR #4618 head (8 commits behind)  "src/run-task.ts": 15565
+      PR #4637 head (8 commits behind)  "src/run-task.ts": 15565
+      after `node scripts/comment-load-ratchet.mjs` in EITHER worktree, unprompted:  15594
+
+    The run exits 0 and prints `recording base-inherited growth`, so nothing refuses, and a worker
+    that runs the gate and then `git add -A` ships that line without ever deciding to. Merging it
+    is the incident:
+
+      git merge-file  base=15565  ours=15594  theirs=15603   -> CONFLICT
+      git merge-file  base=15565  ours=15750  theirs=15750   -> CLEAN   (the bucketed control)
+
+    WHY THIS PATH AND NOT THE OTHERS. Inheritance fires exactly when a branch is behind main on a
+    file main has grown — on this repo the common case, not the rare one: both open PRs sampled
+    today hit it, and it fires ONLY on an otherwise-passing run, so the gate is green while it
+    happens. The three bucketed paths agree between two concurrent branches by construction,
+    because a bucket is a function of the count alone. This one disagrees whenever two branches
+    measure even one comment line apart.
+
+    THE REMEDY IS THE ONE ALREADY RATIFIED, APPLIED TO THE PATH THAT MISSED IT: record
+    `ceilingForComments(v.comments)`. It cannot regress the inheritance behaviour it exists for —
+    the point of that block is that this PR is not charged for main's growth, and a bucketed
+    ceiling is always >= the exact count, so the file still passes.
+
+    NOT IN SCOPE: the legacy exact values already in the baseline (193, 15565, 15603 and the rest
+    predate the bucket). They are grandfathered by the `otherwise` path and converge as files
+    shrink; converting them wholesale is a separate decision and would itself be one enormous
+    conflicting diff.
+  acceptance:
+    - claim: "inherited base growth is recorded at the bucketed ceiling, so two branches inheriting the same growth write the same number and merge clean"
+      proof: "unit test: test/inherited-growth-records-a-bucket.test.ts"
+    - claim: "the inherited write goes through the same ceiling function the other recording paths already use"
+      proof: 'grep: ceilingForComments(v\.comments) in scripts/comment-load-ratchet.mjs'
+    - claim: "a falsifier restores the exact-count write and shows two concurrent inheritors conflicting again"
+      proof: "grep: MUTANT in test/inherited-growth-records-a-bucket.test.ts"
