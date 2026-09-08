@@ -176,6 +176,32 @@ export function ceilingForComments(comments) {
  *
  * Performs no I/O. `ok` is decided by violations alone; the caller decides what to persist.
  */
+/**
+ * Record the baseline rows for violations that turned out to be INHERITED from the merge base --
+ * growth main landed while this PR was open, which is not this PR's to answer for.
+ *
+ * W1-T3180: record the count AT THE MERGE BASE, not the count this branch measured. The raw
+ * measured count is a property of THIS working tree, so two branches inheriting the same growth
+ * from main wrote two DIFFERENT numbers on one line and conflicted -- the incident W1-T3022
+ * bucketed this ledger to end, reopened on the one path its fix did not reach. It fires only on an
+ * otherwise PASSING run, so the gate is green while it happens and a worker that then runs
+ * `git add -A` ships the line without deciding to.
+ *
+ * WHY `atBase` AND NOT THE BUCKET the sibling paths use: a bucket also makes the two branches
+ * agree, and it was this task's filed remedy -- but `ceilingForComments` rounds UP to the next 250,
+ * which hands the file up to 249 lines of free headroom, so growth the branch DOES cause afterwards
+ * stops being charged. `atBase` is equally identical between two branches cut from the same base,
+ * and grants none: the ceiling becomes exactly what main already carries, which is the whole claim
+ * being made -- this PR is not answerable for main's growth, and is answerable for its own.
+ *
+ * @param {Record<string, number>} nextBaseline mutated in place, as the caller's verdict expects
+ * @param {Array<{path: string, comments: number, atBase: number}>} inherited
+ */
+export function recordInheritedGrowth(nextBaseline, inherited) {
+  for (const v of inherited) nextBaseline[v.path] = v.atBase;
+  return nextBaseline;
+}
+
 export function evaluateCommentLoadRatchet(currentComments, baseline) {
   const violations = [];
   const shrunk = [];
@@ -417,7 +443,7 @@ export function main(argv) {
   // files are read at the base, so a clean run pays nothing for this.
   const inheritedAtBase = commentCountsAtBase(root, base, verdict.violations.map((v) => v.path));
   const split = splitBaseInheritedViolations(verdict.violations, inheritedAtBase);
-  for (const v of split.inherited) verdict.nextBaseline[v.path] = v.comments;
+  recordInheritedGrowth(verdict.nextBaseline, split.inherited);
   const causedViolations = split.caused;
 
   if (values.json) {
