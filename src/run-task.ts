@@ -18786,14 +18786,39 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
   return 0;
 }
 
-/** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses. */
+/**
+ * W1-T3084 — THE ONE RULE BOTH RUNGS APPLY. `sweep.ts:1347` declines any candidate whose
+ * `creditIsImplementation !== true`; `defaultCreditedMergedIds` used to filter on `.merged` alone,
+ * so the verb that WRITES `status: merged` into the plan was strictly more permissive than the
+ * read-only rung auditing it. MEASURED 2026-09-07 by running the real verb both ways on the real
+ * plan: 1036 shards flipped as shipped, 953 with this rule — 83 apart.
+ *
+ * BOTH NON-TRUE VALUES DECLINE: `undefined` (the merge subject fell outside the scanned window, so
+ * nothing is known) and `false` (a filing earned the credit). Reading `undefined` as a credit is
+ * how #4461 was closed against a `chore(plan)`.
+ *
+ * `=== true` RATHER THAN A TRUTHY TEST, and honestly: for `boolean | undefined` the two are
+ * behaviourally IDENTICAL, so this is a statement of intent, not a behavioural guard — a mutation
+ * to `!!c.creditIsImplementation` passes every test here, which was measured, not assumed. It is
+ * written this way to match sweep.ts:1347's `!== true` exactly, so a reader comparing the two rungs
+ * sees one rule and not two spellings of it.
+ *
+ * Exported as a PREDICATE rather than inlined so a test can drive all three values directly: the
+ * function below reads config, a ledger and GitHub, and none of that is the rule under test.
+ */
+export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean }): boolean {
+  return c.merged === true && c.creditIsImplementation === true;
+}
+
+/** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses,
+ *  now under the SAME filter too — see {@link creditIsReconcilable}. */
 function defaultCreditedMergedIds(): Set<string> {
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const self = resolveOwnerRepo();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   return new Set(
-    buildCreditCandidates(self.owner, self.repo, plan, ledgerPath).filter((c) => c.merged).map((c) => c.taskId),
+    buildCreditCandidates(self.owner, self.repo, plan, ledgerPath).filter(creditIsReconcilable).map((c) => c.taskId),
   );
 }
 
