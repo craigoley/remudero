@@ -209,10 +209,68 @@ function renderChangeViewLines(changeView: RiskJudgeChangeView | undefined): str
 
 /** Render the risk judge's prompt: candidate change, gates state, plan context — never
  *  the static `risk:` field. */
+/**
+ * W1-T2371 — a subject that DECLARES plan work rather than implementing it.
+ *
+ * THE SAME VOCABULARY as `FILING_SUBJECT_RE` (`src/lib/sweep.ts`), and IMPORTING IT WAS TRIED
+ * FIRST. It cannot be: `risk-judge` -> `sweep` closes a cycle through `feedback.ts`, which
+ * depcruise reports as 15 further `no-circular` violations (13 -> 28, MEASURED 2026-09-07). A
+ * cycle to avoid a duplicated regex is the worse trade.
+ *
+ * SO DRIFT IS FORBIDDEN BY A TEST INSTEAD, not by convention: this file's own suite asserts this
+ * pattern's `source` equals `FILING_SUBJECT_RE`'s, character for character. A test may import both
+ * because tests are outside the module graph depcruise cruises — the one place the two lists can be
+ * compared without creating the cycle. `lint-plan`'s failing-split already treats this exact
+ * vocabulary as "a filing cites a task; it does not implement it".
+ */
+export const PLAN_DECLARING_SUBJECT_RE = /^(?:chore\((?:plan|triage|feedback)\)|docs\(plan\)|plan:|docs:|chore:)/;
+
+/**
+ * W1-T2371 — is this change a plan-only AMENDMENT: a filing-shaped subject over a diff that touches
+ * nothing but `plan/`? The founding shape is a shard whose `files:` names src paths the diff does
+ * not contain, which reads as misdeclared scope and is not.
+ *
+ * BOTH HALVES ARE REQUIRED, and each falsifier below is a real refusal rather than a formality. A
+ * plan subject over a diff that also touches `src/` is judged exactly as today; a `feat(...)`
+ * subject over a plan-only diff buys no narrowing however plan-ish it reads.
+ *
+ * A TRUNCATED VIEW CANNOT PROVE PLAN-ONLY, so it declines. Absence from a capped enumeration is not
+ * absence from the change — the same reasoning `declaredFilesAbsentFromChange` already applies, and
+ * the failure direction is toward today's behaviour rather than toward a narrower judgement.
+ *
+ * AN EMPTY VIEW DECLINES TOO: "no files observed" is not evidence that the files are all plan ones.
+ */
+export function isPlanOnlyAmendment(
+  description: string | undefined,
+  changeView: RiskJudgeChangeView | undefined,
+): boolean {
+  if (description === undefined || !PLAN_DECLARING_SUBJECT_RE.test(description.trim())) return false;
+  if (changeView === undefined || changeView.truncated) return false;
+  if (changeView.files.length === 0) return false;
+  return changeView.files.every((file) => file.path.startsWith("plan/"));
+}
+
 export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
   const filesLine = input.change.files?.length ? input.change.files.join(", ") : "(no files listed)";
+  // W1-T2371: NARROWED ONLY on the founding shape, and the narrowing is stated to the judge rather
+  // than applied silently — it may still classify HIGH for any other reason it sees.
+  const planOnlyAmendmentNote = isPlanOnlyAmendment(input.change.description, input.change.changeView)
+    ? [
+        ``,
+        `THIS IS A PLAN-ONLY AMENDMENT. The subject declares plan work and the observed`,
+        `change touches nothing outside \`plan/\`. A shard's \`files:\` naming source paths this`,
+        `diff does not contain is EXPECTED here, and is NOT`,
+        `evidence of incomplete work or of misdeclared scope. Do not classify HIGH on`,
+        `that mismatch alone.`,
+        ``,
+        `THIS NARROWS ONE INFERENCE ONLY. Every other ground for HIGH survives intact:`,
+        `if the amendment weakens a criterion, contradicts a ruling, or drifts from`,
+        `established practice, classify HIGH exactly as you would on any other change.`,
+      ]
+    : [];
 
   return [
+    ...planOnlyAmendmentNote,
     `You are the RISK JUDGE (P34 clause (b), dispatch-path control) assessing ONE`,
     `candidate CHANGE. You judge the CHANGE ITSELF — its coherence with the plan,`,
     `drift risk, and alignment with established practice, in light of the gates`,

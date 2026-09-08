@@ -1,0 +1,47 @@
+- id: W1-T3093
+  title: "gh pr diff IS REFUSED ABOVE 300 FILES AND IT IS THE REVIEWER'S ONLY DIFF SOURCE, SO A BULK PR IS UNREVIEWABLE RATHER THAN REFUSED — fall back to the local comparison, and name the refusal when even that cannot answer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  origin: "session 2026-09-07 — #4510 could not be reviewed by any path while the queue was being cleared"
+  plan_refs: ["W1-T297"]
+  rationale: |
+    (1) THE CAP IS GITHUB'S, NOT OURS, AND IT IS HARD. `gh pr diff` answers
+    `HTTP 406: Sorry, the diff exceeded the maximum number of files (300)` and returns nothing
+    usable. `execFileSync` turns that into a throw, and the reviewer's diff read had no handler:
+    the exception left `reviewCommand` entirely.
+
+    (2) THE FAILURE MODE IS WORSE THAN A WRONG VERDICT — IT IS NO VERDICT. MEASURED 2026-09-07 on
+    #4510, a 930-shard plan reconciliation: every attempt died with `Command failed: gh pr diff`.
+    Nothing was posted, no refusal was recorded, and no ledger row existed to attribute it to. The
+    pull request was UNREVIEWABLE, which on a board read is indistinguishable from un-reviewed.
+
+    (3) THE LOCAL COMPARISON HAS NO CAP AND IS THE SAME COMPARISON. `git diff origin/main...<head>`
+    is what `gh pr diff` renders; the API's limit is a transport bound, not a semantic one. So the
+    size case has a real, equivalent answer rather than a degraded one.
+
+    (4) ONLY THE SIZE CASE FALLS BACK, AND THAT IS THE SAFETY PROPERTY. An auth failure, a rate
+    limit or a deleted pull request has NO locally-equivalent answer, and a diff computed from
+    whatever the checkout happens to hold would be a fabricated review input. Those are refused BY
+    NAME. The recogniser matches BOTH halves of GitHub's wording — the 406 AND the sentence — so a
+    different 406 is not mistaken for the cap, and a test pins each arm.
+
+    (5) WHEN BOTH FAIL, THE REFUSAL TEACHES THE REMEDY: it names the cap, both ways out (split the
+    pull request, or fetch its head into this checkout), and carries the underlying failure text.
+    A bare rethrow is what this replaces.
+
+  acceptance:
+    - claim: "a diff over the cap is answered from the local comparison rather than crashing the review"
+      proof: "unit test: test/a-review-that-cannot-read-its-diff-refuses.test.ts"
+    - claim: "any failure that is not the size cap is refused rather than answered from the checkout"
+      proof: "unit test: test/a-review-that-cannot-read-its-diff-refuses.test.ts"
+    - claim: "the reviewer records that it fell back rather than falling back silently"
+      proof: "grep: review\\.diff_local_fallback in src/run-task.ts"
+    - claim: "the reviewer is the module's call site, so the fallback is reachable from a real review"
+      proof: "grep: fetchPrDiff( in src/run-task.ts"
+  files: [src/lib/pr-diff.ts, src/run-task.ts, test/a-review-that-cannot-read-its-diff-refuses.test.ts]
+  status: queued
