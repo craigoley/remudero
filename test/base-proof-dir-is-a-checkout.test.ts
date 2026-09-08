@@ -19,11 +19,22 @@
  *
  * FALSIFIERS, as the audit brief names them:
  *   (i)   a test file passing at both base and head is graded `executed_stale`;
- *   (ii)  a test file absent at base is graded `executed_pass` and recorded as discriminating;
+ *   (ii)  [AMENDED by W1-T3098 below] a test file the PR ADDED still had no path to even RUN at
+ *         base — R-11 gave `unit test:` a real checkout, but a checkout of the merge-base never
+ *         contains a file this diff itself added, so the proof still couldn't be re-run there;
  *   (iii) with the worktree seam forced to fail, a `unit test:` proof is `base_unknown`, never
  *         "discriminates".
  * Deleting the worktree materialisation reddens (i) (no base dir is ever built for a test-only
  * review, so nothing is ever stale); deleting the `base_unknown` classification reddens (iii).
+ *
+ * W1-T3098 AMENDS (ii). `buildBaseProofDir` now copies the diff's added/changed `test/**` files
+ * from the head checkout into the base worktree before handing it back, so a PR-added test CAN be
+ * re-run at base — exactly the run (ii) never actually performed (R-11's checkout held no
+ * `test/fresh.test.ts` for it to find). `FRESH_TEST` asserts nothing, so once it is genuinely
+ * re-run at base it genuinely PASSES there too: the correct grade is `executed_stale`, not a
+ * `discriminates` earned by the file being absent. The positive "a genuinely new test that
+ * actually fails at base still discriminates" case lives in
+ * test/a-new-test-that-passes-on-the-base-tree-proves-nothing.test.ts (W1-T3098).
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -113,7 +124,9 @@ test("R-11: the base dir is a detached worktree AT THE MERGE-BASE, and a unit-te
     assert.ok(built.baseCheckoutDir, "a `unit test:` proof alone is enough to want a base");
     assert.equal(git(built.baseCheckoutDir!, "rev-parse", "HEAD"), mergeBase, "checked out at the merge-base, not the head");
     assert.equal(existsSync(join(built.baseCheckoutDir!, "test", "stale.test.ts")), true, "the base's own test file is there");
-    assert.equal(existsSync(join(built.baseCheckoutDir!, "test", "fresh.test.ts")), false, "the head-only file is not");
+    // W1-T3098: the diff ADDED test/fresh.test.ts, so it is now copied into the base worktree too —
+    // the differential run this whole file is about. See (ii) below for the classification this enables.
+    assert.equal(existsSync(join(built.baseCheckoutDir!, "test", "fresh.test.ts")), true, "the diff-added file is copied in");
     assert.equal(existsSync(join(built.baseCheckoutDir!, "package.json")), true, "a tree `node --test` can run in");
     assert.deepEqual([...built.baseUnreadablePaths], [], "a checkout has no per-blob read step to fail");
     assert.equal(built.baseWorktreeFailure, undefined);
@@ -143,18 +156,23 @@ test("R-11 (i): a `unit test:` file that passes at BOTH base and head is graded 
   }
 });
 
-// ── (ii) absent at base ⇒ discriminates ──────────────────────────────────────────────────────────
+// ── (ii) [W1-T3098] a diff-added test that asserts nothing is copied in and correctly grades stale ─
 
-test("R-11 (ii): a `unit test:` file ABSENT at the base (forward-referencing TDD) keeps executed_pass and is recorded as discriminating", () => {
+test("R-11 (ii) [W1-T3098]: a `unit test:` file the PR ADDED is copied into the base and, asserting nothing, genuinely passes there too — executed_stale, not a false discriminates", () => {
   const { head } = twoCommitRepo();
   let built: BaseProofDir | undefined;
   try {
     built = buildBaseProofDir([{ proof: "unit test: test/fresh.test.ts" }], head);
     assert.equal(built.baseIsCheckout, true);
+    // Precondition, measured directly: the copied file genuinely PASSES in the base worktree — it
+    // has no assertion, so it would pass against ANY implementation, including the unmodified one.
+    const wp = parseWhitelistedProof("unit test: test/fresh.test.ts")!;
+    assert.equal(execWhitelistedProof(wp, built.baseCheckoutDir!), "pass", "precondition: the base run is a real pass");
+
     const v = judgeWithRealExecutor(head, built, "unit test: test/fresh.test.ts");
-    assert.equal(v.proof_exec, "executed_pass", `absent at base is the OPPOSITE of stale: ${v.reason}`);
-    assert.equal(v.met, true);
-    assert.match(v.reason, /discriminates/);
+    assert.equal(v.proof_exec, "executed_stale", `a test that would pass on the base proves nothing: ${v.reason}`);
+    assert.equal(v.met, false, "the positive override is withdrawn, never converted into a failure");
+    assert.match(v.reason, /non-discriminating/);
     assert.doesNotMatch(v.reason, /base_unknown/, "a real checkout answered — this is not an environment gap");
   } finally {
     teardown(head, built);

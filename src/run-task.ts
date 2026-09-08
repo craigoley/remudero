@@ -15147,6 +15147,14 @@ export function buildBaseProofDir(
      *  shape {@link ReviewWorktreeDeps.addWorktree} has for the head. Injected by tests to force the
      *  fallback (throw) or to observe the call; real callers omit it. */
     addWorktree?: (repoDir: string, worktreePath: string, revision: string) => void;
+    /** (W1-T3098) The diff's ADDED/MODIFIED `test/**` paths between `base` and the head checkout's
+     *  `HEAD` — what {@link buildBaseProofDir} copies into the base worktree so a `unit test:` proof
+     *  for a PR-added test can be RE-RUN there instead of failing on a file the merge-base checkout
+     *  never had. Injected by tests against a real temp repo; real callers omit it. */
+    changedTestFiles?: (headDir: string, base: string) => string[];
+    /** (W1-T3098) Copies one file from the head checkout into the base worktree, creating parent
+     *  directories as needed. Injected by tests to observe/force failure; real callers omit it. */
+    copyFile?: (src: string, dest: string) => void;
   } = {},
 ): BaseProofDir {
   const mergeBase =
@@ -15181,6 +15189,27 @@ export function buildBaseProofDir(
         stdio: ["ignore", "pipe", "pipe"],
       }));
   const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
+  // (W1-T3098) `--diff-filter=AM` is design (i)'s "ADDED and CHANGED" — never D/R/C, so a file the
+  // diff only deleted or renamed is never conjured into the base tree. The pathspec restricts the
+  // walk to `test/` itself, matching design (iv): only the files a `unit test:` proof could ever
+  // name are ever copied.
+  const changedTestFiles =
+    deps.changedTestFiles ??
+    ((headDir: string, base: string) =>
+      execFileSync(
+        "git",
+        ["-C", headDir, "diff", "--name-only", "--diff-filter=AM", base, "HEAD", "--", "test/"],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      )
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean));
+  const copyFile =
+    deps.copyFile ??
+    ((src: string, dest: string) => {
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, readFileSync(src));
+    });
 
   const noBase: BaseProofDir = { baseCheckoutDir: undefined, baseUnreadablePaths: new Set<string>(), baseIsCheckout: false };
   // No DIALECT proof at all (prose only, or no criteria) ⇒ nothing will ever be re-run against a
@@ -15198,6 +15227,27 @@ export function buildBaseProofDir(
   let worktreeFailure: string;
   try {
     addWorktree(headCheckoutDir, dir, base);
+    // (W1-T3098) THE DIFFERENTIAL RUN: a bare `git worktree add --detach <dir> <base>` (R-11) is a
+    // checkout of the MERGE-BASE and so never contains a test the PR itself added — `node --test`
+    // there finds nothing, exits nonzero, and the classifier used to read that as `discriminates`.
+    // Copy the diff's added/changed `test/**` files in at the same repo-relative paths so the SAME
+    // proof that just passed on the head can actually be re-run here. Best-effort and isolated in
+    // its own try: a copy failure (or a `git diff` that itself throws) narrows what gets re-run —
+    // that one file's proof falls back to whatever it graded before this change — it must never
+    // downgrade `baseIsCheckout`, which is a fact about the WORKTREE, already true by this point,
+    // not about any one file inside it.
+    try {
+      for (const rel of changedTestFiles(headCheckoutDir, base)) {
+        try {
+          copyFile(join(headCheckoutDir, rel), join(dir, rel));
+        } catch {
+          // per-file: leave this one path absent from the base tree, exactly as before this change
+        }
+      }
+    } catch {
+      // `changedTestFiles` itself failed to run (e.g. `git diff` broke) — no files copied, no worse
+      // than the pre-W1-T3098 checkout.
+    }
     return { baseCheckoutDir: dir, baseUnreadablePaths: new Set<string>(), baseIsCheckout: true };
   } catch (e) {
     // Not erased: the reason rides out on `baseWorktreeFailure` below, where `rmd check-proof`
