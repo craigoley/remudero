@@ -88,6 +88,30 @@ test("W1-T3207: source PRs do not invoke the quieter ci or test-slow harnesses",
   assert.match(slow.stdout, /single instrumented full-suite run/);
 });
 
+test("W1-T3207: a PUSH to main still runs the ci harness — the skip is event-conditional, never unconditional", () => {
+  // THE OTHER HALF OF THE TEST ABOVE, and the one with teeth. `coverage-ratchet` is PR-only
+  // (W1-T1033), so on a push to main the `ci` job is the ONLY harness that runs the suite at all.
+  // A skip that fired unconditionally would leave main with no test run whatsoever and still pass
+  // every other case in this file — MEASURED by mutating THIS guard's own line: all 54 assertions
+  // across this file, push-ci-on-main and fast-lane-classifier stayed green.
+  //
+  // A push is modelled by BOTH signals, because the guard may only read push-safe ones: the event
+  // name, and an EMPTY base ref (GitHub sets no base ref outside a pull request, which is what
+  // makes it a legitimate discriminator here where the request-scoped contexts are not).
+  const push = runBash(runnable("ci", "Test"), { GITHUB_EVENT_NAME: "push", GITHUB_BASE_REF: "" });
+  assert.match(push.stdout, /class=SOURCE — running test shard/, "a push must reach the shard run, not exit early");
+  assert.match(
+    push.calls,
+    /scripts\/test-with-retry\.mjs/,
+    "a push to main must actually invoke the test harness — it is the only one that runs there",
+  );
+  assert.doesNotMatch(
+    push.stdout,
+    /single instrumented full-suite run/,
+    "the coverage-owns-the-run skip must not fire on a push, where coverage-ratchet does not run",
+  );
+});
+
 test("W1-T3207: the full test glob appears only in the instrumented coverage run", () => {
   const executableRunText = Object.values(doc.jobs)
     .flatMap((job) => job.steps ?? [])
