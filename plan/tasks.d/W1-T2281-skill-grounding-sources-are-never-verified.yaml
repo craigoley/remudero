@@ -126,7 +126,7 @@
     - claim: "a source that vanishes at runtime still degrades to no-match rather than throwing"
       proof: "unit test: test/skill-grounding-sources-resolve.test.ts"
   files: [src/lib/skill.ts, .remudero/skills, test/skill-grounding-sources-resolve.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#deterministic-skills-recon-2026-08-25"
   plan_refs: ["W1-T44", "W1-T255", "W1-T256", "W1-T284", "W1-T444", "W1-T2266"]

@@ -11,7 +11,7 @@
   files: [src/lib/worker-provider.ts, test/worker-provider.test.ts]
   origin: "operator-session#claude-weekly-headroom-must-outweigh-short-window-pressure-2026-09-06"
   plan_refs: ["W1-T2711", "W1-T2748", "W1-T2859", "W1-T2871"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT 547790d6 AND ON THE AZURE FLEET AT 2026-09-06T08:17Z.

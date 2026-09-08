@@ -149,7 +149,7 @@
     - claim: "a run that never reaches propose is bounded in how many permanent remote ids it can hold"
       proof: "unit test: test/triage-files-under-the-reserved-id.test.ts"
   files: [src/run-task.ts, test/triage-files-under-the-reserved-id.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#triage-reserves-one-id-and-files-another-2026-08-26"
   plan_refs: ["W1-T2324", "W1-T2315", "W1-T1011", "W1-T949", "W1-T509", "W1-T1066"]

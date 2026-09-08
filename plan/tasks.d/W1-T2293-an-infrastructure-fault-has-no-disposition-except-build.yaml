@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/infrastructure-fault-has-a-disposition.test.ts]
   origin: oper#an-infrastructure-fault-has-no-disposition-except-build-2026-08-25
   plan_refs: ["W1-T1100", "W1-T1282", "W1-T205", "W1-T2263", "W1-T94"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main 9f8eb325 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT BY

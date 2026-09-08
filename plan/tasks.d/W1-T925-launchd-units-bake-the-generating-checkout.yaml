@@ -87,7 +87,7 @@
   origin: feedback#fb-1784913390318-1fcb63
   plan_refs: ["§4A", "W1-T109", "W1-T924", "W1-T926"]
   files: [src/lib/launchd.ts, src/run-task.ts, test/launchd.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `depends_on: [W1-T924]` IS LOAD-BEARING, not bookkeeping: this task CONSUMES that task's

@@ -133,7 +133,7 @@
     - claim: "nothing in the change releases a claim it reports"
       proof: "unit test: test/dispatch-claim-stranded-visibility.test.ts"
   files: [src/lib/status-board.ts, test/dispatch-claim-stranded-visibility.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#no-timer-trade-rests-on-a-false-premise-2026-08-25"
   plan_refs: ["W1-T2264", "W1-T1268", "W1-T396"]

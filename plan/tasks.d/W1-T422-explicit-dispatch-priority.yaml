@@ -57,7 +57,7 @@
   origin: oper#plan-review-triage-2026-08-11
   plan_refs: ["§5D", "W1-T418", "W1-T419", "W1-T420"]
   files: [src/lib/drain.ts, src/lib/plan.ts, src/lib/task-linter.ts, test/dispatch-priority.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — ordering, tiebreak and lint behavior are all fixture-decidable.
     risk:high — it changes WHAT DISPATCHES NEXT for the whole fleet; the determinism falsifier in

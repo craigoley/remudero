@@ -65,7 +65,7 @@
   origin: "oper#audit-filings-2026-08-04 (audit §2b/§2c/§2d + rec 3)"
   plan_refs: ["W1-T229", "W1-T269", "W1-T270", "W1-T273", "W1-T246"]
   files: [plan/tasks.yaml, src/run-task.ts, test/lint-plan-open-only.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high — it edits the plan's standing records (23 entries) and a CI-adjacent command's
     default in one reviewed change; the sizing exemption is earned, not claimed: the concern is

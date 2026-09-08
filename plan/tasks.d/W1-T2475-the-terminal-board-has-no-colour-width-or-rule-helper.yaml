@@ -10,7 +10,7 @@
   files: [src/lib/tty.ts, src/lib/status-board.ts, test/tty-layer-and-status-board-rendering.test.ts]
   origin: "operator-brief#go-with-the-recommendations-2026-08-30"
   plan_refs: ["W1-T279", "W1-T280", "W1-T262", "W1-T336", "W1-T183"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS REPO HAS SPENT ENORMOUS EFFORT MAKING THE BOARD HONEST AND NONE MAKING IT LEGIBLE AT A

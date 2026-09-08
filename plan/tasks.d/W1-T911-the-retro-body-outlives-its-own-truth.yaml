@@ -74,7 +74,7 @@
   origin: oper#retro-body-changeset-2026-08-16
   plan_refs: ["W1-T136", "W1-T39"]
   files: [src/lib/plan-pr-emitter.ts, src/run-task.ts, test/retro-changeset-claim.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the reconciler is a pure string fold and the suite drives a REAL git
     repository, so every criterion is decidable with no network and no spawn.

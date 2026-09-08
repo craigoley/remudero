@@ -10,7 +10,7 @@
   files: [deploy/recycle-container.sh, test/recycle-capture-falls-back-to-the-shell.test.ts]
   origin: "operator-brief#app-auth-dispatch-claim-refuses-2026-08-30"
   plan_refs: ["W1-T2311", "W1-T1069", "W1-T2552"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE DEADLOCK ─────────────────────────────────────────────────────────────────────────────

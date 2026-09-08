@@ -123,7 +123,7 @@
   origin: "feedback#fb-1785807201821-e4c9dc"
   plan_refs: ["W1-T320", "W1-T411", "W1-T1082"]
   files: [src/run-task.ts, test/clone-reap-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS — recorded up front rather than shipped as a
     lint violation. `subsystemsOf` reads two concerns off this `files:` list (the dispatcher module

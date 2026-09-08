@@ -15,7 +15,7 @@
     - test/law-5-is-judged-never-assumed.test.ts
   origin: "operator-ruling#law-5-should-enforce-only-where-a-judge-finds-risk-2026-09-06"
   plan_refs: ["W1-T2959", "W1-T2967", "W1-T2968", "W1-T2694", "W1-T130", "W1-T178", "W1-T186"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR RULING, 2026-09-06, RECORDED AS THE ORIGIN OF THIS TASK. Law 5's arm is to stay, and

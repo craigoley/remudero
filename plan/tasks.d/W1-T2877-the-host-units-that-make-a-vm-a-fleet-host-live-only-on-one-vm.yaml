@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§8", "W1-T2856", "W1-T2875", "W1-T2876"]
   files: [deploy/install-host-units.sh, docs/operator-guide.md, test/host-units-install.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2856 established the pattern and closed exactly one instance of this problem: emergency

@@ -10,7 +10,7 @@
   files: [src/lib/containment.ts, test/probe-turn-observability.test.ts]
   origin: "oper#probe-reports-exhaustion-without-a-count-2026-08-24"
   plan_refs: ["W1-T2201", "W1-T303", "W1-T1281"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RE-DERIVED 2026-08-24 in a scratch worktree with `HEAD == origin/main` PROVEN BY SHA at

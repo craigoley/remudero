@@ -10,7 +10,7 @@
   files: [docs/operator-guide.md]
   origin: "followup:DAEMON-1788016810368:2026-08-29T15:26:29.026Z:1"
   plan_refs: ["W1-T2248", "W1-T2254", "W1-T2286", "W1-T434"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SECTION, READ AT HEAD. docs/operator-guide.md:204 is titled "Correcting a merged shard's

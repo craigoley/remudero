@@ -11,7 +11,7 @@
   files: [scripts/mkdtemp-callsite-check.mjs, hooks/pre-commit, hooks/mkdtemp-allowlist.txt, test/mkdtemp-callsite-check.test.ts, scripts/recovery-drill.mjs, test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts, test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts, test/a-gate-shaped-instrument-that-nothing-invokes.test.ts, test/a-hand-rolled-mutation-test-collides-with-the-real-harness.test.ts, test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts]
   origin: "operator-decision#w1-t2773-reshape-source-fix-to-linter-2026-09-03"
   plan_refs: ["W1-T115", "W1-T131", "W1-T137", "W1-T2291"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THIS SHARD'S SCOPE CHANGED. The first brief called for an unconditional fix inside src/lib/tmp.ts:

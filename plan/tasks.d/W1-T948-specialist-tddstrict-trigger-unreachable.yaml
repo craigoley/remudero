@@ -94,7 +94,7 @@
   origin: "recon#specialist-tddstrict-unreachable-2026-08-17"
   plan_refs: ["W1-T229"]
   files: [src/lib/specialist-panel.ts, test/specialist-panel.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify: human IS SET DELIBERATELY AND UP FRONT. This is arm-adjacent review machinery and

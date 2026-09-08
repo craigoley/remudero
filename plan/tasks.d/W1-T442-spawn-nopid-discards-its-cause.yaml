@@ -93,7 +93,7 @@
   origin: recon#last-cycle-stale-2026-08-12
   plan_refs: ["W1-T236", "W1-T113", "P48"]
   files: [src/lib/worker-containment.ts, src/lib/worker.ts, src/run-task.ts, test/spawn-nopid-diagnosis.test.ts, test/worker-containment.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — nothing here needs an operator ruling. Design (ii) leaves ONE choice open and
     states why (a) is preferred, which is an engineering argument rather than a policy the plan

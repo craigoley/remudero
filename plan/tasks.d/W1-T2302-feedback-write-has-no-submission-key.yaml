@@ -86,7 +86,7 @@
   origin: feedback#fb-1785969338913-dc3d0f
   plan_refs: ["W1-T350", "W1-T2206", "W1-T2278", "W1-T451", "§7B"]
   files: [src/lib/serve.ts, src/lib/panel-graph.ts, src/lib/feedback.ts, test/serve.test.ts, test/panel-graph.test.ts, test/feedback.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify:auto — the route half asserts in-process against a temp root the way every other

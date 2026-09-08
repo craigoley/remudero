@@ -10,7 +10,7 @@
   origin: "incident#3681-post-review-dedup-loop-2026-09-02"
   plan_refs: ["W1-T2299", "W1-T2443", "W1-T254", "W1-T1018"]
   files: [src/lib/sweep.ts, test/review-body-edit-reoffer.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON #3681 AT HEAD 7932adb9. A failing `review.posted` row at

@@ -121,7 +121,7 @@
     - claim: "no mount row and no configured model is altered by this change"
       proof: "unit test: test/tier-invariant-evidence.test.ts"
   files: [src/lib/retro.ts, test/tier-invariant-evidence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#tier-invariant-justification-2026-08-24"
   plan_refs: ["W1-T63", "W1-T64", "W1-T167", "W1-T21"]

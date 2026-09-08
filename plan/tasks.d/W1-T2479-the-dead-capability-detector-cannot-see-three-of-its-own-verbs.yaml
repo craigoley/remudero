@@ -10,7 +10,7 @@
   files: [src/lib/emissions.ts, src/run-task.ts, test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts]
   origin: "operator-brief#keep-going-2026-08-30"
   plan_refs: ["W1-T47", "W1-T2477", "W1-T2478", "W1-T322"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE DETECTOR ANSWERS CONFIDENTLY OVER AN INCOMPLETE CORPUS, WHICH IS THE ONE FAILURE THIS REPO

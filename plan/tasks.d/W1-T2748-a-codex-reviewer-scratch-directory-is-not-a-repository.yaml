@@ -10,7 +10,7 @@
   files: [src/lib/worker-provider.ts, test/worker-provider.test.ts, test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts]
   origin: "oper#codex-reviewer-nonrepo-scratch-2026-09-03"
   plan_refs: ["W1-T115", "W1-T185"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CONNECTOR IS SELECTED BUT ITS REVIEWER NEVER STARTS. The Azure ledger contains four

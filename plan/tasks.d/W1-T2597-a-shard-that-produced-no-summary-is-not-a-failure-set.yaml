@@ -10,7 +10,7 @@
   files: [.github/workflows/ci.yml, test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts]
   origin: "operator-brief#shard-without-a-summary-2026-09-01"
   plan_refs: ["W1-T2595"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE MEASURED INSTANCE ───────────────────────────────────────────────────────────────────

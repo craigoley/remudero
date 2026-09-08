@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/the-mint-blames-the-fleet-for-its-own-caller.test.ts]
   origin: "operator-session#mint-misattributes-its-own-reservations-2026-09-02"
   plan_refs: ["W1-T1055"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T1055 FIXED THE RACE AND LEFT THE REPORTING. `--reserve` shipped as #2312 and the push IS

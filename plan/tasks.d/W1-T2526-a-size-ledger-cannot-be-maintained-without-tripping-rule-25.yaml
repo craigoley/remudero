@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-size-ledger-is-not-a-score-floor.test.ts]
   origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
   plan_refs: ["W1-T297", "W1-T402", "W1-T2488", "W1-T2521"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     DISTINCT FROM W1-T2521, WHICH IS THE FIRST-COMMIT CIRCULARITY. That task is about a gate that

@@ -166,7 +166,7 @@
     - claim: "the exchange timeout constant is unchanged and the abort is still armed before the fetch is issued"
       proof: "unit test: test/token-refresh-reason-provenance.test.ts"
   files: [src/lib/github-app.ts, test/token-refresh-reason-provenance.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#one-label-covered-three-causes-2026-08-26"
   plan_refs: ["W1-T2318", "W1-T2311", "W1-T1068", "W1-T1024"]

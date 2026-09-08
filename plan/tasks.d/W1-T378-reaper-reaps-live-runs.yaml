@@ -97,7 +97,7 @@
   plan_refs: ["W1-T175", "W1-T377", "W1-T368", "W1-T179"]
   files: [src/lib/worker.ts, src/lib/policy.ts, plan/policy.yaml, test/worktree-reap-liveness.test.ts,
     test/prune-liveness.test.ts, test/policy.test.ts, test/config-reader-seams.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED, NOT BUILT, deliberately: W1-T377 closes the arm that actually cost the duplicate build and
     is the one concern that PR carries. This is the upstream trigger and a separate predicate with its own

@@ -186,7 +186,7 @@
     - claim: "diff-coverage still blocks a genuinely uncovered added line after the reconciliation"
       proof: "unit test: test/lcov-function-record-attribution.test.ts"
   files: [scripts/diff-coverage.mjs, test/ledger-rotation.test.ts, test/lcov-function-record-attribution.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#coverage-mapped-onto-the-wrong-lines-2026-08-25"
   plan_refs: ["W1-T210", "W1-T212", "W1-T240", "W1-T421", "W1-T481", "W1-T1277", "W1-T2244"]

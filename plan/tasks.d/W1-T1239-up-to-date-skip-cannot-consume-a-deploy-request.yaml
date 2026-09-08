@@ -127,7 +127,7 @@
   origin: feedback#fb-1785954511635-a6c209
   plan_refs: ["W1-T443", "W1-T341", "W1-T380"]
   files: [src/lib/deployer.ts, src/run-task.ts, test/deployer.test.ts, test/deploy-request-consumed-on-skip.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `test/deployer.test.ts` IS DECLARED BECAUSE IT IS THE SUITE THAT GOES RED, not as a courtesy —

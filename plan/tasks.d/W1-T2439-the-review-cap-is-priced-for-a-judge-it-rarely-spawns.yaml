@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, src/run-task.ts, test/plan-filing-admission-bound.test.ts]
   origin: "operator-brief#review-cap-priced-for-a-judge-it-rarely-spawns-2026-08-28"
   plan_refs: ["W1-T526", "W1-T2426", "W1-T2427", "W1-T205", "W1-T1211", "W1-T2430", "W1-T1218"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base fe4b0591, anchored `W1-T2439([^0-9]|$)` with a `[0-9]`

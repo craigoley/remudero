@@ -75,7 +75,7 @@
   origin: oper#split-w1-t314-2026-08-04
   plan_refs: ["§7", "W1-T314", "W1-T255"]
   files: [test/setup/open-shell.ts, test/serve.test.ts, test/serve.density-ia.test.ts, test/serve.detail-journey.test.ts, test/serve.find.test.ts, test/serve.first-paint.test.ts, test/serve.live-state.test.ts, test/serve.shell-ux.test.ts, test/serve.write-ack.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is a real Chromium suite passing, which is the standard this repo
     already holds serve.ts DOM behaviour to.

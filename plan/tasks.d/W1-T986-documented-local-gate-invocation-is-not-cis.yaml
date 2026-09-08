@@ -111,7 +111,7 @@
   origin: feedback#fb-1785780032614-be23bf
   plan_refs: ["§5C", "§12A", "W1-T294", "W1-T373", "W1-T387"]
   files: [CLAUDE.md, plan/claims.yaml]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED FROM fb-1785780032614-be23bf. The feedback asked for a recon over every locally-run gate and

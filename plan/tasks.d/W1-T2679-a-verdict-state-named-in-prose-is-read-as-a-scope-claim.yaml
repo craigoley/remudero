@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts]
   origin: "operator-session#3512-misattribution-2026-09-02"
   plan_refs: ["W1-T395", "W1-T2533", "W1-T2549"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON #3569, 2026-09-01. CI was fully green (36 checks) and remudero-review posted

@@ -10,7 +10,7 @@
   files: [src/lib/daemon.ts, src/run-task.ts, test/a-starvation-episode-closes-its-own-escalation.test.ts]
   origin: "operator-brief#next-item-2026-08-30"
   plan_refs: ["W1-T1103", "W1-T104", "W1-T2474", "W1-T186", "W1-T130"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE RECONCILER IS NOT THE DEFECT AND MUST NOT BE CHANGED. Its referentless arm is deliberate

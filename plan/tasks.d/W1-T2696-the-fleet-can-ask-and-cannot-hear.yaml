@@ -60,7 +60,7 @@
   origin: "oper#external-scan-2026-09-02"
   plan_refs: ["W1-T2273", "W1-T507", "W1-T2604", "W1-T2211", "§7", "§8"]
   files: [src/lib/escalate.ts, src/lib/notify.ts, src/lib/panel-actions.ts, src/lib/serve.ts, test/escalation-answer-links.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — the escalation module, the notifier, the panel routes and the

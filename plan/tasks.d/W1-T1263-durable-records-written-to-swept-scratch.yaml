@@ -120,7 +120,7 @@
   origin: oper#2026-08-23-durable-records-written-to-swept-scratch
   plan_refs: ["#1587", "P48", "Law 4", "W1-T383", "W1-T398", "W1-T438", "W1-T439", "W1-T1259"]
   files: [scripts/state-citation-check.mjs, scripts/state-citation-baseline.json, .github/workflows/ci.yml, test/state-citation-check.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19's SPAN, NOT THE BLAST RADIUS, AND IT WAS SET FROM THE LINTER RATHER

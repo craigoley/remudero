@@ -10,7 +10,7 @@
   origin: "incident#3681-identical-input-verdict-replacement-2026-09-02"
   plan_refs: ["W1-T178", "W1-T228", "W1-T2443", "W1-T2299", "W1-T168"]
   files: [src/lib/review.ts, src/run-task.ts, test/review-decision-finality.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED IN THE FLEET LEDGER AND GITHUB, NOT INFERRED. For #3681 at head 7932adb9, run

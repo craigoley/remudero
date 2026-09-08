@@ -47,7 +47,7 @@
   origin: oper#needs-me-filings-2026-08-04
   plan_refs: ["W1-T346", "W1-T104"]
   files: [src/lib/sweep.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — close-comment selection over injected referent states, assertable in-process.
     risk:medium — one branch in an existing close path; the failure directions are a wrong comment,

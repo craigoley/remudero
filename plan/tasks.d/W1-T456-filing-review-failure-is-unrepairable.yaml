@@ -94,7 +94,7 @@
   origin: recon#filing-unrepairable-2026-08-13
   plan_refs: ["W1-T205", "W1-T453", "W1-T454"]
   files: [src/lib/review.ts, src/lib/sweep.ts, src/run-task.ts, test/filing-forward-reference.test.ts, test/review.test.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — design (i) and (ii) both carry recommendations with their reasons, and clause
     (iii) states a hard constraint rather than leaving the outcome to taste. Nothing is parked on an

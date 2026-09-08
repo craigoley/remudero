@@ -113,7 +113,7 @@
   origin: "oper#unwired-triage-guard-2026-08-19"
   plan_refs: ["W1-T300", "W1-T298", "W1-T177", "W1-T276"]
   files: [src/run-task.ts, test/daemon-triage-guard-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` WAS SET BY THE LINTER, NOT ASSERTED. A draft at `medium` was refused, exit 1,

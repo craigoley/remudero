@@ -87,7 +87,7 @@
   origin: feedback#fb-1784821500625-cdcf8b
   plan_refs: ["§5C", "W1-T112", "W1-T310", "W1-T369", "W1-T387"]
   files: [src/lib/task-linter.ts, test/lint-proof-name-resolution.test.ts, CLAUDE.md, src/lib/proof-grammar.ts, test/docs-claims.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED FROM feedback#fb-1784821500625-cdcf8b (2026-07-23), triaged 2026-08-14.
     verify:auto — every claim is decidable in-process: two of them over seeded fixture tasks through the

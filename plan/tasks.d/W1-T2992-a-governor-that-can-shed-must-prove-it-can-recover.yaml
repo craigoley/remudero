@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["W1-T2853", "W1-T2985", "W1-T2987", "W1-T312", "W1-T380", "W1-T382"]
   files: [src/lib/review-capacity.ts, test/a-governor-that-sheds-must-recover.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED across the full ledger union, every adaptive review-width decision ever taken:

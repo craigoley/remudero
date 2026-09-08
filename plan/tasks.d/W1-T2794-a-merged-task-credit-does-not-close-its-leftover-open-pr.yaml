@@ -11,7 +11,7 @@
   files: [src/lib/sweep.ts, src/run-task.ts, test/merged-task-open-pr-supersession.test.ts]
   origin: "operator-session#pr-3877-left-open-after-w1-t2786-merged-2026-09-03"
   plan_refs: ["W1-T77", "W1-T150", "W1-T920", "W1-T2779"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED INCIDENT. PR #3874 merged W1-T2786 at 2026-09-03T21:52:52Z. The level-triggered

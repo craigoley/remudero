@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/light-pass-requeue-admission.test.ts, .github/workflows/ci.yml]
   origin: "oper#requeue-lane-unreachable-from-light-pass-2026-08-28"
   plan_refs: ["W1-T1211", "W1-T1223", "W1-T2283", "W1-T1041", "W1-T2407", "W1-T356", "W1-T1066"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     **THIS IS ONE DEFECT, NOT TWO, AND THE SECOND ONE IS ALREADY FIXED.** The commissioning brief

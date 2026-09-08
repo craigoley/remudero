@@ -108,7 +108,7 @@
     - claim: "the sweep still runs one at a time and no additional lane is taken"
       proof: "unit test: test/daemon.test.ts"
   files: [src/lib/daemon.ts, test/daemon.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#full-sweep-unreachable-after-first-iteration-2026-08-23"
   plan_refs: ["W1-T126", "W1-T513", "W1-T1044", "W1-T1049", "W1-T1218"]

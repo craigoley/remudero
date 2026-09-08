@@ -13,7 +13,7 @@
     - test/un-crediting-a-task-today-means-editing-a-merged-pr-body.test.ts
   origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
   plan_refs: ["W1-T413", "W1-T1004", "W1-T444"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE TWO CREDIT PATHS BOTH READ HISTORY. CLAUDE.md's plan-hygiene section states them: the

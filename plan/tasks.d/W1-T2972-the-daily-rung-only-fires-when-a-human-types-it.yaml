@@ -14,7 +14,7 @@
     - test/the-daily-rung-only-fires-when-a-human-types-it.test.ts
   origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
   plan_refs: ["W1-T2957", "W1-T2958", "W1-T2959", "W1-T1259", "W1-T2277", "W1-T2304"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED AT d4004806, the merge of W1-T2959. `git grep -c ciLearning -- src/lib/daemon.ts`

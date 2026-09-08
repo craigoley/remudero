@@ -124,7 +124,7 @@
     - claim: "the probe's turn cap absorbs the added command without a hand-set literal"
       proof: "unit test: test/containment.test.ts"
   files: [settings/worker.json, src/lib/containment.ts, test/containment.test.ts, test/settings.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#tilde-anchored-denies-resolve-inside-scratch-home-2026-08-24"
   plan_refs: ["W1-T2211", "W1-T2201", "W1-T1265", "W1-T1289", "W1-T18"]

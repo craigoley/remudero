@@ -132,7 +132,7 @@
   origin: recon-mini-assumptions#daemon-only-sweeps
   plan_refs: ["§8A", "§4A"]
   files: [src/run-task.ts, test/one-shot-disk-reclaim-rung.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS, set up front rather than shipped as a
     violation. `subsystemsOf` counts two concerns here — the dispatcher gaining the call site and its

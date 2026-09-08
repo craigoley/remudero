@@ -118,7 +118,7 @@
   origin: "feedback#fb-1785982194342-bb9d81"
   plan_refs: ["W1-T1066", "W1-T151", "W1-T452", "W1-T2313", "W1-T2314", "D-11"]
   files: [hooks/deny-floor.sh, test/deny-floor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     WHY THIS IS THREE TASKS AND NOT ONE — THE LINTER FORCED IT, AND IT WAS RIGHT. The first filing

@@ -48,7 +48,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T20d", "§5C", "§12"]
   files: [src/run-task.ts, test/retro.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — gather assembly over fixture plans, in-process.
     risk:high — set by Rule 19's span (retro, run-task), not blast radius: the sweep lives in

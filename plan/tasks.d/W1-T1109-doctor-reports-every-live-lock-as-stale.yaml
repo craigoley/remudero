@@ -99,7 +99,7 @@
   origin: "recon#doctor-lock-arm-reports-every-lock-stale-2026-08-21"
   plan_refs: ["W1-T1047", "W1-T1099", "W1-T978", "W1-T1081", "W1-T368"]
   files: [src/run-task.ts, test/doctor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a tag per declared

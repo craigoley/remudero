@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/the-fix-rung-strike-cap-does-not-bind.test.ts]
   origin: "operator-session#fix-rung-runaway-2026-08-30"
   plan_refs: ["W1-T513", "W1-T1211", "W1-T2379", "W1-T76"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED LIVE, AND IT SPENDS A WORKER EACH TIME. One `docker logs --since 90m` window, two PRs:

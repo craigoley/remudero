@@ -125,7 +125,7 @@
   origin: recon#empty-toolset-truthiness-2026-08-14
   plan_refs: ['W1-T454', 'W1-T98']
   files: [test/worker.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "**NO `src/` PATH IS DECLARED AND THAT IS THE FINDING, NOT AN OVERSIGHT.** `src/lib/worker.ts`
     is CORRECT at 66ef336; this task adds the assertion that was missing and changes no behaviour. A

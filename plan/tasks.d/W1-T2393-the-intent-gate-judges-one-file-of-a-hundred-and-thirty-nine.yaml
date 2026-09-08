@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/ledger-read-intent.test.ts]
   origin: "operator-brief#ledger-read-intent-blind-spot-2026-08-27"
   plan_refs: ["W1-T1262", "W1-T2382", "W1-T2388", "W1-T2345"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept, anchored `W1-T2393([^0-9]|$)` with a `[0-9]` class and never `\d`,

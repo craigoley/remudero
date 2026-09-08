@@ -124,7 +124,7 @@
       proof: "unit test: test/base-lint-attributes-pre-existing-violations.test.ts"
     - claim: "no run without the base flag performs a second lint pass"
       proof: "unit test: test/base-lint-attributes-pre-existing-violations.test.ts"
-  status: queued
+  status: merged
   attempts: 0
   plan_refs: ["W1-T65", "W1-T279"]
   note: |

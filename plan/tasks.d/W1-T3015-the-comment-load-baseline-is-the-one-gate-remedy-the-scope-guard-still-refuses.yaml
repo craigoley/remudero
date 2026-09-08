@@ -12,7 +12,7 @@
     - test/the-comment-load-baseline-is-the-one-gate-remedy-the-scope-guard-still-refuses.test.ts
   origin: "operator-request#follow-up-work-2026-09-07"
   plan_refs: ["W1-T2548", "W1-T2650", "W1-T2651", "W1-T106", "W1-T2999"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE TRAP W1-T2650/W1-T2651 CLOSED IS STILL OPEN FOR THE TWIN GATE. Those tasks record it in

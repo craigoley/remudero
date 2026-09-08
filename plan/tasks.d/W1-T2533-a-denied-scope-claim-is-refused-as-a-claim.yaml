@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-denied-scope-claim-is-not-a-claim.test.ts]
   origin: "operator-session#the-pr-board-is-very-red-2026-08-31"
   plan_refs: ["W1-T274", "W1-T395", "W1-T413"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON A REAL PR, THEN REPRODUCED IN-PROCESS. #3373's body carried, verbatim:

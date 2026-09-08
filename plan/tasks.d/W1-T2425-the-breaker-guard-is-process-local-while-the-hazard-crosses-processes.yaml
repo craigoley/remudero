@@ -10,7 +10,7 @@
   files: [src/lib/ledger.ts, src/lib/status.ts, test/breaker-guard-survives-rotation.test.ts]
   origin: "operator-brief#breaker-gate-rotates-and-its-guard-cannot-fire-2026-08-27"
   plan_refs: ["W1-T2423", "W1-T206", "W1-T209", "W1-T244", "W1-T271", "W1-T316", "W1-T2415", "W1-T2344", "W1-T2249"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base a064a10d, anchored `W1-T2425([^0-9]|$)` with a `[0-9]`

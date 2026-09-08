@@ -139,7 +139,7 @@
   origin: "oper#arm-path-needs-a-checked-out-branch-2026-08-20"
   plan_refs: ["W1-T1045", "W1-T447", "W1-T921", "W1-T125", "W1-T230", "W1-T947"]
   files: [src/run-task.ts, src/lib/worker.ts, test/live-write-guard-command-sites.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE STAKES, STATED PLAINLY. One PR reported a failed merge that may well have succeeded, and

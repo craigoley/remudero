@@ -10,7 +10,7 @@
   files: [src/lib/daemon.ts, test/the-dispatch-loop-is-never-told-the-window-closed.test.ts]
   origin: "operator-brief#we-lost-an-hour-to-the-session-limit-2026-08-30"
   plan_refs: ["W1-T113", "W1-T46", "W1-T2515", "W1-T2516"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SIGNAL IS ALREADY COMPUTED AND DISCARDED — TWO GREPS, CONTROLS ON BOTH SIDES:

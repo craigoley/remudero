@@ -49,7 +49,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T297", "§5", "§12"]
   files: [src/run-task.ts, src/lib/review.ts, test/review.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — advisory-section assembly and independence assertions, in-process.
     risk:high — it touches the review flow that gates every merge: the acceptance's independence

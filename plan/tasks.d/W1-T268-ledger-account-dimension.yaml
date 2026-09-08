@@ -56,7 +56,7 @@
   origin: architect
   plan_refs: ["§9"]
   files: [src/lib/ledger.ts, src/lib/worker.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every criterion is a shape assertion over lines a test writes and reads back, plus two
     literal greps; nothing needs a live run or a real account.

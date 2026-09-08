@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts]
   origin: "operator-brief#keep-going-2026-08-30"
   plan_refs: ["W1-T2474", "W1-T476", "W1-T1287"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE RULE IS RIGHT AND STAYS. `declared-scope` names its own harm precisely: an undeclared scope

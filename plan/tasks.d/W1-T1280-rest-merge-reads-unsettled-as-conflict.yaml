@@ -106,7 +106,7 @@
     - claim: "no conflict is resolved and no merge happens without a passing verdict"
       proof: "unit test: test/rest-merge-unsettled-retry.test.ts"
   files: [src/run-task.ts, test/rest-merge-unsettled-retry.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#rest-merge-unsettled-as-conflict-2026-08-23"
   plan_refs: ["W1-T148", "W1-T1050", "W1-T1095", "W1-T1235", "W1-T1255", "W1-T1278"]

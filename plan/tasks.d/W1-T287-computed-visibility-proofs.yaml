@@ -60,7 +60,7 @@
   origin: feedback#fb-1784731575322-753af9
   plan_refs: ["§7"]
   files: [src/lib/serve.ts, test/serve.computed-visibility.test.ts, test/serve.live-state.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED from feedback#fb-1784731575322-753af9 (Session 5 console recon, 2026-07-22), re-verified at source
     2026-08-02 before filing — serve.ts:479-482 still carries the unguarded `display: inline-block`, and

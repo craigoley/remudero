@@ -113,7 +113,7 @@
   origin: "oper#docker-restart-strands-drain-lock-2026-08-20"
   plan_refs: ["W1-T978", "W1-T1036", "W1-T396", "W1-T368"]
   files: [src/lib/fs-race-safe.ts, deploy/entrypoint.sh, test/drain-lock-restart-reclaim.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE LIVE PROBES WERE READ-ONLY AND ARE LISTED SO THEY CAN BE RE-RUN. Over ssh, inside the

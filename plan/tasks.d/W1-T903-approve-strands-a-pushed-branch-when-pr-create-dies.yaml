@@ -125,7 +125,7 @@
   origin: "feedback#fb-1784841309112-63054e"
   plan_refs: ["W1-T372", "W1-T311", "W1-T190", "W1-T525", "W1-T529", "W1-T510", "W1-T511", "W1-T327", "W1-T530"]
   files: [src/run-task.ts, src/lib/inbox.ts, src/lib/plan-pr-emitter.ts, test/approve-resumable-rest.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify:auto — every claim is an assertion over an injected `RatifyGateway` and a seeded ledger,

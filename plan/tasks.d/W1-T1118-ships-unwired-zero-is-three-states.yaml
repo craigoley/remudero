@@ -134,7 +134,7 @@
   origin: "feedback#fb-1785870873355-d91fc2"
   plan_refs: ["W1-T322", "W1-T323", "W1-T1017", "W1-T1086", "W1-T1081", "W1-T1101"]
   files: [src/lib/reachability.ts, src/lib/review.ts, src/run-task.ts, test/ships-unwired-floor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, recorded up front rather than shipped as a

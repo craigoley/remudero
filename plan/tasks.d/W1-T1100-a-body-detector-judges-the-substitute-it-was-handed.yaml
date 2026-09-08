@@ -108,7 +108,7 @@
     - claim: "a genuinely fetched body still reaches every consumer exactly as it does today"
       proof: "unit test: test/review-evidence-provenance.test.ts"
   files: [src/run-task.ts, src/lib/review.ts, test/review-evidence-provenance.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: recon#body-detector-judges-a-substitute-2026-08-21
   plan_refs: ['W1-T1081', 'W1-T1097', 'W1-T274', 'W1-T1016']

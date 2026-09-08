@@ -11,7 +11,7 @@
   files: [src/lib/worker-provider.ts, src/lib/provider-routing-policy.ts, src/lib/provider-routing-status.ts, src/lib/worker.ts, src/lib/serve.ts, test/codex-model-console.test.ts, test/provider-routing-console-controls.test.ts, test/worker-provider.test.ts, scripts/source-size-baseline.json]
   origin: "operator-session#console-codex-model-management-2026-09-02"
   plan_refs: ["W1-T2572", "W1-T2573", "W1-T2704", "W1-T2709", "G-17"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT c28595e3. `readCodexCapacity` starts one authenticated Codex app-server,

@@ -14,7 +14,7 @@
     - test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts
   origin: "oper#pr-3766-exact-head-materialization-2026-09-03"
   plan_refs: ["W1-T185", "W1-T232", "W1-T233"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS BLOCKED A READY REVIEW ON PR #3766. At 2026-09-03T03:12:16Z the Azure ledger recorded

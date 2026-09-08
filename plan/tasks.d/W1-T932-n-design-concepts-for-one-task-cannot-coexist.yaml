@@ -105,7 +105,7 @@
   origin: recon#n-concepts-cannot-coexist-2026-08-16
   plan_refs: ["W1-T920", "W1-T915", "W1-T471"]
   files: [src/lib/sweep.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. This changes the predicate that decides whether an open PR is
     left alone or marked dead. Set wrong in one direction it strands real duplicates open forever; set

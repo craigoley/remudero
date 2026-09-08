@@ -60,7 +60,7 @@
   origin: incident
   plan_refs: ["W1-T94", "W1-T106", "W1-T2536", "W1-T2539"]
   files: [src/run-task.ts, test/run-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `files:` is the prompt's home and its existing suite. `renderFixPrompt`'s merge-conflict branch

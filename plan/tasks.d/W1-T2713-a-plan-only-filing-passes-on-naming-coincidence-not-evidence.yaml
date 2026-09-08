@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-plan-only-filing-passes-on-naming-coincidence-not-evidence.test.ts]
   origin: "operator-session#floor-scores-naming-coincidence-2026-09-02"
   plan_refs: ["W1-T205", "W1-T178", "W1-T219", "W1-T1100", "W1-T2221"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE FLOOR IS THE ONLY THING THAT CAN FAIL A PLAN-ONLY FILING, AND IT IS MEASURING THE WRONG

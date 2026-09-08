@@ -211,5 +211,5 @@
       proof: "unit test: test/run-task.test.ts"
     - claim: "if a lane ships, a real per-PR guard replaces the ledger-read dedup before it is enabled"
       proof: "unit test: test/daemon.test.ts"
-  status: queued
+  status: merged
   attempts: 0

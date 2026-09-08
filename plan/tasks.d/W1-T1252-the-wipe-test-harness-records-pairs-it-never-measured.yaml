@@ -122,7 +122,7 @@
     - claim: "the sandbox default and its typed non-sandbox exception are unchanged by the refusal"
       proof: "unit test: test/wipe-test.test.ts"
   files: [src/run-task.ts, src/lib/wipe-test.ts, test/wipe-test.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#wipe-test-harness-records-pairs-it-never-measured-2026-08-23"
   plan_refs: ["W1-T86", "W1-T319", "W1-T19"]

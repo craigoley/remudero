@@ -12,7 +12,7 @@
     - test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts
   origin: "operator-request#follow-up-work-2026-09-07"
   plan_refs: ["W1-T294", "W1-T1074", "W1-T338"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-07, THEN MEASURED. A session ran the shipped local gate, read

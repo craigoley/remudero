@@ -61,7 +61,7 @@
   # defect, not a cluster), and src/lib/ci-parity.ts is NOT touched — no cluster is declared.
   # lint-plan's proof-scope check named this: a criterion may not cite a path outside files:.
   files: [test/codex-worker-home-redirection.test.ts, test/codex-worker-home-cluster-declared.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     CORRECTED 2026-09-05 BY DESIGN (iii)'s OWN CHECK — THIS IS NOT A HOST FACT. The note below

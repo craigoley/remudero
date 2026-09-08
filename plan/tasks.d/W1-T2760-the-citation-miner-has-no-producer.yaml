@@ -75,7 +75,7 @@
   origin: "oper#concept-scan-2026-09-03"
   plan_refs: ["W1-T419", "W1-T1248", "W1-T941", "W1-T2297", "W1-T2512", "W1-T2659", "§8A", "§12"]
   files: [src/lib/compaction.ts, src/lib/worker.ts, src/lib/retro.ts, scripts/learnings-budget-ratchet.mjs, test/the-citation-miner-has-a-producer.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — the output contract, the transcript parser, the retro aggregate

@@ -107,7 +107,7 @@
     - claim: "the falsifier technique is stated where an author meets the gate"
       proof: "unit test: test/body-claim-recognition.test.ts"
   files: [src/lib/review.ts, src/run-task.ts, test/body-claim-recognition.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#zero-from-changeset-detector-is-not-a-check-2026-08-23"
   plan_refs: ["W1-T274", "W1-T308", "W1-T413", "W1-T1254"]

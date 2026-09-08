@@ -15,7 +15,7 @@
     - test/a-source-text-assertion-cannot-survive-instrumentation.test.ts
   origin: "operator-brief#issue-3387-mutation-nightly-red-2026-09-02"
   plan_refs: ["W1-T2587", "W1-T2514", "W1-T2524", "W1-T133"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, not blast radius: the `files:`

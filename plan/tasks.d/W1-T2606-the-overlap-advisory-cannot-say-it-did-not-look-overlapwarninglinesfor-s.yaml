@@ -9,7 +9,7 @@
   files: [src/run-task.ts, test/overlap-advisory-outage.test.ts, test/next-task-id-overlap-warning.test.ts]
   origin: architect
   plan_refs: ["W1-T917", "W1-T985", "W1-T2324", "W1-T181", "W1-T119"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ONE COMMAND TREATS ONE OUTAGE TWO OPPOSITE WAYS, AND BOTH ARMS ARE ON MAIN TODAY.

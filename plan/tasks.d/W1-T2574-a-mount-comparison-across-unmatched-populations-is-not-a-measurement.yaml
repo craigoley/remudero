@@ -10,7 +10,7 @@
   files: [scripts/mount-headroom-sweep.mjs, test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts]
   origin: "operator-session#codex-router-design-2026-09-01"
   plan_refs: ["W1-T2560", "W1-T2572", "W1-T2573"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2560 BUILT THE RIGHT CENSUS AND IT CANNOT ANSWER THE ROUTING QUESTION. It reports turn and

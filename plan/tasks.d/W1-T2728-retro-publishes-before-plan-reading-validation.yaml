@@ -15,7 +15,7 @@
     - test/retro-prepublish-validation.test.ts
     - test/retro-marker-atomic.test.ts
     - scripts/source-size-baseline.json
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on PR #3705, first failing head 74010c25992cecda1e46ac3b292c13d35464659e,

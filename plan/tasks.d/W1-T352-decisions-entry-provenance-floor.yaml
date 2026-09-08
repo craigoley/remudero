@@ -59,7 +59,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T322", "§4", "§12"]
   files: [src/lib/review.ts, test/review.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — diff-shaped fixtures through the real judgeReview, in-process.
     risk:high — it adds a BLOCKING review condition; wrong in the permissive direction it misses the

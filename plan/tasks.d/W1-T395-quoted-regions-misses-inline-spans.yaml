@@ -81,7 +81,7 @@
   origin: session-review#1451-inline-quoting-2026-08-07
   plan_refs: ["W1-T274", "W1-T288", "W1-T304", "W1-T308", "W1-T328"]
   files: [src/lib/review.ts, test/review-absence-anchor-delimiter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is a pure string-in/verdict-out assertion over
     `bodyContradictsDiff`, decidable in-process with no operator and no network.

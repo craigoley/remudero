@@ -46,7 +46,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["§4B", "W1-T322"]
   files: [src/lib/daemon.ts, src/run-task.ts, test/daemon.test.ts, test/run-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a deletion proven by compilation, suite passage and the fold-note grep.
     risk:high — set by Rule 19's span (daemon, run-task): the deletion lives in daemon.ts and the

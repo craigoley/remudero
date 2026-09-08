@@ -10,7 +10,7 @@
   files: [src/lib/escalate.ts, src/lib/serve.ts, test/escalation-options-are-executable.test.ts]
   origin: oper#escalation-options-are-prose-not-actions-2026-08-25
   plan_refs: ["W1-T2244", "W1-T2264", "W1-T8", "W1-T1216"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main ce38a8c1 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/the-followup-retirement-arm-has-a-call-site.test.ts]
   origin: "inbox#followup-retirement-arm-uncalled-2026-09-02"
   plan_refs: ["W1-T2563", "W1-T2458", "W1-T2591", "W1-T2455"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── MEASURED, WITH THE CONTROL THAT MAKES THE ZERO A MEASUREMENT ────────────────────────────

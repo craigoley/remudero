@@ -72,7 +72,7 @@
   origin: oper#recon-state-retention-2026-08-05
   plan_refs: ["§8A", "§5D"]
   files: [src/lib/ledger-grep.ts, src/run-task.ts, docs/cli-reference.md, test/ledger-grep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — both directions of the falsifier assert in-process against a temp state root;
     no network, no model call, nothing spawned.

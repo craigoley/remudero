@@ -10,7 +10,7 @@
   files: [src/lib/ledger-grep.ts, src/lib/autonomy.ts, test/a-windowed-union-never-opens-an-archive-outside-it.test.ts]
   origin: "operator-incident#azure-io-saturation-2026-08-30"
   plan_refs: ["W1-T2482", "W1-T444", "W1-T209"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS THE STRUCTURAL HALF OF THE INCIDENT W1-T2482 ONLY DIVIDED BY TEN. Compressing the

@@ -14,7 +14,7 @@
     - test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts
   origin: "operator-session#terminal-head-outer-dispatch-gap-2026-09-03"
   plan_refs: ["W1-T2231", "W1-T2379", "W1-T2723"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE LIVE FLEET, AFTER W1-T2723 WAS RUNNING. PR #3719 at head

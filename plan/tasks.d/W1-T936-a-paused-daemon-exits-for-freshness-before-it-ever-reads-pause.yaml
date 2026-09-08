@@ -75,7 +75,7 @@
   origin: recon#daemon-pause-freshness-2026-08-17
   plan_refs: ["W1-T126", "W1-T215", "W1-T915"]
   files: [src/lib/daemon.ts, test/daemon-freshness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "**`risk: high` IS SET UP FRONT, AND THE BAND IS RULE 19'S *SPAN*, NOT BLAST RADIUS.** The
     linter classes `src/lib/daemon.ts` and `test/daemon-freshness.test.ts` as two distinct concerns

@@ -88,7 +88,7 @@
   origin: "oper#sweep-tick-unbounded-2026-08-19"
   plan_refs: ["W1-T943", "W1-T942", "W1-T1009", "W1-T484", "W1-T513"]
   files: [src/lib/daemon.ts, src/run-task.ts, plan/policy.yaml, test/sweep-wall-clock-bound.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     WHERE THE BOUND GOES, AND WHAT EACH PLACEMENT MISSES. Three candidates, and the measurement says

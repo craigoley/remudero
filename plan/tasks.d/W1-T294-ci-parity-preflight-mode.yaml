@@ -74,7 +74,7 @@
   origin: feedback#fb-1784762611444-e6bdc0
   plan_refs: ["§5C", "§5"]
   files: [src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED FROM fb-1784762611444-e6bdc0. The feedback asks for workers to reach green locally before the
     first push; that decomposes into a suite that actually mirrors CI (this task) and the worker-side

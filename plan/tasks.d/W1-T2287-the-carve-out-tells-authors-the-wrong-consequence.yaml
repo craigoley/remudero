@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/proof-scope-consequence.test.ts]
   origin: oper#the-carve-out-tells-authors-the-wrong-consequence-2026-08-25
   plan_refs: ["W1-T456", "W1-T310", "W1-T2286", "W1-T2216", "W1-T205"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (0) THE MECHANISM, RE-DERIVED.

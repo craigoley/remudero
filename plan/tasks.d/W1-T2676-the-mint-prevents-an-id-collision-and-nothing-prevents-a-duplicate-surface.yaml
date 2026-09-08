@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts]
   origin: "operator-session#3512-misattribution-2026-09-02"
   plan_refs: ["W1-T2581", "W1-T2589"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON 2026-09-01, IN THIS FILE'S OWN PLAN TREE. W1-T2589 was filed for "the durable merge

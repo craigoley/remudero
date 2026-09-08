@@ -74,7 +74,7 @@
   origin: oper#learning-system-research-2026-08-10
   plan_refs: ["§8A", "P48", "W1-T388", "W1-T240"]
   files: [src/lib/rule-efficacy.ts, src/run-task.ts, docs/cli-reference.md, test/rule-efficacy.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every deliverable is a function over fixture ledgers and a registry write,
     decidable in-process; the operator's judgment enters at the INBOX, where it already lives.

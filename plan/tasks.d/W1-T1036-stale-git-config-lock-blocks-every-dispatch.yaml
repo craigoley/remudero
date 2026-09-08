@@ -118,7 +118,7 @@
   origin: "oper#stale-git-config-lock-2026-08-19"
   plan_refs: ["W1-T978", "W1-T406", "W1-T446", "W1-T381"]
   files: [src/lib/worker.ts, test/stale-git-config-lock.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `files:` IS TIGHT AND ITS OWN PATH IS ABSENT. `pruneStaleRuns` and `reapStaleWorktrees` both

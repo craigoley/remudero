@@ -127,7 +127,7 @@
     - claim: "the unchanged-tree stand-down and the review false-block escape both behave exactly as they do today"
       proof: "unit test: test/fix-rung-verdict-unchanged.test.ts"
   files: [src/run-task.ts, test/fix-rung-verdict-unchanged.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#fix-rung-verdict-unchanged-2026-08-26"
   plan_refs: ["W1-T2317", "W1-T2298", "W1-T1066"]

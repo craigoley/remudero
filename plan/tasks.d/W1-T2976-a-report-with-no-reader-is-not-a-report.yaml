@@ -12,7 +12,7 @@
     - test/a-report-with-no-reader-is-not-a-report.test.ts
   origin: "operator-session#email-the-daemon-report-while-the-console-is-unbuilt-2026-09-06"
   plan_refs: ["W1-T2497", "W1-T2277", "W1-T915", "W1-T8"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE REPORT IS BUILT, SCHEDULED, AND UNDELIVERABLE. `digestCadence` in plan/policy.yaml reads

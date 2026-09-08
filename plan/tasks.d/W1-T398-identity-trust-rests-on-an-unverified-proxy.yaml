@@ -123,7 +123,7 @@
   origin: recon#blackout-and-hosted-console-2026-08-07
   plan_refs: []
   files: [src/lib/serve.ts, src/lib/config.ts, src/run-task.ts, test/serve-identity-declaration.test.ts, test/serve-identity-default-path.test.ts, test/serve-identity-optout.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is decidable in-process. The refusals are pure resolution-time
     checks over a config object, and the default-path claim is an assertion that a resolver returns

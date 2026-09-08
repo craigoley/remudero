@@ -10,7 +10,7 @@
   files: [src/run-task.ts, src/lib/learnings.ts, test/the-project-layer-follows-the-target-repo.test.ts]
   origin: "operator-brief#each-repos-learnings-live-in-that-repo-2026-08-30"
   plan_refs: ["W1-T2505", "W1-T145", "W1-T2492"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE LAYERED ARCHITECTURE IS BUILT AND ONE OF ITS THREE HOMES POINTS AT THE WRONG REPO. The

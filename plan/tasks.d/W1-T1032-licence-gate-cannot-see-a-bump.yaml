@@ -81,7 +81,7 @@
   origin: "oper#licence-gate-bump-blindness-2026-08-19"
   plan_refs: ["W1-T1004"]
   files: [test/helpers/check-dependency-licences.mjs, test/dependency-licence-policy.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL

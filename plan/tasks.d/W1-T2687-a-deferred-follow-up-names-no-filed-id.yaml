@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/a-deferred-follow-up-names-no-filed-id.test.ts]
   origin: "operator-session#prose-followups-own-nothing-2026-09-02"
   plan_refs: ["W1-T470"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SHAPE IS ALWAYS THE SAME AND ALWAYS INVISIBLE. A shard's design or note says the rest

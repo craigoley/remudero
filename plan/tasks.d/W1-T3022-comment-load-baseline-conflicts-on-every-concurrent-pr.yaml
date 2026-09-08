@@ -10,7 +10,7 @@
   files: [scripts/comment-load-ratchet.mjs, test/comment-load-ratchet.test.ts]
   origin: "operator-session#four-prs-one-conflicted-file-2026-09-07"
   plan_refs: ["W1-T2539", "W1-T2526", "W1-T2532"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07, and the whole finding is one table. Every open CONFLICTING pull request,

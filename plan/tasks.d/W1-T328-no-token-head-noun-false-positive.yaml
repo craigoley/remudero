@@ -66,7 +66,7 @@
   origin: oper#remaining-items-2026-08-04
   plan_refs: ["§5", "W1-T274", "W1-T308"]
   files: [src/lib/review.ts, test/body-contradicts-diff.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a pure predicate over text plus a fixture table, no operator present.
     risk:high — this edits the gate that blocks merges. Widening it strands correct PRs (the observed

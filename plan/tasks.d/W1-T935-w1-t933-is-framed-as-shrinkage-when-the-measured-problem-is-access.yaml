@@ -84,7 +84,7 @@
   origin: recon#access-not-shrinkage-2026-08-17
   plan_refs: ["W1-T933", "W1-T420", "W1-T503"]
   files: [src/lib/panel-skill-run.ts, test/panel-skill-run.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: medium` IS SET UP FRONT. Widening a signature and refactoring its one caller changes no
     gate, no disposition and no policy; the declared span is one module and its own suite. It is not

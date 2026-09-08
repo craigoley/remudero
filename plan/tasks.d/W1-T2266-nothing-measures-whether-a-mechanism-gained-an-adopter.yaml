@@ -144,7 +144,7 @@
     - claim: "a mechanism that gained an adopter stops being reported"
       proof: "unit test: test/adoption-report-has-a-producer.test.ts"
   files: [src/lib/measurement-cadence.ts, src/run-task.ts, test/adoption-report-has-a-producer.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#adoption-gap-unmeasured-2026-08-25"
   plan_refs: ["W1-T322", "W1-T1076", "W1-T1259", "W1-T1287"]

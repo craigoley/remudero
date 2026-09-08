@@ -149,7 +149,7 @@
     - claim: "temp-directory hygiene behaves exactly as it does today"
       proof: "unit test: test/git-fixture-gc-hygiene.test.ts"
   files: [test/setup/tmp-hygiene.ts, test/git-fixture-gc-hygiene.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#fixture-races-git-background-repack-2026-08-22"
   plan_refs: ["W1-T1206", "W1-T1018", "W1-T1041", "W1-T459", "W1-T515", "W1-T1127"]

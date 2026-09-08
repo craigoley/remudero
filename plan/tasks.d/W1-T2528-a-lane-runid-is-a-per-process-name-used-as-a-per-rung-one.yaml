@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/two-rungs-in-one-tick-cannot-collide-on-one-branch-name.test.ts]
   origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
   plan_refs: ["W1-T348", "W1-T2469"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED IN THE DAEMON'S OWN LOG, 2026-08-31, verbatim and in order:

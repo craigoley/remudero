@@ -11,7 +11,7 @@
   files: [src/lib/main-health-rung.ts, src/run-task.ts, scripts/source-size-baseline.json, test/main-health-wiring.test.ts]
   origin: "operator-brief#self-watch-the-pr-queue-overnight-2026-09-02"
   plan_refs: ["W1-T2204", "W1-T1275"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED AT `e2b9c012`, NOT INFERRED FROM THE PLAN RECORD. `mainHealthFromRollup`,

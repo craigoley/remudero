@@ -80,7 +80,7 @@
   origin: recon#proof-name-resolution-dep-starved-2026-08-14
   plan_refs: ["W1-T488", "W1-T245"]
   files: [src/run-task.ts, test/lint-proof-name-resolution-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`. Blast radius is one
     assignment plus whatever design (iv) rules; the check itself is unchanged and cannot block.

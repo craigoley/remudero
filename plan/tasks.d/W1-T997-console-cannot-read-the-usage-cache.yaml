@@ -111,7 +111,7 @@
   origin: "oper#console-cannot-read-usage-cache-2026-08-18"
   plan_refs: ["W1-T417", "W1-T915", "W1-T333"]
   files: [src/lib/account-usage.ts, src/lib/serve.ts, test/account-usage.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT c8568c2, OWN PATH ABSENT.

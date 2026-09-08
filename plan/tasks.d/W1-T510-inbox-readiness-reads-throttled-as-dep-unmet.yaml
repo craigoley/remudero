@@ -99,7 +99,7 @@
   origin: feedback#fb-1784825998733-98ef84
   plan_refs: ["W1-T110", "W1-T119", "W1-T130", "W1-T367", "W1-T415", "§7B"]
   files: [src/lib/inbox.ts, src/run-task.ts, src/lib/panel-graph.ts, src/lib/status-board.ts, test/inbox-deps-unobservable.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — `classifyProposal` is a PURE function over an injected context, so every claim
     is decidable in-process against seeded projections. No network, nothing spawned, no operator present.

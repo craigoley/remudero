@@ -10,7 +10,7 @@
   files: [src/lib/trace.ts, src/lib/panel-graph.ts, test/feedback-discharge.test.ts]
   origin: oper#feedback-inbox-no-retirement-path-2026-08-23
   plan_refs: ["W1-T43", "W1-T257", "W1-T285", "W1-T415", "W1-T1103", "W1-T1251"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Q1 — DOES ANY CODE PATH WRITE A TERMINAL STATUS MEANING "THE WORK THIS PRODUCED HAS SHIPPED"?

@@ -78,7 +78,7 @@
   origin: oper#duplicate-dispatch-W1-T350-2026-08-05
   plan_refs: ["W1-T80", "W1-T177", "W1-T256", "W1-T257", "W1-T181"]
   files: [src/lib/status.ts, test/open-pr-corroboration.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high because the rung GATES DISPATCH — this file's own header says a false credit here is
     worse than no credit. Graded on the blast radius of being wrong, not on the size of the change.

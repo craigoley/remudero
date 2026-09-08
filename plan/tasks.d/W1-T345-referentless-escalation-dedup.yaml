@@ -53,7 +53,7 @@
   origin: oper#needs-me-filings-2026-08-04
   plan_refs: ["W1-T195", "W1-T104", "§4"]
   files: [src/lib/escalate.ts, test/escalate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — dedup decisions over injected gateways, fully machine-checkable.
     risk:high — it touches the escalation transport: wrong in the permissive direction it keeps the

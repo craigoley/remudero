@@ -109,7 +109,7 @@
   origin: recon#detectors-without-suppliers-2026-08-16
   plan_refs: ["W1-T534", "W1-T532", "W1-T528", "W1-T520", "W1-T471"]
   files: [src/lib/drain.ts, src/lib/daemon.ts, src/run-task.ts, test/drain.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across three `src/` modules and a suite, and
     independently warranted: this changes what the fleet REFUSES to dispatch, so a wrong predicate

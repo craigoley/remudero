@@ -90,7 +90,7 @@
   origin: "followup#W1-T2460-1788054755234"
   plan_refs: ["W1-T405", "W1-T2501", "W1-T496", "§4B"]
   files: [docs/audits/worktree-base-provisioning-2026-09.md, docs/docs-index.json]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED 2026-09-01 from follow-up harvest followup:W1-T2460-1788054755234 (run

@@ -10,7 +10,7 @@
   files: [.github/workflows/ci.yml, test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts, test/ci-sharding.test.ts, test/push-ci-on-main.test.ts, test/test-with-retry.test.ts]
   origin: "operator-overnight-steward#ci-shards-run-the-full-suite-2026-09-02"
   plan_refs: ["W1-T2597"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     GitHub job logs from PR #3609 are the material measurement: ci-shards 1/4, 2/4, 3/4 and

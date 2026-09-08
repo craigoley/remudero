@@ -75,7 +75,7 @@
   origin: oper#daemon-watch-2026-08-06
   plan_refs: ["§4A", "W1-T378", "W1-T175"]
   files: [src/lib/worker.ts, test/worktree-reap-liveness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — `WorktreeReapOpts` already injects `isPidAlive`, `newestActivity` and `now`,
     so both directions assert in-process against a temp dir with no real process and no clock skew.

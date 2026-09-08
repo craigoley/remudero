@@ -68,7 +68,7 @@
   origin: oper#flake-cross-check-2026-08-15
   plan_refs: ["W1-T255", "W1-T356"]
   files: [src/lib/host-parity.ts, test/host-parity.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the function is a pure fold over an outcome list, decidable from fixtures
     with no spawn, no network and no runner. risk:medium is Rule 19's SPAN and it is honest:

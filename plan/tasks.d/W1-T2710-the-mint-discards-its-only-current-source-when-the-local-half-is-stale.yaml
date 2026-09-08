@@ -10,7 +10,7 @@
   files: [src/lib/task-id.ts, test/the-mint-discards-its-only-current-source-when-the-local-half-is-stale.test.ts]
   origin: "operator-session#mint-walked-twenty-ids-2026-09-02"
   plan_refs: ["W1-T509", "W1-T518", "W1-T1039", "W1-T1055", "W1-T2685"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE GUARD FIRED ON THE HEALTHY SOURCE. `MAX_MENTION_LEAD` exists for W1-T1039's defect — a

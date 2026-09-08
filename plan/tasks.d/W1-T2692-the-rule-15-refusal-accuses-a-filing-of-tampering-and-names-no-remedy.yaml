@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts]
   origin: "operator-session#pr-3615-split-2026-09-02"
   plan_refs: ["W1-T58", "W1-T399", "W1-T400", "W1-T2532"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED: THREE PRs BLOCKED BY THIS SHAPE IN ONE SESSION, each green on every check and each

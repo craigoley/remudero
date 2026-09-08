@@ -68,7 +68,7 @@
   origin: oper#build-daemon-parallelism-2026-08-04
   plan_refs: ["W1-T326"]
   files: [src/lib/deployer.ts, src/lib/ledger.ts, test/deployer.test.ts, test/ledger-render-retention.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — elapsed-time bounds and counter states are pure decisions over injected inputs.
     risk:high — Rule 19 counts deployer and ledger as distinct subsystems, and this decides when a

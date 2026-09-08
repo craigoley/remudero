@@ -113,7 +113,7 @@
   origin: recon#guard-reach-2026-08-07
   plan_refs: ["W1-T142", "W1-T322", "W1-T386", "W1-T396"]
   files: [src/lib/review.ts, test/scope-guard-review-direction.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is a predicate assertion over synthetic diffs and a declared file
     list, decidable in-process with no worker spawn and no network.

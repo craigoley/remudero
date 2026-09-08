@@ -10,7 +10,7 @@
   files: [src/lib/ledger.ts, src/lib/panel-actions.ts, test/risk-override-record.test.ts]
   origin: oper#risk-escalation-override-leaves-no-record-2026-08-24
   plan_refs: ["W1-T182", "W1-T219", "W1-T248", "W1-T329", "W1-T346", "W1-T1031"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main 2e6a0748 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT.

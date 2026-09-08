@@ -10,7 +10,7 @@
   files: [src/lib/dispatch-claim.ts, src/run-task.ts, test/dispatch-claim.test.ts]
   origin: oper#dispatch-claim-second-rung-2026-08-23
   plan_refs: ["W1-T534", "W1-T916", "W1-T1035", "W1-T1207", "W1-T1240", "W1-T1019", "W1-T1132", "W1-T978", "W1-T396", "W1-T509"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RE-DERIVED FROM SOURCE, NOT CITED FROM A BRIEF. `isDispatchEligible` (src/lib/drain.ts) decides

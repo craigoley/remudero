@@ -125,7 +125,7 @@
     - claim: "the posted review row can say which of the two a failed pure-path proof was"
       proof: "unit test: test/pure-path-proof-outcomes.test.ts"
   files: [src/lib/review.ts, test/pure-path-proof-outcomes.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: recon#pure-path-proof-conflates-outcomes-2026-08-21
   plan_refs: ['W1-T499', 'W1-T456', 'W1-T362', 'W1-T273', 'W1-T112']

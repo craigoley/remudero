@@ -124,7 +124,7 @@
     - claim: "no declaration is removed and no branch is deleted by the reported signal"
       proof: "unit test: test/declared-guard-drift.test.ts"
   files: [src/lib/status.ts, src/run-task.ts, test/declared-guard-drift.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#declared-but-not-named-2026-08-24"
   plan_refs: ["W1-T447", "W1-T420", "W1-T1076", "W1-T1268", "W1-T509"]

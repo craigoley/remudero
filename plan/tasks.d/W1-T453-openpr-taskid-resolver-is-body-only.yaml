@@ -85,7 +85,7 @@
   origin: recon#arm-refusal-no-backoff-2026-08-13
   plan_refs: ["W1-T230", "W1-T449"]
   files: [src/run-task.ts, src/lib/status.ts, test/openpr-taskid-resolver.test.ts, test/sweep.test.ts, test/status.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every open question here has a derivable answer. The one judgement call is
     precedence, and design (ii) states a recommendation with its reason rather than parking it.

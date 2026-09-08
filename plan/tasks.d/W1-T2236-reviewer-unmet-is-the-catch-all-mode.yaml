@@ -10,7 +10,7 @@
   files: [src/run-task.ts, src/lib/sweep.ts, test/fix-mode-gate-failures.test.ts]
   origin: oper#reviewer-unmet-is-the-catch-all-mode-2026-08-24
   plan_refs: ["W1-T457", "W1-T1282", "W1-T440"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RE-DERIVED 2026-08-24 in a scratch worktree with `HEAD == origin/main` PROVEN BY SHA at

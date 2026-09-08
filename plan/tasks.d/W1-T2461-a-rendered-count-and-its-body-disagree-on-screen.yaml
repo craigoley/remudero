@@ -10,7 +10,7 @@
   files: [src/lib/inbox.ts, test/inbox.test.ts]
   origin: "oper#count-and-body-disagree-2026-08-30"
   plan_refs: ["W1-T2450", "W1-T2445", "W1-T2397", "W1-T193", "W1-T111"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     **THE COMMISSIONING HYPOTHESIS IS FALSE, AND THE REAL MECHANISM IS SHARPER.** The brief expects

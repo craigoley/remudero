@@ -65,7 +65,7 @@
   origin: "oper#external-scan-2026-09-02"
   plan_refs: ["W1-T2311", "W1-T2552", "W1-T2211", "W1-T1289", "W1-T1265", "W1-T2295", "W1-T2317", "W1-T2699", "§4A", "§8"]
   files: [src/lib/containment.ts, scripts/credential-reach-baseline.json, test/credential-reach-probe.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:blast-radius — the probe touches the spawn path's env builder and

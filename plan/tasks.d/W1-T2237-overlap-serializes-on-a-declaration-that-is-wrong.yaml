@@ -153,7 +153,7 @@
     - claim: "the partition stays deterministic in candidate order with the observed input supplied"
       proof: "unit test: test/overlap-uses-observed-scope.test.ts"
   files: [src/lib/dispatch-overlap.ts, test/overlap-uses-observed-scope.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#declared-scope-vs-real-diff-2026-08-24"
   plan_refs: ["W1-T171", "W1-T401", "W1-T434", "W1-T1014", "W1-T1030", "W1-T1227"]

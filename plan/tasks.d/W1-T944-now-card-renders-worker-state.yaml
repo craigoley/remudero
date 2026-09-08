@@ -59,7 +59,7 @@
   origin: feedback#fb-1785237627858-ffafd9
   plan_refs: ["§7"]
   files: [src/lib/status.ts, src/lib/board.ts, src/lib/serve.ts, test/now-card-worker-state.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high is Rule 19's SPAN (three src/lib modules plus test/), the W1-T310 grade. Blast radius

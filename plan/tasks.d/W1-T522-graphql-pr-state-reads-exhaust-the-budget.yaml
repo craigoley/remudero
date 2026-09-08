@@ -172,7 +172,7 @@
   origin: "oper#rate-limit-recon-2026-08-15"
   plan_refs: ["W1-T511", "W1-T468", "W1-T177", "W1-T494"]
   files: [src/lib/review.ts, src/run-task.ts, test/review-status-gate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high is set UP FRONT and it is Rule 19's SPAN, not blast radius: the files: list
     crosses two source modules because the two offending sites live in two modules and

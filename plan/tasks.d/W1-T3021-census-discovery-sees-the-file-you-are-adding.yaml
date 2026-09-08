@@ -10,7 +10,7 @@
   files: [src/lib/ci-parity.ts, test/census-discovery-sees-the-file-you-are-adding.test.ts]
   origin: "operator-session#4380-census-drift-false-clean-2026-09-07"
   plan_refs: ["W1-T2643", "W1-T2809", "W1-T2849"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, NOT INFERRED. PR #4380 failed all four ci-shards on `undisclosed census-shaped

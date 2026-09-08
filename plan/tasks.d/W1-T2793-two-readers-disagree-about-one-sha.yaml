@@ -11,7 +11,7 @@
   files: [src/lib/sweep.ts, src/lib/review.ts, test/two-readers-cannot-disagree-about-one-sha.test.ts]
   origin: "operator-decision#w1-t2793-file-reader-disagreement-2026-09-03"
   plan_refs: ["W1-T2541", "W1-T2790", "W1-T2791"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE EVIDENCE, at head 61f3518 of #3840, both posts to that ONE sha:
