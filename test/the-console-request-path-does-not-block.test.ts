@@ -1,6 +1,7 @@
 // @source-text-subject: this suite's first two assertions intentionally inspect route handler
 // source text because W1-T3192's deliverable is a request-path census/ratchet.
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -168,8 +169,43 @@ test("console read routes answer within budget under four fetches plus an open S
 
     assert.ok(elapsedMs < CONSOLE_READ_ROUTE_BUDGET_MS, `overlapping console fetches took ${elapsedMs.toFixed(1)}ms`);
     for (const res of responses) assert.equal(res.status, 200);
-    const bodies = await Promise.all(responses.map((res) => res.json() as Promise<{ staleness?: { stale?: boolean; ageMs?: number | null } }>));
-    assert.ok(bodies.every((body) => body.staleness && body.staleness.stale === true));
-    assert.ok(bodies.every((body) => body.staleness?.ageMs === null));
+    const bodies = await Promise.all(responses.map((res) => res.json() as Promise<{ staleness?: { budgetMs?: number }; tasks?: unknown[] }>));
+    assert.equal(bodies[0].tasks?.length, 2);
+    assert.ok(bodies.every((body) => body.staleness?.budgetMs === CONSOLE_READ_ROUTE_BUDGET_MS));
   });
+});
+
+test("an over-budget console read route returns a stale fallback with staleness instead of waiting unbounded", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root, planOf([task({ id: "W1-T3192-SLOW" })]));
+  const slowStatus: Route = {
+    method: "GET",
+    path: "/v1/status",
+    scope: "read",
+    handler: async (_req, res) => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ generated_at: new Date().toISOString(), tasks: [{ taskId: "late" }] }));
+    },
+  };
+  const [route] = boundConsoleReadRoutes([slowStatus], deps, 20);
+  const server = createServer((req, res) => {
+    void route.handler(req, res, { params: {} });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const started = performance.now();
+    const res = await fetch(`${base}/v1/status`);
+    const elapsedMs = performance.now() - started;
+    const body = (await res.json()) as { tasks: unknown[]; staleness?: { stale?: boolean; ageMs?: number | null; refreshing?: boolean } };
+    assert.ok(elapsedMs < CONSOLE_READ_ROUTE_BUDGET_MS, `stale fallback took ${elapsedMs.toFixed(1)}ms`);
+    assert.equal(res.headers.get("x-rmd-cache-state"), "stale");
+    assert.equal(body.tasks.length, 1);
+    assert.equal(body.staleness?.stale, true);
+    assert.equal(body.staleness?.ageMs, null);
+    assert.equal(body.staleness?.refreshing, true);
+  } finally {
+    server.close();
+  }
 });

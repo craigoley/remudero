@@ -478,7 +478,6 @@ export interface ConsoleBlockingRequestPathViolation {
 }
 
 export const CONSOLE_READ_ROUTE_BUDGET_MS = 750;
-export const CONSOLE_READ_ROUTE_REFRESH_DELAY_MS = 25;
 export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
 const CONSOLE_STALENESS_FIELD = "staleness";
 const CONSOLE_CACHED_READ_PATHS = new Set(["/", "/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health"]);
@@ -651,34 +650,42 @@ export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: n
   if (route.method !== "GET" || route.scope !== "read" || !CONSOLE_CACHED_READ_PATHS.has(route.path)) return route;
   let cached: BufferedRouteResponse | undefined;
   let refreshing = false;
+  let refreshPromise: Promise<void> | undefined;
   let lastError: string | undefined;
 
-  const refresh = (req: import("node:http").IncomingMessage): void => {
-    if (refreshing) return;
+  const refresh = (req: import("node:http").IncomingMessage): Promise<void> => {
+    if (refreshPromise) return refreshPromise;
     refreshing = true;
-    setTimeout(() => {
-      void (async () => {
-        const startedAt = Date.now();
-        const buffer = new RouteResponseBuffer();
-        try {
-          await route.handler(req, buffer as unknown as import("node:http").ServerResponse, { params: {} });
-          cached = buffer.buffered(startedAt);
-          lastError = undefined;
-        } catch (error) {
-          lastError = String((error as Error)?.message ?? error);
-        } finally {
-          refreshing = false;
-        }
-      })();
-    }, CONSOLE_READ_ROUTE_REFRESH_DELAY_MS).unref?.();
+    const startedAt = Date.now();
+    const buffer = new RouteResponseBuffer();
+    refreshPromise = (async () => {
+      try {
+        await route.handler(req, buffer as unknown as import("node:http").ServerResponse, { params: {} });
+        cached = buffer.buffered(startedAt);
+        lastError = undefined;
+      } catch (error) {
+        lastError = String((error as Error)?.message ?? error);
+      } finally {
+        refreshing = false;
+        refreshPromise = undefined;
+      }
+    })();
+    return refreshPromise;
   };
 
   return {
     ...route,
-    handler: (req, res) => {
-      const nowMs = Date.now();
-      refresh(req);
-      const staleness = responseStaleness(nowMs, cached?.generatedAtMs, refreshing, budgetMs, lastError);
+    handler: async (req, res) => {
+      const refreshDone = refresh(req);
+      const outcome = await Promise.race([
+        refreshDone.then(() => "ready" as const),
+        new Promise<"budget">((resolve) => setTimeout(() => resolve("budget"), budgetMs)),
+      ]);
+      if (outcome === "ready" && cached) {
+        writeBufferedResponse(res, cached, responseStaleness(Date.now(), cached.generatedAtMs, refreshing, budgetMs, lastError));
+        return;
+      }
+      const staleness = responseStaleness(Date.now(), cached?.generatedAtMs, refreshing, budgetMs, lastError);
       if (cached) {
         writeBufferedResponse(res, cached, staleness);
         return;

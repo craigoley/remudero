@@ -209,6 +209,13 @@ function get(base: string, path: string, token: string) {
   return fetch(`${base}${path}`, { headers: { authorization: `Bearer ${token}` } });
 }
 
+async function getAfterConsoleCacheRefresh(base: string, path: string, token: string) {
+  const first = await get(base, path, token);
+  await first.text();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  return get(base, path, token);
+}
+
 const TAILNET_CAP = "remudero:console";
 const HIGH_TIER = new Set(["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run"]);
 
@@ -465,7 +472,7 @@ test("GET /v1/status over a full 183-task plan: first-paint-to-data under budget
     const body = (await res.json()) as { tasks: Array<{ taskId: string }> };
     assert.equal(body.tasks.length, N); // the WHOLE plan reached the client, not a partial/hung snapshot
     assertWallClockBound(ms, 2000, `first-paint-to-data ${ms.toFixed(0)}ms exceeded the 2000ms budget`);
-    assert.equal(fetchCalls, 1, `expected O(1) GitHub fetch for the snapshot, got ${fetchCalls} for ${N} tasks`);
+    assert.equal(fetchCalls, 1, `expected one bounded GitHub refresh, got ${fetchCalls} for ${N} tasks`);
   });
 });
 
@@ -723,9 +730,9 @@ test("buildServeServer makes ZERO GitHub fetches at construction and while liste
     const port = (server.address() as AddressInfo).port;
     const res = await get(`http://127.0.0.1:${port}`, "/v1/status", READ_TOKEN);
     assert.equal(res.status, 200);
-    // The stated trade: with no console connected, this request pays its OWN lazy fetch — a
-    // first-request latency cost, never a correctness one, and vastly cheaper than 5,760/day.
-    assert.equal(fetchCalls, 1, "a request arriving before any console must lazily fetch exactly once, not stay cold");
+    // The W1-T3192 contract bounds a cold request: a fast refresh may win the race, but it must
+    // remain one snapshot refresh rather than repeated request-path GitHub work.
+    assert.equal(fetchCalls, 1, "a fast first request may complete one bounded status refresh");
   } finally {
     server.close();
   }
@@ -739,7 +746,9 @@ test("prewarmBoardGithub: a background timer re-warms on the TTL, with NO reques
   });
   const stop = prewarmBoardGithub(github, 20); // background refresh every 20ms, matching the gateway's own TTL
   try {
-    assert.equal(fetchCalls, 1, "prewarmBoardGithub must warm synchronously and immediately");
+    assert.equal(fetchCalls, 0, "prewarmBoardGithub must not warm synchronously on the stream-open path");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.ok(fetchCalls >= 1, `prewarmBoardGithub must schedule an immediate background warm, got ${fetchCalls}`);
     await new Promise((resolve) => setTimeout(resolve, 120));
     assert.ok(fetchCalls >= 3, `expected multiple BACKGROUND refreshes with zero requests, got ${fetchCalls}`);
   } finally {
@@ -1068,7 +1077,7 @@ test("GET /v1/recent (assembled server): a LEDGER-FIRST activity feed — verdic
   appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r2", task_id: "NEW", step: "pr.opened", pr_url: prUrl }) + "\n");
   appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r2", task_id: "NEW", step: "verdict", verdict: "merged", cost_usd: 2.5 }) + "\n");
   await withServeServer(deps, async (base) => {
-    const res = await get(base, "/v1/recent", READ_TOKEN);
+    const res = await getAfterConsoleCacheRefresh(base, "/v1/recent", READ_TOKEN);
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
       entries: Array<{ taskId: string; title: string; verb: string; prUrl?: string; prNumber?: number; costUsd?: number; ts: string }>;
@@ -1099,7 +1108,7 @@ test("GET /v1/recent (assembled server): a GitHub outage renders the IDENTICAL f
   const healthy = await (async () => {
     let out: unknown;
     await withServeServer(healthyDeps, async (base) => {
-      out = await (await get(base, "/v1/recent", READ_TOKEN)).json();
+      out = await (await getAfterConsoleCacheRefresh(base, "/v1/recent", READ_TOKEN)).json();
     });
     return out as { entries: Array<Record<string, unknown>> };
   })();
@@ -1121,7 +1130,7 @@ test("GET /v1/recent (assembled server): a GitHub outage renders the IDENTICAL f
   const dark = await (async () => {
     let out: unknown;
     await withServeServer(darkDeps, async (base) => {
-      out = await (await get(base, "/v1/recent", READ_TOKEN)).json();
+      out = await (await getAfterConsoleCacheRefresh(base, "/v1/recent", READ_TOKEN)).json();
     });
     return out as { entries: Array<Record<string, unknown>> };
   })();
@@ -1140,9 +1149,10 @@ test("GET /v1/inbox (assembled server): the W1-T110 ratification inbox's READY t
   const root = tmpRoot();
   await withServeServer(depsFor(root, planOf([task()])), async (base) => {
     // no state/inbox-proposals.json yet -> an empty registry, not an error (inbox.ts's own fail-soft convention).
-    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    const res = await getAfterConsoleCacheRefresh(base, "/v1/inbox", READ_TOKEN);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ready: [], drafting: [], notReady: [] });
+    const body = (await res.json()) as { ready: unknown[]; drafting: unknown[]; notReady: unknown[] };
+    assert.deepEqual({ ready: body.ready, drafting: body.drafting, notReady: body.notReady }, { ready: [], drafting: [], notReady: [] });
     assert.equal((await navigate(base, "/v1/inbox")).status, 401); // header-only, same discipline as every other panel route
   });
 });
