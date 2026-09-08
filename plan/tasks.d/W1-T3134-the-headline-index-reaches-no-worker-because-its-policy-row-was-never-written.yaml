@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: investigate
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: medium
   budget_usd: 10.00
@@ -72,3 +72,12 @@
     `rmd next-task-id`'s own next-free computation and was swept against all three surfaces —
     reservation refs (highest reserved 3133), origin/main's plan, and every open PR's title/body/
     head ref plus every open head's shard files — each with a positive control that fired.
+
+    verify FLIPPED human -> auto BY OPERATOR RULING 2026-09-08. Filed verify:human on the author's
+    own caution, because enabling the row changes every worker prompt fleet-wide. That reasoning
+    belongs to the RULING, which design (iii) still leaves with the operator, not to the record:
+    the deliverable in `files:` is a test that asserts the dark state, and no acceptance criterion
+    here asks anyone to write the policy row. An author's caution is not a reason to park a record
+    on a person; only a judge that deems a change risky should. No gate required human — this shard
+    carries no `author_class`, so Law 5's arm (`machineAuthorVerifyViolation`) never applied and
+    auto was always available. The durable mechanism is filed as W1-T3143.

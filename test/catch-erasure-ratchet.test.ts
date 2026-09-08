@@ -284,7 +284,7 @@ function conflatorViolations(root: string, baseline: ConflatorSite[]): Conflator
 // had carried since capture, surfaced by the recount and lowered because leaving a known-loose
 // row is the population growth W1-T2295 exists to stop.
 const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
-  "src/lib/analytics-route.ts": 1,
+  "src/lib/analytics-route.ts": 0,
   "src/lib/autonomy.ts": 1,
   "src/lib/board.ts": 3,
   "src/lib/ci-parity.ts": 3,
@@ -339,7 +339,7 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/serve.ts": 20,
   "src/lib/skill.ts": 4,
   "src/lib/status-board.ts": 5,
-  "src/lib/status.ts": 7,
+  "src/lib/status.ts": 6,
   "src/lib/task-id-reservation.ts": 1,
   "src/lib/task-linter.ts": 1,
   "src/lib/trace.ts": 1,

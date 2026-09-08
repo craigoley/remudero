@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: investigate
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: medium
   budget_usd: 12.00
@@ -67,6 +67,12 @@
   note: |
     FILED 2026-09-08. NO RESERVATION MINTED — see W1-T3134's note.
 
-    verify:human because Route A changes what every dispatched worker reads, fleet-wide, and the
-    isolation it would undo was a deliberate choice this repo has pinned with a claim and a census
-    test. That is an operator ruling, not a worker's.
+    verify:auto BY OPERATOR RULING 2026-09-08, and the blast-radius argument that produced the
+    original verify:human is preserved WHERE IT BELONGS — in design (ii), which keeps the Route A /
+    Route B choice with the operator. The distinction matters: parking the RECORD stopped a worker
+    from writing the reachability TEST, which is the whole deliverable and is inert; it never was
+    what stopped Route A, because no acceptance criterion here asks for a `settingSources` change
+    and a worker that made one would be building something this shard does not describe. An author's
+    caution is not a reason to park a record on a person; only a judge that deems a change risky
+    should. No gate required human here — this shard carries no `author_class`, so Law 5's arm never
+    applied. The durable mechanism is filed as W1-T3143.
