@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { readLedgerLines } from "../src/lib/status.js";
+import { buildSweepEffects } from "../src/run-task.js";
+import type { IssueGateway } from "../src/lib/escalate.js";
 import {
   ARTIFACT_FINALIZE_INTERMEDIARY_403,
   DEFAULT_SWEEP_POLICY,
@@ -201,4 +203,44 @@ test("MUTANT: the same failure WITH a job id still reruns — the missing-id arm
   assert.equal(f.requeued.length, 1, "a resolvable job id still takes the dispatch arm");
   const outcome = readLedgerLines(ledgerPath).find((l) => l.step === "sweep.ci_infrastructure_requeue");
   assert.equal(outcome?.outcome, "dispatched");
+});
+
+test("the production sweep escalation adapter carries the check, signature, and refusal reason to the issue gateway", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-ci-infra-escalation-root-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const created: Array<{ title: string; body: string; labels: string[] }> = [];
+  const issues: IssueGateway = {
+    create: (title, body, labels) => {
+      created.push({ title, body, labels });
+      return "https://github.com/craigoley/remudero/issues/9999";
+    },
+  };
+  const effects = buildSweepEffects(
+    "craigoley",
+    "remudero",
+    { root, claudeBin: "/usr/bin/true" } as never,
+    ledgerPath,
+    "SWEEP-INFRA-ESCALATION",
+    { tasks: [] } as never,
+    () => {},
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    issues,
+  );
+
+  await effects.escalateInfrastructureCheck?.(
+    subject(),
+    infra("coverage-ratchet"),
+    "the single-job rerun API call failed",
+    ARTIFACT_FINALIZE_INTERMEDIARY_403,
+  );
+
+  assert.equal(created.length, 1, "the production adapter reaches the configured issue gateway");
+  assert.match(created[0]?.title ?? "", /coverage-ratchet/);
+  assert.match(created[0]?.body ?? "", new RegExp(ARTIFACT_FINALIZE_INTERMEDIARY_403));
+  assert.match(created[0]?.body ?? "", /single-job rerun API call failed/);
+  assert.match(created[0]?.body ?? "", /No code worker or fix strike was spent/);
+  assert.deepEqual(created[0]?.labels.slice(0, 1), ["needs-human"]);
 });
