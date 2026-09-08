@@ -2983,6 +2983,8 @@ export interface SweepDeps {
     queueDepth: number;
     nowMs: number;
     ledgerLines: ReadonlyArray<Record<string, unknown>>;
+    /** W1-T3202 — already-read process count shared with repair admission. */
+    activeWorkers?: number;
   }) => number;
   /** W1-T2584 — MAY THE BOUNDED REVIEW POOL ADMIT ANOTHER HEAD from this pass's already-derived
    *  pending set? Consulted synchronously before each worker pulls its next job; omission means
@@ -3004,6 +3006,15 @@ export interface SweepDeps {
   claimFixAdmission?: (pr: OpenPrView) =>
     | { admitted: true }
     | { admitted: false; reason: string };
+  /** W1-T3202 — identifies the one shared host-budget controller that admitted this pass's
+   *  detached repairs. Full sweeps build it inside {@link runSweep}; light sweeps share one across
+   *  their per-PR calls. Omission preserves every direct/test caller's previous behavior. */
+  repairAdmissionSurface?: SweepRepairSurface;
+  /** Read-only live view of the controller above, used only for bounded overlap telemetry. */
+  repairAdmissionTelemetry?: () => SweepFixCapacitySnapshot;
+  /** W1-T3202 — injectable seam for the process-wide count. Production omits it and reads
+   *  {@link activeWorkerCount}; a pass invokes either form exactly once. */
+  readActiveWorkerCount?: () => number;
   /** W1-T2998 — repair a red RECORDABLE ratchet by re-running its generator and pushing the result,
    *  instead of spending an LLM fix round on a number the failing script already printed. Consulted
    *  ONLY when {@link SweepPolicy.recordableRatchetRepairEnabled} is true AND
@@ -3068,7 +3079,8 @@ export interface SweepDeps {
    *  refusal, so it can never admit anything. // Why: 289 such rows across 18 PRs. */
   standDownReasonFor?: (d: Disposition) => string | undefined;
 
-  /** W1-T2379 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set ONLY by {@link runSweepLightPass}. The
+  /** W1-T2379/W1-T3202 — DO NOT AWAIT THE FIX RUNG'S CI WAIT. Set by the light pass and by the
+   *  production full-sweep wrapper. The
    *  dispatch is still CALLED and still writes its `acted: true` row before returning, so the dedup
    *  seed is untouched — only the `await` moves into {@link drainDetachedSweepActions}. NOT AN
    *  ADMISSION CHANGE. */
@@ -3809,6 +3821,92 @@ export function detachedActionInFlight(kind: DetachedActionKind): boolean {
   return false;
 }
 
+export type SweepRepairSurface = "full" | "light";
+
+export interface SweepFixCapacitySnapshot {
+  surface: SweepRepairSurface;
+  queueDepth: number;
+  hostWorkerBudget: number;
+  activeWorkers: number;
+  reviewReservations: number;
+  fixesAdmitted: number;
+  fixesRefused: number;
+  fixAdmissionsAvailable: number;
+}
+
+/** W1-T3202 — one admission controller shared by both sweep surfaces. The caller supplies the
+ *  already-measured worker count and review reservation; this function never re-reads either, so
+ *  concurrent repair starts cannot each observe the same free slot. */
+export function createSweepFixAdmissionController(input: {
+  surface: SweepRepairSurface;
+  queueDepth: number;
+  hostWorkerBudget: number;
+  activeWorkers: number;
+  reviewReservations: number;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}): {
+  claim: NonNullable<SweepDeps["claimFixAdmission"]>;
+  snapshot: () => SweepFixCapacitySnapshot;
+} {
+  let available = Math.max(
+    0,
+    Math.trunc(input.hostWorkerBudget) - Math.max(0, Math.trunc(input.activeWorkers)) -
+      Math.max(0, Math.trunc(input.reviewReservations)),
+  );
+  let fixesAdmitted = 0;
+  let fixesRefused = 0;
+  const snapshot = (): SweepFixCapacitySnapshot => ({
+    surface: input.surface,
+    queueDepth: input.queueDepth,
+    hostWorkerBudget: input.hostWorkerBudget,
+    activeWorkers: input.activeWorkers,
+    reviewReservations: input.reviewReservations,
+    fixesAdmitted,
+    fixesRefused,
+    fixAdmissionsAvailable: available,
+  });
+  const emit = (): void => {
+    const state = snapshot();
+    input.log?.("sweep.fix_capacity", {
+      surface: state.surface,
+      queue_depth: state.queueDepth,
+      host_worker_budget: state.hostWorkerBudget,
+      active_workers: state.activeWorkers,
+      review_reservations: state.reviewReservations,
+      fixes_admitted: state.fixesAdmitted,
+      fixes_refused: state.fixesRefused,
+      fix_admissions_available: state.fixAdmissionsAvailable,
+    });
+  };
+  emit();
+  return {
+    snapshot,
+    claim: () => {
+      if (available <= 0) {
+        fixesRefused++;
+        emit();
+        return {
+          admitted: false,
+          reason:
+            `host worker budget ${input.hostWorkerBudget} exhausted for this ${input.surface} pass ` +
+            `(${input.activeWorkers} active, ${input.reviewReservations} reserved for review, ` +
+            `${fixesAdmitted} fixes admitted)` +
+            " — repair remains queued and will be re-derived next pass",
+        };
+      }
+      available--;
+      fixesAdmitted++;
+      emit();
+      return { admitted: true };
+    },
+  };
+}
+
+/** Production composition for both full-sweep entry points. Kept pure so wiring cannot drift. */
+export function withFullSweepRepairAdmission(deps: SweepDeps): SweepDeps {
+  return { ...deps, detachFixWait: true, repairAdmissionSurface: "full" };
+}
+
 /**
  * THE SHARED ENTRY POINT: BOTH `rmd sweep` and the daemon poll loop call this ONE function. It
  * re-derives every open PR's disposition fresh, takes the ONE gated action per PR, writes one
@@ -3844,13 +3942,14 @@ function effectiveReviewWidth(
   queueDepth: number,
   nowMs: number,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  activeWorkers?: number,
 ): number {
   const min = Math.max(1, Math.trunc(policy.reviewLaneMin));
   const max = Math.max(min, Math.trunc(policy.reviewLaneMax));
   const base = Math.min(max, Math.max(min, Math.trunc(policy.reviewLanes)));
   if (!deps.selectAdaptiveReviewWidth) return base;
   try {
-    const selected = deps.selectAdaptiveReviewWidth({ queueDepth, nowMs, ledgerLines });
+    const selected = deps.selectAdaptiveReviewWidth({ queueDepth, nowMs, ledgerLines, activeWorkers });
     if (!Number.isFinite(selected)) throw new Error(`non-finite width ${JSON.stringify(selected)}`);
     return Math.min(max, Math.max(min, Math.trunc(selected)));
   } catch (error) {
@@ -3881,6 +3980,37 @@ export async function runSweep(
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
   const prior = priorActionsFromLedger(ledgerLines);
+  // W1-T3202 — FULL-SWEEP CAPACITY IS DERIVED ONCE, BEFORE ANY REPAIR CAN SPAWN. Reviews reserve
+  // only their live spawning width (plan filings are deterministic), and the same active-worker
+  // sample feeds both the adaptive review selector and the repair remainder. Light passes supply
+  // their shared controller below because they fan this function out one PR at a time.
+  const fullRepairActiveWorkers =
+    deps.repairAdmissionSurface === "full" && !deps.claimFixAdmission
+      ? (deps.readActiveWorkerCount ?? activeWorkerCount)()
+      : undefined;
+  const fullReviewQueueDepth = deps.repairAdmissionSurface === "full"
+    ? reviewAdmissionQueueDepth(openPrs, policy, now, {
+        delivered: prior.reviewDelivered,
+        refused: prior.reviewRefused,
+        retryableThrows: prior.reviewRetryableThrows,
+      })
+    : undefined;
+  const fullReviewLanes = fullReviewQueueDepth === undefined
+    ? undefined
+    : effectiveReviewWidth(deps, policy, fullReviewQueueDepth, now, ledgerLines, fullRepairActiveWorkers);
+  const fullRepairAdmission =
+    fullRepairActiveWorkers === undefined || fullReviewQueueDepth === undefined || fullReviewLanes === undefined
+      ? undefined
+      : createSweepFixAdmissionController({
+          surface: "full",
+          queueDepth: fullReviewQueueDepth,
+          hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
+          activeWorkers: fullRepairActiveWorkers,
+          reviewReservations: Math.min(fullReviewQueueDepth, fullReviewLanes),
+          log,
+        });
+  const claimFixAdmission = deps.claimFixAdmission ?? fullRepairAdmission?.claim;
+  const repairAdmissionTelemetry = deps.repairAdmissionTelemetry ?? fullRepairAdmission?.snapshot;
   // W1-T1223 (design ii) — read fresh every pass, off the SAME ledger read above; never held in
   // memory across passes. See `requeuedCheckKeysFromLedger`'s own doc.
   const requeuedCheckKeys = requeuedCheckKeysFromLedger(ledgerLines);
@@ -4670,7 +4800,7 @@ export async function runSweep(
               // no-worker exit AND after the per-PR mutex. A duplicate in-flight fix must not burn
               // one of this pass's host slots. A host refusal releases that mutex without invoking
               // dispatch, so it spends neither a worker nor a strike.
-              const fixAdmission = deps.claimFixAdmission?.(pr);
+              const fixAdmission = claimFixAdmission?.(pr);
               if (fixAdmission && !fixAdmission.admitted) {
                 fixClaim.release();
                 acted = false;
@@ -4730,7 +4860,7 @@ export async function runSweep(
               // W1-T2931: merge-conflict repair spends the same worker slot as every other fix
               // rung. As above, the task-specific mutex comes first so an in-flight duplicate
               // cannot consume shared capacity; a host refusal releases it without dispatch.
-              const conflictedAdmission = deps.claimFixAdmission?.(pr);
+              const conflictedAdmission = claimFixAdmission?.(pr);
               if (conflictedAdmission && !conflictedAdmission.admitted) {
                 conflictedFixClaim.release();
                 acted = false;
@@ -4997,7 +5127,7 @@ export async function runSweep(
   // W1-T1218/W1-T2584: ORDER BEFORE THE PULL — GitHub answers newest-first, so slicing by position
   // deferred the same oldest tail every pass.
   const orderedReviews = orderPendingReviews(pendingReviews);
-  const reviewLanes = effectiveReviewWidth(deps, policy, orderedReviews.length, now, ledgerLines);
+  const reviewLanes = fullReviewLanes ?? effectiveReviewWidth(deps, policy, orderedReviews.length, now, ledgerLines);
   const postReview = deps.postReview;
   let nextReviewIndex = 0;
   let admissionStopReason: string | undefined;
@@ -5049,6 +5179,21 @@ export async function runSweep(
         undefined,
       );
       return;
+    }
+    const repairCapacity = repairAdmissionTelemetry?.();
+    if (deps.repairAdmissionSurface && repairCapacity) {
+      log("sweep.review_started", {
+        surface: deps.repairAdmissionSurface,
+        queue_depth: repairCapacity.queueDepth,
+        host_worker_budget: repairCapacity.hostWorkerBudget,
+        active_workers: repairCapacity.activeWorkers,
+        review_reservations: repairCapacity.reviewReservations,
+        fixes_admitted: repairCapacity.fixesAdmitted,
+        fixes_refused: repairCapacity.fixesRefused,
+        review_began_while_repair_pending: detachedActionInFlight("fix-dispatch"),
+        pr_number: job.pr.prNumber,
+        head_sha: job.pr.headSha,
+      });
     }
       let acted = true;
       let actionError: string | undefined;
@@ -5297,37 +5442,24 @@ export async function runSweepLightPass(
     retryableThrows: selectionPrior.reviewRetryableThrows,
   };
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
-  const semanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines);
+  const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
+  const semanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { spawning, planFilings } = selectReviewAdmissions(openPrs, policy, now, outcomes, semanticBound);
   // W1-T2931 — one host budget, with review/merge work served before new repair work. The light
   // pass still reconciles every PR concurrently; only the expensive fix-dispatch spending point
   // claims from this shared pool. `activeWorkerCount` is the same process-wide counter the adaptive
   // review controller reads, and selected spawning reviews reserve their width before fixes race.
   const hostWorkerBudget = policy.reviewCapacity.hostWorkerBudget;
-  const activeWorkers = activeWorkerCount();
   const reviewReservations = spawning.length;
-  let availableFixAdmissions = Math.max(0, hostWorkerBudget - activeWorkers - reviewReservations);
-  let admittedFixes = 0;
-  const claimFixAdmission: NonNullable<SweepDeps["claimFixAdmission"]> = () => {
-    if (availableFixAdmissions <= 0) {
-      return {
-        admitted: false,
-        reason:
-          `host worker budget ${hostWorkerBudget} exhausted for this light pass ` +
-          `(${activeWorkers} active, ${reviewReservations} reserved for review, ${admittedFixes} fixes admitted)` +
-          " — repair remains queued and will be re-derived next pass",
-      };
-    }
-    availableFixAdmissions--;
-    admittedFixes++;
-    return { admitted: true };
-  };
-  deps.log?.("sweep.fix_capacity", {
-    host_worker_budget: hostWorkerBudget,
-    active_workers: activeWorkers,
-    review_reservations: reviewReservations,
-    fix_admissions_available: availableFixAdmissions,
+  const repairAdmission = createSweepFixAdmissionController({
+    surface: "light",
+    queueDepth,
+    hostWorkerBudget,
+    activeWorkers,
+    reviewReservations,
+    log: deps.log,
   });
+  const claimFixAdmission = repairAdmission.claim;
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
@@ -5352,10 +5484,19 @@ export async function runSweepLightPass(
       // CI wait must leave the await on both branches.
       const scopedDeps: SweepDeps =
         selectedNumbers.has(pr.prNumber) || outcomeDedupedNumbers.has(pr.prNumber)
-          ? { ...deps, detachFixWait: true, selectAdaptiveReviewWidth: undefined, claimFixAdmission }
+          ? {
+              ...deps,
+              detachFixWait: true,
+              repairAdmissionSurface: "light",
+              repairAdmissionTelemetry: repairAdmission.snapshot,
+              selectAdaptiveReviewWidth: undefined,
+              claimFixAdmission,
+            }
           : {
               ...deps,
               detachFixWait: true,
+              repairAdmissionSurface: "light",
+              repairAdmissionTelemetry: repairAdmission.snapshot,
               selectAdaptiveReviewWidth: undefined,
               claimFixAdmission,
               actionable: (d) => (d === "post-review" ? false : baseActionable ? baseActionable(d) : true),

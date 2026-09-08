@@ -530,6 +530,7 @@
     "test/followup-rotation-idempotency.test.ts": 774,
     "test/followup-routing-has-a-consumer.test.ts": 1118,
     "test/followup-settled-question-arm.test.ts": 1155,
+    "test/full-sweep-fix-head-of-line.test.ts": 1180,
     "test/fs-race-alerts.test.ts": 1453,
     "test/gate-properties.test.ts": 1252,
     "test/gateway-lives-across-ticks.test.ts": 4753,

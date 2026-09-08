@@ -1054,6 +1054,7 @@ import {
   runPostFixReverification,
   runSweep,
   runSweepLightPass,
+  withFullSweepRepairAdmission,
   redQualityGateNames,
   stillRedRequiredNames,
   terminalStateReason,
@@ -29833,11 +29834,11 @@ export function buildSweepEffects(
     // each pass supplies its already-read ledger snapshot. Host observation is local, provider
     // capacity comes only from the existing age-bounded status file, and all worker kinds count
     // against the same spawnWorker boundary counter.
-    selectAdaptiveReviewWidth: ({ queueDepth, nowMs, ledgerLines }) =>
+    selectAdaptiveReviewWidth: ({ queueDepth, nowMs, ledgerLines, activeWorkers }) =>
       selectRuntimeReviewWidth({
         root: config.root,
         queueDepth,
-        activeWorkers: activeWorkerCount(),
+        activeWorkers: activeWorkers ?? activeWorkerCount(),
         nowMs,
         ledgerLines,
         policy: policy.reviewCapacity,
@@ -30899,7 +30900,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
   const summary = await runSweep(
     projectMergedTaskCandidates(prsForFixRung, creditCandidates),
-    {
+    withFullSweepRepairAdmission({
       ...effects,
       ledgerPath,
       runId,
@@ -30908,7 +30909,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)),
       staleGateWorkflowsByPr,
       updatedForWorkflow,
-    },
+    }),
     DEFAULT_SWEEP_POLICY,
   );
 
@@ -31788,7 +31789,7 @@ export function buildSweepHook(
       const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runSweep(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
-        {
+        withFullSweepRepairAdmission({
           ...effects,
           ledgerPath,
           runId,
@@ -31800,7 +31801,7 @@ export function buildSweepHook(
           // own wall-clock timeout and re-checks the existing STOP/PAUSE controls on every pull.
           // Direct/tests calls omit it and receive the true default above.
           continueReviewAdmissions,
-        },
+        }),
         DEFAULT_SWEEP_POLICY,
       );
       // fb-1784756088300-6a481e: the escalation-lifecycle reconciler rung — closes stale
