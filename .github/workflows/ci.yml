@@ -1050,6 +1050,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # W1-T3141: the inherited/introduced split re-measures each violating file at
+          # `origin/main`, so that ref must exist. At the default depth 1 it does not, and
+          # `git show origin/main:<path>` exits 128 exactly as it does for a missing PATH — which
+          # read as "absent", classified every violation as INTRODUCED, and printed nothing.
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
