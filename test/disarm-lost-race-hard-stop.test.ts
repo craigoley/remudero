@@ -274,10 +274,18 @@ test("STRUCTURAL: all THREE disarmAutoMerge call sites follow the outcome — no
     0,
     "automerge.disarmed must only ever be reached through disarmOutcomeWithdrawn(...)",
   );
+  // W1-T2887: the ">= 3" this once asserted against run-task.ts ALONE was 2 genuine call sites
+  // (disposeDisarm, withdrawArmIfVerdictRefuses) plus disarmOutcomeWithdrawn's OWN declaration —
+  // a coincidental third match on the same substring, never a third call site. That declaration
+  // moved to src/lib/arm-auto-merge.ts with the rest of the arm cluster; reading it back in here
+  // as text would add a NEW source-text read this repo's own source-text-assertion-census ratchet
+  // refuses to grow (test/source-text-assertion-census.test.ts) for a check that was already
+  // counting its declaration as a third "site" by coincidence. The two REAL call sites left in
+  // run-task.ts are what this assertion actually protects; asserted directly instead.
   assert.equal(
-    [...src.matchAll(/disarmOutcomeWithdrawn\(/g)].length >= 3,
+    [...src.matchAll(/disarmOutcomeWithdrawn\(/g)].length >= 2,
     true,
-    "each of the three sites branches on the one shared predicate",
+    "each of the two run-task.ts call sites branches on the one shared predicate",
   );
 });
 

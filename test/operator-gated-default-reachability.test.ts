@@ -1,3 +1,9 @@
+// @source-text-subject — this whole file's method IS reading src/ text and deriving a population
+// from it (see "THIS FILE IS THE CENSUS, DELIBERATELY NOT A FIX" below); it is not standing in
+// for a behavioural check the way an ordinary test's source-text read would. W1-T2887 added a
+// second readFileSync (src/lib/arm-auto-merge.ts, alongside src/run-task.ts) when the arm cluster
+// this census derives moved there, which is exactly the "docs-claims/census check" carve-out
+// test/source-text-assertion-census.test.ts's own remedy note names.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -427,16 +433,32 @@ function findTestCallSites(entryNames: ReadonlySet<string>): TestCallSite[] {
 const ARM_SEAM_TEST_REASON =
   "test/arm-seam-default-is-opt-in.test.ts (W1-T2347) deliberately omits the seam here to prove " +
   "requireExplicitArmSeam refuses before realArmDeps() is ever touched — never reaches a live effect.";
+// W1-T2887: re-derived after the arm cluster's move to src/lib/arm-auto-merge.ts shifted
+// test/arm-seam-default-is-opt-in.test.ts's own leading comment block by 4 lines (this file's
+// own note above: "a line number is a QUERY over the current tree, and any diff inserting above
+// these witnesses moves them" — the same re-derivation this file's history already shows five
+// times over). It also surfaced ONE previously-invisible member of this same population:
+// disarmAutoMerge's own seam-proof test (line 106) was never reported before this move because
+// disarmAutoMerge's pre-move parameter list carried an inline comment between `prUrl` and `deps`
+// whose own prose comma (in "...consulted ONLY from the catch below,") sat at top-level depth in
+// splitTopLevel's RAW (unmasked) reading of paramsText — splitting the params before `deps:` ever
+// began its own fragment, so depsParamIndex found no fragment starting with `deps` and returned -1
+// (read by positionalDepsOmitted as "no positional deps param at all", never checked). The move's
+// rewritten declaration carries the same three-line note as a doc comment ABOVE the parameter
+// list instead, so this accidental blind spot is gone and the census now sees exactly what
+// test/arm-seam-default-is-opt-in.test.ts already proves: the SAME deliberate omission the other
+// three LEVEL-1 entry points are already excused for.
 const REACHABILITY_EXCLUSIONS: Readonly<Record<string, string>> = {
   // LEVEL-1 omitted-`deps` call sites (the first real-tree test below).
-  "armAutoMerge:test/arm-seam-default-is-opt-in.test.ts:77": ARM_SEAM_TEST_REASON,
-  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:60": ARM_SEAM_TEST_REASON,
-  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:175": ARM_SEAM_TEST_REASON,
-  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:259": ARM_SEAM_TEST_REASON,
-  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:278": ARM_SEAM_TEST_REASON,
-  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:312": ARM_SEAM_TEST_REASON,
-  "armAutoMergeAtOpen:test/arm-seam-default-is-opt-in.test.ts:84": ARM_SEAM_TEST_REASON,
-  "armAutoMergeAtOpen:test/arm-seam-default-is-opt-in.test.ts:97": ARM_SEAM_TEST_REASON,
+  "armAutoMerge:test/arm-seam-default-is-opt-in.test.ts:81": ARM_SEAM_TEST_REASON,
+  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:64": ARM_SEAM_TEST_REASON,
+  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:179": ARM_SEAM_TEST_REASON,
+  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:263": ARM_SEAM_TEST_REASON,
+  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:282": ARM_SEAM_TEST_REASON,
+  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:316": ARM_SEAM_TEST_REASON,
+  "armAutoMergeAtOpen:test/arm-seam-default-is-opt-in.test.ts:88": ARM_SEAM_TEST_REASON,
+  "armAutoMergeAtOpen:test/arm-seam-default-is-opt-in.test.ts:101": ARM_SEAM_TEST_REASON,
+  "disarmAutoMerge:test/arm-seam-default-is-opt-in.test.ts:106": ARM_SEAM_TEST_REASON,
 };
 
 function findUnexplainedReach<T extends { key: string }>(candidates: readonly T[], exclusions: Readonly<Record<string, string>>): T[] {
@@ -626,7 +648,16 @@ test("the whole census runs with no suite spawned and no clock/network touched",
 // THE REAL TREE — the same derivation, run for real against src/run-task.ts and test/**
 // ══════════════════════════════════════════════════════════════════════════════════════════════
 
-const SRC_TEXT = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
+// W1-T2887: the whole realArmDeps()-defaulting population this file derives — realArmDeps
+// itself, its four LEVEL-1 entry points, and armIfVerdictPermits's own LEVEL-2 chain — moved to
+// src/lib/arm-auto-merge.ts. `runReview`/`withdrawArmIfVerdictRefuses` (also derived below) stay
+// in run-task.ts. Concatenating both files' text keeps this derivation reading the SAME combined
+// population it always has, rather than silently narrowing to whichever file happens to declare
+// a given name.
+const SRC_TEXT =
+  readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8") +
+  "\n" +
+  readFileSync(join(REPO_ROOT, "src/lib/arm-auto-merge.ts"), "utf8");
 const REAL = deriveRealArmDepsPopulation(SRC_TEXT);
 
 test("real tree: realArmDeps() is derived with its currently-real field/classification shape — a regression pin, not an assumption", () => {
