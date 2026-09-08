@@ -1,0 +1,100 @@
+- id: W1-T3104
+  title: "THE RETRO'S ELIGIBILITY CHECK RE-QUERIES GITHUB ACROSS HISTORICAL RUNS BEFORE IT MAY START AN ALREADY-DETACHED RETRO — MEASURED 2026-09-08: 101.5 SECONDS ON THE BUILD-ADMISSION PATH WITH 151 RUNS SINCE THE MARKER"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files: [src/run-task.ts, test/retro-trigger-ledger-credit-fast-path.test.ts]
+  origin: "operator-session#boot-maintenance-critical-path-2026-09-08"
+  plan_refs: ["W1-T150", "W1-T160", "W1-T2288", "W1-T2289", "W1-T2981", "W1-T3088"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE LIVE AZURE FLEET, READ-ONLY, OVER THE THREE-FORM LEDGER UNION. The daemon
+    booted at 2026-09-08T01:15:59.902Z. Its main-thread headroom row completed at
+    01:23:32.775Z; `retro_triggered` did not appear until 01:25:14.312Z. Nothing between those
+    rows gates the retro check, so its synchronous eligibility read held task admission for
+    101.537 seconds. The same marker was 2026-09-03T02:24:39.835Z, and the union contained 151
+    distinct `run.start` ids after it. Task selection and admission then completed in under four
+    seconds, so lane count cannot recover this time: the lanes do not exist yet.
+
+    THE SOURCE EXPLAINS THE MEASUREMENT. `retroTriggerCheck` parses the run corpus, calls
+    `shippedSince`, then calls `runlessMergesSince`. `shippedSince` loops every scoped run. A run
+    that observed `merged` pays `headRefName`; every other run pays `findMergedByTrailer`, then a
+    matching result pays `headRefName` too. That is O(runs since marker) GitHub round trips in a
+    function whose only output is a threshold decision. W1-T2981 correctly detached the retro
+    body, but this synchronous preflight remains above dispatch.
+
+    THE LEDGER ALREADY HOLDS THE CHEAPER AUTHORITATIVE INPUT. W1-T150's full sweep writes
+    `verdict.merged` only after its `CreditCandidate.merged` has been ownership-asserted and
+    trailer-anchored. A native `verdict` with `verdict: merged` is the worker's own terminal
+    credit. Both rows carry task and PR identity and are in the same archive/live corpus the
+    trigger already reads. W1-T3088 taught `gatherRuns` to consume `verdict.merged`, but
+    `RUN_LEDGER_STEP_PATTERN` does not include that step, so the trigger's narrow union drops the
+    new fact before `gatherRuns` can see it. Filing is not implementation: both facts were checked
+    at origin/main `c3db99bb9bea6bfc89c61b1946ac7551683da6d9`.
+
+    THE TRIGGER AND THE RETRO HAVE DIFFERENT JOBS. Eligibility needs a bounded, conservative count
+    to answer whether a cadence threshold fired. The full retro gather still needs its complete
+    ledger/GitHub union and P9 branch-ownership diagnostics. Repeating the full gather before
+    deciding whether to launch the full gather is the maintenance tax this task removes.
+  design: |
+    (i) MAKE THE TRIGGER LEDGER-FIRST. Extend its narrow ledger pattern to include
+    `verdict.merged`. Derive `mergesSinceMarker` from native merged verdicts plus ownership-asserted
+    credit rows strictly after the marker. Deduplicate by PR URL when present, then by task id, so
+    repeated descriptions of one merge never manufacture threshold progress.
+
+    (ii) REMOVE PER-RUN GITHUB LOOKUPS FROM ELIGIBILITY. `retroTriggerCheck` may retain the one
+    gateway-availability probe that preserves its current fail-closed outage posture, but it must
+    not call `findMergedByTrailer`, `headRefName`, or `mergedCommits`. Those remain in the full
+    retro gather, unchanged, where their detailed reconciliation is consumed.
+
+    (iii) PRESERVE THE OTHER TWO TRIGGERS. Marker age and pending follow-ups still feed
+    `evaluateRetroTrigger` exactly once from the same parsed corpus. An absent marker remains the
+    unbounded-days case; a corrupt marker still returns `undefined`; an unavailable gateway still
+    skips the tick.
+
+    (iv) WINDOW THE ARCHIVE READ AT THE MARKER WHEN ONE EXISTS. `resolveLedgerUnion` already owns
+    a name-derived, fail-loud `since` option. Pass the marker timestamp so rotations proven older
+    than the eligibility window are not opened. The live file is still always read, malformed
+    rotation names are still read, and zero/unreadable archive coverage keeps the existing loud
+    fallback rather than becoming a plausible partial count.
+
+    (v) DO NOT WEAKEN THE RETRO'S P9 CONTRACT. `buildGather`/`shippedSince`, their branch checks,
+    discrepancy output, and the retro subprocess are out of scope. This changes only the daemon's
+    pre-launch cadence input; the launched retro still verifies the full truth before publishing.
+
+    (vi) TELEMETRY, NOT A TIMER ASSERTION. Add the credited/native/deduplicated counts to the
+    existing retro-trigger decision path or a single adjacent diagnostic so a future regression
+    is attributable. Do not encode a wall-clock threshold in unit tests; prove zero per-run gateway
+    calls with throwing spies over a 151-run synthetic corpus.
+  acceptance:
+    - claim: "retro eligibility over 151 historical runs performs zero `findMergedByTrailer`, `headRefName`, and `mergedCommits` calls while retaining the single availability check"
+      proof: "unit test: test/retro-trigger-ledger-credit-fast-path.test.ts"
+    - claim: "native merged verdicts and ownership-asserted verdict.merged credit rows after the marker count once per PR, with task id as the no-URL fallback"
+      proof: "unit test: test/retro-trigger-ledger-credit-fast-path.test.ts"
+    - claim: "a repeated credit row or native verdict for the same PR cannot inflate the merge threshold"
+      proof: "unit test: test/retro-trigger-ledger-credit-fast-path.test.ts"
+    - claim: "the marker timestamp is passed to the existing ledger-union window, while absent and corrupt marker behavior stays unchanged"
+      proof: "unit test: test/retro-trigger-ledger-credit-fast-path.test.ts"
+    - claim: "the pending-followup and days triggers still fire from the same parsed corpus and an unavailable gateway still skips the tick"
+      proof: "unit test: test/retro-trigger-ledger-credit-fast-path.test.ts"
+    - claim: "the full retro gather still performs its existing P9 branch-ownership reconciliation rather than trusting the cadence shortcut as publication truth"
+      proof: "unit test: test/retro-trigger-ledger-credit-fast-path.test.ts"
+  falsifier: |
+    Close without implementation if a production-shaped trace shows `retroTriggerCheck` does not
+    call a GitHub gateway per scoped run, or if the main-thread interval from the last pre-retro
+    rung to `retro_triggered` is under ten seconds with the same 151-run corpus. Both were checked:
+    source at c3db99bb loops scoped runs through `shippedSince`, and the three-form ledger trace
+    measured 101.537 seconds. Also close if `verdict.merged` is not ownership-asserted at its
+    writer; `runCreditBackfill` documents and types `CreditCandidate.merged` as ownership-asserted,
+    trailer-anchored before appending the row.
+  note: |
+    `W1-T3104` was atomically reserved at `refs/rmd-id/W1-T3104` before this file was written. One
+    concern only: the retro cadence check repeats the full retro's historical GitHub reconciliation
+    on the dispatch critical path. The full-sweep/light-clock transition and board-review duplicate
+    board read are measured siblings and require separate tasks and PRs.

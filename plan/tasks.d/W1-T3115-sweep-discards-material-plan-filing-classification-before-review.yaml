@@ -1,0 +1,92 @@
+- id: W1-T3115
+  title: "THE SWEEP PROVES AN EXTERNAL PLAN FILING FROM GITHUB'S MATERIAL FILE LIST, THEN DISCARDS THAT FACT BEFORE REVIEWCOMMAND — THE REVIEW REATTRIBUTES THE FILING FROM ITS RUN BRANCH AND GRADES FUTURE IMPLEMENTATION CLAIMS"
+  repo: remudero
+  depends_on: [W1-T2864]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - src/run-task.ts
+    - test/review-command-plan-filing-provenance.test.ts
+  origin: "operator-session#remove-plan-filing-review-maintenance-2026-09-08"
+  plan_refs: ["W1-T2439", "W1-T2472", "W1-T2713", "W1-T2846", "W1-T2864"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #4544 AT HEAD 277099FDB9B4. The full sweep correctly placed the externally
+    opened, one-file task-shard PR in the non-spawning plan-filing lane, but the review posted
+    failure over all six FUTURE implementation criteria. Its ledger row recorded
+    `reviewer_outcome:not_attempted_plan_only`, six `not_yet_built` proofs, and
+    `failure_class:unmet_criteria`. Replacing the PR body's three abbreviated bullets with the six
+    task claims made the unchanged head pass and merge. That manual rewrite was recovery, not a
+    suitable operating procedure.
+
+    THE SOURCE EXPLAINS THE SPLIT. W1-T2864's `buildOpenPrViews` performs a bounded REST files read
+    and returns `isPlanFiling:true, planFilingSource:github-files` when material paths prove an
+    external filing. `selectReviewAdmissions` consumes that fact, so the PR reaches the cheap lane.
+    The `postReview` effect then calls `reviewRunner(pr.prNumber)`. The production runner invokes
+    `reviewCommand` with only the number; inside that new process, `isPlanOnlyFilingPr` can see only
+    an emitter-owned `pr.opened{plan_only:true}` ledger row. An externally opened PR has no such
+    row, so `resolveReviewTaskId` recovers W1-T3115 from `run-W1-T3115-*`, loads the task at the PR
+    head, and grades its future implementation acceptance rather than the filing criteria in the
+    body. W1-T2864 proved the fact and paid the GitHub request, then this call boundary threw it
+    away.
+
+    THIS IS A PRODUCER-CONSUMER CONTRACT DEFECT, NOT A REQUEST TO WEAKEN REVIEW. W1-T2713's
+    claim-keyword floor remains binding. W1-T2846's run-branch recovery remains binding for actual
+    implementation PRs. The fix is to carry the already-proven plan-filing fact through the one
+    process boundary that currently loses it, so `resolveReviewTaskId` follows its existing
+    deliberately-unattributed filing arm and judges the PR body's filing contract.
+  design: |
+    (i) EXTEND THE POST-REVIEW RUNNER CONTRACT WITH THE FACT ALREADY IN HAND. Pass
+    `pr.isPlanFiling` from `buildSweepEffects.postReview` to its injectable `reviewRunner`. The
+    production adapter threads the value into `reviewCommand`; tests keep a recorder at this exact
+    seam. Do not fetch the PR file list again and do not add a second classifier.
+
+    (ii) LET REVIEWCOMMAND ACCEPT THE TRUSTED SWEEP CLASSIFICATION AS AN OPTIONAL DEPENDENCY. When
+    supplied, use it as the `planOnlyFiling` argument to the existing `resolveReviewTaskId` call.
+    When absent, preserve the operator CLI's existing emitter-ledger lookup byte-for-byte. An exact
+    `Remudero-Task:` trailer still wins inside `resolveReviewTaskId`, so the carried fact cannot
+    erase an explicit implementation identity.
+
+    (iii) KEEP FAIL-CLOSED DIRECTIONS. `false` remains false: a source-bearing, enforcement-data or
+    unreadable candidate stays on the ordinary task-resolution path. `true` is reachable only from
+    `OpenPrView.isPlanFiling`, whose W1-T2864 producer requires an emitter receipt or a complete,
+    non-empty material GitHub file list entirely in non-enforcement plan scope.
+
+    (iv) PROVE THE WHOLE HANDOFF. Drive `buildSweepEffects.postReview` with a classified external
+    filing and record both runner arguments; then drive `reviewCommand` with the carried fact and a
+    `run-W1-T...` head, asserting it withholds the branch-derived task id and uses the body
+    acceptance criteria. Controls cover an ordinary implementation and an exact trailer. Assert
+    the fetch recorder gains no call: this fix reuses W1-T2864's read rather than adding GitHub
+    maintenance.
+  acceptance:
+    - claim: "a post-review action for an external PR classified `github-files` passes its existing `isPlanFiling:true` fact across the review-runner boundary"
+      proof: "unit test: test/review-command-plan-filing-provenance.test.ts"
+    - claim: "reviewCommand given that carried filing fact withholds a `run-W1-T...` branch fallback and judges the PR body's filing acceptance instead of the newly filed task's future implementation acceptance"
+      proof: "unit test: test/review-command-plan-filing-provenance.test.ts"
+    - claim: "an exact Remudero-Task trailer still wins and an ordinary `isPlanFiling:false` run branch still resolves its task exactly as before"
+      proof: "unit test: test/review-command-plan-filing-provenance.test.ts"
+    - claim: "the handoff performs no additional GitHub file-list read and introduces no second plan-filing classifier"
+      proof: "unit test: test/review-command-plan-filing-provenance.test.ts"
+    - claim: "the reviewer's deterministic claim floor, proof execution, verdict state, auto-merge policy and W1-T2864 admission bounds are unchanged"
+      proof: "unit test: test/review-command-plan-filing-provenance.test.ts"
+    - claim: "deleting the carried classification makes the external filing resolve from its run branch again and fails the focused end-to-end fixture"
+      proof: "unit test: test/review-command-plan-filing-provenance.test.ts"
+  falsifier: |
+    Close without implementation if the post-review runner already receives `pr.isPlanFiling`, or
+    if `reviewCommand` can recover W1-T2864's `github-files` classification without an emitter
+    ledger row. Both were checked at origin/main 612f46de34d0: `postReview` calls
+    `reviewRunner(pr.prNumber)` and the runner calls `reviewCommand` with only execution mode;
+    `reviewCommand` passes only `isPlanOnlyFilingPr(reviewLedger, view.url)` to
+    `resolveReviewTaskId`. Also close if PR #4544 had an emitter `pr.opened{plan_only:true}` row;
+    its review resolved W1-T3104 from the run branch and the observed six-criterion verdict is the
+    counterexample.
+  note: |
+    `W1-T3115` was atomically reserved at `refs/rmd-id/W1-T3115` before this shard was written. One
+    concern only: preserve W1-T2864's material plan-filing classification across the post-review
+    process boundary. Startup cadence costs, Git object maintenance and CI-parity over-execution
+    remain separate work.
