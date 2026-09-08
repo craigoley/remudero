@@ -5,10 +5,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { INSTALLED_CLAUDE_AGENT_SDK_VERSION } from "../src/lib/settings.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_JSON_PATH = join(REPO_ROOT, "package.json");
 const DEPCRUISE_CONFIG_PATH = join(REPO_ROOT, ".dependency-cruiser.cjs");
+const SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";
 
 interface PackageJson {
   dependencies?: Record<string, string>;
@@ -20,6 +22,14 @@ interface PackageJson {
 
 function readPackageJson(): PackageJson {
   return JSON.parse(readFileSync(PACKAGE_JSON_PATH, "utf8")) as PackageJson;
+}
+
+function readInstalledSdkVersion(): string {
+  const entryUrl = import.meta.resolve(SDK_PACKAGE);
+  const pkg = JSON.parse(
+    readFileSync(join(dirname(fileURLToPath(entryUrl)), "package.json"), "utf8"),
+  ) as { version: string };
+  return pkg.version;
 }
 
 function trackedSrcFiles(): string[] {
@@ -118,4 +128,8 @@ test("tool-only dependencies carry rationale", () => {
     assert.equal(typeof reason, "string", `${name} must have dependency rationale`);
     assert.ok(reason!.trim().length > 0, `${name} rationale must not be blank`);
   }
+});
+
+test("settings SDK citation matches installed package", () => {
+  assert.equal(INSTALLED_CLAUDE_AGENT_SDK_VERSION, readInstalledSdkVersion());
 });

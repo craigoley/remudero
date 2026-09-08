@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * Validate-before-spawn guard for worker settings (WS-0 FIELD FINDING 10a).
@@ -12,18 +14,29 @@ import { readFileSync } from "node:fs";
  * allowlist. This guard is therefore deliberately STRICTER than the SDK schema:
  * it rejects any unknown or MISPLACED key with a named error, before spawn.
  *
- * Key sets verified equal to SandboxSettingsSchema at SDK 0.3.233, 2026-08-24
- * (CLI 2.1.220, the version the DAEMON CONTAINER resolves — not the operator
- * shell's, which reads a newer one; `pathToClaudeCodeExecutable` is resolved
- * FRESH at spawn time, so the container's binary is the one workers use) —
- * `SANDBOX_KEYS` below is enforced against the live schema by
- * test/settings.test.ts (W1-T2216), which parses the installed `sdk.d.ts` by
- * brace depth (the schema object isn't exported at runtime, and the type-level
- * `keyof SandboxSettings` widens to `string`, so neither mechanical check is
+ * `SANDBOX_KEYS` below is enforced against the installed SDK's live schema by
+ * test/settings.test.ts (W1-T2216), which parses `sdk.d.ts` by brace depth (the
+ * schema object isn't exported at runtime, and the type-level `keyof
+ * SandboxSettings` widens to `string`, so neither mechanical check is
  * available) and FAILS the suite on drift, naming the added/removed keys and
- * the SDK version measured. When the platform is bumped (WS-7 release
- * watcher), that test goes red until someone re-pins from the schema dump.
+ * the installed SDK version measured. When the platform is bumped (WS-7
+ * release watcher), that test goes red until someone re-pins from the schema
+ * dump.
  */
+
+const CLAUDE_AGENT_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";
+
+function readInstalledClaudeAgentSdkVersion(): string {
+  const entryUrl = import.meta.resolve(CLAUDE_AGENT_SDK_PACKAGE);
+  const pkgPath = join(dirname(fileURLToPath(entryUrl)), "package.json");
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown };
+  if (typeof pkg.version !== "string" || pkg.version.length === 0) {
+    throw new Error(`${CLAUDE_AGENT_SDK_PACKAGE} package.json does not declare a version.`);
+  }
+  return pkg.version;
+}
+
+export const INSTALLED_CLAUDE_AGENT_SDK_VERSION = readInstalledClaudeAgentSdkVersion();
 
 /** Named error so callers (and tests) can assert the guard fired by type. */
 export class WorkerSettingsError extends Error {
@@ -33,9 +46,9 @@ export class WorkerSettingsError extends Error {
   }
 }
 
-// Verified equal to SandboxSettingsSchema at SDK 0.3.233, 2026-08-24 — see the
-// bidirectional comparison in test/settings.test.ts (W1-T2216), which fails
-// loudly (naming the delta) the day this drifts from the live schema.
+// Verified equal to the installed SandboxSettingsSchema by the bidirectional
+// comparison in test/settings.test.ts (W1-T2216), which fails loudly (naming the
+// delta) the day this drifts from the live schema.
 export const SANDBOX_KEYS = new Set([
   "enabled",
   "failIfUnavailable",
@@ -113,11 +126,13 @@ function checkKeys(obj: Record<string, unknown>, allowed: Set<string>, path: str
     if (belongs && path === "sandbox") {
       throw new WorkerSettingsError(
         `sandbox.${key} is not a valid top-level sandbox key; ` +
-          `'${key}' belongs under sandbox.${belongs} (silent-drop hazard — WS-0 FF10a, pinned SDK 0.3.233).`,
+          `'${key}' belongs under sandbox.${belongs} (silent-drop hazard — WS-0 FF10a, ` +
+          `installed SDK ${INSTALLED_CLAUDE_AGENT_SDK_VERSION}).`,
       );
     }
     throw new WorkerSettingsError(
-      `unknown key '${key}' in ${path} (pinned SDK 0.3.233 SandboxSettingsSchema).`,
+      `unknown key '${key}' in ${path} ` +
+        `(installed SDK ${INSTALLED_CLAUDE_AGENT_SDK_VERSION} SandboxSettingsSchema).`,
     );
   }
 }
