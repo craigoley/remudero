@@ -28615,7 +28615,7 @@ export interface RegisteredFixOwnerSnapshot {
   attachmentState: "exact" | "detached_or_other" | "unknown";
   treeState: "clean" | "dirty" | "unknown";
   remoteState: "exact" | "changed" | "unknown";
-  historyState: "contained" | "ahead_or_diverged" | "unknown";
+  historyState: "contained" | "ahead" | "diverged" | "unknown";
   claimState: "clear" | "occupied" | "unknown";
   processState: "clear" | "occupied" | "unknown";
   ageMs: number | null;
@@ -28626,7 +28626,7 @@ export interface RegisteredFixOwnerSnapshot {
 }
 
 export type RegisteredFixOwnerRecoveryDecision =
-  | { kind: "reclaim" }
+  | { kind: "reclaim-contained" | "publish-ahead" | "preserve-diverged" }
   | {
       kind: "keep";
       reason:
@@ -28638,7 +28638,6 @@ export type RegisteredFixOwnerRecoveryDecision =
         | "tree_probe_unreadable"
         | "remote_head_changed"
         | "remote_head_unreadable"
-        | "local_commit_not_contained"
         | "history_probe_unreadable"
         | "live_branch_claim"
         | "branch_claim_unreadable"
@@ -28658,14 +28657,14 @@ export function decideRegisteredFixOwnerRecovery(
   if (snapshot.treeState !== "clean") return { kind: "keep", reason: "tree_probe_unreadable" };
   if (snapshot.remoteState === "changed") return { kind: "keep", reason: "remote_head_changed" };
   if (snapshot.remoteState !== "exact") return { kind: "keep", reason: "remote_head_unreadable" };
-  if (snapshot.historyState === "ahead_or_diverged")
-    return { kind: "keep", reason: "local_commit_not_contained" };
-  if (snapshot.historyState !== "contained") return { kind: "keep", reason: "history_probe_unreadable" };
+  if (snapshot.historyState === "unknown") return { kind: "keep", reason: "history_probe_unreadable" };
   if (snapshot.claimState === "occupied") return { kind: "keep", reason: "live_branch_claim" };
   if (snapshot.claimState !== "clear") return { kind: "keep", reason: "branch_claim_unreadable" };
   if (snapshot.processState === "occupied") return { kind: "keep", reason: "process_cwd_owner" };
   if (snapshot.processState !== "clear") return { kind: "keep", reason: "process_cwd_probe_unreadable" };
-  return { kind: "reclaim" };
+  if (snapshot.historyState === "ahead") return { kind: "publish-ahead" };
+  if (snapshot.historyState === "diverged") return { kind: "preserve-diverged" };
+  return { kind: "reclaim-contained" };
 }
 
 export interface ProcessCwdCensusDeps {
@@ -28843,15 +28842,26 @@ export function captureRegisteredFixOwnerSnapshot(
       ["-C", args.repoDir, "merge-base", "--is-ancestor", snapshot.localSha, args.observedRemoteSha],
       { stdio: "ignore" },
     );
-    snapshot.historyState = contained.status === 0
-      ? "contained"
-      : contained.status === 1
-        ? "ahead_or_diverged"
-        : "unknown";
+    if (contained.status === 0) {
+      snapshot.historyState = "contained";
+    } else if (contained.status === 1) {
+      const remoteContainedByLocal = spawnSync(
+        "git",
+        ["-C", args.repoDir, "merge-base", "--is-ancestor", args.observedRemoteSha, snapshot.localSha],
+        { stdio: "ignore" },
+      );
+      snapshot.historyState = remoteContainedByLocal.status === 0
+        ? "ahead"
+        : remoteContainedByLocal.status === 1
+          ? "diverged"
+          : "unknown";
+    } else {
+      snapshot.historyState = "unknown";
+    }
   } catch (e) {
     return { ...snapshot, error: String(e) };
   }
-  if (snapshot.historyState !== "contained") return snapshot;
+  if (snapshot.historyState === "unknown") return snapshot;
 
   try {
     snapshot.claimState = (deps.readClaim ?? readRegisteredFixOwnerClaim)(args.inflightDir, args.claimKey);
@@ -28901,6 +28911,52 @@ function preserveFixHead(repoDir: string, branch: string, localSha: string): str
   }).trim();
   if (preserved !== localSha) throw new Error(`recovery ref ${recoveryRef} did not preserve ${localSha}`);
   return recoveryRef;
+}
+
+export interface PublishAbandonedFixOwnerAheadDeps {
+  runGit?: (args: string[]) => string;
+}
+
+function remoteHeadShaFromLsRemote(raw: string, ref: string): string | null {
+  for (const line of raw.split("\n")) {
+    const [sha, name] = line.trim().split(/\s+/, 2);
+    if (name === ref && /^[0-9a-f]{40}$/i.test(sha ?? "")) return sha;
+  }
+  return null;
+}
+
+export function publishAbandonedFixOwnerAhead(
+  repoDir: string,
+  branch: string,
+  localSha: string,
+  observedRemoteSha: string,
+  deps: PublishAbandonedFixOwnerAheadDeps = {},
+): void {
+  const ref = `refs/heads/${branch}`;
+  const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
+    "git",
+    ["-C", repoDir, ...args],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ));
+  const before = remoteHeadShaFromLsRemote(
+    runGit(["ls-remote", "--exit-code", "origin", ref]),
+    ref,
+  );
+  if (before !== observedRemoteSha) {
+    throw new Error(`remote head changed before publish: expected ${observedRemoteSha}, observed ${before ?? "unreadable"}`);
+  }
+  runGit(["push", "origin", `${localSha}:${ref}`]);
+  const after = remoteHeadShaFromLsRemote(
+    runGit(["ls-remote", "--exit-code", "origin", ref]),
+    ref,
+  );
+  if (after !== localSha) {
+    throw new Error(`ordinary push did not publish exact local SHA: expected ${localSha}, observed ${after ?? "unreadable"}`);
+  }
+}
+
+export function preserveAbandonedFixOwnerDivergence(repoDir: string, branch: string, localSha: string): string {
+  return preserveFixHead(repoDir, branch, localSha);
 }
 
 /**
@@ -29493,6 +29549,8 @@ export function captureRepairFeedbackWithPriorVerdict(
 export interface RegisteredFixOwnerRecoveryDeps {
   capture: typeof captureRegisteredFixOwnerSnapshot;
   remove: typeof removeAbandonedFixWorktreeOwner;
+  publishAhead?: typeof publishAbandonedFixOwnerAhead;
+  preserveDiverged?: typeof preserveAbandonedFixOwnerDivergence;
 }
 
 export function buildSweepEffects(
@@ -30282,6 +30340,67 @@ export function buildSweepEffects(
             });
             return;
           }
+          let preservedRecoveryRef: string | undefined;
+          if (recovery.kind !== "reclaim-contained") {
+            const localSha = snapshot.localSha;
+            const remoteSha = snapshot.remoteSha;
+            if (!localSha || !remoteSha) {
+              log("sweep.fix.checkout_claim_declined", {
+                reason: "registered_worktree_owner",
+                owner_recovery_reason: "owner_salvage_identity_unreadable",
+                pr_number: pr.prNumber,
+                task_id: task.id,
+                branch: realBranch,
+                worktree_path: snapshot.path,
+              });
+              return;
+            }
+            try {
+              if (recovery.kind === "publish-ahead") {
+                (registeredOwnerRecovery.publishAhead ?? publishAbandonedFixOwnerAhead)(
+                  repoDir,
+                  realBranch,
+                  localSha,
+                  remoteSha,
+                );
+                log("sweep.fix.checkout_owner_ahead_published", {
+                  pr_number: pr.prNumber,
+                  task_id: task.id,
+                  branch: realBranch,
+                  local_sha_prefix: localSha.slice(0, 12),
+                  remote_sha_prefix: remoteSha.slice(0, 12),
+                });
+              } else {
+                preservedRecoveryRef = (registeredOwnerRecovery.preserveDiverged ?? preserveAbandonedFixOwnerDivergence)(
+                  repoDir,
+                  realBranch,
+                  localSha,
+                );
+                log("sweep.fix.checkout_owner_divergence_preserved", {
+                  pr_number: pr.prNumber,
+                  task_id: task.id,
+                  branch: realBranch,
+                  local_sha_prefix: localSha.slice(0, 12),
+                  remote_sha_prefix: remoteSha.slice(0, 12),
+                  recovery_ref: preservedRecoveryRef.slice(0, 512),
+                });
+              }
+            } catch (e) {
+              log("sweep.fix.checkout_claim_declined", {
+                reason: "registered_worktree_owner",
+                owner_recovery_reason:
+                  recovery.kind === "publish-ahead" ? "owner_ahead_publish_failed" : "owner_divergence_preserve_failed",
+                pr_number: pr.prNumber,
+                task_id: task.id,
+                branch: realBranch,
+                worktree_path: snapshot.path,
+                local_sha_prefix: localSha.slice(0, 12),
+                remote_sha_prefix: remoteSha.slice(0, 12),
+                error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+              });
+              return;
+            }
+          }
           try {
             registeredOwnerRecovery.remove(repoDir, registeredOwner);
           } catch (e) {
@@ -30336,7 +30455,9 @@ export function buildSweepEffects(
               exact_branch: snapshot.attachmentState === "exact",
               clean_tree: snapshot.treeState === "clean",
               exact_remote_head: snapshot.remoteState === "exact",
+              owner_history_action: recovery.kind,
               local_contained_by_remote: snapshot.historyState === "contained",
+              recovery_ref: preservedRecoveryRef?.slice(0, 512),
               no_live_claim: snapshot.claimState === "clear",
               no_process_cwd: snapshot.processState === "clear",
             },
