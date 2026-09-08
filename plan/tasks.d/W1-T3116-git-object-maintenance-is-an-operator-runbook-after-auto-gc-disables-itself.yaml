@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 24.00
-  files: [src/lib/object-reaper.ts, src/lib/policy.ts, plan/policy.yaml, src/run-task.ts, src/lib/status-board.ts, test/repository-maintenance-controller.test.ts]
+  files: [deploy/entrypoint.sh, src/lib/object-reaper.ts, src/lib/policy.ts, plan/policy.yaml, src/lib/daemon.ts, src/run-task.ts, src/lib/status-board.ts, test/object-reaper.test.ts, test/repository-maintenance-controller.test.ts, test/one-shot-disk-reclaim-rung.test.ts, test/policy.test.ts]
   origin: "operator-session#remove-routine-fleet-maintenance-2026-09-08"
   plan_refs: ["W1-T175", "W1-T320", "W1-T942", "W1-T2529", "W1-T2694", "W1-T3090", "W1-T3092"]
   status: queued
@@ -80,7 +80,8 @@
     (iii) USE THE INSTALLED GIT CONTRACT. Ordinary cadence executes bounded, asynchronous
     `git maintenance run --task=commit-graph --task=loose-objects --task=incremental-repack`.
     A persistent failed-GC marker may select `git maintenance run --task=gc` only when the survey
-    proves zero ACTIVE RMD workers/reviewers/fix lanes and no other repository maintenance is active.
+    proves zero ACTIVE RMD workers/reviewers/fix lanes. The command's documented object-database
+    lock is the authoritative cross-process exclusion; a contender fails and enters durable backoff.
     Registered but idle linked worktrees are not activity and never create a permanently false
     prerequisite. Never invoke raw `git gc`, `git prune`, `--prune=now`, `maintenance start`, cron
     or systemd; the daemon remains the one scheduler and Git remains the object-database lock owner.
@@ -108,7 +109,7 @@
       proof: "unit test: test/repository-maintenance-controller.test.ts"
     - claim: "one daemon-lifetime cadence invokes the installed Git maintenance tasks asynchronously at most daily and never shells raw `git gc`, `git prune`, `--prune=now` or an external scheduler"
       proof: "unit test: test/repository-maintenance-controller.test.ts"
-    - claim: "full GC is authorized only with a persistent failed-GC marker, zero active RMD lanes and a complete survey; idle registered worktrees do not refuse it, while busy or unreadable state defers without losing the due episode"
+    - claim: "full GC is authorized only with a persistent failed-GC marker, zero active RMD lanes and a complete survey, then Git's object-database lock supplies cross-process exclusion; idle registered worktrees do not refuse it, while busy or unreadable state defers without losing the due episode"
       proof: "unit test: test/repository-maintenance-controller.test.ts"
     - claim: "RMD never writes or removes `gc.log`; full-maintenance success requires Git to return zero and the post-survey to find the marker absent, while a failed run, timeout or surviving marker enters backoff"
       proof: "unit test: test/repository-maintenance-controller.test.ts"
