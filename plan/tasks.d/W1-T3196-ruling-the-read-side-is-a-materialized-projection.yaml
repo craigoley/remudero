@@ -1,0 +1,130 @@
+- id: W1-T3196
+  title: "DESIGN RULING: THE READ SIDE IS A MATERIALIZED PROJECTION, NOT A RECOMPUTE — the console derives the whole 1 550-task board from an append-only ledger ON EVERY CACHE MISS, and the fleet's own writes invalidate that cache on its sweep cadence, so the answer is an incrementally-maintained read model and a conventional resource API over it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 3.00
+  files: [DECISIONS.md]
+  origin: "operator-session#console-read-model-2026-09-08"
+  plan_refs: ["W1-T3192", "W1-T3193", "W1-T3195", "W1-T187", "W1-T179", "W1-T2919", "W1-T3173"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR QUESTION 2026-09-08, verbatim: "are we sure this is the right setup for fetching the
+    backend data? Should we use CQRS patterns or make the API more industry standard and have the
+    data it fetches be more readily accessible?"
+
+    THE ANSWER IS NO, AND THE SHAPE IS ALREADY HALF-BUILT. This system is event-sourced in all but
+    name: `state/ledger.ndjson` is an append-only log (3.9 MB, 7 682 live lines, 579 gz archives),
+    the daemon is the command side, and `DECISION_RELEVANT_LEDGER_STEPS` already declares which
+    events matter. What is missing is the other half of the pattern — a materialized read model.
+
+    WHAT HAPPENS ON A READ TODAY (src/lib/status.ts, src/lib/board.ts):
+      - `projectPlan` recomputes a `StatusProjection` for EVERY task in the plan — 1 550 of them
+      - it reads the whole ledger once and builds an index once, per call
+      - it reads a 20 MB prior-projection file (`state/cache/board/…ndjson`) for W1-T179's
+        monotonic-under-darkness guarantee
+      - `/v1/status` then serialises 881 619 bytes
+    THAT IS "REPLAY THE LOG ON READ", which is the shape event-sourcing literature names as the one
+    materialized views exist to replace.
+
+    THE PATH HAS BEEN PATCHED TWICE ALREADY, WITHOUT CHANGING SHAPE, and the comments record it:
+      W1-T187  "deriveStatus parses the WHOLE ledger per call and the loop calls it once PER TASK —
+                clocked at 5-8s per projection against the console's <2s budget"
+      R-23     "reading once was half the fix — the ten per-task helpers each still walked the whole
+                array, so an N-task plan scanned it ~10N times"
+      W1-T2919 folded the cache fingerprint incrementally so a hit costs one pass over new lines
+    Each fix was correct and each left the recompute in place. A third optimisation of the same loop
+    is the predictable next step and it will not hold either.
+
+    AND THE CACHE MISSES ON THE FLEET'S OWN CADENCE. The key is a fingerprint over
+    decision-relevant rows; `sweep.disposed` is one of them and appears 28 times per 500 ledger
+    lines. The fleet appends decision-relevant events continuously, so the board is invalidated
+    roughly as fast as it is asked for — and each miss pays the full 1 550-task recompute,
+    synchronously, on the same event loop serving the operator's browser.
+
+    THE MEASURED CONSEQUENCE (W1-T3192): the same 319 418-byte shell at 0.022s, 3.0s, 9.9s, 32.7s,
+    53.3s, 85.1s and once past 60s; `/v1/recent` at 0.009s on one sample and 71.562s on another for
+    identical bytes. The 0.009s reading is the important one — it proves the work is not the
+    endpoint's, it is queueing behind whatever recompute holds the loop.
+  design: |
+    (i) A PROJECTOR MAINTAINS THE READ MODEL INCREMENTALLY. Each appended ledger row updates the
+    affected records; nothing recomputes the population. The write side is unchanged — the ledger
+    stays the source of truth and this ruling does not propose replacing it.
+    (ii) THE READ MODEL IS REBUILDABLE FROM THE LOG, ALWAYS. It is a cache in the strict sense:
+    deletable, reconstructible, never authoritative. If a projection and the ledger disagree, the
+    ledger wins and the model is rebuilt — otherwise a derived store quietly becomes a second source
+    of truth, which is the failure mode this pattern is most often criticised for.
+    (iii) THE API BECOMES CONVENTIONAL over that model: resource-shaped, FILTERABLE and PAGED, with
+    conditional requests (ETag / If-None-Match) so an unchanged board costs a 304 rather than 881 KB.
+    "More industry standard" in the operator's words is precisely this — a board asking for the rows
+    it renders, not a projection of everything (W1-T3193).
+    (iv) STALENESS IS STATED, NEVER GUESSED. Every response carries how current it is. An
+    eventually-consistent read model that cannot say how far behind it is turns a latency problem
+    into a trust problem, and this operator's console already had one confident-but-wrong indicator
+    (W1-T189's freshness contradiction).
+    (v) W1-T179'S MONOTONIC-UNDER-DARKNESS GUARANTEE SURVIVES. A projection must not regress when a
+    source is unreadable; today that is bought by reading a 20 MB prior-state file per call. In a
+    maintained read model it is the natural behaviour — the last good value simply persists — but it
+    must be asserted, not assumed.
+    (vi) INCREMENTAL, NOT ETERNAL. Rebuild cost is bounded and measured, so a cold start on a
+    579-archive ledger has a known, tested bound rather than an unknown one.
+  acceptance:
+    - claim: "DECISIONS.md records the ruling: the read side is an incrementally-maintained materialized projection over the ledger, and the ledger remains the sole source of truth"
+      proof: "grep: THE READ SIDE IS A MATERIALIZED PROJECTION in DECISIONS.md"
+    - claim: "the record states the measurement that motivated it — the recompute-per-miss shape over a projection of every task in the plan"
+      proof: "grep: 1550-task projection in DECISIONS.md"
+    - claim: "the record names what is NOT changing: the ledger stays authoritative and the command side is untouched"
+      proof: "grep: the write path is untouched in DECISIONS.md"
+    - claim: "the record names the two prior in-place optimisations and why a third would not hold"
+      proof: "grep: a third optimisation would not hold in DECISIONS.md"
+  falsifier: |
+    CLOSE IF a materialized read model already exists: list `state/` and read what
+    `state/cache/board/` is for.
+    MEASURED 2026-09-08: `state/cache/board/craigoley_remudero-….ndjson` is 20 MB and exists for
+    W1-T179's MONOTONIC-UNDER-DARKNESS correctness guarantee — a memo of the PREVIOUS projection so
+    a value cannot regress when a source goes dark. It is not read to SERVE a request; `projectPlan`
+    recomputes regardless. A correctness memo is not a read model.
+    POSITIVE CONTROL for "recompute on every miss", because a claim about a hot path needs one: the
+    source states it — W1-T187 records "5-8s per projection" and R-23 records "an N-task plan
+    scanned it ~10N times". Both are fixes TO the recompute, which is evidence the recompute is what
+    is there.
+    DO NOT satisfy this ruling by adding a third optimisation to `projectPlan`. Two already landed
+    and the shape survived both; a ruling that ends in "make the loop faster" has answered a
+    different question than the one asked.
+    DO NOT let the read model become authoritative. The moment a projection is trusted over the
+    ledger, a rebuild becomes lossy and the append-only log stops being the record — which is the
+    single most common way this pattern fails in practice.
+    DO NOT couple this to W1-T3173. The React console and the read model are INDEPENDENT: a SPA over
+    today's endpoints inherits every stall, and a read model behind today's server-rendered shell
+    fixes the stalls without any front-end change. Either can ship first.
+  note: |
+    THREE PROOFS WERE REWRITTEN BEFORE FILING, and the reasons are recorded because two of them
+    would have graded green while proving nothing. `lint-plan` refused "MONOTONIC UNDER DARKNESS"
+    (proof-grep-unmatchable — the file says "MONOTONIC under darkness"; grep does not case-fold, so
+    it could NEVER match) and "71.562" (proof-grep-safety — an unescaped `.` is any-character in a
+    BRE). The third it did not catch: "W1-T187" ALREADY APPEARS in DECISIONS.md, so that criterion
+    would have passed at base and graded on prose. All three now name strings this ruling must
+    itself add, verified absent at filing time.
+    Rule 25 CHECKED: `DECISIONS.md` is documentation.
+    THIS IS `verify: human` BECAUSE IT IS AN ARCHITECTURAL DIRECTION with real costs — a derived
+    store to keep consistent, a rebuild path to test, and an eventual-consistency window to explain.
+    No test establishes that the trade is worth making; that is the operator's call, and he asked
+    the question that prompted it.
+    W1-T3195 IS THE SMALL INDEPENDENT PIECE and can ship first regardless of how this rules: the
+    board cache key currently calls `github.listOpenHeadBranches()` on every request, so even a
+    cache HIT pays a network round-trip. That is worth removing whether or not a read model is ever
+    built.
+    CAVEAT WITH EQUAL WEIGHT: an incremental projector is NOT free. It introduces a component that
+    can silently drift from the log, and drift in a board an operator trusts is worse than latency
+    he can see. Design (ii) and (iv) exist for that reason and are the parts most likely to be
+    skipped under time pressure.
+    SECOND CAVEAT: the measurements motivating this were taken on one afternoon under live sweep
+    load, and W1-T3192 has not yet attributed the 85-second tail to a specific call. This ruling
+    argues from the SHAPE of the read path — recompute-per-miss over an append-only log, invalidated
+    at the fleet's own write rate — which is visible in the source independent of any timing. If a
+    profile later shows the tail is dominated by something else entirely, that finding does not
+    rescue recompute-on-read; it just means there are two problems.
