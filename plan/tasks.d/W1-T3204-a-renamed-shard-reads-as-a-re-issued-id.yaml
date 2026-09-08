@@ -1,0 +1,57 @@
+- id: W1-T3204
+  title: "RENAMING A SHARD READS AS RE-ISSUING ITS ID, AND THE REMEDY THE GATE PRINTS IS WRONG FOR THAT CASE — `task-id-existence --base` compares declared ids BY FILE with no rename awareness, so a `git mv` refuses; following its \"Renumber to a fresh reserved id\" would burn an id and split one task's record across two"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 8.00
+  files: [scripts/task-id-existence-check.mjs, test/a-renamed-shard-reads-as-a-re-issued-id.test.ts]
+  origin: "operator-session#gate-degrade-2026-09-08"
+  plan_refs: ["W1-T2324", "W1-T3022"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2324 added the collision check for a real reason its own message states: "git merges two
+    differently-named shards with no conflict, and `loadPlan` then refuses origin/main -- seven
+    historical repairs exist". That is correct, and this task does not weaken it.
+
+    IT CANNOT SEE A RENAME. `evaluateAddedIdCollisions` compares the ids DECLARED in the working
+    tree against the ids declared at the base, keyed by file. A `git mv` of a shard is a delete plus
+    an add of the same id, so the id appears "already declared at the base" and the change is
+    refused as a RE-ISSUE.
+
+    REPRODUCED 2026-09-08 on a clean worktree, renaming one shard and nothing else:
+
+      $ git mv plan/tasks.d/W1-T3180-inherited-growth-records-a-bucket.yaml \
+               plan/tasks.d/W1-T3180-renamed-for-the-probe.yaml
+      $ npm run --silent task-id-existence:check -- --base origin/main
+      task-id-existence: FAILED -- the following id(s) are ALREADY DECLARED:
+        W1-T3180 -- the base declares it in plan/tasks.d/W1-T3180-inherited-growth-records-a-bucket.yaml,
+                    so this change RE-ISSUED it
+          plan/tasks.d/W1-T3180-renamed-for-the-probe.yaml:1
+      Renumber to a fresh reserved id. ...
+
+    THE REMEDY IS THE HARMFUL PART. "Renumber to a fresh reserved id" is right for a genuine
+    collision and WRONG here: obeying it burns an id and leaves one task's history split across two
+    numbers. There is no way to comply correctly, so the only options are to abandon the rename or
+    to ignore a red gate — and on 2026-09-08 an operator abandoned a legitimate rename of W1-T3180's
+    shard, whose slug no longer described the task after its remedy was corrected mid-build.
+
+    THE DISCRIMINATOR IS ALREADY PRESENT, TWICE OVER. `git status` reports the change as
+    `R  <old> -> <new>`, and independently: the base declares the id in exactly ONE file, and THIS
+    CHANGE DELETES THAT FILE. A duplicate therefore cannot survive the merge, which is the only
+    thing W1-T2324 is defending. So the rule is: an id is RE-ISSUED only when the base's declaring
+    file still exists after this change. When every base file declaring it is deleted here, it moved.
+
+    NOT IN SCOPE: rename detection by similarity score, and any relaxation of the two-files-one-id
+    refusal. A change that adds a second file for an id the base still declares must refuse exactly
+    as it does today — that is the incident this gate exists for, and the test must watch it fail.
+  acceptance:
+    - claim: "renaming a shard is not refused as a re-issue, because the base file declaring that id is deleted by the same change"
+      proof: "unit test: test/a-renamed-shard-reads-as-a-re-issued-id.test.ts"
+    - claim: "the rule is stated as the base's declaring file surviving the change, not as a similarity guess"
+      proof: "grep: still exists after this change in scripts/task-id-existence-check.mjs"
+    - claim: "a genuine collision — a second file for an id the base still declares — is still refused, so W1-T2324 is not weakened"
+      proof: "grep: MUTANT in test/a-renamed-shard-reads-as-a-re-issued-id.test.ts"

@@ -1,0 +1,57 @@
+- id: W1-T3203
+  title: "`test-tier-manifest --check` WITHOUT `--base` REPORTS INHERITED FILES AS VIOLATIONS AND PRINTS A REMEDY THAT IS WRONG — CI passes `--base \"$TIER_BASE\"` and tolerates them; the bare local invocation everyone actually types does not, says nothing about the difference, and tells you to `--seed` a change you do not need"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 8.00
+  files: [scripts/test-tier-manifest.mjs, test/a-check-without-a-base-reports-inherited-files-as-violations.test.ts]
+  origin: "operator-session#gate-degrade-2026-09-08"
+  plan_refs: ["W1-T2904", "W1-T3022"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CARVE-OUT IS BUILT AND CI USES IT. `inheritedUntieredFiles` (scripts/test-tier-manifest.mjs)
+    tolerates a file the merge base already had, and `.github/workflows/ci.yml:187` passes
+    `--base "$TIER_BASE"`. With a base the reading is:
+
+      test-tier-manifest: N untiered file(s) came from origin/main; defaulting them to the fast
+      tier without charging this branch for base movement.
+      test-tier-manifest: OK — all 1279 test file(s) are tiered.
+
+    WITHOUT a base — the bare `npm run test-tier-manifest:check`, and the invocation an operator or
+    a worker types by hand — the SAME tree reads:
+
+      test-tier-manifest: 21 test file(s) are not recorded in scripts/test-tier-manifest.json ...
+      Record it with: node scripts/test-tier-manifest.mjs --seed
+
+    Both statements are true of what they measured. Only one of them is CI's verdict, and nothing
+    says which. MEASURED 2026-09-08: an operator read the bare form as "main is failing its own gate
+    and blocking every open PR", opened a 21-row seeding PR on that basis, and merged it. The rows
+    are harmless placeholders; the diagnosis was false, and the PR body asserted a blockage that was
+    not happening. The gate's own printed remedy is what led there.
+
+    THE SIBLING ALREADY DOES THIS RIGHT, AND IS THE MODEL. `scripts/task-id-existence-check.mjs`
+    announces the same degrade in as many words:
+
+      task-id-existence: collision check SKIPPED -- no --base given, so no id was compared against
+      a base. Pass --base origin/main to enable it.
+
+    So the fix is not new judgement, it is the sibling's sentence: when `--check` runs with no
+    `--base`, say that the reading is NOT CI's, name the flag, and do not print a `--seed` remedy
+    for files that may be inherited. A file this working tree genuinely adds still refuses exactly
+    as it does today — that is the case the gate exists for, and it must not soften.
+
+    NOT IN SCOPE: defaulting `--base` to `origin/main` when the flag is absent. That would make a
+    local run depend on a fetched remote and silently change what the bare command measures; the
+    repo's own W1-T2324 note ("an unreadable surface read as an empty one is the false zero that
+    produced every id collision") is why announcing beats guessing.
+  acceptance:
+    - claim: "a --check with no --base announces that its reading is not CI's and names the flag, instead of presenting inherited files as violations"
+      proof: "unit test: test/a-check-without-a-base-reports-inherited-files-as-violations.test.ts"
+    - claim: "the seed remedy is not printed for a reading that could not tell inherited from added"
+      proof: "grep: not CI's verdict in scripts/test-tier-manifest.mjs"
+    - claim: "a file this tree genuinely ADDS still refuses with a base supplied, so the gate is not softened"
+      proof: "grep: MUTANT in test/a-check-without-a-base-reports-inherited-files-as-violations.test.ts"
