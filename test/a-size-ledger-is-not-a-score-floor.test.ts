@@ -107,5 +107,17 @@ test("removing the exemption entry makes the ordinary-growth case refuse again",
     true,
     "a non-exempt *-baseline.json in the same shape still refuses, so membership in the set is what decided the exempt case",
   );
-  assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.size, 3, "exactly three paths are exempt — a fourth would need its own reviewed reason");
+  // W1-T2897 raised this from three to four, which is the tripwire working rather than being
+  // worked around: the fourth is scripts/clock-signature-baseline.json, and its reason is recorded
+  // beside it in src/lib/review.ts. It earns the same LEDGER/FLOOR argument as the source-size
+  // entry — per-file counts enforced as a ceiling, where raising a row records debt and cannot make
+  // a failing falsifier pass — plus one the others do not need: the census it belongs to is
+  // UNSATISFIABLE without it, because that suite's own falsifiers read the MEASURED tree
+  // (`scanClockSignatures()`) and assert the post-migration counts, so the instrument cannot be
+  // landed alone in the instrument-only PR rule 25 normally prescribes.
+  assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.size, 4, "exactly four paths are exempt — a fifth would need its own reviewed reason");
+  assert.ok(
+    ENTANGLEMENT_EXEMPT_INSTRUMENTS.has("scripts/clock-signature-baseline.json"),
+    "the fourth entry is named, so a bare count bump cannot stand in for a reviewed path",
+  );
 });
