@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
 import { captureFeedback, feedbackEntryPath, type FeedbackEntry } from "./feedback.js";

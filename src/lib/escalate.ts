@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
@@ -1085,7 +1084,7 @@ export function ghIssueGateway(
     listOpen(label) {
       // OPEN issues only, with body (carries `**Task:** <id>`). Read over REST's `/issues`, NOT
       // `gh issue list --label`: that routes label filtering through GitHub's GraphQL `search()`
-      // connection, throttled account-wide here, and made this read fail 100% of the time. THROWS
+      // connection, throttled account-wide here; `ghJson(` cannot parse this bare `--paginate` shape. THROWS
       // on a `gh` failure — the caller degrades to no action this cycle, never "zero open".
       return parseLabelledIssuesRest(run(labelledIssuesRestArgs(repoArg, label, "open")));
     },

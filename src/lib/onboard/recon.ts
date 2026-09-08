@@ -1,5 +1,4 @@
 import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
-import { execFileSync } from "node:child_process";
 import { ghExec } from "../github-transport.js";
 // Imported ADDITIONALLY as the module's DEFAULT export (a plain, mutable object) for the
 // SAME reason inventory.ts's header comment gives: ESM named bindings off `node:fs` are

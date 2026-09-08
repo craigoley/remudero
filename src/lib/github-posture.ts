@@ -43,7 +43,6 @@
  */
 
 import { existsSync, mkdirSync, openSync, readFileSync, renameSync, writeSync, closeSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import { dirname, join } from "node:path";
 

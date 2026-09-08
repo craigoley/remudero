@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import type { DiffSummary, RiskBand } from "./risk-score.js";
 import type { Mount } from "./mounts.js";

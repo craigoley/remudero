@@ -15,7 +15,6 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import { existsSync } from "node:fs";
 import {

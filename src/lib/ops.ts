@@ -1,5 +1,4 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import { join } from "node:path";
 import { appendLedger } from "./ledger.js";

@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import { inflateRawSync } from "node:zlib";
 import { appendLedger, type LedgerLine } from "./ledger.js";

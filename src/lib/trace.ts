@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import type { FeedbackEntry } from "./feedback.js";
 import type { Plan, Task } from "./plan.js";

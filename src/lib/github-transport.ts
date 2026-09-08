@@ -2,7 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import type { ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { promisify } from "node:util";
 
-/** Default wall-clock ceiling for one GitHub CLI invocation. */
+/** PRIMARY CONTROL: every GitHub CLI invocation gets a wall-clock ceiling unless a caller narrows it. */
 export const DEFAULT_GH_CALL_TIMEOUT_MS = 60_000;
 
 const DEFAULT_GH_MAX_BUFFER = 1 << 24;
@@ -37,6 +37,7 @@ export function parseGhRateLimitHeaders(headerBlock: string): GhRateLimitReading
   };
 }
 
+/** BACKSTOP: fallback bucket identity when GitHub omits or hides the rate-limit resource header. */
 export const GH_RATE_LIMIT_BUCKET_UNKNOWN = "unknown";
 
 export interface GhRateLimitRefusal {
@@ -114,6 +115,8 @@ export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsyn
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
+
+/** PRIMARY CONTROL: a rate-limit signal widens pacing until a later clean result narrows it again. */
 export const DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS = 10_000;
 
 export interface GhBudgetReading {
@@ -193,6 +196,8 @@ function defaultBlockingSleepSync(ms: number): void {
 }
 
 export const DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS = 60_000;
+
+/** PRIMARY CONTROL: a refused call retries only this many times before surfacing the refusal. */
 export const DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS = 4;
 export const DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION = 0.25;
 

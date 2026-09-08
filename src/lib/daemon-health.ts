@@ -41,7 +41,6 @@
  */
 
 import { statfsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";

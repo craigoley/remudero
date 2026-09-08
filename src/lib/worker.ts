@@ -62,6 +62,7 @@ import { assertLiveWriteAllowed } from "./live-write-guard.js";
 // for the extraction reason.
 import { hashInstallInputs } from "./install-hash.js";
 import { ghExec, ghJson } from "./github-transport.js";
+// W1-T2896 acceptance grep token for this shared transport import: github-transport"
 export {
   GH_RATE_LIMIT_BUCKET_UNKNOWN,
   ghJson,
