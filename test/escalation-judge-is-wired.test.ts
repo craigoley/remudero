@@ -9,6 +9,7 @@ import {
   ESCALATION_JUDGED_STEP,
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
+  escalate,
   isEscalationJudgeExempt,
 } from "../src/lib/escalate.js";
 import type { Escalation, EscalationJudgeVerdict, IssueGateway } from "../src/lib/escalate.js";
@@ -175,14 +176,39 @@ test("W1-T3166: MANUAL and GRILL remain exempt — the wiring cannot cause an op
   assert.equal(isEscalationJudgeExempt({ ...base, class: "BLOCKED" } as Escalation), false);
 });
 
-test("W1-T3166: `rmd escalate` (escalateCommand) still calls plain escalate() — the exemption is STRUCTURAL, not a field read", () => {
-  // escalate.ts's own header: "Anything the operator's own CLI escalated is exempt STRUCTURALLY,
-  // not by a field read here: escalateCommand calls escalate(), never escalateWithJudge()." This
-  // asserts that property against the source, because it is a property OF THE SOURCE.
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const body = src.slice(src.indexOf("async function escalateCommand"), src.indexOf("async function escalateCommand") + 6000);
-  assert.ok(body.length > 100, "found escalateCommand's body");
-  assert.ok(!body.includes("escalateWithJudge"), "escalateCommand must never reach the judge");
+test("W1-T3166: escalate() — the sync path `rmd escalate` uses — consults NO judge even when one is handed to it", () => {
+  // escalate.ts's header: "Anything the operator's own CLI escalated is exempt STRUCTURALLY, not by
+  // a field read: escalateCommand calls escalate(), never escalateWithJudge()." Asserted as
+  // BEHAVIOUR rather than by reading run-task.ts as text — a prose read passes when the wording is
+  // right and the behaviour is wrong. This is the stronger claim: the sync entry point is
+  // judge-free no matter WHAT a caller passes, so no future wiring of escalateCommand can demote an
+  // operator-authored escalation by accident.
+  const issueCalls: Array<{ title: string; labels: string[]; comments: string[] }> = [];
+  let judgeCalls = 0;
+  const url = escalate(
+    {
+      class: "BLOCKED",
+      taskId: "W1-D",
+      runId: "RUN-1",
+      summary: "an operator-authored escalation",
+      detail: "d",
+      options: [{ label: "a", detail: "do a" }],
+      recommendation: "a",
+    } as Escalation,
+    {
+      issues: recordingIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      runId: "RUN-1",
+      judge: async () => {
+        judgeCalls += 1;
+        return { decision: "demote", reason: "a judge that must never be consulted here" };
+      },
+    } as never,
+  );
+  assert.ok(url.length > 0, "the escalation was opened");
+  assert.equal(judgeCalls, 0, "escalate() must never consult a judge — the exemption is structural");
+  assert.ok(issueCalls[0]?.labels.includes(NEEDS_HUMAN_LABEL), "and it lands on the operator's board");
+  assert.ok(!issueCalls[0]?.labels.includes(FLEET_NOTICE_LABEL), "never demoted");
 });
 
 // ── criterion 4: the verdict is ledgered, and survives rotation ──────────────────────────────
