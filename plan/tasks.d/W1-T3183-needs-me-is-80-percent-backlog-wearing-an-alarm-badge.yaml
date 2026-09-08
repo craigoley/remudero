@@ -1,0 +1,97 @@
+- id: W1-T3183
+  title: "NEEDS ME IS 80% BACKLOG WEARING AN ALARM BADGE — 53 queued `verify: human` shards render as `needs-human` rows beside 5 real escalations, under ONE section, ONE badge and ONE count, so the browser tab reads `(66)` and a genuine ask is buried in a list of things that have never needed a decision"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/serve.ts, test/needs-me-separates-asks-from-backlog.test.ts]
+  origin: "operator-session#console-live-review-2026-09-08"
+  plan_refs: ["W1-T507", "W1-T153", "W1-T3166", "W1-T3168"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED AGAINST THE LIVE CONSOLE 2026-09-08, headless Chromium over the running `rmd serve` at
+    `ec3c69d9a` — not a fixture server (no suite in this repo drives the live one; see W1-T3185).
+
+    THE COUNT. `document.title` reads **"(66) Remudero — the operator console"**. The NEEDS ME
+    section renders 66 rows. A census of the plan gives the composition:
+      `verify: human` shards total                          71
+      of those, status queued                               53
+      not merged / blocked / retired                        55
+    So roughly 53 of the 66 rows — about 80% — are the `verify: human` class, and 5 are live
+    escalations (#4522, #4559, #4621, #4619, MAIN-HEALTH). The screenshot shows the shape plainly:
+    one escalation block, then ~53 consecutive identical rows reading "W1-TXXX awaiting human
+    verification -- filed verify: human, never auto-dispatched".
+
+    W1-T507 IS NOT WRONG AND THIS SHARD DOES NOT SAY IT IS. Its own comment at
+    `src/lib/serve.ts:3038` states the intent exactly: "No action affordance renders here on
+    purpose: unlike an escalation row, there is no issue to view and no PR to point at ... This
+    row's only job is making the queue itself visible, which is this task's whole point." Making
+    the queue visible is right. Rendering it INDISTINGUISHABLY from work that is actually blocked
+    is what this shard refuses.
+
+    THE OPERATOR'S OWN WORDS, 2026-09-08, about the two escalations he could see: "neither of them
+    seem like they actually need me." The measurement says the problem is larger than the two he
+    named — the section is 80% items that have never needed him, and the count in his browser tab
+    is a backlog depth presented as an alarm.
+
+    WHY THE ESCALATION WORK DOES NOT COVER THIS. W1-T3166 (judge at birth), W1-T3167 (re-judge),
+    W1-T3168 (producer precision) and W1-T3179 (dedup key) all act on ESCALATIONS. These rows are
+    not escalations: `status.ts`'s only two `needsHuman = true` assignments (:2501, :2899) are both
+    escalation-derived, and this row is emitted by the console's own client
+    (`needsMeVerifyRowHtml`) from the plan, never from the ledger. All four could ship and this
+    board would look identical.
+  design: |
+    (i) TWO POPULATIONS, SEPARATED IN THE MARKUP, not merely styled differently. An ASK has a
+    referent an operator can act on now (an issue, a PR, a proposal); a BACKLOG ROW has none —
+    W1-T507 says so itself. The separation must be structural so a screen reader and a count both
+    see it, not a colour a reader has to learn.
+    (ii) THE COUNT AN OPERATOR SEES IS THE COUNT OF ASKS. The tab title and the section header
+    carry the actionable number; the backlog carries its own, separately labelled. A single "66"
+    that mixes them is the defect, and any fix that leaves one blended number has not landed.
+    (iii) THE BACKLOG STAYS VISIBLE AND STAYS REACHABLE. W1-T507's purpose is preserved exactly:
+    collapsing, hiding behind a filter, or paginating it away re-creates the invisible queue that
+    task existed to end. Visible, counted, and NOT mixed into the ask count.
+    (iv) NO NEW PREDICATE FOR "ACTIONABLE". The distinction already exists in the data — an
+    escalation row carries an issue URL and an affordance, a verify row carries neither, by
+    construction. Deriving actionability from what the row already has is honest; inventing a
+    second classifier that could disagree with the renderer is not.
+  acceptance:
+    - claim: "asks and backlog rows render as SEPARATE groups in the markup, each with its own labelled count"
+      proof: "unit test: test/needs-me-separates-asks-from-backlog.test.ts"
+    - claim: "the operator-facing count (tab title and section header) counts ASKS only — a fixture of 53 backlog rows and 5 asks reads 5, never 58"
+      proof: "unit test: test/needs-me-separates-asks-from-backlog.test.ts"
+    - claim: "every backlog row remains present and reachable — W1-T507's visible-queue purpose survives, so a fixture's 53 rows are all still rendered"
+      proof: "unit test: test/needs-me-separates-asks-from-backlog.test.ts"
+    - claim: "a row's group is derived from whether it carries an actionable referent, not from a second classifier that could disagree with the renderer"
+      proof: "unit test: test/needs-me-separates-asks-from-backlog.test.ts"
+  falsifier: |
+    CLOSE IF the two populations are already separated: load the live console and read
+    `document.title` plus the NEEDS ME section's row composition.
+    MEASURED 2026-09-08: title "(66) Remudero — the operator console"; one blended section; the
+    `verify: human` rows carry the SAME `needs-human` badge as the escalations.
+    POSITIVE CONTROL for the census, required because "53" is the whole claim: the same walk must
+    report the OTHER statuses too — MEASURED: {queued:53, blocked:6, done:2, merged:10} over 71
+    `verify: human` shards. A walk returning only one bucket is broken, not conclusive.
+    PROVE IT LOAD-BEARING: the fixture must carry BOTH populations. A test with only backlog rows
+    passes a "count is 0" assertion while proving nothing about separation; a test with only asks
+    never exercises the defect.
+    DO NOT satisfy this by hiding, collapsing or paginating the backlog. W1-T507 exists because
+    that queue was invisible; trading one invisibility for another is a regression wearing a fix.
+    DO NOT satisfy this by removing the verify rows from NEEDS ME entirely and putting them
+    nowhere. "Separated" means still on the board, still counted, under their own heading.
+  note: |
+    Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src.
+    THIS IS AN INFORMATION-ARCHITECTURE DEFECT, not an accessibility one (W1-T3184 carries those)
+    and not an escalation-routing one (W1-T3166/3167/3168/3179 carry those). Filed separately
+    because none of them changes a single row on this board.
+    CAVEAT WITH EQUAL WEIGHT: the 53/5 split is ONE observation of ONE board on 2026-09-08. The
+    `verify: human` population is stable (it is a plan property), but the escalation count moves
+    hourly — a quiet day would read 53/1 and a bad one 53/12. The RATIO is not the claim; the
+    conflation is, and that holds at every ratio.
+    SECOND CAVEAT: this shard does not ask whether 53 queued `verify: human` shards is itself too
+    many, or whether those tasks should be re-typed. That is a plan question, not a console one,
+    and answering it here would hide a rendering defect behind a backlog cleanup.

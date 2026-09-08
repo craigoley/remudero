@@ -1,0 +1,104 @@
+- id: W1-T3185
+  title: "NOTHING REVIEWS THE RUNNING CONSOLE — all 22 browser suites drive a fixture server built in-process by `buildServeServer`, no test accepts a live base URL, and a fixture cannot render the volume that produced the defects W1-T3183 and W1-T3184 record"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [scripts/console-live-review.mjs, test/a-live-console-review-is-runnable.test.ts]
+  origin: "operator-session#console-live-review-2026-09-08"
+  plan_refs: ["W1-T153", "W1-T3018", "W1-T3183", "W1-T3184", "W3-T7"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08. This repo has a MATURE browser-test capability and it is pointed entirely
+    at synthetic data.
+
+    THE CENSUS. 31 files under `test/` import Playwright. Classifying each by whether it stands up
+    its own server: **22 build a fixture server** (`buildServeServer`/`createServer`) — every
+    `serve.*` suite, `console-write-state`, `decision-summary`, `accept-status-consumed`,
+    `console-freshness-wired`, `serve-self-measurement` — and the remaining 9 are about the browser
+    TOOLCHAIN rather than the console (`browser-absence`, `review-browsers`,
+    `workflow-playwright-install`, `serve-browser-teardown`, `verify-image-probes`, …).
+    `grep -rn 'CONSOLE_URL\|BASE_URL' test/*.ts` finds only `console-url.test.ts`'s exit-code
+    constants. **No suite can be pointed at a running console.**
+
+    WHAT THAT COSTS, MEASURED THE SAME DAY. `test/serve.shell-ux.test.ts` already runs
+    `@axe-core/playwright` and passes 18/18 against its fixture. The LIVE console at the same
+    commit reports 2 SERIOUS axe violations across 10 nodes, 5 unlabelled form controls, 17
+    sub-24x24 targets and 67 elements at 11px (W1-T3184). Both statements are true simultaneously,
+    because the defects are properties of REAL VOLUME: five escalations produce five reply boxes and
+    five list items; a fixture with one produces one of each and trips nothing.
+
+    AND THE BIGGEST FINDING WAS INVISIBLE TO A FIXTURE ENTIRELY. The live board renders 66 NEEDS ME
+    rows of which ~53 are queued `verify: human` shards (W1-T3183). That composition is a property
+    of the real plan. No hand-written fixture would have been given 53 rows of one class, because
+    nobody writing the fixture believed the board looked like that.
+
+    THE OPERATOR ASKED FOR THIS DIRECTLY on 2026-09-08: "allow yourself to get access to the console
+    (and rmd to access it too) so you can run playwright tests against it and use the mcp to
+    validate and improve the design."
+  design: |
+    (i) A REVIEW SCRIPT, NOT A TEST SUITE. This runs against a console that may be up, down, stale
+    or mid-deploy; a `node --test` case that fails when the daemon is restarting is a false alarm
+    in the one place this repo has already been burned (W1-T3018: a missing Chromium made eleven
+    suites look like 189 real failures and the false claim reached two merged PR bodies). It
+    REPORTS; it does not gate CI.
+    (ii) THE TARGET IS AN ENV VAR AND CARRIES NO CREDENTIAL. The console requires a bearer token;
+    a token on a command line lands in shell history, `ps`, and any transcript. The script takes a
+    base URL that already carries auth (a loopback proxy, an SSH-forwarded port) and must REFUSE to
+    accept a token argument at all, so there is no shape in which it can leak one.
+    (iii) IT MUST BE ABLE TO SAY "I COULD NOT LOOK". An unreachable console, a timeout, or a missing
+    Chromium is reported AS SUCH and never as a clean bill of health — the exact polarity
+    `browser-absence.ts` already establishes for the suites, reused rather than re-derived.
+    (iv) IT REPORTS COMPOSITION, NOT JUST VIOLATIONS. The 53-of-66 finding is not an axe rule; it
+    came from counting what the board actually rendered. The script states row composition, type
+    scale in use, target sizes and axe output together, because the design defects live in the
+    numbers a rule list does not have.
+    (v) ARTEFACTS AN OPERATOR CAN LOOK AT. Full-page screenshots per viewport, kept beside the JSON,
+    because "beautiful" is his judgement and no criterion here can stand in for it.
+  acceptance:
+    - claim: "the script reviews a console at a base URL given by an environment variable, and reports axe violations, row composition, type scale and target sizes together"
+      proof: "unit test: test/a-live-console-review-is-runnable.test.ts"
+    - claim: "an unreachable or timing-out target is reported as NOT LOOKED AT, never as zero findings"
+      proof: "unit test: test/a-live-console-review-is-runnable.test.ts"
+    - claim: "a missing Chromium is reported the way browser-absence.ts already reports it, never as a console defect"
+      proof: "unit test: test/a-live-console-review-is-runnable.test.ts"
+    - claim: "the script accepts NO token argument or token environment variable — auth reaches it only inside the base URL"
+      proof: "unit test: test/a-live-console-review-is-runnable.test.ts"
+    - claim: "one viewport failing does not abort the run — the others still report, and the failure is itself a finding"
+      proof: "unit test: test/a-live-console-review-is-runnable.test.ts"
+  falsifier: |
+    CLOSE IF a live-target review already exists:
+      `grep -rn 'CONSOLE_URL\|BASE_URL' test/ scripts/` and a classification of every
+      Playwright-importing suite by whether it builds its own server.
+    MEASURED 2026-09-08: 22 of 31 build a fixture server, 9 are toolchain suites, ZERO take a live
+    URL; the only `CONSOLE_URL` hits are exit-code constants in `console-url.test.ts`.
+    PROVE IT LOAD-BEARING: point the script at a URL that is NOT a console (a 404, a plain 200 with
+    no shell) and at one that is. The first must report "could not review" and the second must
+    produce findings. If both produce the same output the script is not observing anything.
+    DO NOT make this a CI gate. A review that fails the build when the daemon is restarting is the
+    W1-T3018 failure mode again, and this repo has already paid for it once.
+    DO NOT accept a token as an argument or an env var "for convenience". The whole reason this
+    shard specifies a pre-authenticated base URL is that every convenient shape leaks the token
+    into history, `ps`, or a transcript.
+    DO NOT duplicate the 22 fixture suites. They test the shell's LOGIC and stay exactly as they
+    are; this observes the rendered result at real volume, which is a different question.
+  note: |
+    Rule 25 CHECKED — AND THIS ONE IS CLOSE, so it is stated rather than assumed. A file under
+    `scripts/` is an INSTRUMENT by rule 25's own definition, and its test lives under `test/`.
+    Those two paths are the whole diff; NOTHING under `src/` may ride along, and a builder who
+    finds themselves editing `src/lib/serve.ts` here has entangled this with W1-T3184 and must
+    split.
+    PRIOR ART THIS BUILDS ON RATHER THAN REPLACES: `test/browser-absence.ts` (skip semantics),
+    `test/setup/open-shell.ts` (shell-ready predicate), `@axe-core/playwright` and `playwright`
+    (both already devDependencies). A session on 2026-09-08 wrote a throwaway version of this
+    harness before discovering the 31 existing suites — the near-duplication is recorded here so
+    the next reader starts from the helpers instead.
+    CAVEAT WITH EQUAL WEIGHT: a live review is only as good as the console it reaches. The
+    2026-09-08 run could not measure the 390px viewport at all — the observing tunnel saturated on
+    the console's own SSE stream and `page.goto` timed out at 60s. That is a property of the
+    observation path, not the console, and this shard's third and fifth criteria exist so a future
+    run says so rather than reporting a clean mobile pass it never obtained.
