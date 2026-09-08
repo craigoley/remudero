@@ -142,7 +142,7 @@
   origin: recon#diff-coverage-misalignment-2026-08-11
   plan_refs: ["W1-T25", "W1-T212", "W1-T297", "W1-T220"]
   files: [test/helpers/mutant-module.ts, test/changeset-shorthand-anchor.test.ts, test/trailer-credit-plan-only.test.ts, test/architecture-fitness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every deliverable is decidable in-process, with no network and no operator.
     The one live measurement clause (i) needed is a full-suite coverage run, which is a local command.

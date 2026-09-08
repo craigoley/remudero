@@ -10,7 +10,7 @@
   files: [scripts/source-size-ratchet.mjs, src/lib/ci-parity.ts, package.json, test/a-source-file-cannot-outgrow-its-baseline.test.ts]
   origin: "operator-brief#agree-with-your-recommendations-2026-08-30"
   plan_refs: ["W1-T373", "W1-T294"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ASYMMETRY IS THE FINDING. This repo ratchets what it has been burned by: CLAUDE.md's

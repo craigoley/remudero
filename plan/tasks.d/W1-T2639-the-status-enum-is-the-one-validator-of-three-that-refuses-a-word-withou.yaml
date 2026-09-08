@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["W1-T3E", "W1-T1287", "§2"]
   files: [src/lib/plan.ts, test/plan.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED AT SOURCE, all three in the same loader block. `loadPlan` validates three closed

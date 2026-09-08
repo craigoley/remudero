@@ -79,7 +79,7 @@
   origin: feedback#fb-1785237559155-feef92
   plan_refs: ["§9", "§4", "W1-T252", "W1-T253", "W1-T330", "W1-T148"]
   files: [src/lib/cost-anomaly.ts, src/lib/sweep.ts, src/lib/status-board.ts, plan/policy.yaml, test/cost-anomaly.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high on BOTH of Rule 19's counts, deliberately: SPAN (src/lib, plan/, test/) and the

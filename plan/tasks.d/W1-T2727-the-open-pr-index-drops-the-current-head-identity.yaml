@@ -15,7 +15,7 @@
     - test/board-pr-head-identity.test.ts
     - test/board-prs-rest.test.ts
     - scripts/source-size-baseline.json
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED AT origin/main e1eb5261. `mapRestPr` already reads the current pull-request head SHA

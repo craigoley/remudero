@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§4", "W1-T2349", "W1-T2876", "W1-T2960"]
   files: [scripts/fleet-heartbeat.sh, .github/workflows/fleet-heartbeat-watch.yml, test/the-beat-reports-whether-the-fleet-builds.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2960 measured a daemon that dispatched NOTHING for two days — zero `run.start` rows on

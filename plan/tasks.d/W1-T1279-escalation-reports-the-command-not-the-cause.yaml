@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/escalation-names-the-cause.test.ts]
   origin: oper#escalation-reports-command-not-cause-2026-08-23
   plan_refs: ["W1-T487", "W1-T974", "W1-T1269", "W1-T138", "W1-T1219"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (1) HALF ONE, RE-DERIVED FROM THE LIVE ISSUE RATHER THAN CARRIED. `issues/2624`'s

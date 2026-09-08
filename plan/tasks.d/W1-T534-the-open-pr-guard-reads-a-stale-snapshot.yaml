@@ -88,7 +88,7 @@
   origin: recon#same-id-second-run-2026-08-16
   plan_refs: ["W1-T533", "W1-T177", "W1-T471", "W1-T494"]
   files: [src/lib/drain.ts, test/drain.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: medium` IS SET UP FRONT — Rule 19 SPAN folds `src/lib/drain.ts` and `test/drain.test.ts`
     onto ONE subsystem, and the blast radius matches: one additional injectable probe inside an

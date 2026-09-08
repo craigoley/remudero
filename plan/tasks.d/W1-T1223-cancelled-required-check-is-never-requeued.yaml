@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, src/run-task.ts, test/cancelled-required-check-requeue.test.ts]
   origin: oper#cancelled-required-check-2026-08-22
   plan_refs: ["W1-T1212", "W1-T457"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SIGNAL IS AN ABSENCE OF A VERDICT, AND THE SWEEP READS IT AS A VERDICT.

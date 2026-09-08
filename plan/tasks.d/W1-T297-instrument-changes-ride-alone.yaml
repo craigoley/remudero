@@ -85,7 +85,7 @@
   origin: feedback#fb-1784762618336-8211ab
   plan_refs: ["§5", "§12"]
   files: [src/lib/review.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED from feedback#fb-1784762618336-8211ab (captured 2026-07-22), covered-by NONE — checked against
     plan/tasks.yaml and every plan/tasks.d shard. Ships with the MASTER-PLAN §12 amendment that states the

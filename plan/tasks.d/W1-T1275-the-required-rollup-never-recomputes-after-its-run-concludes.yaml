@@ -133,7 +133,7 @@
     - claim: "no path marks the gate green without re-evaluating it"
       proof: "unit test: test/ci-gate-reaggregate.test.ts"
   files: [src/lib/sweep.ts, test/ci-gate-reaggregate.test.ts, test/ci-gate-dedupe.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#required-rollup-never-recomputes-2026-08-23"
   plan_refs: ["W1-T1223", "W1-T261", "W1-T123", "W1-T1249"]

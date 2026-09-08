@@ -10,7 +10,7 @@
   files: [scripts/claude-md-budget-ratchet.mjs, test/claude-md-budget-ratchet.test.ts]
   origin: oper#capbytes-type-disarm-2026-08-23
   plan_refs: ["W1-T503", "W1-T1231"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE DEFECT IS NOT THAT A MISSING CAP PASSES. IT IS THAT A DECLARED-BUT-UNUSABLE CAP PASSES AND

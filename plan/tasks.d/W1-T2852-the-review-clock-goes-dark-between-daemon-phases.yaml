@@ -13,7 +13,7 @@
     - test/event-review-clock-all-phases.test.ts
   origin: "operator-session#green-review-backlog-2026-09-04"
   plan_refs: ["W1-T254", "W1-T484", "W1-T1272", "W1-T2584", "W1-T2744"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON AZURE RUN DAEMON-1788562467405. A full sweep reached its configured 559000 ms

@@ -10,7 +10,7 @@
   files: [src/lib/serve.ts, test/console-shell-unknowns.test.ts]
   origin: oper#console-shell-renders-unknowns-as-findings-2026-08-24
   plan_refs: ["W1-T281", "W1-T282", "W1-T262", "W1-T2219"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-08-24 from a scratch worktree proved equal to `origin/main` BY SHA

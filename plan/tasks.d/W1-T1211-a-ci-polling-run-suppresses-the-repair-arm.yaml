@@ -125,7 +125,7 @@
     - claim: "no lock is released or aged out by this path"
       proof: "unit test: test/light-pass-ci-idle.test.ts"
   files: [src/run-task.ts, test/light-pass-ci-idle.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#ci-polling-run-suppresses-repair-2026-08-22"
   plan_refs: ["W1-T254", "W1-T526", "W1-T1067", "W1-T1109", "W1-T1127", "W1-T1129", "W1-T1110"]

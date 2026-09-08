@@ -10,7 +10,7 @@
   files: [src/lib/serve.ts, test/serve-incident-timeline.test.ts]
   origin: "operator-brief#direction-refresh-2026-08-27"
   plan_refs: ["W1-T2296", "W1-T2304", "W1-T915"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE VERB EXISTS AND THE SURFACE DOES NOT. W1-T2296 shipped `buildReplay` (src/lib/replay.ts):

@@ -135,7 +135,7 @@
   origin: recon#silent-stop-retry-budget-2026-08-14
   plan_refs: ['W1-T215', 'W1-T126']
   files: [scripts/fleet-heartbeat.sh, .github/workflows/fleet-heartbeat-watch.yml, test/fleet-heartbeat.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `files:` spans THREE subsystems — `scripts/`, `.github/` and
     `test/` — and `sizingViolation` (`src/lib/task-linter.ts`) blocks at >=2 below `high`. The band is

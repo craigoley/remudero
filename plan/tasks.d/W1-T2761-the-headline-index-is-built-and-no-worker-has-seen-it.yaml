@@ -77,7 +77,7 @@
   origin: "oper#concept-scan-2026-09-03"
   plan_refs: ["W1-T35", "W1-T2297", "W1-T2507", "W1-T2508", "W1-T2512", "W1-T2579", "W1-T2659", "W1-T2759", "§8A", "§12"]
   files: [src/run-task.ts, src/lib/policy.ts, src/lib/wipe-test.ts, test/the-worker-gets-the-headlines.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — the prompt assembly, the policy schema and the wipe test under

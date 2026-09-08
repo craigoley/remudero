@@ -47,7 +47,7 @@
   origin: architect
   plan_refs: ["§9"]
   files: [src/lib/env.ts, src/lib/worker.ts, src/lib/daemon.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high — it changes what the fleet BILLS. The fail-safe direction is asymmetric: the dangerous failure
     is a SILENT flip to metered API, so the design makes engagement TWO-FACTOR (config intent that forces a

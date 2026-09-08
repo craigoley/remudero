@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§4", "W1-T76", "W1-T104", "W1-T168", "W1-T178", "W1-T195", "W1-T345", "W1-T1284"]
   files: [src/lib/escalate.ts, src/run-task.ts, test/fix-rung-open-escalation-stand-down.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     FILED FROM A READ-ONLY DIAGNOSIS OF PR #3887 (2026-09-04). The review false-block escape

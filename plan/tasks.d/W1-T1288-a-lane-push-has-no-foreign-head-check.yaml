@@ -10,7 +10,7 @@
   files: [src/lib/git-push.ts, test/lane-push-foreign-head.test.ts]
   origin: oper#lane-push-clobbered-a-shared-branch-2026-08-23
   plan_refs: ["W1-T296", "W1-T1268", "#2668"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (1) THE INCIDENT, AS THE OPERATOR MEASURED IT. On PR `#2668`, one lane read `head.sha` from the

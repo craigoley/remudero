@@ -73,7 +73,7 @@
   origin: feedback#fb-1785237627858-ffafd9
   plan_refs: ["§7", "§5D"]
   files: [src/run-task.ts, src/lib/serve.ts, docs/operator-guide.md, test/worker-peek.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high is Rule 19's SPAN, and here blast radius argues UP rather than down for ONE reason: this

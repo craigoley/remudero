@@ -3,6 +3,7 @@
  *  into a plan-only PR: generation deterministic here, publication with the gate and the human. */
 
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 // Import the DEFAULT export so a test's `t.mock.method` can intercept the marker's reads and
 // writes: named `node:fs` bindings are non-configurable and mocking one throws (W1-T207).
 import fsMarker from "node:fs";
@@ -27,6 +28,7 @@ import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
 import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-workshop.js";
+import { openLedgerUnion } from "./ledger-union.js";
 import { closureByClass, guardFireCounts, renderClosureByClass, renderGuardFireCounts, type ClassClosure, type GuardFireCount } from "./retro-closure.js";
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
@@ -51,6 +53,12 @@ export function parseLedger(ndjson: string): LedgerRecord[] {
     }
   }
   return out;
+}
+
+export async function readRetroLedgerNdjson(stateDir: string): Promise<string> {
+  const lines: string[] = [];
+  for await (const row of openLedgerUnion(stateDir)) lines.push(JSON.stringify(row));
+  return lines.join("\n");
 }
 
 /** The reduced summary of ONE run (all lines sharing a run_id). */
@@ -414,7 +422,7 @@ export function ownBranchOf(runId: string): string {
  *  dependency cycle. Why: docs/forensics/retro.md (W1-T2305). */
 export function probeGithubThrottle(): string | undefined {
   try {
-    const out = execFileSync("gh", ["api", "rate_limit", "--jq", ".rate.remaining"], {
+    const out = ghExec(["api", "rate_limit", "--jq", ".rate.remaining"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();

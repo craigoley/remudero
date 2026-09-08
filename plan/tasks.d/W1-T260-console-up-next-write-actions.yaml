@@ -42,7 +42,7 @@
   origin: architect
   plan_refs: ["§4", "§7"]
   files: [src/lib/fleet-control.ts, src/lib/panel-actions.ts, src/lib/daemon.ts, src/lib/serve.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high — it lets the console DISPATCH work. The safety comes from reusing the EXISTING gate: the daemon
     runs a kicked task through the SAME assertRunnable + merged-projection path a normal pick takes, so a console

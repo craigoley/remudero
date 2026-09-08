@@ -77,7 +77,7 @@
   origin: "oper#external-scan-2026-09-02"
   plan_refs: ["W1-T2297", "W1-T2568", "W1-T1279", "W1-T2699", "§4A", "§8"]
   files: [src/lib/untrusted-envelope.ts, src/run-task.ts, src/lib/triage.ts, test/untrusted-envelope.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — four ingestion points across two modules under Rule 19

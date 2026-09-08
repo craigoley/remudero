@@ -78,4 +78,4 @@
     - claim: "the job is push-only, so requiring its name could never deadlock a pull request"
       proof: "unit test: test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts"
   files: [.github/workflows/ci.yml, test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts]
-  status: queued
+  status: merged

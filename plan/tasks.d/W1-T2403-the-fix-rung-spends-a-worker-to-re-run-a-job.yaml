@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/fix-rung-retrigger-accounting.test.ts]
   origin: "operator-brief#fix-rung-spends-a-worker-to-retrigger-2026-08-27"
   plan_refs: ["W1-T356", "W1-T2379", "W1-T1066", "W1-T127", "W1-T2344"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID, AND WHAT "FIRST RESERVED" WAS TAKEN TO MEAN. Eight surfaces swept, anchored

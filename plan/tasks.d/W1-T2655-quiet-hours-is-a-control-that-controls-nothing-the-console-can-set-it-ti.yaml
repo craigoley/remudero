@@ -120,7 +120,7 @@
   origin: "feedback#followup:W1-T2519-1788196324559"
   plan_refs: ["§4B", "§9", "§7"]
   files: [src/lib/dispatch-governor.ts, src/lib/daemon.ts, src/run-task.ts, src/lib/fleet-control.ts, src/lib/status-board.ts, test/quiet-hours-dispatch-gate.test.ts, test/status-board.test.ts, test/daemon.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RATIFIED 2026-09-01 from the W1-T2519 follow-up harvest (run W1-T2519-1788196324559, PR #3419),

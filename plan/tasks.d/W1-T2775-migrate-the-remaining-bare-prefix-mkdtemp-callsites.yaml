@@ -11,7 +11,7 @@
   files: [hooks/mkdtemp-allowlist.txt]
   origin: "operator-decision#w1-t2773-file-companion-now-2026-09-03"
   plan_refs: ["W1-T2773"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `verify: human` because this is a scheduled, operator-paced migration whose direction the

@@ -57,7 +57,7 @@
   origin: oper#needs-me-filings-2026-08-04
   plan_refs: ["W1-T313", "W1-T322", "§7B"]
   files: [src/run-task.ts, src/lib/escalate.ts, src/lib/triage.ts, test/escalate.test.ts, test/triage.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — summary presence, option pass-through and fail-open arms all assert in-process
     against injected summarizer deps, plus one wiring test against the real default seam.

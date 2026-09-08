@@ -32,7 +32,7 @@
  * `resolveReceiptLedgerLines` does; a replay is evidence for a human, never a shorter story.
  */
 
-import { resolveLedgerUnion, type LedgerGrepFsDeps } from "./ledger-grep.js";
+import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps } from "./ledger-union.js";
 
 /** One ledger line, as {@link buildReplay} reads it — the same loose shape every other ledger
  *  consumer in the tree uses (`Array<Record<string, unknown>>`), never a narrower type this
@@ -155,7 +155,11 @@ const REPLAY_LEDGER_LINE_PATTERN = /"step":"/;
  * into a row.
  */
 export function resolveReplayLedgerLines(stateDir: string, fsDeps?: LedgerGrepFsDeps): ReplayLedgerRead {
-  const result = resolveLedgerUnion(stateDir, REPLAY_LEDGER_LINE_PATTERN, fsDeps);
+  const result = readLedgerUnionRecordsSync(
+    stateDir,
+    { pattern: REPLAY_LEDGER_LINE_PATTERN, requireArchives: true, refuseIncomplete: true },
+    fsDeps,
+  );
   if (!result.ok) {
     const reason =
       result.archiveCount === 0
@@ -165,17 +169,5 @@ export function resolveReplayLedgerLines(stateDir: string, fsDeps?: LedgerGrepFs
           result.unread.join(", ");
     return { ok: false, reason };
   }
-  const lines: ReplayLedgerLine[] = [];
-  for (const raw of result.matches) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      continue; // Not valid JSON — never guessed into a row, just dropped.
-    }
-    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-      lines.push(parsed as ReplayLedgerLine);
-    }
-  }
-  return { ok: true, lines };
+  return { ok: true, lines: result.rows as ReplayLedgerLine[] };
 }

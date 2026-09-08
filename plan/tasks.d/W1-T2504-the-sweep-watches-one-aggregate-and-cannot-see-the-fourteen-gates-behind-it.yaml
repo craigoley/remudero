@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, test/a-red-quality-gate-is-visible-to-the-sweep.test.ts]
   origin: "operator-brief#why-didnt-rmd-drive-3318-2026-08-30"
   plan_refs: ["W1-T1223", "W1-T100", "W1-T138", "W1-T977"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ONE FIELD ANSWERS TWO DIFFERENT QUESTIONS AND ONLY ONE OF THEM WANTS THAT FILTER. "What gates

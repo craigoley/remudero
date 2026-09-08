@@ -142,7 +142,7 @@
     - claim: "the existing refusal to fabricate an unknown spend still holds"
       proof: "unit test: test/spend-figures-name-their-channel.test.ts"
   files: [src/lib/glance.ts, test/spend-figures-name-their-channel.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#operator-session-spend-unmetered-2026-08-24"
   plan_refs: ["W1-T159", "W1-T167", "W1-T268"]

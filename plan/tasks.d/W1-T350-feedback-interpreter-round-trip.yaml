@@ -77,7 +77,7 @@
   origin: oper#needs-me-filings-2026-08-04
   plan_refs: ["W1-T313", "W1-T243", "§7B"]
   files: [src/lib/feedback.ts, src/lib/panel-graph.ts, src/lib/serve.ts, test/feedback.test.ts, test/panel-graph.test.ts, test/serve.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — expansion shape, RECON placement, raw byte-identity and the confirm idiom all
     assert in-process with an injected expander; the few-shot register needs no operator to judge.

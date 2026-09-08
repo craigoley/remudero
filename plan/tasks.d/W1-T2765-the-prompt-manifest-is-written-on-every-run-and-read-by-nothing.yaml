@@ -58,7 +58,7 @@
   origin: "oper#concept-scan-2026-09-03"
   plan_refs: ["W1-T2266", "W1-T2277", "W1-T2297", "W1-T2660", "§8A"]
   files: [src/lib/digest.ts, src/run-task.ts, test/the-prompt-manifest-reaches-a-reader.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — the digest module and the summary builder that feeds it are

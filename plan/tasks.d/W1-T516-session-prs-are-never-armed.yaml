@@ -92,7 +92,7 @@
   origin: oper#session-pr-automerge-2026-08-15
   plan_refs: ["W1-T489", "W1-T500", "W1-T230", "W1-T125"]
   files: [src/run-task.ts, src/lib/policy.ts, plan/policy.yaml, test/policy.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — and it was RAISED from medium by the linter rather than
     argued into place, which is worth recording. `sizingViolation` (`src/lib/task-linter.ts`) reads

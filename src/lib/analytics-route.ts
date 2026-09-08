@@ -47,21 +47,11 @@
  * once W1-T433's second cell exists — this shard deliberately does not build that consumer.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { isQueueDispatchRunStart } from "./ledger.js";
-import { dirname, join } from "node:path";
-import { gunzipSync } from "node:zlib";
+import { dirname } from "node:path";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
-import { ledgerRotationEntries, type LedgerGrepFsDeps } from "./ledger-grep.js";
-import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
-
-const realAnalyticsFs: LedgerGrepFsDeps = {
-  readdirSync: (dir) => readdirSync(dir),
-  existsSync: (path) => existsSync(path),
-  readFileSync: (path) => readFileSync(path),
-  gunzipSync: (buf) => gunzipSync(buf),
-};
+import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps } from "./ledger-union.js";
 
 /**
  * Read every ledger line across the rotation union (every `ledger.*` rotation ON DISK, in the
@@ -76,51 +66,9 @@ const realAnalyticsFs: LedgerGrepFsDeps = {
  */
 export function readAnalyticsLedgerLines(
   stateDir: string,
-  fsDeps: LedgerGrepFsDeps = realAnalyticsFs,
+  fsDeps?: LedgerGrepFsDeps,
 ): Array<Record<string, unknown>> {
-  let names: string[];
-  try {
-    names = fsDeps.readdirSync(stateDir);
-  } catch {
-    names = [];
-  }
-  const rotations = ledgerRotationEntries(names, stateDir);
-
-  const seen = new Set<string>();
-  const parsed: Array<Record<string, unknown>> = [];
-  const ingest = (text: string): void => {
-    for (const raw of text.split("\n")) {
-      const line = raw.trim();
-      if (!line || seen.has(line)) continue;
-      seen.add(line);
-      try {
-        parsed.push(JSON.parse(line) as Record<string, unknown>);
-      } catch {
-        // Torn/unparseable line — dropped, the same discipline `readLedgerLines` (status.ts)
-        // already applies to a torn trailing write.
-      }
-    }
-  };
-
-  for (const entry of rotations) {
-    try {
-      const buf = fsDeps.readFileSync(entry.path);
-      ingest((entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf).toString("utf8"));
-    } catch {
-      // Unreadable rotation — best-effort, see this function's own doc.
-    }
-  }
-
-  const livePath = join(stateDir, NEVER_ROTATE_FILENAME);
-  if (fsDeps.existsSync(livePath)) {
-    try {
-      ingest(fsDeps.readFileSync(livePath).toString("utf8"));
-    } catch {
-      // Best-effort — the live file is the smaller, secondary half of the union.
-    }
-  }
-
-  return parsed;
+  return readLedgerUnionRecordsSync(stateDir, { dedupe: true }, fsDeps).rows;
 }
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */

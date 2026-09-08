@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, src/lib/inbox.ts, test/an-unanswered-duplicate-title-match-blocks.test.ts]
   origin: "operator-brief#agree-with-your-recommendations-2026-08-30"
   plan_refs: ["W1-T420", "W1-T403", "W1-T1062"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS ONE DEFECT WEARING TWO FILES, WHICH IS WHY IT IS FILED ONCE. The comment at the

@@ -60,7 +60,7 @@
   origin: incident
   plan_refs: ["W1-T2536", "W1-T2540", "W1-T2539", "W1-T94", "W1-T106"]
   files: [src/lib/sweep.ts, test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning: blast-radius — automatic conflict resolution is dangerous in a way

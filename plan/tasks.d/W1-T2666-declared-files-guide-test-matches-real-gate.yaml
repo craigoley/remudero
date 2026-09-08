@@ -33,7 +33,7 @@
   origin: "oper#overnight-steward-2026-09-02"
   plan_refs: ["W1-T2248", "W1-T2608", "W1-T2663"]
   files: [test/declared-files-correction-exit.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     One stale test predicate and its falsifier. #3613 remains a separate CI-wiring concern.

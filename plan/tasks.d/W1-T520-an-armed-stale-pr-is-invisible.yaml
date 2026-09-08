@@ -62,7 +62,7 @@
   origin: oper#stale-armed-pr-2026-08-15
   plan_refs: ["W1-T516", "W1-T517"]
   files: [src/lib/sweep.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the predicate is a pure fold over per-PR facts the caller supplies, decidable
     from fixtures with no network and no spawn. risk:medium is Rule 19's SPAN and it is honest:

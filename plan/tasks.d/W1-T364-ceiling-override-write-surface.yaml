@@ -55,7 +55,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T332", "W1-T363", "§7"]
   files: [src/lib/panel-graph.ts, src/lib/serve.ts, test/panel-graph.test.ts, test/serve.write-ack.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — route and control behavior over the real store against fixture roots,
     in-process.

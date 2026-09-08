@@ -11,7 +11,7 @@
   files: [src/lib/ci-parity.ts, src/run-task.ts, test/a-gate-verdict-names-its-own-context.test.ts]
   origin: "operator-decision#w1-t2810-gate-verdict-context-2026-09-04"
   plan_refs: ["W1-T2811", "W1-T2790", "W1-T986", "W1-T455"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE DEFECT IS A COMBINATION, NOT AN OMISSION: the gate is HONEST ABOUT WHAT IT MEASURED and

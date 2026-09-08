@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§8", "W1-T1013", "W1-T2484", "W1-T2803"]
   files: [src/run-task.ts, src/lib/ledger-grep.ts, test/followup-harvest-corpus.test.ts, test/the-retros-ledger-read-opens-every-rotation-forever.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     `followupLedgerUnionNdjson` (src/run-task.ts) calls

@@ -111,7 +111,7 @@
   origin: "oper#triage-mints-before-work-holds-2026-08-18"
   plan_refs: ["W1-T1005", "W1-T1007", "W1-T1008", "W1-T509"]
   files: [src/run-task.ts, test/triage-remote-reservation-timing.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE PHRASE THIS SHARD'S GREP PROOF MATCHES APPEARS IN RATIONALE (3) AS PROSE, NOT ONLY IN THE

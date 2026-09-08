@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/plan-only-carve-out-reachable.test.ts]
   origin: oper#plan-only-carve-out-unreachable-2026-08-24
   plan_refs: ["W1-T205", "W1-T456", "W1-T1085", "W1-T427", "W1-T384", "W1-T168"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-08-24 from a scratch worktree proved equal to `origin/main` BY SHA

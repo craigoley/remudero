@@ -10,7 +10,7 @@
   files: [src/lib/panel-graph.ts, src/lib/inbox.ts, test/the-console-inbox-can-decline-a-proposal.test.ts]
   origin: "operator-request#make-the-console-inbox-amazing-2026-09-02"
   plan_refs: ["W1-T2563", "W1-T2601", "W1-T2455", "W1-T110", "W1-T111"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── MEASURED, WITH THE CONTROL ──────────────────────────────────────────────────────────────

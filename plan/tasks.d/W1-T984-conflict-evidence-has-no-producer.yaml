@@ -166,7 +166,7 @@
   origin: recon
   plan_refs: ["W1-T94", "W1-T106", "W1-T920", "W1-T932", "§5D"]
   files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, src/lib/producer-completeness.ts, src/run-task.ts, test/open-prs-rest.test.ts, test/sweep-conflicted-disposition.test.ts, test/producer-completeness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high SET UP FRONT, AND THE BAND IS RULE 19's SPAN, NOT BLAST RADIUS. The `files:` list

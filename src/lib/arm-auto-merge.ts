@@ -400,6 +400,27 @@ export interface DirectMergePreflightEvidence {
   error?: string;
 }
 
+/**
+ * Arm GitHub auto-merge on a PR the runner opened. Non-fatal: the poll decides.
+ *
+ * W1-T230 (THE ARM DECISION): this is the SOLE choke point every arm call
+ * site reaches, and it keys arming ENTIRELY off the orchestrator's own
+ * ledgered `review.posted` verdict for `taskId`, re-checked against the LIVE
+ * current head sha right here — never the live `remudero-review` status
+ * channel, which #449 proved is a mutable, writable, last-write-wins surface
+ * (seven contradictory writes on one sha, one 85s after merge) that W1-T203's
+ * provenance gate never actually fenced in production (REVIEWER_IDENTITY_ENV
+ * is unset on this host). No ledger record for this task/head ⇒ no arm — fail
+ * closed, identical in shape to "no verdict yet" (the decision itself is
+ * {@link decideArmFromLedgerVerdict}, lib/review.ts). `taskId` absent (a PR
+ * this orchestrator cannot key a verdict to) also fails closed, same shape.
+ *
+ * Re-fetches the live head sha immediately before arming — never trusts a
+ * caller's possibly-stale in-memory value — so a push between review and arm
+ * is caught by the sha-binding check, and re-reads the ledger fresh every
+ * call: a resumed process recovers the SAME decision from nothing but the
+ * ledger + the live head (acceptance criterion 3), never from memory.
+ */
 export function armAutoMerge(
   prUrl: string,
   taskId: string | undefined,

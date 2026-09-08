@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, src/lib/board.ts, test/board-terminal-review-state.test.ts]
   origin: oper#terminal-rows-restatus-forever-on-a-dead-ref-2026-08-24
   plan_refs: ["W1-T2217", "W1-T2222", "W1-T2215", "W1-T2212"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RE-DERIVED 2026-08-24 in a scratch worktree with `HEAD == origin/main` PROVEN BY SHA at

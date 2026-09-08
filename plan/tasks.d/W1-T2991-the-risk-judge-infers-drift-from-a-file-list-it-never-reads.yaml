@@ -10,7 +10,7 @@
   origin: "operator-session#4316-was-blocked-by-a-false-escalation-2026-09-06"
   plan_refs: ["§4", "W1-T2519"]
   files: [src/lib/review.ts, test/a-declared-file-absent-from-a-diff-is-not-proof-of-drift.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON #4316, 2026-09-06. The risk judge escalated at high risk, confidence 0.85, opening

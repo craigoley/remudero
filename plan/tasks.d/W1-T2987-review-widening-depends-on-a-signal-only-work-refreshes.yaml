@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["W1-T2519", "W1-T2853", "W1-T2985"]
   files: [src/lib/review-capacity.ts, src/lib/provider-routing-status.ts, test/review-widening-survives-a-quiet-provider-snapshot.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED across the full ledger union, 670 `review.capacity` rows by reason:

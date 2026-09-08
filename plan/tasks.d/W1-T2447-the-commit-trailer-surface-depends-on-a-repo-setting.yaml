@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, test/commit-trailer-surface-squash-setting.test.ts]
   origin: "operator-brief#commit-trailer-surface-squash-2026-08-28"
   plan_refs: ["W1-T2387", "W1-T2435", "W1-T256", "W1-T2392", "W1-T20c", "W1-T1012"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base 0cbfdc47, anchored `W1-T2447([^0-9]|$)`, `[0-9]` never

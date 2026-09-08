@@ -15,7 +15,7 @@
     - test/event-driven-semantic-review.test.ts
   origin: "operator-session#github-event-semantic-review-workers-2026-09-01"
   plan_refs: ["W1-T63", "W1-T473", "W1-T2472", "W1-T2568", "W1-T2584"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT a5711696. The semantic reviewer exists and is wired only through

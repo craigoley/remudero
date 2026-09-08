@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/review-admission-key-is-not-self-defeating.test.ts]
   origin: "operator-brief#review-admission-key-self-defeating-2026-08-27"
   plan_refs: ["W1-T1218", "W1-T526", "W1-T528", "W1-T2419"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces, anchored `W1-T2426([^0-9]|$)` with a `[0-9]` class and never `\d`, each

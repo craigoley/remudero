@@ -134,7 +134,7 @@
     - claim: "an id with exactly one citation site reports exactly as it does today"
       proof: "unit test: test/plan-state-claims-completeness.test.ts"
   files: [scripts/plan-state-claims.mjs, test/plan-state-claims-completeness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#plan-state-claims-reports-one-site-at-a-time-2026-08-24"
   plan_refs: ["W1-T392", "W1-T409", "W1-T2215"]

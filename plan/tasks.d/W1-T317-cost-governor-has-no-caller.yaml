@@ -63,7 +63,7 @@
   origin: oper#throughput-blockers-2026-08-03
   plan_refs: ["§5", "W1-T148"]
   files: [src/run-task.ts, test/cost-governor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto - a predicate consultation plus a ledger line, both machine-checkable.
     risk:high - it gates DISPATCH and it gates SPEND. Wired too tightly it halts a healthy fleet; left

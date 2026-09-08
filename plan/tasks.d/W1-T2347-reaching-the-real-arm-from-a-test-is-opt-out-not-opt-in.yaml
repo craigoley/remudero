@@ -106,7 +106,7 @@
     - claim: "the arm entry points consult the seam guard"
       proof: "grep: requireExplicitArmSeam( in src/run-task.ts"
   files: [src/run-task.ts, test/arm-seam-default-is-opt-in.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: feedback#fb-1786025201466-7081b2
   plan_refs: ["W1-T2346", "W1-T1206", "W1-T1000002", "W1-T230", "W1-T1079"]

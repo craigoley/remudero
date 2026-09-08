@@ -115,7 +115,7 @@
   origin: "oper#arm-survives-abandoned-run-2026-08-18"
   plan_refs: ["W1-T970", "W1-T125"]
   files: [src/run-task.ts, test/arm-at-open.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     depends_on: W1-T970 IS ORDERING, NOT COMPILATION, AND THE DIFFERENCE IS STATED SO NOBODY

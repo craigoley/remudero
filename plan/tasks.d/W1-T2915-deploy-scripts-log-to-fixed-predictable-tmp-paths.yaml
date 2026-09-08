@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§8", "§4A"]
   files: [deploy/recycle-container.sh, deploy/host-update.sh, deploy/verify-image.sh, test/deploy-scripts-use-mktemp.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-21 (OBSERVED). At f7ceb86, `deploy/recycle-container.sh:697`

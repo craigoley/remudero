@@ -10,7 +10,7 @@
   files: [test/deny-floor-probe.test.ts]
   origin: oper#probe-prompt-step-count-2026-08-23
   plan_refs: ["W1-T1265"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE BRIEFING'S PREMISE WAS OVERTAKEN WHILE THIS WAS BEING FILED, AND THE CORRECTION IS THE

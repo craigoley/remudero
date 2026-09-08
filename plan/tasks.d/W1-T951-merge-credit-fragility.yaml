@@ -99,7 +99,7 @@
   origin: "recon#merge-credit-fragility-2026-08-17"
   plan_refs: ["#1657", "#1695", "#1747"]
   files: [src/lib/status.ts, src/lib/drain.ts, test/open-pr-corroboration.test.ts, test/dispatch-lifetime-breaker.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify: human IS SET UP FRONT AND IS THE POINT. A defect in this task re-dispatches work

@@ -10,7 +10,7 @@
   files: [src/lib/ci-gate-required.ts, src/lib/sweep.ts, src/run-task.ts, scripts/source-size-baseline.json, test/red-quality-gate-producer.test.ts, test/producer-completeness.test.ts]
   origin: "operator-brief#pr-3555-red-gate-waited-as-pending-2026-09-01"
   plan_refs: ["W1-T2504", "W1-T977", "W1-T1282", "W1-T2430"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     PR #3555 is the exact production falsifier for W1-T2504's current material state. GitHub's

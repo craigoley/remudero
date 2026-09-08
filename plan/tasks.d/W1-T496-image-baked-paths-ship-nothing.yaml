@@ -133,7 +133,7 @@
   origin: recon#image-baked-paths-ship-nothing-2026-08-14
   plan_refs: ["W1-T483", "W1-T490", "W1-T494"]
   files: [scripts/fleet-heartbeat.sh, test/fleet-heartbeat-image-sha.test.ts, CLAUDE.md]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `files:` SPANS THREE SUBSYSTEMS — `scripts/`, `test/` and a
     root doc — and `sizingViolation` (`src/lib/task-linter.ts`) blocks at >=2 below that band. The

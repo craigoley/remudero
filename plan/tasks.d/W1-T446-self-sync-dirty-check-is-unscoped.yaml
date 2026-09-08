@@ -98,7 +98,7 @@
   origin: recon#gitignore-claude-dir-2026-08-12
   plan_refs: ["W1-T445", "W1-T79"]
   files: [src/lib/self-sync.ts, test/self-sync-dirty-scope.test.ts, test/self-sync.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:human ON PURPOSE — `isDispatchEligible` parks it until the operator rules, because
     design (i) is a policy question about relaxing a safety guard and no linter can settle it. Every

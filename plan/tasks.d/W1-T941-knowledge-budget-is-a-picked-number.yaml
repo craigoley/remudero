@@ -72,7 +72,7 @@
   origin: feedback#fb-1785237596465-45d06d
   plan_refs: ["§8A", "W1-T940", "W1-T929", "W1-T419", "W1-T38"]
   files: [src/lib/learnings.ts, src/lib/digest.ts, scripts/knowledge-budget-baseline.json, test/knowledge-budget-derivation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the derivation is a pure function over fixture ledger rows and fixture
     entry weights; both falsifier directions and the drift pin are offline-decidable.

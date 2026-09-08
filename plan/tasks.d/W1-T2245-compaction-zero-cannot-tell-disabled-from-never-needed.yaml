@@ -124,7 +124,7 @@
     - claim: "the existing compaction fields keep their current names and meanings"
       proof: "unit test: test/compaction-zero-is-unexplained.test.ts"
   files: [src/lib/worker.ts, test/compaction-zero-is-unexplained.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#compaction-never-fired-2026-08-24"
   plan_refs: ["W1-T36", "W1-T235", "W1-T236", "W1-T12e"]

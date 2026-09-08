@@ -72,7 +72,7 @@
   origin: "oper#concept-scan-2026-09-03"
   plan_refs: ["W1-T29", "W1-T503", "W1-T2215", "W1-T2507", "W1-T2508", "§8A", "§12"]
   files: [CLAUDE.md, scripts/claude-md-budget-baseline.json, test/claude-md-budget-ratchet.test.ts, plan/claims.yaml, test/what-a-worker-loads.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — a doc line, a baseline rationale, a test header, a claims row and

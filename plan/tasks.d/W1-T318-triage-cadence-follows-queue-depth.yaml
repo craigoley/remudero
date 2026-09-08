@@ -63,7 +63,7 @@
   origin: oper#throughput-blockers-2026-08-03
   plan_refs: ["§9", "W1-T298"]
   files: [src/lib/auto-triage.ts, plan/policy.yaml, test/auto-triage-policy-seam.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto - a pure decision function over a census plus bounded policy rows.
     risk:high - three subsystems by Rule 19's count (auto-triage, policy data, test) and it raises the

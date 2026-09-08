@@ -10,7 +10,7 @@
   files: [src/run-task.ts, src/lib/replay.ts, test/replay.test.ts]
   origin: "operator-brief#innovation-expansion-2026-08-25"
   plan_refs: ["W1-T71", "W1-T444", "W1-T2244", "W1-T2245"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     WHAT EXISTS IS REFUSED BY NAME, BECAUSE EACH ONE ANSWERS A DIFFERENT QUESTION. `buildReceipt`

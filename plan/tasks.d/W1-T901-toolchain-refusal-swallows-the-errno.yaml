@@ -89,7 +89,7 @@
   origin: feedback#fb-1784830299772-26248a
   plan_refs: ["W1-T113", "W1-T236", "W1-T442"]
   files: [src/lib/worker.ts, test/worker.test.ts, test/toolchain-refusal-errno.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — nothing here needs an operator ruling; the one open choice (design (i), the
     probe's return shape) is an engineering call the implementer settles against the live injection

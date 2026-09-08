@@ -12,7 +12,7 @@
     - test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts
   origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
   plan_refs: ["W1-T418", "W1-T2957", "W1-T2595"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED AT 903b5a6. `RULE_SIGNATURES` holds three entries. Exactly one is `measurable: true`.

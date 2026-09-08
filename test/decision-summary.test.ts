@@ -46,6 +46,7 @@ import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { shellBootReady } from "./setup/open-shell.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import { validateMounts, type Mount } from "../src/lib/mounts.js";
@@ -514,9 +515,6 @@ const WRITE_TOKEN = "decision-summary-write-token";
 
 function emptyPlan(): Plan {
   return { tasks: [], byId: new Map() };
-}
-function fakeGitHub(): GitHub {
-  return { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined } as GitHub;
 }
 function fakeTraceGithub(): TraceGithub {
   return { prView: () => null };

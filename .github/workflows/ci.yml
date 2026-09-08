@@ -1088,3 +1088,38 @@ jobs:
         run: npm ci
       - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
         run: npm run --silent comment-load-signal
+
+  baseline-monotonic:
+    # BASELINE-MONOTONIC gate (W1-T2906). Every ratchet above reads ITS OWN scripts/*-baseline.json
+    # from this PR's tree, so a PR that edits one of those SCORE floors/ceilings down (or up, for a
+    # ceiling) passes its own gate by construction — nothing compared the recorded score against
+    # `origin/main`. scripts/baseline-monotonic-check.mjs reads each row in its SCORE_TABLE from
+    # `git show origin/main:<path>` and refuses a regression unless the working tree also carries a
+    # fresh `bumpRationale` naming the reviewing PR/task — the convention
+    # scripts/claude-md-budget-baseline.json already follows.
+    #
+    # SCOPE: SCALAR score floors/ceilings only (coverage, mutation, cycle-count, the CLAUDE.md and
+    # learnings-budget caps) — never a per-file LEDGER (source-size, comment-load, clock-signature,
+    # knowledge-budget), which src/lib/review.ts's ENTANGLEMENT_EXEMPT_INSTRUMENTS comment already
+    # names as grading no falsifier, so raising one row there cannot make a failing test pass.
+    # FALSIFIER: test/baseline-monotonic-against-origin-main.test.ts.
+    name: baseline-monotonic
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # It reads `origin/main:<path>` for every row, so that ref must resolve. An unreadable
+          # base read as "no baseline at origin/main" would be a false "new file" for every row,
+          # so the gate REFUSES by design instead (comment-load-ratchet's own added-block half
+          # makes the same call for the same reason).
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Baseline-monotonic check (no SCORE_TABLE floor/ceiling regresses against origin/main without a reviewed bumpRationale)
+        run: node scripts/baseline-monotonic-check.mjs

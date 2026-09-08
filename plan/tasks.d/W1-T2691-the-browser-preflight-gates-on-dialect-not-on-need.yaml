@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/the-browser-preflight-gates-on-dialect-not-on-need.test.ts]
   origin: "operator-session#preflight-noise-on-source-only-proofs-2026-09-02"
   plan_refs: []
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS A LATENCY AND LEGIBILITY DEFECT, NOT A CORRECTNESS ONE, AND THE SHARD SAYS SO UP FRONT

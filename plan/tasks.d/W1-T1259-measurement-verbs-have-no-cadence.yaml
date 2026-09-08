@@ -117,7 +117,7 @@
   origin: oper#2026-08-23-measurement-verbs-have-no-cadence
   plan_refs: ["#1605", "#1614", "#1658", "W1-T240", "W1-T264", "P48", "Law 5"]
   files: [src/lib/daemon.ts, plan/policy.yaml, test/measurement-cadence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     NO PROOF GREPS THIS SHARD'S OWN PATH. All five criteria use the pure-path `unit test:` form

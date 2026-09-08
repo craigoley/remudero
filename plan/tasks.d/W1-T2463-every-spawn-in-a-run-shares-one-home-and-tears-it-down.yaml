@@ -10,7 +10,7 @@
   files: [src/lib/worker-home.ts, src/lib/worker.ts, test/worker-home-per-spawn.test.ts]
   origin: "operator-brief#ship-the-per-spawn-worker-home-remedy-2026-08-30"
   plan_refs: ["W1-T2441", "W1-T170"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept, anchored W1-T2463([^0-9]|$) with a [0-9] class and never a \d

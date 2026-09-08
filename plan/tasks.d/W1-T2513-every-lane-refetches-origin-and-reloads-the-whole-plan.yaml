@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/one-fetch-and-one-plan-load-per-tick.test.ts]
   origin: "operator-brief#it-doesnt-seem-like-we-have-3-parallel-builds-2026-08-30"
   plan_refs: ["W1-T2509", "W1-T60", "W1-T343"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS THE REMAINDER AFTER W1-T2509, NOT A RESTATEMENT OF IT. W1-T2509 found the dominant term —

@@ -61,7 +61,7 @@
   origin: oper#runtime-config-slice-2026-08-04
   plan_refs: ["§5", "W1-T330"]
   files: [src/lib/sweep.ts, src/lib/daemon.ts, src/run-task.ts, test/cost-governor.test.ts, test/daemon-plan-freshness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a resolution path and a per-tick snapshot, both machine-checkable.
     risk:high — Rule 19 counts sweep, daemon and run-task as distinct subsystems, and this changes how

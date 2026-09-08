@@ -60,7 +60,7 @@
   origin: retro-followup
   plan_refs: ["W1-T12", "W1-T92", "W1-T2503"]
   files: [src/lib/task-linter.ts, test/a-suite-is-not-a-second-concern.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `files:` is the counter and a new suite for it. `subsystemsOf`, `moduleIdFromPath` and

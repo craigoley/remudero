@@ -46,7 +46,7 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/lib/review.ts, src/lib/task-linter.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the dialect, the linter rule and the refusal are all pure predicates over task text.
     risk:high — two subsystems by Rule 19's count (review, task-linter), and the linter is right to raise it:

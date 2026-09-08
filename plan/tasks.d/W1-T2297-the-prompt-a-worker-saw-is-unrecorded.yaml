@@ -10,7 +10,7 @@
   files: [src/lib/prompt-manifest.ts, src/run-task.ts, test/prompt-manifest.test.ts]
   origin: "operator-brief#innovation-expansion-2026-08-25"
   plan_refs: ["W1-T71", "W1-T86", "W1-T35", "W1-T2241"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ASSEMBLY, RE-DERIVED AT HEAD. `renderImplementPrompt` (src/run-task.ts) joins, in order:

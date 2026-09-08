@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, src/lib/sweep.ts, src/run-task.ts, test/protection-read-failure-is-named.test.ts]
   origin: feedback#fb-repair-blocked-ambiguous-2955
   plan_refs: ["§4", "§7B", "W1-T176", "W1-T186", "W1-T103", "W1-T2293"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     TRIGGER (verbatim, off `plan/feedback/fb-repair-blocked-ambiguous-2955.yaml`, itself read off each

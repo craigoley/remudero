@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§2", "§5C", "§12"]
   files: [src/lib/plan.ts, test/plan-acceptance-shape.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-17 (OBSERVED). At f7ceb86, `src/lib/plan.ts:283` reads

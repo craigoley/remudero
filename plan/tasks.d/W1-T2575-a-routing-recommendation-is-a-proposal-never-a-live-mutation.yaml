@@ -11,7 +11,7 @@
   files: [src/lib/mount-recommender.ts, src/run-task.ts, test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts]
   origin: "operator-session#codex-router-design-2026-09-01"
   plan_refs: ["W1-T2574", "W1-T167"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     §9 ALREADY RULES ON THE SHAPE, AND THIS TASK IMPLEMENTS THAT RULING RATHER THAN INVENTING ONE:

@@ -10,7 +10,7 @@
   files: [src/lib/daemon.ts, src/lib/measurement-cadence.ts, test/the-cadence-row-names-every-member.test.ts]
   origin: "operator-audit#nothing-dropped-2026-08-30"
   plan_refs: ["W1-T2473", "W1-T2266", "W1-T2304"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE INSTANCE WAS FIXED AND THE CLASS WAS NOT, WHICH IS WHY THIS IS WORTH ITS OWN TASK. W1-T2473

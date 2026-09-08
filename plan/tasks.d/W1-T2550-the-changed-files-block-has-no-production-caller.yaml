@@ -49,7 +49,7 @@
   origin: retro-followup
   plan_refs: ["W1-T2535", "W1-T2534", "W1-T307", "W1-T1254"]
   files: [src/run-task.ts, test/the-changed-files-block-has-no-production-caller.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     The emitter and its drift detector are already built and tested (W1-T2535,

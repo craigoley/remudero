@@ -10,7 +10,7 @@
   files: [src/lib/ci-parity.ts, test/nothing-tells-you-which-census-suites-your-change-joins.test.ts]
   origin: "operator-session#two-census-suites-missed-2026-08-30"
   plan_refs: ["W1-T2478", "W1-T1266", "W1-T2317"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     CLAUDE.md ALREADY NAMES THIS AND THE NAMING DID NOT PREVENT IT. Its own words: "A CENSUS TEST

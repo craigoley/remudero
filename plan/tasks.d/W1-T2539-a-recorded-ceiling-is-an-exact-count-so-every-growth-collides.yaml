@@ -90,7 +90,7 @@
   origin: incident
   plan_refs: ["W1-T2526", "W1-T2536", "W1-T2538", "W1-T2488"]
   files: [scripts/source-size-ratchet.mjs, test/a-source-file-cannot-outgrow-its-baseline.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning: blast-radius — this changes what a live CI gate accepts on EVERY

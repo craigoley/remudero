@@ -253,7 +253,7 @@
   origin: recon#playwright-apt-orphan-2026-08-19
   plan_refs: ["W1-T1027", "W1-T1009", "W1-T153", "W1-T255", "W1-T66"]
   files: [.github/workflows/ci.yml, test/workflow-playwright-install.test.ts, test/workflow-job-timeouts.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "AMENDED 2026-08-19, AFTER FILING AND BEFORE MERGE — THE RECOMMENDATION IS REVERSED. As
     filed, this shard led with the container image and left the fonts precondition unanswered. Design

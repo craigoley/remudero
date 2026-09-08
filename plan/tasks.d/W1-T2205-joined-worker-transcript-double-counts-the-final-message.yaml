@@ -148,7 +148,7 @@
   origin: "feedback#fb-1785959570301-a65f94"
   plan_refs: ["W1-T348", "W1-T313", "W1-T1118", "P48"]
   files: [src/lib/worker.ts, src/lib/triage.ts, src/run-task.ts, test/worker.test.ts, test/triage.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, recorded up front rather than shipped as a

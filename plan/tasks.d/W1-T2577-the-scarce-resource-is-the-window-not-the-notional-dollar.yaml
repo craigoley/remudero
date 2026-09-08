@@ -11,7 +11,7 @@
   files: [src/lib/routing-objective.ts, src/lib/mount-recommender.ts, test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts]
   origin: "operator-session#codex-router-design-2026-09-01"
   plan_refs: ["W1-T2574", "W1-T2560"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     §9 IS EXPLICIT AND THE ROUTER MUST NOT CONTRADICT IT: "on subscription, `total_cost_usd` is

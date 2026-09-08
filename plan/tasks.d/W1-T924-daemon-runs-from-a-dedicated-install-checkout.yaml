@@ -134,7 +134,7 @@
   origin: feedback#fb-1784913390318-1fcb63
   plan_refs: ["§4A", "W1-T79", "W1-T443", "W1-T446", "W1-T907", "W1-T925", "W1-T926"]
   files: [src/lib/install-root.ts, src/lib/config.ts, src/run-task.ts, test/install-root.test.ts, docs/cli-reference.md]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify:auto, and the contrast with W1-T446 is deliberate. That task is verify:human because it

@@ -137,7 +137,7 @@
     - claim: "the ci-parity step still shells the full suite exactly as it does today"
       proof: "unit test: test/host-caused-suite-reds.test.ts"
   files: [src/lib/ci-parity.ts, test/host-caused-suite-reds.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#darwin-host-caused-suite-reds-2026-08-24"
   plan_refs: ["W1-T235", "W1-T312", "W1-T2205"]

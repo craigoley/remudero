@@ -115,7 +115,7 @@
   origin: "oper#no-polling-gate-2026-08-20"
   plan_refs: ["W1-T1005", "W1-T1008", "W1-T203"]
   files: [hooks/deny-floor.sh, .claude/settings.json, .gitignore, test/deny-floor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RENUMBERED FROM THE ID THIS SHARD FIRST CARRIED, WHICH THE OPERATOR ASSIGNED TWICE IN

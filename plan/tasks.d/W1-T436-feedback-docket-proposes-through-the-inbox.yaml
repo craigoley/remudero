@@ -75,7 +75,7 @@
   origin: oper#warp-podcast-2026-08-11
   plan_refs: ["W1-T418", "W1-T419", "W1-T141", "W1-T194", "W1-T240"]
   files: [src/run-task.ts, src/lib/feedback-docket.ts, test/feedback-docket.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   amendment_note: "AMENDED 2026-08-12 per oper#github-touchpoints-2026-08-12, before first
     dispatch: the original delivery opened a plan PR for the operator to review on GitHub;

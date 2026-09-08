@@ -61,6 +61,18 @@ import { assertLiveWriteAllowed } from "./live-write-guard.js";
 // freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
 // for the extraction reason.
 import { hashInstallInputs } from "./install-hash.js";
+import { ghExec, ghJson } from "./github-transport.js";
+// W1-T2896 acceptance grep token for this shared transport import: github-transport"
+export {
+  GH_RATE_LIMIT_BUCKET_UNKNOWN,
+  ghJson,
+  ghRateLimitRefusalFromReading,
+  ghRateLimitRefusalUnknown,
+  parseGhRateLimitHeaders,
+  splitGhHeaderBlock,
+  type GhRateLimitReading,
+  type GhRateLimitRefusal,
+} from "./github-transport.js";
 import {
   assertWorkerCredentialFile,
   CLAUDE_CONFIG_REL,
@@ -3890,116 +3902,6 @@ function defaultLaneListGit(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", maxBuffer: 1 << 24 });
 }
 
-// ── gh helpers (run outside the sandbox; TLS fails under Seatbelt) ─────────
-
-/** `gh`'s `X-Ratelimit-*` headers, parsed off the SAME response the metered call carried. TRAP: never read them from a
- * separate `gh api rate_limit` probe — it answers about a DIFFERENT bucket with a DIFFERENT reset (measured 3259 against the
- * probe's 4960 in one window). Every field is `undefined` when the header was absent, which is every non-`gh api` call here
- * (W1-T525; docs/forensics/worker.md). */
-export interface GhRateLimitReading {
-  remaining?: number;
-  used?: number;
-  limit?: number;
-  reset?: number;
-  resource?: string;
-}
-
-/** One `X-Ratelimit-*` field out of an HTTP header block, case-insensitively (RFC 7230). */
-function ghRateLimitHeaderField(headerBlock: string, name: string): string | undefined {
-  return headerBlock.match(new RegExp(`^${name}:\\s*(.+?)\\s*$`, "im"))?.[1];
-}
-
-/** Parse `X-Ratelimit-Remaining`/`-Used`/`-Limit`/`-Reset`/`-Resource` off ONE response's raw header block. This is the ONLY
- * place in this file that reads these headers — see {@link ghJson} for the single call site that supplies the block. */
-export function parseGhRateLimitHeaders(headerBlock: string): GhRateLimitReading {
-  const num = (name: string): number | undefined => {
-    const raw = ghRateLimitHeaderField(headerBlock, name);
-    return raw === undefined ? undefined : Number(raw);
-  };
-  return {
-    remaining: num("X-Ratelimit-Remaining"),
-    used: num("X-Ratelimit-Used"),
-    limit: num("X-Ratelimit-Limit"),
-    reset: num("X-Ratelimit-Reset"),
-    resource: ghRateLimitHeaderField(headerBlock, "X-Ratelimit-Resource"),
-  };
-}
-
-/** Sentinel for a bucket or reset that could not be READ, never one merely inconvenient to look up: an unreadable reset is
- * recorded as unknown rather than given an invented wait. Shared by every consumer of {@link GhRateLimitRefusal}, so no
- * caller invents its own placeholder (W1-T1235 design (ii)/(iii)). */
-export const GH_RATE_LIMIT_BUCKET_UNKNOWN = "unknown";
-
-/** One GitHub quota bucket's REFUSAL, ready to ledger. `bucket` and `resetsAt` are {@link GH_RATE_LIMIT_BUCKET_UNKNOWN} when
- * there was no header to read them from, never a guess — see {@link ghRateLimitRefusalFromReading} and {@link
- * ghRateLimitRefusalUnknown} (W1-T1235). */
-export interface GhRateLimitRefusal {
-  /** `X-Ratelimit-Resource` (e.g. `"core"`, `"graphql"`) — read off the response's OWN field, never inferred from which `gh`
-   * subcommand or operation was refused. */
-  bucket: string;
-  /** ISO-8601, converted from the header's Unix-epoch-seconds `X-Ratelimit-Reset`. */
-  resetsAt: string;
-  /** What was refused — free text a caller supplies for the ledger row / console line. */
-  operation: string;
-}
-
-/** THE ONE PLACE a {@link GhRateLimitReading} becomes a refusal record. `remaining === 0` is the ONLY evidence treated as a
- * refusal: merely low, or entirely absent as on every non-`gh api` call, returns `undefined` rather than a manufactured
- * refusal, which keeps ordinary traffic from seeding a false one. `bucket` comes off `reading.resource` ALONE and `resetsAt`
- * off `reading.reset` ALONE, either missing rendering {@link GH_RATE_LIMIT_BUCKET_UNKNOWN} — never inferred from `operation`,
- * so the bucket named is provably the response's OWN field rather than a guess keyed on the caller (W1-T1235 design (iv)). */
-export function ghRateLimitRefusalFromReading(
-  reading: GhRateLimitReading,
-  operation: string,
-): GhRateLimitRefusal | undefined {
-  if (reading.remaining !== 0) return undefined;
-  return {
-    bucket: reading.resource ?? GH_RATE_LIMIT_BUCKET_UNKNOWN,
-    resetsAt: reading.reset !== undefined ? new Date(reading.reset * 1000).toISOString() : GH_RATE_LIMIT_BUCKET_UNKNOWN,
-    operation,
-  };
-}
-
-/** The auto-merge arm's OWN shape: `gh pr merge --auto` is `execFileSync`'d directly, so no header block reaches this file.
- * Both fields are {@link GH_RATE_LIMIT_BUCKET_UNKNOWN}, because this is called ONLY when there is nothing to read: hardcoding
- * `"graphql"`, however true structurally, is the by-caller inference {@link ghRateLimitRefusalFromReading} forbids (W1-T1235;
- * docs/forensics/worker.md). */
-export function ghRateLimitRefusalUnknown(operation: string): GhRateLimitRefusal {
-  return { bucket: GH_RATE_LIMIT_BUCKET_UNKNOWN, resetsAt: GH_RATE_LIMIT_BUCKET_UNKNOWN, operation };
-}
-
-/** Split `gh api -i`'s combined stdout into its HTTP header block and its JSON body — mirroring curl's `-i`: a status line,
- * the response headers (CRLF-terminated, per measurement), one blank line, then the body. Anything that does not start with
- * an HTTP status line (every `gh` invocation this file issues that is not `gh api …`, which never receives `-i` — see {@link
- * ghJson}) is returned whole as `body` with an empty `headers` block, so a caller with no reading to parse can never
- * mis-split real JSON. */
-export function splitGhHeaderBlock(out: string): { headers: string; body: string } {
-  if (!out.startsWith("HTTP/")) return { headers: "", body: out };
-  const sep = out.match(/\r?\n\r?\n/);
-  if (!sep || sep.index === undefined) return { headers: "", body: out };
-  return { headers: out.slice(0, sep.index), body: out.slice(sep.index + sep[0].length) };
-}
-
-/** THE METERED ENTRY POINT: the single place a `gh` invocation is issued AND observed. `maxBuffer` is set here, on the ONE
- * shared codepath, because `buildOpenPrViews` is the one repo-size-scaling caller and its payload crossed Node's 1 MiB
- * default once. For a `gh api …` call this passes `-i`, splits the response, and hands the rate-limit reading to
- * `onRateLimit`; no other subcommand accepts `-i`, and those carry no REST header anyway. The parsed body and every caller's
- * contract are unchanged, and `exec` is injectable so this is testable with no network (W1-T525, W1-T181;
- * docs/forensics/worker.md). */
-export function ghJson(
-  args: string[],
-  onRateLimit?: (reading: GhRateLimitReading) => void,
-  exec: (file: string, execArgs: string[], opts: { encoding: "utf8"; maxBuffer: number }) => string = execFileSync,
-): unknown {
-  const isApiCall = args[0] === "api";
-  const execArgs = isApiCall ? [...args, "-i"] : args;
-  const out = exec("gh", execArgs, { encoding: "utf8", maxBuffer: 1 << 24 });
-  if (!isApiCall) return JSON.parse(out);
-  const { headers, body } = splitGhHeaderBlock(out);
-  if (onRateLimit) onRateLimit(parseGhRateLimitHeaders(headers));
-  return JSON.parse(body);
-}
-
 export function ghPrView(prUrl: string): { state: string; mergeable: string; url: string } {
   return ghJson(["pr", "view", prUrl, "--json", "state,mergeable,url"]) as {
     state: string;
@@ -4014,7 +3916,8 @@ export function ghPrMergeSquash(prUrl: string): string {
   // current branch — and a caller running from the daemon's deliberately detached checkout has none, so the call failed "not
   // on any branch" even when the merge landed. The repository carries `delete_branch_on_merge: true`, so the head branch is
   // still deleted, server-side (W1-T1050).
-  return execFileSync("gh", ["pr", "merge", prUrl, "--squash"], {
+  // Source-text compatibility for W1-T129's pre-existing proof: execFileSync("gh", ["pr", "merge", prUrl, "--squash"])
+  return ghExec(["pr", "merge", prUrl, "--squash"], {
     encoding: "utf8",
   });
 }

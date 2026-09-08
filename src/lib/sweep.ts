@@ -13,7 +13,7 @@ import {
   REVIEW_CONTEXT,
 } from "./review.js";
 import type { ArmDecision, AutomergeHold, CriterionVerdict } from "./review.js";
-import type { QuestionEntry } from "./worker.js";
+import { activeWorkerCount, type QuestionEntry } from "./worker.js";
 import {
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
@@ -2944,6 +2944,13 @@ export interface SweepDeps {
     pr: OpenPrView,
     evidence: FixDispatchEvidence,
   ) => boolean | void | Promise<boolean | void>;
+  /** W1-T2931 — claim one slot from the light pass's shared host budget immediately before a
+   *  fix worker is dispatched. The claim is synchronous, so concurrent per-PR reconciliation
+   *  cannot all observe the same free slot. Omitted by every non-light caller, preserving the
+   *  full sweep and CLI paths byte-for-byte. A refusal spends no strike and re-derives next pass. */
+  claimFixAdmission?: (pr: OpenPrView) =>
+    | { admitted: true }
+    | { admitted: false; reason: string };
   /** W1-T2998 — repair a red RECORDABLE ratchet by re-running its generator and pushing the result,
    *  instead of spending an LLM fix round on a number the failing script already printed. Consulted
    *  ONLY when {@link SweepPolicy.recordableRatchetRepairEnabled} is true AND
@@ -3887,7 +3894,7 @@ export async function runSweep(
    *  that has already reached {@link fixCeilingInForce}. Only a successful claim releases. */
   function claimFixDispatch(
     pr: OpenPrView,
-  ): { ok: true; run: <T>(fn: () => T | Promise<T>) => Promise<T> } | { ok: false; reason: string } {
+  ): { ok: true; release: () => void; run: <T>(fn: () => T | Promise<T>) => Promise<T> } | { ok: false; reason: string } {
     const fixKey = `${pr.taskId ?? ""}@${pr.headSha}`;
     if (inFlightFixKeys.has(fixKey)) {
       return {
@@ -3909,13 +3916,20 @@ export async function runSweep(
         reason: `fix strikes exhausted under the claim (${freshStrikes}/${ceiling}) — refused before dispatch, never spending a strike a concurrent sweep already spent`,
       };
     }
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      inFlightFixKeys.delete(fixKey);
+    };
     return {
       ok: true,
+      release,
       run: async (fn) => {
         try {
           return await fn();
         } finally {
-          inFlightFixKeys.delete(fixKey);
+          release();
         }
       },
     };
@@ -4529,6 +4543,17 @@ export async function runSweep(
                 standDownReason = fixClaim.reason;
                 break;
               }
+              // W1-T2931 — CLAIM THE SHARED HOST SLOT AT THE SPENDING POINT, after every earlier
+              // no-worker exit AND after the per-PR mutex. A duplicate in-flight fix must not burn
+              // one of this pass's host slots. A host refusal releases that mutex without invoking
+              // dispatch, so it spends neither a worker nor a strike.
+              const fixAdmission = deps.claimFixAdmission?.(pr);
+              if (fixAdmission && !fixAdmission.admitted) {
+                fixClaim.release();
+                acted = false;
+                standDownReason = fixAdmission.reason;
+                break;
+              }
               // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
               if (deps.detachFixWait) {
                 detachSweepAction(
@@ -4577,6 +4602,16 @@ export async function runSweep(
               if (!conflictedFixClaim.ok) {
                 acted = false;
                 standDownReason = conflictedFixClaim.reason;
+                break;
+              }
+              // W1-T2931: merge-conflict repair spends the same worker slot as every other fix
+              // rung. As above, the task-specific mutex comes first so an in-flight duplicate
+              // cannot consume shared capacity; a host refusal releases it without dispatch.
+              const conflictedAdmission = deps.claimFixAdmission?.(pr);
+              if (conflictedAdmission && !conflictedAdmission.admitted) {
+                conflictedFixClaim.release();
+                acted = false;
+                standDownReason = conflictedAdmission.reason;
                 break;
               }
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
@@ -5141,6 +5176,35 @@ export async function runSweepLightPass(
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
   const semanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines);
   const { spawning, planFilings } = selectReviewAdmissions(openPrs, policy, now, outcomes, semanticBound);
+  // W1-T2931 — one host budget, with review/merge work served before new repair work. The light
+  // pass still reconciles every PR concurrently; only the expensive fix-dispatch spending point
+  // claims from this shared pool. `activeWorkerCount` is the same process-wide counter the adaptive
+  // review controller reads, and selected spawning reviews reserve their width before fixes race.
+  const hostWorkerBudget = policy.reviewCapacity.hostWorkerBudget;
+  const activeWorkers = activeWorkerCount();
+  const reviewReservations = spawning.length;
+  let availableFixAdmissions = Math.max(0, hostWorkerBudget - activeWorkers - reviewReservations);
+  let admittedFixes = 0;
+  const claimFixAdmission: NonNullable<SweepDeps["claimFixAdmission"]> = () => {
+    if (availableFixAdmissions <= 0) {
+      return {
+        admitted: false,
+        reason:
+          `host worker budget ${hostWorkerBudget} exhausted for this light pass ` +
+          `(${activeWorkers} active, ${reviewReservations} reserved for review, ${admittedFixes} fixes admitted)` +
+          " — repair remains queued and will be re-derived next pass",
+      };
+    }
+    availableFixAdmissions--;
+    admittedFixes++;
+    return { admitted: true };
+  };
+  deps.log?.("sweep.fix_capacity", {
+    host_worker_budget: hostWorkerBudget,
+    active_workers: activeWorkers,
+    review_reservations: reviewReservations,
+    fix_admissions_available: availableFixAdmissions,
+  });
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
@@ -5165,11 +5229,12 @@ export async function runSweepLightPass(
       // CI wait must leave the await on both branches.
       const scopedDeps: SweepDeps =
         selectedNumbers.has(pr.prNumber) || outcomeDedupedNumbers.has(pr.prNumber)
-          ? { ...deps, detachFixWait: true, selectAdaptiveReviewWidth: undefined }
+          ? { ...deps, detachFixWait: true, selectAdaptiveReviewWidth: undefined, claimFixAdmission }
           : {
               ...deps,
               detachFixWait: true,
               selectAdaptiveReviewWidth: undefined,
+              claimFixAdmission,
               actionable: (d) => (d === "post-review" ? false : baseActionable ? baseActionable(d) : true),
               // W1-T2426: name the mechanism, not just the fact. A `post-review` refused HERE was
               // eligible and lost this pass's bounded admission — a different event from a lane the

@@ -78,7 +78,7 @@
     - claim: "clearing the dedup posts no verdict and arms nothing"
       proof: "unit test: test/post-review-refusal-rearm.test.ts"
   files: [src/lib/sweep.ts, test/post-review-refusal-rearm.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#transient-review-refusal-pins-green-pr-2026-08-22"
   plan_refs: ["W1-T228", "W1-T254", "W1-T1067", "W1-T1110", "W1-T1206"]

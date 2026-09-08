@@ -81,7 +81,7 @@
   origin: oper#queue-order-2026-08-14
   plan_refs: ["W1-T422", "W1-T340", "W1-T60"]
   files: [src/lib/drain.ts, test/dispatch-order-disjoint.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every direction is fixture-decidable with the real partitioner; the
     simulation scripts and outputs are preserved under the filing session's val/ artifacts.

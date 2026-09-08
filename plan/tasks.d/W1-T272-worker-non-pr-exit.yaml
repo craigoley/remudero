@@ -47,7 +47,7 @@
   origin: architect
   plan_refs: ["§5"]
   files: [src/lib/compaction.ts, src/lib/run-result.ts, src/run-task.ts, src/lib/retro.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the contract text, the evidence check and the verdict handling are all assertable
     without an operator watching.

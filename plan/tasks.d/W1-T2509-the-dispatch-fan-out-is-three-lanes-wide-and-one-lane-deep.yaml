@@ -10,7 +10,7 @@
   files: [src/lib/worker.ts, src/run-task.ts, test/three-lanes-start-within-one-window.test.ts]
   origin: "operator-brief#it-doesnt-seem-like-we-have-3-parallel-builds-2026-08-30"
   plan_refs: ["W1-T343", "W1-T172", "W1-T476"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SELECTOR, THE PACKER AND THE PARTITION ALL WORK; THE EXECUTION DOES NOT. Every

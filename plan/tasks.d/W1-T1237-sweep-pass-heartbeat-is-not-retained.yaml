@@ -103,7 +103,7 @@
   origin: feedback#fb-1785937739950-070a87
   plan_refs: ["W1-T1236", "W1-T1238", "W1-T275", "W1-T468"]
   files: [src/lib/ledger.ts, test/ledger-render-retention.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RULE 19 / #588 MERITS TEST — ANSWERED YES, RATIONALE IN ONE LINE: the derived-from-consumers

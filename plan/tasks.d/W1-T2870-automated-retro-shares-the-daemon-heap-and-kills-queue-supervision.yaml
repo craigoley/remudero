@@ -17,7 +17,7 @@
     - test/retro-sweep-ticker.test.ts
   origin: "operator-session#retro-oom-crash-domain-2026-09-05"
   plan_refs: ["W1-T160", "W1-T276", "W1-T2833"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED TWICE ON THE AZURE FLEET ON 2026-09-05: the daemon died with V8

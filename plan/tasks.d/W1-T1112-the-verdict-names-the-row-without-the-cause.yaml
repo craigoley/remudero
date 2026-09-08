@@ -82,7 +82,7 @@
   origin: "recon#verdict-names-the-row-without-the-cause-2026-08-21"
   plan_refs: ["W1-T981", "W1-T1081", "W1-T1097"]
   files: [src/lib/isolation.ts, test/isolation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: medium` — verify against the linter rather than assuming; if Rule 19 refuses the span,

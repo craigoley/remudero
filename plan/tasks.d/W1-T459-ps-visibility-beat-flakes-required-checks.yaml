@@ -97,5 +97,5 @@
       proof: "unit test: test/worker-containment.test.ts"
     - claim: "the host-parity header no longer names these two as whole-suite flakes"
       proof: "unit test: test/host-parity.test.ts"
-  status: queued
+  status: merged
   attempts: 0

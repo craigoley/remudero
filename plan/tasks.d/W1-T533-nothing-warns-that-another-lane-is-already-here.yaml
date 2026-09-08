@@ -92,7 +92,7 @@
   origin: recon#two-lanes-one-problem-2026-08-16
   plan_refs: ["W1-T471", "W1-T509", "W1-T494"]
   files: [src/lib/dispatch-overlap.ts, test/dispatch-overlap.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: medium` IS SET UP FRONT — Rule 19 SPAN folds `src/lib/dispatch-overlap.ts` and
     `test/dispatch-overlap.test.ts` onto ONE subsystem (`subsystemsOf` folds a `.test` basename onto

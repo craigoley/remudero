@@ -10,7 +10,7 @@
   origin: "fleet-lifeguard#review-clock-dark-2026-09-07"
   plan_refs: ["W1-T2568", "W1-T2744", "W1-T2852", "W1-T2981", "W1-T2984"]
   files: [src/lib/github-event-wake.ts, test/github-event-sweep-wake.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED on the Azure fleet 2026-09-07: the daemon detached a retro at 01:42:29Z, admitted two

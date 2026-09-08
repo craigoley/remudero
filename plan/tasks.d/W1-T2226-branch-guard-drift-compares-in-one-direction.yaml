@@ -140,7 +140,7 @@
     - claim: "the set of branches deleted and the set withheld are unchanged by the added report"
       proof: "unit test: test/reap-branches-reverse-drift.test.ts"
   files: [src/run-task.ts, test/reap-branches-reverse-drift.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#branch-guard-drift-compares-in-one-direction-2026-08-24"
   plan_refs: ["W1-T2223", "W1-T447"]

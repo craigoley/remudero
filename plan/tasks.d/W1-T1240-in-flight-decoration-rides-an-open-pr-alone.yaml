@@ -109,7 +109,7 @@
     - claim: "the marker reaches the board row rather than stopping at the projection"
       proof: "unit test: test/open-pr-liveness-decoration.test.ts"
   files: [src/lib/status.ts, src/lib/board.ts, test/open-pr-liveness-decoration.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: feedback#fb-1785958099820-862db0
   plan_refs: ["W1-T179", "W1-T155", "W1-T368", "W1-T381", "W1-T944", "W1-T1207", "§7"]

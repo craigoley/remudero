@@ -108,7 +108,7 @@
   origin: recon#binary-grep-blindness-2026-08-11
   plan_refs: ["P48", "W1-T297", "W1-T402"]
   files: [src/lib/task-linter.ts, src/lib/flight-signals.ts, test/gate-properties.test.ts, test/property-parsers.test.ts, test/no-raw-nul.test.ts, test/nul-escape-equivalence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — nothing here needs an operator ruling. The tier of judgement this task
     requires is bounded by design (iii)'s one choice, and both options are named with the condition

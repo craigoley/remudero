@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§4", "W1-T2311", "W1-T2434", "W1-T2552", "W1-T2778"]
   files: [deploy/serve-container.sh, test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     `daemon_host_path_for` (deploy/serve-container.sh, W1-T2778) translates a container path

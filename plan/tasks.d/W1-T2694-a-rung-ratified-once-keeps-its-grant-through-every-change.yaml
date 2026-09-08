@@ -72,7 +72,7 @@
   origin: "oper#external-scan-2026-09-02"
   plan_refs: ["W1-T2579", "W1-T489", "W1-T2254", "W1-T2295", "§4", "§12"]
   files: [src/lib/ratification.ts, src/lib/policy.ts, src/run-task.ts, test/ratification-pin.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — a new module, the policy schema and the daemon tick under

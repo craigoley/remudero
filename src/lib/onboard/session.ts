@@ -5,6 +5,7 @@
 // writes are answers.json + ledger.ndjson" by spying on the REAL module needs every call
 // site below to be a live `fs.<method>(...)` property lookup, never a destructured local.
 import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
+import { LEDGER_FILENAME } from "../ledger-path.js";
 import fs from "node:fs";
 import { join } from "node:path";
 import type { Inventory } from "./inventory.js";
@@ -311,7 +312,7 @@ function answersPathFor(targetDir: string): string {
 }
 
 function ledgerPathFor(targetDir: string): string {
-  return join(targetDir, "plan", "onboarding", "ledger.ndjson");
+  return join(targetDir, "plan", "onboarding", LEDGER_FILENAME);
 }
 
 /** Atomic JSON write through the shared primitive (W1-T2899). The INJECTED seam is kept for

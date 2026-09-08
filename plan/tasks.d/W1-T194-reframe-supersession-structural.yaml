@@ -68,7 +68,7 @@
   origin: architect
   plan_refs: ["§7B"]
   files: [src/lib/inbox.ts, test/inbox.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   cycle_residual: |
     FOR THE CURRENT P34 CYCLE, which runs BEFORE this task ships and therefore on prose precedence by necessity:

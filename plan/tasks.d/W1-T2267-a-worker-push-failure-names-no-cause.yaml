@@ -118,7 +118,7 @@
     - claim: "a cause the run cannot determine is named as undetermined rather than left out"
       proof: "unit test: test/worker-push-credential-visibility.test.ts"
   files: [src/run-task.ts, test/worker-push-credential-visibility.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#worker-push-failure-names-no-cause-2026-08-25"
   plan_refs: ["W1-T1068", "W1-T142", "W1-T434"]

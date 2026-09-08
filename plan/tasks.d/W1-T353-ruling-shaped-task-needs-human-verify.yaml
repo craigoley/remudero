@@ -55,7 +55,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T326", "§4", "§12"]
   files: [src/lib/task-linter.ts, test/task-linter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — linter verdicts over fixture tasks, fully in-process; this task ITSELF is not
     ruling-shaped (it writes a linter, not a ruling).

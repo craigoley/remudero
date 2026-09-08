@@ -91,7 +91,7 @@
     - claim: "the deny-floor hook is unchanged and still refuses the tripwire, and the allowance covers the rework it forces"
       proof: "unit test: test/containment-turn-budget.test.ts"
   files: [src/lib/containment.ts, test/containment-turn-budget.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#probe-turn-budget-did-not-move-2026-08-24"
   plan_refs: ["W1-T1271", "W1-T1281", "W1-T1265"]

@@ -14,7 +14,7 @@
     - test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts
   origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
   plan_refs: ["W1-T418", "W1-T2595", "W1-T2599", "W1-T1282"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED AT 903b5a6, NOT REASONED ABOUT.

@@ -19,6 +19,7 @@ import { createService, type Method, type Route, type Scope } from "../src/lib/s
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
 
@@ -40,9 +41,6 @@ function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-route-scope-matrix-"));
 }
 
-function fakeGitHub(): GitHub {
-  return { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
-}
 function fakeTraceGithub(): TraceGithub {
   return { prView: () => null };
 }

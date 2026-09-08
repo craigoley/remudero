@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { RmdError } from "./errors.js";
 
 /** The plan/tasks.yaml loader and validator (schema v1, MASTER-PLAN §2), read-only — the control
  *  plane flips `status`; every task's `prompt` is pre-authored (G-2). */
@@ -153,9 +154,15 @@ export interface Task {
   retirement?: RetirementReason;
 }
 
-export class PlanError extends Error {
-  constructor(message: string) {
-    super(message);
+/**
+ * W1-T2901: the best-behaved of this repo's ~55 hand-rolled `Error` subclasses, now adopting the
+ * shared envelope (`./errors.ts`) first. `kind: "plan"` and `exitCode: 1` reproduce today's
+ * observed behaviour exactly (uncaught, it already fell through `main()`'s outer catch to exit
+ * 1) — this migration adds a machine-readable discriminant, not a behaviour change.
+ */
+export class PlanError extends RmdError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super("plan", 1, message, details);
     this.name = "PlanError";
   }
 }

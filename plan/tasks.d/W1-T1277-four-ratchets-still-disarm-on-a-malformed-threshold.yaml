@@ -129,7 +129,7 @@
     - claim: "a well-formed baseline evaluates exactly as it does today, with no value or threshold moved"
       proof: "unit test: test/mutation-ratchet.test.ts"
   files: [scripts/learnings-budget-ratchet.mjs, scripts/coverage-ratchet.mjs, scripts/mutation-ratchet.mjs, test/learnings-budget-ratchet.test.ts, test/coverage-ratchet.test.ts, test/mutation-ratchet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#four-ratchets-still-disarm-on-a-malformed-threshold-2026-08-23"
   plan_refs: ["W1-T1233", "W1-T1234"]

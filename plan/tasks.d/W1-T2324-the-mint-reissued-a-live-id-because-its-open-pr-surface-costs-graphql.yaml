@@ -10,7 +10,7 @@
   files: [src/run-task.ts, scripts/task-id-existence-check.mjs, test/mint-open-pr-surface-is-rest.test.ts]
   origin: "operator-brief#mint-open-pr-surface-2026-08-26"
   plan_refs: ["W1-T2315", "W1-T2318", "W1-T2323", "W1-T1066"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-08-26, NOT PREDICTED. `plan/tasks.d/W1-T2316-the-retro-renders-past-its-own-line-

@@ -93,7 +93,7 @@
     - claim: "arming is still attempted first and the fallback never replaces it for a PR that can arm"
       proof: "unit test: test/rest-merge-fallback.test.ts"
   files: [src/run-task.ts, test/rest-merge-fallback.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#arm-fallback-shares-the-exhausted-transport-2026-08-23"
   plan_refs: ["W1-T1235", "W1-T1095", "W1-T1208", "W1-T1079", "W1-T1119", "W1-T1215", "W1-T1050", "W1-T203"]

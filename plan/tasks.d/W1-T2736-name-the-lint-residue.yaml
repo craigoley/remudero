@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/name-the-lint-residue.test.ts]
   origin: "operator-session#w1-t1260-ruling-2026-09-02"
   plan_refs: ["W1-T1260", "W1-T367"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     AUTHORISED BY THE W1-T1260 RULING, AND BY NOTHING ELSE. That ruling (DECISIONS.md, 2026-09-02)

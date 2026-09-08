@@ -75,7 +75,7 @@
   origin: "oper#concept-scan-2026-09-03"
   plan_refs: ["W1-T362", "W1-T387", "W1-T2507", "W1-T2614", "§8A", "§12"]
   files: [src/lib/review.ts, src/lib/task-linter.ts, src/lib/proof-grammar.ts, scripts/generate-proof-dialect.mjs, docs/proof-dialect.md, package.json, test/proof-dialect-doc.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — two parser modules gaining exports, a generator, a page and a

@@ -95,7 +95,7 @@
   origin: feedback#fb-1784856771241-14ea45
   plan_refs: ["W1-T79", "W1-T191", "W1-T243", "W1-T446", "W1-T530"]
   files: [src/run-task.ts, src/lib/operator-sync.ts, test/operator-sync.test.ts, docs/cli-reference.md]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify:auto ON PURPOSE, and it is the deliberate contrast with W1-T446. That task is

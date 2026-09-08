@@ -100,7 +100,7 @@
   origin: oper#split-w1t392-2026-08-09
   plan_refs: ["§8A", "§12A", "§5E", "P29", "P43", "P48"]
   files: [src/lib/retro.ts, src/run-task.ts, test/plan-state-truth-rung.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS, and the band is set UP FRONT rather than
     shipped as a violation and raised later. subsystemsOf counts three concerns here — retro,

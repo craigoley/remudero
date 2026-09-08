@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§12", "W1-T2525", "W1-T2543", "W1-T2809"]
   files: [src/lib/task-linter.ts, test/sizing-inflates-when-a-slug-does-not-match-its-falsifier.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A DIAGNOSTIC THAT SUGGESTS REMEDIES IS STEERING BEHAVIOUR, AND AN INCOMPLETE LIST STEERS WRONG.

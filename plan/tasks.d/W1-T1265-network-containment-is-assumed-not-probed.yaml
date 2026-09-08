@@ -10,7 +10,7 @@
   files: [src/lib/containment.ts, test/containment.test.ts]
   origin: oper#network-containment-assumed-2026-08-23
   plan_refs: ["W1-T2", "W1-T237", "W1-T268"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RE-DERIVED AT origin/main 8f2a9112, NOT CARRIED — AND ONE FIGURE IN THE BRIEFING IS CORRECTED

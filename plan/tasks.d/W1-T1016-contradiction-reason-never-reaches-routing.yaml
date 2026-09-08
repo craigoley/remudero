@@ -92,7 +92,7 @@
   origin: "recon#contradiction-reason-unreachable-2026-08-19"
   plan_refs: ["W1-T304", "W1-T307", "W1-T923", "W1-T952"]
   files: [src/lib/review.ts, src/run-task.ts, test/review-failure-reason-ledgered.test.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`

@@ -47,7 +47,7 @@
   origin: feedback#fb-1784731575322-753af9
   plan_refs: ["§7"]
   files: [src/lib/serve.ts, test/control-status-daemon-liveness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED from feedback#fb-1784731575322-753af9's [T189-fleet-truth] item, which named the source condition
     ('/v1/control/status is currently flags-only') as a PREREQUISITE for its proof rather than a proof. Re-verified

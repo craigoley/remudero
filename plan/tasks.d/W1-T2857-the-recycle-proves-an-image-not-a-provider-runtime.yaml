@@ -22,7 +22,7 @@
     - test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts
   origin: "operator-session#azure-restart-runtime-contract-2026-09-04"
   plan_refs: ["W1-T1010", "W1-T1069", "W1-T2592", "W1-T2774"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE HOST 2026-09-05T01:44Z. The host has non-empty

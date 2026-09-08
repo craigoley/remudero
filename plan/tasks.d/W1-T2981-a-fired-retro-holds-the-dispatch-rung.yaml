@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§5C", "W1-T276", "W1-T2265", "W1-T2379", "W1-T2744", "W1-T2875", "W1-T2960", "W1-T2965"]
   files: [src/lib/daemon.ts, src/lib/sweep.ts, test/a-fired-retro-must-not-hold-the-dispatch-rung.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE THIRD BLOCKER IN ONE OUTAGE, AND THE ONE STILL STANDING. W1-T2960 fixed the pre-admission

@@ -118,7 +118,7 @@
   origin: "recon#recycle-retypes-the-env-2026-08-20"
   plan_refs: ["W1-T1024", "W1-T1068"]
   files: [deploy/recycle-container.sh, deploy/host-update.sh, test/recycle-container.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan` reads three

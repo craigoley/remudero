@@ -93,7 +93,7 @@
   origin: "oper#manual-completion-cannot-be-credited-2026-08-19"
   plan_refs: ["W1-T12d", "W1-T12e", "W1-T13", "W12-T1", "W1-T367", "W1-T1004"]
   files: [src/lib/status.ts, src/lib/ledger.ts, test/manual-completion-assertion.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL

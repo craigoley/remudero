@@ -53,7 +53,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T42", "§4", "§7B"]
   files: [src/run-task.ts, src/lib/plan-architect.ts, test/plan-architect.test.ts, test/escalate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — verdict-to-escalation wiring over injected gateways, in-process.
     risk:high — set by Rule 19's span (escalate, plan-architect, run-task), not blast radius: the

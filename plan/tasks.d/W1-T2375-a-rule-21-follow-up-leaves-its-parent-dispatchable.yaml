@@ -122,7 +122,7 @@
       proof: "unit test: test/rule-21-follow-up-couples-parent-disposition.test.ts"
     - claim: "every merged PR matching the historical shape still passes"
       proof: "unit test: test/rule-21-follow-up-couples-parent-disposition.test.ts"
-  status: queued
+  status: merged
   attempts: 0
   plan_refs: ["W1-T180", "W1-T1268", "W1-T2248", "W1-T2254", "W1-T2326"]
   note: |

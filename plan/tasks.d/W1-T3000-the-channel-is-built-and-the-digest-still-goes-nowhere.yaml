@@ -12,7 +12,7 @@
     - test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts
   origin: "operator-session#daily-daemon-report-by-email-2026-09-06"
   plan_refs: ["W1-T2976", "W1-T2497", "W1-T2277", "W1-T8"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A CONSUMER-LESS PRODUCER, WHICH IS THIS REPO'S MOST-RECORDED SHAPE. W1-T2976 shipped

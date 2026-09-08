@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
@@ -585,7 +586,7 @@ function defaultUpstreamGit(root: string): UpstreamGitExec {
 }
 
 function defaultUpstreamGh(): UpstreamGhExec {
-  return (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return (args) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /** `root`'s own owner/repo, parsed from its git origin remote — deliberately duplicated from

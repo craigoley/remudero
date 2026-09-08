@@ -269,7 +269,7 @@ diff --git a/test/knowledge-budget-derivation.test.ts b/test/knowledge-budget-de
 // in CI, but each is a size LEDGER and not a score FLOOR, so raising an entry cannot make a failing
 // falsifier pass), and test/a-size-ledger-is-not-a-score-floor.test.ts /
 // test/comment-load-baseline-is-exempt.test.ts pin that the reasons stay distinct.
-test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the four named, reviewed paths — no blanket widening", () => {
+test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the seven named, reviewed paths — no blanket widening", () => {
   // W1-T2897 raised this from three to four. The list is deepEqual'd rather than counted precisely
   // so a widening must NAME its path here, and this is the second of two tripwires on the same set
   // (test/a-size-ledger-is-not-a-score-floor.test.ts holds the other) — both had to be edited, which
@@ -287,6 +287,19 @@ test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the four named, reviewed paths �
       "scripts/source-size-baseline.json",
       "scripts/comment-load-baseline.json",
       "scripts/clock-signature-baseline.json",
+      // W1-T2901 and W1-T2896 added the fifth, sixth and seventh. All three earn the fourth's
+      // SECOND reason, the one the first three do not need: each belongs to a census that
+      // re-measures the REAL tree, so the instrument-only PR rule 25 normally prescribes cannot
+      // exist -- it would record a number the tree does not have and redden on its own.
+      //   error-subclass: a CEILING on classes extending the built-in error type directly; the PR
+      //     that migrates one onto the shared envelope moves the measured count in the same diff.
+      //   bound-kind: a GRANDFATHER LIST whose entries can only be REMOVED as constants declare
+      //     their kind, so an edit is monotonically tightening and hides nothing.
+      //   gh-transport: a count PINNED AT ZERO, new in the diff that achieves zero; there is no
+      //     direction to loosen it without its own census refusing.
+      "scripts/error-subclass-baseline.json",
+      "scripts/bound-kind-baseline.json",
+      "scripts/gh-transport-baseline.json",
     ],
   );
 });

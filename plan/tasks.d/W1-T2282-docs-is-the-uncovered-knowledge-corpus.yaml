@@ -10,7 +10,7 @@
   files: [scripts/generate-docs-index.mjs, docs/docs-index.json, test/docs-index.test.ts]
   origin: oper#docs-is-the-uncovered-knowledge-corpus-2026-08-25
   plan_refs: ["W1-T37", "W1-T33", "W1-T19", "W1-T418", "W1-T2266"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (0) THE WARRANT IS AN ASYMMETRY MEASURED HERE, NOT A FEATURE OBSERVED ELSEWHERE.

@@ -11,7 +11,7 @@
   files: [src/lib/isolation.ts, test/a-failed-probe-is-not-a-parse-failure.test.ts, scripts/source-size-baseline.json]
   origin: "operator-brief#codex-integration-defect-pair-2026-09-03"
   plan_refs: ["W1-T2754", "W1-T238", "W1-T1112", "W1-T17"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     SIBLING OF W1-T2754. The operator reserved W1-T2754 and W1-T2755 as a consecutive pair for

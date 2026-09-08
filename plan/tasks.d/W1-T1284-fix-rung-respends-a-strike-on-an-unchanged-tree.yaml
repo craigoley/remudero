@@ -109,7 +109,7 @@
     - claim: "the strike cap and the escalation at the ceiling are unchanged, and a base that moved under the branch does not trigger the refusal"
       proof: "unit test: test/fix-rung-unchanged-tree-stand-down.test.ts"
   files: [src/run-task.ts, test/fix-rung-unchanged-tree-stand-down.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#fix-rung-rerun-against-unchanged-tree-2026-08-23"
   plan_refs: ["W1-T1278", "W1-T1282", "W1-T296", "W1-T225", "W1-T195"]

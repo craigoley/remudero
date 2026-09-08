@@ -152,7 +152,7 @@
     - claim: "the house dialect still compiles to the same invocation it does today, so existing proofs keep their meaning"
       proof: "unit test: test/proof-engine-declaration.test.ts"
   files: [src/lib/task-linter.ts, src/lib/review.ts, test/proof-engine-declaration.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#proof-grep-engine-undeclared-2026-08-26"
   plan_refs: ["W1-T387", "W1-T460", "W1-T273", "W1-T362"]

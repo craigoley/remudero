@@ -10,7 +10,7 @@
   origin: "board-review:escalation:#3227"
   plan_refs: ["W1-T2304", "W1-T7B", "W1-T188", "§4B", "§5C"]
   files: [src/run-task.ts, test/board-review-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SHIPPED CRITERION AND THE SHIPPED CODE DISAGREE. W1-T2304's fourth acceptance criterion

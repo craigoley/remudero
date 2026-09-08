@@ -103,7 +103,7 @@
     - claim: "the spawn is still bounded and can still be abandoned"
       proof: "unit test: test/fix-spawn-bound-split.test.ts"
   files: [plan/policy.yaml, src/lib/policy.ts, src/run-task.ts, test/fix-spawn-bound-split.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#fix-spawn-bound-measured-on-sweep-ticks-2026-08-22"
   plan_refs: ["W1-T127", "W1-T1044", "W1-T1049", "W1-T1129", "W1-T473"]

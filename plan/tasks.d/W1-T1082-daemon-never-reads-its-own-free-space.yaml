@@ -131,7 +131,7 @@
   origin: "feedback#fb-1785800392721-196dbe"
   plan_refs: ["W1-T215", "W1-T1047", "W1-T320", "W1-T411", "W1-T1064", "W1-T379"]
   files: [src/lib/daemon.ts, src/lib/daemon-health.ts, src/lib/doctor.ts, src/lib/ledger.ts, src/run-task.ts, test/daemon-disk-headroom.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify:auto — every arm is decidable in-process: `readDiskFreeBytes` takes an injected `statfs`,

@@ -155,7 +155,7 @@
     - claim: "an escalation whose referent no lookup can resolve is refused rather than opened"
       proof: "unit test: test/escalation-retirability.test.ts"
   files: [src/lib/sweep.ts, src/lib/escalate.ts, test/escalation-retirability.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: recon#needs-human-board-classification-2026-08-21
   plan_refs: ['W1-T176', 'W1-T186', 'W1-T283', 'W1-T345', 'W1-T347', 'W1-T298']

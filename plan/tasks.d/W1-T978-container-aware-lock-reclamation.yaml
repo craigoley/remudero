@@ -109,7 +109,7 @@
   origin: "oper#container-lock-unreclaimable-2026-08-18"
   plan_refs: ["W1-T396", "W1-T972", "W1-T509"]
   files: [src/lib/fs-race-safe.ts, test/stale-lock-host-ordering.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     W1-T972 IS THE SIBLING, NOT THE DUPLICATE, AND THIS IS THE SAME ABSENCE SEEN FROM A THIRD
