@@ -22,7 +22,7 @@ usage:
   rmd lint-plan [--plan <path>] [--base <git-ref>]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
   rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
-  rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
+  rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message and Rule 15 checks.
   rmd next-task-id [--plan <path>] [--offline] [--reserve]   # Print (or --reserve atomically claim) the next free W1-T<n> task id.
   rmd emissions [--days N]   # Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
   rmd receipt <pr> [--repo <name>]   # Print a deterministic in-toto-style run receipt from ledger ground truth.
@@ -173,7 +173,7 @@ W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN 
 
 ### `rmd preflight`
 
-The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
+The HAND route's commit gate: commitlint, tsc --noEmit, commit-message and Rule 15 checks.
 
 ```
 rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]
