@@ -1,0 +1,126 @@
+- id: W1-T3141
+  title: "THE INHERITED-VIOLATION NOTICE W1-T3037 BUILT CANNOT FIRE IN CI — `source-size` is the only ratchet job that checks out at the default depth 1, so `origin/main` is not a ref there and `git show origin/main:<path>` exits 128 for a MISSING REF exactly as it does for a missing PATH; `contentAtRef` reads that as `absent`, every violation is classified INTRODUCED, and the notice is unreachable in the one environment the gate runs in"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one defect spanning the workflow that provisions the ref, the helper that
+              # misreads its absence, and the caller that reports the result — the three are the
+              # same fault and a fix to any one of them alone leaves the notice unreachable.
+  band_meaning: span
+  budget_usd: 25.00
+  files: [.github/workflows/ci.yml, scripts/lib/inherited-violation.mjs, scripts/source-size-ratchet.mjs, test/an-unfetched-base-is-not-an-absent-file.test.ts]
+  origin: "operator-session#the-notice-that-cannot-print-2026-09-08"
+  plan_refs: ["W1-T3037", "W1-T2883", "W1-T2324", "W1-T3068"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON `origin/main` AT 41231c67, 2026-09-08.
+
+    W1-T3037 shipped a real repair: when `source-size-ratchet` blocks, it re-measures each violating
+    file at `origin/main` and tells the author which reds they INHERITED rather than grew. The
+    helper is careful — it separates "absent at the ref" from "could not ask", and its own comment
+    explains that reading the second as the first is what once reported an INHERITED violation as
+    INTRODUCED. Eleven tests cover it. None of that reaches CI.
+
+    THE JOB CANNOT SEE THE REF IT MEASURES AGAINST. `.github/workflows/ci.yml`'s `source-size` job
+    checks out with a BARE `actions/checkout` — no `with:` block at all, so the default
+    `fetch-depth: 1`, and on a `pull_request` event that fetches only the merge ref. There is no
+    `refs/remotes/origin/main` in that checkout and nothing in the job fetches one. It is the ONLY
+    ratchet job in the file that reads `origin/main` at check time without asking for it: nine
+    sibling jobs set `fetch-depth: 0`, and the two either side of `source-size` say why in as many
+    words — task-id-existence, "so that ref must exist. An unreadable base read as an empty one is
+    the false zero that produced the 2026-08-26 id collisions"; comment-load-ratchet, "Without it
+    the base read fails and the gate REFUSES by design (an unreadable base read as an empty diff is
+    a false zero)".
+
+    AND THE MISSING REF IS INDISTINGUISHABLE FROM A MISSING PATH. `contentAtRef` decides between
+    `absent` and `unreadable` on the exit STATUS of `git show <ref>:<path>`, and git exits 128 for
+    BOTH — MEASURED in a throwaway repository, with a positive control:
+
+      git show main:nosuch.txt   -> fatal: path 'nosuch.txt' does not exist in 'main'   exit 128
+      git show origin/main:f.txt -> fatal: invalid object name 'origin/main'.           exit 128
+      git show main:f.txt        -> (content)                                           exit 0
+
+    So `contentAtRef` returns `{kind:"absent"}` for a ref that is not there, `splitInheritedViolations`
+    pushes every violation to `introduced`, `inherited` is empty, `inheritedNotice` returns
+    `undefined`, and nothing is printed. The gate reports the author grew every one of those files.
+
+    THIS IS THE THIRD OUTCOME THE HELPER EXISTS TO PRESERVE, LOST AT THE BOUNDARY. Its own comment
+    says an unreadable ref "is not treated as clean either; it yields `undetermined`, because 'we
+    could not ask' and 'the base is fine' must not arrive as the same answer." That is exactly what
+    happens: a checkout that cannot answer the question arrives as a confident answer about every
+    file. It is CLAUDE.md's own hazard (d) — a query returning a perfectly good value for a
+    question nobody asked — and the notice's absence looks identical to "nothing was inherited".
+
+    WHY IT SURVIVED. The split runs only when the ratchet BLOCKS, which is rare and is exactly the
+    moment nobody is reading closely; the helper's eleven tests all inject a `run`, so no test ever
+    exercises a real checkout; and the failure is SILENT — a missing sentence, not a red.
+  design: |
+    (i) PROVISION THE REF THE JOB ALREADY DEPENDS ON. `source-size`'s checkout takes
+    `fetch-depth: 0`, the same one-line shape and the same stated reason as the nine sibling jobs
+    around it. This is the half that makes the feature work; without it the code below can only
+    report that it could not tell.
+
+    (ii) A CALLER THAT CAN ESTABLISH THE REF MUST BE ABLE TO SAY SO, AND THE HELPER MUST BELIEVE
+    IT OVER `git show`'s ambiguous 128. Export `refResolvable(run, ref)` — one
+    `git rev-parse --verify --quiet <ref>^{commit}`, which separates the two cases cleanly (0 for a
+    real ref, 1 for a missing one; MEASURED above). `splitInheritedViolations` gains an OPTIONAL
+    `refPresent` predicate; when it is supplied and answers false, every violation is `undetermined`
+    and none is `introduced`.
+
+    (iii) THE OPTION IS OPTIONAL ON PURPOSE. W1-T3037's contract and all eleven of its tests stay
+    byte-identical: a caller that passes no predicate behaves exactly as it does today. This task
+    does not get to redefine a merged task's helper out from under its falsifiers; it adds the seam
+    the real caller needs and wires the real caller to it.
+
+    (iv) AN UNANSWERABLE QUESTION MUST PRINT, NOT VANISH. `inheritedNotice` returns `undefined` for
+    an empty set, which is correct and must stay so. Add `undeterminedNotice`, printed when the
+    split could not be made, naming the ref and saying the gate could not tell whose red this is.
+    A silent absence and "we could not ask" are the two readings this whole module exists to keep
+    apart, and today they render identically.
+
+    (v) THE FALSIFIER MUST TOUCH REAL GIT AND THE REAL CLI. The premise is a claim about git's exit
+    codes, so one test asserts them in a throwaway repository rather than restating them; and one
+    drives the SHIPPED `source-size-ratchet` as a subprocess over a fixture tree with no
+    `origin/main`, because that — not a unit call — is the configuration CI actually runs.
+
+    (vi) THE `fetch-depth` ASSERTION SELECTS BY STRUCTURE, WITH AN AMBIGUITY GUARD. Parse ci.yml,
+    take `jobs["source-size"]`, require EXACTLY ONE `actions/checkout` step, then read its
+    `fetch-depth`. Two guards this session failed because a selector was unambiguous only while one
+    thing matched it (#4493, #4505); asserting the count is what keeps this one honest.
+
+    (vii) OUT OF SCOPE, DELIBERATELY. Whether the other `*-baseline.json` gates should share the
+    inherited/introduced split is a separate question with its own answer; this task changes no
+    gate's verdict and no ceiling. What a violation BLOCKS on is untouched — only what the author
+    is told about whose repair it is.
+  acceptance:
+    - claim: a ref that is not present in the checkout is reported as unresolvable rather than as a file absent at the base, so no violation is attributed to the diff on a base nobody could read
+      proof: "unit test: test/an-unfetched-base-is-not-an-absent-file.test.ts"
+    - claim: git exits 128 for a missing ref and for a missing path alike, so exit status alone cannot separate them while the rev-parse probe can
+      proof: "unit test: test/an-unfetched-base-is-not-an-absent-file.test.ts"
+    - claim: the shipped ratchet run against a checkout with no origin/main says it could not determine whose red this is, instead of printing nothing
+      proof: "unit test: test/an-unfetched-base-is-not-an-absent-file.test.ts"
+    - claim: the source-size job checks out at a depth that makes origin/main resolvable, and carries exactly one checkout step so the assertion cannot go ambiguous later
+      proof: "unit test: test/an-unfetched-base-is-not-an-absent-file.test.ts"
+    - claim: a caller that supplies no predicate gets W1-T3037's behaviour unchanged, so the merged task keeps its own falsifiers rather than being redefined by this one
+      proof: "unit test: test/an-unfetched-base-is-not-an-absent-file.test.ts"
+    - claim: the resolvability probe ships as a named exported seam, so any other caller of this helper can establish its ref the same way instead of re-deriving it
+      proof: "grep: refResolvable in scripts/lib/inherited-violation.mjs"
+  falsifier: |
+    Close without implementation if `refs/remotes/origin/main` turns out to EXIST in the
+    `source-size` job's checkout — reproduce by adding a `git rev-parse --verify origin/main` step
+    to that job on a PR and reading the log. If it resolves, the premise is wrong and the notice
+    was reachable all along.
+
+    A change that adds `fetch-depth: 0` and stops does NOT satisfy this task. The ref would resolve
+    on this workflow today, and the helper would still read a missing ref as an absent file
+    anywhere else it is used, silently, which is the defect.
+
+    A change that makes an unreadable base BLOCK, or that changes which files the ratchet refuses,
+    does not satisfy it either. The gate's verdict is not in question here; only whether the author
+    is told the truth about whose red it is.
+
+    A change that edits W1-T3037's eleven existing tests to accommodate a new required argument
+    does not satisfy it: the seam is additive precisely so that those falsifiers keep holding.
