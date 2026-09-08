@@ -590,6 +590,116 @@ test("W1-T3170 real owner census distinguishes ahead from diverged and preserves
   }
 });
 
+/** The two history arms the ancestry census above never reaches. `ahead`/`diverged` both come
+ *  back from `merge-base --is-ancestor` exiting 1; these two are the OTHER exits — 0 (the owner
+ *  is already contained by the remote, so there is nothing to salvage) and anything else, which
+ *  is git failing to answer at all. They are split from the census test rather than folded into
+ *  it because each needs a repository the other cannot be in: `contained` needs an owner that
+ *  never committed, and the unreadable arm needs a remote SHA that names no object. */
+test("W1-T3170 an owner already contained by the remote is a salvage no-op, not an abandonment", () => {
+  const root = tmp("rmd-fbcs-owner-contained-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const branch = "run-W1-T3170-1785600000013";
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const worktreesRoot = join(root, "worktrees");
+    const ownerPath = join(worktreesRoot, "sweep-W1-T3170-1785600000013");
+    mkdirSync(worktreesRoot, { recursive: true });
+    // NO local commit: the owner's HEAD stays where the branch was, so advancing the remote
+    // below leaves the owner strictly BEHIND — an ancestor, which is the `contained` arm.
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+    const localSha = sha(ownerPath, "HEAD");
+
+    const advancer = join(root, "advancer");
+    cloneOf(upstream, advancer);
+    execFileSync("git", ["-C", advancer, "checkout", "--quiet", branch]);
+    commit(advancer, "remote.txt", "remote commit the owner never saw");
+    execFileSync("git", ["-C", advancer, "push", "--quiet", "origin", branch]);
+    const remoteAhead = sha(advancer, "HEAD");
+    execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin", branch]);
+    assert.notEqual(localSha, remoteAhead, "the fixture is only meaningful if the two SHAs differ");
+
+    const snapshot = captureRegisteredFixOwnerSnapshot({
+      repoDir,
+      worktreesRoot,
+      ownerPath,
+      taskId: "W1-T3170",
+      branch,
+      expectedRemoteSha: remoteAhead,
+      observedRemoteSha: remoteAhead,
+      inflightDir: join(root, "inflight"),
+      claimKey: "fixture",
+    }, {
+      readClaim: () => "clear",
+      processCensus: () => ({ state: "clear", scanned: 1 }),
+    });
+
+    assert.equal(snapshot.historyState, "contained");
+    // Nothing is at risk, so the decision must be to reclaim rather than stand down -- the
+    // whole point of telling this arm apart from `ahead`/`diverged`.
+    assert.deepEqual(decideRegisteredFixOwnerRecovery(snapshot), { kind: "reclaim-contained" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3170 a remote SHA git cannot resolve reads unknown and stands the salvage down", () => {
+  const root = tmp("rmd-fbcs-owner-unreadable-");
+  try {
+    const upstream = seedUpstream(root);
+    const repoDir = join(root, "repo");
+    cloneOf(upstream, repoDir);
+    const branch = "run-W1-T3170-1785600000014";
+    execFileSync("git", ["-C", repoDir, "branch", branch]);
+    execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
+    const worktreesRoot = join(root, "worktrees");
+    const ownerPath = join(worktreesRoot, "sweep-W1-T3170-1785600000014");
+    mkdirSync(worktreesRoot, { recursive: true });
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
+
+    // Well-formed but nameless: `merge-base --is-ancestor` exits 128 rather than 0 or 1, which
+    // is the arm that must NOT be read as "not an ancestor". Observed === expected so the probe
+    // reaches the ancestry question at all instead of short-circuiting on remoteState.
+    const nonexistent = "0".repeat(39) + "1";
+    assert.throws(
+      () => execFileSync("git", ["-C", repoDir, "cat-file", "-e", nonexistent], { stdio: "ignore" }),
+      "the fixture SHA must genuinely name no object",
+    );
+
+    let claimReads = 0;
+    let processReads = 0;
+    const snapshot = captureRegisteredFixOwnerSnapshot({
+      repoDir,
+      worktreesRoot,
+      ownerPath,
+      taskId: "W1-T3170",
+      branch,
+      expectedRemoteSha: nonexistent,
+      observedRemoteSha: nonexistent,
+      inflightDir: join(root, "inflight"),
+      claimKey: "fixture",
+    }, {
+      readClaim: () => { claimReads += 1; return "clear"; },
+      processCensus: () => { processReads += 1; return { state: "clear", scanned: 1 }; },
+    });
+
+    assert.equal(snapshot.historyState, "unknown");
+    assert.equal(snapshot.remoteState, "exact", "the probe reached the ancestry question, not a remote mismatch");
+    assert.equal(snapshot.error, undefined, "an unreadable ancestry is a STATE, not a thrown probe error");
+    assert.equal(claimReads, 0, "an unreadable history returns before the claim proof");
+    assert.equal(processReads, 0, "an unreadable history returns before the process-cwd proof");
+    assert.deepEqual(decideRegisteredFixOwnerRecovery(snapshot), {
+      kind: "keep",
+      reason: "history_probe_unreadable",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T3170 ahead publish fails closed", () => {
   const localSha = "c".repeat(40);
   const remoteSha = "b".repeat(40);
