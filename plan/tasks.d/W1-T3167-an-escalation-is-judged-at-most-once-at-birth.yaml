@@ -109,7 +109,19 @@
     POLARITY (escalate.ts:440-445): a false negative hides work the operator cannot know to look for
     — the costly direction. WHEN IN DOUBT, DELIVER. This holds MORE strongly on a re-judge than at
     birth, because an item that has survived a dwell has already been implicitly triaged once.
-    CAVEAT WITH EQUAL WEIGHT: the four-duplicates-of-one-condition shape (#4541/#4568/#4595/#4604)
-    has a SECOND, independent cause — the same condition re-escalating without dedup across passes.
-    A re-judge that demotes all four is treating a symptom; the dedup defect is separate work and is
-    NOT claimed here. Both are real and fixing one does not close the other.
+    CORRECTED 2026-09-08 BY THE AUTHOR, BEFORE ANY BUILDER READ IT. This caveat first said the
+    four-duplicates shape "has a SECOND, independent cause — the same condition re-escalating
+    WITHOUT DEDUP across passes". THAT WAS WRONG and it was never measured. Dedup RAN and correctly
+    declined. MEASURED: every one of the six duplicates carries a DISTINCT head sha —
+    #4541 26a53a22 · #4568 5105a48d · #4595 b1a1429e · #4604 e765a00e (all PR #4532), and
+    #4633 3a29c58a · #4646 69b6e0a1 (both PR #4559, where 69b6e0a1 is exactly the commit pushed at
+    12:57:12Z, between the two escalations). `findDuplicateEscalation` (src/lib/escalate.ts) vetoes
+    on `headSha` when both sides carry one and disagree, which is W1-T195's stated design: "with the
+    condition recurring on the same sha, that is a genuine re-escalation".
+    THE REAL SECOND CAUSE, stated correctly and filed as W1-T3179: the dedup key includes the head
+    sha, so a PR that gets PUSHED re-asks a question the push did not change. Both of these
+    conditions are head-INDEPENDENT — "review failing with no actionable unmet criteria" is a spec
+    problem and "cannot be repaired from its non-fleet head" is an ownership fact — so a new commit
+    produces a fresh copy of an unanswered ask.
+    IT REMAINS A SECOND, INDEPENDENT CAUSE and is still NOT claimed here: a re-judge that demotes all
+    six is treating a symptom. Fixing one does not close the other.

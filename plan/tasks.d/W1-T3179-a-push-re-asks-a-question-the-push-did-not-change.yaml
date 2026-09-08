@@ -1,0 +1,99 @@
+- id: W1-T3179
+  title: "A PUSH RE-ASKS A QUESTION THE PUSH DID NOT CHANGE — the escalation dedup key vetoes on `headSha`, so a head-INDEPENDENT ask ('review failing with no actionable unmet criteria', 'cannot be repaired from its non-fleet head') opens a fresh copy on every new commit: six such duplicates were live on the operator's board on 2026-09-08, two of them 79 minutes apart"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/escalate.ts, test/a-push-does-not-re-ask-a-head-independent-question.test.ts]
+  origin: "operator-session#console-architecture-2026-09-08"
+  plan_refs: ["W1-T195", "W1-T345", "W1-T3167", "W1-T3168", "W1-T104"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08, and this record exists because its author FIRST GOT IT WRONG. W1-T3167's
+    caveat as filed said this shape came from "the same condition re-escalating WITHOUT DEDUP".
+    Dedup was never skipped. It ran, and it correctly declined.
+
+    THE MEASUREMENT THAT SETTLES IT — every duplicate carries a DISTINCT head sha:
+      PR #4532: #4541 26a53a22 · #4568 5105a48d · #4595 b1a1429e · #4604 e765a00e
+      PR #4559: #4633 3a29c58a (12:31:09Z) · #4646 69b6e0a1 (13:50:00Z)
+    and `gh api repos/craigoley/remudero/pulls/4559/commits` shows 69b6e0a1 committed 12:57:12Z —
+    BETWEEN the two. The push is the whole explanation.
+
+    THE MECHANISM, exactly. `findDuplicateEscalation` (src/lib/escalate.ts) requires taskId and PR to
+    match, then vetoes when `headSha` is present on both sides and differs
+    (`matchesOptionalDimension`, `HEAD_SHA_LINE_RE = /^\*\*Head:\*\*\s*(\S+)\s*$/m`). W1-T195 chose
+    that deliberately: "with the prior issue CLOSED and the condition recurring on the same sha,
+    that is a genuine re-escalation. Dedup is about concurrent observers, not about time."
+
+    WHY THE DESIGN IS RIGHT AND STILL PRODUCES THIS. For a CONTENT-dependent ask — "these checks are
+    red at this sha" — a new head genuinely is a new question, and re-asking is correct. But these
+    two producers ask head-INDEPENDENT questions:
+      "review failing with no actionable unmet criteria (contradictory)" is a SPEC problem: the
+        criterion's text is unattainable, which no commit alters.
+      "PR ... cannot be repaired from its non-fleet head" is an OWNERSHIP fact about the branch,
+        which a further push to that same branch cannot change (W1-T3168).
+    Pushing to either PR re-asks a question the operator has not yet answered.
+
+    THE OPERATOR-VISIBLE COST: on a board holding 8 items, 6 were duplicates of 2 questions.
+  design: |
+    (i) THE PRODUCER DECLARES WHETHER ITS ASK DEPENDS ON THE HEAD. This is the producer's knowledge,
+    not the dedup function's — `escalate()` cannot infer from a summary string whether a new commit
+    changes the question. A head-independent escalation omits the head from its DEDUP KEY while
+    still RECORDING the head it observed, because the observed sha is evidence and must not be lost.
+    (ii) DEFAULT UNCHANGED, AND THAT IS THE SAFETY ARGUMENT. Every existing producer keeps today's
+    head-vetoing behaviour by default; only a producer that opts in becomes head-independent. A
+    change that flips the default silently converts genuine per-sha re-escalations into a single
+    stale issue — the false-negative direction, which is the costly one.
+    (iii) AN UNANSWERED ASK IS UPDATED, NEVER SILENTLY DROPPED. When a head-independent duplicate is
+    suppressed, the OPEN issue records that the condition recurred at a new sha. The operator must be
+    able to see the question is still live and has been observed again; a suppression that leaves no
+    trace is how a re-escalation becomes a forgotten one.
+    (iv) THE TWO NAMED PRODUCERS OPT IN, and no others in this task. Widening beyond the two whose
+    head-independence is argued above would be asserting a property of producers this shard has not
+    read.
+  acceptance:
+    - claim: "a head-independent producer firing twice at DIFFERENT head shas opens ONE issue — the measured #4633/#4646 shape collapses to one"
+      proof: "unit test: test/a-push-does-not-re-ask-a-head-independent-question.test.ts"
+    - claim: "a head-DEPENDENT producer firing twice at different shas still opens TWO issues — W1-T195's design is preserved, not overturned"
+      proof: "unit test: test/a-push-does-not-re-ask-a-head-independent-question.test.ts"
+    - claim: "the suppressed recurrence is recorded on the open issue, naming the new sha — the ask is never silently dropped"
+      proof: "unit test: test/a-push-does-not-re-ask-a-head-independent-question.test.ts"
+    - claim: "a head-independent escalation still RECORDS the head it observed in its body, so the evidence survives even though the dedup key omits it"
+      proof: "unit test: test/a-push-does-not-re-ask-a-head-independent-question.test.ts"
+    - claim: "every producer that does not opt in dedups byte-identically to today"
+      proof: "unit test: test/a-push-does-not-re-ask-a-head-independent-question.test.ts"
+  falsifier: |
+    CLOSE IF the dedup key already ignores the head for these producers:
+      `grep -n 'HEAD_SHA_LINE_RE' src/lib/escalate.ts` and read `findDuplicateEscalation`'s
+      `matchesOptionalDimension(e.headSha, ...)` veto.
+    MEASURED 2026-09-08: the veto is unconditional for any escalation carrying a headSha, and both
+    named producers carry one — every one of the six duplicate issues renders a `**Head:**` line.
+    POSITIVE CONTROL, required because "the shas differ" is the entire claim: the six issue bodies
+    must yield SIX DISTINCT `**Head:**` values. MEASURED: 26a53a22, 5105a48d, b1a1429e, e765a00e,
+    3a29c58a, 69b6e0a1 — six distinct.
+    PROVE IT LOAD-BEARING: the head-independent fixture must collapse to ONE issue while the
+    head-dependent fixture in the SAME suite still opens TWO. If both collapse, the change has
+    overturned W1-T195 rather than narrowed it, and genuine per-sha re-escalations are now lost.
+    DO NOT satisfy this by dropping `headSha` from the dedup key globally. That is the false-negative
+    direction: a check that is red at one sha and red again at a later one is TWO observations, and
+    collapsing them hides the second.
+    DO NOT satisfy this by deduping on the rendered title. Two producers can share a title prefix,
+    and W1-T345 already had to reach for the title only in the no-PR case for exactly that reason.
+  note: |
+    Rule 25 CHECKED: `src/lib/escalate.ts` is ordinary src.
+    THIS CORRECTS W1-T3167's FILED CAVEAT, which claimed the cause was missing dedup. It was not;
+    dedup ran and declined correctly. The correction ships in the same PR as this shard so a reader
+    of either record reaches the same account.
+    RELATIONSHIP TO ITS SIBLINGS, stated so three shards are not mistaken for one: W1-T3166 wires
+    the judge at BIRTH (routing), W1-T3167 re-judges what is ALREADY OPEN (aged routing), W1-T3168
+    stops a producer firing on a HEALTHY PR (producer precision), and this one stops a producer
+    re-asking an UNCHANGED question (dedup key). Each is a distinct mechanism and none subsumes
+    another — the six duplicates measured here would survive all three of the others.
+    CAVEAT WITH EQUAL WEIGHT: head-independence is asserted here for TWO producers, from reading
+    what their questions ask. It is a judgement about their semantics, not a measurement, and a
+    reviewer who disagrees about either one should say so — the criterion structure holds either
+    way, only the opt-in list would shrink.
