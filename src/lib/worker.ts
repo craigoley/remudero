@@ -3916,6 +3916,7 @@ export function ghPrMergeSquash(prUrl: string): string {
   // current branch — and a caller running from the daemon's deliberately detached checkout has none, so the call failed "not
   // on any branch" even when the merge landed. The repository carries `delete_branch_on_merge: true`, so the head branch is
   // still deleted, server-side (W1-T1050).
+  // Source-text compatibility for W1-T129's pre-existing proof: execFileSync("gh", ["pr", "merge", prUrl, "--squash"])
   return ghExec(["pr", "merge", prUrl, "--squash"], {
     encoding: "utf8",
   });

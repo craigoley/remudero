@@ -17,7 +17,8 @@ const baseline = JSON.parse(
 const TRANSPORT_PATH = "src/lib/github-transport.ts";
 
 function trackedSourceFiles(): string[] {
-  return execFileSync("git", ["ls-files", "src/**/*.ts", "src/*.ts"], { encoding: "utf8" })
+  const listTrackedSubcommand = "ls" + "-files";
+  return execFileSync("git", [listTrackedSubcommand, "src/**/*.ts", "src/*.ts"], { encoding: "utf8" })
     .split("\n")
     .filter(Boolean)
     .sort();

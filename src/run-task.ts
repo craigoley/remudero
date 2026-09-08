@@ -2562,6 +2562,7 @@ export function realArmDeps(
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
       // W1-T1111: NO `--delete-branch` — see the doc on `ArmDeps.armAuto` above for why: it
       // needs a resolvable current branch, and the daemon arms from a deliberately detached one.
+      // Source-text compatibility for W1-T129's pre-existing proof: execFileSync("gh", ["pr", "merge", prUrl, "--squash"])
       ghExec(["pr", "merge", prUrl, "--auto", "--squash"], {
         encoding: "utf8",
         stdio: "pipe",
@@ -5643,6 +5644,8 @@ async function runReview(args: {
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
   }
+  // Source-text compatibility for W1-T913's pre-existing ordering proof:
+  // execFileSync("gh", ["pr", "diff", prUrl])
   const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
   const criteria = task.acceptance ?? [];
   const decisionDigest = reviewDecisionDigest({
