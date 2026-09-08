@@ -9,7 +9,17 @@
   risk: high
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§8A", "W1-T2883"]
-  files: [src/run-task.ts, src/lib/report-commands.ts, test/report-commands.test.ts]
+  files:
+    - src/run-task.ts
+    - src/lib/report-commands.ts
+    - src/lib/cli-args.ts
+    - test/report-commands.test.ts
+    - test/slug-branch-task-resolution.test.ts
+    - test/catch-erasure-ratchet.test.ts
+    - scripts/source-size-baseline.json
+    - scripts/comment-load-baseline.json
+    - scripts/clock-signature-baseline.json
+    - scripts/test-tier-manifest.json
   status: queued
   attempts: 0
   rationale: |
@@ -32,6 +42,19 @@
     Lower the run-task.ts ceiling in `scripts/source-size-baseline.json` by the lines removed.
     The new test runs each moved verb through a recorder and asserts exit code and stdout match
     the pre-move output on a fixed state directory.
+
+    SCOPE AMENDMENT (2026-09-08). The original three-file declaration omitted the mechanical
+    surfaces required by the extraction. `flagValue` must move to the existing `cli-args` leaf to
+    avoid a lib -> run-task edge; the source-size, comment-load, catch-erasure and test-tier
+    ratchets must record the moved code and new test; and the clock census must transfer the
+    existing Date-call allowance from run-task.ts to report-commands.ts rather than report false
+    growth. The W1-T2720 source-lock test also used the moved `ledgerGrepCommand` declaration as
+    the end delimiter for `reapBranchesCommand`, so it must follow the new module boundary.
+    OBSERVED on the rebased source branch: without these two final surfaces,
+    `test/slug-branch-task-resolution.test.ts` could not locate its production slice and
+    `test/clock-signature-census.test.ts` reported report-commands.ts dateNow 3/newDate 2 above a
+    zero baseline. This amendment changes no behavior or acceptance claim; it makes the task own
+    every file its already-specified extraction requires.
   acceptance:
     - claim: "run-task.ts imports the report verbs from lib instead of defining them"
       proof: "grep: lib/report-commands\" in src/run-task.ts"
