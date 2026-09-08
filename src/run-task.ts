@@ -2072,7 +2072,14 @@ export function ghPrCreateFillCommand(
     // design (iv): the branch-name fallback is stated in the body, never silent.
     bodyParts.push(`(no commit-derived title was available — this PR is titled after its branch, \`${branch}\`)`);
   }
-  const body = bodyParts.filter((p) => p.length > 0).join("\n\n");
+  // THE ACCEPTANCE BLOCK IS AUTHORED HERE, NOT LEFT TO A LATER RED. `fillDerivedBody` derives the
+  // body from the commit, which carries no Acceptance block, so every PR opened through this seam
+  // used to reach `acceptance-author-gate` with nothing to judge and fail closed. A no-op whenever
+  // the body already parses judgeably.
+  const body = ensureJudgeableBody(
+    bodyParts.filter((p) => p.length > 0).join("\n\n"),
+    PR_OPEN_TIME_ACCEPTANCE_FALLBACK,
+  );
   const args = [
     "api",
     "--method",
@@ -4217,6 +4224,34 @@ const ACCEPTANCE_AUTHOR_GATE_CHECK_NAME = "acceptance-author-gate";
  * `repairRetroAcceptanceBlock`'s own fallback shape (a claim about gate-compliance, not content),
  * the SAME instrument, applied here to a different PR-authoring path.
  */
+/**
+ * W1-T3066 — THE SAME REPAIR, AT THE MOMENT THE PR IS OPENED RATHER THAN AFTER IT GOES RED.
+ * {@link ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK} below is the fix rung's, applied once
+ * `acceptance-author-gate` has already refused a PR; this one is applied by
+ * {@link ghPrCreateFillCommand} before the PR exists, so the refusal never happens. The wording is
+ * DELIBERATELY NOT SHARED: the fix rung's text says the gate refused this body, which is true there
+ * and false here, and a body that misreports its own provenance is the defect this repo keeps
+ * paying for. Same predicate, same renderer, two honest sentences.
+ *
+ * WHAT THIS DOES AND DOES NOT BUY, stated plainly. It does NOT make a PR's claims better: a generic
+ * block says only that the body parses. It removes a WASTED CYCLE — measured 2026-09-07, six PRs
+ * (#4447, #4449, #4461, #4465, #4471, #4472) each opened with no judgeable block, went red on
+ * `acceptance-author-gate`, and were then repaired by hand or by the rung, every one costing a full
+ * CI run first. It weakens nothing that was not already weakened: the fix rung ALREADY substitutes
+ * this same generic block, just later. And it is INERT wherever criteria really resolve — a body
+ * carrying a `Remudero-Task:` trailer whose shard is on main is judged from the shard, and
+ * `bodyNeedsAcceptanceRepair` leaves a healthy block untouched.
+ */
+const PR_OPEN_TIME_ACCEPTANCE_FALLBACK: AcceptanceCriterion[] = [
+  {
+    claim:
+      "this PR body carries a judgeable Acceptance block (auto-authored when the PR was opened, " +
+      "because the commit-derived body carried none) — not a claim that the underlying diff is " +
+      "correct, or that any task's acceptance is met",
+    proof: "acceptanceAuthorTimeCheck (src/lib/review.ts) — the same predicate scripts/acceptance-author-gate.mjs runs in CI — returns ok:true for this body",
+  },
+];
+
 const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
   {
     claim:
@@ -40387,22 +40422,6 @@ export async function main(
   } catch {
     /* best-effort by contract — never let housekeeping fail the verb the operator asked for */
   }
-  // THE GITHUB APP IS THE FLEET HOST'S ONLY CREDENTIAL, and until now only `daemonCommand` and
-  // `serveCommand` minted from it. `gh auth login` is never run there and the boot env deliberately
-  // carries NO `GH_TOKEN` (deploy/recycle-container.sh, see github-app.ts's header), so every OTHER
-  // verb that shells to `gh` — 32 call sites — failed on the one host the fleet actually runs on.
-  // MEASURED 2026-09-06: `rmd review <pr>` inside the daemon container died in `ghJson`, which is
-  // how a CAPPED verdict's own documented remedy, `--override-capped-by`, became unrunnable there.
-  // Absent `GH_APP_*` — any dev machine — this is NOT AN ATTEMPT: it mints nothing, logs nothing and
-  // leaves `GH_TOKEN` alone, so behaviour off the fleet host is byte-identical. Guarded on an absent
-  // token so an operator's own exported `GH_TOKEN` is never clobbered, and unawaited failure is
-  // reported rather than swallowed, because falling through to a bare `gh` error is what cost the
-  // diagnosis above.
-  if (!process.env.GH_TOKEN) {
-    await refreshInstallationToken({
-      log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
-    });
-  }
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
   const arg = rest[0];
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
@@ -40419,6 +40438,34 @@ export async function main(
   if (helpSpec && (rest.includes("--help") || rest.includes("-h"))) {
     console.log(commandHelp(helpSpec));
     process.exit(0);
+  }
+  // THE GITHUB APP IS THE FLEET HOST'S ONLY CREDENTIAL, and until now only `daemonCommand` and
+  // `serveCommand` minted from it. `gh auth login` is never run there and the boot env deliberately
+  // carries NO `GH_TOKEN` (deploy/recycle-container.sh, see github-app.ts's header), so every OTHER
+  // verb that shells to `gh` — 32 call sites — failed on the one host the fleet actually runs on.
+  // MEASURED 2026-09-06: `rmd review <pr>` inside the daemon container died in `ghJson`, which is
+  // how a CAPPED verdict's own documented remedy, `--override-capped-by`, became unrunnable there.
+  // Absent `GH_APP_*` — any dev machine — this is NOT AN ATTEMPT: it mints nothing, logs nothing and
+  // leaves `GH_TOKEN` alone, so behaviour off the fleet host is byte-identical. Guarded on an absent
+  // token so an operator's own exported `GH_TOKEN` is never clobbered, and unawaited failure is
+  // reported rather than swallowed, because falling through to a bare `gh` error is what cost the
+  // diagnosis above.
+  // W1-T3071: THE MINT SITS BELOW THE HELP ARMS, and the four lines above are why. Both arms
+  // `process.exit(0)` before any dispatch, so a help invocation cannot shell `gh` BY CONSTRUCTION
+  // -- which makes this an exemption that cannot silently grow, not a verb list to curate. An
+  // UNKNOWN verb matches neither arm, falls through here, and still mints before dispatch, so
+  // #4298's guarantee is unchanged for every path that can actually use a token.
+  //
+  // MEASURED 2026-09-07 with the mint above the arms: `rmd --help` emitted
+  // `github_app.token_refreshed {...}` to stderr on every invocation, reddening
+  // doctor-node-pin's two assertions (exactly-one-line, and empty) on the fleet host itself, and
+  // cost ~120ms (700/723/734 vs 592/615/592 with GH_TOKEN preset). The mint is AWAITED and carries
+  // EXCHANGE_TIMEOUT_MS (20s, src/lib/github-app.ts:66), so on an unreachable network that ceiling
+  // stood between the operator and `usage:`.
+  if (!process.env.GH_TOKEN) {
+    await refreshInstallationToken({
+      log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
+    });
   }
   // W1-T79: CLI self-freshness, checked directly after the (mandatory, every-call) help
   // preamble above and BEFORE any command's real dispatch — the #138 incident shape: `rmd

@@ -598,7 +598,7 @@
     {
       "path": "docs/open-decisions.md",
       "title": "Open decisions — the rulings only the operator makes",
-      "summary": "Three things are currently undecided, and each one blocks work that is otherwise ready. They are",
+      "summary": "One ruling here is still undecided; the other two rows are kept because a reader who met them as",
       "grepHint": "Open decisions — the rulings only the operator makes"
     },
     {

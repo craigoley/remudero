@@ -328,11 +328,88 @@ export function classifyUnreadableOpenPrSurface(kind, ctx, required) {
  * this PR's own row (unresolvable = excludes nothing, fail-open: a missed exclusion only self-flags).
  * Why: W1-T2324 (Q3). docs/forensics/task-id-existence-check.md#evaluateopenpridcollisions.
  */
-export function evaluateOpenPrIdCollisions(addedIds, openPrRows, ownHeadRef) {
+/** The two plan surfaces a shard can be declared in -- the same pair `resolveBaseDeclaredIds`
+ *  greps: a path this misses is a declaration read as a mention. */
+const PLAN_DECLARING_PATH_RE = /^plan\/tasks\.yaml$|^plan\/tasks\.d\/[^/]+\.ya?ml$/;
+
+/** One page only. A list AT the cap may be truncated, and a truncated list under-reports
+ *  declarations -- the direction that turns a real collision into a pass -- so it reads unreadable. */
+export const PR_FILES_PAGE_CAP = 100;
+
+/**
+ * Ids a PR actually DECLARES, read from its changed-file rows -- the authority that settles what a
+ * bare mention only suspects. `readable: false` is the read FAILING, never "declares nothing":
+ * reading an uninterpretable shape as an empty declaration is the false zero this gate refuses
+ * (W1-T2316). A NON-PLAN file is IGNORED rather than unreadable -- it cannot declare an id at
+ * all, and that distinction is what clears a build PR touching only src/ and test/.
+ */
+export function prDeclaredIdsFromFiles(files) {
+  if (!Array.isArray(files) || files.length === 0) return { readable: false, ids: new Set() };
+  if (files.length >= PR_FILES_PAGE_CAP) return { readable: false, ids: new Set() };
+  const ids = new Set();
+  let readable = true;
+  for (const f of files) {
+    const name = f && typeof f === "object" && typeof f.filename === "string" ? f.filename : undefined;
+    if (name === undefined) {
+      readable = false; // not a file row at all -- the shape is unrecognised, so nothing is concluded
+      continue;
+    }
+    if (!PLAN_DECLARING_PATH_RE.test(name)) continue;
+    if (typeof f.patch !== "string") {
+      readable = false; // a plan file changed and the diff is withheld -- the one case that must refuse
+      continue;
+    }
+    for (const line of f.patch.split("\n")) {
+      if (!line.startsWith("+") || line.startsWith("+++")) continue;
+      const m = DECLARED_ID_LINE_RE.exec(line.slice(1));
+      if (m) ids.add(m[1]);
+    }
+  }
+  return { readable, ids };
+}
+
+/** One page of a PR's changed files. Mirrors `fetchOpenPrRows`: every failure folds to
+ *  `readable: false`, which the caller turns into a KEPT refusal, never a pass. */
+export function fetchPrChangedFiles(owner, repo, number, cwd) {
+  const result = spawnSync("gh", ["api", `repos/${owner}/${repo}/pulls/${number}/files?per_page=${PR_FILES_PAGE_CAP}`], {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) return { readable: false, files: [] };
+  let rows;
+  try {
+    rows = JSON.parse(result.stdout);
+  } catch {
+    return { readable: false, files: [] };
+  }
+  if (!Array.isArray(rows)) return { readable: false, files: [] };
+  return { readable: true, files: rows };
+}
+
+/**
+ * W1-T3070: A MENTION IS A SUSPICION, NOT A CLAIM.
+ *
+ * The scan below stays loose as a cheap PREFILTER, but it cannot tell a rival worker from THIS
+ * TASK'S OWN SIBLING: `uniqueRunBranch` names every build branch `run-<runId>-*`, so the build PR
+ * mentions the id its filing declares, by construction, on every task following standing rule 15
+ * (65 of the last 100 closed PRs carry such a head ref, measured 2026-09-07). So a suspect is
+ * CONFIRMED against `confirmDeclares`, and the asymmetry is ONE-WAY: only POSITIVE evidence of no
+ * declaration clears, while an unreadable answer keeps the refusal. OMITTING `confirmDeclares`
+ * leaves the original behaviour -- how W1-T2324's arms drive it, never reaching the network.
+ */
+export function evaluateOpenPrIdCollisions(addedIds, openPrRows, ownHeadRef, confirmDeclares) {
   const others = openPrRows.filter((r) => (r.head && r.head.ref) !== ownHeadRef);
   const collisions = [];
   for (const id of addedIds) {
-    const claimants = others.filter((r) => mentionedIds([r.title, r.body, r.head && r.head.ref].filter(Boolean).join("\n")).has(id));
+    const suspects = others.filter((r) => mentionedIds([r.title, r.body, r.head && r.head.ref].filter(Boolean).join("\n")).has(id));
+    const claimants =
+      confirmDeclares === undefined
+        ? suspects
+        : suspects.filter((r) => {
+            const seen = confirmDeclares(r, id);
+            return !seen || seen.readable !== true || seen.ids.has(id);
+          });
     if (claimants.length > 0) collisions.push({ id, prs: claimants.map((r) => ({ number: r.number, url: r.html_url })) });
   }
   collisions.sort((a, b) => a.id.localeCompare(b.id));
@@ -555,7 +632,28 @@ export function main(argv) {
         if (!openPrs.reachable) {
           reportUnreadable("open-pr-list", { owner: ownerRepo.owner, repo: ownerRepo.repo });
         } else {
-          const openPrCollisions = evaluateOpenPrIdCollisions(added.ids, openPrs.rows, ownHeadRef);
+          // One files read per SUSPECTED claimant, memoised by number. The verdict is ANNOUNCED, so
+          // a wrong exemption is visible in the log, not a gate that quietly stopped biting.
+          const declaredCache = new Map();
+          const confirmDeclares = (row, id) => {
+            if (!declaredCache.has(row.number)) {
+              const fetched = fetchPrChangedFiles(ownerRepo.owner, ownerRepo.repo, row.number, cwd);
+              declaredCache.set(row.number, fetched.readable ? prDeclaredIdsFromFiles(fetched.files) : { readable: false, ids: new Set() });
+            }
+            const seen = declaredCache.get(row.number);
+            if (!seen.readable) {
+              console.log(
+                `task-id-existence: could not read PR #${row.number}'s changed files, so its mention of ${id} is treated as a claim -- an unreadable surface is never read as an empty one.`,
+              );
+            } else if (!seen.ids.has(id)) {
+              console.log(
+                `task-id-existence: PR #${row.number} mentions ${id} but declares no plan record for it ` +
+                  `(W1-T3070: a build PR named run-${id}-* is its filing's sibling, not a rival claimant) -- CLEARED.`,
+              );
+            }
+            return seen;
+          };
+          const openPrCollisions = evaluateOpenPrIdCollisions(added.ids, openPrs.rows, ownHeadRef, confirmDeclares);
           if (openPrCollisions.length > 0) {
             console.error("\ntask-id-existence: FAILED -- the following added id(s) are ALREADY CLAIMED by another OPEN PR:\n");
             for (const c of openPrCollisions) {

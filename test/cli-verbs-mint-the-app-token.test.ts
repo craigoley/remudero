@@ -185,3 +185,99 @@ test("CLI entry mints before dispatch, and only when GH_TOKEN is absent — the 
     }
   }
 });
+
+// ── W1-T3071: the mint sits BELOW the help arms ───────────────────────────────────────────────
+//
+// The three assertions above are UNEDITED and still green, which is this task's control: #4298's
+// guarantee — every path that can shell `gh` mints first — is preserved, and only the two arms
+// that `process.exit(0)` before dispatch are excluded. Same in-process discipline as the suite
+// above: drive the real `main()`, never read src/ as text.
+
+/**
+ * Drives the real `main()` with the app configured, a key that cannot sign, and `GH_TOKEN` absent,
+ * and returns everything it wrote to stderr.
+ *
+ * THE STUBBED KEY IS THE DISCRIMINATOR, exactly as in the suite above: the exchange fails, so
+ * `refreshInstallationToken` NAMES its reason through the logger `main()` hands it. A `github_app`
+ * line therefore exists IF AND ONLY IF the mint was reached. Asserting "no token was set" instead
+ * would pass identically when no mint ran at all, which is the test theatre this file already
+ * warns about.
+ */
+async function stderrOfMain(t: { mock: { method: Function } }, argv: string[]): Promise<string[]> {
+  const saved = {
+    id: process.env.GH_APP_ID,
+    inst: process.env.GH_APP_INSTALLATION_ID,
+    key: process.env.GH_APP_PRIVATE_KEY_PATH,
+    tok: process.env.GH_TOKEN,
+    argv: process.argv,
+  };
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t3071-`));
+  const keyPath = join(dir, "key.pem");
+  writeFileSync(keyPath, "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
+
+  const stderr: string[] = [];
+  t.mock.method(console, "error", (...a: unknown[]) => {
+    stderr.push(a.map(String).join(" "));
+  });
+  t.mock.method(console, "log", () => {});
+  class ExitCalled extends Error {}
+  t.mock.method(process, "exit", ((): never => {
+    throw new ExitCalled();
+  }) as typeof process.exit);
+
+  try {
+    process.env.GH_APP_ID = "1";
+    process.env.GH_APP_INSTALLATION_ID = "2";
+    process.env.GH_APP_PRIVATE_KEY_PATH = keyPath;
+    delete process.env.GH_TOKEN;
+    process.argv = ["node", "run-task.js", ...argv];
+    const { main } = await import("../src/run-task.js");
+    await main().catch(() => {}); // the help arms exit; an unknown verb exits too
+    return stderr;
+  } finally {
+    process.argv = saved.argv;
+    for (const [k, v] of [
+      ["GH_APP_ID", saved.id],
+      ["GH_APP_INSTALLATION_ID", saved.inst],
+      ["GH_APP_PRIVATE_KEY_PATH", saved.key],
+      ["GH_TOKEN", saved.tok],
+    ] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+const mintedIn = (lines: string[]) => lines.some((l) => /github_app/.test(l));
+
+test("W1-T3071: every help arm completes without minting — the credential a help path cannot use is never asked for", async (t) => {
+  // Each arm separately, not one representative: `--help` and `-h` and `help` are three distinct
+  // string comparisons, and `<cmd> --help` is a DIFFERENT arm reached only after a COMMANDS lookup.
+  // One case standing for four would pass while three stayed dead.
+  assert.equal(mintedIn(await stderrOfMain(t, ["--help"])), false, "rmd --help");
+  assert.equal(mintedIn(await stderrOfMain(t, ["-h"])), false, "rmd -h");
+  assert.equal(mintedIn(await stderrOfMain(t, ["help"])), false, "rmd help");
+  assert.equal(mintedIn(await stderrOfMain(t, ["sweep", "--help"])), false, "rmd sweep --help");
+  assert.equal(mintedIn(await stderrOfMain(t, ["sweep", "-h"])), false, "rmd sweep -h");
+});
+
+test("W1-T3071: an unknown verb still mints, so the exemption is the terminating arms and not a curatable list", async (t) => {
+  // THE POSITIVE CONTROL for the test above, and the reason #4298's guarantee is intact: a verb
+  // that matches NEITHER arm falls through and mints before dispatch, exactly as it always did.
+  // If this ever goes quiet, the change stopped being a move and became an exemption list.
+  assert.equal(mintedIn(await stderrOfMain(t, ["--no-such-verb"])), true, "an unknown verb is not a help arm");
+});
+
+test("W1-T3071: a help invocation emits nothing on stderr with the app configured", async (t) => {
+  // The property doctor-node-pin's two assertions actually require — `stderrLines.length === 1` on
+  // a node mismatch, and `stderr === ""` on a match. Both were red on the fleet host because the
+  // mint's `github_app.token_refreshed` line rode along on every invocation. Asserted here on the
+  // WHOLE stderr, not just the absence of a github_app line, so any future chatter added above the
+  // help arms reddens this too.
+  assert.deepEqual(await stderrOfMain(t, ["--help"]), [], "rmd --help says nothing to stderr");
+  assert.deepEqual(await stderrOfMain(t, ["sweep", "--help"]), [], "and neither does per-command help");
+});
