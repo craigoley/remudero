@@ -1,0 +1,111 @@
+- id: W1-T3198
+  title: "MAIN-HEALTH PAGES A HUMAN FOR A FLAKE — the rung escalates on the FIRST settled red conclusion with no same-sha re-run grace window, so an OSV-Scanner job whose scan exited 0 and whose only error was `Failed to FinalizeArtifact … (403) Forbidden` turned main red and opened a MANUAL issue; re-running the identical commit went green, and 17 such escalations have been opened and self-closed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/main-health-rung.ts, test/main-health-waits-for-a-same-sha-rerun.test.ts]
+  origin: "operator-session#main-health-2026-09-08"
+  plan_refs: ["W1-T3166", "W1-T3168", "W1-T3179"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08, end to end, with the corrective action taken and its result recorded.
+
+    THE EPISODE. `OSV-Scanner` concluded FAILURE on main at `0688d7a64`. The main-health rung
+    escalated: issue #4674, class MANUAL, "The default branch `main` … is red. required check(s)
+    concluded failing on main". The operator's board gained an item.
+
+    THE SCAN HAD PASSED. From the job log:
+      line 240  `Exit code: 0`                              <- the OSV scan itself, clean
+      line 238  `osv-scanner.toml has unused ignores:` GHSA-frvp-7c67-39w9   (informational)
+      line 275  `##[error]Failed to FinalizeArtifact: Received non-retryable error:
+                 Failed request: (403) Forbidden`           <- a DEBUG SARIF artifact upload
+      line 236  `Loaded filter from: /github/workspace/osv-scanner.toml`
+    No vulnerability was found. The job failed uploading a debug artifact.
+
+    RE-RUNNING THE IDENTICAL COMMIT WENT GREEN. `POST /actions/runs/34252209508/rerun-failed-jobs`
+    → the same sha, the same scan, conclusion `success`. That is the discriminating fact: the red
+    was never a property of the code.
+
+    IT IS TRANSIENT, NOT SYSTEMIC. 11 of the last 12 OSV-Scanner runs on main succeeded. A
+    concurrency explanation is RULED OUT rather than assumed: the two minutes that carried TWO runs
+    each (16:16, 16:33) both succeeded, and the failure was alone in its minute.
+
+    THE VOLUME. `gh issue list --search "MAIN-HEALTH in:title"` → 0 open, **17 closed**. The rung's
+    recovery path works correctly and every one self-closed; this shard does not dispute that half.
+    What it costs is 17 pages for a condition the operator could not act on and that resolved itself.
+
+    THE SIBLING ALREADY SOLVES THIS. `.github/workflows/ci-gate.yml` carries
+    `GRACE_WINDOW_SECONDS` (600s) and states its purpose outright — "entering a Ns grace window for
+    a same-sha rerun to land before concluding". `src/lib/main-health-rung.ts` has an EVENT-settlement
+    window (its own doc: "head SHA and its rollup are re-read after the brief event-settlement
+    freshness window") but no re-run grace. Event settlement answers "has GitHub finished telling
+    me?"; it does not answer "would this still be red on a retry?" — and those are different
+    questions with different answers, as this episode demonstrates.
+  design: |
+    (i) A SAME-SHA GRACE WINDOW BEFORE PAGING, matching the pattern ci-gate already uses. A settled
+    red conclusion starts a bounded wait; if the same sha goes green within it, no escalation is
+    ever opened.
+    (ii) THE WINDOW IS BOUNDED AND LOUD AT ITS CEILING. ci-gate's own comment frames the trade —
+    "a 50m worst case, so 60m stays a finite, loud ceiling". A grace window that can wait forever
+    has traded a false page for a silent trunk failure, which is far worse.
+    (iii) A GENUINELY RED TRUNK STILL PAGES, and this is the property that must not regress. A check
+    that stays red across the window escalates exactly as it does today, with the same class, body
+    and options. This shard reduces FALSE pages only.
+    (iv) THE RECOVERY PATH IS UNTOUCHED. 17 of 17 escalations self-closed; whatever does that keeps
+    working. A fix that suppresses the open but breaks the close leaves a stuck item, which is the
+    W1-T3030 shape.
+    (v) DO NOT TRY TO CLASSIFY WHY A CHECK FAILED. Reading job logs to distinguish "scan failed"
+    from "artifact upload failed" is a parser against someone else's log format, and it breaks
+    silently when they change it. The re-run outcome answers the same question from behaviour.
+  acceptance:
+    - claim: "a check that concludes red and then goes GREEN on the same sha within the window opens NO escalation"
+      proof: "unit test: test/main-health-waits-for-a-same-sha-rerun.test.ts"
+    - claim: "a check that stays red across the whole window still escalates, with its class, body and options unchanged"
+      proof: "unit test: test/main-health-waits-for-a-same-sha-rerun.test.ts"
+    - claim: "the window is bounded — an indefinitely-pending check escalates at the ceiling rather than waiting forever"
+      proof: "unit test: test/main-health-waits-for-a-same-sha-rerun.test.ts"
+    - claim: "a red on a NEW sha is not suppressed by a grace window opened for an older one"
+      proof: "unit test: test/main-health-waits-for-a-same-sha-rerun.test.ts"
+    - claim: "the existing recovery path still closes an escalation once the branch goes green"
+      proof: "unit test: test/main-health-waits-for-a-same-sha-rerun.test.ts"
+  falsifier: |
+    CLOSE IF the rung already waits for a same-sha re-run:
+      `grep -inE 'grace|settle|confirm|window|consecutive|debounce|retry' src/lib/main-health-rung.ts`
+    MEASURED 2026-09-08: the only matches are the doc's EVENT-settlement window (lines 81-83). No
+    re-run grace exists.
+    POSITIVE CONTROL, because a grep finding nothing looks the same as a missing file: the same
+    expression against `.github/workflows/ci-gate.yml` must FIND `GRACE_WINDOW_SECONDS` and the
+    phrase "grace window". MEASURED 2026-09-08: it does. The pattern exists in this repo; it is
+    absent from this rung.
+    PROVE IT LOAD-BEARING: the fixture must contain BOTH a flake (red then green, same sha) and a
+    genuine failure (red, stays red). A suite with only the flake passes by never escalating at all,
+    which is the opposite defect.
+    DO NOT satisfy this by parsing job logs to decide whether a failure was "real". Design (v)
+    refuses it: that is a parser against another project's log format and it fails silently on their
+    next release.
+    DO NOT satisfy this by removing the MAIN-HEALTH escalation. A red trunk is exactly the thing an
+    operator must hear about; 17 self-closing pages is a precision problem, not a reason to go
+    silent.
+    DO NOT widen the window without a ceiling. An unbounded wait converts a noisy alarm into no
+    alarm, and this repo has already recorded that trade going wrong (W1-T3030).
+  note: |
+    Rule 25 CHECKED: `src/lib/main-health-rung.ts` is ordinary src; `.github/workflows/ci-gate.yml`
+    is cited as PRIOR ART only and is NOT edited by this task.
+    THIS IS THE SAME FAMILY AS W1-T3166/3168/3179 — all four reduce pages the operator cannot act
+    on — but the mechanism is distinct and none of them reaches it: this is neither an escalation
+    routing decision (3166/3167), nor a producer firing on a healthy PR (3168), nor a dedup key
+    (3179). It is a rung escalating before the evidence has settled.
+    CAVEAT WITH EQUAL WEIGHT: ONE episode was traced end to end. The 17 closed MAIN-HEALTH issues
+    are NOT all shown to be flakes — some were surely genuine red trunks, correctly reported. This
+    shard does not claim a false-positive RATE, only that at least one page was provably avoidable
+    and that the mechanism to avoid it already exists in a sibling.
+    SECOND CAVEAT: the root cause of the `(403) Forbidden` on FinalizeArtifact is NOT established.
+    It is intermittent (1 in 12), it is not explained by run concurrency, and the workflow grants
+    `actions: read` where artifact writes conventionally want `actions: write` — but 11 runs
+    succeeded under that same grant, so the permission theory does not fit either. A builder should
+    NOT cite a cause this shard has not proven.
