@@ -43,10 +43,14 @@
     the ordinary case. A lease pinned to the sha the lane just pushed keeps that path working and
     refuses only when someone else moved the ref in between — which is the whole distinction.
 
-    A REFUSAL MUST NOT COST THE RUN. The work is already committed and already on origin when this
-    fires. The refusal belongs on the trailer amend, not on the branch, and it must be LEDGERED
-    with the two shas so an operator can see what was preserved — a silent skip here would trade
-    one invisible loss for another.
+    A REFUSAL MUST NOT COST THE RUN, AND MUST NOT LEAVE THE LEAF. The work is already committed and
+    already on origin by the time this fires — only the trailer amend is at stake, and a missing
+    trailer is survivable: `findMergedByHeadBranch` credits a merged `run-<id>-<digits>` head with
+    no trailer at all (MEASURED on #1657). So the refusal is REPORTED on the push leaf's own
+    output, naming BOTH shas, and returns without throwing. Throwing would abort the run after the
+    money was spent and before the PR is opened, trading one invisible loss for a louder one; and
+    routing the report through a ledger seam would drag `src/run-task.ts` into a change that
+    belongs entirely at the leaf, where it is testable with no worker and no remote.
 
     THE FALSIFIER IS THE PAIR, AGAINST A REAL REMOTE. A lease that never refuses is the current
     behaviour wearing a new flag; a lease that always refuses breaks every ordinary trailer amend.
@@ -59,7 +63,7 @@
       proof: "unit test: test/a-lane-force-push-drops-the-head-it-never-saw.test.ts"
     - claim: "a remote advanced by a commit the lane never saw refuses the push, and that commit is still reachable afterwards"
       proof: "unit test: test/a-lane-force-push-drops-the-head-it-never-saw.test.ts"
-    - claim: "the refusal is ledgered with both shas rather than skipped silently, and does not fail the run whose work is already on origin"
+    - claim: "the refusal names both shas on the leaf's own output rather than passing silently, and returns without throwing so the run still opens its PR"
       proof: "unit test: test/a-lane-force-push-drops-the-head-it-never-saw.test.ts"
     - claim: "the local-head check W1-T1288 added still fires alongside the new lease, since the two answer different questions"
       proof: "unit test: test/a-lane-force-push-drops-the-head-it-never-saw.test.ts"
