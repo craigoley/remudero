@@ -1,0 +1,96 @@
+- id: W1-T3171
+  title: "A REGISTRATION THE REPO'S OWN CENSUSES MAKE MANDATORY IS REFUSED AS RULE-25 ENTANGLEMENT — two bidirectionally-coupled gates force `.github/workflows/*` to change in the same PR as `src/`, so the mixture is UNAVOIDABLE and the diff is unsplittable, yet rule 25 reads it as smuggling"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [src/lib/review.ts, test/a-mandatory-registration-is-not-entanglement.test.ts]
+  origin: "operator-session#board-clearing-2026-09-08"
+  plan_refs: ["W1-T297", "W1-T2521", "W1-T3133"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3133 GAVE RULE 25 A DIRECTION AXIS AND DELIBERATELY DID NOT REACH THIS. Its classifier answers
+    "did this instrument get stricter" for a numeric baseline. A WORKFLOW registration is neither a
+    direction nor a newly introduced instrument, so it classifies `undetermined` and stays blocking —
+    which is that task's fail-closed default working correctly, not a defect in it. MEASURED against
+    #4559's real diff after W1-T3133: still `entangled: true`, with
+    `.github/workflows/ci-gate.yml -> undetermined` and `.github/workflows/ci.yml -> undetermined`.
+
+    THE MIXTURE HERE IS NOT A CHOICE. #4559 adds a CI job (`test-slow`). Two of this repo's own gates
+    then force both halves into one PR:
+      - `test/every-pr-check-is-required-or-advisory.test.ts` refuses a job registered on
+        `pull_request` that appears in NEITHER ci-gate.yml's REQUIRED nor its ADVISORY list; and
+      - the SAME suite refuses a REQUIRED/ADVISORY entry naming no real derived candidate.
+    MEASURED 2026-09-08 by applying each half alone: the registration without the job fails
+    ("stale REQUIRED/ADVISORY entr(y/ies) naming no real derived candidate"), and the job without the
+    registration fails the forward direction. `src/lib/ci-parity.ts`'s table is coupled the same way
+    ("the ci-parity table cannot silently grow ahead of the workflow either"). So the workflow and its
+    registrations MUST land together, and the registration lives in `src/`.
+
+    THAT MAKES RULE 25 UNSATISFIABLE FOR THIS SHAPE, NOT MERELY INCONVENIENT. There is no operator
+    override for entanglement — `--override-capped-by` covers a CAPPED verdict only — so a PR of this
+    shape cannot merge by any route. #4559 has been blocked on exactly this through repeated passes.
+
+    AND THE OBVIOUS ESCAPE IS WRONG. Adding `.github/workflows/ci.yml` and `ci-gate.yml` to
+    `ENTANGLEMENT_EXEMPT_INSTRUMENTS` would let ANY PR change CI alongside `src/` for any reason. That
+    list is documented for instruments "no workflow job ratchets against"; the workflows ARE the
+    gates. Exempting them by path would retire the rule rather than refine it.
+  design: |
+    (i) THE CARVE-OUT IS THE COUPLING, NOT THE PATH. Subtract a workflow path from the entanglement
+    VERDICT only when the diff's change to it is a REGISTRATION — a job key added under `jobs:`, and/or
+    that job's name added to ci-gate.yml's REQUIRED/ADVISORY arrays — AND the `src/` half that would
+    otherwise entangle is itself only the matching registry entry. Any other workflow edit (a `run:`
+    line, a permission, a trigger, a timeout) is untouched and still refuses.
+
+    (ii) THE PAIRING MUST BE CHECKED, NOT ASSUMED. The subtraction requires the SAME job name to
+    appear on both sides: added under `jobs:` in ci.yml and named in ci-gate.yml's list and/or the
+    ci-parity table. A workflow edit that registers nothing, or a registry entry naming no added job,
+    is not this shape and stays blocking — the exact asymmetry the two censuses already police.
+
+    (iii) EVERY OTHER src/ PATH DEFEATS IT. If the diff carries any product `src/` file beyond the
+    registry entries, the mixture is the ordinary hazard again and the verdict is unchanged. This is
+    what stops the carve-out becoming "add a job and ship anything".
+
+    (iv) SUBTRACT AT THE SAME POINT, LEAVING EVIDENCE INTACT. Same seam as W1-T2521's census gate and
+    W1-T3133's direction axis: `instrumentPaths` and `srcPaths` keep every path unedited and only
+    `entangled` moves, so a reviewer still sees exactly what the diff touched.
+
+    (v) FAIL CLOSED, AND SAY WHICH ARM DECIDED. Anything unparseable, any job name that does not match
+    on both sides, any extra src/ path: no subtraction. The refusal message should name which of the
+    three conditions failed, so an author is not left guessing between them.
+  acceptance:
+    - claim: "a diff adding a ci.yml job plus its ci-gate registration and the matching registry entry is not entangled, and #4559's real shape is the fixture"
+      proof: "unit test: test/a-mandatory-registration-is-not-entanglement.test.ts"
+    - claim: "the same workflow diff carrying ANY other product src/ file is still refused, so the carve-out cannot ship unrelated code"
+      proof: "unit test: test/a-mandatory-registration-is-not-entanglement.test.ts"
+    - claim: "a workflow edit that is not a registration — a run: line, a trigger, a timeout — is untouched and still refuses beside src/"
+      proof: "unit test: test/a-mandatory-registration-is-not-entanglement.test.ts"
+    - claim: "a registration whose job name does not match on both sides is not this shape and stays blocking"
+      proof: "unit test: test/a-mandatory-registration-is-not-entanglement.test.ts"
+    - claim: "instrumentPaths and srcPaths still report every path unedited when the verdict is subtracted, and ENTANGLEMENT_EXEMPT_INSTRUMENTS is not touched"
+      proof: "unit test: test/a-mandatory-registration-is-not-entanglement.test.ts"
+  falsifier: |
+    Close without implementation if W1-T3133 already admits this shape. MEASURED against #4559's real
+    diff WITH W1-T3133 applied: `entangled: true`, both workflow paths `undetermined`. W1-T3133's
+    direction table deliberately names no workflow, and its own PR body says so.
+
+    Close also if the mixture can be split. It cannot, and this was measured both ways in one session:
+    the ci-gate registration alone fails "stale REQUIRED/ADVISORY entr(y/ies) naming no real derived
+    candidate", and the job alone fails the forward census. `src/lib/ci-parity.ts` carries the same
+    bidirectional rule for its own table.
+
+    DO NOT falsify this by adding the workflow paths to ENTANGLEMENT_EXEMPT_INSTRUMENTS. That set is
+    documented for instruments nothing in CI ratchets against, and the workflows are the gates
+    themselves; a per-path exemption there would let any PR change CI beside src/ for any reason.
+  note: |
+    ONE CONCERN: a registration the repo's own censuses make mandatory is not smuggling. Not in scope:
+    the direction axis (W1-T3133), the per-path exemption list, what counts as a product path, or
+    relaxing either census — both are correct and their coupling is the evidence, not the bug.
+
+    Design (iii) is the half that can go wrong quietly. A carve-out that forgets to refuse extra src/
+    paths turns "add a job" into a universal escape hatch, so criterion 2 must be verified by watching
+    it FAIL against an implementation missing that guard, not merely by passing.

@@ -19,6 +19,7 @@ import { appendLedger } from "../src/lib/ledger.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDrain, type DrainDeps, type DrainSummary, type MergedSet } from "../src/lib/drain.js";
 import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
+import { checkDispatchGovernors } from "../src/lib/dispatch-governor.js";
 import type { Config } from "../src/lib/config.js";
 import { drainCommand, daemonCommand } from "../src/run-task.js";
 
@@ -331,6 +332,23 @@ const OPEN_GITHUB: GitHub = {
   prBody: () => undefined,
 };
 
+/** A complete open-board snapshot whose branches deliberately cannot be attributed to the one
+ * plan task. The WIP ceiling governs the board, not only PRs that current main can map to a shard. */
+function boardWithUnplannedOpenPrs(count: number, onList?: () => void): GitHub {
+  return {
+    ...OPEN_GITHUB,
+    listOpenHeadBranches: () => {
+      onList?.();
+      return Array.from({ length: count }, (_, i) => ({
+        number: 10_000 + i,
+        url: `https://github.com/o/r/pull/${10_000 + i}`,
+        state: "OPEN",
+        headRefName: `fix/unplanned-${i}`,
+      }));
+    },
+  };
+}
+
 /** Drives the REAL drainCommand exactly like {@link captureDrainDeps}, but ALSO calls the
  *  captured `refreshMerged()` once — the same populate-`lastProj`-before-`openPrCount` sequence
  *  `runDrain`'s own loop performs on every tick — so `checkQueueGovernor()` reads a live count. */
@@ -417,6 +435,84 @@ test("W1-T321: daemonCommand's WIRED checkQueueGovernor reads the REAL open-PR c
     else process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3144: drain WIP admission counts every open board PR even when current main cannot attribute it to a plan task", async () => {
+  const config = queueGovernorFixtureConfig();
+  try {
+    const planPath = planWithOpenPrs(1);
+    const github = boardWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
+    const deps = await captureDrainDepsWithLiveProjection(config, planPath, github);
+
+    const result = deps.checkQueueGovernor!();
+    assert.ok(result, "ten open board PRs must defer new work even though the plan projection sees only one");
+    assert.equal(result!.observedOpenCount, DEFAULT_SWEEP_POLICY.wipLimit);
+  } finally {
+    rmSync(config.root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3144: daemon WIP admission counts every open board PR even when current main cannot attribute it to a plan task", async () => {
+  const { home, root } = daemonFixtureHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const planPath = planWithOpenPrs(1);
+    const github = boardWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
+    let captured: DaemonDeps | undefined;
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      githubFactory: () => github,
+      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+        deps.refreshMerged();
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0);
+    assert.ok(captured);
+
+    const result = captured!.checkQueueGovernor!();
+    assert.ok(result, "ten open board PRs must defer new work even though the plan projection sees only one");
+    assert.equal(result!.observedOpenCount, DEFAULT_SWEEP_POLICY.wipLimit);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3144: the complete board count reuses projectPlan's one open-list read", async () => {
+  const config = queueGovernorFixtureConfig();
+  let listCalls = 0;
+  try {
+    const planPath = planWithOpenPrs(1);
+    const github = boardWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit, () => { listCalls++; });
+    const deps = await captureDrainDepsWithLiveProjection(config, planPath, github);
+
+    assert.equal(deps.checkQueueGovernor!()?.observedOpenCount, DEFAULT_SWEEP_POLICY.wipLimit);
+    assert.equal(listCalls, 1, "projection and WIP admission must share one open-board enumeration");
+  } finally {
+    rmSync(config.root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3144: an unreadable complete board count reaches the existing fail-closed queue governor path", async () => {
+  const config = queueGovernorFixtureConfig();
+  try {
+    const planPath = planWithOpenPrs(1);
+    const github: GitHub = { ...OPEN_GITHUB, listOpenHeadBranches: () => null };
+    const deps = await captureDrainDepsWithLiveProjection(config, planPath, github);
+
+    const verdict = checkDispatchGovernors({ checkQueueGovernor: deps.checkQueueGovernor }, undefined);
+    assert.deepEqual(verdict, {
+      kind: "unreadable",
+      source: "queue",
+      error: "open PR board count is unreadable",
+    });
+  } finally {
+    rmSync(config.root, { recursive: true, force: true });
   }
 });
 

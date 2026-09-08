@@ -173,8 +173,10 @@ test("an operator hold refuses the arm before either transport is reached", () =
 
 // ── criterion 5: the live-write guard still gates the real dep ──────────────────────────────────
 test("the real mergeDirect is guarded by the live-write boundary before it can touch a PR", async () => {
+  // W1-T2887: realArmDeps (and the mergeDirect field this scans) moved to src/lib/arm-auto-merge.ts
+  // with the rest of the arm cluster; run-task.ts now only imports and re-exports it.
   const src = await import("node:fs").then((fs) =>
-    fs.readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8"),
+    fs.readFileSync(new URL("../src/lib/arm-auto-merge.ts", import.meta.url), "utf8"),
   );
   const i = src.indexOf("mergeDirect: (prUrl) => {");
   assert.ok(i > 0, "the real dep is still defined");

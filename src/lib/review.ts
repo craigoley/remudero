@@ -5387,6 +5387,98 @@ function isIntroducingCensusGate(diff: string, diffFiles: string[], scriptFile: 
   return walkDiff(diff).some((l) => l.file === CENSUS_REGISTRATION_PATH && l.kind === "add" && l.text.includes(stem));
 }
 
+/** W1-T3133 — WHICH WAY IS STRICTER, PER INSTRUMENT. THIS TABLE IS THE DANGEROUS HALF OF THE WHOLE
+ *  CARVE-OUT and is therefore DECLARED, never inferred. For a size/count LEDGER a LOWER number is
+ *  stricter (source-size, comment-load, catch-erasure, clock-signature, fixture-copy: the row records
+ *  how much debt a file carries, so lowering it records less). For a SCORE FLOOR a HIGHER number is
+ *  stricter (mutation, coverage: the row is a minimum a suite must clear). Guessing wrong INVERTS the
+ *  exemption and admits exactly the loosening Standing rule 25 exists to refuse, so an instrument
+ *  with no row here classifies `undetermined` and stays fully blocking. The default is refusal. */
+const INSTRUMENT_STRICTER_DIRECTION: ReadonlyArray<{ re: RegExp; stricter: "lower" | "higher" }> = [
+  { re: /^scripts\/mutation-baseline\.json$/, stricter: "higher" },
+  { re: /^scripts\/coverage-baseline\.json$/, stricter: "higher" },
+  { re: /^scripts\/[^/]*-baseline\.json$/, stricter: "lower" },
+];
+
+/** The declared stricter direction for one instrument, or `undefined` when nothing declares it. */
+function stricterDirectionFor(file: string): "lower" | "higher" | undefined {
+  return INSTRUMENT_STRICTER_DIRECTION.find((r) => r.re.test(file))?.stricter;
+}
+
+export type InstrumentChangeDirection = "tightening" | "loosening" | "introduced" | "undetermined";
+
+/** Every `"key": <number>` pair on one diff line, as [key, value]. A line carrying no such pair
+ *  yields nothing, which is what makes an unparseable hunk fall through to `undetermined` below. */
+function numericRowsOn(text: string): Array<[string, number]> {
+  const out: Array<[string, number]> = [];
+  const re = /"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) out.push([m[1], Number(m[2])]);
+  return out;
+}
+
+/** W1-T3133 — classify ONE instrument path's change in THIS diff.
+ *
+ *  `introduced`: the file is NEW here and something that READS it is added or changed in the same
+ *  diff. A baseline nothing reads has no grading power, and a lone new JSON must not become a way to
+ *  pre-place a lax bound for a later PR — the same requirement W1-T2521 puts on a new census gate.
+ *
+ *  `tightening`: EVERY changed line is either a removed grandfather entry, or a numeric value moved
+ *  in this instrument's DECLARED stricter direction. Any added entry, any value moved the other way,
+ *  or ANY hunk this parser cannot account for makes the whole file `undetermined` — one unreadable
+ *  hunk must never be skipped while the rest of the file grades tightening.
+ *
+ *  THE ONE ADMITTED ADDITION: a new key naming a source file this SAME diff adds has no prior bound
+ *  to loosen, so it does not spoil a tightening verdict. A new key for a PRE-EXISTING file does,
+ *  which is the loophole where a generous ceiling would hide real growth. */
+export function classifyInstrumentChange(diff: string, diffFiles: string[], file: string): InstrumentChangeDirection {
+  if (fileIsNewInDiff(diff, file)) {
+    const stem = scriptStem(file);
+    const readerChanged = diffFiles.some(
+      (f) => f !== file && !isDocsPath(f) && (f.startsWith("test/") || f.startsWith("src/") || f.startsWith("scripts/") || f.startsWith(".github/")),
+    );
+    const named = walkDiff(diff).some((l) => l.file !== file && l.kind === "add" && l.text.includes(stem));
+    return readerChanged && named ? "introduced" : "undetermined";
+  }
+
+  const direction = stricterDirectionFor(file);
+  if (direction === undefined) return "undetermined";
+
+  const lines = walkDiff(diff).filter((l) => l.file === file);
+  if (lines.length === 0) return "undetermined";
+
+  const removedByKey = new Map<string, number>();
+  for (const l of lines) {
+    if (l.kind !== "del") continue;
+    for (const [k, v] of numericRowsOn(l.text)) removedByKey.set(k, v);
+  }
+
+  let sawTightening = false;
+  for (const l of lines) {
+    if (l.kind === "del") {
+      // A removed row is strictly fewer exemptions / one less recorded allowance. Always tightening.
+      sawTightening = true;
+      continue;
+    }
+    if (l.kind !== "add") continue;
+    const rows = numericRowsOn(l.text);
+    if (rows.length === 0) return "undetermined"; // a hunk this parser cannot account for
+    for (const [key, value] of rows) {
+      const before = removedByKey.get(key);
+      if (before === undefined) {
+        // A brand-new key is admissible ONLY when it names a source file this diff also adds.
+        if (!diffFiles.includes(key) || !fileIsNewInDiff(diff, key)) return "undetermined";
+        continue;
+      }
+      if (value === before) continue;
+      const stricter = direction === "lower" ? value < before : value > before;
+      if (!stricter) return "loosening";
+      sawTightening = true;
+    }
+  }
+  return sawTightening ? "tightening" : "undetermined";
+}
+
 /** INSTRUMENT ISOLATION (W1-T297, Standing rule 25): true when `diffFiles` holds at least one {@link
  *  INSTRUMENT_SURFACE} path AND at least one {@link isProductPath} src/ path — the ENTANGLEMENT predicate, not mere
  *  instrument-touching. An instrument-only diff, optionally with its own `test/` falsifier or a `docs/` update, is the
@@ -5414,7 +5506,22 @@ export function detectInstrumentEntanglement(
   // W1-T2521: subtract a newly introduced census gate (script + its own first registration, both new in THIS diff)
   // from the ENTANGLEMENT VERDICT only; `instrumentPaths`/`srcPaths` stay the raw, unedited evidence.
   const introducedGates = diff === undefined ? [] : instrumentPaths.filter((f) => isIntroducingCensusGate(diff, diffFiles, f));
-  const effectiveInstrumentPaths = introducedGates.length === 0 ? instrumentPaths : instrumentPaths.filter((f) => !introducedGates.includes(f));
+  // W1-T3133: subtract instruments whose change in THIS diff cannot hide anything — one that only
+  // TIGHTENS, or one INTRODUCED here alongside a reader. Subtracted at the SAME point W1-T2521's
+  // census carve-out subtracts, and for the same reason: rule 25 refuses a mixture because an
+  // instrument edit can weaken the gate that would have caught the product regression beside it, and
+  // a strictly stricter edit has no weakening for anything to slip through. `undetermined` — the
+  // default for any instrument with no declared direction, and for any hunk the parser cannot
+  // account for — keeps its full blocking power. `instrumentPaths`/`srcPaths` stay raw evidence.
+  const harmlessInstruments =
+    diff === undefined
+      ? []
+      : instrumentPaths.filter((f) => {
+          const d = classifyInstrumentChange(diff, diffFiles, f);
+          return d === "tightening" || d === "introduced";
+        });
+  const subtracted = new Set([...introducedGates, ...harmlessInstruments]);
+  const effectiveInstrumentPaths = subtracted.size === 0 ? instrumentPaths : instrumentPaths.filter((f) => !subtracted.has(f));
   const effectiveSrcPaths = introducedGates.length === 0 ? srcPaths : srcPaths.filter((f) => f !== CENSUS_REGISTRATION_PATH);
   return {
     entangled: effectiveInstrumentPaths.length > 0 && effectiveSrcPaths.length > 0,
