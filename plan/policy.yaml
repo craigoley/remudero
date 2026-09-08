@@ -1196,6 +1196,22 @@ worktreeReapBoot:
 # REPORTS ONLY (design note v) — no dispatch deferred, no worker stopped, no merge blocked.
 # BOTH rows below are net-new: no source literal of either shape (a cost multiplier over a class
 # median, a minimum-sample floor before a median is trusted) ever existed in src/ to lift from.
+
+# W1-T3092 — the OBJECT reaper inside logDiskReclaimRung: git prune of UNREACHABLE objects in the
+# worker clone. Nothing has ever reclaimed a git object; the clone reached 16,747 loose objects and
+# a .git/gc.log whose presence SUPPRESSES git own automatic cleanup, so the condition that would
+# self-heal is the condition that disables the healer.
+objectReap:
+  # SHIPPED OFF, same posture as worktreeReapBoot above and scratchReap, and for the same reason:
+  # this rung DELETES. While false the rung SURVEYS — it runs every quiet probe the armed path runs
+  # and ledgers what a prune WOULD remove, spawning nothing — so several passes of dispositions can
+  # be read before arming. The reap only acts when the fleet is QUIET (no registered worktree, no
+  # inflight lock, no open handle under .git) and always with --expire, so a live worker fresh
+  # object is ineligible even if the quiet verdict were wrong. Set true to arm; that is the ONLY
+  # step, and ratifying afterwards (rmd ratify objectReap) pins it against silent drift.
+  enabled:
+    value: false
+    origin: "net-new"
 costAnomaly:
   # (iii) MEDIAN, NOT MEAN, AND THAT IS LOAD-BEARING — the mean is dragged by the very outlier
   # being detected. This row is the multiplier a run's own cost must clear over its class's

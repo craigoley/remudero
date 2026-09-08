@@ -162,6 +162,10 @@ function goodRaw(): Record<string, unknown> {
     worktreeReapBoot: {
       enabled: { value: false, origin: "net-new" },
     },
+    // W1-T3092: the object reaper rung — same net-new, ships-off shape as the block above.
+    objectReap: {
+      enabled: { value: false, origin: "net-new" },
+    },
   };
 }
 
@@ -235,7 +239,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
     "keychainProvisionLockWaitMs",
-    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "ciLearningCadence", "wipeTestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "githubEventWake",
+    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "ciLearningCadence", "wipeTestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "objectReap", "githubEventWake",
     "armCalibrationBands", "workerRuleHeadlines",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
@@ -500,6 +504,8 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // W1-T406: `worktreeReapBoot.enabled` joins them too — the one-shot boot rung it gates
     // did not exist before this task, so there is no prior literal to cite as its source.
     "worktreeReapBoot.enabled",
+    // W1-T3092: the object reaper rung, same net-new posture as the line above.
+    "objectReap.enabled",
     "sweep.tmpMaxAgeMs",
     // W1-T378: `worktreeReapGraceMs` is net-new for the same reason as sweep.tmpMaxAgeMs — it is
     // NOT a lift of DEFAULT_PRUNE_GRACE_MS. It is a deliberately SEPARATE dial (the cadence
