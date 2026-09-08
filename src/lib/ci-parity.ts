@@ -1321,6 +1321,20 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     verdict: { status: "ADMITTED", measuredMs: 470 },
   },
   {
+    testFile: "test/ledger-literal-census.test.ts",
+    job: "ledger-literal-census",
+    script: "census:ledger-literal",
+    walks: ["src/"],
+    reason:
+      "same-class (W1-T2478) — a census suite: walks tracked src/ via git ls-files, reads each file's text and asserts a " +
+      "property EVERY enumerated file must hold (no ledger-filename literal outside its own declared ALLOWED exemptions table), which is " +
+      "clause (a) SATISFIED rather than a search for call sites. Structurally identical to the catch-erasure and bound-kind " +
+      "members beside it. MEASURED 2026-09-08, three runs alone: 338/452/456ms, median 452ms — well under " +
+      "FAST_GATE_CENSUS_BOUND_MS, so neither the predicate nor the cost gave a reason to refuse it. ADMITTED rather than " +
+      "refused because the fast lane exists to catch exactly this class before a full CI cycle",
+    verdict: { status: "ADMITTED", measuredMs: 452 },
+  },
+  {
     testFile: "test/catch-erasure-ratchet.test.ts",
     job: "catch-erasure-census",
     script: "census:catch-erasure",
