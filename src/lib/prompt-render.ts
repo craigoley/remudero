@@ -221,6 +221,9 @@ interface FixModeRule {
  *                        meant ANY posted-or-computed verdict, pass or fail,
  *                        made the row miss and fall through to a
  *                        review-shaped mode, masking the check. Every CURRENT
+ */
+
+/**
  *                        caller (`runFixRung`, `buildFixRungDispatchArgs`,
  *                        `routeFix`/`runSweep`'s `dispatchFix`) already
  *                        constructs `review`/`ciFailures` mutually
