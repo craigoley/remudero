@@ -68,6 +68,7 @@
     "learnings-budget-ratchet": "node scripts/learnings-budget-ratchet.mjs",
     "claude-md-budget-ratchet": "node scripts/claude-md-budget-ratchet.mjs",
     "source-size-signal": "node scripts/source-size-ratchet.mjs",
+    "source-size-ratchet": "node scripts/source-size-ratchet.mjs",
     "source-size-baseline:legacy": "node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json",
   "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs",
   "comment-load-signal": "node scripts/comment-load-ratchet.mjs --no-record",

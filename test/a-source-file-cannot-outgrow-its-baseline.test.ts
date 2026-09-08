@@ -276,7 +276,11 @@ test("a malformed baseline is REFUSED, never silently disarmed", () => {
 test("W1-T2734 prerequisite: source-size-signal is callable while the blocking compatibility command stays explicit", () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
   assert.equal(pkg.scripts["source-size-signal"], "node scripts/source-size-ratchet.mjs");
-  assert.equal(pkg.scripts["source-size-ratchet"], undefined, "the obsolete gate-shaped package name must be retired");
+  assert.equal(
+    pkg.scripts["source-size-ratchet"],
+    "node scripts/source-size-ratchet.mjs",
+    "the worker-contract command name remains callable but now runs the nonblocking signal mode",
+  );
   assert.equal(
     pkg.scripts["source-size-baseline:legacy"],
     "node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json",

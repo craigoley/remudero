@@ -42,6 +42,7 @@ import { fixRungScopeStandDownReason, outOfDeclaredScopeFiles, renderFixPrompt }
 import { FAST_GATE_STEPS, remedyFilesForFailingChecks, type FastGateStep } from "../src/lib/ci-parity.js";
 
 const FIXTURE_REMEDY = "remedy/a.json";
+const SOURCE_SIZE_REMEDY = "scripts/source-size-baseline.json";
 const ROGUE_PATH = "src/lib/rogue.ts";
 
 function ciEvidence(): { ciFailures: Array<{ name: string; logTail: string }> } {
@@ -58,10 +59,10 @@ const FIXTURE_STEPS: FastGateStep[] = [
 
 // ── SANITY: the registry really carries the source-size entry's own remedy, per-entry ───────────
 
-test("W1-T3140: the source-size signal declares no baseline remedy", () => {
+test("W1-T3140: the source-size signal retains baseline remedy metadata for deadlock visibility", () => {
   const entry = FAST_GATE_STEPS.find((s) => s.job === "source-size");
   assert.ok(entry, "the source-size gate must still exist in the registry");
-  assert.equal(entry?.remedyFiles, undefined);
+  assert.deepEqual(entry?.remedyFiles, [SOURCE_SIZE_REMEDY]);
   assert.ok(entry?.reason && entry.reason.length > 0, "the entry carries its own reason, never a borrowed one");
 });
 
@@ -96,9 +97,9 @@ test("remedyFilesForFailingChecks: no failing checks at all returns empty — ne
   assert.deepEqual(remedyFilesForFailingChecks([], FIXTURE_STEPS), []);
 });
 
-test("W1-T3140: a failing source-size sensor surfaces no mechanical baseline remedy", () => {
+test("W1-T3140: a failing source-size sensor surfaces legacy remedy metadata only", () => {
   const got = remedyFilesForFailingChecks(["source-size"]);
-  assert.deepEqual(got, []);
+  assert.deepEqual(got, [{ path: SOURCE_SIZE_REMEDY, job: "source-size" }]);
 });
 
 // ── ACCEPTANCE 1 — reachable: a fix rung repairing THAT gate's failure may write its remedy ─────
