@@ -19895,9 +19895,43 @@ export function describeReservationRefusal(outcome: string | undefined, message:
  * silently resolved, the same posture `unknownArgError` already takes on an unknown flag.
  */
 export function validateReserveArgs(rest: readonly string[]): string | undefined {
-  return rest.includes("--reserve") && rest.includes("--offline")
-    ? "### rmd next-task-id: --reserve and --offline are contradictory — --reserve must push to origin, --offline declines to read it"
-    : undefined;
+  if (rest.includes("--reserve") && rest.includes("--offline")) {
+    return "### rmd next-task-id: --reserve and --offline are contradictory — --reserve must push to origin, --offline declines to read it";
+  }
+  if (rest.includes("--reserve") && rest.includes("--no-reserve")) {
+    return "### rmd next-task-id: --reserve and --no-reserve are contradictory — pass neither and the id IS reserved, which is the default";
+  }
+  return undefined;
+}
+
+/**
+ * W1-T3091 — DOES THIS MINT CLAIM THE ID? Reserving is the DEFAULT; printing without claiming is
+ * the opt-out. The old default was the reverse, and `ci.yml`'s own task-id-existence job records
+ * what that cost, in its own words: "`rmd next-task-id` prints an id and reserves NOTHING by
+ * design, so a later mint handed the same number out as free and nothing noticed until an open PR
+ * had to be renumbered."
+ *
+ * MEASURED 2026-09-07, FIVE TIMES IN ONE SESSION. Two tasks were minted free, claimed meanwhile,
+ * and renumbered after their PRs were open — they survive as W1-T3059 and W1-T3065, and their
+ * original ids are cited NOWHERE here on purpose: a renumbered-away id resolves to neither a
+ * reservation nor a plan record, so naming one in this comment is itself a task-id-existence
+ * failure (measured, on the first draft of this block). Two open PRs each filed a DIFFERENT task
+ * under one id. A batch of ten shards recorded "FILED without a `refs/rmd-id/` reservation" in its
+ * own text and then collided on the first of them. And a branch was named for an id the
+ * reservation walk had already passed, which would have credited the wrong task on merge.
+ *
+ * `--offline` IMPLIES the opt-out rather than erroring: it declines to read origin, so it cannot
+ * push to it either. Only an EXPLICIT `--reserve` alongside `--offline` is a contradiction worth
+ * refusing, because that one asks for two incompatible things by name.
+ *
+ * THE COST IS AN INTEGER, THE ALTERNATIVE IS A RENUMBER. A reserved id nobody files is HELD, not
+ * free — reclaiming one is an operator decision. That is the real price of this default, and it is
+ * a cheap one: ids are unbounded, while renumbering an open pull request means rewriting its shard,
+ * its citations and its branch name.
+ */
+export function mintReservesById(rest: readonly string[]): boolean {
+  if (rest.includes("--no-reserve") || rest.includes("--offline")) return false;
+  return true;
 }
 
 /**
@@ -20075,7 +20109,7 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files"], ["--offline", "--reserve"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files"], ["--offline", "--reserve", "--no-reserve"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -20099,7 +20133,7 @@ export async function nextTaskIdCommand(
     console.error(`### rmd next-task-id: ${(e as Error).message}`);
     return 2;
   }
-  const reserving = rest.includes("--reserve");
+  const reserving = mintReservesById(rest);
   if (!reserving) console.log(describeMintWithHistory(mint));
   if (!reserving) {
     // READS reservations, never TAKES one. This verb is advisory and spawns nothing, so an operator
@@ -39574,9 +39608,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--reserve]",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve]",
     summary: "Print (or --reserve atomically claim) the next free W1-T<n> task id.",
-    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.",
+    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T3091 — RESERVING IS THE DEFAULT, and `--no-reserve` is the opt-out for a peek that must claim nothing. The old default printed an id and claimed NOTHING, which this repo's own task-id-existence job describes as: 'prints an id and reserves NOTHING by design, so a later mint handed the same number out as free and nothing noticed until an open PR had to be renumbered.' MEASURED five times on 2026-09-07: two tasks renumbered after their ids were claimed meanwhile, two different tasks filed as one id across two PRs, a ten-shard batch that recorded 'FILED without a refs/rmd-id/ reservation' in its own text and then collided, and a branch named for an id the reservation walk had already passed. `--offline` implies the opt-out rather than erroring, since it declines to read origin and so cannot push to it; only an explicit `--reserve` beside `--offline` is refused. The cost of the new default is an integer nobody files, held rather than free; the cost of the old one was rewriting an open PR's shard, citations and branch name.",
   },
   {
     name: "emissions",
