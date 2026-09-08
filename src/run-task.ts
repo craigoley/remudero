@@ -15506,8 +15506,9 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
 // ReceiptCommandDeps/receiptCommand and ReplayCommandOpts/replayCommand moved to
 // src/lib/report-commands.ts (W1-T2888) — imported/re-exported below.
 
-/** Injectable seam for `authorityCommand` — same shape as `ReplayCommandOpts` (lib/report-commands.ts) above: a test
- *  drives both the measured and refused (`ledger.ok === false`) paths without a real state root. */
+/** Injectable seam for `authorityCommand` — same shape as `lib/report-commands.ts`'s own
+ *  `ReplayCommandOpts`: a test drives both the measured and refused (`ledger.ok === false`)
+ *  paths without a real state root. */
 export interface AuthorityCommandDeps {
   out?: (s: string) => void;
   err?: (s: string) => void;
