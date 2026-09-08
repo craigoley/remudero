@@ -46,6 +46,7 @@
   "src/lib/emissions.ts": 205,
   "src/lib/env.ts": 500,
   "src/lib/escalate.ts": 1500,
+  "src/lib/escalation-catalogue.ts": 1000,
   "src/lib/feedback-docket.ts": 334,
   "src/lib/feedback-landing.ts": 1000,
   "src/lib/feedback.ts": 1000,
@@ -181,6 +182,6 @@
   "src/lib/worker.ts": 4500,
   "src/lib/workflow-run.ts": 28,
   "src/lib/worktree-sites.ts": 500,
-  "src/run-task.ts": 41000,
+  "src/run-task.ts": 40500,
   "src/spike.ts": 311
 }
