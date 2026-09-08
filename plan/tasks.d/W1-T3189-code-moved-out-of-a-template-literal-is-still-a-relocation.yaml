@@ -1,0 +1,71 @@
+- id: W1-T3189
+  title: "LIFTING BROWSER CODE OUT OF A TEMPLATE LITERAL REWRITES EVERY ESCAPED LINE, SO diff-coverage SEES A REWRITE WHERE THERE IS A MOVE — and the rewritten lines FRAGMENT the runs around them below MIN_RELOCATION_RUN, so W1-T3138's relocation exemption misses far more than the escaped lines themselves: on #4522, 486 lines beyond the 3229 it already exempts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [scripts/diff-coverage.mjs, test/code-moved-out-of-a-template-literal-is-still-a-relocation.test.ts]
+  origin: "operator-session#console-refactor-2026-09-08"
+  plan_refs: ["W1-T3138", "W1-T2325", "W1-T2902"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE PATTERN THIS UNBLOCKS IS NOW THE REPO'S MAIN LINE OF WORK. The console's DOM-driving
+    client code lives inside a raw string in `renderShellHtml`'s template literal, where `tsc`,
+    eslint and coverage are all blind to it. Moving it into a real module is exactly the right
+    change and the operator is doing more of it. But `diff-coverage` reads every moved line as
+    ADDED source, and the module is browser-executed, so node's lcov cannot cover much of it.
+
+    W1-T3138 already built the right exemption: a contiguous run of added lines that matches a
+    contiguous run of lines this same diff REMOVED is a relocation, not new code. It fires on
+    #4522 -- 3229 of 3934 lines -- and then stops, for a reason that is entirely mechanical.
+
+    MOVING TEXT OUT OF A TEMPLATE LITERAL REWRITES IT. Inside the literal every backtick and every
+    `${` is backslash-escaped; on the way out the escapes come off:
+
+      in serve.ts (removed)   const authHeaders = { authorization: \`Bearer \${token}\` };
+      in the new module (added)  const authHeaders = { authorization: `Bearer ${token}` };
+
+    `bestRunAt` compares `R[j][1].trim() !== A[i][1].trim()` -- raw text -- so that line does not
+    match. THE SECOND-ORDER EFFECT IS THE EXPENSIVE ONE: an unmatched line in the middle of a
+    moved block splits one long run into two short ones, and any piece shorter than
+    `MIN_RELOCATION_RUN` (5) is discarded whole. So a handful of escaped lines disqualifies the
+    unescaped lines around them.
+
+    MEASURED 2026-09-08 on #4522's real diff, against the shipped functions:
+
+      added lines in src/lib/console-shell-client.ts        3934
+      relocation-exempt TODAY                               3229
+      relocation-exempt with escaping normalised            3715   (+486)
+
+      of 3820 non-blank added lines:
+        match a removed serve.ts line RAW                    3346  (87%)
+        match after unescaping                               3639  (95%)
+        genuinely new                                         181
+
+    486 lines recovered from 293 escape-affected lines is the fragmentation, quantified: the fix
+    is worth two-thirds more than the lines it directly repairs.
+
+    THE REMEDY IS ONE COMPARISON KEY, NOT A NEW EXEMPTION CLASS. Normalise the text both sides are
+    compared in -- `trim()` as today, plus template-literal unescaping -- and leave `bestRunAt`'s
+    matching rule untouched, which its own doc-comment says is deliberate. Applied to BOTH sides,
+    so a move INTO a literal (which ADDS escapes) normalises identically.
+
+    WHY THIS IS NOT A WEAKENING. It exempts only lines that demonstrably existed in this same diff,
+    in a contiguous run of at least five, consumed once. It admits nothing that was not already
+    admissible in principle; it stops the gate mistaking a lossless move for new code. The 181
+    genuinely-new lines stay flagged and still need tests -- that is the gate working.
+
+    NOT IN SCOPE: a `browser-runtime` coverage exemption, and collecting V8 coverage from
+    Playwright and merging it into lcov. The second is the real long-term answer for browser code
+    and deserves its own task; neither is needed to stop a pure move reading as new code.
+  acceptance:
+    - claim: "code lifted out of a template literal matches as a relocation despite the escaping the move strips, and the run around it survives"
+      proof: "unit test: test/code-moved-out-of-a-template-literal-is-still-a-relocation.test.ts"
+    - claim: "both sides are normalised through one shared comparison key, so a move INTO a literal normalises identically"
+      proof: "grep: relocationKey in scripts/diff-coverage.mjs"
+    - claim: "a falsifier restores raw-text matching and shows the run collapsing below the minimum again"
+      proof: "grep: MUTANT in test/code-moved-out-of-a-template-literal-is-still-a-relocation.test.ts"
