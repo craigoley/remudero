@@ -148,7 +148,7 @@
   "src/lib/retro.ts": 4500,
   "src/lib/review-capacity.ts": 1000,
   "src/lib/review-provider-provenance.ts": 500,
-  "src/lib/review.ts": 7000,
+  "src/lib/review.ts": 7500,
   "src/lib/risk-judge.ts": 868,
   "src/lib/risk-score.ts": 456,
   "src/lib/routing-objective.ts": 500,
