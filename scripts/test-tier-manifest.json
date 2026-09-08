@@ -431,6 +431,7 @@
     "test/dispatch-repo-guard.test.ts": 703,
     "test/dispatch-settled-set.test.ts": 1047,
     "test/docs-awareness-does-not-read-a-ledger-as-a-surface.test.ts": 1120,
+    "test/docs-cite-real-symbols.test.ts": 0,
     "test/docs-claims.test.ts": 1705,
     "test/docs-index.test.ts": 586,
     "test/doctor-node-pin.test.ts": 3564,
