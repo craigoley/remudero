@@ -1,4 +1,5 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { constants as osConstants } from "node:os";
 import { resolve } from "node:path";
 // Type-only: erased at runtime, so daemon.ts stays a one-way dependency and keeps its
 // filesystem-free purity even though this module shells out to git.
@@ -305,21 +306,49 @@ function currentBranch(git: GitRunner): string | undefined {
  * to parse the `.ts` entry file), loop-guard env added, `stdio: "inherit"` so the child's output
  * and exit code are indistinguishable from a single un-re-exec'd run.
  */
+const REEXEC_FORWARDED_SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"] as const satisfies readonly NodeJS.Signals[];
+
+function exitCodeForSignal(signal: NodeJS.Signals | null): number {
+  if (!signal) return 1;
+  const signalNumber = (osConstants.signals as Record<string, number | undefined>)[signal];
+  return signalNumber === undefined ? 1 : 128 + signalNumber;
+}
+
 // diff-cov: process-boundary — re-execs process.execArgv and exits with the child's code; a real
 // re-exec cannot carry a coverage hit without forking the suite (W1-T221, see docs/review-gate.md).
 function defaultReexec(env: NodeJS.ProcessEnv | Record<string, string | undefined>): void {
   // Second, independent stop, at the spawn itself: alreadySelfSynced keeps a re-exec child from
   // deciding to sync, this keeps it from spawning even via some other route.
   if (process.env[SELF_SYNC_GUARD_ENV] === "1") return;
-  const result = spawnSync(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
+  const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
     stdio: "inherit",
     env: { ...(env as NodeJS.ProcessEnv), [SELF_SYNC_GUARD_ENV]: "1" },
   });
-  if (result.error) {
-    console.error(`### rmd self-sync: re-exec failed: ${String(result.error)}`);
-    process.exit(1);
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  let exitStarted = false;
+
+  const exitOnce = (code: number): void => {
+    if (exitStarted) return;
+    exitStarted = true;
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+    process.exit(code);
+  };
+
+  for (const signal of REEXEC_FORWARDED_SIGNALS) {
+    const handler = () => {
+      child.kill(signal);
+    };
+    handlers.set(signal, handler);
+    process.once(signal, handler);
   }
-  process.exit(result.status ?? 1);
+
+  child.once("error", (err) => {
+    console.error(`### rmd self-sync: re-exec failed: ${String(err)}`);
+    exitOnce(1);
+  });
+  child.once("exit", (status, signal) => {
+    exitOnce(status ?? exitCodeForSignal(signal));
+  });
 }
 
 /**
