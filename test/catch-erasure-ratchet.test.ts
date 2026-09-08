@@ -336,7 +336,7 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/review.ts": 4,
   "src/lib/risk-judge.ts": 1,
   "src/lib/self-sync.ts": 2,
-  "src/lib/serve.ts": 20,
+  "src/lib/serve.ts": 3,
   "src/lib/skill.ts": 4,
   "src/lib/status-board.ts": 5,
   "src/lib/status.ts": 6,

@@ -159,13 +159,13 @@ test("the GLANCE strip's own client-side predicate is the SAME as board.ts's —
       );
     }
   }
-  // AND THE WIRING, so this can never pass over a predicate the shell does not actually ship:
+  // AND THE WIRING, so this can never pass over a predicate the shell does not actually ship. The
+  // "must USE it" half moved to test/console-shell-client.test.ts (W1-T2902: setGlanceValue's own
+  // call site lives in lib/console-shell-client.ts now, a real module) and asserts on BEHAVIOUR —
+  // the actual rendered #glance-blocked value — rather than a second readFileSync-as-text check
+  // here (test/source-text-assertion-census.test.ts's own ratchet: assert behaviour, not prose).
   assert.match(shell, /\$\{renderConsoleShellScript\(\)\}/, "the shell splices the module that defines it");
-  assert.match(shell, /setGlanceValue\("glance-blocked", tasks\.filter\(isBlockedRow\)\.length\)/, "the strip must USE it");
-  assert.ok(
-    !/setGlanceValue\("glance-blocked", tasks\.filter\(\(t\) => t\.status === "blocked"\)/.test(shell),
-    "the old status-only strip predicate must be gone",
-  );
+  assert.match(shell, /\$\{consoleShellClientSource\(/, "the shell splices the module that USES it");
 });
 
 // ── The idle buckets are a DIFFERENT partition, in a different module, and must not move ───────
@@ -269,7 +269,9 @@ test("repeated automatic polls do NOT advance the marker; an explicit acknowledg
 });
 
 test("the shell asks for an ack on exactly the fetch whose recap it renders, and never on a later poll", () => {
-  const shell = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
+  // W1-T2902: refreshAll (and the fetch this asserts on) moved out of serve.ts's template
+  // literal into lib/console-shell-client.ts, a real module — see that file's own header.
+  const shell = readFileSync(new URL("../src/lib/console-shell-client.ts", import.meta.url), "utf8");
   assert.match(
     shell,
     /extraHeaders: recapRendered \? undefined : \{ "x-rmd-recap-ack": "1" \}/,

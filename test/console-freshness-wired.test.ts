@@ -31,23 +31,32 @@ import type { IssueCloser } from "../src/lib/panel-actions.js";
 const READ_TOKEN = "freshness-wired-read-token";
 
 const SERVE_TS_SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "serve.ts"), "utf8");
+// W1-T2902: the shell's client script (event wiring, DOM rendering, and the resolveFreshness
+// calls this file's own (1) proves) moved out of serve.ts's template literal into a real module,
+// lib/console-shell-client.ts — see that file's own header. resolveFreshness is still imported
+// as the REAL, unit-tested function and still really called, just from its new, real home rather
+// than a raw string inside serve.ts; these checks follow it there rather than assume the file.
+const CONSOLE_SHELL_CLIENT_SOURCE = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "console-shell-client.ts"),
+  "utf8",
+);
 
-// ── (1) serve.ts imports and CALLS the real resolveFreshness — not a comment claiming to. ──────
+// ── (1) the shell client imports and CALLS the real resolveFreshness — not a comment claiming to. ─
 
 test("serve.ts imports resolveFreshness from lib/console-freshness.ts", () => {
   assert.match(
-    SERVE_TS_SOURCE,
+    CONSOLE_SHELL_CLIENT_SOURCE,
     /import\s*\{\s*resolveFreshness\s*\}\s*from\s*"\.\/console-freshness\.js"/,
-    "serve.ts must import the real, unit-tested resolveFreshness — not re-derive its rule by hand",
+    "the shell client must import the real, unit-tested resolveFreshness — not re-derive its rule by hand",
   );
 });
 
 test("serve.ts's shell script CALLS resolveFreshness( — a comment mentioning the name is not enough (the #339/W1-T281 class of bug: a proof that only greps a COMMENT passes on entirely unbuilt wiring)", () => {
-  const calls = SERVE_TS_SOURCE.match(/resolveFreshness\(/g) ?? [];
+  const calls = CONSOLE_SHELL_CLIENT_SOURCE.match(/resolveFreshness\(/g) ?? [];
   // one call to embed the REAL function's own source (\`resolveFreshness.toString()\` is NOT a
   // match for this pattern — toString() is a property access, never "resolveFreshness(") plus at
   // least two genuine invocations (markStale's guard, handlePollFailure's escalation decision).
-  assert.ok(calls.length >= 2, `expected >= 2 literal "resolveFreshness(" call sites in serve.ts, found ${calls.length}`);
+  assert.ok(calls.length >= 2, `expected >= 2 literal "resolveFreshness(" call sites in the shell client, found ${calls.length}`);
 });
 
 // ── (2) the hand-written mirror this task's own rationale named is gone. ────────────────────────
