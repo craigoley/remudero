@@ -347,7 +347,7 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/worker-containment.ts": 5,
   "src/lib/worker-home.ts": 3,
   "src/lib/worker.ts": 11,
-  "src/run-task.ts": 60,
+  "src/run-task.ts": 55,
   "src/spike.ts": 1,
 };
 
