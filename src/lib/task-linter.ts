@@ -5,7 +5,6 @@ import { RETIREMENT_REASONS } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
-  explainGrepProofRefusal,
   explainUnitTestProofRefusal,
   grepProofTargetNamesNoFile,
   isDialectPrefixed,
@@ -569,9 +568,12 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
       // W1-T3073: when the shared parser can name WHY it refused, print that sentence rather than
       // the catch-all below — the author gets the remedy, not a list of things it might have been.
       // Deliberately the parser's own explainer and not a second interpretation living here.
+      // Only the `unit test:` explainer is consulted here. The `grep:` refusals already reach the
+      // author through this catch-all and through `rmd check-proof`, and swapping their wording is
+      // W1-T3073's scope creep, not its task — test/task-linter.test.ts's near-miss case pins the
+      // existing sentence.
       why =
         explainUnitTestProofRefusal(trimmed) ??
-        explainGrepProofRefusal(trimmed) ??
         "dialect-prefixed but refused by parseWhitelistedProof (e.g. a `grep:` proof with no `in <path>` clause, " +
           "or a path attempting traversal/a glob) — not executable as written";
     } else if (NEAR_MISS_PREFIX_RE.test(trimmed)) {
