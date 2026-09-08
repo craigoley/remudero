@@ -294,6 +294,15 @@ export interface DeriveDeps {
   github: GitHub;
   /** Ledger reader; defaults to reading + parsing NDJSON from disk. */
   readLedger?: LedgerReader;
+  /** W1-T3067 — PR number to the paths its merge commit changed, built ONCE per pass from a local
+   *  `git log origin/main --name-only`. Consulted by the plan-only DIFF refusal so that removing
+   *  the `ownsOwnRunBranch` shortcut costs no network: `deriveStatus` runs once per plan task
+   *  (~1,400 a pass), and a `changedFiles` call each would be 1,400 GitHub requests.
+   *
+   *  ⚠ ABSENT OR EMPTY IS "NO OPINION", NEVER "NOT A FILING". A PR with no entry falls back to the
+   *  existing `deps.github.changedFiles` call, so behaviour outside the scanned window is exactly
+   *  today's. A failed git read must never be able to uncredit the plan. */
+  mergedPathsByPr?: ReadonlyMap<number, readonly string[]>;
   /** R-23: the per-projection {@link LedgerIndex}, built ONCE by {@link projectPlan} and shared by
    *  every task — the same batch-once shape as the ledger read (W1-T187). Omitted, or built over a
    *  DIFFERENT array (the identity check catches it), each helper scans as before, so this can only
@@ -2088,12 +2097,38 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     // `ownsOwnRunBranch`, unlike the diff-based refusal below — a filing PR dispatched from this task's OWN run
     // branch sits on that branch too, so that test would wave it through by construction.
     const planOnlyFilingRefusal = wouldCredit && isPlanOnlyFilingPr(ledgerLines, trailerPr.url, ledgerIndex);
-    // W1-T413: the DIFF-BASED plan-only refusal, only for a hit that would otherwise credit and that the ledger
-    // check did not refuse. ORDER IS THE COST CONTROL: `ownsOwnRunBranch` is free and a worker's own run-branch
-    // PR is an implementation by construction, so only the residual case pays.
+    // W1-T413: the DIFF-BASED plan-only refusal, for any hit that would otherwise credit and that the ledger
+    // check did not refuse.
+    //
+    // ⚠ W1-T3067 — `ownsOwnRunBranch` NO LONGER SUPPRESSES THIS, AND THAT SUPPRESSION WAS THE BUG.
+    // The removed clause read `&& !ownsOwnRunBranch(head, task.id)`, justified as "a worker's own
+    // run-branch PR is an implementation by construction". IT IS NOT: a worker dispatched on a task
+    // opens its PR from `run-<id>-<epoch>`, and a lane that decides the right move is an AMENDMENT
+    // files one from that same branch. MEASURED: #3195 (head `run-W1-T2371-1787887882921`, whole
+    // diff `plan/tasks.d/W1-T2371-*.yaml`) and #3896 (head `run-W1-T2648-1788508326964`) are exactly
+    // that shape, and the ledger arm above cannot catch them either — so nothing did, and W1-T2794's
+    // supersession rung closed the validated build in #4461 against #3195.
+    //
+    // A run branch says WHO opened the PR; the changed paths say WHAT is in it. Only the second
+    // answers this question.
+    //
+    // THE SHORTCUT WAS A COST CONTROL, SO THE COST IS PAID LOCALLY INSTEAD: `mergedPathsByPr` is one
+    // `git log` per pass. The `changedFiles` network call remains the fallback for a PR outside that
+    // window, which keeps behaviour there byte-identical to before.
     const planOnlyDiffRefusal =
-      wouldCredit && !planOnlyFilingRefusal && !ownsOwnRunBranch(head, task.id)
+      wouldCredit && !planOnlyFilingRefusal
         ? (() => {
+            // LOCAL EVIDENCE FIRST, AND IT IS FREE. A merged PR's merge commit is on origin/main by
+            // definition, so the one-git-log map answers for exactly the population that matters.
+            const local = deps.mergedPathsByPr?.get(trailerPr.number);
+            if (local && local.length > 0) return isPlanOnlyChangeset(local);
+            // ⚠ NO LOCAL ANSWER: FALL BACK TO EXACTLY THE PRE-W1-T3067 BEHAVIOUR, INCLUDING THE
+            // SHORTCUT. That shortcut is a TESTED COST GUARANTEE, not an oversight — "a worker's own
+            // run- branch credits without ever reading the changed-file list" is an existing test,
+            // and `deriveStatus` runs once per plan task (~1,400 a pass). Paying a GitHub call here
+            // would trade a rare wrong credit for 1,400 requests. So the fix is NARROW: the shortcut
+            // no longer decides when free local evidence exists, and is untouched when it does not.
+            if (ownsOwnRunBranch(head, task.id)) return false;
             const files = deps.github.changedFiles?.(trailerPr.url);
             return files !== undefined && isPlanOnlyChangeset(files);
           })()

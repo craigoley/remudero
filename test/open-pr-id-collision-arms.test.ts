@@ -272,3 +272,174 @@ test("W1-T2324: main stays silent when the board carries no competing claim", ()
   assert.doesNotMatch(all, /ALREADY CLAIMED/, "the POSITIVE control's counterpart: a healthy board is silent");
   assert.notEqual(r.code, 1);
 });
+
+// ── W1-T3070: a mention is a suspicion, not a claim ───────────────────────────────────────────
+//
+// The six W1-T2324 assertions above are UNEDITED and still green, and that is this task's control:
+// the fix narrows the gate on positive evidence rather than relaxing a pinned ruling. It stays
+// green because `evaluateOpenPrIdCollisions` reaches confirmation only when handed a
+// `confirmDeclares`, and because an unconfirmable answer keeps the refusal — those fixture rows
+// carry no file evidence, so they remain collisions exactly as W1-T2324 pinned them.
+
+/** A `gh` that answers the PR LIST and the PR FILES calls DIFFERENTLY, discriminated on the `/files`
+ *  path. `fakeGh` above answers every call with one body, which cannot drive this seam at all. */
+function fakeGhRouting(listJson: string, filesJson: string, filesCode = 0): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-fake-gh-routed-"));
+  const p = join(dir, "gh");
+  writeFileSync(
+    p,
+    `#!/bin/sh\ncase "$*" in\n  */files*) cat <<'EOF'\n${filesJson}\nEOF\n    exit ${filesCode} ;;\nesac\ncat <<'EOF'\n${listJson}\nEOF\nexit 0\n`,
+  );
+  chmodSync(p, 0o755);
+  return dir;
+}
+
+const planFile = (patch: string) => ({ filename: "plan/tasks.d/W1-T4242-a-thing.yaml", patch });
+const srcFile = (filename: string) => ({ filename, patch: "@@ -1 +1 @@\n+const x = 1;\n" });
+
+// ── prDeclaredIdsFromFiles ────────────────────────────────────────────────────────────────────
+
+test("W1-T3070: a changed plan file that ADDS an `- id:` line declares that id", () => {
+  const r = mod.prDeclaredIdsFromFiles([planFile("@@ -0,0 +1,2 @@\n+- id: W1-T4242\n+  title: x\n")]);
+  assert.equal(r.readable, true);
+  assert.deepEqual([...r.ids], ["W1-T4242"]);
+});
+
+test("W1-T3070: a build PR touching only src/ and test/ declares nothing, and that is READABLE", () => {
+  const r = mod.prDeclaredIdsFromFiles([srcFile("src/lib/status.ts"), srcFile("test/a-thing.test.ts")]);
+  assert.equal(r.readable, true, "a non-plan file cannot declare an id, so it says nothing either way");
+  assert.equal(r.ids.size, 0, "and THIS is the case the whole task exists for");
+});
+
+test("W1-T3070: a REMOVED id line is not a declaration, and a `+++` header is not one either", () => {
+  const r = mod.prDeclaredIdsFromFiles([planFile("@@ -1,2 +0,0 @@\n-- id: W1-T4242\n-  title: x\n")]);
+  assert.equal(r.readable, true);
+  assert.equal(r.ids.size, 0, "deleting a shard does not claim its id");
+  const hdr = mod.prDeclaredIdsFromFiles([planFile("+++ b/plan/tasks.d/W1-T4242-a-thing.yaml\n@@ -0,0 +1 @@\n+- id: W1-T4242\n")]);
+  assert.deepEqual([...hdr.ids], ["W1-T4242"], "the header is skipped, the real add is still read");
+});
+
+test("W1-T3070: plan/tasks.yaml is a declaring surface too, and a nested or non-yaml path is not", () => {
+  const top = mod.prDeclaredIdsFromFiles([{ filename: "plan/tasks.yaml", patch: "@@ -0,0 +1 @@\n+- id: W1-T4242\n" }]);
+  assert.deepEqual([...top.ids], ["W1-T4242"], "the monolithic plan file declares");
+  const doc = mod.prDeclaredIdsFromFiles([{ filename: "docs/plan/tasks.d/W1-T4242.yaml", patch: "@@ -0,0 +1 @@\n+- id: W1-T4242\n" }]);
+  assert.equal(doc.ids.size, 0, "a lookalike path outside plan/ declares nothing");
+  assert.equal(doc.readable, true);
+});
+
+test("W1-T3070: an id with a lettered suffix or another workstream is captured, not mismatched", () => {
+  const r = mod.prDeclaredIdsFromFiles([planFile("@@ -0,0 +1,2 @@\n+- id: W1-T4242b\n+- id: W3-T3\n")]);
+  assert.deepEqual([...r.ids].sort(), ["W1-T4242b", "W3-T3"], "DECLARED_ID_LINE_RE's whole-line match rides through");
+});
+
+test("W1-T3070: every unreadable SHAPE keeps the answer unreadable — never 'declares nothing'", () => {
+  // Each arm is separate on purpose: one "malformed input" case would pass while the rest died.
+  assert.equal(mod.prDeclaredIdsFromFiles(undefined).readable, false, "not an array at all");
+  assert.equal(mod.prDeclaredIdsFromFiles({ files: [] }).readable, false, "an object, not an array");
+  assert.equal(mod.prDeclaredIdsFromFiles([]).readable, false, "an empty list — every real PR changes a file");
+  assert.equal(mod.prDeclaredIdsFromFiles([{ number: 7, title: "not a file row" }]).readable, false, "a row with no filename");
+  assert.equal(mod.prDeclaredIdsFromFiles([{ filename: "plan/tasks.d/x.yaml" }]).readable, false, "a plan file whose patch is withheld");
+  assert.equal(
+    mod.prDeclaredIdsFromFiles(Array.from({ length: mod.PR_FILES_PAGE_CAP }, () => srcFile("src/a.ts"))).readable,
+    false,
+    "a list at the page cap may be truncated, and a truncated list under-reports declarations",
+  );
+  // THE POSITIVE CONTROL for the six arms above: one row under the cap reads fine.
+  assert.equal(mod.prDeclaredIdsFromFiles([srcFile("src/a.ts")]).readable, true);
+});
+
+test("W1-T3070: an unreadable ROW does not blind the rest of the list", () => {
+  const r = mod.prDeclaredIdsFromFiles([planFile("@@ -0,0 +1 @@\n+- id: W1-T4242\n"), { filename: "plan/tasks.d/y.yaml" }]);
+  assert.equal(r.readable, false, "the withheld patch still makes the whole answer unreadable");
+  assert.deepEqual([...r.ids], ["W1-T4242"], "and what WAS read is still reported, so the refusal names a real id");
+});
+
+// ── evaluateOpenPrIdCollisions, confirmed ─────────────────────────────────────────────────────
+
+const suspectRow = row(2, "fix(status): a thing (W1-T4242)", "", "run-W1-T4242-build-1788812945000");
+
+test("W1-T3070: a suspect that declares no plan record is CLEARED — the sibling build PR case", () => {
+  const declaresNothing = () => ({ readable: true, ids: new Set<string>() });
+  assert.deepEqual(
+    mod.evaluateOpenPrIdCollisions(["W1-T4242"], [suspectRow], "mine", declaresNothing),
+    [],
+    "the build PR is its filing's sibling, not a rival claimant",
+  );
+});
+
+test("W1-T3070: a suspect that DOES declare the id is still refused — the real collision is untouched", () => {
+  const declaresIt = () => ({ readable: true, ids: new Set(["W1-T4242"]) });
+  const out = mod.evaluateOpenPrIdCollisions(["W1-T4242"], [suspectRow], "mine", declaresIt);
+  assert.equal(out.length, 1, "two PRs each adding a shard for one id is exactly what this gate exists to catch");
+  assert.deepEqual(out[0].prs.map((p: { number: number }) => p.number), [2]);
+});
+
+test("W1-T3070: confirmation is ONE-WAY — an unreadable or absent verdict KEEPS the refusal", () => {
+  const unreadable = () => ({ readable: false, ids: new Set<string>() });
+  assert.equal(mod.evaluateOpenPrIdCollisions(["W1-T4242"], [suspectRow], "mine", unreadable).length, 1, "unreadable");
+  assert.equal(mod.evaluateOpenPrIdCollisions(["W1-T4242"], [suspectRow], "mine", () => undefined).length, 1, "no verdict at all");
+  assert.equal(mod.evaluateOpenPrIdCollisions(["W1-T4242"], [suspectRow], "mine", () => ({ ids: new Set() })).length, 1, "readable absent");
+  // AND THE OMITTED SEAM IS THE ORIGINAL BEHAVIOUR, stated rather than inferred from the arms above.
+  assert.equal(mod.evaluateOpenPrIdCollisions(["W1-T4242"], [suspectRow], "mine").length, 1, "no confirmer: every mention is a claim");
+});
+
+test("W1-T3070: confirmation runs only on SUSPECTS, so a healthy board costs no files reads", () => {
+  const calls: number[] = [];
+  const confirm = (r: { number: number }) => {
+    calls.push(r.number);
+    return { readable: true, ids: new Set<string>() };
+  };
+  mod.evaluateOpenPrIdCollisions(["W1-T4242"], [row(9, "unrelated", "", "other"), suspectRow], "mine", confirm);
+  assert.deepEqual(calls, [2], "the unrelated PR is never fetched — the mention scan stays the cheap prefilter");
+});
+
+// ── fetchPrChangedFiles ───────────────────────────────────────────────────────────────────────
+
+test("W1-T3070: every fetchPrChangedFiles failure folds to unreadable, and the happy path does not", () => {
+  const root = scratchRepo("https://github.com/acme/widgets.git");
+  assert.equal(withPath(fakeGh("[]", 1), () => mod.fetchPrChangedFiles("acme", "widgets", 7, root)).readable, false, "gh exits non-zero");
+  assert.equal(withPath(fakeGh("not json"), () => mod.fetchPrChangedFiles("acme", "widgets", 7, root)).readable, false, "unparsable");
+  assert.equal(withPath(fakeGh('{"message":"Not Found"}'), () => mod.fetchPrChangedFiles("acme", "widgets", 7, root)).readable, false, "not an array");
+  const ok = withPath(fakeGh('[{"filename":"src/a.ts","patch":"@@\\n+x\\n"}]'), () => mod.fetchPrChangedFiles("acme", "widgets", 7, root));
+  assert.equal(ok.readable, true, "the POSITIVE control: the three arms above are arms, not a dead read");
+  assert.equal(ok.files.length, 1);
+});
+
+// ── end to end, through main ──────────────────────────────────────────────────────────────────
+
+test("W1-T3070: main CLEARS a sibling build PR and the gate passes — the deadlock is gone", () => {
+  const root = repoAddingAnId("https://github.com/acme/widgets.git");
+  const list = JSON.stringify([
+    { number: 4488, html_url: "https://example.test/4488", title: "fix(status): a thing (W1-T4242)", body: "", head: { ref: "run-W1-T4242-build-1" } },
+  ]);
+  const files = JSON.stringify([{ filename: "src/lib/status.ts", patch: "@@ -1 +1 @@\n+const x = 1;\n" }]);
+  const r = withPath(fakeGhRouting(list, files), () => runMain(["--base", "base-ref", "--cwd", root, "--head-ref", "mine"]));
+  const all = [...r.out, ...r.err].join("\n");
+  assert.doesNotMatch(all, /ALREADY CLAIMED/, "a build PR that changes no plan file is not a claimant");
+  assert.match(all, /PR #4488 mentions W1-T4242 but declares no plan record for it/, "and the clearing is ANNOUNCED, never silent");
+  assert.notEqual(r.code, 1, "the filing PR can merge");
+});
+
+test("W1-T3070: main still REFUSES when the other PR really declares the id", () => {
+  const root = repoAddingAnId("https://github.com/acme/widgets.git");
+  const list = JSON.stringify([
+    { number: 4488, html_url: "https://example.test/4488", title: "also files W1-T4242", body: "", head: { ref: "theirs" } },
+  ]);
+  const files = JSON.stringify([{ filename: "plan/tasks.d/W1-T4242-theirs.yaml", patch: "@@ -0,0 +1 @@\n+- id: W1-T4242\n" }]);
+  const r = withPath(fakeGhRouting(list, files), () => runMain(["--base", "base-ref", "--cwd", root, "--head-ref", "mine"]));
+  const all = [...r.out, ...r.err].join("\n");
+  assert.match(all, /ALREADY CLAIMED by another OPEN PR/, "the POSITIVE control for the test above");
+  assert.equal(r.code, 1);
+});
+
+test("W1-T3070: main keeps the refusal when the files read FAILS — no false zero opens the gate", () => {
+  const root = repoAddingAnId("https://github.com/acme/widgets.git");
+  const list = JSON.stringify([
+    { number: 4488, html_url: "https://example.test/4488", title: "claims W1-T4242", body: "", head: { ref: "theirs" } },
+  ]);
+  const r = withPath(fakeGhRouting(list, "[]", 1), () => runMain(["--base", "base-ref", "--cwd", root, "--head-ref", "mine"]));
+  const all = [...r.out, ...r.err].join("\n");
+  assert.match(all, /could not read PR #4488's changed files/, "the degrade is REPORTED in the script's own voice");
+  assert.match(all, /ALREADY CLAIMED by another OPEN PR/, "and it refuses rather than passing");
+  assert.equal(r.code, 1);
+});

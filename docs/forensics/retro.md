@@ -3559,3 +3559,46 @@ there to `ea02cc8`, where the ranges were taken).
  *  states the counts it examined, so a check that did not run is distinguishable from one that
  *  passed. */
 ```
+
+## Standing rule 28 as code — the failure census joins each member to merge state (2026-09-07)
+
+`mastCategoryDistribution`, `infrastructureEvents` and `taskDefectCounts` take a `CensusMergeState`
+built by `censusMergeStateFrom` from the SAME `shipped` union `renderGather` already prints. Before
+this change they read `RunSummary.verdict` alone, so the census restated the verdict column's error
+as a taxonomy: R44 (RETRO-1788374498685) reported `verification × 8` and seven of the eight tasks
+had merged gate-side; R45 reported five and four had. MASTER-PLAN §12 rule 28 and DR-28 stated the
+rule in prose; nothing in the retro enforced it, which is the CLAUDE.md failure mode a rule stated
+only in prose has.
+
+Three named join states, so a zero is never naked (P48):
+
+- `github` — the gateway answered; every credited run id is RECONCILED and named beside the table.
+- `unavailable` — the gateway was supplied but degraded (`ShippedGithub.unavailable()` returned a
+  reason); every un-credited member that could depend on merge state is UNCONFIRMED, never a failure.
+  A guard-fired infrastructure block never opened a PR, so it stays classified.
+- `ledger-only` — no gateway was supplied (unit tests, `--dry-run` without a gateway); the table
+  prints exactly what it printed before and SAYS it did not join.
+
+Falsifier, in `test/a-verdict-class-is-not-a-failure-class-until-its-members-are-joined-to-merge-state.test.ts`:
+the same five-run corpus reads `verification: 4` without the join and `verification: 2` with it, and
+the marker's `mast_category_counts` (the trend column's input) now carries the joined figure.
+
+## P53 — the implement lane's `model` lives on the run, not on the `verdict` row (2026-09-07)
+
+`COMPARISON_LANE_STEPS.implement` is `"verdict"`. MEASURED at `b8892bc4`: every one of the 23
+`log("verdict", …)` call sites in `src/run-task.ts` writes a block with no `model` key. The model
+rides two other rows of the same run: `implement.done` spreads `workerLedgerFields` (`model`,
+`served_model`, `routed_model`) and `run.start` nests it as `mount.model`. So "18 of 202 implement
+rows carry `model`" (NET STATE, three cycles frozen) was a key-placement fact, not a missing emission,
+and no writer needed to change to read it.
+
+`runModelIndex(records)` maps `run_id` to the model: `implement.done`'s own key first (the worker
+that ran), `run.start`'s `mount.model` as the fallback (the mount that was resolved — and the only
+one of the two rows that `DECISION_RELEVANT_LEDGER_STEPS` retains through rotation). `laneSpendOf`
+consults it only when the row has no `model` of its own, counts the join under `viaRun`, and the
+table prints `sonnet×N (M via run join)` so a reader can tell attribution-by-row from
+attribution-by-run. A row with neither stays `unattributed`.
+
+Not done here, and filed separately: the writer-side half (a `verdict` row that carries its own
+`model`, and `implement.done` in a retention set), and the OTel `api_request` route that would make
+`served_model` and cache tokens first-class per call.

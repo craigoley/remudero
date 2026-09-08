@@ -26,6 +26,7 @@ import { utcWeekWindowMs } from "./sweep.js";
 import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
+import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-workshop.js";
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
 export interface LedgerRecord {
@@ -574,10 +575,12 @@ const COMPARISON_LANE_STEPS: Readonly<Record<string, string>> = {
 /** The bucket for a row with no `model` key — NEVER folded into a real model's count. */
 export const UNATTRIBUTED_MODEL = "unattributed";
 
-/** One model's row-count within a single lane (see {@link UNATTRIBUTED_MODEL}). */
+/** One model's row-count within a single lane (see {@link UNATTRIBUTED_MODEL}). `viaRun` counts
+ *  rows attributed through the run's `implement.done`/`run.start` rows, not the row's own key. */
 export interface LaneModelShare {
   model: string;
   rows: number;
+  viaRun?: number;
 }
 
 /** One lane's measured spend: rows, NOTIONAL (never billed) cost, newest row, model attribution. */
@@ -600,12 +603,40 @@ function costOf(r: LedgerRecord): number {
   return 0;
 }
 
-function laneSpendOf(lane: string, step: string, rows: LedgerRecord[]): LaneSpend {
-  const models = new Map<string, number>();
+function ownModelOf(r: LedgerRecord): string | undefined {
+  return typeof r.model === "string" && r.model.length > 0 ? r.model : undefined;
+}
+
+/** run_id -> the model that implemented it: `implement.done`'s own key first, else `run.start`'s
+ *  `mount.model`. The `verdict` row carries neither. Why: docs/forensics/retro.md (P53). */
+export function runModelIndex(records: LedgerRecord[]): Map<string, string> {
+  const fromDone = new Map<string, string>();
+  const fromStart = new Map<string, string>();
+  for (const r of records) {
+    if (typeof r.run_id !== "string") continue;
+    if (r.step === "implement.done") {
+      const m = ownModelOf(r);
+      if (m) fromDone.set(r.run_id, m);
+    } else if (r.step === "run.start") {
+      const mount = r.mount;
+      const m = mount && typeof mount === "object" ? (mount as { model?: unknown }).model : undefined;
+      if (typeof m === "string" && m.length > 0) fromStart.set(r.run_id, m);
+    }
+  }
+  return new Map([...fromStart, ...fromDone]);
+}
+
+function laneSpendOf(lane: string, step: string, rows: LedgerRecord[], byRun: ReadonlyMap<string, string>): LaneSpend {
+  const models = new Map<string, { rows: number; viaRun: number }>();
   let newestTs: string | undefined;
   for (const r of rows) {
-    const model = typeof r.model === "string" && r.model.length > 0 ? r.model : UNATTRIBUTED_MODEL;
-    models.set(model, (models.get(model) ?? 0) + 1);
+    const own = ownModelOf(r);
+    const joined = own === undefined && typeof r.run_id === "string" ? byRun.get(r.run_id) : undefined;
+    const model = own ?? joined ?? UNATTRIBUTED_MODEL;
+    const cell = models.get(model) ?? { rows: 0, viaRun: 0 };
+    cell.rows += 1;
+    if (joined !== undefined) cell.viaRun += 1;
+    models.set(model, cell);
     if (typeof r.ts === "string" && (newestTs === undefined || r.ts > newestTs)) newestTs = r.ts;
   }
   return {
@@ -615,7 +646,7 @@ function laneSpendOf(lane: string, step: string, rows: LedgerRecord[]): LaneSpen
     costUsd: round(rows.reduce((s, r) => s + costOf(r), 0)),
     ...(newestTs !== undefined ? { newestTs } : {}),
     models: [...models.entries()]
-      .map(([model, n]) => ({ model, rows: n }))
+      .map(([model, c]) => ({ model, rows: c.rows, ...(c.viaRun > 0 ? { viaRun: c.viaRun } : {}) }))
       .sort((a, b) => (a.model < b.model ? -1 : a.model > b.model ? 1 : 0)),
   };
 }
@@ -658,11 +689,12 @@ export function architectLaneShare(records: LedgerRecord[]): ArchitectLaneShareR
     }
   }
 
+  const byRun = runModelIndex(records);
   const architectLanes = Object.entries(ARCHITECT_LANE_STEPS).map(([lane, step]) =>
-    laneSpendOf(lane, step, rowsByLane.get(lane) ?? []),
+    laneSpendOf(lane, step, rowsByLane.get(lane) ?? [], byRun),
   );
   const comparisonLanes = Object.entries(COMPARISON_LANE_STEPS).map(([lane, step]) =>
-    laneSpendOf(lane, step, rowsByLane.get(lane) ?? []),
+    laneSpendOf(lane, step, rowsByLane.get(lane) ?? [], byRun),
   );
   const allLanes = [...architectLanes, ...comparisonLanes];
   const architectRows = architectLanes.reduce((s, l) => s + l.rows, 0);
@@ -684,14 +716,16 @@ export function architectLaneShare(records: LedgerRecord[]): ArchitectLaneShareR
 
 /** Render one {@link ArchitectLaneShareReport} lane row (markdown table body). */
 function laneSpendRow(l: LaneSpend): string {
-  const models = l.models.length ? l.models.map((m) => `${m.model}×${m.rows}`).join(", ") : "(no rows)";
+  const models = l.models.length
+    ? l.models.map((m) => `${m.model}×${m.rows}${m.viaRun ? ` (${m.viaRun} via run join)` : ""}`).join(", ")
+    : "(no rows)";
   return `| ${l.lane} (\`${l.step}\`) | ${l.rows} | $${l.costUsd.toFixed(2)} | ${l.newestTs ?? "(none)"} | ${models} |`;
 }
 
 /** Render the lane table — Architect lanes first, in the SAME row shape, so the share is legible. */
 export function architectLaneShareTable(g: ArchitectLaneShareReport): string {
   return [
-    "| lane (`step`) | rows | notional $ (api-equivalent, NOT billed) | newest row | models (unattributed = no `model` key) |",
+    "| lane (`step`) | rows | notional $ (api-equivalent, NOT billed) | newest row | models (unattributed = no `model` key on the row OR its run's `implement.done`/`run.start.mount`) |",
     "|---|---|---|---|---|",
     ...g.architectLanes.map(laneSpendRow),
     ...g.comparisonLanes.map(laneSpendRow),
@@ -811,12 +845,37 @@ export function mastRowFor(mapping: MastMapping, run: Pick<RunSummary, "verdict"
   return mapping.rows.find((r) => r.verdict === run.verdict && r.subtype === undefined);
 }
 
+/** How a census learned each member's live merge state (Standing rule 28). */
+export type MergeStateSource = "github" | "ledger-only" | "unavailable";
+
+/** The merge-state join every failure census takes: run ids the SHIPPED union credited, and where
+ *  that knowledge came from. Why: docs/forensics/retro.md ("Standing rule 28 as code"). */
+export interface CensusMergeState {
+  creditedRunIds: ReadonlySet<string>;
+  source: MergeStateSource;
+  unavailableReason?: string;
+}
+
+const LEDGER_ONLY_MERGE_STATE: CensusMergeState = { creditedRunIds: new Set(), source: "ledger-only" };
+
+/** One verdict-blocked run whose pull request merged anyway — excluded from the census, named. */
+export interface ReconciledCensusMember {
+  runId: string;
+  taskId: string;
+  verdict: string;
+}
+
 /** The per-cycle MAST failure distribution `rmd retro` reports (W1-T89). */
 export interface MastCategoryDistribution {
   /** category -> count, deterministic order. A `merged` run never reaches {@link mastRowFor}. */
   byCategory: Record<string, number>;
   /** Every unmapped failure verdict, named and visible, never folded into a guessed category. */
   unmapped: Record<string, number>;
+  /** Standing rule 28: members whose PR merged despite a blocked verdict, never counted above. */
+  reconciled: ReconciledCensusMember[];
+  /** Members the census could not join to merge state — unconfirmed, never counted as failures. */
+  unconfirmed: Record<string, number>;
+  mergeStateSource: MergeStateSource;
 }
 
 function sortedCountRecord(m: Record<string, number>): Record<string, number> {
@@ -831,13 +890,28 @@ function sortedCountRecord(m: Record<string, number>): Record<string, number> {
 const CREDITED_VERDICTS: ReadonlySet<string> = new Set(["merged", "already_satisfied", "task_already_merged"]);
 
 /** Reduce a cycle's runs into a {@link MastCategoryDistribution}. The mapping is DATA, so a row
- *  edit alone flips a fixture's outcome (mast-mapping.test.ts). */
-export function mastCategoryDistribution(runs: RunSummary[], mapping: MastMapping): MastCategoryDistribution {
+ *  edit alone flips a fixture's outcome (mast-mapping.test.ts). A member the SHIPPED union credited
+ *  is reconciled, never a failure; a guard-fired block is a host signal whatever the gateway said. */
+export function mastCategoryDistribution(
+  runs: RunSummary[],
+  mapping: MastMapping,
+  mergeState: CensusMergeState = LEDGER_ONLY_MERGE_STATE,
+): MastCategoryDistribution {
   const byCategory: Record<string, number> = {};
   const unmapped: Record<string, number> = {};
+  const unconfirmed: Record<string, number> = {};
+  const reconciled: ReconciledCensusMember[] = [];
   for (const r of runs) {
     if (CREDITED_VERDICTS.has(r.verdict)) continue;
+    if (mergeState.creditedRunIds.has(r.runId)) {
+      reconciled.push({ runId: r.runId, taskId: r.taskId, verdict: r.verdict });
+      continue;
+    }
     const row = mastRowFor(mapping, r);
+    if (mergeState.source === "unavailable" && row?.category !== "infrastructure") {
+      unconfirmed[r.verdict] = (unconfirmed[r.verdict] ?? 0) + 1;
+      continue;
+    }
     if (row) {
       byCategory[row.category] = (byCategory[row.category] ?? 0) + 1;
     } else {
@@ -845,11 +919,49 @@ export function mastCategoryDistribution(runs: RunSummary[], mapping: MastMappin
       unmapped[key] = (unmapped[key] ?? 0) + 1;
     }
   }
-  return { byCategory: sortedCountRecord(byCategory), unmapped: sortedCountRecord(unmapped) };
+  reconciled.sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+  return {
+    byCategory: sortedCountRecord(byCategory),
+    unmapped: sortedCountRecord(unmapped),
+    reconciled,
+    unconfirmed: sortedCountRecord(unconfirmed),
+    mergeStateSource: mergeState.source,
+  };
+}
+
+/** The merge-state join, from the SAME SHIPPED union `renderGather` prints — one credit path. */
+export function censusMergeStateFrom(shipped: readonly ShippedRecord[], github: ShippedGithub | undefined, unavailable: string | undefined): CensusMergeState {
+  const creditedRunIds = new Set(shipped.map((s) => s.runId));
+  if (!github) return { creditedRunIds, source: "ledger-only" };
+  if (unavailable) return { creditedRunIds, source: "unavailable", unavailableReason: unavailable };
+  return { creditedRunIds, source: "github" };
+}
+
+function mergeStateLines(dist: MastCategoryDistribution, unavailableReason?: string): string[] {
+  const reconciledLines = dist.reconciled.map((m) => `- ${m.taskId} (${m.runId}): ledger verdict=${m.verdict}, PR MERGED — reconciled, not a failure`);
+  if (dist.mergeStateSource === "github") {
+    return [
+      `Merge-state join: github — ${dist.reconciled.length} verdict-blocked run(s) merged gate-side and are excluded above (Standing rule 28).`,
+      ...reconciledLines,
+    ];
+  }
+  if (dist.mergeStateSource === "unavailable") {
+    const n = Object.values(dist.unconfirmed).reduce((s, v) => s + v, 0);
+    const named = Object.entries(dist.unconfirmed).map(([k, v]) => `${k}×${v}`).join(", ") || "(none)";
+    return [
+      `Merge-state join: UNAVAILABLE${unavailableReason ? ` (${unavailableReason})` : ""} — ${n} member(s) UNCONFIRMED, never counted as failures (Standing rule 28): ${named}.`,
+      ...reconciledLines,
+    ];
+  }
+  return ["Merge-state join: ledger-only — NOT joined to live merge state; a verdict here is what the run observed, not what its PR did (Standing rule 28)."];
 }
 
 /** Render the MAST category table, with an optional trend column against the prior cycle. */
-export function mastDistributionTable(dist: MastCategoryDistribution, priorByCategory?: Record<string, number>): string {
+export function mastDistributionTable(
+  dist: MastCategoryDistribution,
+  priorByCategory?: Record<string, number>,
+  unavailableReason?: string,
+): string {
   const categories = [...new Set([...Object.keys(dist.byCategory), ...Object.keys(priorByCategory ?? {})])].sort();
   const rows = categories.map((c) => {
     const cur = dist.byCategory[c] ?? 0;
@@ -869,6 +981,8 @@ export function mastDistributionTable(dist: MastCategoryDistribution, priorByCat
       ? "Unmapped verdict classes (named, never guessed):"
       : "Unmapped verdict classes: (none)",
     ...unmappedLines,
+    "",
+    ...mergeStateLines(dist, unavailableReason),
   ].join("\n");
 }
 
@@ -925,10 +1039,14 @@ export interface InfrastructureEvent {
 
 /** Mine `runs` for every run the mapping codes `category: infrastructure` (Rule 2). An unresolved
  *  guard/check still counts, named "unknown". */
-export function infrastructureEvents(runs: RunSummary[], mapping: MastMapping): InfrastructureEvent[] {
+export function infrastructureEvents(
+  runs: RunSummary[],
+  mapping: MastMapping,
+  mergeState: CensusMergeState = LEDGER_ONLY_MERGE_STATE,
+): InfrastructureEvent[] {
   const out: InfrastructureEvent[] = [];
   for (const r of runs) {
-    if (CREDITED_VERDICTS.has(r.verdict)) continue;
+    if (CREDITED_VERDICTS.has(r.verdict) || mergeState.creditedRunIds.has(r.runId)) continue;
     const row = mastRowFor(mapping, r);
     if (row?.category !== "infrastructure") continue;
     const gc = resolveGuardCheck(r) ?? { guard: "unknown", check: "unknown" };
@@ -981,12 +1099,17 @@ export function infrastructureRecurrence(events: InfrastructureEvent[]): Infrast
 /** Per-task DEFECT count (W1-T91/P23 part ii): every non-merged run for that task EXCLUDING
  *  guard-fired infrastructure events, because a guard firing correctly is a host signal. Driven by
  *  the SAME mapping `category` {@link infrastructureEvents} reads — one classifier, not two. */
-export function taskDefectCounts(runs: RunSummary[], mapping: MastMapping): Record<string, number> {
+export function taskDefectCounts(
+  runs: RunSummary[],
+  mapping: MastMapping,
+  mergeState: CensusMergeState = LEDGER_ONLY_MERGE_STATE,
+): Record<string, number> {
   const out: Record<string, number> = {};
   for (const r of runs) {
-    if (CREDITED_VERDICTS.has(r.verdict)) continue;
+    if (CREDITED_VERDICTS.has(r.verdict) || mergeState.creditedRunIds.has(r.runId)) continue;
     const row = mastRowFor(mapping, r);
     if (row?.category === "infrastructure") continue; // guard-fired, not a task defect
+    if (mergeState.source === "unavailable") continue; // unconfirmed, never a defect (rule 28)
     out[r.taskId] = (out[r.taskId] ?? 0) + 1;
   }
   return sortedCountRecord(out);
@@ -1204,6 +1327,10 @@ export interface RetroGather {
   /** W1-T87/P13: the other half of the flywheel — merged-run shapes shared by two or more runs,
    *  mined as procedural-learning candidates for the Architect to phrase and ratify. */
   proceduralCandidates: ProceduralCandidate[];
+  /** W1-T2766: a drafted SKILL.md beside each `proceduralCandidates` entry that cleared the
+   *  two-run floor — the flywheel's other half, a procedure the runtime EXECUTES rather than a
+   *  fact line it only recalls. Rendering never writes; `rmd approve` is the only ratifying path. */
+  skillDrafts: SkillDraft[];
   learningsNow: number;
   learningsAtMarker: number;
   /** W1-T132: present ONLY when `opts.github.unavailable()` named a reason. `renderGather` refuses
@@ -1288,7 +1415,11 @@ export function buildGather(opts: {
   const githubUnavailable = opts.github?.unavailable?.();
   // Computed once, shared by the events list and its recurrence trend — never two reads.
   const mapping = opts.mastMapping ?? { rows: [] };
-  const infraEvents = infrastructureEvents(scoped, mapping);
+  const mergeState = censusMergeStateFrom(shipped, opts.github, githubUnavailable);
+  const infraEvents = infrastructureEvents(scoped, mapping, mergeState);
+  // Mined ONCE, read by both `proceduralCandidates` and `skillDrafts` below — a draft with no
+  // matching candidate in the gather would be a procedure the gather never actually observed.
+  const proceduralCandidates = mineProceduralCandidates(merged, records);
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
@@ -1309,18 +1440,20 @@ export function buildGather(opts: {
     // re-surfaces for a run the marker has moved past (W1-T73).
     degradedSuccess: mineDegradedSuccess(merged, records),
     // Same marker-scoped window as degradedSuccess above (W1-T87/P13).
-    proceduralCandidates: mineProceduralCandidates(merged, records),
+    proceduralCandidates,
+    // Drafted from the SAME candidates above, never re-mined (W1-T2766).
+    skillDrafts: proceduralCandidates.map((c) => renderSkillDraft(c)).filter((d): d is SkillDraft => d !== undefined),
     learningsNow: learningsCount(opts.learningsMd),
     learningsAtMarker: opts.learningsAtMarker ?? 0,
     ...(githubUnavailable ? { githubUnavailable } : {}),
     // SAME `scoped` window as verdicts above — the whole cycle's runs, not just the merged
     // subset, since anything narrower would miss runs mergedSince excludes by definition.
-    mast: mastCategoryDistribution(scoped, mapping),
+    mast: mastCategoryDistribution(scoped, mapping, mergeState),
     ...(opts.priorMastCategoryCounts ? { priorMastCategoryCounts: opts.priorMastCategoryCounts } : {}),
     // SAME `scoped` window and mapping as `mast`: one classifier read twice (W1-T91/P23).
     infrastructureEvents: infraEvents,
     infrastructureRecurrence: infrastructureRecurrence(infraEvents),
-    taskDefectCounts: taskDefectCounts(scoped, mapping),
+    taskDefectCounts: taskDefectCounts(scoped, mapping, mergeState),
     // The FULL ledger, never `scoped`: a followup must survive past the marker window, and
     // W1-T1013 makes "full" the archive ∪ live union, because rotation truncates the live file.
     followups: mineFollowups(followupRecords, opts.openTitles ?? []),
@@ -1452,7 +1585,7 @@ export function renderGather(g: RetroGather): string {
       : []),
     "",
     "## Failure distribution BY MAST CATEGORY (W1-T89, ratifies P18 — plan/mast-mapping.yaml)",
-    mastDistributionTable(g.mast, g.priorMastCategoryCounts),
+    mastDistributionTable(g.mast, g.priorMastCategoryCounts, g.githubUnavailable),
     "",
     // Guard-fired blocks are already excluded from `mast`'s agent-failure categories; this is the
     // per-guard/check view plus the per-task defect exclusion the defect stats must honour.
@@ -1463,6 +1596,8 @@ export function renderGather(g: RetroGather): string {
     renderDegradedSuccess(g.degradedSuccess),
     "",
     renderProceduralCandidates(g.proceduralCandidates),
+    "",
+    renderSkillDrafts(g.skillDrafts),
     "",
     renderFollowupCandidates(g.followups),
     // W1-T2642: ALWAYS printed — `g.planCoherence` is never undefined (see its own field doc).

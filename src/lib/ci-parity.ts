@@ -1602,6 +1602,23 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "`git ls-files -s escape` runs inside a throwaway fixture repo and reads ONE fixture path (asserting mode 120000, i.e. a " +
       "committed symlink) — it is not a walk of the tracked src/ population and asserts nothing over any tree-wide set",
   ),
+  refusedForPredicate(
+    "test/env-var-registry.test.ts",
+    "a",
+    "W1-T2900's harness-env registry suite. Its `git ls-files src/**/*.ts` DOES enumerate the tracked src/ population and it " +
+      "reads each file's text, so it satisfies (b) and (c). It fails (a) on WHAT IT ASSERTS OVER: the property is a SET " +
+      "EQUALITY between the `RMD_`/`REMUDERO_` literals found anywhere in that text and ENV_REGISTRY's names — a fact about " +
+      "the tree-wide literal set, not a property each enumerated file must hold. A src file containing no env literal " +
+      "contributes nothing and is asserted over in no way, which is the same shape as " +
+      "test/rule-citation-gate-engine-portable.test.ts above: the enumeration is a SEARCH for call sites rather than the " +
+      "population under test. " +
+      "NOTE FOR A LATER READER, and the numbers are supplied so the decision needs no re-measurement: this suite is CHEAP — " +
+      "`node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/env-var-registry.test.ts`, alone, measured " +
+      "2026-09-07 at 243/215/213ms across three runs (median 215ms), far under FAST_GATE_CENSUS_BOUND_MS. So cost is NOT the " +
+      "reason it sits here, and admission is the defensible alternative. It was NOT taken: admission changes FAST_GATE_STEPS " +
+      "composition, which the entry above records as a decision a build pass must not make unilaterally. If an operator " +
+      "judges (a) satisfied, this row becomes an ADMITTED entry with `script: \"census:env-var-registry\"` and that measured ms.",
+  ),
 ];
 
 // W1-T2644: the roster is the population, re-exported under the name that task's acceptance

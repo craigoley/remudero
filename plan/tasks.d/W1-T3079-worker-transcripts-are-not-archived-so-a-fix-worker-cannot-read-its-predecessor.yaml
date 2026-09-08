@@ -1,0 +1,69 @@
+- id: W1-T3079
+  title: "WORKER TRANSCRIPTS ARE NOT ARCHIVED, SO A FIX WORKER CANNOT READ WHAT ITS PREDECESSOR TRIED — MASTER-PLAN §Self-improvement promises a per-task transcript archive with a predecessor query, `workerTranscript` lives only for the run that produced it, the retro reads the NDJSON ledger and never a transcript, and a fix worker receives a 60-line CI tail plus the unmet criteria and no record of the approach that just failed, which is how a second strike repeats the first"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [src/run-task.ts, src/lib/sweep.ts, test/a-fix-worker-is-pointed-at-its-predecessors-transcript.test.ts]
+  origin: "operator-session#deep-research-2026-09-07"
+  plan_refs: ["W1-T2733", "W1-T2236", "W1-T1269", "W1-T2205"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MASTER-PLAN §Self-improvement: "Transcript archive + predecessor query: every worker session
+    transcript is archived per task; fix/diagnose workers may read their predecessors' transcripts
+    before acting (Gas Town's 'seance' pattern, done as plain files)."
+
+    OBSERVED at b8892bc4: `grep -rn "seance\|predecessor" src/` returns nothing relevant; no
+    `archiveTranscript` or transcript store exists; `src/run-task.ts`'s `workerTranscript` is
+    consumed in-run (W1-T2205 fixed its double count) and discarded with the run. The retro's
+    `buildGather` parses the NDJSON ledger only. `renderFixPrompt` (`src/run-task.ts`) hands a fix
+    worker exactly one evidence mode — the CI failure tail (bounded, W1-T2733), or the unmet
+    criteria and gate failures, or the merge conflict — plus the declared scope. The only
+    predecessor material any worker sees is the DIAGNOSE report appended verbatim on a
+    diagnose-informed retry (`runDiagnoseThenRetry`), which is one path of many.
+
+    W1-T1269 ("the fix rung retries with no test for progress") and W1-T2328 ("never asks whether
+    the verdict moved") both describe strikes that repeat because nothing carries the prior attempt
+    forward. Reflexion-style episodic memory (arXiv 2303.11366) and the Darwin Godel Machine's own
+    self-discovered improvement — "a history of what has been tried before (and why it failed)" —
+    are the published forms of the same fix.
+  design: |
+    (i) ARCHIVE AT `implement.done`, `diagnose.worker_done` AND EVERY FIX WORKER EXIT: write the
+    joined transcript to `<config.root>/state/transcripts/<taskId>/<runId>.<rung>.md` with a
+    small front-matter (run id, rung, model, verdict-so-far, head sha). Atomic write (temp +
+    rename, Standing rule 23). `state/` is already the daemon's exhaust and gitignored.
+    (ii) BOUND IT: keep the newest N per task (policy row, default 5) and cap each file at the
+    existing `REPORT_EXCERPT_CAP`-scaled size; a reaper runs where `reapStaleWorktrees` already
+    runs. Never a growth with no ceiling.
+    (iii) POINT, DO NOT INJECT: `renderFixPrompt` and the diagnose prompt gain ONE line naming the
+    predecessor transcript path(s) for this task and PR, newest first, with the instruction to
+    read them before acting. Injecting the transcript would blow the context budget and is the
+    whole-file-injection anti-pattern the learnings store already avoids; a path is retrieval.
+    (iv) LEDGER ONE ROW `transcript.archived` per write (path, bytes, rung) so the retro can
+    measure whether fix rungs that had a predecessor pointer strike less — the efficacy question
+    is left to a later task, but its data starts now.
+  acceptance:
+    - claim: "an implement worker's transcript is written atomically under state/transcripts keyed by task and run, and the ledger carries transcript.archived"
+      proof: "unit test: test/a-fix-worker-is-pointed-at-its-predecessors-transcript.test.ts"
+    - claim: "the rendered fix prompt names the newest predecessor transcript path for the same task and PR, and names nothing when none exists"
+      proof: "unit test: test/a-fix-worker-is-pointed-at-its-predecessors-transcript.test.ts"
+    - claim: "the per-task retention bound keeps the newest N and removes the rest"
+      proof: "unit test: test/a-fix-worker-is-pointed-at-its-predecessors-transcript.test.ts"
+  falsifier: |
+    CLOSE IF a transcript archive exists under any name: grep `src/` for `transcripts/` and for a
+    write of `workerTranscript` to disk. MEASURED 2026-09-07: none.
+    PROVE IT LOAD-BEARING: with the pointer line removed from `renderFixPrompt`, the second
+    criterion's positive fixture must fail while the archive write still passes.
+  note: |
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3088's note). risk:high on
+    Rule 19 SPAN (the archive write in run-task.ts, the pointer in the fix prompt, one suite).
+    The efficacy measurement (do pointed fix rungs strike less) is deliberately NOT here.
+    DUPLICATE-SURFACE ADVISORY, ANSWERED: `lint-plan` names W1-T77, W1-T78, W1-T100, W1-T150, W1-T168 and W1-T176 as live shards sharing
+    run-task.ts with this one. Every one of them predates the sweep's fix rung as it exists today and
+    none names a per-run transcript archive and the predecessor pointer in the fix prompt; the overlap is the run-task.ts hot-file class (445 of 1,204 shards declare
+    it), not a duplicate of this work.

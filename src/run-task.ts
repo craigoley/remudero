@@ -690,6 +690,7 @@ import {
   projectLearningsHome,
   renderDoctrinePreamble,
   renderExportBundle,
+  renderHeadlineOnlyIndex,
   retrieveRuleBodyOrDegrade,
   runPromotionPass,
   verifyBundlePin,
@@ -2070,7 +2071,14 @@ export function ghPrCreateFillCommand(
     // design (iv): the branch-name fallback is stated in the body, never silent.
     bodyParts.push(`(no commit-derived title was available — this PR is titled after its branch, \`${branch}\`)`);
   }
-  const body = bodyParts.filter((p) => p.length > 0).join("\n\n");
+  // THE ACCEPTANCE BLOCK IS AUTHORED HERE, NOT LEFT TO A LATER RED. `fillDerivedBody` derives the
+  // body from the commit, which carries no Acceptance block, so every PR opened through this seam
+  // used to reach `acceptance-author-gate` with nothing to judge and fail closed. A no-op whenever
+  // the body already parses judgeably.
+  const body = ensureJudgeableBody(
+    bodyParts.filter((p) => p.length > 0).join("\n\n"),
+    PR_OPEN_TIME_ACCEPTANCE_FALLBACK,
+  );
   const args = [
     "api",
     "--method",
@@ -4215,6 +4223,34 @@ const ACCEPTANCE_AUTHOR_GATE_CHECK_NAME = "acceptance-author-gate";
  * `repairRetroAcceptanceBlock`'s own fallback shape (a claim about gate-compliance, not content),
  * the SAME instrument, applied here to a different PR-authoring path.
  */
+/**
+ * W1-T3066 — THE SAME REPAIR, AT THE MOMENT THE PR IS OPENED RATHER THAN AFTER IT GOES RED.
+ * {@link ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK} below is the fix rung's, applied once
+ * `acceptance-author-gate` has already refused a PR; this one is applied by
+ * {@link ghPrCreateFillCommand} before the PR exists, so the refusal never happens. The wording is
+ * DELIBERATELY NOT SHARED: the fix rung's text says the gate refused this body, which is true there
+ * and false here, and a body that misreports its own provenance is the defect this repo keeps
+ * paying for. Same predicate, same renderer, two honest sentences.
+ *
+ * WHAT THIS DOES AND DOES NOT BUY, stated plainly. It does NOT make a PR's claims better: a generic
+ * block says only that the body parses. It removes a WASTED CYCLE — measured 2026-09-07, six PRs
+ * (#4447, #4449, #4461, #4465, #4471, #4472) each opened with no judgeable block, went red on
+ * `acceptance-author-gate`, and were then repaired by hand or by the rung, every one costing a full
+ * CI run first. It weakens nothing that was not already weakened: the fix rung ALREADY substitutes
+ * this same generic block, just later. And it is INERT wherever criteria really resolve — a body
+ * carrying a `Remudero-Task:` trailer whose shard is on main is judged from the shard, and
+ * `bodyNeedsAcceptanceRepair` leaves a healthy block untouched.
+ */
+const PR_OPEN_TIME_ACCEPTANCE_FALLBACK: AcceptanceCriterion[] = [
+  {
+    claim:
+      "this PR body carries a judgeable Acceptance block (auto-authored when the PR was opened, " +
+      "because the commit-derived body carried none) — not a claim that the underlying diff is " +
+      "correct, or that any task's acceptance is met",
+    proof: "acceptanceAuthorTimeCheck (src/lib/review.ts) — the same predicate scripts/acceptance-author-gate.mjs runs in CI — returns ok:true for this body",
+  },
+];
+
 const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
   {
     claim:
@@ -12271,6 +12307,10 @@ export function implementPromptParts(
   runId: string,
   matchedLearnings = "",
   operatorNotesBlock = "",
+  // W1-T2761: policy-gated headline index (`buildRuleHeadlinesPart`, below) — "" when the
+  // `workerRuleHeadlines.enabled` row is absent or off, the default for every existing caller
+  // that never passes this argument at all.
+  ruleHeadlinesPart = "",
 ): Array<{ name: string; value: string }> {
   const contextClaims = (task.context ?? [])
     .map((c) => `- ${c.claim} ${citation(c.src)}`)
@@ -12280,6 +12320,10 @@ export function implementPromptParts(
     .split("${TASK_ID}").join(task.id);
   return [
     { name: "doctrine", value: renderDoctrinePreamble() },
+    // W1-T2761, design (ii): directly after doctrine — the other STABLE half of the CONTEXT
+    // block. It changes only when CLAUDE.md's own headline set moves, never per-task/per-run,
+    // so it precedes every volatile/per-task part exactly as renderDoctrinePreamble does.
+    { name: "rule_headlines", value: ruleHeadlinesPart },
     { name: "task_claims", value: contextClaims },
     { name: "recon", value: reconContext },
     { name: "operator_notes", value: operatorNotesBlock },
@@ -12294,8 +12338,9 @@ export function renderImplementPrompt(
   runId: string,
   matchedLearnings = "",
   operatorNotesBlock = "",
+  ruleHeadlinesPart = "",
 ): string {
-  const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
+  const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart);
   const partValue = (name: string) => parts.find((p) => p.name === name)!.value;
 
   return [
@@ -12307,6 +12352,9 @@ export function renderImplementPrompt(
     "",
     "# CONTEXT",
     partValue("doctrine"),
+    // W1-T2761: an empty part (the row absent/off) contributes NOTHING — not even a blank line —
+    // so a disabled row renders BYTE-IDENTICAL to every render before this task existed.
+    ...(partValue("rule_headlines") ? [partValue("rule_headlines")] : []),
     partValue("task_claims"),
     partValue("recon"),
     partValue("operator_notes"),
@@ -12323,6 +12371,23 @@ export function renderImplementPrompt(
   ].join("\n");
 }
 
+/** Shared default `readFile` for a rule-source read ({@link retrieveRuleBodyOnDemand} and
+ *  {@link buildRuleHeadlinesPart} below both default to this ONE function, never a
+ *  copy-pasted second try/catch) — repo-relative FILE resolution `run-task.ts` already
+ *  centralises for every other repo-rooted read. */
+function readRuleSourceFileOrUndefined(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    // DELIBERATE ERASURE, and the one place it is correct here: `undefined` is this seam's
+    // OWN "the rule source could not be read" value, and every caller turns it into an
+    // explicit unreadable RuleHeadline that degrades to the FULL rule. Distinguishing a
+    // missing file from an unreadable one would change nothing at either call site — both
+    // must degrade, never withhold — so carrying the distinction would be dead information.
+    return undefined;
+  }
+}
+
 /**
  * W1-T2508: the ON-DEMAND half of the progressive-disclosure mechanism `learnings.ts` now
  * exposes — given a headline+body rule corpus's raw markdown (CLAUDE.md's own bullets, W1-T2507's
@@ -12334,28 +12399,18 @@ export function renderImplementPrompt(
  * file). `readFile` is injectable — default a real `readFileSync` — so a test can simulate an
  * unreadable source (the retrieval path failing) without touching disk.
  *
- * NOT wired into {@link implementPromptParts}/{@link renderImplementPrompt}: making a worker's
- * stable prefix carry headlines instead of CLAUDE.md's current whole-file inject is a follow-up
- * switch-over, not this task's acceptance — W1-T2508's rationale's own "NOT IN SCOPE" names "any
- * change to what a worker is permitted to do". What this proves is that the retrieval path exists
- * and degrades to the full rule (never to silence) BEFORE any body is ever withheld from a live
- * prompt — the ordering the rationale calls out as the hazard.
+ * STILL NOT WIRED INTO A LIVE CALL SITE, even after W1-T2761: this resolves ONE headline's body
+ * by name, for a future mid-run retrieval a worker asks for explicitly — that call site remains
+ * unbuilt, per W1-T2508's own "NOT IN SCOPE: any change to what a worker is permitted to do".
+ * What W1-T2761 DOES wire in is this function's SIBLING primitive, {@link
+ * retrieveRuleBodyOrDegrade}: {@link buildRuleHeadlinesPart} (below) reuses it to degrade the
+ * WHOLE headline index to a synthetic full-rule line when CLAUDE.md is unreadable, the same
+ * never-silence discipline this function already proved safe for one rule at a time.
  */
 export function retrieveRuleBodyOnDemand(
   headline: string,
   sourcePath: string,
-  readFile: (path: string) => string | undefined = (p) => {
-    try {
-      return readFileSync(p, "utf8");
-    } catch {
-      // DELIBERATE ERASURE, and the one place it is correct here: `undefined` is this seam's
-      // OWN "the rule source could not be read" value, and the sole caller below turns it into
-      // an explicit unreadable RuleHeadline that degrades to the FULL rule. Distinguishing a
-      // missing file from an unreadable one would change nothing at that call site — both must
-      // degrade, never withhold — so carrying the distinction would be dead information.
-      return undefined;
-    }
-  },
+  readFile: (path: string) => string | undefined = readRuleSourceFileOrUndefined,
 ): string {
   const raw = readFile(sourcePath);
   if (raw === undefined) {
@@ -12372,6 +12427,64 @@ export function retrieveRuleBodyOnDemand(
     body: ` (unavailable — no headline matches "${headline}" in ${sourcePath})`,
   };
   return retrieveRuleBodyOrDegrade(rule, (h) => index.get(h));
+}
+
+/** The one citation every `rule_headlines` line carries — the task that shipped the
+ *  parse/index/degrade primitives {@link buildRuleHeadlinesPart} is built from. Not a per-rule
+ *  citation (CLAUDE.md's individual headlines carry no per-line provenance of their own); this
+ *  cites the MECHANISM that makes surfacing them to a worker safe. */
+const RULE_HEADLINES_SRC = "plan#W1-T2508";
+
+/**
+ * W1-T2761, design (ii)/(iii) — build the `rule_headlines` prompt PART / anchor section: CLAUDE.md's
+ * headline-only index ({@link renderHeadlineOnlyIndex}, learnings.ts) plus one pointer line naming
+ * where a body is read from, gated by `policy.ts`'s `workerRuleHeadlines.enabled`. `enabled: false`
+ * (the row absent or off, the default) returns `""` — the ONE call both `implementPromptParts`
+ * (the turn-0 CONTEXT part) and `renderAnchorBlock` (the post-compaction re-injection) share, so
+ * "the index the worker was told at turn 0" and "the index re-injected after a compaction" can
+ * never drift apart (same discipline `outputContractLines` already keeps for the hard constraints).
+ *
+ * CITED PER LINE, NOT REUSING {@link renderHeadlineOnlyIndex}'s BARE OUTPUT DIRECTLY: this text
+ * lands inside a prompt's `# CONTEXT` block, and `assertProvenance` (provenance.ts) requires every
+ * claim there to carry a `[src:]` — its block grouping treats ANY line starting with a list marker
+ * as a NEW, separately-citeable claim, so a raw `- **headline**` per line would need its own
+ * citation, not one at the end. The fix keeps ONE bulleted opening line (cited) and renders every
+ * headline as a plain `**headline**` CONTINUATION line (no leading `-`, so the linter folds it into
+ * the same block) — {@link renderAnchorBlock} embeds this SAME string unchanged, where no linting
+ * ever applies, so the citation-safety cost is paid once and read everywhere.
+ *
+ * DEGRADES, NEVER GOES SILENT (the W1-T2508 hazard, honoured at the seam it names): an unreadable
+ * `sourcePath` builds a synthetic one-rule `RuleHeadline` and resolves it through {@link
+ * retrieveRuleBodyOrDegrade} — the SAME degrade primitive {@link retrieveRuleBodyOnDemand} uses —
+ * so the worker is told a headline that turned out unreadable, in full, rather than nothing at all.
+ */
+export function buildRuleHeadlinesPart(
+  enabled: boolean,
+  sourcePath: string,
+  readFile: (path: string) => string | undefined = readRuleSourceFileOrUndefined,
+): string {
+  if (!enabled) return "";
+  const introLine =
+    `- CLAUDE.md's rule headlines (progressive disclosure, W1-T2508) — headlines only, no ` +
+    `bodies, so you know what exists without paying for what you don't need yet. ` +
+    citation(RULE_HEADLINES_SRC);
+  const raw = readFile(sourcePath);
+  if (raw === undefined) {
+    const unreadable: RuleHeadline = {
+      headline: "CLAUDE.md rule index",
+      body: ` (unavailable — could not read rule source ${sourcePath})`,
+    };
+    return [introLine, `    ${retrieveRuleBodyOrDegrade(unreadable, () => undefined)}`].join("\n");
+  }
+  const rules = parseRuleHeadlines(raw);
+  const indexLines = renderHeadlineOnlyIndex(rules)
+    .split("\n")
+    .filter((l) => l.length > 0)
+    .map((l) => `    ${l.replace(/^- /, "")}`);
+  const pointer =
+    `    Read a headline's full body from ${sourcePath} in your own worktree when you need it — ` +
+    "this index carries headlines only.";
+  return [introLine, ...indexLines, pointer].join("\n");
 }
 
 /**
@@ -12595,6 +12708,18 @@ async function runTask(
      *  CONTEXT block; see {@link reconMaskedContextNote}) instead of whatever recon would have
      *  observed. Never set by any caller other than `wipeTestCommand`. */
     maskRecon?: boolean;
+    /** W1-T2761 (P12 wipe-test harness, RULES factor): arm B of a RULES-factor `rmd wipe-test`
+     *  pair — force the `rule_headlines` prompt part to `""` for this run REGARDLESS of the
+     *  `workerRuleHeadlines.enabled` policy row, masking the part and nothing else
+     *  ({@link wipeTestFactorMasksRules}, wipe-test.ts). Never set by any caller other than
+     *  `wipeTestCommand`. */
+    maskRules?: boolean;
+    /** Injectable override for the `workerRuleHeadlines.enabled` policy gate (design (i)) — the
+     *  SAME `?? loadDefaultPolicy()` seam every other opts-defaulted policy knob in this file
+     *  uses, so a test can drive the `rule_headlines` prompt part on/off without a real
+     *  `plan/policy.yaml` row. Default: `loadDefaultPolicy().values.workerRuleHeadlines.enabled`
+     *  (absent/off unless an operator commits the row). */
+    workerRuleHeadlinesEnabled?: boolean;
     /** Injectable containment-probe executor (W1-T91) — behavioral tests drive the REAL
      *  blocked_containment catch branch (the structured guard/check/observed fields on its
      *  ledger verdict line) through this seam, the SAME shape `defaultReconRunLens`'s own
@@ -13666,7 +13791,16 @@ async function runTask(
         : reconDegradedSubtype
           ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
           : reconObservedToContext(recon!, taskId, recordPath);
-    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
+    // W1-T2761: the `rule_headlines` part — "" (identical to every render before this task)
+    // unless `workerRuleHeadlines.enabled` is on AND this isn't a RULES-factor wipe-test arm B.
+    // Read from THIS dispatch's own worktree (W1-T501's "the worker's own tree, never the
+    // orchestrator's" discipline `recordPath` above already follows), never the orchestrator's
+    // own checkout, so a worker is only ever handed an index of the CLAUDE.md it can itself see.
+    const ruleHeadlinesEnabled = opts.maskRules
+      ? false
+      : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
+    const ruleHeadlinesPart = buildRuleHeadlinesPart(ruleHeadlinesEnabled, join(worktreePath, "CLAUDE.md"));
+    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -13686,7 +13820,9 @@ async function runTask(
     // `buildPromptManifest`'s own doc. A RECORD, never a gate: nothing reads this to decide
     // anything, so it is deliberately NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts).
     log("prompt.manifest", {
-      parts: buildPromptManifest(implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock)),
+      parts: buildPromptManifest(
+        implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart),
+      ),
     });
 
     // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
@@ -13695,8 +13831,10 @@ async function runTask(
     // repo-state fact, not a claim in a possibly-lossy REPORT. Live mid-stream
     // re-injection (a real compaction firing during THIS spawn) is W1-T12e's
     // operator-golden drill — this run-level wiring records the anchor that
-    // drill will send.
-    const anchor = renderAnchorBlock(task, runId);
+    // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
+    // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
+    // headline index that drifted from what turn 0 actually said.
+    const anchor = renderAnchorBlock(task, runId, ruleHeadlinesPart);
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -21676,6 +21814,14 @@ export const WIPE_TEST_CADENCE_CONTRACT_VERSION = "v1";
 export const HEADROOM_CONTRACT_VERSION = "v1";
 export const SCRATCH_REAP_CONTRACT_VERSION = "v1";
 export const WORKTREE_REAP_BOOT_CONTRACT_VERSION = "v1";
+// W1-T2761: `workerRuleHeadlines` joins GATED_RUNGS the moment its `.enabled` origin entry
+// lands in policy.ts, exactly as wipeTestCadence's own comment above describes. Its constant is
+// exported for that SAME enumeration but, like `headroom`'s, is deliberately NOT wired to a live
+// `ratificationPinCheck` call: unlike a spend/mint rung, "refuse ⇒ behave as disabled" here only
+// NARROWS what a worker's prompt carries (design (v)'s "can only refuse" direction, correctly
+// aligned) — wiring Law 5 for it is a separate operator decision this task's design never asked
+// for, not a call this diff makes on the design's behalf.
+export const WORKER_RULE_HEADLINES_CONTRACT_VERSION = "v1";
 
 /** Rung name (as {@link GATED_RUNGS} spells it) -> its contract-version constant above — the one
  *  registry `rmd ratify <rung>` and every `ratificationPinCheck(...)` call site resolve against,
@@ -21692,6 +21838,7 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   headroom: HEADROOM_CONTRACT_VERSION,
   scratchReap: SCRATCH_REAP_CONTRACT_VERSION,
   worktreeReapBoot: WORKTREE_REAP_BOOT_CONTRACT_VERSION,
+  workerRuleHeadlines: WORKER_RULE_HEADLINES_CONTRACT_VERSION,
 };
 
 /** Ledger one rung's refusal (design (ii): "a refusal ledgers `rung.unratified` with the diff").
@@ -30662,6 +30809,49 @@ export function buildOpenPrViews(
  * === [] here, never a hard failure of its own.
  */
 /**
+ * W1-T3067 — every merge commit's CHANGED PATHS on `origin/main`, keyed by the PR number a squash
+ * merge puts in `(#N)`. ONE local git invocation per pass. This is the producer the plan-only DIFF
+ * refusal needs: a merged PR's merge commit is on `origin/main` by definition, so this answers for
+ * exactly the population credit is derived over, and it answers for FREE.
+ *
+ * ⚠ WITHOUT THIS THE REFUSAL IS INERT. `DeriveDeps.mergedPathsByPr` defaults to absent, and absent
+ * means the pre-W1-T3067 shortcut decides — which is what credited #3195, a `chore(plan)` on its
+ * own run branch, and cost the validated build in #4461.
+ *
+ * ⚠ BEST-EFFORT, AND AN EMPTY MAP IS THE SAFE ANSWER: a failed or truncated read leaves every PR
+ * without an entry, which restores exactly today's behaviour rather than refusing anything. A
+ * transient git failure must never be able to uncredit the plan.
+ */
+export function readMergedPathsByPr(root: string, limit = MERGED_PATHS_SCAN_LIMIT): Map<number, string[]> {
+  const byPr = new Map<number, string[]>();
+  try {
+    const out = execFileSync(
+      "git",
+      ["log", "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
+      { cwd: root, encoding: "utf8", maxBuffer: 1 << 26 },
+    );
+    let current: number | undefined;
+    for (const raw of out.split("\n")) {
+      if (raw.startsWith("\u0000")) {
+        const m = raw.slice(1).match(/\(#(\d+)\)\s*$/);
+        current = m ? Number(m[1]) : undefined;
+        if (current !== undefined && !byPr.has(current)) byPr.set(current, []);
+        continue;
+      }
+      const path = raw.trim();
+      if (!path || current === undefined) continue;
+      const files = byPr.get(current);
+      // FIRST commit wins per PR: `--first-parent` walks newest-first, and a PR number appearing
+      // twice means a re-merge, whose newest paths are the ones credit was derived from.
+      if (files && files.length < MERGED_PATHS_PER_PR_CAP) files.push(path);
+    }
+  } catch {
+    /* best-effort: an unreadable log yields an empty map, and absent restores today's behaviour */
+  }
+  return byPr;
+}
+
+/**
  * W1-T3063 — `origin/main`'s merge subjects, keyed by the PR number a squash merge puts in
  * `(#N)`. ONE local git invocation per sweep pass; no network, no per-candidate cost.
  *
@@ -30688,6 +30878,12 @@ function readMergeSubjectsByPr(root: string): Map<number, string> {
   return byPr;
 }
 
+/** How far back {@link readMergedPathsByPr} scans. A BACKSTOP on cost, not a correctness bound: a
+ *  merge outside the window has no entry and takes the pre-existing path. */
+const MERGED_PATHS_SCAN_LIMIT = 4000;
+/** Per-PR path cap. `isPlanOnlyChangeset` only needs to see ONE non-plan path to answer, so a
+ *  1,000-file merge does not need 1,000 strings held to decide it. */
+const MERGED_PATHS_PER_PR_CAP = 200;
 /** How far back {@link readMergeSubjectsByPr} scans. A BACKSTOP on cost, not a correctness bound:
  *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
 const MERGE_SUBJECT_SCAN_LIMIT = 5000;
@@ -30707,7 +30903,13 @@ function buildCreditCandidates(
 ): CreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
-  const deps: DeriveDeps = { ledgerPath, github: github ?? buildBatchedGithub(owner, repo, { log }) };
+  // W1-T3067: the free local evidence the plan-only DIFF refusal needs, built ONCE for the whole
+  // walk below rather than per task — `deriveStatus` runs once per plan task (~1,400 a pass).
+  const deps: DeriveDeps = {
+    ledgerPath,
+    github: github ?? buildBatchedGithub(owner, repo, { log }),
+    mergedPathsByPr: readMergedPathsByPr(repoRoot),
+  };
   // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
   // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
@@ -30792,7 +30994,20 @@ export function buildEscalationReconcileCandidates(
   // would make `issuesSeen > total` on a healthy pass whenever a PR happens to carry the label,
   // i.e. a false alarm in the one field added to stop false alarms.
   const intake: EscalationIntake = { issuesSeen: open.length, droppedNoTaskTrailer: 0, droppedNoReferent: 0 };
-  const deps: DeriveDeps = { ledgerPath, github: injected.github ?? buildBatchedGithub(owner, repo, { log }) };
+  // W1-T3067 — THE SECOND DESTRUCTIVE CONSUMER, wired for the same reason as the first. This
+  // builder reads `proj.merged` and feeds the closer that CLOSES a needs-human issue; a credit
+  // earned by a plan-only filing would close an escalation whose task is not done, which is the
+  // supersession incident (#4461) in a different surface. The free local evidence must reach here
+  // too, or the refusal is fixed in one place and open in the other.
+  //
+  // A SECOND `git log` PER SWEEP PASS IS THE COST, and it is local and bounded. The alternative —
+  // hoisting one map through the sweep composition into both builders — threads a new argument
+  // through call sites that do not otherwise change, for a saving measured in milliseconds.
+  const deps: DeriveDeps = {
+    ledgerPath,
+    github: injected.github ?? buildBatchedGithub(owner, repo, { log }),
+    mergedPathsByPr: readMergedPathsByPr(repoRoot),
+  };
   const candidates: EscalationReconcileCandidate[] = [];
   for (const issue of open) {
     const taskId = /^\*\*Task:\*\*\s*(\S+)\s*$/m.exec(issue.body ?? "")?.[1];
@@ -32076,6 +32291,7 @@ export function buildSweepEffects(
   | "dispatchFix"
   | "escalate"
   | "readLiveState"
+  | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
   | "depReview"
   | "postReview"
@@ -33029,6 +33245,25 @@ export function buildSweepEffects(
     // blocked-fixable disposition actually spends a fix-rung strike — see
     // `SweepDeps.readLiveState`'s own doc for the fail-open contract.
     readLiveState: (pr) => ghLiveState(pr.prUrl),
+
+    // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
+    // dispatch surface invokes `dispatchFix`. Reads the SAME process-lifetime `terminalHeads`
+    // map (above) `dispatchFix`'s own `priorTerminal?.escalated` early-return already consults —
+    // no second cache, no fresh GitHub read. Declines only the exact `PR@head SHA` whose
+    // escalation was already delivered; a cached entry that has not yet delivered (or was never
+    // cached at all) returns `undefined` and the ordinary dispatch path — including the failed-
+    // delivery retry — runs unchanged.
+    terminalFixStandDown: (pr) => {
+      const terminal = terminalHeads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
+      // Written as two explicit checks, not `!terminal?.escalated` — that negated-optional-chain
+      // shape is exactly the conflator test/catch-erasure-ratchet.test.ts's detector (b) exists to
+      // hold at zero (it folds "no cached entry at all" and "cached but not yet delivered" into
+      // one boolean the same way an erasing catch folds a failure and an absence together). Both
+      // cases really do return the SAME `undefined` here — that is this seam's design (iv), not an
+      // accidental erasure — but spelling it out keeps the two conditions separately legible.
+      if (terminal === undefined || terminal.escalated !== true) return undefined;
+      return `terminal uncreditable head already escalated for this PR@head (${TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP})`;
+    },
 
     // W1-T2789 — the sweep-level consumer of the SAME reversed-compare reader and exact-path
     // decision runFixRung already uses. This is deliberately not exposed through Serve.
@@ -34625,12 +34860,14 @@ function defaultWipeTestMergedState(taskId: string, planPath: string, config: Co
 }
 
 /**
- * `rmd wipe-test <task-id> [--factor learnings|recon] [--repo remudero-sandbox]
+ * `rmd wipe-test <task-id> [--factor learnings|recon|rules] [--repo remudero-sandbox]
  * [--allow-non-sandbox]` — the P12 learning-utility A/B harness (W1-T86; see
  * src/lib/wipe-test.ts's module doc for the full design). Runs `<task-id>` TWICE through
  * `runTask`: arm A unmasked, arm B with `--factor`'s factor MASKED (the store itself
  * untouched — see `computeMatchedLearningsForArm` for `learnings`, `opts.maskRecon` above
- * for `recon`) — then computes + LEDGERS the deltas between them (`wipetest.pair`, now
+ * for `recon`, `opts.maskRules` for `rules` (W1-T2761) — the `workerRuleHeadlines.enabled`
+ * row itself is never written, only the rendered `rule_headlines` part is forced empty) —
+ * then computes + LEDGERS the deltas between them (`wipetest.pair`, now
  * carrying WHICH factor it varied — W1-T2512). SANDBOX-ONLY by default
  * (`resolveWipeTestTarget`): a bare `--repo remudero` (or any non-sandbox name) is REFUSED
  * before either arm ever spawns, for EVERY factor — the guard reads only `--repo`/
@@ -39554,9 +39791,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "wipe-test",
-    syntax: "rmd wipe-test <task-id> [--factor learnings|recon] [--repo remudero-sandbox] [--allow-non-sandbox]",
+    syntax: "rmd wipe-test <task-id> [--factor learnings|recon|rules] [--repo remudero-sandbox] [--allow-non-sandbox]",
     summary: "P12 A/B harness: run a sandbox task twice, ledger the deltas for one factor.",
-    detail: "the P12 learning-utility A/B harness (W1-T86, generalised to a named FACTOR by W1-T2512): runs <task-id> TWICE — arm A with --factor's factor ON, arm B with it MASKED (the store itself untouched, whether that store is task-matched learnings or the recon artifact) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec, now naming which factor it varied); --factor defaults to \"learnings\" (byte-identical to before W1-T2512), \"recon\" masks the recon worker spawn instead; SANDBOX-ONLY by default for every factor, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs of the SAME factor is signal",
+    detail: "the P12 learning-utility A/B harness (W1-T86, generalised to a named FACTOR by W1-T2512, joined by \"rules\" in W1-T2761): runs <task-id> TWICE — arm A with --factor's factor ON, arm B with it MASKED (the store itself untouched, whether that store is task-matched learnings, the recon artifact, or the workerRuleHeadlines policy row) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec, now naming which factor it varied); --factor defaults to \"learnings\" (byte-identical to before W1-T2512), \"recon\" masks the recon worker spawn instead, \"rules\" masks the rule_headlines prompt part instead; SANDBOX-ONLY by default for every factor, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs of the SAME factor is signal",
   },
   {
     name: "stop",
@@ -40159,22 +40396,6 @@ export async function main(
   } catch {
     /* best-effort by contract — never let housekeeping fail the verb the operator asked for */
   }
-  // THE GITHUB APP IS THE FLEET HOST'S ONLY CREDENTIAL, and until now only `daemonCommand` and
-  // `serveCommand` minted from it. `gh auth login` is never run there and the boot env deliberately
-  // carries NO `GH_TOKEN` (deploy/recycle-container.sh, see github-app.ts's header), so every OTHER
-  // verb that shells to `gh` — 32 call sites — failed on the one host the fleet actually runs on.
-  // MEASURED 2026-09-06: `rmd review <pr>` inside the daemon container died in `ghJson`, which is
-  // how a CAPPED verdict's own documented remedy, `--override-capped-by`, became unrunnable there.
-  // Absent `GH_APP_*` — any dev machine — this is NOT AN ATTEMPT: it mints nothing, logs nothing and
-  // leaves `GH_TOKEN` alone, so behaviour off the fleet host is byte-identical. Guarded on an absent
-  // token so an operator's own exported `GH_TOKEN` is never clobbered, and unawaited failure is
-  // reported rather than swallowed, because falling through to a bare `gh` error is what cost the
-  // diagnosis above.
-  if (!process.env.GH_TOKEN) {
-    await refreshInstallationToken({
-      log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
-    });
-  }
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
   const arg = rest[0];
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
@@ -40191,6 +40412,34 @@ export async function main(
   if (helpSpec && (rest.includes("--help") || rest.includes("-h"))) {
     console.log(commandHelp(helpSpec));
     process.exit(0);
+  }
+  // THE GITHUB APP IS THE FLEET HOST'S ONLY CREDENTIAL, and until now only `daemonCommand` and
+  // `serveCommand` minted from it. `gh auth login` is never run there and the boot env deliberately
+  // carries NO `GH_TOKEN` (deploy/recycle-container.sh, see github-app.ts's header), so every OTHER
+  // verb that shells to `gh` — 32 call sites — failed on the one host the fleet actually runs on.
+  // MEASURED 2026-09-06: `rmd review <pr>` inside the daemon container died in `ghJson`, which is
+  // how a CAPPED verdict's own documented remedy, `--override-capped-by`, became unrunnable there.
+  // Absent `GH_APP_*` — any dev machine — this is NOT AN ATTEMPT: it mints nothing, logs nothing and
+  // leaves `GH_TOKEN` alone, so behaviour off the fleet host is byte-identical. Guarded on an absent
+  // token so an operator's own exported `GH_TOKEN` is never clobbered, and unawaited failure is
+  // reported rather than swallowed, because falling through to a bare `gh` error is what cost the
+  // diagnosis above.
+  // W1-T3071: THE MINT SITS BELOW THE HELP ARMS, and the four lines above are why. Both arms
+  // `process.exit(0)` before any dispatch, so a help invocation cannot shell `gh` BY CONSTRUCTION
+  // -- which makes this an exemption that cannot silently grow, not a verb list to curate. An
+  // UNKNOWN verb matches neither arm, falls through here, and still mints before dispatch, so
+  // #4298's guarantee is unchanged for every path that can actually use a token.
+  //
+  // MEASURED 2026-09-07 with the mint above the arms: `rmd --help` emitted
+  // `github_app.token_refreshed {...}` to stderr on every invocation, reddening
+  // doctor-node-pin's two assertions (exactly-one-line, and empty) on the fleet host itself, and
+  // cost ~120ms (700/723/734 vs 592/615/592 with GH_TOKEN preset). The mint is AWAITED and carries
+  // EXCHANGE_TIMEOUT_MS (20s, src/lib/github-app.ts:66), so on an unreachable network that ceiling
+  // stood between the operator and `usage:`.
+  if (!process.env.GH_TOKEN) {
+    await refreshInstallationToken({
+      log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
+    });
   }
   // W1-T79: CLI self-freshness, checked directly after the (mandatory, every-call) help
   // preamble above and BEFORE any command's real dispatch — the #138 incident shape: `rmd

@@ -28,6 +28,51 @@ import { syncBuiltinESMExports } from "node:module";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 
 /**
+ * W1-T3069 — REFUSE THE READ-ONLY ESCAPE BEFORE A SINGLE TEST RUNS.
+ *
+ * `RMD_SELF_SYNC_DONE=1` is what `rmd` itself tells an operator to set on a detached HEAD — "the
+ * read-only escape" — and every worktree this fleet creates is detached, so every lane is told to
+ * export it. It flips `checkCliFreshness` from `assessed` to `guarded`, which 26 suites assert on.
+ *
+ * MEASURED at origin/main over those suites: 644 tests, 48 FAIL with it set against 2 without. The
+ * 46 differences surface as ordinary assertion errors — `expected: 'assessed', actual: 'guarded'` —
+ * with nothing naming the cause. One of them cost a false "fails on a pristine main" claim in a PR
+ * body, because a control that reverts the SOURCE and keeps the ENVIRONMENT reproduces the
+ * contamination and calls it the baseline.
+ *
+ * ⚠ IT REFUSES; IT DOES NOT QUIETLY UNSET. Deleting the variable and proceeding would produce a
+ * result the printed command cannot reproduce, which is a worse failure than the one being removed.
+ *
+ * ⚠ AND IT SAYS NOTHING WHEN THE VARIABLE IS ABSENT. That is the normal path and CI's path; the
+ * guard costs one property read there and changes nothing.
+ */
+function refuseSelfSyncEscape(): void {
+  if (process.env.RMD_SELF_SYNC_DONE === undefined) return;
+  console.error(
+    [
+      "",
+      "test setup REFUSED: RMD_SELF_SYNC_DONE is set in this environment.",
+      "",
+      "  WHAT IT DOES: it makes checkCliFreshness report 'guarded' instead of 'assessed'.",
+      "  26 suites assert on that state, so the suite reports ~46 failures that are caused by the",
+      "  variable and not by the code under test — as ordinary assertion errors, naming nothing.",
+      "",
+      "  WHY YOU HAVE IT: rmd's own refusal on a detached HEAD tells you to set it (the read-only",
+      "  escape). That advice is correct FOR THE CLI. It is not correct for a test run.",
+      "",
+      "  FIX: run the suite without it, e.g.  env -u RMD_SELF_SYNC_DONE npm test",
+      "",
+      "  This refuses rather than unsetting the variable itself, so the command you re-run is the",
+      "  command that produced this result.",
+      "",
+    ].join("\n"),
+  );
+  process.exit(1);
+}
+
+refuseSelfSyncEscape();
+
+/**
  * DISABLE GIT'S AUTOMATIC BACKGROUND GC FOR EVERY GIT THIS SUITE SPAWNS (W1-T1217).
  *
  * INCIDENT: `realRepoFixture` (test/fix-dedup-seed.test.ts) pushes `main`, pushes a second

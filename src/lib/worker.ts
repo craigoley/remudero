@@ -21,7 +21,7 @@ import fs from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
+import { query, type Options, type PermissionMode, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { detectUsageLimitRefusal } from "./classify.js";
 import {
   loadConfig,
@@ -1137,6 +1137,25 @@ async function finishSelectedCapacityMeasurement(
  *    loaded. `sandbox` is parsed from that file and passed validated, so a malformed block fails loud instead of running
  *    unsandboxed.
  *  - `env.home` — a worker-home dir UNIQUE to this call, reaped in a `finally` whatever the outcome (W1-T170, W1-T2463). */
+
+/** The literal SDK option object every spawn's `settingSources` is drawn from below, kept as an
+ *  object literal (rather than inlined at the call site) so the ONE place that ever writes
+ *  `settingSources: [],` in this file is this declaration — BOTH the comment-stripped raw-text
+ *  census in `test/what-a-worker-loads.test.ts` AND plan/claims.yaml's `worker-loads-no-claude-md`
+ *  claim read that literal text (trailing comma included) directly out of the object literal
+ *  below, not out of this prose, so a caller wanting the real value imports
+ *  {@link WORKER_SETTING_SOURCES} instead of re-deriving it. */
+const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
+  settingSources: [],
+};
+
+/** The `settingSources` every spawn passes below, so `~/.claude/settings.json` and every
+ *  other filesystem-settings source are never loaded. Exported (W1-T2766, design iv) so a caller
+ *  measuring whether a repo-owned `.claude/skills/<name>/SKILL.md` reaches a worker reads the REAL
+ *  value a spawn uses — see {@link import("./skill-workshop.js").describeWorkerSkillReachability}
+ *  — never a value asserted independently of it. */
+export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   try {
@@ -1454,7 +1473,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       pathToClaudeCodeExecutable: claudeBin,
       env: childEnv,
       settings: args.settingsFile,
-      settingSources: [],
+      settingSources: WORKER_SETTING_SOURCES, // real value: settingSources: [] (see WORKER_SPAWN_ISOLATION above)
       // Run the CLI DETACHED into its own process group and session, so teardown reaches every descendant — including one
       // outliving the CLI's own exit — with a single group signal. This REPLACES the SDK's default local spawn, so
       // `stderrChunks` is fed from THIS closure rather than an `Options.stderr` callback, which the SDK never invokes for a

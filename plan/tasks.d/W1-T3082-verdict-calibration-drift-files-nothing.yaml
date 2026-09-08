@@ -1,0 +1,67 @@
+- id: W1-T3082
+  title: "THE VERDICT-CALIBRATION JOIN MEASURES REVERT AND FOLLOW-UP-FIX RATES PER VERDICT CLASS EVERY SIX HOURS AND FILES NOTHING WHEN THEY DRIFT — `verdictCalibrationReport` is wired to the CLI and the measurement cadence, its own header names auto-filing tuning tasks as out of scope, and the rule-efficacy rung beside it already escalates a repeating rule into the inbox, so the one signal MASTER-PLAN says a periodic job must turn into tuning tasks is computed four times a day and read by no one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 15.00
+  files: [src/lib/verdict-calibration.ts, src/lib/measurement-cadence.ts, plan/policy.yaml, test/a-calibration-drift-reaches-the-inbox.test.ts]
+  origin: "operator-session#deep-research-2026-09-07"
+  plan_refs: ["W1-T424", "W1-T418", "W1-T437", "P48"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MASTER-PLAN §Self-improvement, "Verdict calibration": "a periodic job compares them against
+    post-merge reality (revert rate, follow-up-fix rate within N days) and FILES TUNING TASKS when
+    calibration drifts."
+
+    OBSERVED at b8892bc4: `src/lib/verdict-calibration.ts`'s `verdictCalibrationReport` joins
+    `automerge.armed` x `review.posted` rows (the ledger union) to `git log` reverts and
+    fix-typed commits under `ATTRIBUTION_POLICY` (14 days), per `VerdictClass` (`full-pass`,
+    `keyword-floor`, `degraded-arm`), refusing rates below `MIN_POPULATION_FLOOR = 5` and naming
+    every unmeasurable row. It is wired twice: `rmd verdict-calibration` and the daemon's
+    measurement cadence (`src/lib/measurement-cadence.ts`, policy `measurementCadence` on,
+    360 minutes, 4/day). Its module header: "NOT IN SCOPE: ... auto-filing tuning tasks."
+    Nothing consumes drift. By contrast `src/lib/rule-efficacy.ts`'s `escalateRepeatingRules`
+    (W1-T418) already turns a repeating rule into an inbox proposal through
+    `updateProposalRegistry`, and `plan/policy.yaml`'s `measurementCadence.escalate` is `true`
+    since 2026-09-02 — the transport exists and the calibration rung does not use it.
+
+    WHY IT MATTERS FOR THE ROUTING QUESTION: W1-T437's autonomy dial ratchets zero-touch merging
+    "where proofs are strong first". The keyword-floor class is the weak one by construction; if
+    its revert rate rises past the full-pass class's and nothing says so, the dial moves on a
+    reading nobody checked.
+  design: |
+    (i) A POLICY ROW `verdictCalibration.driftBands`: per class, a revert-rate ceiling and a
+    follow-up-fix-rate ceiling (bounded, `origin: net-new`), plus the population floor already
+    in code; a class above a ceiling WITH a measured population is DRIFTED. Below the floor is
+    never drifted (P48: an anecdote is not a rate).
+    (ii) THE ESCALATION: inside the measurement-cadence hook, after the report is computed, a
+    drifted class raises ONE inbox proposal through the same `updateProposalRegistry` path
+    `escalateRepeatingRules` uses, keyed on (class, window) so the same drift is not re-raised
+    every six hours; the proposal text carries the rate, the denominator, the window and the
+    named members, and its drift anchor is the report's own window so it goes stale when the
+    window moves (the anchor discipline W1-T2464/W1-T2465 asked for).
+    (iii) THE LEDGER: one row `verdict_calibration.drift` per raised proposal and one
+    `verdict_calibration.within_bands` per clean pass, so the retro can show the rung fired.
+    (iv) NO DIAL MOVES: the proposal is advice; W1-T437's ratchet remains the operator's.
+  acceptance:
+    - claim: "a class whose revert rate exceeds its band with a population at or above the floor raises exactly one inbox proposal per window, carrying rate, denominator and members"
+      proof: "unit test: test/a-calibration-drift-reaches-the-inbox.test.ts"
+    - claim: "a class above the band but below the population floor raises nothing and the ledger says within_bands with the floor named"
+      proof: "unit test: test/a-calibration-drift-reaches-the-inbox.test.ts"
+    - claim: "the drift bands are policy rows with bounds"
+      proof: "grep: driftBands in plan/policy.yaml"
+  falsifier: |
+    CLOSE IF drift already escalates: grep `src/lib/measurement-cadence.ts` and
+    `src/lib/verdict-calibration.ts` for `updateProposalRegistry` or `escalate`. MEASURED
+    2026-09-07: the calibration module has neither; the cadence file escalates rule efficacy only.
+    PROVE IT LOAD-BEARING: remove the (class, window) dedup key and the first criterion's fixture
+    run twice in one window must raise two proposals instead of one.
+  note: |
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3088's note). risk:high on
+    Rule 19 SPAN (two src files, a policy row, one suite). The `grep:` proof names a token absent
+    from plan/policy.yaml today (checked), so it discriminates at head against base.

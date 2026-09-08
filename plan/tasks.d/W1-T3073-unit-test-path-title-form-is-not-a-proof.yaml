@@ -1,0 +1,81 @@
+- id: W1-T3073
+  title: "A `unit test: test/file.test.ts::title` proof is accepted as a bare test name even though that combined form does not exist — the plan-only carve-out then merges it, and the implementation is guaranteed to reach review with zero executable proofs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  origin: "operator-session#daily-pr-retro-shift-left-2026-09-07"
+  files: [src/lib/review.ts, docs/proof-dialect.md, test/proof-path-title-separator.test.ts]
+  rationale: |
+    OBSERVED AT ORIGIN/MAIN `36c360006144e873c544c240c4d3273347571394`. The task filed by
+    PR #4502 and merged as `7f98a786` carries four proofs in
+    `plan/tasks.d/W1-T3071-rmd-help-mints-a-github-app-token-before-it-prints-usage.yaml`, all in
+    the form `unit test: test/cli-verbs-mint-the-app-token.test.ts::<title>`. The authoritative
+    review at 2026-09-07T23:49:41Z resolved every one as `not_executable`, reporting zero tests
+    matched the whole `test/...test.ts::<title>` string. The filing still correctly received the
+    plan-only PASS and merged, so the malformed proof was shifted into the future build instead of
+    being refused where it was authored.
+
+    THE PARSER EXPLAINS THE RESULT. `parseTestTarget` in `src/lib/review.ts` has exactly two forms:
+    an exact `test/**/*.test.ts` path, or a bare title. Appending `::<title>` makes the body fail
+    the exact-path regex, so the function deliberately falls through to the bare-title arm,
+    escapes the complete string, and passes it as `--test-name-pattern`. No code splits on `::`.
+    This is therefore not a flaky resolver or a missing test. It is unsupported grammar accepted
+    as another grammar.
+
+    THIS IS A RECURRING CLASS, NOT ONE BAD SHARD. The retained plan text for W1-T388, W1-T389,
+    W1-T394, W1-T396 and W1-T499 already warns that `test/foo.test.ts::title` satisfies lint-plan
+    and then matches zero tests. The current tree nevertheless contains nine live acceptance
+    proofs in that form: five on W1-T258 and four newly merged on W1-T3071. Prose has not prevented
+    recurrence.
+
+    THE FIX IS A GRAMMAR REFUSAL, NOT A BROADER ZERO-MATCH BLOCK. A bare title that matches zero
+    tests can be a legitimate forward reference, which is why `proofNameResolutionViolations`
+    remains warn-only. A string beginning with a test-file path and continuing with `::`, however,
+    is never one of the two supported forms. Refuse that shape in the shared proof parser, expose
+    the reason through the existing proof-dialect surface, and let the changed-task author gate
+    block it before a plan-only filing merges. `rmd check-proof` and review must consume the same
+    parser decision; do not add a second hand-rolled interpretation in the linter.
+
+    ONE CONCERN. This task owns only the unsupported path-plus-title proof grammar and its
+    author-time refusal. It does not change the plan-only review carve-out, make every unresolved
+    future test blocking, repair W1-T3071's already-merged criteria, or alter proof execution and
+    discrimination for either supported form.
+  design: |
+    Add one explicit `parseTestTarget` refusal for a body shaped as an exact test-file path followed
+    by `::` and any suffix. Derive the user-facing explanation from the proof dialect alongside the
+    parser's other canonical refusals, stating the two supported alternatives: the whole-file path
+    or the exact bare test-title substring. Ensure the existing changed-task lint path sees the
+    rejected proof through the shared parser and returns a blocking proof-dialect violation.
+
+    The regression must use W1-T3071's real shape, not an invented punctuation example. Its
+    falsifier is current main: before the fix the proof parses as a name-filtered test and lint
+    stays green; with the fix it is refused before any executor is called. Preserve exact-path and
+    bare-title controls byte-for-byte.
+  acceptance:
+    - claim: "a `unit test: test/file.test.ts::title` proof is refused as unsupported grammar rather than compiled as one literal test name"
+      proof: "unit test: test/proof-path-title-separator.test.ts"
+    - claim: "the changed-task lint path blocks a plan filing carrying W1-T3071's real proof shape before the plan-only review carve-out can admit it"
+      proof: "unit test: test/proof-path-title-separator.test.ts"
+    - claim: "`rmd check-proof` reports the same refusal and never launches the test executor for this shape"
+      proof: "unit test: test/proof-path-title-separator.test.ts"
+    - claim: "a whole-file `unit test: test/file.test.ts` proof and an exact bare-title proof keep their existing parse and execution contracts"
+      proof: "unit test: test/proof-path-title-separator.test.ts"
+    - claim: "the generated proof-dialect page names the unsupported separator form and the two valid alternatives"
+      proof: "unit test: test/proof-path-title-separator.test.ts"
+    - claim: "deleting only the new parser refusal makes the regression fail, proving the test does not pass on current main"
+      proof: "unit test: test/proof-path-title-separator.test.ts"
+  status: queued
+  attempts: 0
+  plan_refs: ["W1-T488", "W1-T497", "W1-T1053", "W1-T3071"]
+  note: |
+    This is a shift-left control derived from the 2026-09-07 PR lifecycle, not a change to review
+    policy. Plan-only PRs still skip implementation proof execution. The authoring gate refuses one
+    grammar shape that the shared executor can prove has no supported meaning.
+
+    W1-T3071 requires its own plan amendment or a build that first repairs its criteria. This task
+    deliberately does not edit that already-merged shard, so task ownership and review evidence do
+    not blur across two concerns.
