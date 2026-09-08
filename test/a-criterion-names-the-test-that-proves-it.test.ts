@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { loadPlan, type Task } from "../src/lib/plan.js";
-import { lintTask, unboundCriterionViolations } from "../src/lib/task-linter.js";
+import { lintTask, literalTestTitlesIn, unboundCriterionViolations } from "../src/lib/task-linter.js";
 
 const REPO_ROOT = process.cwd();
 const TARGET = "test/a-criterion-names-the-test-that-proves-it.fixture.test.ts";
@@ -114,4 +114,23 @@ test("W1-T3217 criterion 5: lintTask reaches unboundCriterionViolations", () => 
 
   assert.equal(result.ok, true);
   assert.ok(result.violations.some((v) => v.check === "unbound-criterion" && /criterion 2/.test(v.message)));
+});
+
+// W1-T3217 round 2 (CI hang — every ci-shard, test-slow, and ci exited 1 with no node-test-runner
+// summary, which W1-T2597 marks as an UNVERIFIED, killed/timed-out failure set, not a diagnosed
+// one). `TEST_TITLE_PATTERN`'s escape branch (`\\.`) and its "any other char" branch previously
+// overlapped on every backslash, the classic catastrophic-backtracking shape: an unterminated
+// quoted title with a long backslash run took the engine exponentially long to give up. A real
+// proof-target file carrying such a string — fed to `literalTestTitlesIn` by
+// `unboundCriterionViolations` — would hang whichever shard reached it well past any CI timeout,
+// printing no summary, exactly this round's log. This asserts the scan stays linear: 20,000
+// backslashes with no closing quote must resolve in well under a second, not merely "eventually".
+test("W1-T3217 round 2: an unterminated quoted title with a long backslash run does not hang the scan", () => {
+  const evil = 'test("' + "\\".repeat(20000) + "X";
+  const start = Date.now();
+
+  const titles = literalTestTitlesIn(evil);
+
+  assert.ok(Date.now() - start < 2000, "the scan must stay linear, not exponential, on an unterminated backslash run");
+  assert.deepEqual(titles, [], "no closing quote is ever found, so no title is extracted");
 });

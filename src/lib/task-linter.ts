@@ -1350,7 +1350,18 @@ export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): 
 
 export type UnboundCriterionBaseline = Readonly<Record<string, number>>;
 
-const TEST_TITLE_PATTERN = /\b(?:test|it)\s*\(\s*(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/g;
+// W1-T3217 round 2 (CI hang, no shard printed a summary): the ORIGINAL group here was
+// `(?:\\.|(?!\1)[\s\S])*?` — an escape branch and a "any other char" branch that OVERLAP on
+// every backslash that is not immediately followed by the closing quote, because `[\s\S]` also
+// matches `\`. That overlap is the textbook catastrophic-backtracking shape: an unterminated
+// quote after a long backslash run forces the engine to try exponentially many ways to
+// partition the run between the two branches. Measured locally: 35 backslashes with no closing
+// quote took ~55s on this box; a real fixture or proof-target file with a longer run would hang
+// past any CI timeout with NO summary line printed — exactly the symptom this round's CI log
+// shows on every shard. The fix excludes `\` from the second branch ([^\\] instead of [\s\S]),
+// so the two branches are mutually exclusive on their first character and backtracking stays
+// linear regardless of how many backslashes precede an unterminated string.
+const TEST_TITLE_PATTERN = /\b(?:test|it)\s*\(\s*(["'`])((?:\\.|(?!\1)[^\\])*?)\1/g;
 
 function decodeTestTitle(raw: string): string {
   return raw.replace(/\\(["'`\\])/g, "$1").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
