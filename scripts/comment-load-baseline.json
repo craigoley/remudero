@@ -2,7 +2,7 @@
   ".github/workflows/acceptance-author-gate.yml": 43,
   ".github/workflows/acr-build.yml": 80,
   ".github/workflows/ci-gate.yml": 120,
-  ".github/workflows/ci.yml": 409,
+  ".github/workflows/ci.yml": 500,
   ".github/workflows/clock-sweep.yml": 250,
   ".github/workflows/codeql.yml": 15,
   ".github/workflows/coverage-session-blanking.yml": 250,

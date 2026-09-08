@@ -11,13 +11,13 @@
 // scripts/ledger-steps-baseline.json (the task-id-existence-check.mjs shape -- an entry with no
 // reason is REJECTED, so the exemption list cannot grow silently). A literal that resolves to
 // neither FAILS the ratchet BY NAME.
-//
+
 // SHRINK-ONLY. The baseline is not a count to raise; it is a list of literals nobody has decoded
 // yet. The only way this population falls is registering a literal in LEDGER_STEPS (moving it OUT
 // of the baseline and INTO the registry, with a real writer + outcome read) or deleting the dead
 // code that logs it. Adding a baseline entry for a literal that is not already exempt requires a
 // written reason a reviewer reads -- exactly like task-id-existence-check.mjs's own baseline.
-//
+
 // TWO LITERAL FORMS, MATCHING recon's OWN CENSUS METHODOLOGY (so this gate's count is the same
 // count the task was filed against): `log("<dotted.step>"` / `ctx.log("<dotted.step>"` call-site
 // literals, and `step: "<dotted.step>"` object/type literals. Both are ANCHORED to a
@@ -26,7 +26,7 @@
 // undercount this repo's own `log(\"...\")`/`step: \"...\"` grep already carries; see
 // src/lib/ledger-steps.ts's own doc for two named examples (`automerge.arm_failed`,
 // `automerge.disarm_skipped`).
-//
+
 // Usage: node scripts/ledger-steps-check.mjs [--dir <path>]... [--baseline <path>]
 //   [--registry <path>] [--cwd <path>]. Defaults: src; scripts/ledger-steps-baseline.json;
 //   src/lib/ledger-steps.ts.

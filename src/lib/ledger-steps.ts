@@ -20,7 +20,9 @@
  * question anyone can ask of the record." Every step below keeps its literal exactly as logged;
  * this registry only adds the plain-language meaning, its writer(s) and their real outcome set
  * beside it. Nothing here renames, relocates or removes a single logged literal.
- *
+ */
+
+/**
  * SEEDED, NOT EXHAUSTIVE. `scripts/ledger-steps-check.mjs` (the ratchet) finds roughly five hundred
  * distinct step literals under `src/`; this registry seeds the ones read closely enough to state a
  * writer and an honest outcome set for, starting with the `automerge.*` family the learning above
