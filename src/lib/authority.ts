@@ -106,11 +106,12 @@ export interface AuthorityRow {
  * `module`. The baseline is empty: every write measured at this task's own HEAD is entered below.
  */
 export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
-  // ── src/run-task.ts ──────────────────────────────────────────────────────────────────────
+  // ── src/lib/arm-auto-merge.ts (W1-T2887: moved from src/run-task.ts, which still imports and
+  // re-exports every symbol below so every verb/call site is unchanged) ───────────────────────
   {
     id: "arm-auto-merge-at-open",
     action: "arm `gh pr merge --auto --squash` on a freshly opened task PR, before any review verdict",
-    module: "src/run-task.ts",
+    module: "src/lib/arm-auto-merge.ts",
     symbol: "armAutoMergeAtOpen",
     boundary: "gh-pr-merge",
     gate: "always",
@@ -123,7 +124,7 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   {
     id: "arm-auto-merge-ledger-gated",
     action: "arm `gh pr merge --auto --squash` after CI is green and a ledgered review verdict permits it",
-    module: "src/run-task.ts",
+    module: "src/lib/arm-auto-merge.ts",
     symbol: "armAutoMerge / armAutoMergeDetailed",
     boundary: "gh-pr-merge",
     gate: "ledger-verdict",
@@ -138,7 +139,7 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   {
     id: "disarm-auto-merge",
     action: "withdraw a standing `--auto` arm with `gh pr merge --disable-auto`",
-    module: "src/run-task.ts",
+    module: "src/lib/arm-auto-merge.ts",
     symbol: "realArmDeps().disableAuto",
     boundary: "gh-pr-merge",
     gate: "always",
@@ -149,7 +150,7 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   {
     id: "arm-direct-merge-fallback",
     action: "merge a PR directly (`gh pr merge --squash`, no `--auto`) when GitHub already reports it clean-mergeable",
-    module: "src/run-task.ts",
+    module: "src/lib/arm-auto-merge.ts",
     symbol: "realArmDeps().mergeDirect (attemptArm's clean-status fallback)",
     boundary: "gh-pr-merge",
     gate: "always",
@@ -162,14 +163,18 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   {
     id: "update-branch-on-arm",
     action: "REST PUT a PR's `update-branch` endpoint to bring a mergeable-but-behind head current before merging",
-    module: "src/run-task.ts",
-    symbol: "ArmDeps.updateBranch -> ghUpdateBranch",
+    module: "src/lib/arm-auto-merge.ts",
+    symbol: "ArmDeps.updateBranch -> (private) ghUpdateBranch",
     boundary: "gh-pr-update-branch",
     gate: "always",
     ledgerSteps: ["automerge.direct_merge_updated", "automerge.direct_merge_update_failed", "automerge.direct_merge_preflight_refused"],
     verb: "rmd run-task / rmd drain",
-    note: "W1-T2855: directMergePreflight requires a definitely-MERGEABLE head that compare evidence shows behind base.",
+    note:
+      "W1-T2855: directMergePreflight requires a definitely-MERGEABLE head that compare evidence shows behind base. " +
+      "W1-T2887: this is now a PRIVATE mirror of run-task.ts's own (still public) ghUpdateBranch, not a shared " +
+      "function — a lib module may not import run-task.ts (dependency-cruiser lib-no-spike-or-cli).",
   },
+  // ── src/run-task.ts ──────────────────────────────────────────────────────────────────────
   {
     id: "open-task-pr",
     action: "open the PR for a completed task run (plan/triage/retro/implement)",
