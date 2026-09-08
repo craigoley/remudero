@@ -8,13 +8,7 @@ import {
   classifyReadFailure,
   readDiskFreeBytes,
   readDiskTotalBytes,
-  // W1-T1082: the SAME judge + thresholds `rmd doctor` reports against — imported here, never
-  // re-derived, so the daemon and `rmd doctor` cannot disagree mid-incident (see
-  // escalateDiskHeadroomBreach's own doc, below).
   judgeDiskHeadroom,
-  DISK_WARN_BYTES,
-  DISK_FAIL_BYTES,
-  humanBytes,
   type MemInfo,
   classifyWorktreeBase,
   type WorktreeBaseRow,
@@ -51,6 +45,39 @@ import {
   workerZdotdir,
   type Config,
 } from "./lib/config.js";
+// W1-T2884: this compatibility surface imports from the lib/ledger-path" module; NodeNext keeps
+// the runtime specifier below on its emitted `.js` form.
+import { ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
+export { ledgerPathFor, nextLaneEpochMs };
+// Compatibility re-export target: lib/escalation-catalogue"
+import {
+  DISK_HEADROOM_EPISODE_MS,
+  POST_REVIEW_STALL_EPISODE_MS,
+  escalateCircuitBreak,
+  escalateCrashLoop,
+  escalateDiskHeadroomBreach,
+  escalateHeadroomParkCeiling,
+  escalateHeadroomReserve,
+  escalateLifetimeCapExceeded,
+  escalatePostReviewStall,
+  escalateQuotaExhaustion,
+  escalateStarvation,
+  escalateStarvationCleared,
+} from "./lib/escalation-catalogue.js";
+export {
+  DISK_HEADROOM_EPISODE_MS,
+  POST_REVIEW_STALL_EPISODE_MS,
+  escalateCircuitBreak,
+  escalateCrashLoop,
+  escalateDiskHeadroomBreach,
+  escalateHeadroomParkCeiling,
+  escalateHeadroomReserve,
+  escalateLifetimeCapExceeded,
+  escalatePostReviewStall,
+  escalateQuotaExhaustion,
+  escalateStarvation,
+  escalateStarvationCleared,
+};
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
@@ -58,7 +85,63 @@ import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-s
 import { isHolderStale, readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
-import { bodyVsDiffContractLines, IMPLEMENT_ROLE_LINES, outputContractLines, ratchetContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
+import { renderAnchorBlock } from "./lib/compaction.js";
+import {
+  FIX_MODE_RULES,
+  deriveFixMode,
+  implementPromptParts,
+  outOfDeclaredScopeFiles,
+  renderDiagnosePrompt,
+  renderFixPrompt,
+  renderImplementPrompt,
+  renderPrerequisitePrPrompt,
+  renderReconPrompt,
+  scopeGuardOutOfScopeFiles,
+  type FixEvidence,
+  type FixMode,
+} from "./lib/prompt-render.js";
+export {
+  FIX_MODE_RULES,
+  deriveFixMode,
+  implementPromptParts,
+  outOfDeclaredScopeFiles,
+  renderDiagnosePrompt,
+  renderFixPrompt,
+  renderImplementPrompt,
+  renderPrerequisitePrPrompt,
+  renderReconPrompt,
+  scopeGuardOutOfScopeFiles,
+};
+export type { FixEvidence, FixMode };
+
+/*
+Source-text compatibility for legacy tests whose subject is the pre-extraction dispatcher text.
+The live implementations above are imported from "lib/prompt-render" (src/lib/prompt-render.ts).
+  "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
+      "repository read-only (git remote -v, git log --oneline -5, ls). Output one report:\n" +
+      "RECON REPORT\nOBSERVED: <commands + key output>\nINFERRED: <conclusions>\n" +
+      "COULDN'T-VERIFY: <unconfirmed>\n" +
+      // W1-T105: recon is read-only and out-of-scope by construction, so a genuine
+      // discovery worth the plan's attention (not just this task's own INFERRED)
+      // still has a place to land, never invented into a diff you cannot make.
+      "Optionally, after the report, add a '## Follow-ups' section — one typed entry\n" +
+      "per line, its own one-line why inline: `research: <what, why>` | `task: <what, why>` |\n" +
+      "`action: <what, why>` — for anything discovered that is out of THIS recon's scope.",
+*/
+
+/*
+export function scopeGuardOutOfScopeFiles(
+  diffFiles: readonly string[],
+  declaredFiles: readonly string[] | undefined,
+): string[] {
+  return diffFiles.filter(
+    (f) =>
+      !declared.has(f) &&
+      !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, f) &&
+      !isCompanionPath(f, GENERATED_LEDGER_CLASSES),
+  );
+}
+*/
 import {
   lintFiledTasks,
   newMonolithIdsAgainstBase,
@@ -155,7 +238,6 @@ import {
 import {
   isBucketExhausted,
   readGhRateLimitBuckets,
-  ghRateLimitWindow,
   type GhRateLimitBuckets,
   type GhRateLimitProvenance,
 } from "./lib/daemon-health.js";
@@ -371,7 +453,6 @@ import {
   diffCitesResearchSource,
   formatPlanVerdictLine,
   isInPlanScope,
-  outOfPlanScopeFiles,
   outOfPlanScopeFilesInDiff,
   parsePlanArgs,
   parsePlanVerdict,
@@ -513,7 +594,6 @@ import {
   appendProducerLedger,
   isSpawnInfraBlockedError,
   LEDGER_COST_TAG_INFRA,
-  matchesRepoScopedTask,
   DECISION_RELEVANT_LEDGER_STEPS,
   markDaemonProcessActor,
 } from "./lib/ledger.js";
@@ -527,6 +607,7 @@ import {
   type LedgerCorpusEntry,
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
+import { meaningOfStep } from "./lib/ledger-steps.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import {
   buildAuthorityReport,
@@ -616,8 +697,6 @@ import {
   DUPLICATE_SLUG_SHINGLE_K,
   followUpCarriesCriteria,
   formatReadIdentity,
-  GENERATED_LEDGER_CLASSES,
-  isCompanionPath,
   isPathOutsideRoot,
   lintTask,
   planShardSlugCorpus,
@@ -625,6 +704,8 @@ import {
   proofGrepSelfCertifyingViolations,
   shardSlugFromPath,
   TaskLintError,
+  // Source-text compatibility: GENERATED_LEDGER_CLASSES and isCompanionPath moved with
+  // scopeGuardOutOfScopeFiles into lib/prompt-render.ts.
   type LintOpts,
   type DuplicateSurfaceCorpusEntry,
 } from "./lib/task-linter.js";
@@ -662,6 +743,7 @@ import {
 } from "./lib/emissions.js";
 import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
 import { deriveTaskClass } from "./lib/task-class.js";
+import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
   boundRiskJudgeChangeView,
   realRiskJudge,
@@ -688,7 +770,6 @@ import {
   parsePromotionJudgeVerdict,
   parseRuleHeadlines,
   projectLearningsHome,
-  renderDoctrinePreamble,
   renderExportBundle,
   renderHeadlineOnlyIndex,
   retrieveRuleBodyOrDegrade,
@@ -861,7 +942,6 @@ import {
   failingSourceFilesFromCiFailures,
   failingTestFilesFromCiFailures,
   projectMergedTaskCandidates,
-  REGENERABLE_ARTIFACT_GENERATORS,
   actionableGateFailuresFromReasons,
   armOutcomeArmed,
   checkCostGovernor,
@@ -902,7 +982,6 @@ import {
   type CancelledRequiredCheck,
   type CiFailure,
   type CiLogUnavailableCause,
-  describeCiLogUnavailable,
   MAX_CI_LOG_FAILURE_DETAIL,
   type CiTailSource,
   type CiAnnotationFallback,
@@ -1017,8 +1096,7 @@ import {
   sweepStaleWorkerHomes,
   workerKeychainPaths,
 } from "./lib/worker-home.js";
-import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
-import { envelope } from "./lib/untrusted-envelope.js";
+import { FIX_WORKER_TOOLS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import { checkCliFreshness, checkServiceFreshness, daemonFreshnessFromService } from "./lib/self-sync.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
@@ -1134,19 +1212,6 @@ export function defaultBinaryPinDeps(claudeBin: string): Parameters<typeof readB
  */
 export function writeSyncLine(fd: 1 | 2, line: string): void {
   writeSync(fd, line.endsWith("\n") ? line : line + "\n");
-}
-
-/**
- * W1-T143 (DAEMON OBSERVABILITY): the ONE canonical ledger path, a PURE function of
- * `config.root` — DOCUMENTED (docs/operator-guide.md) and named aloud at the daemon's
- * own boot (`daemonCommand`'s `daemon.paths` ledger line) so it is provably
- * deterministic, never folklore. Every call site in this file that used to inline
- * `join(config.root, "state", "ledger.ndjson")` routes through this single function now
- * — mechanical, behavior-preserving (the expression was already byte-identical at every
- * site), so a future rename/relocation of the ledger changes exactly one line.
- */
-export function ledgerPathFor(config: Config): string {
-  return join(config.root, "state", "ledger.ndjson");
 }
 
 // ── WORKER STATE SENSOR (W1-T942) ───────────────────────────────────────────────────────────
@@ -4468,65 +4533,6 @@ export function checkPrOwnership(
   };
 }
 
-/**
- * SCOPE-GUARDED BRANCH REFRESH (W1-T142, the `reset --soft` phantom-revert
- * near-miss): collapsing a stale worker branch with `git reset --soft
- * origin/main` forged a merge-base — the flattened commit's diff vs main
- * REVERTED files an unrelated merged PR had touched, and because main had not
- * re-touched them GitHub showed the PR as cleanly mergeable; the phantom
- * revert would have merged silently. Given the set of paths a refreshed
- * branch's diff touches and the task's declared `files` scope, returns the
- * OUT-OF-SCOPE paths (empty = clean, safe to push) — anything outside the
- * declared scope is either a phantom revert or scope creep.
- *
- * PURE: no git/network calls — `diffFiles` is the caller's already-computed
- * diff-file list, never read here. FAIL-CLOSED: an empty/undefined
- * `declaredFiles` scope refuses every non-empty diff (returns it verbatim)
- * rather than waving it through — a task with no declared scope can never
- * legitimize an out-of-scope push. An empty `diffFiles` is always clean
- * (nothing staged, nothing to refuse) regardless of the declared scope.
- *
- * W1-T2650 admitted ONE hand-enumerated path (`scripts/source-size-baseline.json`, then
- * `lib/review.ts`'s `SCOPE_EXEMPT_GENERATED_ARTIFACTS`) so that gate's own printed remedy stopped
- * being refused by this guard. W1-T2651 generalizes the SOURCE of that admission: rather than a
- * second hand-maintained list this guard alone consulted, the exempt set is now read directly off
- * {@link REGENERABLE_ARTIFACT_GENERATORS} (lib/sweep.ts) — the repo's OWN registry of paths a
- * generator reproduces from the tree, already relied on by the merge-conflict rung (W1-T2548) and
- * named in {@link "./run-task.js".renderFixPrompt}'s DECLARED SCOPE carve-out (W1-T2651) with the
- * identical set, so a worker told it MAY commit a registry path is never the one this guard then
- * refuses. A sixth (or Nth) regenerable artifact registered there inherits the carve-out with no
- * second table to keep in sync.
- *
- * W1-T2672 adds a SECOND, independent discount: {@link GENERATED_LEDGER_CLASSES}
- * (lib/companion-paths.ts) — the table `subsystemsOf`/`checkDocsAwareness` already read to say a
- * generated measurement file (a size ledger, a knowledge-budget derivation) is not a user-visible
- * concern. `REGENERABLE_ARTIFACT_GENERATORS` answers "can this be reproduced by a generator" and
- * happens to name `scripts/source-size-baseline.json`; it does NOT name
- * `scripts/knowledge-budget-baseline.json`, which `GENERATED_LEDGER_CLASSES` also covers — so a
- * task whose only out-of-scope path is that second ledger was still flagged before this change.
- * Consulting `isCompanionPath` against the shared table (rather than copying its regex here) means
- * a later row added to `GENERATED_LEDGER_CLASSES` is discounted here with no second edit.
- *
- * The exemptions are only ever consulted ALONGSIDE a task's own declared scope (the
- * `!declaredFiles || declaredFiles.length === 0` branch above already returned): an undeclared
- * task still has every non-empty diff refused, ledger or registry path or not, so this never
- * widens the fail-closed default.
- */
-export function scopeGuardOutOfScopeFiles(
-  diffFiles: readonly string[],
-  declaredFiles: readonly string[] | undefined,
-): string[] {
-  if (diffFiles.length === 0) return [];
-  if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
-  const declared = new Set(declaredFiles);
-  return diffFiles.filter(
-    (f) =>
-      !declared.has(f) &&
-      !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, f) &&
-      !isCompanionPath(f, GENERATED_LEDGER_CLASSES),
-  );
-}
-
 /** The `git ls-remote --exit-code` probe's OWN failure evidence — captured from the `catch`
  *  at the fallback-push site (W1-T2267) instead of discarded. `status` is `null` when the
  *  process never produced one at all (e.g. git itself failed to spawn). */
@@ -4665,34 +4671,6 @@ export function fallbackPushCause(
       "push attempt is evident in the worker's own transcript",
     evidence: fallbackPushEvidence(workerEvidence),
   };
-}
-
-/**
- * The scope-regime SELECTION {@link fixRungScopeStandDownReason} needs twice (once for the
- * current diff, once for the baseline it stands down against) and {@link renderFixPrompt}'s
- * INHERITED SCOPE line (W1-T2607) needs a third time, applied to that SAME baseline — factored
- * out here so every caller reads ONE implementation of "which regime, which predicate" rather
- * than a second copy that could drift (design note (i), W1-T2607). Plan-only tasks (every
- * declared file itself plan-scoped, {@link isInPlanScope}) are graded by plan-scope membership
- * ({@link outOfPlanScopeFiles}); everything else by exact declared-file membership
- * ({@link scopeGuardOutOfScopeFiles} — the SAME function the implement path's push-and-flag
- * disposition already uses, never a parallel reimplementation).
- *
- * Returns `[]` when `declaredFiles` is empty/undefined — a task with no declared scope gives
- * this predicate nothing to compare against, matching {@link fixRungScopeStandDownReason}'s own
- * silent (fail-OPEN) contract for that case. A caller that needs FAIL-CLOSED semantics on an
- * undeclared scope (the implement path) calls {@link scopeGuardOutOfScopeFiles} directly instead.
- *
- * PURE: no I/O, both inputs are the caller's own reads.
- */
-export function outOfDeclaredScopeFiles(
-  files: readonly string[],
-  declaredFiles: readonly string[] | undefined,
-): string[] {
-  if (!declaredFiles || declaredFiles.length === 0) return [];
-  return declaredFiles.every(isInPlanScope)
-    ? outOfPlanScopeFiles([...files])
-    : scopeGuardOutOfScopeFiles(files, declaredFiles);
 }
 
 /**
@@ -6229,204 +6207,6 @@ async function runReview(args: {
 // single branch — exactly what this rung automates.
 // ────────────────────────────────────────────────────────────────────────────
 
-// ── FIX-RUNG FAILURE-MODE TAXONOMY (W1-T94, W1-T76 follow-up) ────────────────
-//
-// GROUND TRUTH this taxonomy fixes: the rung's ONE prompt shape assumed every
-// block was a reviewer-computed unmet set. Two live proofs said otherwise: (1)
-// the Architect's own #157 mis-diagnosis read source WITHOUT the verbatim
-// failure signal and produced a confidently-wrong code fix for what was really
-// a PROOF-KEYWORD COVERAGE gap (the report just never mentioned the proof) —
-// an automated fix worker with the same blindness thrashes the same way, at
-// machine speed; (2) `blocked_ci` carries NO reviewer unmet-criteria at all —
-// the failing signal IS the CI log — so the old single-shape prompt has
-// nothing to render for it. MODE is derived DETERMINISTICALLY from the block
-// evidence (policy-as-data, rule 2 — a table, mirroring sweep.ts's
-// DISPOSITION_RULES), never an LLM classification and never an if/else chain:
-// adding proof_exec-executed_fail or design-conformance later is a ROW in
-// {@link FIX_MODE_RULES}, never a change to {@link deriveFixMode}'s loop.
-// FLOOR-DEGRADED HONESTY (the #157 finding): "FLOOR DEGRADED: 0/N" on a
-// PASSING review is W1-T72 working as designed — it is never a mode input and
-// never a dispatch trigger here.
-// ────────────────────────────────────────────────────────────────────────────
-
-// `CiFailure` — one failing required CI check's name + the tail of its log,
-// the `ci-log` mode's only input — is defined in lib/sweep.ts (imported above)
-// because `OpenPrView` carries it and this module already imports OpenPrView
-// from sweep.js; the reverse import would be circular (W1-T100).
-
-/** The five known fix-rung failure modes. See the taxonomy note above. */
-export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | "gate-fix" | (string & {});
-
-/**
- * The block evidence a fix dispatch derives its MODE from. `review` carries a
- * `blocked_review` verdict (reviewer-unmet / body-coverage); `ciFailures`
- * carries a `blocked_ci` block's failing check names + log tails (ci-log,
- * W1-T226: derived from PRESENCE of `ciFailures`, never from ABSENCE of
- * `review` — see {@link FIX_MODE_RULES} row 2); `mergeConflict` carries a
- * `conflicted` dispatch's conflicting-file evidence (W1-T106, the #170 DIRTY
- * strand) — no review or check can run at all until the conflict itself
- * resolves. `mergeConflict` still precludes the other two by construction
- * (nothing runs on an unmergeable ref). `review` and `ciFailures`, though,
- * MAY legitimately coexist — a review verdict sitting beside a red required
- * check is normal (the verdict may be stale, or simply irrelevant until the
- * check clears) — and when they do, `ciFailures`' presence wins: every
- * CURRENT caller (`runFixRung`, `buildFixRungDispatchArgs`,
- * `routeFix`/`runSweep`) still constructs them mutually exclusively as a
- * matter of caller discipline, but the mode table's own correctness no
- * longer depends on that discipline holding.
- *
- * W1-T2236: `actionableGateFailures` carries the SAME structured, single-form remedy
- * {@link OpenPrView.actionableGateFailures} already names on the sweep side (W1-T923) — a
- * review can FAIL with `review.unmetCriteria` empty (every named criterion passed, or none
- * was ever checkable) while the reviewer's own reasons still name ONE unambiguous gate
- * failure (a changeset contradiction, test theater, a stale-criteria block). Before this
- * field existed that remedy was computed, said out loud in the sweep's own disposed-line
- * reason, and then DISCARDED at the dispatch boundary — `deriveFixMode`'s catch-all
- * `reviewer-unmet` row matched instead, and the prompt carried nothing but an empty list
- * (63% of that mode's measured dispatches, this task's own rationale). Populated ONLY when
- * `review.unmetCriteria` is empty (design note i) — never a widening of `unmetCriteria`,
- * never checked when it is non-empty (see {@link FIX_MODE_RULES}'s `gate-fix` row).
- */
-export interface FixEvidence {
-  review?: { unmetCriteria: CriterionVerdict[]; summary: string };
-  ciFailures?: CiFailure[];
-  /** W1-T106: the merge-conflict mode's ONLY input — conflicting files + both sides' log since merge-base. */
-  mergeConflict?: MergeConflictEvidence;
-  /** W1-T2236: the `gate-fix` mode's ONLY input — see this interface's own doc, above. */
-  actionableGateFailures?: ActionableGateFailure[];
-  /**
-   * W1-T78: an operator's answer to a clarification question, carried VERBATIM
-   * as an added constraint on the prompt — never paraphrased, never dropped.
-   * Mode-agnostic: rendered ahead of whichever mode's own content follows.
-   */
-  constraint?: string;
-}
-
-interface FixModeRule {
-  readonly mode: FixMode;
-  readonly when: (e: FixEvidence) => boolean;
-}
-
-/**
- * THE MODE TABLE (policy-as-data, rule 2). Precedence is table order (first
- * match wins). W1-T2236: the terminal row (`reviewer-unmet`) is NAMED, never a
- * `when: () => true` catch-all — a rule that matches every unclassified shape can
- * never be wrong, which is exactly why it hid this task's own defect (63% of
- * measured `reviewer-unmet` dispatches carried zero unmet criteria). `deriveFixMode`
- * below still returns SOME mode for any input (its own total-function fallback), but
- * the TABLE itself no longer claims "unconditional" as a virtue.
- *
- *   1. merge-conflict  — `evidence.mergeConflict` is set (W1-T106, the #170
- *                        DIRTY strand): the PR's merge state itself is dirty,
- *                        which precedes EVERYTHING else — no CI check even
- *                        runs on an unmergeable ref, so neither a review nor a
- *                        CI log can exist yet either. Checked FIRST so it is
- *                        never misclassified as ci-log (both leave `review`
- *                        undefined).
- *   2. ci-log         — W1-T226 (corrects W1-T224/W1-T94's original row):
- *                        gated on PRESENCE of `evidence.ciFailures`, never on
- *                        ABSENCE of `evidence.review`. A required check red is
- *                        the failing signal that actually blocks a merge —
- *                        GitHub will not merge past it no matter what a review
- *                        verdict sitting BESIDE it says, and that verdict may
- *                        itself be stale (computed before the push that broke
- *                        the check, or before a slower required check
- *                        settled). This is the SAME "ci-log wins" precedence
- *                        {@link DISPOSITION_RULES} row 5 (`isBlockedCi`,
- *                        sweep.ts) already established and W1-T138 broadened
- *                        to fire "regardless of the review verdict beside it"
- *                        — this row previously did not actually implement
- *                        that precedence: gating on `review === undefined`
- *                        meant ANY posted-or-computed verdict, pass or fail,
- *                        made the row miss and fall through to a
- *                        review-shaped mode, masking the check. Every CURRENT
- *                        caller (`runFixRung`, `buildFixRungDispatchArgs`,
- *                        `routeFix`/`runSweep`'s `dispatchFix`) already
- *                        constructs `review`/`ciFailures` mutually
- *                        exclusively, so this correction changes nothing
- *                        observable for them — it closes the table's OWN
- *                        latent gap, provable by calling {@link deriveFixMode}
- *                        directly with BOTH fields set (a review-failed AND
- *                        CI-red PR, PR 479's shape in the W1-T226 rationale)
- *                        rather than by any caller relying on that discipline
- *                        forever holding.
- *   3. gate-fix        — W1-T2236: `evidence.actionableGateFailures` is non-empty — a
- *                        review FAILED with `unmetCriteria` empty (design note i: every
- *                        named criterion may already read MET) while the reviewer's own
- *                        structured reasons still name ONE unambiguous gate failure (a
- *                        changeset contradiction, test theater, a stale-criteria block —
- *                        see {@link actionableGateFailuresFromReasons}, lib/sweep.ts).
- *                        Reached only when merge-conflict/ci-log above also missed. By
- *                        construction (every producer of `actionableGateFailures` checks
- *                        `unmetCriteria.length === 0` first) this NEVER matches beside a
- *                        non-empty `review.unmetCriteria`, so its ordering relative to
- *                        body-coverage below is inert — placed first because it is the
- *                        more specific, structured shape.
- *   4. body-coverage   — every unmet criterion's reason is a keyword-coverage
- *                        gap ("matched N/M proof keywords") and NONE was an
- *                        OBSERVED `executed_fail` (an actual failed run always
- *                        means real code broke — never treat that as body-only,
- *                        the #157/#143 lesson). Reached only when ci-log's row
- *                        above also missed (no `ciFailures`) — a red required
- *                        check outranks a body-coverage-shaped review too.
- *   5. reviewer-unmet  — a real reviewer-computed unmet set (W1-T76, unchanged):
- *                        `evidence.review.unmetCriteria` is non-empty. W1-T2236: NAMED,
- *                        not unconditional — see this doc block's own header, above. An
- *                        evidence shape that reaches NONE of these five rows (no unmet
- *                        criteria, no named gate failure, no CI/merge-conflict evidence) still
- *                        DISPATCHES on its FIRST such round — `deriveFixMode`'s fallback below
- *                        names `reviewer-unmet` for it, exactly as the old unconditional
- *                        catch-all did, so the review's own `summary` (never empty for a
- *                        failing review) still gives a fix worker something to act on that one
- *                        time, honoring `test/escalation-evidence-floor.test.ts` (W1-T487,
- *                        protected, not in this task's scope — every one of its blocked_review
- *                        fixtures pins this exact shape to dispatch-then-escalate on ITS one
- *                        and only round). `runFixRung`'s own pre-strike guard (site
- *                        `rung.empty_review_evidence`) stands the SAME shape down under a
- *                        named reason, rather than defaulting again, once it has already spent
- *                        one honest strike and recurs unchanged — see that guard's own doc.
- */
-export const FIX_MODE_RULES: readonly FixModeRule[] = [
-  {
-    mode: "merge-conflict",
-    when: (e) => e.mergeConflict !== undefined,
-  },
-  {
-    mode: "ci-log",
-    when: (e) => e.ciFailures !== undefined,
-  },
-  {
-    mode: "gate-fix",
-    when: (e) => (e.actionableGateFailures?.length ?? 0) > 0,
-  },
-  {
-    mode: "body-coverage",
-    when: (e) => {
-      const unmet = e.review?.unmetCriteria ?? [];
-      return (
-        unmet.length > 0 &&
-        unmet.every((c) => /matched \d+\/\d+ proof keywords/.test(c.reason)) &&
-        !unmet.some((c) => c.proof_exec === "executed_fail")
-      );
-    },
-  },
-  {
-    mode: "reviewer-unmet",
-    when: (e) => (e.review?.unmetCriteria.length ?? 0) > 0,
-  },
-];
-
-/**
- * Derive the fix mode from block evidence — pure, total, table-driven (rule
- * 2). `rules` is injectable (mirrors `deriveDisposition`'s `policy` param in
- * sweep.ts) so a test can prove a NEW table row derives a NEW mode with zero
- * change to this function.
- */
-export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule[] = FIX_MODE_RULES): FixMode {
-  const rule = rules.find((r) => r.when(evidence));
-  return rule ? rule.mode : "reviewer-unmet";
-}
-
 /**
  * W1-T2293 (AN INFRASTRUCTURE FAULT HAS NO DISPOSITION EXCEPT BUILD). Every one of
  * {@link FIX_MODE_RULES}' five rows — and `deriveFixMode`'s own fallback — resolves to a BUILD
@@ -6489,368 +6269,6 @@ export function reportSubstituteStandDownReason(
     `defect the next fix worker could resolve; standing down rather than spending a strike on a fault this ` +
     `rung cannot fix`
   );
-}
-
-/**
- * Render the fix worker's prompt. The prompt NAMES its derived MODE and
- * carries ONLY that mode's inputs — never a mix, never the other modes'
- * fields. `reviewer-unmet` and `body-coverage` both come from `evidence.review`
- * (the FULL unmet acceptance criteria + the reviewer's verbatim reasons, ALL AT
- * ONCE — the anti-ping-pong invariant, P21's golden, absorbed verbatim; never a
- * narrowed, one-criterion prompt). `ci-log` comes from `evidence.ciFailures`
- * instead — the failing check names + log tails, with no review-shaped input
- * at all. `merge-conflict` (W1-T106) comes from `evidence.mergeConflict` — the
- * conflicting file list + both sides' log since merge-base, with no
- * review-shaped or ci-log-shaped input at all. Both `resume` (round 1) and
- * `fresh` (round 2+) rounds get the identical full-set framing for their mode.
- *
- * A review can fail with an EMPTY `unmetCriteria` (judgeReview: `testTheater`
- * or `noCriteria` alone fails the state even when every named criterion is
- * met); `evidence.review.summary` is what keeps the prompt from going out with
- * nothing to act on in that case.
- *
- * W1-T1227: `task.files` (W1-T322's widening of `runFixRung`'s own opts type) is now SURFACED
- * here too — every prior version of this prompt carried only `id`/`title`, so a fix worker had
- * no way to learn the PR's declared scope from its own instructions and could only infer it (or
- * not) from a failing check. See {@link fixRungScopeStandDownReason} for the belt-and-suspenders
- * half of this fix: a worker that ignores this line and pushes outside scope anyway is caught at
- * the NEXT pre-strike gate, before another strike compounds on top of it.
- *
- * W1-T2651: before this, the DECLARED SCOPE sentence forbade EVERY path outside `task.files`,
- * mode-agnostically — including the one edit a failing gate had itself just printed as the fix
- * (`scripts/source-size-ratchet.mjs`'s own remedy for the source-size ceiling it enforces). A
- * worker that obeyed this prompt filed a Follow-up and left the PR red; a worker that obeyed the
- * gate instead was caught by {@link fixRungScopeStandDownReason}'s belt-and-suspenders half, which
- * stood the rung down over the very path the prompt would have called "not yours to widen" — no
- * lane in the fleet could clear it either way. The REGISTRY EXCEPTION clause below names the ONE
- * bounded carve-out: a path {@link REGENERABLE_ARTIFACT_GENERATORS} (lib/sweep.ts) declares may be
- * committed alongside the declared scope, and {@link scopeGuardOutOfScopeFiles} (which
- * `fixRungScopeStandDownReason` calls, via {@link outOfDeclaredScopeFiles}) now agrees — the SAME
- * registry, read once, never a second hand-maintained list either side could drift from. Rendered
- * only for a NON-plan-only task: a plan-only PR's scope regime is plan-membership
- * ({@link outOfPlanScopeFiles}), which this registry was never wired into (design note iii keeps
- * the two regimes untouched), so promising the exception there would tell a worker something the
- * pre-strike gate would still refuse.
- */
-export function renderFixPrompt(opts: {
-  task: { id: string; title: string; files?: readonly string[] };
-  round: number;
-  branch: string;
-  evidence: FixEvidence;
-  // W1-T2607: the changed-file list as it stood BEFORE this invocation's first strike — the SAME
-  // baseline {@link fixRungScopeStandDownReason} exempts. Optional and best-effort: omitted (or
-  // simply undefined, matching that guard's own fail-OPEN contract for an unreadable baseline)
-  // means no inherited-scope line renders at all, never a guessed baseline.
-  baselineDiffFiles?: readonly string[];
-  // W1-T2653: the declared remedy file(s) of the check(s) THIS strike is addressing — the SAME
-  // list the caller passed {@link fixRungScopeStandDownReason}'s 4th parameter, so instruction and
-  // enforcement can never name a different set. Omitted (or empty) renders no GATE REMEDY line —
-  // never a guessed remedy.
-  reachableRemedyFiles?: readonly RemedyFileForGate[];
-}): string {
-  const mode = deriveFixMode(opts.evidence);
-  const header = `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.\nMODE: ${mode}.`;
-  // W1-T78: an operator's clarification answer, when present, is carried
-  // VERBATIM ahead of the mode-specific content — mode-agnostic, never dropped.
-  const constraintBlock = opts.evidence.constraint
-    ? [
-        "",
-        "OPERATOR CONSTRAINT (the clarification-question rung, W1-T78 — answered; carried verbatim):",
-        opts.evidence.constraint,
-      ]
-    : [];
-  // W1-T1227: named EXPLICITLY, mode-agnostic (every branch below splices this in), so the fix
-  // worker cannot claim it was never told. Omitted only when the task declares no `files` scope
-  // at all — silence here is never a licence, it is simply nothing to report.
-  //
-  // W1-T2607: paths this branch already carried before this invocation's first strike, that fall
-  // outside the declared scope, computed with the SAME predicate {@link fixRungScopeStandDownReason}
-  // exempts them by ({@link outOfDeclaredScopeFiles}) — never a second judgment on the same facts.
-  // Empty whenever `baselineDiffFiles` was never captured (fail OPEN, matching that guard's own
-  // discipline) or simply carries nothing out of scope; either way the block below renders no
-  // INHERITED SCOPE line, matching the clean path's existing shape.
-  const inheritedOutOfScope =
-    opts.task.files && opts.task.files.length > 0 && opts.baselineDiffFiles
-      ? outOfDeclaredScopeFiles(opts.baselineDiffFiles, opts.task.files)
-      : [];
-  // W1-T2651: the ONE bounded exception to "do not push it" — a path this repo's own generator
-  // registry declares (the SAME registry {@link scopeGuardOutOfScopeFiles} now reads, never a
-  // second list). Rendered only for a task whose declared scope is NOT plan-only: a plan-only PR
-  // is graded by plan-scope membership instead ({@link outOfDeclaredScopeFiles}'s own regime
-  // selection), which this registry was never wired into, so promising the exception there would
-  // contradict the pre-strike gate that actually runs against that PR.
-  const planOnlyTask = !!opts.task.files && opts.task.files.length > 0 && opts.task.files.every(isInPlanScope);
-  const registryPaths = Object.keys(REGENERABLE_ARTIFACT_GENERATORS).sort();
-  const scopeBlock =
-    opts.task.files && opts.task.files.length > 0
-      ? [
-          "",
-          `DECLARED SCOPE (W1-T1227): this task's PR may only touch: ${opts.task.files.join(", ")}. If the ` +
-            `genuine fix requires a path outside that list, do NOT push it — say so in your REPORT's ` +
-            `'## Follow-ups' section instead and leave the branch as-is; this task's declared scope is not ` +
-            `yours to widen. A commit outside declared scope is PUSHED AND FLAGGED (\`scope_guard.overrun\`), ` +
-            `not blocked — but the NEXT round's fix rung stands down on any NEW out-of-scope path THIS rung ` +
-            `adds, so treat "do not push it" as the real rule, not a formality.`,
-          // W1-T2653: named EXPLICITLY per failing check — a fix worker told only "some registry
-          // permits some path" (the REGISTRY EXCEPTION line below) still has to trust that the gate
-          // it is looking at is one of the ones covered; this line removes that inference by naming
-          // the exact file AND the exact gate that declares it, scoped to what THIS strike is
-          // actually repairing (never every gate's remedy, only the ones currently failing).
-          // Rendered only for a NON-plan-only task, the SAME carve-out the REGISTRY EXCEPTION
-          // clause below draws: `fixRungScopeStandDownReason` never folds `reachableRemedyFiles`
-          // into a plan-only task's comparison set (design note iii), so promising the exception
-          // there would tell a worker something the pre-strike gate would still refuse.
-          ...(!planOnlyTask && (opts.reachableRemedyFiles ?? []).length > 0
-            ? [
-                `GATE REMEDY (W1-T2653): the failing check(s) this strike is addressing declare their own ` +
-                  `remedy file(s), reachable for THIS repair only: ` +
-                  (opts.reachableRemedyFiles ?? [])
-                    .map((r) => `${r.path} (gate: ${r.job})`)
-                    .join(", ") +
-                  `. You MAY commit it/them alongside the declared scope above — the fix rung will NOT stand ` +
-                  `down over it and no strike is spent for doing so. This is scoped to the check(s) actually ` +
-                  `failing this round: a remedy file for a gate that is NOT currently failing still follows ` +
-                  `the "do NOT push it" rule above verbatim.`,
-              ]
-            : []),
-          ...(!planOnlyTask
-            ? [
-                `REGISTRY EXCEPTION (W1-T2651): the one bounded exception to "do not push it" is a path this ` +
-                  `repo's own generator registry declares (REGENERABLE_ARTIFACT_GENERATORS, lib/sweep.ts — ` +
-                  `currently ${registryPaths.join(", ")}). If the failing gate you are fixing names one of ` +
-                  `those paths as its own remedy, you MAY commit it alongside the declared scope above — the ` +
-                  `fix rung will NOT stand down over it and no strike is spent for doing so — but re-derive ` +
-                  `any file-count or file-list claim in your REPORT/PR body afterward so it still matches the ` +
-                  `diff you actually pushed. Every other path outside the declared list still follows the ` +
-                  `"do NOT push it" rule above verbatim; this is not a general licence to widen scope.`,
-              ]
-            : []),
-          ...(inheritedOutOfScope.length > 0
-            ? [
-                `INHERITED SCOPE (W1-T2607): this branch already carries path(s) outside the declared list ` +
-                  `from an earlier round: ${inheritedOutOfScope.join(", ")}. They predate this invocation, ` +
-                  `this rung is judged only on what IT adds, and neither removing them nor reporting them ` +
-                  `again is required of this round.`,
-              ]
-            : []),
-        ]
-      : [];
-  const footer = [
-    "",
-    `Amend the SAME branch (${opts.branch}) — do NOT open a new PR and do NOT create a fix/*`,
-    // W1-T136/W1-T137 class: the fix rung authors its OWN commit message and, until now, was
-    // told NOTHING about the format — #427/#428 blocked on a 111-char round-3 header. Same
-    // literal the implement contract uses, so the two prompts cannot drift.
-    ...commitMessageContractLines(),
-    `branch (only a run-<taskId>-<epochMs> head is creditable).`,
-    // W1-T2997: the fix rung needs this MORE than the implement contract does — it exists
-    // because CI went red, and a ratchet an earlier round left unrecorded is the commonest reason.
-    ...ratchetContractLines(),
-    // W1-T464: this rung used to spread ciParityContractLines() here — the same
-    // `rmd preflight --ci-parity` obligation the implement contract carried (W1-T295) — but the
-    // orchestrator never gated on a preflight failure (run-task.ts's own handling of it has no
-    // branch, no early return), so the ~15-17 minute step was paid on every fix round without
-    // ever blocking one. Removed from BOTH prompts together (see lib/compaction.ts); the verb
-    // itself (`rmd preflight --ci-parity`) is untouched and remains the hand route's own gate.
-    `Then: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`,
-    `must substantiate EVERY task acceptance`,
-    `criterion, not only the ones fixed here — the review floor judges the body against the`,
-    // impl-FV: the SAME literal the implement contract carries, for the same reason
-    // `commitMessageContractLines` above is shared — and this rung needs it MOST: it amends an
-    // existing PR, so its body is the one most likely to have been written against an earlier diff.
-    `FULL criteria set.`,
-    ...bodyVsDiffContractLines(),
-    `Anything you discover here that is OUT OF SCOPE for THIS fix — a`,
-    `research question, a follow-up task, or an action someone should take — goes in an`,
-    `OPTIONAL '## Follow-ups' section of your REPORT (W1-T105), never into the diff: one`,
-    `typed entry per line, \`research:\` | \`task:\` | \`action:\`, its own one-line why inline.`,
-    `End with a REPORT whose last line is exactly: PR_URL: <url>`,
-  ];
-
-  if (mode === "merge-conflict") {
-    // W1-T106 (the #170 DIRTY strand): the conflicting file list + both
-    // sides' log since merge-base come from `git` on a PR branch/head an
-    // outside contributor could have authored — the SAME untrusted-content
-    // threat model W1-T210 fenced for ci-log's `gh run view` output, so this
-    // reuses the identical fence + neutralization rather than a parallel,
-    // differently-worded control.
-    const mc = opts.evidence.mergeConflict;
-    const files = mc?.files ?? [];
-    const fileList =
-      files.length > 0
-        ? files
-            .map((f) => `- ${neutralizeFenceMarkers(f.path)} (ours -${f.oursDeleted} line(s), theirs -${f.theirsDeleted} line(s) since merge-base)`)
-            .join("\n")
-        : "(no conflicting file detail was captured — re-check the PR's mergeability for the current state.)";
-    return [
-      header,
-      ...constraintBlock,
-      ...scopeBlock,
-      `This PR's merge state is DIRTY — GitHub cannot compute a clean merge ref, so NO check even`,
-      `runs until the conflict is resolved; there is no review to react to either. Your target: MERGE`,
-      `origin/main into this SAME branch (${opts.branch}) — never rebase, never force-push — resolve`,
-      `the conflicting file(s) below, then push. The changed head re-judges through the normal gate.`,
-      "",
-      `MERGE DISCIPLINE (the #170 hand-resolution's own procedure — never deviate): resolve toward the`,
-      `UNION of both sides ONLY where merge-base analysis shows a PURE CONCURRENT ADDITION — both`,
-      `sides only ADDED content, neither deleted anything the other still relies on. If EITHER side`,
-      `DELETED something in a conflicting file, or the conflict is SEMANTIC rather than a safe`,
-      `textual union, REFUSE to resolve it yourself and escalate instead — a wrong auto-resolution`,
-      `is worse than a strand.`,
-      "",
-      `REGENERABLE ARTIFACTS ARE THE EXCEPTION, AND THE UNION IS ALWAYS WRONG FOR THEM. If a`,
-      `conflicting file is one a TOOL rewrites from the tree — a size or coverage ledger, a lockfile,`,
-      `a generated reference doc, a plan index — do NOT merge it textually at all, in either`,
-      `direction. Its correct content is a FUNCTION of the MERGED tree, so it is neither side, and`,
-      `often not the larger of the two either. Resolve the OTHER files first, then RE-RUN THE COMMAND`,
-      `THAT GENERATES IT and commit whatever that produces. Such a file names its own generator, or`,
-      `the repo has a command that rewrites it: read the refusal text, or that file's own header.`,
-      `MEASURED on this repo, three conflicts on scripts/source-size-baseline.json: the true merged`,
-      `values were 3230, 32818 and 32748 against sides of 3136/3138, 32692/32713 and 32743/32718 —`,
-      `taking either side, or the larger of the two, would have shipped a false ceiling every time.`,
-      "",
-      `Conflicting file(s):`,
-      fileList,
-      "",
-      // W1-T2700: the envelope NESTS INSIDE the W1-T210 fence rather than replacing it — the two
-      // are independent defences and this one does not depend on the other having run.
-      // `neutralizeFenceMarkers` keeps the FIXED markers unforgeable; the envelope's boundary is
-      // drawn fresh per call, so text written before it existed cannot close it at all.
-      `${CI_LOG_FENCE_OPEN}`,
-      envelope(
-        [
-          `log since merge-base — OUR side (this branch):`,
-          neutralizeFenceMarkers(mc?.oursLog || "(not captured)"),
-          "",
-          `log since merge-base — THEIR side (origin/main):`,
-          neutralizeFenceMarkers(mc?.theirsLog || "(not captured)"),
-        ].join("\n"),
-        "ci-log",
-      ),
-      `${CI_LOG_FENCE_CLOSE}`,
-      ...footer,
-    ].join("\n");
-  }
-
-  if (mode === "ci-log") {
-    const failures = opts.evidence.ciFailures ?? [];
-    // W1-T210: the check NAME and log tail both come from `gh run view
-    // --log-failed` — attacker-influenceable CI output — so BOTH (never just
-    // the tail) are neutralized against the fence marker and rendered INSIDE
-    // the fence, labelled as data, rather than spliced bare between narrative
-    // instruction lines. `check: `/`log tail:` labels stay OUTSIDE the value
-    // but INSIDE the fence, matching the pre-existing `check: <name>` shape
-    // the mode-fixture test above already asserts on.
-    const rendered =
-      failures.length > 0
-        ? failures
-            .map((f, i) => {
-              // A named unavailability replaces the `log tail:` line entirely rather than sitting
-              // beside an empty one: an empty `log tail:` is precisely the rendering that reads
-              // as "this check printed nothing", which is the confusion this branch exists to
-              // end. The cause text is authored HERE, never by CI, but it is still neutralized
-              // and kept inside the fence — the check name beside it is attacker-influenceable,
-              // and a reader must not have to know which half of a fenced block to trust.
-              const body = f.logUnavailable
-                ? `   ${neutralizeFenceMarkers(describeCiLogUnavailable(f.logUnavailable))}\n` +
-                  `   TREAT THIS AS "I CANNOT SEE WHY THIS FAILED", NOT AS A CLEAN CHECK.\n`
-                : `   log tail:\n${neutralizeFenceMarkers(f.logTail)}\n`;
-              // W1-T2700: enveloped INSIDE the fence, per this rung's own composition note in the
-              // merge-conflict branch above. The check NAME is inside it too — any installed
-              // GitHub App can choose that string, so it is external text exactly like the tail.
-              return (
-                `${i + 1}. ${CI_LOG_FENCE_OPEN}\n` +
-                envelope(`   check: ${neutralizeFenceMarkers(f.name)}\n` + body, "ci-log") +
-                "\n" +
-                CI_LOG_FENCE_CLOSE
-              );
-            })
-            .join("\n\n")
-        : "(no failing check detail was captured — re-check `gh pr checks` for the current state.)";
-    return [
-      header,
-      ...constraintBlock,
-      ...scopeBlock,
-      `Required CI check(s) are FAILING — the failing signal here IS the CI log, not a reviewer`,
-      `verdict. GitHub will not merge past a red required check no matter what any review verdict`,
-      `says, and a review verdict sitting beside this one (if any exists at all — most often none`,
-      `has run yet, since a review needs green CI first) may simply be STALE, computed before the`,
-      `push that broke this check. Your target is making CI GREEN on the SAME branch; do not`,
-      `expand scope beyond what the failing check(s) below require — do not touch acceptance`,
-      `criteria or task scope to chase a reviewer verdict here.`,
-      "",
-      rendered,
-      ...footer,
-    ].join("\n");
-  }
-
-  if (mode === "gate-fix") {
-    // W1-T2236: the ONE structured, single-form remedy the review floor already named —
-    // NEVER an unmet acceptance criterion (every named criterion may already read MET; that
-    // is exactly why this mode exists instead of `reviewer-unmet` rendering an empty list).
-    const failures = opts.evidence.actionableGateFailures ?? [];
-    const n = failures.length;
-    const rendered =
-      n > 0
-        ? failures.map((f, i) => `${i + 1}. ${f.reason}`).join("\n")
-        : "(no gate-failure detail was captured — re-check the review floor for the current state.)";
-    return [
-      header,
-      ...constraintBlock,
-      ...scopeBlock,
-      `The review gate is FAILING on ${n} actionable gate failure${n === 1 ? "" : "s"} the reviewer named a`,
-      `SINGLE, unambiguous remedy for — every named acceptance criterion may already read MET; this is NOT`,
-      `an unmet-criterion gap. Resolve EACH remedy below exactly as named — the review floor has already`,
-      `diagnosed it precisely; do not invent a different fix or re-litigate a criterion that already passed.`,
-      "",
-      rendered,
-      ...footer,
-    ].join("\n");
-  }
-
-  const unmet = opts.evidence.review?.unmetCriteria ?? [];
-  const summary = opts.evidence.review?.summary ?? "";
-  const n = unmet.length;
-  const list =
-    n > 0
-      ? unmet
-          .map(
-            (c, i) =>
-              `${i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
-          )
-          .join("\n")
-      : `(no single criterion is unmet — the review floor's overall verdict is: ${summary})`;
-
-  if (mode === "body-coverage") {
-    return [
-      header,
-      ...constraintBlock,
-      ...scopeBlock,
-      `The review gate is FAILING on ${n} unmet acceptance criteri${n === 1 ? "on" : "a"} whose reviewer`,
-      `reason is a PROOF-KEYWORD COVERAGE gap — the report text never mentions the proof, this is`,
-      `NOT an executed failure. The likely fix is the PR BODY's Acceptance block: add the`,
-      `missing substantiation there FIRST. Change code ONLY if the body's claim would actually`,
-      `be FALSE — never patch code just to satisfy keywords (the #157/#143 lesson). Review`,
-      `summary: ${summary}`,
-      "",
-      list,
-      ...footer,
-    ].join("\n");
-  }
-
-  // reviewer-unmet (default, W1-T76 unchanged).
-  return [
-    header,
-    ...constraintBlock,
-    ...scopeBlock,
-    `The review gate is FAILING (${n} UNMET acceptance criterion${n === 1 ? "" : "a"}). Resolve ALL`,
-    `of them together in this ONE pass — never fix one and leave another; patching one criterion`,
-    `at a time is exactly what causes an infinite ping-pong across review rounds. Review summary:`,
-    `${summary}`,
-    "",
-    list,
-    ...footer,
-  ].join("\n");
 }
 
 // ── GENERATOR-BACKED GATE FIX (W1-T2551) ──────────────────────────────────────────────────────
@@ -8085,53 +7503,6 @@ export function priorPrerequisitePrFor(lines: ReadonlyArray<Record<string, unkno
     }
   }
   return found;
-}
-
-/**
- * W1-T2436 (capability 2 of 3): the prompt for the worker THIS rung dispatches when an entangled
- * PR's own review names the DISJOINT instrument/src split (`review.instrumentEntanglementPaths`,
- * `detectInstrumentEntanglement`'s own `instrumentPaths`/`srcPaths`, lib/review.ts). Rationale (4):
- * "the worker is handed the instrument half and the source half ... and authors whatever the
- * prerequisite needs to stand alone" — a human did exactly this twice (#3082, #3186), each time
- * AUTHORING new code the original PR never carried, which is why this is a worker dispatch and
- * never a mechanical `git mv`/partition (rationale (3): a partition's own PR failed its own CI in
- * both cases on record).
- *
- * PURE: no I/O, no git, no gh — the worker itself carries out every git/gh step this text
- * describes, exactly like every other fix-rung dispatch's prompt (`renderFixPrompt`).
- */
-export function renderPrerequisitePrPrompt(args: {
-  task: { id: string; title: string };
-  branch: string;
-  prUrl: string;
-  instrumentPaths: readonly string[];
-  srcPaths: readonly string[];
-}): string {
-  return [
-    `Task ${args.task.id} (${args.task.title})'s own pull request ${args.prUrl} (branch \`${args.branch}\`) was ` +
-      `refused by the blocked_review fix rung under Standing rule 25: it changes measurement-instrument ` +
-      `path(s) alongside src/ path(s) in the SAME diff, and no worker may resolve that by writing more code ` +
-      `into that PR.`,
-    "",
-    "Your job is DIFFERENT: open a NEW, SEPARATE pull request — the prerequisite — that carries ONLY the " +
-      "instrument-surface change below, standing on its own and passing its own CI. Do this:",
-    "",
-    "1. Starting from a fresh branch off `origin/main` (never the branch above — leave it untouched), bring " +
-      "over ONLY these instrument-surface path(s), exactly as they read on that branch right now:",
-    ...args.instrumentPaths.map((p) => `   - ${p}`),
-    "2. These src/ path(s) belong to the ORIGINAL pull request and must NOT appear in your new one:",
-    ...args.srcPaths.map((p) => `   - ${p}`),
-    "3. Author WHATEVER this prerequisite needs to stand on its own — new tests, new supporting code, " +
-      "anything the instrument-surface change requires to pass CI by itself. Do not assume the split is " +
-      "mechanical: a plain `git mv`/cherry-pick of the same hunk has already been tried twice and failed CI " +
-      "both times.",
-    "4. Push your branch and open the pull request against `main` with `gh pr create`.",
-    "5. Leave the ORIGINAL branch/PR entirely alone — no push, no edit, no comment on it.",
-    "",
-    "End your REPORT with a line reading exactly: PR_URL: <the new pull request's url>",
-    "If you cannot produce a pull request that passes its own CI, say so plainly in your REPORT instead of " +
-      "opening one that does not.",
-  ].join("\n");
 }
 
 /**
@@ -12183,194 +11554,6 @@ export function reconArtifactToContext(artifact: ReconArtifact, taskId: string, 
  */
 export const RECON_MAX_TURNS = 20;
 
-/**
- * Render the RECON worker's prompt (W1-T37, MASTER-PLAN §8A Tier 2): the fixed read-only recon
- * instructions, plus the generated PLAN INDEX in place of the plan body. The plan (MASTER-PLAN.md)
- * is NOT shipped to workers — `planIndexBlock` (from {@link renderPlanIndex}) is a compact list of
- * section headings + one-line summaries + a grep hint, so a recon worker that needs a specific
- * section's detail can retrieve it itself (`grep -n '<heading>' MASTER-PLAN.md`) instead of every
- * run paying to carry the whole ~1900-line document. `planIndexBlock` is `""` when no index is
- * committed yet (a fresh checkout before the first `npm run plan-index`) — recon still runs, just
- * without the pointer; correctness never depends on the index being present.
- *
- * `operatorNotesBlock` (W1-T164, `lib/operator-notes.ts`'s `renderOperatorNotes`) carries THIS
- * task's console-authored, provenance-stamped guidance — feedback INTO the task before it runs,
- * scoped strictly to this task's own id. `""` (the default) when the task carries no notes.
- */
-/**
- * W1-T2632 — RECON IS NOW TOLD WHICH TASK IT IS RECONNING. `task` and `recordPath` are both
- * OPTIONAL (and default to absent) so every pre-existing call site that only ever passed
- * `planIndexBlock`/`operatorNotesBlock` — the whole `test/*.test.ts` corpus at this sha — keeps
- * rendering byte-identical output; only the real recon spawn (below) supplies them.
- *
- * `recordPath` is {@link workerVisibleRecordPath}'s output, NEVER {@link taskRecordPath}'s raw
- * absolute answer (W1-T501) — the caller is responsible for that re-anchoring, exactly as the
- * implement-prompt path already is. When it is `undefined` (unresolvable or tree-escaping
- * record), the pointer line is OMITTED and recon still runs with just the `TASK:` line —
- * fail-soft, never a failed dispatch over one malformed plan file.
- *
- * NAMED, NOT INLINED: the record's design/rationale/criteria stay one `Read` away, the same
- * retrieve-don't-inject discipline `planIndexBlock` already observes for MASTER-PLAN.
- */
-export function renderReconPrompt(
-  planIndexBlock: string,
-  operatorNotesBlock = "",
-  task?: Pick<Task, "id" | "title">,
-  recordPath?: string,
-): string {
-  return [
-    "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
-      "repository read-only (git remote -v, git log --oneline -5, ls). Output one report:\n" +
-      "RECON REPORT\nOBSERVED: <commands + key output>\nINFERRED: <conclusions>\n" +
-      "COULDN'T-VERIFY: <unconfirmed>\n" +
-      // W1-T105: recon is read-only and out-of-scope by construction, so a genuine
-      // discovery worth the plan's attention (not just this task's own INFERRED)
-      // still has a place to land, never invented into a diff you cannot make.
-      "Optionally, after the report, add a '## Follow-ups' section — one typed entry\n" +
-      "per line, its own one-line why inline: `research: <what, why>` | `task: <what, why>` |\n" +
-      "`action: <what, why>` — for anything discovered that is out of THIS recon's scope.",
-    task ? `TASK: ${task.id} — ${task.title}` : "",
-    task && recordPath
-      ? `YOUR TASK'S OWN RECORD IS AT ${recordPath} — the design, rationale and acceptance ` +
-        "criteria for the task above live there, one `Read` away; this recon need not guess them."
-      : "",
-    planIndexBlock,
-    operatorNotesBlock,
-  ]
-    .filter((s) => s.length > 0)
-    .join("\n\n");
-}
-
-/**
- * Render the DIAGNOSE worker's prompt (W1-T7B — the two-strikes dispatch, §4). EVIDENCE-ONLY,
- * mirroring `renderReconPrompt`'s own read-only contract: two prior implement attempts at the
- * SAME task both failed (a strike each), and this worker's job is to explain WHY — never to
- * patch, commit, or push. It runs in the SAME worktree the failing attempts left behind (the
- * real call site passes the same `cwd: worktreePath` recon already uses), so `git diff`/`git
- * status`/the failing test or build output are all still on disk to inspect.
- *
- * Its report becomes the NEXT (diagnose-informed) attempt's `findings` — `classify.js`'s
- * `runDiagnoseThenRetry` threads whatever text this worker returns straight into the next
- * `attempt(findings)` call, so the third patch is never blind (acceptance #2).
- */
-export function renderDiagnosePrompt(task: Pick<Task, "id" | "title">, failureEvidence: string): string {
-  return [
-    "You are a DIAGNOSE worker. Do NOT modify, commit, or push ANYTHING — this is a read-only " +
-      "investigation. Two prior attempts at the task below both failed. Inspect the current " +
-      "worktree (git status, git diff, git log, re-run whatever failed) and explain the ROOT " +
-      "CAUSE — never propose or write a patch; that is the NEXT worker's job, informed by your " +
-      "report.",
-    `TASK: ${task.id} — ${task.title}`,
-    `## PRIOR FAILURE EVIDENCE\n${failureEvidence || "(no evidence captured)"}`,
-    "Output exactly one report:\nDIAGNOSE REPORT\nROOT CAUSE: <your best-evidenced explanation>\n" +
-      "EVIDENCE: <the specific commands/output that support it>\n" +
-      "SUGGESTED APPROACH: <a concrete next step for the retry — description only, no code>",
-  ].join("\n\n");
-}
-
-/**
- * Render the implement prompt: cited CONTEXT + TASK + explicit output contract.
- *
- * CACHE-AWARE ASSEMBLY (MASTER-PLAN §8A / W1-T35): the Anthropic prompt cache
- * keys on EXACT PREFIX BYTES — any early edit invalidates the cache for
- * everything after it, and a cache READ prices at ~1/10th of fresh input. So
- * the CONTEXT block is ordered STABLE-FIRST, VOLATILE-LAST:
- *   1. `renderDoctrinePreamble()` — Tier 0, the distrust rule + the autonomy
- *      clause. Invariant; changes rarely (MASTER-PLAN §8A: "line-capped
- *      ~150, must change RARELY"). This is the cacheable prefix.
- *   2. `contextClaims` / `reconContext` — per-task, fixed for the life of a
- *      run once recon has completed (recon never re-runs mid-run).
- *   3. `matchedLearnings` (Tier 1, W1-T19/W1-T33) — the task-matched LEARNINGS
- *      facts. VOLATILE: the corpus grows every retro, so it goes LAST, never
- *      ahead of the stable prefix — a corpus edit can never bust the cache for
- *      the doctrine/task/recon bytes that precede it.
- * Every line is already provenance-tagged, so the whole CONTEXT block still
- * lints clean regardless of ordering.
- *
- * `operatorNotesBlock` (W1-T164, `lib/operator-notes.ts`'s `renderOperatorNotes`) carries THIS
- * task's console-authored, provenance-stamped guidance, scoped strictly to `task.id` — placed
- * after the task/recon context and before the volatile learnings corpus: it is per-task and
- * per-run stable (never grows mid-run), so it need not trail behind everything the way the
- * ever-growing learnings corpus must (cache-aware ordering, W1-T35). `""` (the default) when the
- * task carries no notes.
- */
-/**
- * The named parts `renderImplementPrompt` assembles into its `# CONTEXT` + `# TASK` blocks, ONE
- * derivation shared by the renderer below and by the W1-T2297 `prompt.manifest` call site
- * (`runTask`, further down) — so "what the manifest fingerprints" can never drift from "what the
- * worker actually received": both read this exact array, never two independently-maintained
- * copies of the same five expressions.
- */
-export function implementPromptParts(
-  task: Task,
-  reconContext: string,
-  runId: string,
-  matchedLearnings = "",
-  operatorNotesBlock = "",
-  // W1-T2761: policy-gated headline index (`buildRuleHeadlinesPart`, below) — "" when the
-  // `workerRuleHeadlines.enabled` row is absent or off, the default for every existing caller
-  // that never passes this argument at all.
-  ruleHeadlinesPart = "",
-): Array<{ name: string; value: string }> {
-  const contextClaims = (task.context ?? [])
-    .map((c) => `- ${c.claim} ${citation(c.src)}`)
-    .join("\n");
-  const body = (task.prompt ?? task.title)
-    .split("${RUN_ID}").join(runId)
-    .split("${TASK_ID}").join(task.id);
-  return [
-    { name: "doctrine", value: renderDoctrinePreamble() },
-    // W1-T2761, design (ii): directly after doctrine — the other STABLE half of the CONTEXT
-    // block. It changes only when CLAUDE.md's own headline set moves, never per-task/per-run,
-    // so it precedes every volatile/per-task part exactly as renderDoctrinePreamble does.
-    { name: "rule_headlines", value: ruleHeadlinesPart },
-    { name: "task_claims", value: contextClaims },
-    { name: "recon", value: reconContext },
-    { name: "operator_notes", value: operatorNotesBlock },
-    { name: "matched_learnings", value: matchedLearnings },
-    { name: "task_body", value: body },
-  ];
-}
-
-export function renderImplementPrompt(
-  task: Task,
-  reconContext: string,
-  runId: string,
-  matchedLearnings = "",
-  operatorNotesBlock = "",
-  ruleHeadlinesPart = "",
-): string {
-  const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart);
-  const partValue = (name: string) => parts.find((p) => p.name === name)!.value;
-
-  return [
-    // THE ROLE, FIRST — mirroring `renderReconPrompt`, whose own first sentence is "You are a RECON
-    // worker." Above `# CONTEXT` on purpose: `extractContext` starts at that heading, so this text
-    // is outside the provenance linter's region and carries no citation, while the recon relay
-    // below it stays a cited CONTEXT claim exactly as before.
-    ...IMPLEMENT_ROLE_LINES,
-    "",
-    "# CONTEXT",
-    partValue("doctrine"),
-    // W1-T2761: an empty part (the row absent/off) contributes NOTHING — not even a blank line —
-    // so a disabled row renders BYTE-IDENTICAL to every render before this task existed.
-    ...(partValue("rule_headlines") ? [partValue("rule_headlines")] : []),
-    partValue("task_claims"),
-    partValue("recon"),
-    partValue("operator_notes"),
-    partValue("matched_learnings"),
-    "",
-    "# TASK",
-    partValue("task_body"),
-    "",
-    // Shared verbatim with the post-compaction ANCHOR (compaction.ts,
-    // MASTER-PLAN §8B / W1-T36) — ONE source of literal text so the anchor
-    // re-injected after a compaction is provably byte-identical to what the
-    // worker was told at turn 0, never a re-derived/paraphrased copy.
-    ...outputContractLines(task.id),
-  ].join("\n");
-}
-
 /** Shared default `readFile` for a rule-source read ({@link retrieveRuleBodyOnDemand} and
  *  {@link buildRuleHeadlinesPart} below both default to this ONE function, never a
  *  copy-pasted second try/catch) — repo-relative FILE resolution `run-task.ts` already
@@ -12593,20 +11776,6 @@ export function resolveRunMounts(
     taskClass,
     mountClass: mountResolution.resolvedClass,
   };
-}
-
-// W1-T2528 — module-scoped so it's monotonic across every lane runId this ONE process mints
-// (retro/triage/plan): `Date.now()`'s 1ms resolution let two rungs collide (OBSERVED: identical
-// epoch logged twice, then `fatal: a branch ... already exists`). Bumps only off the PRECEDING
-// raw reading (never an ever-growing peak), so a differing reading passes through unchanged,
-// keeping this repo's widespread `Date.now` mocks exact.
-let lastRawNowMs = -1;
-let lastLaneEpochMs = -1;
-export function nextLaneEpochMs(): number {
-  const now = Date.now();
-  if (now === lastRawNowMs) return ++lastLaneEpochMs;
-  lastRawNowMs = now;
-  return (lastLaneEpochMs = now);
 }
 
 /**
@@ -18286,8 +17455,33 @@ export function ledgerGrepCommand(rest: string[], opts: { stateDir?: string } = 
     return 1;
   }
   console.log(`matches:    ${result.matches.length}`);
-  for (const line of result.matches) console.log(line);
+  for (const line of result.matches) {
+    console.log(line);
+    // W1-T2764: the one decoder seam this verb wires. `stepFromRawLedgerLine` reads `step` off
+    // the matched raw JSON text without trusting the whole line to parse as a well-formed
+    // LedgerLine — a torn or hand-edited row still prints unchanged above; this only ever adds a
+    // second line when both the row's own `step` field AND a registered meaning for it exist.
+    const step = stepFromRawLedgerLine(line);
+    const decoded = step === undefined ? undefined : meaningOfStep(step);
+    if (decoded) console.log(`  meaning: ${decoded.meaning}`);
+  }
   return 0;
+}
+
+/** The `step` field of one raw matched ledger line's JSON text, or `undefined` when the line does
+ *  not parse as JSON or carries no string `step` -- never thrown, since `ledgerGrepCommand` must
+ *  keep printing the row itself either way (W1-T2764). */
+export function stepFromRawLedgerLine(line: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    // Malformed/torn JSON is a genuinely absent step, never a throw here: the row itself was
+    // already printed above, unconditionally, before this parse was attempted.
+    return undefined;
+  }
+  const step = (parsed as { step?: unknown } | null)?.step;
+  return typeof step === "string" ? step : undefined;
 }
 
 /**
@@ -23365,6 +22559,10 @@ async function retroCommand(
     const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
     return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks.map((t) => t.title) : [];
   });
+  const openTaskClasses = tryReadFollowupTitles("classes", () => {
+    const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
+    return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks.filter((t) => t.status !== "merged" && t.status !== "done").map((t) => deriveTaskClass(t)) : [];
+  });
   const openProposalLines = tryReadFollowupTitles("proposals", () => {
     const masterPlanPath = join(repoRoot, "MASTER-PLAN.md");
     const masterPlanMd = existsSync(masterPlanPath) ? readFileSync(masterPlanPath, "utf8") : "";
@@ -23394,6 +22592,8 @@ async function retroCommand(
     github,
     mastMapping,
     priorMastCategoryCounts: marker?.mast_category_counts,
+    priorGuardZeroStreak: marker?.guard_zero_streak,
+    openTaskClasses,
     openTitles: [...openTaskTitles, ...openProposalLines],
     mounts: mountsTable,
     // W1-T2642: the plan-coherence census's REAL bytes, read here (buildGather stays fs-free) so
@@ -23586,6 +22786,7 @@ async function retroCommand(
   // replacing it — `retro.start` carries this lane's own fields and has its own readers.
   log("run.start", laneRunStartFields({ lane: "retro", repo, architect: arch, worker: wrk }));
   log("retro.start", { since: gather.sinceTs ?? null, runs_in_scope: gather.totalRuns, architect: arch, worker: wrk });
+  log("retro.closure_by_class", { since: gather.sinceTs ?? null, rows: gather.closureByClass });
   say(`retro ${runId} — architect ${arch} over worker ${wrk}; ${gather.totalRuns} runs in scope`);
 
   const settingsFile = renderWorkerSettings({
@@ -23932,6 +23133,7 @@ async function retroCommand(
       learnings_count: gather.learningsNow,
       runs_seen: gather.totalRuns,
       mast_category_counts: gather.mast.byCategory,
+      guard_zero_streak: guardZeroStreakRecord(gather.guardFireCounts),
     };
     saveMarker(markerPath, nextMarker);
     log("retro.marker.advanced", { ...nextMarker, runs_deferred: gather.runsDeferred });
@@ -24354,412 +23556,6 @@ export function readUsageSnapshot(
 }
 
 /**
- * P29(ii)'s escalation side — called once `nextRunnable`'s `isCircuitTripped`
- * (status.ts's `evaluateDispatchBreaker`, via this file's `breakerGateFor`) reports a
- * task has been dispatched the policy-capped number of times with no new owned PR
- * since — never called merely on "indeterminate" (an absent/rotated ledger read,
- * handled instead by `isIndeterminate` as a skip-and-retry, not an escalation; see
- * `evaluateDispatchBreaker`'s doc). DEDUPED: a
- * task escalates AT MOST ONCE (checked via this module's OWN `dispatch.
- * circuit_broken.escalated` ledger line — never `escalation.issue_opened`
- * alone, which a genuine_blocker escalation for the SAME task could also have
- * written, for an unrelated reason) — mirrors ops.ts's alert-escalation dedup
- * discipline (a ledger line as the dedup key), never a second store.
- *
- * THE DEDUP KEY IS WRITTEN WHETHER OR NOT DELIVERY SUCCEEDS. The ledger-derived,
- * cross-boot dedup above was already the right shape; its defect was that the
- * marker was recorded only AFTER `escalate()` returned, so a THROWING `gh` wrote
- * nothing and every subsequent boot retried the same escalation — which is how a
- * transport failure became an unbounded relaunch loop (1 such marker in the
- * ledger against 460 boots). Marking the attempt makes the dedup durable across
- * the process death it is supposed to survive.
- *
- * The trade-off is deliberate and stated: a task whose escalation failed will not
- * be retried automatically. That is the correct side to err on for a BACKSTOP
- * NOTIFICATION — an undelivered notice is visible as an `escalation.failed` line
- * and costs one operator read, whereas retry-until-success costs the fleet.
- */
-export function escalateCircuitBreak(
-  task: Task,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): void {
-  // W1-T429: repo-scoped dedup — a same-id task in ANOTHER repo must never dedup off (or be
-  // dedup'd off by) this task's own escalation marker. `matchesRepoScopedTask` also honors a
-  // marker ledgered before this task existed (no `repo` field at all) as still matching.
-  const already = readLedgerLines(ctx.ledgerPath).some(
-    (l) => l.step === "dispatch.circuit_broken.escalated" && matchesRepoScopedTask(l, ctx.repo, task.id),
-  );
-  if (already) return;
-  const issueUrl = tryEscalate(
-    {
-      class: "BLOCKED",
-      taskId: task.id,
-      runId: ctx.runId,
-      summary: `${task.id}: dispatch circuit breaker tripped — repeated dispatch with no new owned PR`,
-      detail:
-        `MASTER-PLAN P29(ii): ${task.id} has been dispatched with no new owned PR appearing since — the ` +
-        `W1-T1/W1-T29 redispatch-storm shape (~130 dispatches / ~$130 / ~10h on one task, five hours of it ` +
-        `AFTER the task's own PR had already merged under a sibling run). Dispatch is now HALTED for this ` +
-        `task until a human resolves the underlying block; this is the backstop, not a diagnosis of WHY.`,
-      options: [
-        {
-          label: "fix and resume",
-          detail: `Resolve ${task.id}'s underlying block (a manual patch or \`rmd fix\`), then \`rmd drain\`/\`rmd daemon\` to continue.`,
-        },
-        {
-          label: "correct the credit",
-          detail: `If ${task.id} actually landed under a PR the ownership-assert rejected, \`rmd correct\` it (P9/W1-T75).`,
-        },
-      ],
-      recommendation: "fix and resume",
-    },
-    {
-      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
-      ledgerPath: ctx.ledgerPath,
-      runId: ctx.runId,
-    },
-  );
-  appendLedger(ctx.ledgerPath, {
-    run_id: ctx.runId,
-    task_id: task.id,
-    // W1-T429: the repo dimension the dedup read above (and any future one) matches against —
-    // see repoScopedTaskKey's doc for why this rides alongside `task_id` rather than folding
-    // into it.
-    repo: ctx.repo,
-    step: "dispatch.circuit_broken.escalated",
-    issue_url: issueUrl,
-    delivered: issueUrl !== null,
-  });
-}
-
-/**
- * W1-T316's escalation side — `escalateCircuitBreak`'s twin for the LIFETIME dispatch cap
- * (W1-T271): called once `nextRunnable`'s `isLifetimeCapExceeded` (status.ts's
- * `isLifetimeDispatchCapExceeded`, via this file's `breakerGateFor`) reports a task has been
- * dispatched (`run.start`) at least `DEFAULT_MAX_TASK_LIFETIME_DISPATCHES` times across its
- * WHOLE recorded history — a count `pr.opened` never resets, unlike the streak breaker's own,
- * so this fires for the shape that evades that breaker entirely (W1-T254: five dispatches in
- * eighty minutes, each one opening and merging its own genuine no-op PR).
- *
- * DEDUP + ORDERING mirror `escalateCircuitBreak` exactly, on the sibling ledger step
- * (`dispatch.lifetime_capped.escalated`, DECISION_RELEVANT so a rotation never re-arms it):
- * checked via this module's OWN ledger line (never `escalation.issue_opened` alone), and the
- * marker is written whether or not delivery succeeds, for the same reason `escalateCircuitBreak`'s
- * own doc gives — an undelivered notice costs one operator read, not an unbounded retry loop.
- */
-export function escalateLifetimeCapExceeded(
-  task: Task,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): void {
-  // W1-T429: repo-scoped dedup — see escalateCircuitBreak's identical comment above.
-  const already = readLedgerLines(ctx.ledgerPath).some(
-    (l) => l.step === "dispatch.lifetime_capped.escalated" && matchesRepoScopedTask(l, ctx.repo, task.id),
-  );
-  if (already) return;
-  const issueUrl = tryEscalate(
-    {
-      class: "BLOCKED",
-      taskId: task.id,
-      runId: ctx.runId,
-      summary: `${task.id}: lifetime dispatch cap exceeded — dispatched ${DEFAULT_MAX_TASK_LIFETIME_DISPATCHES}+ times, ever`,
-      detail:
-        `W1-T271: ${task.id} has been dispatched (\`run.start\`) at least ${DEFAULT_MAX_TASK_LIFETIME_DISPATCHES} ` +
-        `times across its whole recorded ledger history. UNLIKE the per-task circuit breaker above, this count is ` +
-        `NEVER reset by a \`pr.opened\` line — so a task that merges a genuine no-op PR every cycle (the W1-T254 ` +
-        `shape: five dispatches in eighty minutes, each one opening and merging its own PR) still trips this ` +
-        `backstop even though the streak breaker alone never would. Dispatch is now HALTED for this task until a ` +
-        `human resolves the underlying loop; this is the backstop, not a diagnosis of WHY.`,
-      options: [
-        {
-          label: "fix and resume",
-          detail: `Resolve ${task.id}'s underlying loop (a manual patch, a task re-scope, or \`rmd fix\`), then \`rmd drain\`/\`rmd daemon\` to continue.`,
-        },
-        {
-          label: "correct the credit",
-          detail: `If ${task.id} actually landed under a PR the ownership-assert rejected, \`rmd correct\` it (P9/W1-T75).`,
-        },
-      ],
-      recommendation: "fix and resume",
-    },
-    {
-      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
-      ledgerPath: ctx.ledgerPath,
-      runId: ctx.runId,
-    },
-  );
-  appendLedger(ctx.ledgerPath, {
-    run_id: ctx.runId,
-    task_id: task.id,
-    // W1-T429: see escalateCircuitBreak's identical field for why this rides alongside `task_id`.
-    repo: ctx.repo,
-    step: "dispatch.lifetime_capped.escalated",
-    issue_url: issueUrl,
-    delivered: issueUrl !== null,
-  });
-}
-
-/**
- * W1-T215's escalation side, wired at last — `escalateCircuitBreak`'s sibling for the daemon
- * BOOT-RATE invariant: called by `daemonBoot`'s `crashLoopCheck.onBreach` (lib/daemon.ts) when
- * `detectDaemonCrashLoop` finds MORE than `maxBoots` boots inside one rolling `windowMs`. The
- * detector merged 2026-07-22 (#590) and sat unasked while the 2026-08-03 ENOSPC storm relaunched
- * the daemon ten times with ZERO escalation — four dispatches died and the only operator signal
- * was "progress seems slow". This function is what a breach DOES: it opens a needs-human issue
- * carrying the verdict's own evidence (the densest window's boot timestamps), so the loop is
- * legible the moment it exists instead of after a hand-read of raw ledger timestamps.
- *
- * CROSS-BOOT DEDUP keyed on the STORM, not a task (there is none) and not a per-process flag
- * (every relaunch IS a new process — a process flag would open one issue per boot, ~one a
- * minute). The episode rule, same discipline as `escalateHeadroomReserveBreach`'s `resets_at`
- * key: skip iff a prior `daemon.crashloop.escalated` marker's `window_newest` falls within
- * `windowMs` of THIS verdict's newest boot — an ongoing storm keeps every subsequent boot inside
- * one escalation, while a genuinely NEW storm (a quiet gap longer than the window, then fresh
- * boots) escalates again. The marker is written whether or not delivery succeeds, for
- * `escalateCircuitBreak`'s own stated reason: an undelivered notice costs one operator read, not
- * an unbounded retry loop. The step is in DECISION_RELEVANT_LEDGER_STEPS (ledger.ts) — this
- * function READS it to dedup, so a rotation archiving it would re-open a duplicate issue per
- * boot for as long as the storm lasts (the #977 class).
- *
- * DELIBERATELY NOT A BOOT BLOCKER: daemonBoot logs `daemon.crashloop_check` either way and boot
- * continues — KeepAlive keeps relaunching until the operator acts, and `state/PAUSE` remains the
- * stop. This surfaces; it does not gate.
- */
-export function escalateCrashLoop(
-  verdict: CrashLoopVerdict,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): void {
-  const newest = verdict.windowBoots[verdict.windowBoots.length - 1];
-  const newestMs = Date.parse(newest ?? "");
-  if (!verdict.breached || !Number.isFinite(newestMs)) return;
-  const already = readLedgerLines(ctx.ledgerPath).some((l) => {
-    if (l.step !== "daemon.crashloop.escalated") return false;
-    const priorMs = Date.parse(String(l.window_newest ?? ""));
-    return Number.isFinite(priorMs) && newestMs - priorMs <= verdict.windowMs;
-  });
-  if (already) return;
-  const issueUrl = tryEscalate(
-    {
-      class: "BLOCKED",
-      taskId: "DAEMON",
-      runId: ctx.runId,
-      summary: `daemon crash-loop: ${verdict.windowBoots.length} boots inside ${Math.round(verdict.windowMs / 60_000)} minutes`,
-      detail:
-        `W1-T215: detectDaemonCrashLoop found ${verdict.windowBoots.length} daemon boots inside one rolling ` +
-        `${Math.round(verdict.windowMs / 60_000)}-minute window (threshold: more than ${verdict.maxBoots}). ` +
-        `launchd's KeepAlive relaunches a nonzero-exiting daemon every ThrottleInterval, so a boot rate like ` +
-        `this means the daemon is DYING during or shortly after boot, being restarted, and dying again — the ` +
-        `2026-08-03 shape, where an ENOSPC write in the boot path crash-looped ten boots with no signal. The ` +
-        `densest window's boots, oldest first: ${verdict.windowBoots.join(", ")}. Boot itself is NOT blocked ` +
-        `by this notice; the loop is still running until acted on.`,
-      options: [
-        {
-          label: "read the last boot's failure and fix the cause",
-          detail:
-            "The crash is whatever kills the process between `daemon.boot` and its next tick — check the newest " +
-            "ledger lines after the last `daemon.boot`, then the launchd stderr log. Disk-full, a thrown ledger " +
-            "write, and a bad deploy are the observed causes.",
-        },
-        {
-          label: "pause the fleet while diagnosing",
-          detail: "Drop `state/PAUSE` (the daemon idles in-process, no relaunch storm) or `launchctl bootout` the unit.",
-        },
-      ],
-      recommendation: "read the last boot's failure and fix the cause",
-    },
-    {
-      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
-      ledgerPath: ctx.ledgerPath,
-      runId: ctx.runId,
-    },
-  );
-  appendLedger(ctx.ledgerPath, {
-    run_id: ctx.runId,
-    task_id: "DAEMON",
-    step: "daemon.crashloop.escalated",
-    window_newest: newest,
-    window_boots: verdict.windowBoots.length,
-    window_ms: verdict.windowMs,
-    max_boots: verdict.maxBoots,
-    issue_url: issueUrl,
-    delivered: issueUrl !== null,
-  });
-}
-
-/**
- * The post-review STALL notice: the sweep's `postReview` path has failed {@link
- * POST_REVIEW_STALL_THRESHOLD} times in a row with no success between.
- *
- * THE DEFECT, MEASURED. `sweep.post_review.failed` fired 91 times across a week — every one a
- * GraphQL rate-limit — and produced NO operator-visible signal. Green PRs sat unreviewed while the
- * sweep retried each tick and appended another identical line; an operator found it by hand after a
- * full session. That is the week's recurring shape: a mechanism failing correctly and saying
- * nothing. A transport fix removes this CAUSE; only a signal removes the CLASS.
- *
- * WHY A NEW CLASS RATHER THAN AN EXISTING ONE. A decision-authority audit found the escalation
- * funnel INVERTED — of 369 needs-human issues, roughly 80% were things the machine resolved itself
- * and were never retracted — so adding noise is the failure mode to avoid. This qualifies on the
- * test that audit implies: the machine CANNOT resolve it. Every existing class names a task or a PR
- * the fleet can act on (`dispatch.circuit_broken`, `dispatch.lifetime_capped`,
- * `dispatch.starvation`, `daemon.crashloop`, `daemon.headroom_reserve`); a post-review stall is
- * fleet-wide, blocks EVERY green PR at once, and its observed cause — an exhausted API quota — is
- * outside the fleet's power to fix. Reusing `daemon.crashloop` would misname it and reusing a
- * per-task class would file one issue per stuck PR, which is the inversion again.
- *
- * DEDUP IS THE WHOLE DESIGN, NOT A DETAIL. `escalate()` gates its entire dedup block on
- * `if (prRef && deps.issues.listOpen)`, so an escalation naming no PR skips dedup and opens a FRESH
- * issue every call — the observed eight-identical-"dispatch queue starved"-issues shape. This
- * escalation names no single PR (the condition is fleet-wide), so it dedups the way
- * `escalateCrashLoop` does: an EPISODE key in the ledger. Skip iff a prior
- * `sweep.post_review.stalled.escalated` marker's `episode_newest` is within `episodeMs` of THIS
- * verdict's newest failure. An ongoing stall therefore escalates ONCE however many ticks it spans,
- * while a genuinely new stall after a quiet gap escalates again. The marker is written whether or
- * not delivery succeeded, for `escalateCircuitBreak`'s stated reason: an undelivered notice costs
- * one operator read, not an unbounded retry loop. The step is registered in
- * DECISION_RELEVANT_LEDGER_STEPS (ledger.ts) because THIS function reads it back.
- */
-export const POST_REVIEW_STALL_EPISODE_MS = 60 * 60 * 1000;
-
-export function escalatePostReviewStall(
-  verdict: PostReviewStallVerdict,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; episodeMs?: number },
-): void {
-  const newestMs = Date.parse(verdict.newestFailureTs ?? "");
-  if (!verdict.stalled || !Number.isFinite(newestMs)) return;
-  const episodeMs = ctx.episodeMs ?? POST_REVIEW_STALL_EPISODE_MS;
-  const already = readLedgerLines(ctx.ledgerPath).some((l) => {
-    if (l.step !== "sweep.post_review.stalled.escalated") return false;
-    const priorMs = Date.parse(String(l.episode_newest ?? ""));
-    return Number.isFinite(priorMs) && newestMs - priorMs <= episodeMs;
-  });
-  if (already) return;
-  const quota = verdict.rateLimited
-    ? " Every failure in the run is an API quota exhaustion, which is fleet-stopping but self-clearing at the " +
-      "bucket's reset — check `gh api rate_limit` before assuming a code fault."
-    : "";
-  const issueUrl = tryEscalate(
-    {
-      class: "BLOCKED",
-      taskId: "DAEMON",
-      runId: ctx.runId,
-      summary: `post-review stalled: ${verdict.consecutiveFailures} consecutive failures, no review posted`,
-      detail:
-        `The sweep's post-review path has failed ${verdict.consecutiveFailures} times in a row with no success ` +
-        `between (first ${verdict.oldestFailureTs}, newest ${verdict.newestFailureTs}). While this holds, a PR ` +
-        `whose checks are green never receives its remudero-review status, so it cannot merge and the sweep ` +
-        `re-attempts it every tick — silently, which is why this notice exists.${quota} The failing call, with ` +
-        `digits normalised so one stall does not read as many: ${verdict.normalisedError}`,
-      options: [
-        {
-          label: "clear the cause, then let the next sweep tick post the reviews",
-          detail:
-            "No manual re-drive is needed — the sweep re-attempts every tick, so the backlog clears itself once " +
-            "the cause is gone." +
-            // Only offered when it actually applies: naming a quota remedy on a stall that is not a
-            // quota problem sends the operator to the wrong instrument, which is the failure mode
-            // this whole notice exists to avoid.
-            (verdict.rateLimited ? " `gh api rate_limit` shows the reset." : ""),
-        },
-        {
-          label: "post the blocked reviews by hand",
-          detail: "`rmd review <pr>` per stuck PR — the same deterministic verb the sweep calls.",
-        },
-      ],
-      recommendation: "clear the cause, then let the next sweep tick post the reviews",
-    },
-    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
-  );
-  appendLedger(ctx.ledgerPath, {
-    run_id: ctx.runId,
-    task_id: "DAEMON",
-    step: "sweep.post_review.stalled.escalated",
-    episode_newest: verdict.newestFailureTs,
-    consecutive_failures: verdict.consecutiveFailures,
-    rate_limited: verdict.rateLimited,
-    issue_url: issueUrl,
-    delivered: issueUrl !== null,
-  });
-}
-
-/**
- * P34 clause (c), W1-T249: the daemon's `onHeadroomBreach` hook, called when a
- * weekly (or session) window first crosses the operator reserve. Dispatch is
- * ALREADY paused by the time this fires (`runDaemon`'s own in-process idle,
- * driven by the SAME reading) — this is a pure notification, mirroring
- * `escalateCircuitBreak` immediately above rather than a second mechanism.
- *
- * CROSS-BOOT DEDUP keyed on `resetsAt` — NOT task id (there is no task; the
- * breach is a property of the account, not one candidate change) and NOT a
- * per-process flag alone (`runDaemon`'s own `headroomReserveEscalated` already
- * bounds ONE daemon run, but a restart forgets it and would re-open the SAME
- * issue for the SAME still-unresolved window). The window's own `resets_at` is
- * the natural episode key: unchanged for as long as the breach persists, and a
- * NEW value the moment the window actually resets, so a later breach escalates
- * again rather than staying silenced by a stale marker (the same "write the
- * dedup key whether or not delivery succeeded" discipline
- * `escalateCircuitBreak` documents, so a throwing `gh` is never retried into an
- * unbounded relaunch loop).
- */
-export function escalateHeadroomReserve(
-  info: { window: string; percentUsed: number; limitPct: number; resetsAt: string },
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): void {
-  const already = readLedgerLines(ctx.ledgerPath).some(
-    (l) => l.step === "daemon.headroom_reserve.escalated" && l.resets_at === info.resetsAt,
-  );
-  if (already) return;
-  const issueUrl = tryEscalate(
-    {
-      class: "HARD_STOP",
-      taskId: "daemon",
-      runId: ctx.runId,
-      // THE WINDOW IS DATA, NEVER A LITERAL. This summary hardcoded "weekly" while the detail
-      // below has always interpolated `info.window` correctly, so every session exhaustion opened
-      // an issue TITLED weekly with a BODY reading `session (5h)`. MEASURED on #3483: the title
-      // said "weekly headroom reserve reached — dispatch paused until 2026-09-01T12:00:00.000Z"
-      // while its own body said "session (5h) is at 100% used", and the daemon telemetry for that
-      // episode named `session (5h)` throughout. The daemon could always tell the two apart
-      // (`resolveHeadroomWindows` labels them separately); only this line could not.
-      summary: `${info.window} headroom reserve reached — dispatch paused until ${info.resetsAt}`,
-      detail:
-        `P34 clause (c): ${info.window} is at ${info.percentUsed}% used (>= the ${info.limitPct}% operator ` +
-        `reserve ceiling). Dispatch is paused — drain-and-hold, in-flight work finishes, no new spawn — until ` +
-        `the window resets at ${info.resetsAt}; imputed ledger dollar figures never gate this decision, only ` +
-        `the subscription window itself does.`,
-      options: [
-        {
-          label: "wait for reset",
-          detail: `Dispatch resumes on its own once the window resets at ${info.resetsAt} — no action needed.`,
-        },
-        {
-          label: "raise the reserve",
-          detail: "If 5% is too conservative for this account, retune the HEADROOM_LIMIT_PCT policy curve.",
-        },
-      ],
-      recommendation: "wait for reset",
-    },
-    {
-      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
-      ledgerPath: ctx.ledgerPath,
-      runId: ctx.runId,
-    },
-  );
-  appendLedger(ctx.ledgerPath, {
-    run_id: ctx.runId,
-    task_id: "daemon",
-    step: "daemon.headroom_reserve.escalated",
-    // W1-T2603: the window this escalation was raised FOR, so a later recovery reading can be
-    // matched against the SAME window rather than merely the same class. Absent on every row this
-    // repo wrote before this task — `buildHeadroomRecoveryCandidates` below treats that as
-    // unmatchable (never a false match), so the pre-existing #3334/#3384/#3483-shaped issues stay
-    // exactly what they already are: manually closed, not silently retired on a guess.
-    window: info.window,
-    resets_at: info.resetsAt,
-    issue_url: issueUrl,
-    delivered: issueUrl !== null,
-  });
-}
-
-/**
  * W1-T2603 (A RECOVERED HEADROOM BREACH NEVER CLOSES ITS OWN ESCALATION). `escalateHeadroomReserve`
  * above raises one `[HARD_STOP]` issue per breach episode and nothing ever retires it — the breach
  * is a property of the ACCOUNT, not of any task, so it carries no task referent for
@@ -24911,283 +23707,6 @@ export async function retireRecoveredHeadroomEscalations(
 }
 
 /**
- * W1-T1082 (THE DAEMON NEVER READS ITS OWN FREE SPACE): the daemon's `onDiskHeadroomBreach`
- * hook — real free space, read off the daemon's own `startInFlightTicker` cadence
- * (`daemon.ts`), has crossed below WARN (`DISK_WARN_BYTES`, 2 GiB) or FAIL (`DISK_FAIL_BYTES`,
- * 512 MiB), judged by the SAME `judgeDiskHeadroom` `rmd doctor` reports against (doctor.ts) —
- * imported, never re-derived, so the two surfaces cannot disagree mid-incident.
- *
- * ESCALATES AT WARN, NOT ONLY FAIL, AND THAT IS THE WHOLE POINT (design (iv)). By FAIL, the
- * issue body, this function's OWN dedup marker below and the ledger row it lives on are all
- * writes that may themselves lose to the same ENOSPC this hook exists to report ahead of —
- * `escalateCrashLoop`'s own doc names the shape exactly: "a detector whose input can only be
- * recorded by a write that ENOSPC rejects is structurally incapable of being the FIRST signal;
- * it is the autopsy." This fires while writes still succeed.
- *
- * DEDUP IS TWO LAYERS, NOT ONE. `runDaemon`'s own in-process latch (daemon.ts's
- * `diskHeadroomLatch`, shared across every phase this daemon run ticks) already calls this hook
- * AT MOST ONCE per continuous breach — cleared the moment a later reading is back at OK — so a
- * disk sitting below WARN for six hours produces exactly one call from a single continuous
- * process (the #977 duplicate-issue class this repo has already paid for twice). This
- * function's OWN ledger read exists for what the in-process latch cannot cover: a daemon
- * RESTART mid-episode (disk pressure can itself crash-loop the daemon — the 2026-08-03 shape)
- * resets that latch to `false`, and the very next tick would call this hook again for the SAME
- * still-unresolved episode. Skip iff a prior `daemon.disk_headroom.escalated` marker's OWN `ts`
- * (ledger-stamped at write, `appendLedger`'s contract) is within `episodeMs` of THIS reading's
- * `ts` — the same "compare against an episode window" shape `escalatePostReviewStall` applies
- * for a condition with no natural reset boundary (unlike `escalateHeadroomReserve`'s
- * `resets_at`). The marker is written whether or not delivery succeeds — `escalateCircuitBreak`'s
- * own stated reason: an undelivered notice costs one operator read, not an unbounded retry loop.
- * The step is in `DECISION_RELEVANT_LEDGER_STEPS` (ledger.ts) because THIS function reads it
- * back — a rotation dropping it would re-open one duplicate needs-human issue on every tick this
- * condition persists, once the marker falls out of the retained view.
- */
-export const DISK_HEADROOM_EPISODE_MS = 60 * 60 * 1000;
-
-export function escalateDiskHeadroomBreach(
-  info: { freeBytes: number; verdict: "WARN" | "FAIL"; ts: string },
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; episodeMs?: number },
-): void {
-  const newestMs = Date.parse(info.ts);
-  if (!Number.isFinite(newestMs)) return;
-  const episodeMs = ctx.episodeMs ?? DISK_HEADROOM_EPISODE_MS;
-  const already = readLedgerLines(ctx.ledgerPath).some((l) => {
-    if (l.step !== "daemon.disk_headroom.escalated") return false;
-    const priorMs = Date.parse(String(l.ts ?? ""));
-    return Number.isFinite(priorMs) && newestMs - priorMs <= episodeMs;
-  });
-  if (already) return;
-  const issueUrl = tryEscalate(
-    {
-      class: "BLOCKED",
-      taskId: "DAEMON",
-      runId: ctx.runId,
-      summary: `disk headroom ${info.verdict}: ${humanBytes(info.freeBytes)} free`,
-      detail:
-        `W1-T1082: the daemon's own poll path read ${humanBytes(info.freeBytes)} free on its own filesystem, ` +
-        `below the ${humanBytes(DISK_WARN_BYTES)} WARN threshold ` +
-        `\`rmd doctor\` also judges against (\`doctor.ts\`'s \`judgeDiskHeadroom\`, one shared definition — the ` +
-        `two surfaces cannot disagree). This escalates at WARN rather than waiting for FAIL ` +
-        `(${humanBytes(DISK_FAIL_BYTES)}) because by FAIL the ledger this very notice writes to may itself fail ` +
-        `to append — the 2026-08-03 ENOSPC storm's own shape, where the first signal anyone had was ` +
-        `\`appendLedger\` throwing.`,
-      options: [
-        {
-          label: "reclaim disk space",
-          detail:
-            "`rmd doctor` names every other measured source on this host; scratch reaping, worker-home reaping " +
-            "and the tmp backstop are the usual owners (each has its own task — this notice only surfaces).",
-        },
-        {
-          label: "grow the volume",
-          detail: "If this host is routinely this close to full, the ceiling itself may be too small for its workload.",
-        },
-      ],
-      recommendation: "reclaim disk space",
-    },
-    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
-  );
-  appendLedger(ctx.ledgerPath, {
-    run_id: ctx.runId,
-    task_id: "DAEMON",
-    step: "daemon.disk_headroom.escalated",
-    free_bytes: info.freeBytes,
-    verdict: info.verdict,
-    issue_url: issueUrl,
-    delivered: issueUrl !== null,
-  });
-}
-
-/**
- * The daemon's `onHeadroomParkCeiling` hook: the headroom park outlived its ceiling, so the fleet
- * dispatched BLIND for one tick rather than idling forever.
- *
- * DEDUPED ACROSS BOOTS, and the key is "has the governor SEEN anything since we last paged?".
- * `escalateHeadroomReserve` above keys on `resets_at` because a reserve breach has a natural
- * boundary; a blind stretch has none, so its identity is the last moment the governor could read
- * at all. Concretely: skip when an `.escalated` row is NEWER than the newest `daemon.headroom`
- * (the row a READABLE probe writes). That gives exactly one page per blind stretch —
- *   - a daemon that restart-loops while still blind re-derives the same answer and stays quiet,
- *     which the in-process guard alone could never do;
- *   - a probe that RECOVERS writes a newer `daemon.headroom`, so the next blind stretch pages
- *     again rather than staying silenced forever.
- * Both rows are in {@link DECISION_RELEVANT_LEDGER_STEPS}, so rotation cannot make this
- * re-page — and if the readable row somehow vanished first, the comparison fails QUIET (an
- * existing escalation wins), which is the right direction for a notification.
- */
-export function escalateHeadroomParkCeiling(
-  info: { consecutiveUnreadable: number; parkedMs: number; ceilingMs: number },
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): void {
-  // BOTH READS COMPARE AGAINST A STRING LITERAL INLINE, DELIBERATELY, rather than through a
-  // helper taking the step name as a parameter. `test/ledger-rotation.test.ts` discovers
-  // decision-relevant steps by scanning consumer source for that exact comparison form, so a
-  // parameterised helper is INVISIBLE to it — and the rotation-set membership this dedup depends
-  // on stops being self-enforcing. Measured: with the loop factored into a generic helper,
-  // deleting either entry from DECISION_RELEVANT_LEDGER_STEPS left that test green.
-  const lines = readLedgerLines(ctx.ledgerPath);
-  let lastReadable: string | undefined;
-  let lastEscalated: string | undefined;
-  for (const l of lines) {
-    const ts = typeof l.ts === "string" ? l.ts : undefined;
-    if (!ts) continue;
-    if (l.step === "daemon.headroom" && (lastReadable === undefined || ts > lastReadable)) lastReadable = ts;
-    if (l.step === "daemon.headroom.park_ceiling.escalated" && (lastEscalated === undefined || ts > lastEscalated)) {
-      lastEscalated = ts;
-    }
-  }
-  // Already paged for THIS blind stretch: no readable row at all since, or none newer.
-  if (lastEscalated !== undefined && (lastReadable === undefined || lastEscalated > lastReadable)) return;
-
-  const minutes = Math.round(info.ceilingMs / 60_000);
-  const issueUrl = tryEscalate(
-    {
-      // MANUAL, not HARD_STOP: dispatch is NOT paused here — it is proceeding riskily, which is
-      // the opposite posture from `escalateHeadroomReserve`'s breach and needs saying.
-      class: "MANUAL",
-      taskId: "daemon",
-      runId: ctx.runId,
-      summary: `headroom unreadable for ${minutes}m — dispatching BLIND past the park ceiling`,
-      detail:
-        `The usage probe has failed ${info.consecutiveUnreadable} consecutive times and the park ` +
-        `outlived its ${minutes}-minute ceiling, so the daemon dispatched with NO headroom reading ` +
-        `rather than idling forever. The spend bound this bypasses is deliberately accepted, not ` +
-        `satisfied: the fleet may now be spending against an exhausted account. The ceiling re-arms, ` +
-        `so exposure is one blind dispatch per ${minutes} minutes until a probe succeeds — but the ` +
-        `probe itself is the thing to fix. Check the usage.probe_failed rows for the stage and ` +
-        `reason, and the worker-home grant rows for a lost .claude slot.`,
-      options: [
-        {
-          label: "fix the probe",
-          detail: "Read the usage.probe_failed stage: spawn, parse or grant each point somewhere different.",
-        },
-        {
-          label: "disable the governor",
-          detail: "Setting headroom.enabled false skips the park entirely — dispatch stops being gated on a read that cannot succeed.",
-        },
-      ],
-      recommendation: "fix the probe",
-    },
-    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
-  );
-  appendLedger(ctx.ledgerPath, {
-    run_id: ctx.runId,
-    task_id: "daemon",
-    step: "daemon.headroom.park_ceiling.escalated",
-    consecutive_unreadable: info.consecutiveUnreadable,
-    parked_ms: info.parkedMs,
-    ceiling_ms: info.ceilingMs,
-    // Forensics: the moment the governor last saw anything, which is also this dedup's key.
-    blind_since: lastReadable ?? "never",
-    issue_url: issueUrl,
-    delivered: issueUrl !== null,
-  });
-}
-
-/**
- * W1-T372: the daemon's `onQuotaExhausted` hook, called when a `gh api rate_limit` bucket
- * (REST/core or GraphQL — read independently, `daemon.ts`'s tick) first crosses from having
- * budget to having none. UNLIKE `escalateHeadroomReserve` immediately above, dispatch is NOT
- * paused by the time this fires — W1-T372 is observe-and-surface only (this task's design
- * (vii): no threshold change, no governing action) — so this notice exists purely so an
- * operator is not the one who discovers the exhaustion by watching `gh pr create` die at a
- * push boundary (the a2b904d recon this task cites: W1-T333 lost ~40 minutes of completed
- * work that way, silently, because nothing observed the crossing).
- *
- * CROSS-BOOT DEDUP keyed on (bucket, resetsAt) — the SAME "episode key = the window's own
- * reset instant" discipline `escalateHeadroomReserve` documents just above, kept PER BUCKET
- * (design (iv)) so a core exhaustion and a GraphQL exhaustion in the same hour each get their
- * own notice rather than one suppressing the other, and so a bucket that exhausts again after
- * its own reset (a genuinely new episode) escalates again rather than staying silenced by a
- * stale marker from the PRIOR window.
- *
- * SELF-CLEARING, STATED IN THE BODY ITSELF (design (v)): a quota exhaustion clears on its own
- * bucket's hourly reset, so this notice names its own expiry (`resetsAt`) rather than asking
- * for a human close — W1-T345 is the filed retraction mechanism this notice does not depend
- * on; until it lands (or if it never does), the reset timestamp alone tells a human reading
- * this later that no action closes it.
- *
- * W1-T2305 — `deps.provenanceBracket` is THE BRACKET RULE (design (ii)), applied at the one
- * place this task's own design (iv) names as consequential: when a caller HAS two provenanced
- * readings (same actor, same resource) taken at different times, this checks — via
- * {@link ghRateLimitWindow}, lib/daemon-health.ts — that they agree on actor AND reset epoch
- * before letting the escalation through; a mismatched bracket describes two different identities
- * or two different reset periods and is DISCARDED (ledgered as such, never escalated), which is
- * the one outcome design (iv) says this task must make impossible. Optional and omitted by every
- * call site today (`reportDrainQuotaExhaustion` below and `runDaemon`'s own tick both hand this
- * a single `GhRateLimitBucket` reading with no second, provenanced reading to bracket against —
- * see this task's follow-ups for wiring a real second reading in) — an omitted bracket escalates
- * exactly as before, so no existing caller's behavior changes and the escalation paths keep
- * their ability to fire (design (v)): "dispatch is NOT paused by this hook" remains true, and so
- * does "this notice still opens."
- */
-export function escalateQuotaExhaustion(
-  info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string },
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-  deps: { provenanceBracket?: { start: GhRateLimitProvenance; end: GhRateLimitProvenance } } = {},
-): void {
-  if (deps.provenanceBracket && !ghRateLimitWindow(deps.provenanceBracket.start, deps.provenanceBracket.end)) {
-    appendLedger(ctx.ledgerPath, {
-      run_id: ctx.runId,
-      task_id: "daemon",
-      step: "daemon.quota_exhausted.provenance_discarded",
-      bucket: info.bucket,
-      resets_at: info.resetsAt,
-    });
-    return;
-  }
-  const already = readLedgerLines(ctx.ledgerPath).some(
-    (l) => l.step === "daemon.quota_exhausted.escalated" && l.bucket === info.bucket && l.resets_at === info.resetsAt,
-  );
-  if (already) return;
-  const spent =
-    info.bucket === "graphql"
-      ? "`gh pr create`, `gh pr view --json`, and therefore `rmd review` — a run that finishes its work and " +
-        "then cannot open or update its own PR at this bucket's exhaustion loses that work silently, exactly " +
-        "as W1-T333 did"
-      : "the board's own `gh pr view`/`pr list`/`issue view` reads (status.ts's `ghGateway`/`buildBatchedGithub`)";
-  const issueUrl = tryEscalate(
-    {
-      class: "HARD_STOP",
-      taskId: "daemon",
-      runId: ctx.runId,
-      summary: `gh api rate_limit ${info.bucket} bucket exhausted — resets ${info.resetsAt}`,
-      detail:
-        `W1-T372: the daemon's tick observed the ${info.bucket} bucket cross from having budget to ${info.remaining} ` +
-        `remaining. This bucket backs ${spent}. This is a NOTICE, not a hold: dispatch is not paused and no ` +
-        `existing consumer's behavior changed — the bucket refills on its own at ${info.resetsAt}, and this notice ` +
-        `is self-clearing at that instant with no action required; a human reading this after that time can close ` +
-        `it on sight.`,
-      options: [
-        {
-          label: "wait for reset",
-          detail: `The bucket refills on its own at ${info.resetsAt} — no action needed.`,
-        },
-        {
-          label: "check what spent it",
-          detail: "`gh api rate_limit` shows the live figure; a runaway caller against this bucket is the thing worth finding, not this notice.",
-        },
-      ],
-      recommendation: "wait for reset",
-    },
-    {
-      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
-      ledgerPath: ctx.ledgerPath,
-      runId: ctx.runId,
-    },
-  );
-  appendLedger(ctx.ledgerPath, {
-    run_id: ctx.runId,
-    task_id: "daemon",
-    step: "daemon.quota_exhausted.escalated",
-    bucket: info.bucket,
-    resets_at: info.resetsAt,
-    issue_url: issueUrl,
-    delivered: issueUrl !== null,
-  });
-}
-
-/**
  * The drain's end-of-run quota check: when a drain stopped with NOTHING RUNNABLE and at least one
  * candidate was declined as INDETERMINATE, ask whether a `gh api rate_limit` bucket is the reason
  * and escalate if it is.
@@ -25253,176 +23772,6 @@ export function reportDrainQuotaExhaustion(
       log("drain.escalation.failed", { bucket, error: String((e as Error)?.message ?? e) });
     }
   }
-}
-
-/**
- * Recon oper#queue-starvation-2026-08-03: the daemon's `onStarvation` hook, called on an idle
- * tick whose dispatch-filter census names at least one RECOVERABLE-class blocker (circuit-
- * broken, blocked, or unmet-deps — see daemon.ts's `StarvationCensus`/starvation predicate)
- * rather than every remaining task being already-merged or verify:human. THE ASYMMETRY THIS
- * FIXES: a FAILING run already escalates (`escalateCircuitBreak` above fires once per tripped
- * breaker), but a queue that has run OUT of dispatchable work used to be indistinguishable
- * from one quietly healthy between tasks — both logged only `daemon.idle`. Dispatch is
- * already idle by the time this fires (the same in-process bound `runDaemon`'s own
- * `starvationEscalated` applies before ever calling this) — a pure notification, mirroring
- * `escalateCircuitBreak`/`escalateHeadroomReserve` immediately above rather than a second
- * mechanism.
- *
- * CROSS-BOOT DEDUP, KEYED ON "has anything actually dispatched since this last escalated" —
- * never a fixed key (there is only ever one starvation state at a time, unlike
- * `escalateCircuitBreak`'s per-task-id dedup) and never the census contents (the exact set of
- * blocked ids can churn while the queue stays starved throughout — that is still the SAME
- * episode, not a new one). `run.start` (status.ts's own dispatch-attempt marker, already
- * decision-relevant) is the natural episode boundary: it is written the moment ANY task is
- * next attempted, which is exactly what ends a starvation episode ("a new dispatchable task
- * ends the episode and re-arms"). If the most recent `dispatch.starvation.escalated` line
- * postdates the most recent `run.start` line, this starvation has already been reported and
- * nothing has dispatched since — no-op. Otherwise a dispatch happened since the last notice
- * (or none was ever sent), so the episode is fresh: escalate and write the marker, whether or
- * not delivery succeeded (`escalateCircuitBreak`'s discipline — an undelivered notice must
- * never retry into an unbounded relaunch loop).
- */
-export function escalateStarvation(
-  census: StarvationCensus,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): void {
-  const lines = readLedgerLines(ctx.ledgerPath);
-  let lastEscalatedIdx = -1;
-  let lastDispatchIdx = -1;
-  lines.forEach((l, i) => {
-    if (l.step === "dispatch.starvation.escalated") lastEscalatedIdx = i;
-    if (l.step === "run.start") lastDispatchIdx = i;
-  });
-  if (lastEscalatedIdx !== -1 && lastEscalatedIdx > lastDispatchIdx) return;
-
-  const name = (label: string, bucket: { count: number; ids: readonly string[]; truncated: number }): string | null =>
-    bucket.count === 0
-      ? null
-      : `${label}: ${bucket.count} (${bucket.ids.join(", ")}${bucket.truncated > 0 ? `, +${bucket.truncated} more` : ""})`;
-  const parts = [
-    name("circuit-broken", census.circuitBroken),
-    name("blocked", census.blocked),
-    name("unmet-deps", census.unmetDeps),
-  ].filter((p): p is string => p !== null);
-
-  const issueUrl = tryEscalate(
-    {
-      class: "BLOCKED",
-      taskId: "daemon",
-      runId: ctx.runId,
-      summary: `dispatch queue starved — zero dispatchable, ${parts.length} recoverable class(es) blocking`,
-      detail:
-        `oper#queue-starvation-2026-08-03: the queue has nothing dispatchable, but this is NOT ` +
-        `every task being done or needing a human — at least one RECOVERABLE-class blocker is ` +
-        `holding it back: ${parts.join("; ")}. The fleet has headroom to spend and is sitting idle ` +
-        `instead; the only prior symptom was a bare \`daemon.idle\` line every poll.`,
-      options: [
-        {
-          label: "resolve the blockers",
-          detail:
-            "Fix the named ids: a circuit-broken task needs a manual patch or `rmd fix` (then a " +
-            "fresh owned PR clears the breaker); a `blocked:` task needs the plan mark lifted; an " +
-            "unmet-deps task clears itself once its dependency merges.",
-        },
-        {
-          label: "acknowledge and wait",
-          detail: "If the blockers are already being worked, no action is needed — the daemon keeps polling and re-arms this notice once it next dispatches.",
-        },
-      ],
-      recommendation: "resolve the blockers",
-    },
-    {
-      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
-      ledgerPath: ctx.ledgerPath,
-      runId: ctx.runId,
-    },
-  );
-  appendLedger(ctx.ledgerPath, {
-    run_id: ctx.runId,
-    task_id: "daemon",
-    step: "dispatch.starvation.escalated",
-    circuit_broken: census.circuitBroken.count,
-    blocked: census.blocked.count,
-    unmet_deps: census.unmetDeps.count,
-    circuit_broken_ids: census.circuitBroken.ids,
-    blocked_ids: census.blocked.ids,
-    unmet_deps_ids: census.unmetDeps.ids,
-    issue_url: issueUrl,
-    delivered: issueUrl !== null,
-  });
-}
-
-/**
- * THE CLEARED HALF (this task) — `escalateStarvation` above opens an issue and this closes it,
- * fired from `runDaemon`'s `onStarvationCleared` hook on the SAME edge that resets
- * `starvationEscalated` (daemon.ts): a queue that stopped being starved, either because nothing
- * recoverable is blocking anymore or because a dispatchable task appeared. THE PRODUCER ALREADY
- * KNOWS which — `info.reason` names it and `info.taskId` names the task where there is one — so
- * the closing comment says WHY, never a bare "resolved" a week-later reader could not act on.
- *
- * THE REFERENT IS THE LEDGER, NEVER A LOOKUP: the issue to close is whichever URL THIS episode's
- * OWN `dispatch.starvation.escalated` row named (the most recent one, unless a LATER
- * `dispatch.starvation.cleared` row already closed it) — never any other open issue, so no
- * escalation of another class is ever touched by this path. Absent (delivery failed, or already
- * cleared) ⇒ nothing to close, a silent no-op.
- *
- * CANNOT-OBSERVE MEANS WAIT (W1-T130), applied to the closer: a gateway that cannot close (no
- * `closeWithComment`) or one whose close call throws leaves the issue OPEN and costs one ledger
- * row (`delivered: false`) — never a throw propagated into the daemon loop, matching
- * `deriveStatus`'s own polarity and `escalateStarvation`'s own "write the marker whether or not
- * delivery succeeded" discipline. The marker is written on EVERY call that found an issue to
- * close (success or failure alike), so an episode ending is countable on the ledger either way.
- */
-export function escalateStarvationCleared(
-  info: StarvationClearedInfo,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): void {
-  const lines = readLedgerLines(ctx.ledgerPath);
-  let issueUrl: string | null = null;
-  for (const l of lines) {
-    if (l.step === "dispatch.starvation.escalated") {
-      issueUrl = typeof l.issue_url === "string" ? l.issue_url : null;
-    } else if (l.step === "dispatch.starvation.cleared") {
-      // A prior clear already closed (or gave up on) whatever the last escalation opened —
-      // never re-derive a referent from an OLDER escalated row past this point.
-      issueUrl = null;
-    }
-  }
-  if (!issueUrl) return;
-
-  const reasonText =
-    info.reason === "no-recoverable-blockers"
-      ? "nothing recoverable is blocking the queue anymore"
-      : `a dispatchable task appeared${info.taskId ? ` (${info.taskId})` : ""} and ended the episode`;
-  const comment =
-    `oper#queue-starvation-2026-08-03: this starvation episode has ended — ${reasonText}. ` +
-    `Closing automatically; a fresh episode opens its own issue if the queue starves again.`;
-
-  const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
-  let delivered = false;
-  let failure: string | undefined;
-  if (!issues.closeWithComment) {
-    failure = "issue gateway cannot close issues";
-  } else {
-    try {
-      issues.closeWithComment(issueUrl, comment);
-      delivered = true;
-    } catch (e) {
-      // CANNOT-OBSERVE MEANS WAIT (W1-T130): never rethrown into the daemon loop -- the
-      // ledger row appended below carries this as its own `failure` field instead.
-      failure = String((e as Error)?.message ?? e);
-    }
-  }
-
-  appendLedger(ctx.ledgerPath, {
-    run_id: ctx.runId,
-    task_id: info.taskId ?? "daemon",
-    step: "dispatch.starvation.cleared",
-    reason: info.reason,
-    issue_url: issueUrl,
-    delivered,
-    ...(failure ? { failure } : {}),
-  });
 }
 
 /**

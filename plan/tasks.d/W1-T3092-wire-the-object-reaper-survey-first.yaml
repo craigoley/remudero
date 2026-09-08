@@ -1,0 +1,113 @@
+- id: W1-T3092
+  title: "WIRE THE OBJECT REAPER INTO `logDiskReclaimRung`, SURVEY-FIRST — the module W1-T3090 built is inert with no caller, and the rung it belongs in already runs three sweeps; it ships OFF and SURVEY-ONLY behind a `policy.objectReap.enabled` flag, the same posture `worktreeReapBoot` and `scratchReap` take, so several passes of dispositions can be read before anything is destroyed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 16.00
+  files:
+    - src/lib/object-reaper.ts
+    - src/lib/policy.ts
+    - plan/policy.yaml
+    - src/run-task.ts
+    - test/object-reaper-rung-wiring.test.ts
+  origin: "operator-session#please-wire-up-the-reaper-2026-09-07"
+  plan_refs: ["W1-T3090", "W1-T2694"]
+  status: queued
+  attempts: 0
+  rationale: |
+    DEPENDS ON W1-T3090 IN SUBSTANCE THOUGH NOT IN `depends_on:` — that shard is still in flight
+    (#4523) and an unmerged id cannot be declared as a dependency without failing lint-plan. This
+    task is unbuildable until it lands, and a builder who finds src/lib/object-reaper.ts absent
+    should stop rather than recreate it.
+
+    W1-T3090 BUILT THE REAPER AND DELIBERATELY DID NOT CALL IT. This task supplies the caller. The
+    operator asked for the wiring explicitly after being told the module was inert.
+
+    THE POSTURE IS NOT A CHOICE THIS TASK IS MAKING FRESHLY. plan/policy.yaml's own comment above
+    `worktreeReapBoot` states the convention for rungs that delete, verbatim: "SHIPPED OFF, same
+    posture as `scratchReap.enabled` above and for the same reason: this rung DELETES, so it begins
+    survey-only — while false the boot pass SURVEYS and ledgers `worktree.reap_boot` with what it
+    would reclaim, removing nothing, so an operator can read several boots' worth of dispositions
+    before arming it." A git prune is at least as destructive as a worktree reap. It takes the same
+    posture, for the same stated reason.
+
+    SURVEY-ONLY IS NOT A HEDGE HERE; IT IS THE MEASUREMENT THE DECISION NEEDS. The reaper only acts
+    when the fleet is QUIET, and on this host the fleet is rarely quiet: at the time W1-T3090 was
+    filed there were four worktrees under thirty minutes old and two live locks. NOBODY KNOWS HOW
+    OFTEN THE QUIET PREDICATE ACTUALLY HOLDS, and that number decides whether the rung is worth
+    arming at all. A survey pass answers it — "refused: N worktrees registered" on every poll is a
+    real finding, and it would mean the honest remedy is a scheduled maintenance window rather than
+    an opportunistic rung.
+
+    WHAT THE WIRING IS. `logDiskReclaimRung` (src/run-task.ts) already runs three best-effort sweeps
+    and emits one `run.disk_reclaim` line. This adds a fourth, guarded identically: a throw inside it
+    can never fail the dispatch or the other three. The reaper gains a `dryRun` mode that performs
+    every check and reports what it WOULD prune while spawning nothing, so the survey exercises the
+    real predicate rather than a parallel one — a survey that used different logic from the armed
+    path would measure the wrong thing.
+
+    THE DRY-RUN COUNT IS AN ESTIMATE AND MUST SAY SO. `git prune -n --expire=...` lists what it would
+    remove without removing it, so the survey has a real number; but it is a number at survey time,
+    and the armed pass runs later against a repo that has moved. The ledger field is named to make
+    that plain rather than implying a guarantee.
+
+    NO EXISTING BEHAVIOUR CHANGES WHILE THE FLAG IS FALSE, which is the property to test hardest. A
+    policy block that defaults to true, or a rung that prunes when the flag is absent, would convert
+    a survey into a live destructive operation on the fleet's own repository — the exact outcome the
+    operator's standing rule guards against, arrived at by accident.
+
+    THE RATIFICATION PIN IS A DRIFT DETECTOR, NOT THE ARMING GATE, and this shard records that
+    because it is easy to get backwards. `ratificationPinCheck` (src/lib/ratification.ts:137) returns
+    `{fire: true}` when NO pin exists — absence of a pin never blocks. The pin refuses only when a
+    previously-ratified policy block or contract version has since MOVED. So arming is entirely the
+    `enabled` flag; ratifying afterwards is what stops the armed operation silently changing shape.
+
+    THE OBJECTION, STATED AT FULL STRENGTH. Shipping a wired-but-off rung is indistinguishable from
+    not shipping it, and the operator asked for a working reaper, not a survey. That objection is
+    fair and the shard does not dodge it: the answer is that the arming step is ONE LINE in
+    plan/policy.yaml, available immediately, and that this repo's own convention for deleting rungs
+    exists because two working trees were destroyed by a rung that was trusted before it was
+    measured. If the operator wants it armed on landing, they should say so and the flag ships true —
+    that is their call to make explicitly, not a default for a builder to choose quietly.
+
+    The weaker half, not argued away: a survey that nobody reads is pure cost. If no one inspects
+    `run.disk_reclaim` for the object fields within a few days, the rung is worse than useless — it
+    burns a subprocess per poll to produce a number nobody consumes. The dry-run path must therefore
+    be cheap (it already short-circuits below the loose-object floor before any probe) and the
+    survey's value has an expiry date measured in days, not months.
+  acceptance:
+    - claim: with policy.objectReap.enabled false the rung SURVEYS and spawns no prune, so no object is removed by default
+      proof: "unit test: test/object-reaper-rung-wiring.test.ts::a disabled rung surveys and never prunes"
+    - claim: the survey runs the SAME quiet predicate the armed path runs, so the dispositions it reports describe the decision that would actually be made
+      proof: "unit test: test/object-reaper-rung-wiring.test.ts::survey and armed share one predicate"
+    - claim: with the flag true and the fleet quiet the rung prunes, so arming is a one-line policy change and nothing more
+      proof: "unit test: test/object-reaper-rung-wiring.test.ts::an armed rung prunes when quiet"
+    - claim: a throw inside the object sweep cannot fail the dispatch or the other three sweeps, matching the guard they already carry
+      proof: "unit test: test/object-reaper-rung-wiring.test.ts::a throwing object sweep does not break the rung"
+    - claim: an absent or non-boolean policy block fails loud at load rather than defaulting to armed
+      proof: "unit test: test/object-reaper-rung-wiring.test.ts::a malformed policy block refuses at load"
+  falsifier: |
+    Close without implementation if the module already has a caller. Check it: `grep -rn
+    "reapGitObjects\|object-reaper" src/ --include=*.ts` and read every hit. If `logDiskReclaimRung`
+    or anything else already calls it, this task is void.
+
+    SHIPPING THE FLAG DEFAULTED TRUE DOES NOT SATISFY THIS TASK unless the operator has said so in
+    writing on this task. The posture is inherited from `worktreeReapBoot` and `scratchReap`, whose
+    reason is recorded in plan/policy.yaml, and a builder who flips it has overturned that convention
+    from inside a wiring task that never argued for it.
+
+    A SURVEY THAT USES DIFFERENT LOGIC FROM THE ARMED PATH DOES NOT SATISFY IT EITHER. If `dryRun`
+    skips a probe the armed path runs, or reaches a probe the armed path skips, the dispositions
+    describe a decision nobody will ever make. One predicate, two outcomes.
+
+    Making the object sweep able to fail the rung does not satisfy it. The other three sweeps are
+    each wrapped so a throw cannot block dispatch or its siblings; a fourth that can is a regression
+    in the rung's contract, not a stricter reaper.
+
+    If a builder finds the quiet predicate essentially never holds on this host, do NOT loosen it to
+    make the rung fire. Report the measurement — that is the survey working — and say so plainly, so
+    the operator can choose a maintenance window instead.
