@@ -9,7 +9,7 @@
   budget_usd: 30.00
   files: [src/lib/drain.ts, src/lib/plan.ts, test/an-operator-verdict-releases-a-parked-task.test.ts]
   origin: "operator-session#verify-human-deadend-2026-09-08"
-  plan_refs: ["W1-T507", "W1-T3183", "W1-T3188"]
+  plan_refs: ["W1-T507", "W1-T3183", "W1-T3188", "W1-T80"]
   status: queued
   priority: 1
   attempts: 0
@@ -83,6 +83,14 @@
     parked shards were parked for reasons nobody has re-read; releasing them wholesale is not a fix,
     it is the largest unreviewed dispatch in this repo's history.
   note: |
+    DUPLICATE-SURFACE RULED ON, NOT NARROWED AWAY (lint-plan flagged W1-T80, sharing
+    `src/lib/drain.ts` and `src/lib/plan.ts`). THEY ARE DIFFERENT WORK: W1-T80 is a 2026-07-16
+    live-incident task about `rmd review` posting success and the drain starting seconds later — a
+    RACE between review and dispatch. This task is about a class of shard the dispatcher refuses
+    OUTRIGHT and can never be told to stop refusing. Neither subsumes the other and the overlap is
+    two files rather than a shared concern. IF BOTH ARE IN FLIGHT, W1-T80 should land first: it
+    changes when dispatch may proceed, and a release path built on top of a racing gate inherits the
+    race.
     Rule 25 CHECKED: `src/lib/drain.ts` and `src/lib/plan.ts` are ordinary src.
     THIS IS THE MECHANISM W1-T3188 ASSUMED EXISTED. That shard proposes judging the verify:human
     backlog so only the real ones reach the operator — but a judged verdict has nowhere to land

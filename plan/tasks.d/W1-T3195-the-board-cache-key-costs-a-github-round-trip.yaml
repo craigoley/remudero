@@ -11,6 +11,7 @@
   origin: "operator-session#console-read-model-2026-09-08"
   plan_refs: ["W1-T3192", "W1-T2919", "W1-T3196"]
   status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     RETIRED 2026-09-08 BY OPERATOR RULING. Not because the finding is wrong — the measurement stands
