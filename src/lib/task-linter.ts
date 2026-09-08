@@ -56,6 +56,7 @@ export type LintCheck =
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-name-resolution"
+  | "unbound-criterion"
   | "post-merge-amendment"
   | "post-merge-field-drift"
   | "post-merge-criterion-removed"
@@ -1336,6 +1337,113 @@ export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): 
       });
     }
   });
+  return violations;
+}
+
+// ── UNBOUND-CRITERION (W1-T3217 — file-level proof targets hide sibling gaps) ───────────────
+// A path-form `unit test: test/x.test.ts` proof executes the WHOLE FILE, then review applies that
+// single result to every criterion naming it. So a sibling's passing test can certify a criterion
+// the file never names. This check binds EACH criterion to a title in its named test file by
+// requiring that title to carry this task id plus the criterion index, or an explicit criterion tag.
+// It is warning-first: existing backlog is surfaced, while callers that pass a recorded per-file
+// baseline can block only growth above that baseline.
+
+export type UnboundCriterionBaseline = Readonly<Record<string, number>>;
+
+const TEST_TITLE_RE = /\b(?:test|it)\s*\(\s*(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/g;
+
+function decodeTestTitle(raw: string): string {
+  return raw.replace(/\\(["'`\\])/g, "$1").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+}
+
+export function literalTestTitlesIn(fileText: string): string[] {
+  const titles: string[] = [];
+  TEST_TITLE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = TEST_TITLE_RE.exec(fileText))) {
+    titles.push(decodeTestTitle(m[2] ?? ""));
+  }
+  return titles;
+}
+
+function exactUnitTestTargetPath(proof: string): string | undefined {
+  const whitelisted = parseWhitelistedProof(proof);
+  if (!whitelisted || whitelisted.kind !== "test" || whitelisted.nameFiltered) return undefined;
+  return whitelisted.label;
+}
+
+function criterionDeclaredTags(c: AcceptanceCriterion): string[] {
+  const tagged = c as AcceptanceCriterion & { tag?: unknown; criterion_tag?: unknown; marker?: unknown };
+  return [tagged.tag, tagged.criterion_tag, tagged.marker]
+    .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+    .map((x) => x.trim().toLowerCase());
+}
+
+function criterionBindingMarkers(taskId: string, criterionIndex: number, c: AcceptanceCriterion): string[] {
+  const n = criterionIndex + 1;
+  const id = taskId.toLowerCase();
+  return [
+    `${id} criterion ${n}`,
+    `${id} criteria ${n}`,
+    `${id} acceptance ${n}`,
+    `${id} c${n}`,
+    `${id}#${n}`,
+    `${id}-${n}`,
+    `${id}.${n}`,
+    ...criterionDeclaredTags(c),
+  ];
+}
+
+function titleBindsCriterion(title: string, taskId: string, criterionIndex: number, c: AcceptanceCriterion): boolean {
+  const lowered = title.toLowerCase();
+  return criterionBindingMarkers(taskId, criterionIndex, c).some((marker) => lowered.includes(marker));
+}
+
+/** Every path-form `unit test:` criterion whose target file exists but carries no test title naming
+ *  that criterion. Silent without a file reader, on non-test proofs, on name-filtered proofs, and on
+ *  absent targets so legitimate forward references stay legal. */
+export function unboundCriterionViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const readFile = opts.readGrepProofFile;
+  if (!readFile) return [];
+
+  const byTarget = new Map<string, Array<{ criterion: AcceptanceCriterion; index: number }>>();
+  (task.acceptance ?? []).forEach((c, index) => {
+    if (c.satisfied_by) return; // Architect-only; no target test is expected here.
+    const path = exactUnitTestTargetPath(c.proof ?? "");
+    if (!path) return;
+    const entries = byTarget.get(path) ?? [];
+    entries.push({ criterion: c, index });
+    byTarget.set(path, entries);
+  });
+
+  const violations: LintViolation[] = [];
+  for (const [path, entries] of byTarget) {
+    const text = readFile(path);
+    if (text === undefined) continue;
+    const titles = literalTestTitlesIn(text);
+    if (titles.length === 0) continue; // no literal titles to judge; avoid guessing.
+    const unbound = entries.filter(({ criterion, index }) => !titles.some((title) => titleBindsCriterion(title, task.id, index, criterion)));
+    if (unbound.length === 0) continue;
+
+    const baseline = opts.unboundCriterionBaseline;
+    const recorded = baseline === undefined ? undefined : (baseline[path] ?? 0);
+    const severity: LintSeverity = recorded !== undefined && unbound.length > recorded ? "block" : "warn";
+    const named = unbound.map(({ index }) => `criterion ${index + 1}`).join(", ");
+    const baselineText =
+      recorded === undefined
+        ? "no recorded baseline was supplied, so this is advisory-only"
+        : `${unbound.length} unbound criterion(s) vs recorded baseline ${recorded}`;
+    violations.push({
+      check: "unbound-criterion",
+      severity,
+      message:
+        `${path} has ${unbound.length} criterion/proof binding gap(s): no test title names ${named} ` +
+        `for task ${task.id}. A path-form \`unit test:\` proof executes the whole file, so a sibling ` +
+        `test can otherwise certify this criterion. Add a title marker such as "${task.id} criterion ` +
+        `${unbound[0]!.index + 1}" to the test that proves it, or declare a criterion tag and name that ` +
+        `tag in the title. ${baselineText}.`,
+    });
+  }
   return violations;
 }
 
@@ -2677,9 +2785,14 @@ export interface LintOpts {
    *  Absent ⇒ only `task.rationale` is checked on this side. */
   taskPlanRefs?: readonly string[];
   /** A `grep:` proof's named path -> that file's text, or `undefined` when the path is not on
-   *  disk, for {@link proofGrepUnmatchableViolations} and {@link proofEngineDivergenceViolations}:
-   *  one contract for two checks that both need today's text. Absent ⇒ both are silent. */
+   *  disk, for {@link proofGrepUnmatchableViolations}, {@link proofEngineDivergenceViolations},
+   *  and {@link unboundCriterionViolations}: one contract for checks that need today's text.
+   *  Absent ⇒ those checks are silent. */
   readGrepProofFile?: (repoRelPath: string) => string | undefined;
+  /** Recorded unbound-criterion count by path-form unit-test target. Absent ⇒
+   *  {@link unboundCriterionViolations} reports warnings only; present ⇒ growth above the recorded
+   *  per-file count blocks while at-or-below baseline remains advisory. */
+  unboundCriterionBaseline?: UnboundCriterionBaseline;
 }
 
 /** Lint one task, aggregating every check below. The hard checks — sizing, headless-fitness,
@@ -2699,6 +2812,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofGrepSafetyViolations(task));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofNameResolutionViolations(task, opts));
+  violations.push(...unboundCriterionViolations(task, opts));
   violations.push(...proofBaseDiscriminationViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
