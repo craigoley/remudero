@@ -299,6 +299,7 @@ import {
   preflightFailureNotice,
   preflightSummaryPath,
   remedyFilesForFailingChecks,
+  rule15MixedPlanSourceDiffStep,
   runCiParity,
   runPreflightCoverage,
   runPreflightFast,
@@ -627,6 +628,7 @@ import {
   planShardSlugCorpus,
   proofGrepUnmatchableViolations,
   proofGrepSelfCertifyingViolations,
+  rule15MixedPlanSourceDiffViolation,
   shardSlugFromPath,
   TaskLintError,
   type LintOpts,
@@ -20989,6 +20991,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let oldById: Map<string, Task> | undefined;
   let newTaskIds: Set<string> | undefined;
   let newMonolithIds: Set<string> | undefined;
+  let rule15DiffText: string | undefined;
+  let rule15ChangedFiles: string[] | undefined;
   if (baseRef) {
     const relPath = relative(repoRoot, planPath);
     // W1-T246 (recon): a plain `git show <base>:<relPath>` only ever materializes the MONOLITH
@@ -21001,6 +21005,18 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // matches exactly what `loadPlan` would see from a real checkout at `baseRef`.
     const tmpDir = makeTempDir("lint-plan-base");
     try {
+      rule15DiffText = execFileSync("git", ["diff", `${baseRef}...HEAD`], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        maxBuffer: 1 << 26,
+      });
+      rule15ChangedFiles = execFileSync("git", ["diff", "--name-only", `${baseRef}...HEAD`], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        maxBuffer: 1 << 26,
+      })
+        .split("\n")
+        .filter(Boolean);
       const oldRaw = execFileSync("git", ["show", `${baseRef}:${relPath}`], {
         cwd: repoRoot,
         encoding: "utf8",
@@ -21086,6 +21102,14 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // TRAP 1: this check is MEANINGLESS without a base — "new" has no definition — and a check that
     // silently does nothing in the mode people run by hand is a check nobody notices is broken.
     console.log("### rmd lint-plan: no --base given — the monolith-filing check is SKIPPED (it needs a base ref to know which ids are new).");
+  }
+
+  if (baseRef && rule15DiffText !== undefined && rule15ChangedFiles !== undefined) {
+    const mixedRule15 = rule15MixedPlanSourceDiffViolation(rule15DiffText, rule15ChangedFiles);
+    if (mixedRule15) {
+      console.error(`✗ diff: [${mixedRule15.check}] ${mixedRule15.message}`);
+      return 1;
+    }
   }
 
   // W1-T324: the whole-plan (no --base) scope filter. `--base` mode is untouched — `scope`
@@ -21381,7 +21405,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  * `rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]` —
  * W1-T221's hand-route commit gate. Runs {@link runPreflight}'s three independent steps (commitlint, `tsc --noEmit`,
  * and lib/commit-message.ts's own header/body checks) over the commit range not yet on
- * `origin/main`, prints every step's own pass/fail line UNCONDITIONALLY (never only on
+ * `origin/main`, plus the reviewer-owned Rule 15 mixed criteria/source diff check, prints every
+ * step's own pass/fail line UNCONDITIONALLY (never only on
  * failure — fixture 3's redirected-and-swallowed check is exactly the shape this avoids),
  * and exits non-zero iff any step failed. `--from`/`--to` override the default
  * `origin/main..HEAD` range so a caller can preflight an arbitrary range (e.g. re-checking
@@ -21389,7 +21414,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *
  * `--ci-parity` (W1-T294), `--fast` (W1-T373) and `--coverage` (W1-T1074) are each a SECOND/
  * THIRD/FOURTH, ADDITIVE mode on this same verb — never a second command, never a change to
- * the three steps above, and never a change to one another. `--ci-parity` runs
+ * one another. `--ci-parity` runs
  * {@link runCiParity}'s steps (one or more per .github/workflows/ci.yml job — see lib/ci-
  * parity.ts), which shells the FULL `npm run test:ci` suite as part of the `ci` job's mirror
  * and is therefore not a mode a worker can run habitually. `--fast` runs
@@ -21477,7 +21502,9 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const to = flagValue(rest, "--to");
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
 
+  const preflightSpawn = deps.spawn ?? defaultPreflightSpawn;
   const result = runPreflight(repoRoot, { ...deps, range });
+  const rule15 = rule15MixedPlanSourceDiffStep(repoRoot, preflightSpawn, range);
   const fast = rest.includes("--fast") ? runPreflightFast(repoRoot, { spawn: deps.spawn }) : undefined;
   const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn }) : undefined;
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn }) : undefined;
@@ -21485,6 +21512,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   for (const step of result.steps) {
     console.log(step.detail);
   }
+  console.log(rule15.detail);
   if (fast) {
     for (const step of fast.steps) {
       console.log(step.detail);
@@ -21500,7 +21528,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
       console.log(step.detail);
     }
   }
-  const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true);
+  const ok = result.ok && rule15.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true);
   // W1-T2810 — THE STAMP, ON BOTH BRANCHES AND ON THE LINE ITSELF.
   //
   // ON BOTH: a stale RED gets investigated anyway, because the reader is already suspicious. The
@@ -21516,7 +21544,6 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // W1-T3017 — PEEK, never resolve. The pin belongs to whichever mode actually diffed; a run with
   // no diff-consuming step has no base, and resolving one here would put a sha on the line that no
   // step ever measured against.
-  const preflightSpawn = deps.spawn ?? defaultPreflightSpawn;
   const pin = peekPinnedBase(repoRoot, preflightSpawn);
   const runContext = detectRunContext({
     repoRoot,
@@ -21529,7 +21556,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   });
   console.log(
     (ok
-      ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
+      ? "\n### rmd preflight: PASS — commitlint, typecheck, emitter checks, and Rule 15 diff check are all clean; the push may proceed"
       : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes") +
       `\n### ${runContextLine(runContext)}`,
   );
@@ -21556,7 +21583,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const injectedSpawn = deps.spawn !== undefined;
   const summaryPath = explicitSummaryFile ?? (injectedSpawn ? undefined : preflightSummaryPath(repoRoot));
   const summary = buildPreflightSummary({
-    steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])],
+    steps: [...result.steps, rule15, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])],
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
     headSha,
@@ -39543,7 +39570,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "preflight",
     syntax: "rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]",
-    summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
+    summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message and Rule 15 checks.",
     detail:
       "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +
       renderFastGateScriptList(FAST_GATE_STEPS) +

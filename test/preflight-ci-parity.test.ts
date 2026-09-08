@@ -393,8 +393,8 @@ test("preflightCommand: WITHOUT --ci-parity, none of the ci-parity steps run or 
   assert.equal(code, 0);
   assert.equal(lines.some((l) => l.includes("ci-parity")), false, "no ci-parity output at all without the flag");
   assert.deepEqual(
-    lines.filter((l) => /^(commitlint|typecheck|emitter-checks):/.test(l)).length,
-    3,
-    "exactly the three shipped hand-route steps",
+    lines.filter((l) => /^(commitlint|typecheck|emitter-checks|rule15-mixed-diff):/.test(l)).length,
+    4,
+    "exactly the shipped hand-route steps plus the cheap Rule 15 diff check",
   );
 });

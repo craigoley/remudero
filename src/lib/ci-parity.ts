@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
-import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
+import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightRange, type PreflightSpawn } from "./commit-message.js";
+import { rule15MixedPlanSourceDiffViolation } from "./task-linter.js";
 
 /**
  * lib/ci-parity.ts — `rmd preflight --ci-parity` (W1-T294, MASTER-PLAN §5/§5C): a second,
@@ -358,6 +359,62 @@ function mergeBaseDiffText(repoRoot: string, spawn: PreflightSpawn): string {
  * needed the same sentence. Two hand-written copies of one refusal are two things to drift.
  */
 export const EMPTY_DIFF_COVERAGE_REFUSAL = "origin/main...HEAD (freshly refreshed) is an empty diff; there is no diff to assert coverage over";
+
+/** The full judge reason is imported through task-linter.ts; this anchor keeps the preflight
+ *  wrapper refusing loudly if that reason ever stops carrying the reviewer remedy it promises:
+ *  "file the shard in its own plan-only PR". */
+const RULE15_REMEDY_ANCHOR = "file the shard in its own plan-only PR";
+
+function diffRangeSpec(range: PreflightRange): string {
+  return `${range.from}...${range.to}`;
+}
+
+/** Author-time Rule 15 refusal for `rmd preflight`, before an implement branch spends CI. */
+export function rule15MixedPlanSourceDiffStep(
+  repoRoot: string,
+  spawn: PreflightSpawn = defaultPreflightSpawn,
+  range: PreflightRange = { from: "origin/main", to: "HEAD" },
+): CiParityStepResult {
+  return runStep("rule15-mixed-diff", () => {
+    const spec = diffRangeSpec(range);
+    const diff = spawn("git", ["diff", spec], { cwd: repoRoot });
+    const diffSpawnFailure = spawnFailureDetail("rule15-mixed-diff git diff", diff);
+    if (diffSpawnFailure) return { ok: false, detail: diffSpawnFailure };
+    if (diff.status !== 0) {
+      const stderr = (diff.stderr ?? "").trim();
+      return {
+        ok: false,
+        detail:
+          `FAIL — could not compute ${spec}: git diff exited ${diff.status}` +
+          `${stderr ? `: ${stderr.slice(0, 200)}` : ""}`,
+      };
+    }
+
+    const names = spawn("git", ["diff", "--name-only", spec], { cwd: repoRoot });
+    const namesSpawnFailure = spawnFailureDetail("rule15-mixed-diff git diff --name-only", names);
+    if (namesSpawnFailure) return { ok: false, detail: namesSpawnFailure };
+    if (names.status !== 0) {
+      const stderr = (names.stderr ?? "").trim();
+      return {
+        ok: false,
+        detail:
+          `FAIL — could not list changed files for ${spec}: git diff --name-only exited ${names.status}` +
+          `${stderr ? `: ${stderr.slice(0, 200)}` : ""}`,
+      };
+    }
+
+    const files = (names.stdout ?? "").split("\n").filter(Boolean);
+    const violation = rule15MixedPlanSourceDiffViolation(diff.stdout ?? "", files);
+    if (!violation) return { ok: true, detail: `PASS — no mixed plan/source criteria edit in ${spec}` };
+    if (!violation.message.includes(RULE15_REMEDY_ANCHOR)) {
+      return {
+        ok: false,
+        detail: `FAIL — Rule 15 refusal did not carry the judge's split-remedy anchor ${JSON.stringify(RULE15_REMEDY_ANCHOR)}`,
+      };
+    }
+    return { ok: false, detail: `FAIL — ${violation.message}` };
+  });
+}
 
 /**
  * W1-T3013 — THE THREE-DOT DIFF, CHECKED, because feeding an unchecked one to `diff-coverage.mjs`

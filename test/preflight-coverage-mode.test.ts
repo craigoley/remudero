@@ -362,7 +362,7 @@ test("preflightCommand: --coverage ADDS the coverage-mode steps after the three 
   assert.equal(lines.some((l) => l.includes("ci-parity")), false, "no --ci-parity output when only --coverage was passed");
 });
 
-test("preflightCommand: WITHOUT --coverage, no coverage-mode step runs or prints — the shipped hand route (and --ci-parity/--fast) is untouched", async () => {
+test("preflightCommand: WITHOUT --coverage, no coverage-mode step runs or prints — the default route stays scoped", async () => {
   const spawn: PreflightSpawn = () => ({ status: 0, stdout: "\0feat(x): fine\n", stderr: "" });
   const originalLog = console.log;
   const lines: string[] = [];
@@ -378,9 +378,9 @@ test("preflightCommand: WITHOUT --coverage, no coverage-mode step runs or prints
   assert.equal(code, 0);
   assert.equal(lines.some((l) => l.includes("coverage-mode")), false, "no coverage-mode output at all without the flag");
   assert.deepEqual(
-    lines.filter((l) => /^(commitlint|typecheck|emitter-checks):/.test(l)).length,
-    3,
-    "exactly the three shipped hand-route steps",
+    lines.filter((l) => /^(commitlint|typecheck|emitter-checks|rule15-mixed-diff):/.test(l)).length,
+    4,
+    "exactly the shipped hand-route steps plus the cheap Rule 15 diff check",
   );
 });
 

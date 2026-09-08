@@ -4,9 +4,12 @@ import type { AcceptanceCriterion, Plan, Task, TaskStatus } from "./plan.js";
 import { RETIREMENT_REASONS } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
+  checkSatisfiedByGuard,
+  criterionFieldTampered,
   isDemonstrationProof,
   grepProofTargetNamesNoFile,
   isDialectPrefixed,
+  planOnlyDiff,
   parseWhitelistedProof,
   type NameFilterResolution,
   type WhitelistedProof,
@@ -69,6 +72,7 @@ export type LintCheck =
   | "budget-sanity"
   | "ruling-verify"
   | "rule15-filing"
+  | "rule15-mixed-diff"
   | "duplicate-title"
   | "duplicate-surface"
   | "duplicate-learning"
@@ -1927,6 +1931,51 @@ const TASKS_SHARD_PATH_RE = /^plan\/tasks\.d\/[^/]+\.ya?ml$/;
  *  as "declares a task record". */
 function isTaskRecordFile(f: string): boolean {
   return f === TASKS_MONOLITH_PATH || TASKS_SHARD_PATH_RE.test(f);
+}
+
+export interface Rule15MixedPlanSourceDiffViolation extends LintViolation {
+  check: "rule15-mixed-diff";
+  planPaths: string[];
+  otherPaths: string[];
+}
+
+export interface Rule15MixedPlanSourceDiffDeps {
+  criterionFieldTampered?: (diff: string) => boolean;
+  planOnlyDiff?: (diff: string) => boolean;
+  guardReason?: (diff: string, planOnly: boolean) => string;
+}
+
+/** The reviewer-owned Rule 15 decision, lifted for author-time callers.
+ *
+ *  DECIDES ON THE JUDGE'S PREDICATE, NOT PATH SHAPE. `files` is used only to NAME the two halves
+ *  of the split after `criterionFieldTampered(diff)` has already said a protected field moved and
+ *  `planOnlyDiff(diff)` has already said the Architect carve-out is unavailable. */
+export function rule15MixedPlanSourceDiffViolation(
+  diff: string,
+  files: readonly string[],
+  deps: Rule15MixedPlanSourceDiffDeps = {},
+): Rule15MixedPlanSourceDiffViolation | undefined {
+  const tampered = deps.criterionFieldTampered ?? criterionFieldTampered;
+  if (!tampered(diff)) return undefined;
+
+  const isPlanOnly = deps.planOnlyDiff ?? planOnlyDiff;
+  const planOnly = isPlanOnly(diff);
+  if (planOnly) return undefined;
+
+  const planPaths = files.filter(isTaskRecordFile);
+  const otherPaths = files.filter((f) => !isInPlanScope(f));
+  const reason =
+    deps.guardReason?.(diff, planOnly) ??
+    checkSatisfiedByGuard(diff, { planOnly, humanAuthored: false }).reason;
+  return {
+    check: "rule15-mixed-diff",
+    severity: "block",
+    planPaths,
+    otherPaths,
+    message:
+      `diff edits acceptance criteria in ${planPaths.join(", ") || "a plan task record"} alongside ` +
+      `${otherPaths.join(", ") || "non-plan files"} — ${reason}`,
+  };
 }
 
 /** Retired or landed records, excluded from {@link rule15FilingViolation}. A withdrawal preserves

@@ -33,6 +33,7 @@ class ProcessExitCalled extends Error {
 function fakeSpawn(map: Record<string, { status: number; stdout?: string; stderr?: string }>): PreflightSpawn {
   return (file, args) => {
     const key = [file, ...args].join(" ");
+    if (file === "git" && args[0] === "diff") return { status: 0, stdout: "", stderr: "" };
     for (const [needle, result] of Object.entries(map)) {
       if (key.includes(needle)) {
         return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
