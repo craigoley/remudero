@@ -71,19 +71,19 @@
     restore the observed blocked-ambiguous/no-spawn failure.
   acceptance:
     - claim: "an exact-head exact-input instrument_entangled ledger row with empty unmet criteria derives blocked-fixable rather than contradictory blocked-ambiguous"
-      proof: "grep: W1-T3172 exact structural verdict reaches blocked-fixable in test/entanglement-split-sweep-reachability.test.ts"
+      proof: "unit test: test/entanglement-split-sweep-reachability.test.ts"
     - claim: "the cold fix-rung reconstruction carries instrumentEntangled and both exact path sets into W1-T2436's existing prerequisite-worker arm"
-      proof: "grep: W1-T3172 cold reconstruction preserves both entanglement path sets in test/entanglement-split-sweep-reachability.test.ts"
+      proof: "unit test: test/entanglement-split-sweep-reachability.test.ts"
     - claim: "the first effect for that cold route is a prerequisite spawn with zero ordinary fix strikes, not an in-place gate-fix worker"
-      proof: "grep: W1-T3172 prerequisite spawn precedes every ordinary strike in test/entanglement-split-sweep-reachability.test.ts"
+      proof: "unit test: test/entanglement-split-sweep-reachability.test.ts"
     - claim: "a stale head, changed input digest, missing or malformed path set, or non-entanglement failure cannot launch the split worker"
-      proof: "grep: W1-T3172 incomplete structural evidence fails closed in test/entanglement-split-sweep-reachability.test.ts"
+      proof: "unit test: test/entanglement-split-sweep-reachability.test.ts"
     - claim: "Standing rule 15 and a genuinely empty unexplained failure remain blocked-ambiguous, while ordinary unmet criteria retain their existing fix route"
-      proof: "grep: W1-T3172 unrelated review routes stay byte-identical in test/entanglement-split-sweep-reachability.test.ts"
+      proof: "unit test: test/entanglement-split-sweep-reachability.test.ts"
     - claim: "strike exhaustion still wins before the split route and no prerequisite is merged or rebased before its independently green merge state"
-      proof: "grep: W1-T3172 exhaustion and prerequisite safety still win in test/entanglement-split-sweep-reachability.test.ts"
+      proof: "unit test: test/entanglement-split-sweep-reachability.test.ts"
     - claim: "removing the producer, disposition, or cold-rung threading link reproduces PR #4559's blocked-ambiguous no-spawn state"
-      proof: "grep: W1-T3172 three-link falsifier reproduces the PR 4559 stall in test/entanglement-split-sweep-reachability.test.ts"
+      proof: "unit test: test/entanglement-split-sweep-reachability.test.ts"
   falsifier: |
     Close without implementation if a current-main board view built from #4559's exact ledger row
     already derives `blocked-fixable` and its first cold fix effect is
@@ -103,3 +103,11 @@
     Rule 25 checked before filing: the implementation changes product source plus its own test and
     no measurement-instrument path. W1-T3072's author-time prevention is a separate upstream
     question; it does not clear already-open entanglement and is not folded into this repair.
+
+    PROOF AMENDMENT 2026-09-08. Source PR #4666 passed its 7-test focused suite, 29 related tests,
+    a 274-test regression set and fast preflight, but all seven original `grep:` proofs were
+    comments inside the newly added test file. The reviewer's base comparison deliberately copies
+    an added test into the base checkout; each comment therefore matched both trees and graded
+    `executed_stale`, leaving 0/7 executable evidence. The replacement runs the focused test file:
+    it passes on the source head and fails against current main, so it discriminates implementation
+    from absence. Claims, scope, code, acceptance count and fail-closed behavior are unchanged.
