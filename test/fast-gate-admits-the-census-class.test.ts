@@ -239,7 +239,11 @@ test("package.json: the seven pre-existing FAST_GATE_STEPS commands are byte-ide
   assert.equal(pkg.scripts["cli-reference:check"], "tsx scripts/generate-cli-reference.mjs --check");
   assert.equal(pkg.scripts["claims"], "node scripts/claims-check.mjs");
   assert.equal(pkg.scripts["learnings-budget-ratchet"], "node scripts/learnings-budget-ratchet.mjs");
-  assert.equal(pkg.scripts["jscpd"], "jscpd src --config .jscpd.json");
+  // W1-T2907 widened the duplication gate to read scripts/ as well as src/ — that is the task's
+  // own point ("the duplication gate reads scripts as well as src"), not drift. What this
+  // assertion guards is that the CENSUS ADMISSION did not disturb the pre-existing steps; a
+  // later, deliberate scope change to one of them is a different thing and is recorded here.
+  assert.equal(pkg.scripts["jscpd"], "jscpd src scripts --config .jscpd.json");
   assert.equal(pkg.scripts["depcruise"], "depcruise src --config .dependency-cruiser.cjs");
   assert.equal(pkg.scripts["api-client:check"], "node scripts/generate-api-client.mjs --check");
   assert.equal(pkg.scripts["no-hand-rolled-fetch:check"], "node scripts/no-hand-rolled-fetch-check.mjs");
