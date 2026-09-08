@@ -422,6 +422,7 @@ import { ghTraceGateway } from "./lib/trace.js";
 import { defaultPreflightSpawn, runPreflight, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
+  callerReachableSuites,
   censusSuiteMembershipFor,
   detectRunContext,
   peekPinnedBase,
@@ -16459,6 +16460,54 @@ export function censusMembershipCommand(
     // nothing" and "the model does not know".
     console.log("  UNMODELLED census suite(s), which this cannot place and will not guess:");
     for (const u of report.unknownCoverage) console.log(`    ? ${u}`);
+  }
+  return 0;
+}
+
+/**
+ * `rmd caller-sweep <symbol> [<symbol>...] [--files]` — W1-T3215: the SECOND hop `census-membership`
+ * (above) does not take. `git grep -l <symbol>` — CLAUDE.md's own mandated sweep — finds every
+ * suite naming a changed symbol directly; it is structurally blind to a suite that instead drives
+ * the symbol's IN-FILE CALLER. MEASURED on #4722: the diff changed only `prewarmBoardGithub`'s
+ * body; the mandated sweep named four suites, all green, while CI reddened a fifth,
+ * test/serve-prewarm-clientgate.test.ts — zero `prewarmBoardGithub` hits, 22 hits on
+ * `gatePrewarmOnClients`, the only src/ function that calls it. `callerReachableSuites` walks
+ * src/ at run time for every caller of each named symbol and unions in the suites naming THOSE, so
+ * a caller added anywhere in the same commit is found with no registry to edit.
+ * REPORT-ONLY: names suites, runs none, gates nothing, exits 0 whatever it finds — same contract
+ * as `census-membership` (W1-T2969), which answers the sibling half of this same sweep gap.
+ */
+export function callerSweepCommand(
+  rest: string[],
+  deps: { repoRoot?: string; spawn?: PreflightSpawn; readFile?: (path: string) => string } = {},
+): number {
+  const files = rest.includes("--files");
+  const symbols = rest.filter((a) => a !== "--files");
+  const badFlag = symbols.find((a) => a.startsWith("--"));
+  if (badFlag) {
+    console.error(`rmd caller-sweep: unexpected argument '${badFlag}' — see \`rmd --help\`\n${USAGE}`);
+    return 2;
+  }
+  if (symbols.length === 0) {
+    console.error("rmd caller-sweep: needs at least one changed symbol name (the sweep this replaces takes one too)");
+    return 2;
+  }
+
+  const root = deps.repoRoot ?? repoRoot;
+  const report = callerReachableSuites(symbols, root, deps.spawn ?? defaultPreflightSpawn, deps.readFile);
+  if (files) {
+    // STDOUT stays a clean file list a caller can splice — same shape as `census-membership --files`.
+    for (const s of report.suites) console.log(s);
+    return 0;
+  }
+  console.log(`rmd caller-sweep — ${symbols.length} changed symbol(s): ${symbols.join(", ")}`);
+  if (report.suites.length === 0) {
+    console.log("  no suite reachable, directly or through a src/ caller");
+  }
+  for (const entry of report.entries) {
+    console.log(`  ${entry.symbol}`);
+    if (entry.callers.length > 0) console.log(`    src/ caller(s): ${entry.callers.join(", ")}`);
+    for (const s of entry.suites) console.log(`    -> ${s}`);
   }
   return 0;
 }
@@ -36472,6 +36521,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2969: the answer censusSuiteMembership (W1-T2523) has always been able to give and nothing could ask for. A census suite WALKS a population and asserts a property of the whole set, so it names none of a caller's symbols and `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is structurally blind to it. MEASURED 2026-09-06: four CI failures across #4283 and #4290 were census baselines, and a correctly-run symbol sweep found none of them. Models both halves: the fast-gate census members, DERIVED from CENSUS_ADMITTED_MEMBERS, and the registry-shaped suites (the COMMANDS name list, the policy key set, the source-text-read ratchet) that are not fast-gate members and must not become them. A suite the model cannot place is NAMED as unmodelled rather than dropped, so 'joins nothing' is never confused with 'the model does not know'. REPORT-ONLY: runs no suite, gates nothing, exits 0 whatever it finds. `--files` emits the same membership as the bare TEST FILE PATHS on stdout, one per line, so a caller can run them without carrying a second copy of the table; incompleteness (an unmodelled or unmappable suite) is named on stderr, never folded into the list, because a caller that cannot tell a partial enumeration from a complete one reads its own subset pass as covering the whole set.",
   },
   {
+    name: "caller-sweep",
+    syntax: "rmd caller-sweep <symbol> [<symbol>...] [--files]",
+    summary: "Name the suites reachable from a changed symbol, including through its src/ callers.",
+    detail: "W1-T3215: the SECOND hop `census-membership` above does not take. `git grep -l <symbol>` — the mandated sweep — finds every suite naming a changed symbol directly and is structurally blind to a suite that instead drives the symbol's IN-FILE CALLER. MEASURED on #4722: a diff changing only prewarmBoardGithub's body named four suites by the mandated sweep, all green, while CI reddened a fifth, test/serve-prewarm-clientgate.test.ts — zero prewarmBoardGithub hits, 22 hits on gatePrewarmOnClients, the only src/ function calling it. `callerReachableSuites` walks src/ at run time for every caller of each named symbol (never a hand list — a caller added in the same commit is walked by the run that adds it) and unions in the suites naming those callers too. An empty symbol list is refused as a usage error, never run as 'every suite'. REPORT-ONLY: names suites, runs none, gates nothing, exits 0 whatever it finds. `--files` emits the same union as bare TEST FILE PATHS on stdout, one per line.",
+  },
+  {
     name: "ci-learning",
     syntax: "rmd ci-learning [--days N] [--force]",
     summary: "Draft a marked, parked shard for each repaired CI failure in the window.",
@@ -37458,6 +37513,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(censusMembershipCommand(rest)) cannot carry a DA hit without forking the process; censusMembershipCommand's own logic — arg validation, the --base bound, the unreadable-diff arm, and every render path (joining, none, unmodelled) — is unit-tested in test/the-census-map-names-four-suites-and-no-verb-reads-it.test.ts (same irreducible-glue shape as the sibling ci-learning/ci-failures/rule-efficacy dispatch cases).
   if (cmd === "census-membership") {
     process.exit(censusMembershipCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(callerSweepCommand(rest)) cannot carry a DA hit without forking the process; callerSweepCommand's own logic — arg validation, the empty-symbol refusal, and the report/--files render paths — is unit-tested in test/the-caller-sweep-stops-at-one-hop.test.ts (same irreducible-glue shape as the sibling census-membership/ci-learning/ci-failures dispatch cases).
+  if (cmd === "caller-sweep") {
+    process.exit(callerSweepCommand(rest));
   }
   if (cmd === "ci-learning") {
     process.exit(ciLearningCommand(rest));
