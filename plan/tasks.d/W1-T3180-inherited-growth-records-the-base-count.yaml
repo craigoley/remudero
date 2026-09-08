@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: low
   budget_usd: 8.00
-  files: [scripts/comment-load-ratchet.mjs, test/inherited-growth-records-a-bucket.test.ts]
+  files: [scripts/comment-load-ratchet.mjs, test/inherited-growth-records-the-base-count.test.ts]
   origin: "operator-session#board-pass-2026-09-08"
   plan_refs: ["W1-T3022", "W1-T2539", "W1-T3015"]
   status: queued
@@ -61,10 +61,35 @@
     predate the bucket). They are grandfathered by the `otherwise` path and converge as files
     shrink; converting them wholesale is a separate decision and would itself be one enormous
     conflicting diff.
+    AMENDED 2026-09-08, DURING THE BUILD — THE FILED REMEDY WAS MEASURABLY WRONG AND THE REPO'S OWN
+    SUITE CAUGHT IT.
+
+    This task proposed `ceilingForComments(v.comments)`, reasoning that the bucket is what the
+    sibling paths use and what W1-T3022 ratified. The bucket does make two branches agree. It also
+    ROUNDS UP to the next 250, handing the file up to 249 lines of free headroom — so growth the
+    branch itself causes afterwards stops being charged. `test/comment-load-ratchet.test.ts`'s
+    existing case "growth main landed while the PR was open passes and is recorded; growth the PR
+    added still fails" went red on exactly that second half: it expected 3 and got 250, and its
+    follow-on assertion that a fourth comment line is REFUSED could no longer hold.
+
+    RECORD `v.atBase` INSTEAD. `splitBaseInheritedViolations` already computes it. It is equally
+    identical between two branches cut from the same base — which is the whole conflict property —
+    and grants no slack at all: the ceiling becomes exactly what main already carries, which is
+    precisely the claim being made, that this PR is not answerable for main's growth and remains
+    answerable for its own. MEASURED with both wrong remedies in place: the raw count fails 2 of 31
+    tests, the bucket fails 3.
+
+    Criterion 2 also had to move, because its pattern `ceilingForComments(v.comments)` MATCHES AN
+    UNRELATED PRE-EXISTING LINE — the console.error that prints a suggested ceiling. It would have
+    passed against any implementation at all, and matches the merge base too, so it graded
+    `executed_stale` rather than proving anything.
+
   acceptance:
-    - claim: "inherited base growth is recorded at the bucketed ceiling, so two branches inheriting the same growth write the same number and merge clean"
-      proof: "unit test: test/inherited-growth-records-a-bucket.test.ts"
-    - claim: "the inherited write goes through the same ceiling function the other recording paths already use"
-      proof: 'grep: ceilingForComments(v\.comments) in scripts/comment-load-ratchet.mjs'
+    - claim: "inherited growth is recorded at the MERGE BASE's count, so two branches inheriting the same growth write the same number and merge clean"
+      proof: "unit test: test/inherited-growth-records-the-base-count.test.ts"
+    - claim: "the inherited write records the base count itself, not a value derived from this branch's own measurement"
+      proof: 'grep: nextBaseline\[v\.path\] = v\.atBase in scripts/comment-load-ratchet.mjs'
+    - claim: "NO HEADROOM is granted: the recorded ceiling is exactly the base count, so growth the branch itself causes afterwards is still charged"
+      proof: "grep: NO HEADROOM in test/inherited-growth-records-the-base-count.test.ts"
     - claim: "a falsifier restores the exact-count write and shows two concurrent inheritors conflicting again"
-      proof: "grep: MUTANT in test/inherited-growth-records-a-bucket.test.ts"
+      proof: "grep: MUTANT in test/inherited-growth-records-the-base-count.test.ts"
