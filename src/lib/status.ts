@@ -696,7 +696,14 @@ export function readMergeCreditedTaskIds(
   // `complete: false` means the cap or the corpus ran out with candidates unresolved — those get re-credited,
   // which is today's behaviour, not a regression.
   const complete = wanted.size === 0 ? true : outstanding <= 0;
-  return { credited, filesRead: read.filesRead, complete, budgetExhausted: !complete && wanted.size > 0 };
+  // W1-T3019: `budgetExhausted` separates "the BUDGET ran out" (the rotation cap hid files we never
+  // opened, so an outstanding candidate's absence is UNPROVEN) from "the CORPUS ran out" (every file
+  // that exists was opened and the id was not there, so the absence IS proven). The discriminator is
+  // therefore whether the cap actually hid anything -- `archiveCount > cap` -- and NOT whether
+  // candidates remain outstanding: `!complete` already means they do, so testing `wanted.size > 0`
+  // here reports every proven absence as a budget exhaustion and erases the distinction the field
+  // exists for. A corpus of EXACTLY the cap, or one rotation short of it, is fully read and proven.
+  return { credited, filesRead: read.filesRead, complete, budgetExhausted: !complete && read.archiveCount > cap };
 }
 
 /** The ledger union a RENDERING surface needs: the live file plus dated rotations, NEWEST FIRST, stopping at
