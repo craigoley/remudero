@@ -26,6 +26,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
 import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS, loadDefaultPolicy } from "./policy.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 
 /**
  * The general shell-isolation mechanism (W1-T18, the OSS blocker). Every worker's HOME is redirected
@@ -620,7 +621,7 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
   const parent = dirname(root);
   const prefix = `${basename(root)}-`;
   const inflightDir = opts.inflightDir ?? join(parent, "state", "inflight");
-  const ledgerPath = opts.ledgerPath ?? join(parent, "state", "ledger.ndjson");
+  const ledgerPath = opts.ledgerPath ?? join(parent, "state", LEDGER_FILENAME);
 
   let entries: string[];
   try {
