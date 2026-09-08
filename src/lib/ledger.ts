@@ -19,6 +19,7 @@ import { basename, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV } from "./worker-containment.js";
 
@@ -1116,11 +1117,9 @@ export class StateBackupError extends Error {
 }
 
 /** Relative path (from `state/`) of the ledger this module treats as authoritative-by-name
- *  when verifying a snapshot — mirrors `ledgerPathFor`'s own basename (run-task.ts:
- *  `join(config.root, "state", "ledger.ndjson")`), duplicated as a bare string here rather
- *  than imported so this file never takes a dependency on run-task.ts (a CLI entrypoint) for
- *  one constant. */
-export const STATE_BACKUP_LEDGER_RELPATH = "ledger.ndjson";
+ *  when verifying a snapshot — mirrors `ledgerPathFor`'s own basename through the shared
+ *  filename constant, without depending on run-task.ts (a CLI entrypoint). */
+export const STATE_BACKUP_LEDGER_RELPATH = LEDGER_FILENAME;
 
 /** Relative path (from `state/`) of the proposals register this module treats as
  *  authoritative-by-name — mirrors the inbox registry's own basename (run-task.ts:

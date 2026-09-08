@@ -8,6 +8,7 @@ import {
   selectLearnings,
 } from "./learnings.js";
 import { appendLedger } from "./ledger.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readLedgerLines } from "./status.js";
 import type { Config } from "./config.js";
 import type { LayeredLearningsHomes, LearningsIndex } from "./learnings.js";
@@ -595,7 +596,7 @@ export type WipeTestPairRunResult =
     };
 
 function ledgerPathForRoot(root: string): string {
-  return join(root, "state", "ledger.ndjson");
+  return join(root, "state", LEDGER_FILENAME);
 }
 
 function renderGeneratedSubjectTask(subject: WipeTestPairSubject, repo: string): string {

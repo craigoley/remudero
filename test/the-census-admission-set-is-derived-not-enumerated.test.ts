@@ -202,7 +202,8 @@ test("every CENSUS_ADMITTED_MEMBERS entry has a corresponding FAST_GATE_STEPS st
 
 test("CENSUS_POPULATION: exactly five ADMITTED members today, each under FAST_GATE_CENSUS_BOUND_MS", () => {
   // W1-T2695: `authority-census` is the fifth, joining the four W1-T2478 admitted.
-  assert.equal(CENSUS_ADMITTED_MEMBERS.length, 5);
+  // W1-T2898: `ledger-literal-census` joins on the same terms — clause (a) satisfied (it asserts a property EVERY enumerated src/ file must hold) and MEASURED at a 452ms median, well under the bound. Named rather than counted, so the addition stays a reviewed one.
+  assert.equal(CENSUS_ADMITTED_MEMBERS.length, 6);
   for (const m of CENSUS_ADMITTED_MEMBERS) {
     assert.equal(m.verdict.status, "ADMITTED");
     if (m.verdict.status === "ADMITTED") {
@@ -228,18 +229,25 @@ test("FAST_GATE_CENSUS_BOUND_MS is unchanged at 2000ms", () => {
   assert.equal(FAST_GATE_CENSUS_BOUND_MS, 2000);
 });
 
-test("the four suites W1-T2478 admitted are still admitted, by job name, unchanged", () => {
+test("the census suites admitted so far are still admitted, by job name, unchanged", () => {
   const jobs = CENSUS_ADMITTED_MEMBERS.map((m) => m.job).sort();
   // W1-T2695 added a fifth (`authority-census`) without touching the original four's own entries.
   assert.deepEqual(
     jobs,
-    ["authority-census", "bound-kind-census", "catch-erasure-census", "negative-reachability-census", "no-shallowing-census"].sort(),
+    [
+      "authority-census",
+      "bound-kind-census",
+      "catch-erasure-census",
+      "ledger-literal-census",
+      "negative-reachability-census",
+      "no-shallowing-census",
+    ].sort(),
   );
 });
 
-test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the five census entries, every one measures under the bound and passes on this HEAD", () => {
+test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the six census entries, every one measures under the bound and passes on this HEAD", () => {
   const result = runPreflightFast(REPO_ROOT, { steps: CENSUS_STEPS });
-  assert.equal(result.steps.length, 5);
+  assert.equal(result.steps.length, 6);
   for (const step of result.steps) {
     assert.equal(step.ok, true, `expected ${step.name} to pass on a clean HEAD: ${step.detail}`);
     assert.doesNotMatch(step.detail, /BOUND EXCEEDED/, `${step.name} must not report BOUND EXCEEDED on a clean, fast run`);

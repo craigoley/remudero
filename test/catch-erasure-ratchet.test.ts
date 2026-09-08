@@ -28,7 +28,13 @@
 // THE BASELINE TABLES BELOW are today's measured population (this detector's own count, run over
 // this repo's own tracked src/**/*.ts at HEAD) -- not a hand-picked target. A file entering the
 // tree for the first time, or renamed, has no row and so starts at an allowance of zero. A file
-// that improves needs no edit here: bareCatchViolations() only fires when actual > baseline.
+// that improves needs no edit to PASS: bareCatchViolations() only fires when actual > baseline.
+//
+// W1-T2906 ADDS THE OTHER HALF, so improving one still means editing the table: an allowance left
+// standing after the code it counted shrinks is a never-tightened ceiling, the same drift an
+// un-compared `scripts/*-baseline.json` score left against `origin/main` (this task's sibling
+// gate, scripts/baseline-monotonic-check.mjs). slackViolations() fails a row sitting slack above
+// its file's actual count, naming the allowance to lower -- see CATCH_COUNT_SLACK below.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -185,6 +191,26 @@ function bareCatchViolations(root: string, baseline: Record<string, number>): Ba
   return violations;
 }
 
+// W1-T2906: ZERO SLACK -- the table above is EXACT-MEASURED already (see the file header), so no
+// row should ever legitimately sit above its file's real count. `CATCH_COUNT_SLACK` is named
+// rather than inlined so a future, reviewed tolerance is a one-line change, not a rewrite.
+const CATCH_COUNT_SLACK = 0;
+
+/** The OTHER half of the census (W1-T2906): an allowance that stays put after the code it counted
+ *  shrinks is a NEVER-TIGHTENED ceiling, the same drift a `scripts/*-baseline.json` score left
+ *  unchecked against `origin/main` (scripts/baseline-monotonic-check.mjs's sibling gate). A row
+ *  whose recorded allowance sits more than {@link CATCH_COUNT_SLACK} above its file's actual count
+ *  fails here, naming the allowance to lower -- so the census tracks the code DOWN, not just up. */
+function slackViolations(root: string, baseline: Record<string, number>): BareCatchViolation[] {
+  const violations: BareCatchViolation[] = [];
+  for (const file of trackedSrcFiles(root)) {
+    const actual = bareCatchCountForSource(readFileSync(join(root, file), "utf8"));
+    const allowed = baseline[file] ?? 0;
+    if (actual < allowed - CATCH_COUNT_SLACK) violations.push({ file, actual, baseline: allowed });
+  }
+  return violations;
+}
+
 // ─────────────────────── detector (b): negated optional-chain conflators ──────────────────────
 
 function stripCommentsPreserveOffsets(source: string): string {
@@ -258,7 +284,7 @@ function conflatorViolations(root: string, baseline: ConflatorSite[]): Conflator
 // had carried since capture, surfaced by the recount and lowered because leaving a known-loose
 // row is the population growth W1-T2295 exists to stop.
 const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
-  "src/lib/analytics-route.ts": 1,
+  "src/lib/analytics-route.ts": 0,
   "src/lib/autonomy.ts": 1,
   "src/lib/board.ts": 3,
   "src/lib/ci-parity.ts": 3,
@@ -313,7 +339,7 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/serve.ts": 20,
   "src/lib/skill.ts": 4,
   "src/lib/status-board.ts": 5,
-  "src/lib/status.ts": 7,
+  "src/lib/status.ts": 6,
   "src/lib/task-id-reservation.ts": 1,
   "src/lib/task-linter.ts": 1,
   "src/lib/trace.ts": 1,
@@ -513,6 +539,51 @@ test("catch-erasure-ratchet: a file dropping below its baseline passes with no e
   }
 });
 
+// ── W1-T2906: the OTHER half -- an allowance sitting slack above the actual count now fails too
+
+test("catch-erasure-ratchet: an allowance sitting slack above the actual count fails and names the new allowance (acceptance criterion, W1-T2906)", () => {
+  const dir = initFixtureRepo();
+  try {
+    mkdirSync(join(dir, "src", "lib"), { recursive: true });
+    // The SAME fixture the growth-check test above accepts -- one bare catch, allowance 3 -- now
+    // ALSO fails the slack check: the allowance never tightened when the code shrank.
+    writeFileSync(join(dir, "src", "lib", "improved.ts"), `try { return f(); } catch { return null; }\n`);
+    commitFixture(dir);
+
+    const violations = slackViolations(dir, { "src/lib/improved.ts": 3 });
+    assert.deepEqual(violations, [{ file: "src/lib/improved.ts", actual: 1, baseline: 3 }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("catch-erasure-ratchet: an allowance exactly matching the actual count is not slack", () => {
+  const dir = initFixtureRepo();
+  try {
+    mkdirSync(join(dir, "src", "lib"), { recursive: true });
+    writeFileSync(join(dir, "src", "lib", "exact.ts"), `try { return f(); } catch { return null; }\n`);
+    commitFixture(dir);
+
+    assert.deepEqual(slackViolations(dir, { "src/lib/exact.ts": 1 }), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("catch-erasure-ratchet: a file entirely cleaned up (actual 0) still fails while its row is not removed", () => {
+  const dir = initFixtureRepo();
+  try {
+    mkdirSync(join(dir, "src", "lib"), { recursive: true });
+    writeFileSync(join(dir, "src", "lib", "clean.ts"), `try { return f(); } catch (err) { throw err; }\n`);
+    commitFixture(dir);
+
+    const violations = slackViolations(dir, { "src/lib/clean.ts": 2 });
+    assert.deepEqual(violations, [{ file: "src/lib/clean.ts", actual: 0, baseline: 2 }], "lower the allowance to 0, or drop the row");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("catch-erasure-ratchet: a new negated optional-chain conflator fails the gate naming its site (acceptance criterion 1)", () => {
   const dir = initFixtureRepo();
   try {
@@ -551,6 +622,19 @@ test("PROPERTY no tracked src/**/*.ts file's bare-catch count exceeds its baseli
     violations,
     [],
     violations.map((v) => `${v.file}: ${v.actual} bare catch(es) > baseline ${v.baseline}`).join("\n"),
+  );
+});
+
+// W1-T2906: the census's other half, over this repo's own real table. Today's table is
+// EXACT-MEASURED (see the file header), so this must read clean with zero slack.
+test("PROPERTY no tracked src/**/*.ts file's baseline allowance sits slack above its actual bare-catch count", () => {
+  const violations = slackViolations(REPO_ROOT, BASELINE_BARE_CATCH_COUNTS);
+  assert.deepEqual(
+    violations,
+    [],
+    violations
+      .map((v) => `${v.file}: actual ${v.actual} < allowed ${v.baseline} -- lower the allowance to ${v.actual}`)
+      .join("\n"),
   );
 });
 

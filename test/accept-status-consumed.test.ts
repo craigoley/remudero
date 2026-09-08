@@ -24,6 +24,7 @@ import { shellBootReady } from "./setup/open-shell.js";
 import { captureFeedback, setFeedbackStatus } from "../src/lib/feedback.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 
@@ -34,9 +35,6 @@ function emptyPlan(): Plan {
   return { tasks: [], byId: new Map() };
 }
 
-function fakeGitHub(): GitHub {
-  return { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
-}
 function fakeTraceGithub(): TraceGithub {
   return { prView: () => null };
 }

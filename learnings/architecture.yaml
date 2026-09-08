@@ -138,34 +138,34 @@
 - id: ledger-corpus-needs-the-resolver
   subsystem: ledger
   lifecycle: active
-  files: [ src/lib/ledger-grep.ts, src/lib/ledger.ts, src/run-task.ts ]
+  files: [ src/lib/ledger-union.ts, src/lib/ledger.ts, src/run-task.ts ]
   fact: >-
     A shell glob over state/ledger.*.ndjson.gz names ONE of two rotation forms
     and answers from the other in silence — it read 0 against 21 archives
-    resolveLedgerUnion found. ledgerRotationEntries (ledger-grep.ts) is the one
+    resolveLedgerUnion found. ledgerRotationEntries (ledger-union.ts) is the one
     definition of the corpus and run-task.ts's ledgerCorpusFiles delegates to
     it; resolveLedgerUnion refuses on partial coverage. Read through the
     resolver, never a glob.
-  assertion: 'grep -q "ledgerRotationEntries" src/lib/ledger-grep.ts && grep -q
+  assertion: 'grep -q "ledgerRotationEntries" src/lib/ledger-union.ts && grep -q
     "ledgerRotationEntries" src/run-task.ts'
   src: operator-report 2026-08-23; resolver delegation re-derived at 682c5d5a
   cited: "2026-08-23"
 - id: ledger-query-anchors-on-the-step-field
   subsystem: ledger
   lifecycle: active
-  files: [ src/lib/ledger-grep.ts, src/lib/ledger.ts ]
+  files: [ src/lib/ledger-union.ts, src/lib/ledger.ts ]
   fact: >-
     resolveLedgerUnion takes a raw pattern and matches ANYWHERE in a row, so a
     bare step name like 'ratify.' also hits prose — three unrelated rows matched
     that way. Anchor every step query on the field itself, "step":"<name>",
     never the bare name, or the count silently includes narrative text.
-  assertion: 'grep -q "pattern: string | RegExp" src/lib/ledger-grep.ts'
+  assertion: 'grep -q "pattern: string | RegExp" src/lib/ledger-union.ts'
   src: operator-report 2026-08-23; raw-pattern signature re-derived at 682c5d5a
   cited: "2026-08-23"
 - id: step-names-come-from-source
   subsystem: ledger
   lifecycle: active
-  files: [ src/lib/ledger.ts, src/lib/ledger-grep.ts, src/run-task.ts ]
+  files: [ src/lib/ledger.ts, src/lib/ledger-union.ts, src/run-task.ts ]
   fact: >-
     A guessed ledger step name is indistinguishable from an absent event.
     sweep.escalation_reconcile exists nowhere as a step — the real names carry

@@ -18,6 +18,7 @@ import {
 import { runnableCandidates, tallyDispatchFilters, type MergedSet } from "../src/lib/drain.js";
 import { loadPlanFromYaml, type Plan, type Task } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import { createLastSeenStore, hashToken } from "../src/lib/last-seen.js";
 
 // ── impl-GO: the two console counts an away operator actually scans ────────────────────────────
@@ -43,10 +44,6 @@ const WRITE_TOKEN = "stopped-counts-write";
 
 function row(over: Partial<BoardRow> = {}): BoardRow {
   return { taskId: "W1-TX", status: "queued", merged: false, source: "none", ...over } as BoardRow;
-}
-
-function fakeGitHub(): GitHub {
-  return { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
 }
 
 function tmpLedger(): string {

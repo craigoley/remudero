@@ -85,6 +85,7 @@
   "src/lib/ledger-path.ts": 500,
   "src/lib/ledger-replay.ts": 181,
   "src/lib/ledger-steps.ts": 500,
+  "src/lib/ledger-union.ts": 500,
   "src/lib/ledger.ts": 1500,
   "src/lib/live-write-guard.ts": 200,
   "src/lib/log-rotation.ts": 115,
