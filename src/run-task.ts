@@ -19065,16 +19065,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         [headMonolithRaw, ...readShardTexts(join(dirname(planPath), "tasks.d"))],
       );
       for (const id of rawChanged) scope.add(id);
-      try {
-        const diffText = execFileSync("git", ["-C", repoRoot, "diff", "--no-ext-diff", "--unified=0", `${baseRef}...HEAD`, "--", "src"], {
-          encoding: "utf8",
-          maxBuffer: 64 * 1024 * 1024,
-        });
-        addedExports = addedExportsFromPatch(diffText, pathExistsAtBase);
-      } catch (e) {
-        void e;
-        addedExports = [];
-      }
+      const diffText = execFileSync("git", ["-C", repoRoot, "diff", "--no-ext-diff", "--unified=0", `${baseRef}...HEAD`, "--", "src"], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      addedExports = addedExportsFromPatch(diffText, pathExistsAtBase);
     } catch (e) {
       console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
       return 2;

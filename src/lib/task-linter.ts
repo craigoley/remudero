@@ -98,7 +98,7 @@ export interface AddedExport {
   symbol: string;
 }
 
-const ADDED_EXPORT_RE = /^\s*export\s+(?:function|const|class)\s+([A-Za-z_$][\w$]*)\b/;
+const ADDED_EXPORT_DECLARATION = /^\s*export\s+(?:function|const|class)\s+([A-Za-z_$][\w$]*)\b/;
 
 export function addedExportsFromPatch(
   diffText: string,
@@ -125,7 +125,7 @@ export function addedExportsFromPatch(
     }
     if (!raw.startsWith("+") || raw.startsWith("+++") || !path) continue;
     if (!path.startsWith("src/") || !path.endsWith(".ts") || newFile || !pathExistsAtBase(path)) continue;
-    const m = ADDED_EXPORT_RE.exec(raw.slice(1));
+    const m = ADDED_EXPORT_DECLARATION.exec(raw.slice(1));
     if (!m) continue;
     out.set(`${path}\0${m[1]}`, { path, symbol: m[1] });
   }
