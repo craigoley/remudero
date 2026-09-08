@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { execWhitelistedProof, parseWhitelistedProof } from "../src/lib/review.js";
+import { execWhitelistedProof, judgeReview, parseWhitelistedProof } from "../src/lib/review.js";
 import { proofGrepSafetyViolations } from "../src/lib/task-linter.js";
 import type { Task } from "../src/lib/plan.js";
 
@@ -70,6 +70,24 @@ test("CLAIM 1: a proof pinning nothing but its own criterion line now FAILS (was
     "fail",
     "the proof's ONLY match in the target file is the criterion line that carries it — unmet",
   );
+});
+
+test("CLAIM 1 (end-to-end, naming the proof): judgeReview grades a self-only proof executed_fail/unmet, naming the proof in the reason", () => {
+  const dir = fixtureDir();
+  const proofText = `grep: FIXTURE_SELF_ONLY_TOKEN in ${SHARD_PATH}`;
+  const verdict = judgeReview([{ claim: "self-only pins nothing but its own text", proof: proofText }], {
+    diff: "",
+    report: "an unrelated report that never substantiates anything",
+    headCheckoutDir: dir,
+  });
+  assert.equal(verdict.criteria[0].proof_exec, "executed_fail");
+  assert.equal(verdict.criteria[0].met, false);
+  assert.match(
+    verdict.criteria[0].reason,
+    /FIXTURE_SELF_ONLY_TOKEN in plan\/tasks\.d\/W1-T9001-fixture\.yaml/,
+    "the FAIL reason must name the proof that failed, not just say 'unmet'",
+  );
+  assert.equal(verdict.state, "failure");
 });
 
 // ── CLAIM 2: the SAME shape of proof, with a genuine match elsewhere, still PASSES ──────────────
