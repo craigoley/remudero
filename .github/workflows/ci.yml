@@ -357,7 +357,13 @@ jobs:
     name: test-slow
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
-    timeout-minutes: 15
+    timeout-minutes: 35
+    # W1-T2904 HEAVY BAND. `test-slow` carries a `playwright install` step because 9 of the 106
+    # files at or over the manifest's 5000ms threshold are the Playwright-driven serve.* suites,
+    # so it is a third Playwright-carrying job and must be banded like the other two rather than
+    # left at the light-band 10-15m: under the observed non-hung tail a light bound kills honest
+    # work. 35m is the derived heavy FLOOR, and it stays strictly below ci-gate.yml's
+    # WAIT_CAP_SECONDS (2400s = 40m) so ci-gate never times out first and misattributes the hang.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
