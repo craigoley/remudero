@@ -85,6 +85,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.251",
+    "playwright": "^1.62.1",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
     "yaml": "^2.9.0"
@@ -99,11 +100,17 @@
     "commit-and-tag-version": "^13.1.2",
     "dependency-cruiser": "^18.2.0",
     "fast-check": "^4.9.0",
-    "jscpd": "^5.1.0",
-    "playwright": "^1.62.1"
+    "jscpd": "^5.1.0"
+  },
+  "_dependencyRationale": {
+    "@swc/core": "Required by .dependency-cruiser.cjs parser: \"swc\"; src never imports it, but depcruise loads it for TypeScript 7 extraction.",
+    "playwright": "Runtime dependency for rmd review's browser proof path; src/lib/review.ts resolves node_modules/playwright/cli.js to install Chromium."
   },
   "overrides": {
-    "qs": "^6.15.3"
+    "qs": "^6.16.0"
+  },
+  "_overridesRationale": {
+    "qs": "Forces typed-rest-client's qs 6.15.1 pin and Express/body-parser qs ranges to 6.16.0, patched for GHSA-4mjr-xmp4-gh2g and GHSA-x5fp-wj9c-mxmx."
   },
   "commit-and-tag-version": {
     "skip": {

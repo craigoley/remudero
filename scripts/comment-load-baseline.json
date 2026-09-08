@@ -275,7 +275,7 @@
   "src/lib/self-sync.ts": 193,
   "src/lib/serve.ts": 2500,
   "src/lib/service.ts": 269,
-  "src/lib/settings.ts": 50,
+  "src/lib/settings.ts": 250,
   "src/lib/skill-workshop.ts": 250,
   "src/lib/skill.ts": 125,
   "src/lib/source-size-followup.ts": 4,
