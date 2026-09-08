@@ -3,7 +3,13 @@ import { test } from "node:test";
 
 import { RELEASE_LEDGER_STEP, assertRunnable, releasedTaskIds } from "../src/lib/plan.js";
 import { nextRunnable, resolveReleasedIds, runDrain } from "../src/lib/drain.js";
-import { approveParkedTask, namesATask } from "../src/run-task.js";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ledgerPathFor } from "../src/lib/ledger-path.js";
+import { approveCommand, approveParkedTask, namesATask } from "../src/run-task.js";
 
 /**
  * W1-T3206 — `verify: human` WAS A ONE-WAY PARK WITH NO RELEASE.
@@ -213,4 +219,64 @@ test("W1-T3216 FALSIFIER: runDrain DISPATCHES a released verify:human task, and 
     [],
     "with no reader, the identical task is refused — a door added, never a wall removed",
   );
+});
+
+// ── The approveCommand BRANCH itself, driven end to end ───────────────────────────────────────
+//
+// coverage-ratchet caught that every test above reaches `approveParkedTask` DIRECTLY and none
+// reaches the branch in `approveCommand` that routes a task id to it. That branch IS the wiring,
+// so an untested one is this task's own defect in miniature. Driven here against a real temp root.
+
+test("W1-T3216: `rmd approve <task-id>` reaches the release path and writes the row to the real ledger", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t3216-`));
+  try {
+    mkdirSync(join(tmp, "plan"), { recursive: true });
+    mkdirSync(join(tmp, "state"), { recursive: true });
+    writeFileSync(
+      join(tmp, "plan", "tasks.yaml"),
+      [
+        "- id: W1-T1041",
+        "  title: a parked shard",
+        "  repo: remudero",
+        "  type: implement",
+        "  verify: human",
+        "  status: queued",
+        "  depends_on: []",
+      ].join("\n"),
+    );
+    const config = { root: tmp } as never;
+
+    const code = await approveCommand(["W1-T1041"], { config });
+    assert.equal(code, 0, "the branch is REACHED and succeeds — not a usage error from the proposal path");
+
+    const ledger = readFileSync(ledgerPathFor({ root: tmp } as never), "utf8").split("\n").filter(Boolean);
+    const rows = ledger.map((l) => JSON.parse(l) as Record<string, unknown>);
+    const release = rows.filter((r) => r.step === RELEASE_LEDGER_STEP && r.task_id === "W1-T1041");
+    assert.equal(release.length, 1, "exactly one release row, written by the real command against a real ledger file");
+    assert.equal(release[0]!.run_id, "APPROVE-W1-T1041");
+
+    // Idempotent through the REAL command too, not only through the pure function.
+    const again = await approveCommand(["W1-T1041"], { config });
+    assert.equal(again, 0);
+    const after = readFileSync(ledgerPathFor({ root: tmp } as never), "utf8").split("\n").filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r.step === RELEASE_LEDGER_STEP && r.task_id === "W1-T1041");
+    assert.equal(after.length, 1, "a second bit is not a second release, end to end");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3216: an unknown but well-formed task id is refused AS A TASK, not as a missing proposal", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t3216-`));
+  try {
+    mkdirSync(join(tmp, "plan"), { recursive: true });
+    mkdirSync(join(tmp, "state"), { recursive: true });
+    writeFileSync(join(tmp, "plan", "tasks.yaml"), "- id: W1-T1041\n  title: x\n  repo: remudero\n  type: implement\n  verify: human\n  status: queued\n  depends_on: []\n");
+    const code = await approveCommand(["W1-T9999"], { config: { root: tmp } as never });
+    assert.equal(code, 2, "refused — and by the TASK path, which is what the shape test buys");
+    assert.equal(existsSync(ledgerPathFor({ root: tmp } as never)), false, "a refusal writes nothing at all, not even an empty ledger");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
