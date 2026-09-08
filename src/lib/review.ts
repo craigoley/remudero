@@ -4875,6 +4875,7 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
+  "^scripts/baseline-monotonic-check\\.mjs$", // W1-T2906: refuses a baseline-score regression against origin/main
   // W1-T2764: the ledger-step ratchet's rule logic, behind the required `ledger-steps` ci.yml job —
   // the same shape as the task-id-existence and assertion-discrimination entries above. Before that
   // job existed `unwired-gate:check` refused it as "a gate-shaped instrument that nothing invokes";
