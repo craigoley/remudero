@@ -46,6 +46,6 @@
     - claim: "a new import cycle under the repo's own depcruise config fails rather than warns"
       proof: "unit test: test/no-circular-is-an-error.test.ts"
     - claim: "the plan-scope predicate lives in a leaf module that review.ts imports"
-      proof: "grep: lib/plan-scope\" in src/lib/review.ts"
+      proof: "grep: from \"\\./plan-scope\\.js\" in src/lib/review.ts"
     - claim: "each new leaf module is exercised by the test and imports nothing from the ring it cut"
       proof: "grep: utcWeekWindowMs( in test/no-circular-is-an-error.test.ts"
