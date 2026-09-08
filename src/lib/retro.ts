@@ -86,6 +86,10 @@ export interface RunSummary {
   /** Summed `TokenUsage.output` over every DONE_STEPS line. Optional only so a pre-W1-T930 fixture
    *  compiles; every reader treats an absent value as 0, never as unknown. */
   outputTokens?: number;
+  verdictSource?: "ledger-credit";
+  observedVerdict?: string;
+  creditTs?: string;
+  creditMatch?: "pr_url" | "task_id";
 }
 
 const DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
@@ -111,8 +115,40 @@ function outputTokensOf(l: LedgerRecord): number {
   return 0;
 }
 
+interface LedgerCreditIndex {
+  byPrUrl: Map<string, LedgerRecord>;
+  byTaskId: Map<string, LedgerRecord>;
+}
+
+// W1-T3088: a sweep credit row is keyed on the SWEEP's run_id, so it is matched here by pr_url, never by run — why: docs/forensics/retro.md.
+export function ledgerCreditIndex(records: LedgerRecord[]): LedgerCreditIndex {
+  const byPrUrl = new Map<string, LedgerRecord>();
+  const byTaskId = new Map<string, LedgerRecord>();
+  for (const r of records) {
+    if (r.step !== "verdict.merged") continue;
+    if (typeof r.pr_url === "string" && r.pr_url.length > 0) byPrUrl.set(r.pr_url, r);
+    else if (typeof r.task_id === "string" && r.task_id.length > 0) byTaskId.set(r.task_id, r);
+  }
+  return { byPrUrl, byTaskId };
+}
+
+function ledgerCreditFor(
+  credits: LedgerCreditIndex,
+  observedVerdict: string,
+  prUrl: string | undefined,
+  taskId: string,
+): { row: LedgerRecord; match: "pr_url" | "task_id" } | undefined {
+  if (CREDITED_VERDICTS.has(observedVerdict)) return undefined;
+  const byUrl = prUrl !== undefined ? credits.byPrUrl.get(prUrl) : undefined;
+  if (byUrl) return { row: byUrl, match: "pr_url" };
+  const byTask = credits.byTaskId.get(taskId);
+  if (byTask) return { row: byTask, match: "task_id" };
+  return undefined;
+}
+
 /** Reduce ledger lines into per-run summaries, keyed by run_id (deterministic). */
 export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
+  const credits = ledgerCreditIndex(records);
   const byRun = new Map<string, LedgerRecord[]>();
   for (const r of records) {
     if (!r.run_id) continue;
@@ -138,17 +174,29 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       lines.find((l) => l.step === "pr.opened") ?? verdictLine ?? lines.find((l) => l.pr_url);
     const claimedPrUrl = typeof prLine?.pr_url === "string" ? prLine.pr_url : undefined;
     const correctedUrl = correctionFor(lines);
+    const taskId = String(start.task_id ?? "");
+    const prUrl = correctedUrl ?? claimedPrUrl;
+    const observedVerdict = String(verdictLine?.verdict ?? "incomplete");
+    const credit = ledgerCreditFor(credits, observedVerdict, prUrl, taskId);
     runs.push({
       runId,
-      taskId: String(start.task_id ?? ""),
+      taskId,
       type: String(start.type ?? "unknown"),
       startTs: String(start.ts ?? ""),
-      verdict: String(verdictLine?.verdict ?? "incomplete"),
+      verdict: credit ? "merged" : observedVerdict,
       costUsd: typeof costLine?.cost_usd === "number" ? costLine.cost_usd : 0,
       numTurns,
       outputTokens,
-      prUrl: correctedUrl ?? claimedPrUrl,
+      prUrl,
       ...(correctedUrl !== undefined ? { correctedFromPrUrl: claimedPrUrl } : {}),
+      ...(credit
+        ? {
+            verdictSource: "ledger-credit" as const,
+            observedVerdict,
+            creditMatch: credit.match,
+            ...(typeof credit.row.ts === "string" ? { creditTs: credit.row.ts } : {}),
+          }
+        : {}),
       ...(typeof start.risk === "string" ? { risk: start.risk } : {}),
       ...(typeof start.task_class === "string" ? { taskClass: start.task_class } : {}),
       ...(typeof verdictLine?.subtype === "string" ? { subtype: verdictLine.subtype } : {}),
@@ -389,7 +437,7 @@ export interface ShippedRecord {
   costUsd: number;
   numTurns: number;
   source: "ledger" | "github";
-  /** Present ONLY for a GitHub-discovered merge whose run did NOT end verdict=merged. */
+  /** Present ONLY for a GitHub-discovered or ledger-credited merge whose run did NOT observe verdict=merged. */
   annotation?: string;
 }
 
@@ -448,7 +496,15 @@ export function shippedSince(
         );
         continue;
       }
-      shipped.push({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" });
+      shipped.push({
+        taskId: r.taskId,
+        runId: r.runId,
+        prUrl: r.prUrl,
+        costUsd: r.costUsd,
+        numTurns: r.numTurns,
+        source: "ledger",
+        ...(r.verdictSource === "ledger-credit" ? { annotation: ledgerCreditAnnotation(r) } : {}),
+      });
     } else {
       const pr = github.findMergedByTrailer(r.taskId);
       if (!pr) continue; // no GitHub evidence either — genuinely not shipped
@@ -477,6 +533,21 @@ export function shippedSince(
 
   shipped.sort((a, b) => (a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0));
   return { shipped, discrepancies };
+}
+
+function ledgerCreditAnnotation(r: RunSummary): string {
+  return `ledger-credited gate-side merge (verdictSource=ledger-credit, matched by ${r.creditMatch ?? "pr_url"}); run observed ${r.observedVerdict ?? "unknown"}`;
+}
+
+export function ledgerCreditDiscrepancies(runs: RunSummary[], sinceTs: string | undefined): string[] {
+  const scoped = sinceTs ? runs.filter((r) => r.startTs > sinceTs) : runs;
+  return scoped
+    .filter((r) => r.verdictSource === "ledger-credit")
+    .map((r) => {
+      const named = r.creditMatch === "task_id" ? `task ${r.taskId} (row carries no pr_url — matched by task_id)` : (r.prUrl ?? "(no pr_url)");
+      const when = r.creditTs ? ` at ${r.creditTs}` : "";
+      return `${r.taskId} (${r.runId}): ledger verdict=${r.observedVerdict ?? "unknown"} but the ledger's own verdict.merged credit row names ${named}${when} — credited from the ledger (verdictSource=ledger-credit), not from GitHub`;
+    });
 }
 
 /** The ledger-only fallback when no gateway is wired: `mergedSince` crediting, no unverified claim. */
@@ -1407,9 +1478,11 @@ export function buildGather(opts: {
   const runsDeferred = inWindow.length - scoped.length;
   const consumedThroughTs = scoped.length > 0 ? scoped[scoped.length - 1].startTs : opts.sinceTs;
   const merged = mergedSince(runs, opts.sinceTs);
-  const { shipped, discrepancies } = opts.github
+  const union = opts.github
     ? shippedSince(runs, opts.sinceTs, opts.github)
     : { shipped: ledgerOnlyShipped(merged), discrepancies: [] as string[] };
+  const shipped = union.shipped;
+  const discrepancies = [...union.discrepancies, ...ledgerCreditDiscrepancies(runs, opts.sinceTs)];
   // Checked ONCE, after the union runs so a healthy union still gets full credit: a reason here
   // means the read layer is untrustworthy, whatever shippedSince managed to resolve (W1-T132).
   const githubUnavailable = opts.github?.unavailable?.();
@@ -1581,7 +1654,7 @@ export function renderGather(g: RetroGather): string {
     "## SHIPPED since marker (W1-T51 — ledger ∪ GitHub-derived trailered merges, ownership-asserted)",
     ...shippedLines,
     ...(g.discrepancies.length
-      ? ["", "## Discrepancies (ledger vs GitHub — every gate-side addition and rejected foreign trailer)", ...g.discrepancies.map((d) => `- ${d}`)]
+      ? ["", "## Discrepancies (ledger vs GitHub — every gate-side addition, ledger-credited merge and rejected foreign trailer)", ...g.discrepancies.map((d) => `- ${d}`)]
       : []),
     "",
     "## Failure distribution BY MAST CATEGORY (W1-T89, ratifies P18 — plan/mast-mapping.yaml)",

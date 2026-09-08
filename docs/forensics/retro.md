@@ -3602,3 +3602,57 @@ attribution-by-run. A row with neither stays `unattributed`.
 Not done here, and filed separately: the writer-side half (a `verdict` row that carries its own
 `model`, and `implement.done` in a retention set), and the OTel `api_request` route that would make
 `served_model` and cache tokens first-class per call.
+
+## W1-T3088 — the ledger's own `verdict.merged` credit rows finalise the run they credit (2026-09-08)
+
+OBSERVED at `c53bcec0`: `runCreditBackfill` (`src/lib/sweep.ts`) appends
+`{ run_id: deps.runId, task_id, step: "verdict.merged", verdict: "merged", pr_number, pr_url,
+source: "sweep.credit_backfill" }`, and `deps.runId` is the SWEEP's own daemon run id, never the
+task run's. `gatherRuns` groups by `run_id` and reads `lines.find((l) => l.step === "verdict")`, so
+that row landed in a `DAEMON-*` group with no `run.start` and was dropped as a torn fragment. A run
+that merged gate-side therefore still reduced to `blocked_ci` in `aggregateByType`,
+`aggregateByClass`, `verdictDistribution`, `mergedSince` and `mineDegradedSuccess`'s population,
+and `shippedSince` recovered the truth only by a live `findMergedByTrailer` REST read. The DR-28
+census join (`censusMergeStateFrom`, #4509) made the FAILURE census right from the shipped union;
+it did not make the RUN right.
+
+The reader now honours the row; no writer changed (design iv). `ledgerCreditIndex` indexes every
+`verdict.merged` row by `pr_url`, and by `task_id` ONLY for a row that carries no `pr_url`. In
+`gatherRuns`, a run whose observed verdict is not in `CREDITED_VERDICTS` and whose own `prUrl`
+(correction-aware, so the P9 override still wins) is named by a credit row reduces to
+`verdict: "merged"` with `verdictSource: "ledger-credit"`, `observedVerdict` (the verdict the run
+wrote), `creditMatch` (`pr_url` or the labelled `task_id` fallback) and `creditTs` (the credit
+row's `ts`). Every other field — `subtype`, `reason`, guard fields, cost — is still the run's own.
+
+Why `pr_url` and never `task_id` alone when both exist (design ii): a task can have several runs
+and only the one whose PR merged earns the credit — the same ownership discipline `shippedSince`
+applies through `ownBranchOf`. Consequences worth stating: a credit row naming a DIFFERENT
+`pr_url` for the same task credits nothing (the shard's falsifier); a run with no `pr_url` of its
+own is not credited by a row that has one, because there is nothing to match — it stays what it
+observed, and the shipped union's GitHub half remains its only route. The `task_id` arm exists for a
+row with no `pr_url` (none of the sweep's rows lack one today; the arm is for hand-written or
+future correction rows) and is labelled in the discrepancy line so it is never read as a
+`pr_url` match.
+
+`shippedSince` (design iii): a ledger-credited run enters the `r.verdict === "merged"` arm, so the
+P9 head-branch assert STILL RUNS — the row asserts the merge, not the ownership. A foreign head is
+REJECTED exactly as a native ledger merge would be; a matching head ships with `source: "ledger"`
+and an annotation naming `verdictSource=ledger-credit`, the match kind and the observed verdict.
+`findMergedByTrailer` is never called for it: the REST read the retro used to pay is gone for
+every run the ledger already answers.
+
+Discrepancies (design v): `ledgerCreditDiscrepancies` emits ONE line per ledger-credited run in the
+window, appended to the union's own list in BOTH gateway modes, so `renderGather`'s Discrepancies
+section names the credit as coming from the ledger, not GitHub. `shippedSince` adds no second line
+for the same run (a REJECTED foreign head is a different finding and keeps its own line).
+
+Census consistency with #4509: a ledger-credited run reads `verdict === "merged"`, so
+`mastCategoryDistribution`, `infrastructureEvents` and `taskDefectCounts` exclude it through
+`CREDITED_VERDICTS` before any mapping lookup — excluded as merged, never a failure category and
+never a member of `reconciled` (that list is for runs the union credited whose OWN verdict still
+reads blocked). The Discrepancies line is where the operator sees it.
+
+Falsifier, in `test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts`: with
+`ledgerCreditIndex`'s `pr_url` arm neutered, the first criterion's fixture reduces to `blocked_ci`
+again while the different-`pr_url` negative case is unchanged. The comment budget for
+`src/lib/retro.ts` allowed exactly one added comment line, which is why this note lives here.
