@@ -266,6 +266,7 @@ import {
   type DrainSummary,
   type MergedSet,
   type OpenPrCheck,
+  resolveReleasedIds,
 } from "./lib/drain.js";
 import {
   daemonBoot,
@@ -721,6 +722,8 @@ import {
   type BoardReviewReport,
 } from "./lib/board-review.js";
 import {
+  RELEASE_LEDGER_STEP,
+  releasedTaskIds,
   assertRunnable,
   loadPlan,
   selectTask,
@@ -11058,7 +11061,9 @@ async function runTask(
     }
   }
 
-  assertRunnable(plan, task, isMerged); // refuse unmerged deps / blocked / verify:human
+  // W1-T3216: the released set is passed so an operator-ratified verify:human task runs here too.
+  // Read once, at this single-task entry point — there is no pass to amortise it over.
+  assertRunnable(plan, task, isMerged, releasedTaskIds(readLedgerRawLines(ledgerPath)));
 
   // ── §5C LAYER A: deterministic task linter, FAIL-CLOSED pre-dispatch guard
   // (MASTER-PLAN §5C). Four malformed tasks (W1-T6, W1-T9, W1-T12) reached a
@@ -23367,6 +23372,10 @@ async function drainCommand(
         refreshMerged,
         isOpenPr,
         isCreditIndeterminate,
+        // W1-T3216: THE PRODUCER. `resolveReleasedIds` (drain.ts) turns these lines into the
+        // released set once per pass. Omitting this line is not a degraded feature — it is the
+        // dead one #4715 shipped, so it is asserted by test rather than left to review.
+        readLedgerLines: () => readLedgerRawLines(ledgerPathFor(config)),
         // W1-T2397: the two halves of the observation. #3120 shipped the predicate live and said so
         // — `openSiblingBuild` is computed on every projection pass while
         // `NextRunnableOpts.openSiblingBuildFor`/`onOpenSiblingBuild` had no production caller,
@@ -24684,6 +24693,9 @@ export async function daemonCommand(
         refreshMerged,
         isOpenPr,
         isCreditIndeterminate,
+        // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
+        // W1-T534/W1-T916 hit two lines below, and the one #4715 shipped for this very feature.
+        readLedgerLines: () => readLedgerRawLines(ledgerPathFor(config)),
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
         // `repo:` field — the SAME value, never a second resolution that could drift from it.
         targetRepo: target.repo,
@@ -34207,11 +34219,94 @@ export async function ruleCommand(
  * {@link approveProposal}; this command is the thin real-world glue (mirrors
  * `inboxCommand`/`planCommand`'s split).
  */
+/** W1-T3216 — SHAPE ONLY: does this token name a TASK rather than a proposal? `W1-T1041` takes
+ *  the release path, `P7` the proposal path. Deliberately not an EXISTENCE test: a well-formed
+ *  but unknown id is refused BY NAME one step later, which reads better than "unknown proposal". */
+export function namesATask(token: string): boolean {
+  return /^W\d+-T[0-9A-Za-z]+$/.test(token);
+}
+
+/**
+ * W1-T3216 — RATIFY A PARKED `verify: human` TASK through the pipeline proposals already use.
+ *
+ * Writes the SAME `ratify.approved` row a proposal ratification writes, which `releasedTaskIds`
+ * (plan.ts) reads back and `resolveReleasedIds` (drain.ts) turns into dispatch eligibility — so
+ * the plan record is NEVER edited and the decision is auditable on the one ledger step that
+ * already means "the operator spent his bit".
+ *
+ * REFUSES, NAMING THE STATE, WITH ZERO SIDE EFFECTS: an unknown id, a task that is not
+ * `verify: human` (it needs no release), one that is blocked or retired, and one ALREADY
+ * released — that last returns 0 and writes NO second row, because a second bit is not a second
+ * release.
+ */
+export function approveParkedTask(
+  taskId: string,
+  deps: {
+    plan: Plan;
+    ledgerPath: string;
+    runId: string;
+    ledgerLines?: readonly string[];
+    append?: typeof appendLedger;
+  },
+): { code: number; message: string } {
+  const task = deps.plan.byId.get(taskId);
+  if (!task) return { code: 2, message: `rmd approve: unknown task '${taskId}' — not in the plan` };
+  if (task.verify !== "human") {
+    return {
+      code: 2,
+      message: `rmd approve: ${taskId} is verify:${task.verify} — it needs no release; only a verify:human task is parked`,
+    };
+  }
+  if (task.status !== "queued") {
+    return { code: 2, message: `rmd approve: ${taskId} is status:${task.status} — only a queued task can be released` };
+  }
+  const already = releasedTaskIds(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath));
+  if (already.has(taskId)) {
+    return { code: 0, message: `rmd approve: ${taskId} is already released — no second row written` };
+  }
+  (deps.append ?? appendLedger)(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: taskId,
+    step: RELEASE_LEDGER_STEP,
+    released: "verify-human",
+  });
+  return { code: 0, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
+}
+
+/** The ledger's RAW lines. `releasedTaskIds` parses them itself (it rejects on a cheap substring
+ *  before spending a JSON.parse), so handing it pre-parsed rows would parse every line twice.
+ *  An unreadable ledger yields NO releases — the safe direction: the wall stands. */
+export function readLedgerRawLines(path: string): readonly string[] {
+  try {
+    return readFileSync(path, "utf8").split("\n").filter(Boolean);
+  } catch {
+    // no ledger yet (a fresh checkout) or unreadable — releases nothing, never throws into dispatch
+    return [];
+  }
+}
+
 export async function approveCommand(
   rest: string[],
   deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway; overlap?: OverlapWarningDeps } = {},
 ): Promise<number> {
   const proposalId = rest[0];
+  // W1-T3216: a TASK id takes the release path. Taken BEFORE the proposal registry is consulted,
+  // so the proposal path below is byte-for-byte unchanged, and keyed on SHAPE so an unknown but
+  // well-formed task id is refused as a task rather than as a missing proposal.
+  if (proposalId && rest.length === 1 && namesATask(proposalId)) {
+    const config = deps.config ?? loadConfig();
+    const outcome = approveParkedTask(proposalId, {
+      plan: loadPlan(join(config.root, "plan", "tasks.yaml")),
+      ledgerPath: ledgerPathFor(config),
+      // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
+      // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already
+      // unique per task, so keying it on the task id is deterministic AND makes the
+      // row findable by the very thing it releases.
+      runId: `APPROVE-${proposalId}`,
+    });
+    console.log(outcome.message);
+    return outcome.code;
+  }
   const badArg = unknownArgError("approve", rest.slice(1), [], []);
   // W1-T2471: more than one bare id named (e.g. `rmd approve P1 P2 P3`) is what the SINGLE-id
   // parse above already flags as a bad arg — every token after the first is "unexpected".
