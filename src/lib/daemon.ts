@@ -90,11 +90,19 @@ import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
  * a supervisor restart is the only way a long-running daemon gets off the code it loaded at boot (W1-T126). */
 export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale";
 
-// W1-T2895: `DEFAULT_POLL_INTERVAL_MS` moved to the leaf module `poll-interval.ts` — it was the
-// value edge `daemon-health.ts` imported, which is what made its own `import type { GhRateLimitBuckets }`
-// edge back into this file a genuine two-module cycle. Re-exported here unchanged.
-export { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
-import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
+/** Default idle-poll pace: check back once a minute while nothing is runnable. The literal stays
+ *  here because this module never touches the filesystem; `daemonCommand` threads the policy value
+ *  on every real invocation, so this is provably dead for the operating path (W1-T253).
+ *
+ *  W1-T2895: `daemon-health.ts` used to import this VALUE from here, which — paired with this
+ *  file's own `import type { GhRateLimitBuckets }` from `daemon-health.ts` above (dependency-
+ *  cruiser's `swc` parser counts a type-only edge the same as a value one for cycle detection) —
+ *  closed a genuine two-module ring. `daemon-health.ts` now sources the value from the leaf module
+ *  `poll-interval.ts` instead: that module restates this same literal and imports nothing, so it
+ *  cannot itself close a cycle back here. This declaration is therefore unchanged (still the
+ *  canonical, filesystem-free constant every other consumer of `daemon.js` imports), and the ring
+ *  is cut on `daemon-health.ts`'s side, not by turning this export into a re-export. */
+export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
 /** Default wall-clock bound on the full reconciliation pass, mirroring `plan/policy.yaml`'s
  *  `sweepWallClockBoundMs` row, which carries the healthy-versus-hung derivation. Same fs-free
