@@ -12,6 +12,7 @@ import {
   buildServeRoutes,
   buildServeServer,
   boundConsoleReadRoutes,
+  buildInboxDigestsRoute,
   consoleBlockingRequestPathViolations,
   CONSOLE_BLOCKING_REQUEST_PATH_BASELINE,
   CONSOLE_READ_ROUTE_BUDGET_MS,
@@ -123,6 +124,21 @@ async function withServeServer<T>(deps: ServeDeps, fn: (baseUrl: string) => Prom
   }
 }
 
+async function serveRoute(route: Route, path: string = route.path): Promise<Response> {
+  const server = createServer((req, res) => {
+    void route.handler(req, res, { params: {} });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const res = await fetch(`${base}${path}`);
+    const body = await res.arrayBuffer();
+    return new Response(body, { status: res.status, headers: res.headers });
+  } finally {
+    server.close();
+  }
+}
+
 test("console blocking request-path census is a zero ratchet over the assembled read routes", () => {
   const routes = buildServeRoutes(depsFor(tmpRoot()));
   const violations = consoleBlockingRequestPathViolations(routes);
@@ -208,4 +224,105 @@ test("an over-budget console read route returns a stale fallback with staleness 
   } finally {
     server.close();
   }
+});
+
+test("over-budget cached JSON routes return route-shaped stale fallbacks", async () => {
+  const deps = depsFor(tmpRoot());
+  deps.daemonHealth = { defaultPollIntervalMs: 50 };
+  for (const [path, assertBody] of [
+    ["/v1/recent", (body: Record<string, unknown>) => assert.deepEqual(body.entries, [])],
+    ["/v1/inbox", (body: Record<string, unknown>) => {
+      assert.deepEqual(body.ready, []);
+      assert.deepEqual(body.drafting, []);
+      assert.deepEqual(body.notReady, []);
+    }],
+    ["/v1/daemon-health", (body: Record<string, unknown>) => assert.equal(body.pollIntervalMs, 50)],
+  ] as const) {
+    const slow: Route = {
+      method: "GET",
+      path,
+      scope: "read",
+      handler: async (_req, res) => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{}");
+      },
+    };
+    const [route] = boundConsoleReadRoutes([slow], deps, 20);
+    const res = await serveRoute(route);
+    const body = (await res.json()) as Record<string, unknown> & { staleness?: { stale?: boolean; refreshing?: boolean } };
+    assert.equal(res.headers.get("x-rmd-cache-state"), "stale");
+    assert.equal(body.staleness?.stale, true);
+    assert.equal(body.staleness?.refreshing, true);
+    assertBody(body);
+  }
+});
+
+test("cached console read routes reuse buffered bodies when a later refresh misses the budget", async () => {
+  const deps = depsFor(tmpRoot());
+  let calls = 0;
+  const source: Route = {
+    method: "GET",
+    path: "/v1/recent",
+    scope: "read",
+    handler: async (_req, res) => {
+      calls += 1;
+      if (calls > 1) await new Promise((resolve) => setTimeout(resolve, 200));
+      res.setHeader("content-type", "application/json; charset=utf-8");
+      res.write('{"entries":[');
+      res.end('{"id":"cached"}]}');
+    },
+  };
+  const [route] = boundConsoleReadRoutes([source], deps, 20);
+  const first = await serveRoute(route);
+  assert.equal(first.headers.get("x-rmd-cache-state"), "fresh");
+  const second = await serveRoute(route);
+  const body = (await second.json()) as { entries?: Array<{ id?: string }>; staleness?: { stale?: boolean; ageMs?: number | null } };
+  assert.equal(second.headers.get("x-rmd-cache-state"), "stale");
+  assert.equal(body.entries?.[0]?.id, "cached");
+  assert.equal(body.staleness?.stale, true);
+  assert.equal(typeof body.staleness?.ageMs, "number");
+});
+
+test("a throwing cached JSON route returns its stale fallback with the failure reason", async () => {
+  const deps = depsFor(tmpRoot());
+  const source: Route = {
+    method: "GET",
+    path: "/v1/recent",
+    scope: "read",
+    handler: async () => {
+      throw new Error("refresh exploded");
+    },
+  };
+  const [route] = boundConsoleReadRoutes([source], deps, 20);
+  const res = await serveRoute(route);
+  const body = (await res.json()) as { entries?: unknown[]; staleness?: { stale?: boolean; reason?: string } };
+  assert.equal(res.headers.get("x-rmd-cache-state"), "stale");
+  assert.deepEqual(body.entries, []);
+  assert.equal(body.staleness?.stale, true);
+  assert.equal(body.staleness?.reason, "refresh exploded");
+});
+
+test("the document shell is served live and reports an unreadable checkout sha", async () => {
+  const deps = depsFor(tmpRoot());
+  deps.resolveCurrentSha = () => {
+    throw new Error("git unavailable");
+  };
+  await withServeServer(deps, async (base) => {
+    const res = await fetch(`${base}/`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(res.headers.get("x-rmd-cache-state"), null);
+    const html = await res.text();
+    assert.match(html, /data-idle-reasons="unknown"/);
+    assert.match(html, /console-code-unknown/);
+  });
+});
+
+test("an injected inbox digest reader returns directly through the real route", async () => {
+  const route = buildInboxDigestsRoute({
+    root: tmpRoot(),
+    read: () => ({ entries: [{ ts: "2026-09-08T00:00:00.000Z", text: "W1-T3192-DIGEST" }], omitted: 0 }),
+  });
+  const res = await serveRoute(route, "/v1/inbox/digests");
+  const body = (await res.json()) as { entries?: Array<{ text?: string }> };
+  assert.equal(body.entries?.[0]?.text, "W1-T3192-DIGEST");
 });

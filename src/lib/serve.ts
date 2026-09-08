@@ -693,15 +693,6 @@ export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: n
         writeBufferedResponse(res, cached, staleness);
         return;
       }
-      if (route.path === "/") {
-        res.writeHead(200, {
-          "content-type": "text/html; charset=utf-8",
-          "x-rmd-cache-state": "stale",
-          "x-rmd-cache-age-ms": "unknown",
-        });
-        res.end(renderShellHtml());
-        return;
-      }
       sendStaleJson(res, 200, fallbackBodyForCachedRead(route.path, deps, staleness), staleness);
     },
   };
