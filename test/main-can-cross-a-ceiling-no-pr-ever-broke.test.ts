@@ -36,7 +36,6 @@ function stepScript(job: Job, stepName: string): string {
 
 /** The ceilings this job exists to measure — absolute, so a merge can cross one with no PR red. */
 const ABSOLUTE_CEILING_GATES = [
-  "source-size-ratchet",
   "learnings-budget-ratchet",
   "claude-md-budget-ratchet",
   "comment-load-signal",
@@ -61,6 +60,7 @@ test("it runs EVERY absolute ceiling, so one breach cannot hide behind another's
     /comment-load-signal -- --base HEAD\^/,
     "comment-load must compare the push against the previous main commit, not origin/main at HEAD",
   );
+  assert.doesNotMatch(script, /source-size-ratchet/, "the PR-relative source-size signal is not an absolute main ceiling");
 });
 
 test("a failing ceiling does not short-circuit the rest — one breach must never mask another", () => {
