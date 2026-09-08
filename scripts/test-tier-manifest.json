@@ -152,6 +152,7 @@
     "test/an-inherited-red-is-not-the-authors.test.ts": 256,
     "test/an-instrument-change-that-only-tightens-is-not-entanglement.test.ts": 0,
     "test/an-onboarded-repo-has-a-learnings-home.test.ts": 1500,
+    "test/an-operator-verdict-releases-a-parked-task.test.ts": 0,
     "test/an-operator-stop-is-undone-by-the-restart-policy.test.ts": 23135,
     "test/an-outcome-metric-reports-per-repo.test.ts": 1275,
     "test/an-unanswered-duplicate-title-match-blocks.test.ts": 1276,
