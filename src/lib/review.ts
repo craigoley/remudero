@@ -5237,6 +5237,9 @@ export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
   // in the diff that achieves zero: the centralisation IS what makes the count true, so the
   // instrument cannot precede the product change even in principle.
   "scripts/gh-transport-baseline.json",
+  // W1-T2895: same unsplittable ceiling shape. The cycle baseline records the measured graph
+  // after the cycle-cutting source moves; landing maxCycles: 0 before those moves would be false.
+  "scripts/cycle-baseline.json",
 ]);
 
 /** DECLARATIONS WHOSE DATA HAS GRADING POWER OVER OTHER PRs. A changed line inside one counts as EXECUTABLE even when

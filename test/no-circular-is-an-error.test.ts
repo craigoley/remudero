@@ -32,6 +32,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { ORIENTATION_DOC, isInPlanScope, outOfPlanScopeFiles } from "../src/lib/plan-scope.js";
+import { detectInstrumentEntanglement } from "../src/lib/review.js";
 import { utcDayWindowMs, utcWeekWindowMs } from "../src/lib/time-window.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "../src/lib/poll-interval.js";
 
@@ -98,4 +99,10 @@ test("PROPERTY poll-interval.ts calls through — the DEFAULT_POLL_INTERVAL_MS e
 test("PROPERTY the ceiling this task ratcheted down is zero", () => {
   const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "cycle-baseline.json"), "utf8"));
   assert.equal(baseline.maxCycles, 0);
+});
+
+test("PROPERTY the cycle baseline can ride with the source moves it records", () => {
+  const verdict = detectInstrumentEntanglement(["scripts/cycle-baseline.json", "src/lib/review.ts"]);
+  assert.equal(verdict.entangled, false);
+  assert.deepEqual(verdict.instrumentPaths, []);
 });
