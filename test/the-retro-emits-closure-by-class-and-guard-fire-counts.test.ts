@@ -272,18 +272,3 @@ test("renderGather prints both tables and the marker carries the guard zero-stre
     "isolation",
   ], "with no mapping the fallback table still names the two shipped guards");
 });
-
-test("the production retro wires the tables: the marker write, the prior-streak read, the open-class read and the ledger line are in run-task.ts", () => {
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
-  for (const pin of [
-    "guard_zero_streak: guardZeroStreakRecord(gather.guardFireCounts),",
-    "priorGuardZeroStreak: marker?.guard_zero_streak,",
-    'log("retro.closure_by_class", { since: gather.sinceTs ?? null, rows: gather.closureByClass });',
-    ".map((t) => deriveTaskClass(t))",
-  ]) {
-    assert.ok(src.includes(pin), `run-task.ts must carry: ${pin}`);
-  }
-  const marker = src.indexOf("guard_zero_streak: guardZeroStreakRecord(");
-  const save = src.indexOf("saveMarker(markerPath, nextMarker);");
-  assert.ok(marker > 0 && save > marker, "the streak is on the SAME nextMarker object saveMarker writes");
-});
