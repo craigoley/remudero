@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -100,6 +100,9 @@ function seedFixtureRepo(): string {
   writeFileSync(join(dir, "MASTER-PLAN.md"), BASELINE_MASTER_PLAN, "utf8");
   writeFileSync(join(dir, "plan", "tasks.yaml"), BASELINE_PLAN_TASKS_YAML, "utf8");
   copyFileSync(REAL_GENERATOR_SCRIPT, join(dir, "scripts", "generate-plan-index.mjs"));
+  // W1-T2907: the generator now imports `./lib/argv.mjs`; copying the script alone leaves an
+  // unresolvable import and the whole test FILE fails to load.
+  cpSync(join(REPO_ROOT, "scripts", "lib"), join(dir, "scripts", "lib"), { recursive: true });
   runRealGenerator(dir, join("plan", "plan-index.json"));
 
   git(dir, ["init", "--quiet", "-b", "main"]);
