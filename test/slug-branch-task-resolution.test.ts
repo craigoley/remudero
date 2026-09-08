@@ -260,7 +260,7 @@ test("W1-T2720: reapBranchesCommand loads one merged plan and reads credit once 
 test("W1-T2720: production maps resolver and credit outputs into BranchFacts before classification", () => {
   const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
   const start = source.indexOf("export function reapBranchesCommand(");
-  const end = source.indexOf("export function ledgerGrepCommand(", start);
+  const end = source.indexOf("export function handRunsCommand(", start);
   assert.ok(start >= 0 && end > start, "production command source must be locatable");
   const body = source.slice(start, end);
   assert.match(body, /taskIdFromSlugBranch\(name, candidates\)/);
