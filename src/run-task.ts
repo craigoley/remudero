@@ -49,7 +49,8 @@ import {
 // the runtime specifier below on its emitted `.js` form.
 import { ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { ledgerPathFor, nextLaneEpochMs };
-export {
+// Compatibility re-export target: lib/escalation-catalogue"
+import {
   DISK_HEADROOM_EPISODE_MS,
   POST_REVIEW_STALL_EPISODE_MS,
   escalateCircuitBreak,
@@ -63,6 +64,20 @@ export {
   escalateStarvation,
   escalateStarvationCleared,
 } from "./lib/escalation-catalogue.js";
+export {
+  DISK_HEADROOM_EPISODE_MS,
+  POST_REVIEW_STALL_EPISODE_MS,
+  escalateCircuitBreak,
+  escalateCrashLoop,
+  escalateDiskHeadroomBreach,
+  escalateHeadroomParkCeiling,
+  escalateHeadroomReserve,
+  escalateLifetimeCapExceeded,
+  escalatePostReviewStall,
+  escalateQuotaExhaustion,
+  escalateStarvation,
+  escalateStarvationCleared,
+};
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
