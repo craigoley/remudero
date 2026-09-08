@@ -1,0 +1,60 @@
+- id: W1-T3210
+  title: "FIVE SHIPPED PROOFS CERTIFY COMMENT TEXT, NOT CODE — a `grep:` proof whose every match falls inside a comment passes GREEN while proving nothing, and four of the five match a stray unbalanced `\"` that exists in the source for no reason except to make the pattern hit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/lib/review.ts, test/a-grep-proof-whose-only-match-is-a-comment-certifies-nothing.test.ts]
+  origin: "operator-session#false-green-proofs-2026-09-08"
+  plan_refs: ["W1-T273", "W1-T2895", "W1-T2888"]
+  status: queued
+  attempts: 0
+  rationale: |
+    A `grep:` proof that reads 0 fails LOUDLY — `executed_fail` overrides keyword coverage and the
+    PR goes red. That is the healthy case and this repo has fixed several of them. The defect here
+    is the opposite and silent: the proof MATCHES, the criterion is credited, and what it matched
+    is a comment.
+
+    MEASURED 2026-09-08 across `plan/tasks.d/` on origin/main. Every one of these is a shipped
+    criterion whose proof passes today:
+
+      proof pattern                target            matches   NON-COMMENT matches
+      lib/ledger-path"             src/run-task.ts       1           0
+      lib/escalation-catalogue"    src/run-task.ts       1           0
+      lib/prompt-render"           src/run-task.ts       1           0   (inside a /* */ block)
+      lib/arm-auto-merge"          src/run-task.ts       1           0
+      lib/clock"                   src/lib/daemon.ts     1           0
+
+    THE MATCHED LINES, VERBATIM. Four carry a `"` with no opening quote — punctuation that is not
+    valid prose and not valid code, and whose only effect is to terminate the proof's pattern:
+
+      run-task.ts:48   // W1-T2884: this compatibility surface imports from the lib/ledger-path" module; NodeNext keeps
+      run-task.ts:52   // Compatibility re-export target: lib/escalation-catalogue"
+      run-task.ts:81   // Compatibility re-export target: lib/arm-auto-merge" (W1-T2887) — the auto-merge arm cluster
+      daemon.ts:80     // The Clock port (W1-T2897): declared in "../lib/clock" so every reachable-through-lib import
+
+    WHY THE PATTERNS ARE SHAPED THIS WAY, WHICH IS THE ROOT. Each was written as a module specifier
+    without its extension — `lib/x"` — but this repo is NodeNext and EVERY relative import in
+    `src/**/*.ts` carries `.js` (MEASURED: 0 without it). So the pattern can never match a real
+    import, and the only way it goes green is a comment. The same shape read 0 and blocked two PRs
+    today, W1-T2895 (#4652) and W1-T2888 (#4705); these five went the other way and were never noticed.
+
+    THE FIX IS AT EXECUTION, NOT AT FILING. A shape rule on the pattern would guess; the executor
+    KNOWS. After a `grep:` proof runs, if every matching line is a comment, the proof has certified
+    nothing about behaviour — grade it as it grades a non-discriminating match (withdraw the
+    positive override, apply the keyword floor) and SAY SO, rather than crediting the criterion. A
+    proof with even one non-comment match is untouched.
+
+    NOT IN SCOPE: deleting the stray quotes, or amending the five tasks. They are already merged;
+    the point is that nothing would catch the sixth. Also not in scope: `unit test:` proofs, which
+    execute rather than match text.
+  acceptance:
+    - claim: "a grep proof whose every matching line is a comment withdraws its positive override and falls to the keyword floor, saying which"
+      proof: "unit test: test/a-grep-proof-whose-only-match-is-a-comment-certifies-nothing.test.ts"
+    - claim: "the judgement reads the executor's real matched lines rather than guessing from the pattern's shape"
+      proof: "grep: matchedLinesAreAllComments in src/lib/review.ts"
+    - claim: "a proof with even one non-comment match is graded exactly as it is today, so nothing that legitimately passes changes"
+      proof: "grep: MUTANT in test/a-grep-proof-whose-only-match-is-a-comment-certifies-nothing.test.ts"
