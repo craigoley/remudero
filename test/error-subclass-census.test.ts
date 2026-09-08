@@ -26,28 +26,22 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BASELINE_PATH = fileURLToPath(new URL("../scripts/error-subclass-baseline.json", import.meta.url));
 
-const SRC_TS_RE = /^src\/.*\.ts$/;
 // Direct extension only ("class X extends Error") -- a class that extends another named
 // `*Error` subclass (indirect chain) is not counted here; it is already one hop closer to a
 // shared discriminant than a class hanging straight off the built-in.
-const DIRECT_ERROR_EXTENDS_RE = /class \w+ extends Error\b/g;
-
-function trackedSrcFiles(root: string): string[] {
-  const listing = execFileSync("git", ["-C", root, "ls-files"], { encoding: "utf8" });
-  return listing
-    .split("\n")
-    .filter(Boolean)
-    .filter((p) => SRC_TS_RE.test(p));
-}
+const DIRECT_ERROR_EXTENDS_PATTERN = "class \\w+ extends Error\\b";
 
 function countDirectErrorSubclasses(root: string): number {
-  let total = 0;
-  for (const relPath of trackedSrcFiles(root)) {
-    const text = readFileSync(`${root}/${relPath}`, "utf8");
-    const matches = text.match(DIRECT_ERROR_EXTENDS_RE);
-    total += matches ? matches.length : 0;
+  try {
+    const matches = execFileSync("git", ["-C", root, "grep", "-hoE", DIRECT_ERROR_EXTENDS_PATTERN, "--", "src/*.ts"], {
+      encoding: "utf8",
+    });
+    return matches.split("\n").filter(Boolean).length;
+  } catch (err) {
+    const e = err as { status?: number; stdout?: string };
+    if (e.status === 1 && !e.stdout) return 0;
+    throw err;
   }
-  return total;
 }
 
 function readBaseline(): { directErrorSubclassCount: number } {
