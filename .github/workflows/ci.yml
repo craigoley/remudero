@@ -341,9 +341,9 @@ jobs:
     # W1-T1033: deliberately no `if:` here, at job or step level — test/diff-coverage.test.ts asserts
     # this job body carries none at all (the #729 discipline), so the job still registers on the push
     # trigger. Its collection step opens with a plain shell guard instead, and the staging step
-    # uploads a skipped marker so every matrix child still yields a checkable artifact. A push has no
-    # PR base — `github.event.pull_request.base.sha` is empty there — so the real work must be
-    # skipped rather than run wrong.
+    # uploads a skipped marker so every matrix child still yields a checkable artifact. A push HEAD is
+    # no merge commit, so `HEAD^1` names its ordinary parent rather than a base side — the real work
+    # must be skipped rather than run wrong (W1-T3060).
     # W1-T1009: HEAVY band. Unlike `ci`, this job runs the whole suite under
     # `--experimental-test-coverage`, and W1-T2430's measurement found every one of THIS job's
     # cancellations died on the `Test with coverage` step below, none on `npx playwright install` —
@@ -372,11 +372,9 @@ jobs:
         # empty-list rule resolves it to SOURCE.
         # TRAP: step-level bash, never a YAML `if:` — the class is READ by the bash guards below.
         id: classify
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt || true
+            git diff --name-only HEAD^1...HEAD > changed-files.txt || true
           else
             : > changed-files.txt
           fi
@@ -556,11 +554,9 @@ jobs:
         run: npm ci
       - name: Determine this diff's fast-lane class for the coverage aggregator
         id: classify
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt || true
+            git diff --name-only HEAD^1...HEAD > changed-files.txt || true
           else
             : > changed-files.txt
           fi
@@ -602,17 +598,15 @@ jobs:
       # per-diff check first makes it independent without an `if:`, which `if: always()` would not
       # have preserved.
       - name: Compute this PR's base...head diff (for the per-diff coverage check below)
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event — BASE_SHA is empty here and would fail this diff."; exit 0; }
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event — HEAD is no merge commit here and HEAD^1 would not resolve."; exit 0; }
           CLASS="${{ steps.classify.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping the base...head diff computation (Diff coverage below has nothing to check)."
             echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Compute this PR's base...head diff**" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          git diff "${BASE_SHA}"...HEAD > pr.diff
+          git diff HEAD^1...HEAD > pr.diff
       # TRAP: RMD_CI_REPORT is set per-STEP on these two gate steps only, never at job level. The
       # collection step above runs the whole suite, and the diff-coverage and coverage-ratchet
       # suites spawn these same scripts over BLOCKING fixtures that inherit the job env — a
@@ -697,11 +691,9 @@ jobs:
         run: npm ci
       - name: Determine whether this diff can move src/lib/classify.ts's mutation score
         id: trigger
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt
+          git diff --name-only HEAD^1...HEAD > changed-files.txt
           cat changed-files.txt
           node scripts/mutation-ratchet.mjs --changed-files changed-files.txt
       - name: Restore Stryker incremental cache
@@ -772,16 +764,18 @@ jobs:
       # a matching runStep(). Enforcement is unchanged: a `run:` step carries no continue-on-error,
       # so a non-zero exit fails `learnings-budget-ratchet`, already required by ci-gate.yml.
       #
-      # TRAP (W1-T2831): the §8A net-byte arm needs a comparand. This job checks out at
-      # actions/checkout's default depth, so `git merge-base HEAD origin/main` cannot resolve and
-      # the script falls back to BASE_SHA — which no step passed, so the arm would have skipped on
-      # every run. On a push this is empty and the arm correctly skips. The cap in
-      # scripts/claude-md-budget-baseline.json only ratchets up, by a reviewed bump.
+      # TRAP (W1-T2831): the §8A net-byte arm needs a comparand, and with none passed it skips on
+      # every run — green forever, enforcing nothing. W1-T3060 changed WHICH comparand: `HEAD^1` is
+      # the merge commit's base side, correct however long the job queued, where the event payload's
+      # base.sha is main's tip when the webhook fired. (This job checks out at `fetch-depth: 0`, so
+      # the preferred `git merge-base HEAD origin/main` path resolves to the same commit; the env is
+      # the fallback that must agree with it.) The job is PR-only, so a push never reaches here. The
+      # cap in scripts/claude-md-budget-baseline.json only ratchets up, by a reviewed bump.
       # Why: the 2026-08-22 cap raise and its zero-headroom predecessor — docs/forensics/ci-yml.md.
       - name: CLAUDE.md size ratchet (blocks a PR that grows CLAUDE.md past the recorded cap, and refuses a net-positive diff per §8A)
         run: npm run --silent claude-md-budget-ratchet
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: HEAD^1
 
   jscpd-gate:
     # §5 TIER 2, quality gate 3/4 (W1-T97) — a duplication CEILING: copy-pasted code rots
@@ -887,9 +881,7 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: rmd lint-plan (PR-changed tasks only)
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: npm run --silent lint-plan -- --base "$BASE_SHA"
+        run: npm run --silent lint-plan -- --base HEAD^1
 
   depcruise:
     # MASTER-PLAN §5 TIER 3 (W1-T26) — the architecture fitness gate, and cheap static analysis.
@@ -948,11 +940,9 @@ jobs:
         run: npm ci
       - name: Determine whether this diff touches sandbox/hooks/env/deny-floor
         id: trigger
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt
+          git diff --name-only HEAD^1...HEAD > changed-files.txt
           cat changed-files.txt
           node --import tsx .github/scripts/containment-diff-trigger.ts changed-files.txt
       - name: Containment probe (test/containment.test.ts — required, this diff touches a containment-relevant path)

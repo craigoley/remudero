@@ -154,6 +154,11 @@ export interface MintSources {
    *  `monolith`/`shards` read, but from a source this checkout cannot silently lag behind.
    *  `null` when no reader was injected (a legitimate offline mint) or it answered nothing. */
   remotePlan: number | null;
+  /** (W1-T3062) The highest id HELD in the reservation namespace — the one surface that cannot lag:
+   *  `remotePlan` reads a TRACKING ref, only as fresh as the last fetch, so a container that never
+   *  fetched reads it as stale as its own tree. This is read from origin at reserve time. `null`
+   *  with no reader injected — the offline host and the W1-T2203 403 class, both unchanged. */
+  reservations: number | null;
 }
 
 /** The mint: the id to use, what it was derived from, and what could not be read. */
@@ -242,6 +247,10 @@ export function mintNextTaskId(opts: {
    * `planBehindBy` stays `0`, and the corroboration check reads the local ceiling alone.
    */
   remotePlanCeiling?: () => number | null;
+  /** (W1-T3062) The reservation namespace's highest id. Injected like `remotePlanCeiling`: the read
+   *  happens at the EDGE, so this verb still answers with no network and in the 403 class.
+   *  `--reserve` already consults it, so it costs nothing there. Omitting it changes nothing. */
+  reservationCeiling?: () => number | null;
 }): MintedTaskId {
   const degraded: MintDegradation[] = [];
 
@@ -275,11 +284,24 @@ export function mintNextTaskId(opts: {
     }
   }
 
+  // W1-T3062: read like the ceiling above, for a sharper version of its reason — a tracking ref
+  // lags a checkout that never fetched; this cannot.
+  let reservationCeiling: number | null = null;
+  if (opts.reservationCeiling) {
+    try {
+      const answered = opts.reservationCeiling();
+      reservationCeiling = answered !== null && isAllocatableTaskId(answered) ? answered : null;
+    } catch (err) {
+      degraded.push({ source: "reservations", reason: `cannot read the reservation ceiling: ${String(err)}` });
+    }
+  }
+
   const sources: MintSources = {
     monolith: highest(monolithIds),
     shards: highest(shards.ids),
     openPrs: openPrsEnumerated ? highest(openPrIds) : null,
     remotePlan: remotePlanCeiling,
+    reservations: reservationCeiling,
   };
 
   // THE CORROBORATION CHECK (a source that is PRESENT AND ABSURD). `degraded` already covers a
@@ -331,7 +353,11 @@ export function mintNextTaskId(opts: {
     // The CURRENT plan ceiling: the local half, raised by the remote's when this checkout is
     // behind it. Absent a remote reader this is the local figure verbatim, so an offline mint
     // keeps the pre-W1-T2710 behaviour exactly.
-    const planCeiling = Math.max(localPlanCeiling, sources.remotePlan ?? 0);
+    // W1-T3062 CARRIES W1-T2710's ARGUMENT ONE SURFACE FURTHER, because one was not enough.
+    // MEASURED 2026-09-07, three consecutive mints: `shards` read 216 behind origin, the open-PR
+    // scan read the truth, the lead computed as 216, the only current source was dropped and the
+    // DEGRADED line blamed it. A tracking ref could not save that; the namespace can.
+    const planCeiling = Math.max(localPlanCeiling, sources.remotePlan ?? 0, sources.reservations ?? 0);
     const lead = sources.openPrs - planCeiling;
     if (planCeiling > 0 && lead > MAX_MENTION_LEAD) {
       degraded.push({
@@ -354,13 +380,24 @@ export function mintNextTaskId(opts: {
   // Reported EVEN WHEN the corroboration check above did not fire: the staleness is a fact about
   // the checkout, not about whether it happened to change this one answer.
   const localPlanCeiling = Math.max(0, ...[sources.monolith, sources.shards].filter((n): n is number => n != null));
-  const planBehindBy = sources.remotePlan !== null ? Math.max(0, sources.remotePlan - localPlanCeiling) : 0;
+  // W1-T3062: measured against whichever CURRENT surface answered, and named. Two surfaces
+  // disagreeing with a third is evidence about the third. With neither reader injected this stays
+  // 0, so an unmeasured gap is still never reported as a measured zero.
+  const currentCeilings = [sources.remotePlan, sources.reservations].filter((n): n is number => n !== null);
+  const planBehindBy = currentCeilings.length ? Math.max(0, Math.max(...currentCeilings) - localPlanCeiling) : 0;
   if (planBehindBy > 0) {
+    // W1-T2710's SENTENCE IS PRESERVED BYTE-FOR-BYTE where its own surface is the witness; only the
+    // case it could not see gets new words. A fresh checkout and one behind ORIGIN both read
+    // exactly what they read before this task.
+    const reservationsWitness =
+      sources.reservations !== null && sources.reservations - localPlanCeiling === planBehindBy;
     degraded.push({
       source: "local-plan",
-      reason:
-        `this checkout's plan half is ${planBehindBy} id(s) behind origin's — its own ceiling is ` +
-        "not current, so the remote's was used instead; pull before filing",
+      reason: reservationsWitness
+        ? `this checkout's plan half is ${planBehindBy} id(s) behind the reservation namespace — its own ` +
+          "ceiling is not current, so the namespace's was used instead; pull before filing"
+        : `this checkout's plan half is ${planBehindBy} id(s) behind origin's — its own ceiling is ` +
+          "not current, so the remote's was used instead; pull before filing",
     });
   }
 
@@ -400,7 +437,8 @@ export function describeMint(mint: MintedTaskId): string {
   // a measured zero rather than an unmeasured one.
   const src =
     `tasks.yaml ${mint.sources.monolith ?? "-"}, shards ${mint.sources.shards ?? "-"}, ` +
-    `open PRs ${openPrs}, remote plan ${mint.sources.remotePlan ?? "-"}`;
+    `open PRs ${openPrs}, remote plan ${mint.sources.remotePlan ?? "-"}, ` +
+    `reservations ${mint.sources.reservations ?? "-"}`;
   const warn = mint.degraded.length
     ? ` — DEGRADED: ${mint.degraded.map((d) => `${d.source} (${d.reason})`).join("; ")}`
     : "";

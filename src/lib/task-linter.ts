@@ -2833,3 +2833,7 @@ export function formatReadIdentity(absPath: string, raw: string): string {
   const hash = createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 12);
   return `${absPath} (sha256:${hash})`;
 }
+
+/** W1-T3099 — `lint-plan --base` reaches its rule-15 verdict through the SAME function
+ *  `rmd preflight` calls. Re-exported, never re-implemented: two copies are two things to drift. */
+export { rule15SplitViolation, RULE_15_SPLIT_REMEDY, type Rule15SplitVerdict } from "./ci-parity.js";
