@@ -1,0 +1,95 @@
+- id: W1-T3193
+  title: "`/v1/status` SHIPS 881 619 BYTES ON EVERY POLL — the console re-downloads a projection of all 1 550 tasks to render ~65 rows, so a board the operator leaves open moves close to a megabyte per refresh cycle for a page whose visible content changes by a line or two"
+  repo: remudero
+  depends_on: [W1-T3192]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/serve.ts, test/the-board-does-not-reship-the-whole-plan.test.ts]
+  origin: "operator-session#console-performance-2026-09-08"
+  plan_refs: ["W1-T3192", "W1-T3183", "W1-T3173"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 inside the serve container at `ec3c69d9a`:
+      GET /v1/status        881 619 bytes   ttfb 1.446s
+      GET /v1/inbox         201 419 bytes   ttfb 53.263s
+      GET /                 319 418 bytes
+      total transfer for ONE console load, 4 requests: 1 182.9 KB
+    The rendered page shows 65 NEEDS ME rows and 5 mailbox threads. The console header itself
+    reports the population those bytes describe: "1550 tasks · 2 running · 1383 merged · 161 queued".
+
+    SO THE SHAPE IS: ~860 KB of JSON describing 1 550 tasks, of which roughly 70 are rendered, and
+    of THOSE roughly 53 are a `verify: human` backlog that has not changed in weeks (W1-T3183).
+    The console re-fetches it on a poll cycle, so an open board moves ~1 MB repeatedly to redraw
+    a page that changed by a line.
+
+    THIS IS NOT THE SAME DEFECT AS W1-T3192 and the two must not be merged. That one is about the
+    request path BLOCKING — `/v1/recent` spends 64 seconds returning 9.7 KB, which no payload
+    reduction touches. This one is about VOLUME: `/v1/status` is comparatively quick at 1.4s and
+    still the largest single thing the console moves. Fixing either leaves the other.
+
+    WHY IT MATTERS BEYOND BYTES. The operator reaches this console over a Tailscale tunnel and,
+    at times, a Cloudflare tunnel from wherever he is. A megabyte per refresh is a different
+    experience on a phone tether than on the host, and it is spent almost entirely on rows nobody
+    is looking at. It also sets the floor for W1-T3173's rebuild: a React console polling the same
+    endpoint inherits the same megabyte, so the contract has to change, not just the renderer.
+  design: |
+    (i) THE BOARD ASKS FOR WHAT IT RENDERS. A projection of every task in the plan is the wrong
+    request for a view showing tens of rows. What replaces it — a filtered query, a paged one, a
+    delta against a version the client already holds — is the builder's call, but the property is
+    that response size tracks RENDERED rows, not plan size.
+    (ii) THE SSE STREAM ALREADY EXISTS AND SHOULD CARRY THE CHANGE. `/v1/status/stream` is in the
+    contract and the client already holds it open. A console that streams deltas and polls only to
+    recover has no reason to re-download a full projection on a timer at all.
+    (iii) COUNTS ARE NOT ROWS. The header's "1550 tasks · 1383 merged · 161 queued" needs three
+    numbers, not 1 550 objects. An aggregate endpoint answers the strip without shipping the
+    population.
+    (iv) A SIZE RATCHET, or this returns. Response size for the board's own requests is recorded and
+    may FALL, never RISE — the same discipline as the repo's other baselines. Without it the next
+    field added to a task record silently multiplies by 1 550.
+    (v) DEGRADE HONESTLY WHEN TRUNCATING. If a response is bounded, the client must be told it was
+    bounded and what was left out. A board that silently shows the first N rows and looks complete
+    is worse than a slow one — the operator cannot tell it is lying.
+  acceptance:
+    - claim: "the board's own request returns a response whose size tracks RENDERED rows, not plan size — a fixture plan of 1550 tasks rendering ~65 rows does not ship a projection of all 1550"
+      proof: "unit test: test/the-board-does-not-reship-the-whole-plan.test.ts"
+    - claim: "the header's aggregate counts are answerable without shipping the task population"
+      proof: "unit test: test/the-board-does-not-reship-the-whole-plan.test.ts"
+    - claim: "a bounded or truncated response says so, and the client can distinguish 'this is all of it' from 'this is the first N'"
+      proof: "unit test: test/the-board-does-not-reship-the-whole-plan.test.ts"
+    - claim: "response size for the board's requests is recorded as a ratchet that may fall and never rise"
+      proof: "unit test: test/the-board-does-not-reship-the-whole-plan.test.ts"
+  falsifier: |
+    CLOSE IF the board already requests only what it renders: measure the endpoint against a plan
+    of known size and compare bytes to rendered rows.
+    MEASURED 2026-09-08: `/v1/status` returned 881 619 bytes while the page rendered 65 NEEDS ME
+    rows and 5 mailbox threads, over a plan the console's own header counted as 1 550 tasks.
+    POSITIVE CONTROL, because "the response got smaller" is also what a broken endpoint reports:
+    the fixture must assert the rendered ROWS are unchanged — same ids, same order — while the
+    bytes fall. A shrink that loses rows is a regression, not a win.
+    PROVE IT LOAD-BEARING: the fixture needs a plan MUCH larger than the rendered set (the measured
+    ratio is roughly 1 550 to 70). A fixture where every task renders cannot distinguish "ships what
+    it renders" from "ships everything", and would pass either way.
+    DO NOT satisfy this by gzipping the response and declaring victory. Compression reduces transfer
+    and leaves the server building, serialising and the client parsing 1 550 objects — and the
+    parse is on the operator's device.
+    DO NOT satisfy this by dropping fields from the task record until it fits. That silently
+    degrades every other consumer of the same contract; the number of OBJECTS is the problem, not
+    their width.
+  note: |
+    Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src.
+    DEPENDS ON W1-T3192 for sequencing, not for correctness: shrinking a response that arrives after
+    a 64-second synchronous stall improves a number the operator cannot perceive. Unblock the path
+    first, then stop over-shipping.
+    RELATIONSHIP TO W1-T3183: that shard stops 53 backlog rows being COUNTED as asks; this one stops
+    1 550 task records being SHIPPED to render them. Neither implies the other — separating the
+    counts leaves the payload identical, and shrinking the payload leaves the board just as confusing.
+    CAVEAT WITH EQUAL WEIGHT: 881 619 bytes is one reading of one plan on one day. The plan grows
+    monotonically, so the figure is a floor rather than a fixed cost — which is the argument for the
+    ratchet in design (iv) rather than for a one-time reduction.
+    SECOND CAVEAT: this shard does not claim the console is slow BECAUSE of this payload. It is not
+    — `/v1/status` was the FASTEST of the three measured routes at 1.4s. The cost here is bandwidth
+    and client parse, and conflating it with W1-T3192's stalls would misdirect the fix.

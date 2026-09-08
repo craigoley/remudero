@@ -1,0 +1,112 @@
+- id: W1-T3192
+  title: "THE CONSOLE'S RESPONSE TIME IS UNBOUNDED AND UNSTABLE — the SAME 319 418-byte shell returned in 0.022s, 3.0s, 9.9s, 32.7s, 53.3s and 85.1s, and once timed out past 60s, because the request path is SYNCHRONOUS: `serve.ts` makes 12 blocking fs/exec calls (3 of them `execFileSync`) and `status.ts` 21, on a single-threaded runtime the client itself fans four parallel fetches into"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/serve.ts, test/the-console-request-path-does-not-block.test.ts]
+  origin: "operator-session#console-performance-2026-09-08"
+  plan_refs: ["W1-T154", "W1-T3185", "W1-T3173"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 INSIDE the `remudero-serve` container against `127.0.0.1:4317` — no tunnel,
+    no proxy, no network hop — at checkout `ec3c69d9a`.
+
+    THE SAME REQUEST, SEVEN TIMES, IDENTICAL 319 418-BYTE RESPONSE:
+      0.022s · 3.038s · 9.923s · 32.731s · 53.276s · 85.106s · and one that exceeded a 60s cap
+    That is not "slow". A slow endpoint is predictable and can be planned around; this varies by
+    more than three orders of magnitude for byte-identical output.
+
+    THE API ROUTES THE SHELL'S OWN CLIENT CALLS ON EVERY REFRESH:
+      /v1/status         1.446s     881 619 bytes
+      /v1/recent        64.137s       9 748 bytes
+      /v1/inbox         53.263s     201 419 bytes
+      /v1/daemon-health  3.746s         183 bytes
+    `/v1/recent` spends 64 seconds to produce 9.7 KB. Nothing about that is a payload problem.
+
+    IT IS NOT GITHUB THROTTLING, which was the obvious suspect and is ruled out: at the time of
+    measurement `gh api /rate_limit` reported core 15000/15000, search 30/30, graphql 10000/10000,
+    and the last 400 ledger lines contain ZERO rows matching throttle/backoff/rate/retry.
+
+    THE MECHANISM. Node is single-threaded, and the request path is synchronous:
+      `src/lib/serve.ts`   12 blocking calls — 5 readFileSync, 4 existsSync, 3 execFileSync, 2 statSync
+      `src/lib/status.ts`  21 blocking calls
+    `execFileSync` halts the event loop for the whole duration of a child process. The shell route
+    additionally reads the live ledger per request (3.9 MB, 7 682 lines). Meanwhile the console's own
+    client fans out four parallel fetches on every refresh AND holds an SSE stream, so those
+    requests queue behind one another's synchronous work — which is precisely a distribution with a
+    22ms floor and a >60s tail.
+
+    WHY THIS IS FILED SEPARATELY FROM THE REBUILD, and this is the load-bearing point: W1-T3173's
+    React console DOES NOT FIX IT. A bundled SPA calling `/v1/recent` waits the same 64 seconds. The
+    front end and the request path are independent, and doing only the visible one would ship a
+    beautiful console that still stalls.
+
+    WHAT IS ALREADY GOOD, measured in the same run and stated so this is not read as a general
+    indictment: CLS 0.0001 over one shift, worst interaction 56ms, ZERO long tasks, zero events over
+    200ms. Once bytes arrive, the client is responsive. The defect is entirely server-side.
+  design: |
+    (i) NO SYNCHRONOUS FS OR CHILD-PROCESS CALL ON A REQUEST PATH. That is the whole property. Every
+    blocking call either moves off the request path (computed once, cached, refreshed on a timer) or
+    becomes its async equivalent. A census makes it checkable rather than a promise.
+    (ii) THE CENSUS IS A RATCHET, not a one-time cleanup. The count of blocking calls reachable from
+    a route handler may FALL and never RISE, matching this repo's own baseline discipline — otherwise
+    the next convenient `readFileSync` re-opens it and nobody notices for months.
+    (iii) A BOUND, AND A HONEST ANSWER WHEN IT IS EXCEEDED. A route that cannot answer within its
+    budget returns what it HAS with a stated staleness, rather than holding the socket open for 64
+    seconds. An operator reading a 30-second-old number knowingly is better served than one watching
+    a spinner.
+    (iv) MEASURE UNDER THE CONCURRENCY THE CLIENT ACTUALLY CREATES. A single sequential request is
+    the 22ms case and proves nothing; the defect only appears when four fetches and an SSE stream
+    overlap, which is the console's ordinary steady state, not a stress test.
+    (v) DO NOT "FIX" THIS BY WIDENING CACHES ALONE. A cache in front of a blocking call still blocks
+    on a miss, and a miss is exactly when the operator is looking at something new.
+  acceptance:
+    - claim: "no synchronous fs or child-process call is reachable from a route handler — a census enumerates them and reports zero"
+      proof: "unit test: test/the-console-request-path-does-not-block.test.ts"
+    - claim: "the census is recorded as a ratchet that may fall and never rise, so a new blocking call is refused rather than absorbed"
+      proof: "unit test: test/the-console-request-path-does-not-block.test.ts"
+    - claim: "under the client's own concurrency — four overlapping fetches plus an open SSE stream — every response completes within its stated budget"
+      proof: "unit test: test/the-console-request-path-does-not-block.test.ts"
+    - claim: "a route that cannot meet its budget returns what it has WITH a stated staleness, never an unbounded wait"
+      proof: "unit test: test/the-console-request-path-does-not-block.test.ts"
+    - claim: "a synthetic blocking call added to a route handler is REPORTED by the census — it discriminates rather than counting files"
+      proof: "unit test: test/the-console-request-path-does-not-block.test.ts"
+  falsifier: |
+    CLOSE IF the request path is already asynchronous:
+      `grep -coE 'readFileSync|writeFileSync|existsSync|readdirSync|execFileSync|statSync' src/lib/serve.ts`
+      `grep -coE 'readFileSync|execFileSync|readdirSync' src/lib/status.ts`
+    MEASURED 2026-09-08: 12 and 21.
+    POSITIVE CONTROL, required because a grep that finds nothing looks identical to a clean file:
+    the same expression must return the BREAKDOWN — MEASURED: readFileSync 5, existsSync 4,
+    execFileSync 3, statSync 2. A run yielding a bare 0 has matched nothing and proves nothing.
+    PROVE IT LOAD-BEARING: the timing fixture must exercise OVERLAPPING requests. A sequential
+    fixture measures the 22ms case, passes, and leaves the 85s case untouched — which is exactly how
+    this survived a repo with 22 browser suites.
+    DO NOT satisfy this by raising a timeout or a client retry. That converts a 64-second wait into
+    a 64-second wait the operator is told to expect.
+    DO NOT satisfy this by moving the blocking work to boot and calling it fixed. W1-T154 already
+    removed a boot-time warm deliberately ("the alternative is paying it 5 760 times a day for
+    nobody"); re-adding one trades a request-path stall for a startup stall and contradicts a
+    recorded decision.
+  note: |
+    Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src.
+    MEASUREMENT PROVENANCE: run inside the serve container, so no tunnel, proxy or LAN hop is in the
+    numbers. An earlier attempt from a workstation over an SSH forward produced timeouts that were
+    the FORWARD's fault, not the console's; those readings are discarded and none of them appear
+    above.
+    A CLAIM THIS SESSION MADE AND WITHDREW: "21 `innerHTML =` assignments are an INP killer" was
+    asserted before measuring and is WRONG. Worst interaction 56ms, zero events over 200ms, zero
+    long tasks, CLS 0.0001. Wholesale DOM replacement is not costing this console anything an
+    operator can feel, and a task filed against it would have optimised a non-problem.
+    CAVEAT WITH EQUAL WEIGHT: seven samples of one endpoint on one afternoon, taken while the fleet
+    was actively sweeping (190 `github.wake` rows in the last 300 ledger lines). The VARIANCE is the
+    finding and it is unambiguous; the specific figures are one load profile and will differ on a
+    quiet host.
+    SECOND CAVEAT: this shard does not establish WHICH blocking call dominates. The census bounds
+    the class; attributing the 64 seconds to a specific `execFileSync` needs a profile, and a
+    builder should take one rather than guessing from this list.
