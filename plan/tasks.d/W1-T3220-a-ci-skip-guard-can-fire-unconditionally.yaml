@@ -1,0 +1,77 @@
+- id: W1-T3220
+  title: "A ci.yml SKIP GUARD CAN FIRE UNCONDITIONALLY AND EVERY CHECK STAYS GREEN — 12 skip-shaped guards decide whether the suite runs at all, `stryker.conf.json` mutates exactly ONE file (`src/lib/classify.ts`), and mutating a real guard to a constant-true condition left 54 assertions across its three own suites passing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 30.00
+  files: [scripts/workflow-guard-mutation-check.mjs, scripts/workflow-guard-mutation-baseline.json, .github/workflows/ci.yml, test/a-ci-skip-guard-can-fire-unconditionally.test.ts]
+  origin: "operator-session#board-pass-2026-09-08"
+  plan_refs: ["W1-T3207", "W1-T1033", "W1-T2428", "W1-T1051"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 ON #4733 (W1-T3207). That PR added a guard to the `ci` job's Test step so a
+    source PR skips the quieter harness and coverage-ratchet owns the single instrumented run. Its
+    own new suite asserts the skip FIRES on a source PR. Nothing asserted it does not fire
+    otherwise. Mutating that guard's condition to a constant-true one left all 54 assertions across
+    test/workflow-single-suite-run.test.ts, test/push-ci-on-main.test.ts and
+    test/fast-lane-classifier.test.ts GREEN — while the mutant leaves a push to main with no test
+    run whatsoever, because coverage-ratchet is PR-only (W1-T1033). One added case closed that
+    specific hole; the class is still open.
+
+    THE POPULATION, COUNTED. 12 guards in ci.yml are skip-shaped — an `if [ ... ]` or a
+    `[ ... ] || { ...; }` whose block reaches `exit 0` within a few lines. Each one decides whether
+    a required check does its work or returns success having done nothing. That is the vacuous-pass
+    family this repo already treats as its worst class (diff-coverage over an empty set, a proof
+    that resolves to zero tests, a census with no corpus), and it is the one place where the
+    detector itself is what goes quiet.
+
+    THE EXISTING MUTATION GATE CANNOT REACH THEM. `stryker.conf.json`'s `mutate` list is exactly
+    `["src/lib/classify.ts"]` and Stryker mutates JavaScript, not shell inside YAML. So the file
+    with the most leverage in the repo — it decides what every other gate runs — has zero mutation
+    coverage, and the assertion-discrimination gate (W1-T1051) does not help either: these
+    assertions are real, they simply only test one branch.
+
+    ONE MUTANT PER GUARD, FORCED TO SKIP, AND THE SUITE MUST NOTICE. For each skip-shaped guard,
+    rewrite THAT LINE ONLY to a constant-true condition and require at least one test to fail.
+    A guard no test can distinguish is recorded in a baseline with its reason, so this lands as a
+    ratchet over the 12 rather than a demand that all 12 be covered first.
+
+    MUTATE BY LINE INDEX, NEVER BY STRING REPLACE — this is the falsifier's own trap and it fired
+    during the session that found this. `[ -n "${GITHUB_BASE_REF}" ]` occurs THREE times in ci.yml;
+    a replace-first mutation hit line 131 instead of line 205, reddened an unrelated fast-lane case,
+    and left the guard under test untouched, so the new test appeared to pass a falsifier it had
+    never actually been given. Same shape as this repo's whole-file lcov-edit trap. The check must
+    assert exactly one line changed and that it is the intended one.
+
+    ENUMERATE FROM THE TREE, NEVER FROM A LIST. The guard population is parsed out of ci.yml at run
+    time, so a guard added tomorrow is mutated tomorrow. A frozen list of 12 rots on the next PR
+    that touches the workflow — which is precisely when this check matters.
+
+    RUN IT ONLY WHEN ci.yml CHANGES. 12 mutants times a suite run is too slow for every PR and
+    unnecessary: the population cannot change unless the workflow does. `scripts/diff-class.mjs`
+    already classifies a diff, and the suites to re-run are the ones that READ ci.yml, enumerated
+    the same way. Sizing the run against a measured wall-clock is part of the deliverable, not an
+    afterthought — a bound that fires on a healthy condition is this repo's recurring defect.
+
+    THE FALSIFIER IS THE PAIR. A check loose enough to flag every guard is as useless as none: it
+    must report the W1-T3207 guard as COVERED once its push-side case exists, and report a
+    deliberately unprotected guard as UNCOVERED, both against the real ci.yml.
+  acceptance:
+    - claim: "the check parses ci.yml at run time and enumerates its skip-shaped guards rather than reading a frozen list"
+      proof: "unit test: test/a-ci-skip-guard-can-fire-unconditionally.test.ts"
+    - claim: "each mutant rewrites exactly one line, identified by index, and the check refuses if any other line changed"
+      proof: "unit test: test/a-ci-skip-guard-can-fire-unconditionally.test.ts"
+    - claim: "a guard whose skip no test can distinguish is reported UNCOVERED, and one that is distinguished is reported COVERED"
+      proof: "unit test: test/a-ci-skip-guard-can-fire-unconditionally.test.ts"
+    - claim: "a guard added to ci.yml is mutated without editing any baseline or registry"
+      proof: "unit test: test/a-ci-skip-guard-can-fire-unconditionally.test.ts"
+    - claim: "the baselined guards carry a recorded reason, so the ratchet can land without covering all twelve first"
+      proof: "unit test: test/a-ci-skip-guard-can-fire-unconditionally.test.ts"
+    - claim: "the check is reachable from CI on a diff that touches the workflow, not merely exported for its own tests"
+      proof: "grep: workflow-guard-mutation-check in .github/workflows/ci.yml"

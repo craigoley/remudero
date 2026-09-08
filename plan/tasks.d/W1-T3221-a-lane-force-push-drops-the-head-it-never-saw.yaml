@@ -1,0 +1,69 @@
+- id: W1-T3221
+  title: "A LANE'S FORCE-PUSH DISCARDS THE REMOTE HEAD IT NEVER SAW — W1-T1288's lease is a LOCAL worktree read by its own doc, reaches 2 of the 9 `gitPushRunBranch` sites, and neither of the two `force: true` sites carries one, so a rebuilt run branch silently drops whatever was published there"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/git-push.ts, test/a-lane-force-push-drops-the-head-it-never-saw.test.ts]
+  origin: "operator-session#board-pass-2026-09-08"
+  plan_refs: ["W1-T1288", "W1-T2610", "W1-T1012"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 on run-W1-T3207-1788902917008. The branch head `f4f18be74` was fetched from
+    origin at 22:37:48Z. It is NOT an ancestor of the branch's later head: it was replaced by
+    `15b27634e`, SAME SUBJECT, different parent (404999789 vs 90097932a) and different tree,
+    committed 22 minutes later. The lane rebuilt the branch and force-pushed over it. Nothing
+    recorded that a published head had been dropped.
+
+    WHY THIS IS NOT W1-T1288, WHICH IS ALREADY MERGED. That task added `expectedHeadSha`, and its
+    own docblock states the design: it reads "the worktree's OWN head ... never the value observed
+    on the remote, because a refused push must never have to know what actually happened out there".
+    It catches a LOCAL ref that drifted between commit and push. It cannot see a remote head the
+    lane never fetched, which is this case exactly. It also reaches only the two fix-rung call
+    sites that pass it; the two `force: true` sites (the `Remudero-Task:` trailer amend, W1-T1012)
+    pass no lease at all, and `git-push.ts` appends a bare `--force`, never `--force-with-lease`.
+
+    THE HAZARD IS NEWLY LIVE, WHICH IS WHY IT IS WORTH FIXING NOW. The operator now works
+    lane-owned PRs by hand as normal practice, so a run branch is routinely SHARED between a lane
+    and a human. In this same session an operator commit was pushed onto three different lanes'
+    run branches. Under the current push path any of them could have been discarded by the lane's
+    next rebuild, with no error, no ledger row, and a green PR carrying less work than it did
+    before. `--force-with-lease` exists for precisely this and is already used elsewhere in this
+    repo — `dispatch-claim.ts` and `auto-triage.ts` both pin their pushes that way, and
+    `git-push.ts`'s own doc at gitPushEmptyCommit describes the lease as a PRECONDITION. The run
+    branch is the one shared ref that does not get one.
+
+    IT MUST STILL LAND THE TRAILER. The force is not gratuitous: `appendTaskTrailerToCommit` amends
+    the tip, so the push is a genuine history rewrite of the lane's OWN commit and must succeed in
+    the ordinary case. A lease pinned to the sha the lane just pushed keeps that path working and
+    refuses only when someone else moved the ref in between — which is the whole distinction.
+
+    A REFUSAL MUST NOT COST THE RUN, AND MUST NOT LEAVE THE LEAF. The work is already committed and
+    already on origin by the time this fires — only the trailer amend is at stake, and a missing
+    trailer is survivable: `findMergedByHeadBranch` credits a merged `run-<id>-<digits>` head with
+    no trailer at all (MEASURED on #1657). So the refusal is REPORTED on the push leaf's own
+    output, naming BOTH shas, and returns without throwing. Throwing would abort the run after the
+    money was spent and before the PR is opened, trading one invisible loss for a louder one; and
+    routing the report through a ledger seam would drag `src/run-task.ts` into a change that
+    belongs entirely at the leaf, where it is testable with no worker and no remote.
+
+    THE FALSIFIER IS THE PAIR, AGAINST A REAL REMOTE. A lease that never refuses is the current
+    behaviour wearing a new flag; a lease that always refuses breaks every ordinary trailer amend.
+    Drive both through a real local remote: an unchanged remote head still lands the amend, and a
+    remote advanced by a foreign commit refuses with that commit still reachable afterwards.
+  acceptance:
+    - claim: "a run-branch force-push is pinned to the sha the lane last published, not sent as a bare --force"
+      proof: "unit test: test/a-lane-force-push-drops-the-head-it-never-saw.test.ts"
+    - claim: "an unchanged remote head still lands the trailer amend, so the ordinary path is unbroken"
+      proof: "unit test: test/a-lane-force-push-drops-the-head-it-never-saw.test.ts"
+    - claim: "a remote advanced by a commit the lane never saw refuses the push, and that commit is still reachable afterwards"
+      proof: "unit test: test/a-lane-force-push-drops-the-head-it-never-saw.test.ts"
+    - claim: "the refusal names both shas on the leaf's own output rather than passing silently, and returns without throwing so the run still opens its PR"
+      proof: "unit test: test/a-lane-force-push-drops-the-head-it-never-saw.test.ts"
+    - claim: "the local-head check W1-T1288 added still fires alongside the new lease, since the two answer different questions"
+      proof: "unit test: test/a-lane-force-push-drops-the-head-it-never-saw.test.ts"
