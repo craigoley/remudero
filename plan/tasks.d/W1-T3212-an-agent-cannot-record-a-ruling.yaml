@@ -1,0 +1,106 @@
+- id: W1-T3212
+  title: "AN AGENT CANNOT RECORD A RULING, SO 45 SHARDS ARE PARKED WITH NO RELEASE — build the judged path the operator ruled on: an agent authors, a judge assesses risk and quality, and only a risky or bad ruling is routed to the INBOX for his bit"
+  repo: remudero
+  depends_on: [W1-T3206]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/ruling-judge.ts, src/lib/authority.ts, src/run-task.ts, test/an-agent-records-a-ruling-behind-a-judge.test.ts]
+  origin: "operator-session#agent-authority-2026-09-08"
+  plan_refs: ["W1-T3206", "W1-T3188", "W1-T3166", "W1-T110"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-09-08, recorded in DECISIONS.md the same day, verbatim: "An agent should
+    absolutely be able to record a ruling. It should only escalate to human if an llm as a judge
+    determines it to be risky or bad. Then it should show up in the inbox."
+
+    THE RULE BEING REPLACED, and what it cost. `fb-1785882211812-bafd8f` says "an agent may recommend
+    a ruling and may never record a ruling", and `src/lib/authority.ts` enforces the boundary:
+    "ratification PRs only when an operator names a proposal to `rmd approve`". MEASURED 2026-09-08:
+    60 `verify: human` shards exist, 45 are queued, the oldest still queued was filed 2026-07-21 —
+    seven weeks — and `isDispatchEligible` refuses every one (`drain.ts:418`). The operator's own
+    reading of that backlog: "All of your recommendations are always good. And any that are
+    borderline just need a push in one direction or another or a judgement call. it seems like many
+    of these can be solved without me."
+
+    THE BLANKET BAN BOUGHT ONE REAL THING and this task must keep it: an agent could not quietly
+    install a decision nobody reviewed. What replaces the ban is not permission — it is a REVIEWER.
+
+    THIS IS THE FOURTH JUDGE IN THIS REPO AND THE PATTERN'S FAILURE MODE IS DOCUMENTED. W1-T349 built
+    a complete, tested escalation judge with ZERO production callers until W1-T3166 wired it on
+    2026-09-08; `lint-plan` refused W1-T3188 the same day for the same omission. This shard declares
+    its call site in its own acceptance rather than discovering the gap later.
+  design: |
+    (i) THE JUDGE ASSESSES RISK AND QUALITY, NOT CORRECTNESS OF THE DECISION. Its question is whether
+    THIS ruling is safe for an agent to land: is it reversible, is it inside the agent's competence,
+    does it contradict a standing decision, is it evidenced. It is not asked whether the ruling is
+    RIGHT — that is what the operator's bit is for when the answer is no.
+    (ii) FAIL CLOSED, AND THIS IS THE OPPOSITE POLARITY TO THE ESCALATION JUDGE. An unreadable,
+    throwing or unparseable verdict routes to the INBOX, never to a landed ruling. There the costly
+    direction was hiding work from a human; here it is installing a decision nobody reviewed. A
+    reviewer's instinct will be to make it match its siblings and it must not.
+    (iii) THE ESCAPE HATCH IS THE INBOX THAT ALREADY EXISTS. A refused ruling becomes a proposal the
+    operator ratifies with `rmd approve` — the same gated, ledgered, one-bit path (`ratify.approved`)
+    proposals already take. No second channel with its own audit trail.
+    (iv) EVERY RULING IS ATTRIBUTED AND REVERTIBLE, whoever authored it. An agent-recorded ruling
+    carries its author, its evidence and a rollback line, exactly as the operator's entries do. An
+    entry a reader cannot attribute is worse than no entry.
+    (v) A STANDING DECISION IS NEVER SILENTLY OVERTURNED. A ruling that contradicts an existing
+    DECISIONS.md record is RISKY by construction and goes to the inbox regardless of what else the
+    judge thinks — the reversal this task itself implements had to be the operator's for exactly
+    that reason.
+    (vi) EVERY VERDICT LEDGERED WITH ITS REASON, both arms, registered for retention in the SAME
+    change. Establishing that the escalation judge had never run took three separate reads because
+    no such row existed; that is not repeated.
+  acceptance:
+    - claim: "an agent-authored ruling the judge passes lands in DECISIONS.md attributed to the agent, with its evidence and a rollback line"
+      proof: "unit test: test/an-agent-records-a-ruling-behind-a-judge.test.ts"
+    - claim: "a ruling the judge finds risky or bad does NOT land and is routed to the inbox as a proposal the operator can ratify"
+      proof: "unit test: test/an-agent-records-a-ruling-behind-a-judge.test.ts"
+    - claim: "a throwing, timing-out or unparseable verdict routes to the inbox — fail closed, proven at the callsite"
+      proof: "unit test: test/an-agent-records-a-ruling-behind-a-judge.test.ts"
+    - claim: "a ruling that contradicts an existing DECISIONS.md record is routed to the inbox regardless of the judge's other findings"
+      proof: "unit test: test/an-agent-records-a-ruling-behind-a-judge.test.ts"
+    - claim: "every verdict writes a ledger row naming decision and reason on BOTH arms, and that step survives rotation"
+      proof: "unit test: test/an-agent-records-a-ruling-behind-a-judge.test.ts"
+    - claim: "the judge has a PRODUCTION call site — run-task.ts calls it, not only its own tests"
+      proof: "grep: judgeRulingRisk( in src/run-task.ts"
+  falsifier: |
+    CLOSE IF an agent can already record a ruling: read `src/lib/authority.ts` and the
+    decision-authority text in DECISIONS.md.
+    MEASURED 2026-09-08: `fb-1785882211812-bafd8f` states "an agent may recommend a ruling and may
+    never record a ruling", cited four times in DECISIONS.md, and `authority.ts` enforces
+    "ratification PRs only when an operator names a proposal to `rmd approve`".
+    POSITIVE CONTROL for the backlog claim, because a count with no denominator proves nothing: the
+    census must report every status — MEASURED {queued: 45, blocked: 5, merged: 10} over 60
+    `verify: human` shards. A walk returning one bucket has failed to read the corpus.
+    PROVE IT LOAD-BEARING: the fixture needs a ruling the judge PASSES and one it REFUSES, and the
+    DECISIONS.md file must differ between them. A suite exercising only the pass arm cannot
+    distinguish "the judge gates" from "the judge is decorative".
+    DO NOT fail open. The escalation judge fails OPEN because hiding work from a human is its costly
+    direction; here the costly direction is landing a decision nobody reviewed. Copying the sibling's
+    default is the single most damaging error available in this task.
+    DO NOT let the judge rule on a decision that contradicts a standing record. Design (v) sends
+    those to the operator unconditionally; a judge permitted to overturn DECISIONS.md entries has
+    been handed the authority this task is carefully NOT granting.
+    DO NOT build a second ratification channel. The inbox and `rmd approve` already carry the
+    operator's bit through a gate that ledgers it; a parallel path duplicates the audit trail and
+    the bugs.
+  note: |
+    Rule 25 CHECKED: `src/lib/` and `src/run-task.ts` are ordinary src.
+    DEPENDS ON W1-T3206 because the refused arm needs somewhere to land: that task is what lets a
+    parked record reach `approveCommand` at all. Without it, "route to the inbox" has no route.
+    THE BOOTSTRAP IS ALREADY RESOLVED and a builder should not re-open it. The ruling this task
+    implements could not itself be recorded by an agent, so it was the operator's own, transcribed
+    on 2026-09-08. This task builds the path for everything AFTER it.
+    CAVEAT WITH EQUAL WEIGHT: no measurement here establishes that a judge assesses ruling risk
+    WELL. The operator's claim — that most of these need a nudge rather than a judgement — is a
+    reasonable bet borne out by one session, not a finding. The ledgered verdicts required by design
+    (vi) are what will settle it, and the first weeks of them should be READ rather than assumed.
+    SECOND CAVEAT: this widens what an agent may do to the repo's own governance record. That is the
+    point, and it is also the risk. Designs (ii), (iv) and (v) are the whole safety argument, and
+    they are the clauses most likely to be traded away under time pressure.
