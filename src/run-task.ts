@@ -344,15 +344,19 @@ import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js
 import {
   deliversRealtime,
   escalate,
+  escalateWithJudge,
   escalateWithSummary,
   escalationCause,
+  realEscalationJudge,
   escalationHeadSha,
   findDuplicateEscalation,
   ghIssueGateway,
   presenceMode,
   setPresenceMode,
   tryEscalate,
+  type Escalation,
   type EscalationClass,
+  type EscalationJudgeVerdict,
   type EscalationDedupKey,
   type EscalationOption,
   type IssueGateway,
@@ -7161,6 +7165,9 @@ export async function runFixRung(opts: {
    */
   ciFailures?: CiFailure[];
   ciEvidenceDisagreement?: CiEvidenceDisagreementObservation;
+  /** W1-T3166: the residual escalation judge (W1-T349). Defaulted to the real spawn, so production
+   *  is wired by OMISSION — a mechanism behind a default-off flag is unwired wearing a switch. */
+  escalationJudge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
   /**
    * W1-T106 (the #170 DIRTY strand): merge-conflict evidence for a
    * `conflicted` dispatch — this PR's merge state is dirty, so no CI check
@@ -7412,6 +7419,16 @@ export async function runFixRung(opts: {
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
+  // W1-T3166 — THE CALL W1-T349's judge never had: zero production callers, an empty fleet-notice
+  // queue, no ledger step. The ten fix-rung sites below are the NEEDS ME board's largest class.
+  // Built here, not per callsite, so a construction failure surfaces once at rung entry.
+  const escalationJudge =
+    opts.escalationJudge ??
+    realEscalationJudge({
+      mounts: loadMounts(mountsPath(repoRoot)),
+      cwd: opts.worktreePath,
+      settingsFile: opts.settingsFile,
+    });
   const retriggerCap = opts.retriggerCap ?? DEFAULT_FIX_RETRIGGER_CAP;
   let review = opts.initialReview;
   let strikes = 0;
@@ -7597,9 +7614,9 @@ export async function runFixRung(opts: {
       if (foreignTree) {
         deps.log("rung.foreign_tree", { site: "rung.strike", strike: strikes + 1, branch: opts.branch, reason: foreignTree.reason, porcelain_paths: foreignTree.porcelainPaths, diffstat: foreignTree.diffstat, other_worktrees: foreignTree.otherWorktrees });
         const detail = `The blocked_review FIX RUNG (W1-T76, W1-T2652) observed local worktree content on ${opts.branch} before spending strike ${strikes + 1}: ${foreignTree.reason}. The rung did not observe an author for this content and will not reset, stash, clean, commit or push it. Observed porcelain paths: ${JSON.stringify(foreignTree.porcelainPaths)}. Observed diffstat: ${JSON.stringify(foreignTree.diffstat)}. Other registered worktrees on this branch: ${JSON.stringify(foreignTree.otherWorktrees)}.`;
-        const issueUrl = escalate(
+        const issueUrl = await escalateWithJudge(
           { class: "BLOCKED", taskId: opts.taskId, runId: opts.runId, headSha: review.headSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), summary: `fix rung standing down — foreign worktree content before round 1 — ${opts.prUrl}`, detail, options: [{ label: "discard", detail: "remove the foreign local content, then re-run the fix rung against a clean materialized worktree." }, { label: "adopt", detail: "confirm this local content is intentional and should be preserved before resuming the fix rung." }], recommendation: "discard" },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
         deps.log("fix.stood_down", { site: "rung.foreign_tree", strike: strikes + 1, reason: preStrikeStandDown.reason, issue_url: issueUrl });
         deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason} — escalated: ${issueUrl}`);
@@ -7613,7 +7630,7 @@ export async function runFixRung(opts: {
         // Distinct disposition from W1-T196's unattributable-pr stand-down,
         // which ledgers because THAT state carries no decidable question.
         const { headSha: foreignHeadSha, author: foreignAuthor } = preStrikeStandDown.foreignHead;
-        const issueUrl = escalate(
+        const issueUrl = await escalateWithJudge(
           {
             class: "BLOCKED",
             taskId: opts.taskId,
@@ -7643,7 +7660,7 @@ export async function runFixRung(opts: {
             ],
             recommendation: "yield",
           },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
         deps.log("fix.stood_down", {
           site: "rung.strike",
@@ -8006,7 +8023,7 @@ export async function runFixRung(opts: {
         const gateRemedyDetail = gateRemedy
           ? ` Observed blocker: failing gate ${gateRemedy.gate} prescribes ${gateRemedy.file} as its own remedy; declaring entry: ${gateRemedy.declaringEntry}.`
           : "";
-        const issueUrl = escalate(
+        const issueUrl = await escalateWithJudge(
           {
             class: "BLOCKED",
             taskId: opts.taskId,
@@ -8031,7 +8048,7 @@ export async function runFixRung(opts: {
             ],
             recommendation: "revert",
           },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
         deps.log("fix.stood_down", {
           site: "rung.scope",
@@ -8109,7 +8126,7 @@ export async function runFixRung(opts: {
         `fix rung: REFUSED — the diff itself edits plan/tasks.yaml's acceptance criteria (Standing rule 15); ` +
           `escalating rather than dispatching a fix worker: ${opts.prUrl}`,
       );
-      const issueUrl = escalate(
+      const issueUrl = await escalateWithJudge(
         {
           class: "BLOCKED",
           taskId: opts.taskId,
@@ -8129,7 +8146,7 @@ export async function runFixRung(opts: {
           ],
           recommendation: "hand-fix",
         },
-        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "rule15_violation" });
       deps.say(`fix rung: escalated (rule 15 violation) — ${issueUrl}`);
@@ -8173,8 +8190,10 @@ export async function runFixRung(opts: {
       // Standing rule 25 — never a second, differently-shaped one. Design note (9): this rung must
       // never merge anything, never rebase onto an unmerged prerequisite, and must escalate exactly
       // as it does today when the prerequisite cannot go green.
-      const escalateInstrumentEntangled = (): string =>
-        escalate(
+      // W1-T3166: async because the escalation it opens is now judged. Wording and options are
+      // untouched — W1-T2436 requires this arm to file the identical, already-understood issue.
+      const escalateInstrumentEntangled = async (): Promise<string> =>
+        await escalateWithJudge(
           {
             class: "BLOCKED",
             taskId: opts.taskId,
@@ -8199,10 +8218,12 @@ export async function runFixRung(opts: {
             ],
             recommendation: "split",
           },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
-      const escalateAndExhaust = (): FixRungOutcome => {
-        const issueUrl = escalateInstrumentEntangled();
+      // W1-T3166: async for the same reason as escalateInstrumentEntangled — its escalation is
+      // now judged. Both return sites await; the outcome is unchanged.
+      const escalateAndExhaust = async (): Promise<FixRungOutcome> => {
+        const issueUrl = await escalateInstrumentEntangled();
         deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "instrument_entangled" });
         deps.say(`fix rung: escalated (instrument entanglement) — ${issueUrl}`);
         return { outcome: "escalated", review, strikes, retriggers, reason: "instrument_entangled", issueUrl };
@@ -8256,14 +8277,14 @@ export async function runFixRung(opts: {
             strike: strikes,
             reason: spawnOutcome.kind === "abandoned" ? "spawn wall-clock bound exceeded" : "worker opened no pull request",
           });
-          return escalateAndExhaust();
+          return await escalateAndExhaust();
         }
         const ciState = ciGateState(await deps.waitForCiGreen(prerequisiteUrl!, deps.log));
         if (ciState !== "green") {
           // THE REFUSAL CONDITION, SECOND ARM: a prerequisite that CANNOT GO GREEN escalates
           // exactly as the rung does today (rationale (5)) — never merged, never rebased onto.
           deps.log("fix.prerequisite_ci_failed", { strike: strikes, prerequisite_pr: target.prNumber, ci_state: ciState });
-          return escalateAndExhaust();
+          return await escalateAndExhaust();
         }
         deps.log("fix.prerequisite_opened", {
           strike: strikes,
@@ -8742,7 +8763,7 @@ export async function runFixRung(opts: {
             `fix rung: ESCAPING after strike ${strikes}/${opts.strikeCap} — ${ciFalseBlockReason} — escalating for ` +
               `re-judgment rather than striking toward exhaustion: ${opts.prUrl}`,
           );
-          const issueUrl = escalate(
+          const issueUrl = await escalateWithJudge(
             {
               class: "BLOCKED",
               taskId: opts.taskId,
@@ -8771,7 +8792,7 @@ export async function runFixRung(opts: {
               ],
               recommendation: "hand-fix",
             },
-            { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+            { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
           );
           deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "ci_false_block" });
           deps.say(`fix rung: escalated (ci-log false-block) — ${issueUrl}`);
@@ -8938,7 +8959,7 @@ export async function runFixRung(opts: {
     }
     if (review.decisionDisposition === "conflict") {
       const digest = review.reviewDecisionDigest ?? "unknown";
-      const issueUrl = escalate(
+      const issueUrl = await escalateWithJudge(
         {
           class: "BLOCKED",
           taskId: opts.taskId,
@@ -8954,7 +8975,7 @@ export async function runFixRung(opts: {
           ],
           recommendation: "re-judge",
         },
-        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
       );
       deps.log("review.decision_conflict_escalated", { strike: strikes, review_decision_digest: digest, issue_url: issueUrl });
       return { outcome: "escalated", review, strikes, retriggers, reason: "review_decision_conflict", issueUrl };
@@ -8994,7 +9015,7 @@ export async function runFixRung(opts: {
         `fix rung: ESCAPING after strike ${strikes}/${opts.strikeCap} — ${falseBlockReason} — escalating for ` +
           `re-judgment rather than striking toward exhaustion: ${opts.prUrl}`,
       );
-      const issueUrl = escalate(
+      const issueUrl = await escalateWithJudge(
         {
           class: "BLOCKED",
           taskId: opts.taskId,
@@ -9029,7 +9050,7 @@ export async function runFixRung(opts: {
           ],
           recommendation: "re-judge",
         },
-        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "false_block" });
       deps.say(`fix rung: escalated (review false-block) — ${issueUrl}`);
@@ -9066,7 +9087,7 @@ export async function runFixRung(opts: {
       };
     }
     const staleCheckNames = Array.from(new Set([...everRedCiCheckNames, ...(currentCiFailures ?? []).map((f) => f.name)]));
-    const issueUrl = escalate(
+    const issueUrl = await escalateWithJudge(
       {
         class: "BLOCKED",
         taskId: opts.taskId,
@@ -9093,7 +9114,7 @@ export async function runFixRung(opts: {
         ],
         recommendation: "hand-fix",
       },
-      { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+      { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
     );
     deps.log("fix.exhausted", { strikes, retriggers, issue_url: issueUrl, reason: "retrigger_cap_exhausted" });
     deps.say(`fix rung: retrigger cap exhausted (${retriggers} retrigger(s)) — escalated: ${issueUrl}`);
@@ -9125,7 +9146,7 @@ export async function runFixRung(opts: {
   // still spent trying to resolve a dirty merge state — mirrors `noReviewYet`
   // for the ci-log shape, checked first (mutually exclusive by construction).
   const stillConflicted = currentMergeConflict !== undefined;
-  const issueUrl = escalate(
+  const issueUrl = await escalateWithJudge(
     {
       class: "BLOCKED",
       taskId: opts.taskId,
@@ -9184,7 +9205,7 @@ export async function runFixRung(opts: {
           ],
       recommendation: "hand-fix",
     },
-    { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+    { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
   );
   const exhaustionReason = stillConflicted
     ? "merge_conflict_unresolved"

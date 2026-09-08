@@ -450,6 +450,12 @@ export function deliversRealtime(root: string): boolean {
  *  is no third value that could mean "drop"; the type itself cannot express suppression. */
 export type EscalationJudgeDecision = "demote" | "deliver";
 
+/** The step {@link escalateWithJudge} writes for EVERY judged escalation, both arms — proving the
+ *  judge had NEVER run took three reads because no such row existed. READER: the operator, and
+ *  W1-T3167's re-judge rung, which needs demotion history to avoid re-asking a settled question.
+ *  Retained across rotation in DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts), same change. */
+export const ESCALATION_JUDGED_STEP = "escalation.judged";
+
 /** The judge's verdict. `reason` is ledgered verbatim and, on a demotion, becomes the FIRST
  *  comment on the fleet-notice issue (design clause ii) — so the demotion is never silent. */
 export interface EscalationJudgeVerdict {
@@ -997,6 +1003,15 @@ export async function escalateWithJudge(
   if (dup) return recordDuplicateEscalation(resolved, dup, deps);
 
   const verdict = await judgeEscalation(resolved, deps);
+  // W1-T3166, BOTH arms: a judge that only leaves a trace when it demotes cannot be calibrated.
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: resolved.taskId,
+    step: ESCALATION_JUDGED_STEP,
+    class: resolved.class,
+    judge_decision: verdict.decision,
+    judge_reason: verdict.reason,
+  });
   const messageCheck = checkOperatorMessageSafe(resolved);
   if (verdict.decision === "demote") {
     return createEscalationIssue(resolved, deps, {
