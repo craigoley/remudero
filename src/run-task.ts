@@ -116,7 +116,7 @@ export type { FixEvidence, FixMode };
 
 /*
 Source-text compatibility for legacy tests whose subject is the pre-extraction dispatcher text.
-The live implementations above are imported from lib/prompt-render.ts.
+The live implementations above are imported from "lib/prompt-render" (src/lib/prompt-render.ts).
   "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
       "repository read-only (git remote -v, git log --oneline -5, ls). Output one report:\n" +
       "RECON REPORT\nOBSERVED: <commands + key output>\nINFERRED: <conclusions>\n" +
