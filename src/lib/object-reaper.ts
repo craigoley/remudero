@@ -26,36 +26,6 @@ export type RepositoryMaintenanceVerdict =
   | "deferred"
   | "escalate";
 
-<<<<<<< HEAD
-export interface ObjectReapDeps {
-  /** Registered worktrees for the repo. Non-empty REFUSES. */
-  listWorktrees?: (repoDir: string) => readonly string[];
-  /** Inflight lock files. Non-empty REFUSES. */
-  listInflightLocks?: () => readonly string[];
-  /** Open-handle count under `.git`. Non-zero REFUSES; unreadable must return >0 (fail closed). */
-  openFileCount?: (dir: string) => number;
-  /** Loose object count. */
-  looseObjectCount?: (repoDir: string) => number;
-  /** Runs the prune. Injected so a test can assert the ARGV, which is where the expiry lives. */
-  runPrune?: (repoDir: string, args: readonly string[]) => void;
-  /** SURVEY MODE. Every check the armed path runs still runs; nothing is spawned and nothing is
-   *  removed. ONE PREDICATE, TWO OUTCOMES — a survey that reached different probes would report a
-   *  decision nobody will ever make, which is the whole point of reading dispositions first. */
-  dryRun?: boolean;
-  /** Counts what a prune WOULD remove, for the survey. An ESTIMATE AT SURVEY TIME: the armed pass
-   *  runs later, against a repo that has moved. */
-  countPrunable?: (repoDir: string, args: readonly string[]) => number;
-}
-
-export interface ObjectReapResult {
-  /** Objects removed, or 0 when refused OR surveying. */
-  pruned: number;
-  /** SURVEY ONLY: what a prune would have removed. Undefined on an armed pass. An estimate. */
-  wouldPrune?: number;
-  /** Present iff nothing was pruned. Names the cause in the operator's own vocabulary. */
-  refusedBecause?: string;
-  looseBefore: number;
-=======
 export interface RepositorySurvey {
   readable: boolean;
   detail?: string;
@@ -75,7 +45,6 @@ export interface RepositoryMaintenanceState {
   /** Set once when the durable failure episode crosses the escalation threshold. */
   escalationRecordedIso?: string;
   consecutiveFailures: number;
->>>>>>> de8c8a6ed (feat(maintenance): automate Git object hygiene)
 }
 
 export interface RepositoryMaintenancePolicy {
@@ -198,27 +167,8 @@ export function writeRepositoryMaintenanceState(path: string, state: RepositoryM
   renameSync(tempPath, path);
 }
 
-<<<<<<< HEAD
-/** Loose (unpacked) object count from `git count-objects -v`. Unreadable reads as 0, which only
- *  ever causes a SKIP (below the floor), never a prune — the safe direction for this input. */
-export function defaultLooseObjectCount(repoDir: string): number {
-  try {
-    const out = execFileSync("git", ["-C", repoDir, "count-objects", "-v"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const m = /^count: (\d+)$/m.exec(out);
-    return m ? Number(m[1]) : 0;
-  } catch {
-    // Unreadable reads as 0, and 0 is BELOW the floor, so an unreadable count can only ever cause
-    // a SKIP — never a prune. That is the safe direction for this input, unlike the probes above,
-    // where unreadable must read as "held".
-    return 0;
-  }
-=======
 export function repositoryMaintenanceStatePath(stateDir: string): string {
   return join(stateDir, "repository-maintenance.json");
->>>>>>> de8c8a6ed (feat(maintenance): automate Git object hygiene)
 }
 
 /**
@@ -242,51 +192,6 @@ export function readGcLogPresent(repoDir: string): boolean | undefined {
   }
 }
 
-<<<<<<< HEAD
-/**
- * Reclaim unreachable objects, or refuse with a named cause.
- *
- * ORDER IS LOAD-BEARING: `.git/gc.log` is removed ONLY on a pass that is about to prune. Removing
- * it on a refused pass would re-arm git's UNSUPERVISED automatic cleanup, which is precisely what
- * the operator's standing rule exists to prevent — the opposite of this function's purpose.
- */
-/** How many objects `git prune -n` would remove. Unreadable reads as 0 — a survey that cannot
- *  measure reports nothing, and reporting nothing is never mistaken for authorising something. */
-export function defaultCountPrunable(repoDir: string, args: readonly string[]): number {
-  try {
-    const out = execFileSync("git", ["-C", repoDir, ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    return out.split("\n").filter((l) => l.trim().length > 0).length;
-  } catch {
-    // A survey that cannot measure reports nothing. Reporting nothing is never mistaken for
-    // authorising something: this value is ledgered, never compared against a threshold.
-    return 0;
-  }
-}
-
-export function reapGitObjects(
-  repoDir: string,
-  inflightDir: string,
-  deps: ObjectReapDeps = {},
-): ObjectReapResult {
-  const looseBefore = (deps.looseObjectCount ?? defaultLooseObjectCount)(repoDir);
-  if (looseBefore < LOOSE_OBJECT_FLOOR) {
-    return { pruned: 0, looseBefore, refusedBecause: `only ${looseBefore} loose object(s), below the ${LOOSE_OBJECT_FLOOR} floor` };
-  }
-  const refusal = objectReapRefusal(repoDir, inflightDir, deps);
-  if (refusal !== undefined) return { pruned: 0, looseBefore, refusedBecause: refusal };
-
-  // SURVEY: past every refusal above, so the disposition reported is the decision the armed path
-  // would have made. Returns BEFORE gc.log is touched and before anything is spawned.
-  if (deps.dryRun === true) {
-    const count = deps.countPrunable ?? defaultCountPrunable;
-    return { pruned: 0, wouldPrune: count(repoDir, ["prune", "-n", `--expire=${OBJECT_PRUNE_EXPIRY}`]), looseBefore };
-  }
-  // Only now, with the prune committed to, does the auto-gc suppressor come off.
-=======
 export function surveyRepository(
   repoDir: string,
   activeLaneCount: number,
@@ -300,7 +205,6 @@ export function surveyRepository(
   const exec = deps.exec ?? execFileSync;
   const exists = deps.exists ?? existsSync;
   const read = deps.read ?? readFileSync;
->>>>>>> de8c8a6ed (feat(maintenance): automate Git object hygiene)
   try {
     const raw = String(exec("git", ["-C", repoDir, "count-objects", "-v"], {
       encoding: "utf8",
