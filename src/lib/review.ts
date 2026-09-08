@@ -5003,6 +5003,9 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "plan/tasks.yaml": "plan/task DATA, not gate logic",
   "plan/plan-index.json": "a generated index artifact, and its :check mode is not wired into any CI workflow",
   "package-lock.json": "a dependency lockfile, not gate logic",
+  "scripts/test-tier-manifest.json":
+    "the per-test-file duration ledger (W1-T2904) — DATA scripts/test-tier-manifest.mjs's --check reads, " +
+    "not the rule logic itself, same shape as openapi/daemon.yaml above",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
   "scripts/rule15-precheck.mjs":
@@ -5015,6 +5018,11 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "registration, the circularity W1-T402 clause (v) records for its siblings.",
   "scripts/clock-shift.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/clock-sweep.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
+  "scripts/flake-retry-aggregate.mjs":
+    "VERIFIED NON-INSTRUMENT (W1-T2904) — reads scripts/test-with-retry.mjs's own FLAKE-RETRY lines and " +
+    "prints a per-test count. The only ci.yml job that runs it is flake-retry-aggregate, registered " +
+    "ADVISORY in ci-gate.yml and gating nothing, and the script exits 0 whatever it finds, so a diff " +
+    "touching it cannot change whether any check passes or fails — informational only, by construction.",
   "deploy/recycle-container.sh":
     "container-recycle ops runbook script with no CI-gate role — derived only because the task-id-existence " +
     "job's comment cites it as the defect's worked example, which is prose, not a reference",
@@ -5094,6 +5102,11 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/no-hand-rolled-fetch-check.mjs": "the no-hand-rolled-fetch gate script — widening deferred, see above",
   "scripts/test-with-retry.mjs":
     "wraps the ci/coverage-ratchet jobs' actual test pass/fail determination — widening deferred, see above",
+  "scripts/test-tier-manifest.mjs":
+    "KNOWN GAP, WIDENING DEFERRED (W1-T2904) — its --check/--run modes genuinely refuse (exit 1) an " +
+    "untiered test file and assigns the required fast/slow test surfaces. It is now required through " +
+    "ci-gate; promotion into the blocking instrument surface remains separate under W1-T402 clause (v), " +
+    "because widening the reviewer in the introducing PR would entangle it with its own parity registration.",
   "tsconfig.json": "the TS strict-mode config the Typecheck step compiles against — widening deferred, see above",
 };
 

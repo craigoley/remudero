@@ -1,5 +1,5 @@
-// test/test-with-retry.test.ts — W1-T255: ONE bounded, evidence-preserving whole-command test
-// retry, plus the shared serve boot-barrier predicate this same task's hygiene item fixes.
+// test/test-with-retry.test.ts — W1-T255/W1-T2904: ONE bounded, evidence-preserving failed-file
+// retry with whole-command fallback, plus the shared serve boot-barrier predicate.
 //
 // scripts/test-with-retry.mjs is a plain .mjs file outside tsconfig's `include`, so (same
 // convention as claims-check.test.ts / coverage-ratchet.test.ts) it is exercised here only via
@@ -12,14 +12,25 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { shellBootReady } from "./setup/open-shell.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "test-with-retry.mjs");
 const FIXTURE = join(__dirname, "fixtures", "test-with-retry", "fake-suite.mjs");
+
+const retryModule = (await import(pathToFileURL(SCRIPT).href)) as {
+  parseFailingTestFiles: (output: string, cwd?: string) => string[];
+  retryInvocationForFailedFiles: (
+    cmd: string,
+    args: string[],
+    failedFiles: string[],
+  ) => { cmd: string; args: string[]; scoped: boolean };
+};
+const { parseFailingTestFiles, retryInvocationForFailedFiles } = retryModule;
 
 function newStateFile(): string {
   const dir = mkdtempSync(join(tmpdir(), "test-with-retry-"));
@@ -128,6 +139,75 @@ test("test-with-retry: FLAKE-RETRY evidence is also appended to $GITHUB_STEP_SUM
   assert.match(summary, /FLAKE-RETRY: first attempt failed — .*summary-recorded test/);
 });
 
+test("test-with-retry: extracts the exact failed test FILES from TAP failure locations, not colliding test titles", () => {
+  const output = [
+    "not ok 7 - handles the empty case",
+    "  ---",
+    `  location: '${join(REPO_ROOT, "test", "alpha.test.ts")}:19:3'`,
+    "  ...",
+    "not ok 8 - handles the empty case",
+    "  ---",
+    `  location: '${join(REPO_ROOT, "test", "beta.test.ts")}:44:1'`,
+    "  ...",
+  ].join("\n");
+  assert.deepEqual(parseFailingTestFiles(output, REPO_ROOT), ["test/alpha.test.ts", "test/beta.test.ts"]);
+});
+
+test("test-with-retry: a duration-tier command retries only the failed files through the real test harness", () => {
+  const retry = retryInvocationForFailedFiles(
+    process.execPath,
+    ["scripts/test-tier-manifest.mjs", "--run", "fast", "--shard", "2/4", "--base", "origin/main"],
+    ["test/alpha.test.ts", "test/beta.test.ts"],
+  );
+  assert.equal(retry.scoped, true);
+  assert.equal(retry.cmd, process.execPath);
+  assert.deepEqual(retry.args, [
+    "--test",
+    "--import",
+    "tsx",
+    "--import",
+    "./test/setup/tmp-hygiene.ts",
+    "test/alpha.test.ts",
+    "test/beta.test.ts",
+  ]);
+});
+
+test("test-with-retry: a direct node test shard drops the shard selector and broad glob on retry", () => {
+  const retry = retryInvocationForFailedFiles(
+    process.execPath,
+    ["--test", "--test-shard=3/4", "--import", "tsx", "test/**/*.test.ts"],
+    ["test/only-failure.test.ts"],
+  );
+  assert.equal(retry.scoped, true);
+  assert.deepEqual(retry.args, ["--test", "--import", "tsx", "test/only-failure.test.ts"]);
+});
+
+test("test-with-retry: an unrecognized Node command falls back to the identical whole command", () => {
+  const args = ["scripts/custom-runner.mjs", "--all"];
+  assert.deepEqual(retryInvocationForFailedFiles(process.execPath, args, ["test/failure.test.ts"]), {
+    cmd: process.execPath,
+    args,
+    scoped: false,
+  });
+});
+
+test("test-with-retry: a real failing Node test is retried by exact file and emits file evidence", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}test-with-retry-file-scope-`));
+  const marker = join(dir, "seen");
+  const file = join(dir, "scoped-flake.test.mjs");
+  writeFileSync(
+    file,
+    `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { existsSync, writeFileSync } from "node:fs";\ntest("scoped flake", () => { if (!existsSync(${JSON.stringify(marker)})) { writeFileSync(${JSON.stringify(marker)}, "1"); assert.fail("first pass"); } });\n`,
+  );
+  const result = spawnSync(process.execPath, [SCRIPT, process.execPath, "--test", "scoped-flake.test.mjs"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /FLAKE-RETRY-FILES: retrying 1 failed file\(s\) — scoped-flake\.test\.mjs/);
+});
+
 // ── ONE required surface routes through the wrapper now; `npm test` itself stays retry-free ─────
 //
 // THIS TEST USED TO ASSERT THE OPPOSITE AND KEPT PASSING AFTER THE WIRING CHANGED. It read
@@ -156,8 +236,8 @@ test("test-with-retry: ci's SOURCE shard reaches the wrapper with its option bef
   assert.match(executable, /npm run test:ci/, "the plan/docs fail-closed fallback must still reach the retry wrapper through package.json");
   assert.match(
     executable,
-    /node scripts\/test-with-retry\.mjs\s+\\\s+node --test --test-shard=\$\{\{ matrix\.shard \}\}\/4[\s\S]*"test\/\*\*\/\*\.test\.ts"/,
-    "the SOURCE matrix must invoke the retry wrapper directly with Node's shard option before the positional glob",
+    /node scripts\/test-with-retry\.mjs\s+\\\s+node scripts\/test-tier-manifest\.mjs --run fast --shard \$\{\{ matrix\.shard \}\}\/4 --base "\$TIER_BASE"/,
+    "the SOURCE matrix must invoke the retry wrapper around the duration-balanced fast-tier shard",
   );
   assert.equal(
     executable.match(/node scripts\/test-with-retry\.mjs/g)?.length,
