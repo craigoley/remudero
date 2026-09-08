@@ -29353,9 +29353,38 @@ export function uncreditableHeadReason(
 }
 
 const TERMINAL_UNCREDITABLE_HEAD_STEP = "sweep.fix.uncreditable_head";
+/** W1-T3168: a foreign-head decline that did NOT escalate because the PR is not stuck. Ledgered so
+ *  the suppression is legible — "we saw this and chose not to page you" must be greppable. */
+const TERMINAL_UNCREDITABLE_HEAD_HEALTHY_STEP = "sweep.terminal_head.not_stuck";
 const TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP = "sweep.fix.uncreditable_head_escalated";
 const TERMINAL_UNCREDITABLE_HEAD_PATTERN =
   '"step":"sweep\\.fix\\.uncreditable_head"|"step":"sweep\\.fix\\.uncreditable_head_escalated"';
+
+/**
+ * W1-T3168 — is a foreign-head PR actually STUCK, or merely not fleet-owned?
+ *
+ * The fix rung refuses a branch it does not own (W1-T296) and that refusal is correct. What did
+ * NOT follow is that a human must be interrupted: "the rung declines to act on this PR" and "a
+ * person must decide something about this PR" are different statements, and the producer collapsed
+ * them. MEASURED 2026-09-08: issues #4623 and #4624 asked the operator to discard PRs #4619 and
+ * #4621 minutes after they opened, both healthy; #4621 then merged on its own.
+ *
+ * STUCK is read off the rollup {@link OpenPrView} already carries — no extra GitHub read: required
+ * checks RED, or a review that has come back FAILURE. Anything else that is positively healthy
+ * (checks green or still running, review not failing) is a PR whose author is presumably still
+ * working, which is the ordinary case for every operator-authored and every human contribution.
+ *
+ * INDETERMINATE ESCALATES. `"none"` on both is not evidence of health — it is the absence of
+ * evidence, and it takes the same fail-open direction `EscalationReconcileCandidate.indeterminate`
+ * already takes ("treat as neither resolved nor live").
+ */
+export function foreignHeadIsStuck(pr: Pick<OpenPrView, "reviewState" | "checksState">): boolean {
+  if (pr.checksState === "red") return true;
+  if (pr.reviewState === "failure") return true;
+  // Positively healthy: checks are green or still running AND the review has not failed.
+  if (pr.checksState === "green" || pr.checksState === "pending") return false;
+  return true; // checksState "none" — unreadable, not healthy
+}
 
 interface TerminalUncreditableHead {
   prNumber: number;
@@ -29764,8 +29793,21 @@ export function buildSweepEffects(
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const terminalHeads = terminalUncreditableHeads(ledgerPath);
-  const escalateTerminalHead = (terminal: TerminalUncreditableHead): void => {
+  const escalateTerminalHead = (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): void => {
     if (terminal.escalated) return;
+    // W1-T3168: the ownership fact alone is not an ask. A foreign head on a PR that is not stuck
+    // needs no decision from anyone today, so it is LEDGERED and not escalated — never silently
+    // dropped, because a suppressed ask nobody can see is the defect this repo keeps re-finding.
+    // `pr` absent means the caller could not supply a rollup, which is indeterminate: escalate.
+    if (pr && !foreignHeadIsStuck(pr)) {
+      log(TERMINAL_UNCREDITABLE_HEAD_HEALTHY_STEP, {
+        pr_number: terminal.prNumber,
+        head_sha: terminal.headSha,
+        review_state: pr.reviewState,
+        checks_state: pr.checksState,
+      });
+      return;
+    }
     const prUrl = `https://github.com/${owner}/${repo}/pull/${terminal.prNumber}`;
     const issueUrl = tryEscalate(
       {
@@ -30255,7 +30297,7 @@ export function buildSweepEffects(
         const preflightStandDown = await dispatchFixPreflightStandDown(ghLiveState, pr, log);
         if (preflightStandDown) return;
         if (priorTerminal) {
-          escalateTerminalHead(priorTerminal);
+          escalateTerminalHead(priorTerminal, pr);
           return;
         }
 
@@ -30345,7 +30387,7 @@ export function buildSweepEffects(
               escalated: false,
             };
             terminalHeads.set(terminalKey, terminal);
-            escalateTerminalHead(terminal);
+            escalateTerminalHead(terminal, pr);
           }
           return;
         }

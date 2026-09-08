@@ -720,6 +720,7 @@
     "test/no-raw-nul.test.ts": 341,
     "test/no-shallowing-of-the-canonical-checkout.test.ts": 606,
     "test/node-runtime-provenance.test.ts": 1189,
+    "test/non-fleet-head-escalation-precision.test.ts": 0,
     "test/nothing-reclaims-the-images-the-recycle-pulls.test.ts": 1237,
     "test/nothing-tells-you-which-census-suites-your-change-joins.test.ts": 737,
     "test/notify-platform-guard.test.ts": 977,
