@@ -5352,6 +5352,104 @@ function scriptStem(path: string): string {
 /** The one workflow {@link CI_PARITY_TABLE} mirrors — see test/preflight-ci-parity.test.ts, which asserts that table
  *  against THIS file in both directions. */
 const CI_WORKFLOW_PATH = ".github/workflows/ci.yml";
+const CI_GATE_WORKFLOW_PATH = ".github/workflows/ci-gate.yml";
+
+/**
+ * The registries this repo's own censuses make MANDATORY to edit in the same diff that adds a
+ * gate: `CI_PARITY_TABLE` (preflight --ci-parity must carry one entry per ci.yml job, both ways)
+ * and `INSTRUMENT_SURFACE_EXCLUSIONS` (W1-T402 refuses a gate-rule-like path that is neither
+ * declared nor excluded with a reason). A registration is not smuggling — it is the coupling two
+ * bidirectional gates impose — but only while the file carries NOTHING ELSE, which is what
+ * `declaration` is checked against.
+ */
+const MANDATORY_REGISTRIES: ReadonlyArray<{ path: string; declaration: string }> = [
+  { path: CENSUS_REGISTRATION_PATH, declaration: "CI_PARITY_TABLE" },
+  { path: "src/lib/review.ts", declaration: "INSTRUMENT_SURFACE_EXCLUSIONS" },
+];
+
+/** Each `@@` hunk's trailing context for `file`, in order; `undefined` where git emitted none.
+ *  {@link walkDiff} drops `@@` lines outright, so this is a separate pass over the same text. */
+function diffHunkContexts(diff: string, file: string): Array<string | undefined> {
+  const out: Array<string | undefined> = [];
+  let current = "";
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("diff --git")) {
+      current = raw.match(/\sb\/(\S+)\s*$/)?.[1] ?? "";
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      const plus = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      if (plus !== "/dev/null") current = plus;
+      continue;
+    }
+    if (!raw.startsWith("@@") || current !== file) continue;
+    const trailing = /^@@[^@]*@@(.*)$/.exec(raw)?.[1]?.trim();
+    out.push(trailing ? trailing : undefined);
+  }
+  return out;
+}
+
+/**
+ * True when `file` is one of {@link MANDATORY_REGISTRIES} and EVERY hunk it carries in this diff
+ * sits inside that registry's own declaration. Fails closed: a hunk for which git emitted no
+ * function context at all is not confined, and a file with no hunks is not confined either.
+ *
+ * This is the guard that stops the carve-out becoming an escape hatch. Naming a registry file
+ * without it would make `src/lib/review.ts` — the reviewer itself — freely editable beside any
+ * workflow change.
+ */
+function changeIsConfinedToRegistry(diff: string, file: string): boolean {
+  const registry = MANDATORY_REGISTRIES.find((r) => r.path === file);
+  if (registry === undefined) return false;
+  const contexts = diffHunkContexts(diff, file);
+  if (contexts.length === 0) return false;
+  return contexts.every((c) => c !== undefined && c.includes(registry.declaration));
+}
+
+/**
+ * The W1-T3171 subtraction: a CI job registration the repo's own censuses make unavoidable.
+ *
+ * Rule 25 refuses an instrument beside `src/` because a weakened instrument could hide a product
+ * regression shipped next to it. Here there IS no product change to hide — every `src/` path in
+ * the diff is a registration map, and adding a ci.yml job FORCES entries in both. Returns the
+ * paths to subtract from the VERDICT, never from the reported evidence.
+ *
+ * All three conditions must hold, and each closes a different hole:
+ *   (a) every instrument in the diff is one of the two CI workflows — so an unrelated instrument
+ *       cannot ride along on a registration;
+ *   (b) ci.yml adds at least one job and EVERY added job is registered in BOTH ci-gate.yml and
+ *       the parity table — an unmatched name is not this shape (and a workflow edit that adds no
+ *       job at all, a `run:`/trigger/timeout change, never reaches the carve-out);
+ *   (c) every product `src/` path is a registry file confined to its own declaration.
+ */
+function mandatoryRegistrationPaths(
+  diff: string,
+  instrumentPaths: readonly string[],
+  srcPaths: readonly string[],
+): { instruments: string[]; srcs: string[] } {
+  const none = { instruments: [], srcs: [] };
+  const workflows = [CI_WORKFLOW_PATH, CI_GATE_WORKFLOW_PATH];
+  if (instrumentPaths.length === 0 || !instrumentPaths.every((f) => workflows.includes(f))) return none;
+
+  const lines = walkDiff(diff);
+  const addedJobs = lines
+    .filter((l) => l.file === CI_WORKFLOW_PATH && l.kind === "add")
+    .map((l) => /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(l.text)?.[1])
+    .filter((name): name is string => name !== undefined);
+  if (addedJobs.length === 0) return none;
+
+  const gateAdds = lines.filter((l) => l.file === CI_GATE_WORKFLOW_PATH && l.kind === "add");
+  const parityAdds = lines.filter((l) => l.file === CENSUS_REGISTRATION_PATH && l.kind === "add");
+  const registeredBothSides = addedJobs.every(
+    (job) =>
+      gateAdds.some((l) => l.text.includes(`"${job}"`)) && parityAdds.some((l) => l.text.includes(`job: "${job}"`)),
+  );
+  if (!registeredBothSides) return none;
+
+  if (srcPaths.length === 0 || !srcPaths.every((f) => changeIsConfinedToRegistry(diff, f))) return none;
+  return { instruments: [...instrumentPaths], srcs: [...srcPaths] };
+}
+
 
 /** A ci.yml JOB introduced by this diff, keyed on the REGISTERED UNIT rather than the instrument FILE (W1-T2738).
  * `.github/workflows/ci.yml` has existed since the repo did, so {@link fileIsNewInDiff} is false for it however new
@@ -5520,9 +5618,16 @@ export function detectInstrumentEntanglement(
           const d = classifyInstrumentChange(diff, diffFiles, f);
           return d === "tightening" || d === "introduced";
         });
-  const subtracted = new Set([...introducedGates, ...harmlessInstruments]);
+  // W1-T3171: subtract a CI job registration two bidirectional censuses make UNAVOIDABLE. Unlike
+  // the two carve-outs above it subtracts on BOTH sides at once, because the mixture it clears is
+  // symmetric: the workflows are the instrument, the registry entries are the `src/` half, and
+  // neither exists without the other. Same subtract-from-the-verdict-only discipline.
+  const registration = diff === undefined ? { instruments: [], srcs: [] } : mandatoryRegistrationPaths(diff, instrumentPaths, srcPaths);
+  const subtracted = new Set([...introducedGates, ...harmlessInstruments, ...registration.instruments]);
   const effectiveInstrumentPaths = subtracted.size === 0 ? instrumentPaths : instrumentPaths.filter((f) => !subtracted.has(f));
-  const effectiveSrcPaths = introducedGates.length === 0 ? srcPaths : srcPaths.filter((f) => f !== CENSUS_REGISTRATION_PATH);
+  const subtractedSrc = new Set(registration.srcs);
+  const effectiveSrcPaths = (introducedGates.length === 0 ? srcPaths : srcPaths.filter((f) => f !== CENSUS_REGISTRATION_PATH))
+    .filter((f) => !subtractedSrc.has(f));
   return {
     entangled: effectiveInstrumentPaths.length > 0 && effectiveSrcPaths.length > 0,
     instrumentPaths,
