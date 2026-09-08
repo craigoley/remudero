@@ -50,6 +50,13 @@ test('the slow tier is required before duration sharding removes it from the fou
   const advisory = JSON.parse(env.ADVISORY ?? '[]') as string[];
   assert.ok(required.includes('test-slow'), 'the slow files are no longer in ci shards, so test-slow must gate ci-gate');
   assert.ok(!advisory.includes('test-slow'), 'one check cannot be both required and advisory');
+
+  const slowRuns = runBodies('test-slow');
+  assert.match(
+    slowRuns,
+    /npm run --silent test:tier:check -- --base "origin\/\$\{GITHUB_BASE_REF\}"/,
+    'invoke the package script so unwired-gate can prove that the tier checker is an actual gate',
+  );
 });
 
 test('duration sharding learns from structured per-file evidence without writing the test checkout', () => {
@@ -67,6 +74,12 @@ test('duration sharding learns from structured per-file evidence without writing
     (step) => step.name === 'Publish the next duration manifest proposal',
   );
   assert.equal(proposalUpload?.with?.path, 'test-tier-manifest.next.json');
+
+  const aggregateSteps = workflow.jobs['flake-retry-aggregate'].steps ?? [];
+  const checkoutIndex = aggregateSteps.findIndex((step) => step.uses?.startsWith('actions/checkout@'));
+  const firstDownloadIndex = aggregateSteps.findIndex((step) => step.uses?.startsWith('actions/download-artifact@'));
+  assert.ok(checkoutIndex >= 0, 'the aggregate job must check out the scripts it executes');
+  assert.ok(firstDownloadIndex > checkoutIndex, 'checkout clean deletes artifacts, so downloads must happen after checkout');
 });
 
 test('coverage sharding: four lossless V8 bundles are required before Node-range merge and both gates', () => {

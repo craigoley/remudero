@@ -77,7 +77,8 @@ jobs:
         "comment-load-ratchet",
         "source-size",
         "coverage-session-blanking",
-        "baseline-monotonic"
+        "baseline-monotonic",
+        "test-slow"
         ]
       # Never waited on, never failed for: ci-gate is self, and remudero-review is a separate
       # required context the orchestrator posts directly rather than a check-run.
@@ -92,7 +93,6 @@ jobs:
       ADVISORY: >-
         [
         "flake-retry-aggregate",
-        "test-slow",
         "ci-shard (1/4)",
         "ci-shard (2/4)",
         "ci-shard (3/4)",

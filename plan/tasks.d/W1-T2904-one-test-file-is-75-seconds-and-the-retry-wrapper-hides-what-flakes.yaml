@@ -28,6 +28,7 @@
     - test/test-duration-reporter.test.ts
     - test/test-tier-manifest.test.ts
     - test/test-with-retry.test.ts
+    - test/workflow-playwright-install.test.ts
   status: queued
   attempts: 0
   rationale: |
