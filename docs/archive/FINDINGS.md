@@ -1,5 +1,11 @@
 # WS-0 Spike — FINDINGS
 
+> **Archived W1-T2918.** Moved here from the repo root, where it sat as a dated snapshot no gate
+> reads. The version table below is from the WS-0 spike and is stale (the pins that matter today
+> are `package.json`, `.nvmrc` and `deploy/Dockerfile`'s `ARG`s — see README's docs map); the
+> credential-shape ground truth further down is still cited by comments and one test, now
+> repointed to this path. Read it for the record, not for present-day version numbers.
+
 Ground truth from running the primitive Remudero loop end-to-end against
 `remudero-sandbox`, fully unattended, under OS-sandbox containment, on
 subscription OAuth. Machine identifiers are redacted as `<host>` / `~` /

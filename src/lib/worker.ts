@@ -260,7 +260,9 @@ export function cacheTokenLedgerFields(tokens: TokenUsage): {
 
 /** Persisted-stderr length ceiling. Bounds the PERSISTED copy so a runaway transcript cannot bloat the ledger; it never bounds
  * what stays in memory on {@link WorkerResult}.
- * Why: two "Not logged in" spawns died with their only diagnostic in memory (W1-T238). */
+ * Why: two "Not logged in" spawns died with their only diagnostic in memory (W1-T238; the
+ * observed "Not logged in · Please run /login" text is docs/archive/FINDINGS.md's ground truth
+ * for a credential-dead spawn with no usable OAuth token at all). */
 export const STDERR_EXCERPT_CAP = 4000;
 
 /** Truncate `s` to {@link STDERR_EXCERPT_CAP} chars, noting how much was cut — never a silent drop. */
@@ -3250,7 +3252,7 @@ export function reclaimStaleConfigLock(repoDir: string, opts: ConfigLockReclaimO
  * about-to-be-created branch does not exist yet, so it is safe. LIVENESS GUARD: a worktree whose sibling {@link runLockPath}
  * names a LIVE pid is SKIPPED. A CORRUPT lock is treated the SAME as an ABSENT one, never as proof of death — both go through
  * the age and grace guard, which is what makes a torn read survivable.
- * Why: force-removing any `run-*` worktree once destroyed a successful 65-turn implement mid-run (DIAGNOSIS.md
+ * Why: force-removing any `run-*` worktree once destroyed a successful 65-turn implement mid-run (docs/archive/DIAGNOSIS.md
  *      diag/drain-concurrency; W1-T208). */
 export function pruneStaleRuns(
   repoDir: string,
