@@ -64,7 +64,6 @@ test/base-caused-release.test.ts	w1t2620-real-wiring- # pre-existing at W1-T2786
 test/base-caused-release.test.ts	w1t2620-real-wiring-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/binary-pin-rung.test.ts	binary-pin-default- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/binary-pin-rung.test.ts	runtask-binary-pin- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/blockers-name-only-dispatchable-work.test.ts	blockers-name-only-ledger- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/blockers-name-only-dispatchable-work.test.ts	blockers-name-only-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/board-prewarm-does-not-block.test.ts	prewarm-port- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/board-review-wiring.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
@@ -863,7 +862,6 @@ test/worker-push-credential-visibility.test.ts	pushvis-seed- # pre-existing at W
 test/worker.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/worker.test.ts	remudero-q- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/worker.test.ts	remudero-qa- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/worktree-base-currency-healthy.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/worktree-base-currency-unreadable.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/worktree-base-currency.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/worktree-base-observability.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
