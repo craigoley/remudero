@@ -145,6 +145,7 @@ function leasedForcePush(
       const out = io.capture("git", ["-C", worktreePath, ...args]).trim();
       return out.length > 0 ? out : undefined;
     } catch {
+      // An absent ref, not a fault -- every caller below names its own reason for `undefined`.
       return undefined;
     }
   };
