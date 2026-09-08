@@ -1335,6 +1335,12 @@ export function renderShellHtml(
   </button></h2>
   <div id="needs-me-body">
     <ul id="needs-me-list" class="row-list">${skeletonRows(2)}</ul>
+    <!-- W1-T3183: the verify:human backlog (W1-T507) is a SEPARATE population from the asks
+         above -- its own list, its own heading, its own count, never blended into needs-me-list
+         or needs-me-summary (see renderNeedsMe's own doc, below). W1-T507's purpose (the queue
+         stays VISIBLE) survives exactly: this list is never collapsed, hidden or paginated. -->
+    <h3>Awaiting verification <span id="needs-me-backlog-summary" class="section-summary">…</span></h3>
+    <ul id="needs-me-backlog-list" class="row-list" aria-label="verify: human backlog, no action required"></ul>
     <!-- W1-T2497: THE MAILBOX -- same escalations above, as a thread; ADDITIVE, needs-me-list untouched. --><h3 class="mailbox-heading">Mailbox<span id="mailbox-unread-count" class="mailbox-unread-count" aria-label="unread threads"></span></h3><div id="mailbox" class="mailbox" aria-label="Mailbox"></div>
   </div>
 </section>
@@ -2134,7 +2140,10 @@ ${renderConsoleShellScript()}
   let latestMergeHeld = []; // same atomic /v1/status projection; never inferred from UI/check state
   let latestPrQueue = { complete: false, rows: [], unavailableReason: "waiting for the first open-PR snapshot" };
   const prQueueFilters = { actionability: "all", review: "all", task: "all" };
-  let latestNeedsMeRows = []; // set by renderNeedsMe -- the SAME combined NEEDS ME rows the section itself renders
+  // W1-T3183: the ASK rows only (escalations, feedback, inbox, merge holds, blocked PRs) --
+  // the verify:human backlog is deliberately EXCLUDED (it never needed a decision), so the
+  // glance strip / tab title / arrival emphasis all read the ask count, never the blended one.
+  let latestNeedsMeRows = []; // set by renderNeedsMe
   let latestDaemonHealth = null; // GET /v1/daemon-health's body
   let latestAccountUsage = null; // GET /v1/account-usage's body (account-usage.ts's AccountUsageSnapshot)
   let latestProviderRouting = null; // daemon-written routing decision + effective/default policy projection
@@ -2354,8 +2363,10 @@ ${renderConsoleShellScript()}
   /** running/queued reuse the EXACT predicates summaryText/statusColorKey already use for the
    *  SAME words elsewhere on this page (never a second, disagreeing derivation); blocked uses
    *  isBlockedRow above, the mirror of board.ts's; needs-me is latestNeedsMeRows.length -- the
-   *  SAME combined set (tasks.needsHuman + feedback grilling/proposed + inbox ready/drafting) the
-   *  NEEDS ME section itself just rendered, and a STRICT SUBSET of blocked by construction.
+   *  SAME ask set (tasks.needsHuman + feedback grilling/proposed + inbox ready/drafting) the
+   *  NEEDS ME section itself just rendered as asks (W1-T3183: the verify:human backlog is a
+   *  separate, separately-counted population and is deliberately never part of this number), and
+   *  a STRICT SUBSET of blocked by construction.
    *  merged-today/spend-today/spend-this-week come from latestSpend (GET /v1/status's "spend"
    *  field, board.ts's computeGlanceSpend) -- "…" (unknown, never a fabricated 0) until the
    *  first real snapshot has landed. W1-T2218: running gets the SAME "…"-until-known guard --
@@ -3232,10 +3243,15 @@ ${renderConsoleShellScript()}
     // sparse field (status.ts's projectPlan-level \`verifyHumanPending\`, set only once a task is
     // filed verify: human AND not yet credited merged) -- never a widened \`needsHuman\`, per this
     // task's design.
+    // W1-T3183: this is the ONLY row kind carrying no actionable referent -- no issue URL, no PR,
+    // no form, no button (needsMeVerifyRowHtml's own doc: "No action affordance renders here on
+    // purpose"). \`group: "backlog"\` names that fact right where the row is built, off the SAME
+    // \`verifyHumanPending\` field that already singles this loop out -- never a second classifier
+    // that re-derives actionability from the rendered html and could disagree with the renderer.
     for (const t of tasks) {
       if (!t.verifyHumanPending) continue;
       shown.add(t.taskId);
-      rows.push({ key: \`verify:\${t.taskId}\`, html: needsMeVerifyRowHtml(t), taskId: t.taskId });
+      rows.push({ key: \`verify:\${t.taskId}\`, html: needsMeVerifyRowHtml(t), taskId: t.taskId, group: "backlog" });
     }
     for (const e of feedbackEntries ?? []) {
       if (e.status === "grilling") rows.push({ key: \`fbg:\${e.id}\`, html: needsMeGrillHtml(e), ts: e.ts });
@@ -3250,14 +3266,24 @@ ${renderConsoleShellScript()}
     if (latestBlockedPrsUnverifiedReason) {
       rows.push({ key: "blocked-pr-unverified", html: needsMeBlockedPrUnverifiedHtml(latestBlockedPrsUnverifiedReason) });
     }
-    reconcileRows(document.getElementById("needs-me-list"), rows, "nothing needs you right now");
+    // W1-T3183: TWO POPULATIONS, SEPARATED IN THE MARKUP -- an ask has a referent an operator can
+    // act on now; the verify:human backlog has none (see the \`group: "backlog"\` push above). Each
+    // gets its own list, own count, own reconcileRows call -- never one blended list wearing one
+    // blended count. The backlog list is never collapsed, hidden or paginated (W1-T507's own
+    // purpose survives): it always renders, right alongside the asks.
+    const askRows = rows.filter((r) => r.group !== "backlog");
+    const backlogRows = rows.filter((r) => r.group === "backlog");
+    reconcileRows(document.getElementById("needs-me-list"), askRows, "nothing needs you right now");
+    reconcileRows(document.getElementById("needs-me-backlog-list"), backlogRows, "no verify: human backlog");
     tickElapsed(); // paint the DRAFTING row's freshly-(re)rendered elapsed span immediately, same as renderNow does
-    updateNeedsMeArrivalEmphasis(rows);
-    finishSectionRender("needs-me", rows.length === 0, () => needsMeSummaryText(rows));
-    // W1-T159: the GLANCE strip's needs-me count AND the tab-title badge both read THIS exact
-    // set (task escalations + feedback grilling/proposed + inbox ready/drafting) -- never a
-    // second, independently-derived needs-me tally that could disagree with the section itself.
-    latestNeedsMeRows = rows;
+    updateNeedsMeArrivalEmphasis(askRows);
+    finishSectionRender("needs-me", askRows.length === 0 && backlogRows.length === 0, () => needsMeSummaryText(askRows));
+    if (sectionDefaultsReady) setSectionSummary("needs-me-backlog", needsMeBacklogSummaryText(backlogRows));
+    // W1-T159/W1-T3183: the GLANCE strip's needs-me count AND the tab-title badge both read THIS
+    // exact ASK set (task escalations + feedback grilling/proposed + inbox ready/drafting) --
+    // never a second, independently-derived needs-me tally, and never the verify:human backlog,
+    // which never needed a decision and must never read as one more thing behind an alarm badge.
+    latestNeedsMeRows = askRows;
     renderGlanceStrip(tasks);
     updateTabTitle();
     updateGlanceAnomaly();

@@ -21,7 +21,7 @@
 
 import { readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEFAULT_MANIFEST_RELATIVE_PATH = "scripts/test-tier-manifest.json";
@@ -125,6 +125,57 @@ export function balanceFilesByDuration(testFiles, manifest, shardCount) {
   return shards.map((shard) => shard.files);
 }
 
+/** Validate one newline-delimited conservative candidate set and select a duration-balanced
+ * shard. The caller may execute only this returned subset. Any ambiguity throws so workflow
+ * callers can take the complete source-CI fallback instead of manufacturing an empty green. */
+export function selectPlanReadingShard(candidateText, testFiles, manifest, shard) {
+  if (!shard || !Number.isInteger(shard.index) || !Number.isInteger(shard.count) ||
+      shard.count < 1 || shard.index < 1 || shard.index > shard.count) {
+    throw new Error("plan-reading candidates require a valid shard index/count");
+  }
+  if (typeof candidateText !== "string") throw new Error("plan-reading candidate input is unreadable");
+  const lines = candidateText.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  if (lines.length === 0 || lines.some((line) => line.length === 0)) {
+    throw new Error("plan-reading candidate set is empty or contains a blank entry");
+  }
+
+  const known = new Set(testFiles);
+  const seen = new Set();
+  for (const file of lines) {
+    if (
+      file !== file.trim() ||
+      file.includes("\\") ||
+      isAbsolute(file) ||
+      win32.isAbsolute(file) ||
+      file !== posix.normalize(file) ||
+      !file.startsWith("test/") ||
+      !file.endsWith(".test.ts")
+    ) {
+      throw new Error(`unsafe or non-normalized plan-reading candidate: ${JSON.stringify(file)}`);
+    }
+    if (seen.has(file)) throw new Error(`duplicate plan-reading candidate: ${file}`);
+    if (!known.has(file)) throw new Error(`unknown plan-reading candidate: ${file}`);
+    if (!(file in manifest.files)) throw new Error(`plan-reading candidate is absent from the duration manifest: ${file}`);
+    seen.add(file);
+  }
+
+  const candidates = [...seen].sort();
+  if (candidates.length < shard.count) {
+    throw new Error(
+      `plan-reading candidate set has ${candidates.length} file(s), fewer than ${shard.count} shards; ` +
+        "a zero-work shard is not an established matrix",
+    );
+  }
+  const balanced = balanceFilesByDuration(candidates, manifest, shard.count);
+  const files = balanced[shard.index - 1];
+  return {
+    candidates,
+    files,
+    predictedDurationMs: files.reduce((sum, file) => sum + manifest.files[file], 0),
+  };
+}
+
 /** Separates a moving base's untiered files from files this branch introduced. An explicit base
  * is required for inheritance; without one the author-time check remains fail-closed. */
 export function inheritedUntieredFiles(missing, baseRef, root, spawn = spawnSync) {
@@ -215,6 +266,23 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
   const testFiles = listTestFiles(root);
   const baseRef = getFlagValue(argv, "--base");
 
+  const spawnTestFiles = (files) => {
+    const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts"];
+    const durationOutputRaw = env.RMD_TEST_DURATION_OUTPUT;
+    if (durationOutputRaw) {
+      const durationOutput = resolve(root, durationOutputRaw);
+      mkdirSync(dirname(durationOutput), { recursive: true });
+      testArgs.push(
+        "--test-reporter=tap",
+        `--test-reporter=${resolve(root, "scripts/test-duration-reporter.mjs")}`,
+        "--test-reporter-destination=stdout",
+        `--test-reporter-destination=${durationOutput}`,
+      );
+    }
+    const result = spawn(process.execPath, [...testArgs, ...files], { cwd: root, stdio: "inherit" });
+    return result.status ?? (result.signal ? 1 : 0);
+  };
+
   if (argv.includes("--record-evidence")) {
     const evidencePaths = getFlagValues(argv, "--record-evidence").map((path) => resolve(root, path));
     const output = getFlagValue(argv, "--output");
@@ -275,6 +343,44 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     return 0;
   }
 
+  const candidateMode = argv.includes("--select-candidates")
+    ? "select"
+    : argv.includes("--run-candidates")
+      ? "run"
+      : undefined;
+  if (candidateMode) {
+    const flag = candidateMode === "select" ? "--select-candidates" : "--run-candidates";
+    const candidatePath = getFlagValue(argv, flag);
+    const shard = parseShard(getFlagValue(argv, "--shard"));
+    if (!candidatePath || shard === undefined || shard === null) {
+      console.error(`test-tier-manifest: ${flag} requires <candidate-file> and --shard <index>/<count>`);
+      return 2;
+    }
+    try {
+      const selection = selectPlanReadingShard(
+        readFileSync(resolve(root, candidatePath), "utf8"),
+        testFiles,
+        manifest,
+        shard,
+      );
+      console.error(
+        "test-tier-manifest: plan-reading shard summary " +
+          `candidate_count=${selection.candidates.length} assigned_count=${selection.files.length} ` +
+          `predicted_duration_ms=${selection.predictedDurationMs} fallback=none shard=${shard.index}/${shard.count}`,
+      );
+      if (candidateMode === "select") {
+        console.log(selection.files.join("\n"));
+        return 0;
+      }
+      return spawnTestFiles(selection.files);
+    } catch (error) {
+      console.error(
+        `test-tier-manifest: plan-reading candidate selection refused — ${error && error.message ? error.message : String(error)}`,
+      );
+      return 1;
+    }
+  }
+
   const runTier = getFlagValue(argv, "--run");
   if (runTier !== undefined) {
     if (runTier !== "fast" && runTier !== "slow") {
@@ -300,24 +406,7 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       console.log(`test-tier-manifest: no ${runTier}-tier test files recorded yet — nothing to run.`);
       return 0;
     }
-    const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts"];
-    const durationOutputRaw = env.RMD_TEST_DURATION_OUTPUT;
-    if (durationOutputRaw) {
-      const durationOutput = resolve(root, durationOutputRaw);
-      mkdirSync(dirname(durationOutput), { recursive: true });
-      testArgs.push(
-        "--test-reporter=tap",
-        `--test-reporter=${resolve(root, "scripts/test-duration-reporter.mjs")}`,
-        "--test-reporter-destination=stdout",
-        `--test-reporter-destination=${durationOutput}`,
-      );
-    }
-    const result = spawn(
-      process.execPath,
-      [...testArgs, ...files],
-      { cwd: root, stdio: "inherit" },
-    );
-    return result.status ?? (result.signal ? 1 : 0);
+    return spawnTestFiles(files);
   }
 
   const { fast, slow } = tierFiles(testFiles, manifest);

@@ -1,0 +1,60 @@
+- id: W1-T3214
+  title: "A TASK RETIRED BETWEEN SELECTION AND EXECUTION RESTARTS THE WHOLE DAEMON — W1-T3195 was selected while queued, merged to blocked/retired before its lane entered runTask, assertRunnable threw an undifferentiated PlanError, and daemon classified that expected admission invalidation as fatal after its sibling had completed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  files: [src/lib/plan.ts, src/lib/daemon.ts, test/daemon.test.ts]
+  origin: "operator-session#queue-lag-retired-after-selection-2026-09-08"
+  plan_refs: ["W1-T197", "W1-T343", "W1-T976", "W1-T3122", "W1-T3165", "W1-T3195"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED IN THE AZURE DAEMON LOG AND CURRENT SOURCE. One dispatch batch selected W1-T3183 and
+    W1-T3195 from a plan revision where both were queued. Before the W1-T3195 lane entered
+    `runTask`, commit 7536941d changed W1-T3195 to `status: blocked` with `retirement: retired`.
+    `runTask` reloaded current origin/main, `assertRunnable` rejected the now-retired task, and the
+    daemon's settle-all classifier treated the plain `PlanError` as fatal. W1-T3183 still settled,
+    but the daemon returned an error, slept under its supervisor, and restarted instead of
+    continuing the queue. This is a freshness race between two individually correct reads, not
+    evidence that the selector admitted a task which was blocked at selection time.
+
+    Preserve fail-closed plan handling. A generic `PlanError` can mean malformed or inconsistent
+    plan data and must remain fatal. Give only `assertRunnable`'s expected not-runnable refusals a
+    typed subclass, classify that narrow type as an admission stand-down, and keep processing every
+    successful sibling in the batch. Exclude the invalidated task for the rest of the daemon run so
+    the already-loaded selector snapshot cannot immediately select it again before a normal plan
+    refresh or process replacement. Emit bounded telemetry naming the task and refusal reason.
+
+    This does not duplicate the overlapping daemon tasks. W1-T197 keeps a deliberate provider
+    headroom stop in process; W1-T976 reconciles a completed run with a pull request that merged
+    later; W1-T3165 degrades a positively classified transient GitHub transport rejection. None
+    distinguishes a current-plan admission refusal from corrupt plan data after a task was already
+    selected, and none excludes that newly invalidated id from the stale selector snapshot.
+  acceptance:
+    - claim: "assertRunnable refusals have a machine-readable type distinct from generic PlanError while preserving the existing message and exit behavior"
+      proof: "grep: class TaskAdmissionError extends PlanError in src/lib/plan.ts"
+    - claim: "when one concurrent lane succeeds and another rejects because its task became non-runnable, the successful sibling is processed and the daemon iteration does not return error or request a restart"
+      proof: "grep: a retired-after-selection lane stands down without losing its successful sibling in test/daemon.test.ts"
+    - claim: "a task invalidated after selection is excluded for the remainder of the daemon run, preventing a tight re-selection loop from a stale in-memory plan"
+      proof: "grep: an invalidated admission is not selected twice from one daemon plan snapshot in test/daemon.test.ts"
+    - claim: "an ordinary PlanError remains fatal, proving corrupt-plan failures were not broadly swallowed"
+      proof: "grep: an ordinary PlanError from a worker lane remains fatal in test/daemon.test.ts"
+    - claim: "the stand-down telemetry names the invalidated task and bounded reason"
+      proof: 'grep: daemon\.admission_stood_down in test/daemon.test.ts'
+  falsifier: |
+    Delete the typed admission classification and the mixed-lane test must return an error after the
+    not-runnable rejection. Delete the run-local exclusion and the selector stub must offer the
+    same invalidated id a second time. Replace the admission error with a plain PlanError and the
+    control must still return error. If current source already distinguishes this exact race while
+    meeting all three controls, close this task without implementation; checked at d67617cd and it
+    does not.
+  note: |
+    `rmd next-task-id --reserve` atomically RESERVED W1-T3214 at `refs/rmd-id/W1-T3214`; use the
+    reserved id even if the mint's advisory maximum moves. This task does not weaken any preflight,
+    mutate a retired task back to queued, or change selection eligibility. It narrows only the
+    daemon's response when freshness changes after selection.
