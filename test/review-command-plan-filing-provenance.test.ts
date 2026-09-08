@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,6 +9,7 @@ import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
 import { buildSweepEffects, reviewCommand, runReview } from "../src/run-task.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const HEAD_SHA = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
@@ -67,10 +68,9 @@ test("W1-T3115: buildSweepEffects's own PRODUCTION reviewRunner default is actua
   // fail fast at its very first side effect (`fetchView`), before materialize/runReview/post ever
   // run, so this drives the default's own three-line body without spawning a real review.
   const root = mkdtempSync(join(tmpdir(), "rmd-review-filing-default-runner-"));
-  const binDir = mkdtempSync(join(tmpdir(), "rmd-review-filing-fake-gh-"));
-  writeFileSync(join(binDir, "gh"), "#!/bin/sh\nexit 87\n", { mode: 0o755 });
+  const shim = ghShim([{ when: "", exit: 87 }], { kind: "review-filing-default" });
   const originalPath = process.env.PATH;
-  process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+  process.env.PATH = `${shim.dir}:${originalPath ?? ""}`;
   try {
     const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     const effects = buildSweepEffects(
