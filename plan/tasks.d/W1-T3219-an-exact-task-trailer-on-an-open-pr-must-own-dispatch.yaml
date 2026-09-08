@@ -1,0 +1,97 @@
+- id: W1-T3219
+  title: "AN EXACT TASK TRAILER ON AN OPEN PR MUST OWN DISPATCH — the status projection indexes open work only from a run-<taskId>-<digits> head, so the daemon knowingly rebuilt W1-T3212 as #4739 while the signed, reviewed implementation #4729 was still open"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - src/lib/status.ts
+    - test/an-open-trailered-build-owns-dispatch.test.ts
+  origin: "operator-session#queue-lag-duplicate-dispatch-2026-09-08"
+  plan_refs: ["W1-T377", "W1-T2397", "W1-T2429", "W1-T2491"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED INCIDENT, NOT INFERRED. PR #4729 was open with exact body trailer
+    `Remudero-Task: W1-T3212`, a signed implementation head, a successful remudero-review and
+    nearly-complete CI. Its branch was `run-W1-T3212-build`, which does not satisfy the narrower
+    `run-<taskId>-<digits>` parser. At 2026-09-08T22:44Z the Azure daemon printed that W1-T3212
+    already had open build #4729 and then printed `DISPATCHING ANYWAY`; it spent a second worker and
+    opened #4739. The two feature diffs have the same stable patch-id
+    `e65e2a19443d815f0f340528c477fb3fbdc0a826`. #4739 was closed as superseded after starting a
+    second full CI and review cycle. This is direct queue inflation and subscription waste.
+
+    THE OLD DECISION WAS CORRECT FOR THE EVIDENCE IT HAD AND DOES NOT COVER THIS SIGNAL. W1-T2397
+    measured a weak sibling predicate: prose naming plus declared-file overlap produced one true
+    duplicate and one false positive, so it deliberately warned and dispatched. Its fixtures carry
+    no exact trailer. W1-T2429 later added `runBranchClaimGap`, which already treats an anchored
+    trailer on an unclaimed OPEN branch as a distinct, deterministic fact, but explicitly left
+    enforcement to an operator ruling. The operator now requires RMD to own the whole PR queue and
+    stop manufacturing duplicate builds. An exact line-anchored task trailer is stronger than the
+    W1-T2397 heuristic and is already the authoritative merged-task identity surface.
+
+    THE OWNER TRANSFER REMOVES THE STRANDING ARGUMENT. Once an exact-trailered implementation PR is
+    open, the sweep owns progress: green goes to review/merge, red goes to the fix rung, conflict
+    goes to conflict repair, and terminally unsuitable work can be closed or escalated. Dispatching
+    a second builder is not recovery; it creates another PR for the same task and makes both slower.
+    Closing the first PR removes the open fact on the next bounded board refresh and makes the task
+    eligible again. The operator retains the existing manual close, merge and squash overrides.
+
+    THIS COSTS NO GITHUB REQUEST. `projectPlan` already receives every open PR body in
+    `listOpenHeadBranches()` from the batched board gateway. It currently groups those in-memory
+    rows only by `taskIdFromRunBranch(pr.headRefName)`. Indexing a second owner from the existing
+    exact trailer makes `corroborateOpenByBranch` return the same OPEN projection shape it already
+    returns for a conforming run branch. `isOpenPr` already refuses that projection. No new status,
+    classifier, file-list read, timer or daemon-side special case is needed.
+  design: |
+    (i) GROUP THE EXISTING OPEN BATCH BY TWO STRONG OWNERSHIP SURFACES. Preserve run-branch grouping
+    byte-for-byte. Additionally extract exactly one task id only from a full-line
+    `Remudero-Task:` trailer whose token satisfies `TASK_ID_TRAILER_RE`; group that PR under the
+    trailer id too. Deduplicate when branch and trailer name the same task.
+
+    (ii) REUSE THE EXISTING OPEN CORROBORATION RUNG. `corroborateOpenByBranch` must accept a row
+    already selected for this task by either strong surface, while still requiring GitHub state
+    OPEN and re-asserting that the row either owns the run branch or has this task's exact trailer.
+    It returns the existing OPEN projection shape so every current dispatch caller stands down
+    through `isOpenPr`; do not add a parallel eligibility predicate.
+
+    (iii) KEEP W1-T2397'S WEAK-SIGNAL DECISION. A foreign branch with only prose, title or file
+    overlap remains an observation and still dispatches. A plan filing without an exact trailer is
+    not credited. Prefix-sharing, malformed, mismatched, CLOSED and unreadable rows never create an
+    OPEN fact. A failed open-board read retains W1-T119's existing indeterminate refusal.
+
+    (iv) PROVE RELEASE AS WELL AS HOLD. The focused test drives `projectPlan` and the real
+    `nextRunnable`: #4729's exact-trailer/foreign-branch shape is projected OPEN and refused; remove
+    the trailer and the same row remains only W1-T2397's observation; change OPEN to CLOSED and the
+    task becomes runnable again. Count the injected list call to prove there is no second read.
+  acceptance:
+    - claim: "an OPEN PR on a nonconforming branch with an exact anchored Remudero-Task trailer is indexed under that task from the existing batched open-board rows"
+      proof: "unit test: test/an-open-trailered-build-owns-dispatch.test.ts"
+    - claim: "the resulting ordinary OPEN status projection makes the real nextRunnable refuse a second build of that task"
+      proof: "unit test: test/an-open-trailered-build-owns-dispatch.test.ts"
+    - claim: "a foreign branch carrying only prose, title or file overlap remains W1-T2397's warning-only case and does not gain dispatch authority"
+      proof: "unit test: test/an-open-trailered-build-owns-dispatch.test.ts"
+    - claim: "a missing, malformed, prefix-sharing or mismatched trailer and a CLOSED PR never manufacture an OPEN credit"
+      proof: "unit test: test/an-open-trailered-build-owns-dispatch.test.ts"
+    - claim: "closing the exact-trailered PR releases the task on the next projection, so recovery does not depend on a second builder or a staleness timer"
+      proof: "unit test: test/an-open-trailered-build-owns-dispatch.test.ts"
+    - claim: "the stronger ownership surface reuses the one existing open-board batch and adds no GitHub read, changed-files call or second dispatch predicate"
+      proof: "unit test: test/an-open-trailered-build-owns-dispatch.test.ts"
+    - claim: "deleting exact-trailer grouping reproduces the observed #4729 to #4739 duplicate-dispatch path and fails the focused fixture"
+      proof: "unit test: test/an-open-trailered-build-owns-dispatch.test.ts"
+  falsifier: |
+    Close without implementation if PR #4729 did not carry an exact anchored W1-T3212 trailer at
+    the head the daemon observed, if #4739's feature patch differs from #4729's, or if the current
+    projection already indexes open PR bodies as a dispatch-blocking task association. All three
+    were checked before filing: the body has the exact trailer; both feature diffs produce stable
+    patch-id e65e2a19443d815f0f340528c477fb3fbdc0a826; and origin/main e5465941 groups the open batch
+    only through `taskIdFromRunBranch`, while `runBranchClaimGap` remains report-only.
+  note: |
+    `W1-T3219` was atomically reserved at `refs/rmd-id/W1-T3219` before this shard was written. One
+    concern only: promote the existing exact-trailer OPEN fact into the existing dispatch ownership
+    projection. Review throughput, CI duration, general branch-shape enforcement and weak sibling
+    heuristics remain separate work.
