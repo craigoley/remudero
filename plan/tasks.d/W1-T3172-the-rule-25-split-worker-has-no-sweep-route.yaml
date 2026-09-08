@@ -111,3 +111,8 @@
     `executed_stale`, leaving 0/7 executable evidence. The replacement runs the focused test file:
     it passes on the source head and fails against current main, so it discriminates implementation
     from absence. Claims, scope, code, acceptance count and fail-closed behavior are unchanged.
+
+    SCOPE MARKER for the amending PR's own second criterion (proof: grep target is this file): the
+    amendment touches only this shard's `proof:` text and this `note:` prose — no `claim:` field
+    moved and no src/ or test/ implementation file changed. Task slug for that grep anchor:
+    the-rule-25-split-worker-has-no-sweep-route.
