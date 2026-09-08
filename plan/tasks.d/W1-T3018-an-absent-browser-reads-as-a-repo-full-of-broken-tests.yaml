@@ -24,7 +24,7 @@
     - test/serve.write-ack.test.ts
   origin: "operator-session#189-red-was-a-missing-chromium-2026-09-07"
   plan_refs: ["W1-T202", "W1-T1063", "W1-T1027", "W1-T1034", "W1-T2691"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS EXACT MISREADING IS ALREADY RECORDED IN THIS REPO, AND IT HAPPENED AGAIN ANYWAY.

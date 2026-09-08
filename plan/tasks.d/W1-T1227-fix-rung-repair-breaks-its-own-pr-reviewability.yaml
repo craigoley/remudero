@@ -145,7 +145,7 @@
     - claim: "the stand-down names the paths it observed and writes neither the PR body nor the task record"
       proof: "unit test: test/fix-rung-scope-standdown.test.ts"
   files: [src/run-task.ts, test/fix-rung-scope-standdown.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#fix-rung-repair-breaks-its-own-pr-reviewability-2026-08-23"
   plan_refs: ["W1-T297", "W1-T1116", "W1-T362", "W1-T322", "W1-T76"]

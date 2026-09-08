@@ -11,7 +11,7 @@
   files: [src/lib/retro.ts, test/a-recon-cannot-propose-its-own-task.test.ts]
   origin: "inbox#followup:W1-T2458-1788035402626:2026-08-29T20:33:15.794Z:0"
   plan_refs: ["W1-T2458", "W1-T2563", "W1-T2561", "W1-T2455", "W1-T190"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE PROPOSAL THAT PRODUCED THIS RECORD IS ITS OWN FIXTURE ────────────────────────────────

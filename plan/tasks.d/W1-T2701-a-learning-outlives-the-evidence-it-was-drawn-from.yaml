@@ -62,7 +62,7 @@
   origin: "oper#external-scan-2026-09-02"
   plan_refs: ["W1-T1248", "W1-T424", "W1-T2700", "W1-T2659", "W1-T86", "§8A", "§12"]
   files: [src/lib/learnings.ts, src/lib/retro.ts, src/lib/measurement-cadence.ts, test/learnings-provenance-gates.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — the learnings module, the retro and the measurement report

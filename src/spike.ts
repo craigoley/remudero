@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./lib/github-transport.js";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -70,7 +71,7 @@ async function main(): Promise<void> {
   if (!existsSync(repoDir)) {
     mkdirSync(dirname(repoDir), { recursive: true });
     log("CLONE", SANDBOX);
-    execFileSync("gh", ["repo", "clone", SANDBOX, repoDir], { stdio: "inherit" });
+    ghExec(["repo", "clone", SANDBOX, repoDir], { stdio: "inherit" });
   }
 
   // (a) worktree add
@@ -271,9 +272,7 @@ async function main(): Promise<void> {
   if (!prUrl) {
     log("PR FALLBACK", "no PR_URL in worker REPORT → orchestrator opens PR");
     assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${SANDBOX}`);
-    const out = execFileSync(
-      "gh",
-      ["pr", "create", "--repo", SANDBOX, "--base", "main", "--head", branch, "--fill"],
+    const out = ghExec(["pr", "create", "--repo", SANDBOX, "--base", "main", "--head", branch, "--fill"],
       { encoding: "utf8" },
     );
     prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];

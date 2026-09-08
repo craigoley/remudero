@@ -10,7 +10,7 @@
   origin: "followup#W1-T2477-1788105355034"
   plan_refs: ["W1-T367", "W1-T105", "W1-T2455", "§12"]
   files: [src/lib/retro.ts, test/retro.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE FIXTURE IS THE FOLLOW-UP THAT PRODUCED THIS TASK, and it is the fourth of its kind.

@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/entanglement-split-dispatches-a-worker.test.ts]
   origin: "operator-brief#entanglement-split-needs-a-worker-2026-08-28"
   plan_refs: ["W1-T1095", "W1-T2324", "W1-T2430", "W1-T503", "W1-T1213", "W1-T386", "W1-T419"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept before a byte of this file was written, controls from the ENUMERATED

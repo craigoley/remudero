@@ -64,7 +64,7 @@
   origin: feedback#followup-W1-T2474
   plan_refs: ["§7", "§5D"]
   files: [src/lib/status-board.ts, test/status-board.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED 2026-08-31 from the follow-up harvest of W1-T2474 (run W1-T2474-1788101371246, PR #3314).

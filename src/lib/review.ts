@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -5162,6 +5163,27 @@ export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
   // is a diff MOVING the instrument that judges it; here the instrument is introduced WITH the product it was
   // written to measure, and its ceiling only ever ratchets debt down from that first recording.
   "scripts/clock-signature-baseline.json",
+  // W1-T2901's sibling of the clock-signature entry, and it earns that entry's SECOND argument, not
+  // just its first. LEDGER, NOT FLOOR: a per-population CEILING on classes extending the built-in
+  // error type directly; raising a row records debt and cannot make a failing falsifier pass, which
+  // is the source-size argument. UNSATISFIABLE WITHOUT THE MIXTURE is the one that actually forces
+  // this entry: test/error-subclass-census.test.ts re-measures the REAL tree every run, so a PR that
+  // migrates one class onto the shared envelope changes the measured count in the same diff that
+  // moves the ceiling. The instrument-only PR rule 25 normally prescribes cannot exist here — it
+  // would record a count the tree does not have, and redden on its own.
+  "scripts/error-subclass-baseline.json",
+  // W1-T2896, same two arguments. This one is a GRANDFATHER LIST rather than a number: the
+  // bound-shaped constants not yet declaring BACKSTOP or PRIMARY CONTROL. Entries can only be
+  // REMOVED as constants are declared, so an edit here is monotonically tightening and cannot hide a
+  // product regression behind itself. Its census reads the measured tree, so the removal and the
+  // declaration that earns it are necessarily one diff.
+  "scripts/bound-kind-baseline.json",
+  // W1-T2896's second instrument, and the clearest case of the pair. It is a COUNT PINNED AT ZERO --
+  // direct gh spawns outside the one transport module -- so there is no direction in which it could
+  // be loosened without the number ceasing to be zero, which its own census would refuse. It is NEW
+  // in the diff that achieves zero: the centralisation IS what makes the count true, so the
+  // instrument cannot precede the product change even in principle.
+  "scripts/gh-transport-baseline.json",
 ]);
 
 /** DECLARATIONS WHOSE DATA HAS GRADING POWER OVER OTHER PRs. A changed line inside one counts as EXECUTABLE even when
@@ -5849,7 +5871,7 @@ export interface PostReviewStatusRetryOpts {
   backoffMs?: (failedAttempt: number) => number;
   /** Injectable sleep (tests skip real waiting). Default: a real `setTimeout`. */
   sleep?: (ms: number) => Promise<void>;
-  /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the real `execFileSync("gh", ...)` POST below. */
+  /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the real `ghExec(...)` POST below. */
   exec?: (args: string[], env: NodeJS.ProcessEnv) => void;
 }
 
@@ -5857,7 +5879,7 @@ export interface PostReviewStatusRetryOpts {
  *  same temp-dir fake-gh pattern `realArmDeps` tests use — rather than only exercising it through {@link
  *  postReviewStatus}'s injectable `exec`, which would leave this wrapper uncovered by the diff-coverage ratchet. */
 export function execGhStatusPost(args: string[], env: NodeJS.ProcessEnv): void {
-  execFileSync("gh", args, { stdio: "pipe", env, encoding: "utf8" });
+  ghExec(args, { stdio: "pipe", env, encoding: "utf8" });
 }
 
 /** The text a thrown `gh`/execFileSync error carries — stderr first, where `gh api`'s own "gh: <message> (HTTP
@@ -6180,11 +6202,11 @@ export interface PostReviewCommentDeps {
 /** Exported so a unit test can PATH-stub `gh` and drive this exact real invocation directly, mirroring {@link
  * execGhStatusPost}'s own reasoning: it keeps this one-line real wrapper covered by the diff-coverage ratchet. */
 export function execGhPrComment(prUrl: string, body: string): void {
-  execFileSync("gh", ["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
+  ghExec(["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
 }
 
 /** THE ONE POST SITE for a review-verdict PR comment (W1-T2419) — `runReview`'s only call path from here on,
- * replacing a bare `execFileSync("gh", ["pr", "comment", ...])`. Refuses to append when `body` is byte-identical to
+ * replacing a bare `ghExec(["pr", "comment", ...])`. Refuses to append when `body` is byte-identical to
  * the newest standing comment ({@link isDuplicateReviewComment}). Otherwise it posts exactly as the old call did,
  * best-effort failure contract included: a `gh` error is swallowed, status and ledger already carrying the verdict. */
 export function postReviewCommentGuarded(

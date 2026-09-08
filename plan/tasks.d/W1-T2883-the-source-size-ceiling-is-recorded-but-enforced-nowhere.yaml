@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§5C", "§8A", "W1-T2488"]
   files: [.github/workflows/ci.yml, .dependency-cruiser.cjs, scripts/source-size-baseline.json, scripts/source-size-ratchet.mjs, src/lib/ci-parity.ts, test/source-size-baseline-is-enforced.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Step 0 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; findings R-29,

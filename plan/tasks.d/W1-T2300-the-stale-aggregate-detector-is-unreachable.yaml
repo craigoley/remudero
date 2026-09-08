@@ -10,7 +10,7 @@
   files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, src/run-task.ts, test/rest-rollup-started-at.test.ts, test/stale-ci-gate-wiring.test.ts]
   origin: oper#stale-aggregate-detector-unreachable-2026-08-26
   plan_refs: ["W1-T457", "W1-T1066", "W1-T1275", "W1-T2299"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RE-DERIVED IN A SCRATCH WORKTREE PROVEN EQUAL TO origin/main at 6a0626bf. run-task.ts is over a

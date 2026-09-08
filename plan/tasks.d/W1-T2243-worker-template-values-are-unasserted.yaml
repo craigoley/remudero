@@ -10,7 +10,7 @@
   files: [src/lib/settings.ts, test/worker-settings-values.test.ts]
   origin: oper#unpinned-worker-template-2026-08-24
   plan_refs: ["W1-T439", "W1-T425"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ASYMMETRY IS REAL AND ITS SHAPE IS NARROWER THAN "THE TEMPLATE IS NOT PINNED".

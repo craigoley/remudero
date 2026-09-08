@@ -160,7 +160,7 @@
   origin: "feedback#fb-1785931542108-07f5d8"
   plan_refs: ["W1-T468", "W1-T529", "W1-T415", "W1-T522", "W1-T523"]
   files: [src/run-task.ts, src/lib/serve.ts, test/serve-board-pacer-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     REWIRED 2026-08-23 BY THE fb-1785931542108-07f5d8 TRIAGE, AND THE ORIGINAL ORIGIN IS PRESERVED

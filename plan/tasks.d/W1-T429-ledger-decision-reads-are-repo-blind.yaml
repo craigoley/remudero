@@ -48,7 +48,7 @@
   origin: oper#architecture-2026-08-11
   plan_refs: ["W1-T408", "W1-T403"]
   files: [src/lib/ledger.ts, src/lib/fleet-control.ts, src/run-task.ts, test/ledger-repo-scope.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — key scoping and both falsifier directions are fixture-decidable offline.
     risk:high — the files: span (ledger, fleet-control, their run-task wiring) is Rule 19's SPAN,

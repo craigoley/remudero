@@ -94,7 +94,7 @@
   origin: oper#daemon-watch-2026-08-06
   plan_refs: ["§4B", "W1-T312", "W1-T380"]
   files: [src/run-task.ts, test/check-wait-progress.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the predicate is pure over `RollupEntry[]`, so all three directions assert
     in-process with no network, no clock and nothing spawned.

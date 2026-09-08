@@ -70,7 +70,7 @@
   origin: oper#learning-system-research-2026-08-10
   plan_refs: ["§8A", "W1-T322", "W1-T352", "W1-T365"]
   files: [src/lib/knowledge-dedup.ts, src/lib/task-linter.ts, test/knowledge-dedup.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — similarity scores, refusal messages and severity routing are all
     fixture-decidable; the one judgment (the cutoff) is bound by design (ii) to a measurement the

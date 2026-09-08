@@ -71,7 +71,7 @@
   origin: feedback#fb-1785237559155-feef92
   plan_refs: ["§8A", "§9", "W1-T35", "W1-T253"]
   files: [src/lib/digest.ts, src/lib/status-board.ts, test/cache-hit-sensor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high is Rule 19's SPAN, not blast radius — `files:` crosses `src/lib` and `test/`, the

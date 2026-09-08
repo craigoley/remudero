@@ -10,7 +10,7 @@
   files: [src/run-task.ts, scripts/generate-cli-reference.mjs, docs/cli-reference.md, test/help-renders-a-summary-not-a-paragraph.test.ts, test/help-registry.test.ts]
   origin: "operator-brief#keep-going-2026-08-30"
   plan_refs: ["W1-T47", "W1-T48", "W1-T373"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE STRUCTURE IS ALREADY THERE AND IS RECOVERED BY A REGEX. `commandSyntax` (run-task.ts) is

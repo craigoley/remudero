@@ -11,7 +11,7 @@
   files: [deploy/install-container-runtime-mount-order.sh, docs/operator-guide.md, test/container-runtime-mount-order-install.test.ts]
   origin: "operator-session#azure-reboot-lost-fleet-2026-09-05"
   plan_refs: ["W1-T2204", "W1-T2555", "W1-T2585", "W1-T2671", "W1-T2833"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE HOST AFTER THE 2026-09-05 REBOOT. The prior boot was unclean. Docker

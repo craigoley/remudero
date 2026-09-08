@@ -101,7 +101,7 @@
   origin: oper#ruling-codebase-debt-2026-08-06
   plan_refs: ["W1-T219", "W1-T227", "W1-T183", "W1-T384"]
   files: [src/run-task.ts, src/lib/review.ts, CLAUDE.md, plan/claims.yaml, test/check-proof-executor-parity.test.ts, test/claims-check.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is an assertion over two executors' agreement on fixture proofs,
     decidable in-process with no operator present.

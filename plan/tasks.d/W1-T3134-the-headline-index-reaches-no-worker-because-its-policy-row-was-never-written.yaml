@@ -1,0 +1,74 @@
+- id: W1-T3134
+  title: "THE HEADLINE INDEX IS BUILT, WIRED, TESTED AND DARK — `workerRuleHeadlines` has no row in plan/policy.yaml, so config-schema's absent-row branch returns `{enabled: false}` and `buildRuleHeadlinesPart` returns \"\" on every spawn; a dispatched worker sees ZERO of CLAUDE.md's 56 rules, and the index that would give it all 56 headlines costs 7377 bytes"
+  repo: remudero
+  depends_on: []
+  type: investigate
+  verify: human
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [test/the-headline-index-is-dark.test.ts]
+  origin: "operator-session#context-modularization-2026-09-08"
+  plan_refs: ["W1-T2508", "W1-T2761", "W1-T2759"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 at origin/main (1ee2b5ff).
+
+    (1) THE MECHANISM SHIPPED. W1-T2508 built `parseRuleHeadlines` / `buildHeadlineIndex` /
+    `renderHeadlineOnlyIndex` / `retrieveRuleBodyOrDegrade` (src/lib/learnings.ts). W1-T2761 wired
+    the headline HALF into `implementPromptParts` as the named part `rule_headlines`
+    (src/lib/prompt-render.ts), fed by `buildRuleHeadlinesPart` (src/run-task.ts). Both merged.
+
+    (2) THE SWITCH WAS NEVER WRITTEN. `grep -n workerRuleHeadlines plan/policy.yaml` returns
+    NOTHING. `config-schema.ts`'s reader ends `: { enabled: false }` on the absent-row branch, so
+    the effective value is FALSE, and `buildRuleHeadlinesPart` returns "" for its `!enabled` guard.
+    The part renders empty on every spawn this fleet performs.
+
+    (3) WHAT THAT COSTS, BOTH DIRECTIONS. CLAUDE.md is 43685 bytes / 495 lines and parses to 56
+    rule bullets; `renderHeadlineOnlyIndex` over them is 7377 bytes — 16.9% of the file, matching
+    the "about 15%" its own docblock claims. A dispatched worker today receives a 433-byte doctrine
+    preamble and its matched learnings, and NO rule at all (W1-T2759's census, already registered
+    as the `worker-loads-no-claude-md` claim). So enabling this does not REDUCE a worker's context:
+    it ADDS ~7.4KB to a lane that currently pays zero. That is the honest framing and the reason
+    this is filed `investigate` rather than as a one-line policy edit.
+
+    (4) WHY A HUMAN RULES. W1-T2761's own rationale says the switch-over "would be the first time a
+    worker saw any rule at all — a decision the headline shard filed beside this one puts behind a
+    policy row and a wipe-test factor". The harness for that measurement already exists: run-task.ts
+    carries a RULES-factor `rmd wipe-test` arm B that suppresses the part even when the row is on.
+    The deliverable here is the A/B READING plus a ruling, not a flip.
+  design: |
+    (i) THE DARKNESS TEST. test/the-headline-index-is-dark.test.ts asserts, against the real tree:
+    the effective `workerRuleHeadlines.enabled` is false while no row exists; `buildRuleHeadlinesPart`
+    returns "" at that value; and it returns a non-empty index carrying all 56 headlines at `true`.
+    That makes the dark state a checkable fact rather than a claim, and it stays meaningful after
+    the ruling either way.
+
+    (ii) THE MEASUREMENT. Run the existing RULES-factor wipe-test both arms over a real task set and
+    report the delta in worker outcome, not in bytes alone. Bytes are already known (7377); what is
+    unknown is whether a worker that can see 56 headlines behaves differently.
+
+    (iii) THE RULING IS THE OPERATOR'S. Enabling grows every worker prompt fleet-wide. Filing this
+    `verify: auto` would invite a worker to flip a fleet-wide switch on its own reading.
+
+    (iv) OUT OF SCOPE. The cap, the learnings budget, the spawn options, and CLAUDE.md's own text.
+  acceptance:
+    - claim: "the dark state is asserted against the real tree — absent row, false value, empty part"
+      proof: "unit test: test/the-headline-index-is-dark.test.ts"
+    - claim: "the part carries every CLAUDE.md rule headline when the row is on, so the two arms differ"
+      proof: "unit test: test/the-headline-index-is-dark.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF THE ROW ALREADY EXISTS. Re-run before building:
+    `grep -n workerRuleHeadlines plan/policy.yaml`. A hit means another lane wrote the row and this
+    task was measured against a stale tree.
+
+    AND THE TEST MUST DISCRIMINATE ON THE FLAG, NOT ON THE FILE. Assert BOTH arms through
+    `buildRuleHeadlinesPart`'s `enabled` parameter over the SAME CLAUDE.md. A test that only asserts
+    "" would pass identically if the parser broke and returned nothing at either value.
+  note: |
+    FILED 2026-09-08. NO RESERVATION MINTED: every `refs/rmd-id/*` push from this container fails
+    (`send-pack: unexpected disconnect`, probed directly), the W1-T2203 lane class. The id came from
+    `rmd next-task-id`'s own next-free computation and was swept against all three surfaces —
+    reservation refs (highest reserved 3133), origin/main's plan, and every open PR's title/body/
+    head ref plus every open head's shard files — each with a positive control that fired.

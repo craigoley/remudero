@@ -88,7 +88,7 @@
   origin: recon#base-blob-misgrade-2026-08-13
   plan_refs: []
   files: [src/lib/review.ts, test/base-blob-read-failure.test.ts, test/review.test.ts, test/preexisting-proof-hits-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT, deliberately — a session had `sizingViolation`
     (`src/lib/task-linter.ts`) refuse a `medium` at three subsystems today. The band is Rule 19's

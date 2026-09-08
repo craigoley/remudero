@@ -83,7 +83,7 @@
     - claim: "the widened guard introduces no readability, length or vocabulary score"
       proof: "unit test: test/board-projection-is-guarded.test.ts"
   files: [src/lib/status-board.ts, test/board-projection-is-guarded.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#plain-language-surfaces-2026-09-04"
   plan_refs: ["W1-T2279", "W1-T2806", "W1-T2807", "W1-T2498"]

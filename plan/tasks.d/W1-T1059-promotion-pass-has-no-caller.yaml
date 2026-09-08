@@ -163,7 +163,7 @@
   origin: recon
   plan_refs: ["P32", "W1-T145", "W1-T146", "W1-T432", "§Self-improvement"]
   files: [src/lib/retro.ts, src/run-task.ts, test/learnings-promotion-caller.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high SET UP FRONT. Rule 19 sizing counts `src/lib/retro.ts` and `src/run-task.ts` as a

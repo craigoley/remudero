@@ -96,7 +96,7 @@
   origin: recon#nothing-backs-off-before-exhaustion-2026-08-15
   plan_refs: ["W1-T525", "W1-T522", "W1-T523", "W1-T527", "W1-T494"]
   files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, test/open-prs-rest.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently
     warranted: this makes the fleet REFUSE its own calls, so a floor set wrong does not fail loudly, it

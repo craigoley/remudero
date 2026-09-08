@@ -11,7 +11,7 @@
   origin: "retro-followup#3410"
   plan_refs: ["P63", "W1-T1227", "W1-T186", "W1-T2532"]
   files: [src/run-task.ts, test/a-deadlock-the-harness-cannot-count.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE OBSERVABILITY HALF OF P63, and the plan states the defect in one clause of its own:

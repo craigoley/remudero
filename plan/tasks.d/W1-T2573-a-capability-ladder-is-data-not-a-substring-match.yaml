@@ -11,7 +11,7 @@
   files: [src/lib/worker-provider.ts, src/lib/mounts.ts, test/a-capability-ladder-is-data-not-a-substring-match.test.ts]
   origin: "operator-session#codex-router-design-2026-09-01"
   plan_refs: ["W1-T167", "W1-T2572"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON MAIN, VERBATIM (src/lib/worker-provider.ts, `codexTierForRequestedModel`):

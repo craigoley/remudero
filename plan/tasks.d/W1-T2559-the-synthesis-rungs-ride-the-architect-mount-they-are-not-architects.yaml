@@ -10,7 +10,7 @@
   files: [.remudero/mounts.yaml, src/lib/config.ts, src/lib/mounts.ts, src/run-task.ts, test/synthesis-rungs-ride-their-own-mount.test.ts]
   origin: "operator-session#the-spend-census-2026-09-01"
   plan_refs: ["W1-T2560", "W1-T9b", "W1-T21"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE INVARIANT IS RIGHT AND IS NOT WHAT THIS CHANGES. G-17's Tier Invariant

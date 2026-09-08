@@ -11,7 +11,7 @@
   files: [src/lib/task-id.ts, test/an-advisory-id-from-a-stale-checkout-says-so.test.ts]
   origin: "operator-session#the-mint-printed-an-id-216-below-reality-2026-09-07"
   plan_refs: ["W1-T509", "W1-T2203", "W1-T2324", "W1-T278", "W1-T3016"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07, FROM THE OPERATOR'S OWN THREE CONSECUTIVE MINTS. Each printed:

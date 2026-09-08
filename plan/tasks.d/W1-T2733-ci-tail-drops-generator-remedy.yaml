@@ -13,7 +13,7 @@
     - test/ci-log-generator-remedy-retention.test.ts
   origin: "operator-session#pr-3716-generator-fix-miss-2026-09-02"
   plan_refs: ["W1-T2551", "W1-T2298", "W1-T1282"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PR #3716 HEAD 2ff348e5. ci-shard (3/4) printed

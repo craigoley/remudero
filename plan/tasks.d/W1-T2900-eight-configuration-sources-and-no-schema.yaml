@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§8", "§9"]
   files: [src/lib/config.ts, src/lib/config-schema.ts, src/lib/env.ts, test/config-schema.test.ts, test/env-var-registry.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-36 (OBSERVED). At f7ceb86, `validateConfig`

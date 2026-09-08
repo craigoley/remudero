@@ -101,5 +101,5 @@
       proof: "unit test: test/golden-verdicts.test.ts"
     - claim: "the two existing scope comparisons keep their current behaviour in both directions"
       proof: "unit test: test/scope-guard-review-direction.test.ts"
-  status: queued
+  status: merged
   attempts: 0

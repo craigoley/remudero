@@ -10,7 +10,7 @@
   origin: "followup#W1-T2481-1788113218856"
   plan_refs: ["§5C", "W1-T2481"]
   files: [scripts/citation-anchor-census.mjs, test/citation-anchor-census.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ONE REPAIRED CITATION ANSWERS NOTHING ABOUT THE REST. W1-T2648 fixes #3305's citation in

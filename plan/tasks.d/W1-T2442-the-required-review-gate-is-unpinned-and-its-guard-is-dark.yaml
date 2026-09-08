@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/required-gate-pin-precondition.test.ts]
   origin: "operator-brief#required-review-gate-unpinned-2026-08-28"
   plan_refs: ["W1-T203", "W1-T990", "W1-T2299"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces, anchored `W1-T2442([^0-9]|$)` with a `[0-9]` class and never a `\d`

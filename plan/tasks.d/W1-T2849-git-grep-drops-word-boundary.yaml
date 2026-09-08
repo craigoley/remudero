@@ -76,7 +76,7 @@
   origin: "oper#git-grep-word-boundary-2026-09-04"
   plan_refs: ["W1-T2622"]
   files: [CLAUDE.md, test/rule-15-16-filing-misattribution.test.ts, test/rule-citation-gate-engine-portable.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE FOURTH CRITERION IS ASSERTED BY TEST, NOT BY A NEGATIVE GREP. Its first draft greped for

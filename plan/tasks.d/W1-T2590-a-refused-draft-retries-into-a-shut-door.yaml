@@ -10,7 +10,7 @@
   files: [src/lib/inbox.ts, src/run-task.ts, test/a-refused-draft-waits-out-the-stated-window.test.ts]
   origin: "operator-brief#do-not-raise-the-cap-yet-2026-09-01"
   plan_refs: ["W1-T2564", "W1-T2561", "W1-T2569", "W1-T2515"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── WHY THIS IS A PREREQUISITE AND NOT A NICETY ─────────────────────────────────────────────

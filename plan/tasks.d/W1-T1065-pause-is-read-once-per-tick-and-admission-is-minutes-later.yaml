@@ -108,7 +108,7 @@
   origin: "oper#pause-missed-during-sweep-window-2026-08-20"
   plan_refs: ["W1-T11", "W1-T936", "W1-T343", "W1-T254"]
   files: [src/lib/daemon.ts, test/daemon-pause-before-admission.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE ALTERNATIVE HYPOTHESIS WAS TESTED AND REJECTED ON THE OPERATOR'S OWN NUMBERS, WHICH IS WHY

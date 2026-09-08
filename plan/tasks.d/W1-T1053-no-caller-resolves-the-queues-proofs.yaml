@@ -92,7 +92,7 @@
   origin: feedback#fb-1785794082507-130558
   plan_refs: ["W1-T488", "W1-T497", "W1-T369", "W1-T358", "W1-T305", "§5C"]
   files: [src/lib/proof-queue-audit.ts, src/run-task.ts, test/proof-queue-audit.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS SET UP FRONT — Rule 19 SPAN across src/ and test/, which `sizingViolation`
     (src/lib/task-linter.ts) blocks below that band. The blast radius argues LOWER: a new read-only verb

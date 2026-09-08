@@ -13,7 +13,7 @@
   files: [src/lib/dispatch-claim.ts, src/run-task.ts, scripts/source-size-baseline.json, learnings/failures.yaml, learnings/index.json, docs/troubleshooting.md, test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts, test/dispatch-claim.test.ts, test/dispatch-claim-evidence-reachability.test.ts, test/sandbox-subject-generator.test.ts]
   origin: "oper#dispatch-claim-liveness-2026-09-03"
   plan_refs: ["W1-T1268", "W1-T2446", "W1-T396", "W1-T2754"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE MEASURED INCIDENT. `refs/rmd-dispatch/W1-T2631` was minted `490780@5670f73af4f4` at

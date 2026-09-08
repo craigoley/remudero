@@ -135,7 +135,7 @@
     - claim: "refactoring the ordered call sites leaves every rewritten assertion green"
       proof: "unit test: test/wiring-ordering-behaviour.test.ts"
   files: [test/review.test.ts, test/arm-ordering.test.ts, test/arm-on-passing-verdict.test.ts, test/wiring-ordering-behaviour.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#source-text-ordering-locks-2026-08-24"
   plan_refs: ["W1-T359", "W1-T434", "W1-T1051", "W1-T2205"]

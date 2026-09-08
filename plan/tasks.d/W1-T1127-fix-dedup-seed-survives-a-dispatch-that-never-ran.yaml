@@ -119,7 +119,7 @@
     - claim: "a preflight stand-down is distinguishable from a failed dispatch on the disposed row"
       proof: "unit test: test/fix-dedup-seed.test.ts"
   files: [src/run-task.ts, test/fix-dedup-seed.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#fix-dedup-seed-asymmetry-2026-08-22"
   plan_refs: ["W1-T1110", "W1-T1116", "W1-T1109", "W1-T1117", "W1-T254", "W1-T1044"]

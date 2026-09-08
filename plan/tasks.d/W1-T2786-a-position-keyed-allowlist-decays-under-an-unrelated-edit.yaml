@@ -18,7 +18,7 @@
   files: [scripts/mkdtemp-callsite-check.mjs, hooks/mkdtemp-allowlist.txt, test/mkdtemp-allowlist-rekey.test.ts, test/mkdtemp-callsite-check.test.ts, learnings/testing.yaml, learnings/index.json]
   origin: "oper#mkdtemp-allowlist-position-key-2026-09-03"
   plan_refs: ["W1-T2773", "W1-T2775", "W1-T2784"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE KEY DECAYS; NOTHING FAILS. `hooks/mkdtemp-allowlist.txt` records each exemption as

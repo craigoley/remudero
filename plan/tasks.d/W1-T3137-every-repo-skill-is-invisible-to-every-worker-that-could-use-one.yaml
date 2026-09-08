@@ -1,0 +1,72 @@
+- id: W1-T3137
+  title: "EVERY REPO-OWNED SKILL IS INVISIBLE TO EVERY WORKER — `.claude/skills/` ships two skills and `describeWorkerSkillReachability` already returns reachable:false for the exact `settingSources` value `spawnWorker` passes, so the runtime's own progressive-disclosure primitive (name and description always loaded, body only on activation) is the one mechanism this fleet has and cannot use"
+  repo: remudero
+  depends_on: []
+  type: investigate
+  verify: human
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [test/a-repo-skill-no-worker-can-reach.test.ts]
+  origin: "operator-session#context-modularization-2026-09-08"
+  plan_refs: ["W1-T2759", "W1-T2761"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 at origin/main (1ee2b5ff).
+
+    (1) THE SKILLS EXIST. `.claude/skills/` carries `tddr` and `grfp`.
+
+    (2) THE FLEET ALREADY KNOWS THEY ARE UNREACHABLE, IN CODE. `describeWorkerSkillReachability`
+    (src/lib/skill-workshop.ts) returns reachable:false unless `settingSources` includes 'project',
+    and reads the REAL exported `WORKER_SETTING_SOURCES` rather than asserting a value of its own.
+    `spawnWorker` passes `[]`. The installed SDK's own sentence for that option — "Pass `[]` to
+    disable filesystem settings (SDK isolation mode). Must include `'project'` to load CLAUDE.md
+    files." — is the same isolation W1-T2759 pinned for CLAUDE.md.
+
+    (3) WHY IT MATTERS HERE AND NOT ELSEWHERE. A skill is progressive disclosure implemented by the
+    runtime: the name and description are always resident, the body loads only when the skill is
+    activated. That is precisely the shape W1-T2508 hand-built for CLAUDE.md's bullets. This fleet
+    is paying to reimplement, in prompt-assembly code, a primitive it already ships and cannot see.
+
+    (4) THE TWO ROUTES HAVE VERY DIFFERENT BLAST RADII, WHICH IS THE WHOLE RULING.
+      A. Add 'project' to `WORKER_SETTING_SOURCES`. One line, and it also loads
+         `.claude/settings.json`, `.claude/settings.local.json` and CLAUDE.md into every worker —
+         undoing the isolation this fleet chose deliberately and changing what every spawn reads.
+      B. Render skill names and descriptions into the prompt the way `rule_headlines` renders
+         headlines, leaving isolation intact and the body a file read away.
+    Route A is smaller to write and much larger to live with. Route B costs a prompt part.
+  design: |
+    (i) THE REACHABILITY TEST. test/a-repo-skill-no-worker-can-reach.test.ts asserts against the real
+    tree: `.claude/skills/` is non-empty, and `describeWorkerSkillReachability(WORKER_SETTING_SOURCES)`
+    returns reachable:false — reading the exported constant, never a literal. It must also assert the
+    function returns TRUE for `['project']`, so it discriminates on the value rather than always
+    reporting unreachable.
+
+    (ii) THE RULING. Route A or Route B above, decided by an operator with the blast radius stated.
+
+    (iii) IF ROUTE B: the part is shaped like `buildRuleHeadlinesPart` — policy-gated, degrading to
+    the full text rather than to "" when a description cannot be read, and named in
+    `implementPromptParts` so it is visible in the manifest rather than smuggled into another part.
+
+    (iv) NOT IN SCOPE. Writing new skills, the skill-workshop drafting lane, and any change to what
+    an INTERACTIVE session loads.
+  acceptance:
+    - claim: "a repo-owned skill is proven unreachable at the settingSources value the fleet actually spawns with, read from the exported constant"
+      proof: "unit test: test/a-repo-skill-no-worker-can-reach.test.ts"
+    - claim: "the same predicate reports reachable at 'project', so the assertion discriminates on the value instead of always failing"
+      proof: "unit test: test/a-repo-skill-no-worker-can-reach.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF `WORKER_SETTING_SOURCES` ALREADY INCLUDES 'project', or if
+    `.claude/skills/` is empty. Re-run both:
+    `grep -n 'settingSources: \[' src/lib/worker.ts` and `ls .claude/skills`.
+
+    AND DO NOT ASSERT THE LITERAL `[]`. Read `WORKER_SETTING_SOURCES`; a test that hard-codes the
+    value passes unchanged after someone edits the spawn, which is the exact regression it exists to
+    catch. `describeWorkerSkillReachability`'s own docblock says it is exported for this reason.
+  note: |
+    FILED 2026-09-08. NO RESERVATION MINTED — see W1-T3134's note.
+
+    verify:human because Route A changes what every dispatched worker reads, fleet-wide, and the
+    isolation it would undo was a deliberate choice this repo has pinned with a claim and a census
+    test. That is an operator ruling, not a worker's.

@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§7B", "P25"]
   files: [src/run-task.ts, src/lib/board-review.ts, test/board-review.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE EVIDENCE IS THIS DRAFT. Ratifying proposal `board-review:escalation:#3205` required stating what

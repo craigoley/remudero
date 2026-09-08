@@ -10,7 +10,7 @@
   files: [src/lib/containment.ts, src/lib/status.ts, test/containment-spawn-failure-class.test.ts]
   origin: oper#dead-probe-and-broken-boundary-share-one-verdict-2026-08-24
   plan_refs: ["W1-T238", "W1-T292", "W1-T1265", "W1-T1279", "W1-T1281", "W1-T2201"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main 52e03619 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

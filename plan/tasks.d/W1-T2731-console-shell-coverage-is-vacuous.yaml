@@ -11,7 +11,7 @@
   files: [src/lib/serve.ts, src/lib/console-shell-script.ts, test/console-shell-coverage-is-vacuous.test.ts]
   origin: "operator-session#plan-review-2026-09-02"
   plan_refs: ["W1-T153", "W1-T2489"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED AT origin/main 4d631f4c, WITH THE COVERAGE INSTRUMENT ITSELF. `renderShellHtml`

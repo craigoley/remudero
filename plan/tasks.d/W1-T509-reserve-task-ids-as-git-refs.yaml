@@ -101,7 +101,7 @@
   origin: recon#id-allocator-substrate-2026-08-15
   plan_refs: ["W1-T491", "W1-T471"]
   files: [src/lib/task-id-reservation.ts, src/run-task.ts, test/task-id-reservation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across two `src/` modules plus `test/`, so
     `sizingViolation` (`src/lib/task-linter.ts`) returns early before `subsystemsOf` is consulted.

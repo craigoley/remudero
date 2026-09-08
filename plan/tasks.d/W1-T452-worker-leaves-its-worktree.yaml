@@ -107,7 +107,7 @@
   origin: recon#worker-builds-in-checkout-2026-08-13
   plan_refs: ["W1-T445", "W1-T446"]
   files: [src/lib/self-sync.ts, test/worktree-verb-containment.test.ts, test/self-sync.test.ts, test/self-sync-branch-guard.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILES: CORRECTED WHEN CANDIDATE (b) WAS RULED (2026-08-13). `src/lib/env.ts` and
     `test/env.test.ts` were candidate (a)'s paths and are DROPPED, not touched to satisfy the list —

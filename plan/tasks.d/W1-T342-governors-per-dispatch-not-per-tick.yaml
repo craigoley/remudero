@@ -67,7 +67,7 @@
   origin: oper#build-daemon-parallelism-2026-08-04
   plan_refs: ["W1-T317", "W1-T321", "W1-T326"]
   files: [src/lib/daemon.ts, test/cost-governor.test.ts, test/daemon-plan-freshness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — admission decisions over injected readings, fully machine-checkable.
     risk:high — it changes how a SPEND ceiling admits work, on a gate with almost no production

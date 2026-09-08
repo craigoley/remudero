@@ -77,7 +77,7 @@
   origin: recon#sweep-enumeration-degradation-2026-08-15
   plan_refs: ["W1-T468", "W1-T394", "W1-T103"]
   files: [src/lib/open-prs-rest.ts, test/open-prs-rest.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: medium` IS SET UP FRONT and `sizingViolation` (`src/lib/task-linter.ts`) agrees:
     `subsystemsOf` folds `test/open-prs-rest.test.ts` onto `src/lib/open-prs-rest.ts`, so the span

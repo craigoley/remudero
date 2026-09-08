@@ -105,7 +105,7 @@
   # diff, and leaving them declared would both trip inverseScopeUntouchedFiles and serialise
   # this task against every other task that also names them (partitionByFileOverlap).
   files: [src/lib/sweep.ts, test/sweep.test.ts, test/review-status-gate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "CLOSES W1-T463's (#1750) CRITERION ONE. That shard asked whether the light sweep was broken
     before anyone built a per-kind budget on the same `runSweep`, disposition table and dedup — its own

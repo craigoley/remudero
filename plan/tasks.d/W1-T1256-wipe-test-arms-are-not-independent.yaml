@@ -118,7 +118,7 @@
     - claim: "the learnings-on arm is not always the arm that runs first"
       proof: "unit test: test/wipe-test-arm-isolation.test.ts"
   files: [src/lib/wipe-test.ts, src/run-task.ts, test/wipe-test-arm-isolation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#wipe-test-arms-are-not-independent-2026-08-23"
   plan_refs: ["W1-T1252", "W1-T1253", "W1-T534", "W1-T319"]

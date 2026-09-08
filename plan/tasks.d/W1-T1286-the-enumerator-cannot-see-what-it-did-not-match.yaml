@@ -10,7 +10,7 @@
   files: [src/lib/ledger-grep.ts, test/ledger-grep-unclassified.test.ts]
   origin: oper#enumerator-blind-to-unmatched-2026-08-23
   plan_refs: ["W1-T444", "W1-T1262"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     NO LEDGER FIGURE IS CLAIMED HERE. The archive count in the filing environment reads ZERO in all

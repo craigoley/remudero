@@ -10,7 +10,7 @@
   files: [src/lib/doctor.ts, src/run-task.ts, test/doctor.test.ts]
   origin: architect
   plan_refs: ["§9", "W1-T405", "W1-T1047", "W1-T2461", "W1-T2463"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE QUESTION THAT PRODUCED THIS FILING IS ALREADY ANSWERED, AND THE ANSWER IS BENIGN. A

@@ -10,7 +10,7 @@
   files: [test/an-import-sweep-sees-every-import-form.test.ts, test/mutation-ratchet.test.ts, test/task-linter.test.ts, test/cli-plumbing-extraction.test.ts]
   origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
   plan_refs: ["W1-T133", "W1-T180", "W1-T2524"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, NOT PREDICTED. On 2026-08-31, `test/mutation-ratchet.test.ts`'s importer sweep

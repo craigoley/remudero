@@ -56,7 +56,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T117", "W1-T322", "§4A"]
   files: [src/run-task.ts, src/lib/ledger.ts, test/worker-containment.test.ts, test/daemon.test.ts, test/ledger-rotation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — real-command wiring locks over process fixtures, in-process.
     risk:high — this arms a path that SIGNALS PROCESSES: wrong in the permissive direction it kills

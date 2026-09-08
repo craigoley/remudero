@@ -10,7 +10,7 @@
   files: [test/a-count-assertion-names-its-members.test.ts]
   origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
   plan_refs: ["W1-T2488", "W1-T2491"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED, NOT HYPOTHETICAL. #3331 (W1-T2488) and #3335 (W1-T2491) each added one entry to

@@ -10,7 +10,7 @@
   files: [src/lib/dispatch-overlap.ts, src/lib/drain.ts, src/lib/daemon.ts, test/observed-scope-wiring.test.ts]
   origin: oper#the-scope-corrector-is-built-and-unwired-2026-08-25
   plan_refs: ["W1-T2237", "W1-T2248", "W1-T2254", "W1-T2266", "W1-T1031"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (0) THE MEASUREMENT, AND THE HYPOTHESIS IT REFUTES.

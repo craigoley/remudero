@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-mentioned-claim-is-not-a-made-one.test.ts]
   origin: "operator-session#how-do-we-get-it-all-green-2026-08-31"
   plan_refs: ["W1-T274", "W1-T395", "W1-T413", "W1-T2533"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON #3388 — the PR whose entire subject is warning authors about this detector. Its

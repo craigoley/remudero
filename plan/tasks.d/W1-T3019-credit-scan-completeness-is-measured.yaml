@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, src/lib/status.ts, test/credit-scan-completeness-is-measured.test.ts, test/slug-branch-task-resolution.test.ts]
   origin: "operator-session#ledger-recon-2026-09-07"
   plan_refs: ["W1-T150", "W1-T119", "W1-T103", "W1-T2629"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON THE LIVE CORPUS 2026-09-07, union of the live ledger plus 297 rotations

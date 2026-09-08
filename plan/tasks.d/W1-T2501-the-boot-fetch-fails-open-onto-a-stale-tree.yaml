@@ -10,7 +10,7 @@
   files: [deploy/entrypoint.sh, test/the-boot-fetch-survives-a-transient-ref-lock.test.ts]
   origin: "operator-log#cannot-lock-ref-2026-08-30"
   plan_refs: ["W1-T1036", "W1-T496"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED TWICE, AND THE SECOND TIME ITS COST WAS VISIBLE TWO COMMANDS LATER. The boot fetch

@@ -53,7 +53,7 @@
   origin: azure-run-2026-08-08#empty-diff-success
   plan_refs: ["§8A"]
   files: [src/run-task.ts, src/lib/worker.ts, test/no-pr-verdict-commit-count.test.ts, test/no-pr-verdict-reason.test.ts, test/no-pr-verdict-report-excerpt.test.ts, test/no-pr-verdict-shape.test.ts, test/run-task.test.ts, test/already-satisfied-exit.test.ts, test/ledger-account-dimension.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "ALL THREE FIELDS GO ON THE VERDICT ROW, AND THE OBVIOUS PLACE FOR THE FIRST ONE IS WRONG.
     The brief that produced this task named `implement.done` as the row missing the commit count.

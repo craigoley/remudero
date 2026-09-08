@@ -59,7 +59,7 @@
   origin: oper#throughput-blockers-2026-08-03
   plan_refs: ["§9", "W1-T271"]
   files: [src/run-task.ts, test/dispatch-lifetime-breaker.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto - the whole behaviour is a predicate supplied to a dep object plus a ledger line,
     machine-checkable with no operator present.

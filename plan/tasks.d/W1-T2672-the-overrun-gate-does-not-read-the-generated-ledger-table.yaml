@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/the-overrun-gate-does-not-read-the-generated-ledger-table.test.ts]
   origin: "operator-session#baseline-bump-reads-as-overrun-2026-09-02"
   plan_refs: ["W1-T2547"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ANSWER IS ALREADY IN THE TREE, IN A TABLE BUILT FOR EXACTLY THIS. W1-T2547 added

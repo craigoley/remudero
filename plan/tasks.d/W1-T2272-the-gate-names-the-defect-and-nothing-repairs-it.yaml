@@ -94,7 +94,7 @@
     - claim: "an unchanged tree still stands the rung down after a body repair"
       proof: "unit test: test/acceptance-gate-body-repair.test.ts"
   files: [src/run-task.ts, test/acceptance-gate-body-repair.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#gate-names-the-defect-and-nothing-repairs-it-2026-08-25"
   plan_refs: ["W1-T516", "W1-T1254", "W1-T440"]

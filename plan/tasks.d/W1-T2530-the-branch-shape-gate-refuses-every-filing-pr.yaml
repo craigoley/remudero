@@ -10,7 +10,7 @@
   files: [scripts/worker-branch-shape.mjs, test/a-filing-is-not-a-build.test.ts]
   origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
   plan_refs: ["W1-T2491"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON THIS FILING ITSELF, within the hour W1-T2491 (#3335) merged. A plan-only branch

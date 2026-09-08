@@ -10,7 +10,7 @@
   origin: "operator-session#the-self-improvement-loop-has-been-dead-since-09-03"
   plan_refs: ["W1-T2993", "W1-T2988", "W1-T2875", "W1-T490", "W1-T1134"]
   files: [test/entrypoint-boot.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SELF-IMPROVEMENT LOOP HAS BEEN DEAD FOR THREE DAYS AND THIS IS WHY. `state/last-retro.json`

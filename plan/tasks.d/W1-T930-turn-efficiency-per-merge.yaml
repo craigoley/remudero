@@ -67,7 +67,7 @@
   origin: feedback#fb-1785237559155-feef92
   plan_refs: ["§9", "W1-T167", "W1-T250", "W1-T264"]
   files: [src/lib/retro.ts, test/turn-efficiency.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high is Rule 19's SPAN (src/lib + test/), the grade W1-T310's ruling settled for a src

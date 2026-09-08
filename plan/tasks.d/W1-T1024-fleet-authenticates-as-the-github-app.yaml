@@ -143,7 +143,7 @@
   origin: "oper#github-app-credential-2026-08-19"
   plan_refs: ["W1-T990", "W1-T204", "W1-T203", "W1-T492"]
   files: [src/lib/github-app.ts, src/run-task.ts, test/github-app.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — the declared paths reach

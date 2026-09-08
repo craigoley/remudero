@@ -11,7 +11,7 @@
   files: [CLAUDE.md, learnings/architecture.yaml, learnings/failures.yaml, learnings/index.json]
   origin: "operator-decision#w1-t2805-learnings-pass-2026-09-04"
   plan_refs: ["§8A", "W1-T2507", "W1-T33"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     SIX CORRECTIONS, EACH MEASURED THIS WEEK, EACH HAVING COST CYCLES. THREE OF THEM CORRECT TEXT

@@ -10,7 +10,7 @@
   files: [src/lib/status-board.ts, test/queue-head-names-a-circuit-broken-refusal.test.ts]
   origin: "operator-brief#circuit-breaker-refusal-has-no-filter-reason-2026-08-27"
   plan_refs: ["W1-T1205", "W1-T2249", "W1-T2335", "W1-T2413", "W1-T206", "W1-T280", "W1-T316"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base 880a49df, anchored `W1-T2415([^0-9]|$)` with a `[0-9]`

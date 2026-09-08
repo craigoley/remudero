@@ -92,7 +92,7 @@
   origin: oper#queue-order-2026-08-14
   plan_refs: ["W1-T431", "W1-T433", "W1-T425", "W1-T437"]
   files: [src/run-task.ts, src/lib/worker.ts, src/lib/analytics-route.ts, src/lib/serve.ts, test/analytics-route.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — both falsifier directions are fixture-decidable with throwaway state
     dirs; no fleet ledger is needed to build or test any of it. risk:high — the files: span

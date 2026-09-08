@@ -96,7 +96,7 @@
   origin: oper#undeclared-scope-2026-08-15
   plan_refs: ["W1-T476", "W1-T324", "W1-T245"]
   files: [src/lib/task-linter.ts, test/task-linter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the check is a pure predicate over a Task and its verdict is
     fixture-decidable with no I/O, no spawn and no network. risk:medium is Rule 19's SPAN and it

@@ -123,7 +123,7 @@
   origin: recon#board-fetch-truncation-2026-08-10
   plan_refs: ["W1-T119", "W1-T179", "W1-T181", "W1-T265"]
   files: [src/lib/open-prs-rest.ts, src/lib/status.ts, test/board-gateway-truncation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is decidable in-process against an injected `fetch` that returns
     synthetic pages. No network, nothing spawned, no operator present.

@@ -67,7 +67,7 @@
   origin: "oper#external-scan-2026-09-02"
   plan_refs: ["W1-T489", "W1-T2317", "W1-T2266", "W1-T2694", "W1-T2660", "§4", "§12"]
   files: [src/lib/authority.ts, src/run-task.ts, test/authority-table.test.ts, test/authority-ratchet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — a new module, the CLI and a ratchet over two gateway modules

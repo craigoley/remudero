@@ -96,7 +96,7 @@
   origin: recon#remudero-root-and-owner-2026-08-07
   plan_refs: ["§9", "§4"]
   files: [src/run-task.ts, src/lib/drain.ts, src/lib/plan.ts, test/owner-target-resolution.test.ts, test/owner-qualified-dispatch.test.ts, test/owner-self-host-gating.test.ts, test/owner-dispatch-threading.test.ts, test/owner-self-scoped-verbs-unchanged.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:human, and the reason is design (i), not the work. The schema question is an
     OPERATOR DECISION with three defensible answers, and `isDispatchEligible` refuses a task whose

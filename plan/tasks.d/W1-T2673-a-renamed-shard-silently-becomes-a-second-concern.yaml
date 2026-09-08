@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/a-renamed-shard-silently-becomes-a-second-concern.test.ts]
   origin: "operator-session#slug-match-is-unenforced-prose-2026-09-02"
   plan_refs: ["W1-T2525", "W1-T2543"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE COUPLING IS REAL AND INVISIBLE. `subsystemsOf` discounts a `test/` companion only when

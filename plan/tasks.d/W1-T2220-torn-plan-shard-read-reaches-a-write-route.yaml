@@ -151,7 +151,7 @@
     - claim: "an uncommitted working-tree edit is either still visible or its invisibility is stated, never silent"
       proof: "unit test: test/main-plan-load-guard.test.ts"
   files: [src/lib/plan.ts, test/main-plan-load-guard.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#torn-plan-shard-read-reaches-a-write-route-2026-08-24"
   plan_refs: ["W1-T404", "W1-T2212"]

@@ -13,7 +13,7 @@
     - scripts/source-size-baseline.json
   origin: "oper#feedback-landing-local-ack-2026-09-03"
   plan_refs: ["W1-T243", "W1-T530", "W1-T1054"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS CAUSED A FIVE-RESTART OUTAGE ON THE AZURE DAEMON. The boot checkout was at 653fbdd2 and

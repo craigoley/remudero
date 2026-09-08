@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§12", "W1-T2388"]
   files: [src/lib/fs-race-safe.ts, src/lib/ledger.ts, src/lib/deployer.ts, src/lib/github-event-wake.ts, src/lib/onboard/inventory.ts, src/lib/onboard/recon.ts, src/lib/onboard/session.ts, src/lib/onboard/synthesize.ts, test/write-atomic.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-39 (OBSERVED). At f7ceb86: `function writeFileAtomic` is private

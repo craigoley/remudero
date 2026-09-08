@@ -115,9 +115,17 @@ test("removing the exemption entry makes the ordinary-growth case refuse again",
   // UNSATISFIABLE without it, because that suite's own falsifiers read the MEASURED tree
   // (`scanClockSignatures()`) and assert the post-migration counts, so the instrument cannot be
   // landed alone in the instrument-only PR rule 25 normally prescribes.
-  assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.size, 4, "exactly four paths are exempt — a fifth would need its own reviewed reason");
-  assert.ok(
-    ENTANGLEMENT_EXEMPT_INSTRUMENTS.has("scripts/clock-signature-baseline.json"),
-    "the fourth entry is named, so a bare count bump cannot stand in for a reviewed path",
-  );
+  assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.size, 7, "exactly seven paths are exempt — an eighth would need its own reviewed reason");
+  // Each added path is named individually, so a bare count bump can never stand in for a reviewed
+  // one. The three added after clock-signature all earn ITS argument, not the knowledge-budget one:
+  // each census re-measures the real tree, so the instrument-only PR rule 25 normally prescribes
+  // would record a number the tree does not have and redden on its own.
+  for (const named of [
+    "scripts/clock-signature-baseline.json",
+    "scripts/error-subclass-baseline.json",
+    "scripts/bound-kind-baseline.json",
+    "scripts/gh-transport-baseline.json",
+  ]) {
+    assert.ok(ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(named), `${named} is named, so a bare count bump cannot stand in for a reviewed path`);
+  }
 });

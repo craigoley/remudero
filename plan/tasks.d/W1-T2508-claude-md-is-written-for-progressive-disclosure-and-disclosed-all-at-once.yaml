@@ -10,7 +10,7 @@
   files: [src/lib/learnings.ts, src/run-task.ts, test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts]
   origin: "operator-brief#pull-knowledge-out-of-claude-md-2026-08-30"
   plan_refs: ["W1-T2507", "W1-T35", "W1-T2506"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE FILE IS ALREADY IN THE SHAPE THE PATTERN REQUIRES AND NOBODY NOTICED. Progressive disclosure

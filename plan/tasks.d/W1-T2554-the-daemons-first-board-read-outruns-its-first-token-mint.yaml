@@ -10,7 +10,7 @@
   files: [src/lib/github-app.ts, src/run-task.ts, test/the-first-board-read-waits-for-the-first-mint.test.ts]
   origin: "operator-session#the-github-auth-outage-2026-09-01"
   plan_refs: ["W1-T2311", "W1-T2552"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS AN ORDERING DEFECT, NOT A CREDENTIAL ONE, AND THE DISTINCTION IS THE WHOLE TASK. The App

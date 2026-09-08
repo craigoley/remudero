@@ -110,7 +110,7 @@
   origin: "oper#pacer-opt-in-coverage-2026-08-18"
   plan_refs: ["W1-T468", "W1-T525", "W1-T529", "W1-T978"]
   files: [src/lib/status.ts, test/status.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     src/run-task.ts IS DELIBERATELY NOT DECLARED, AND DESIGN (i) IS WHY. All sixteen gateway

@@ -11,7 +11,7 @@
   files: [src/lib/replay-harness.ts, src/run-task.ts, test/the-golden-suite-has-every-piece-except-a-producer.test.ts]
   origin: "operator-session#dropped-findings-2026-09-02"
   plan_refs: ["W1-T165", "W1-T423", "W1-T2575"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED AT acde3777. `git grep 'replayGoldens('` over `src/` returns ONE hit, and it is

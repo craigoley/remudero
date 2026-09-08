@@ -84,7 +84,7 @@
   origin: oper#scope-guard-refusal-2026-08-11
   plan_refs: ["W1-T401", "W1-T405", "W1-T409"]
   files: [src/run-task.ts, src/lib/review.ts, test/scope-guard-overrun.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the push-site behavior is fixture-decidable with an injected push
     recorder, and the advisory section is a pure renderer. risk:high — the files: span

@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/review-wires-criteria-at-head.test.ts]
   origin: "oper#at-head-resolver-has-no-call-site-2026-08-29"
   plan_refs: ["W1-T2220", "W1-T2432"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RE-DERIVED IN A SCRATCH WORKTREE PROVEN EQUAL TO origin/main at d278e84d. THIS IS A WIRING TASK,

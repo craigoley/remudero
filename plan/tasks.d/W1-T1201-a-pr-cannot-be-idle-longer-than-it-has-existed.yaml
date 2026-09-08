@@ -105,7 +105,7 @@
     - claim: "the open pull request view carries the creation timestamp the clamp reads"
       proof: "unit test: test/sweep-age-clamp.test.ts"
   files: [src/lib/sweep.ts, src/run-task.ts, test/sweep-age-clamp.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#shifted-clock-closed-live-prs-2026-08-22"
   plan_refs: ["W1-T1104", "W1-T114", "W1-T1110"]

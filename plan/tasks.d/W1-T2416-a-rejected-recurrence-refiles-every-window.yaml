@@ -10,7 +10,7 @@
   files: [src/run-task.ts, src/lib/digest.ts, test/repair-filing-respects-prior-rejection.test.ts]
   origin: "feedback#fb-repair-blocked-fixable-2956"
   plan_refs: ["§7B", "W1-T905", "W1-T2231", "W1-T2381", "W1-T470", "W1-T494"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     FILED FROM fb-repair-blocked-fixable-2956, AND THE ENTRY'S OWN SUBSTANCE IS NOT WHAT IS FILED

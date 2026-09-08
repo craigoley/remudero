@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§4", "§12", "W1-T2263", "W1-T2304", "W1-T2284"]
   files: [src/lib/review.ts, test/the-downgrade-clause-has-a-writer.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS SHARD REPLACES ITS OWN ORIGINAL PREMISE, WHICH WAS MEASURED AND FOUND FALSE. It first

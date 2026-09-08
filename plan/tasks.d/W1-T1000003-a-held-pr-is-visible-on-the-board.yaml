@@ -58,7 +58,7 @@
   origin: feedback#fb-1785792944591-e0473c
   plan_refs: ["W1-T1000002"]
   files: [src/lib/status-board.ts, test/status-board.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk: medium — ONE subsystem by Rule 19's count (both declared paths share the `status-board`

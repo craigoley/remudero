@@ -104,7 +104,7 @@
   origin: oper#console-exposure-prereq-2026-08-14
   plan_refs: ["W1-T404", "W1-T495", "W1-T430"]
   files: [src/lib/serve.ts, src/lib/service.ts, src/lib/panel-actions.ts, test/serve-write-tier-wiring.test.ts, test/serve-write-errors.test.ts, test/panel-actions.test.ts, test/route-wiring.test.ts, test/skill-run-route-registered.test.ts, test/serve.test.ts, test/serve.find.test.ts, test/serve.live-state.test.ts, test/serve.shell-ux.test.ts, test/serve.write-ack.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS SET UP FRONT. `files:` spans src/ and test/, and `sizingViolation`
     (`src/lib/task-linter.ts`) blocks at >=2 subsystems below that band; it is independently

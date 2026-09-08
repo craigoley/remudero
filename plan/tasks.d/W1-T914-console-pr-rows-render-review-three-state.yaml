@@ -58,7 +58,7 @@
     - src/lib/serve.ts
     - src/lib/panel-graph.ts
     - test/console-review-three-state.test.ts
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-08-16 from feedback fb-1784901239119-1be356 (clause c). The mechanism half is W1-T913;
     fb-1784919225707-0fab8b is the same report restated and is covered by the pair.

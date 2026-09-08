@@ -10,7 +10,7 @@
   files: [scripts/mount-headroom-sweep.mjs, plan/policy.yaml, test/a-recorded-baseline-that-names-no-statistic-cannot-be-compared.test.ts]
   origin: "operator-session#lane-restore-unanswerable-2026-09-02"
   plan_refs: ["W1-T1049", "W1-T2557", "W1-T2560", "W1-T2668"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CONDITION IS ALREADY WRITTEN AND ALREADY UNANSWERABLE. `dispatchLanes`' own comment holds

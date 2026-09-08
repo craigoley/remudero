@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/fix-error-class-field.test.ts]
   origin: "operator-brief#fix-error-bucket-three-defects-2026-08-28"
   plan_refs: ["W1-T2441", "W1-T2443", "W1-T2440", "W1-T2402", "W1-T1127", "W1-T2383"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base 21def697, anchored `W1-T2444([^0-9]|$)` with a `[0-9]`

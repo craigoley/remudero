@@ -81,7 +81,7 @@
   origin: "recon#doctor-liveness-arm-cannot-see-dispatch-2026-08-21"
   plan_refs: ["W1-T1047", "W1-T1081", "W1-T1097", "W1-T450"]
   files: [src/lib/doctor.ts, test/doctor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a tag per declared path,

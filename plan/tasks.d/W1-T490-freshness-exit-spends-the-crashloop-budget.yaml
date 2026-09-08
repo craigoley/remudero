@@ -115,7 +115,7 @@
   origin: recon#freshness-exit-spends-crashloop-budget-2026-08-14
   plan_refs: ['W1-T483', 'W1-T126']
   files: [src/lib/daemon.ts, deploy/entrypoint.sh, test/daemon.test.ts, test/entrypoint-boot.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `files:` spans THREE subsystems — `src/lib/`, `deploy/` and
     `test/` — and `sizingViolation` (`src/lib/task-linter.ts`) blocks at >=2 below that band. The band

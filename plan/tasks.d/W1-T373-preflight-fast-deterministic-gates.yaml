@@ -90,7 +90,7 @@
       proof: "unit test: test/preflight-fast-mode.test.ts"
     - claim: "the cli-reference check is a ci-parity entry, so that mode is at parity with CI on it"
       proof: "unit test: test/ci-parity-contract.test.ts"
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is an assertion over an injected spawn recorder, with no operator
     present. It builds a mechanism and touches no DECISIONS.md, so W1-T353's verify:human requirement

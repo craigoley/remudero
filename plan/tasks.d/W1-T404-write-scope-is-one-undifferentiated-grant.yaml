@@ -218,7 +218,7 @@
   origin: recon#hosted-console-auth-2026-08-07
   plan_refs: ["§7", "§8"]
   files: [src/lib/service.ts, src/lib/serve.ts, src/lib/panel-actions.ts, src/lib/panel-graph.ts, src/lib/panel-skill-run.ts, src/lib/operator-notes.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/write-tier-enforcement.test.ts, test/write-tier-low-path.test.ts, test/write-tier-middle-tier.test.ts, test/write-tier-completeness.test.ts, test/write-tier-second-factor.test.ts, test/write-tier-migration-defaults-low.test.ts, test/service.test.ts, test/panel-actions.test.ts, test/tailnet-identity-scope.test.ts, test/api-client-drift-check.test.ts, test/api-client-client.test.ts, test/serve-prewarm-clientgate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "AMENDED 2026-08-11 — TWO OF THE THREE BLOCKING RULINGS ARE NOW RECORDED, AND THE PARK
     STAYS FOR THE THIRD. The prior note said to flip to auto once BOTH design (i) and design (iv)

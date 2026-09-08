@@ -10,7 +10,7 @@
   files: [src/lib/specialist-panel.ts, src/lib/inbox.ts, test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts]
   origin: "operator-brief#push-to-rmd-to-execute-when-ready-2026-08-30"
   plan_refs: ["W1-T2499", "W1-T190", "W2-T1"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS THE LAST RUNG AND THE ONLY ONE THAT COULD SPEND MONEY, SO ITS CONSTRAINTS ARE THE

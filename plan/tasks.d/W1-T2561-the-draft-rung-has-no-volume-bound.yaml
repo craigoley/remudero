@@ -10,7 +10,7 @@
   files: [src/lib/inbox.ts, src/run-task.ts, test/daemon-draft-batch-is-capped.test.ts]
   origin: "operator-brief#seven-hour-daemon-review-2026-09-01"
   plan_refs: ["W1-T2559", "W1-T2557", "W1-T2558", "W1-T192", "W1-T2458"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── WHAT THE SEVEN-HOUR REVIEW MEASURED ──────────────────────────────────────────────────────

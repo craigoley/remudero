@@ -110,7 +110,7 @@
     - claim: "the discriminating test drives the argument list and never a live gh"
       proof: "unit test: W1-T1208: the falsifier drives argv and spawns no subprocess"
   files: [src/lib/escalate.ts, src/run-task.ts, test/escalation-issue-list-rest.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#gh-version-split-on-operator-paths-2026-08-22"
   plan_refs: ["W1-T1101", "W1-T1134", "W1-T1095", "W1-T528", "W1-T349"]

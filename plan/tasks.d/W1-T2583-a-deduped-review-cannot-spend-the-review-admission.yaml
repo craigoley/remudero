@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/sweep.test.ts, test/review-admission-dedup.test.ts]
   origin: "operator-session#review-admission-dedup-2026-09-01"
   plan_refs: ["W1-T526", "W1-T1213", "W1-T2427", "W1-T2439"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED LIVE ON AZURE, 2026-09-01 19:29:34Z. PR #3512 derived `post-review` and won the

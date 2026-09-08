@@ -92,7 +92,7 @@
   origin: feedback#fb-1785969218105-99834b
   plan_refs: ["W1-T350", "W1-T202", "§7B"]
   files: [src/lib/serve.ts, test/serve.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is a DOM assertion against the served shell with an injected
     preview response (the serve suites already drive this control through open-shell); the pending

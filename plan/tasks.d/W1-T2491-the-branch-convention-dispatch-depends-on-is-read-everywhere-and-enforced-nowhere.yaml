@@ -10,7 +10,7 @@
   files: [src/lib/ci-parity.ts, scripts/worker-branch-shape.mjs, test/a-worker-branch-must-be-shaped-for-dispatch.test.ts]
   origin: "operator-brief#lean-into-automation-2026-08-30"
   plan_refs: ["W1-T444", "W1-T2488"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS CONVENTION IS LOAD-BEARING TWICE AND POLICED ZERO TIMES. `projectPlan` attributes an OPEN

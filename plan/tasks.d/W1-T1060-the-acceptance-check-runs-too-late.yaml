@@ -108,7 +108,7 @@
       proof: "unit test: acceptance gate: the refusal names the truncating bullet"
   origin: "oper#acceptance-check-runs-too-late-2026-08-20"
   plan_refs: ["W1-T952"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RULE 25 RE-DERIVED BY RUNNING THE REAL `INSTRUMENT_SURFACE` EXPORT, NOT BY READING IT, WITH FOUR

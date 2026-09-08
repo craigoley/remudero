@@ -97,7 +97,7 @@
   origin: "recon#ci-gate-holds-on-any-check-2026-08-22"
   plan_refs: ["W1-T261", "W1-T312", "W1-T1104", "W1-T1128"]
   files: [.github/workflows/ci-gate.yml, test/ci-gate-required-format.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — MEASURED, NOT ASSUMED:

@@ -10,7 +10,7 @@
   files: [scripts/plan-state-claims.mjs, test/plan-state-claims.test.ts]
   origin: oper#plan-state-claims-unexamined-2026-08-23
   plan_refs: ["W1-T409", "W1-T410"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     FULL COMPLIANCE WITH EITHER GATE FAILS THE OTHER, AND BOTH GATES ARE CORRECT.

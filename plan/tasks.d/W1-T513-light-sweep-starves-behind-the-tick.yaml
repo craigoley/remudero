@@ -169,7 +169,7 @@
   origin: recon#light-sweep-starves-behind-the-tick-2026-08-15
   plan_refs: ["W1-T511", "W1-T463", "W1-T471"]
   files: [src/lib/daemon.ts, src/lib/sweep.ts, test/daemon.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and the blast radius is
     genuinely high: the light pass is what posts every review, so a change that stalls or duplicates it

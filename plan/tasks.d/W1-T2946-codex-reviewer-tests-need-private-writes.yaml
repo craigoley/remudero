@@ -17,7 +17,7 @@
     - test/codex-reviewer-production-wiring.test.ts
   origin: "operator-session#codex-reviewer-tmpdir-read-only-2026-09-06"
   plan_refs: ["W1-T2748", "W1-T2868"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PR #4175 AT HEAD 8915d71053bac2fa5d6b8cca13ff35eebc822120: every GitHub

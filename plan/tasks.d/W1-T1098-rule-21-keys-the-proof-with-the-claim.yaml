@@ -122,7 +122,7 @@
   origin: "recon#rule-21-keys-proof-with-claim-2026-08-21"
   plan_refs: ["W1-T180", "W1-T1078", "W1-T1081", "W1-T1097"]
   files: [src/lib/task-linter.ts, test/task-linter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT AND RULE 19 DOES **NOT** FORCE IT — MEASURED: this shard lints

@@ -96,7 +96,7 @@
   origin: recon#pinned-base-sha-stale-red-2026-08-14
   plan_refs: ["W1-T474", "W1-T489"]
   files: [.github/workflows/main-plan-guard.yml, test/main-plan-load-guard.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `.github/workflows/` and `test/`. The blast
     radius is one new workflow that can only ever ADD a signal; it gates no merge and blocks no PR.

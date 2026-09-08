@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, test/a-corrected-title-reaches-the-worker.test.ts]
   origin: "operator-brief#frozen-title-is-the-prompt-2026-08-28"
   plan_refs: ["W1-T166", "W1-T399", "W1-T2427", "W1-T2433", "W1-T2254", "W1-T2375"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base def87848, anchored `W1-T2438([^0-9]|$)` with a `[0-9]`

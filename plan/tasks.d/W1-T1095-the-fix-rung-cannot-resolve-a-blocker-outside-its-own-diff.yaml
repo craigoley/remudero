@@ -130,7 +130,7 @@
   origin: "recon#fix-rung-cannot-reach-outside-its-diff-2026-08-21"
   plan_refs: ["W1-T507", "W1-T1079", "W1-T487", "W1-T307", "W1-T457", "W1-T923"]
   files: [src/run-task.ts, src/lib/sweep.ts, test/fix-rung-no-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, and it is also honest about size: this task

@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§12", "W1-T2523", "W1-T2790", "W1-T2805"]
   files: [src/lib/ci-parity.ts, test/census-discovery-is-blind-to-a-second-idiom.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS NOT "A FILE IS MISSED". Stated that way a reviewer accepts a one-line fix, and the

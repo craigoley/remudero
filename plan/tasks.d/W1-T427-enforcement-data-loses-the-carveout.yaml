@@ -70,7 +70,7 @@
   origin: oper#guard-complements-2026-08-11
   plan_refs: ["W1-T402", "W1-T29", "P48"]
   files: [src/lib/review.ts, test/enforcement-data-carveout.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the predicate, the reasons and the alarm are all fixture-decidable.
     risk:high — it changes what the reviewer EXEMPTS, and too wide a category taxes routine plan

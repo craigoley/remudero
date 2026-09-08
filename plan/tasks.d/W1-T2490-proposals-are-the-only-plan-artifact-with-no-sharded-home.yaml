@@ -10,7 +10,7 @@
   files: [src/lib/inbox.ts, src/lib/digest.ts, test/a-proposal-lands-as-its-own-reviewable-record.test.ts]
   origin: "operator-brief#agree-with-your-recommendations-2026-08-30"
   plan_refs: ["W1-T2477", "W1-T418", "W1-T2486"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE FLEET IS BEING TAUGHT TO GENERATE ITS OWN WORK AND THE ARTIFACT IT GENERATES IS THE ONE

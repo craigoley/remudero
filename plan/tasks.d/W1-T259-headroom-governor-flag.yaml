@@ -41,7 +41,7 @@
   origin: architect
   plan_refs: ["§4", "§9"]
   files: [src/lib/config.ts, src/lib/daemon.ts, src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high — it changes WHEN the fleet throttles itself. The failure direction is asymmetric, so the design
     keeps the library default (enforcement ON) unchanged and moves ONLY the live host to OFF via config/env — an

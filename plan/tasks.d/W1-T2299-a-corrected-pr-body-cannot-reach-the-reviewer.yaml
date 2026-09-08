@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, src/run-task.ts, test/review-body-edit-reoffer.test.ts]
   origin: oper#corrected-body-cannot-reach-the-reviewer-2026-08-26
   plan_refs: ["W1-T913", "W1-T1018", "W1-T1060", "W1-T456", "W1-T351"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RE-DERIVED AT origin/main b1ed96c1 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT. THE LEDGER WAS NOT

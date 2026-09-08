@@ -16,7 +16,7 @@
     - test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts
   origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
   plan_refs: ["W1-T326", "W1-T353", "W1-T418", "W1-T2957", "W1-T2958", "W1-T20c", "W1-T120"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE OPERATOR ASKED FOR A DAILY LOOP THAT FILES ITS OWN FINDINGS. Both halves are open, and the

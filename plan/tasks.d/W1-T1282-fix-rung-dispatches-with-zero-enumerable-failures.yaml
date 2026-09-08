@@ -115,7 +115,7 @@
     - claim: "the refused pass does not mark itself acted, so the disposition is not deduped away next pass"
       proof: "unit test: test/fix-rung-empty-failures-stand-down.test.ts"
   files: [src/run-task.ts, test/fix-rung-empty-failures-stand-down.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#renumber-and-narrow-2648-2026-08-23"
   plan_refs: ["W1-T1278", "W1-T1279", "W1-T984", "W1-T1269"]

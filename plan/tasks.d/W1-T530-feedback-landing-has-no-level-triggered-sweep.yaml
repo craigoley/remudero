@@ -106,7 +106,7 @@
   origin: feedback#fb-1784826522421-1d57e9
   plan_refs: ["§7B", "§2", "W1-T243", "W1-T191", "W1-T117", "W1-T60"]
   files: [src/lib/feedback-landing.ts, src/lib/daemon.ts, src/run-task.ts, test/feedback-landing-sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is decidable in-process: `landPending` already takes injectable
     `git`/`gh` seams (LandFeedbackOpts, the W1-T243 test seam `captureFeedback` threads as

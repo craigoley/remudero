@@ -113,7 +113,7 @@
   origin: recon#freshness-retry-pays-crash-throttle-2026-08-14
   plan_refs: ["W1-T490", "W1-T483", "W1-T496"]
   files: [deploy/entrypoint.sh, test/entrypoint-boot.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `files:` spans TWO subsystems — `deploy/` and `test/` — and
     `sizingViolation` (`src/lib/task-linter.ts`) blocks at >=2 below that band. The band is Rule 19's

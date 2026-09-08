@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/terminal-run-pins-a-job-non-terminal.test.ts]
   origin: oper#terminal-run-pins-a-job-non-terminal-2026-08-26
   plan_refs: ["W1-T2327", "W1-T180"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     WHY THIS TASK EXISTS AS A SEPARATE RECORD RATHER THAN AS AN EDIT. W1-T2327 is MERGED, and

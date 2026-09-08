@@ -107,7 +107,7 @@
   origin: feedback#fb-1785775974389-e25033
   plan_refs: ["§7B", "W1-T170", "W1-T505"]
   files: [src/lib/worker-home.ts, test/worker-home.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     TRIAGED, NOT RELAYED. The feedback asked for recon into "what creates a worker home's .claude.json,

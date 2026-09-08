@@ -47,7 +47,7 @@
   origin: architect
   plan_refs: ["§9"]
   files: [docs/account-selection.md, plan/policy.yaml]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the deliverable is a document with NAMED sections, so each criterion is a literal grep
     against an explicit path; nothing here needs a human to look at a screen, which is why this is not verify:human

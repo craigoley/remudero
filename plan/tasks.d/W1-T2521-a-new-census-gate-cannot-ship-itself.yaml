@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-new-census-gate-cannot-ship-itself.test.ts]
   origin: "operator-session#both-still-red-2026-08-30"
   plan_refs: ["W1-T402", "W1-T2488", "W1-T2491"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED TWICE IN ONE WEEK, ON TWO PRs THAT DIFFER ONLY IN A FILENAME.

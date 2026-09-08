@@ -10,7 +10,7 @@
   files: [deploy/serve-container.sh, src/lib/account-usage.ts, test/account-identity-is-readable.test.ts]
   origin: "operator-ruling#console-account-switch-piece-one-2026-08-28"
   plan_refs: ["W1-T266", "W1-T269", "W1-T270", "W1-T997", "W1-T333", "W1-T329"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS PIECE ONE OF A RULING, NOT A PROPOSAL. The operator has ruled for a console account

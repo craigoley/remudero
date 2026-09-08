@@ -90,7 +90,7 @@
   origin: feedback#fb-repair-blocked-ambiguous-2956
   plan_refs: ["§3", "§9"]
   files: [src/run-task.ts, src/lib/sweep.ts, test/strike-cap-cumulative.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-08-27 while grounding the board-review proposal board-review:escalation:#3043. EVIDENCE
     LIMIT, STATED RATHER THAN HIDDEN: the '3/2' string is read verbatim off plan/feedback/

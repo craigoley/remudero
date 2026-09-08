@@ -74,7 +74,7 @@
   origin: oper#build-daemon-parallelism-2026-08-04
   plan_refs: ["W1-T326", "W1-T265", "W1-T293"]
   files: [src/lib/worker-home.ts, test/worker-keychain-account.test.ts, test/worker-home.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — real concurrent calls against real files, machine-checkable without an operator.
     risk:high — it guards the credential path every dispatch depends on. Lock too widely and every

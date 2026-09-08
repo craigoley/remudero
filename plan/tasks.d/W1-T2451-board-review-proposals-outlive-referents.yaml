@@ -78,7 +78,7 @@
   origin: architect
   plan_refs: ["§7B", "§7", "P25"]
   files: [src/lib/board-review.ts, src/lib/inbox.ts, test/board-review-proposal-lifecycle.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "PROVENANCE: filed 2026-08-27 while drafting the ratification candidate for the board-review
     rung's own live proposal `board-review:escalation:#3039`. `origin: architect` because the schema's

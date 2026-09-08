@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, test/ledger-read-intent.test.ts]
   origin: oper#ledger-read-intent-2026-08-23
   plan_refs: ["W1-T444", "W1-T1013"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE RATIO IS STATED INDEPENDENTLY IN TWO MODULE DOCS. `src/lib/rule-efficacy.ts` reads the

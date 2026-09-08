@@ -135,7 +135,7 @@
     - claim: "a cancelled-check stand-down still records acted false and still avoids seeding the fix dedup"
       proof: "unit test: test/repair-filing-counts-invocations.test.ts"
   files: [src/lib/sweep.ts, test/repair-filing-counts-invocations.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#acted-as-a-spend-signal-2026-08-24"
   plan_refs: ["W1-T78", "W1-T254", "W1-T905", "W1-T1052", "W1-T1213", "W1-T1284"]

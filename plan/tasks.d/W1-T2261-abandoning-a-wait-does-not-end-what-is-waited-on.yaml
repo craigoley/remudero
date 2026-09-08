@@ -106,7 +106,7 @@
     - claim: "a teardown seam that throws leaves the rung's verdict unchanged rather than propagating into it"
       proof: "unit test: test/abandon-reclaims-the-worker.test.ts"
   files: [src/run-task.ts, src/lib/worker-containment.ts, test/abandon-reclaims-the-worker.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#abandon-does-not-end-the-spawn-2026-08-25"
   plan_refs: ["W1-T1044", "W1-T1274", "W1-T1067", "W1-T117"]

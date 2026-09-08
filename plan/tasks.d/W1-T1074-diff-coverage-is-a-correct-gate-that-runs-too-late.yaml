@@ -136,7 +136,7 @@
     - claim: "the fast mode still shells no test suite once the coverage mode exists"
       proof: "unit test: test/preflight-coverage-mode.test.ts"
   files: [src/run-task.ts, src/lib/ci-parity.ts, test/preflight-coverage-mode.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: recon#diff-coverage-runs-too-late-2026-08-20
   plan_refs: ['W1-T373', 'W1-T294', 'W1-T221', 'W1-T1060', 'W1-T471']

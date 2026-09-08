@@ -10,7 +10,7 @@
   files: [src/lib/auto-triage.ts, src/lib/retro.ts, src/run-task.ts, test/intake-triggers-read-their-own-depth.test.ts]
   origin: oper#intake-triggers-never-ask-how-much-is-waiting-2026-08-25
   plan_refs: ["W1-T469", "W1-T475", "W1-T160", "W1-T1259", "W1-T2288"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main 41405563 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

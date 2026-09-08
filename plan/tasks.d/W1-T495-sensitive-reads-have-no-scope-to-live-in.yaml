@@ -91,7 +91,7 @@
   origin: oper#console-exposure-step2-2026-08-14
   plan_refs: ["W1-T493", "W1-T431", "W1-T430", "W1-T404"]
   files: [src/lib/service.ts, test/read-sensitivity-gate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS SET UP FRONT. `files:` spans two subsystems (src/, test/) and
     `sizingViolation` (src/lib/task-linter.ts) blocks at >=2 below high; the band is Rule 19's SPAN,

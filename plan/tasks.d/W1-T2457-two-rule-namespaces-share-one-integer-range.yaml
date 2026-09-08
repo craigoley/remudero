@@ -10,7 +10,7 @@
   files: [MASTER-PLAN.md, CLAUDE.md, test/rule-citations-match-their-rule.test.ts]
   origin: "recon#rule-namespace-collision-2026-08-29"
   plan_refs: ["W1-T2456", "W1-T2455", "W1-T2279"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces at base f3f9ca76, anchored `W1-T2457([^0-9]|$)` with a `[0-9]` class and

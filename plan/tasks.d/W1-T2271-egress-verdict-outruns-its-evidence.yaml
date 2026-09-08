@@ -10,7 +10,7 @@
   files: [src/lib/containment.ts, test/egress-evidence-discriminates.test.ts]
   origin: oper#egress-verdict-outruns-its-evidence-2026-08-25
   plan_refs: ["W1-T1265", "W1-T1289", "W1-T2201", "W1-T2238", "W1-T2249"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main cd60cdb9 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

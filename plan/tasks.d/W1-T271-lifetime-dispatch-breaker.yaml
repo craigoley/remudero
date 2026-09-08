@@ -46,7 +46,7 @@
   origin: architect
   plan_refs: ["§9"]
   files: [src/lib/status.ts, src/lib/drain.ts, src/lib/ledger.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the whole behaviour is a pure function over ledger lines plus one predicate, both
     machine-checkable with no operator present.

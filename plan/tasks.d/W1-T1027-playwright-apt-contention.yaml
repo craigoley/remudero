@@ -128,7 +128,7 @@
   origin: recon#playwright-apt-contention-2026-08-19
   plan_refs: ["W1-T1009", "W1-T153", "W1-T255"]
   files: [.github/workflows/ci.yml, test/workflow-job-timeouts.test.ts, test/workflow-playwright-install.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) exempts only
     `risk === 'high'` and returns clean only below two subsystems, and `files:` spans `.github/`

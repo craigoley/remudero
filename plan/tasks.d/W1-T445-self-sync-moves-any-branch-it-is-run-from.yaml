@@ -81,7 +81,7 @@
   origin: recon#self-sync-moved-a-branch-2026-08-12
   plan_refs: ["W1-T79", "W1-T221"]
   files: [src/lib/self-sync.ts, test/self-sync-branch-guard.test.ts, test/self-sync.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — design (ii) leaves ONE choice open and states why (a) is the floor, which is an
     engineering argument rather than a policy the plan withheld.

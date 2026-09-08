@@ -10,7 +10,7 @@
   files: [src/lib/autonomy.ts, src/run-task.ts, test/an-outcome-metric-reports-per-repo.test.ts]
   origin: "operator-brief#self-improves-any-repo-it-is-assigned-to-2026-08-30"
   plan_refs: ["W1-T437", "W1-T403", "W1-T1062"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CAPABILITY IS BUILT AND THE FEEDBACK LOOP IS NOT, WHICH IS THE WRONG HALF TO BE MISSING.

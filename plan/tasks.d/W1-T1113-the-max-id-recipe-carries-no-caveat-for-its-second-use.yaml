@@ -80,7 +80,7 @@
   origin: feedback#fb-1785860405044-c77b60
   plan_refs: ["§8A", "W1-T503", "W1-T488"]
   files: [CLAUDE.md, scripts/claude-md-budget-baseline.json, test/claude-md-budget-ratchet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED FROM feedback#fb-1785860405044-c77b60 (part 1 of 2). Part 2, the commitlint title-edit

@@ -48,7 +48,7 @@
   origin: architect
   plan_refs: ["§5"]
   files: [src/lib/review.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a pure comparison of two values judgeReview already computes.
     risk:medium — ONE subsystem by Rule 19's count (review). It is a BLOCKING verdict, which argues upward,

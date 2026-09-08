@@ -129,7 +129,7 @@
   origin: recon#coverage-tier-two-2026-08-13
   plan_refs: []
   files: [src/lib/coverage-improvement.ts, src/run-task.ts, src/lib/feedback.ts, src/lib/ledger.ts, .github/workflows/ci.yml, test/coverage-improvement.test.ts, test/coverage-ratchet.test.ts, test/ledger-rotation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
     `>=2 subsystems while risk<high`, and `files:` spans `src/lib/`, `.github/workflows/` and

@@ -75,7 +75,7 @@
   origin: "oper#host-update-tmp-collision-2026-09-04"
   plan_refs: ["W1-T2773", "W1-T2775"]
   files: [deploy/host-update.sh, test/host-update-tmp-paths.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE FOURTH CRITERION WAS REWRITTEN BEFORE FILING AND THE FIRST DRAFT WAS WRONG. It began as a

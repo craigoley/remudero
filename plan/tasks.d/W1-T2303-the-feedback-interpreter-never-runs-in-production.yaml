@@ -87,7 +87,7 @@
   origin: feedback#fb-1785969338913-dc3d0f
   plan_refs: ["W1-T350", "W1-T2206", "W1-T348", "§7B"]
   files: [src/run-task.ts, src/lib/feedback.ts, test/serve-command-boot.test.ts, test/panel-graph.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify:auto — the wiring is assertable at boot with an injected spawn

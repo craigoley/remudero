@@ -90,7 +90,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/review-status-pending.test.ts
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-08-16 from feedback fb-1784901239119-1be356. fb-1784919225707-0fab8b (2026-07-24T18:53Z)
     is the SAME report restated and is covered by this filing plus W1-T914 — it is named here so a later

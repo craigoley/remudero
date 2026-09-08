@@ -12,7 +12,7 @@
     - test/serves-key-mount-is-a-snapshot-of-a-sibling-container.test.ts
   origin: "operator-session#three-misattributions-of-one-environment-refusal-2026-09-07"
   plan_refs: ["W1-T2834", "W1-T2778"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     NEITHER THE SCRIPT NOR THE SUITE IS WRONG. THE FIXTURE IS, IN TWO PLACES, AND BOTH REMEDIES

@@ -1,0 +1,76 @@
+- id: W1-T3136
+  title: "THE ONLY LANE THAT PAYS FOR CLAUDE.md IN FULL IS THE ONE THE PROGRESSIVE-DISCLOSURE SPLIT WAS NEVER APPLIED TO — interactive sessions load all 43685 bytes at 99.3% of the 44000-byte cap and 495 lines against Anthropic's own \"target under 200\", while the headline/body split built for workers would render the same corpus as a 7377-byte index with bodies read on demand"
+  repo: remudero
+  depends_on: []
+  type: investigate
+  verify: human
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [test/the-interactive-lane-pays-the-whole-file.test.ts]
+  origin: "operator-session#context-modularization-2026-09-08"
+  plan_refs: ["W1-T2759", "W1-T2508", "W1-T2507", "W1-T2282"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 at origin/main (1ee2b5ff).
+
+    (1) THE LANE THAT PAYS. W1-T2759 established and registered (`worker-loads-no-claude-md`) that
+    `spawnWorker` passes `settingSources: []` and no dispatched worker loads CLAUDE.md. What it
+    left standing is that INTERACTIVE sessions in this checkout load all 43685 bytes, every session.
+    `node scripts/claude-md-budget-ratchet.mjs` reads 43685 against a cap of 44000 — 99.3% spent,
+    315 bytes of headroom. The file is 495 lines; Anthropic's memory guidance targets under 200 per
+    file and states longer files "consume more context and reduce adherence".
+
+    (2) THE SPLIT ALREADY EXISTS AND POINTS THE OTHER WAY. `parseRuleHeadlines` splits this file's
+    own `- **HEADLINE** body` bullets — 56 of them — and `renderHeadlineOnlyIndex` renders 7377
+    bytes, 16.9% of the whole. W1-T2761 wired that index toward WORKERS, the lane whose cost is
+    zero. Nobody has applied it to the lane whose cost is the entire file.
+
+    (3) THE TRAP THAT MAKES THIS NON-OBVIOUS. Claude Code's `@path` import is expanded at session
+    start, so an "@-import everything" refactor moves bytes between files and saves NOTHING — the
+    same total is still resident. The saving comes only from NOT importing: headlines inline in
+    CLAUDE.md, bodies in files a session opens when it needs one. Any design that reaches for
+    imports as the mechanism has misread where the cost is, and this shard exists partly to record
+    that so the next reader does not rediscover it by shipping it.
+
+    (4) WHY THE CAP CANNOT ABSORB THIS. Raising the cap is available and is the wrong lever twice
+    over: it is the ratchet this repo built to refuse exactly that, and it does not reduce what a
+    session loads. The cap is the forcing function, not the problem.
+  design: |
+    (i) THE MEASUREMENT TEST. test/the-interactive-lane-pays-the-whole-file.test.ts pins the three
+    numbers this ruling turns on, read from the real tree: the file's byte size against the ratchet's
+    cap, the parsed headline count, and `renderHeadlineOnlyIndex`'s size as a fraction. It fails
+    when the ratio moves materially, so the premise re-verifies rather than aging into prose.
+
+    (ii) THE RULING TO PUT TO AN OPERATOR. Whether CLAUDE.md becomes a headline index plus bodies
+    under a docs path read on demand, and if so which sections move first. Candidate order by size,
+    not by importance, is a fact the test above can produce.
+
+    (iii) WHAT MUST NOT REGRESS. Every rule stays reachable by a session that needs it, and the
+    headline text stays byte-identical to today's — W1-T2508's own invariant is that headline plus
+    body reproduces the source bullet exactly, so a move that alters wording is out of scope.
+
+    (iv) NOT IN SCOPE. The worker lane (W1-T3134 rules on that), the Codex lane (W1-T3135), the
+    learnings budget, and any cap change.
+  acceptance:
+    - claim: "the interactive lane's cost is pinned as a measured fact — file size against cap, headline count, and index fraction"
+      proof: "unit test: test/the-interactive-lane-pays-the-whole-file.test.ts"
+    - claim: "the split's saving is asserted against the real corpus rather than assumed, so a corpus that stopped splitting cleanly is caught"
+      proof: "unit test: test/the-interactive-lane-pays-the-whole-file.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF THE PREMISE HAS MOVED. Re-run before building:
+    `node scripts/claude-md-budget-ratchet.mjs` and re-derive the headline fraction. If a compaction
+    has taken the file well under its cap, the pressure this task names is gone and it should be
+    closed rather than built.
+
+    AND THE TEST MUST NOT BE A TAUTOLOGY. Deriving the index from CLAUDE.md and then asserting it is
+    smaller than CLAUDE.md proves nothing — that is true by construction. Assert the FRACTION against
+    a named threshold, and prove the assertion bites by feeding a fixture corpus whose bullets carry
+    no bodies, where the fraction approaches 1.
+  note: |
+    FILED 2026-09-08. NO RESERVATION MINTED — see W1-T3134's note.
+
+    type:investigate AND verify:human because the deliverable is a ruling on this repo's most
+    contested file. A worker given `implement` would restructure CLAUDE.md on its own reading, and
+    every rule in it exists because someone lost a cycle to its absence.

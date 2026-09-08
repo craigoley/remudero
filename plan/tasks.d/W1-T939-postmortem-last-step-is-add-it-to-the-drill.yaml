@@ -70,7 +70,7 @@
   origin: feedback#fb-1785237583569-3304ae
   plan_refs: ["§5D", "W1-T50", "W1-T366", "W1-T938", "W1-T418"]
   files: [src/lib/review.ts, src/lib/learnings.ts, learnings/failures.yaml, test/drill-coverage-rubric.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify:auto — every claim is an assertion over the rubric's verdict against synthetic diffs. No

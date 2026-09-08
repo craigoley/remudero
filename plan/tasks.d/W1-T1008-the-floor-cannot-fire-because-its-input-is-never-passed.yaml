@@ -111,7 +111,7 @@
   origin: "oper#floor-unreachable-2026-08-18"
   plan_refs: ["W1-T529", "W1-T1005", "W1-T1007", "W1-T525"]
   files: [src/lib/open-prs-rest.ts, test/open-prs-rest.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THIS SHARD SERIALISES AGAINST W1-T1007 AND THAT IS ACCEPTED IN WRITING. W1-T1007 declares

@@ -10,7 +10,7 @@
   files: [scripts/comment-load-ratchet.mjs, package.json, test/recording-a-ceiling-does-not-depend-on-reading-prose.test.ts]
   origin: "operator-session#the-pr-board-is-very-red-2026-08-31"
   plan_refs: ["W1-T2488", "W1-T2521", "W1-T2526"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     FILED AFTER ITS OWN MITIGATION SHIPPED, DELIBERATELY. #3377 and #3388 both carry

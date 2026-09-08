@@ -10,7 +10,7 @@
   files: [deploy/recycle-container.sh, test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts]
   origin: "operator-session#recycle-refused-on-healthy-work-2026-09-01"
   plan_refs: ["W1-T312", "W1-T380", "W1-T382", "W1-T1046", "W1-T2555", "W1-T2556"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE FILE CONTAINS ITS OWN CORRECTION AND DOES NOT APPLY IT. `WAIT_SECONDS` reads

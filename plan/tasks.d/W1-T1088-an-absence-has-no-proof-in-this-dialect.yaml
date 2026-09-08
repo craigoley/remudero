@@ -86,7 +86,7 @@
   origin: feedback#fb-1785853266240-841899
   plan_refs: ["§5C", "W1-T277", "W1-T326", "W1-T488"]
   files: [src/lib/proof-grammar.ts, test/proof-grammar.test.ts, CLAUDE.md]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED FROM feedback#fb-1785853266240-841899 (part 1 of 2; part 2 is W1-T1089, a different

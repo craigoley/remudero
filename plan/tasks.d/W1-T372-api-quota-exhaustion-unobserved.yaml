@@ -97,7 +97,7 @@
       proof: "unit test: test/quota-exhaustion-escalation.test.ts"
     - claim: "every ledger step the detector or escalator reads to decide something is retained across rotation, so a rotation cannot re-open one notice per tick"
       proof: "unit test: test/ledger-rotation.test.ts"
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is an assertion over injected quota readings and a fixture ledger,
     with no operator present. It builds a mechanism and touches no DECISIONS.md, so W1-T353's

@@ -180,7 +180,7 @@
     - claim: "dispatchLanes still governs dispatch and no longer governs the review lane"
       proof: "unit test: test/review-lane-budget.test.ts"
   files: [src/lib/sweep.ts, plan/policy.yaml, test/review-lane-budget.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: recon#drainage-concurrency-2026-08-20
   plan_refs: ['W1-T473', 'W1-T526', 'W1-T513', 'W1-T463', 'W1-T1044']

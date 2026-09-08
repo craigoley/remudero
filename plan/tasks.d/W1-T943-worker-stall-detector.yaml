@@ -68,7 +68,7 @@
   origin: feedback#fb-1785237627858-ffafd9
   plan_refs: ["§4", "§5D"]
   files: [plan/policy.yaml, src/lib/policy.ts, src/run-task.ts, test/worker-stall-detector.test.ts, test/policy.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high is Rule 19's SPAN (policy data + src/lib + test/). Blast radius argues DOWN hard: the

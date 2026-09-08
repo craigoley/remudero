@@ -84,7 +84,7 @@
     - claim: "a draft and an in-flight head stay vetoed on the widened set"
       proof: "unit test: test/update-branch-stale-gate.test.ts"
   files: [src/lib/sweep.ts, src/run-task.ts, test/update-branch-stale-gate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#red-pr-frozen-gate-2026-08-22"
   plan_refs: ["W1-T528", "W1-T1095"]
