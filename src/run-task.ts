@@ -24546,6 +24546,21 @@ export async function daemonCommand(
     runId,
     log,
     freshMs: policy.values.githubEventWake.checkSettleMs,
+    readCiFailures: (rollup) => fetchCiFailures(target.owner, target.repo, [...(rollup ?? [])]),
+    requeueCheck: (failure) => {
+      if (!failure.jobId) return false;
+      try {
+        ghExec(["api", "-X", "POST", `repos/${target.owner}/${target.repo}/actions/jobs/${failure.jobId}/rerun`]);
+        return true;
+      } catch (error) {
+        log("main.health.ci_requeue.error", {
+          check_name: failure.name,
+          job_id: failure.jobId,
+          error: String((error as Error)?.message ?? error),
+        });
+        return false;
+      }
+    },
   });
   // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
   // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
@@ -27382,6 +27397,8 @@ export function fetchCiFailures(
     return {
       name,
       logTail,
+      conclusion: (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase(),
+      ...(jobId ? { jobId } : {}),
       ...(logUnavailable === undefined ? {} : { logUnavailable }),
       ...(tailSource ? { tailSource } : {}),
       ...(annotationFallback ? { annotationFallback } : {}),
@@ -29750,6 +29767,7 @@ export function buildSweepEffects(
   | "disarmAutoMerge"
   | "requeueCheck"
   | "escalateCancelledCheck"
+  | "escalateInfrastructureCheck"
   | "readCiGateRollup"
   | "reaggregateCiGate"
   | "readMainTip"
@@ -30040,13 +30058,15 @@ export function buildSweepEffects(
     requeueCheck: (pr, check) => {
       if (!check.jobId) {
         log("sweep.check_requeue.no_job_id", { pr_number: pr.prNumber, check_name: check.name });
-        return;
+        return false;
       }
       try {
         ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${check.jobId}/rerun`]);
         log("sweep.check_requeue.dispatched", { pr_number: pr.prNumber, check_name: check.name, job_id: check.jobId });
+        return true;
       } catch (e) {
         log("sweep.check_requeue.error", { pr_number: pr.prNumber, check_name: check.name, error: String((e as Error)?.message ?? e) });
+        return false;
       }
     },
 
@@ -30080,6 +30100,38 @@ export function buildSweepEffects(
             { label: "manual-rerun", detail: "re-run the job by hand once the underlying CI-side cause is understood." },
           ],
           recommendation: "investigate",
+        },
+        { issues, ledgerPath, runId },
+      );
+    },
+
+    // W1-T3194 — a repeated or unaddressable positively identified infrastructure failure is
+    // terminal for the deterministic retry lane, but never a source-code worker strike. The
+    // escalation gateway supplies durable episode dedup for the exact task/head/cause tuple.
+    escalateInfrastructureCheck: (pr, check, reason, signature) => {
+      tryEscalate(
+        {
+          class: "BLOCKED",
+          taskId: escalationTaskIdFor(pr),
+          runId,
+          headSha: pr.headSha,
+          cause: "ci",
+          summary: `required check "${check.name}" exhausted its bounded infrastructure retry — ${pr.prUrl}`,
+          detail:
+            `The failed-CI infrastructure classifier identified ${signature} for check "${check.name}" ` +
+            `on head ${pr.headSha}, but ${reason}. No code worker or fix strike was spent because ` +
+            `the captured failure is outside the source diff's control.`,
+          options: [
+            {
+              label: "investigate-actions",
+              detail: "inspect the exact Actions job and GitHub artifact-service response before deciding whether to rerun manually.",
+            },
+            {
+              label: "manual-rerun",
+              detail: "rerun the exact job after confirming the infrastructure condition has cleared.",
+            },
+          ],
+          recommendation: "investigate-actions",
         },
         { issues, ledgerPath, runId },
       );

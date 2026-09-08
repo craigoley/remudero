@@ -1,0 +1,166 @@
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { readLedgerLines } from "../src/lib/status.js";
+import {
+  ARTIFACT_FINALIZE_INTERMEDIARY_403,
+  DEFAULT_SWEEP_POLICY,
+  classifyCiInfrastructureFailure,
+  runSweep,
+  type CiFailure,
+  type FixDispatchEvidence,
+  type OpenPrView,
+  type SweepDeps,
+} from "../src/lib/sweep.js";
+
+const TRANSCRIPT = [
+  "Artifact upload completed successfully!",
+  "Finalizing artifact upload",
+  "Failed to FinalizeArtifact: (403) Forbidden: Error from intermediary",
+].join("\n");
+
+function infra(name = "ci-shard (2/4)"): CiFailure {
+  return { name, conclusion: "FAILURE", jobId: "34249290033", logTail: TRANSCRIPT };
+}
+
+function subject(overrides: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: 4671,
+    prUrl: "https://github.com/craigoley/remudero/pull/4671",
+    taskId: "W1-T3140",
+    reviewState: "none",
+    checksState: "red",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: "2026-09-08T15:30:00Z",
+    headSha: "e0838eb6e0702ff1a35bd5d9c240e8c7bbf6fd25",
+    headRefName: "run-W1-T3140-1788886671767",
+    autoMergeArmed: false,
+    ciFailures: [infra()],
+    ...overrides,
+  };
+}
+
+function deps(ledgerPath: string) {
+  const requeued: CiFailure[] = [];
+  const escalated: CiFailure[] = [];
+  const fixed: FixDispatchEvidence[] = [];
+  const d: SweepDeps = {
+    arm: () => {},
+    close: () => {},
+    dispatchFix: (_pr, evidence) => {
+      fixed.push(evidence);
+    },
+    escalate: () => {},
+    requeueCheck: (_pr, failure) => {
+      const preCall = readLedgerLines(ledgerPath).find(
+        (line) =>
+          line.step === "sweep.check_requeued" &&
+          line.head_sha === subject().headSha &&
+          line.check_name === failure.name,
+      );
+      assert.ok(preCall, "the durable bound is written before the GitHub mutation");
+      requeued.push(failure as CiFailure);
+      return true;
+    },
+    escalateInfrastructureCheck: (_pr, failure) => {
+      escalated.push(failure);
+    },
+    ledgerPath,
+    runId: "SWEEP-INFRA-TEST",
+    now: () => Date.parse("2026-09-08T15:40:00Z"),
+  };
+  return { d, escalated, fixed, requeued };
+}
+
+test("only the complete upload-then-FinalizeArtifact intermediary 403 classifies as retryable infrastructure", () => {
+  assert.equal(
+    classifyCiInfrastructureFailure({ conclusion: "FAILURE", logTail: TRANSCRIPT }),
+    ARTIFACT_FINALIZE_INTERMEDIARY_403,
+  );
+  for (const text of [
+    "403 Forbidden",
+    "permission denied: 403 Forbidden",
+    "AssertionError: expected 1 to equal 2\n403 Forbidden",
+    "error TS2322: Type 'string' is not assignable to type 'number'\n403 Forbidden",
+    "Finalizing artifact upload\nFailed to FinalizeArtifact: (403) Forbidden: Error from intermediary",
+    "Artifact upload completed successfully!\nFailed to FinalizeArtifact: (403) Forbidden: Error from intermediary",
+    "Artifact upload completed successfully!\nFinalizing artifact upload",
+    "",
+    `${TRANSCRIPT}\nPermission denied while writing artifact`,
+    `${TRANSCRIPT}\nAssertionError: expected 1 to equal 2`,
+    `${TRANSCRIPT}\nerror TS2322: Type 'string' is not assignable to type 'number'`,
+    [
+      "Failed to FinalizeArtifact: (403) Forbidden: Error from intermediary",
+      "Finalizing artifact upload",
+      "Artifact upload completed successfully!",
+    ].join("\n"),
+  ]) {
+    assert.equal(
+      classifyCiInfrastructureFailure({ conclusion: "FAILURE", logTail: text }),
+      undefined,
+      `fail closed for ${JSON.stringify(text)}`,
+    );
+  }
+  assert.equal(
+    classifyCiInfrastructureFailure({ conclusion: "ERROR", logTail: TRANSCRIPT }),
+    undefined,
+    "the exact FAILURE conclusion is part of the signature",
+  );
+});
+
+test("a matching PR job is rerun once before any worker strike and records bounded, log-free telemetry", async () => {
+  const ledgerPath = join(mkdtempSync(join(tmpdir(), "rmd-ci-infra-")), "ledger.ndjson");
+  const f = deps(ledgerPath);
+  await runSweep([subject()], f.d, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(f.requeued.length, 1);
+  assert.equal(f.fixed.length, 0, "the infrastructure-only result spends no worker strike");
+  assert.equal(f.escalated.length, 0);
+  const rows = readLedgerLines(ledgerPath);
+  const bound = rows.find((line) => line.step === "sweep.check_requeued");
+  assert.equal(bound?.surface, "pr");
+  assert.equal(bound?.signature, ARTIFACT_FINALIZE_INTERMEDIARY_403);
+  assert.equal(bound?.job_id, "34249290033");
+  assert.equal(bound?.worker_strike_avoided, true);
+  assert.ok(!("logTail" in (bound ?? {})) && !("log" in (bound ?? {})), "unbounded log evidence is never copied");
+  const outcome = rows.find((line) => line.step === "sweep.ci_infrastructure_requeue");
+  assert.equal(outcome?.outcome, "dispatched");
+  assert.equal(outcome?.head_sha, subject().headSha);
+});
+
+test("the same PR head escalates after one rerun, while a new head gets a fresh allowance", async () => {
+  const ledgerPath = join(mkdtempSync(join(tmpdir(), "rmd-ci-infra-repeat-")), "ledger.ndjson");
+  const first = deps(ledgerPath);
+  await runSweep([subject()], first.d, DEFAULT_SWEEP_POLICY);
+  assert.equal(first.requeued.length, 1);
+
+  const second = deps(ledgerPath);
+  await runSweep([subject()], second.d, DEFAULT_SWEEP_POLICY);
+  assert.equal(second.requeued.length, 0);
+  assert.equal(second.escalated.length, 1);
+  assert.equal(second.fixed.length, 0);
+
+  const third = deps(ledgerPath);
+  await runSweep([subject({ headSha: "new-head", ciFailures: [infra()] })], third.d, DEFAULT_SWEEP_POLICY);
+  assert.equal(third.requeued.length, 1, "the bound is exact-head scoped");
+});
+
+test("mixed PR evidence reruns only the proven infrastructure job and keeps genuine failures on the normal fix route", async () => {
+  const ledgerPath = join(mkdtempSync(join(tmpdir(), "rmd-ci-infra-mixed-")), "ledger.ndjson");
+  const f = deps(ledgerPath);
+  const genuine: CiFailure = {
+    name: "test-slow (4/4)",
+    conclusion: "FAILURE",
+    jobId: "444",
+    logTail: "AssertionError: expected true but got false",
+  };
+  await runSweep([subject({ ciFailures: [infra(), genuine] })], f.d, DEFAULT_SWEEP_POLICY);
+
+  assert.deepEqual(f.requeued.map((failure) => failure.name), ["ci-shard (2/4)"]);
+  assert.equal(f.fixed.length, 1);
+  assert.deepEqual(f.fixed[0]?.ciFailures?.map((failure) => failure.name), ["test-slow (4/4)"]);
+});
