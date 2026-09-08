@@ -100,7 +100,7 @@ test("MUTANT: restoring the unconditional bail makes the re-captured baseline un
   const source = readFileSync(join(import.meta.dirname, "..", "src", "lib", "review.ts"), "utf8");
   assert.match(
     source,
-    /keys\.every\(\(k\) => INSTRUMENT_PROVENANCE_KEY_RE\.test\(k\)\)\) continue;/,
+    /keys\.every\(isInstrumentProvenanceKey\)\) continue;/,
     "the provenance skip is what this suite proves; if it is gone the tests below are vacuous",
   );
 

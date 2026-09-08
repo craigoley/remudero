@@ -5421,8 +5421,20 @@ export type InstrumentChangeDirection = "tightening" | "loosening" | "introduced
  * so adding one IS a loosening. Those stay unaccountable, which is what stops a diff from
  * lowering one ceiling while quietly adding an exemption beside it and still reading `tightening`.
  */
-const INSTRUMENT_PROVENANCE_KEY_RE =
-  /^(?:_|capturedAt$|capturedAtSha$|capturedAgainst$|captureCommand$|bumpRationale$|priorBumpRationale$)/;
+const INSTRUMENT_CAPTURE_KEYS: ReadonlySet<string> = new Set([
+  "capturedAt",
+  "capturedAtSha",
+  "capturedAgainst",
+  "captureCommand",
+  "bumpRationale",
+  "priorBumpRationale",
+]);
+
+/** True for a provenance/prose key: `_`-prefixed by this repo's baseline convention (`_comment`,
+ *  `_methodology`, `_history`), or one of the capture fields above. */
+function isInstrumentProvenanceKey(key: string): boolean {
+  return key.startsWith("_") || INSTRUMENT_CAPTURE_KEYS.has(key);
+}
 
 /** The keys of every `"key": "string"` row on one line. Companion to {@link numericRowsOn}, which
  *  sees only numeric values and therefore cannot tell prose from an exemption entry. */
@@ -5493,7 +5505,7 @@ export function classifyInstrumentChange(diff: string, diffFiles: string[], file
       // baselines that record a `capturedAt`, because a correct re-capture must refresh it.
       // Anything else — including a line with no parseable row at all — still refuses.
       const keys = stringRows(l.text);
-      if (keys.length > 0 && keys.every((k) => INSTRUMENT_PROVENANCE_KEY_RE.test(k))) continue;
+      if (keys.length > 0 && keys.every(isInstrumentProvenanceKey)) continue;
       return "undetermined"; // a hunk this parser cannot account for
     }
     for (const [key, value] of rows) {
