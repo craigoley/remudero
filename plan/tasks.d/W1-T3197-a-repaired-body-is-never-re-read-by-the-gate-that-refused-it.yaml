@@ -10,7 +10,8 @@
   files: [src/run-task.ts, test/a-repaired-body-is-never-re-read-by-the-gate-that-refused-it.test.ts]
   origin: "operator-session#board-pass-2026-09-08"
   plan_refs: ["W1-T3066", "W1-T2948", "W1-T2272"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
     `acceptance-author-gate` describes itself in `ci.yml` as *"reads the pull_request event payload
@@ -51,6 +52,36 @@
     on every body edit by anyone, including the many edits that change nothing a gate reads — a
     far larger blast radius than the rung minting one event when it knows it just repaired a body.
     Also not in scope: W1-T3066's create-seam repair, which is upstream of this and already merged.
+    WITHDRAWN 2026-09-08, THE SAME DAY IT WAS FILED — THE PREMISE IS WRONG AND I MEASURED IT WRONG.
+
+    This task claimed three things hold together: the repaired body is correct, a re-run replays the
+    old one, and `on: pull_request` excludes `edited`. The FIRST is true. The other two are not.
+
+    THE GATE ALREADY FIRES ON `edited`. It is not a job inside `ci.yml` at all — it is its own
+    workflow, `.github/workflows/acceptance-author-gate.yml`, and it declares
+    `types: [opened, synchronize, reopened, edited]` explicitly. MEASURED by experiment on #4684:
+    a body edit at 17:04:21Z produced a fresh gate run at 17:04:24Z, three seconds later, with no
+    close/reopen and no push.
+
+    THE REPAIR ALREADY PASSES THAT GATE. Running the shipped `ensureJudgeableBody` over a body of
+    exactly the shape the rung was handed, then `acceptanceAuthorTimeCheck` over its output:
+    broken -> `{ok: false, defect: "empty-proofs", "4 criterion/criteria have no proof"}`;
+    repaired -> `{ok: true, "Acceptance block is judgeable"}`.
+
+    AND THE PRs I CITED HAD ALREADY SELF-HEALED. #4647's gate history, by run:
+      13:53:42Z failure   (the original)
+      13:55:29Z SUCCESS   (107 seconds later, automatic, before any operator touched it)
+      14:34:05Z failure   (`gh run rerun --failed`, which replays the ORIGINAL payload)
+      14:50:41Z SUCCESS
+    The 14:34 red was mine, not the fleet's: re-running a FAILED run replays its stored payload by
+    design. Reading that as the live state is what produced this filing.
+
+    THE REAL DEFECT THIS EXPOSED IS IN THE OPERATOR'S BOARD QUERY, NOT THE FLEET. `statusCheckRollup`
+    carries ONE ENTRY PER RUN, not per check name: #4647 shows four `acceptance-author-gate` entries,
+    one FAILURE and three SUCCESS. A query selecting any failing entry reports a check as red long
+    after its latest run went green. Take the latest entry per name — group by name, sort by
+    `completedAt`, keep the last — or the board over-reports failures on every PR that ever had one.
+
   acceptance:
     - claim: "a body repair mints a fresh pull_request event, so the gate that refused the old body is re-run against the repaired one"
       proof: "unit test: test/a-repaired-body-is-never-re-read-by-the-gate-that-refused-it.test.ts"
