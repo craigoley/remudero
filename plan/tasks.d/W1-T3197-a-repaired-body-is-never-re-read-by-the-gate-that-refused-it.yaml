@@ -1,0 +1,60 @@
+- id: W1-T3197
+  title: "THE FIX RUNG REPAIRS A PR BODY AND NOTHING MINTS AN EVENT, SO acceptance-author-gate RE-READS THE BODY IT ALREADY REFUSED — the gate reads the stored `pull_request` payload, a re-run replays it verbatim, and `on: pull_request` excludes `edited`; the repair is correct and permanently invisible"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/run-task.ts, test/a-repaired-body-is-never-re-read-by-the-gate-that-refused-it.test.ts]
+  origin: "operator-session#board-pass-2026-09-08"
+  plan_refs: ["W1-T3066", "W1-T2948", "W1-T2272"]
+  status: queued
+  attempts: 0
+  rationale: |
+    `acceptance-author-gate` describes itself in `ci.yml` as *"reads the pull_request event payload
+    directly — no API call"*. That payload is frozen when the event fired. So when the fix rung
+    repairs a refused body, three things are all true at once and the PR never recovers:
+
+      the repaired body is CORRECT      `check-acceptance` reports OK on it
+      re-running the job changes NOTHING  it replays the payload, i.e. the OLD body
+      a body edit fires NO event         `on: pull_request` carries no `types:`, so the defaults
+                                         [opened, synchronize, reopened] exclude `edited`
+
+    MEASURED 2026-09-08, twice, on two PRs the fix rung had already repaired — both bodies carried
+    its own marker, *"mechanically repaired by the fix rung after acceptance-author-gate refused
+    it"*:
+
+      #4647  re-run after repair -> REFUSED (empty-proofs) — 4 criteria have no proof
+             ...which is the count of bullets in the SUPERSEDED block, not the repaired one
+      #4676  same shape, same refusal
+
+    THE REPAIR ITSELF IS NOT THE DEFECT, AND THAT IS THE POINT. `parseAcceptanceBlock` over a body
+    carrying the superseded block AND the appended repair resolves the REPAIRED one — measured
+    directly: 1 criterion, claim and proof both populated. `ACCEPTANCE_HEADER_RE` requires a BARE
+    header, so `## Acceptance (superseded — …)` is correctly skipped. The repair works; the gate is
+    simply never shown it.
+
+    THE OPERATOR REMEDY, APPLIED BY HAND TWICE TODAY, IS ONE COMMAND: `gh pr close && gh pr reopen`
+    fires `reopened`, which mints a fresh payload carrying the repaired body. #4676 went from
+    `acceptance-author-gate: FAIL` to `pass` in 23s with no push and no diff change. #4647 cleared
+    the same way and merged.
+
+    So the fix is to make the rung do what the operator does: after a body repair lands, mint an
+    event. Close/reopen is the cheapest and touches no tree; an empty commit also works but moves
+    the head sha and re-earns every other check. Whichever is chosen must be recorded on the
+    ledger row for the repair, so a repair that could not mint an event is visible rather than
+    silently inert.
+
+    NOT IN SCOPE: adding `edited` to `ci.yml`'s trigger types. That would re-run the whole gate set
+    on every body edit by anyone, including the many edits that change nothing a gate reads — a
+    far larger blast radius than the rung minting one event when it knows it just repaired a body.
+    Also not in scope: W1-T3066's create-seam repair, which is upstream of this and already merged.
+  acceptance:
+    - claim: "a body repair mints a fresh pull_request event, so the gate that refused the old body is re-run against the repaired one"
+      proof: "unit test: test/a-repaired-body-is-never-re-read-by-the-gate-that-refused-it.test.ts"
+    - claim: "the mint is recorded on the repair's own ledger row, so a repair that could not mint one is visible rather than silently inert"
+      proof: "grep: event_minted in src/run-task.ts"
+    - claim: "a falsifier removes the mint and shows the repaired body still judged against the stale payload"
+      proof: "grep: MUTANT in test/a-repaired-body-is-never-re-read-by-the-gate-that-refused-it.test.ts"

@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: low
   budget_usd: 8.00
-  files: [scripts/comment-load-ratchet.mjs, test/inherited-growth-records-the-base-count.test.ts]
+  files: [scripts/comment-load-ratchet.mjs, test/inherited-growth-records-a-bucket.test.ts]
   origin: "operator-session#board-pass-2026-09-08"
   plan_refs: ["W1-T3022", "W1-T2539", "W1-T3015"]
   status: queued
@@ -84,12 +84,18 @@
     passed against any implementation at all, and matches the merge base too, so it graded
     `executed_stale` rather than proving anything.
 
+    THE SHARD'S OWN FILENAME SLUG IS HISTORICAL. It still reads `-a-bucket`, from the filed remedy
+    this amendment overturns, and it stays that way deliberately: `task-id-existence --base` compares
+    declared ids by FILE with no rename awareness, so renaming a shard reads as RE-ISSUING its id and
+    is refused — its printed remedy, "renumber to a fresh reserved id", is wrong advice for a rename.
+    The title, rationale and criteria above are the record; the slug is not.
+
   acceptance:
     - claim: "inherited growth is recorded at the MERGE BASE's count, so two branches inheriting the same growth write the same number and merge clean"
-      proof: "unit test: test/inherited-growth-records-the-base-count.test.ts"
+      proof: "unit test: test/inherited-growth-records-a-bucket.test.ts"
     - claim: "the inherited write records the base count itself, not a value derived from this branch's own measurement"
       proof: 'grep: nextBaseline\[v\.path\] = v\.atBase in scripts/comment-load-ratchet.mjs'
     - claim: "NO HEADROOM is granted: the recorded ceiling is exactly the base count, so growth the branch itself causes afterwards is still charged"
-      proof: "grep: NO HEADROOM in test/inherited-growth-records-the-base-count.test.ts"
+      proof: "grep: NO HEADROOM in test/inherited-growth-records-a-bucket.test.ts"
     - claim: "a falsifier restores the exact-count write and shows two concurrent inheritors conflicting again"
-      proof: "grep: MUTANT in test/inherited-growth-records-the-base-count.test.ts"
+      proof: "grep: MUTANT in test/inherited-growth-records-a-bucket.test.ts"
