@@ -1,35 +1,33 @@
 import assert from "node:assert/strict";
-import { spawn, execFileSync, type ChildProcessByStdio } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 
+import { gitRepo } from "./helpers/git-repo.js";
+
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SELF_SYNC_IMPORT = pathToFileURL(join(REPO_ROOT, "src", "lib", "self-sync.ts")).href;
 type ReexecParentProcess = ChildProcessByStdio<null, Readable, Readable>;
 
+// W1-T2903's shared fixture, not a hand-rolled `git init`. It already pins the identity env the
+// runner needs (CLAUDE.md's #1971 class: `commit-tree` refuses `Author identity unknown` on a CI
+// runner and passes on every dev machine), and `cloneFrom` is exactly the origin+checkout shape this
+// test wants — so the duplication the fixture-copy census counts is avoided rather than recorded.
 function gitFixture(): { originDir: string; localDir: string } {
-  const root = mkdtempSync(join(tmpdir(), "rmd-reexec-signal-"));
-  const originDir = join(root, "origin");
-  const localDir = join(root, "local");
-  mkdirSync(originDir, { recursive: true });
-  const git = (dir: string, args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
-  execFileSync("git", ["init", "--quiet", "-b", "main", originDir]);
-  git(originDir, ["config", "user.email", "test@example.invalid"]);
-  git(originDir, ["config", "user.name", "Test"]);
-  writeFileSync(join(originDir, "seed.txt"), "one\n");
-  git(originDir, ["add", "."]);
-  git(originDir, ["commit", "--quiet", "-m", "init"]);
-  execFileSync("git", ["clone", "--quiet", originDir, localDir], { encoding: "utf8" });
-  git(localDir, ["config", "user.email", "test@example.invalid"]);
-  git(localDir, ["config", "user.name", "Test"]);
-  writeFileSync(join(originDir, "published.txt"), "published\n");
-  git(originDir, ["add", "."]);
-  git(originDir, ["commit", "--quiet", "-m", "published"]);
-  return { originDir, localDir };
+  const origin = gitRepo({ kind: "reexec-signal-origin" });
+  writeFileSync(join(origin.dir, "seed.txt"), "one\n");
+  origin.git("add", ".");
+  origin.git("commit", "--quiet", "-m", "init");
+  const local = gitRepo({ cloneFrom: origin.dir, kind: "reexec-signal-local" });
+  // Published AFTER the clone, so the local checkout is deliberately one commit behind.
+  writeFileSync(join(origin.dir, "published.txt"), "published\n");
+  origin.git("add", ".");
+  origin.git("commit", "--quiet", "-m", "published");
+  return { originDir: origin.dir, localDir: local.dir };
 }
 
 function writeHarnessScript(dir: string): string {
