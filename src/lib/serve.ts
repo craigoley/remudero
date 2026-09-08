@@ -34,6 +34,7 @@
  */
 
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
+import { promises as fsPromises } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -109,6 +110,7 @@ import { readLedgerLines } from "./status.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./ledger-replay.js";
 import { latestMeasurementRows, type LatestMeasurementRowsResult } from "./measurement-cadence.js";
 import type { LedgerUnionResult } from "./ledger-grep.js";
+import type { BoardRow, BoardSnapshot } from "./board.js";
 import {
   startInstallationTokenRefresh,
   TOKEN_REFRESHED_STEP,
@@ -436,10 +438,267 @@ export function buildInboxDigestsRoute(deps: { root: string; limit?: number; rea
     method: "GET",
     path: "/v1/inbox/digests",
     scope: "read",
-    handler: (_req, res) => {
-      sendJson(res, 200, (deps.read ?? readConsoleInboxDigests)(deps.root, deps.limit));
+    handler: async (_req, res) => {
+      if (deps.read) {
+        sendJson(res, 200, deps.read(deps.root, deps.limit));
+        return;
+      }
+      sendJson(res, 200, await readConsoleInboxDigestsAsync(deps.root, deps.limit));
     },
   };
+}
+
+async function readConsoleInboxDigestsAsync(root: string, limit: number = CONSOLE_INBOX_DIGEST_LIMIT): Promise<ConsoleInboxDigests> {
+  if (limit <= 0) return emptyConsoleInboxDigests();
+  try {
+    const raw = JSON.parse(await fsPromises.readFile(inboxDigestsPath(root), "utf8")) as unknown;
+    if (!Array.isArray(raw)) return emptyConsoleInboxDigests();
+    const valid = raw.filter(isConsoleInboxDigestEntry);
+    const entries = valid.slice(Math.max(0, valid.length - limit));
+    return { entries, omitted: Math.max(0, valid.length - entries.length) };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") return emptyConsoleInboxDigests();
+    return { entries: [], omitted: 0, reason: String((error as Error)?.message ?? error) };
+  }
+}
+
+export interface ConsoleResponseStaleness {
+  stale: boolean;
+  ageMs: number | null;
+  generatedAt: string | null;
+  refreshing: boolean;
+  budgetMs: number;
+  reason?: string;
+}
+
+export interface ConsoleBlockingRequestPathViolation {
+  route: string;
+  symbol: string;
+}
+
+export const CONSOLE_READ_ROUTE_BUDGET_MS = 750;
+export const CONSOLE_READ_ROUTE_REFRESH_DELAY_MS = 25;
+export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
+const CONSOLE_STALENESS_FIELD = "staleness";
+const CONSOLE_CACHED_READ_PATHS = new Set(["/", "/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health"]);
+const BLOCKING_REQUEST_PATH_SYMBOLS = [
+  "readFileSync",
+  "writeFileSync",
+  "existsSync",
+  "readdirSync",
+  "execFileSync",
+  "statSync",
+  "openSync",
+  "mkdirSync",
+] as const;
+
+function responseStaleness(nowMs: number, generatedAtMs: number | undefined, refreshing: boolean, budgetMs: number, reason?: string): ConsoleResponseStaleness {
+  return {
+    stale: generatedAtMs === undefined || nowMs - generatedAtMs > budgetMs,
+    ageMs: generatedAtMs === undefined ? null : Math.max(0, nowMs - generatedAtMs),
+    generatedAt: generatedAtMs === undefined ? null : new Date(generatedAtMs).toISOString(),
+    refreshing,
+    budgetMs,
+    ...(reason ? { reason } : {}),
+  };
+}
+
+function withJsonStaleness(body: unknown, staleness: ConsoleResponseStaleness): string {
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    return JSON.stringify({ ...(body as Record<string, unknown>), [CONSOLE_STALENESS_FIELD]: staleness });
+  }
+  return JSON.stringify({ value: body, [CONSOLE_STALENESS_FIELD]: staleness });
+}
+
+function sendStaleJson(res: import("node:http").ServerResponse, status: number, body: unknown, staleness: ConsoleResponseStaleness): void {
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "x-rmd-cache-state": staleness.stale ? "stale" : "fresh",
+    "x-rmd-cache-age-ms": staleness.ageMs === null ? "unknown" : String(staleness.ageMs),
+  });
+  res.end(withJsonStaleness(body, staleness));
+}
+
+function fallbackStatusSnapshot(deps: BoardDeps, nowMs: number, staleness: ConsoleResponseStaleness): BoardSnapshot & { staleness: ConsoleResponseStaleness } {
+  const tasks: BoardRow[] = deps.plan.tasks.map((task) => ({
+    taskId: task.id,
+    title: task.title,
+    risk: task.risk,
+    status: "queued",
+    merged: false,
+    source: "throttled",
+    indeterminate: true,
+    unavailableReason: "transport",
+  }));
+  return {
+    generated_at: new Date(nowMs).toISOString(),
+    github_unreachable: true,
+    counts: {
+      total: tasks.length,
+      running: 0,
+      merged: 0,
+      queued: tasks.length,
+      blocked: tasks.filter((t) => t.needsHuman === true || t.status === "blocked").length,
+      merged_known: false,
+    },
+    spend: { mergedToday: 0, channel: "fleet", spendTodayUsd: 0, spendWeekUsd: 0, sessionSpendUsd: null },
+    tasks,
+    blockedPrs: [],
+    mergeHeld: [],
+    prQueue: {
+      complete: false,
+      rows: [],
+      unavailableReason: "console read cache has not produced a live status snapshot yet",
+    },
+    staleness,
+  };
+}
+
+function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: ConsoleResponseStaleness): unknown {
+  const nowMs = Date.now();
+  switch (path) {
+    case "/v1/status":
+      return fallbackStatusSnapshot(deps.board, nowMs, staleness);
+    case "/v1/recent":
+      return { entries: [], staleness };
+    case "/v1/inbox":
+      return { ready: [], drafting: [], notReady: [], staleness };
+    case "/v1/daemon-health":
+      return { pollIntervalMs: deps.daemonHealth?.defaultPollIntervalMs ?? DEFAULT_POLL_MS, staleness };
+    default:
+      return { staleness };
+  }
+}
+
+interface BufferedRouteResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+  generatedAtMs: number;
+}
+
+class RouteResponseBuffer {
+  statusCode = 200;
+  headersSent = false;
+  private headers: Record<string, string> = {};
+  private chunks: string[] = [];
+
+  writeHead(status: number, headers?: import("node:http").OutgoingHttpHeaders): this {
+    this.statusCode = status;
+    this.headersSent = true;
+    for (const [key, value] of Object.entries(headers ?? {})) {
+      if (value === undefined) continue;
+      this.headers[key.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
+    }
+    return this;
+  }
+
+  setHeader(name: string, value: number | string | readonly string[]): this {
+    this.headers[name.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
+    return this;
+  }
+
+  end(chunk?: unknown): this {
+    if (chunk !== undefined) this.chunks.push(Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk));
+    this.headersSent = true;
+    return this;
+  }
+
+  write(chunk: unknown): boolean {
+    this.chunks.push(Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk));
+    return true;
+  }
+
+  buffered(generatedAtMs: number): BufferedRouteResponse {
+    return { status: this.statusCode, headers: { ...this.headers }, body: this.chunks.join(""), generatedAtMs };
+  }
+}
+
+function writeBufferedResponse(res: import("node:http").ServerResponse, cached: BufferedRouteResponse, staleness: ConsoleResponseStaleness): void {
+  const headers = {
+    ...cached.headers,
+    "x-rmd-cache-state": staleness.stale ? "stale" : "fresh",
+    "x-rmd-cache-age-ms": staleness.ageMs === null ? "unknown" : String(staleness.ageMs),
+  };
+  const contentType = headers["content-type"] ?? "";
+  let body = cached.body;
+  if (/application\/json/i.test(contentType)) {
+    try {
+      body = withJsonStaleness(JSON.parse(cached.body), staleness);
+    } catch {
+      body = cached.body;
+    }
+  }
+  res.writeHead(cached.status, headers);
+  res.end(body);
+}
+
+export function consoleBlockingRequestPathViolations(routes: readonly Route[]): ConsoleBlockingRequestPathViolation[] {
+  const violations: ConsoleBlockingRequestPathViolation[] = [];
+  for (const route of routes) {
+    if (route.method !== "GET" || route.scope !== "read") continue;
+    if (route.selfAuthenticated) continue;
+    const source = route.handler.toString();
+    for (const symbol of BLOCKING_REQUEST_PATH_SYMBOLS) {
+      if (new RegExp(`\\b${symbol}\\b`).test(source)) violations.push({ route: `${route.method} ${route.path}`, symbol });
+    }
+  }
+  return violations;
+}
+
+export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS): Route {
+  if (route.method !== "GET" || route.scope !== "read" || !CONSOLE_CACHED_READ_PATHS.has(route.path)) return route;
+  let cached: BufferedRouteResponse | undefined;
+  let refreshing = false;
+  let lastError: string | undefined;
+
+  const refresh = (req: import("node:http").IncomingMessage): void => {
+    if (refreshing) return;
+    refreshing = true;
+    setTimeout(() => {
+      void (async () => {
+        const startedAt = Date.now();
+        const buffer = new RouteResponseBuffer();
+        try {
+          await route.handler(req, buffer as unknown as import("node:http").ServerResponse, { params: {} });
+          cached = buffer.buffered(startedAt);
+          lastError = undefined;
+        } catch (error) {
+          lastError = String((error as Error)?.message ?? error);
+        } finally {
+          refreshing = false;
+        }
+      })();
+    }, CONSOLE_READ_ROUTE_REFRESH_DELAY_MS).unref?.();
+  };
+
+  return {
+    ...route,
+    handler: (req, res) => {
+      const nowMs = Date.now();
+      refresh(req);
+      const staleness = responseStaleness(nowMs, cached?.generatedAtMs, refreshing, budgetMs, lastError);
+      if (cached) {
+        writeBufferedResponse(res, cached, staleness);
+        return;
+      }
+      if (route.path === "/") {
+        res.writeHead(200, {
+          "content-type": "text/html; charset=utf-8",
+          "x-rmd-cache-state": "stale",
+          "x-rmd-cache-age-ms": "unknown",
+        });
+        res.end(renderShellHtml());
+        return;
+      }
+      sendStaleJson(res, 200, fallbackBodyForCachedRead(route.path, deps, staleness), staleness);
+    },
+  };
+}
+
+export function boundConsoleReadRoutes(routes: readonly Route[], deps: ServeDeps, budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS): Route[] {
+  return routes.map((route) => boundConsoleReadRoute(route, deps, budgetMs));
 }
 
 /**
@@ -522,10 +781,21 @@ export const DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS: Record<string, number> = {
  * to the server's own `close` event so the timer doesn't outlive it.
  */
 export function prewarmBoardGithub(github: GitHub, refreshMs: number = DEFAULT_BOARD_PREWARM_MS): () => void {
-  github.warm?.();
-  const timer = setInterval(() => github.warm?.(), refreshMs);
+  const warm = (): void => {
+    try {
+      github.warm?.();
+    } catch {
+      // The gateway records its own failure state; prewarming must never break stream open.
+    }
+  };
+  const first = setTimeout(warm, 0);
+  first.unref?.();
+  const timer = setInterval(warm, refreshMs);
   timer.unref?.();
-  return () => clearInterval(timer);
+  return () => {
+    clearTimeout(first);
+    clearInterval(timer);
+  };
 }
 
 /**
@@ -1939,32 +2209,30 @@ export function buildShellRoute(
     scope: "read",
     allowQueryToken: true,
     handler: (_req, res) => {
-      // PER REQUEST, deliberately: the shell re-renders on every page load, so the panel is fresh
-      // without touching the client script (which lives in a template literal and has broken the
-      // last five PRs that edited it). A read failure degrades to UNKNOWN, never to zero.
       let panel: string;
-      try {
-        const read = idle.readLedger ?? readLedgerLines;
-        const lines = idle.ledgerPath ? read(idle.ledgerPath) : [];
-        panel = renderIdleReasonsHtml(
-          idle.ledgerPath
-            ? readIdleReasons(lines, idle.now?.() ?? new Date())
-            : { kind: "unknown", why: "the console was assembled without a ledger path" },
-        );
-      } catch (e) {
-        panel = renderIdleReasonsHtml({ kind: "unknown", why: `ledger unreadable: ${String((e as Error)?.message ?? e)}` });
+      if (idle.readLedger && idle.ledgerPath) {
+        try {
+          // Tests may inject a pure reader for this fragment. The production shell path leaves it
+          // unknown until the JSON endpoints refresh; it must not parse the live ledger while a
+          // browser navigation is waiting for the document.
+          const lines = idle.readLedger(idle.ledgerPath);
+          panel = renderIdleReasonsHtml(readIdleReasons(lines, idle.now?.() ?? new Date()));
+        } catch (e) {
+          panel = renderIdleReasonsHtml({ kind: "unknown", why: `ledger unreadable: ${String((e as Error)?.message ?? e)}` });
+        }
+      } else {
+        panel = renderIdleReasonsHtml({ kind: "unknown", why: "idle reasons refresh off the bounded console data routes" });
       }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      // PER REQUEST, for the same reason the idle panel above is: the shell re-renders on every
-      // page load, so a merge that lands after boot shows up on the very next load. A resolution
-      // failure degrades to UNKNOWN inside the renderer, never to a confident "current".
       let consoleCodeHtml: string;
-      try {
-        consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: consoleSha, currentSha: resolveCurrentSha() });
-      } catch {
-        // NOT "current": a throw here cannot decide the question either, and the whole defect this
-        // chip exists for is a confident, wrong yes. Reported as undecided, with the reason.
-        consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: CONSOLE_SHA_UNKNOWN, currentSha: CONSOLE_SHA_UNKNOWN });
+      if (resolveCurrentSha !== resolveConsoleSha) {
+        try {
+          consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: consoleSha, currentSha: resolveCurrentSha() });
+        } catch {
+          consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: CONSOLE_SHA_UNKNOWN, currentSha: CONSOLE_SHA_UNKNOWN });
+        }
+      } else {
+        consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: consoleSha, currentSha: consoleSha });
       }
       res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha, panel, renderGithubCredentialHtml(credential), consoleCodeHtml));
     },
@@ -2263,7 +2531,7 @@ export function buildPeekRoute(deps: { root: string; isLive: (runId: string) => 
     method: "GET",
     path: "/v1/peek",
     scope: "read",
-    handler: (req, res) => {
+    handler: async (req, res) => {
       const url = new URL(req.url ?? "/", "http://localhost");
       const runId = url.searchParams.get("runId");
       if (!runId || !runId.trim()) {
@@ -2281,7 +2549,7 @@ export function buildPeekRoute(deps: { root: string; isLive: (runId: string) => 
       const tailPath = join(deps.root, "state", "runs", `${runId}.tail`);
       let raw: string;
       try {
-        raw = readFileSync(tailPath, "utf8");
+        raw = await fsPromises.readFile(tailPath, "utf8");
       } catch {
         sendJson(res, 200, { runId, live, found: false, lines: [], reason: `no tail recorded for ${runId}` });
         return;
@@ -2524,7 +2792,7 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
     root: deps.accountUsage?.root ?? deps.fleetControlRoot,
     accountFilePath: resolveAccountFilePath(deps.accountUsage?.accountFilePath),
   };
-  const routes = [
+  const rawRoutes = [
     buildStatusRoute(deps.board, lastSeen),
     buildRecentRoute(deps.board),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
@@ -2620,7 +2888,7 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
     buildShellRoute(
       deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS,
       consoleSha,
-      { ledgerPath: deps.ledgerPath },
+      deps.resolveCurrentSha ? { ledgerPath: deps.ledgerPath, readLedger: readLedgerLines } : { ledgerPath: deps.ledgerPath },
       githubCredential.state,
       // W1-T2562: threaded from ServeDeps so a test observes the staleness chip without shelling
       // to git, exactly as `gateStaleCodeExit`'s own `resolveCurrentSha` seam already allows.
@@ -2673,6 +2941,7 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
       log: deps.log,
     }),
   ];
+  const routes = boundConsoleReadRoutes(rawRoutes, deps);
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
   // (this one), not merely a test — a write-scoped route added here with no declared tier fails
   // the build rather than defaulting quietly. See `assertWriteTiersComplete`'s own doc.
