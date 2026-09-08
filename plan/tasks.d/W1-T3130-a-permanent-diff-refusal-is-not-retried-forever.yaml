@@ -1,0 +1,92 @@
+- id: W1-T3130
+  title: "A PERMANENT `gh pr diff` REFUSAL IS RETRIED FOREVER — GitHub answers HTTP 406 (\"the diff exceeded the maximum number of files (300)\") for any PR over 300 files, `sweep.post_review.failed` records it, `review.post_refused` stands down FOR THAT ATTEMPT, and the next pass re-derives the identical `post-review` disposition because that arm carries no strike counter; PR #4510 was re-dispatched 143 times in three days at ~2.5-minute intervals"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 1
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files: [src/lib/sweep.ts, test/a-permanent-diff-refusal-is-not-retried-forever.test.ts]
+  origin: "operator-session#daemon-telemetry-2026-09-08"
+  plan_refs: ["W1-T2844", "W1-T913"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED in the live ledger, 2026-09-05..2026-09-08.
+
+    THE LOOP, END TO END. `sweep.post_review.failed` on PR #4510 carries, verbatim:
+
+      error: Command failed: gh pr diff https://github.com/craigoley/remudero/pull/4510
+      could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum
+      number of files (300).
+
+    Reproduced by hand at 2026-09-08T07:26Z: `gh pr diff 4510` returns the same 406. The PR has
+    930 changed files. THE LIMIT IS A CONSTANT OF THE API, not a transient.
+
+    THE ARM THAT RE-FIRES. `src/lib/sweep.ts:2222-2228` — the `post-review` disposition:
+
+      disposition: "post-review",
+      when: (pr, policy, _ageDays, now) =>
+        pr.checksState === "green" && pr.requiredContextsUnreadable !== true &&
+        (pr.reviewState === "none" ||
+          (pr.reviewState === "pending" &&
+            (pr.reviewPendingOwnerDead === true || reviewPendingIsStale(pr, policy, now)))),
+
+    None of those terms changes when the diff is unservable, so the disposition is a fixed point.
+    `review.post_refused`'s own reason — "post-review attempt threw — standing down rather than
+    retrying this head unbound" — bounds ONE attempt; nothing bounds the sequence.
+
+    THERE IS A STRIKE COUNTER, AND THIS ARM DOES NOT USE IT. `priorStrikes` (sweep.ts:622) is read
+    at :1562 and :1932-1935, both fix-rung paths. MEASURED: `grep -n priorStrikes src/lib/sweep.ts`
+    returns no hit inside the `post-review` block.
+
+    NOTHING CLASSIFIES 406 AS PERMANENT. MEASURED: `grep -rn "406|too_large|too large"
+    src/lib/sweep.ts src/lib/review.ts src/run-task.ts` returns only `W1-T406` task-id matches.
+
+    THE COST IS NOT TOKENS — IT IS QUOTA. Notional spend attributable to #4510 across the window is
+    $1.43 over 5 cost-bearing rows. What it actually consumed: 586 ledger rows against one PR
+    number, and GitHub API budget. The board gateway pulled 110.5 MiB in three days, and this
+    session watched `rmd next-task-id --reserve` REFUSE (correctly, W1-T2316) because the open-PR
+    surface was unreadable, and watched two `rmd retro` runs lose their merge-state join to the
+    same exhaustion. A cheap loop that never ends is not cheap.
+  design: |
+    (i) CLASSIFY THE REFUSAL, do not count it. A 406 naming the 300-file ceiling is PERMANENT for
+    this head: no retry can succeed until the head changes. It must dispose to a terminal state
+    that NAMES the ceiling and the remedy (split under 300 files), not to `post-review` again.
+    (ii) A STRIKE COUNTER ON THE ARM, for every OTHER post-review failure. The permanent
+    classification cannot be exhaustive — an unknown throw must still stop eventually. Reuse
+    `priorStrikes`' shape rather than inventing a second counter.
+    (iii) KEYED ON THE HEAD SHA. A new push is a new chance: strikes and the permanent mark must
+    reset when `head_sha` moves, or a fixed PR stays dead after its author fixes it.
+    (iv) THE TERMINAL STATE IS VISIBLE. It escalates or names itself in `sweep.summary`; a loop that
+    goes quiet without saying why is the same defect wearing a different face.
+  acceptance:
+    - claim: "a post-review failure whose error names the 300-file diff ceiling disposes to a terminal state naming the ceiling, and is not re-dispatched on the next pass at the same head"
+      proof: "unit test: test/a-permanent-diff-refusal-is-not-retried-forever.test.ts"
+    - claim: "an unrecognised post-review throw is retried under a bounded strike count and then stops, so the bound does not depend on classifying every error"
+      proof: "unit test: test/a-permanent-diff-refusal-is-not-retried-forever.test.ts"
+    - claim: "both the permanent mark and the strike count reset when head_sha moves, so a split or amended PR is retried"
+      proof: "unit test: test/a-permanent-diff-refusal-is-not-retried-forever.test.ts"
+    - claim: "a post-review failure that is genuinely transient still re-dispatches on the next pass, so the fix does not freeze a recoverable PR"
+      proof: "unit test: test/a-permanent-diff-refusal-is-not-retried-forever.test.ts"
+  falsifier: |
+    CLOSE IF the arm already bounds itself: read src/lib/sweep.ts:2222-2240 and grep the
+    `post-review` block for `priorStrikes`. MEASURED 2026-09-08: the block reads only
+    `checksState`, `requiredContextsUnreadable`, `reviewState`, `reviewPendingOwnerDead` and
+    `reviewPendingIsStale` — no counter, no attempt memory.
+    PROVE IT LOAD-BEARING: with the permanent classification removed, the 406 probe must re-dispatch
+    on a second pass at the same head (the loop returns), while the transient probe re-dispatches
+    either way — so the suite discriminates the CLASSIFIER, not the harness.
+    DO NOT satisfy this by suppressing the `post-review` arm whenever a diff read fails. That would
+    strand every PR whose diff read hiccups once, which is the opposite error and a worse one.
+    DO NOT raise the 300-file ceiling by paginating the files API here. That is a real option and a
+    SEPARATE task with its own argument; bolting it on makes this change unreviewable.
+  note: |
+    Rule 25 CHECKED BEFORE FILING: `src/lib/sweep.ts` is ordinary src, so the build PR is a src+test
+    pair and must not carry a plan record.
+    THE TRIGGERING PR WAS MINE. #4510 was a 930-file plan reconcile I opened; it has been closed and
+    will return as ≤300-file batches. The sweep defect is real independently of that PR, but the
+    corpus evidence for it exists because I created the condition.

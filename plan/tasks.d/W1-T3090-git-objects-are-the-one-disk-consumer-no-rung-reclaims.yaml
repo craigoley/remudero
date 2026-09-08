@@ -90,15 +90,15 @@
     of silently weakening the guard.
   acceptance:
     - claim: the reap REFUSES with a named cause when any worktree is registered, any inflight lock exists, or the liveness probe cannot be read, so quiet is proven and never assumed
-      proof: "unit test: test/object-reaper.test.ts::each refusal arm names its cause"
+      proof: "unit test: test/object-reaper.test.ts"
     - claim: prune is invoked with an expiry window and never bare, so an object a live worker created in the last day is ineligible even if the quiet check were wrong
-      proof: "unit test: test/object-reaper.test.ts::prune always carries its expiry"
+      proof: "unit test: test/object-reaper.test.ts"
     - claim: gc.log is removed only immediately before a prune that actually runs, so a refused pass leaves git's automatic cleanup suppressed rather than re-arming it
-      proof: "unit test: test/object-reaper.test.ts::a refused pass leaves gc.log in place"
+      proof: "unit test: test/object-reaper.test.ts"
     - claim: the reap never invokes git gc or repack, so no ref or reflog is rewritten by this rung
-      proof: "unit test: test/object-reaper.test.ts::only prune is ever spawned"
+      proof: "unit test: test/object-reaper.test.ts"
     - claim: a throw anywhere in the reap cannot fail the dispatch or the other three sweeps, matching the guard the existing three already carry
-      proof: "unit test: test/object-reaper.test.ts::a throwing reap does not break the rung"
+      proof: "unit test: test/object-reaper.test.ts"
   falsifier: |
     Close without implementation if object housekeeping already exists. Look, do not trust this
     shard: `grep -rnE '"gc"|"prune"|git gc|git prune|repack' src/ --include=*.ts` and read every hit.
