@@ -763,6 +763,15 @@ import {
   type RiskJudgeVerdict,
 } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
+import {
+  describeWorkerSkillReachability,
+  loadInjectableSkills,
+  renderSkillsPart,
+  selectSkillsForTask,
+  skillsInjectedEvent,
+  stageSkillDrafts,
+  workerAllowlistFromSettings,
+} from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
 import { parse as parseYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
@@ -12962,7 +12971,19 @@ async function runTask(
       ? false
       : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
     const ruleHeadlinesPart = buildRuleHeadlinesPart(ruleHeadlinesEnabled, join(worktreePath, "CLAUDE.md"));
-    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart);
+    // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
+    // matchedLearnings already spends. Empty for every task until an operator approves a skill that
+    // declares `applies-to:`, so today this changes no prompt by a single byte.
+    const injectableSkills = selectSkillsForTask(
+      loadInjectableSkills(join(repoRoot, ".claude", "skills")),
+      task.type,
+      DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+    );
+    const skillsPart = renderSkillsPart(injectableSkills);
+    // Same shape as learnings.injected above, and same status: analytics, never a decision input.
+    const skillsEvent = skillsInjectedEvent(injectableSkills, task.type, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
+    if (skillsEvent) log("skills.injected", skillsEvent);
+    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -22848,6 +22869,19 @@ async function retroCommand(
   const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: the singleton lane the collision was observed on
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
+
+  // W1-T3101 — THE CALLER stageSkillDraft NEVER HAD. Its own suite drove it; nothing in production
+  // did, so `skill.staged` had fired ZERO times across three days of ledger. Staging writes a
+  // PROPOSAL and nothing else: the operator still releases it with `rmd approve`, and only that
+  // writes under .claude/skills/. Best-effort — a throw here must never fail the retro, whose
+  // report is the thing the operator actually came for.
+  stageSkillDrafts(
+    followupRegistryPath,
+    gather.skillDrafts,
+    workerAllowlistFromSettings(undefined),
+    describeWorkerSkillReachability([]),
+    log,
+  );
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its

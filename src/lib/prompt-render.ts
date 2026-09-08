@@ -817,6 +817,9 @@ export function implementPromptParts(
   // `workerRuleHeadlines.enabled` row is absent or off, the default for every existing caller
   // that never passes this argument at all.
   ruleHeadlinesPart = "",
+  // W1-T3101: approved, opted-in skills for this task class. Appended LAST so no positional caller
+  // shifts — the convention ruleHeadlinesPart above already follows. "" for every existing caller.
+  skillsPart = "",
 ): Array<{ name: string; value: string }> {
   const contextClaims = (task.context ?? [])
     .map((c) => `- ${c.claim} ${citation(c.src)}`)
@@ -834,6 +837,9 @@ export function implementPromptParts(
     { name: "recon", value: reconContext },
     { name: "operator_notes", value: operatorNotesBlock },
     { name: "matched_learnings", value: matchedLearnings },
+    // W1-T3101, beside matched_learnings: both are injected KNOWLEDGE selected for this task and
+    // both spend the SAME budget, so they belong adjacent rather than in separate regions.
+    { name: "skills", value: skillsPart },
     { name: "task_body", value: body },
   ];
 }
@@ -845,8 +851,9 @@ export function renderImplementPrompt(
   matchedLearnings = "",
   operatorNotesBlock = "",
   ruleHeadlinesPart = "",
+  skillsPart = "",
 ): string {
-  const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart);
+  const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart);
   const partValue = (name: string) => parts.find((p) => p.name === name)!.value;
 
   return [
@@ -865,6 +872,9 @@ export function renderImplementPrompt(
     partValue("recon"),
     partValue("operator_notes"),
     partValue("matched_learnings"),
+    // W1-T3101: inside # CONTEXT, beside the learnings it shares a budget with. Empty when no
+    // approved skill opted in for this class, so the prompt is byte-identical to today's.
+    ...(partValue("skills") ? [partValue("skills")] : []),
     "",
     "# TASK",
     partValue("task_body"),

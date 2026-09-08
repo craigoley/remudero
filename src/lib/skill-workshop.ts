@@ -14,6 +14,8 @@
  * cycle. TypeScript's structural typing means a real `ProceduralCandidate` satisfies this shape
  * with zero conversion at the one call site that matters (retro.ts's `buildGather`).
  */
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { updateProposalRegistry, type UpdateProposalRegistryOpts } from "./inbox.js";
@@ -305,4 +307,152 @@ export function stageSkillDraft(
     opts,
   );
   return { refused: false, staged, alreadyStaged, reason: alreadyStaged ? "already staged" : undefined };
+}
+
+// ── W1-T3101: a staged skill reaches the worker prompt ────────────────────────────────────────
+
+/**
+ * The frontmatter key a skill uses to declare which task classes it applies to, e.g.
+ * `applies-to: implement, diagnose`. OPT-IN BY CONSTRUCTION, and that is the whole point: the
+ * `.claude/skills/` tree already holds GENERATED macro skills (`tddr`, `grfp`) written by
+ * scripts/generate-macro-skills.mjs and marked `disable-model-invocation: true`. Those are for a
+ * human at a terminal; injecting them into every implement prompt would spend the knowledge budget
+ * on text no worker asked for. A skill with no `applies-to:` is NEVER selected — so the macro tree
+ * is excluded without an allowlist naming it, and stays excluded when it grows.
+ */
+export const SKILL_APPLIES_TO_RE = /^applies-to:\s*(.+)$/m;
+
+/** One skill that has been APPROVED into `.claude/skills/` and opted in to prompt injection. */
+export interface InjectableSkill {
+  name: string;
+  /** Task classes this skill declares itself for, lower-cased. */
+  appliesTo: string[];
+  /** The body below the frontmatter — what a worker actually reads. */
+  body: string;
+}
+
+/** Split `---`-delimited frontmatter from the body. A file with no frontmatter has no `applies-to`
+ *  and is therefore never injectable, which is the safe direction for an unrecognised shape. */
+function splitFrontmatter(text: string): { front: string; body: string } {
+  const m = /^---\n([\s\S]*?)\n---\n?/.exec(text);
+  return m ? { front: m[1], body: text.slice(m[0].length) } : { front: "", body: text };
+}
+
+/**
+ * Every APPROVED skill under `dir` (`.claude/skills/<name>/SKILL.md`) that opted in to injection.
+ *
+ * READS THE APPROVED TREE, NEVER THE PROPOSAL REGISTRY. `stageSkillDraft` writes a PROPOSAL; only
+ * `rmd approve` turns one into a file here. Injecting a staged-but-unapproved draft would put
+ * machine-authored text into a worker prompt with no operator in the loop, which is the one thing
+ * this repo's "a machine may propose, only an operator releases" rule forbids.
+ */
+export function loadInjectableSkills(
+  dir: string,
+  readDir: (d: string) => string[] = (d) => readdirSync(d),
+  readFile: (p: string) => string = (p) => readFileSync(p, "utf8"),
+): InjectableSkill[] {
+  let names: string[];
+  try {
+    names = readDir(dir).sort();
+  } catch {
+    return []; // no approved tree yet — an absent directory is zero skills, never an error
+  }
+  const out: InjectableSkill[] = [];
+  for (const name of names) {
+    let text: string;
+    try {
+      text = readFile(join(dir, name, "SKILL.md"));
+    } catch {
+      continue; // a directory without a SKILL.md is not a skill; skip it rather than throw
+    }
+    const { front, body } = splitFrontmatter(text);
+    const m = SKILL_APPLIES_TO_RE.exec(front);
+    if (!m) continue; // no opt-in — the generated macro tree lands here and is excluded
+    const appliesTo = m[1].split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0);
+    if (appliesTo.length === 0) continue;
+    out.push({ name, appliesTo, body: body.trim() });
+  }
+  return out;
+}
+
+/**
+ * The skills to inject for one task class, bounded by `budgetChars`.
+ *
+ * SPENDS FROM THE EXISTING KNOWLEDGE BUDGET rather than adding a second one: a prompt carrying
+ * skills is no larger than {@link import("./learnings.js").DEFAULT_KNOWLEDGE_BUDGET_CHARS} already
+ * allowed, so no task has to re-measure a prompt ceiling. Deterministic order (name-sorted, already
+ * guaranteed by {@link loadInjectableSkills}) so two runs of one task get one prompt.
+ *
+ * A skill that does not FIT is DROPPED, never truncated: half a procedure is worse than none.
+ */
+export function selectSkillsForTask(
+  skills: readonly InjectableSkill[],
+  taskType: string,
+  budgetChars: number,
+): InjectableSkill[] {
+  const want = taskType.toLowerCase();
+  const out: InjectableSkill[] = [];
+  let spent = 0;
+  for (const s of skills) {
+    if (!s.appliesTo.includes(want)) continue;
+    const cost = s.body.length;
+    if (spent + cost > budgetChars) continue;
+    out.push(s);
+    spent += cost;
+  }
+  return out;
+}
+
+/** The CONTEXT part. Empty string when nothing was selected, so the prompt is byte-identical to
+ *  today's for every task with no applicable skill — which is every task until one is approved. */
+export function renderSkillsPart(selected: readonly InjectableSkill[]): string {
+  if (selected.length === 0) return "";
+  return selected.map((s) => `## skill: ${s.name}\n\n${s.body}`).join("\n\n");
+}
+
+/** The `skills.injected` payload, or `undefined` when nothing was selected — the caller logs only
+ *  when this returns a value, so "no applicable skill" leaves no row rather than a zero-count one.
+ *  Extracted as a seam because the caller is inside the implement command, where the branch was
+ *  reachable by no test and `diff-coverage` named all five of its lines. ANALYTICS ONLY: nothing
+ *  reads this row to make a decision, exactly like `learnings.injected` beside it. */
+export function skillsInjectedEvent(
+  selected: readonly InjectableSkill[],
+  taskType: string,
+  budgetChars: number,
+): { selected: number; selected_names: string[]; task_type: string; budget_chars: number } | undefined {
+  if (selected.length === 0) return undefined;
+  return {
+    selected: selected.length,
+    selected_names: selected.map((s) => s.name),
+    task_type: taskType,
+    budget_chars: budgetChars,
+  };
+}
+
+/**
+ * Stage every draft the retro gathered, BEST-EFFORT: a throw on one draft must never fail the
+ * retro, whose report is the thing the operator actually came for. Extracted as a seam for the
+ * same reason as {@link skillsInjectedEvent} — the loop lived inside `retroCommand`, so its catch
+ * arm was unreachable by any test and `diff-coverage` named nine of its lines.
+ *
+ * STAGING WRITES A PROPOSAL AND NOTHING ELSE. The operator still releases it with `rmd approve`,
+ * and only that writes under `.claude/skills/` — so nothing here can put machine-authored text in
+ * front of a worker.
+ */
+export function stageSkillDrafts(
+  registryPath: string,
+  drafts: readonly SkillDraft[],
+  allowlist: WorkerAllowlist,
+  reachability: { reachable: boolean; reason: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  stageOne: typeof stageSkillDraft = stageSkillDraft,
+): void {
+  for (const draft of drafts) {
+    try {
+      const r = stageOne(registryPath, draft, allowlist, reachability);
+      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, refused: r.refused, reason: r.reason });
+    } catch (e) {
+      log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
+    }
+  }
 }
