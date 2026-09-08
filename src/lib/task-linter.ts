@@ -1350,7 +1350,7 @@ export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): 
 
 export type UnboundCriterionBaseline = Readonly<Record<string, number>>;
 
-const TEST_TITLE_RE = /\b(?:test|it)\s*\(\s*(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/g;
+const TEST_TITLE_PATTERN = /\b(?:test|it)\s*\(\s*(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/g;
 
 function decodeTestTitle(raw: string): string {
   return raw.replace(/\\(["'`\\])/g, "$1").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
@@ -1358,9 +1358,9 @@ function decodeTestTitle(raw: string): string {
 
 export function literalTestTitlesIn(fileText: string): string[] {
   const titles: string[] = [];
-  TEST_TITLE_RE.lastIndex = 0;
+  TEST_TITLE_PATTERN.lastIndex = 0;
   let m: RegExpExecArray | null;
-  while ((m = TEST_TITLE_RE.exec(fileText))) {
+  while ((m = TEST_TITLE_PATTERN.exec(fileText))) {
     titles.push(decodeTestTitle(m[2] ?? ""));
   }
   return titles;
