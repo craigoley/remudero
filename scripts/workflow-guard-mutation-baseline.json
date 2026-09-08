@@ -1,0 +1,34 @@
+{
+  "guards": {
+    "ci#1: if [ \"${{ matrix.shard }}\" != \"1\" ]; then": {
+      "reason": "The one-shard-only preamble. Mutated to always-skip, the three non-first shards keep doing exactly what they already do and shard 1 merely stops running a step it alone runs; nothing in the workflow's shape changes, so no source-reading suite can see it. Covering it needs a harness that executes this step body per shard, which test/workflow-single-suite-run.test.ts's runBash could give it. UNCOVERED, not acceptable-forever."
+    },
+    "test-slow#1: if ! node --import tsx scripts/diff-class.mjs --list-plan-reading-suites > plan-reading-suites.txt; then": {
+      "reason": "The fail-closed arm of the plan-reading enumeration: if the classifier cannot list its suites, the job stands down. Forcing it always-true makes test-slow always stand down. test/plan-reading-fast-lane-sharding.test.ts drives the classifier, not this step's shell, so nothing distinguishes it today."
+    },
+    "test-slow#1: if [ \"${{ steps.plan-reading.outputs.established }}\" = \"true\" ]; then": {
+      "reason": "The duplicate-execution suppressor. Always-skip means the slow tier never runs on any diff -- a real vacuous pass, and the highest-value entry in this file to cover. It needs the same runBash treatment as the `ci` Test step got in W1-T3207."
+    },
+    "coverage-ratchet#1: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
+      "reason": "W1-T2428's fast lane: plan/docs diffs skip coverage work. Always-skip means a SOURCE PR is certified with no coverage measured at all. test/fast-lane-classifier.test.ts asserts the CLASSIFIER's verdicts, never that this step acts on them, so the two are not connected by any test."
+    },
+    "coverage-ratchet#1: if ! find coverage/raw -maxdepth 1 -type f -name 'coverage-*.json' -print -quit | grep -q .; then": {
+      "reason": "The no-raw-coverage refusal. This one FAILS closed rather than skipping (its block exits non-zero after the echo), so an always-true mutant makes the job refuse rather than pass vacuously -- the safe direction. Enumerated because its block reaches `exit 0` further down; a narrower shape-check would drop it, at the cost of missing genuine skips."
+    },
+    "coverage-ratchet-required#1: [ \"${GITHUB_EVENT_NAME}\" = \"pull_request\" ] || { echo \"coverage-ratchet: push event \u2014 no PR coverage merge required.\"; exit 0; }": {
+      "reason": "The push-event bypass on the aggregator's merge step. Its four siblings in the same job ARE covered by test/push-ci-on-main.test.ts; this one is worded differently and that suite's assertion does not reach it. Closing it is a wording or assertion fix, not new machinery."
+    },
+    "coverage-ratchet-required#1: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
+      "reason": "Fast-lane skip on the aggregator, first of four identical occurrences. Same gap as the coverage-ratchet entry above: the classifier is tested, its consumption here is not."
+    },
+    "coverage-ratchet-required#2: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
+      "reason": "Second of the four identical fast-lane skips in this job. Recorded separately rather than collapsed: they guard different steps, and one being covered would say nothing about the others."
+    },
+    "coverage-ratchet-required#3: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
+      "reason": "Third of the four identical fast-lane skips in this job, guarding the pr.diff computation. Recorded separately rather than collapsed with its siblings: they guard different steps, so one being covered would say nothing about the others, and a single shared entry would exempt three guards nobody measured."
+    },
+    "coverage-ratchet-required#4: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
+      "reason": "Fourth of the four identical fast-lane skips in this job -- the one guarding the diff-coverage read, so an always-skip here is precisely the vacuous diff-coverage pass this repo already names as its worst class."
+    }
+  }
+}
