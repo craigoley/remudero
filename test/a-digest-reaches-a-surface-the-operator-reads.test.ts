@@ -192,8 +192,12 @@ test("W1-T3156: absent or unparseable digest storage renders no digests and thro
   const brokenRoot = tmpRoot();
   mkdirSync(dirname(inboxDigestsPath(brokenRoot)), { recursive: true });
   writeFileSync(inboxDigestsPath(brokenRoot), "{not json");
-  assert.deepEqual(readConsoleInboxDigests(brokenRoot), { entries: [], omitted: 0 });
-  assert.deepEqual(await routeBody(brokenRoot), { entries: [], omitted: 0 });
+  const direct = readConsoleInboxDigests(brokenRoot);
+  assert.deepEqual({ entries: direct.entries, omitted: direct.omitted }, { entries: [], omitted: 0 });
+  assert.match(direct.reason ?? "", /JSON/);
+  const routed = (await routeBody(brokenRoot)) as { entries: unknown[]; omitted: number; reason?: string };
+  assert.deepEqual({ entries: routed.entries, omitted: routed.omitted }, { entries: [], omitted: 0 });
+  assert.match(routed.reason ?? "", /JSON/);
 
   const { mailboxHtml } = mailboxHarness();
   assert.match(mailboxHtml([], [], [], [], false, "", readConsoleInboxDigests(brokenRoot)), /no open threads/);

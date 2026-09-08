@@ -401,8 +401,10 @@ export interface ConsoleInboxDigestEntry {
 export interface ConsoleInboxDigests {
   entries: ConsoleInboxDigestEntry[];
   omitted: number;
+  reason?: string;
 }
 
+/** PRIMARY CONTROL: the mailbox's daily-digest render window. */
 export const CONSOLE_INBOX_DIGEST_LIMIT = 10;
 
 function emptyConsoleInboxDigests(): ConsoleInboxDigests {
@@ -424,8 +426,8 @@ export function readConsoleInboxDigests(root: string, limit: number = CONSOLE_IN
     const valid = raw.filter(isConsoleInboxDigestEntry);
     const entries = valid.slice(Math.max(0, valid.length - limit));
     return { entries, omitted: Math.max(0, valid.length - entries.length) };
-  } catch {
-    return emptyConsoleInboxDigests();
+  } catch (error) {
+    return { entries: [], omitted: 0, reason: String((error as Error)?.message ?? error) };
   }
 }
 
@@ -5086,7 +5088,7 @@ ${renderConsoleShellScript()}
         getJson("/v1/recent").catch(() => ({ entries: [] })),
         getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
         getJson("/v1/feedback").catch(() => ({ entries: [] })),
-        getJson("/v1/inbox/digests").catch(() => ({ entries: [], omitted: 0 })),
+        getJson("/v1/inbox/digests").catch((error) => ({ entries: [], omitted: 0, reason: String(error && error.message ? error.message : error) })),
         getJson("/v1/inbox").catch(() => ({ ready: [], drafting: [] })),
         getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false, quietHours: false })),
         // W1-T159: the daemon-health widget's own fetch -- a fetch failure here must never break
