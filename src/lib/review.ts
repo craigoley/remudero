@@ -283,6 +283,9 @@ export interface ReviewEvidence {
    *  being the file grep reads. TRAP: in a blob-only directory `node --test` exits 1 with empty stdout, read as "did
    *  not pass at base ⇒ discriminates" and certifying a test that passes at both commits. */
   baseIsCheckout?: boolean;
+  /** (W1-T3190) mirrors {@link BaseProofDir.addedTestFiles} — the `test/**` paths copied INTO the
+   *  base worktree for `unit test:` re-runs, which a `grep:` proof must not mistake for base content. */
+  addedTestFiles?: ReadonlySet<string>;
   /** Injected proof executor; real callers omit it and get {@link execWhitelistedProof}. Also the executor {@link
    *  preexistingProofHits} reuses against `baseCheckoutDir` — the same function at a different `cwd`, so one injected
    *  fake covers both sides. */
@@ -1566,6 +1569,12 @@ export interface ProofExecContext {
    * merge-base (a worktree), the one tree a `unit test:` proof can be re-run in. Absent/false ⇒ every `unit test:`
    * proof's base outcome is `base_unknown` (fail closed); `grep:` proofs behave exactly as before. */
   baseIsCheckout?: boolean;
+  /** (W1-T3190) The repo-relative `test/**` paths this diff ADDS, which {@link buildBaseProofDir}
+   *  copies INTO the base worktree so a `unit test:` proof can genuinely be re-run there. A
+   *  `grep:` proof naming one of them would otherwise find the copy put there for someone else
+   *  and be graded `executed_stale` about a file the base never had. Same set the copy uses, so
+   *  the two cannot drift. */
+  addedTestFiles?: ReadonlySet<string>;
   /** (W1-T456, DEFECT A) Repo-relative paths a `unit test:` proof may forward-reference without
    *  being scored `executed_fail` — the union of {@link shardDeclaredFilesInDiff}'s read of THIS
    *  diff's own added shard(s) and, when a task id resolved, that task's declared `files:`. */
@@ -1673,9 +1682,17 @@ function classifyBaseProofOutcome(
   baseCwd: string,
   baseUnreadablePaths?: ReadonlySet<string>,
   baseIsCheckout?: boolean,
+  addedTestFiles?: ReadonlySet<string>,
 ): "stale" | "discriminates" | "base_unknown" | "base_unreadable" {
   const target = grepProofTargetPath(whitelisted);
   if (target !== undefined && baseUnreadablePaths?.has(target)) return "base_unreadable";
+  // (W1-T3190) A `grep:` whose target this diff ADDS discriminates BY CONSTRUCTION: the path did
+  // not exist at the merge-base, so no text could match there. What the base tree holds is
+  // W1-T3098's copy, put there so a `unit test:` proof could be re-run — and grepping that copy
+  // graded a forward reference, the STRONGEST discrimination a proof has, as the weakest. Only
+  // `grep:` is short-circuited: a `unit test:` proof on a copied-in file is exactly what W1-T3098
+  // built the copy for, and its base run stays a real measurement.
+  if (whitelisted.kind === "grep" && target !== undefined && addedTestFiles?.has(target)) return "discriminates";
   // (R-11) A `unit test:` proof can only be re-run in a REAL checkout of the base. In the blob-only fallback
   // `node --test` finds no file, exits 1 with empty stdout, and the executor returns "fail" — which the line below
   // would grade `discriminates`, certifying a test that passes identically at both commits. Fails closed.
@@ -1696,11 +1713,12 @@ export function preexistingProofHits(
   baseCwd: string | undefined,
   baseUnreadablePaths?: ReadonlySet<string>,
   baseIsCheckout?: boolean,
+  addedTestFiles?: ReadonlySet<string>,
 ): boolean {
   if (baseCwd === undefined) return false;
   // Only `"stale"` is a hit, so an unreadable base blob answers `false` here exactly like every other non-stale
   // outcome — this guard never manufactures a false positive (W1-T460 changed WHICH outcome is reported, not that).
-  return classifyBaseProofOutcome(whitelisted, exec, baseCwd, baseUnreadablePaths, baseIsCheckout) === "stale";
+  return classifyBaseProofOutcome(whitelisted, exec, baseCwd, baseUnreadablePaths, baseIsCheckout, addedTestFiles) === "stale";
 }
 
 /** Verdict one criterion against its proof, given the report + optional semantic. */
@@ -1837,7 +1855,7 @@ export function judgeCriterion(
             // merge-base — one execution answers both "is this stale" and, if not, why not.
             const baseOutcome =
               execCtx.baseCwd !== undefined
-                ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout)
+                ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles)
                 : undefined;
             if (baseOutcome === "base_unreadable") {
               // The base tree exists and siblings were checked against it, but THIS proof's base blob never arrived,
@@ -2819,6 +2837,7 @@ export function judgeReview(
         baseCwd: evidence.baseCheckoutDir,
         baseUnreadablePaths: evidence.baseUnreadablePaths,
         baseIsCheckout: evidence.baseIsCheckout,
+        addedTestFiles: evidence.addedTestFiles,
         forwardReferenceFiles,
         // W1-T2737: the SAME `planOnly` computed above — one derivation, so the reviewer's
         // scope judgement and the forward-reference carve-out can never disagree.

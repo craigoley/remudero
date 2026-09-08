@@ -4395,6 +4395,8 @@ async function runReview(args: {
   baseUnreadablePaths?: ReadonlySet<string>;
   /** R-11: true when `baseCheckoutDir` is a real merge-base worktree — see buildBaseProofDir. */
   baseIsCheckout?: boolean;
+  /** (W1-T3190) see {@link BaseProofDir.addedTestFiles}. */
+  addedTestFiles?: ReadonlySet<string>;
   /**
    * W1-T233: the NAMED reason `headCheckoutDir` is absent because a worktree
    * materialization attempt failed (rather than simply never having been
@@ -4653,6 +4655,7 @@ async function runReview(args: {
     baseCheckoutDir: args.baseCheckoutDir,
     baseUnreadablePaths: args.baseUnreadablePaths,
     baseIsCheckout: args.baseIsCheckout,
+    addedTestFiles: args.addedTestFiles,
     // W1-T322: advisory-only inputs — see ReviewEvidence's own doc for both fields.
     taskDeclaredFiles: task.files,
     openTaskIds: args.openTaskIds,
@@ -13076,6 +13079,10 @@ export interface BaseProofDir {
   baseUnreadablePaths: ReadonlySet<string>;
   baseIsCheckout: boolean;
   baseWorktreeFailure?: string;
+  /** (W1-T3190) Exactly the `test/**` paths COPIED in above, so `classifyBaseProofOutcome` reads
+   *  the same set the copy used: a `grep:` naming one would otherwise find the copy and read as
+   *  non-discriminating about a file the merge-base never had. Empty when no copy happened. */
+  addedTestFiles: ReadonlySet<string>;
 }
 
 /**
@@ -13209,7 +13216,7 @@ export function buildBaseProofDir(
       writeFileSync(dest, readFileSync(src));
     });
 
-  const noBase: BaseProofDir = { baseCheckoutDir: undefined, baseUnreadablePaths: new Set<string>(), baseIsCheckout: false };
+  const noBase: BaseProofDir = { baseCheckoutDir: undefined, baseUnreadablePaths: new Set<string>(), baseIsCheckout: false, addedTestFiles: new Set<string>() };
   // No DIALECT proof at all (prose only, or no criteria) ⇒ nothing will ever be re-run against a
   // base, so no checkout is paid for. A single `grep:` OR `unit test:` proof is enough to want one.
   if (!criteria.some((c) => typeof c.proof === "string" && parseWhitelistedProof(c.proof) !== null)) return noBase;
@@ -13234,10 +13241,12 @@ export function buildBaseProofDir(
     // that one file's proof falls back to whatever it graded before this change — it must never
     // downgrade `baseIsCheckout`, which is a fact about the WORKTREE, already true by this point,
     // not about any one file inside it.
+    const copiedTestFiles = new Set<string>();
     try {
       for (const rel of changedTestFiles(headCheckoutDir, base)) {
         try {
           copyFile(join(headCheckoutDir, rel), join(dir, rel));
+          copiedTestFiles.add(rel); // W1-T3190: only on SUCCESS, so set and tree agree
         } catch {
           // per-file: leave this one path absent from the base tree, exactly as before this change
         }
@@ -13246,7 +13255,7 @@ export function buildBaseProofDir(
       // `changedTestFiles` itself failed to run (e.g. `git diff` broke) — no files copied, no worse
       // than the pre-W1-T3098 checkout.
     }
-    return { baseCheckoutDir: dir, baseUnreadablePaths: new Set<string>(), baseIsCheckout: true };
+    return { baseCheckoutDir: dir, baseUnreadablePaths: new Set<string>(), baseIsCheckout: true, addedTestFiles: copiedTestFiles };
   } catch (e) {
     // Not erased: the reason rides out on `baseWorktreeFailure` below, where `rmd check-proof`
     // prints it and the classifier reads the fallback's `baseIsCheckout: false` (R-11).
@@ -13267,6 +13276,8 @@ export function buildBaseProofDir(
     baseCheckoutDir: written > 0 ? dir : undefined,
     baseUnreadablePaths: new Set(unreadable),
     baseIsCheckout: false,
+    addedTestFiles: new Set<string>(), // the blob fallback copies nothing in; absent means absent
+
     baseWorktreeFailure: worktreeFailure,
   };
 }
@@ -14172,6 +14183,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           baseCheckoutDir: baseProof?.baseCheckoutDir,
           baseUnreadablePaths: baseProof?.baseUnreadablePaths,
           baseIsCheckout: baseProof?.baseIsCheckout,
+          addedTestFiles: baseProof?.addedTestFiles,
           // W1-T233: the named reason materialization failed (absent ⇒ it was
           // never attempted at all) — carried onto the posted CAPPED description
           // and the review.posted ledger line's degraded_reason fields.
