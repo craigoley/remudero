@@ -595,6 +595,8 @@ export interface DaemonDeps {
   /** True when a task's own read is indeterminate — a genuine read failure rather than a clean
    *  absence of evidence — re-derived from the same projection. Optional (W1-T119). */
   isIndeterminate?: (taskId: string) => boolean;
+  /** True when status.ts derives a durable independent-failure block from the ledger. */
+  isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
@@ -1757,9 +1759,15 @@ export async function runDaemon(
 
       if (disposition.kind === "independent_failure") {
         // Independent failure: nothing in the plan transitively depends on this task, so skipping it cannot
-        // leave a dependent building on a gap. Flag it, so selection never reconsiders it this run, and
-        // keep draining everything else.
-        task.status = "blocked";
+        // leave a dependent building on a gap. Record the block in the ledger, so a plan reload or daemon
+        // restart derives the same skip instead of trusting this tick's Task object.
+        log("dispatch.blocked_independent", {
+          task_id: task.id,
+          task: task.id,
+          verdict: result.verdict,
+          pr_url: result.prUrl,
+          run_id: result.runId,
+        });
         log("daemon.block.independent_failure", {
           task: task.id,
           verdict: result.verdict,
@@ -2534,6 +2542,7 @@ export async function runDaemon(
           }
         }
       },
+      isIndependentFailureBlocked: deps.isIndependentFailureBlocked,
     };
 
     // The dispatch set, adopting drain.ts's lane machinery rather than a second implementation. A console

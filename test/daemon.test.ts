@@ -1570,7 +1570,16 @@ test("W1-T46 INDEPENDENT-FAILURE: a block on a task with NO transitive dependent
     verdict: "blocked_review",
     pr_url: "https://github.com/o/r/pull/11",
   });
-  assert.equal(plan.byId.get("D")?.status, "blocked", "D is flagged in-memory — nextRunnable never reconsiders it this run");
+  const durableBlockLine = lines.find((l) => l.step === "dispatch.blocked_independent");
+  assert.ok(durableBlockLine, "a dispatch.blocked_independent ledger line was emitted");
+  assert.deepEqual(durableBlockLine?.extra, {
+    task_id: "D",
+    task: "D",
+    verdict: "blocked_review",
+    pr_url: "https://github.com/o/r/pull/11",
+    run_id: "D-run",
+  });
+  assert.equal(plan.byId.get("D")?.status, "queued", "D is recorded in the ledger, not mutated in memory");
   assert.ok(!lines.some((l) => l.step === "daemon.blocked"), "an independent failure never triggers a genuine-blocker halt");
 });
 
