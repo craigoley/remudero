@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: high
   band_meaning: span
@@ -92,5 +92,12 @@
     changes what any Claude lane loads, and a defect shows up as a failing drift check rather than
     as a behaviour change in a worker.
 
-    verify:human because adding a second doctrine file at the repo root is a durable convention
-    change an operator should rule on, even though every acceptance criterion is mechanical.
+    verify:auto BY OPERATOR RULING 2026-09-08. This shard was filed verify:human on the author's
+    own caution — that adding a root doctrine file is a durable convention change. The operator
+    ruled that caution is not a reason to park a record on a person: only a judge that deems a
+    change risky should do that. No gate ever required human here, and the record says so rather
+    than leaving a stale justification standing: this shard carries no `author_class`, so Law 5's
+    arm (`machineAuthorVerifyViolation`) never applied and auto was always available. Every
+    acceptance criterion here is mechanical, which is what makes auto correct rather than merely
+    permitted. The durable mechanism — a filing-time judge recording a pinned `risk_ruling`, which
+    W1-T2977 designed and left without a producer — is filed as W1-T3143.
