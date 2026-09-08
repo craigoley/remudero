@@ -1228,34 +1228,6 @@ worktreeReapBoot:
 # REPORTS ONLY (design note v) — no dispatch deferred, no worker stopped, no merge blocked.
 # BOTH rows below are net-new: no source literal of either shape (a cost multiplier over a class
 # median, a minimum-sample floor before a median is trusted) ever existed in src/ to lift from.
-
-# W1-T3092 — the OBJECT reaper inside logDiskReclaimRung: git prune of UNREACHABLE objects in the
-# worker clone. Nothing has ever reclaimed a git object; the clone reached 16,747 loose objects and
-# a .git/gc.log whose presence SUPPRESSES git own automatic cleanup, so the condition that would
-# self-heal is the condition that disables the healer.
-objectReap:
-  # ARMED 2026-09-08, ON THE OPERATOR'S EXPLICIT INSTRUCTION ("arm 4532"). That instruction is
-  # the condition W1-T3092's falsifier names: this flag may not ship true unless the operator has
-  # said so in writing on the task.
-  #
-  # A DEPARTURE FROM THE CONVENTION, RECORDED RATHER THAN GLOSSED. worktreeReapBoot and
-  # scratchReap ship OFF because they DELETE, so an operator can read several passes of
-  # dispositions before arming. This rung was written that way and is being armed in the same PR,
-  # so NO pass of survey dispositions was read first. The operator asked for it armed; the cost of
-  # that shortcut is that the quiet predicate's real firing rate is still unmeasured.
-  #
-  # WHAT ARMED MEANS HERE. The reap acts only when the fleet is QUIET — no registered worktree, no
-  # inflight lock, no open handle under .git — and ALWAYS with --expire=24.hours.ago, so an object
-  # a live worker created today is ineligible even if that quiet verdict were wrong. Prune only,
-  # never gc. While false it SURVEYS instead: every one of those probes still runs and what a
-  # prune WOULD remove is ledgered, spawning nothing.
-  #
-  # Set back to false to return to survey-only; nothing else changes. Ratifying afterwards
-  # (rmd ratify objectReap) pins the armed operation against silent drift.
-  enabled:
-    value: true
-    origin: "net-new"
-
 costAnomaly:
   # (iii) MEDIAN, NOT MEAN, AND THAT IS LOAD-BEARING — the mean is dragged by the very outlier
   # being detected. This row is the multiplier a run's own cost must clear over its class's

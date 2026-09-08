@@ -750,11 +750,6 @@ import {
   EMISSIONS_ALLOWLIST,
 } from "./lib/emissions.js";
 import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
-import { reapGitObjects } from "./lib/object-reaper.js";
-
-/** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
- *  rather than authorising something the operator never read. */
-export const OBJECT_REAP_CONTRACT_VERSION = "1";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
@@ -21148,10 +21143,6 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   scratchReap: SCRATCH_REAP_CONTRACT_VERSION,
   worktreeReapBoot: WORKTREE_REAP_BOOT_CONTRACT_VERSION,
   workerRuleHeadlines: WORKER_RULE_HEADLINES_CONTRACT_VERSION,
-  // W1-T3092: GATED_RUNGS is DERIVED from EXPECTED_ORIGIN_KIND, so adding `objectReap.enabled`
-  // to the policy schema enrols the rung here automatically and the walk over GATED_RUNGS then
-  // refuses it as unpinnable until this entry exists. That guard working is what caught it.
-  objectReap: OBJECT_REAP_CONTRACT_VERSION,
 };
 
 /** Ledger one rung's refusal (design (ii): "a refusal ledgers `rung.unratified` with the diff").
@@ -25067,21 +25058,12 @@ export function logDiskReclaimRung(
     cloneReapDeps?: Parameters<typeof logCloneReapSurvey>[2];
     sweepWorkerHomes?: typeof sweepStaleWorkerHomes;
     workerHomeRoot?: () => string;
-    /** W1-T3092: the object reaper. Seams mirror the three sweeps above — appended LAST so no
-     *  positional caller shifts. `policy` and `ratifications` follow logWorktreeReapBootSurvey. */
-    reapObjects?: typeof reapGitObjects;
-    objectRepoDir?: () => string;
-    objectInflightDir?: () => string;
-    objectPolicy?: () => { enabled: boolean };
-    ratifications?: Ratifications;
   } = {},
 ): {
   tempDirsRemoved: number;
   clonesReaped: number;
   cloneBytesReclaimed: number;
   workerHomesRemoved: number;
-  objectsPruned: number;
-  objectsWouldPrune: number;
 } {
   const sweepTempDirs = deps.sweepTempDirs ?? sweepStaleTempDirs;
   const reapClonesSurvey = deps.reapClonesSurvey ?? logCloneReapSurvey;
@@ -25115,48 +25097,16 @@ export function logDiskReclaimRung(
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
 
-  // W1-T3092 — THE FOURTH SWEEP. Guarded exactly like the three above: a throw here can never
-  // block the dispatch or its siblings. DRY BY DEFAULT behind `objectReap.enabled`, the posture
-  // plan/policy.yaml prescribes for rungs that delete — while off this runs EVERY quiet probe the
-  // armed path runs and reports what a prune WOULD remove, spawning nothing. One predicate, two
-  // outcomes: a survey that reached different probes would describe a decision nobody will make.
-  let objectsPruned = 0;
-  let objectsWouldPrune = 0;
-  let objectRefusal: string | undefined;
-  try {
-    const readPolicy = deps.objectPolicy ?? (() => loadPolicy(policyPath(config.root)).values.objectReap);
-    const policyBlock = readPolicy();
-    const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
-    const pin = ratificationPinCheck("objectReap", policyBlock, OBJECT_REAP_CONTRACT_VERSION, pins);
-    if (!pin.fire) log("rung.unratified", { rung: "objectReap", diff: pin.diff });
-    const enabled = pin.fire && policyBlock.enabled;
-    const repoDir = (deps.objectRepoDir ?? (() => join(config.root, "repos", "remudero")))();
-    const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
-    const r = (deps.reapObjects ?? reapGitObjects)(repoDir, inflight, { dryRun: !enabled });
-    objectsPruned = r.pruned;
-    objectsWouldPrune = r.wouldPrune ?? 0;
-    objectRefusal = r.refusedBecause;
-  } catch {
-    // best-effort — a throw here must never block the dispatch or the other three sweeps
-  }
-
-  if (tempDirsRemoved || clonesReaped || workerHomesRemoved || objectsPruned || objectsWouldPrune) {
+  if (tempDirsRemoved || clonesReaped || workerHomesRemoved) {
     log("run.disk_reclaim", {
       tmp_dirs_removed: tempDirsRemoved,
       clones_reaped: clonesReaped,
       clone_bytes_reclaimed: cloneBytesReclaimed,
       worker_homes_removed: workerHomesRemoved,
-      objects_pruned: objectsPruned,
-      // SURVEY ESTIMATE, at survey time — the armed pass runs later against a repo that has moved.
-      objects_would_prune: objectsWouldPrune,
     });
   }
-  // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
-  // that decides whether arming this rung is worth anything at all, and it is unreadable unless
-  // the declines are ledgered too.
-  if (objectRefusal !== undefined) log("run.disk_reclaim.objects_declined", { reason: objectRefusal });
 
-  return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved, objectsPruned, objectsWouldPrune };
+  return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved };
 }
 
 /**

@@ -180,13 +180,6 @@ export interface PolicyValues {
   worktreeReapBoot: {
     enabled: boolean;
   };
-  /** W1-T3092: the object reaper rung inside `logDiskReclaimRung`. SHIPPED OFF: while false the
-   *  rung SURVEYS — it runs every quiet probe and reports what a prune WOULD remove, spawning
-   *  nothing. Same posture as `worktreeReapBoot` and `scratchReap`, and for the same reason: this
-   *  rung DELETES. Why: docs/forensics/policy.md#objectreap. */
-  objectReap: {
-    enabled: boolean;
-  };
   /** W1-T2568: the GitHub-event wake's bounded recent-delivery dedup window (`github-event-wake.ts`'s
    *  `createDeliveryDedupStore`) — distinct `X-GitHub-Delivery` ids remembered before eviction.
    *  Optional. Why: docs/forensics/policy.md#githubeventwake. */
@@ -306,7 +299,6 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "scratchReap.enabled": "net-new",
   "scratchReap.maxAgeHours": "lifted",
   "worktreeReapBoot.enabled": "net-new",
-  "objectReap.enabled": "net-new",
   "githubEventWake.dedupCapacity": "net-new",
   "githubEventWake.checkSettleMs": "net-new",
   "workerRuleHeadlines.enabled": "net-new",
@@ -684,15 +676,6 @@ export function validatePolicy(raw: unknown): Policy {
   }
   const worktreeReapBootEnabled = booleanField("worktreeReapBoot.enabled", worktreeReapBootRaw.enabled, origin);
 
-  // W1-T3092: same shape as worktreeReapBoot above — a MISSING or non-boolean block is a LOUD
-  // failure, never a default. A block that defaulted to true on absence would arm a destructive
-  // git operation by omission, which is the one way this must never become enabled.
-  const objectReapRaw = raw.objectReap;
-  if (!isPlainObject(objectReapRaw)) {
-    throw new PolicyError("policy.yaml: 'objectReap' must be a mapping.");
-  }
-  const objectReapEnabled = booleanField("objectReap.enabled", objectReapRaw.enabled, origin);
-
   // Optional, same absent-means-default shape as sweepWallClockBoundMs/fixSpawnWallClockBoundMs
   // above — only a present row is validated, so a typo in an opted-in row still fails loud.
   const githubEventWakeRaw = raw.githubEventWake as Record<string, unknown> | undefined;
@@ -754,7 +737,6 @@ export function validatePolicy(raw: unknown): Policy {
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },
       worktreeReapBoot: { enabled: worktreeReapBootEnabled },
-      objectReap: { enabled: objectReapEnabled },
       githubEventWake: {
         dedupCapacity: githubEventWakeDedupCapacity,
         checkSettleMs: githubEventWakeCheckSettleMs,

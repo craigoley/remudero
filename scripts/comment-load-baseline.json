@@ -225,7 +225,7 @@
   "src/lib/plan-pr-emitter.ts": 250,
   "src/lib/plan-reconcile.ts": 250,
   "src/lib/plan.ts": 250,
-  "src/lib/policy.ts": 300,
+  "src/lib/policy.ts": 254,
   "src/lib/producer-completeness.ts": 242,
   "src/lib/producer-identity.ts": 70,
   "src/lib/project-init.ts": 176,

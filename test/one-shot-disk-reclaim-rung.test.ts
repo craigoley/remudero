@@ -108,10 +108,6 @@ describe("no new predicate — every decision stays inside the sweep that alread
       clonesReaped: 0,
       cloneBytesReclaimed: 0,
       workerHomesRemoved: 0,
-      // W1-T3092 adds the object-reaper to this rung; a pass that reclaims nothing reports zero
-      // for it exactly like the other three, rather than omitting the field.
-      objectsPruned: 0,
-      objectsWouldPrune: 0,
     });
   });
 });
@@ -176,8 +172,6 @@ describe("throw isolation — each sweep is its own guard", () => {
         clonesReaped: 0,
         cloneBytesReclaimed: 0,
         workerHomesRemoved: 0,
-          objectsPruned: 0,
-          objectsWouldPrune: 0,
       });
     });
   });
