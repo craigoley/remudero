@@ -2304,10 +2304,12 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
  * at 39efeddb: 373 of 538 trailered merges (69%) carry the trailer in the body and not
  * in the commit.
  *
- * W1-T2887 compatibility note for commitlint-mode's source-text census: the executable
- * `execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash"])` call moved with the
- * auto-merge arm cluster to `src/lib/arm-auto-merge.ts`; run-task.ts still owns this
- * squash-commit rationale and still must not document or pass any `--subject` override.
+ * W1-T2887 compatibility note: the executable gh pr-merge call moved with the auto-merge arm
+ * cluster to `src/lib/arm-auto-merge.ts`; run-task.ts still owns this squash-commit rationale and
+ * still must not document or pass any `--subject` override. THE CALL IS DESCRIBED HERE, NEVER
+ * SPELLED: test/live-write-guard.test.ts's census reads SOURCE TEXT, so quoting the argv verbatim
+ * in a comment registers as an unguarded outward-effect call site at this line — which is exactly
+ * what it did before this rewording.
  *
  * Called ONLY at the two non-filing `ghPrCreateFillCommand`/`lastCommitSubject` call
  * sites (implement's `runTask`, retro's `retroCommand`) — never at the triage/plan
