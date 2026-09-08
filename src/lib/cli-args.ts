@@ -1,28 +1,17 @@
 /**
- * ARGUMENT-PARSING PLUMBING — `unknownArgError`, moved verbatim out of `src/run-task.ts`
- * (W1-T2260). A MOVE, NOT A REDESIGN: the declaration below is byte-identical to the one it
- * replaces, no signature changed, and `run-task.ts` re-imports it under its original name so
- * its ~44 call sites read exactly as before.
- *
- * WHY THIS ONE MOVES ALONE. Of the four locally-declared CLI symbols the branch-reaper
- * extraction (`src/lib/branch-reaper.ts`) stopped short of, `unknownArgError` is the only one
- * that depends on nothing else declared in `run-task.ts` — it is a pure function of its own
- * arguments. Its sibling stays anchored in `run-task.ts`: it looks up a command's usage line in
- * the registry that IS the CLI's identity, and moving it would drag that registry lookup along,
- * which is a redesign this task does not make.
- *
- * `flagValue` (W1-T2888) joins it for the identical reason: a pure function of its own
- * arguments, with no dependency on the `COMMANDS` registry or anything else `run-task.ts`-local.
- * `src/lib/report-commands.ts`'s moved report verbs need it; `run-task.ts` re-imports it under
- * its original name for its own ~45 call sites.
+ * ARGUMENT-PARSING PLUMBING — pure functions of their own arguments, moved verbatim out of
+ * `src/run-task.ts`: `unknownArgError` (W1-T2260) and `flagValue` (W1-T2888). Neither depends
+ * on the `COMMANDS` registry or anything else `run-task.ts`-local, unlike `commandSyntax`
+ * (stays there — it looks up the registry that IS the CLI's identity). `run-task.ts` re-imports
+ * both under their original names; `src/lib/report-commands.ts`'s moved report verbs use
+ * `flagValue` too.
  */
 
 /**
  * Strict arg check for a FLAGS-ONLY subcommand: return an error string for the FIRST
- * unrecognized token (a bare positional, or a `--flag` not in `valueFlags`/`boolFlags`),
- * else null. `valueFlags` consume the following token as their value. This is what makes a
- * SPAWNING command fail loud on junk instead of draining — `rmd daemon install --dry-run`
- * silently ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored.
+ * unrecognized token, else null. `valueFlags` consume the following token as their value.
+ * This is what makes a SPAWNING command fail loud on junk instead of draining — `rmd daemon
+ * install --dry-run` silently ran the daemon because `install`/`--dry-run` were ignored.
  */
 export function unknownArgError(
   command: string,

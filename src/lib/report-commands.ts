@@ -3,29 +3,22 @@
  *
  * `receiptCommand`, `replayCommand`, `ledgerGrepCommand`, `digestPlistCommand`, `doctorCommand`,
  * `statusCommand`, `digestCommand`, `learningsCommand`/`learningsExportCommand`/
- * `learningsImportCommand`, and `traceCommand` all take a deps object, read the ledger/plan/
- * GitHub through it, print, and return an exit code. None dispatches a worker, holds a lock, or
- * mutates the plan — the cheapest large cluster of `run-task.ts`'s 75 `*Command` handlers to move,
- * because their seams were already explicit.
+ * `learningsImportCommand`, and `traceCommand` each take a deps object, read the ledger/plan/
+ * GitHub through it, print, and return an exit code — none dispatches a worker, holds a lock, or
+ * mutates the plan, the cheapest large cluster of `run-task.ts`'s 75 `*Command` handlers to move.
  *
  * A MOVE, NOT A REDESIGN — same discipline `lib/cli-args.ts`'s `unknownArgError` move (W1-T2260)
  * established: every function below is byte-identical in behaviour to the one it replaces.
- * `run-task.ts` re-imports every name under its original identifier so its existing call sites and
- * every pre-existing test that imports these symbols from `../src/run-task.js` keep working
- * unchanged.
+ * `run-task.ts` re-imports/re-exports every name under its original identifier, so every
+ * pre-existing call site and test import keeps working unchanged.
  *
- * USAGE TEXT IS INJECTED, NEVER IMPORTED. Several of these verbs print the full `rmd --help`
- * listing (`USAGE`) or one command's own syntax line (`commandSyntax(name)`) alongside a usage
- * refusal. Both are DERIVED FROM `COMMANDS`, the registry that stays in `run-task.ts` (it IS the
- * CLI's identity — see `lib/cli-args.ts`'s header for the identical call on `unknownArgError`'s own
- * sibling). Importing them here would make this module depend on `run-task.ts`, exactly the
- * `lib -> run-task` edge this decomposition exists to avoid — and it would also mean importing
- * this file for a unit test (as `test/report-commands.test.ts` does) drags in the entire
- * 38k-line dispatcher to resolve one constant. Instead, the handful of verbs that print it accept
- * `usage`/`syntax` as optional injected strings; `run-task.ts`'s CLI dispatch passes the real
- * `USAGE`/`commandSyntax(name)` at the call site, so production output is unchanged, while a
- * caller that supplies neither (a direct unit-test call, same as before this move) degrades to an
- * empty appended listing rather than throwing or reaching back into the dispatcher.
+ * USAGE TEXT IS INJECTED, NEVER IMPORTED: `USAGE`/`commandSyntax(name)` derive from `COMMANDS`,
+ * which stays in `run-task.ts` — importing them here would be the `lib -> run-task` edge this
+ * decomposition exists to avoid, and would drag the 38k-line dispatcher into
+ * `test/report-commands.test.ts`'s import graph. The handful of verbs that print it instead
+ * accept `usage`/`syntax` as optional strings; `run-task.ts`'s CLI dispatch passes the real
+ * values, so production output is unchanged, while a caller that supplies neither degrades to
+ * an empty appended listing.
  */
 
 import { execFileSync } from "node:child_process";
