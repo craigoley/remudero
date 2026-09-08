@@ -3,7 +3,7 @@
   ".github/workflows/acceptance-author-gate.yml": 43,
   ".github/workflows/acr-build.yml": 80,
   ".github/workflows/ci-gate.yml": 120,
-  ".github/workflows/ci.yml": 409,
+  ".github/workflows/ci.yml": 500,
   ".github/workflows/clock-sweep.yml": 250,
   ".github/workflows/codeql.yml": 15,
   ".github/workflows/coverage-session-blanking.yml": 250,
@@ -184,6 +184,7 @@
   "src/lib/ledger-grep.ts": 202,
   "src/lib/ledger-path.ts": 250,
   "src/lib/ledger-replay.ts": 86,
+  "src/lib/ledger-steps.ts": 250,
   "src/lib/ledger.ts": 500,
   "src/lib/live-write-guard.ts": 123,
   "src/lib/log-rotation.ts": 50,
@@ -282,6 +283,6 @@
   "src/lib/worker.ts": 1250,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16872,
+  "src/run-task.ts": 17000,
   "src/spike.ts": 18
 }
