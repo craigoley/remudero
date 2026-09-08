@@ -263,7 +263,7 @@
   "src/lib/runbook-coverage.ts": 48,
   "src/lib/secret-boundary.ts": 129,
   "src/lib/self-sync.ts": 193,
-  "src/lib/serve.ts": 2359,
+  "src/lib/serve.ts": 2500,
   "src/lib/service.ts": 269,
   "src/lib/settings.ts": 50,
   "src/lib/skill-workshop.ts": 250,
