@@ -158,6 +158,37 @@ architect:
 # (src/lib/mounts.ts's `validateMounts`), the same fail-loud shape `architect`/`judge` already
 # get; there is no fallback to the Architect mount.
 #
+# ── W1-T3094 program, MEASURED 2026-09-08 over the ledger union at /mnt/rmd/state2/state ──────
+# THE MODEL IS THE THIRD LEVER AND THIS ROW HAD NEVER PULLED IT. W1-T2559 (below) stepped
+# `triage` down on the EFFORT axis and left every synthesis row on `claude-opus-5`, the top of
+# the `tiers` ladder. Re-measured a week later over 4,131,278 run-tagged rows -> 915 distinct
+# runs: `inbox.draft_synthesized` is 1,436 runs and $4,486 of notional spend, 45% OF ALL METERED
+# SPEND and the largest single lane in the fleet -- larger than `implement.done` ($3,429 across
+# 668 runs), which is the lane that actually ships code.
+#
+# WHAT THE DRAFT RUNG PRODUCES DOES NOT NEED THE TOP MOUNT, AND THE EVIDENCE IS THE READINESS
+# GATE'S OWN VERDICTS. A draft is a `plan/tasks.yaml` fragment + a MASTER-PLAN stamp line, judged
+# afterwards by a DETERMINISTIC linter (`classifyProposal`, src/lib/inbox.ts) behind a bounded
+# relint retry (`MAX_RELINT_ATTEMPTS`). Across 468 retained `inbox.classified` rows, all 299
+# `not_ready` verdicts failed on exactly ONE predicate -- `drafted` ("no drafted candidate
+# available yet"). ZERO failed `lint_clean`, `deps_merged`, `evidence_anchors` or `no_conflict`.
+# So the gate has never once rejected a draft for its CONTENT: the top mount is buying a margin
+# nothing downstream has ever had to spend. `triage` is the same argument at 176 runs -- the row
+# below already calls it "CLASSIFICATION at HIGH VOLUME", and classification is the canonical
+# workload a frontier model does not repay.
+#
+# `retro` STAYS ON claude-opus-5/high, DELIBERATELY. 89 runs, $740: low volume, and its output is
+# acted on directly (a plan/LEARNINGS edit) rather than passing a linter first. The 2026-09-01
+# reasoning below is unchanged for that row; only the two rows whose output IS machine-checked
+# move. Both stay at the `sonnet` worker ceiling, so nothing here approaches the Architect.
+#
+# THIS IS A TIER CHANGE ON A MEASURED LANE, NOT A FLYWHEEL RECOMMENDATION. `recommendMounts` has
+# filed ZERO recommendations across 959 `mount_recommendation.swept` rows (33/33 refusals every
+# sweep: 24 `insufficient-sample`, 6 `unmatched-arms`, 1 `tier-invariant`, 2 `quality-regression`)
+# because the routing policy concentrates ~95% of traffic into one arm and no alternative arm can
+# reach `DEFAULT_MIN_SAMPLE_N`. W1-T3095 builds the bounded exploration that fixes that; until it
+# lands, a measured operator edit here is the only lever, and this comment is its evidence.
+#
 # MEASURED 2026-09-01 (this task's own rationale): $827 across 219 invocations, 22% of the
 # pipeline, none of it shipping code. `triage` is CLASSIFICATION at HIGH VOLUME (159 of those 219
 # runs) — precisely the workload profile this file's own `max_turns` section already names as not
@@ -170,8 +201,8 @@ architect:
 # `architect.effort: high` silently governed nothing for these lanes).
 synthesis:
   retro:       { model: claude-opus-5, effort: high, max_turns: 400, context_budget: 180000 }
-  triage:      { model: claude-opus-5, effort: low,  max_turns: 400, context_budget: 180000 }
-  inbox_draft: { model: claude-opus-5, effort: high, max_turns: 400, context_budget: 180000 }
+  triage:      { model: sonnet,        effort: low,  max_turns: 400, context_budget: 180000 }
+  inbox_draft: { model: sonnet,        effort: high, max_turns: 400, context_budget: 180000 }
 
 # ── The flight-judge mount (Layer 2, W1-T21 — MASTER-PLAN §4B) ─────────────────
 # The advisory process-judge a Layer-1 trip (flight-signals.ts, W1-T20) spawns

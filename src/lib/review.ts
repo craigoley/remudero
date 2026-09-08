@@ -4875,6 +4875,16 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
+  // W1-T2764: the ledger-step ratchet's rule logic, behind the required `ledger-steps` ci.yml job —
+  // the same shape as the task-id-existence and assertion-discrimination entries above. Before that
+  // job existed `unwired-gate:check` refused it as "a gate-shaped instrument that nothing invokes";
+  // wiring it is what makes it an instrument, and this line is the other half of that.
+  "^scripts/ledger-steps-check\\.mjs$",
+  // W1-T2764: the ledger-step DOC generator, run as `--check` by the same job. A generator whose
+  // check mode can refuse a PR is enforcement logic, not content — the distinction
+  // INSTRUMENT_SURFACE_EXCLUSIONS already draws for openapi/daemon.yaml against
+  // scripts/generate-api-client.mjs, which is tracked here for exactly this reason.
+  "^scripts/generate-ledger-steps\\.mjs$",
 ];
 
 const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
@@ -5092,6 +5102,22 @@ export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
   // falsifier pass. The ratchet script itself stays on the surface; only its recorded counts are
   // exempt.
   "scripts/comment-load-baseline.json",
+  // W1-T2897: the per-file legacy-clock-shape LEDGER. Same LEDGER/FLOOR distinction the source-size entry above
+  // records, and it applies for the same reason: this file holds three COUNTS per src file — the legacy shape and
+  // the two unported clock-reading idioms, deliberately NOT spelled here, because the census counts those literals
+  // wherever they appear and a comment naming them inflates this very file's row (measured: 2 -> 3 on both, on the
+  // first draft of this entry) — enforced as a per-row CEILING. It grades no falsifier — raising a row permits more
+  // recorded debt and cannot make a failing test pass, where a SCORE floor (mutation, coverage) lowered by a diff
+  // lets a weakened suite through.
+  //
+  // AND WITHOUT THIS THE GATE IS UNSATISFIABLE FOR THE TASK THAT INTRODUCES IT, MEASURED rather than argued. The
+  // census suite's own falsifiers read the MEASURED tree (`scanClockSignatures()`), not the baseline: one asserts
+  // `src/lib/daemon.ts` sits at exactly 2 legacy shapes after the migration, another that `src/lib/clock.ts` exists
+  // and declares zero. Neither can pass before the src/ change they measure, so the instrument cannot be landed in
+  // an instrument-only PR first — the split rule 25 normally prescribes. The entanglement the rule protects against
+  // is a diff MOVING the instrument that judges it; here the instrument is introduced WITH the product it was
+  // written to measure, and its ceiling only ever ratchets debt down from that first recording.
+  "scripts/clock-signature-baseline.json",
 ]);
 
 /** DECLARATIONS WHOSE DATA HAS GRADING POWER OVER OTHER PRs. A changed line inside one counts as EXECUTABLE even when

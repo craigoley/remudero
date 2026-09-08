@@ -1,0 +1,98 @@
+- id: W1-T3094
+  title: "THE DAEMON DRAFTS AN ARCHITECT FRAGMENT FOR 100% OF THE PROPOSAL REGISTRY AND 6.7% ARE EVER RATIFIED — `proposalsNeedingDraft`'s only exclusion is `trigger && !fired`, which is a PRODUCTION NO-OP (0 of 147 live proposals carry a trigger at all), so the rung spends the fleet's largest lane on proposals `classifyProposal` could already have proven can never render READY without spawning anything"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [src/lib/inbox.ts, test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts]
+  origin: "operator-session#router-efficiency-2026-09-08"
+  plan_refs: ["P25", "W1-T192", "W1-T2561", "W1-T2564", "W1-T2566", "W1-T2575"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 over the ledger union at the daemon state root (450 gz archives + 2 plain
+    rotations + the live file; 4,131,278 run-tagged rows -> 915 distinct runs; newest row
+    2026-09-08T01:15:28.635Z).
+
+    (1) THE LANE IS THE LARGEST IN THE FLEET. `inbox.draft_synthesized` is 1,436 runs and $4,486
+    notional — 45% of all metered spend, larger than `implement.done` ($3,429 across 668 runs),
+    which is the lane that actually ships code.
+
+    (2) ALMOST NONE OF IT IS EVER CONSUMED. Those 1,436 runs cover 659 distinct `proposal_id`s.
+    `ratify.approved` carries 44 distinct `task_id`s across 7 plan PRs on 3 days (38 of them in one
+    `APPROVE-BATCH` on 2026-09-02). So 44 of 659 drafted proposals were ever ratified — 6.7%, or
+    about $102 of drafting per ratification. `ratify.reframed` and `ratify.refused` are BOTH ZERO
+    across the whole union: the reframe path whose invalidation semantics motivate re-drafting has
+    never once fired in production.
+
+    (3) THE ONE EXCLUSION THE DRAFTING PREDICATE APPLIES IS INERT. `proposalsNeedingDraft` filters
+    exactly one thing — `if (p.trigger && !p.trigger.fired) return false`. Reading
+    `state/inbox-proposals.json`: 147 live proposals, `withTrigger: 0`. The filter has nothing to
+    filter. Every live proposal is therefore due, forever, and `inbox.draft_batch` rows confirm the
+    steady state is a permanent backlog draining at the cap (`eligible: 6, drafting: 3, deferred: 3`).
+
+    (4) THE INFORMATION TO DECLINE MOST OF THEM ALREADY EXISTS, DETERMINISTICALLY AND WITHOUT A
+    SPAWN. `classifyProposal` (same module) resolves FIVE terminal-or-never-READY states before it
+    ever looks at a draft: `ctx.isRatified`, `ctx.isDeclined`, `resolveBoardReferent` -> `retired`,
+    the trigger gate, and — in its AND-clause — `evidence_anchors` (`ctx.grepAnchorTrue` over the
+    PROPOSAL's own anchors, not the draft's) and `no_conflict` (`ctx.openProposalIds`). Only
+    `deps_merged`/`deps_observable` and `lint_clean` genuinely need the drafted fragment. A
+    proposal failing any of the former can never be READY no matter how good the draft is, so
+    drafting it is provably wasted spend.
+
+    (5) THE GATE HAS NEVER REJECTED A DRAFT ON CONTENT, WHICH IS WHY (4) IS THE WHOLE LEVER. Across
+    468 retained `inbox.classified` rows: 169 `ready`, 299 `not_ready`, and ALL 299 failed on
+    exactly one predicate — `drafted` ("no drafted candidate available yet"). Zero `lint_clean`,
+    zero `deps_merged`, zero `evidence_anchors`, zero `no_conflict`. Drafting is not a filter; it is
+    a formality applied to everything.
+
+    (6) NOT THE ALREADY-FIXED FAILURES. The boot re-open storm is FIXED (W1-T2566, merged
+    2026-09-05): repeat-draft spend fell from 50% of the lane to 12%, $364/day to $210/day. The
+    43-86% `no FRAGMENT/STAMP markers` spike was 2026-08-30..09-01 and has run 1-6% since 09-02.
+    Neither is what this task is about; both were checked before filing so this rationale does not
+    re-litigate a closed defect.
+  design: |
+    (i) EXTEND THE PURE PREDICATE, DO NOT ADD A SECOND ONE. `proposalsNeedingDraft` stays the ONE
+    shared predicate `rmd inbox`'s manual force and the daemon rung both consult (its own doc's
+    stated property). It gains the never-READY exclusions from (4), supplied through an injected
+    context of the SAME shape `classifyProposal` already takes — never re-derived, never a second
+    source of truth about readiness.
+    (ii) EXCLUSIONS ONLY, NEVER A NEW ADMISSION. A proposal this predicate cannot PROVE is
+    never-READY stays draftable, so an unreadable GitHub referent or an unrunnable anchor grep
+    forgoes the saving rather than silently dropping a proposal — the same conservative direction
+    `deriveTaskClass` takes for an ambiguous class.
+    (iii) `rmd inbox` KEEPS ITS UNTHROTTLED FORCE. The manual path must still be able to draft a
+    named proposal on demand, since a filtered-out proposal is precisely what an operator may want
+    to look at. The exclusion applies to the DAEMON's selection, not to an explicit ask.
+    (iv) RANK THE REMAINDER SO THE CAP SPENDS ON WHAT IS CLOSEST TO SURFACEABLE.
+    `DAEMON_DRAFT_BATCH_CAP` currently slices an arbitrary order; with the registry permanently
+    over cap, WHICH three are drafted is the whole decision and today it is unspecified.
+    (v) NO CHANGE TO `classifyProposal` ITSELF. Its verdicts are what the console and `rmd approve`
+    read; this task changes only what gets DRAFTED, never what counts as READY.
+  acceptance:
+    - claim: "a proposal whose referent has resolved, that is already ratified, that is declined, whose evidence anchors have drifted, or that conflicts with an open proposal is excluded from the daemon's drafting selection, and each exclusion is attributable to its own predicate"
+      proof: "unit test: test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts"
+    - claim: "a proposal whose never-READY status cannot be determined stays draftable rather than being silently dropped"
+      proof: "unit test: test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts"
+    - claim: "rmd inbox's manual force still drafts a named proposal the daemon selection excludes"
+      proof: "unit test: test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts"
+    - claim: "with the registry over the batch cap the selection is ranked rather than arbitrary, and the ranking is asserted rather than incidental"
+      proof: "unit test: test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if `proposalsNeedingDraft` already excludes anything beyond the trigger gate:
+    read its body — MEASURED 2026-09-08 at 847e551c, its whole filter is
+    `if (p.trigger && !p.trigger.fired) return false`. CLOSE IT ALSO if triggers are actually
+    populated in production, which would make that filter live rather than inert: reading
+    `state/inbox-proposals.json` gives 147 live proposals and `withTrigger: 0`.
+    PROVE IT LOAD-BEARING: delete the new exclusion clause and the first criterion's fixture must
+    fail — a guard whose fixture passes with the clause removed is testing the fixture, not the gate.
+  note: |
+    risk:high on Rule 19 SPAN: one module, but the predicate is consumed by BOTH the daemon rung and
+    the CLI, and getting the direction wrong drops operator-visible work rather than merely
+    overspending. Every `unit test:` proof is the pure-path form naming a file that does NOT exist at
+    filing (checked), which is what keeps `judgeCriterion`'s `not_yet_built` carve-out reachable on a
+    plan-only head. Id reserved at `refs/rmd-id/W1-T3094` before filing.
