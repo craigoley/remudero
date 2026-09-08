@@ -531,6 +531,7 @@ import {
   type LedgerCorpusEntry,
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
+import { meaningOfStep } from "./lib/ledger-steps.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import {
   buildAuthorityReport,
@@ -18263,8 +18264,33 @@ export function ledgerGrepCommand(rest: string[], opts: { stateDir?: string } = 
     return 1;
   }
   console.log(`matches:    ${result.matches.length}`);
-  for (const line of result.matches) console.log(line);
+  for (const line of result.matches) {
+    console.log(line);
+    // W1-T2764: the one decoder seam this verb wires. `stepFromRawLedgerLine` reads `step` off
+    // the matched raw JSON text without trusting the whole line to parse as a well-formed
+    // LedgerLine — a torn or hand-edited row still prints unchanged above; this only ever adds a
+    // second line when both the row's own `step` field AND a registered meaning for it exist.
+    const step = stepFromRawLedgerLine(line);
+    const decoded = step === undefined ? undefined : meaningOfStep(step);
+    if (decoded) console.log(`  meaning: ${decoded.meaning}`);
+  }
   return 0;
+}
+
+/** The `step` field of one raw matched ledger line's JSON text, or `undefined` when the line does
+ *  not parse as JSON or carries no string `step` -- never thrown, since `ledgerGrepCommand` must
+ *  keep printing the row itself either way (W1-T2764). */
+export function stepFromRawLedgerLine(line: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    // Malformed/torn JSON is a genuinely absent step, never a throw here: the row itself was
+    // already printed above, unconditionally, before this parse was attempted.
+    return undefined;
+  }
+  const step = (parsed as { step?: unknown } | null)?.step;
+  return typeof step === "string" ? step : undefined;
 }
 
 /**

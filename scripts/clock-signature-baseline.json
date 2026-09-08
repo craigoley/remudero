@@ -1,0 +1,387 @@
+{
+  "src/lib/account-usage.ts": {
+    "dateNow": 0,
+    "legacy": 1,
+    "newDate": 1
+  },
+  "src/lib/analytics-route.ts": {
+    "dateNow": 0,
+    "legacy": 1,
+    "newDate": 1
+  },
+  "src/lib/auto-triage.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/board-review.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/board.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 2
+  },
+  "src/lib/ci-parity.ts": {
+    "dateNow": 1,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/classify.ts": {
+    "dateNow": 1,
+    "legacy": 1,
+    "newDate": 1
+  },
+  "src/lib/claude-model-health.ts": {
+    "dateNow": 0,
+    "legacy": 2,
+    "newDate": 0
+  },
+  "src/lib/clock.ts": {
+    "dateNow": 4,
+    "legacy": 0,
+    "newDate": 12
+  },
+  "src/lib/clone-reaper.ts": {
+    "dateNow": 1,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/console-freshness.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/console-shell-script.ts": {
+    "dateNow": 2,
+    "legacy": 0,
+    "newDate": 5
+  },
+  "src/lib/containment.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/correct.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/coverage-improvement.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/daemon-health.ts": {
+    "dateNow": 0,
+    "legacy": 1,
+    "newDate": 2
+  },
+  "src/lib/daemon.ts": {
+    "dateNow": 2,
+    "legacy": 2,
+    "newDate": 10
+  },
+  "src/lib/deployer.ts": {
+    "dateNow": 2,
+    "legacy": 2,
+    "newDate": 3
+  },
+  "src/lib/digest.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 3
+  },
+  "src/lib/dispatch-claim.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 2
+  },
+  "src/lib/drain-lock.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/escalate.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 2
+  },
+  "src/lib/feedback-docket.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/feedback-landing.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 2
+  },
+  "src/lib/feedback.ts": {
+    "dateNow": 2,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/fleet-control.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 4
+  },
+  "src/lib/fs-race-safe.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/github-app.ts": {
+    "dateNow": 1,
+    "legacy": 3,
+    "newDate": 1
+  },
+  "src/lib/github-event-wake.ts": {
+    "dateNow": 0,
+    "legacy": 2,
+    "newDate": 1
+  },
+  "src/lib/github-posture.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/hand-run-census.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/inbox-thread.ts": {
+    "dateNow": 0,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/inbox.ts": {
+    "dateNow": 7,
+    "legacy": 0,
+    "newDate": 2
+  },
+  "src/lib/inflight-lock.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/isolation.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/issues-intake.ts": {
+    "dateNow": 1,
+    "legacy": 1,
+    "newDate": 1
+  },
+  "src/lib/ledger-path.ts": {
+    "dateNow": 2,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/ledger-replay.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/ledger.ts": {
+    "dateNow": 0,
+    "legacy": 2,
+    "newDate": 5
+  },
+  "src/lib/main-health-rung.ts": {
+    "dateNow": 0,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/measurement-cadence.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 3
+  },
+  "src/lib/onboard/inventory.ts": {
+    "dateNow": 0,
+    "legacy": 1,
+    "newDate": 1
+  },
+  "src/lib/onboard/session.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/open-prs-rest.ts": {
+    "dateNow": 1,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/operator-merge-hold.ts": {
+    "dateNow": 0,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/operator-notes.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/operator-sync.ts": {
+    "dateNow": 1,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/ops.ts": {
+    "dateNow": 2,
+    "legacy": 1,
+    "newDate": 1
+  },
+  "src/lib/panel-actions.ts": {
+    "dateNow": 1,
+    "legacy": 2,
+    "newDate": 1
+  },
+  "src/lib/panel-graph.ts": {
+    "dateNow": 2,
+    "legacy": 1,
+    "newDate": 1
+  },
+  "src/lib/policy.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 1
+  },
+  "src/lib/project-init.ts": {
+    "dateNow": 0,
+    "legacy": 2,
+    "newDate": 1
+  },
+  "src/lib/provider-routing-policy.ts": {
+    "dateNow": 1,
+    "legacy": 2,
+    "newDate": 2
+  },
+  "src/lib/provider-routing-status.ts": {
+    "dateNow": 1,
+    "legacy": 1,
+    "newDate": 3
+  },
+  "src/lib/receipt.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/retro-preflight.ts": {
+    "dateNow": 3,
+    "legacy": 2,
+    "newDate": 0
+  },
+  "src/lib/retro-subprocess.ts": {
+    "dateNow": 0,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/retro.ts": {
+    "dateNow": 2,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/review.ts": {
+    "dateNow": 2,
+    "legacy": 0,
+    "newDate": 2
+  },
+  "src/lib/rule-efficacy.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 4
+  },
+  "src/lib/serve.ts": {
+    "dateNow": 16,
+    "legacy": 7,
+    "newDate": 8
+  },
+  "src/lib/service.ts": {
+    "dateNow": 2,
+    "legacy": 3,
+    "newDate": 0
+  },
+  "src/lib/status-board.ts": {
+    "dateNow": 0,
+    "legacy": 2,
+    "newDate": 1
+  },
+  "src/lib/status.ts": {
+    "dateNow": 2,
+    "legacy": 2,
+    "newDate": 3
+  },
+  "src/lib/sweep.ts": {
+    "dateNow": 5,
+    "legacy": 1,
+    "newDate": 5
+  },
+  "src/lib/task-card.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/task-id-reservation.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 2
+  },
+  "src/lib/tmp.ts": {
+    "dateNow": 1,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/trace.ts": {
+    "dateNow": 2,
+    "legacy": 0,
+    "newDate": 0
+  },
+  "src/lib/verdict-calibration.ts": {
+    "dateNow": 0,
+    "legacy": 0,
+    "newDate": 6
+  },
+  "src/lib/wipe-test.ts": {
+    "dateNow": 1,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/worker-home.ts": {
+    "dateNow": 3,
+    "legacy": 3,
+    "newDate": 1
+  },
+  "src/lib/worker-provider.ts": {
+    "dateNow": 5,
+    "legacy": 2,
+    "newDate": 0
+  },
+  "src/lib/worker-scratch.ts": {
+    "dateNow": 1,
+    "legacy": 1,
+    "newDate": 0
+  },
+  "src/lib/worker.ts": {
+    "dateNow": 10,
+    "legacy": 8,
+    "newDate": 2
+  },
+  "src/run-task.ts": {
+    "dateNow": 59,
+    "legacy": 19,
+    "newDate": 43
+  },
+  "src/spike.ts": {
+    "dateNow": 1,
+    "legacy": 0,
+    "newDate": 1
+  }
+}

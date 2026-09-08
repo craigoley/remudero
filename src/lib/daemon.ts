@@ -77,6 +77,12 @@ import type { OrphanSweepReport } from "./worker-containment.js";
 import type { LandFeedbackResult } from "./feedback-landing.js";
 // Type-only — github-posture.ts owns this shape; the real read lives in run-task.ts (W1-T1040).
 import type { GithubPostureFinding } from "./github-posture.js";
+// The Clock port (W1-T2897): declared in "../lib/clock" so every reachable-through-lib import
+// still resolves through this same file. `DaemonDeps.now`/`crashLoopCheck.now` keep their legacy
+// `() => Date` / `() => string` shapes (many tests inject those directly), so the adapters below
+// convert them into a `Clock` at the read site instead of forcing every caller to change; the
+// headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
+import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
 
 /** Reason the scheduler loop returned. Every terminal state is one of these. `headroom_exhausted` and `paused` are
  * deliberately absent: both are awaiting-states whose exit the supervisor would relaunch straight back into, so both
@@ -940,12 +946,15 @@ function startInFlightTicker(
   sweepRetrigger?: SweepRetrigger,
   // The last account-headroom sample's wall clock, shared with the main loop so the two samplers
   // cannot double-read. Optional and trailing, so every existing call site is unchanged (W1-T2565).
-  headroomSampler?: { lastSampleMs: number; now: () => number; policy: HeadroomPolicy; enforced: boolean },
+  headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean },
 ): { stop: () => Promise<void> } {
   // W1-T2981: a second concurrent ticker would double every light sweep — hand back an inert one.
   if (inFlightTickerActive) return { stop: async () => {} };
   inFlightTickerActive = true;
   let active = true;
+  // Reads through the Clock port (W1-T2897) rather than the `() => Date` shape directly, so every
+  // projection this function needs — millis, Date, ISO — comes from one adapted instant.
+  const daemonClock = clockFromDateFn(deps.now);
   // A wake edge is consumed when it shortens a wait, but its durable marker is not claimed until the
   // gate accepts a pass. Retain that intent across a hold or an older still-settling pass, and retry
   // once per ordinary cadence, never as a zero-delay loop.
@@ -983,7 +992,7 @@ function startInFlightTicker(
           // next heartbeat but never swallow this one. Telemetry, not enforcement — a reading taken here cannot abort
           // work in flight, and the main loop remains the single place that decides to idle (W1-T2565).
           if (headroomSampler && deps.readUsage) {
-            const nowMs = headroomSampler.now();
+            const nowMs = headroomSampler.clock.now();
             if (nowMs - headroomSampler.lastSampleMs >= HEADROOM_SAMPLE_MAX_AGE_MS) {
               headroomSampler.lastSampleMs = nowMs;
               try {
@@ -1018,7 +1027,7 @@ function startInFlightTicker(
               await deps.onDiskHeadroomBreach?.({
                 freeBytes: diskHeadroom.freeBytes,
                 verdict: diskHeadroom.verdict,
-                ts: (deps.now ?? (() => new Date()))().toISOString(),
+                ts: daemonClock.iso(),
               });
             } catch (e) {
               log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
@@ -1030,7 +1039,7 @@ function startInFlightTicker(
           // tick, so an operator's halt withholds a new pass but can never abort the phase's own running work;
           // the elapsed budget keeps accruing while held (W1-T2519). Forensics: docs/forensics/daemon.md.
           if (sweepRetrigger && deps.sweep) {
-            const nowMs = (deps.now ?? (() => new Date()))().getTime();
+            const nowMs = daemonClock.now();
             const last = sweepRetrigger.state.lastRunAtMs;
             const trigger = eventWakePending ? "github-event" : "interval";
             if (eventWakePending || last === undefined || nowMs - last >= sweepRetrigger.intervalMs) {
@@ -1119,7 +1128,7 @@ async function runGatedSweep(
   // Threaded to the pass's own ticker. This is the phase that motivated the sampler: it carries the
   // largest spender, and the measured 58-minute blind window was a pass running long while the
   // account went from 30% used to exhausted. Optional and trailing (W1-T2565).
-  headroomSampler?: { lastSampleMs: number; now: () => number; policy: HeadroomPolicy; enforced: boolean },
+  headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean },
   // The shared liveness flag. Optional and trailing, so every existing caller behaves exactly as
   // before, which is what keeps the W1-T1044 bound tests meaningful (W1-T2582).
   liveness?: SweepLiveness,
@@ -1358,7 +1367,9 @@ export function daemonBoot(
   // The boot-rate invariant: the shape-not-cause check. Logged either way, so the invariant's own
   // pass or fail is part of the boot record, not only its breaches (W1-T215).
   if (crashLoopCheck) {
-    const nowIso = (crashLoopCheck.now ?? (() => new Date().toISOString()))();
+    // Adapted through the Clock port (W1-T2897): the field keeps its legacy `() => string` shape
+    // (tests inject a fixed ISO instant directly), read here through `clockFromIsoFn`.
+    const nowIso = clockFromIsoFn(crashLoopCheck.now).iso();
     const verdict = detectDaemonCrashLoop(
       [...crashLoopCheck.priorBoots(), nowIso],
       crashLoopCheck.window ?? DEFAULT_CRASHLOOP_WINDOW,
@@ -1599,13 +1610,15 @@ export async function runDaemon(
   // The headroom governor switch (ruling fb-1784894405468-a4153e). Library default true; the live
   // entry passes the host posture resolved from config or env, also default true.
   const headroomEnabled = opts.headroomEnabled ?? true;
+  // The Clock port (W1-T2897): `deps.now` keeps its legacy `() => Date` shape (many tests inject
+  // it directly), adapted here once for every reading this loop needs.
+  const daemonClock: Clock = clockFromDateFn(deps.now);
   // One sampler state shared by the main loop and every in-flight ticker, so the two can never
   // double-read and staleness is measured against whichever read last. Seeded to 0 so the first long
   // phase after boot samples immediately (W1-T2565).
-  const headroomSampler = { lastSampleMs: 0, now: () => now().getTime(), policy: headroomPolicy, enforced: headroomEnabled };
+  const headroomSampler = { lastSampleMs: 0, clock: daemonClock, policy: headroomPolicy, enforced: headroomEnabled };
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? DEFAULT_UNREADABLE_DEGRADED_LIMIT;
   const parkCeilingMs = opts.headroomParkCeilingMs ?? HEADROOM_PARK_CEILING_MS;
-  const now = deps.now ?? (() => new Date());
   // Top-level waits are interruptible, as are phase-ticker waits that own a retrigger. Light and
   // pass ticker waits stay on the plain clock, so they cannot consume an event without reconciling it
   // through the ordinary gated full pass (W1-T2568).
@@ -1634,7 +1647,7 @@ export async function runDaemon(
     // Every stale exit reaches the same bounded full-pass gate before returning. The restart is never
     // suppressed by the pass, and no second implementation is introduced (W1-T1272).
     if (deps.sweep) {
-      sweepRetriggerState.lastRunAtMs = now().getTime();
+      sweepRetriggerState.lastRunAtMs = daemonClock.now();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
     // A freshness restart is the process-lifetime boundary the detached-action registry was built for.
@@ -1643,7 +1656,7 @@ export async function runDaemon(
     // its interphase clock before entering here, so nothing races in behind the drain (W1-T2865).
     const detachedAtFreshness = detachedSweepActionCount();
     if (detachedAtFreshness > 0) {
-      const drainStartedAtMs = now().getTime();
+      const drainStartedAtMs = daemonClock.now();
       log("daemon.freshness_drain.started", { detached_sweep_actions: detachedAtFreshness });
       const abandoned = await drainDetachedSweepActions({ boundMs: sweepWallClockBoundMs });
       for (const action of abandoned) {
@@ -1658,7 +1671,7 @@ export async function runDaemon(
         detached_sweep_actions: detachedAtFreshness,
         remaining_detached_sweep_actions: detachedSweepActionCount(),
         abandoned_detached_sweep_actions: abandoned.length,
-        duration_ms: Math.max(0, now().getTime() - drainStartedAtMs),
+        duration_ms: Math.max(0, daemonClock.now() - drainStartedAtMs),
       });
     }
     const detail =
@@ -1870,7 +1883,7 @@ export async function runDaemon(
     // Best-effort in code, not just prose: this loop's only try/catch wraps the dispatch below, so an
     // unreachable GitHub used to propagate out of the process (W1-T513). Forensics: docs/forensics/daemon.md.
     if (deps.sweep) {
-      sweepRetriggerState.lastRunAtMs = now().getTime();
+      sweepRetriggerState.lastRunAtMs = daemonClock.now();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
 
@@ -2067,7 +2080,7 @@ export async function runDaemon(
       // The authoritative per-tick read stamps the shared sampler, so an in-flight ticker starting straight
       // after it waits out the full staleness bound instead of re-probing seconds later. Stamped before
       // the guard below because an unreadable read is still an attempt (W1-T2565).
-      headroomSampler.lastSampleMs = now().getTime();
+      headroomSampler.lastSampleMs = daemonClock.now();
       const snap = await deps.readUsage();
       if (snap) {
         // A GOOD read clears the degraded-mode counter — only CONSECUTIVE
@@ -2077,7 +2090,7 @@ export async function runDaemon(
         // nothing left to bound and a LATER park starts its clock fresh.
         parkedSinceMs = undefined;
         parkCeilingEscalated = false;
-        const windows = resolveHeadroomWindows(snap, now(), headroomPolicy, (window, raw) => {
+        const windows = resolveHeadroomWindows(snap, daemonClock.date(), headroomPolicy, (window, raw) => {
             // Once per window, not per distinct string. The loop polls every 60s, so a per-tick emission would write
             // about 1,440 identical lines a day. Keying on the raw string stopped bounding anything once the upstream
             // emitted microsecond-precision timestamps: measured 1:1 fired-to-distinct on two independent ledgers.
@@ -2155,10 +2168,10 @@ export async function runDaemon(
           consecutiveUnreadable,
           unreadableDegradedLimit,
           parkedSinceMs,
-          now().getTime(),
+          daemonClock.now(),
           parkCeilingMs,
         );
-        if (parkGate.parked && parkedSinceMs === undefined) parkedSinceMs = now().getTime();
+        if (parkGate.parked && parkedSinceMs === undefined) parkedSinceMs = daemonClock.now();
         if (parkGate.parked && !parkGate.forced) {
           ticks++;
           log("daemon.headroom.degraded", {
@@ -2885,7 +2898,7 @@ export async function runDaemon(
       // the next tick pay another full spawn to rediscover the identical closed window. Visible by design —
       // never a silent idle — so one row names the reason, the streak and the instant dispatch resumes.
       ticks++;
-      const resumesAtMs = now().getTime() + apiWindowHoldMs;
+      const resumesAtMs = daemonClock.now() + apiWindowHoldMs;
       log("daemon.api_window_hold", {
         tick: ticks,
         hold_ms: apiWindowHoldMs,
