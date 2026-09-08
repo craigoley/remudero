@@ -104,6 +104,28 @@ test("argv.mjs: parseArgv reports --help uniformly and (with helpText) prints it
   };
   assert.equal(parseArgv(["--help"], {}).helpRequested, true);
   assert.equal(parseArgv([], {}).helpRequested, false);
+  assert.equal(parseArgv(["-h"], {}).helpRequested, true, "the short form is the same question");
+
+  // The printing half the title promises. Without this the `console.log(helpText)` line never
+  // runs, which is what diff-coverage flagged: the two calls above pass no `helpText` at all, so
+  // the guard short-circuits and a caller relying on parseArgv to print `--help` is unproven.
+  const printed: unknown[] = [];
+  const realLog = console.log;
+  console.log = (...args: unknown[]) => void printed.push(args.join(" "));
+  try {
+    assert.equal(parseArgv(["--help"], {}, { helpText: "usage: rmd thing [--flag]" }).helpRequested, true);
+    assert.deepEqual(printed, ["usage: rmd thing [--flag]"], "helpText is printed verbatim, once");
+
+    printed.length = 0;
+    assert.equal(parseArgv([], {}, { helpText: "usage: rmd thing [--flag]" }).helpRequested, false);
+    assert.deepEqual(printed, [], "no --help means nothing is printed");
+
+    // Omitting helpText is the documented opt-out: still reported, never printed.
+    assert.equal(parseArgv(["--help"], {}).helpRequested, true);
+    assert.deepEqual(printed, [], "opting out of helpText must not print an empty line either");
+  } finally {
+    console.log = realLog;
+  }
 });
 
 test("argv.mjs: isMainModule is true for this file's own URL against its own argv[1], false against an unrelated argv[1]", async () => {
