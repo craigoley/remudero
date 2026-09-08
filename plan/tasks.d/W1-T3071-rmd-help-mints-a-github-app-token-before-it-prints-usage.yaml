@@ -13,7 +13,7 @@
     - test/cli-verbs-mint-the-app-token.test.ts
   origin: "operator-session#doctor-node-pin-red-on-the-fleet-host-2026-09-07"
   plan_refs: ["W1-T3065", "W1-T477", "W1-T1134"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS A PLACEMENT DEFECT, NOT A CREDENTIAL DEFECT, AND THE DISTINCTION IS THE WHOLE TASK.

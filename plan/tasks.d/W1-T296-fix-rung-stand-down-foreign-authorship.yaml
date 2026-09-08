@@ -79,7 +79,7 @@
   origin: feedback#fb-1784762617707-d6e3d5
   plan_refs: ["§4", "§9"]
   files: [src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED from feedback#fb-1784762617707-d6e3d5 (captured 2026-07-22), covered-by NONE — checked against
     plan/tasks.yaml and every plan/tasks.d shard. The four near neighbours are enumerated in the rationale with

@@ -66,7 +66,7 @@
   origin: feedback#fb-1784770111145-cf7c24
   plan_refs: ["§7", "§7B", "§4"]
   files: [src/lib/feedback.ts, src/lib/escalate.ts, src/lib/serve.ts, test/decision-summary.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-08-03 from feedback fb-1784770111145-cf7c24 (clause 1), source-verified at filing:
     serve.ts:1903/1918/1927 (the three raw decision-row templates), escalate.ts:322/435 (the raw issue body),

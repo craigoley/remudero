@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§5C", "W1-T126", "W1-T2845", "W1-T2865", "W1-T312"]
   files: [src/lib/daemon.ts, test/the-pre-admission-freshness-check-starves-dispatch.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE FLEET HAS NOT DISPATCHED A BUILD SINCE 2026-09-04. Measured over the FULL ledger union

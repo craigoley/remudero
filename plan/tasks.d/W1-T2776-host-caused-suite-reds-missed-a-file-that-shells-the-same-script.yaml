@@ -11,7 +11,7 @@
   files: [src/lib/ci-parity.ts, test/host-parity-azure-pole.test.ts]
   origin: "operator-decision#w1-t2776-file-bash32-registry-gap-2026-09-03"
   plan_refs: ["W1-T2773"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASURED 2026-09-03 on the mac mini during W1-T2773 verification:

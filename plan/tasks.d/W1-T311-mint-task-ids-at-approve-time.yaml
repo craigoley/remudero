@@ -96,7 +96,7 @@
   origin: feedback#fb-1784766965325-c7b673
   plan_refs: ["§5C", "§7"]
   files: [src/lib/inbox.ts, src/run-task.ts, test/inbox-approve-mint.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "Files the SECOND half of feedback#fb-1784766965325-c7b673. The first half (one GitHub-derived
     derivation: merged plan ∪ shards ∪ open plan-PR minted ids, no state-side registry in the DERIVATION)

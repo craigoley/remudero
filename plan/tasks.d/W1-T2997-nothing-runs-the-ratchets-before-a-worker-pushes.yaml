@@ -10,7 +10,7 @@
   origin: "operator-session#eight-fleet-prs-none-merging-2026-09-07"
   plan_refs: ["W1-T464", "W1-T295", "W1-T2526"]
   files: [src/run-task.ts, test/a-worker-runs-the-cheap-gates-before-it-pushes.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07, the eight open PRs on the board were ALL `run-W1-T*` fleet builds, opened

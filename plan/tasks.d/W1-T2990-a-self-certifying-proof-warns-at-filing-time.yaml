@@ -68,7 +68,7 @@
     - claim: "The check never blocks: a task whose only violation is this one still lints ok, and the linter exposes no severity override for it"
       proof: "unit test: test/a-self-certifying-proof-warns-at-filing-time.test.ts"
   files: [src/lib/task-linter.ts, src/run-task.ts, test/a-self-certifying-proof-warns-at-filing-time.test.ts, scripts/comment-load-baseline.json]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#plain-language-surfaces-2026-09-04"
   plan_refs: ["W1-T2983", "W1-T1225", "W1-T2909", "W1-T1014", "W1-T2967"]

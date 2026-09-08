@@ -58,7 +58,7 @@
   origin: "oper#external-scan-2026-09-02"
   plan_refs: ["W1-T2580", "W1-T2694", "W1-T425", "W1-T988", "§6", "§12"]
   files: [src/lib/bundle.ts, src/lib/inbox.ts, src/run-task.ts, test/bundle-policy-proposals.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — the bundle, the inbox and the CLI under Rule 19; runtime

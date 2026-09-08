@@ -76,7 +76,7 @@
   origin: "oper#concept-scan-2026-09-03"
   plan_refs: ["W1-T2273", "W1-T2279", "W1-T2697", "§8A", "§12"]
   files: [src/lib/ledger-steps.ts, src/run-task.ts, scripts/ledger-steps-check.mjs, scripts/ledger-steps-baseline.json, scripts/generate-ledger-steps.mjs, docs/ledger-steps.md, package.json, test/every-ledger-step-has-a-meaning.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — a registry, a ratchet with its baseline, a generator and a page

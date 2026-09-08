@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§8", "W1-T2833", "W1-T2484", "W1-T2803"]
   files: [src/run-task.ts, src/lib/retro.ts, test/a-failing-retro-can-never-shrink-its-own-scope.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2833/#4018 bounded the retro's follow-up ledger read, which was linear in ROTATIONS. This is

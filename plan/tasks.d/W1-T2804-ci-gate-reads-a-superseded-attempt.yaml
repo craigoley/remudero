@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/ci-gate-reads-a-superseded-attempt.test.ts]
   origin: "operator-decision#w1-t2804-ci-gate-superseded-attempt-2026-09-04"
   plan_refs: ["W1-T457", "W1-T2274", "W1-T2793"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE GAP, OBSERVED IN SOURCE AT HEAD 3bc1542.

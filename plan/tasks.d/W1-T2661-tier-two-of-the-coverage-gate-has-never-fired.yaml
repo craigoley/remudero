@@ -84,7 +84,7 @@
   origin: "oper#follow-up-brief-2026-09-02"
   plan_refs: ["W1-T470", "W1-T466", "W1-T1259", "W1-T2266", "§12"]
   files: [src/lib/coverage-improvement.ts, src/run-task.ts, src/lib/measurement-cadence.ts, test/coverage-improvement-cadence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — the producer module, the measurement report and the CLI verb

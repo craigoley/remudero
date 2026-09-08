@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§7", "§9", "W1-T2873"]
   files: [src/lib/board.ts, test/board-snapshot-cache-ignores-heartbeats.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-26 (OBSERVED). At f7ceb86, `createBoardSnapshotCache`

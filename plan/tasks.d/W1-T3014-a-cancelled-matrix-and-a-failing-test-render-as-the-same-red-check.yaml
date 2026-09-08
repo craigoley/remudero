@@ -12,7 +12,7 @@
     - test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts
   origin: "operator-request#follow-up-work-2026-09-07"
   plan_refs: ["W1-T2428", "W1-T1033"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07 IN ONE SESSION. Nine red collapsed checks were investigated across the

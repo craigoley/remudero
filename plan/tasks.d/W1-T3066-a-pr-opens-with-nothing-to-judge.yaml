@@ -57,4 +57,4 @@
     - claim: "a body that already parses judgeably is passed through untouched"
       proof: "unit test: test/a-pr-opens-with-a-judgeable-body.test.ts"
   files: [src/run-task.ts, test/a-pr-opens-with-a-judgeable-body.test.ts, test/pr-create-rest-transport.test.ts]
-  status: queued
+  status: merged

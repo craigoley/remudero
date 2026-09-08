@@ -13,7 +13,7 @@
     - test/a-permanently-uncreditable-head-is-re-dispatched-forever.test.ts
   origin: "operator-session#session-audit-2026-09-02"
   plan_refs: ["W1-T2703", "W1-T522", "W1-T523", "W1-T468"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     NOT W1-T2703, WHICH IS THE OPPOSITE CASE. That task fixes a head that SHOULD be creditable and

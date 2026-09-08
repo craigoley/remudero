@@ -18,7 +18,7 @@
     - test/merge-lcov-node-drift-cluster-and-image-pin.test.ts
   origin: "oper#gate-rule-invalidated-2026-09-03"
   plan_refs: ["W1-T2234", "W1-T2769"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SIX FAILURES ARE `assertPinnedNodeVersion` THROWING, NOT SIX INDEPENDENT DEFECTS.

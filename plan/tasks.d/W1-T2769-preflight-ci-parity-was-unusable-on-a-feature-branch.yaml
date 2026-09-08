@@ -19,7 +19,7 @@
     - test/self-sync-refusal-names-the-guard-env.test.ts
   origin: "oper#gate-rule-invalidated-2026-09-03"
   plan_refs: ["W1-T79", "W1-T1134", "W1-T2248", "W1-T2449"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     CLAUDE.md'S OWN FIRST RULE: "Run the shipped local gate before your FIRST push, not every

@@ -10,7 +10,7 @@
   files: [scripts/diff-class.mjs, test/the-fast-lane-cannot-see-a-suite-that-joins-its-docs-path.test.ts]
   origin: "operator-session#docs-lane-merged-a-red-2026-09-02"
   plan_refs: ["W1-T2428"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE FILE STATES THE PROPERTY IT VIOLATES. `namesPlanOrDocsPath`'s own doc comment says the

@@ -11,7 +11,7 @@
   files: [src/lib/provider-routing-status.ts, src/lib/worker.ts, src/run-task.ts, src/lib/serve.ts, test/provider-routing-console.test.ts]
   origin: "operator-session#console-provider-routing-2026-09-02"
   plan_refs: ["W1-T2572", "W1-T2573", "W1-T2577", "W1-T2592", "W1-T2434", "W1-T2660"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT e3a54bc0. `spawnWorker` is the only producer of

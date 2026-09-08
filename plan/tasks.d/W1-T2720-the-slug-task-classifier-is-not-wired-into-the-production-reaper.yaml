@@ -10,7 +10,7 @@
   origin: "incident#3681-semantic-review-overruled-2026-09-02"
   plan_refs: ["W1-T2629", "W1-T2247", "W1-T2246", "W1-T2280"]
   files: [src/run-task.ts, test/slug-branch-task-resolution.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED AT origin/main 1c274bf6. W1-T2629's implementation merged as #3681. The pure

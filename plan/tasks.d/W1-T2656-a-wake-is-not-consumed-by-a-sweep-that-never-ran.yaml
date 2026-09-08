@@ -11,7 +11,7 @@
   files: [src/lib/daemon.ts, src/lib/github-event-wake.ts, test/a-wake-is-not-consumed-by-a-sweep-that-never-ran.test.ts]
   origin: "operator-decision#refile-3551-off-a-completed-task-2026-09-02"
   plan_refs: ["W1-T2568", "W1-T2582"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING, not blast radius: the `files:`

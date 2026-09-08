@@ -51,7 +51,7 @@
   origin: "oper#audit-filings-2026-08-04 (audit §4/§2d; sibling of W1-T316/W1-T317)"
   plan_refs: ["W1-T121", "W1-T172", "W1-T316", "W1-T317"]
   files: [src/lib/drain.ts, src/lib/daemon.ts, src/run-task.ts, test/queue-governor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high — gates DISPATCH, same blast radius W1-T316/T317 argued. budget 60 — the
     predicate, its test file and the landed sibling template all exist; this is call sites, a

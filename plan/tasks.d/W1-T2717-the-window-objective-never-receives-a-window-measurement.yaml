@@ -11,7 +11,7 @@
   files: [scripts/mount-headroom-sweep.mjs, src/lib/mount-recommender.ts, src/run-task.ts, test/window-share-recommender-input.test.ts, scripts/source-size-baseline.json]
   origin: "operator-session#material-window-share-producer-2026-09-02"
   plan_refs: ["W1-T2572", "W1-T2573", "W1-T2574", "W1-T2575", "W1-T2577", "G-17"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT fc5087ec. `workerLedgerFields` writes `window_consumption` on the SAME

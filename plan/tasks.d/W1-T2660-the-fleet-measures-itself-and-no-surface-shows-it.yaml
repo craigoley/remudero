@@ -72,7 +72,7 @@
   origin: "oper#follow-up-brief-2026-09-02"
   plan_refs: ["W1-T1259", "W1-T2266", "W1-T2485", "W1-T2304", "W1-T184", "W1-T2579", "§12"]
   files: [src/lib/serve.ts, src/lib/measurement-cadence.ts, test/serve-self-measurement.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — the console and the measurement module are two subsystems under

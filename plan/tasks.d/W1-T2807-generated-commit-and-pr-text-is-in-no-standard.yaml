@@ -89,7 +89,7 @@
     - claim: "the extension introduces no readability, length or vocabulary score"
       proof: "unit test: test/generated-text-message-standard.test.ts"
   files: [docs/operator-message-standard.md, src/lib/commit-message.ts, src/lib/plan-pr-emitter.ts, test/generated-text-message-standard.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#plain-language-surfaces-2026-09-04"
   plan_refs: ["W1-T2279", "W1-T2498", "W1-T2806"]

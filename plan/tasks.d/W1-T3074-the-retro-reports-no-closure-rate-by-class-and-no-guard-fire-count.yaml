@@ -11,7 +11,7 @@
   files: [src/lib/retro.ts, test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts]
   origin: "operator-session#deep-research-2026-09-07"
   plan_refs: ["W1-T2490", "W1-T2976", "P38", "W1-T91"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07 over `origin/main` (3,586 commits) and `plan/tasks.d/`:

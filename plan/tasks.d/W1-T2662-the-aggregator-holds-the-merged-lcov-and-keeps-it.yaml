@@ -42,7 +42,7 @@
   origin: "oper#follow-up-brief-2026-09-02"
   plan_refs: ["W1-T2661", "W1-T470", "§12"]
   files: [.github/workflows/ci.yml, test/coverage-merged-artifact.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — Rule 19 counts the workflow and its test as two concerns even

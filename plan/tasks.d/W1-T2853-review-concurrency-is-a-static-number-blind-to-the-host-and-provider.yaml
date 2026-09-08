@@ -17,7 +17,7 @@
     - test/adaptive-review-capacity.test.ts
   origin: "operator-session#adaptive-review-concurrency-2026-09-04"
   plan_refs: ["W1-T1038", "W1-T1049", "W1-T2584", "W1-T2792", "W1-T2852"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED IN SOURCE. `runSweep` converts `policy.reviewLanes` directly into a fixed-size pull

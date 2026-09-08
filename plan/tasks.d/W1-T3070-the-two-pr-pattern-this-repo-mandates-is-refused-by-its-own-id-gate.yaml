@@ -13,7 +13,7 @@
     - test/open-pr-id-collision-arms.test.ts
   origin: "operator-session#pr-4487-blocked-by-its-own-build-pr-2026-09-07"
   plan_refs: ["W1-T2324", "W1-T3055", "W1-T509"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE TWO SIDES OF THIS GATE ARE NOT THE SAME KIND OF THING, AND THAT ASYMMETRY IS THE DEFECT.

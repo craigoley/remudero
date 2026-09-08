@@ -10,7 +10,7 @@
   origin: "operator-session#eight-fleet-prs-none-merging-2026-09-07"
   plan_refs: ["W1-T2997", "W1-T2427", "W1-T1110"]
   files: [src/lib/sweep.ts, test/a-recordable-ratchet-is-repaired-not-dispatched.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07: of eight fleet builds, seven ended `blocked_ci`. Four were repaired by hand

@@ -15,7 +15,7 @@
     - test/host-capability-fixtures.test.ts
   origin: "operator-session#main-poisoned-by-moving-base-falsifiers-2026-09-04"
   plan_refs: ["W1-T985", "W1-T2585", "W1-T2204", "W1-T2671"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED AT origin/main 6eb5432b AND REPRODUCED LOCALLY. The focused pair runs 19 tests,

@@ -93,4 +93,4 @@
   origin: "session 2026-09-07 — recommendation (2) of the automation review; W1-T221's deferral record is stale"
   plan_refs: ["W1-T221", "W1-T2969", "W1-T3052"]
   files: [hooks/pre-push, src/run-task.ts, test/prepush-gates-refuse.test.ts, docs/cli-reference.md]
-  status: queued
+  status: merged

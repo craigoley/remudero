@@ -10,7 +10,7 @@
   origin: "incident#3692-repair-arm-starvation-2026-09-02"
   plan_refs: ["W1-T2609", "W1-T1211", "W1-T1209"]
   files: [src/run-task.ts, test/light-pass-ci-idle.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE HOST WHILE PR #3692 WAS RED. Repeated light passes classified #3692 as

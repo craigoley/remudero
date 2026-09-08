@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§8A", "W1-T1128"]
   files: [src/lib/clock.ts, src/lib/daemon.ts, test/clock-port.test.ts, test/clock-signature-census.test.ts, scripts/clock-signature-baseline.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-34 (OBSERVED). At f7ceb86, `git grep -ohE '\bnow\??: \(\) =>

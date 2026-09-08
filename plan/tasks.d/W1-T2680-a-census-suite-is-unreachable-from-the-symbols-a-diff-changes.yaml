@@ -10,7 +10,7 @@
   files: [scripts/diff-class.mjs, test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts]
   origin: "operator-session#3512-misattribution-2026-09-02"
   plan_refs: ["W1-T2428", "W1-T2521", "W1-T2639"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED TWICE IN ONE SESSION, 2026-09-01, ON TWO DIFFERENT PRs. #3569 added ONE seamed policy
