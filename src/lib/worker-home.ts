@@ -18,10 +18,9 @@ import {
   writeSync,
   renameSync,
 } from "node:fs";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
-import { playwrightCacheRoot } from "./review.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
@@ -78,9 +77,27 @@ export interface WorkerHomeSymlink {
  *  populated breaks no host. // Why: docs/forensics/worker-home.md#the-claude-grant. */
 export const WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH = ".claude-fleet";
 
+/** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real path, which is how CI
+ *  images relocate the cache; the literal `"0"` means "inside node_modules" and is NOT a directory, so it falls
+ *  through to the platform default exactly as Playwright's own resolution does.
+ *  W1-T2895: moved here from `review.ts` (its `ensureBrowsersOnce` imports it back) — this module is
+ *  {@link playwrightCacheRoot}'s only OTHER consumer, and `worker-home.ts -> review.ts` was the closing edge of
+ *  four of the thirteen import cycles `npm run cycle-ratchet` tolerated. */
+export function playwrightCacheRoot(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: string = process.platform,
+  home: string = homedir(),
+): string {
+  const override = env.PLAYWRIGHT_BROWSERS_PATH;
+  if (override !== undefined && override !== "" && override !== "0") return override;
+  if (platform === "darwin") return join(home, "Library", "Caches", "ms-playwright");
+  if (platform === "win32") return join(env.LOCALAPPDATA ?? join(home, "AppData", "Local"), "ms-playwright");
+  return join(home, ".cache", "ms-playwright");
+}
+
 /** The explicit allowlist of real-HOME paths a worker needs back, symlinked individually. Mirrors
  *  env.ts's ALLOWLIST discipline: name each grant and its reason, never inherit HOME wholesale. */
-/** The browser cache's path relative to HOME, derived from {@link playwrightCacheRoot} (lib/review.ts)
+/** The browser cache's path relative to HOME, derived from {@link playwrightCacheRoot} above
  *  rather than a second copy of its platform branch, so grant and resolver cannot disagree. INVARIANT:
  *  the empty env and sentinel HOME are deliberate — `ALLOWLIST` (lib/env.ts) passes no
  *  `PLAYWRIGHT_BROWSERS_PATH` into a spawn, so only the no-override branch is reachable.
@@ -103,7 +120,7 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
   {
     relPath: playwrightCacheRelPath(),
     reason:
-      "Playwright's browser cache is HOME-relative (playwrightCacheRoot, lib/review.ts, resolves its " +
+      "Playwright's browser cache is HOME-relative (playwrightCacheRoot, above, resolves its " +
       "no-override branch off HOME), so a redirected HOME hides the copy the image already installed " +
       "and every run downloads its own — MEASURED on the container at the great majority of a completed " +
       "worker home. READ-ONLY IN PRACTICE: on a populated cache every browser directory's mtime is its " +

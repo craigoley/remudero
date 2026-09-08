@@ -2,8 +2,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test as nodeTest } from "node:test";
 
-import { playwrightCacheRoot, requiredChromiumDirs } from "../src/lib/review.js";
+import { requiredChromiumDirs } from "../src/lib/review.js";
 import { isCiEnv } from "../src/lib/self-sync.js";
+import { playwrightCacheRoot } from "../src/lib/worker-home.js";
 
 /**
  * test/browser-absence.ts — W1-T3018. Whether the pinned Chromium build is actually here, and what

@@ -385,6 +385,22 @@ export interface DeriveDeps {
   writeCreditStore?: (store: CreditStore) => void;
 }
 
+/**
+ * `board.ts`'s dependency shape, defined here (not there) as of W1-T2895: `task-card.ts` needs
+ * only the TYPE, and it already imports `status.ts` for `projectPlan`/`readLedgerLines` — so
+ * defining {@link BoardDeps} beside the {@link DeriveDeps} it extends means `task-card.ts` never
+ * needs an `import type` from `board.ts` at all. That single-edge cycle (`board.ts` ->
+ * `status-board.ts` -> `task-card.ts` -> `board.ts`) was the one ring `npm run cycle-ratchet`
+ * still reported after this task's six named single-symbol moves cut the other twelve —
+ * dependency-cruiser's `swc` parser (required for this repo's TypeScript version; see
+ * `.dependency-cruiser.cjs`) does not distinguish `import type` from a value import when
+ * detecting cycles, so the edge counted as circular exactly like any other. `board.ts` re-exports
+ * this name unchanged for its own (many) internal uses.
+ */
+export interface BoardDeps extends DeriveDeps {
+  plan: Plan;
+}
+
 /** Default LIVENESS BOUND (W1-T179, 30 minutes): a dispatched task with no terminal verdict and no newer ledger
  *  line is no longer trusted as "running" absent an open PR. The W1-T1 spin-loop (27h21m) blows past it by two
  *  orders of magnitude, while a slow poll cadence sits inside it. */
