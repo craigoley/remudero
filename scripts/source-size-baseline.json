@@ -133,6 +133,7 @@
   "src/lib/replay.ts": 240,
   "src/lib/reply-interpreter.ts": 198,
   "src/lib/repo-location.ts": 84,
+  "src/lib/retro-closure.ts": 500,
   "src/lib/retro-preflight.ts": 500,
   "src/lib/retro-subprocess.ts": 500,
   "src/lib/retro.ts": 4500,

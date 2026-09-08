@@ -667,6 +667,7 @@ import {
 } from "./lib/emissions.js";
 import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
 import { deriveTaskClass } from "./lib/task-class.js";
+import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
   boundRiskJudgeChangeView,
   realRiskJudge,
@@ -23368,6 +23369,10 @@ async function retroCommand(
     const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
     return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks.map((t) => t.title) : [];
   });
+  const openTaskClasses = tryReadFollowupTitles("classes", () => {
+    const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
+    return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks.filter((t) => t.status !== "merged" && t.status !== "done").map((t) => deriveTaskClass(t)) : [];
+  });
   const openProposalLines = tryReadFollowupTitles("proposals", () => {
     const masterPlanPath = join(repoRoot, "MASTER-PLAN.md");
     const masterPlanMd = existsSync(masterPlanPath) ? readFileSync(masterPlanPath, "utf8") : "";
@@ -23397,6 +23402,8 @@ async function retroCommand(
     github,
     mastMapping,
     priorMastCategoryCounts: marker?.mast_category_counts,
+    priorGuardZeroStreak: marker?.guard_zero_streak,
+    openTaskClasses,
     openTitles: [...openTaskTitles, ...openProposalLines],
     mounts: mountsTable,
     // W1-T2642: the plan-coherence census's REAL bytes, read here (buildGather stays fs-free) so
@@ -23589,6 +23596,7 @@ async function retroCommand(
   // replacing it — `retro.start` carries this lane's own fields and has its own readers.
   log("run.start", laneRunStartFields({ lane: "retro", repo, architect: arch, worker: wrk }));
   log("retro.start", { since: gather.sinceTs ?? null, runs_in_scope: gather.totalRuns, architect: arch, worker: wrk });
+  log("retro.closure_by_class", { since: gather.sinceTs ?? null, rows: gather.closureByClass });
   say(`retro ${runId} — architect ${arch} over worker ${wrk}; ${gather.totalRuns} runs in scope`);
 
   const settingsFile = renderWorkerSettings({
@@ -23935,6 +23943,7 @@ async function retroCommand(
       learnings_count: gather.learningsNow,
       runs_seen: gather.totalRuns,
       mast_category_counts: gather.mast.byCategory,
+      guard_zero_streak: guardZeroStreakRecord(gather.guardFireCounts),
     };
     saveMarker(markerPath, nextMarker);
     log("retro.marker.advanced", { ...nextMarker, runs_deferred: gather.runsDeferred });
