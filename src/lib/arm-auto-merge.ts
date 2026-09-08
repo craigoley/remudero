@@ -27,6 +27,7 @@ import { execFileSync } from "node:child_process";
 import { loadConfig, type Config } from "./config.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { readLedgerLines } from "./status.js";
+import { ghExec } from "./github-transport.js";
 import {
   ghJson,
   ghRateLimitRefusalUnknown,
@@ -333,7 +334,7 @@ export function realArmDeps(
     },
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash"], {
+      ghExec(["pr", "merge", prUrl, "--auto", "--squash"], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -344,7 +345,7 @@ export function realArmDeps(
     },
     disableAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `disabling auto-merge on ${prUrl}`);
-      execFileSync("gh", ["pr", "merge", prUrl, "--disable-auto"], {
+      ghExec(["pr", "merge", prUrl, "--disable-auto"], {
         encoding: "utf8",
         stdio: "pipe",
       });
