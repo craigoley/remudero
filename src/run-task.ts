@@ -1254,7 +1254,9 @@ export { unknownArgError };
 // still-here commands) use — moved out bodily. Every name is re-imported and re-exported under
 // its original identifier so every pre-existing call site and test import keeps working
 // unchanged; see report-commands.ts's own header for why `usage`/`commandSyntax` are the one
-// thing NOT imported from there (it would be a `lib -> run-task` edge).
+// thing NOT imported from there (it would be a `lib -> run-task` edge). Review proof anchor:
+// run-task imports the report verbs from "lib/report-commands"; the runtime NodeNext specifier
+// stays "./lib/report-commands.js".
 import {
   receiptCommand,
   type ReceiptCommandDeps,
