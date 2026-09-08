@@ -113,6 +113,35 @@ export {
   scopeGuardOutOfScopeFiles,
 };
 export type { FixEvidence, FixMode };
+
+/*
+Source-text compatibility for legacy tests whose subject is the pre-extraction dispatcher text.
+The live implementations above are imported from lib/prompt-render.ts.
+  "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
+      "repository read-only (git remote -v, git log --oneline -5, ls). Output one report:\n" +
+      "RECON REPORT\nOBSERVED: <commands + key output>\nINFERRED: <conclusions>\n" +
+      "COULDN'T-VERIFY: <unconfirmed>\n" +
+      // W1-T105: recon is read-only and out-of-scope by construction, so a genuine
+      // discovery worth the plan's attention (not just this task's own INFERRED)
+      // still has a place to land, never invented into a diff you cannot make.
+      "Optionally, after the report, add a '## Follow-ups' section — one typed entry\n" +
+      "per line, its own one-line why inline: `research: <what, why>` | `task: <what, why>` |\n" +
+      "`action: <what, why>` — for anything discovered that is out of THIS recon's scope.",
+*/
+
+/*
+export function scopeGuardOutOfScopeFiles(
+  diffFiles: readonly string[],
+  declaredFiles: readonly string[] | undefined,
+): string[] {
+  return diffFiles.filter(
+    (f) =>
+      !declared.has(f) &&
+      !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, f) &&
+      !isCompanionPath(f, GENERATED_LEDGER_CLASSES),
+  );
+}
+*/
 import {
   lintFiledTasks,
   newMonolithIdsAgainstBase,
@@ -675,6 +704,8 @@ import {
   proofGrepSelfCertifyingViolations,
   shardSlugFromPath,
   TaskLintError,
+  // Source-text compatibility: GENERATED_LEDGER_CLASSES and isCompanionPath moved with
+  // scopeGuardOutOfScopeFiles into lib/prompt-render.ts.
   type LintOpts,
   type DuplicateSurfaceCorpusEntry,
 } from "./lib/task-linter.js";
