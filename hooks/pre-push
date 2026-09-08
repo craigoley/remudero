@@ -47,6 +47,16 @@ else
   echo "pre-push: scripts/rule15-precheck.mjs absent — skipped, NOT passed" >&2
 fi
 
+# W1-T3205: BEGIN test-tier admission
+# Refuse before push, but never mutate the duration ledger from a gate. The check already names
+# `--seed`, whose zero-duration placeholder is the repository's established unmeasured state.
+if [ -f scripts/test-tier-manifest.mjs ]; then
+  node scripts/test-tier-manifest.mjs --check || fail=1
+else
+  echo "pre-push: scripts/test-tier-manifest.mjs absent — skipped, NOT passed" >&2
+fi
+# W1-T3205: END test-tier admission
+
 # The verb owns membership; this reads its answer. stdout is the bare file list, and anything the
 # verb could not place goes to stderr, where it stays visible to the author instead of quietly
 # shortening the list this runs.
