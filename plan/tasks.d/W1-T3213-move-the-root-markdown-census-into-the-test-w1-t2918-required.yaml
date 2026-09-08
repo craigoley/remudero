@@ -1,0 +1,54 @@
+- id: W1-T3213
+  title: "MOVE THE ROOT-MARKDOWN CENSUS INTO THE DEDICATED TEST W1-T2918 REQUIRED — PR #4707 merged after a deterministic partial review credited keyword evidence, then the event-driven semantic reviewer found the declared test absent and downgraded the same SHA"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 4.00
+  files: [test/credential-arms-match-the-observed-text.test.ts, test/root-level-markdown-census.test.ts, scripts/test-tier-manifest.json]
+  origin: "operator-session#pr-4707-post-merge-review-race-2026-09-08"
+  plan_refs: ["W1-T2918", "W1-T2593", "W1-T1020", "W1-T2443"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PR #4707 AT HEAD 0540902c. W1-T2918's filed `files:` and acceptance proof both
+    require `test/root-level-markdown-census.test.ts`. The implementation instead placed the
+    census helpers and three tests in `test/credential-arms-match-the-observed-text.test.ts`; the
+    dedicated file is absent on the merged head. The census behavior exists and passes, but the
+    task's promised ownership boundary was not built.
+
+    The documented hand-run `rmd review` path is deterministic-only (W1-T2593). It executed two of
+    three proofs, accepted the third through the keyword floor, posted success, and auto-merge
+    landed #4707. The event-driven semantic review then judged that same criterion non-responsive,
+    disarmed auto-merge, and posted failure on the same SHA after the merge had already completed.
+    This task repairs the missing deliverable only. The policy/composition question—whether a
+    deterministic partial review may race the semantic reviewer and arm—is already owned by the
+    operator-gated W1-T2443 and must not be smuggled into this low-risk file move.
+
+    Move the root-markdown allowlist, root walk, predicate, synthetic-offender control, live-root
+    assertion, and archived-away assertions into the dedicated test. Remove them from the
+    credential suite so the gate has one owner. Register the new test in the tier manifest. Do not
+    weaken the allowlist, baseline the offender, or change production code.
+  acceptance:
+    - claim: "the dedicated root-level markdown census test owns both the synthetic offender control and the live repository-root walk"
+      proof: "unit test: test/root-level-markdown-census.test.ts"
+    - claim: "DIAGNOSIS.md and FINDINGS.md remain asserted absent from the root in the dedicated suite"
+      proof: "unit test: test/root-level-markdown-census.test.ts"
+    - claim: "deleting the allowlist refusal makes the synthetic offender test fail, so the new suite is load-bearing rather than a file-name shell"
+      proof: "unit test: test/root-level-markdown-census.test.ts"
+  falsifier: |
+    Close without implementation if `test/root-level-markdown-census.test.ts` exists on current
+    main and independently fails for an unallowlisted synthetic root markdown file. Checked before
+    filing: `git ls-tree -r --name-only origin/main` returned no such path, while the equivalent
+    helpers and tests were observed inside the credential suite. The missing ownership boundary is
+    therefore material even though the underlying predicate already works.
+  note: |
+    `rmd next-task-id --reserve` atomically RESERVED W1-T3213 at `refs/rmd-id/W1-T3213`; the command
+    reported W1-T3212 as the prior maximum and W1-T3213 as the id actually held.
+
+    `risk: high` is Rule 19's span reading, not blast radius: the one ownership correction must
+    remove the misplaced suite, add its promised dedicated suite, and register that new test with
+    the repository-wide tier manifest. Production behavior remains untouched.
