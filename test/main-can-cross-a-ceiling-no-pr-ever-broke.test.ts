@@ -33,7 +33,12 @@ function runScript(job: Job): string {
 }
 
 /** The ceilings this job exists to measure — absolute, so a merge can cross one with no PR red. */
-const ABSOLUTE_CEILING_GATES = ["source-size-ratchet", "learnings-budget-ratchet", "claude-md-budget-ratchet"];
+const ABSOLUTE_CEILING_GATES = [
+  "source-size-ratchet",
+  "learnings-budget-ratchet",
+  "claude-md-budget-ratchet",
+  "comment-load-signal",
+];
 
 test("a job measures the absolute ceilings against main itself, on push", () => {
   const job = jobs()["main-ceiling-drift"];
@@ -46,6 +51,11 @@ test("it runs EVERY absolute ceiling, so one breach cannot hide behind another's
   for (const gate of ABSOLUTE_CEILING_GATES) {
     assert.ok(script.includes(gate), `main is unmeasured against ${gate}`);
   }
+  assert.match(
+    script,
+    /comment-load-signal -- --base HEAD\^/,
+    "comment-load must compare the push against the previous main commit, not origin/main at HEAD",
+  );
 });
 
 test("a failing ceiling does not short-circuit the rest — one breach must never mask another", () => {
