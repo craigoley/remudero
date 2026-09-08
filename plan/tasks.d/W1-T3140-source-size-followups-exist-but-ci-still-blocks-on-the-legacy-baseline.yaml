@@ -15,10 +15,12 @@
     - src/lib/ci-parity.ts
     - src/lib/compaction.ts
     - src/lib/sweep.ts
+    - test/a-deadlock-the-harness-cannot-count.test.ts
     - test/a-gates-own-remedy-is-reachable.test.ts
     - test/a-source-file-cannot-outgrow-its-baseline.test.ts
     - test/a-worker-runs-the-cheap-gates-before-it-pushes.test.ts
     - test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts
+    - test/prompt-render.test.ts
     - test/source-size-baseline-is-enforced.test.ts
     - test/sweep.test.ts
     - test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts
@@ -73,3 +75,10 @@
     ID PROVENANCE: `rmd next-task-id --reserve` atomically held refs/rmd-id/W1-T3140. This changes
     no correctness gate: only line-count growth stops being represented as correctness failure;
     inability to produce the signal still fails closed.
+
+    SCOPE AMENDMENT 2026-09-08. Source PR #4678 exposed two deterministic regression contracts
+    that the original file list omitted. Removing source-size's remedy changes the gate-remedy
+    deadlock fixture in `test/a-deadlock-the-harness-cannot-count.test.ts`; changing the worker
+    contract changes `renderFixPrompt`'s byte-identity lock in `test/prompt-render.test.ts`. CI
+    failed both on the source head, and both must be updated to the ruled behavior rather than
+    preserved as stale expectations. No acceptance claim or implementation design changes.
