@@ -1098,3 +1098,30 @@ jobs:
         run: npm ci
       - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
         run: npm run --silent comment-load-signal
+
+  ledger-steps:
+    # LEDGER-STEPS gate (W1-T2764). Two scripts ship with this task and, until this job, NOTHING
+    # invoked either — which `unwired-gate:check` refused by name: "a gate-shaped instrument that
+    # nothing invokes is not a gate". A recorded ceiling nothing enforces is dead configuration that
+    # drifts, the same lesson W1-T2488 paid for on source-size.
+    #
+    # `ledger-steps:check` holds the step-name baseline; `ledger-steps:doc-check` re-runs the
+    # generator against the committed docs/ledger-steps.md, so the doc cannot go stale silently the
+    # way docs/cli-reference.md did. Both run here rather than in one script, so a doc drift and a
+    # baseline breach are told apart rather than collapsing into one red.
+    name: ledger-steps
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Ledger step names resolve against their baseline
+        run: npm run --silent ledger-steps:check
+      - name: docs/ledger-steps.md is not stale against its generator
+        run: npm run --silent ledger-steps:doc-check
