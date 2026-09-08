@@ -1,0 +1,85 @@
+- id: W1-T3146
+  title: "EVERY SHARD DECLARES A `budget_usd` AND NOT ONE HAS EVER FIRED — the median declared budget is $35.00 against a median implement run of $4.08 and a p90 of $10.30, so the enforced hard cap sits 8.6x above the middle of the population it bounds and `blocked_budget` appears ZERO times in the entire ledger union"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: span
+  budget_usd: 12.00
+  files: [src/lib/task-linter.ts, test/a-declared-budget-is-calibrated-against-observed-runs.test.ts]
+  origin: "operator-session#router-efficiency-2026-09-08"
+  plan_refs: ["P53", "§9", "W1-T19", "W1-T931"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 across `plan/tasks.d/` and the ledger union at the daemon state root.
+
+    (1) THE DECLARED SIDE. 1,233 shards carry a `budget_usd` row: min $0.00, median $35.00, max
+    $150.00. The modal values are $30 (124 shards), $100 (119), $45 (95), $40 (90), $20 (85).
+
+    (2) THE OBSERVED SIDE. 668 retained `implement.done` rows: median $4.08, p90 $10.30, p99 far
+    below the cap, max $44.59 — a single run, and the most expensive one the fleet has ledgered.
+
+    (3) THE CAP HAS NEVER FIRED. `blocked_budget` reads ZERO across the union. POSITIVE CONTROL on
+    the identical query and corpus: `blocked_ci` reads 44,040 raw, so this is a real zero and not a
+    query that cannot see its own corpus. The enforcement path is live and correct — `subtype
+    error_max_budget_usd` throws `ImplementBudgetBreach` and yields `verdict: blocked_budget`
+    (`src/run-task.ts`) — so this is a CALIBRATION defect, never a wiring one, and the task must not
+    be mistaken for the latter.
+
+    (4) THIS IS THE MIRROR OF A DEFECT THIS REPO ALREADY NAMES. CLAUDE.md's investigation section
+    records "a bound that fires on a HEALTHY condition is this repo's recurring defect — before
+    tuning the number, check the population it is meant to separate has ever been observed." The
+    inverse is equally useless: a bound so far above the population that it separates nothing has
+    the same evidentiary value as no bound, while reading in every shard as though it were a real
+    control. At $35 against a $4.08 median it would take an 8.6x runaway to trip.
+
+    (5) THE NUMBER IS AN AUTHOR-TIME GUESS AND ALWAYS HAS BEEN. `budget_usd` is written by the
+    Architect at filing time, before any run exists, and nothing has ever compared the declared
+    figure to what the class actually costs. The distribution in (2) did not exist when these rows
+    were being chosen; it does now.
+
+    (6) NOT A PROPOSAL TO LOWER EVERY ROW. The right output is that the figure becomes ANSWERABLE
+    at filing time — an author who declares $100 for a task whose class has never exceeded $12
+    should be told so, with the class's own numbers. Rule 19's sizer is the precedent: the linter
+    already refuses a shard on a measurable property rather than leaving it to judgment.
+  design: |
+    (i) THE LINTER IS THE SEAM, NOT THE RUNTIME. `budget_usd` enforcement at run time is already
+    correct; what is missing is an author-time check that the declared figure bears any relation to
+    the class's observed distribution. `src/lib/task-linter.ts` is where every other
+    measurable-shard-property check already lives.
+    (ii) ADVISORY BEFORE BLOCKING. Rule 19's own sizing check reports rather than refuses when a
+    shard has declared `band_meaning: span`. A budget check must start in the same posture: name
+    the mismatch and the class's numbers, refuse nothing, so the first thing this produces is a
+    measurement of how widespread the miscalibration is.
+    (iii) THE CLASS'S OWN DISTRIBUTION, NEVER A GLOBAL CONSTANT. A `docs` task and a `risk:high src`
+    task have different cost populations; a single fleet-wide number would reintroduce exactly the
+    cross-population comparison W1-T2574 refuses.
+    (iv) A THIN CLASS IS SILENT. Below a sample floor the class has no median worth comparing to —
+    the same discipline `costAnomaly.minSamples` already applies, and for the same reason.
+    (v) NO SHARD IS REWRITTEN BY THIS TASK. It makes the figure checkable; changing 1,233 declared
+    rows is a separate decision that should be taken once the check reports how many are wrong.
+  acceptance:
+    - claim: "a shard whose declared budget is far above its class's observed distribution is reported with the class's own median and sample count, not a bare complaint"
+      proof: "unit test: test/a-declared-budget-is-calibrated-against-observed-runs.test.ts"
+    - claim: "a class with too few settled runs to have a trustworthy median produces no finding at all"
+      proof: "unit test: test/a-declared-budget-is-calibrated-against-observed-runs.test.ts"
+    - claim: "the check is advisory and refuses no shard, so it changes no dispatch outcome on introduction"
+      proof: "unit test: test/a-declared-budget-is-calibrated-against-observed-runs.test.ts"
+    - claim: "classes are compared only against their own population, never against a fleet-wide constant"
+      proof: "unit test: test/a-declared-budget-is-calibrated-against-observed-runs.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if the hard cap has ever fired: `zgrep` the union for `"verdict":"blocked_budget"`
+    — MEASURED 2026-09-08, zero, with `blocked_ci` at 44,040 on the identical query as the positive
+    control. CLOSE IT ALSO if declared budgets already track observed cost: MEASURED, declared
+    median $35.00 against an observed implement median of $4.08 and a max of $44.59 across the whole
+    corpus.
+    PROVE IT LOAD-BEARING: feed the check a shard whose declared budget sits inside its class's
+    observed range and it must report nothing; a check that fires on both is asserting nothing.
+  note: |
+    risk:medium: advisory-only by design point (ii), one linter module, and it refuses no shard, so
+    the failure direction is a missing warning rather than a blocked filing. DISTINCT FROM W1-T3147
+    — that task moves a RUNAWAY tripwire that fires too often; this one is about a per-task bound
+    that has never fired at all. Id reserved at `refs/rmd-id/W1-T3146` before filing.
