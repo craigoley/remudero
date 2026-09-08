@@ -626,6 +626,7 @@ function writeBufferedResponse(res: import("node:http").ServerResponse, cached: 
     try {
       body = withJsonStaleness(JSON.parse(cached.body), staleness);
     } catch {
+      // Malformed cached JSON keeps its original body; the cache headers still carry staleness.
       body = cached.body;
     }
   }
@@ -664,7 +665,8 @@ export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: n
         cached = buffer.buffered(startedAt);
         lastError = undefined;
       } catch (error) {
-        lastError = String((error as Error)?.message ?? error);
+        const reason = String((error as Error)?.message ?? error);
+        lastError = reason;
       } finally {
         refreshing = false;
         refreshPromise = undefined;
@@ -2236,6 +2238,7 @@ export function buildShellRoute(
         try {
           consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: consoleSha, currentSha: resolveCurrentSha() });
         } catch {
+          // A failing injected resolver cannot decide freshness, so render the existing unknown state.
           consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: CONSOLE_SHA_UNKNOWN, currentSha: CONSOLE_SHA_UNKNOWN });
         }
       } else {
@@ -2558,6 +2561,7 @@ export function buildPeekRoute(deps: { root: string; isLive: (runId: string) => 
       try {
         raw = await fsPromises.readFile(tailPath, "utf8");
       } catch {
+        // Missing or unreadable tails share the existing not-found response for this read-only peek.
         sendJson(res, 200, { runId, live, found: false, lines: [], reason: `no tail recorded for ${runId}` });
         return;
       }
