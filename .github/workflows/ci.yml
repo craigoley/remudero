@@ -167,9 +167,40 @@ jobs:
         # Why: measured on PR #3542 — docs/forensics/ci-yml.md.
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
-          if [ "$CLASS" != "SOURCE" ] && [ "${{ matrix.shard }}" != "1" ]; then
-            echo "W1-T2428 fast-lane: class=${CLASS} — shard ${{ matrix.shard }} has no work; shard 1 owns the plan/docs-reading set."
-            exit 0
+          TIER_BASE="HEAD"
+          if [ -n "${GITHUB_BASE_REF}" ]; then
+            TIER_BASE="origin/${GITHUB_BASE_REF}"
+          fi
+          if [ "$CLASS" != "SOURCE" ]; then
+            COUNT=0
+            SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites)" || SUITES=""
+            if [ -z "$SUITES" ]; then
+              if [ "${{ matrix.shard }}" = "1" ]; then
+                echo "W1-T3191 fast-lane: candidate enumeration FAILED or was empty — shard 1 owns the FULL suite fallback."
+                echo "- plan-reading shard summary: candidate_count=0, assigned_count=all, predicted_duration_ms=unknown, fallback=full-suite, shard=1/4" >> "$GITHUB_STEP_SUMMARY"
+                npm run test:ci
+                exit $?
+              fi
+              echo "W1-T3191 fast-lane: candidate enumeration FAILED or was empty — shard 1 owns the FULL suite fallback; shard ${{ matrix.shard }} does not duplicate it."
+              echo "- plan-reading shard summary: candidate_count=0, assigned_count=0, predicted_duration_ms=0, fallback=full-suite-owner-1, shard=${{ matrix.shard }}/4" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            else
+              printf '%s\n' "$SUITES" > plan-reading-suites.txt
+              COUNT="$(grep -c . plan-reading-suites.txt)"
+              if node scripts/test-tier-manifest.mjs \
+                --select-candidates plan-reading-suites.txt --shard ${{ matrix.shard }}/4 --base "$TIER_BASE" \
+                > assigned-plan-reading-suites.txt 2> plan-reading-selector.log; then
+                cat plan-reading-selector.log
+              else
+                cat plan-reading-selector.log
+                echo "W1-T3191 fast-lane: candidate validation failed — taking the complete source-CI fallback."
+                CLASS="SOURCE"
+              fi
+            fi
+            if [ "$CLASS" = "SOURCE" ] && [ -n "$SUITES" ]; then
+              echo "plan-reading shard summary candidate_count=${COUNT} assigned_count=0 predicted_duration_ms=0 fallback=source shard=${{ matrix.shard }}/4"
+              echo "- plan-reading shard summary: candidate_count=${COUNT}, assigned_count=0, predicted_duration_ms=0, fallback=source, shard=${{ matrix.shard }}/4" >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           if [ "$CLASS" = "SOURCE" ]; then
             echo "CI sharding: class=SOURCE — running test shard ${{ matrix.shard }}/4."
@@ -177,10 +208,6 @@ jobs:
             # The manifest assigns the fast tier by cumulative recorded duration. The explicit
             # base means tests newly merged to main default fast without making this branch update
             # a ledger entry it did not introduce; a test introduced by this PR still refuses.
-            TIER_BASE="HEAD"
-            if [ -n "${GITHUB_BASE_REF}" ]; then
-              TIER_BASE="origin/${GITHUB_BASE_REF}"
-            fi
             RMD_TEST_DURATION_OUTPUT="${RUNNER_TEMP}/test-duration/shard-${{ matrix.shard }}.json"
             export RMD_TEST_DURATION_OUTPUT
             node scripts/test-with-retry.mjs \
@@ -222,22 +249,30 @@ jobs:
             grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log"
             exit "$CODE"
           fi
-          SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites)" || SUITES=""
-          if [ -z "$SUITES" ]; then
-            echo "W1-T2428 fast-lane: class=${CLASS} but the suite enumeration FAILED or was empty — running the FULL suite (fail closed)."
-            echo "- W1-T2428 fast-lane: class=${CLASS}, enumeration unusable — ran the **full** suite (fail closed)" >> "$GITHUB_STEP_SUMMARY"
-            npm run test:ci
-            exit $?
-          fi
-          COUNT="$(printf '%s\n' "$SUITES" | grep -c .)"
+          ASSIGNED_COUNT="$(grep -c . assigned-plan-reading-suites.txt)"
           TOTAL="$(ls test/*.test.ts | grep -c .)"
-          echo "W1-T2428 fast-lane: class=${CLASS} — running ${COUNT} of ${TOTAL} suites (the plan/docs-reading set); skipping the rest, which this diff cannot fail."
-          echo "- W1-T2428 fast-lane: class=${CLASS} — ran **${COUNT} of ${TOTAL}** suites (the plan/docs-reading set), skipped the remainder" >> "$GITHUB_STEP_SUMMARY"
-          printf '%s\n' "$SUITES" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
-          # THE SAME HARNESS IMPORTS `npm run test:ci` CARRIES — `--import tsx` and
-          # `--import ./test/setup/tmp-hygiene.ts`. The fast lane changes WHICH suites run,
-          # never the harness they run under.
-          node --test --import tsx --import ./test/setup/tmp-hygiene.ts $SUITES
+          SUMMARY="$(grep '^test-tier-manifest: plan-reading shard summary ' plan-reading-selector.log)"
+          echo "W1-T3191 fast-lane: class=${CLASS} — running ${ASSIGNED_COUNT} of ${COUNT} plan-reading candidates on shard ${{ matrix.shard }}/4 (${TOTAL} repository suites total)."
+          echo "$SUMMARY"
+          echo "- W1-T3191 fast-lane: ran **${ASSIGNED_COUNT} of ${COUNT}** candidates (${COUNT} of ${TOTAL} repository suites are in the conservative set); ${SUMMARY#test-tier-manifest: }" >> "$GITHUB_STEP_SUMMARY"
+          sed 's/^/    /' assigned-plan-reading-suites.txt >> "$GITHUB_STEP_SUMMARY"
+          RMD_TEST_DURATION_OUTPUT="${RUNNER_TEMP}/test-duration/shard-${{ matrix.shard }}.json"
+          export RMD_TEST_DURATION_OUTPUT
+          set +e
+          RETRY_SCRIPT="scripts/test-with-retry.mjs"
+          node "$RETRY_SCRIPT" \
+            node scripts/test-tier-manifest.mjs --run-candidates plan-reading-suites.txt --shard ${{ matrix.shard }}/4 --base "$TIER_BASE" \
+            2>&1 | tee test-shard-output.log
+          CODE="${PIPESTATUS[0]}"
+          set -e
+          if [ "$CODE" -ne 0 ] && ! grep -qE '^# tests [0-9]+' test-shard-output.log; then
+            echo "::error::plan-reading shard ${{ matrix.shard }}/4 exited ${CODE} with no node-test-runner summary — the failure set is unverified (W1-T2597)."
+            echo "- **W1-T2597: NO-SUMMARY PLAN-READING SHARD** — shard ${{ matrix.shard }}/4 exited ${CODE} with no trailing test summary." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          FLAKE_RETRY_DIR="${RUNNER_TEMP:-$PWD}/flake-retry"
+          mkdir -p "$FLAKE_RETRY_DIR"
+          grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log"
+          exit "$CODE"
       - name: Upload this shard's flake-retry evidence (best-effort input to ci-required's per-test aggregator, W1-T2904)
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -387,8 +422,41 @@ jobs:
         run: npx playwright install chromium
       - name: Check every test file is tiered (W1-T2904 unwired-gate wiring — `test:tier:check` refuses an untiered file so the fast/slow split can trust scripts/test-tier-manifest.json before either tier runs)
         run: npm run --silent test:tier:check -- --base "origin/${GITHUB_BASE_REF}"
+      - name: Establish whether the exact plan-reading matrix owns this diff (W1-T3191)
+        id: plan-reading
+        run: |
+          git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
+          git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > changed-files.txt 2>/dev/null || : > changed-files.txt
+          CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY) ;;
+            *)
+              cat diff-class.log || true
+              echo "established=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          if ! node --import tsx scripts/diff-class.mjs --list-plan-reading-suites > plan-reading-suites.txt; then
+            echo "established=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if node scripts/test-tier-manifest.mjs \
+            --select-candidates plan-reading-suites.txt --shard 1/4 --base "origin/${GITHUB_BASE_REF}" \
+            > /dev/null 2> plan-reading-selector.log; then
+            cat plan-reading-selector.log
+            echo "established=true" >> "$GITHUB_OUTPUT"
+          else
+            cat plan-reading-selector.log
+            echo "established=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
-        run: npm run --silent test:slow -- --base "origin/${GITHUB_BASE_REF}"
+        run: |
+          if [ "${{ steps.plan-reading.outputs.established }}" = "true" ]; then
+            echo "W1-T3191: exact plan-reading matrix established — slow-tier files are already distributed across its four shards; suppressing duplicate execution."
+            echo "- plan-reading matrix established: test-slow registered successfully and suppressed duplicate execution" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm run --silent test:slow -- --base "origin/${GITHUB_BASE_REF}"
 
   commitlint:
     # W1-T31 (MASTER-PLAN §6A), relocated by W1-T129 — the Conventional Commits gate. This repo

@@ -787,6 +787,7 @@
     "test/plan-lane-mint.test.ts": 5337,
     "test/plan-only-carve-out-reachable.test.ts": 1039,
     "test/plan-only-floor-reads-the-body.test.ts": 1106,
+    "test/plan-reading-fast-lane-sharding.test.ts": 0,
     "test/plan-pr-emitter.test.ts": 5312,
     "test/plan-prompt-placement.test.ts": 825,
     "test/plan-proof-debt.test.ts": 8782,
