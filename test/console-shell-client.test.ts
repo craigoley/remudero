@@ -225,6 +225,108 @@ nodeTest("bootConsoleShellClient renders account usage and provider routing thro
   );
 });
 
+nodeTest("bootConsoleShellClient ticks elapsed, anomaly, and quiet-worker text through the imported module", async () => {
+  const startedAt = new Date(Date.now() - 60_000).toISOString();
+  const elapsed = new StubElement("elapsed");
+  elapsed.setAttribute("data-started", startedAt);
+  elapsed.setAttribute("data-threshold-ms", "1");
+  const row = new StubElement("row");
+  const marker = new StubElement("marker");
+  marker.hidden = true;
+  elapsed.setClosest(".row", row);
+  row.setQuerySelector(".anomaly-flag", marker);
+
+  const quiet = new StubElement("quiet");
+  quiet.setAttribute("data-worker-since", startedAt);
+
+  await withStubbedBoot(
+    {
+      selectorAll: {
+        ".elapsed[data-started]": [elapsed],
+        ".worker-quiet[data-worker-since]": [quiet],
+      },
+    },
+    async () => {
+      await waitForStubValue(new Map([["elapsed", elapsed]]), "elapsed", (value) => value.length > 0);
+      assert.match(elapsed.textContent, /^1m/);
+      assert.equal(row.classList.contains("anomaly"), true);
+      assert.equal(marker.hidden, false);
+      assert.match(quiet.textContent, /^quiet 1m/);
+    },
+  );
+});
+
+nodeTest("bootConsoleShellClient renders every needs-me row kind through the imported module", async () => {
+  const ts = "2026-09-08T01:00:00.000Z";
+  const tasks = [
+    {
+      taskId: "W1-TNEED",
+      title: "needs a decision",
+      status: "queued",
+      needsHuman: true,
+      escalationTitle: "[GRILL] W1-TNEED: choose a route",
+      escalationIssueUrl: "https://github.test/remudero/issues/1",
+      escalationUnverified: true,
+      escalationOpenedAt: ts,
+    },
+    {
+      taskId: "W1-TVERIFY",
+      title: "verify by hand",
+      status: "queued",
+      verifyHumanPending: true,
+    },
+  ];
+  const feedbackEntries = [
+    { id: "Q1", status: "grilling", raw: "answer this", ts },
+    { id: "P1", status: "proposed", raw: "accept this", ts },
+  ];
+  const inboxReady = [
+    {
+      proposalId: "PREADY",
+      summary: "ratify ready proposal",
+      draftedTasks: [{ id: "W1-TDRAFTED", title: "drafted title" }],
+    },
+  ];
+  const inboxDrafting = [{ proposalId: "PDRAFTING", summary: "still drafting", spawnedAt: ts }];
+  await withStubbedBoot(
+    {
+      status: {
+        generated_at: ts,
+        tasks,
+        counts: {},
+        spend: null,
+      },
+      feedback: {
+        entries: feedbackEntries,
+      },
+      inbox: {
+        ready: inboxReady,
+        drafting: inboxDrafting,
+      },
+    },
+    async (elements) => {
+      const html = await waitForStubChildrenHtml(elements, "needs-me-list", (value) =>
+        value.includes("W1-TNEED") &&
+        value.includes("feedback#Q1") &&
+        value.includes("feedback#P1") &&
+        value.includes("PREADY") &&
+        value.includes("PDRAFTING") &&
+        value.includes("W1-TVERIFY"),
+      );
+      assert.match(html, /Decide/);
+      assert.match(html, /issue state unverified/);
+      assert.match(html, /Mark handled/);
+      assert.match(html, /Answer/);
+      assert.match(html, /Accept/);
+      assert.match(html, /READY to ratify/);
+      assert.match(html, /Reframe \(feedback\)/);
+      assert.match(html, /DRAFTING/);
+      assert.match(html, /awaiting human verification/);
+      assert.match(html, /Read-only/);
+    },
+  );
+});
+
 // ── (2) bootConsoleShellClient exercised directly, under the real DOM harness ───────────────
 
 function task(over: Partial<Task> = {}): Task {
@@ -291,6 +393,8 @@ class StubElement {
   readonly dataset: Record<string, string> = {};
   readonly attributes = new Map<string, string>();
   readonly children: StubElement[] = [];
+  private readonly closestMatches = new Map<string, StubElement>();
+  private readonly queryMatches = new Map<string, StubElement>();
   options: StubElement[] = [];
   textContent = "";
   hidden = false;
@@ -357,15 +461,17 @@ class StubElement {
 
   remove(): void {}
   contains(): boolean { return false; }
-  querySelector(): StubElement | null { return null; }
+  setClosest(selector: string, element: StubElement): void { this.closestMatches.set(selector, element); }
+  setQuerySelector(selector: string, element: StubElement): void { this.queryMatches.set(selector, element); }
+  querySelector(selector: string): StubElement | null { return this.queryMatches.get(selector) ?? null; }
   querySelectorAll(): StubElement[] { return []; }
-  closest(): StubElement | null { return null; }
+  closest(selector: string): StubElement | null { return this.closestMatches.get(selector) ?? null; }
   click(): void {}
   focus(): void {}
   scrollIntoView(): void {}
 }
 
-function makeStubDocument(): { document: unknown; elements: Map<string, StubElement> } {
+function makeStubDocument(selectorAll: Record<string, StubElement[]> = {}): { document: unknown; elements: Map<string, StubElement> } {
   const elements = new Map<string, StubElement>();
   const get = (id: string): StubElement => {
     let el = elements.get(id);
@@ -376,13 +482,14 @@ function makeStubDocument(): { document: unknown; elements: Map<string, StubElem
     return el;
   };
   const body = get("body");
+  get("rest-detail").hidden = true;
   const document = {
     title: "Remudero",
     body,
     getElementById: get,
     createElement: (tag: string) => new StubElement(tag),
     querySelector: (selector: string) => (selector === "main" ? get("main") : null),
-    querySelectorAll: () => [],
+    querySelectorAll: (selector: string) => selectorAll[selector] ?? [],
     addEventListener: () => {},
   };
   return { document, elements };
@@ -422,11 +529,35 @@ async function waitForStubHtml(
   assert.fail(`timed out waiting for ${id} innerHTML`);
 }
 
+async function waitForStubChildrenHtml(
+  elements: Map<string, StubElement>,
+  id: string,
+  predicate: (html: string) => boolean,
+): Promise<string> {
+  let lastHtml = "";
+  for (let i = 0; i < 50; i += 1) {
+    const html = (elements.get(id)?.children ?? []).map((child) => child.innerHTML).join("\n");
+    lastHtml = html;
+    if (predicate(html)) return html;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`timed out waiting for ${id} child markup; last html: ${lastHtml}`);
+}
+
 async function withStubbedBoot(
-  payloads: { accountUsage?: unknown; providerRouting?: unknown; selfMeasurement?: unknown },
+  payloads: {
+    accountUsage?: unknown;
+    providerRouting?: unknown;
+    selfMeasurement?: unknown;
+    cacheSnapshot?: unknown;
+    status?: unknown;
+    feedback?: unknown;
+    inbox?: unknown;
+    selectorAll?: Record<string, StubElement[]>;
+  },
   fn: (elements: Map<string, StubElement>) => Promise<void>,
 ): Promise<void> {
-  const { document, elements } = makeStubDocument();
+  const { document, elements } = makeStubDocument(payloads.selectorAll);
   const original = {
     window: globalThis.window,
     document: globalThis.document,
@@ -443,6 +574,9 @@ async function withStubbedBoot(
     setItem: (key: string, value: string) => { storage.set(key, value); },
     removeItem: (key: string) => { storage.delete(key); },
   };
+  if (payloads.cacheSnapshot !== undefined) {
+    storage.set("rmd-console-snapshot-v1", JSON.stringify(payloads.cacheSnapshot));
+  }
   const windowStub = {
     location: { search: "?token=stub-read", hash: "", pathname: "/" },
     sessionStorage: storageApi,
@@ -453,11 +587,11 @@ async function withStubbedBoot(
     confirm: () => false,
   };
   const endpointBodies: Record<string, unknown> = {
-    "/v1/status": { generated_at: "2026-09-08T01:00:00.000Z", tasks: [], counts: {}, spend: null },
+    "/v1/status": payloads.status ?? { generated_at: "2026-09-08T01:00:00.000Z", tasks: [], counts: {}, spend: null },
     "/v1/recent": { entries: [] },
     "/v1/drain/preview?max=5": { cards: [] },
-    "/v1/feedback": { entries: [] },
-    "/v1/inbox": { ready: [], drafting: [] },
+    "/v1/feedback": payloads.feedback ?? { entries: [] },
+    "/v1/inbox": payloads.inbox ?? { ready: [], drafting: [] },
     "/v1/control/status": { paused: false, stopped: false, quietHours: false },
     "/v1/daemon-health": null,
     "/v1/account-usage": payloads.accountUsage ?? null,
@@ -489,6 +623,7 @@ async function withStubbedBoot(
     });
     bootConsoleShellClient({ default: 1 }, resolveFreshness);
     await fn(elements);
+    await new Promise((resolve) => setTimeout(resolve, 0));
   } finally {
     Object.assign(globalThis, original);
   }
