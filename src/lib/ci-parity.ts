@@ -1158,6 +1158,19 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       ),
     ],
   },
+  // W1-T2906: the baseline-monotonic gate, mirrored. Written in the EXPLICIT object form rather
+  // than through npmScriptEntry for the same reason as the source-size entry directly above —
+  // Standing rule 25's introducing-commit carve-out (isIntroducingCiYmlJob, review.ts) keys on an
+  // ADDED line carrying `job: "<name>"` beside the added ci.yml job key.
+  {
+    job: "baseline-monotonic",
+    mirrored: true,
+    run: (repoRoot, spawn) => [
+      runStep("baseline-monotonic", () =>
+        shellOut(spawn, "node scripts/baseline-monotonic-check.mjs", process.execPath, [join(repoRoot, "scripts", "baseline-monotonic-check.mjs")], { cwd: repoRoot }),
+      ),
+    ],
+  },
 ];
 export interface CiParityDeps {
   spawn?: PreflightSpawn;
