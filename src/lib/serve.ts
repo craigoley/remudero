@@ -103,6 +103,7 @@ import { appendLedger } from "./ledger.js";
 import { buildAnalyticsRoute, type AnalyticsRouteDeps } from "./analytics-route.js";
 import { resolveFreshness } from "./console-freshness.js";
 import { renderConsoleShellScript } from "./console-shell-script.js";
+import { inboxDigestsPath } from "./digest.js";
 import { readIdleReasons, renderIdleReasonsHtml } from "./idle-reasons-panel.js";
 import { readLedgerLines } from "./status.js";
 import { buildReplay, resolveReplayLedgerLines, type ReplayLedgerRead } from "./ledger-replay.js";
@@ -390,6 +391,53 @@ export interface GithubCredentialState {
    *  refresh succeeds. Absent when `armed` is false (no attempt was ever made) or no attempt has
    *  failed yet. Only ever a fixed reason string — see {@link GithubCredentialState}'s own doc. */
   lastFailureReason?: string;
+}
+
+export interface ConsoleInboxDigestEntry {
+  ts: string;
+  text: string;
+}
+
+export interface ConsoleInboxDigests {
+  entries: ConsoleInboxDigestEntry[];
+  omitted: number;
+}
+
+export const CONSOLE_INBOX_DIGEST_LIMIT = 10;
+
+function emptyConsoleInboxDigests(): ConsoleInboxDigests {
+  return { entries: [], omitted: 0 };
+}
+
+function isConsoleInboxDigestEntry(value: unknown): value is ConsoleInboxDigestEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  return typeof entry.ts === "string" && typeof entry.text === "string";
+}
+
+export function readConsoleInboxDigests(root: string, limit: number = CONSOLE_INBOX_DIGEST_LIMIT): ConsoleInboxDigests {
+  if (limit <= 0) return emptyConsoleInboxDigests();
+  try {
+    if (!existsSync(inboxDigestsPath(root))) return emptyConsoleInboxDigests();
+    const raw = JSON.parse(readFileSync(inboxDigestsPath(root), "utf8")) as unknown;
+    if (!Array.isArray(raw)) return emptyConsoleInboxDigests();
+    const valid = raw.filter(isConsoleInboxDigestEntry);
+    const entries = valid.slice(Math.max(0, valid.length - limit));
+    return { entries, omitted: Math.max(0, valid.length - entries.length) };
+  } catch {
+    return emptyConsoleInboxDigests();
+  }
+}
+
+export function buildInboxDigestsRoute(deps: { root: string; limit?: number; read?: (root: string, limit?: number) => ConsoleInboxDigests }): Route {
+  return {
+    method: "GET",
+    path: "/v1/inbox/digests",
+    scope: "read",
+    handler: (_req, res) => {
+      sendJson(res, 200, (deps.read ?? readConsoleInboxDigests)(deps.root, deps.limit));
+    },
+  };
 }
 
 /**
@@ -2059,6 +2107,7 @@ ${renderConsoleShellScript()}
   // is driven from ONE source of truth regardless of which transport last updated a task. ─────
   const tasksById = new Map();
   let latestFeedbackEntries = [];
+  let latestInboxDigests = { entries: [], omitted: 0 };
   let latestInboxReady = [];
   let latestInboxDrafting = [];
   let latestUpNextCards = [];
@@ -2274,7 +2323,7 @@ ${renderConsoleShellScript()}
     const needsMeIds = renderNeedsMe(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting);
     renderMergeHoldControls();
     renderPrQueue(latestPrQueue);
-    renderMailbox(tasks, latestFeedbackEntries);
+    renderMailbox(tasks, latestFeedbackEntries, latestInboxDigests);
     renderAccepted(latestFeedbackEntries);
     const upNextIds = renderUpNext(latestUpNextCards);
     const recentIds = renderRecent(latestRecentEntries);
@@ -2776,6 +2825,7 @@ ${renderConsoleShellScript()}
     latestMergeHeld = snapshot.mergeHeld ?? [];
     latestPrQueue = snapshot.prQueue ?? { complete: false, rows: [], unavailableReason: "queue snapshot unavailable" };
     latestFeedbackEntries = snapshot.feedbackEntries ?? [];
+    latestInboxDigests = snapshot.inboxDigests ?? { entries: [], omitted: 0 };
     latestInboxReady = snapshot.inboxReady ?? [];
     latestInboxDrafting = snapshot.inboxDrafting ?? [];
     latestUpNextCards = snapshot.upNextCards ?? [];
@@ -3149,18 +3199,18 @@ ${renderConsoleShellScript()}
     summary.textContent = \`\${shown.length} of \${rows.length} · \${counts.actionable || 0} actionable · \${counts.active || 0} active · \${counts["ready-held"] || 0} ready/held · as of \${rows[0] ? formatTimestamp(rows[0].snapshotAt) : "now"}\`;
     reconcileRows(list, shown.length ? shown.map((row) => ({ key: \`pr:\${row.prNumber}:\${row.headSha || row.headRefName || "unknown"}\`, html: prQueueRowHtml(row) })) : [{ key: "queue-empty", html: '<span class="detail">No pull requests match these filters.</span>' }]);
   }
-  // ── MAILBOX (W1-T2497): same escalations, as threads, ADDITIVE alongside needs-me-list -- no new route/file read, matched by (taskId, class) PREFIX.
-  const MAILBOX_SENDER = { escalation: "Fleet", reply: "You" };
+  // ── MAILBOX (W1-T2497): same escalations, as threads, ADDITIVE alongside needs-me-list -- matched by (taskId, class) PREFIX.
+  const MAILBOX_SENDER = { escalation: "Fleet", reply: "You", digest: "Daily digest" };
   function loadMailboxState() { try { const p = JSON.parse(localStorage.getItem("rmd-console-mailbox-v1")); return { read: Array.isArray(p && p.read) ? p.read : [], resolved: Array.isArray(p && p.resolved) ? p.resolved : [] }; } catch { return { read: [], resolved: [] }; /* corrupt/missing storage reads as empty, not an error */ } }
   function saveMailboxState(state) { try { localStorage.setItem("rmd-console-mailbox-v1", JSON.stringify(state)); } catch { /* full/blocked storage must not break the click */ } }
-  function buildMailboxThreads(tasks, replies) { if (!Array.isArray(tasks) || (replies !== undefined && replies !== null && !Array.isArray(replies))) return null; const safeReplies = Array.isArray(replies) ? replies : []; const threads = []; for (const t of tasks) { if (!t || !t.needsHuman || !t.escalationTitle || !t.taskId) continue; const cls = mailboxEscalationClass(t.escalationTitle); const key = mailboxThreadKey(t.taskId, cls); const messages = [{ role: "escalation", sender: MAILBOX_SENDER.escalation, body: t.escalationTitle, ts: t.escalationOpenedAt || "" }]; for (const r of safeReplies) if (r && typeof r.thread_id === "string" && r.thread_id.indexOf(key) === 0) messages.push({ role: "reply", sender: MAILBOX_SENDER.reply, body: r.raw || "", ts: r.ts || "" }); messages.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0)); threads.push({ threadId: key, taskId: t.taskId, escClass: cls, issueUrl: t.escalationIssueUrl, messages, latestTs: messages[messages.length - 1].ts }); } threads.sort((a, b) => (a.latestTs < b.latestTs ? 1 : a.latestTs > b.latestTs ? -1 : 0)); return threads; // one thread per NEEDS ME row, latest-message order; shaped-wrong returns null
+  function buildMailboxThreads(tasks, replies, digests) { if (!Array.isArray(tasks) || (replies !== undefined && replies !== null && !Array.isArray(replies))) return null; const safeReplies = Array.isArray(replies) ? replies : []; const digestEntries = Array.isArray(digests && digests.entries) ? digests.entries : []; const threads = []; for (const d of digestEntries) { if (!d || typeof d.ts !== "string" || typeof d.text !== "string") continue; threads.push({ threadId: "digest:" + d.ts, taskId: "Daily digest", escClass: "", digest: true, messages: [{ role: "digest", sender: MAILBOX_SENDER.digest, body: d.text, ts: d.ts }], latestTs: d.ts }); } for (const t of tasks) { if (!t || !t.needsHuman || !t.escalationTitle || !t.taskId) continue; const cls = mailboxEscalationClass(t.escalationTitle); const key = mailboxThreadKey(t.taskId, cls); const messages = [{ role: "escalation", sender: MAILBOX_SENDER.escalation, body: t.escalationTitle, ts: t.escalationOpenedAt || "" }]; for (const r of safeReplies) if (r && typeof r.thread_id === "string" && r.thread_id.indexOf(key) === 0) messages.push({ role: "reply", sender: MAILBOX_SENDER.reply, body: r.raw || "", ts: r.ts || "" }); messages.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0)); threads.push({ threadId: key, taskId: t.taskId, escClass: cls, issueUrl: t.escalationIssueUrl, messages, latestTs: messages[messages.length - 1].ts }); } threads.sort((a, b) => (a.latestTs < b.latestTs ? 1 : a.latestTs > b.latestTs ? -1 : 0)); threads.digestOmitted = digests && typeof digests.omitted === "number" ? digests.omitted : 0; return threads; // one thread per mailbox source, latest-message order; shaped-wrong escalation feeds return null
   }
-  function mailboxThreadsHtml(threads, readIds) { if (!Array.isArray(threads)) return ""; if (threads.length === 0) return \`<p class="mailbox-empty">no open threads</p>\`; const read = new Set(readIds || []); return threads.map((t) => { const unread = !read.has(t.threadId); const issueLink = t.issueUrl ? \`<a href="\${escapeHtml(t.issueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>\` : ""; const messagesHtml = t.messages.map((m) => \`<li class="mailbox-message mailbox-message-\${m.role}"><span class="mailbox-sender">\${escapeHtml(m.sender)}</span><span class="mailbox-body">\${escapeHtml(m.body)}</span></li>\`).join(""); return \`<li class="mailbox-thread\${unread ? " mailbox-thread-unread" : ""}" data-thread-id="\${escapeHtml(t.threadId)}"><div class="mailbox-thread-head"><span class="task-id">\${escapeHtml(t.taskId)}</span>\${unread ? '<span class="mailbox-unread-dot" aria-label="unread"></span>' : ""}</div><ul class="mailbox-messages">\${messagesHtml}</ul>\` + \`<span class="btn-row">\${issueLink}<button type="button" class="mailbox-open"\${unread ? "" : " disabled"} data-thread-id="\${escapeHtml(t.threadId)}">Open</button><button type="button" class="mailbox-resolve" data-thread-id="\${escapeHtml(t.threadId)}">Resolve</button></span>\` + \`<form class="mailbox-reply" data-task-id="\${escapeHtml(t.taskId)}" data-class="\${escapeHtml(t.escClass)}"><input type="text" placeholder="Reply…" /><button type="submit"\${writeGateAttrs()}>Reply</button></form></li>\`; }).join(""); // ALREADY-BUILT threads as markup; shaped-wrong draws NOTHING
+  function mailboxThreadsHtml(threads, readIds, omittedDigests) { if (!Array.isArray(threads)) return ""; const omitted = omittedDigests || 0; if (threads.length === 0) return omitted > 0 ? \`<p class="mailbox-empty">\${omitted} older daily digest\${omitted === 1 ? "" : "s"} omitted</p>\` : \`<p class="mailbox-empty">no open threads</p>\`; const read = new Set(readIds || []); const rows = threads.map((t) => { const unread = !read.has(t.threadId); const issueLink = t.issueUrl ? \`<a href="\${escapeHtml(t.issueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>\` : ""; const messagesHtml = t.messages.map((m) => \`<li class="mailbox-message mailbox-message-\${m.role}"><span class="mailbox-sender">\${escapeHtml(m.sender)}</span><span class="mailbox-body">\${escapeHtml(m.body)}</span></li>\`).join(""); const replyForm = t.digest ? "" : \`<form class="mailbox-reply" data-task-id="\${escapeHtml(t.taskId)}" data-class="\${escapeHtml(t.escClass)}"><input type="text" placeholder="Reply…" /><button type="submit"\${writeGateAttrs()}>Reply</button></form>\`; return \`<li class="mailbox-thread\${unread ? " mailbox-thread-unread" : ""}" data-thread-id="\${escapeHtml(t.threadId)}"><div class="mailbox-thread-head"><span class="task-id">\${escapeHtml(t.taskId)}</span>\${unread ? '<span class="mailbox-unread-dot" aria-label="unread"></span>' : ""}</div><ul class="mailbox-messages">\${messagesHtml}</ul>\` + \`<span class="btn-row">\${issueLink}<button type="button" class="mailbox-open"\${unread ? "" : " disabled"} data-thread-id="\${escapeHtml(t.threadId)}">Open</button><button type="button" class="mailbox-resolve" data-thread-id="\${escapeHtml(t.threadId)}">Resolve</button></span>\${replyForm}</li>\`; }); const omittedHtml = omitted > 0 ? \`<p class="mailbox-empty">\${omitted} older daily digest\${omitted === 1 ? "" : "s"} omitted</p>\` : ""; return omittedHtml + rows.join(""); // ALREADY-BUILT threads as markup; shaped-wrong draws NOTHING
   }
-  function mailboxHtml(tasks, replies, readIds, resolvedIds, includeResolved, existingRowsHtml) { let inner = ""; try { const threads = buildMailboxThreads(tasks, replies); inner = threads === null ? "" : mailboxThreadsHtml(mailboxVisibleThreads(threads, resolvedIds, includeResolved), readIds); } catch { inner = ""; /* unreachable feeds degrade to existingRowsHtml below, never a thrown error */ } return inner || existingRowsHtml || "";
+  function mailboxHtml(tasks, replies, readIds, resolvedIds, includeResolved, existingRowsHtml, digests) { let inner = ""; try { const threads = buildMailboxThreads(tasks, replies, digests); inner = threads === null ? "" : mailboxThreadsHtml(mailboxVisibleThreads(threads, resolvedIds, includeResolved), readIds, threads.digestOmitted); } catch { inner = ""; /* unreachable feeds degrade to existingRowsHtml below, never a thrown error */ } return inner || existingRowsHtml || "";
   }
   let mailboxState = loadMailboxState();
-  function renderMailbox(tasks, feedbackEntries) { const el = document.getElementById("mailbox"); const list = document.getElementById("needs-me-list"); if (el) el.innerHTML = mailboxHtml(tasks, feedbackEntries, mailboxState.read, mailboxState.resolved, false, list ? list.innerHTML : ""); const badge = document.getElementById("mailbox-unread-count"); if (!badge) return; const threads = buildMailboxThreads(tasks, feedbackEntries); const count = mailboxUnreadCount(threads === null ? [] : mailboxVisibleThreads(threads, mailboxState.resolved, false), mailboxState.read); badge.textContent = count > 0 ? String(count) : ""; }
+  function renderMailbox(tasks, feedbackEntries, digests) { const el = document.getElementById("mailbox"); const list = document.getElementById("needs-me-list"); if (el) el.innerHTML = mailboxHtml(tasks, feedbackEntries, mailboxState.read, mailboxState.resolved, false, list ? list.innerHTML : "", digests); const badge = document.getElementById("mailbox-unread-count"); if (!badge) return; const threads = buildMailboxThreads(tasks, feedbackEntries, digests); const count = mailboxUnreadCount(threads === null ? [] : mailboxVisibleThreads(threads, mailboxState.resolved, false), mailboxState.read); badge.textContent = count > 0 ? String(count) : ""; }
   function renderNeedsMe(tasks, feedbackEntries, inboxReady, inboxDrafting) {
     const rows = [];
     const shown = new Set();
@@ -4067,7 +4117,7 @@ ${renderConsoleShellScript()}
   });
 
   // ── MAILBOX write-actions (W1-T2497) -- Open/Resolve are read-state, no write token needed. ──
-  document.getElementById("mailbox").addEventListener("click", (e) => { const openBtn = e.target.closest(".mailbox-open"); const resolveBtn = e.target.closest(".mailbox-resolve"); if (openBtn) mailboxState = { ...mailboxState, read: mailboxMarkRead(mailboxState.read, openBtn.dataset.threadId) }; else if (resolveBtn) mailboxState = { ...mailboxState, resolved: mailboxMarkResolved(mailboxState.resolved, resolveBtn.dataset.threadId) }; else return; saveMailboxState(mailboxState); renderMailbox(Array.from(tasksById.values()), latestFeedbackEntries); });
+  document.getElementById("mailbox").addEventListener("click", (e) => { const openBtn = e.target.closest(".mailbox-open"); const resolveBtn = e.target.closest(".mailbox-resolve"); if (openBtn) mailboxState = { ...mailboxState, read: mailboxMarkRead(mailboxState.read, openBtn.dataset.threadId) }; else if (resolveBtn) mailboxState = { ...mailboxState, resolved: mailboxMarkResolved(mailboxState.resolved, resolveBtn.dataset.threadId) }; else return; saveMailboxState(mailboxState); renderMailbox(Array.from(tasksById.values()), latestFeedbackEntries, latestInboxDigests); });
   document.getElementById("mailbox").addEventListener("submit", async (e) => { const replyForm = e.target.closest(".mailbox-reply"); if (!replyForm) return; e.preventDefault(); if (!hasWriteScope) return; const input = replyForm.querySelector("input"); const text = input.value.trim(); if (!text) return; await postJson("/v1/escalation/reply", { taskId: replyForm.dataset.taskId, class: replyForm.dataset.class, text }); input.value = ""; refreshAll(); });
 
   // ── W1-T2719: durable automatic-merge hold controls. One delegated listener serves the
@@ -5032,10 +5082,11 @@ ${renderConsoleShellScript()}
     }
 
     try {
-      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth, accountUsage, providerRouting, planView, selfMeasurement] = await Promise.all([
+      const [recentSnap, upNextSnap, feedbackSnap, digestSnap, inboxSnap, controlStatus, daemonHealth, accountUsage, providerRouting, planView, selfMeasurement] = await Promise.all([
         getJson("/v1/recent").catch(() => ({ entries: [] })),
         getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
         getJson("/v1/feedback").catch(() => ({ entries: [] })),
+        getJson("/v1/inbox/digests").catch(() => ({ entries: [], omitted: 0 })),
         getJson("/v1/inbox").catch(() => ({ ready: [], drafting: [] })),
         getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false, quietHours: false })),
         // W1-T159: the daemon-health widget's own fetch -- a fetch failure here must never break
@@ -5066,6 +5117,7 @@ ${renderConsoleShellScript()}
         getJson("/v1/self-measurement").catch(() => null /* fetch failed -- panel keeps its last-known rows */),
       ]);
       latestFeedbackEntries = feedbackSnap.entries ?? [];
+      latestInboxDigests = digestSnap ?? { entries: [], omitted: 0 };
       latestInboxReady = inboxSnap.ready ?? [];
       latestInboxDrafting = inboxSnap.drafting ?? [];
       latestUpNextCards = upNextSnap.cards ?? [];
@@ -5117,6 +5169,7 @@ ${renderConsoleShellScript()}
         recentEntries: latestRecentEntries,
         upNextCards: latestUpNextCards,
         feedbackEntries: latestFeedbackEntries,
+        inboxDigests: latestInboxDigests,
         inboxReady: latestInboxReady,
         inboxDrafting: latestInboxDrafting,
         controlStatus,
@@ -6218,6 +6271,7 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
   const routes = [
     buildStatusRoute(deps.board, lastSeen),
     buildRecentRoute(deps.board),
+    buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     buildDaemonHealthRoute(daemonHealthDeps),
     buildAccountUsageRoute(accountUsageDeps),
     buildProviderRoutingRoute({ root: deps.fleetControlRoot, ...deps.providerRouting }),
