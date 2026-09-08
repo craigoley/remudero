@@ -2295,3 +2295,45 @@ every class closing, ratify (a) alone and re-file the governor question with the
 
 **Rollback:** delete this entry. No code was written, no shard was retired and no filing was
 refused; W1-T3076 returns to `status: queued` with its question open.
+
+## 2026-09-08 — OPERATOR RULING (W1-T3212): an agent MAY record a ruling; a judge gates it, and only a risky or bad one reaches the operator
+
+*Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. His words,
+2026-09-08: "An agent should absolutely be able to record a ruling. It should only escalate to human
+if an llm as a judge determines it to be risky or bad. Then it should show up in the inbox."*
+
+**THE BOOTSTRAP, STATED FIRST BECAUSE IT IS THE OBVIOUS OBJECTION.** This entry reverses a rule that
+forbids exactly the act of writing it. It is therefore the OPERATOR'S OWN ruling, transcribed under
+the same convention every prior operator ruling in this file uses, and it is the LAST ruling that
+must arrive that way. Everything after it may take the judged path below. An agent could not have
+authored this one, and did not.
+
+**SUPERSEDED.** The decision-authority ruling `fb-1785882211812-bafd8f` — "an agent may recommend a
+ruling and may never record a ruling" — in its BLANKET form. What replaces it is not "agents may do
+anything"; it is a gate with a named refusal.
+
+**THE NEW RULE.**
+1. An agent MAY record a ruling into `DECISIONS.md`, as an author rather than a transcriber.
+2. Before it lands, a judge assesses the ruling for RISK and for QUALITY — is this reversible, is it
+   within the agent's competence, does it contradict a standing decision, is it well-evidenced.
+3. A ruling the judge finds RISKY OR BAD does NOT land. It is routed to the operator through the
+   INBOX — the surface `rmd approve` already ratifies from — and waits for his bit.
+4. A ruling the judge passes lands, attributed to the agent, with its evidence and a rollback line,
+   exactly as an operator ruling carries today.
+
+**WHY THE OLD RULE EXISTED AND WHAT REPLACES ITS PROTECTION.** The blanket ban bought one thing: an
+agent could not quietly install a decision nobody reviewed. That protection is kept, and narrowed —
+the judge is the reviewer, the inbox is the escape hatch, and every ruling remains attributed and
+revertible. What the ban ALSO bought, and should not have, is 45 `verify: human` shards parked with
+no release path, the oldest filed 2026-07-21, and an operator asked to adjudicate matters that
+needed a nudge rather than a judgement.
+
+**THE POLARITY.** The judge FAILS CLOSED: an unreadable, throwing or unparseable verdict routes to the
+inbox, never to a landed ruling. Recording a decision nobody reviewed is the costly direction here,
+which is the opposite of the escalation judge's polarity and deliberately so.
+
+**WHAT DOES NOT CHANGE.** Rule 15 still forbids a worker editing plan criteria beside its own
+implementation. `rmd approve` remains the operator's ratification bit. An operator override of any
+agent-recorded ruling lands as an amendment beneath it, exactly as today.
+
+**Rollback:** revert this entry; agents return to recommend-only and W1-T3212 returns to unbuilt.
