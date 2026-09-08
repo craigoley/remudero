@@ -1274,6 +1274,7 @@
     "test/workflow-harness-import-parity.test.ts": 465,
     "test/workflow-job-timeouts.test.ts": 548,
     "test/workflow-playwright-install.test.ts": 1384,
+    "test/workflow-single-suite-run.test.ts": 0,
     "test/worktree-base-currency-healthy.test.ts": 1586,
     "test/worktree-base-currency-unreadable.test.ts": 932,
     "test/worktree-base-currency.test.ts": 1162,

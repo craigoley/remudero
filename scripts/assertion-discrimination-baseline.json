@@ -50,6 +50,12 @@
       "reason": "The test's own title says 'ci.yml's heavy-band comment names WAIT_CAP_SECONDS, coupling the two files' -- it deliberately pins that ci.yml's comment mentions the constant, not that ci.yml enforces it (ci.yml doesn't own that value; ci-gate.yml does)."
     },
     {
+      "testFile": "test/workflow-single-suite-run.test.ts",
+      "target": ".github/workflows/ci.yml",
+      "literal": "12 of 600",
+      "reason": "W1-T3207 acceptance explicitly requires the workflow file itself to record the measured loss from retiring the second test harness. This assertion deliberately pins that operator-ruling comment; the other five tests in the same file separately exercise the surviving coverage workflow, artifact refusal, and fast-lane mechanisms."
+    },
+    {
       "testFile": "test/what-a-worker-loads.test.ts",
       "target": "node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts",
       "literal": "Pass `[]` to disable filesystem settings",
