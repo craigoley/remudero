@@ -359,3 +359,164 @@ test("runDeployCycle: omitting restartBackends falls back to a single always-ava
   assert.equal(out.deployed, true);
   assert.ok(calls.includes("kickstart"), "the injected kickstart() is still the restart path when no backend list is wired");
 });
+
+// ── THE REAL BACKENDS (W1-T3200) ────────────────────────────────────────────────────────────────
+// Everything above injects `RestartBackend`s, which proves the ORCHESTRATION but leaves the two
+// backends `realDeployDeps` actually ships — the ones a live host runs — with zero covering tests.
+// That is the "every test injects a fake, so the default implementation is unreachable" trap this
+// repo has paid for before (#977/#978), and it is exactly what the seam cannot afford: a probe
+// that mis-reads its host silently picks the wrong restart mechanism, or none.
+//
+// So these drive the SHIPPED closures through `realDeployDeps(...).restartBackends!()`, with only
+// `execFile` faked (the one boundary that would otherwise shell out for real) and a REAL temp
+// directory standing in for the checkout, so `existsSync(deploy/recycle-container.sh)` is a real
+// filesystem answer. Each catch arm gets its own case: for the launchctl probe the ENOENT/other
+// distinction IS the contract, and conflating them would make every macOS host with a transient
+// launchctl error fall through to a backend it does not have.
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { realDeployDeps } from "../src/lib/deployer.js";
+
+function enoent(): NodeJS.ErrnoException {
+  const err: NodeJS.ErrnoException = new Error("spawnSync launchctl ENOENT");
+  err.code = "ENOENT";
+  return err;
+}
+
+/** Build the SHIPPED backends over a real temp checkout, with only the subprocess boundary faked. */
+function realBackends(o: {
+  /** When true, `deploy/recycle-container.sh` really exists on the temp checkout. */
+  recycleScript: boolean;
+  /** Fake subprocess: throw to simulate a failing/absent binary. */
+  execFile: (cmd: string, args: string[]) => string;
+}): { backends: readonly RestartBackend[]; installPath: string; calls: string[][] } {
+  const installPath = mkdtempSync(join(tmpdir(), "rmd-restart-seam-"));
+  if (o.recycleScript) {
+    mkdirSync(join(installPath, "deploy"), { recursive: true });
+    writeFileSync(join(installPath, "deploy", "recycle-container.sh"), "#!/usr/bin/env bash\nexit 0\n");
+  }
+  const calls: string[][] = [];
+  const deps = realDeployDeps({
+    installPath,
+    stateRoot: installPath,
+    daemonLabel: "com.remudero.daemon",
+    serveLabel: "com.remudero.serve",
+    servePort: 4317,
+    uid: 501,
+    ledgerPath: join(installPath, "ledger.ndjson"),
+    log: () => {},
+    execFile: (cmd, args) => {
+      calls.push([cmd, ...args]);
+      return o.execFile(cmd, args);
+    },
+  });
+  return { backends: deps.restartBackends!(), installPath, calls };
+}
+
+const launchctlOf = (bs: readonly RestartBackend[]): RestartBackend =>
+  bs.find((b) => b.name === "launchctl")!;
+const recycleOf = (bs: readonly RestartBackend[]): RestartBackend =>
+  bs.find((b) => b.name === "recycle-container")!;
+
+test("realDeployDeps ships exactly the two shipped backends, launchctl first", () => {
+  const { backends } = realBackends({ recycleScript: false, execFile: () => "" });
+  assert.deepEqual(backends.map((b) => b.name), ["launchctl", "recycle-container"]);
+});
+
+test("the real launchctl probe: `launchctl list` returning cleanly reads AVAILABLE", () => {
+  const { backends, calls } = realBackends({ recycleScript: false, execFile: () => "PID\tStatus\tLabel\n" });
+  assert.equal(launchctlOf(backends).probe(), true);
+  assert.deepEqual(calls[0], ["launchctl", "list"], "probes the BINARY with no label, not this particular job");
+});
+
+test("the real launchctl probe: ENOENT — the binary genuinely absent, as on the Linux fleet host — reads UNAVAILABLE", () => {
+  const { backends } = realBackends({
+    recycleScript: false,
+    execFile: () => {
+      throw enoent();
+    },
+  });
+  assert.equal(launchctlOf(backends).probe(), false);
+});
+
+test("the real launchctl probe: a NON-ENOENT failure still means launchctl RAN, so it reads AVAILABLE", () => {
+  // The distinction is load-bearing: a macOS host whose `launchctl list` errors for any other
+  // reason must NOT fall through to a container backend it does not have.
+  for (const thrown of [Object.assign(new Error("exit 1"), { status: 1 }), Object.assign(new Error("denied"), { code: "EPERM" })]) {
+    const { backends } = realBackends({
+      recycleScript: false,
+      execFile: () => {
+        throw thrown;
+      },
+    });
+    assert.equal(launchctlOf(backends).probe(), true, `a ${String((thrown as NodeJS.ErrnoException).code ?? "non-ENOENT")} failure still means the binary is present`);
+  }
+});
+
+test("the real launchctl backend describes and performs the kickstart it names", () => {
+  const { backends, calls } = realBackends({ recycleScript: false, execFile: () => "" });
+  const backend = launchctlOf(backends);
+  assert.equal(backend.describe(), "launchctl kickstart -k gui/501/com.remudero.daemon");
+  backend.restart();
+  assert.deepEqual(calls.at(-1), ["launchctl", "kickstart", "-k", "gui/501/com.remudero.daemon"]);
+});
+
+test("the real recycle-container probe: no script on this checkout ⇒ UNAVAILABLE, and docker is never consulted", () => {
+  const { backends, calls } = realBackends({
+    recycleScript: false,
+    execFile: () => {
+      throw new Error("no subprocess should run once the script is known absent");
+    },
+  });
+  assert.equal(recycleOf(backends).probe(), false);
+  assert.deepEqual(calls, [], "the cheap filesystem check short-circuits before any docker probe");
+});
+
+test("the real recycle-container probe: script present AND a docker client answering ⇒ AVAILABLE", () => {
+  const { backends, calls } = realBackends({ recycleScript: true, execFile: () => "27.3.1\n" });
+  assert.equal(recycleOf(backends).probe(), true);
+  assert.deepEqual(calls.at(-1), ["docker", "version", "--format", "{{.Client.Version}}"]);
+});
+
+test("the real recycle-container probe: script present but docker absent or unreachable ⇒ UNAVAILABLE", () => {
+  const { backends } = realBackends({
+    recycleScript: true,
+    execFile: () => {
+      throw enoent(); // the script needs a working docker to do anything at all
+    },
+  });
+  assert.equal(recycleOf(backends).probe(), false);
+});
+
+test("the real recycle-container backend describes and runs the script it names", () => {
+  const { backends, installPath, calls } = realBackends({ recycleScript: true, execFile: () => "" });
+  const backend = recycleOf(backends);
+  const script = join(installPath, "deploy", "recycle-container.sh");
+  assert.ok(backend.describe().startsWith(script), "the description names the exact script that will run");
+  backend.restart();
+  assert.deepEqual(calls.at(-1), ["bash", script]);
+});
+
+test("the two real backends select correctly on each host shape, without reading process.platform", () => {
+  // macOS-shaped: launchctl answers, no recycle script.
+  const mac = realBackends({ recycleScript: false, execFile: () => "PID\tStatus\tLabel\n" });
+  assert.equal(selectRestartBackend(mac.backends).backend?.name, "launchctl");
+  // Fleet-shaped: no launchctl binary at all, script present, docker answering.
+  const fleet = realBackends({
+    recycleScript: true,
+    execFile: (cmd) => {
+      if (cmd === "launchctl") throw enoent();
+      return "27.3.1\n";
+    },
+  });
+  assert.equal(selectRestartBackend(fleet.backends).backend?.name, "recycle-container");
+  // Neither: no launchctl, no script — refuses, rather than guessing.
+  const bare = realBackends({
+    recycleScript: false,
+    execFile: () => {
+      throw enoent();
+    },
+  });
+  assert.equal(selectRestartBackend(bare.backends).backend, undefined);
+});
