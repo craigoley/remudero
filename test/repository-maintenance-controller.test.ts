@@ -1,22 +1,38 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { fixedClock, type Clock } from "../src/lib/clock.js";
+import { runDaemon } from "../src/lib/daemon.js";
 import {
   decideRepositoryMaintenance,
   projectRepositoryMaintenanceStatus,
+  readGcLogPresent,
+  readRepositoryMaintenanceState,
+  repositoryMaintenanceStatePath,
   runRepositoryMaintenanceCadence,
   runRepositoryMaintenanceController,
+  surveyRepository,
+  writeRepositoryMaintenanceState,
   type RepositoryMaintenanceState,
   type RepositorySurvey,
 } from "../src/lib/object-reaper.js";
 import { loadPolicy } from "../src/lib/policy.js";
-import { buildRepositoryMaintenanceDaemonHook } from "../src/run-task.js";
+import { loadPlan } from "../src/lib/plan.js";
+import { buildStatusBoard, renderStatusBoardText } from "../src/lib/status-board.js";
+import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import {
+  buildRepositoryMaintenanceDaemonHook,
+  daemonCommand,
+  runRepositoryMaintenanceRung,
+  statusCommand,
+} from "../src/run-task.js";
 
 const NOW = new Date("2026-09-08T12:00:00.000Z");
 const NOW_CLOCK = fixedClock(NOW.getTime());
@@ -68,6 +84,113 @@ function sequenceClock(instants: Date[]): Clock {
   };
 }
 
+function idlePlan() {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-maintenance-plan-"));
+  const path = join(dir, "tasks.yaml");
+  writeFileSync(path, "- id: W1-T9999\n  title: human hold\n  repo: remudero\n  type: implement\n  verify: human\n  depends_on: []\n  status: queued\n");
+  return loadPlan(path);
+}
+
+test("W1-T3116: the durable state and gc.log readers distinguish absent, readable and corrupt material state", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-maintenance-readers-"));
+  const statePath = repositoryMaintenanceStatePath(join(dir, "state"));
+  try {
+    assert.deepEqual(readRepositoryMaintenanceState(statePath), {
+      kind: "absent",
+      state: { consecutiveFailures: 0 },
+    });
+    const expected = state({
+      consecutiveFailures: 2,
+      lastAttemptIso: "2026-09-08T10:00:00.000Z",
+      lastSuccessIso: "2026-09-07T10:00:00.000Z",
+      nextEligibleIso: "2026-09-08T13:00:00.000Z",
+      escalationRecordedIso: "2026-09-08T11:00:00.000Z",
+    });
+    writeRepositoryMaintenanceState(statePath, expected);
+    assert.deepEqual(readRepositoryMaintenanceState(statePath), { kind: "readable", state: expected });
+    assert.equal(existsSync(statePath + ".tmp-" + process.pid), false, "the atomic temp is renamed away");
+
+    for (const invalid of [
+      "null\n",
+      '{"consecutiveFailures":-1}\n',
+      '{"consecutiveFailures":0,"nextEligibleIso":"not-a-date"}\n',
+      "{not json}\n",
+    ]) {
+      writeFileSync(statePath, invalid);
+      assert.equal(readRepositoryMaintenanceState(statePath).kind, "corrupt");
+    }
+
+    const ordinary = join(dir, "ordinary");
+    mkdirSync(join(ordinary, ".git"), { recursive: true });
+    assert.equal(readGcLogPresent(ordinary), false);
+    writeFileSync(join(ordinary, ".git", "gc.log"), "automatic gc failed\n");
+    assert.equal(readGcLogPresent(ordinary), true);
+
+    const linked = join(dir, "linked");
+    const linkedGitDir = join(dir, "admin", "worktrees", "linked");
+    mkdirSync(linkedGitDir, { recursive: true });
+    mkdirSync(linked, { recursive: true });
+    writeFileSync(join(linked, ".git"), `gitdir: ${linkedGitDir}\n`);
+    assert.equal(readGcLogPresent(linked), false);
+    writeFileSync(join(linkedGitDir, "gc.log"), "linked failure\n");
+    assert.equal(readGcLogPresent(linked), true);
+    assert.equal(readGcLogPresent(join(dir, "missing")), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3116: repository surveys parse Git's object census and fail closed on unreadable evidence", () => {
+  const calls: string[][] = [];
+  const readable = surveyRepository("/repo", 2, "OK", {
+    exec: ((_command: string, args: string[]) => {
+      calls.push(args);
+      return args.includes("count-objects") ? "count: 7\nsize: 3\npacks: 2\n" : "/repo/.git\n";
+    }) as never,
+    exists: (() => true) as never,
+    read: (() => "too many unreachable objects\nsecond line\n") as never,
+  });
+  assert.deepEqual(readable, {
+    readable: true,
+    looseCount: 7,
+    looseBytes: 3_072,
+    packCount: 2,
+    gcLogPresent: true,
+    gcLogDetail: "too many unreachable objects",
+    activeLaneCount: 2,
+    diskVerdict: "OK",
+  });
+  assert.deepEqual(calls, [
+    ["-C", "/repo", "count-objects", "-v"],
+    ["-C", "/repo", "rev-parse", "--absolute-git-dir"],
+  ]);
+
+  const incomplete = surveyRepository("/repo", 0, "OK", {
+    exec: ((_command: string, args: string[]) => args.includes("count-objects") ? "count: 1\n" : "/repo/.git\n") as never,
+    exists: (() => false) as never,
+  });
+  assert.equal(incomplete.readable, false);
+  assert.equal(incomplete.looseBytes, undefined);
+
+  const unreadableLog = surveyRepository("/repo", 0, "OK", {
+    exec: ((_command: string, args: string[]) => args.includes("count-objects") ? "count: 1\nsize: 1\npacks: 0\n" : "/repo/.git\n") as never,
+    exists: (() => true) as never,
+    read: (() => { throw new Error("permission denied"); }) as never,
+  });
+  assert.equal(unreadableLog.readable, false);
+  assert.match(unreadableLog.detail ?? "", /gc\.log unreadable.*permission denied/);
+
+  const unreadableRepo = surveyRepository("/missing", 1, "LOW", {
+    exec: (() => { throw new Error("not a repository"); }) as never,
+  });
+  assert.deepEqual(unreadableRepo, {
+    readable: false,
+    detail: "Git object survey failed: not a repository",
+    activeLaneCount: 1,
+    diskVerdict: "LOW",
+  });
+});
+
 test("W1-T3116: unreadable or busy repository state defers without spawning and preserves the due episode", async () => {
   const dueState = state({ nextEligibleIso: "2026-09-08T11:00:00.000Z" });
   for (const observed of [survey({ readable: false }), survey({ gcLogPresent: true, activeLaneCount: 1 })]) {
@@ -80,6 +203,35 @@ test("W1-T3116: unreadable or busy repository state defers without spawning and 
     assert.equal(result.state.nextEligibleIso, dueState.nextEligibleIso);
     assert.equal(spawned, false);
   }
+});
+
+test("W1-T3116: backoff and unhealthy disk state defer before maintenance", () => {
+  assert.deepEqual(
+    decideRepositoryMaintenance({
+      survey: survey(),
+      state: state({ nextEligibleIso: "2026-09-08T13:00:00.000Z" }),
+      policy: POLICY,
+      now: NOW,
+    }),
+    {
+      verdict: "deferred",
+      reason: "maintenance backoff or cadence has not elapsed",
+      nextEligibleIso: "2026-09-08T13:00:00.000Z",
+    },
+  );
+  assert.deepEqual(
+    decideRepositoryMaintenance({
+      survey: survey({ diskVerdict: "LOW" }),
+      state: state(),
+      policy: POLICY,
+      now: NOW,
+    }),
+    {
+      verdict: "deferred",
+      reason: "disk state is not healthy enough for repository maintenance",
+      nextEligibleIso: undefined,
+    },
+  );
 });
 
 test("W1-T3116: ordinary due work uses only Git's incremental maintenance tasks", async () => {
@@ -180,6 +332,85 @@ test("W1-T3116: zero exit with a surviving marker is failure, backs off durably,
   });
   assert.equal(escalation.verdict, "escalate");
   assert.equal(spawnCount, 1, "the threshold changes the disposition rather than starting an unbounded retry");
+});
+
+test("W1-T3116: the controller records an escalation once and never starts Git at the threshold", async () => {
+  const rows: string[] = [];
+  let spawned = false;
+  const first = await runRepositoryMaintenanceController(
+    {
+      repoDir: "/repo",
+      survey: survey({ gcLogPresent: true }),
+      state: state({ consecutiveFailures: 3 }),
+      policy: POLICY,
+    },
+    {
+      clock: NOW_CLOCK,
+      spawn: (() => { spawned = true; throw new Error("must not spawn"); }) as never,
+      log: (step) => rows.push(step),
+    },
+  );
+  assert.equal(first.decision.verdict, "escalate");
+  assert.equal(first.state.escalationRecordedIso, NOW.toISOString());
+  assert.deepEqual(rows, ["repository.maintenance.escalate"]);
+  assert.equal(spawned, false);
+
+  rows.length = 0;
+  const repeated = await runRepositoryMaintenanceController(
+    {
+      repoDir: "/repo",
+      survey: survey({ gcLogPresent: true }),
+      state: first.state,
+      policy: POLICY,
+    },
+    { clock: NOW_CLOCK, log: (step) => rows.push(step) },
+  );
+  assert.equal(repeated.state.escalationRecordedIso, NOW.toISOString());
+  assert.deepEqual(rows, [], "an already-recorded episode does not emit another escalation");
+});
+
+test("W1-T3116: spawn, child and post-survey failures remain attributed and retry with bounded jitter", async () => {
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const spawnFailed = await runRepositoryMaintenanceController(
+    {
+      repoDir: "/repo",
+      survey: survey(),
+      readPostSurvey: () => { throw new Error("post survey unavailable"); },
+      state: state(),
+      policy: POLICY,
+    },
+    {
+      clock: NOW_CLOCK,
+      spawn: ((_options: unknown, onStderr?: (chunk: string) => void) => {
+        onStderr?.("git warning\n");
+        throw new Error("spawn refused");
+      }) as never,
+      jitter: () => 2,
+      log: (step, fields) => rows.push({ step, fields }),
+    },
+  );
+  assert.equal(spawnFailed.outcome, "failed");
+  assert.equal(spawnFailed.state.nextEligibleIso, "2026-09-08T13:06:00.000Z", "jitter is clamped to ten percent");
+  assert.match(String(rows.at(-1)?.fields.stderr_excerpt), /git warning[\s\S]*spawn refused[\s\S]*post-maintenance survey failed/);
+
+  const child = new EventEmitter() as EventEmitter & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough };
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  queueMicrotask(() => child.emit("error", new Error("child failed")));
+  const childFailed = await runRepositoryMaintenanceController(
+    {
+      repoDir: "/repo",
+      survey: survey(),
+      readPostSurvey: () => survey(),
+      state: state(),
+      policy: POLICY,
+    },
+    { clock: NOW_CLOCK, jitter: () => -1, spawn: (() => ({ pid: 93, process: child })) as never },
+  );
+  assert.equal(childFailed.exitCode, null);
+  assert.equal(childFailed.outcome, "failed");
+  assert.equal(childFailed.state.nextEligibleIso, "2026-09-08T13:00:00.000Z", "negative jitter is clamped to zero");
 });
 
 test("W1-T3116: a maintenance timeout tears down the process group and records measured failure detail", async () => {
@@ -457,6 +688,68 @@ test("W1-T3116: daemon scheduling is non-blocking and single-flight across idle 
   assert.equal(calls, 2, "the single-flight guard releases after the background controller settles");
 });
 
+test("W1-T3116: a background cadence rejection is attributed and the single-flight guard reopens", async () => {
+  const rows: Array<{ step: string; fields?: Record<string, unknown> }> = [];
+  let calls = 0;
+  const hook = buildRepositoryMaintenanceDaemonHook({
+    repoDir: "/repo",
+    stateDir: "/state",
+    diskVerdict: "OK",
+    policy: POLICY,
+    log: (step, fields) => rows.push({ step, fields }),
+    run: (async () => {
+      calls++;
+      throw new Error("cadence exploded");
+    }) as never,
+  });
+  await hook(2);
+  await new Promise((resolve) => setImmediate(resolve));
+  await hook(2);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]?.step, "repository.maintenance.failed");
+  assert.deepEqual(rows[0]?.fields, {
+    reason: "background cadence threw",
+    error: "cadence exploded",
+    active_lane_count: 2,
+  });
+});
+
+test("W1-T3116: the daemon calls maintenance only at the no-dispatch boundary and contains a rejection", async () => {
+  for (const throws of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), "rmd-maintenance-daemon-"));
+    const activeCounts: number[] = [];
+    const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+    let sleeps = 0;
+    await runDaemon(
+      idlePlan(),
+      {
+        refreshMerged: () => () => false,
+        runOne: async () => assert.fail("a verify:human task must never dispatch"),
+        runRepositoryMaintenance: async (activeLaneCount) => {
+          activeCounts.push(activeLaneCount);
+          if (throws) throw new Error("maintenance hook failed");
+        },
+        checkStop: () => stopDetail(root),
+        sleep: async () => {
+          sleeps++;
+          requestStop(root, "test complete");
+        },
+        log: (step, fields = {}) => rows.push({ step, fields }),
+      },
+      { max: 1, pollIntervalMs: 1 },
+    );
+    assert.deepEqual(activeCounts, [0]);
+    assert.equal(sleeps, 1);
+    assert.equal(
+      rows.some((row) => row.step === "repository.maintenance.failed"),
+      throws,
+      "only a throwing maintenance hook produces the contained failure row",
+    );
+  }
+});
+
 test("W1-T3116: the status projection names success, failure/backoff and escalation without SSH", () => {
   assert.deepEqual(
     projectRepositoryMaintenanceStatus(
@@ -489,6 +782,247 @@ test("W1-T3116: the status projection names success, failure/backoff and escalat
     projectRepositoryMaintenanceStatus(state({ consecutiveFailures: 3 }), POLICY, NOW.getTime()).verdict,
     "escalate",
   );
+  assert.equal(projectRepositoryMaintenanceStatus(state(), POLICY, NOW.getTime()).verdict, "never-run");
+  assert.equal(
+    projectRepositoryMaintenanceStatus(
+      state({ lastSuccessIso: "2026-09-07T11:00:00.000Z", nextEligibleIso: "2026-09-08T11:00:00.000Z" }),
+      POLICY,
+      NOW.getTime(),
+    ).verdict,
+    "due",
+  );
+  assert.equal(
+    projectRepositoryMaintenanceStatus(state({ consecutiveFailures: 1 }), POLICY, NOW.getTime()).verdict,
+    "retry-due",
+  );
+});
+
+test("W1-T3116: the default cadence path reads, surveys, runs Git maintenance and persists verified state end to end", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-maintenance-real-"));
+  const repoDir = join(dir, "repo");
+  const statePath = repositoryMaintenanceStatePath(join(dir, "state"));
+  try {
+    execFileSync("git", ["init", "-q", "-b", "main", repoDir]);
+    execFileSync("git", ["-C", repoDir, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "seed"]);
+    writeFileSync(join(repoDir, ".git", "gc.log"), "stale automatic-gc failure\n");
+    const result = await runRepositoryMaintenanceCadence(
+      {
+        repoDir,
+        statePath,
+        activeLaneCount: 0,
+        diskVerdict: "OK",
+        policy: POLICY,
+      },
+      { clock: NOW_CLOCK },
+    );
+    assert.equal(result.kind, "ran");
+    if (result.kind !== "ran") return;
+    assert.equal(result.result.outcome, "succeeded", JSON.stringify(result.result));
+    assert.equal(result.result.decision.verdict, "full-gc-due");
+    assert.equal(result.status.verdict, "healthy");
+    assert.equal(readRepositoryMaintenanceState(statePath).kind, "readable");
+
+    const backoff = await runRepositoryMaintenanceCadence(
+      {
+        repoDir,
+        statePath,
+        activeLaneCount: 0,
+        diskVerdict: "OK",
+        policy: POLICY,
+      },
+      {
+        clock: NOW_CLOCK,
+        readState: () => ({
+          kind: "readable",
+          state: state({ consecutiveFailures: 1, nextEligibleIso: "2026-09-08T13:00:00.000Z" }),
+        }),
+      },
+    );
+    assert.equal(backoff.kind, "not-due");
+
+    const escalated = await runRepositoryMaintenanceCadence(
+      {
+        repoDir,
+        statePath,
+        activeLaneCount: 0,
+        diskVerdict: "OK",
+        policy: POLICY,
+      },
+      {
+        clock: NOW_CLOCK,
+        readState: () => ({
+          kind: "readable",
+          state: state({ consecutiveFailures: 3, escalationRecordedIso: NOW.toISOString() }),
+        }),
+      },
+    );
+    assert.equal(escalated.kind, "not-due");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3116: the production rung maps stateDir to the durable file and reaches the real cadence", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-maintenance-rung-"));
+  const repoDir = join(dir, "repo");
+  const stateDir = join(dir, "state");
+  try {
+    execFileSync("git", ["init", "-q", "-b", "main", repoDir]);
+    execFileSync("git", ["-C", repoDir, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "seed"]);
+    writeFileSync(join(repoDir, ".git", "gc.log"), "stale automatic-gc failure\n");
+    const result = await runRepositoryMaintenanceRung({
+      repoDir,
+      stateDir,
+      activeLaneCount: 0,
+      diskVerdict: "OK",
+      policy: POLICY,
+      log: () => {},
+    });
+    assert.equal(result.kind, "ran");
+    assert.equal(existsSync(join(stateDir, "repository-maintenance.json")), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3116: status and text rendering expose healthy, escalated and corrupt maintenance state", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-maintenance-status-"));
+  const statePath = repositoryMaintenanceStatePath(join(root, "state"));
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const deps = {
+    queryService: () => ({ running: false, pid: null }),
+    repoDir: "/nonexistent/repo",
+    now: () => NOW.getTime(),
+    resolveOriginMainSha: () => undefined,
+    isPidAlive: () => true,
+    resolveHeadroomEnabled: () => false,
+    readPushedRunBranches: () => "",
+    readSharedPauseState: () => "absent" as const,
+    readDispatchClaims: () => ({ status: "clear" as const }),
+    repositoryMaintenancePolicy: POLICY,
+  };
+  try {
+    writeRepositoryMaintenanceState(statePath, state({
+      lastAttemptIso: "2026-09-08T11:00:00.000Z",
+      lastSuccessIso: "2026-09-08T11:00:00.000Z",
+      nextEligibleIso: "2026-09-09T11:00:00.000Z",
+    }));
+    const healthy = buildStatusBoard(root, ledgerPath, deps);
+    assert.equal(healthy.generatedAt, NOW.toISOString());
+    assert.equal(healthy.repositoryMaintenance?.status?.verdict, "healthy");
+    assert.match(renderStatusBoardText(healthy), /REPOSITORY MAINTENANCE[\s\S]*verdict\s+: healthy/);
+    assert.match(renderStatusBoardText(healthy), /last attempt: 2026-09-08T11:00:00.000Z/);
+    assert.match(renderStatusBoardText(healthy), /retry pending: no/);
+
+    writeRepositoryMaintenanceState(statePath, state({ consecutiveFailures: 3 }));
+    const escalated = buildStatusBoard(root, ledgerPath, deps);
+    assert.equal(escalated.repositoryMaintenance?.status?.verdict, "escalate");
+    assert.match(renderStatusBoardText(escalated), /automatic Git maintenance exhausted its retry bound/);
+
+    writeFileSync(statePath, "{bad json}\n");
+    const corrupt = buildStatusBoard(root, ledgerPath, deps);
+    assert.equal(corrupt.repositoryMaintenance?.status, undefined);
+    assert.match(renderStatusBoardText(corrupt), /unknown — durable maintenance state is unreadable/);
+    assert.match(renderStatusBoardText(corrupt), /repair state\/repository-maintenance\.json/);
+
+    const withoutSection = { ...healthy, repositoryMaintenance: undefined };
+    assert.doesNotMatch(renderStatusBoardText(withoutSection), /REPOSITORY MAINTENANCE/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3116: a throwing disk survey is a named cadence deferral", async () => {
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const result = await runRepositoryMaintenanceCadence(
+    {
+      repoDir: "/repo",
+      statePath: "/state/repository-maintenance.json",
+      activeLaneCount: 0,
+      diskVerdict: () => { throw new Error("disk probe failed"); },
+      policy: POLICY,
+    },
+    {
+      clock: NOW_CLOCK,
+      readState: () => ({ kind: "absent", state: state() }),
+      gcLogPresent: () => false,
+      log: (step, fields) => rows.push({ step, fields }),
+    },
+  );
+  assert.deepEqual(result, { kind: "deferred", reason: "disk probe failed" });
+  assert.deepEqual(rows, [{
+    step: "repository.maintenance.deferred",
+    fields: { reason: "disk headroom survey failed", detail: "disk probe failed" },
+  }]);
+});
+
+test("W1-T3116: daemonCommand wires maintenance only for the self-target daemon", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-maintenance-daemon-command-"));
+  const root = join(home, "Remudero");
+  const planPath = join(home, "tasks.yaml");
+  const previousHome = process.env.HOME;
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(
+    join(home, ".config", "remudero", "config.json"),
+    JSON.stringify({ claudeBin: "/bin/true", root }),
+  );
+  writeFileSync(planPath, "[]\n");
+  const captured: Array<Parameters<typeof runDaemon>[1]> = [];
+  const runDaemonStub: typeof runDaemon = async (_plan, deps) => {
+    captured.push(deps);
+    return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+  };
+  try {
+    process.env.HOME = home;
+    assert.equal(
+      await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+        runDaemon: runDaemonStub,
+      }),
+      0,
+    );
+    assert.equal(typeof captured[0]?.runRepositoryMaintenance, "function");
+
+    assert.equal(
+      await daemonCommand(["--repo", "craigoley/not-remudero", "--plan", planPath, "--max", "0"], {
+        runDaemon: runDaemonStub,
+      }),
+      0,
+    );
+    assert.equal(captured[1]?.runRepositoryMaintenance, undefined);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3116: statusCommand loads maintenance policy when readable and degrades when it is not", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-maintenance-status-command-"));
+  const observed: unknown[] = [];
+  const invoke = (repoRoot: string) =>
+    statusCommand([], {
+      loadConfig: () => ({ claudeBin: "/bin/true", root }),
+      queryService: () => ({ running: false, pid: null, sensed: false }),
+      ledgerPathFor: () => join(root, "state", "ledger.ndjson"),
+      repoRoot,
+      github: null,
+      readLedgerLines: () => [],
+      buildStatusBoard: (_root, _ledgerPath, deps) => {
+        observed.push(deps.repositoryMaintenancePolicy);
+        return {} as ReturnType<typeof buildStatusBoard>;
+      },
+      renderStatusBoardText: () => "rendered",
+      out: () => {},
+    });
+  try {
+    assert.equal(await invoke(fileURLToPath(new URL("..", import.meta.url))), 0);
+    assert.deepEqual(observed[0], POLICY);
+    assert.equal(await invoke(join(root, "missing-checkout")), 0);
+    assert.equal(observed[1], undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // @source-text-subject — this test's SUBJECT genuinely is the source text: it asserts there is
