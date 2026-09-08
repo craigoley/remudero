@@ -32,7 +32,7 @@
  *       `base_unknown`: never `pass`, never `discriminates`, an environment gap read as evidence in
  *       neither direction;
  *   (4) a pre-existing test file the diff never touched is NOT re-copied over itself — the copy step
- *       is scoped to exactly the diff's added/changed `test/**` paths, observed directly off the
+ *       is scoped to exactly the diff's ADDED `test/**` paths, observed directly off the
  *       injected `copyFile` seam.
  *
  * FALSIFIER (per the task shard): with the copy step reverted (checkout `buildBaseProofDir` at the
@@ -230,7 +230,7 @@ test("W1-T3098 (3): a copied test that imports a module the PR itself added thro
 
 // ── (4) a file this diff never touched is not re-copied over itself ─────────────────────────────
 
-test("W1-T3098 (4): only the diff's added/changed test/** files are copied — a pre-existing, untouched test file is never handed to the copy seam", () => {
+test("W1-T3098 (4): only the diff's ADDED test/** files are copied — a pre-existing, untouched test file is never handed to the copy seam", () => {
   const { head } = fourScenarioRepo();
   let built: BaseProofDir | undefined;
   const copiedRelPaths: string[] = [];

@@ -27,7 +27,7 @@
  * Deleting the worktree materialisation reddens (i) (no base dir is ever built for a test-only
  * review, so nothing is ever stale); deleting the `base_unknown` classification reddens (iii).
  *
- * W1-T3098 AMENDS (ii). `buildBaseProofDir` now copies the diff's added/changed `test/**` files
+ * W1-T3098 AMENDS (ii). `buildBaseProofDir` now copies the diff's ADDED `test/**` files
  * from the head checkout into the base worktree before handing it back, so a PR-added test CAN be
  * re-run at base — exactly the run (ii) never actually performed (R-11's checkout held no
  * `test/fresh.test.ts` for it to find). `FRESH_TEST` asserts nothing, so once it is genuinely

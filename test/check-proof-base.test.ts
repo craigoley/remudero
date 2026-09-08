@@ -382,7 +382,7 @@ test("W1-T3098 (amends R-11): a `unit test:` file the diff ADDED is copied into 
   // R-11 gave `unit test:` a real checkout at --base <ref>, but a checkout of that ref never
   // contains a file only the head commit added — `node --test` there found nothing and exited
   // nonzero, and this proof used to be reported "discriminates" for that reason alone. W1-T3098
-  // makes `buildBaseProofDir` copy the diff's added/changed test/** files into the base worktree
+  // makes `buildBaseProofDir` copy the diff's ADDED test/** files into the base worktree
   // first, so this exact proof can genuinely be re-run there; asserting nothing, it genuinely
   // passes at the base exactly as it does at the head.
   const passing = 'import { test } from "node:test";\ntest("exists on the head, and now copied into the base too", () => {});\n';
