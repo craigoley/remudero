@@ -479,6 +479,11 @@ test("W1-T3116: the status projection names success, failure/backoff and escalat
   );
 });
 
+// @source-text-subject — this test's SUBJECT genuinely is the source text: it asserts there is
+// exactly one production composition call site and that admission-time code never reaches the
+// maintenance rung, which are structural wiring facts about the source, not runtime behaviour a
+// call through the public API could exercise (W1-T2905's census would otherwise count these
+// readFileSync() calls as prose standing in for behaviour, which they are not).
 test("W1-T3116: production has one idle cadence call and no task-admission maintenance rung", () => {
   const runTaskSource = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
   const daemonSource = readFileSync(new URL("../src/lib/daemon.ts", import.meta.url), "utf8");
