@@ -1,0 +1,54 @@
+- id: W1-T3091
+  title: "rmd next-task-id PRINTS AN ID AND CLAIMS NOTHING, SO TWO LANES MINTING IN ONE WINDOW GET THE SAME NUMBER AND ONE RENUMBERS AFTER ITS PR IS OPEN — reserve by default and make not claiming the opt-out"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  origin: "session 2026-09-07 — five id incidents in one session, and ci.yml already records the defect"
+  plan_refs: ["W1-T1048", "W1-T509"]
+  rationale: |
+    (1) THE DEFECT IS ALREADY WRITTEN DOWN IN THIS REPO, in `ci.yml`'s own task-id-existence job:
+    "The hand lane's only id source, `rmd next-task-id`, prints an id and reserves NOTHING by
+    design, so a later mint handed the same number out as free and nothing noticed until an open PR
+    had to be renumbered." That comment predates this task. The gate it guards catches the
+    consequence; nothing changed the cause.
+
+    (2) MEASURED FIVE TIMES IN ONE SESSION, 2026-09-07. Two tasks were minted free, claimed
+    meanwhile and renumbered after their PRs were open (they survive as W1-T3059 and W1-T3065). Two
+    open PRs each filed a DIFFERENT task under one id. A batch of ten shards recorded "FILED without
+    a `refs/rmd-id/` reservation" in its own text and then collided on the first of them. And a
+    branch was named for an id the reservation walk had already passed, which would have credited
+    the wrong task on merge had it not been caught before the first commit.
+
+    (3) THE TWO ANSWERS DISAGREE, WHICH IS THE TELL. The verb prints a plan-scan maximum and then a
+    SECOND line naming the first id no reservation holds. On 2026-09-07 those read W1-T3060 and
+    W1-T3065 in the same invocation. The plan-scan number is the one a reader takes, and it is the
+    one that collides.
+
+    (4) THE BLAST RADIUS IS THE HAND LANE ONLY, and that is the population that produced every
+    incident above. MEASURED: the CLI verb has NO automated caller — `ci.yml` mentions it in prose
+    only, and programmatic minting goes through `src/lib/task-id.ts` and
+    `src/lib/task-id-reservation.ts` rather than the command.
+
+    (5) `--offline` IMPLIES THE OPT-OUT rather than erroring: it declines to read origin, so it
+    cannot push to it either. Only an EXPLICIT `--reserve` beside `--offline` stays a refusal,
+    because that asks for two incompatible things by name. `--reserve` itself remains valid and
+    redundant, so an existing caller is not broken.
+
+    (6) THE COST IS AN INTEGER; THE ALTERNATIVE IS A RENUMBER. A reserved id nobody files is HELD,
+    not free, and reclaiming one is an operator decision — that is the real price of this default.
+    It is the cheap side: ids are unbounded, while renumbering an open pull request means rewriting
+    its shard, every citation of it, and its branch name, which is a credit path in its own right.
+
+  acceptance:
+    - claim: "a bare mint claims the id rather than printing a number anyone may take"
+      proof: "unit test: test/a-mint-that-does-not-claim-is-a-collision-waiting.test.ts"
+    - claim: "an offline mint declines to claim rather than refusing the invocation"
+      proof: "unit test: test/a-mint-that-does-not-claim-is-a-collision-waiting.test.ts"
+    - claim: "the opt-out is named in the command's own syntax rather than only in prose"
+      proof: "grep: --no-reserve in docs/cli-reference.md"
+  files: [src/run-task.ts, test/a-mint-that-does-not-claim-is-a-collision-waiting.test.ts, docs/cli-reference.md]
+  status: queued
