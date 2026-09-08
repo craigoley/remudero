@@ -1,0 +1,53 @@
+- id: W1-T3211
+  title: "AN AMENDED CRITERION DOES NOT REACH THE PR IT WAS AMENDED FOR, AND THE REVIEW BLAMES THE DIFF — criteria resolve from the plan at the PR's OWN HEAD, so a merged correction is invisible until someone merges main INTO the branch; the verdict then quotes the OLD criterion and reads as a code defect"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 8.00
+  files: [src/run-task.ts, test/a-corrected-criterion-does-not-reach-the-pr-it-corrects.test.ts]
+  origin: "operator-session#stale-criteria-2026-09-08"
+  plan_refs: ["W1-T2315", "W1-T2895", "W1-T2888"]
+  status: queued
+  attempts: 0
+  rationale: |
+    `rmd review` prints exactly what it read, and the sha in that line is the PR's HEAD:
+
+      ### rmd review PR #4673 — criteria from plan at 02951ad2... task W1-T2888 (3 criteria)
+        — read: plan/tasks.yaml@2e9dd1cc + plan/tasks.d/@f83b6a05
+
+    So when a proof is corrected on main and merged, the PR it was corrected FOR keeps being judged
+    against the old text until main is merged into that branch. Nothing says so. The verdict names
+    the criterion and reports it unmet, which reads as "the diff does not do this" — and the diff
+    does.
+
+    MEASURED 2026-09-08, twice, both times costing a cycle and a wrong first diagnosis:
+
+      #4665  W1-T3189's shard had merged; the review still reported `criteria from NONE (fail
+             closed)` because the branch was cut before the filing landed. `git merge origin/main`
+             into the branch: `criteria from plan at <head> task W1-T3189 (3 criteria)`.
+      #4673  W1-T2888's proof was corrected in #4705 and MERGED. The criterion was right, the
+             import was present (`src/run-task.ts:1296`), and the review still failed on the OLD
+             pattern. Same remedy, same one push: PASS.
+
+    On #4673 the failing sentence was "run-task.ts imports the report verbs from lib instead of
+    defining them" — a claim the head satisfies. Confirming that took checking the import, the
+    amendment, and the merge state, before the head-sha line explained it.
+
+    THE REVIEWER ALREADY HOLDS BOTH HALVES. It computes the plan tree it read
+    (`plan/tasks.d/@<sha>`) and can read `origin/main`'s in one `git rev-parse`. When they differ
+    AND a criterion is unmet, say so on the verdict: the criteria are older than main's, name the
+    remedy (merge origin/main into the branch), and let the operator stop debugging the diff.
+
+    NOT IN SCOPE: resolving criteria from origin/main instead of the head. That would judge a PR
+    against text its own tree does not carry — the reverse defect, and worse, because a criterion
+    could change under a PR mid-review. The head is the right source; the silence is the bug.
+  acceptance:
+    - claim: "a review whose criteria come from a plan tree older than origin/main says so on the verdict, and names merging main as the remedy"
+      proof: "unit test: test/a-corrected-criterion-does-not-reach-the-pr-it-corrects.test.ts"
+    - claim: "the comparison reads the plan tree sha the reviewer already computed rather than re-deriving a second one"
+      proof: "grep: planTreeIsBehindMain in src/run-task.ts"
+    - claim: "a PR whose plan tree matches origin/main is unchanged, and a stale tree with every criterion MET still passes"
+      proof: "grep: MUTANT in test/a-corrected-criterion-does-not-reach-the-pr-it-corrects.test.ts"
