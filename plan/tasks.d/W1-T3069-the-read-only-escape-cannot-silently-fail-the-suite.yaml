@@ -11,7 +11,7 @@
   files: [test/setup/tmp-hygiene.ts, test/the-read-only-escape-cannot-silently-fail-the-suite.test.ts]
   origin: "operator-session#false-pre-existing-failures-2026-09-07"
   plan_refs: ["W1-T131", "W1-T79", "W1-T221"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07 at origin/main, over the 26 suites that reference `RMD_SELF_SYNC_DONE`,

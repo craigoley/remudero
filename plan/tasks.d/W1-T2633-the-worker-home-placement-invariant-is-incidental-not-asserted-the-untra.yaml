@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§4A", "§2"]
   files: [src/lib/worker-home.ts, test/worker-home.test.ts, .gitignore]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE QUESTION IS ANSWERED, AND THE ANSWER IS "EXPECTED SCAFFOLDING". Measured on the live root

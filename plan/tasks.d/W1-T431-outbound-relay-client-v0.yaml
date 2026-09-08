@@ -58,7 +58,7 @@
   origin: oper#architecture-2026-08-11
   plan_refs: ["W1-T430", "W1-T371", "W1-T404"]
   files: [src/run-task.ts, src/lib/relay-client.ts, test/relay-client.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a loopback stub relay makes both falsifier directions fixture-decidable
     offline; nothing needs the hosted side to exist. risk:high — it is a new network-facing

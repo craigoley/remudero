@@ -14,7 +14,7 @@
     - test/fixtures/codex-0.152.0-isolation-probe.jsonl
   origin: "operator-session#codex-preflight-contract-audit-2026-09-03"
   plan_refs: ["W1-T17", "W1-T115", "W1-T297", "W1-T2748"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET HOST WITH THE PINNED `codex-cli 0.152.0`: a Codex-routed

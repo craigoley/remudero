@@ -68,7 +68,7 @@
   origin: "oper#audit-filings-2026-08-04 (audit §5b L2 + feedback#fb-1785807201821-e4c9dc)"
   plan_refs: ["W1-T115", "W1-T131"]
   files: [src/lib/tmp.ts, src/run-task.ts, src/lib/policy.ts, plan/policy.yaml, test/temp-sweep-backstop.test.ts, test/policy.test.ts, test/tmp.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high — this is the host's disk-survival backstop and it touches the daemon's sweep
     wiring; sized like W1-T316/T317, the sibling wire-the-safety-organ tasks. budget 75: predicate,

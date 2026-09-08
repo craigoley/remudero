@@ -62,7 +62,7 @@
   origin: "oper#external-scan-2026-09-02"
   plan_refs: ["W1-T2304", "W1-T2240", "W1-T1013", "W1-T470", "W1-T2266", "§8A", "§12"]
   files: [src/lib/ledger.ts, src/lib/hand-run-census.ts, src/lib/measurement-cadence.ts, src/run-task.ts, test/hand-run-census.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — the ledger writer, a new miner, the measurement report and

@@ -98,5 +98,5 @@
       proof: "unit test: test/daemon.test.ts"
     - claim: "no lock naming a foreign host is deleted by this change"
       proof: "unit test: test/inflight-lock.test.ts"
-  status: queued
+  status: merged
   attempts: 0

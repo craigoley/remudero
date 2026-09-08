@@ -114,7 +114,7 @@
       proof: "unit test: worker home: the existing grants are unchanged"
   origin: "oper#image-cache-invisible-to-a-worker-2026-08-20"
   plan_refs: ["W1-T18", "W1-T1064", "W1-T505"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RULE 25 RE-DERIVED BY RUNNING THE REAL `INSTRUMENT_SURFACE` EXPORT WITH FOUR CONTROLS.

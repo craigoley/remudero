@@ -10,7 +10,7 @@
   files: [src/lib/retro.ts, test/followup-names-work.test.ts]
   origin: "followup#W1-T2457-1788020906446:2026-08-29T16:31:22.354Z:1"
   plan_refs: ["§7B", "W1-T2458", "W1-T2563", "W1-T2455"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE FIXTURE IS THIS TASK'S OWN PROVENANCE, AND IT IS CONSUMED ────────────────────────────

@@ -109,7 +109,7 @@
   origin: oper#2026-08-23-citation-stamp-has-no-baseline-check
   plan_refs: ["W1-T1248", "#2599", "W1-T419", "W1-T240", "Law 5"]
   files: [src/lib/retro.ts, src/run-task.ts, test/citation-stamp-baseline.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19's SPAN, NOT THE BLAST RADIUS, AND IT WAS SET FROM THE LINTER RATHER

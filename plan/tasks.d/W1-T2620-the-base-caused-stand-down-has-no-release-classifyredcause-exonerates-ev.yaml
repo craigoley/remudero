@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, src/run-task.ts, test/base-caused-release.test.ts, scripts/source-size-baseline.json]
   origin: "feedback#followup-pr3278-base-commit-fix-needs-a-fleet-release"
   plan_refs: ["W1-T527", "W1-T124", "W1-T474", "W1-T977", "W1-T1033", "W1-T1275", "W1-T528", "W1-T2304"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ AT SOURCE 2026-09-01 — every line reference is a SNAPSHOT and must be re-derived, never

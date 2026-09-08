@@ -131,7 +131,7 @@
   origin: "oper#no-one-command-answers-fleet-health-2026-08-20"
   plan_refs: ["W1-T1044", "W1-T1036", "W1-T1021", "W1-T978", "W1-T279", "W1-T280", "W1-T450", "W1-T159", "W1-T471"]
   files: [src/run-task.ts, src/lib/status-board.ts, src/lib/doctor.ts, test/doctor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     PROOF DIALECT ON CRITERION 6 — CORRECTED AT FILING TIME, CLAIM UNTOUCHED. It was authored as

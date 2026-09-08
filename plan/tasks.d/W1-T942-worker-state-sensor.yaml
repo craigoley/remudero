@@ -79,7 +79,7 @@
   origin: feedback#fb-1785237627858-ffafd9
   plan_refs: ["§5D", "§7"]
   files: [src/lib/worker.ts, src/run-task.ts, test/worker-state-sensor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high is Rule 19's SPAN (src/lib + src/ + test/, the W1-T310 grade), and here the blast radius

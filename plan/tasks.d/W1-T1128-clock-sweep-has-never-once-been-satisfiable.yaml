@@ -101,7 +101,7 @@
     - claim: "a stale exclusion still fails regardless of the drift ceiling"
       proof: "unit test: test/clock-sweep.test.ts"
   files: [scripts/clock-sweep.mjs, scripts/clock-sweep-baseline.json, test/clock-sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#clock-sweep-never-satisfiable-2026-08-22"
   plan_refs: ["W1-T1104", "W1-T503", "W1-T25"]

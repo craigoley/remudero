@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/a-task-trailer-redirects-review-to-an-unrelated-shard.test.ts]
   origin: "operator-session#trailer-redirects-criteria-2026-09-02"
   plan_refs: ["W1-T205"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-02 ON A REAL BODY, caught before it shipped. PR #3559 fixes the recycle's

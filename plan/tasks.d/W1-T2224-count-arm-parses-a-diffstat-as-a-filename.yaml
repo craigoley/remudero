@@ -101,7 +101,7 @@
     - claim: "the quotation guard is unchanged and a fenced example is still silenced"
       proof: "unit test: test/count-arm-diffstat-token.test.ts"
   files: [src/lib/review.ts, test/count-arm-diffstat-token.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#count-arm-diffstat-token-2026-08-24"
   plan_refs: ["W1-T274", "W1-T288", "W1-T304", "W1-T308", "W1-T1271"]

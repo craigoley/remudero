@@ -12,7 +12,7 @@
     - test/a-rule-15-refusal-escalates-as-contradictory-though-it-names-its-own-remedy.test.ts
   origin: "operator-request#follow-up-work-2026-09-07"
   plan_refs: ["W1-T440", "W1-T923", "W1-T58", "W1-T399", "W1-T400", "W1-T2692"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE LAST ARM OF THE DISPOSITION TABLE NAMES A PROPERTY THE VERDICT DOES NOT HAVE. OBSERVED at

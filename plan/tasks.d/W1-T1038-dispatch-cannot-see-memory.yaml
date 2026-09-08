@@ -104,7 +104,7 @@
   origin: "oper#dispatch-memory-headroom-2026-08-19"
   plan_refs: ["W1-T1036", "W1-T1028", "W1-T342", "W1-T317", "W1-T321"]
   files: [src/lib/sweep.ts, src/lib/dispatch-governor.ts, src/lib/policy.ts, src/run-task.ts, plan/policy.yaml, test/dispatch-memory-governor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     DESIGN, IN THE ORDER AN IMPLEMENTER MEETS IT.

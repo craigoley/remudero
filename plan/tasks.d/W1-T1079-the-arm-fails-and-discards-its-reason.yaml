@@ -83,7 +83,7 @@
   origin: "recon#arm-fails-and-discards-its-reason-2026-08-21"
   plan_refs: ["W1-T1050", "W1-T1052"]
   files: [src/run-task.ts, test/arm-outcome-five-sites.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a tag per declared path,

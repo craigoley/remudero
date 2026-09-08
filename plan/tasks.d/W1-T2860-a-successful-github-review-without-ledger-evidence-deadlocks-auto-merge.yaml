@@ -13,7 +13,7 @@
     - test/sweep.test.ts
   origin: "operator-session#pr-4016-unowned-review-success-deadlock-2026-09-04"
   plan_refs: ["W1-T230"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET AT 2026-09-05T02:37:19Z. PR #4016 head

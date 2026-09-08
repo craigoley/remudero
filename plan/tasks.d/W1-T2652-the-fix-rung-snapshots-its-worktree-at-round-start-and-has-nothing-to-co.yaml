@@ -107,7 +107,7 @@
   origin: feedback#followup-daemon-1788192519316-stray-staged-revert
   plan_refs: ["§3", "§4A", "P62", "W1-T1284"]
   files: [src/run-task.ts, test/fix-rung-birth-snapshot.test.ts, test/fix-rung-unchanged-tree-stand-down.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED from follow-up harvest id followup:DAEMON-1788192519316:2026-08-31T16:40:10.873Z:1 (research),

@@ -125,7 +125,7 @@
     - claim: "the manifest still prints sha with name on stdout and the run still deletes nothing"
       proof: "unit test: test/branch-backlog-reaper.test.ts"
   files: [src/lib/status.ts, test/branch-backlog-reaper.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#reaper-hold-set-mislabelled-2026-08-24"
   plan_refs: ["W1-T447", "W1-T119", "W1-T1050", "W1-T1111", "W1-T1205", "W1-T1207"]

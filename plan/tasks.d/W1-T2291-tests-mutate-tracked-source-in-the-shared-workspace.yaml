@@ -140,7 +140,7 @@
     - claim: "the guard makes no claim about runtime-built paths, injected seams, or child-process writes"
       proof: "unit test: test/tracked-source-write-guard.test.ts"
   files: [scripts/tracked-source-write-check.mjs, test/tracked-source-write-guard.test.ts, test/dispatch-lifetime-breaker.test.ts, test/task-id-reservation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#tests-mutate-tracked-source-2026-08-25"
   plan_refs: ["W1-T951", "W1-T964", "W1-T2276"]

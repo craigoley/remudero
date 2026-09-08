@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts]
   origin: "operator-session#check-proof-lags-w1-t362-2026-09-02"
   plan_refs: ["W1-T273", "W1-T362", "W1-T912"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE VERB IS NOT MISSING THE FEATURE — IT DECLINES, ON A STATED GROUND THAT HAS EXPIRED.

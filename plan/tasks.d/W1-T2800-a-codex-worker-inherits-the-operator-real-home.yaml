@@ -13,7 +13,7 @@
     - test/codex-worker-home-redirection.test.ts
   origin: "operator-session#codex-reenable-audit-2026-09-04"
   plan_refs: ["W1-T18", "W1-T170", "W1-T258", "W1-T2748", "W1-T2754", "W1-T2756"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     `spawnWorker` (src/lib/worker.ts) returns inside its `selection.provider === "codex"` branch

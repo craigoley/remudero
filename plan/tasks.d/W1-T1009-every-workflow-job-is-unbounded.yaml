@@ -145,7 +145,7 @@
   origin: "oper#unbounded-workflow-step-2026-08-18"
   plan_refs: ["W1-T312", "W1-T261", "W1-T153"]
   files: [.github/workflows/ci.yml, test/workflow-job-timeouts.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THIS MUST RIDE ALONE — NO `src/` PATH MAY ENTER THIS DIFF, AND THAT IS A GATE, NOT A PREFERENCE.

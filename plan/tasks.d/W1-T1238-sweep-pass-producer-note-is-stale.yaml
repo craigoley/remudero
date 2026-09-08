@@ -60,7 +60,7 @@
   origin: feedback#fb-1785937739950-070a87
   plan_refs: ["W1-T1236", "W1-T1237", "W1-T468"]
   files: [src/lib/sweep.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THIRD AND LAST OF THE RULE 19 DECOMPOSITION of the original five-concern filing

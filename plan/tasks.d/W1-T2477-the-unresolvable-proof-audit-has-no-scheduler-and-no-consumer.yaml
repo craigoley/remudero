@@ -10,7 +10,7 @@
   files: [src/lib/measurement-cadence.ts, src/lib/proof-queue-audit.ts, test/proof-debt-becomes-a-proposal.test.ts]
   origin: "operator-brief#next-item-2026-08-30"
   plan_refs: ["W1-T2473", "W1-T1053", "W1-T2280", "W1-T2455", "W1-T229"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED BY RUNNING THE VERB AT HEAD, NOT ESTIMATED. `rmd proof-queue-audit` over the open,

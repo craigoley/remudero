@@ -111,7 +111,7 @@
   origin: oper#2026-08-23-fix-rung-report-provenance
   plan_refs: ["W1-T1100", "W1-T256", "W1-T307", "#2415", "#2569", "#1156"]
   files: [src/run-task.ts, test/fix-rung-report-provenance.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     EVERY PROOF IS A PURE PATH AND NONE GREPS THIS SHARD'S OWN PATH. The named test file does not

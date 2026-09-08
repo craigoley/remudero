@@ -10,7 +10,7 @@
   files: [src/run-task.ts, src/lib/retro.ts, test/retro-trigger-corpus.test.ts]
   origin: oper#the-retro-trigger-counts-runs-not-merges-2026-08-25
   plan_refs: ["W1-T2252", "W1-T1259", "W1-T160", "W1-T1013"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (0) THE MECHANISM, RE-DERIVED FROM SOURCE.

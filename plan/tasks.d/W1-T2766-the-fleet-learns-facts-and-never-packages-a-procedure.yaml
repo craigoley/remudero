@@ -81,7 +81,7 @@
   origin: "oper#external-scan-2026-09-02"
   plan_refs: ["W1-T87", "W1-T971", "W1-T2266", "W1-T2512", "W1-T2659", "W1-T2698", "W1-T2700", "§5B", "§8A", "§12"]
   files: [src/lib/skill-workshop.ts, src/lib/retro.ts, src/lib/inbox.ts, src/lib/worker.ts, test/skill-workshop.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — a new module, the retro and the inbox under Rule 19; runtime

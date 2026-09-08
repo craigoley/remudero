@@ -88,7 +88,7 @@
   origin: recon#guard-reach-2026-08-07
   plan_refs: ["W1-T212", "W1-T294", "W1-T297"]
   files: [src/lib/review.ts, test/instrument-surface-completeness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is decidable in-process against the repo's own tracked file list
     and the exported constant; no worker spawn, no network, no second machine.

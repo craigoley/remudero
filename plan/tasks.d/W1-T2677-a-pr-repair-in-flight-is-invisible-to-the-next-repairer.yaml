@@ -10,7 +10,7 @@
   files: [src/lib/dispatch-claim.ts, test/a-pr-repair-in-flight-is-invisible-to-the-next-repairer.test.ts]
   origin: "operator-session#3512-misattribution-2026-09-02"
   plan_refs: ["W1-T509", "W1-T1268"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED, 2026-09-01, THREE INSTANCES IN ONE SESSION. (1) W1-T2589 was filed to re-attribute

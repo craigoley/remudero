@@ -96,7 +96,7 @@
   origin: feedback#fb-1785237573352-6c7b7e
   plan_refs: ["§5", "§5C", "§6A"]
   files: [.github/workflows/dependency-review.yml, .github/workflows/ci-gate.yml, test/dependency-licence-policy.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — nothing here needs an operator ruling. The allow-list VALUE is named by the
     feedback and constrained by MASTER-PLAN §6A's existing Apache-2.0 commitment; design (vi)

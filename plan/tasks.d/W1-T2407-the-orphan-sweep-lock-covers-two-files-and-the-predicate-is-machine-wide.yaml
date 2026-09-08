@@ -10,7 +10,7 @@
   files: [src/lib/worker-containment.ts, test/orphan-sweep-names-the-third-party.test.ts]
   origin: "operator-brief#orphan-sweep-lock-scope-2026-08-27"
   plan_refs: ["W1-T356", "W1-T117", "W1-T176", "W1-T2403"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-08-27 at origin/main 7d7d5cdf, from the Actions API and CI job logs. No ledger

@@ -140,7 +140,7 @@
   origin: "feedback#fb-1786068880734-3e7151"
   plan_refs: ["W1-T301", "W1-T483", "W1-T494", "W1-T496", "W1-T469", "W1-T2312"]
   files: [scripts/fleet-heartbeat.sh, .github/workflows/fleet-heartbeat-watch.yml, test/fleet-heartbeat-supervisor-tick.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT, ON RULE 19 SPAN AND NOT ON BLAST RADIUS — `files:` covers

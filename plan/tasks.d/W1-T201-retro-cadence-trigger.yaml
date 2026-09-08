@@ -64,7 +64,7 @@
   origin: architect
   plan_refs: ["§8", "§4"]
   files: [src/run-task.ts, test/run-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-07-21 from a read-only diagnosis requested at session close. All three candidate causes were
     tested: the merge counter is NOT below threshold (runs_seen is written as gather.totalRuns and never read back

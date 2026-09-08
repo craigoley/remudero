@@ -94,7 +94,7 @@
   origin: recon#stale-pin-invisible-2026-08-14
   plan_refs: ["W1-T446", "W1-T484", "W1-T490"]
   files: [scripts/fleet-heartbeat.sh, test/fleet-heartbeat-stale-pin.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `scripts/` and `test/`. The blast radius is
     one published field; the beat gates nothing and blocks nothing.

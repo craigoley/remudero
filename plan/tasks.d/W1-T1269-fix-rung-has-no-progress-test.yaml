@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/fix-rung-no-progress-stop.test.ts]
   origin: oper#fix-rung-progress-2026-08-23
   plan_refs: ["W1-T1266"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     NOTHING DESCENDS. Across strikes the only moving quantity is `strikes`, and it ASCENDS:

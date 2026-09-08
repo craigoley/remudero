@@ -133,7 +133,7 @@
   origin: recon#usage-reset-format-drift-2026-08-14
   plan_refs: ["W1-T197", "W1-T249"]
   files: [src/lib/daemon.ts, test/daemon.test.ts, test/usage-reset-unrecognised.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
     `>=2 subsystems while risk<high`, and `files:` spans `src/lib/` and `test/`. The band is Rule 19's

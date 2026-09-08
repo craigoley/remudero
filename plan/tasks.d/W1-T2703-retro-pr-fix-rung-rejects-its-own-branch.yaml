@@ -11,7 +11,7 @@
   files: [src/run-task.ts, test/fix-rung-no-task.test.ts]
   origin: "operator-session#autonomous-pr-queue-2026-09-02"
   plan_refs: ["W1-T78", "W1-T385", "W1-T1127", "W1-T2609"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON AZURE, 2026-09-02. PR #3639 opened from `run-RETRO-1788350665543`

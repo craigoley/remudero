@@ -100,7 +100,7 @@
   origin: trace
   plan_refs: ["W1-T94", "W1-T106", "W1-T984", "W1-T490"]
   files: [src/lib/sweep.ts, test/sweep-conflicted-disposition.test.ts, scripts/source-size-baseline.json]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning: blast-radius — NOT Rule 19 span. The span is one module and its own

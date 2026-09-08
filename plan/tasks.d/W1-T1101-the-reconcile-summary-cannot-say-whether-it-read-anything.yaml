@@ -80,7 +80,7 @@
   origin: "recon#escalation-reconcile-summary-cannot-express-uncertainty-2026-08-21"
   plan_refs: ["W1-T1081", "W1-T1097", "W1-T186"]
   files: [src/run-task.ts, test/escalation-reconcile-intake.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a tag per declared path,

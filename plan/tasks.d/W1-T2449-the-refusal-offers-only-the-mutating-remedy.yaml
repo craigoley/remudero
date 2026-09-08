@@ -10,7 +10,7 @@
   files: [src/lib/self-sync.ts, test/self-sync-refusal-names-the-guard-env.test.ts]
   origin: "operator-brief#readonly-verb-sync-guard-2026-08-28"
   plan_refs: ["W1-T1134", "W1-T446", "W1-T445", "W1-T486", "W1-T2427", "W1-T126", "W1-T255"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base a1013597, anchored `W1-T2449([^0-9]|$)`, `[0-9]` never

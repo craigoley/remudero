@@ -10,7 +10,7 @@
   files: [scripts/bound-kind-baseline.json, test/bound-kind-declared.test.ts]
   origin: oper#bound-kind-undeclared-2026-08-23
   plan_refs: ["W1-T1219", "W1-T312", "W1-T438"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE REPO ALREADY NAMES THE DEFECT AND HAS NOT NAMED ITS MECHANISM. CLAUDE.md states "A bound

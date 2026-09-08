@@ -38,7 +38,7 @@
   origin: architect
   plan_refs: ["§4A", "§12"]
   files: [src/lib/worker.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-07-21. Citation verified at origin/main 2d33735: collectWorkerResult's swallow site is the
     catch block at worker.ts:392-398, with the stderr push at :398 (the brief said ~391-397 - the region is

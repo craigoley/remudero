@@ -74,7 +74,7 @@
   origin: "recon#auto-leg-still-deletes-the-branch-2026-08-21"
   plan_refs: ["W1-T1050", "W1-T1079", "W1-T1081", "W1-T1097"]
   files: [src/run-task.ts, test/live-write-guard-command-sites.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — MEASURED, NOT ASSUMED:

@@ -11,7 +11,7 @@
   files: [src/lib/task-linter.ts, src/run-task.ts, test/lint-plan-proof-discrimination.test.ts]
   origin: "operator-session#proof-discrimination-enforcement-2026-09-04"
   plan_refs: ["W1-T2813", "W1-T2812", "W1-T273", "W1-T362", "W1-T963", "W1-T488"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE RULE EXISTS AND NOTHING REFUSES IT. CLAUDE.md now states that `classifyBaseProofOutcome`

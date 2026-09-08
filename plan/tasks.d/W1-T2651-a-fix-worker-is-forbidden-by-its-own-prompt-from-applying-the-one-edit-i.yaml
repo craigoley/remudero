@@ -123,7 +123,7 @@
   origin: "retro-followup#3409"
   plan_refs: ["W1-T1227", "W1-T2532", "W1-T2538", "W1-T2526", "W1-T2488"]
   files: [src/run-task.ts, test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning: blast-radius — honest on both axes, and recorded rather than exempted.

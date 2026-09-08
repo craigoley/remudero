@@ -88,7 +88,7 @@
   origin: recon#worker-awaits-notification-2026-08-13
   plan_refs: ["W1-T463"]
   files: [src/run-task.ts, test/worker-no-wait-contract.test.ts, test/run-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     MEASUREMENT AMENDMENT, 2026-08-21 — THE FINDING STANDS, IT HAS A PRICE, AND THE TRANSCRIPT NARROWS THE

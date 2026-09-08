@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§7B", "§12", "P46", "P56"]
   files: [src/lib/retro.ts, test/followup-settled-question-arm.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RE-SCOPED FROM followup:DAEMON-1788107419932:2026-08-30T16:56:33.630Z:1, whose literal remedy —

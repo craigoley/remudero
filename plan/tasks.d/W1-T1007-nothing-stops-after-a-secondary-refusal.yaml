@@ -97,7 +97,7 @@
   origin: "oper#stop-after-secondary-refusal-2026-08-18"
   plan_refs: ["W1-T468", "W1-T529", "W1-T1005", "W1-T978"]
   files: [src/lib/open-prs-rest.ts, test/open-prs-rest.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     W1-T1005 IS THE SIBLING AND NEITHER SUBSUMES THE OTHER. W1-T1005 fixes DISTRIBUTION — the pacer is

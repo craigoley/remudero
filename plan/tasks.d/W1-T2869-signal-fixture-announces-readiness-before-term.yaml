@@ -11,7 +11,7 @@
     - test/an-operator-stop-is-undone-by-the-restart-policy.test.ts
   origin: "operator-session#main-signal-fixture-readiness-race-2026-09-05"
   plan_refs: ["W1-T2586"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT b375b9afc33a03c30e1f2a092f0d62e0cd182dca: CI shard 3 failed

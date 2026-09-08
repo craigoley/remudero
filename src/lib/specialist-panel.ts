@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import type { DiffSummary, RiskBand } from "./risk-score.js";
 import type { Mount } from "./mounts.js";
 import { isTddStrict } from "./review.js";
@@ -500,5 +500,5 @@ export function renderSpecialistPanelComment(verdicts: SpecialistVerdict[]): str
  * the testable contract.
  */
 export function postSpecialistPanelComment(prUrl: string, body: string): void {
-  execFileSync("gh", buildSpecialistCommentArgs(prUrl, body), { stdio: "pipe" });
+  ghExec(buildSpecialistCommentArgs(prUrl, body), { stdio: "pipe" });
 }

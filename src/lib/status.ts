@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { ghExec, ghExecFile } from "./github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS } from "./github-transport.js";
 // W1-T2440: the pre-warm walk runs on its own OS thread (`runPrewarmWorker`), so the `execFileSync` below stays
 // synchronous without parking the process serving `/v1/status`. That worker loads THIS module a second time;
 // `isMainThread`/`workerData` gate the worker-only branch near `buildBatchedGithub`.
@@ -102,7 +104,7 @@ export function isGhRateLimitError(err: unknown): boolean {
  * healthy call and sits inside the poll interval. FAIL-SOFT: callers already degrade on the kill's throw.
  * Why: an unbounded sweep ran 10:57-11:54 — docs/forensics/status.md
  */
-export const GH_CALL_TIMEOUT_MS = 60_000;
+export const GH_CALL_TIMEOUT_MS = DEFAULT_GH_CALL_TIMEOUT_MS;
 
 /** A PR's identity + GitHub merge state, as seen by the {@link GitHub} gateway. */
 export interface PrRef {
@@ -2953,9 +2955,7 @@ export type RequiredContextsRead =
 export function readRequiredStatusCheckContexts(owner: string, repo: string, branch = "main"): RequiredContextsRead {
   let raw: string;
   try {
-    raw = execFileSync(
-      "gh",
-      ["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`],
+    raw = ghExec(["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
     );
   } catch (e) {
@@ -3030,7 +3030,7 @@ export function ghGateway(
     // rate-limit or auth message appears. `timeout` is not optional hardening — this call is synchronous, so an
     // unbounded one parks the whole process (see {@link GH_CALL_TIMEOUT_MS}).
     ((args: string[]) =>
-      execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: GH_CALL_TIMEOUT_MS }));
+      ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: GH_CALL_TIMEOUT_MS }));
   // W1-T2219: these back `readState()`. Wrapping the ONE call point every query method funnels through means
   // neither needs its own bookkeeping. In-flight is observable only from a REENTRANT call.
   let attempted = false;
@@ -3335,7 +3335,7 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
   // a reason to keep the walk on the serving thread.
   const walkPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
   const runSync = (args: string[]): string =>
-    execFileSync(req.ghBin, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS });
+    ghExecFile(req.ghBin, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS });
   const makeFetchJson = (): { fetchJson: (args: string[]) => unknown; bytes: () => number } => {
     let bytes = 0;
     return {
@@ -3495,7 +3495,7 @@ export function buildBatchedGithub(
     // closure is EVERY synchronous call made OUTSIDE the warm worker — a test that sets it must get the SAME
     // fake binary here, or a read landing between warms reaches the real one.
     ((args: string[]) =>
-      execFileSync(opts.ghBin ?? "gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS }));
+      ghExecFile(opts.ghBin ?? "gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS }));
   // W1-T265: the cross-refresh row cache the REST delta stops against, held at gateway scope rather than inside
   // the index builder, which deliberately replaces its cache with an EMPTY one on a failed fetch (the W1-T181
   // pairing) — reusing that as the delta base would turn one transient failure into a permanent cold re-walk.

@@ -139,7 +139,7 @@
     - claim: "a console whose boot sha still matches the tree never exits"
       proof: "unit test: test/serve-stale-code-exit.test.ts"
   files: [src/lib/serve.ts, test/serve-stale-code-exit.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#console-never-learns-its-code-is-stale-2026-08-24"
   plan_refs: ["W1-T260", "W1-T154", "W1-T2222"]

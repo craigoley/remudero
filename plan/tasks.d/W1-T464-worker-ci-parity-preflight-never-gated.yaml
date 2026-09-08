@@ -108,7 +108,7 @@
   origin: recon#worker-preflight-never-gated-2026-08-13
   plan_refs: []
   files: [src/lib/compaction.ts, src/run-task.ts, test/ci-parity-contract.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT, deliberately. `sizingViolation` (`src/lib/task-linter.ts`)
     blocks at `>=2 subsystems while risk<high`, and `files:` spans `src/lib/`, `src/` and `test/`. The

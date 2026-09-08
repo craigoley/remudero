@@ -89,7 +89,7 @@
     - claim: "every existing doctor arm's verdict is unchanged by this addition"
       proof: "unit test: W1-T1209: the existing doctor arms are unchanged"
   files: [src/lib/doctor.ts, test/doctor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#nothing-watches-the-repair-arm-2026-08-22"
   plan_refs: ["W1-T1047", "W1-T1099", "W1-T1127", "W1-T1129", "W1-T1110"]

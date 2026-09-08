@@ -82,7 +82,7 @@
   origin: recon#close-deletes-the-branch-the-ruling-preserves-2026-08-16
   plan_refs: ["W1-T919", "W1-T447", "W1-T533"]
   files: [src/run-task.ts, test/live-write-guard-command-sites.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. Not Rule 19 span — the two paths sit in one subsystem — but
     blast radius: this changes what an UNATTENDED destructive act does to a branch, and getting the

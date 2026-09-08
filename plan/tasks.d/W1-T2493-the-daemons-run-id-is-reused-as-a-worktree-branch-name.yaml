@@ -10,7 +10,7 @@
   files: [src/run-task.ts, src/lib/worker.ts, test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts]
   origin: "operator-log#daemon-90m-2026-08-30"
   plan_refs: ["W1-T447", "W1-T1036"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED LIVE, THREE TIMES IN ONE NINETY-MINUTE WINDOW, ON ONE DAEMON PROCESS. The operator's

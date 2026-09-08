@@ -114,7 +114,7 @@
     - claim: "a genuinely stale lock is still reclaimed on the existing three-rung predicate"
       proof: "unit test: test/git-config-lock-contention.test.ts"
   files: [src/run-task.ts, src/lib/worker.ts, test/git-config-lock-contention.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#git-config-lock-contention-2026-08-22"
   plan_refs: ["W1-T1036", "W1-T1127", "W1-T1049", "W1-T1110", "W1-T1116"]

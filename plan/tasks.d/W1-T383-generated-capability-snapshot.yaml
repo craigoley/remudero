@@ -77,7 +77,7 @@
   origin: oper#laws-filings-2026-08-06
   plan_refs: ["P48", "§8A", "W1-T48"]
   files: [MASTER-PLAN.md, plan/plan-index.json, scripts/generate-capability-snapshot.mjs, package.json, test/capability-snapshot.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the deliverable is a generator, a block, and a byte-compare gate; every proof
     greps text the task creates. NOT ruling-shaped: no DECISIONS.md, no rule amendment — the block

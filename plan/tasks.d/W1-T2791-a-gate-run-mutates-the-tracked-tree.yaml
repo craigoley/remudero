@@ -10,7 +10,7 @@
   files: [test/a-gate-run-leaves-the-tracked-tree-clean.test.ts]
   origin: "operator-decision#w1-t2791-file-gate-mutates-tracked-tree-2026-09-03"
   plan_refs: ["W1-T2650", "W1-T2734", "W1-T2755", "W1-T2790"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RE-SCOPED 2026-09-04, operator-approved. THE WORLD MOVED UNDER THIS SHARD; the criteria below

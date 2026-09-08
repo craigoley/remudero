@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§9", "W1-T265", "W1-T268", "W1-T333", "W1-T2800"]
   files: [src/lib/worker-provider.ts, src/lib/worker.ts, test/the-capacity-read-cannot-say-which-account-it-measured.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS EXPECTED OPERATOR BEHAVIOUR, NOT A MALFUNCTION, WHICH IS WHY IT RECURS. The operator

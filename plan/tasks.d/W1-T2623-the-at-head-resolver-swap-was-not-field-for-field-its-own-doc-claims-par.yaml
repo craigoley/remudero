@@ -130,7 +130,7 @@
   origin: architect
   plan_refs: ["§5", "§5C", "W1-T2462", "W1-T2432", "W1-T120", "W1-T367"]
   files: [src/lib/review.ts, src/run-task.ts, test/resolver-swap-field-parity.test.ts, test/review-resolves-criteria-at-the-prs-own-head.test.ts, test/review-wires-criteria-at-head.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RATIFIES the follow-up harvest `followup:W1-T2462-1788054829616:2026-08-30T01:56:18.209Z:1` —

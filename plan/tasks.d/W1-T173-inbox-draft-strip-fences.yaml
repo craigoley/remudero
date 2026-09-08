@@ -32,7 +32,7 @@
   origin: architect
   plan_refs: ["§2", "§11"]
   files: [src/lib/inbox.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "Fixture = P19, the inbox's inaugural ratification item, falsely not-ready because its draft arrived
     markdown-fenced; hand-stripped state-side (state/inbox-drafts.json) to unblock. Single-subsystem (the W1-T110

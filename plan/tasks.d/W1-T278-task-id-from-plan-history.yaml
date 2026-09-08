@@ -44,7 +44,7 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the whole thing is a set union over a git read, assertable against a seeded fixture repo.
     risk:medium — ONE subsystem by Rule 19's count. It argues DOWN toward low (an interactive verb, no

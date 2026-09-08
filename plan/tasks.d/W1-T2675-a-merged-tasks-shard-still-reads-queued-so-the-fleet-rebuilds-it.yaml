@@ -10,7 +10,7 @@
   files: [src/lib/drain.ts, test/a-merged-tasks-shard-still-reads-queued-so-the-fleet-rebuilds-it.test.ts]
   origin: "operator-session#3512-misattribution-2026-09-02"
   plan_refs: ["W1-T1000002", "W1-T2581"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED, AND IT COST A FULL PR LIFECYCLE ON 2026-09-01. W1-T1000002 merged as #2376 on

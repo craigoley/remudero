@@ -123,7 +123,7 @@
     - claim: "the declined strike is named in the ledger and no conflict is resolved by the rung"
       proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
   files: [src/run-task.ts, src/lib/sweep.ts, test/fix-rung-authorship-stand-down.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#fix-rung-dispatches-without-re-reading-2026-08-23"
   plan_refs: ["W1-T1219", "W1-T1275", "W1-T1223", "W1-T1269", "W1-T1095"]

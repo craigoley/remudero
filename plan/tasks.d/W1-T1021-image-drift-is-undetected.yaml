@@ -86,7 +86,7 @@
   origin: "oper#image-drift-undetected-2026-08-19"
   plan_refs: ["W1-T496", "W1-T490"]
   files: [src/lib/image-drift.ts, src/lib/status-board.ts, src/run-task.ts, test/image-drift.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL

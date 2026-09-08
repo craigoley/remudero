@@ -126,7 +126,7 @@
   origin: recon#worker-told-to-write-the-wrong-tree-2026-08-15
   plan_refs: ["W1-T494", "W1-T471", "W1-T497"]
   files: [src/run-task.ts, test/recon-degrade.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and the blast radius is
     genuinely high here because the wiring site is the file every other task contends for.

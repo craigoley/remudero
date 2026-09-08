@@ -91,7 +91,7 @@
   origin: oper#console-liveness-followup-2026-08-05
   plan_refs: ["W1-T289", "W1-T179", "§4B"]
   files: [src/lib/fs-race-safe.ts, src/lib/inflight-lock.ts, src/lib/drain-lock.ts, src/lib/status.ts, test/lock-holder-identity.test.ts, test/inflight-lock.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED as the named follow-up to the inflight-lock liveness anchor. The anchor's own PR body states
     this ceiling rather than hiding it — the lock's startedAt is never compared against a ceiling and its

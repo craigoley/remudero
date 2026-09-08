@@ -88,7 +88,7 @@
       proof: "unit test: test/tailnet-identity-scope.test.ts"
     - claim: "the read and write scope boundary is unchanged — every write-scoped route still requires write scope, whether the caller proved identity or presented a token"
       proof: "unit test: test/service.test.ts"
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is an assertion over the service's own auth decision against a
     constructed request, with no operator present. It builds a mechanism and touches no DECISIONS.md,

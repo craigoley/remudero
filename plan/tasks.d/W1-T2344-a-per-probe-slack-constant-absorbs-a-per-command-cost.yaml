@@ -10,7 +10,7 @@
   files: [src/lib/containment.ts, test/containment.test.ts]
   origin: "operator-brief#containment-probe-turns-2026-08-26"
   plan_refs: ["W1-T2201", "W1-T2238", "W1-T2271", "W1-T1281", "W1-T1066"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-08-26 FROM `containment.probe` LEDGER ROWS, which carry `turns_exhausted`,

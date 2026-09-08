@@ -11,7 +11,7 @@
   files: [DECISIONS.md]
   origin: "operator-session#deep-research-2026-09-07"
   plan_refs: ["W1-T476", "W1-T2575", "W1-T167", "P48"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at b8892bc4. `src/lib/drain.ts`'s `dispatchOrder` -> `compareDispatch` is a strict

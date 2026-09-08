@@ -10,7 +10,7 @@
   files: [scripts/claude-md-budget-ratchet.mjs, test/a-net-positive-claude-md-diff-is-not-refused.test.ts]
   origin: "operator-decision#w1-t2831-net-byte-gate-2026-09-04"
   plan_refs: ["W1-T2507", "W1-T503", "W1-T2805"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     TWO DIFFERENT RULES, ONE OF THEM UNENFORCED. `scripts/claude-md-budget-ratchet.mjs` compares

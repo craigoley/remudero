@@ -11,7 +11,7 @@
   files: [.github/workflows/ci.yml, test/a-moving-base-attributes-another-lanes-lines.test.ts]
   origin: "operator-session#four-false-reds-in-one-afternoon-2026-09-07"
   plan_refs: ["W1-T3017", "W1-T2428", "W1-T1033", "W1-T2732"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON `origin/main` 2026-09-07. `.github/workflows/ci.yml` assigns

@@ -162,5 +162,5 @@
       proof: "unit test: test/coverage-ratchet.test.ts"
     - claim: "a plan-only diff passes the gate once the remedy lands"
       proof: "unit test: test/coverage-ratchet.test.ts"
-  status: queued
+  status: merged
   attempts: 0

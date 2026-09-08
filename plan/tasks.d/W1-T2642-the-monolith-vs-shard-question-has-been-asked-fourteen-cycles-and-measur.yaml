@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§5C", "§12", "W1-T122", "W1-T410", "W1-T2477"]
   files: [src/lib/plan-coherence.ts, src/lib/retro.ts, test/plan-coherence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     FILED FROM A RESEARCH FOLLOW-UP OF RUN W1-T2477 (PR #3318): "check plan/tasks.yaml monolith vs

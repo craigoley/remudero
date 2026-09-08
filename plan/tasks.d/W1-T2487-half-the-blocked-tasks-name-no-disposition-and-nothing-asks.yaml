@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, src/run-task.ts, test/a-blocked-task-must-name-its-disposition.test.ts]
   origin: "operator-brief#agree-with-your-recommendations-2026-08-30"
   plan_refs: ["W1-T2474", "W1-T2486"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2474 MADE THIS FIELD LOAD-BEARING AND THAT IS WHAT MAKES ITS ABSENCE A DEFECT RATHER THAN

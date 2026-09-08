@@ -11,7 +11,7 @@
   files: [.github/workflows/ci.yml, package.json, test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts, test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts, test/acceptance-block-diagnostics.test.ts, test/base-blob-read-failure.test.ts, test/coverage-session-blanking.test.ts, test/dispatch-lifetime-breaker.test.ts, test/fast-gate-admits-the-census-class.test.ts, test/git-fixture-gc-hygiene.test.ts, test/ledger-rotation.test.ts, test/merge-lcov.test.ts, test/reapable-prefix.test.ts, test/review-wires-criteria-at-head.test.ts, test/route-scope-matrix.test.ts, test/serve-browser-teardown.test.ts, test/task-id-reservation.test.ts, test/temp-hygiene-suite.test.ts, test/the-local-gate-writes-coverage-where-ci-does.test.ts, test/tracked-source-write-guard.test.ts, test/unexecutable-proof-visibility.test.ts]
   origin: "operator-session#detector-shipped-unwired-2026-09-02"
   plan_refs: ["W1-T2292", "W1-T2291", "W1-T1041", "W1-T2716", "W1-T2276"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A DETECTOR NOBODY RUNS IS NOT A GATE. W1-T2292 built

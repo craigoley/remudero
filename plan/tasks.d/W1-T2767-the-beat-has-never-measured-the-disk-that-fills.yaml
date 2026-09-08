@@ -12,7 +12,7 @@
     - test/fleet-heartbeat.test.ts
   origin: "oper#os-disk-full-2026-09-02"
   plan_refs: ["W1-T496", "W1-T1082", "W1-T2757", "W1-T2758"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE INSTRUMENT WAS HONEST AND ANSWERED THE WRONG QUESTION. At 2026-09-02T03:17:02Z the 29G OS

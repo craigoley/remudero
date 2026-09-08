@@ -11,7 +11,7 @@
   files: [test/the-wipe-test-can-only-ask-about-learnings.test.ts]
   origin: "operator-session#hermetic-cli-entrypoint-test-2026-09-04"
   plan_refs: ["W1-T2812", "W1-T2810"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED IN BOTH STATES on 2026-09-04, on the SAME branch, with no source change between them.

@@ -91,7 +91,7 @@
   origin: "oper#follow-up-brief-2026-09-02"
   plan_refs: ["W1-T86", "W1-T1252", "W1-T1253", "W1-T1256", "W1-T2512", "W1-T1259", "W1-T2579", "§8A"]
   files: [src/lib/wipe-test.ts, src/run-task.ts, src/lib/measurement-cadence.ts, src/lib/policy.ts, test/wipe-test-cadence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning:span — the harness module, the daemon tick, the measurement report and

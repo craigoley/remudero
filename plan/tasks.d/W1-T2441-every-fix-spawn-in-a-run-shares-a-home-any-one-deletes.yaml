@@ -10,7 +10,7 @@
   files: [src/lib/worker.ts, src/lib/worker-home.ts, test/worker-home-reap-visibility.test.ts]
   origin: "operator-brief#shared-fix-worker-home-2026-08-28"
   plan_refs: ["W1-T170", "W1-T2261", "W1-T2407", "W1-T1064", "W1-T115", "W1-T131"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base d69e5441, anchored `W1-T2441([^0-9]|$)` with a `[0-9]`

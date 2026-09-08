@@ -10,7 +10,7 @@
   files: [src/lib/reply-interpreter.ts, src/lib/panel-actions.ts, test/a-reply-is-understood-before-it-is-acted-on.test.ts]
   origin: "operator-brief#an-interpreter-on-the-way-back-to-rmd-2026-08-30"
   plan_refs: ["W1-T2496", "W1-T2494", "W1-T2498"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CLARIFICATION LOOP IS BUILT AND FENCED INTO ONE SUBJECT. `generateGapQuestions`,

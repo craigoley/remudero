@@ -59,7 +59,7 @@
   origin: feedback#fb-1784762611444-e6bdc0
   plan_refs: ["§8B", "§5C"]
   files: [src/lib/compaction.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED FROM fb-1784762611444-e6bdc0, the second half of that feedback: W1-T294 makes a local run mean
     what a CI run means, and this task is what makes a worker do it. depends_on W1-T294 because a contract line

@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§8", "W1-T2349", "W1-T2875"]
   files: [.github/workflows/fleet-heartbeat-watch.yml]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     `scripts/fleet-heartbeat.sh` carries the daemon's own last-poll timestamp precisely so that a

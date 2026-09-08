@@ -68,7 +68,7 @@
   origin: feedback#fb-1785237596465-45d06d
   plan_refs: ["§8A", "W1-T929", "W1-T419", "W1-T425"]
   files: [src/lib/digest.ts, src/lib/status-board.ts, test/learnings-injection-status.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — an aggregate over fixture ledger lines and a rendered block are entirely
     fixture-decidable offline; no live daemon, no network.

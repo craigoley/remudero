@@ -48,7 +48,7 @@
   origin: architect
   plan_refs: ["§7"]
   files: [src/lib/ledger.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — rotation is a pure function over a file, and the retention property is directly
     assertable.

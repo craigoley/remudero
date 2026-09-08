@@ -134,7 +134,7 @@
     - claim: "resume is still the only thing that clears a pause"
       proof: "unit test: test/fleet-hold-shared.test.ts"
   files: [src/lib/fleet-control.ts, src/run-task.ts, test/fleet-hold-shared.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#fleet-hold-is-per-host-2026-08-22"
   plan_refs: ["W1-T1065", "W1-T936", "W1-T972", "W1-T483", "W1-T509", "W1-T1040"]

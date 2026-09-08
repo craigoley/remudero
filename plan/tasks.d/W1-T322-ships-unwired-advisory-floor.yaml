@@ -76,7 +76,7 @@
   origin: "oper#audit-filings-2026-08-04 (audit §1d/§3b/§4; W1-T316's note names the fixtures)"
   plan_refs: ["W1-T316", "W1-T310", "W1-T297"]
   files: [src/lib/reachability.ts, src/lib/review.ts, src/lib/retro.ts, src/run-task.ts, test/ships-unwired-floor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high — it touches the review path that fronts every merge, even though advisory-only
     by construction. budget 100: a new module, two consumers, five-claim lock. The call-site

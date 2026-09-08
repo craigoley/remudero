@@ -111,7 +111,7 @@
     - claim: "the preflight exit code follows what the gate would do with the same body"
       proof: "unit test: test/acceptance-preflight-agrees-with-gate.test.ts"
   files: [src/run-task.ts, test/acceptance-preflight-agrees-with-gate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "recon#acceptance-preflight-gate-divergence-2026-08-24"
   plan_refs: ["W1-T387", "W1-T1097"]

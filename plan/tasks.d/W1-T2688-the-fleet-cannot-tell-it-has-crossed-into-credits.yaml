@@ -10,7 +10,7 @@
   files: [src/lib/account-usage.ts, test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts]
   origin: "operator-session#credit-state-is-unobserved-2026-09-02"
   plan_refs: []
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ECONOMICS CHANGE UNDER THE FLEET WITHOUT A SIGNAL. A subscription drawing on usage credits

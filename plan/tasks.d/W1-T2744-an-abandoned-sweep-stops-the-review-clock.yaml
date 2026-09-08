@@ -11,7 +11,7 @@
   files: [src/lib/daemon.ts, src/lib/sweep.ts, test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts]
   origin: "operator-session#review-outage-2026-09-03"
   plan_refs: ["W1-T2379", "W1-T2582", "W1-T1272", "W1-T2565"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE OUTAGE IS MEASURED AT BOTH ENDS. The live Azure daemon wrote

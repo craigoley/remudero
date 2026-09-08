@@ -10,7 +10,7 @@
   files: [scripts/mount-headroom-sweep.mjs, test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts]
   origin: "operator-session#synthesis-mounts-unmeasured-2026-09-02"
   plan_refs: ["W1-T2559", "W1-T2560"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2559 BUILT THE LEVER AND PULLED IT ONCE. It split retro, triage and inbox_draft out of the

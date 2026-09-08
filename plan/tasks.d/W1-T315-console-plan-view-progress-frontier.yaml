@@ -54,7 +54,7 @@
   origin: feedback#fb-1784770111145-cf7c24
   plan_refs: ["§7", "§7B"]
   files: [src/lib/panel-graph.ts, src/lib/serve.ts, test/plan-view.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-08-03 from feedback fb-1784770111145-cf7c24 (clause 2). depends_on REPOINTED
     [W1-T314] -> [W1-T336] on 2026-08-04, when W1-T314 was withdrawn and decomposed. THIS EDIT IS

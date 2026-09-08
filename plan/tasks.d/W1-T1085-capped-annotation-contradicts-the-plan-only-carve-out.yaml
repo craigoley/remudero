@@ -138,7 +138,7 @@
   origin: "oper#plan-only-pr-told-it-is-not-certified-2026-08-21"
   plan_refs: ["W1-T205", "W1-T229", "W1-T1076", "W1-T1020", "W1-T453", "W1-T489"]
   files: [src/lib/review.ts, src/run-task.ts, test/review.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE SHARD ASKS NOTHING BECAUSE THE RANKING WAS DECIDED BEFORE FILING, AND THE DECISION WENT

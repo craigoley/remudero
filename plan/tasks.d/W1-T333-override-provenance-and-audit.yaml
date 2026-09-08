@@ -68,7 +68,7 @@
   origin: oper#runtime-config-slice-2026-08-04
   plan_refs: ["§7", "W1-T275", "W1-T332"]
   files: [src/lib/ledger.ts, src/lib/account-usage.ts, src/lib/serve.ts, test/ledger-render-retention.test.ts, test/account-usage.test.ts, test/serve.glance.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a derivation, a ledger line, a retention set and a rendered slot, all
     machine-checkable; the strip is covered by a REAL Chromium page, which is the standard this repo

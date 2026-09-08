@@ -134,7 +134,7 @@
   origin: recon#post-fix-reverification-unwired-2026-08-13
   plan_refs: []
   files: [src/lib/sweep.ts, src/run-task.ts, test/post-fix-reverification.test.ts, test/sweep-absent-repush.test.ts, test/sweep-blocked-routing.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
     `>=2 subsystems while risk<high`, and `files:` spans `src/lib/`, `src/` and `test/`. The band is

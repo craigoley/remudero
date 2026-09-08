@@ -55,7 +55,7 @@
   origin: incident
   plan_refs: ["W1-T2537", "W1-T525", "W1-T2515"]
   files: [src/lib/classify.ts, src/lib/daemon.ts, test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning: blast-radius — a wrong classification here decides whether the fleet

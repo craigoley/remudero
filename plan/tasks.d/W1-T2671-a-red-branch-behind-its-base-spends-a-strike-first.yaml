@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts]
   origin: "operator-session#stale-base-reds-2026-09-02"
   plan_refs: ["W1-T2597"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-02, THREE INSTANCES OF ONE CAUSE. #3556 changed `src/run-task.ts` and

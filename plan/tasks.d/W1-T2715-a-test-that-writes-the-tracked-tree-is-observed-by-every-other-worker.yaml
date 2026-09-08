@@ -13,7 +13,7 @@
     - test/a-test-that-writes-the-tracked-tree-is-observed-by-every-other-worker.test.ts
   origin: "operator-session#session-audit-2026-09-02"
   plan_refs: ["W1-T2291", "W1-T131", "W1-T1217"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED, THREE INSTANCES IN ONE SESSION (2026-09-02), each found by accident rather than by a

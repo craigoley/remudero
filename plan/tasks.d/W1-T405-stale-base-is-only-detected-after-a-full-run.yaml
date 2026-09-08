@@ -59,7 +59,7 @@
   origin: azure-run-2026-08-08#stale-base
   plan_refs: ["§8A"]
   files: [src/lib/worker.ts, src/run-task.ts, test/worktree-base-currency.test.ts, test/worktree-base-currency-healthy.test.ts, test/worktree-base-currency-unreadable.test.ts, test/worktree-base-recorded.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FOUR DESIGN QUESTIONS, DECIDED HERE RATHER THAN LEFT TO THE IMPLEMENTER.
     (i) ASSERT-AND-REFUSE, NOT FAST-FORWARD, and the fleet's two precedents do not conflict once the

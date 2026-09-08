@@ -144,7 +144,7 @@
   origin: "oper#escalation-cannot-name-its-machine-2026-08-18"
   plan_refs: ["W1-T915", "W1-T433", "W1-T268", "W1-T471"]
   files: [src/lib/ledger.ts, src/lib/escalate.ts, test/ledger-host-identity.test.ts, test/escalate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THIS SUPERSEDES W1-T966 (#2094), WHICH IS OPEN AND UNMERGED AS THIS IS FILED. That shard covers

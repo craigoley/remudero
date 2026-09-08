@@ -10,7 +10,7 @@
   files: [src/lib/daemon.ts, test/daemon-dispatch-reachability.test.ts]
   origin: oper#dispatch-is-twelfth-and-skippable-2026-08-25
   plan_refs: ["W1-T160", "W1-T276", "W1-T1044", "W1-T1272"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main b5dc5a11 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

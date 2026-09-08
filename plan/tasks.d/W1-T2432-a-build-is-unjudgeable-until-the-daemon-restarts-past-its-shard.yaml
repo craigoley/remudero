@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/review-resolves-criteria-at-the-prs-own-head.test.ts]
   origin: "operator-brief#unjudgeable-until-restart-2026-08-28"
   plan_refs: ["W1-T2315", "W1-T126", "W1-T205", "W1-T2280", "W1-T2426"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept before a byte of this file was written, each control drawn from the

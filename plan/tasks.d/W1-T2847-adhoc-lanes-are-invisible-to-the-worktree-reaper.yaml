@@ -125,7 +125,7 @@
   origin: "oper#adhoc-lane-leak-2026-09-04"
   plan_refs: ["W1-T175", "W1-T378", "W1-T381", "W1-T406", "W1-T411"]
   files: [src/lib/worker.ts, test/adhoc-lane-root.test.ts, test/adhoc-lane-reap.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     SCOPE RATIFIED BY THE OPERATOR BEFORE FILING. Four remediation shapes were put to the operator

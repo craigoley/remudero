@@ -15,7 +15,7 @@
     - docs/operator-guide.md
   origin: "operator-session#durable-azure-dual-provider-config-2026-09-01"
   plan_refs: ["W1-T1010", "W1-T1069", "W1-T505"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON THE LIVE AZURE DAEMON 2026-09-01: both subscription credentials work inside the

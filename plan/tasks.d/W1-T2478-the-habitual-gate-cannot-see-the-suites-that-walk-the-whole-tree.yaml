@@ -10,7 +10,7 @@
   files: [src/lib/ci-parity.ts, package.json, test/fast-gate-admits-the-census-class.test.ts]
   origin: "operator-brief#next-item-2026-08-30"
   plan_refs: ["W1-T373", "W1-T1266", "W1-T294", "W1-T438"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE EXISTING DESIGN IS CITED AND LARGELY UPHELD, NOT STEAMROLLED. `FAST_GATE_STEPS`

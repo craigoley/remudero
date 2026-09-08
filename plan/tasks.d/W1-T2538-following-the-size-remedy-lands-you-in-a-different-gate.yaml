@@ -68,7 +68,7 @@
   origin: "retro-followup#3377"
   plan_refs: ["W1-T2526", "W1-T2488", "W1-T2532", "W1-T2533"]
   files: [scripts/source-size-ratchet.mjs, test/a-source-file-cannot-outgrow-its-baseline.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high with band_meaning: span — Rule 19's SPAN measure, declared rather than exempted. The

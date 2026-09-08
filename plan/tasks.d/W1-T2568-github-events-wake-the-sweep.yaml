@@ -23,7 +23,7 @@
     - docs/operator-guide.md
   origin: "operator-brief#automatic-pr-queue-github-event-response-2026-09-01"
   plan_refs: ["W1-T463", "W1-T473", "W1-T526", "W1-T1272", "W1-T2430", "W1-T2519"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE LIVE GAP ────────────────────────────────────────────────────────────────────────────

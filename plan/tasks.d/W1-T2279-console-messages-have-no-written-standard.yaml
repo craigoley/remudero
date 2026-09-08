@@ -10,7 +10,7 @@
   files: [docs/operator-message-standard.md, test/operator-message-standard.test.ts]
   origin: oper#console-messages-have-no-written-standard-2026-08-25
   plan_refs: ["W1-T2264", "W1-T2273", "W1-T2244", "W1-T238", "W1-T1281"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (0) WHAT THE STANDARD SAYS, AND WHERE THAT WAS CONFIRMED — READ FIRST, BECAUSE THIS SHARD

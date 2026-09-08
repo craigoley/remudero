@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§5", "§12"]
   files: [test/source-text-assertion-census.test.ts, scripts/source-text-assertion-baseline.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-44 (OBSERVED). At f7ceb86, `git grep -nE

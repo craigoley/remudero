@@ -120,7 +120,7 @@
     - claim: "the other allowlisted variables cross unchanged in every one of those cases"
       proof: "unit test: test/proof-env-git-config-triple.test.ts"
   files: [src/lib/review.ts, test/proof-env-git-config-triple.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: recon#proof-env-git-config-count-2026-08-21
   plan_refs: ['W1-T499', 'W1-T1077', 'W1-T387']

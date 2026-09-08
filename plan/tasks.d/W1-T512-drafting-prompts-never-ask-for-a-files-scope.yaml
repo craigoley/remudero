@@ -99,7 +99,7 @@
   origin: recon#drafting-prompts-omit-scope-2026-08-15
   plan_refs: ["W1-T504", "W1-T471", "W1-T476"]
   files: [src/lib/inbox.ts, src/lib/triage.ts, src/lib/plan-architect.ts, src/lib/relint.ts, src/run-task.ts, test/drafting-prompts-require-scope.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across four `src/lib` modules plus `src/` and
     `test/`, so `sizingViolation` (`src/lib/task-linter.ts`) returns early before `subsystemsOf` is

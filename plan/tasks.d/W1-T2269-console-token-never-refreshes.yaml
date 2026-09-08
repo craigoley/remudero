@@ -184,7 +184,7 @@
     - claim: "no credential value reaches a log line, a ledger row, or disk on any arm of the new path"
       proof: "unit test: test/console-token-refresh.test.ts"
   files: [src/lib/serve.ts, src/lib/github-app.ts, deploy/serve-container.sh, test/console-token-refresh.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#console-token-never-refreshes-2026-08-25"
   plan_refs: ["W1-T2264", "W1-T2211", "W1-T1068", "W1-T1069", "W1-T1222", "W1-T2218", "W1-T2222", "W1-T2235", "W1-T181"]

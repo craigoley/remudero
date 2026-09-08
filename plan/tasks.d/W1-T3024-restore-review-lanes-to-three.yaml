@@ -11,7 +11,7 @@
   files: [plan/policy.yaml, test/review-lane-budget.test.ts, test/review-lane-fairness.test.ts, test/event-review-backlog-drain.test.ts, test/plan-filing-admission-bound.test.ts, test/adaptive-review-capacity.test.ts]
   origin: "operator-session#raise-review-lanes-2026-09-07"
   plan_refs: ["W1-T1049", "W1-T2584", "W1-T2853", "W1-T3025"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OPERATOR DIRECTION, 2026-09-07: raise the review lanes. This records what justifies it and what

@@ -62,7 +62,7 @@
   origin: architect
   plan_refs: ["§4B", "§5C"]
   files: [src/run-task.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-07-21 as a standing-rule-21 correcting follow-up to W1-T224, which is merged and so cannot
     be amended. The correction is to the DIAGNOSIS, not the obligations - W1-T224's flake disposition,

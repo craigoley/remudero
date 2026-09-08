@@ -56,7 +56,7 @@ export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 const JWT_BACKDATE_SEC = 60;
 const JWT_TTL_SEC = 9 * 60;
 
-/** Node's `fetch` has no default timeout, so a hung connection would await forever and — since
+/** Node's `fetch` has no default timeout; W1-T2896 leaves this App-JWT exchange outside CLI transport, so a hung connection would await forever and — since
  *  {@link startInstallationTokenRefresh}'s loop only arms its next timer after this promise
  *  settles — permanently kill the refresh loop. 20s is a generous multiple of a normal exchange's
  *  cost, a reasoned bound rather than a fitted measurement (see the forensics page), and stays

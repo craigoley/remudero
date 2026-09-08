@@ -17,6 +17,23 @@ import type { WorkflowRunObservation } from "./workflow-run.js";
 // a dependency (MEASURED: importing this off sweep.js took it 13 -> 24 warnings), and sweep.ts
 // imports a VALUE back off this module — see supersession.ts's own header.
 import type { SupersessionVerdict } from "./supersession.js";
+import { withGhBudgetReading, type GhBudgetReading } from "./github-transport.js";
+export {
+  createGhCallPacer,
+  DEFAULT_GH_PACE_FLOOR_FRACTION,
+  DEFAULT_GH_PACE_LOW_WATER_FRACTION,
+  DEFAULT_GH_PACE_MIN_GAP_MS,
+  DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS,
+  DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS,
+  DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION,
+  DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS,
+  defaultGhRetryAfterSeconds,
+  GhPaceFloorStandDownError,
+  paceGhEntry,
+  type GhBudgetReading,
+  type GhCallPacer,
+  type GhRefusalBackoffOpts,
+} from "./github-transport.js";
 
 /** W1-T2779: injected from run-task.ts, which already owns the shared isInPlanScope import. Keeping
  * this leaf unaware of plan-architect avoids closing three runtime dependency cycles. */
@@ -27,240 +44,6 @@ export type PlanPathPredicate = (path: string) => boolean;
  *  rejects, and the `--slurp` that fixes that cannot be combined with `--jq`. */
 export function openPrsRestArgs(owner: string, repo: string): string[] {
   return ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`];
-}
-
-/* ────────────────────────────────────────────────────────────────────────────────────────────
- * Pacing (W1-T468). GitHub's secondary limit fires on request rate, not on remaining volume: one
- * poll tick fires three independently built REST reads — this enumeration plus lib/status.ts's
- * board PR list and issue list — into the same wall-clock second. Invariant: {@link GhCallPacer}
- * is ONE shared, tick-lifetime instance threaded through every guarded site, because three
- * separately polite call sites still collide at second zero. The limit is a signal to slow down,
- * never to retry, so the fix is spacing (CLAUDE.md, "CI and merging").
- * ──────────────────────────────────────────────────────────────────────────────────────────── */
-
-/** Minimum milliseconds {@link GhCallPacer} enforces between guarded `gh` calls, absent a
- *  rate-limit-classified failure. The measured trigger is three reads inside one second, so a floor
- *  past one second keeps them apart, at ~4.5s of a 60s poll. */
-export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
-
-/** The widened gap every later guarded call switches to once any is classified `rate_limit`: a
- *  classified failure must change behaviour, not just the ledger. One pacer per daemon start, so a hit
- *  slows this tick and the next; a clean result narrows back to {@link DEFAULT_GH_PACE_MIN_GAP_MS}. */
-export const DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS = 10_000;
-
-/** What the bucket a guarded call just drew from has left (W1-T525). Structural rather than a bare
- *  number, so the comparison is always in-bucket: `resource` names the bucket and the reading carries
- *  its denominator. Trap: `search` caps at 30 and `core` at 5,000 — one absolute floor fits neither. */
-export interface GhBudgetReading {
-  remaining: number;
-  limit: number;
-  resource: string;
-}
-
-/** The share of a bucket's limit at or below which {@link createGhCallPacer} widens its gap without
- *  waiting for a failure. Invariant: this is pacing, not a floor — it refuses no call and stands
- *  nothing down. {@link DEFAULT_GH_PACE_FLOOR_FRACTION} is the half that refuses (W1-T529). */
-export const DEFAULT_GH_PACE_LOW_WATER_FRACTION = 0.1;
-
-/** The share of a bucket's limit at or below which a guarded call stands down instead of running
- *  (W1-T529). Invariant: lower than {@link DEFAULT_GH_PACE_LOW_WATER_FRACTION}, so pacing slows calls
- *  well before the floor refuses one. Why: docs/forensics/open-prs-rest.md. */
-export const DEFAULT_GH_PACE_FLOOR_FRACTION = 0.02;
-
-/** Thrown by {@link GhCallPacer.wait} when the bucket the last guarded call reported sat at or below the
- *  floor. Degrade, do not retry: the failure class is exhaustion (W1-T529). Invariant: `call` never runs
- *  when this throws, because {@link paceGhEntry} keeps every `wait()` outside its own `try`. */
-export class GhPaceFloorStandDownError extends Error {
-  readonly resource: string;
-  readonly remaining: number;
-  readonly limit: number;
-  constructor(budget: GhBudgetReading) {
-    super(
-      `gh call pacer stood down: ${budget.resource} at ${budget.remaining}/${budget.limit}, at or below the floor — refusing rather than spending what's left`,
-    );
-    this.name = "GhPaceFloorStandDownError";
-    this.resource = budget.resource;
-    this.remaining = budget.remaining;
-    this.limit = budget.limit;
-  }
-}
-
-/** Paces independent `gh` call sites sharing one daemon poll tick (W1-T468). `wait()` blocks until
- *  the current gap has elapsed since the last call through this instance; `recordResult()` feeds an
- *  outcome back, so a rate-limit hit widens what follows. */
-export interface GhCallPacer {
-  /** Block until it is safe to issue the next guarded call, then record that one starts now. Trap: call
-   *  this immediately before the guarded call, never after — pacing bounds the gap between calls, never
-   *  a call's duration. Throws {@link GhPaceFloorStandDownError} on an armed floor (W1-T529). */
-  wait(): void;
-  /** Record how the call `wait()` just gated resolved: `true` for a rate-limit-classified failure,
-   *  `false` for anything else, success included.
-   *
-   *  `budget` is the reading `ghJson` (lib/worker.ts) parsed off the same response the guarded call
-   *  returned, never a separate probe about a different bucket. At or below
-   *  {@link DEFAULT_GH_PACE_LOW_WATER_FRACTION} it widens the gap; at or below
-   *  {@link DEFAULT_GH_PACE_FLOOR_FRACTION} it also arms the floor, so the next `wait()` throws —
-   *  one object read at two thresholds, never a second pacer (W1-T525, W1-T529). */
-  recordResult(rateLimited: boolean, budget?: GhBudgetReading): void;
-  /** Optional. Block for exactly `ms` on the same clock `wait()` blocks on, so {@link paceGhEntry}'s
-   *  refusal backoff reuses this pacer's clock rather than a second, uninjectable one (W1-T1007). Trap:
-   *  absent on a fixture implementing only `wait`/`recordResult`; `paceGhEntry` calls it through `?.`,
-   *  so such a fixture runs the bounded retry loop and cannot hang. */
-  sleepSync?(ms: number): void;
-}
-
-/** Build a {@link GhCallPacer}. `now`/`sleepSync` are injectable, mirroring this codebase's other
- *  synchronous-clock seams, so a test asserts the gap arithmetic and the widen/heal transitions without
- *  a real wait. The default blocks and is deliberately not `setTimeout`: every guarded site already
- *  shells `gh` through synchronous `execFileSync`. */
-export function createGhCallPacer(
-  opts: {
-    minGapMs?: number;
-    rateLimitGapMs?: number;
-    lowWaterFraction?: number;
-    /** W1-T529: overrides {@link DEFAULT_GH_PACE_FLOOR_FRACTION}. */
-    floorFraction?: number;
-    now?: () => number;
-    sleepSync?: (ms: number) => void;
-  } = {},
-): GhCallPacer {
-  const minGapMs = opts.minGapMs ?? DEFAULT_GH_PACE_MIN_GAP_MS;
-  const rateLimitGapMs = opts.rateLimitGapMs ?? DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS;
-  const lowWaterFraction = opts.lowWaterFraction ?? DEFAULT_GH_PACE_LOW_WATER_FRACTION;
-  const floorFraction = opts.floorFraction ?? DEFAULT_GH_PACE_FLOOR_FRACTION;
-  const now = opts.now ?? (() => Date.now());
-  const sleepSync = opts.sleepSync ?? defaultBlockingSleepSync;
-  let lastCallAt: number | undefined;
-  let gapMs = minGapMs;
-  // W1-T529: the reading that armed the floor, set by `recordResult` and consumed by the very next
-  // `wait()` — never left to latch. This pacer lives for its owner's whole lifetime, so a floor
-  // that latched would refuse forever: nothing would call through it to observe a reset bucket.
-  // Why: spending one call to re-derive beats never spending one again — docs/forensics/open-prs-rest.md.
-  let standDown: GhBudgetReading | undefined;
-  return {
-    wait() {
-      if (standDown) {
-        const reading = standDown;
-        standDown = undefined;
-        throw new GhPaceFloorStandDownError(reading);
-      }
-      if (lastCallAt !== undefined) {
-        const remaining = gapMs - (now() - lastCallAt);
-        if (remaining > 0) sleepSync(remaining);
-      }
-      lastCallAt = now();
-    },
-    recordResult(rateLimited, budget) {
-      // In-bucket, and fail toward NOT widening on a nonsense denominator: a limit of 0 or less
-      // carries no share to compare against. A reactive `rateLimited` still widens regardless.
-      const lowWater = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * lowWaterFraction;
-      gapMs = rateLimited || lowWater ? rateLimitGapMs : minGapMs;
-      // W1-T529: re-armed from this call's own reading every time, never accumulated, so a later
-      // healthy reading clears a stale trip exactly as `gapMs` narrows back on one.
-      standDown = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * floorFraction ? budget : undefined;
-    },
-    sleepSync,
-  };
-}
-
-/** Real blocking wait for {@link createGhCallPacer}. Node has no synchronous timer, so this parks
- *  the thread on a private `SharedArrayBuffer` via `Atomics.wait` — the discipline
- *  `GH_CALL_TIMEOUT_MS` (lib/status.ts) already accepts for this daemon's one thread. */
-function defaultBlockingSleepSync(ms: number): void {
-  if (ms <= 0) return;
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-/** Floor wait before {@link paceGhEntry} retries a `rate_limit` refusal carrying no parseable
- *  `Retry-After` (W1-T1007). One minute, because a shorter floor is still pacing through a refusal.
- *  {@link DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS} stays separate — the gap for later, different calls. */
-export const DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS = 60_000;
-
-/** Total attempts {@link paceGhEntry} allows for one guarded call, first try included (W1-T1007).
- *  `execFileSync` is synchronous, so an unbounded retry converts a refusal into a hang. Four tops out
- *  near seven minutes before jitter, then throws — so the caller's strike handling still sees one. */
-export const DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS = 4;
-
-/** Jitter as a fraction of the base wait (W1-T1007). Independently built call sites can land in one
- *  wall-clock second, and jitter is what stops them re-colliding on the retry. Invariant: additive
- *  only, so an honoured `Retry-After` or the floor stays a true lower bound. */
-export const DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION = 0.25;
-
-/** Parse a `Retry-After` value, in seconds, off whatever text a failing `gh` invocation surfaced. Trap:
- *  this path carries stderr text, never a captured header — `gh api -i` appears nowhere in this module —
- *  so it returns `undefined`, never a manufactured wait (W1-T1007). */
-export function defaultGhRetryAfterSeconds(err: unknown): number | undefined {
-  const e = err as { stderr?: string | Buffer; message?: string } | null | undefined;
-  const text = `${e?.stderr ?? ""}\n${e?.message ?? ""}`;
-  const match = /retry-after\s*:?\s*(\d+)/i.exec(text);
-  if (!match) return undefined;
-  const seconds = Number(match[1]);
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
-}
-
-/** {@link paceGhEntry}'s injectable refusal-backoff policy (W1-T1007). Every field defaults to the
- *  behaviour documented on the constants above; a test overrides whichever it needs, mirroring
- *  {@link createGhCallPacer}'s own seam. */
-export interface GhRefusalBackoffOpts {
-  /** Defaults to {@link defaultGhRetryAfterSeconds}. */
-  retryAfterSeconds?: (err: unknown) => number | undefined;
-  /** Source of jitter in `[0, 1)`. Defaults to `Math.random`. */
-  random?: () => number;
-  /** Defaults to {@link DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS}. */
-  floorMs?: number;
-  /** Defaults to {@link DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS}. */
-  maxAttempts?: number;
-}
-
-/** The wait before retrying after the `attempt`-th refusal (0 for the first). Honours
- *  `retryAfterSeconds(err)` when it resolves one, else exponential off `floorMs`, with jitter. */
-function ghRefusalBackoffMs(
-  attempt: number,
-  err: unknown,
-  opts: { retryAfterSeconds: (err: unknown) => number | undefined; floorMs: number; random: () => number },
-): number {
-  const afterSeconds = opts.retryAfterSeconds(err);
-  const base = afterSeconds !== undefined ? Math.max(0, afterSeconds) * 1000 : opts.floorMs * 2 ** attempt;
-  return Math.round(base + opts.random() * base * DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION);
-}
-
-/** Guard one `gh` entry point with a {@link GhCallPacer} (W1-T468): wait, run `call`, report the
- *  outcome through `isRateLimited` so a later guarded call slows rather than colliding again.
- *  Omitting `pacer` runs `call` immediately with nothing recorded — the pre-W1-T468 behaviour.
- *
- *  A `rate_limit` refusal retries this same call, honouring a `Retry-After` when `backoff` reads one,
- *  else the floor with exponential jitter, bounded by
- *  {@link DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS}; every other class rethrows at once, so the caller
- *  sees exactly one outcome, never wrapped (W1-T1007). Invariant: every `pacer.wait()` sits outside
- *  this `try`, so a stand-down propagates before `call` runs (W1-T529), and a clean `call()` carries
- *  its budget reading into the `recordResult` success already runs (W1-T1008). */
-export function paceGhEntry<T>(
-  pacer: GhCallPacer | undefined,
-  isRateLimited: (err: unknown) => boolean,
-  call: () => T,
-  backoff: GhRefusalBackoffOpts = {},
-): T {
-  if (!pacer) return call();
-  const floorMs = backoff.floorMs ?? DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS;
-  const maxAttempts = backoff.maxAttempts ?? DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS;
-  const retryAfterSeconds = backoff.retryAfterSeconds ?? defaultGhRetryAfterSeconds;
-  const random = backoff.random ?? Math.random;
-  pacer.wait();
-  let attempt = 0;
-  for (;;) {
-    try {
-      const result = call();
-      pacer.recordResult(false, budgetReadingOf(result));
-      return result;
-    } catch (err) {
-      const limited = isRateLimited(err);
-      pacer.recordResult(limited);
-      if (!limited || attempt + 1 >= maxAttempts) throw err;
-      pacer.sleepSync?.(ghRefusalBackoffMs(attempt, err, { retryAfterSeconds, floorMs, random }));
-      attempt += 1;
-    }
-    pacer.wait();
-  }
 }
 
 /** The single-PR argv — the `rmd fix` path, which names one PR explicitly. */
@@ -293,26 +76,6 @@ function budgetFromRateLimitLikeReading(reading: {
   if (remaining === undefined || limit === undefined || resource === undefined) return undefined;
   if (!Number.isFinite(remaining) || !Number.isFinite(limit)) return undefined;
   return { remaining, limit, resource };
-}
-
-/** The channel `fetchOpenPrsRest` uses to hand its list call's budget reading back to
- *  {@link paceGhEntry}, which calls `recordResult` (W1-T1008). A symbol key is invisible to
- *  `JSON.stringify`, `Object.keys`, `for…in` and spread, so every consumer of the returned array is
- *  unaffected. Why: no parameter could carry it — docs/forensics/open-prs-rest.md. */
-const GH_BUDGET_READING = Symbol("open-prs-rest.ghBudgetReading");
-
-/** Attach `budget` (when present) to `value` via {@link GH_BUDGET_READING}, then return `value`. */
-function withBudgetReading<T>(value: T, budget: GhBudgetReading | undefined): T {
-  if (budget !== undefined && value !== null && (typeof value === "object" || typeof value === "function")) {
-    (value as unknown as Record<symbol, GhBudgetReading>)[GH_BUDGET_READING] = budget;
-  }
-  return value;
-}
-
-/** Read back whatever {@link withBudgetReading} attached, or `undefined` if nothing did. */
-function budgetReadingOf(value: unknown): GhBudgetReading | undefined {
-  if (value === null || (typeof value !== "object" && typeof value !== "function")) return undefined;
-  return (value as Record<symbol, GhBudgetReading | undefined>)[GH_BUDGET_READING];
 }
 
 /** Check-runs for a head SHA. REST defaults to `filter=latest` (one run per check name), which is what
@@ -523,7 +286,7 @@ export function rollupFor(owner: string, repo: string, sha: string, fetch: GhApi
  *  queue. Once the list returns the queue size is known, so the per-PR rollup read is guarded
  *  instead: a throw yields that PR with `rollupUnreadable: true` rather than costing every other PR
  *  its disposition, and no retry, because the next pass re-derives (W1-T521). W1-T1008: the list call
- *  alone asks `fetch` for its rate-limit reading and returns it via {@link withBudgetReading}, for
+ *  alone asks `fetch` for its rate-limit reading and returns it via {@link withGhBudgetReading}, for
  *  {@link paceGhEntry} to arm the floor from. */
 export function fetchOpenPrsRest(owner: string, repo: string, fetch: GhApiFetcher): OpenPrRest[] {
   let budget: GhBudgetReading | undefined;
@@ -538,7 +301,7 @@ export function fetchOpenPrsRest(owner: string, repo: string, fetch: GhApiFetche
       return { ...pr, rollupUnreadable: true as const };
     }
   });
-  return withBudgetReading(result, budget);
+  return withGhBudgetReading(result, budget);
 }
 
 /** The `rmd fix` single-PR read — same mapping, plus the `state` token `routeFix` gates on. */

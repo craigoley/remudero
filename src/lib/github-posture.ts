@@ -43,7 +43,7 @@
  */
 
 import { existsSync, mkdirSync, openSync, readFileSync, renameSync, writeSync, closeSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import { dirname, join } from "node:path";
 
 // ── The three-state allowlist: data with reasons, never a bare path list ───────────────────
@@ -179,7 +179,7 @@ export function ghPostureGateway(execFileFn: (args: string[]) => string = defaul
 }
 
 function defaultExec(args: string[]): string {
-  return execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  return ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
 }
 
 function statusFrom(raw: unknown, descriptor: GithubPostureCapabilityDescriptor): GithubPostureCapabilityStatus | undefined {

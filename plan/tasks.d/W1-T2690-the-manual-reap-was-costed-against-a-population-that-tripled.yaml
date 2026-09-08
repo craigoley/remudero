@@ -10,7 +10,7 @@
   files: [src/lib/branch-reaper.ts, test/the-manual-reap-was-costed-against-a-population-that-tripled.test.ts]
   origin: "operator-session#reap-population-tripled-2026-09-02"
   plan_refs: ["W1-T447", "W1-T448", "W1-T2246"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS DOES NOT RE-LITIGATE W1-T448, AND MUST NOT. That ruling rejected wiring the reap into the

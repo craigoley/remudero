@@ -131,7 +131,7 @@
   origin: "oper#attribution-unreadable-disposition-2026-08-19"
   plan_refs: ["W1-T62", "W1-T372", "W1-T952", "W1-T471"]
   files: [src/run-task.ts, test/attribution-unreadable-branch.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     #2199 IS LIVE EVIDENCE AND IS NAMED, NOT ABSORBED. W1-T952's run opened it at 11:56:14Z on

@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/body-repair-strike-counts.test.ts]
   origin: oper#a-body-repair-strike-is-never-counted-2026-08-26
   plan_refs: ["W1-T1282", "W1-T2272"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     (0) TWO PREMISES IN THE COMMISSIONING BRIEF ARE WRONG, AND ONE OF THEM CAME FROM ME. READ THIS

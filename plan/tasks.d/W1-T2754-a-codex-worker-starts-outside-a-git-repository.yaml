@@ -12,7 +12,7 @@
     - test/a-codex-worker-starts-outside-a-git-repository.test.ts
   origin: "oper#codex-isolation-probe-stall-2026-09-03"
   plan_refs: ["W1-T17", "W1-T238", "W1-T1112", "W1-T2750"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE QUEUE STALLED AND THE VERDICT NAMED THE WRONG CAUSE. Every dispatch died at

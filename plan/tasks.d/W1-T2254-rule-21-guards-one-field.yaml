@@ -10,7 +10,7 @@
   files: [src/lib/task-linter.ts, src/run-task.ts, test/merged-shard-field-tamper.test.ts]
   origin: oper#rule-21-guards-one-field-2026-08-25
   plan_refs: ["W1-T15", "W1-T171", "W1-T180", "W1-T1287", "W1-T2248"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ALL SOURCE CLAIMS RE-DERIVED AT origin/main 8522ea47 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT

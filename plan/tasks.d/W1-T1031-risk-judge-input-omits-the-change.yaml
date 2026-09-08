@@ -128,7 +128,7 @@
   origin: "oper#risk-judge-input-2026-08-19"
   plan_refs: ["W1-T454", "W1-T1027", "W1-T125", "W1-T186"]
   files: [src/lib/risk-judge.ts, src/run-task.ts, test/risk-judge-change-view.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — the declared paths reach

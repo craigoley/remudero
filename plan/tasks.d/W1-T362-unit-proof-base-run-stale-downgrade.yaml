@@ -53,7 +53,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T273", "W1-T65", "§5E"]
   files: [src/lib/review.ts, test/review.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — three-outcome matrix over fixture trees, in-process.
     risk:high — it changes proof SCORING on the path that arms merges: wrong in the eager direction

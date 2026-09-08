@@ -96,7 +96,7 @@
     - claim: "stamping writes only the cited field and neither adds, promotes nor retires an entry"
       proof: "unit test: test/citation-stamp-wiring.test.ts"
   files: [src/run-task.ts, src/lib/retro.ts, test/citation-stamp-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-brief#citation-miners-have-no-production-caller-2026-08-23"
   plan_refs: ["W1-T419", "W1-T1013", "W1-T38", "W1-T1059"]

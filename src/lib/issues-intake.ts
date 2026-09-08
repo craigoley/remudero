@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
 import { captureFeedback, feedbackEntryPath, type FeedbackEntry } from "./feedback.js";
 import { existsSync } from "node:fs";
@@ -107,7 +107,7 @@ export function ghIssueListGateway(): IssueListGateway {
   return {
     list(owner, repo) {
       try {
-        const raw = execFileSync("gh", ["api", `repos/${owner}/${repo}/issues?state=open`, "--paginate"], {
+        const raw = ghExec(["api", `repos/${owner}/${repo}/issues?state=open`, "--paginate"], {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
         });

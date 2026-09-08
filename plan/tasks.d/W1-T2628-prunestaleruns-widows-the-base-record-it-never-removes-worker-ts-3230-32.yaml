@@ -10,7 +10,7 @@
   files: [src/lib/worker.ts, test/worktree-base-recorded.test.ts]
   origin: architect
   plan_refs: ["§9", "W1-T405", "W1-T406", "W1-T175"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CONTRACT IS ALREADY WRITTEN DOWN AND ALREADY TESTED. `removeWorktreeBase`'s own doc

@@ -10,7 +10,7 @@
   files: [src/lib/board-review.ts, src/lib/measurement-cadence.ts, test/board-review.test.ts]
   origin: "operator-brief#no-rungs-unit-is-the-board-2026-08-26"
   plan_refs: ["W1-T2288", "W1-T2289", "W1-T2240", "W1-T1259"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     FOUR RUNGS, FOUR UNITS, MEASURED 2026-08-26. `runSweep`'s `DISPOSITION_RULES` rows and the fix

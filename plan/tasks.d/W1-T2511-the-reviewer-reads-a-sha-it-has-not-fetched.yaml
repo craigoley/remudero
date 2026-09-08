@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts]
   origin: "operator-session#3328-fail-closed-on-a-resolvable-trailer-2026-08-30"
   plan_refs: ["W1-T2462", "W1-T2432", "W1-T2315", "W1-T185"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ORDERING IS THE DEFECT AND IT IS PROVABLE FROM SOURCE ALONE — no ledger, no timing, no
