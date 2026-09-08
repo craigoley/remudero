@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import { inflateRawSync } from "node:zlib";
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { captureFeedback, type CaptureFeedbackOptions, type FeedbackEntry } from "./feedback.js";
@@ -319,12 +320,12 @@ export function workflowArtifactZipRestArgs(owner: string, repo: string, artifac
 }
 
 function defaultCoverageArtifactGhJson(args: string[]): unknown {
-  const out = execFileSync("gh", args, { encoding: "utf8", maxBuffer: 1 << 24 });
+  const out = ghExec(args, { encoding: "utf8", maxBuffer: 1 << 24 });
   return JSON.parse(out);
 }
 
 function defaultCoverageArtifactGhBuffer(args: string[]): Buffer {
-  return execFileSync("gh", args, { maxBuffer: 1 << 28 });
+  return ghExec(args, { maxBuffer: 1 << 28 });
 }
 
 function isLcovText(text: string): boolean {

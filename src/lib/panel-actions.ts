@@ -16,6 +16,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import { existsSync } from "node:fs";
 import {
   consumeOptionLink,
@@ -852,7 +853,7 @@ export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
 export function ghIssueCloser(): IssueCloser {
   return {
     close(issueUrl: string) {
-      execFileSync("gh", ["issue", "close", issueUrl], { encoding: "utf8" });
+      ghExec(["issue", "close", issueUrl], { encoding: "utf8" });
     },
   };
 }

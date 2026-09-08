@@ -204,6 +204,9 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   const env = opts.env ?? process.env;
   const now = opts.now ?? Date.now;
   const log = opts.log ?? (() => {});
+  // W1-T2896: deliberate transport exception. The installation-token exchange authenticates with
+  // a freshly signed App JWT, not `gh`'s credential store, and this module already wraps it in
+  // EXCHANGE_TIMEOUT_MS via AbortController so it is bounded independently of the CLI transport.
   const fetchFn = opts.fetchImpl ?? fetch;
   const readKey = opts.readKey ?? ((p: string) => readFileSync(p, "utf8"));
 

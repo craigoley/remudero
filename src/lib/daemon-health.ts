@@ -42,6 +42,7 @@
 
 import { statfsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./daemon.js";
@@ -134,7 +135,7 @@ export function readDiskTotalBytes(path: string, statfs: (path: string) => Statf
  * `gh api rate_limit`'s `resources.core.remaining` — the REST/core budget status.ts's own
  * `gh pr view`/`pr list`/`issue view` calls spend (see this module's header for why core, not
  * graphql). `exec` is injectable exactly like `ghGateway`'s own `opts.exec` (status.ts) — real
- * callers omit it and get the actual `execFileSync("gh", args, ...)` call; a unit test injects a
+ * callers omit it and get the actual `ghExec(args, ...)` call; a unit test injects a
  * fake so this is provable without a real network call. Fails soft (`undefined`, never a fake
  * number) on any read/parse error.
  */
@@ -149,7 +150,7 @@ export function readGhRateLimitRemaining(exec: (args: string[]) => string = defa
 }
 
 function defaultGhExec(args: string[]): string {
-  return execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /** One bucket's reading — {@link readGhRateLimitBuckets}. */

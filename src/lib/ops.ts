@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import { join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { escalate, type Escalation, type IssueGateway } from "./escalate.js";
@@ -222,7 +223,7 @@ export interface AlertGateway {
 export function ghAlertGateway(): AlertGateway {
   function tryList<T>(args: string[]): T[] {
     try {
-      const raw = execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const raw = ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
       const parsed = JSON.parse(raw) as unknown;
       return Array.isArray(parsed) ? (parsed as T[]) : [];
     } catch {

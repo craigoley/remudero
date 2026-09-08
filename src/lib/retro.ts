@@ -3,6 +3,7 @@
  *  into a plan-only PR: generation deterministic here, publication with the gate and the human. */
 
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 // Import the DEFAULT export so a test's `t.mock.method` can intercept the marker's reads and
 // writes: named `node:fs` bindings are non-configurable and mocking one throws (W1-T207).
 import fsMarker from "node:fs";
@@ -414,7 +415,7 @@ export function ownBranchOf(runId: string): string {
  *  dependency cycle. Why: docs/forensics/retro.md (W1-T2305). */
 export function probeGithubThrottle(): string | undefined {
   try {
-    const out = execFileSync("gh", ["api", "rate_limit", "--jq", ".rate.remaining"], {
+    const out = ghExec(["api", "rate_limit", "--jq", ".rate.remaining"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();

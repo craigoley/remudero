@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS } from "./github-transport.js";
 // W1-T2440: the pre-warm walk runs on its own OS thread (`runPrewarmWorker`), so the `execFileSync` below stays
 // synchronous without parking the process serving `/v1/status`. That worker loads THIS module a second time;
 // `isMainThread`/`workerData` gate the worker-only branch near `buildBatchedGithub`.
@@ -102,7 +104,7 @@ export function isGhRateLimitError(err: unknown): boolean {
  * healthy call and sits inside the poll interval. FAIL-SOFT: callers already degrade on the kill's throw.
  * Why: an unbounded sweep ran 10:57-11:54 — docs/forensics/status.md
  */
-export const GH_CALL_TIMEOUT_MS = 60_000;
+export const GH_CALL_TIMEOUT_MS = DEFAULT_GH_CALL_TIMEOUT_MS;
 
 /** A PR's identity + GitHub merge state, as seen by the {@link GitHub} gateway. */
 export interface PrRef {
@@ -2953,9 +2955,7 @@ export type RequiredContextsRead =
 export function readRequiredStatusCheckContexts(owner: string, repo: string, branch = "main"): RequiredContextsRead {
   let raw: string;
   try {
-    raw = execFileSync(
-      "gh",
-      ["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`],
+    raw = ghExec(["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
     );
   } catch (e) {
@@ -3030,7 +3030,7 @@ export function ghGateway(
     // rate-limit or auth message appears. `timeout` is not optional hardening — this call is synchronous, so an
     // unbounded one parks the whole process (see {@link GH_CALL_TIMEOUT_MS}).
     ((args: string[]) =>
-      execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: GH_CALL_TIMEOUT_MS }));
+      ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: GH_CALL_TIMEOUT_MS }));
   // W1-T2219: these back `readState()`. Wrapping the ONE call point every query method funnels through means
   // neither needs its own bookkeeping. In-flight is observable only from a REENTRANT call.
   let attempted = false;

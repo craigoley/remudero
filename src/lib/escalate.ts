@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { ghExec } from "./github-transport.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
@@ -1065,7 +1066,7 @@ export function ghIssueGateway(
   const repoArg = `${owner}/${repo}`;
   const run =
     opts.exec ??
-    ((args: string[]) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+    ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   return {
     ensureLabel(label) {
       try {

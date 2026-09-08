@@ -1,5 +1,6 @@
 import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
 import { execFileSync } from "node:child_process";
+import { ghExec } from "../github-transport.js";
 // Imported as the module's DEFAULT export (a plain, mutable object), never as named
 // bindings — the SAME W1-T115 "assert via injected fs" discipline inventory.ts/recon.ts/
 // session.ts already follow (see inventory.ts's header comment for the full rationale):
@@ -302,7 +303,7 @@ export interface SynthesizeGhGateway {
   openPr(opts: SynthesizeOpenPrOpts): string;
 }
 
-const defaultSynthesizeGhExec: GhExec = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const defaultSynthesizeGhExec: GhExec = (args) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 export function realSynthesizeGhGateway(opts: { exec?: GhExec } = {}): SynthesizeGhGateway {
   const exec = opts.exec ?? defaultSynthesizeGhExec;
