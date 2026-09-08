@@ -294,6 +294,11 @@ test("W1-T2440: the zero-viewer gate still stops the timer when the last client 
   const gated = gatePrewarmOnClients(route, github, INTERVAL);
   assert.equal(warms, 0, "no client connected yet -- warm() must never fire (gatePrewarmOnClients's own contract, unchanged by this task)");
   const release = gated.route.subscribe(SEND);
+  // Since W1-T3192 the first warm is SCHEDULED, not run on the subscriber's own stack (`warm()`
+  // is a blocking `gh pr list`, and this edge is an SSE request's handler). "Immediately" still
+  // means "before the interval's first tick" — this yields exactly one turn to let it land.
+  assert.equal(warms, 0, "the connect itself must not warm on the subscriber's own stack");
+  await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(warms, 1, "first connect warms once immediately");
   release();
   const afterDisconnect = warms;

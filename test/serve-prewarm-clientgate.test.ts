@@ -8,6 +8,16 @@ import type { GitHub } from "../src/lib/status.js";
 const INTERVAL = 20;
 const SEND: SseSend = () => {};
 
+/**
+ * Yield one macrotask turn. Since W1-T3192 the first warm is SCHEDULED rather than run on the
+ * caller's stack: `github.warm()` is a blocking `gh pr list`, and the 0 -> 1 client edge below is
+ * an SSE request's own handler, so warming there held the event loop for the whole round-trip to
+ * GitHub — every concurrent request paying for one viewer connecting. "Immediately" therefore
+ * means "before the interval's first tick", not "in this same tick" — the distinction every
+ * assertion below turns on, and the only thing this helper waits for.
+ */
+const afterScheduledWarm = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
 /** A GitHub whose ONLY job is to count `warm()` — the call this whole gate exists to bound. */
 function countingGithub(): GitHub & { warms: number } {
   const gh = {
@@ -59,7 +69,9 @@ test("gatePrewarmOnClients warms exactly once immediately when the first client 
   const gated = gatePrewarmOnClients(fakeRoute(), github, INTERVAL);
   const release = gated.route.subscribe(SEND);
   try {
-    assert.equal(github.warms, 1, "the first connect must warm synchronously, not wait a full interval");
+    assert.equal(github.warms, 0, "the connect itself must not warm on the subscriber's own stack");
+    await afterScheduledWarm();
+    assert.equal(github.warms, 1, "the first connect must warm on the next tick, not wait a full interval");
     await afterIntervals(3);
     // 1 immediate + 3 ticks. Timer jitter can cost the last tick, so assert the window.
     assert.ok(github.warms >= 3 && github.warms <= 5, `expected ~4 warms (1 immediate + 3 ticks), got ${github.warms}`);
@@ -75,7 +87,8 @@ test("gatePrewarmOnClients runs ONE timer for two connected clients, never a sec
   const releaseA = gated.route.subscribe(SEND);
   const releaseB = gated.route.subscribe(SEND);
   try {
-    // The SECOND connect must not warm again — one immediate warm total, not two.
+    // The SECOND connect must not warm again — one scheduled warm total, not two.
+    await afterScheduledWarm();
     assert.equal(github.warms, 1, "a second viewer must not trigger an extra off-cadence warm");
     await afterIntervals(3);
     const withTwoClients = github.warms;
@@ -157,6 +170,7 @@ test("gatePrewarmOnClients resumes warming when a client reconnects after an idl
 
   const second = gated.route.subscribe(SEND);
   try {
+    await afterScheduledWarm();
     assert.equal(github.warms, afterIdle + 1, "a reconnect must warm immediately, exactly like the first connect");
     await afterIntervals(2);
     assert.ok(github.warms > afterIdle + 1, "the interval must resume on reconnect");
@@ -207,11 +221,12 @@ test("gatePrewarmOnClients preserves the wrapped route's path and scope so the g
   gated.stop();
 });
 
-test("gatePrewarmOnClients defaults its refresh interval to DEFAULT_BOARD_PREWARM_MS, leaving the 15s cadence unchanged", () => {
+test("gatePrewarmOnClients defaults its refresh interval to DEFAULT_BOARD_PREWARM_MS, leaving the 15s cadence unchanged", async () => {
   assert.equal(DEFAULT_BOARD_PREWARM_MS, 15_000);
   const github = countingGithub();
   const gated = gatePrewarmOnClients(fakeRoute(), github, undefined);
   const release = gated.route.subscribe(SEND);
+  await afterScheduledWarm();
   assert.equal(github.warms, 1, "the default-interval path must still warm on connect");
   release();
   gated.stop();
