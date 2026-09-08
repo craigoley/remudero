@@ -815,6 +815,22 @@ function isSpawnInfraBlocked(err: unknown): err is { reasonClass: "blocked_toolc
   return typeof err === "object" && err !== null && (err as { reasonClass?: unknown }).reasonClass === "blocked_toolchain";
 }
 
+/** A rejected worker may be reporting GitHub backpressure from its post-run PR/check polling rather
+ * than a software crash. Keep this carve-out deliberately narrower than {@link classifyFailure}:
+ * the command evidence must name `gh`, and the joined message/stderr/code must positively classify
+ * transient. This prevents arbitrary worker prose such as "internal server error" from being
+ * swallowed while retaining the stderr/code fields Node does not always copy into Error.message. */
+function transientGhDispatchFailure(err: unknown): { detail: string } | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const failure = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
+  const message = String(failure.message ?? "");
+  if (!/(?:^|\s)gh(?:\s|$)/i.test(message)) return undefined;
+  const detail = [message, failure.stderr == null ? "" : String(failure.stderr), failure.code ?? ""]
+    .filter((part) => part.length > 0)
+    .join("\n");
+  return classifyFailure({ text: detail }) === "transient" ? { detail } : undefined;
+}
+
 /** BACKSTOP — the maximum time the inter-phase review clock's stop may wait for an idle wait to notice its phase
  * ended. The wait seam is deliberately promise-only with no cancellation handle, so waiting out the whole poll
  * interval would add up to 60 seconds to every phase transition. The clock therefore subdivides only its in-process
@@ -1583,6 +1599,10 @@ export async function runDaemon(
   // CONSECUTIVE spawn-infra failures — backs the backoff below; reset by any
   // runOne call that does NOT throw this class (success or an unrelated verdict).
   let consecutiveSpawnInfraFailures = 0;
+  // The GitHub-transport counterpart to the spawn-infra streak. A worker can finish useful work,
+  // push a PR, and then lose its post-run rollup read; that must slow dispatch without exiting the
+  // scheduler that owns every review and repair lane (W1-T3165).
+  let consecutiveDispatchTransportFailures = 0;
   // Headroom reserve escalation dedup — the same per-episode bound as the breaker above. A sustained
   // breach is read fresh every tick, so without this the hook would fire on every idle poll. Cleared
   // the moment a read reports the window back under the reserve (P34 (c), W1-T249).
@@ -2859,22 +2879,32 @@ export async function runDaemon(
     await stopTicker();
     restartInterphaseReviewClock();
 
-    // Classify every lane's settlement before this tick decides anything, mirroring `runDrainLanes`. A
-    // genuine, non-spawn-infra throw is fatal for the whole daemon, exactly as it always was for a lone
-    // dispatch; a spawn-infra throw degrades into backoff; a normal settlement is queued for the same
-    // block reasoning every dispatch has always gone through.
+    // Classify every lane's settlement before this tick decides anything, mirroring `runDrainLanes`.
+    // A positively transient gh transport failure and a spawn-infra failure degrade into their bounded
+    // backoffs; every other throw stays fatal. A normal settlement enters the existing block reasoning.
     let fatalError: { taskId: string; message: string } | undefined;
     let spawnInfraSeenThisTick = false;
+    let dispatchTransportSeenThisTick = false;
     const toProcess: Array<{ task: Task; result: RunResult }> = [];
     for (let i = 0; i < admitted.length; i++) {
       const t = admitted[i];
       const outcome = settled[i];
       if (outcome.status === "rejected") {
         const err = outcome.reason;
-        if (!isSpawnInfraBlocked(err)) {
+        const transientTransport = transientGhDispatchFailure(err);
+        if (!isSpawnInfraBlocked(err) && transientTransport === undefined) {
           // First observed wins the summary detail, mirroring `runDrainLanes`' identical choice. Every other
           // already-settled lane is still classified and processed before this tick returns.
           if (!fatalError) fatalError = { taskId: t.id, message: String((err as Error)?.message ?? err) };
+          continue;
+        }
+        if (transientTransport !== undefined) {
+          dispatchTransportSeenThisTick = true;
+          log("daemon.dispatch_transport_deferred", {
+            task: t.id,
+            consecutive: consecutiveDispatchTransportFailures + 1,
+            error: transientTransport.detail,
+          });
           continue;
         }
         // Degrade, do not die: a spawn-infrastructure failure is never a fatal crash. The pre-fix shape was
@@ -2906,7 +2936,10 @@ export async function runDaemon(
 
     // A successful lane — including one returning a non-spawn-infra blocked verdict — clears the backoff
     // streak, exactly as the lone dispatch always did.
-    if (toProcess.length > 0) consecutiveSpawnInfraFailures = 0;
+    if (toProcess.length > 0) {
+      consecutiveSpawnInfraFailures = 0;
+      consecutiveDispatchTransportFailures = 0;
+    }
 
     // Block reasoning, per lane. Every genuine blocker is parked only after all admitted siblings
     // settle, so one blocked subtree can neither abort useful work already in flight nor restart the
@@ -2967,6 +3000,23 @@ export async function runDaemon(
       consecutiveSpawnInfraFailures++;
       const backoffMs = Math.min(pollIntervalMs * 2 ** (consecutiveSpawnInfraFailures - 1), maxSpawnInfraBackoffMs);
       log("daemon.spawn_infra_backoff", { tick: ticks, backoff_ms: backoffMs, consecutive: consecutiveSpawnInfraFailures });
+      if (await stopInterphaseReviewClock()) continue;
+      await sleepUntilSweepWake(backoffMs);
+    }
+
+    if (dispatchTransportSeenThisTick && !spawnInfraSeenThisTick && toProcess.length === 0) {
+      ticks++;
+      consecutiveDispatchTransportFailures++;
+      const backoffMs = Math.min(
+        pollIntervalMs * 2 ** (consecutiveDispatchTransportFailures - 1),
+        maxApiWindowHoldMs,
+      );
+      log("daemon.dispatch_transport_backoff", {
+        tick: ticks,
+        backoff_ms: backoffMs,
+        consecutive: consecutiveDispatchTransportFailures,
+        reason: "transient gh transport refusal after worker dispatch — holding in process",
+      });
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(backoffMs);
     }
