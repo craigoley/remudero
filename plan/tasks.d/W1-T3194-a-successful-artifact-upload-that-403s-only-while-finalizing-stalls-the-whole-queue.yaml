@@ -13,6 +13,7 @@
     - src/lib/sweep.ts
     - src/lib/main-health-rung.ts
     - src/run-task.ts
+    - scripts/test-tier-manifest.json
     - test/failed-ci-infrastructure-requeue.test.ts
     - test/main-health-wiring.test.ts
   origin: "fleet-incident#github-artifact-finalization-403-2026-09-08"
@@ -100,6 +101,14 @@
     from `/actions/jobs/{job_id}/rerun` to a workflow-run endpoint: the recorder must fail. If any
     of those mutations remains green, the suite does not prove the production control loop.
   note: |
+    SCOPE AMENDMENT 2026-09-08. The task creates
+    `test/failed-ci-infrastructure-requeue.test.ts`, and the mandatory test-tier completeness gate
+    refuses every new test absent from `scripts/test-tier-manifest.json`. Measured before source
+    submission: `npm run test:tier:check -- --base origin/main` exited 1 naming exactly that new
+    test and instructed the author to record it. The registry is therefore required production
+    scope, not adjacent cleanup; omitting it guarantees a red source PR before any task behavior is
+    evaluated.
+
     ID PROVENANCE: `rmd next-task-id --reserve` observed remote plan ids through W1-T3193 and
     atomically RESERVED W1-T3194 at `refs/rmd-id/W1-T3194`; that reserved id is authoritative.
     ONE CONCERN: convert positively identified failed-CI infrastructure into one bounded job retry
