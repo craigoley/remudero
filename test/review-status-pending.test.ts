@@ -257,7 +257,7 @@ test("W1-T913 criterion 1 (rmd review's own start): reviewCommand posts remudero
 test("W1-T913 criterion 1 (light-sweep ticker): SweepDeps.postReview's default reviewRunner routes through reviewCommand, so its own pending post (the test above) covers the sweep's post-review dispatch too", () => {
   assert.match(
     runTaskSrc,
-    /reviewRunner:\s*\(prNumber: number\) => Promise<number> = \(prNumber\) => reviewCommand\(/,
+    /reviewRunner:\s*\(prNumber: number, isPlanFiling\?: boolean\) => Promise<number> = \(prNumber, isPlanFiling\) =>\s*reviewCommand\(/,
     "the sweep's post-review lane must dispatch through reviewCommand, never a second review entry point",
   );
 });

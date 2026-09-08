@@ -32,7 +32,7 @@ function stoppedMaterialization() {
 
 test("W1-T2846: reviewCommand and the board builder call the same higher-level task-id resolver", () => {
   const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
-  assert.match(source, /const taskId = resolveReviewTaskId\(body, view\.headRefName,/);
+  assert.match(source, /const taskId = resolveReviewTaskId\(\s*body,\s*view\.headRefName,/);
   assert.match(source, /return resolveReviewTaskId\(pr\.body \?\? "", pr\.headRefName,/);
 });
 
