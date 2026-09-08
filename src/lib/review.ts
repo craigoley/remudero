@@ -4875,6 +4875,16 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
+  // W1-T2764: the ledger-step ratchet's rule logic, behind the required `ledger-steps` ci.yml job —
+  // the same shape as the task-id-existence and assertion-discrimination entries above. Before that
+  // job existed `unwired-gate:check` refused it as "a gate-shaped instrument that nothing invokes";
+  // wiring it is what makes it an instrument, and this line is the other half of that.
+  "^scripts/ledger-steps-check\\.mjs$",
+  // W1-T2764: the ledger-step DOC generator, run as `--check` by the same job. A generator whose
+  // check mode can refuse a PR is enforcement logic, not content — the distinction
+  // INSTRUMENT_SURFACE_EXCLUSIONS already draws for openapi/daemon.yaml against
+  // scripts/generate-api-client.mjs, which is tracked here for exactly this reason.
+  "^scripts/generate-ledger-steps\\.mjs$",
 ];
 
 const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
