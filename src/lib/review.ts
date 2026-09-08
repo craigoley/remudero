@@ -2151,9 +2151,34 @@ export function noClaimIsAboutChangeset(rest: string): boolean {
 const SELF_REFERENTIAL_CLAIM_RE =
   /\b(?:this|these|it|the)(?:\s+(?:pr|diff|changeset|changes|change|commit|patch|revert))?\s+(?:is|are|was|were)\s+[*_`]*$/i;
 
+/** (W1-T3061) A QUALIFIER IN FRONT OF THE CLAUSE IS NOT AN ASSERTION, and W1-T2533's two denial arms are the
+ *  precedent rather than a second mechanism: a negator in that position turns a claim into a denial, and a
+ *  SUBORDINATOR turns it into a rule, a condition or a hypothetical. "A shard is refused unless the PR is plan-only."
+ *  STATES the rule; it does not claim to satisfy it, and refusing it lands on exactly the PRs whose subject IS that
+ *  rule (#4450 built `rule15-precheck`; #4457 was refused the same way, both after a full CI cycle).
+ *  ENUMERATED, NEVER INFERRED: a subordinator not on this list leaves today's verdict exactly as it is, so nothing
+ *  that refuses today silently stops refusing. It carries the SAME self-referential subject and linking verb {@link
+ *  SELF_REFERENTIAL_CLAIM_RE} matches, anchored at the same `$`, so it can only ever cancel THAT arm — never the
+ *  label arm, never the attributive one. */
+const CONDITIONAL_CLAUSE_RE =
+  /\b(?:unless|if|when|whenever|provided|only\s+when)\s+(?:this|these|it|the)(?:\s+(?:pr|diff|changeset|changes|change|commit|patch|revert))?\s+(?:is|are|was|were)\s+[*_`]*$/i;
+
 /** The word a shorthand MODIFIES, if it modifies one: `[ \t]+` and never `\s+`, because a word on the NEXT line
  *  belongs to another sentence, and a leading `[*_`]*` so markdown emphasis does not hide the noun. */
 const SHORTHAND_HEAD_NOUN_RE = /^[*_`]*[ \t]+([A-Za-z][A-Za-z0-9_-]*)/;
+
+/** (W1-T3061) The copular frame an attributive noun phrase sits in — `<subject> is a … <shorthand> <noun>` — with the
+ *  SUBJECT captured. The attributive arm reads the noun the shorthand modifies, which is right about the noun and
+ *  silent about WHICH changeset it names: in "1020 files is a very large plan-only diff" the head noun is `diff`, a
+ *  real changeset word, but the subject is a run the author is DECLINING to produce. Bounded to a few words either
+ *  side, like every other arm here. FAIL-CLOSED BY CONSTRUCTION: no match is no opinion, and the arm then refuses
+ *  exactly as it does today — a false refusal costs a cycle, a false pass costs the guarantee. */
+const ATTRIBUTIVE_SUBJECT_RE = /([A-Za-z0-9][\w'-]*(?:\s+[\w'-]+){0,3})\s+(?:is|are|was|were)\s+(?:a|an|the)\s+(?:[\w'-]+\s+){0,3}[*_`]*$/i;
+
+/** Is a captured {@link ATTRIBUTIVE_SUBJECT_RE} subject THIS changeset? The same vocabulary {@link
+ *  SELF_REFERENTIAL_CLAIM_RE} treats as self-referential, matched at the subject's END so "the diff" counts and
+ *  "1020 files" does not. */
+const SELF_REFERENTIAL_SUBJECT_RE = /(?:^|\s)(?:this|these|it)$|(?:^|\s)the\s+(?:pr|diff|changeset|changes|change|commit|patch|revert)$/i;
 
 /** (W1-T2533) A DENIED CLAIM IS NOT A CLAIM. {@link shorthandIsAboutChangeset}'s label arm decides on the COLON alone,
  *  so a body answering the scope question HONESTLY IN THE NEGATIVE was refused for the claim it just denied — #3373's
@@ -2219,12 +2244,21 @@ function shorthandIsAboutChangeset(report: string, index: number, length: number
   // verb immediately before the shorthand makes it the PREDICATE of what the sentence is about, and in a PR body that
   // subject is the change. Deliberately IMMEDIATE rather than anywhere-in-sentence, which separates it from "makes a
   // triage PR plan-only by construction" (about the LANE) and "described its revert as data-only" (about ANOTHER PR).
-  if (SELF_REFERENTIAL_CLAIM_RE.test(report.slice(0, index))) return true;
+  // W1-T3061: ...unless a subordinator governs that whole clause, which makes the sentence a RULE rather than this
+  // changeset's own assertion. Checked here rather than folded into the pattern above so the two reads stay legible
+  // and the widening is one enumerated list, not a longer regex nobody can audit.
+  if (SELF_REFERENTIAL_CLAIM_RE.test(report.slice(0, index))) return !CONDITIONAL_CLAUSE_RE.test(report.slice(0, index));
   // THE ATTRIBUTIVE FORM IS A CLAIM when, and only when, the noun the shorthand modifies is ITSELF the changeset:
   // "plan-only change", "a data-only diff". A forward scan over the whole rest of the sentence could not draw that
   // line: in "the plan-only CARVE-OUT exempts a plan-scope DIFF" the modified noun is `carve-out`.
   const head = SHORTHAND_HEAD_NOUN_RE.exec(rest);
   if (head === null || !CHANGESET_CONTEXT_RE.test(head[1])) return false;
+  // W1-T3061: the head noun says "a changeset", not "THIS changeset". Where the noun phrase sits in a copular frame
+  // whose subject names something else — "1020 files is a very large plan-only diff" — the sentence describes a
+  // changeset that does not exist. Only a POSITIVELY identified foreign subject cancels the claim; an unreadable or
+  // absent frame leaves the refusal standing.
+  const frame = ATTRIBUTIVE_SUBJECT_RE.exec(report.slice(0, index));
+  if (frame && !SELF_REFERENTIAL_SUBJECT_RE.test(frame[1].trim())) return false;
   // W1-T2533: "this is NOT a plan-only change" modifies the changeset AND denies it. The negator
   // sits in front of the whole noun phrase, where the head-noun read cannot see it.
   return !DENIED_ATTRIBUTIVE_RE.test(report.slice(0, index));
@@ -3828,7 +3862,12 @@ export function failSummary(
     const filesText =
       first.files.slice(0, filesBudget).join(", ") +
       (first.files.length > filesBudget ? `, +${first.files.length - filesBudget} more` : "");
-    return `${FAIL_PREFIX}body contradicts its own diff: claimed "${first.claim}", actual changed files: ${filesText}${more}`;
+    // W1-T3061: the remedy rides HERE, in six words, because this string is the commit-status description and the
+    // cap above is real — the criteriaTampered branch was rewritten to 133 characters for exactly that reason, and a
+    // remedy appended past 140 is sliced off mid-word and invisible. Both PRs refused on 2026-09-07 fixed it by
+    // marking one MENTION as a quotation, which `isInsideInlineQuote` (W1-T2534) already silences; the escape was
+    // discoverable only by reading this file. `files:` is the half that gives, since it is recoverable from the PR.
+    return `${FAIL_PREFIX}body contradicts its own diff: claimed "${first.claim}" (backtick a mention to quote it), files: ${filesText}${more}`;
   }
   if (instrumentEntanglement) {
     return (
