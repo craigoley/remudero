@@ -1,0 +1,64 @@
+- id: W1-T3080
+  title: "THE TERMINAL `verdict` ROW CARRIES NO `model` AND `implement.done` SURVIVES NO ROTATION — all 23 `log(\"verdict\", ...)` sites in run-task.ts omit the model that produced the run, the one row that does carry it (`implement.done`, via `workerLedgerFields`) is in neither retention set, and the reader-side join shipped beside this filing can only fall back to `run.start.mount.model`, the mount that was RESOLVED rather than the model that SERVED, so per-model cost and merge rate stay unmeasurable for the class-routing decision W1-T167 exists to make"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 15.00
+  files: [src/run-task.ts, src/lib/ledger.ts, test/a-terminal-verdict-names-the-model-that-earned-it.test.ts]
+  origin: "operator-session#deep-research-2026-09-07"
+  plan_refs: ["P53", "W1-T2239", "W1-T167", "W1-T2383"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07 at b8892bc4: `grep -n 'log("verdict"' src/run-task.ts` returns 23 sites;
+    reading fourteen lines after each, none writes a `model` key. `implement.done` spreads
+    `workerLedgerFields(impl)` (`src/lib/worker.ts`), which carries `model`, `routed_model`,
+    `served_model` and `served_model_reason`. `src/lib/ledger.ts`'s `DECISION_RELEVANT_LEDGER_STEPS`
+    and `RENDER_RELEVANT_LEDGER_STEPS` retain `run.start` and `verdict`; neither names
+    `implement.done`, so `rotateLedger` sheds it past `MAX_RETAINED_LINES_PER_STEP` and the served
+    model is gone from the corpus the retro reads.
+
+    The retro's `COMPARISON_LANE_STEPS.implement` is `"verdict"`. NET STATE recorded "model present
+    on 18 of 202 implement rows" frozen for three cycles (P53). The companion change in this same
+    filing PR adds `runModelIndex` so the reader joins the row to its run — the reader half. The
+    writer half is this task: the terminal row should carry the model that earned the verdict, and
+    the row that knows the SERVED model should survive rotation. `served_model` matters because
+    provider routing (W1-T2704) and model-health fallbacks can serve a different model than the
+    mount resolved; a routing decision made on `mount.model` alone would credit the wrong tier.
+
+    OpenTelemetry's GenAI conventions and the Agent SDK's own `modelUsage` both distinguish the
+    requested model from the responded model per call; the ledger should not collapse them.
+  design: |
+    (i) ONE HELPER, NOT 23 EDITS: `terminalVerdictFields(impl)` returns `{ model, served_model,
+    routed_model }` from the implement outcome (or the fix/diagnose outcome for those rungs) and
+    every terminal `verdict` writer in `runTaskBody` spreads it. Sites with no worker outcome (a
+    pre-spawn refusal such as `task_already_merged`) write `model: null` explicitly — absent means
+    "not written", null means "no worker ran" (P48).
+    (ii) `implement.done` JOINS `DECISION_RELEVANT_LEDGER_STEPS` — rotation must not shed the one
+    row that names the served model; the per-step cap still bounds it.
+    (iii) THE RETRO'S `runModelIndex` PREFERS `served_model` WHEN PRESENT: extend the join order to
+    `verdict.served_model` > `verdict.model` > `implement.done.served_model` > `implement.done.model`
+    > `run.start.mount.model`, and render which source attributed the row.
+    (iv) NO NEW STEP, NO NEW FILE: a field on rows that already exist (W1-T2383's own finding that
+    four of five spend questions are one field on an existing row).
+  acceptance:
+    - claim: "every terminal verdict written by runTaskBody carries model and served_model, and a pre-spawn refusal writes model null rather than omitting it"
+      proof: "unit test: test/a-terminal-verdict-names-the-model-that-earned-it.test.ts"
+    - claim: "implement.done is retained through rotation"
+      proof: "grep: implement\\.done in src/lib/ledger.ts"
+    - claim: "the retro attributes a verdict row from served_model before model and reports the source"
+      proof: "unit test: test/a-terminal-verdict-names-the-model-that-earned-it.test.ts"
+  falsifier: |
+    CLOSE IF any terminal verdict writer already carries `model`: re-run the 23-site grep with a
+    14-line window and read each. MEASURED 2026-09-07: zero. Also close the retention half if
+    `implement.done` is in either retention set: grep `src/lib/ledger.ts`. MEASURED: absent.
+    PROVE IT LOAD-BEARING: remove the helper spread from one writer and the first criterion's
+    fixture for that path must fail.
+  note: |
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3073's note). risk:high on
+    Rule 19 SPAN across run-task.ts, ledger.ts and the retro's index order. The `grep:` proof names
+    a file and a token absent from it today (checked), so it discriminates at head against base.

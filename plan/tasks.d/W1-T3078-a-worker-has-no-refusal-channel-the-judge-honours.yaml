@@ -1,0 +1,76 @@
+- id: W1-T3078
+  title: "A WORKER THAT CANNOT HONESTLY SATISFY A CRITERION HAS NO CHANNEL THE JUDGE HONOURS — Standing rule 15 says a blocked worker may ADD the missing work or ESCALATE, but the implement report contract has no structured refusal, so the only ways out are a diff that claims more than it did (the test-theater path the goldens exist to catch) or a burned budget; published measurement shows an explicit abort mechanism cuts an agent's cheating on impossible tasks from 54% to 9%, and this harness pays the fix rung's strikes to rediscover what the worker could have said"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 30.00
+  files: [src/run-task.ts, src/lib/review.ts, src/lib/sweep.ts, test/a-refusal-is-a-verdict-not-a-strike.test.ts]
+  origin: "operator-session#deep-research-2026-09-07"
+  plan_refs: ["W1-T423", "W1-T2236", "W1-T1282", "P43"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at b8892bc4. `renderImplementPrompt`'s output contract (`src/run-task.ts`) requires
+    the worker to substantiate EVERY acceptance criterion in its report; the escalation vocabulary
+    it is given is prose ("escalate"), parsed by nothing. `parseReviewerVerdicts` and `judgeReview`
+    (`src/lib/review.ts`) know `executed_pass`, `executed_fail`, `executed_stale`, `not_executable`,
+    the keyword floor, test theater and criterion tampering — and no `refused` outcome. The sweep's
+    `DISPOSITION_RULES` (`src/lib/sweep.ts`) route a red review to `blocked-fixable` and spend a
+    strike; `W1-T2236` measured `reviewer-unmet` as the catch-all in 63% of that mode and
+    `W1-T1282` a fix dispatched with zero enumerable failures. A worker that KNEW the criterion was
+    unsatisfiable (a premise that rotted since filing, P46; a proof that names a file the task's
+    `files:` forbids, P63) has no way to say so that survives into the disposition.
+
+    EXTERNAL EVIDENCE, cited so the size of the effect is not guessed: ImpossibleBench
+    (arXiv 2510.20270) reports frontier agents "cheating" on unsatisfiable tasks at 54% and 9%
+    after an explicit abort channel is added — a one-field change, larger than any prompt
+    admonition measured (METR, 2025-06: instructing models not to reward-hack had a "nearly
+    negligible" effect). MASTER-PLAN §Self-improvement's golden suite plants exactly the
+    violations a refusal channel would pre-empt (test theater, scope creep, tampered criterion).
+  design: |
+    (i) THE CHANNEL: a `REFUSED:` block in the implement report — one line per criterion index it
+    cannot satisfy, each with a reason class from a fixed list (`premise-rotted`,
+    `outside-declared-files`, `needs-operator-input`, `proof-unexecutable-at-head`,
+    `contradicts-another-criterion`) and a sentence. Rendered in `renderImplementPrompt` beside
+    the existing contract, with the rule that a refusal is honest and a fabricated pass is not.
+    (ii) THE JUDGE: `judgeReview` parses the block and grades each named criterion `refused`, a
+    NEW outcome that is neither pass nor fail: the verdict state is `failure` (a refused criterion
+    is unmet — Standing rule 4), but the reason names the refusal class, and `criterionFieldTampered`
+    still refuses any edit to the criteria themselves (rule 15 is untouched).
+    (iii) THE SWEEP: a review whose only unmet criteria are `refused` routes to a NEW disposition
+    `refused-escalate` — NO fix strike is spent, because a fix worker cannot add work the
+    implement worker said was unaddable; the escalation carries the reason classes verbatim to
+    the operator, and a `premise-rotted` class proposes the P46 re-lint of the task.
+    (iv) NO DECISION MOVES TO THE LLM (Standing rule 12): the refusal is advisory input; the
+    deterministic judge still fails the PR and the deterministic sweep still decides the route.
+    (v) THE GOLDEN CORPUS GAINS ONE CASE: a report refusing a criterion honestly must grade
+    `refused` with state `failure` and arm nothing; a report refusing AND shipping a diff that
+    claims the same criterion in prose must grade `bodyContradictsDiff`, so the channel cannot be
+    used to launder a partial diff.
+  acceptance:
+    - claim: "a report carrying a REFUSED block grades that criterion refused with the reason class, the verdict state is failure, and auto-merge does not arm"
+      proof: "unit test: test/a-refusal-is-a-verdict-not-a-strike.test.ts"
+    - claim: "a review whose only unmet criteria are refused routes to refused-escalate and spends no fix strike"
+      proof: "unit test: test/a-refusal-is-a-verdict-not-a-strike.test.ts"
+    - claim: "a report that refuses a criterion and also claims it in prose is graded as a body contradiction, never as a clean refusal"
+      proof: "unit test: test/a-refusal-is-a-verdict-not-a-strike.test.ts"
+  falsifier: |
+    CLOSE IF a structured refusal already exists: grep `src/run-task.ts`'s implement contract and
+    `src/lib/review.ts` for `REFUSED` or `refused` as a criterion outcome. MEASURED 2026-09-07:
+    every hit is the harness refusing an operator or a proof, none is a worker refusing a criterion.
+    PROVE IT LOAD-BEARING: with the sweep route removed, the second criterion's fixture must spend a
+    strike again while the first still grades refused, so the two halves are separately falsified.
+  note: |
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3073's note). risk:high on
+    Rule 19 SPAN across three subsystems; if the implementing worker judges it two concerns, split
+    the SWEEP route into a child task and keep the judge outcome and the prompt contract together —
+    the judge outcome without the contract is dead code, and the contract without the judge is
+    prose (Standing rule 14: the call site is a deliverable).
+    DUPLICATE-SURFACE ADVISORY, ANSWERED: `lint-plan` names W1-T58, W1-T65, W1-T72, W1-T77, W1-T78, W1-T100, W1-T150, W1-T168, W1-T176, W1-T230 and W1-T297 as live shards sharing
+    run-task.ts with this one. Every one of them predates the sweep's fix rung as it exists today and
+    none names a refusal outcome on the criterion, its sweep route and its prompt contract; the overlap is the run-task.ts hot-file class (445 of 1,204 shards declare
+    it), not a duplicate of this work.

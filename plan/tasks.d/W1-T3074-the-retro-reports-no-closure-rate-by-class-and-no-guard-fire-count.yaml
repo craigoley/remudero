@@ -1,0 +1,72 @@
+- id: W1-T3074
+  title: "THE RETRO PRINTS EIGHTEEN PROSE SECTIONS AND NOT THE TWO TABLES A FLEET OPERATOR ACTS ON — closure rate by task class (filed, merged, still open, per class, with cost per merge) and guard fire-count since the last marker — so a task class with zero closures keeps being filed against, and a guard that has not fired in ten cycles cannot be named for retirement, which is the harness-compression duty MASTER-PLAN §Self-improvement assigns to every retro and no rung measures"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [src/lib/retro.ts, test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts]
+  origin: "operator-session#deep-research-2026-09-07"
+  plan_refs: ["W1-T2490", "W1-T2976", "P38", "W1-T91"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-07 over `origin/main` (3,586 commits) and `plan/tasks.d/`:
+      - the corpus grew 601 -> 1,204 shards between 2026-08-25 and 2026-09-07 (605 added, 2 deleted);
+      - `chore(plan)` filings ran 540 commits against 680 ship-class commits in the same window;
+      - 42 of the 60 newest shards cluster into gates, proofs, coverage and the fix rung, and 39
+        titles say some organ "has no reader / never fires / nothing runs";
+      - only 31 shards carry `retirement:`; nothing reports which CLASSES of task close and which
+        are filed forever.
+    `renderGather` (`src/lib/retro.ts`) emits calibration by type and class, the SHIPPED union,
+    MAST, infrastructure recurrence, mutation lifetime, degraded success, procedural candidates,
+    skill drafts, follow-ups and plan coherence. None of them answers: for each task class, how
+    many were FILED in the window, how many MERGED, how many are OPEN, and what a merge cost. The
+    Architect then writes thousands of words of NET STATE from the sections that do exist.
+
+    GitHub's own agentic-workflow meta-orchestrator publishes exactly this table weekly (close rate
+    by category, mean time-to-close, cost per run) and uses it to retire categories with 0%
+    closure. The retro has every input already: `RunSummary` carries `taskClass`, `shipped` carries
+    the merges, and `opts.openTitles` carries the open set.
+
+    THE SECOND TABLE IS HARNESS-COMPRESSION. §Self-improvement makes "which guards are now
+    unnecessary" a required retro item. `infrastructureRecurrence` already groups guard/check
+    pairs that fired; nothing lists the guards that did NOT fire since the marker, so a dead guard
+    is invisible by construction. `resolveGuardCheck`'s fallback rows and `plan/mast-mapping.yaml`'s
+    `infrastructure` rows enumerate the guard population; a zero-fire row is the deliverable.
+  design: |
+    (i) `closureByClass(runs, shipped, openTaskClasses, sinceTs)` returns one row per class:
+    `filed` (open + merged in window, when the caller supplies filing dates; else "not supplied"),
+    `merged`, `open`, `mergeRate` (REFUSED below a population floor of 5, P48), `costPerMerge`,
+    and `lastMergeTs`. Rendered as a markdown table under a new `## Closure by task class`
+    section, and ALSO emitted as one ledger line `retro.closure_by_class` so the console and the
+    next retro can trend it without re-parsing MASTER-PLAN prose.
+    (ii) `guardFireCounts(runs, mapping, sinceTs)` lists EVERY guard the mapping's
+    `infrastructure` rows and `GUARD_REASON_FALLBACK_ROWS` name, with its fire count since the
+    marker, ZERO ROWS INCLUDED. Render under `## Guard fire counts since marker`; a guard at zero
+    for N consecutive markers is flagged "candidate for retirement — verify against the golden
+    suite before removing" (the §Self-improvement rule that retirement goes behind the goldens).
+    (iii) THE COUNT-OF-MARKERS-AT-ZERO NEEDS THE MARKER TO CARRY IT: extend the retro marker with
+    `guard_zero_streak: Record<string, number>` the same way it carries `mast_category_counts`.
+    (iv) NOTHING HERE DECIDES: no class is retired and no guard removed by this task. It names them.
+  acceptance:
+    - claim: "the gather carries a closure-by-class table whose merge rate is refused below the population floor and whose denominator is stated"
+      proof: "unit test: test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts"
+    - claim: "a guard named by the mapping that fired zero times since the marker is listed at zero rather than omitted"
+      proof: "unit test: test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts"
+    - claim: "renderGather prints both tables and the marker carries the guard zero-streak forward"
+      proof: "unit test: test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts"
+  falsifier: |
+    CLOSE IF a closure-by-class table already exists: grep `src/lib/retro.ts` for `closure` and
+    read every `renderGather` section heading. MEASURED 2026-09-07: zero hits, eighteen headings,
+    none of them a closure table.
+    PROVE IT LOAD-BEARING: remove the zero-row inclusion and the second criterion's fixture (a
+    mapping naming three guards, a ledger firing one) must list one guard instead of three.
+  note: |
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (credential-scoped session; see
+    W1-T3073's note for the open-PR read taken at filing time). risk:high is Rule 19 SPAN.
+    Deliberately NOT a filing governor and NOT a selection change: those are rulings
+    (W1-T3075, W1-T3076). This task only makes the two populations visible.

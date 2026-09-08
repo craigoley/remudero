@@ -1,0 +1,72 @@
+- id: W1-T3081
+  title: "LEARNINGS ARE SELECTED BY FILE GLOB ALONE — `selectLearnings` ranks the 78 active entries by how many of the task's `files:` each entry's globs hit, so a task with an empty `files:` list is offered the whole corpus, a task touching run-task.ts (37% of all shards) matches every entry that names it, and an entry about an error a worker is about to hit (a specific refusal text, a symbol it will call) is invisible unless its path happens to overlap — injection is by neighbourhood, never by relevance"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [src/lib/learnings.ts, scripts/generate-learnings-index.mjs, test/a-learning-is-selected-by-what-the-task-will-touch-not-only-where.test.ts]
+  origin: "operator-session#deep-research-2026-09-07"
+  plan_refs: ["W1-T19", "W1-T33", "W1-T2760", "W1-T86"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at b8892bc4 in `src/lib/learnings.ts`: `matchCount(entry, taskFiles)` counts glob
+    hits over `task.files`; `selectLearnings` filters `lifecycle === "active"`, sorts by match
+    count, layer precedence, most-recent `cited`, then id, and cuts at
+    `DEFAULT_KNOWLEDGE_BUDGET_CHARS` (8148). `candidateShardFiles` pre-filters shards through
+    `learnings/index.json`'s `globs`. No entry field names a SYMBOL or an ERROR SIGNATURE, and
+    nothing reads the recon report's observed errors when selecting.
+
+    MEASURED consequences:
+      - 445 of 1,204 shards declare `src/run-task.ts`; every entry whose `files:` names it is a
+        candidate for all of them, so the budget is spent on neighbourhood, not need;
+      - an empty `files:` list is treated as repo-wide (every active entry is a candidate);
+      - `citedCount` is present on zero entries, so the recency tie-break is the hand-stamped
+        `cited:` date (25 of 81 still read 2026-07-14) — W1-T2760 owns that half;
+      - the efficacy meter (`wipe-test`, W1-T86) is off by policy, so nothing measures whether
+        the 8,148 injected characters change behaviour.
+
+    The published evidence on always-on agent instructions is mixed at best (arXiv 2601.20404
+    vs 2602.11988: one finds a runtime saving, one finds no success gain and +20% cost) and the
+    context-rot result (Chroma, 2025) says every frontier model degrades with distractors. Claude
+    Code's own `.claude/rules/*.md` and Copilot's `applyTo` instructions both scope by path AND
+    let a rule declare what it is about; the learnings store has only the path half.
+  design: |
+    (i) TWO OPTIONAL ENTRY KEYS, additive, index-generated: `symbols: [..]` (identifiers the fact
+    is about — a function, a step name, a flag) and `error_signatures: [..]` (literal substrings
+    of a refusal or error text the fact explains). Schema documented in the platform.yaml header
+    beside `files:`; `scripts/generate-learnings-index.mjs` emits both into `index.json` so
+    `candidateShardFiles` can pre-filter on them.
+    (ii) THE SELECTOR GAINS TWO SIGNALS: `symbolHits` — the task's title, rationale and the recon
+    report's `CONTEXT` claims scanned for each entry's `symbols` as whole tokens; and
+    `errorHits` — the recon report and any prior fix evidence scanned for `error_signatures`.
+    Ranking becomes (errorHits, symbolHits, fileMatchCount, layer, cited, id): an entry that
+    explains an error the worker is about to meet outranks one that merely shares a path.
+    (iii) EMPTY `files:` IS NO LONGER REPO-WIDE: with no path, only symbol or error hits admit an
+    entry, and the injected block says "matched by symbol/error" per line so a reader can tell.
+    (iv) BUDGET UNCHANGED; the byte cap and the layer precedence stay as they are.
+    (v) LEDGER `learnings.injected` GAINS `matched_by: {file, symbol, error}` COUNTS so W1-T86's
+    wipe test, when enabled, can split efficacy by match kind.
+  acceptance:
+    - claim: "an entry whose error_signatures match a recon-observed error is selected ahead of an entry that only shares a file glob"
+      proof: "unit test: test/a-learning-is-selected-by-what-the-task-will-touch-not-only-where.test.ts"
+    - claim: "a task with an empty files list is offered only symbol- or error-matched entries, never the whole corpus"
+      proof: "unit test: test/a-learning-is-selected-by-what-the-task-will-touch-not-only-where.test.ts"
+    - claim: "the generated index carries symbols and error_signatures and the check mode fails when they are stale"
+      proof: "unit test: test/a-learning-is-selected-by-what-the-task-will-touch-not-only-where.test.ts"
+  falsifier: |
+    CLOSE IF selection already reads symbols or errors: grep `src/lib/learnings.ts` for
+    `symbol`, `signature` and any read of a recon report. MEASURED 2026-09-07: `symbols` and
+    `error_signatures` appear nowhere in learnings.ts or index.json; the only selection inputs are
+    `task.files` and the entry globs.
+    PROVE IT LOAD-BEARING: with `errorHits` removed from the sort key, the first criterion's
+    fixture must invert.
+  note: |
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3073's note). risk:high on
+    Rule 19 SPAN (learnings.ts, the index generator, one suite). Adding the keys to existing
+    entries is DELIBERATELY not this task's scope — the corpus edit is a separate, plan-data PR
+    once the selector can read them; the budget ratchet bounds it.
