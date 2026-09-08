@@ -118,6 +118,7 @@
     "test/a-wall-clock-bound-declares-itself.test.ts": 1057,
     "test/a-windowed-union-never-opens-an-archive-outside-it.test.ts": 250,
     "test/a-worker-branch-must-be-shaped-for-dispatch.test.ts": 1853,
+    "test/a-worker-that-adds-a-test-file-is-born-red.test.ts": 0,
     "test/a-worker-may-not-apply-the-edit-its-gate-printed.test.ts": 1018,
     "test/a-worker-runs-the-cheap-gates-before-it-pushes.test.ts": 503,
     "test/abandon-reclaims-the-worker.test.ts": 1439,
