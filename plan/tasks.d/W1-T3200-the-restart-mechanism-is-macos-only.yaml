@@ -1,0 +1,113 @@
+- id: W1-T3200
+  title: "THE RESTART MECHANISM IS macOS-ONLY, SO THE FLEET'S ONLY HOST HAS NO AUTOMATIC RESTART AT ALL — `deployer.ts` kickstarts via `launchctl`, which is ABSENT on this Linux host, while `deploy/recycle-container.sh` does the same job correctly here and NO TypeScript can invoke it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/lib/deployer.ts, test/the-restart-seam-adapts-to-its-host.test.ts]
+  origin: "operator-session#deploy-gate-2026-09-08"
+  plan_refs: ["W1-T3199", "W1-T3201"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08 on the running Azure host.
+
+    THE MECHANISM IS macOS. `src/lib/deployer.ts` carries 6 `launchctl` and 6 `launchd` references
+    and restarts by `launchctl kickstart -k`; `src/run-task.ts` carries 14 and 59, plus an
+    `rmd deploy-plist` verb. `rmd deploy`'s own registry text says the supervisor
+    "`launchctl kickstart -k`s the daemon at the next idle gap".
+
+    THE HOST IS NOT. `command -v launchctl` → ABSENT. `uname -s` → Linux. So on the only host the
+    fleet runs on, the automatic restart path cannot execute at all.
+
+    A CORRECT MECHANISM ALREADY EXISTS HERE AND NOTHING CAN CALL IT. `deploy/recycle-container.sh`
+    does precisely this job on this host and does it carefully — it captures credentials before
+    `docker rm` (they are unrecoverable after), engages a PAUSE, waits a bounded 3 000s for
+    in-flight workers, REFUSES rather than killing them, refuses on a non-zero `docker pull` instead
+    of relaunching a cached image, and verifies the started container's image id against the digest
+    it pulled. It was exercised on 2026-09-08: it paused, drained a live Codex worker over 570s, and
+    reported "OK — remudero-daemon recycled". `deploy/serve-container.sh` is its console sibling.
+    MEASURED: `grep -rn "recycle-container\|serve-container\|host-update" src/ --include=*.ts`
+    returns ONLY comments and a `ci-parity.ts` note. No production TypeScript can invoke either.
+
+    THE COST. After that manual recycle the checkout was 0 commits behind `origin/main`; two hours
+    later it was 20 behind. Merged code is inert until a human runs a script — `rmd deploy`'s own
+    text explains why: "The daemon runs `tsx src/` loaded once + dispatches in-process, so merged
+    fixes are inert until this restart."
+
+    THE FIX IS TRACTABLE BECAUSE THE SEAM ALREADY EXISTS. `deployer.ts`'s header states its own
+    discipline: "Every side effect (git, launchctl, process probes, clock, fs) is injected via
+    [deps]". The launchd dependency is already behind an injection point — this is supplying a
+    second implementation, not rewriting a module.
+  design: |
+    (i) THE RESTART SEAM RESOLVES BY HOST CAPABILITY, NOT BY A HARD-CODED PLATFORM STRING. What is
+    available decides: a host with `launchctl` uses it; a host with the container scripts uses
+    those. `uname` says what a machine calls itself, not what it can do, and a fleet that later runs
+    somewhere else should need no third branch.
+    (ii) AN UNSUPPORTED HOST REFUSES LOUDLY, AND THIS IS THE PROPERTY THAT MATTERS MOST. Today's
+    defect is silent: `launchctl` is simply absent and the automatic path never runs, which is
+    indistinguishable from "nothing needed restarting". A host with no usable mechanism must SAY SO
+    on the surface an operator reads, not decline invisibly.
+    (iii) THE SCRIPTS' OWN REFUSALS ARE AUTHORITATIVE AND ARE NEVER SECOND-GUESSED.
+    `recycle-container.sh` refuses on workers past its wait, on a failed pull, and on an image-id
+    mismatch. The caller reports those refusals; it never retries past them, never passes a flag to
+    suppress them, and never falls back to a bare `docker restart`.
+    (iv) THE DETERMINISTIC GATES STAY WHERE THEY ARE. `daemonIsIdle`, `evaluateIdleGate`,
+    `DEPLOY_IDLE_DEFER_CEILING_MS` and the health-check rollback are unchanged by this task; it
+    swaps HOW a restart happens, never WHETHER one is allowed to.
+    (v) DRY-RUN SURVIVES ON EVERY BACKEND. `runDeployCycle`'s `dryRun` must mean the same thing for
+    a container recycle as for a kickstart — describe, change nothing — because it is how an
+    operator inspects a decision before trusting it.
+  acceptance:
+    - claim: "the restart seam selects a backend by PROBING declared capabilities: given two injected backends where only one probes available, that one is selected; selection never reads a platform string"
+      proof: "unit test: test/the-restart-seam-adapts-to-its-host.test.ts"
+    - claim: "a host with NO usable restart mechanism refuses loudly and reports it, rather than declining silently as it does today"
+      proof: "unit test: test/the-restart-seam-adapts-to-its-host.test.ts"
+    - claim: "a refusal from recycle-container.sh — workers past the wait, a failed pull, an image-id mismatch — is reported and never retried past, suppressed, or replaced by a bare docker restart"
+      proof: "unit test: test/the-restart-seam-adapts-to-its-host.test.ts"
+    - claim: "dryRun describes and performs NO side effect on EVERY registered backend — each injected backend records a description and its side-effect spy stays untouched"
+      proof: "unit test: test/the-restart-seam-adapts-to-its-host.test.ts"
+    - claim: "the idle gate, health check and rollback behave identically whichever backend performed the restart"
+      proof: "unit test: test/the-restart-seam-adapts-to-its-host.test.ts"
+  falsifier: |
+    CLOSE IF the restart path already works on Linux:
+      `grep -rn "recycle-container\|serve-container" src/ --include=*.ts` and
+      `grep -cE "launchctl" src/lib/deployer.ts`
+    MEASURED 2026-09-08: the first returns only comments and one `ci-parity.ts` note — no production
+    caller; the second returns 6.
+    POSITIVE CONTROL for the host claim, because "command not found" can also mean a broken PATH:
+    `command -v launchctl` must be ABSENT while `command -v docker` is PRESENT on the same host.
+    MEASURED 2026-09-08: both hold, and `deploy/recycle-container.sh` ran successfully there.
+    PROVE IT LOAD-BEARING: the fixture must drive BOTH backends from the same seam and show the same
+    idle-gate and rollback behaviour from each. A suite exercising only the container path proves
+    portability was replaced, not achieved, and would silently drop macOS support.
+    DO NOT satisfy this by shelling `docker restart remudero-daemon`. That kills in-flight workers,
+    skips the credential capture that `recycle-container.sh` performs before `docker rm`, and
+    relaunches whatever image is cached — the exact three failures that script's header records as
+    having taken the fleet down twice in one day.
+    DO NOT branch on `process.platform` alone. Design (i) refuses it: capability is the question,
+    and a platform string answers a different one.
+  note: |
+    RULE 18 / headless-fitness: two criteria originally named `launchctl` and `lint-plan` REFUSED
+    them on an auto-verify task — a headless runner cannot exercise a macOS supervisor. They are
+    reworded around INJECTED backends and a capability probe, which is what the seam actually
+    exposes and is verifiable anywhere. The rationale still names `launchctl` freely: prose records
+    what was measured, criteria state what a runner can check, and only the latter is bound by
+    Rule 18.
+    Rule 25 CHECKED: `src/lib/deployer.ts` is ordinary src. `deploy/*.sh` are INVOKED, not edited,
+    by this task — a diff that changes the scripts has taken on a second concern and should split.
+    INDEPENDENT OF W1-T3199 AND W1-T3201, and worth shipping alone: today the fleet has NO automatic
+    restart on its only host, and that is true whether the gate stays human, becomes a judge, or is
+    removed entirely.
+    CAVEAT WITH EQUAL WEIGHT: this shard makes an automatic restart POSSIBLE on this host. It does
+    not make one SAFE to trigger automatically — that rests on the idle gate and health check it
+    deliberately leaves untouched, and on W1-T3201's judgement about when a restart is worth its
+    interruption. Shipping this alone leaves the mechanism reachable and still human-triggered,
+    which is a strict improvement and not a hazard.
+    SECOND CAVEAT: `src/lib/ci-parity.ts:794` records that `deploy/recycle-container.sh:198` uses
+    bash-4 `declare -A` syntax and that at least one host's `/bin/bash` lacks associative arrays. A
+    caller that shells this script inherits that constraint. This task does not fix it and should
+    not pretend the script runs everywhere.

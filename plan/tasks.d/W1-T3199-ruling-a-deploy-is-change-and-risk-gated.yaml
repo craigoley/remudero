@@ -1,0 +1,117 @@
+- id: W1-T3199
+  title: "DESIGN RULING: A DEPLOY IS CHANGE-AND-RISK GATED, NOT HUMAN GATED — the supervisor already detected `daemon running stale code` SIX times and declined every one for want of an operator marker, and its restart path is `launchctl`, which does not exist on the Azure Linux host the fleet has run on since 2026-08-13"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 3.00
+  files: [DECISIONS.md]
+  origin: "operator-session#deploy-gate-2026-09-08"
+  plan_refs: ["W1-T3200", "W1-T3201", "W1-T3166"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR DIRECTION 2026-09-08, verbatim: "the judge should not be human gated, it should be
+    change and risk gated. We don't want to restart and recycle too much because it adds
+    interruption to our processing, but we also want to pick up important changes. The llm judge can
+    decide that much better than a human can in the moment. It should be written to leverage restart
+    and recycle scripts that are built to be adaptable to the hosts they are on. In this case, Azure."
+
+    WHAT IS BEING REVERSED, PRECISELY. `rmd deploy`'s own registry entry (src/run-task.ts:37154)
+    states the current rule: "OPERATOR trigger for the deploy supervisor (human-gated) … Deploys
+    nothing itself — keeps Craig's control over WHEN a merged fix goes live." That clause is
+    reversed. NOT reversed: every safety gate around it — the idle gate, the health check, and the
+    rollback — which stay deterministic (see design (ii)).
+
+    THE GATE HAS BEEN REFUSING CORRECT DIAGNOSES. Across the ENTIRE ledger archive union the
+    deployer has emitted 15 rows, all `deploy.skip`:
+      6x  "daemon running stale code (install is current) but no operator marker (human-gated; run rmd deploy)"
+      8x  "install behind origin/main but no operator marker (human-gated; run rmd deploy)"
+      1x  "up-to-date (install HEAD == origin/main; daemon liveness not observed)"
+      first 2026-08-09T16:57:09Z · last 2026-08-13T15:39:11Z
+    It identified the exact condition twice over, fourteen times, and acted on none of them.
+
+    AND THE RESTART PATH DOES NOT EXIST ON THIS HOST. `src/lib/deployer.ts` restarts by
+    `launchctl kickstart` (6 `launchctl` and 6 `launchd` references; `src/run-task.ts` carries 14
+    and 59, plus an `rmd deploy-plist` verb). MEASURED on the running host: `command -v launchctl`
+    → ABSENT; `uname -s` → Linux. The supervisor is a macOS mechanism and the fleet moved to Azure —
+    which is exactly when the skips stop.
+
+    THE COST, MEASURED THE SAME DAY. After a manual `deploy/recycle-container.sh`, the daemon's
+    checkout went from 0 commits behind `origin/main` to **20 behind within two hours**. Merged code
+    is inert until someone runs a script by hand. `rmd deploy`'s own text names the reason:
+    "The daemon runs `tsx src/` loaded once + dispatches in-process, so merged fixes are inert until
+    this restart."
+
+    WHY A JUDGE RATHER THAN A THRESHOLD. "Restart when N commits behind" is the obvious rule and it
+    is wrong in both directions: twenty documentation commits are not worth an interruption, and one
+    commit fixing a live escalation storm is. The question is the WORTH of the pending change
+    against the COST of interrupting whatever is in flight, which is a reading of both, not a count.
+  design: |
+    (i) THE GATE IS CHANGE-AND-RISK, NOT A MARKER. What decides is the pending diff's worth and the
+    current interruption cost. The operator's marker stops being required; an explicit `rmd deploy`
+    must still FORCE one, because a human who has decided should never have to argue with a judge.
+    (ii) THE SAFETY GATES STAY DETERMINISTIC, AND THIS IS THE LOAD-BEARING SPLIT. Idle detection,
+    the health check and the rollback are facts with correct answers and `deployer.ts` already gets
+    them right (`daemonIsIdle`, `evaluateIdleGate`, `DEPLOY_IDLE_DEFER_CEILING_MS`,
+    health-check-rollback). NO judge may override them: a verdict of "deploy now" that lands while a
+    worker is mid-task, or that skips the health check, has replaced a human gate with a worse one.
+    The judge chooses WHETHER and WHEN to want a restart; the gates decide whether it is safe to
+    have one.
+    (iii) THE RESTART MECHANISM IS HOST-ADAPTABLE, and on this host that means the container scripts
+    that already work — `deploy/recycle-container.sh` (which pauses, waits out in-flight workers,
+    refuses on a failed pull, and verifies the started image) and `deploy/serve-container.sh`. The
+    ruling does not prescribe how; it prescribes that a host without `launchctl` is a supported host.
+    (iv) A CEILING ON RESTARTS, STATED. "We don't want to restart and recycle too much" is a
+    requirement, not a preference: a bounded rate is recorded so a miscalibrated judge cannot
+    thrash the fleet, and hitting that bound is itself visible.
+    (v) EVERY VERDICT IS LEDGERED WITH ITS REASON, on both arms, and registered for retention in the
+    same change. The existing `deploy.skip` rows are the only reason this task could establish what
+    the gate has been doing since August; that legibility must survive the change rather than being
+    replaced by silence.
+  acceptance:
+    - claim: "DECISIONS.md records the ruling: a deploy is change-and-risk gated, the operator marker is no longer required, and an explicit rmd deploy still forces one"
+      proof: "grep: CHANGE-AND-RISK GATED in DECISIONS.md"
+    - claim: "the record states that the idle gate, health check and rollback remain DETERMINISTIC and that no judge may override them"
+      proof: "grep: no judge may override in DECISIONS.md"
+    - claim: "the record carries the measurement that motivated it — fourteen correct diagnoses declined for want of a marker, and launchctl absent on the Azure host"
+      proof: "grep: no operator marker in DECISIONS.md"
+    - claim: "the record names the restart-rate ceiling as a requirement, not a preference"
+      proof: "grep: restart-rate ceiling in DECISIONS.md"
+  falsifier: |
+    CLOSE IF deploys are already automatic: read the deployer's own skip reasons.
+    MEASURED 2026-09-08 over the full archive union: 15 rows, ALL `deploy.skip`, 14 of them naming
+    "no operator marker (human-gated; run rmd deploy)".
+    POSITIVE CONTROL, because "no deploy rows" and "no deploys" look identical: the same extraction
+    must FIND those 15 rows and their three distinct reasons. A run returning zero rows has failed
+    to read the archives, not proven the deployer idle.
+    SECOND CONTROL for the host claim: `command -v launchctl` on the running host must be ABSENT
+    while `uname -s` reports Linux. MEASURED 2026-09-08: both hold.
+    DO NOT satisfy this by lowering the gate to a commit-count threshold. The rationale rejects it
+    explicitly in both directions; a ruling that ends in "restart when N behind" has answered a
+    question nobody asked.
+    DO NOT let the judge reach the safety gates. Design (ii) is the whole safety argument, and a
+    verdict that can skip a health check or interrupt a live worker is strictly worse than the human
+    gate it replaced.
+    DO NOT remove `rmd deploy`. An operator who has decided must be able to force a deploy without
+    persuading a model.
+  note: |
+    Rule 25 CHECKED: `DECISIONS.md` is documentation.
+    THIS IS `verify: human` BECAUSE IT REVERSES A RECORDED OPERATOR-CONTROL DECISION. The existing
+    text is explicit that the gate exists to keep the operator's control over when a fix goes live;
+    only he can trade that away, and he has — the direction is quoted verbatim above so a later
+    reader can see it was his and not inferred.
+    THE TWO IMPLEMENTING SHARDS ARE SEPARATE ON PURPOSE: W1-T3200 makes the restart mechanism
+    host-adaptable (a portability defect, true regardless of who or what gates it) and W1-T3201
+    builds the judge (a new mechanism). Either could be wanted without the other, and W1-T3200 is
+    worth shipping alone — today the fleet has NO automatic restart on its only host.
+    CAVEAT WITH EQUAL WEIGHT: automating restarts trades a known cost for an unknown one. Today's
+    failure mode is visible and boring — stale code, fixed by a human running a script. The
+    replacement can thrash, can restart at a bad moment, or can decide wrongly with a model's
+    confidence. Design (ii) and (iv) exist for exactly that, and they are the clauses most likely to
+    be skipped under time pressure.
+    SECOND CAVEAT: no measurement here establishes that an LLM judges this WELL. The operator's
+    claim — that a judge decides it better than a human in the moment — is a reasonable bet and is
+    recorded as his, not as a finding. W1-T3201's ledgered verdicts are what will make it checkable.

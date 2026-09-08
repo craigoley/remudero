@@ -1,0 +1,164 @@
+- id: W1-T3201
+  title: "NOTHING SCORES A PENDING CHANGE, SO TWENTY PLAN-ONLY FILINGS AND ONE COMMIT ENDING AN ESCALATION STORM EXERT IDENTICAL RESTART PRESSURE — score each merged change for daemon impact (plan-only is a DETERMINISTIC zero), accumulate, restart when the running total crosses a recorded threshold, and tune that one number against observed restart frequency"
+  repo: remudero
+  depends_on: [W1-T3199, W1-T3200, W1-T3166]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/deploy-judge.ts, src/lib/deployer.ts, test/a-restart-is-worth-its-interruption.test.ts]
+  origin: "operator-session#deploy-gate-2026-09-08"
+  plan_refs: ["W1-T3199", "W1-T3200", "W1-T3166", "W1-T349"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR DIRECTION 2026-09-08, verbatim: "We don't want to restart and recycle too much because
+    it adds interruption to our processing, but we also want to pick up important changes. The llm
+    judge can decide that much better than a human can in the moment."
+
+    WHAT DECIDES TODAY IS A FILE'S EXISTENCE. `decideDeployTrigger` compares the install's HEAD to
+    `origin/main` and looks for `state/DEPLOY_REQUESTED`. The pending change's CONTENT reaches the
+    decision nowhere. MEASURED over the full ledger archive union: 15 rows, all `deploy.skip`, 14
+    naming "no operator marker".
+
+    A COUNT IS THE OBVIOUS SUBSTITUTE AND IT IS WRONG IN BOTH DIRECTIONS. On 2026-09-08 the checkout
+    reached 20 commits behind in two hours. Most were plan-only filings that change no running
+    behaviour whatsoever; one (#4640) gave the residual escalation judge its first production caller
+    after it had sat unwired since W1-T349 — visible in the ledger as `escalation.judged` going from
+    zero to one only after a restart. "Restart at N behind" would have fired for the twenty and
+    could equally have waited through the one.
+
+    THE COST SIDE IS REAL AND MEASURED, not a worry. That same recycle PAUSED the fleet and waited
+    570s for a live Codex worker to finish before it could proceed. `recycle-container.sh` sizes its
+    own wait from measured worker durations — "19.3 min median (1158s), 36.0 p90, 46.7 p95, 98.5
+    max" over 115 `implement.done` rows. An ill-timed restart can therefore cost the better part of
+    an hour of drained capacity, which is exactly the interruption the operator does not want spent
+    on documentation.
+
+    SO THE QUESTION IS A JUDGEMENT, NOT A THRESHOLD: is what is pending worth what it costs to take
+    it, right now. That reads a diff and a live state together, and neither a commit count nor a
+    file marker can express it.
+
+    THE PATTERN IS ESTABLISHED IN THIS REPO AND ITS FAILURE MODE IS TOO. Four LLM judges exist
+    (risk, flight, escalation, promotion). The escalation judge was BUILT COMPLETE — prompt,
+    exemptions, fail-open default, a real no-tools spawn, six tests — and had ZERO production callers
+    until W1-T3166 wired it the same day this shard was filed. A fifth judge with no call site would
+    repeat that exactly, which is why this task declares one.
+  design: |
+    (i) THE JUDGE DECIDES WANT, THE GATES DECIDE SAFE, AND THE LINE IS ABSOLUTE. A verdict is an
+    input to `runDeployCycle`, never a bypass of it: `daemonIsIdle`, `evaluateIdleGate`,
+    `DEPLOY_IDLE_DEFER_CEILING_MS`, the health check and the rollback all still run and still refuse.
+    A judge that can restart during live work has replaced a human gate with a worse one.
+    (ii) A SCORED ACCUMULATOR, NOT A HOLISTIC VERDICT PER POLL. Each merged change gets an IMPACT
+    SCORE; the scores accumulate; a restart is wanted when the running total crosses a recorded
+    THRESHOLD, and the total resets on a completed restart. This is the operator's design
+    (2026-09-08) and it is better than asking "should I restart now" each time for a reason worth
+    stating: an accumulator is CALIBRATABLE. Restarting too often or too seldom is fixed by moving
+    ONE recorded number, against observed frequency. A holistic verdict offers nothing to turn.
+    (ii-a) PLAN-ONLY IS A DETERMINISTIC ZERO AND NEVER REACHES THE JUDGE. `planOnlyDiff` already
+    exists, exported and tested (src/lib/review.ts:2736, with `planOnlyFromFiles` at :2730). A
+    plan-only change contributes exactly 0, decided by that predicate, spending no spawn and
+    exerting no pressure whatsoever — the operator was explicit: "we definitely shouldn't have any
+    pressure to restart from plan-only changes". A model must not be able to score it above zero.
+    (ii-b) THE JUDGE SCORES IMPACT, IT DOES NOT DECIDE RESTARTS. Its question is narrow and
+    answerable — how much does THIS change alter running daemon behaviour — which is a far better
+    use of a model than a whole-fleet timing call, and it makes each verdict reviewable in isolation.
+    The THRESHOLD, the accumulation and the reset are ordinary code.
+    (ii-c) THE PROMPT CARRIES WHAT SCORING NEEDS: the change's subjects and touched paths, whether
+    it wires a previously-unreached mechanism, and whether it names a live defect. It does NOT carry
+    fleet-timing state — that belongs to the deterministic gates, not to a score.
+    (iii) FAIL CLOSED, WHICH IS THE OPPOSITE POLARITY TO THE ESCALATION JUDGE, AND DELIBERATELY. An
+    unreadable verdict means DO NOT RESTART. There the costly direction was hiding work from a human;
+    here it is interrupting the fleet on a verdict nobody could read. Staying stale is visible,
+    boring and reversible; a bad restart costs drained capacity and can recur.
+    (iv) A RESTART-RATE CEILING THE ACCUMULATOR CANNOT ARGUE WITH, distinct from the threshold and
+    doing a different job: the threshold expresses "enough has built up", the ceiling expresses "not
+    this often, whatever the score says". W1-T3199 makes "not too much" a requirement; a bound
+    outside the score enforces it, so a miscalibrated scorer cannot thrash the fleet however
+    confident it is. Hitting the ceiling is itself a ledgered event.
+    (iv-a) THE THRESHOLD IS RECORDED AND TUNABLE, and its current value carries the reason it holds
+    that value. The operator's own words: "that threshold can be adjusted if we're restarting too
+    much or too little". A magic number with no recorded rationale cannot be tuned by anyone who
+    did not choose it.
+    (v) AN EXPLICIT `rmd deploy` OUTRANKS THE JUDGE. The operator's marker stops being REQUIRED and
+    stays SUFFICIENT — a human who has decided must not have to persuade a model.
+    (vi) EVERY SCORE LEDGERED WITH ITS REASON, ALONGSIDE THE RUNNING TOTAL AND THE THRESHOLD IN
+    FORCE, registered for retention in the SAME change. This is what makes (iv-a) possible at all:
+    tuning needs the history of what scored what and how long the total took to cross. Establishing
+    what the deployer had been doing since August was possible only because `deploy.skip` rows
+    exist; that legibility must survive and must now carry the numbers.
+  acceptance:
+    - claim: "a plan-only change scores exactly 0 and NEVER reaches the judge — a counting stub records zero invocations for it, and the running total is unchanged"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "scores ACCUMULATE and a restart is wanted only when the running total crosses the threshold — N sub-threshold changes want none, and the change that crosses it wants exactly one"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "a completed restart RESETS the running total, so the next restart requires a fresh build-up rather than firing again immediately"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "the threshold is a recorded value, and raising it demonstrably reduces restarts over the same change sequence while lowering it increases them — it is tunable, not decorative"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "the judge's verdict cannot bypass the deterministic gates: a 'restart now' verdict with a live worker still defers through the idle gate"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "an unreadable, throwing or unparseable verdict resolves to DO NOT RESTART — fail closed, proven at the callsite"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "the restart-rate ceiling holds against a judge that says yes every time, and hitting it is ledgered"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "an explicit rmd deploy marker still forces a deploy without consulting the judge"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "every verdict writes a ledger row naming decision and reason on BOTH arms, and that step survives rotation"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "the judge has a PRODUCTION call site — deployer.ts calls it, not only its own tests"
+      proof: "grep: judgeDeployWorth( in src/lib/deployer.ts"
+  falsifier: |
+    CLOSE IF anything already weighs a pending change against interruption cost: read
+    `decideDeployTrigger` (src/lib/deployer.ts) and name the field carrying the diff's content.
+    MEASURED 2026-09-08: it compares HEADs and looks for an operator marker; no content reaches it.
+    POSITIVE CONTROL, because "no deploy decision rows" and "no deploys" look the same: the archive
+    union must yield the 15 `deploy.skip` rows and their three distinct reasons. A read returning
+    nothing has failed to open the archives.
+    PROVE THE ACCUMULATOR LOAD-BEARING, and it takes THREE fixtures, not two: (a) a run of plan-only
+    changes must leave the total at zero and the judge uninvoked; (b) a run of scoring changes that
+    stays UNDER the threshold must want no restart; (c) the change that crosses it must want exactly
+    one, and the total must then reset. A suite that only shows "impactful change causes restart"
+    passes on a design with no accumulator at all.
+    PROVE THE THRESHOLD TUNABLE: the same change sequence replayed at a higher threshold must yield
+    STRICTLY FEWER restarts, and at a lower one strictly more. A threshold that does not move the
+    outcome is a constant nobody can calibrate, which defeats the reason this design was chosen.
+    DO NOT let the judge reach the safety gates. Design (i) is the entire safety argument; a verdict
+    that restarts during live work is worse than the marker it replaced.
+    DO NOT fail open. The escalation judge fails OPEN because hiding work from a human is its costly
+    direction; here the costly direction is interrupting the fleet on a verdict nobody could read,
+    so the polarity inverts. Copying the sibling's default would be the single most damaging error
+    available in this task.
+    DO NOT satisfy this with a commit-count heuristic behind a judge-shaped interface. A count is not
+    a score: the whole point is that twenty plan-only filings weigh ZERO while one wiring commit
+    weighs a lot, and a counter cannot express that.
+    DO NOT let a model score a plan-only change. `planOnlyDiff` decides that arm deterministically;
+    routing it through a judge reintroduces the exact pressure the operator ruled out and spends a
+    spawn to do it.
+    DO NOT collapse the threshold and the restart-rate ceiling into one number. They answer
+    different questions — "has enough built up" versus "not this often regardless" — and merging
+    them means tuning one breaks the other.
+  note: |
+    THE ACCUMULATOR IS THE OPERATOR'S DESIGN (2026-09-08) AND IT DISPLACED A WEAKER ONE OF MINE.
+    This shard was first filed asking the judge to weigh a pending diff against interruption cost
+    per decision. His version — score each change, plan-only is 0, accumulate to a tunable threshold
+    — is better for a reason worth recording: it is CALIBRATABLE. "Restarting too much or too
+    little" is fixed by moving one recorded number; a holistic verdict offers nothing to turn. It
+    also narrows the model's question to something answerable in isolation and removes the judge
+    from the plan-only path entirely.
+    Rule 25 CHECKED: `src/lib/` is ordinary src.
+    THE CALL-SITE CRITERION IS DELIBERATE AND IS THE LESSON OF W1-T3166 AND W1-T3188. W1-T349 built
+    a complete, tested judge that nothing called; `lint-plan` refused W1-T3188 earlier the same day
+    for exactly this omission ("creates src/lib/verify-human-judge.ts but no acceptance criterion
+    proves a CALL SITE for it"). A fifth judge is filed with its caller named from the start.
+    THE POLARITY INVERSION IS THE MOST IMPORTANT LINE IN THIS SHARD and is stated twice on purpose —
+    in design (iii) and again in the falsifier. Every other judge in this repo fails open. This one
+    must not, and a reviewer's instinct will be to make it match its siblings.
+    CAVEAT WITH EQUAL WEIGHT: nothing here establishes that an LLM judges this well. The operator's
+    claim that a judge decides it better than a human in the moment is a reasonable bet, recorded as
+    HIS, not as a finding. The ledgered verdicts required by design (vi) are what will make it
+    checkable after the fact — and the first weeks of them should be READ, not assumed.
+    SECOND CAVEAT: the interruption cost is measured for IMPLEMENT workers (115 `implement.done`
+    rows, 19.3 min median, 98.5 max). The cost of interrupting a review, a sweep pass or a retro is
+    NOT measured, and the prompt should not present a number it does not have.
