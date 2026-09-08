@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -58,6 +58,44 @@ test("W1-T3115: the post-review effect carries the already-measured plan-filing 
 
   await effects.postReview?.(greenFiling());
   assert.deepEqual(calls, [{ prNumber: 42, isPlanFiling: true }]);
+});
+
+test("W1-T3115: buildSweepEffects's own PRODUCTION reviewRunner default is actually reached and threads isPlanFiling into a real reviewCommand call", async () => {
+  // Every real buildSweepEffects(...) call site in src/run-task.ts omits the ninth argument, so
+  // THIS default — not the fake reviewRunner the test above injects — is what production runs.
+  // A fake `gh` on PATH (never a real GitHub or git-worktree touch) makes the real reviewCommand
+  // fail fast at its very first side effect (`fetchView`), before materialize/runReview/post ever
+  // run, so this drives the default's own three-line body without spawning a real review.
+  const root = mkdtempSync(join(tmpdir(), "rmd-review-filing-default-runner-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-review-filing-fake-gh-"));
+  writeFileSync(join(binDir, "gh"), "#!/bin/sh\nexit 87\n", { mode: 0o755 });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+  try {
+    const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const effects = buildSweepEffects(
+      "acme",
+      "remudero",
+      { root } as Config,
+      join(root, "state", "ledger.ndjson"),
+      "SWEEP-W1-T3115-default",
+      plan(),
+      (step, extra) => logs.push({ step, extra }),
+    );
+    // postReview logs THEN rethrows the review failure (so runSweep's own containment records
+    // it) — the assertion is on the log line, not on postReview resolving.
+    await assert.rejects(() => Promise.resolve(effects.postReview!(greenFiling())));
+    assert.ok(
+      logs.some((l) => l.step === "sweep.post_review.failed"),
+      "the real default reviewRunner must be reached (and its failure logged) — not skipped or swallowed silently",
+    );
+    assert.ok(
+      !logs.some((l) => l.step === "sweep.post_review.done"),
+      "a fake `gh` must fail the real call, not accidentally succeed",
+    );
+  } finally {
+    process.env.PATH = originalPath;
+  }
 });
 
 async function reviewIdentity(opts: { planOnlyFiling: boolean; body?: string }): Promise<{
