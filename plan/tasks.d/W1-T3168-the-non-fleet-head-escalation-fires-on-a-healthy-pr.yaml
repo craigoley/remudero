@@ -1,0 +1,94 @@
+- id: W1-T3168
+  title: "THE NON-FLEET-HEAD ESCALATION FIRES ON A HEALTHY PR — `PR … cannot be repaired from its non-fleet head` asks the operator to choose supersede-or-manual-resolution for PRs that are open, green and simply awaiting review, because the producer's predicate is head OWNERSHIP and never asks whether anything is wrong"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/run-task.ts, test/non-fleet-head-escalation-precision.test.ts]
+  origin: "operator-session#console-visibility-2026-09-08"
+  plan_refs: ["W1-T296", "W1-T3166"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08. The producer is `escalateTerminalHead` (src/run-task.ts:30749), summary
+    `PR ${prUrl} cannot be repaired from its non-fleet head`, offering exactly two options —
+    `supersede` ("replace this PR with an implementation on the task's fleet-owned run branch, then
+    close the blocked PR") and `manual-resolution` — with `recommendation: supersede` and consequence
+    "The PR remains red and outside the fix rung's safe ownership boundary until a human chooses a
+    resolution."
+
+    THE CONSEQUENCE LINE ASSERTS "REMAINS RED". THAT IS NOT CHECKED ANYWHERE ON THIS PATH. The
+    escalation is gated on `terminalUncreditableHeads(ledgerPath)` — a HEAD-OWNERSHIP fact — and the
+    recommendation to SUPERSEDE, i.e. to throw the PR away and rebuild it, is made without reading
+    whether the PR is red at all.
+
+    MEASURED CONSEQUENCE, on the operator's own board: issues #4623 (2026-09-08T11:51:29Z) and #4624
+    (11:51:34Z) — five seconds apart — asked him to supersede PRs #4619 and #4621. Both were plan-only
+    PRs opened minutes earlier from an operator-authored lane, both healthy, neither blocked. #4621
+    subsequently MERGED (origin/main is at b75d086fd, "chore(plan): cite the prior art a 2026-09-08
+    audit found for two rulings (#4621)"). THE FLEET ASKED A HUMAN TO DISCARD AND REBUILD A PR THAT
+    WAS ABOUT TO MERGE ON ITS OWN.
+
+    THE OPERATOR'S WORDS FOR THE SAME BOARD: "neither of them seem like they actually need me."
+
+    THE OWNERSHIP GUARD ITSELF IS CORRECT AND MUST SURVIVE. The fix rung SHOULD refuse a branch it
+    does not own — W1-T296 established that, and re-running the rung genuinely cannot change an
+    ownership fact. What does not follow is that a human must be interrupted. "The fix rung declines
+    to act on this PR" and "a person must decide something about this PR" are different statements,
+    and this producer collapses them.
+  design: |
+    (i) SPLIT THE OWNERSHIP FACT FROM THE ASK. The rung keeps refusing foreign heads exactly as it
+    does today; what changes is whether that refusal alone is grounds to interrupt a human. NOTHING
+    ABOUT THE GUARD'S REFUSAL BEHAVIOUR MAY CHANGE — a task that "fixes" this by letting the rung act
+    on foreign heads has inverted W1-T296 and is a safety regression, not a fix.
+    (ii) THE ASK MUST BE CONDITIONED ON THE PR ACTUALLY BEING STUCK, which is what the escalation's
+    own consequence line ALREADY CLAIMS ("remains red"). An open, non-failing PR whose only unusual
+    property is a foreign head is a PR whose author is presumably still working — the ordinary case
+    for every operator-authored and every human contribution this repo will ever receive.
+    (iii) STATE THE STUCKNESS PREDICATE AND MEASURE IT, do not infer it. Whatever stands for "stuck"
+    — checks concluded failing, or a dwell with no head movement — is a declared, tested condition
+    with its reason recorded, because it is the whole difference between a useful escalation and the
+    one this task exists to stop.
+    (iv) WHEN IN DOUBT, STILL ESCALATE. A PR whose state cannot be READ is not thereby healthy. The
+    indeterminate arm delivers, matching `EscalationReconcileCandidate.derived.indeterminate`'s own
+    treatment (sweep.ts:6007: "treat as neither resolved nor live") and the fleet's standing polarity.
+  acceptance:
+    - claim: "an OPEN, non-failing PR on a foreign head produces NO needs-human escalation, while the fix rung still refuses to act on it"
+      proof: "unit test: test/non-fleet-head-escalation-precision.test.ts"
+    - claim: "a foreign-head PR that IS stuck by the declared predicate still escalates, with its supersede/manual-resolution options unchanged"
+      proof: "unit test: test/non-fleet-head-escalation-precision.test.ts"
+    - claim: "a foreign-head PR whose state cannot be read escalates — indeterminate is never treated as healthy"
+      proof: "unit test: test/non-fleet-head-escalation-precision.test.ts"
+    - claim: "the fix rung's refusal to act on a branch it does not own is byte-identical before and after this change"
+      proof: "unit test: test/non-fleet-head-escalation-precision.test.ts"
+  falsifier: |
+    CLOSE IF the producer already reads PR health before escalating: read `escalateTerminalHead`
+    (src/run-task.ts:30749) and `terminalUncreditableHeads`, and name the field consulted.
+    MEASURED 2026-09-08: the gate is head ownership; no check-state read occurs on this path.
+    PROVE IT LOAD-BEARING: the fixture must be the MEASURED shape — a foreign-head PR that is OPEN
+    and NOT failing. Today that escalates; after the change it must not, and the SAME fixture with
+    failing checks must still escalate. If both fixtures behave alike in either direction, the
+    predicate is not discriminating and design (iii) is unmet.
+    DO NOT satisfy this by suppressing the escalation class outright. A genuinely stuck foreign-head
+    PR is real work for a human and W1-T296's guard is why it surfaces at all; deleting the producer
+    trades a false positive for a false negative, which is the costly direction.
+    DO NOT satisfy this by routing the class through the residual judge (W1-T3166) and calling it
+    done. A judge asked "does this need a human" about a healthy PR is being asked to compensate for
+    a producer that should not have fired — that is a second layer paying for a first-layer defect,
+    and it costs a model spawn every time.
+  note: |
+    Rule 25 CHECKED: `src/run-task.ts` is ordinary src.
+    RELATIONSHIP TO W1-T3166/W1-T3167, stated so all three are not mistaken for one: this is a
+    PRODUCER-PRECISION defect (an escalation that should never have been raised); those two are
+    ROUTING (an escalation that was raised correctly and should not be on the real-time board). Fixing
+    routing does not fix this — a demoted false positive is still a false positive, just quieter.
+    CAVEAT WITH EQUAL WEIGHT: "healthy" is measured here from the PR's check state at escalation time,
+    and #4621's subsequent merge is EVIDENCE that the escalation was wrong, not part of the predicate
+    — no producer can read the future. A PR that is green now and breaks later will still escalate
+    later, correctly, and this task neither claims nor wants to prevent that.
+    SECOND CAVEAT: this shard does not measure how much of the needs-human volume this class accounts
+    for. Two of eight open items on 2026-09-08 were this class, plus four more of a different class
+    referencing one open PR — a single day's board, not a rate.
