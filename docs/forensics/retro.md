@@ -3656,3 +3656,53 @@ Falsifier, in `test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts`: w
 `ledgerCreditIndex`'s `pr_url` arm neutered, the first criterion's fixture reduces to `blocked_ci`
 again while the different-`pr_url` negative case is unchanged. The comment budget for
 `src/lib/retro.ts` allowed exactly one added comment line, which is why this note lives here.
+
+## W1-T3074 — closure by task class and guard fire counts (2026-09-08)
+
+The shard's own measurement, taken 2026-09-07 over `origin/main` (3,586 commits) and
+`plan/tasks.d/`: the corpus grew 601 -> 1,204 shards between 2026-08-25 and 2026-09-07 (605 added,
+2 deleted); `chore(plan)` filings ran 540 commits against 680 ship-class commits in the same
+window; 42 of the 60 newest shards cluster into gates, proofs, coverage and the fix rung; 39
+titles say some organ "has no reader / never fires / nothing runs"; only 31 shards carry
+`retirement:`. `renderGather` printed eighteen sections and none answered, per class, how many
+tasks were filed, merged, or still open, nor which guard had not fired since the marker. Zero
+hits for `closure` in `src/lib/retro.ts` at that date.
+
+`src/lib/retro-closure.ts` is a NEW module rather than a hunk in `retro.ts` because `retro.ts`
+sat at 999 of 1,000 comment lines under `scripts/comment-load-baseline.json` and 4,296 of a
+4,500-line source ceiling. It imports nothing from `retro.ts`: every input type is structural
+(`RunSummary`, `ShippedRecord`, `MastMapping` and `GuardReasonFallbackRow` all satisfy them), so
+`retro.ts` importing it adds no cycle to `scripts/cycle-baseline.json`. `buildGather` passes
+`GUARD_REASON_FALLBACK_ROWS` in as an option for the same reason.
+
+Design facts a reader of the two tables needs:
+
+- **`filed` reads `not supplied`.** A plan record carries no filing timestamp (`note: FILED
+  2026-09-07` is prose; `origin:` is a label). The reducer takes an optional filings list and
+  windows it by `sinceTs`; the production caller supplies none today, so the column says so
+  instead of printing a zero that looks measured. The denominator is then `merged + open`.
+- **`open` is the plan's listed tasks whose decorative `status:` is neither `merged` nor
+  `done`, classed by `deriveTaskClass` over the same `loadPlan` read `openTitles` uses.** CLAUDE.md
+  records that `status:` stays `queued` on shipped tasks, so `open` can overcount; the merge
+  credit (`shipped`) is the only completion signal and is what `merged` reads. The caveat is
+  stated here rather than fixed, because reusing the retro's later `projectPlan` pass would
+  reorder `retroCommand` and widen this task.
+- **A mapping row names its guard by verdict.** `MastMappingRow` has no `guard` field; the
+  `infrastructure` rows are `blocked_isolation` and `blocked_containment`, and
+  `GUARD_REASON_FALLBACK_ROWS` maps those verdicts to `isolation` and `containment`.
+  `guardNameOfVerdict` strips `blocked_` so a new infrastructure row names its guard the same way
+  with no table edit; a fallback row for the verdict wins where one exists.
+- **`guardFiredBy` counts one more shape than `resolveGuardCheck`.** Structured fields first,
+  then the prose fallback (the same order), then a verdict the mapping codes `infrastructure`
+  with neither: that line shape exists in the ledger and would otherwise read as no fire. The test
+  asserts the two resolvers agree wherever `resolveGuardCheck` resolves at all.
+- **`lastMergeTs` is the credited run's `startTs`.** A `ShippedRecord` carries no timestamp.
+- **Floor 5, streak 10.** `CLOSURE_POPULATION_FLOOR = 5` is P48's floor; the refused cell states
+  the denominator it would have divided by. `GUARD_RETIREMENT_ZERO_STREAK = 10` is the
+  rationale's own "ten cycles"; the row is NAMED a candidate and nothing removes it, because
+  §Self-improvement puts retirement behind the golden suite.
+- **The marker carries `guard_zero_streak`** beside `mast_category_counts`; `buildGather` reads
+  the prior record through `priorGuardZeroStreak` and never touches the marker itself. A quiet
+  cycle advances every streak by one; a fire resets that guard to 0.
+- **The ledger line `retro.closure_by_class`** is emitted beside `retro.start`, on the real run
+  only (`--dry-run` returns before either), carrying `since` and the rows.

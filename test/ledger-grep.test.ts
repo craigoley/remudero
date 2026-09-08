@@ -6,7 +6,7 @@ import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 import { configPath, type Config } from "../src/lib/config.js";
 import { resolveLedgerUnion } from "../src/lib/ledger-grep.js";
-import { ledgerGrepCommand } from "../src/run-task.js";
+import { ledgerGrepCommand, stepFromRawLedgerLine } from "../src/run-task.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -266,4 +266,10 @@ test("the mirror case: archives present reports the archive count and the dedupl
     console.log = realLog;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("stepFromRawLedgerLine returns undefined for malformed JSON, never throwing", () => {
+  assert.equal(stepFromRawLedgerLine('{"step":"run.start"'), undefined);
+  assert.equal(stepFromRawLedgerLine('{"step":"run.start"}'), "run.start");
+  assert.equal(stepFromRawLedgerLine('{"step":42}'), undefined);
 });

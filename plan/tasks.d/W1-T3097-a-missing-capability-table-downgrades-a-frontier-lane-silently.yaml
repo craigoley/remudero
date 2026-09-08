@@ -1,0 +1,91 @@
+- id: W1-T3097
+  title: "A CODEX WORKER THAT CANNOT LOAD `.remudero/mounts.yaml` ROUTES EVERY MODEL TO `balanced` AND SAYS NOTHING — `codexCapabilityForRequestedModel` returns the `balanced` default for an UNREADABLE table and for a genuinely unmapped model alike, so a `claude-opus-5` synthesis lane silently serves a mid-tier Codex model with no ledger row, no warning, and the cross-provider Tier Invariant quietly not holding"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files: [src/lib/worker-provider.ts, src/lib/worker.ts, test/a-missing-capability-table-downgrades-a-frontier-lane-silently.test.ts]
+  origin: "operator-session#router-efficiency-2026-09-08"
+  plan_refs: ["G-17", "W1-T2572", "W1-T2573", "W1-T2704"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 at 847e551c, and in the ledger union at the daemon state root.
+
+    (1) THE MECHANISM, READ AT SOURCE. `resolveWorkerCapabilities` (`src/lib/worker.ts`) tries the
+    worker cwd then the install root and `return undefined` when neither yields a table. That
+    `undefined` flows to `codexCapabilityForRequestedModel(capabilities, requestedModel)`, whose
+    whole body is `const capability = capabilities?.claude[model]; return isCodexModelTier(capability)
+    ? capability : "balanced"`. An UNREADABLE TABLE and an UNMAPPED MODEL are therefore the same
+    answer. `codexCandidatesForCapability` then takes the `FALLBACK_CODEX_MODELS` branch, whose
+    `balanced` row begins `gpt-5.6-terra` at EVERY effort — the fallback is effort-insensitive, so
+    even the effort axis stops discriminating.
+
+    (2) IT HAS FIRED IN PRODUCTION, ON EXACTLY THE LANES THAT SHOULD BE HIGHEST. Codex spawns since
+    `served_model` began being recorded (2026-09-03) are 147 `gpt-5.5`, 104 `gpt-5.6-sol` and 26
+    `gpt-5.6-terra`. Only 4 of those terra spawns are legitimate (`recon.done` at `effort=medium`,
+    the one live `balanced/medium` cell). The other 22 include `inbox.draft_synthesized` x9 and
+    `retro.synthesized` x1 — both declared `claude-opus-5`, i.e. capability `frontier`, whose table
+    row is `[gpt-5.6-sol, gpt-5.5]` and contains no terra at any effort. A frontier lane cannot
+    reach terra through the table; it can only reach it through this fallback.
+
+    (3) NOTHING RECORDS IT. `grep -rn "capability table is unavailable" src/` returns ONE line, and
+    it is the `detail` string on a CLAUDE MODEL-HEALTH reading, not a ledger step and not on the
+    codex path. There is no `log(...)` anywhere on the capability-resolution path, so the downgrade
+    is invisible in the ledger, invisible in `pr.head_provider`, and indistinguishable after the
+    fact from a deliberate routing decision.
+
+    (4) WHY THIS IS NOT MERELY COSMETIC. `enforceTierInvariant` (G-17) validates the capability axis
+    AT LOAD, which is precisely the moment that does not happen when the table cannot be loaded. So
+    the one situation in which the invariant is not checked is the one situation in which it is
+    violated, and the system's own account of itself still reads correct.
+
+    (5) IT ALSO POISONS THE THING THAT WOULD FIX THE ROUTER. W1-T2574's cells key arms on
+    `served_model`; a silent downgrade puts terra rows in a frontier lane's arm with no marker
+    saying they were not chosen on purpose, so the recommender would eventually compare an arm that
+    is an artefact of a failed file read against one that is a policy decision.
+  design: |
+    (i) SEPARATE "UNMAPPED" FROM "UNREADABLE" AT THE SEAM. The two cases must stop returning the
+    same value silently. An unmapped model resolving to `balanced` is documented, intended
+    behaviour and stays; an unreadable TABLE is a different event and must be reported as one.
+    (ii) FAIL-SOFT STAYS FAIL-SOFT. A worker must still spawn when the table cannot be read — this
+    is a fleet that runs unattended, and blocking dispatch on a file read would trade a silent
+    downgrade for a silent stall. The deliverable is that it becomes LOUD, not that it becomes fatal.
+    (iii) A LEDGER ROW, NOT A CONSOLE WARNING. The evidence has to survive into the corpus the sweep
+    reads, naming the requested model, the capability actually used, the candidate list taken and
+    where the table was looked for — the same "never silent" discipline `mount.class_fallback`
+    already applies to an unmatched task class.
+    (iv) MARK THE SPAWN, SO THE ARM IS ATTRIBUTABLE. A run served under the fallback must be
+    distinguishable in the ledger from one served by the table, or (5) above stays true.
+    (v) NO CHANGE TO THE TABLE OR TO THE FALLBACK LISTS. `FALLBACK_CODEX_MODELS` stays the documented
+    degenerate path; this task is about knowing when it was taken.
+  acceptance:
+    - claim: "resolving a codex capability with no capability table available is reported as a distinct event from resolving a model the table simply does not map, and both still return a usable capability"
+      proof: "unit test: test/a-missing-capability-table-downgrades-a-frontier-lane-silently.test.ts"
+    - claim: "a spawn served under the missing-table fallback writes a ledger row naming the requested model, the capability used and the candidate list taken"
+      proof: "unit test: test/a-missing-capability-table-downgrades-a-frontier-lane-silently.test.ts"
+    - claim: "a worker whose capability table cannot be read still spawns rather than blocking dispatch"
+      proof: "unit test: test/a-missing-capability-table-downgrades-a-frontier-lane-silently.test.ts"
+    - claim: "a run served under the fallback is distinguishable after the fact from one served by the table, so an arm built from it is attributable"
+      proof: "unit test: test/a-missing-capability-table-downgrades-a-frontier-lane-silently.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if anything already records the missing-table case: `grep -rn "capability table
+    is unavailable\|capabilities_unavailable" src/` — MEASURED 2026-09-08, one hit, and it is the
+    Claude model-health `detail` string, not a ledger step on the codex path. CLOSE IT ALSO if a
+    frontier lane can reach `gpt-5.6-terra` through the committed table: read
+    `capabilities.codex.frontier` in `.remudero/mounts.yaml` — MEASURED, it is
+    `[gpt-5.6-sol, gpt-5.5]` at every effort, so the 10 measured frontier-lane terra spawns have no
+    table-side explanation.
+    PROVE IT LOAD-BEARING: delete the new report at the seam and the first criterion must fail.
+  note: |
+    risk:high on Rule 19 SPAN, raised from medium by `lint-plan`'s own sizing check: the two concerns
+    are the resolution point (`resolveWorkerCapabilities`, worker.ts) and the seam that consumes its
+    `undefined` (`codexCapabilityForRequestedModel`, worker-provider.ts), and splitting them would
+    file a task that can only observe the defect and one that can only cause it. Fail-soft behaviour
+    is preserved by design point (ii), so the failure direction is a missing diagnostic rather than a
+    blocked spawn. Complements W1-T3080 (which names the served
+    model) by naming WHY that model was served. Id reserved at `refs/rmd-id/W1-T3097` before filing.
