@@ -1,0 +1,97 @@
+- id: W1-T3207
+  title: "RUN THE SUITE ONCE PER PR AND CONSUME COVERAGE FROM AN ARTIFACT — `ci` and `coverage-ratchet` each run the identical `test/**/*.test.ts` glob under a different harness, currently ~1 052s of duplicated runner time per PR, and the operator ruled on 2026-09-08 to collapse it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 40.00
+  files: [.github/workflows/ci.yml, test/workflow-single-suite-run.test.ts]
+  origin: "operator-session#verify-human-deadend-2026-09-08"
+  plan_refs: ["W1-T1041", "W1-T2428"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    W1-T1041 measured the duplication and DELIBERATELY LEFT THE CHOICE OPEN — its design says "THE
+    DELIVERABLE IS A MEASURED ANSWER AND A RULING. The arithmetic is recorded here; the choice is
+    not made here". OPERATOR RULING 2026-09-08: collapse it. This shard carries that decision into
+    something a worker can build, because a `verify: human` shard can never dispatch (W1-T3206).
+
+    THE DUPLICATION, RE-MEASURED TODAY rather than carried from the August filing. Over the last 12
+    ci.yml runs:
+      coverage-shard   46 jobs   12 102s total   mean 263s
+      ci-shard         43 jobs    6 484s total   mean 151s
+    Four shards each, so ~604s for `ci` and ~1 052s for `coverage-ratchet` per PR, on the SAME glob.
+    The coverage half is the more expensive one because instrumentation is slower — which is why the
+    August figure of 1 178s understates today's cost rather than overstating it.
+
+    WHAT THE OPERATOR IS ACCEPTING, STATED PLAINLY BECAUSE IT IS A REAL LOSS. W1-T1041 measured that
+    THE TWO HARNESSES DISAGREE IN BOTH DIRECTIONS — 12 of 600 runs — so each catches failures the
+    other misses. Collapsing to one run discards that second signal. This is not a free saving and
+    the shard must not present it as one.
+
+    THE PARTIAL MITIGATION THAT ALREADY EXISTS AND IS NOT ENOUGH. W1-T2428's fast-lane skips the
+    coverage run when a diff carries no `src/**` or `test/**` path, so plan-only PRs escape. But
+    42.6% of merges touch `src/` (measured over 1 496 merges, 14 days), so the duplication is paid on
+    every PR that changes behaviour — precisely the PRs that matter.
+
+    THE PATH IS ALREADY PRICED BY W1-T1041 and needs no new dependency: `actions/upload-artifact` is
+    used at a pinned sha in five workflows, and both `scripts/diff-coverage.mjs` and
+    `scripts/coverage-ratchet.mjs` import ONLY `node:` builtins — so the consumer job needs no
+    `npm ci` and no Playwright. W1-T1041 measured it at 25-40s against today's 798s.
+  design: |
+    (i) ONE INSTRUMENTED RUN, THEN A CHEAP CONSUMER. The suite runs once under coverage; the lcov is
+    uploaded as an artifact; a downstream job runs the ratchet and diff-coverage against it. The
+    expensive half is not run twice.
+    (ii) THE SURVIVING HARNESS IS THE INSTRUMENTED ONE, and this is the trade the operator accepted:
+    coverage cannot be reconstructed from an uninstrumented run, while correctness can be judged
+    from either. Dropping coverage to keep the quieter harness would save the same time and lose the
+    ratchet entirely.
+    (iii) THE LOST SIGNAL IS NAMED IN THE WORKFLOW ITSELF, not just here. A future reader debugging a
+    failure the old `ci` harness would have caught must find the reason in the file, not in a plan
+    shard they have never read.
+    (iv) A FAILED OR MISSING ARTIFACT FAILS THE GATE, never passes it. An upload that 403s — which
+    this repo has already seen (W1-T3194) — must not read as "no coverage regression".
+    (v) THE FAST-LANE SURVIVES UNCHANGED. W1-T2428 already skips coverage for diffs that cannot move
+    it; this task must not re-introduce that cost for plan-only PRs.
+  acceptance:
+    - claim: "the `test/**/*.test.ts` glob is invoked exactly ONCE per PR across the whole workflow"
+      proof: "unit test: test/workflow-single-suite-run.test.ts"
+    - claim: "the coverage ratchet and diff-coverage run against an uploaded artifact, in a job that installs neither npm dependencies nor Playwright"
+      proof: "unit test: test/workflow-single-suite-run.test.ts"
+    - claim: "a missing or failed coverage artifact FAILS the gate rather than reading as no regression"
+      proof: "unit test: test/workflow-single-suite-run.test.ts"
+    - claim: "W1-T2428's fast-lane still skips the coverage work for a diff with no src/** or test/** path"
+      proof: "unit test: test/workflow-single-suite-run.test.ts"
+    - claim: "the workflow records, in the file, that the second harness's independent signal was given up and what it measured"
+      proof: "grep: 12 of 600 in .github/workflows/ci.yml"
+  falsifier: |
+    CLOSE IF the suite already runs once: count the jobs invoking the glob.
+    MEASURED 2026-09-08: `ci.yml` contains 3 `node --test` invocations, and the file's own comments
+    say it twice — line 526 "this job runs the same test/**/*.test.ts glob under coverage" and line
+    121 "`ci` owns correctness — it runs the same glob on the quieter harness AND runs on main".
+    POSITIVE CONTROL: the re-measurement must show BOTH job families present with non-zero
+    durations — coverage-shard 46 jobs / 263s mean and ci-shard 43 / 151s. A census returning one
+    family has failed to read the runs, not proven the duplication gone.
+    PROVE IT LOAD-BEARING: the artifact-missing fixture must FAIL. A suite that only exercises the
+    happy path passes on a workflow that silently treats an absent lcov as a clean ratchet, which is
+    strictly worse than the duplication it replaced.
+    DO NOT satisfy this by deleting the coverage job and keeping `ci`. That saves the same runner
+    time and loses the ratchet, which is the one signal that cannot be rebuilt from the other run.
+    DO NOT weaken the ratchet's thresholds to make the single run pass. The task is to run the suite
+    once, not to lower what it proves.
+  note: |
+    Rule 25 CHECKED: `.github/workflows/ci.yml` is CI configuration and `test/` is its own test; no
+    `src/` path is touched, and a diff reaching `src/` has taken on a second concern.
+    SIZING: `risk: high` with `band_meaning: span` — a job restructure that ships no product code,
+    exactly as W1-T1041's own note framed it.
+    CAVEAT WITH EQUAL WEIGHT: this gives up a measured signal. 12 of 600 runs had one harness catch
+    what the other missed; after this, those 12 would have been missed by whichever harness remains.
+    The operator ruled with that number in front of him and it is recorded here so the trade is not
+    rediscovered as a surprise.
+    SECOND CAVEAT: W1-T1041 itself remains `verify: human` and undispatchable. This task does not
+    close it; the operator's ruling is carried here, and W1-T1041 should be retired or released
+    (W1-T3206) rather than left queued forever alongside its own implementation.

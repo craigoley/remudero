@@ -1,0 +1,89 @@
+- id: W1-T3209
+  title: "RAISE `hostWorkerBudget` FROM 4 AGAINST A MEASURED CENSUS — it was sized for a smaller box, the fleet host has 8 cores and ~28 GiB free, review width sheds at 3 active workers, and W1-T2989's stated precondition cites W1-T2985, which holds a reservation ref but was never filed as a shard"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [plan/policy.yaml, test/host-worker-budget-is-sized-to-the-host.test.ts]
+  origin: "operator-session#verify-human-deadend-2026-09-08"
+  plan_refs: ["W1-T2989", "W1-T2987", "W1-T2992"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    W1-T2989 measured this and is `verify: human`, so it can never dispatch (W1-T3206). OPERATOR
+    RULING 2026-09-08: build it. This shard carries the decision.
+
+    THE STATE, MEASURED 2026-09-08 at origin/main:
+      `plan/policy.yaml:621`  `hostWorkerBudget: { value: 4, origin: "net-new", min: 1, max: 16 }`
+      the shed fires when `activeWorkers + effectiveWidth > hostWorkerBudget`
+        (src/lib/review-capacity.ts:214)
+      steady state is 2 dispatch lanes + a detached retro = 3 active, so a review width of 2
+        already crosses it
+      `host-worker-budget` sheds are present in the live ledger
+    W1-T2989 measured 22 sheds across the archive union, newest 2026-09-06T21:23:24.
+
+    THE BOX IT WAS SIZED FOR NO LONGER EXISTS: 8 cores, 31 GiB total, ~28 GiB free.
+
+    AND ITS STATED PRECONDITION CANNOT BE MET AS WRITTEN, which is why this shard exists rather
+    than a one-line edit to W1-T2989. Its acceptance requires "a measured reason census taken after
+    W1-T2985 and W1-T2987 are live". MEASURED 2026-09-08: W1-T2987 is merged, but **W1-T2985 was
+    never filed as a shard** — `grep -rc '^- id: W1-T2985' plan/` returns zero across `tasks.yaml`
+    and `tasks.d/`, though the id holds a reservation ref (`refs/rmd-id/W1-T2985`) and three merged
+    PRs cite it (#4320 "shed review width on cpu starvation", #4328 "let host telemetry alone
+    authorise", #4340 "pin that a shed governor can still recover"). So the work shipped and the
+    record did not. A precondition naming a shard that does not exist can never be satisfied, and
+    W1-T2989 would sit queued forever waiting for it.
+  design: |
+    (i) THE NEW VALUE IS DERIVED FROM THE HOST, NOT PICKED. Cores, free memory and the measured
+    worker memory reserve (`workerMemoryReserveMib: 1536`) bound it; the number recorded is the one
+    that arithmetic yields, and the arithmetic is written down beside it.
+    (ii) THE CENSUS IS TAKEN AGAINST WHAT SHIPPED, not against W1-T2985's absent shard. #4320, #4328
+    and #4340 are the live behaviour; the reason census reads the ledger's actual shed rows after
+    those merged, and says so.
+    (iii) THE SHED SURVIVES. Raising the budget must not remove the governor — W1-T2992 exists
+    because "a governor that can shed must prove it can recover", and a budget high enough never to
+    bind is the same as deleting it.
+    (iv) THE BOUNDS ARE RESPECTED. `min: 1, max: 16` are declared in policy; a value outside them is
+    a schema violation, not a tuning choice.
+    (v) THE VALUE IS TUNABLE AND ITS REASON RECORDED, so the next person who sees sheds can move it
+    without re-deriving the host arithmetic from scratch — the same discipline W1-T3201's threshold
+    carries.
+  acceptance:
+    - claim: "hostWorkerBudget is raised from 4 to a value derived from the host's cores and free memory, with the arithmetic recorded beside it"
+      proof: "unit test: test/host-worker-budget-is-sized-to-the-host.test.ts"
+    - claim: "the shed still fires when the new budget is genuinely exceeded — the governor is raised, not removed"
+      proof: "unit test: test/host-worker-budget-is-sized-to-the-host.test.ts"
+    - claim: "the new value is inside the declared min/max bounds"
+      proof: "unit test: test/host-worker-budget-is-sized-to-the-host.test.ts"
+    - claim: "a review width that sheds today is admitted at the new budget, for the measured steady state of 3 active workers"
+      proof: "unit test: test/host-worker-budget-is-sized-to-the-host.test.ts"
+  falsifier: |
+    CLOSE IF the budget already reflects the host:
+      `grep -n hostWorkerBudget plan/policy.yaml`
+    MEASURED 2026-09-08: `{ value: 4, origin: "net-new", min: 1, max: 16 }`.
+    POSITIVE CONTROL for the shed being live rather than theoretical: `host-worker-budget` rows must
+    be PRESENT in the ledger. MEASURED: they are, and W1-T2989 counted 22 across the archive union.
+    A run finding zero has failed to read the ledger, not proven the governor idle.
+    PROVE IT LOAD-BEARING: the fixture must show a width that sheds at 4 and is admitted at the new
+    value, AND a width that still sheds at the new value. A test showing only the first has proven
+    the budget was raised, not that the governor survived.
+    DO NOT satisfy this by raising the budget to `max: 16`. That is a governor that never binds,
+    which W1-T2992 exists to refuse, and it discards the memory reserve the host actually needs.
+    DO NOT block on W1-T2985's shard appearing. It never will — the id holds a reservation and the
+    work merged as #4320/#4328/#4340 without a record. Census against what shipped.
+  note: |
+    Rule 25 CHECKED: `plan/policy.yaml` is configuration, not an instrument, and the test is its own.
+    THIS SHARD EXISTS BECAUSE W1-T2989 CANNOT DISPATCH — it is `verify: human`, and W1-T3206
+    measures that there is no path from an operator's verdict back to the dispatcher. Carrying the
+    ruling into an auto shard is the only pattern that currently works.
+    A RECORD DEFECT FOUND WHILE VERIFYING, worth its own attention: W1-T2985's work merged in three
+    PRs with no plan record. Anything else citing that id as a precondition is equally unsatisfiable
+    and nobody would notice, because the id resolves against a reservation ref.
+    CAVEAT WITH EQUAL WEIGHT: raising a concurrency budget on a box whose memory headroom was
+    measured ONCE, on one afternoon, is a bet. The `workerMemoryReserveMib: 1536` reserve is what
+    stands between a higher budget and an OOM, and it has not been re-validated at the new width.
+    W1-T2992's recover-after-shed proof is the safety net and should be re-run after this lands.

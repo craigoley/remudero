@@ -1,5 +1,5 @@
 - id: W1-T3195
-  title: "THE BOARD CACHE KEY COSTS A GITHUB ROUND-TRIP ON EVERY REQUEST — `createBoardSnapshotCache.get` calls `readPrQueueIndex(deps.github)` -> `github.listOpenHeadBranches()` BEFORE comparing the key, so a cache HIT still pays a network read, synchronously, on the request path"
+  title: "RETIRED 2026-09-08 (operator ruling) — folded into W1-T3192: THE BOARD CACHE KEY COSTS A GITHUB ROUND-TRIP ON EVERY REQUEST — `createBoardSnapshotCache.get` calls `readPrQueueIndex(deps.github)` -> `github.listOpenHeadBranches()` BEFORE comparing the key, so a cache HIT still pays a network read, synchronously, on the request path"
   repo: remudero
   depends_on: []
   type: implement
@@ -10,10 +10,34 @@
   files: [src/lib/board.ts, test/a-cache-hit-costs-no-network-read.test.ts]
   origin: "operator-session#console-read-model-2026-09-08"
   plan_refs: ["W1-T3192", "W1-T2919", "W1-T3196"]
-  status: queued
-  priority: 1
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
+    RETIRED 2026-09-08 BY OPERATOR RULING. Not because the finding is wrong — the measurement stands
+    and is preserved below — but because the FIX cannot be scoped here without colliding with
+    W1-T3192.
+
+    THE COLLISION, stated so a reader does not un-retire this by mistake. This shard's own falsifier
+    forbids the cheap fix: "DO NOT satisfy this by dropping `prQueueIndexKey` from the cache key.
+    That makes the board stale against a queue that moved and reports it as current." A COMPLIANT fix
+    therefore has to feed the queue index from OFF the request path, which means wiring
+    `gatePrewarmOnClients`'s existing timer — and that is the same integration W1-T3192 needs for
+    its own property ("no synchronous fs or child-process call is reachable from a route handler").
+    Two live shards editing `board.ts`/`serve.ts` for the same integration produce CONFLICTING PRs,
+    which is the duplicate-surface shape `lint-plan` warns about.
+
+    AND ALONE IT WOULD NOT MOVE THE NUMBER. This removes ONE blocking call from a path carrying 33
+    (12 in `serve.ts`, 21 in `status.ts`, measured 2026-09-08). The tail it was filed against —
+    `/v1/recent` at 0.009s on one sample and 71.562s on another for identical bytes — is
+    head-of-line blocking across all of them, so a single removal is not measurable.
+
+    THE FINDING IS CARRIED FORWARD, NOT LOST: W1-T3192 cites this id in `plan_refs` and inherits
+    `readPrQueueIndex` -> `github.listOpenHeadBranches()` as the FIRST named call site to move off
+    the request path — the one distinguished by being a NETWORK read on the cache-HIT path, where
+    nothing should be.
+
+    ORIGINAL RATIONALE, PRESERVED:
     OBSERVED 2026-09-08 at `ec3c69d9a`, and provable from the source alone.
 
     `createBoardSnapshotCache().get(deps)` (src/lib/board.ts) does this, IN ORDER:
