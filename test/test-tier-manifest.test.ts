@@ -208,6 +208,51 @@ test("readDurationEvidence merges shard documents, keeps the slowest repeat, and
   assert.equal(result.warnings.length, 3);
 });
 
+test("readDurationEvidence: an UNREADABLE evidence file warns and skips it, never aborting the merge", () => {
+  // The catch arm. One corrupt shard artifact must not lose the other shards' evidence — a
+  // recording run collects from four shards and any one of them can be truncated.
+  const root = newFixtureRoot();
+  const broken = join(root, "broken.json");
+  const good = join(root, "good.json");
+  writeFileSync(broken, "{ this is not json");
+  writeFileSync(good, JSON.stringify({ version: 1, files: { "test/a.test.ts": 21 } }));
+  const result = readDurationEvidence([broken, good], ["test/a.test.ts"]);
+  assert.deepEqual(result.measured, { "test/a.test.ts": 21 }, "the readable shard's evidence survives");
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /unreadable duration evidence/);
+  assert.ok(result.warnings[0].includes(broken), "the warning names the file it could not read");
+});
+
+test("readDurationEvidence: an evidence file of the WRONG SCHEMA warns and skips it, rather than reading it as empty", () => {
+  // The schema arm, distinct from the catch above: this file parses fine and is simply not the
+  // document we asked for. Reading it as `{}` would silently downgrade every recorded duration.
+  const root = newFixtureRoot();
+  const wrongVersion = join(root, "v2.json");
+  const noFiles = join(root, "nofiles.json");
+  const good = join(root, "good.json");
+  writeFileSync(wrongVersion, JSON.stringify({ version: 2, files: { "test/a.test.ts": 99 } }));
+  writeFileSync(noFiles, JSON.stringify({ version: 1 }));
+  writeFileSync(good, JSON.stringify({ version: 1, files: { "test/a.test.ts": 21 } }));
+  const result = readDurationEvidence([wrongVersion, noFiles, good], ["test/a.test.ts"]);
+  assert.deepEqual(result.measured, { "test/a.test.ts": 21 }, "neither malformed document contributed a duration");
+  assert.equal(result.warnings.length, 2);
+  for (const w of result.warnings) assert.match(w, /unsupported duration evidence schema/);
+});
+
+test("--record-evidence without --output REFUSES with exit 2 rather than writing somewhere it guessed", () => {
+  const root = newFixtureRoot();
+  writeFixtureTestFile(root, "a.test.ts");
+  writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/a.test.ts": 1 } });
+  const evidence = join(root, "shard.json");
+  writeFileSync(evidence, JSON.stringify({ version: 1, files: { "test/a.test.ts": 44 } }));
+  const missingOutput = runCli(["--record-evidence", evidence], root);
+  assert.equal(missingOutput.status, 2, missingOutput.stderr);
+  assert.match(missingOutput.stderr, /--record-evidence requires one or more files and --output/);
+  // The mirror arm: --output given but no evidence file named.
+  const missingEvidence = runCli(["--record-evidence", "--output", join(root, "p.json")], root);
+  assert.equal(missingEvidence.status, 2, missingEvidence.stderr);
+});
+
 test("--record-evidence writes a separate deterministic proposal and never mutates the tracked manifest", () => {
   const root = newFixtureRoot();
   writeFixtureTestFile(root, "a.test.ts");
