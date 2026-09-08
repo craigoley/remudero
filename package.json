@@ -110,7 +110,7 @@
     "qs": "^6.16.0"
   },
   "_overridesRationale": {
-    "qs": "Forces typed-rest-client's qs 6.15.1 pin and Express/body-parser qs ranges to 6.16.0, patched for GHSA-4mjr-xmp4-gh2g."
+    "qs": "Forces typed-rest-client's qs 6.15.1 pin and Express/body-parser qs ranges to 6.16.0, patched for GHSA-4mjr-xmp4-gh2g and GHSA-x5fp-wj9c-mxmx."
   },
   "commit-and-tag-version": {
     "skip": {
