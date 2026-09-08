@@ -215,3 +215,29 @@ test("attemptArm's direct-merge-preflight update-branch write: a throwing update
   assert.equal(result.directMergePreflight?.error, "simulated update-branch outage");
   assert.ok(said.some((m) => m.includes("automerge.direct_merge_update_failed")));
 });
+
+test("attemptArm's direct-merge-preflight current-base path proceeds with direct-merge evidence and never updates the branch", () => {
+  const said: string[] = [];
+  const ghCalls: Array<{ verb: string; prUrl: string }> = [];
+  const result = attemptArm(PR, {
+    armAuto: () => {
+      throw { stderr: "Pull request is in clean status" };
+    },
+    mergeDirect: (prUrl) => void ghCalls.push({ verb: "mergeDirect", prUrl }),
+    isMerged: () => false,
+    say: (m) => void said.push(m),
+    readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 0 }),
+    updateBranch: () => {
+      throw new Error("updateBranch must not run when behind_by is zero");
+    },
+  });
+
+  assert.equal(result.outcome, "direct-merged");
+  assert.deepEqual(ghCalls, [{ verb: "mergeDirect", prUrl: PR }]);
+  assert.deepEqual(result.directMergePreflight, {
+    behindBy: 0,
+    mergeable: "MERGEABLE",
+    remedy: "direct-merge",
+  });
+  assert.ok(said.some((m) => m.includes("automerge.clean_status_direct_merge")));
+});
