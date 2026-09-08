@@ -66,7 +66,7 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
     srcPaths: ["src/run-task.ts", "src/lib/prompt-render.ts"],
   });
   const recon = renderReconPrompt(
-    "PLAN INDEX\n- §1: Mission",
+    "PLAN INDEX\n- section 1: Mission",
     "## OPERATOR NOTES\n- verify byte identity",
     TASK,
     "plan/tasks.d/W1-T2886.yaml",
@@ -83,7 +83,7 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
 
   assert.equal(sha256(fix), "6dfd1cbac80a4f9820ac2c6aa6ba06f0ac9df0662fdd05ed98c5a8a26de200e6");
   assert.equal(sha256(prerequisite), "5c52a37d141fdb3048e692885a6c8b3ae1f9481dd0f4c2f845cde736bcffa239");
-  assert.equal(sha256(recon), "b42229ae8e9a92d34553002bc092ee72767c4f74b03175215264750b5195902f");
+  assert.equal(sha256(recon), "57c4b24a5e00c32427a27e09ff85a8744fbeced6b2585bec723f763e0f2622bb");
   assert.equal(sha256(diagnose), "cc1209eecea9ef35572af1a184d1a90850f2ee6eed0139082b9f54ec2edb41bc");
   assert.equal(sha256(implement), "6e1c7cd2b17da74bacbb6a010fbfe51a60f076fd4803d86389c026783e49b1a6");
 });
@@ -139,5 +139,4 @@ test("renderImplementPrompt: every injected CONTEXT line still carries a provena
     contextLines(prompt).filter((line) => !line.includes("[src:")),
     [],
   );
-}
-);
+});
