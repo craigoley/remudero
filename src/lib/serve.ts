@@ -125,6 +125,7 @@ import {
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
+import { fixedClock, systemClock } from "./clock.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -496,7 +497,7 @@ function responseStaleness(nowMs: number, generatedAtMs: number | undefined, ref
   return {
     stale: generatedAtMs === undefined || nowMs - generatedAtMs > budgetMs,
     ageMs: generatedAtMs === undefined ? null : Math.max(0, nowMs - generatedAtMs),
-    generatedAt: generatedAtMs === undefined ? null : new Date(generatedAtMs).toISOString(),
+    generatedAt: generatedAtMs === undefined ? null : fixedClock(generatedAtMs).iso(),
     refreshing,
     budgetMs,
     ...(reason ? { reason } : {}),
@@ -531,7 +532,7 @@ function fallbackStatusSnapshot(deps: BoardDeps, nowMs: number, staleness: Conso
     unavailableReason: "transport",
   }));
   return {
-    generated_at: new Date(nowMs).toISOString(),
+    generated_at: fixedClock(nowMs).iso(),
     github_unreachable: true,
     counts: {
       total: tasks.length,
@@ -555,7 +556,7 @@ function fallbackStatusSnapshot(deps: BoardDeps, nowMs: number, staleness: Conso
 }
 
 function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: ConsoleResponseStaleness): unknown {
-  const nowMs = Date.now();
+  const nowMs = systemClock.now();
   switch (path) {
     case "/v1/status":
       return fallbackStatusSnapshot(deps.board, nowMs, staleness);
@@ -657,7 +658,7 @@ export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: n
   const refresh = (req: import("node:http").IncomingMessage): Promise<void> => {
     if (refreshPromise) return refreshPromise;
     refreshing = true;
-    const startedAt = Date.now();
+    const startedAt = systemClock.now();
     const buffer = new RouteResponseBuffer();
     refreshPromise = (async () => {
       try {
@@ -684,10 +685,10 @@ export function boundConsoleReadRoute(route: Route, deps: ServeDeps, budgetMs: n
         new Promise<"budget">((resolve) => setTimeout(() => resolve("budget"), budgetMs)),
       ]);
       if (outcome === "ready" && cached) {
-        writeBufferedResponse(res, cached, responseStaleness(Date.now(), cached.generatedAtMs, refreshing, budgetMs, lastError));
+        writeBufferedResponse(res, cached, responseStaleness(systemClock.now(), cached.generatedAtMs, refreshing, budgetMs, lastError));
         return;
       }
-      const staleness = responseStaleness(Date.now(), cached?.generatedAtMs, refreshing, budgetMs, lastError);
+      const staleness = responseStaleness(systemClock.now(), cached?.generatedAtMs, refreshing, budgetMs, lastError);
       if (cached) {
         writeBufferedResponse(res, cached, staleness);
         return;
@@ -797,12 +798,10 @@ export function prewarmBoardGithub(github: GitHub, refreshMs: number = DEFAULT_B
       // The gateway records its own failure state; prewarming must never break stream open.
     }
   };
-  const first = setTimeout(warm, 0);
-  first.unref?.();
+  warm();
   const timer = setInterval(warm, refreshMs);
   timer.unref?.();
   return () => {
-    clearTimeout(first);
     clearInterval(timer);
   };
 }
