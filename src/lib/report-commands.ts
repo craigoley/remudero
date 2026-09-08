@@ -114,8 +114,10 @@ import { worktreesDir, readWorktreeBase } from "./worker.js";
 
 /** `launchctl print`'s pid line ("	pid = 61234"). Absent — a job bootstrapped but not yet
  *  spawned, or one that just exited — means "loaded, not (yet) running", distinct from "not
- *  loaded at all" (the caller tells those apart via {@link LaunchdServiceState.loaded}). */
-const LAUNCHCTL_PID_RE = /"?pid"?\s*=\s*(\d+)/;
+ *  loaded at all" (the caller tells those apart via {@link LaunchdServiceState.loaded}). Exported
+ *  (W1-T2888) solely so test/report-commands.test.ts can drive its unhealthy arm by identifier —
+ *  negative-reachability-ratchet.test.ts's own census. */
+export const LAUNCHCTL_PID_RE = /"?pid"?\s*=\s*(\d+)/;
 
 export interface LaunchdServiceState {
   /** True iff `launchctl print` finds the service at all (bootstrapped into the GUI domain). */
@@ -180,6 +182,8 @@ export function queryLaunchdServiceSensed(
   try {
     out = exec("launchctl", ["print", launchctlGuiTarget(uid, label)]);
   } catch (e) {
+    // `sensed` carries the distinction this catch would otherwise erase: false when `e` is the
+    // ENOENT launchctl-itself-absent case (isLaunchctlAbsent), true for a real "not loaded" answer.
     return { loaded: false, pid: null, sensed: !isLaunchctlAbsent(e) };
   }
   const m = LAUNCHCTL_PID_RE.exec(out);
@@ -199,7 +203,9 @@ export interface LaunchdListStatus {
   lastExitCode: number | undefined;
 }
 
-const LAUNCHCTL_LIST_LINE_RE = /^(-|\d+)\s+(-?\d+)\s+(\S+)/;
+// Exported (W1-T2888) solely so test/report-commands.test.ts can drive its unhealthy arm by
+// identifier — negative-reachability-ratchet.test.ts's own census.
+export const LAUNCHCTL_LIST_LINE_RE = /^(-|\d+)\s+(-?\d+)\s+(\S+)/;
 
 export function queryLaunchdListStatus(
   label: string,
@@ -220,6 +226,8 @@ export function queryLaunchdListStatusSensed(
   try {
     out = exec("launchctl", ["list", label]);
   } catch (e) {
+    // Same distinction as queryLaunchdServiceSensed's own catch, carried in `sensed` rather than
+    // erased: false only when launchctl itself could not run (isLaunchctlAbsent).
     return { pid: null, lastExitCode: undefined, sensed: !isLaunchctlAbsent(e) };
   }
   const line = out.split("\n").find((l) => LAUNCHCTL_LIST_LINE_RE.test(l.trim()));
@@ -281,6 +289,8 @@ export function readLockFilesFrom(
   try {
     return { locks: readdir(dir).filter((n) => n.endsWith(".lock")).map((n) => n.slice(0, -".lock".length)) };
   } catch (e) {
+    // classifyReadFailure carries the distinction: an absent dir reads as zero locks, any other
+    // failure is named in `unreadableReason` rather than folded into the same empty answer.
     const { absent, reason } = classifyReadFailure(e);
     return absent ? { locks: [] } : { locks: [], unreadableReason: `inflight dir unreadable (${reason})` };
   }
@@ -619,6 +629,8 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
       const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
       github = (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo);
     } catch {
+      // Deliberate degrade, documented above the try: no git remote / no network reads exactly
+      // like an unreachable gateway would, never a thrown status read.
       github = undefined;
     }
   } else {
@@ -863,6 +875,8 @@ export function ledgerGrepCommand(rest: string[], opts: LedgerGrepCommandOpts = 
       try {
         return join(loadConfig().root, "state");
       } catch {
+        // An unreadable config is reported by name at the caller (the `stateDir === undefined`
+        // branch just below), never guessed at or silently retried here.
         return undefined;
       }
     })();

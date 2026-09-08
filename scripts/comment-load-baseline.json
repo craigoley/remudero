@@ -257,6 +257,7 @@
   "src/lib/replay.ts": 82,
   "src/lib/reply-interpreter.ts": 104,
   "src/lib/repo-location.ts": 50,
+  "src/lib/report-commands.ts": 500,
   "src/lib/retro-closure.ts": 250,
   "src/lib/retro-preflight.ts": 83,
   "src/lib/retro-subprocess.ts": 8,
@@ -306,6 +307,6 @@
   "src/lib/worker.ts": 1250,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 15750,
+  "src/run-task.ts": 15500,
   "src/spike.ts": 18
 }
