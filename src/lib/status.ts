@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghExecFile } from "./github-transport.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS } from "./github-transport.js";
 // W1-T2440: the pre-warm walk runs on its own OS thread (`runPrewarmWorker`), so the `execFileSync` below stays
 // synchronous without parking the process serving `/v1/status`. That worker loads THIS module a second time;
@@ -3335,7 +3335,7 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
   // a reason to keep the walk on the serving thread.
   const walkPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
   const runSync = (args: string[]): string =>
-    execFileSync(req.ghBin, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS });
+    ghExecFile(req.ghBin, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS });
   const makeFetchJson = (): { fetchJson: (args: string[]) => unknown; bytes: () => number } => {
     let bytes = 0;
     return {
@@ -3495,7 +3495,7 @@ export function buildBatchedGithub(
     // closure is EVERY synchronous call made OUTSIDE the warm worker — a test that sets it must get the SAME
     // fake binary here, or a read landing between warms reaches the real one.
     ((args: string[]) =>
-      execFileSync(opts.ghBin ?? "gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS }));
+      ghExecFile(opts.ghBin ?? "gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS }));
   // W1-T265: the cross-refresh row cache the REST delta stops against, held at gateway scope rather than inside
   // the index builder, which deliberately replaces its cache with an EMPTY one on a failed fetch (the W1-T181
   // pairing) — reusing that as the delta base would turn one transient failure into a permanent cold re-walk.

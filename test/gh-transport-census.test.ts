@@ -24,7 +24,8 @@ function stripComments(source: string): string {
 }
 
 function directGhSpawnHits(): Array<{ file: string; snippet: string }> {
-  const directGh = /\b(?:execFileSync|execFile|spawnSync)\(\s*["']gh["']/g;
+  const ghBinary = String.raw`(?:"gh"|'gh'|[A-Za-z_$][\w$]*\.ghBin(?:\s*\?\?\s*(?:"gh"|'gh'))?)`;
+  const directGh = new RegExp(String.raw`\b(?:execFileSync|execFile|spawnSync)\(\s*${ghBinary}`, "g");
   const hits: Array<{ file: string; snippet: string }> = [];
   for (const file of trackedSourceFiles()) {
     if (file === TRANSPORT_PATH) continue;

@@ -75,7 +75,13 @@ export function ghOptionsWithDefaultTimeout<T extends object>(opts: T & { timeou
 export function ghExec(args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
 export function ghExec(args: string[], opts?: ExecFileSyncOptions): Buffer;
 export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
-  return execFileSync("gh", args, ghOptionsWithDefaultTimeout(opts)) as string | Buffer;
+  return ghExecFile("gh", args, opts) as string | Buffer;
+}
+
+export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptionsWithStringEncoding): string;
+export function ghExecFile(file: string, args: string[], opts?: ExecFileSyncOptions): Buffer;
+export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptions = {}): string | Buffer {
+  return execFileSync(file, args, ghOptionsWithDefaultTimeout(opts)) as string | Buffer;
 }
 
 export function ghJson(

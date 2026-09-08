@@ -912,9 +912,9 @@ test("W1-T525: the free budget probe is never used as the floor's source", () =>
 
   // Structural: the metered entry point's own source never names the probe endpoint at all, so a
   // future edit cannot quietly wire it in as a shortcut.
-  const src = readFileSync(new URL("../src/lib/worker.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/lib/github-transport.ts", import.meta.url), "utf8");
   const start = src.indexOf("export function ghJson(");
-  const end = src.indexOf("\nexport function ghPrView(");
+  const end = src.indexOf("\nconst execFileAsync");
   assert.ok(start !== -1 && end !== -1 && end > start, "could not isolate ghJson's own source for the structural check");
   const ghJsonSrc = src.slice(start, end);
   assert.doesNotMatch(ghJsonSrc, /rate_limit/, "the metered entry point must never shell out to the free `gh api rate_limit` probe");
