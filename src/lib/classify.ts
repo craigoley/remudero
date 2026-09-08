@@ -90,6 +90,33 @@ export function classifyFailure(signal: FailureSignal): FailureClass {
   return "strike";
 }
 
+export const ARTIFACT_FINALIZE_INTERMEDIARY_403 = "artifact-finalize-intermediary-403" as const;
+
+export type CiInfrastructureFailureSignature = typeof ARTIFACT_FINALIZE_INTERMEDIARY_403;
+
+export function classifyCiInfrastructureFailure(
+  signal: Pick<FailureSignal, "ciConclusion" | "text">,
+): CiInfrastructureFailureSignature | undefined {
+  if ((signal.ciConclusion ?? "").toUpperCase() !== "FAILURE") return undefined;
+  const text = signal.text ?? "";
+  if (
+    /permission denied|resource not accessible by integration/i.test(text) ||
+    /AssertionError|(?:^|\n)not ok\s+\d+|# fail\s+[1-9]\d*/i.test(text) ||
+    /\berror TS\d{4}\b/i.test(text)
+  ) {
+    return undefined;
+  }
+  const uploadedAt = text.search(/artifact upload completed successfully/i);
+  const finalizingAt = text.search(/finalizing artifact upload/i);
+  const failedAt = text.search(
+    /Failed to FinalizeArtifact[^\n]*(?:403[^\n]*Forbidden|Forbidden[^\n]*403)[^\n]*Error from intermediary/i,
+  );
+  if (uploadedAt >= 0 && finalizingAt > uploadedAt && failedAt > finalizingAt) {
+    return ARTIFACT_FINALIZE_INTERMEDIARY_403;
+  }
+  return undefined;
+}
+
 /**
  * A USAGE-WINDOW REFUSAL IS NOT A NETWORK BLIP, AND THE DIFFERENCE IS THE SCHEDULE (W1-T2515).
  * Every pattern in {@link TRANSIENT_TEXT_PATTERNS} above describes a condition that may clear in

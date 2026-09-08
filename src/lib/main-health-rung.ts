@@ -6,10 +6,17 @@ import {
   type OpenIssue,
 } from "./escalate.js";
 import { rollupFor, type GhApiFetcher } from "./open-prs-rest.js";
+import { appendLedger } from "./ledger.js";
+import { readLedgerLines } from "./status.js";
+import { classifyCiInfrastructureFailure } from "./classify.js";
 import {
+  CHECK_REQUEUE_STEP,
   mainHealthEscalationDecision,
   mainHealthFromRollup,
+  requeuedCheckKeysFromLedger,
+  type CiFailure,
   type MainHealthObservation,
+  type RollupCheckEntry,
 } from "./sweep.js";
 
 /** Stable referent for the one repo-wide default-branch health incident. */
@@ -25,6 +32,10 @@ export interface MainHealthRungDeps {
   freshMs?: number;
   /** Injectable wall clock for the freshness boundary. */
   now?: () => number;
+  readCiFailures?: (
+    rollup: readonly RollupCheckEntry[] | undefined,
+  ) => CiFailure[] | undefined | Promise<CiFailure[] | undefined>;
+  requeueCheck?: (failure: CiFailure) => boolean | void | Promise<boolean | void>;
 }
 
 interface RepoMetadata {
@@ -109,7 +120,8 @@ export function buildMainHealthRung(
         `repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
       ]) as CommitMetadata;
       const sha = requiredString(commit?.sha, "default branch head sha");
-      const observation = mainHealthFromRollup(sha, rollupFor(owner, repo, sha, deps.fetch), undefined);
+      const rollup = rollupFor(owner, repo, sha, deps.fetch);
+      const observation = mainHealthFromRollup(sha, rollup, undefined);
       deps.log("main.health.observed", {
         branch,
         sha,
@@ -126,6 +138,80 @@ export function buildMainHealthRung(
         if (signature === escalatedSignature) {
           lastSuccessfulObservationAtMs = startedAtMs;
           return;
+        }
+        let failures: CiFailure[] | undefined;
+        try {
+          failures = deps.readCiFailures ? await deps.readCiFailures(rollup) : undefined;
+        } catch (error) {
+          deps.log("main.health.ci_evidence_unreadable", {
+            branch,
+            sha,
+            error: String((error as Error)?.message ?? error),
+          });
+        }
+        const failingNames = [...observation.failingChecks].sort();
+        const evidenceNames = [...(failures ?? [])].map((failure) => failure.name).sort();
+        const exactEvidenceSet =
+          failingNames.length === evidenceNames.length &&
+          failingNames.every((name, index) => name === evidenceNames[index]);
+        const classified = (failures ?? []).map((failure) => ({
+          failure,
+          signature: classifyCiInfrastructureFailure({
+            ciConclusion: failure.conclusion,
+            text: failure.logTail,
+          }),
+        }));
+        const allRetryable =
+          deps.readCiFailures !== undefined &&
+          deps.requeueCheck !== undefined &&
+          exactEvidenceSet &&
+          classified.length > 0 &&
+          classified.every(({ failure, signature: failureSignature }) => failure.jobId && failureSignature);
+        if (allRetryable) {
+          const priorKeys = requeuedCheckKeysFromLedger(readLedgerLines(deps.ledgerPath));
+          const repeated = classified.some(({ failure }) => priorKeys.has(`${sha}@${failure.name}`));
+          if (!repeated) {
+            let allDispatched = true;
+            for (const { failure, signature: failureSignature } of classified) {
+              const jobId = failure.jobId!;
+              const namedSignature = failureSignature!;
+              appendLedger(deps.ledgerPath, {
+                run_id: deps.runId,
+                task_id: MAIN_HEALTH_TASK_ID,
+                step: CHECK_REQUEUE_STEP,
+                surface: "main",
+                head_sha: sha,
+                check_name: failure.name,
+                signature: namedSignature,
+                job_id: jobId,
+                outcome: "attempting",
+                worker_strike_avoided: true,
+              });
+              let dispatched = false;
+              try {
+                dispatched = (await deps.requeueCheck!(failure)) !== false;
+              } catch {
+                dispatched = false;
+              }
+              appendLedger(deps.ledgerPath, {
+                run_id: deps.runId,
+                task_id: MAIN_HEALTH_TASK_ID,
+                step: "main.health.ci_requeued",
+                surface: "main",
+                head_sha: sha,
+                check_name: failure.name,
+                signature: namedSignature,
+                job_id: jobId,
+                outcome: dispatched ? "dispatched" : "failed",
+                worker_strike_avoided: true,
+              });
+              allDispatched = allDispatched && dispatched;
+            }
+            if (allDispatched) {
+              lastSuccessfulObservationAtMs = startedAtMs;
+              return;
+            }
+          }
         }
         const issueUrl = tryEscalate(escalationFor(observation, branch), {
           issues: deps.issues,

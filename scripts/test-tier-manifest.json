@@ -476,6 +476,7 @@
     "test/every-inbox-message-meets-the-standard.test.ts": 1051,
     "test/every-message-names-one-declared-sender.test.ts": 263,
     "test/every-pr-check-is-required-or-advisory.test.ts": 679,
+    "test/failed-ci-infrastructure-requeue.test.ts": 1300,
     "test/fast-gate-admits-the-census-class.test.ts": 5482,
     "test/fast-lane-classifier.test.ts": 7776,
     "test/feedback-discharge.test.ts": 1153,

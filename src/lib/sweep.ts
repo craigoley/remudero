@@ -36,6 +36,7 @@ export type { SupersessionDiffFinding, SupersessionEvidence, SupersessionStatus,
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 import type { WorkflowRunObservation } from "./workflow-run.js";
 import type { ReviewCapacityPolicy } from "./review-capacity.js";
+import { classifyCiInfrastructureFailure, type CiInfrastructureFailureSignature } from "./classify.js";
 // Re-exported so existing `import type { … } from "./sweep.js"` call sites keep working.
 export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 // W1-T2340: declared in a leaf module so open-prs-rest.ts's producer imports it without closing
@@ -86,6 +87,12 @@ export type Disposition =
 export interface CiFailure {
   name: string;
   logTail: string;
+  /** Latest check conclusion preserved from the rollup so narrow infrastructure classifiers do
+   * not have to infer FAILURE from the presence of a log. */
+  conclusion?: string;
+  /** Actions job id parsed from the check's details URL. The bounded retry refuses to guess when
+   * this is absent. */
+  jobId?: string;
   /** The commit sha this failure is attributable to when the read identifies one (W1-T186);
    *  `undefined` in the ordinary case, where the check failed against the PR's own head.
    *  // Why: commitlint lints the whole base..head RANGE, so a required check can be tripped by a
@@ -797,6 +804,9 @@ export interface RollupCheckEntry {
    *  a CheckRun's `startedAt`, a StatusContext's mapped `createdAt` — so it is present on every
    *  entry the real gateway reports, and is what {@link dedupeRollupByLatestAttempt} sorts on. */
   startedAt?: string;
+  /** Actions job details URL when this entry is a check run. Preserved so the main-health reader
+   * can feed the same job-id-bearing evidence producer as the PR sweep. */
+  detailsUrl?: string;
 }
 
 /** Conclusions GitHub's OWN merge-eligibility treats as SATISFYING a required check (W1-T103):
@@ -3024,12 +3034,23 @@ export interface SweepDeps {
    *  (`POST .../actions/jobs/{job_id}/rerun`), NEVER the workflow run: a whole-run re-run would
    *  re-spend an already-green sibling sharing that run. AT MOST ONCE per `${headSha}@${checkName}`.
    *  // Why: learnings/ci.yaml#rerun-the-job-not-the-run pins this endpoint literal. */
-  requeueCheck?: (pr: OpenPrView, check: CancelledRequiredCheck) => void | Promise<void>;
+  requeueCheck?: (
+    pr: OpenPrView,
+    check: CancelledRequiredCheck | CiFailure,
+  ) => boolean | void | Promise<boolean | void>;
   /** W1-T1223 — a SECOND cancellation of the SAME check on the SAME head, after this lane already
    *  spent its one re-queue. Distinct from `escalate`, which asks an operator to pick between two
    *  candidate diffs: here there is no diff to choose, only a CI-side fault re-queueing cannot
    *  reach. */
   escalateCancelledCheck?: (pr: OpenPrView, check: CancelledRequiredCheck, reason: string) => void | Promise<void>;
+  /** W1-T3194 — a positively identified infrastructure failure could not safely receive its one
+   * bounded job retry, or recurred after that retry. It never becomes a source-code worker strike. */
+  escalateInfrastructureCheck?: (
+    pr: OpenPrView,
+    check: CiFailure,
+    reason: string,
+    signature: CiInfrastructureFailureSignature,
+  ) => void | Promise<void>;
   /** W1-T1275 — an OPTIONAL fresh read of ONE PR's live rollup, consulted immediately before a
    *  blocked-fixable disposition acts, never the snapshot this pass started from:
    *  {@link staleCiGateTransition} must compare against a sibling's CURRENT latest attempt. NOT a
@@ -4550,6 +4571,78 @@ export async function runSweep(
                   : `stale ci-gate verdict already re-driven for this transition — awaiting the fresh result`;
                 break;
               }
+              let ciFailuresForFix = isBlockedCi(pr) ? pr.ciFailures ?? [] : [];
+              // W1-T3194 — A POSITIVELY IDENTIFIED CI-INFRASTRUCTURE FAILURE HAS NO DEFECT IN THE
+              // DIFF. Use the SAME job-only effect and durable head/check bound as cancellations,
+              // before any fix claim or worker strike. A generic 403 never reaches this branch.
+              const infrastructureFailures = ciFailuresForFix.flatMap((failure) => {
+                const signature = classifyCiInfrastructureFailure({
+                  ciConclusion: failure.conclusion,
+                  text: failure.logTail,
+                });
+                return signature ? [{ failure, signature }] : [];
+              });
+              if (infrastructureFailures.length > 0) {
+                const handledNames = new Set<string>();
+                const outcomes: string[] = [];
+                for (const { failure, signature } of infrastructureFailures) {
+                  handledNames.add(failure.name);
+                  const key = `${pr.headSha}@${failure.name}`;
+                  let outcome: "dispatched" | "failed" | "repeated" | "missing-job-id";
+                  let reason: string | undefined;
+                  if (requeuedCheckKeys.has(key)) {
+                    outcome = "repeated";
+                    reason = "the same infrastructure signature remained after its one bounded job retry";
+                  } else if (!failure.jobId) {
+                    outcome = "missing-job-id";
+                    reason = "the positively classified failure had no resolvable Actions job id";
+                  } else {
+                    // Durable BEFORE mutation: a crash between these two lines cannot turn one
+                    // bounded retry into an unbounded loop.
+                    appendLine(deps.ledgerPath, {
+                      run_id: deps.runId,
+                      task_id: pr.taskId ?? "SWEEP",
+                      step: CHECK_REQUEUE_STEP,
+                      surface: "pr",
+                      pr_number: pr.prNumber,
+                      pr_url: pr.prUrl,
+                      head_sha: pr.headSha,
+                      check_name: failure.name,
+                      signature,
+                      job_id: failure.jobId,
+                      outcome: "attempting",
+                      worker_strike_avoided: true,
+                    });
+                    requeuedCheckKeys.add(key);
+                    const result = deps.requeueCheck ? await deps.requeueCheck(pr, failure) : false;
+                    outcome = result === false ? "failed" : "dispatched";
+                    if (outcome === "failed") reason = "the single-job rerun API call failed";
+                  }
+                  appendLine(deps.ledgerPath, {
+                    run_id: deps.runId,
+                    task_id: pr.taskId ?? "SWEEP",
+                    step: "sweep.ci_infrastructure_requeue",
+                    surface: "pr",
+                    pr_number: pr.prNumber,
+                    head_sha: pr.headSha,
+                    check_name: failure.name,
+                    signature,
+                    ...(failure.jobId ? { job_id: failure.jobId } : {}),
+                    outcome,
+                    worker_strike_avoided: true,
+                  });
+                  outcomes.push(`${outcome} "${failure.name}"`);
+                  if (reason && deps.escalateInfrastructureCheck) {
+                    await deps.escalateInfrastructureCheck(pr, failure, reason, signature);
+                  }
+                }
+                ciFailuresForFix = ciFailuresForFix.filter((failure) => !handledNames.has(failure.name));
+                if (ciFailuresForFix.length === 0) {
+                  acted = false;
+                  standDownReason = `failed CI infrastructure check(s): ${outcomes.join("; ")}`;
+                  break;
+                }
+              }
               // W1-T1223 — A CANCELLED REQUIRED CHECK HAS NO DEFECT IN THE DIFF for a fix-rung
               // worker to read. Fires BEFORE `dispatchFix` so a PR whose ENTIRE red verdict is
               // cancellations never spends a strike on nothing.
@@ -4593,7 +4686,7 @@ export async function runSweep(
                 // this pass is a cancellation, stand down rather than burning a strike on nothing.
                 // `acted` stays FALSE: claiming true would seed `prior.fixed`, dedupe the whole
                 // disposition away, and stop this logic observing the second cancellation.
-                const genuineFailures = (pr.ciFailures ?? []).filter((f) => !cancelledChecks.some((c) => c.name === f.name));
+                const genuineFailures = ciFailuresForFix.filter((f) => !cancelledChecks.some((c) => c.name === f.name));
                 if (genuineFailures.length === 0) {
                   acted = false;
                   standDownReason = `cancelled required check(s): ${outcomes.join("; ")}`;
@@ -4605,7 +4698,7 @@ export async function runSweep(
               // evidence, never a mix. W1-T2236: the review branch also carries
               // `actionableGateFailures`. W1-T2231: the dedup gate reads `acted`, never `spent`.
               const fixEvidence = isBlockedCi(pr)
-                ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
+                ? { unmetCriteria: [], ciFailures: ciFailuresForFix }
                 : {
                     unmetCriteria: pr.unmetCriteria,
                     actionableGateFailures: pr.actionableGateFailures,
