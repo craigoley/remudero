@@ -87,6 +87,7 @@ usage:
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
+  rmd verify-human-sweep [--dry-run]   # Judge the parked verify:human backlog and surface only the shards that still need you.
   rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evidence "<text>" [--evidence ...] --rollback "<text>" [--supersedes <anchor>]   # An agent records a ruling, behind an LLM judge that routes the risky ones to the operator.
   rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]   # The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.
 
@@ -821,6 +822,16 @@ rmd approve <P##> [<P##> ...]
 ```
 
 one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready
+
+### `rmd verify-human-sweep`
+
+Judge the parked verify:human backlog and surface only the shards that still need you.
+
+```
+rmd verify-human-sweep [--dry-run]
+```
+
+the verify:human backlog, judged (W1-T3188, operator direction 2026-09-08): every queued verify:human shard is put to an LLM judge with the state a person would need — its title, rationale, acceptance, age, whether its depends_on have merged, and whether its id is cited anywhere in src/ — and asked only whether it STILL needs the operator, never whether the work is right. A needs_operator verdict stages an ordinary inbox proposal he ratifies with `rmd approve`; a backlog verdict leaves it in the visible Awaiting-verification list, off the ask count. TOUCHES NO PLAN FILE and cannot: it writes ledger rows and stages proposals, and there is no code path that edits a shard, flips a verify: field, or closes anything. FAILS OPEN — a throwing, timing-out or unparseable verdict routes to needs_operator, because the costly direction is an outage quietly deciding the operator need not see something; such a verdict is marked and NOT cached, so a transient failure is re-asked rather than pinned. Judged once per OBSERVED STATE (task id + whether deps merged + whether cited in src), never once per poll, so a dependency merging re-opens the question and a refresh does not. --dry-run judges nothing, spends nothing, and reports which shards a real pass would ask about
 
 ### `rmd rule`
 

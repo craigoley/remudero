@@ -654,6 +654,17 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { systemClock, type Clock } from "./lib/clock.js";
+import {
+  VERIFY_HUMAN_JUDGED_STEP,
+  judgeVerifyHumanShard,
+  observedStateKey,
+  proposalFromJudgedShard,
+  realVerifyHumanJudge,
+  shardsNeedingJudgement,
+  verifyHumanVerdictRow,
+  type ShardUnderJudgement,
+  type VerifyHumanVerdict,
+} from "./lib/verify-human-judge.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
 import {
@@ -34031,6 +34042,190 @@ function loadProposalsForRatify(
   return { found, unknown };
 }
 
+// ── The verify-human judge's production call site (W1-T3188) ──────────────────────────────────
+//
+// W1-T349 built a complete, tested judge that nothing called for fourteen months. lint-plan
+// refused THIS shard for the same omission until it carried a call-site criterion. So the call
+// site ships in the same change as the judge, and the shard's acceptance greps for it here.
+
+/** {@link routeVerifyHumanBacklog}'s effects, every one injectable — so the fail-open path and
+ *  the never-writes-the-plan invariant are provable without a repo, a spawn or a network. */
+export interface VerifyHumanRouteDeps {
+  judge: (shard: ShardUnderJudgement) => Promise<VerifyHumanVerdict>;
+  /** Verdicts already recorded, keyed by {@link observedStateKey}. */
+  priorVerdicts: ReadonlyMap<string, VerifyHumanVerdict>;
+  /** Stages a needs_operator shard as an inbox proposal. Called ONLY on that arm. */
+  stageProposal: (proposal: Proposal) => void;
+  /** Writes the {@link VERIFY_HUMAN_JUDGED_STEP} row. Called on BOTH arms, always. */
+  appendRow: (row: LedgerLine) => void;
+  runId: string;
+}
+
+/** What one pass did. `skipped` are the shards whose observed state was already settled. */
+export interface VerifyHumanRouteResult {
+  judged: number;
+  needsOperator: string[];
+  backlog: string[];
+  skipped: string[];
+}
+
+/**
+ * Judge the parked `verify: human` population and route the verdicts.
+ *
+ * THE PLAN IS NEVER WRITTEN HERE, and there is no code path that could: this function's only
+ * effects are `deps.appendRow` and `deps.stageProposal`. No fs write, no plan load, no
+ * `verify:` edit. Design clause (ii) is a signature, not a promise.
+ *
+ * A SETTLED SHARD IS NOT RE-ASKED (design iv): 56 shards times every poll is a token event, not
+ * a sweep. A FAILED verdict is never settled, so a judge outage self-heals on the next pass
+ * instead of pinning the whole population to the ask list.
+ */
+export async function routeVerifyHumanBacklog(
+  shards: readonly ShardUnderJudgement[],
+  deps: VerifyHumanRouteDeps,
+): Promise<VerifyHumanRouteResult> {
+  const due = shardsNeedingJudgement(shards, deps.priorVerdicts);
+  const dueIds = new Set(due.map((s) => s.id));
+  const result: VerifyHumanRouteResult = {
+    judged: 0,
+    needsOperator: [],
+    backlog: [],
+    skipped: shards.filter((s) => !dueIds.has(s.id)).map((s) => s.id),
+  };
+  for (const shard of due) {
+    const verdict = await judgeVerifyHumanShard(shard, { judge: deps.judge });
+    // UNCONDITIONAL, and BEFORE either arm: a crash between the verdict and its effect leaves
+    // the verdict readable rather than leaving a silent gap.
+    deps.appendRow(verifyHumanVerdictRow(shard, verdict, deps.runId) as LedgerLine);
+    result.judged += 1;
+    if (verdict.decision === "needs_operator") {
+      deps.stageProposal(proposalFromJudgedShard(shard, verdict));
+      result.needsOperator.push(shard.id);
+      continue;
+    }
+    result.backlog.push(shard.id);
+  }
+  return result;
+}
+
+/** Verdicts already on the ledger, keyed by the observed state they were taken against —
+ *  {@link routeVerifyHumanBacklog}'s `priorVerdicts`. A row with no `observed_state` predates
+ *  the key and is ignored rather than guessed at. */
+export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[]): Map<string, VerifyHumanVerdict> {
+  const out = new Map<string, VerifyHumanVerdict>();
+  for (const row of rows) {
+    if (row?.step !== VERIFY_HUMAN_JUDGED_STEP) continue;
+    const key = row.observed_state;
+    const decision = row.judge_decision;
+    if (typeof key !== "string" || !key) continue;
+    if (decision !== "needs_operator" && decision !== "backlog") continue;
+    out.set(key, {
+      decision,
+      reason: typeof row.judge_reason === "string" ? row.judge_reason : "",
+      ...(row.judge_failed === true ? { judgeFailed: true as const } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * `rmd verify-human-sweep` — W1-T3188's REAL entry point, and the reason
+ * {@link realVerifyHumanJudge} is not another imported-but-uncalled factory. Judges the parked
+ * `verify: human` population once and routes the verdicts: `needs_operator` shards become inbox
+ * proposals, the rest stay in the visible backlog.
+ *
+ * TOUCHES NO PLAN FILE. It reads the plan, writes ledger rows and stages proposals. `--dry-run`
+ * judges nothing and spends nothing; it reports which shards a real pass WOULD ask about.
+ */
+export async function verifyHumanSweepCommand(
+  rest: string[],
+  deps: { root?: string; route?: typeof routeVerifyHumanBacklog; clock?: Clock } = {},
+): Promise<number> {
+  const root = deps.root ?? repoRoot;
+  const dryRun = rest.includes("--dry-run");
+  const badArg = unknownArgError("verify-human-sweep", rest, ["--dry-run"], []);
+  if (badArg) {
+    console.error(`${badArg}\n` + USAGE);
+    return 2;
+  }
+
+  const config = loadConfig();
+  const plan = loadPlan(join(root, "plan", "tasks.yaml"));
+  const ledgerPath = ledgerPathFor(config);
+  // status.ts's reader, which already parses and already skips an unreadable line — no second
+  // JSON pass, and one bad line never hides the verdicts around it.
+  const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
+  const shards = parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock);
+  const priorVerdicts = priorVerifyHumanVerdicts(rows);
+
+  if (dryRun) {
+    const due = shardsNeedingJudgement(shards, priorVerdicts);
+    console.log(`verify-human-sweep --dry-run: ${shards.length} parked shard(s), ${due.length} would be judged, ${shards.length - due.length} already settled. Nothing spent.`);
+    for (const d of due) console.log(`  would judge ${d.id} (${observedStateKey(d)})`);
+    return 0;
+  }
+
+  const registryPath = join(root, "state", "inbox-proposals.json");
+  const result = await (deps.route ?? routeVerifyHumanBacklog)(shards, {
+    judge: realVerifyHumanJudge({
+      mounts: loadMounts(mountsPath(root)),
+      cwd: root,
+      settingsFile: join(root, ".claude", "settings.json"),
+    }),
+    priorVerdicts,
+    stageProposal: (proposal) =>
+      void updateProposalRegistry(registryPath, (current) =>
+        current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
+      ),
+    appendRow: (row) => appendLedger(ledgerPath, row),
+    runId: `VHSWEEP-${(deps.clock ?? systemClock).iso()}`,
+  });
+
+  console.log(`verify-human-sweep: judged ${result.judged}, ${result.needsOperator.length} need you, ${result.backlog.length} stay in the backlog, ${result.skipped.length} already settled.`);
+  for (const id of result.needsOperator) console.log(`  NEEDS YOU: ${id} — staged as verify-human:${id} in the inbox`);
+  return 0;
+}
+
+/** The parked population, as {@link ShardUnderJudgement} — the ONE place plan records become
+ *  judgeable input. Reads the plan and greps src/; writes nothing. */
+export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock): ShardUnderJudgement[] {
+  const nowMs = clock.now();
+  const out: ShardUnderJudgement[] = [];
+  for (const task of plan.tasks) {
+    if (task.verify !== "human" || task.status !== "queued") continue;
+    const deps = task.depends_on ?? [];
+    out.push({
+      id: task.id,
+      title: task.title ?? task.id,
+      rationale: (task as { rationale?: string }).rationale ?? "",
+      acceptance: (task.acceptance ?? []).map((c) => c.claim),
+      ageDays: shardAgeDays(task.id, root, nowMs),
+      depsAllMerged: deps.every((d) => plan.byId.get(d)?.status === "merged"),
+      citedInSrc: idCitedInSrc(task.id, root),
+    });
+  }
+  return out;
+}
+
+/** Days since the shard's file first appeared in git history; 0 when unreadable. Age is
+ *  CONTEXT for the judge, never a threshold — nothing here decides anything from it. */
+function shardAgeDays(taskId: string, root: string, nowMs: number): number {
+  try {
+    const out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `plan/tasks.d/${taskId}-*.yaml`], { encoding: "utf8" }).trim();
+    if (!out) return 0;
+    return Math.max(0, Math.floor((nowMs - Number(out) * 1000) / 86400000));
+  } catch {
+    return 0; // no git, or no such file — age is context, and an unknown age is reported as 0
+  }
+}
+
+/** Whether anything under src/ cites this id — evidence the work may already have landed under
+ *  another shard. `git grep` exits 1 on no match, which is an ANSWER, not a failure. */
+function idCitedInSrc(taskId: string, root: string): boolean {
+  const r = spawnSync("git", ["-C", root, "grep", "-l", "-F", "--", taskId, "--", "src"], { encoding: "utf8" });
+  return r.status === 0 && r.stdout.trim().length > 0;
+}
+
 // ── The ruling judge's production call site (W1-T3212) ────────────────────────────────────────
 //
 // W1-T349 built a complete, tested escalation judge that had ZERO production callers until
@@ -36760,6 +36955,13 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready",
   },
   {
+    name: "verify-human-sweep",
+    syntax: "rmd verify-human-sweep [--dry-run]",
+    summary: "Judge the parked verify:human backlog and surface only the shards that still need you.",
+    detail:
+      "the verify:human backlog, judged (W1-T3188, operator direction 2026-09-08): every queued verify:human shard is put to an LLM judge with the state a person would need — its title, rationale, acceptance, age, whether its depends_on have merged, and whether its id is cited anywhere in src/ — and asked only whether it STILL needs the operator, never whether the work is right. A needs_operator verdict stages an ordinary inbox proposal he ratifies with `rmd approve`; a backlog verdict leaves it in the visible Awaiting-verification list, off the ask count. TOUCHES NO PLAN FILE and cannot: it writes ledger rows and stages proposals, and there is no code path that edits a shard, flips a verify: field, or closes anything. FAILS OPEN — a throwing, timing-out or unparseable verdict routes to needs_operator, because the costly direction is an outage quietly deciding the operator need not see something; such a verdict is marked and NOT cached, so a transient failure is re-asked rather than pinned. Judged once per OBSERVED STATE (task id + whether deps merged + whether cited in src), never once per poll, so a dependency merging re-opens the question and a refresh does not. --dry-run judges nothing, spends nothing, and reports which shards a real pass would ask about",
+  },
+  {
     name: "rule",
     syntax: 'rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evidence "<text>" [--evidence ...] --rollback "<text>" [--supersedes <anchor>]',
     summary: "An agent records a ruling, behind an LLM judge that routes the risky ones to the operator.",
@@ -37626,6 +37828,9 @@ export async function main(
   }
   if (cmd === "approve" && arg) {
     process.exit(await approveCommand(rest));
+  }
+  if (cmd === "verify-human-sweep") {
+    process.exit(await verifyHumanSweepCommand(rest));
   }
   if (cmd === "rule") {
     /* c8 ignore next -- process-boundary dispatch; ruleCommand is exercised directly above. */
