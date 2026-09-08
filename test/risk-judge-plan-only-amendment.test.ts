@@ -9,6 +9,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { FILING_SUBJECT_RE } from "../src/lib/sweep.js";
+
 import {
   PLAN_DECLARING_SUBJECT_RE,
   RISK_JUDGE_CHANGE_VIEW_FILE_CAP,
@@ -129,4 +131,13 @@ test("W1-T2371: the narrowing does not license the change — every other ground
   assert.match(prompt, /THIS NARROWS ONE INFERENCE ONLY/);
   assert.match(prompt, /classify HIGH exactly as you/);
   assert.match(prompt, /THIS FRAMING IS NOT A LICENCE/, "the pre-existing licence disclaimer must survive");
+});
+
+test("W1-T2371: the subject vocabulary has ONE definition in effect — drift is forbidden here", () => {
+  // PLAN_DECLARING_SUBJECT_RE cannot IMPORT FILING_SUBJECT_RE: `risk-judge` -> `sweep` closes a
+  // cycle through feedback.ts, and depcruise counts 15 further no-circular violations for it
+  // (13 -> 28, measured). A test may import both — tests are outside the graph depcruise cruises —
+  // so this is where the two are held identical. If either changes alone, this fails by name.
+  assert.equal(PLAN_DECLARING_SUBJECT_RE.source, FILING_SUBJECT_RE.source);
+  assert.equal(PLAN_DECLARING_SUBJECT_RE.flags, FILING_SUBJECT_RE.flags, "a stray /g would make .test() stateful");
 });
