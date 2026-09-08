@@ -18,7 +18,10 @@
 // (`plan-scope.ts`, `time-window.ts`, `poll-interval.ts`) is exercised — called through, not just
 // imported — proving the moved code still works; (3) each of those three leaves imports NOTHING
 // from the ring it cut, so the cycle it closed cannot silently reopen through a different symbol
-// in the same file.
+// in the same file. (3) is asserted against dependency-cruiser's OWN cruise of `src` (the exact
+// tool the cycle-ratchet drives) rather than a source-text regex over the leaf files: a `depcruise
+// --output-type json` dependency LIST is the tool's real, behavioural verdict on what a module
+// imports, so this drives the tool rather than re-deriving its answer from a second, weaker parser.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -36,32 +39,15 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DEPCRUISE_BIN = join(REPO_ROOT, "node_modules", ".bin", "depcruise");
 const CONFIG_PATH = join(REPO_ROOT, ".dependency-cruiser.cjs");
 
-// Every module that sat on one of the thirteen rings this task cut (import specifiers, as they'd
-// appear in a `from "./<name>.js"` clause) — the leaves below must import NONE of these.
-const FORMER_RING_MODULES = [
-  "review",
-  "plan-architect",
-  "status",
-  "worker",
-  "worker-home",
-  "sweep",
-  "retro",
-  "cost-anomaly",
-  "escalate",
-  "feedback",
-  "feedback-landing",
-  "risk-judge",
-  "plan-pr-emitter",
-  "daemon",
-  "daemon-health",
-  "board",
-  "status-board",
-  "task-card",
-];
+const NEW_LEAF_MODULES = ["src/lib/plan-scope.ts", "src/lib/time-window.ts", "src/lib/poll-interval.ts"];
 
-/** Every local (`./x.js`) import specifier a source file's text declares, basename only. */
-function localImportSpecifiers(sourceText: string): string[] {
-  return [...sourceText.matchAll(/from\s+["']\.\/([^"'.]+)\.js["']/g)].map((m) => m[1]);
+/** `depcruise --output-type json`'s own dependency list for `source`, per its OWN cruise of
+ *  `src` — the exact graph the cycle-ratchet and the `no-circular` rule both act on, so a leaf
+ *  module's claim to import nothing is checked against the tool's real verdict, not re-derived. */
+function dependenciesOf(cruise: { modules: Array<{ source: string; dependencies: unknown[] }> }, source: string): unknown[] {
+  const mod = cruise.modules.find((m) => m.source === source);
+  assert.ok(mod, `depcruise's own cruise must include ${source}`);
+  return mod.dependencies;
 }
 
 test("PROPERTY a new import cycle under the repo's own depcruise config fails rather than warns", () => {
@@ -74,24 +60,28 @@ test("PROPERTY a new import cycle under the repo's own depcruise config fails ra
   assert.match(output, /error\s+no-circular/, "the failure must be attributed to the no-circular rule, at error severity");
 });
 
-test("PROPERTY the repo's shipped tree — carrying zero cycles as of W1-T2895 — passes the same real depcruise gate", () => {
-  const result = spawnSync(DEPCRUISE_BIN, ["src", "--config", CONFIG_PATH], { cwd: REPO_ROOT, encoding: "utf8" });
+test("PROPERTY the repo's shipped tree — carrying zero cycles as of W1-T2895 — passes the same real depcruise gate, and each new leaf imports nothing", () => {
+  const result = spawnSync(DEPCRUISE_BIN, ["src", "--config", CONFIG_PATH, "--output-type", "json"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
   assert.equal(result.status, 0, `the shipped tree must pass its own now-error gate:\n${result.stdout}${result.stderr}`);
+  const cruise = JSON.parse(result.stdout);
+  for (const source of NEW_LEAF_MODULES) {
+    assert.deepEqual(dependenciesOf(cruise, source), [], `${source} must be a true leaf — it cut a cycle by importing nothing from the ring, not by depending on it more quietly`);
+  }
 });
 
-test("PROPERTY plan-scope.ts calls through and imports nothing from the ring it cut (isInPlanScope, review.ts -> plan-architect.ts)", () => {
+test("PROPERTY plan-scope.ts calls through — the isInPlanScope edge review.ts -> plan-architect.ts closed", () => {
   assert.equal(isInPlanScope("MASTER-PLAN.md"), true);
   assert.equal(isInPlanScope(ORIENTATION_DOC), true);
   assert.equal(isInPlanScope("plan/tasks.d/x.yaml"), true);
   assert.equal(isInPlanScope("src/lib/review.ts"), false);
   assert.deepEqual(outOfPlanScopeFiles(["plan/x.yaml", "src/lib/review.ts", "MASTER-PLAN.md"]), ["src/lib/review.ts"]);
-
-  const source = readFileSync(join(REPO_ROOT, "src", "lib", "plan-scope.ts"), "utf8");
-  const imported = localImportSpecifiers(source);
-  assert.deepEqual(imported.filter((m) => FORMER_RING_MODULES.includes(m)), [], `plan-scope.ts must import nothing from the ring it cut; saw [${imported.join(", ")}]`);
 });
 
-test("PROPERTY time-window.ts calls through and imports nothing from the ring it cut (utcWeekWindowMs, retro.ts -> sweep.ts)", () => {
+test("PROPERTY time-window.ts calls through — the utcWeekWindowMs edge retro.ts -> sweep.ts closed", () => {
   const NOW = Date.parse("2026-09-10T15:30:00.000Z"); // a Thursday
   const [dayStart, dayEnd] = utcDayWindowMs(NOW);
   assert.equal(new Date(dayStart).toISOString(), "2026-09-10T00:00:00.000Z");
@@ -99,25 +89,13 @@ test("PROPERTY time-window.ts calls through and imports nothing from the ring it
   const [weekStart, weekEnd] = utcWeekWindowMs(NOW);
   assert.equal(new Date(weekStart).toISOString(), "2026-09-07T00:00:00.000Z", "the ISO week starts Monday");
   assert.equal(weekEnd - weekStart, 7 * 24 * 60 * 60 * 1000);
-
-  const source = readFileSync(join(REPO_ROOT, "src", "lib", "time-window.ts"), "utf8");
-  const imported = localImportSpecifiers(source);
-  assert.deepEqual(imported.filter((m) => FORMER_RING_MODULES.includes(m)), [], `time-window.ts must import nothing from the ring it cut; saw [${imported.join(", ")}]`);
 });
 
-test("PROPERTY poll-interval.ts calls through and imports nothing from the ring it cut (DEFAULT_POLL_INTERVAL_MS, daemon-health.ts -> daemon.ts)", () => {
+test("PROPERTY poll-interval.ts calls through — the DEFAULT_POLL_INTERVAL_MS edge daemon-health.ts -> daemon.ts closed", () => {
   assert.equal(DEFAULT_POLL_INTERVAL_MS, 60_000);
-
-  const source = readFileSync(join(REPO_ROOT, "src", "lib", "poll-interval.ts"), "utf8");
-  const imported = localImportSpecifiers(source);
-  assert.deepEqual(imported.filter((m) => FORMER_RING_MODULES.includes(m)), [], `poll-interval.ts must import nothing from the ring it cut; saw [${imported.join(", ")}]`);
 });
 
-test("PROPERTY the ceiling this task ratcheted down is zero, and no-circular is error", () => {
+test("PROPERTY the ceiling this task ratcheted down is zero", () => {
   const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "cycle-baseline.json"), "utf8"));
   assert.equal(baseline.maxCycles, 0);
-  const config = readFileSync(CONFIG_PATH, "utf8");
-  const at = config.indexOf('name: "no-circular"');
-  assert.ok(at > 0, "sanity: the rule must still be named in the config");
-  assert.match(config.slice(at - 700, at + 200), /severity:\s*"error"/);
 });
