@@ -11,7 +11,7 @@ import { outputContractLines, ratchetContractLines } from "../src/lib/compaction
 // it; ~15-17 minutes of a ~61-minute lane) and nothing bounded replaced it. CLAUDE.md's "run the
 // gate before your first push" cannot reach a worker spawned with `settingSources: []`.
 
-const CHEAP = ["comment-load-signal", "source-size-ratchet"];
+const CHEAP = ["comment-load-signal", "source-size-signal"];
 const NO_ALLOWLIST = ["negative-reachability-ratchet", "catch-erasure-ratchet", "source-text-assertion-census"];
 
 test("W1-T2997: the implement contract names the ratchets it must run before pushing", () => {
@@ -21,12 +21,15 @@ test("W1-T2997: the implement contract names the ratchets it must run before pus
       `the contract must name ${cmd} — a worker never reads CLAUDE.md, so the obligation has to live here`);
   }
   assert.match(contract, /BEFORE YOUR FIRST PUSH/, "and say when to run them");
+  assert.doesNotMatch(contract, /npm run --silent source-size-ratchet/, "workers must not manufacture a baseline edit for line growth");
 });
 
-test("W1-T2997: the contract distinguishes a recordable ratchet from one with no allowlist", () => {
+test("W1-T3140: the contract distinguishes the recordable comment ratchet from the nonblocking source-size signal", () => {
   const contract = ratchetContractLines().join("\n");
   assert.match(contract, /ordinary, reviewed outcome/,
-    "recording is the fix for the cheap two, in those gates' own words");
+    "recording remains the fix for comment-load growth, in that gate's own words");
+  assert.match(contract, /source-size.*risk signal/i);
+  assert.match(contract, /growth.*PASS/i);
   for (const suite of NO_ALLOWLIST) {
     assert.match(contract, new RegExp(suite.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
       `${suite} must be named as the OTHER class`);

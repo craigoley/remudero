@@ -102,7 +102,7 @@ test("acceptance 2 — the dispatch reason names the declared generator and says
   const pr = dirtyPr([sameKeyValueChange()]);
   const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(r.disposition, "conflicted");
-  assert.equal(REGENERABLE_ARTIFACT_GENERATORS[REGISTERED_PATH], "source-size-ratchet", "the registry names the actual npm-run generator id");
+  assert.equal(REGENERABLE_ARTIFACT_GENERATORS[REGISTERED_PATH], "source-size-baseline:legacy", "the registry names the explicit legacy generator id");
   assert.match(r.reason, /declared generator/);
   assert.match(r.reason, new RegExp(REGENERABLE_ARTIFACT_GENERATORS[REGISTERED_PATH]), "names the generator id itself, not merely 'a generator'");
   assert.match(r.reason, /merged tree/);

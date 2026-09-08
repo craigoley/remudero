@@ -240,9 +240,10 @@ export function bodyVsDiffContractLines(): string[] {
  */
 export function ratchetContractLines(): string[] {
   /*
-   * THE SPLIT BELOW IS LOAD-BEARING AND MUST NOT BE FLATTENED. `comment-load-ratchet` and
-   * `source-size-ratchet` print the exact line to write and call recording "an ordinary, reviewed
-   * outcome, not a defeat" — recording IS the fix. `negative-reachability-ratchet` and
+   * THE SPLIT BELOW IS LOAD-BEARING AND MUST NOT BE FLATTENED. `comment-load-signal` prints the
+   * exact line to write and calls recording "an ordinary, reviewed outcome, not a defeat" —
+   * recording IS the fix. `source-size-signal` is different: growth is a PASS carrying durable
+   * follow-up evidence, while inability to measure is a real sensor failure. `negative-reachability-ratchet` and
    * `catch-erasure-ratchet` say in their own text "no allowlist to add it to": a recorded number there
    * BANKS the debt rather than paying it, and the real repairs this session made for them were a
    * two-armed regex fixture and a bound error, neither derivable from the failure output. Telling a
@@ -265,13 +266,14 @@ export function ratchetContractLines(): string[] {
    * trade. It is worded around instead, deliberately: the guard keeps its full force.
    */
   return [
-    "- BEFORE YOUR FIRST PUSH, run the two CHEAP ratchets over your own change — seconds, not",
+    "- BEFORE YOUR FIRST PUSH, run the two CHEAP checks over your own change — seconds, not",
     "  minutes, and the single most common reason a fleet build lands red:",
     "    npm run --silent comment-load-signal",
-    "    npm run --silent source-size-ratchet",
-    "  If either BLOCKS it prints the exact JSON line to write into its baseline file, and calls",
-    "  recording 'an ordinary, reviewed outcome, not a defeat'. Record it in THIS commit and re-run",
-    "  until both print OK. Deliberate growth is expected; leaving it unrecorded is not.",
+    "    npm run --silent source-size-signal",
+    "  If comment-load BLOCKS, it prints the exact JSON line to write into its baseline file and",
+    "  calls recording 'an ordinary, reviewed outcome, not a defeat'. Record that in THIS commit",
+    "  and re-run it. Source-size is a risk signal: growth remains PASS and its durable consumer",
+    "  files material decomposition work; a measurement failure needs diagnosis, never a baseline edit.",
     "- THREE OTHER RATCHETS EXIST AND MUST NOT BE TREATED THE SAME WAY. If any of",
     "  test/negative-reachability-ratchet.test.ts, test/catch-erasure-ratchet.test.ts or",
     "  test/source-text-assertion-census.test.ts fails, do NOT record a number: the first two say",

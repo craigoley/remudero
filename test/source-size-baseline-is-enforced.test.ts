@@ -118,7 +118,7 @@ test("W1-T2883: src/lib is forbidden from importing src/cli before the first fil
   );
 });
 
-test("W1-T2883: the parity entry's EXPLICIT form is load-bearing — the helper shorthand would make this PR instrument-entangled", async () => {
+test("W1-T3140: the ci-parity mirror invokes the same signal as CI and grants no baseline remedy", async () => {
   const { detectInstrumentEntanglement } = await import("../src/lib/review.js");
   const files = [
     ".github/workflows/ci.yml",
@@ -149,7 +149,7 @@ test("W1-T2883: the parity entry's EXPLICIT form is load-bearing — the helper 
   // npmScriptEntry's shorthand emits no such line, so the identical change would be REFUSED as a
   // workflow edited beside product code. This is why the entry above is not written with it, and
   // tidying it into the helper would make the next PR touching both files unmergeable.
-  const helperForm = detectInstrumentEntanglement(files, `${ciAdd}\n+  npmScriptEntry("source-size", "source-size-ratchet"),`);
+  const helperForm = detectInstrumentEntanglement(files, `${ciAdd}\n+  npmScriptEntry("source-size", "source-size-signal"),`);
   assert.equal(helperForm.entangled, true, "the shorthand must NOT satisfy the carve-out — if it now does, this comment is stale");
 
   // And the shipped table really does register the job on the enforcing script, asserted through
@@ -157,8 +157,15 @@ test("W1-T2883: the parity entry's EXPLICIT form is load-bearing — the helper 
   // test that reads a src/ file as source, and it caught this assertion's first form.
   const { CI_PARITY_TABLE } = await import("../src/lib/ci-parity.js");
   const entry = CI_PARITY_TABLE.find((e) => e.job === "source-size");
-  assert.ok(entry, "ci.yml's source-size job must have a CI_PARITY_TABLE entry, or preflight --ci-parity cannot mirror it");
+  assert.ok(entry?.run, "ci.yml's source-size job must have a runnable CI_PARITY_TABLE entry, or preflight --ci-parity cannot mirror it");
   assert.equal(entry.mirrored, true, "the job is mirrored locally, not excluded with a reason");
+  const calls: Array<{ file: string; args: string[] }> = [];
+  const steps = entry.run(REPO_ROOT, (file, args) => {
+    calls.push({ file, args: [...args] });
+    return { status: 0, stdout: "", stderr: "" };
+  });
+  assert.deepEqual(calls, [{ file: "npm", args: ["run", "--silent", "source-size-signal"] }]);
+  assert.equal(steps[0]?.ok, true);
   // Positive control: the lookup can miss, so finding the entry means something.
   assert.equal(CI_PARITY_TABLE.find((e) => e.job === "no-such-job-exists"), undefined);
 });
