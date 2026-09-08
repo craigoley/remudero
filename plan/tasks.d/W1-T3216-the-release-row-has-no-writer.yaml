@@ -1,0 +1,108 @@
+- id: W1-T3216
+  title: "W1-T3206's RELEASE PATH IS ENTIRELY DEAD ON MAIN — `releasedTaskIds` has ZERO callers and `releasedIds` has ZERO producers, so the 56 parked shards have neither a door nor a corridor behind it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/run-task.ts, src/lib/drain.ts, src/lib/daemon.ts, test/an-operator-verdict-releases-a-parked-task.test.ts]
+  origin: "sweep-observation#4727-closed-2026-09-08"
+  plan_refs: ["W1-T3206", "W1-T3212", "W1-T3217", "W1-T3218", "W1-T3188"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    W1-T3206's acceptance criterion 1 reads, verbatim: "a parked verify:human shard can be named to
+    the SAME approveCommand pipeline proposals use, and is refused by name when it is not in a
+    ratifiable state". #4715 merged W1-T3206 WITHOUT it.
+    MEASURED ON MAIN 2026-09-08 (31d8e8324) — AND IT IS WORSE THAN "ONE CRITERION MISSING". The
+    reading half is present but ENTIRELY UNREACHED:
+      - `grep -rn "releasedTaskIds(" src/` returns ONE line: its own definition, plan.ts:173. ZERO
+        callers.
+      - `grep -rn "releasedIds" src/` returns FOUR lines: the optional parameter declared in
+        plan.ts:684 and drain.ts:155, and the two reads of it at plan.ts:689 and drain.ts:421. ZERO
+        producers. Every one of the five `assertRunnable`/`nextRunnable` call sites
+        (run-task.ts:11050, run-task.ts:21578, daemon.ts:2492, drain.ts:710, drain.ts:1204) omits
+        the argument, so `releasedIds` is `undefined` on every real dispatch.
+    SO THE FEATURE IS DEAD IN BOTH DIRECTIONS: nothing writes the row, nothing reads the row, and
+    nothing could act on it if it did. Criteria 2, 3, 5 and 6 of W1-T3206 describe behaviour no
+    production path can reach.
+    CORRECTION TO THIS SHARD'S OWN FIRST DRAFT, recorded rather than silently edited: it claimed
+    "the plan.ts/drain.ts half is already on main, so only `approveCommand` is left" and scoped
+    itself to run-task.ts at risk:medium. That was WRONG — measured before the wiring was checked.
+    The corridor is missing too, and threading the released set to five call sites across three
+    modules is what raises this to risk:high under rule 19.
+    HOW IT PASSED THE GATES, both mechanically confirmed: `callSiteViolations` (task-linter.ts)
+    fires ONLY when a task CREATES a src/ module -- `if (created.length === 0) return []` -- and
+    W1-T3206 edited existing ones, so no call-site criterion was ever required (W1-T3218).
+    `unwired-gate:check` has no jurisdiction: it scans gate-shaped scripts/ executables, never
+    library functions.
+    THE WORK IS PARTLY BUILT. PR #4727 carried the WRITER (namesATask, approveParkedTask, ten
+    tests, gate-green at 728) and `rmd sweep` closed it correctly -- "task W1-T3206 already merged
+    by #4715" -- because a task recorded merged cannot take a second implementation PR. The commit
+    survives at 2f50e732b on branch run-W1-T3206-admission. The WIRING was never built by anyone.
+  design: |
+    (i) TWO HALVES, AND THE SECOND IS THE ONE EVERYONE MISSED. (a) THE WRITER: one branch at the
+    top of `approveCommand`, before the proposal registry is consulted, so the proposal path is
+    untouched -- recover 2f50e732b rather than rebuilding. (b) THE WIRING: compute the released set
+    once per dispatch pass and pass it to every `assertRunnable`/`nextRunnable` call site. A PR
+    shipping only (a) reproduces exactly the defect this shard exists to fix.
+    (ii) THE CALL SITE IS AN ACCEPTANCE CRITERION HERE, not a convention. This shard's own
+    rationale is that a gate did not demand one; it must not repeat the omission by relying on
+    that same gate.
+    (iii) READ THE LEDGER ONCE PER PASS, never per task. `readLedgerLines` (status.ts:774) is real
+    file I/O; computing the set inside the per-task filter would put a disk read in the dispatch
+    loop. Compute it at the pass boundary and pass the SET down -- which is why the parameter is a
+    `ReadonlySet` and not a path.
+    (iv) EVERY REFUSAL NAMES THE STATE AND WRITES NOTHING: an unknown id, a task that is not
+    verify:human (it needs no release), one blocked or retired, and one ALREADY released -- that
+    last returns 0 with no second row. A second bit is not a second release.
+    (v) NO CLOCK. 2f50e732b keyed the run id on the task id precisely because the clock-signature
+    census refused `Date.now()` here, and the row is already unique per task.
+    (vi) DO NOT EDIT THE TASK'S `verify:` FIELD. W1-T3206 criterion 4 requires the plan record be
+    byte-identical before and after; the release is an EVENT, never a rewrite of the ask.
+  acceptance:
+    - claim: "naming a parked verify:human task to `rmd approve` writes exactly one ratify.approved row carrying that task id"
+      proof: "unit test: test/an-operator-verdict-releases-a-parked-task.test.ts"
+    - claim: "an unknown, non-human, blocked or already-released id is refused BY NAME and writes nothing"
+      proof: "unit test: test/an-operator-verdict-releases-a-parked-task.test.ts"
+    - claim: "a released task is dispatch-eligible through the REAL drain path while an identical unreleased task is still refused"
+      proof: "unit test: test/an-operator-verdict-releases-a-parked-task.test.ts"
+    - claim: "the released set is computed once per dispatch pass, not per task, so no disk read enters the per-task filter"
+      proof: "unit test: test/an-operator-verdict-releases-a-parked-task.test.ts"
+    - claim: "the writer has a production call site — approveCommand reaches it, not only its own tests"
+      proof: "grep: approveParkedTask( in src/run-task.ts"
+    - claim: "the reader has a production call site — the drain computes the released set, not only its own tests"
+      proof: "grep: releasedTaskIds( in src/lib/drain.ts"
+  falsifier: |
+    CLOSE IF a task id can already be released end to end on main: grep `releasedTaskIds(` and
+    `releasedIds` across src/, and read the five `assertRunnable`/`nextRunnable` call sites.
+    MEASURED 2026-09-08 on 31d8e8324: `releasedTaskIds(` returns ONLY its own definition;
+    `releasedIds` returns ONLY its two declarations and two reads; all five call sites omit it.
+    POSITIVE CONTROL, because "the door is missing" is unfalsifiable without a denominator: the
+    census must report the whole corpus, not one bucket — MEASURED over plan/tasks.d +
+    plan/tasks.yaml, 74 `verify: human` shards {queued 56, blocked 6, merged 10, done 2} across
+    1,583 tasks. W1-T3206 recorded 60 {queued 45, blocked 5, merged 10} three weeks earlier.
+    RE-MEASURE; do not quote either number.
+    PROVE IT LOAD-BEARING THROUGH THE REAL PATH. The suite needs a released task and an identical
+    unreleased one whose dispatch eligibility DIFFERS *through the drain*, not through a direct
+    call to `assertRunnable` with a hand-built set. A suite that only calls the predicate directly
+    is what let the unwired version ship, and would let it ship again.
+    DO NOT ship the writer alone. That is (i)(a) without (i)(b) and reproduces this exact defect.
+    DO NOT widen this into the judge. Deciding WHICH parked shards deserve release is W1-T3188;
+    this shard builds the door and the corridor, and nothing walks through them by itself.
+  note: |
+    Rule 25 CHECKED: `src/run-task.ts`, `src/lib/drain.ts` and `src/lib/daemon.ts` are ordinary src.
+    RULE 19: risk:high is declared because this spans three subsystems (run-task, drain, daemon).
+    The first draft of this shard was risk:medium over one file and lint-plan refused it; the
+    refusal was correct and the corrected scope is larger, not smaller.
+    NO DEPENDS_ON, deliberately: every precondition is already on main.
+    CAVEAT WITH EQUAL WEIGHT: this restores a capability the operator ruled on and does NOT
+    establish that releasing parked shards is the right disposition for any of the 56. It builds
+    the mechanism. W1-T3188 decides who walks through it, and neither task has measured whether
+    the backlog's contents warrant release.
+    SECOND CAVEAT: widening dispatch eligibility touches the daemon's own admission path. A defect
+    here does not park work — it DISPATCHES work that should have been parked, which is the more
+    expensive direction and the reason this is risk:high rather than medium.
