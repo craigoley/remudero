@@ -11,7 +11,7 @@
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-filing-credit-must-never-close-a-build.test.ts]
   origin: "operator-session#4461-closed-by-a-filing-credit-2026-09-07"
   plan_refs: ["W1-T2794", "W1-T413", "W1-T2779"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, WITH DAMAGE ALREADY DONE. PR #4461 implemented W1-T2371 — 10 passing tests, three

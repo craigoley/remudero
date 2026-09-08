@@ -12,7 +12,7 @@
   files: [src/lib/review.ts, test/a-modified-test-line-reads-as-added-test-code.test.ts]
   origin: "oper#w1-t2775-tranche-1-blocked-by-test-theater-2026-09-04"
   plan_refs: ["W1-T2775", "W1-T423", "W1-T2242"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON A REAL PR, NOT HYPOTHESISED. #3922 (W1-T2775 tranche 1) reds `remudero-review` with

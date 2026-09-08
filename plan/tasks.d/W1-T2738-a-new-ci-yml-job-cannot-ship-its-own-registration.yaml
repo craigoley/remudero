@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts]
   origin: "operator-session#unwired-gate-class-2026-09-02"
   plan_refs: ["W1-T2521", "W1-T402", "W1-T2491", "W1-T2488", "W1-T2735"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2521 SHIPPED A CARVE-OUT FOR THIS CIRCULARITY. IT DOES NOT REACH A ci.yml JOB, AND THE

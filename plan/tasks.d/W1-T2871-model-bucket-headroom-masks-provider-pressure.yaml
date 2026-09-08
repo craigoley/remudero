@@ -17,7 +17,7 @@
     - test/provider-routing-console.test.ts
   origin: "operator-session#provider-subscription-pressure-over-model-bucket-headroom-2026-09-05"
   plan_refs: ["W1-T2577", "W1-T2842", "W1-T2859"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT 10ea419. W1-T2859 correctly replaced winner-take-all routing with a

@@ -45,7 +45,7 @@
   origin: architect
   plan_refs: ["§9"]
   files: [src/lib/daemon.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the daemon loop is driven entirely through injected deps in test, so a long retro and
     the ticks that overlap it are both assertable with no real spawn.

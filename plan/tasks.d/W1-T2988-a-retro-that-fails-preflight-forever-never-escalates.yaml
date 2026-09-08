@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["W1-T2875", "W1-T2981", "W1-T312"]
   files: [src/lib/retro.ts, test/a-retro-that-cannot-publish-escalates-instead-of-retrying.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE MARKER IS FROZEN AND THE TRIGGER CANNOT SEE IT. `state/last-retro.json` reads

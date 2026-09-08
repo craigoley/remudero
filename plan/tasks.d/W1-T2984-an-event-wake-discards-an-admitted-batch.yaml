@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§5C", "W1-T254", "W1-T343", "W1-T2960", "W1-T2965", "W1-T2981"]
   files: [src/lib/daemon.ts, test/an-event-wake-must-not-discard-an-admitted-batch.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE FIFTH BLOCKER OF ONE OUTAGE, AND THE FOURTH OF ONE SHAPE. W1-T2960 fixed the pre-admission

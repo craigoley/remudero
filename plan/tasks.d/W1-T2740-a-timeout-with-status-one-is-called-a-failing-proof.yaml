@@ -13,7 +13,7 @@
     - test/pure-proof-incomplete-run.test.ts
   origin: "operator-session#pr-3719-proof-timeout-2026-09-02"
   plan_refs: ["W1-T65", "W1-T112", "W1-T1077", "W1-T2728"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PR #3719, HEAD 51d4958b, THEN REPRODUCED ON THE AZURE REVIEW HOST. The

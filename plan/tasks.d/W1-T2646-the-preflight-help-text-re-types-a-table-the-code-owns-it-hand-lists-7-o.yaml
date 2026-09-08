@@ -109,7 +109,7 @@
   origin: feedback#followup-W1-T2478
   plan_refs: ["§12A", "§5C", "W1-T373", "W1-T2478", "W1-T48"]
   files: [src/run-task.ts, test/preflight-help-is-derived-not-retyped.test.ts, docs/cli-reference.md]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED FROM the W1-T2478 follow-up harvest (PR #3323). The harvest called it cosmetic; the

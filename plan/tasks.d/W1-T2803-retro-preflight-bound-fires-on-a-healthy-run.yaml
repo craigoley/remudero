@@ -11,7 +11,7 @@
   files: [src/lib/retro-preflight.ts, src/run-task.ts, test/retro-preflight-bound-fires-on-a-healthy-run.test.ts]
   origin: "operator-decision#w1-t2803-retro-preflight-bound-2026-09-04"
   plan_refs: ["W1-T312", "W1-T380", "W1-T382", "W1-T2728"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS THE FIFTH INSTANCE OF ONE SHAPE — A BOUND THAT FIRES ON A HEALTHY CONDITION — AND FIVE

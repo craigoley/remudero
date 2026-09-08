@@ -11,7 +11,7 @@
   files: [test/helpers/wall-clock-bound.ts, test/a-wall-clock-bound-declares-itself.test.ts, test/console-write-entry.test.ts, test/poll-rollup-over-rest.test.ts, test/review-status-gate.test.ts, test/run-task.test.ts, test/worker-containment.test.ts, test/worker-credential-expiry-margin.test.ts, test/worktree-reap-liveness.test.ts]
   origin: "operator-decision#w1-t2811-wall-clock-expression-2026-09-04"
   plan_refs: ["W1-T2790", "W1-T2810", "W1-T2809", "W1-T2776"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE CENSUS IS CRITERION 1 AND IT CARRIES AN ABANDONMENT FLOOR. This task may close as

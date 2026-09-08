@@ -11,7 +11,7 @@
   origin: "retro-followup#3410"
   plan_refs: ["P63", "W1-T1227", "W1-T2526", "W1-T2532", "W1-T2538", "W1-T2539"]
   files: [src/lib/ci-parity.ts, src/run-task.ts, test/a-gates-own-remedy-is-reachable.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RATIFIES P63's REACHABILITY HALF, which MASTER-PLAN names as the unbuilt one in its own words:

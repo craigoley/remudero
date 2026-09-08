@@ -91,7 +91,7 @@
   origin: feedback#fb-1784732685925-86544b
   plan_refs: ["§4", "§9"]
   files: [src/lib/drain.ts, src/lib/headroom.ts, test/drain.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "Filed from feedback fb-1784732685925-86544b (cli, 2026-07-22), triaged 2026-08-02.
     verify:auto — every criterion is assertable against an injected readUsage and an injected runner over a

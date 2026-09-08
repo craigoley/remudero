@@ -10,7 +10,7 @@
   files: [src/lib/worker-provider.ts, test/a-codex-worker-uses-a-private-temporary-root.test.ts]
   origin: "oper#codex-global-tmp-git-contamination-2026-09-03"
   plan_refs: ["W1-T115", "W1-T2633", "W1-T2748"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ONE SUCCESSFUL CODEX SESSION CHANGES THE MEANING OF THE SHARED TEMPORARY TREE. In the running

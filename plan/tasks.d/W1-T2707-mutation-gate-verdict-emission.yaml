@@ -10,7 +10,7 @@
   files: [scripts/mutation-ratchet.mjs, test/mutation-gate-verdict-emission.test.ts]
   origin: "operator-session#plan-review-2026-09-02"
   plan_refs: ["W1-T393", "W1-T133"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED AT origin/main 2ff7d9a1, WITH A POSITIVE CONTROL. `grep -c 'ratchet_verdict'

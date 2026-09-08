@@ -95,7 +95,7 @@
   origin: feedback#fb-1784773321502-86793d
   plan_refs: ["§7", "P39", "W1-T260"]
   files: [src/run-task.ts, src/lib/run-result.ts, src/lib/retro.ts, src/lib/block-reason.ts, plan/mast-mapping.yaml, docs/task-lifecycle.md, test/run-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is a predicate over an injected projection plus a ledger line, assertable
     with no operator present and no live GitHub.

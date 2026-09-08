@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§8A", "W1-T2883"]
   files: [src/run-task.ts, src/lib/escalation-catalogue.ts, test/escalation-catalogue.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Step 2 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29). OBSERVED at

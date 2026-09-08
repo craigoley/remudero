@@ -14,7 +14,7 @@
     - test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts
   origin: "operator-request#daily-ci-failure-learning-loop-2026-09-06"
   plan_refs: ["W1-T2959", "W1-T2972", "W1-T326", "W1-T353", "W1-T413", "W1-T1004"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2959 SHIPPED A GAP BETWEEN ITS OWN CLAIM AND ITS OWN CODE, AND THAT IS WHY THIS IS FILED

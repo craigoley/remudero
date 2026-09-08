@@ -76,7 +76,7 @@
     - claim: "the wiring introduces no readability, length or vocabulary score"
       proof: "unit test: test/status-board-operator-message.test.ts"
   files: [src/lib/status-board.ts, test/status-board-operator-message.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#plain-language-surfaces-2026-09-04"
   plan_refs: ["W1-T2279", "W1-T2498", "W1-T2807"]

@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§5C", "W1-T126", "W1-T2845", "W1-T2960"]
   files: [src/lib/self-sync.ts, test/a-restart-is-only-warranted-by-a-material-advance.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED over the last 60 commits on origin/main, 2026-09-06:

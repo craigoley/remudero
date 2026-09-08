@@ -10,7 +10,7 @@
   files: [test/check-proof-executor-parity.test.ts]
   origin: "operator-session#pr-3619-candidate-set-2026-09-02"
   plan_refs: ["W1-T2387", "W1-T2574"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED, TWICE IN ONE AFTERNOON, FROM TWO UNRELATED DIFFS. The suite's two ACCEPTANCE tests pin

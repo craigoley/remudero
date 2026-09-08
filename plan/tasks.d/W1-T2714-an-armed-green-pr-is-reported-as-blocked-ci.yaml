@@ -11,7 +11,7 @@
   files: [src/run-task.ts, src/lib/run-result.ts, src/lib/block-reason.ts, src/lib/drain.ts, src/lib/daemon.ts, src/lib/retro.ts, test/green-pr-awaiting-merge.test.ts]
   origin: "operator-session#green-pr-falsely-blocked-ci-2026-09-02"
   plan_refs: ["W1-T125", "W1-T382", "W1-T976", "W1-T1211", "W1-T2274"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED LIVE ON #3662 / W1-T2618, 2026-09-02. The run's `pr.polling` row at

@@ -54,7 +54,7 @@
   origin: architect
   plan_refs: ["§9"]
   files: [src/run-task.ts, src/lib/worker-home.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the whole criterion set is about which env a function constructs, which is assertable
     against a recorded argv with no real /usage call, no credential and no spend.

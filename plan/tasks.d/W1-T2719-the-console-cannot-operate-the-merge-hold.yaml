@@ -15,7 +15,7 @@
     - scripts/source-size-baseline.json
   origin: oper#console-operator-merge-override-2026-09-02
   plan_refs: ["P22", "W1-T2581", "W1-T1000002", "W1-T1000003"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED AT origin/main 4cc3efde. `rmd merge-hold engage|release` already calls

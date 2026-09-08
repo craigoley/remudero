@@ -14,7 +14,7 @@
     - test/a-review-runs-each-unique-proof-once.test.ts
   origin: "operator-session#pr-3744-duplicate-proof-execution-2026-09-03"
   plan_refs: ["W1-T65", "W1-T273", "W1-T362", "W1-T1077", "W1-T2742"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PR #3744 AT HEAD 5af85ec9. Its six acceptance criteria all name the byte-identical

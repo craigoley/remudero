@@ -11,7 +11,7 @@
   files: [scripts/unwired-gate-check.mjs, .github/workflows/unwired-gate.yml, package.json, test/a-gate-shaped-instrument-that-nothing-invokes.test.ts]
   origin: "operator-session#unwired-gate-class-2026-09-02"
   plan_refs: ["W1-T2732", "W1-T2292", "W1-T1214", "W1-T2291", "W1-T1263"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CLASS, MEASURED, NOT INFERRED FROM TWO ANECDOTES. Census at origin/main of every tracked
