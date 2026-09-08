@@ -149,9 +149,13 @@ test("diff-coverage CI wiring: the stable coverage-ratchet aggregator checks the
   }
   // Needs the full base..head history to diff against, not the default shallow clone.
   assert.match(jobBody, /fetch-depth:\s*0/, "coverage-ratchet's checkout must fetch full history for the diff");
+  // W1-T3060: the base side is now `HEAD^1` — the merge commit's first parent, which is the exact
+  // point the merge was taken from however long the job queued — rather than the event payload's
+  // `base.sha`, which is main's tip when the webhook fired and drifts as siblings merge. The
+  // property asserted is unchanged: this job must compute the PR's OWN base...head diff.
   assert.match(
     jobBody,
-    /git diff .*BASE_SHA.*\.\.\.HEAD/s,
+    /git diff .*HEAD\^1\.\.\.HEAD/s,
     "the job must compute the PR's base...head diff for diff-coverage to consume",
   );
   assert.match(

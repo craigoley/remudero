@@ -369,10 +369,14 @@ test("W1-T2831: CI actually gives the arm a comparand — an unwired gate skips 
   assert.equal(invocations.length, 1, `exactly one ci.yml step may invoke the ratchet directly; found ${invocations.length}`);
   const step = invocations[0];
   assert.ok(step, "the ratchet step still exists in ci.yml");
+  // W1-T3060 changed WHICH comparand, never whether there is one — the property this test exists
+  // for is unchanged, and the assertion is still an exact literal rather than a loosened pattern.
+  // `HEAD^1` is the merge commit's base side, correct however long the job queued; `base.sha` was
+  // main's tip when the webhook fired, so it attributed every sibling merge to this PR.
   assert.equal(
     step.env?.BASE_SHA,
-    "${{ github.event.pull_request.base.sha }}",
-    "the step must carry the PR's base sha, or the net-byte arm has no comparand and skips every run",
+    "HEAD^1",
+    "the step must carry a base ref, or the net-byte arm has no comparand and skips every run",
   );
 
   // And the property that makes the fallback safe to rely on: with a base present the arm runs, so

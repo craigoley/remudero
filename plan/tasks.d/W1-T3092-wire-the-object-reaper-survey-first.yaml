@@ -81,15 +81,15 @@
     survey's value has an expiry date measured in days, not months.
   acceptance:
     - claim: with policy.objectReap.enabled false the rung SURVEYS and spawns no prune, so no object is removed by default
-      proof: "unit test: test/object-reaper-rung-wiring.test.ts::a disabled rung surveys and never prunes"
+      proof: "unit test: test/object-reaper-rung-wiring.test.ts"
     - claim: the survey runs the SAME quiet predicate the armed path runs, so the dispositions it reports describe the decision that would actually be made
-      proof: "unit test: test/object-reaper-rung-wiring.test.ts::survey and armed share one predicate"
+      proof: "unit test: test/object-reaper-rung-wiring.test.ts"
     - claim: with the flag true and the fleet quiet the rung prunes, so arming is a one-line policy change and nothing more
-      proof: "unit test: test/object-reaper-rung-wiring.test.ts::an armed rung prunes when quiet"
+      proof: "unit test: test/object-reaper-rung-wiring.test.ts"
     - claim: a throw inside the object sweep cannot fail the dispatch or the other three sweeps, matching the guard they already carry
-      proof: "unit test: test/object-reaper-rung-wiring.test.ts::a throwing object sweep does not break the rung"
+      proof: "unit test: test/object-reaper-rung-wiring.test.ts"
     - claim: an absent or non-boolean policy block fails loud at load rather than defaulting to armed
-      proof: "unit test: test/object-reaper-rung-wiring.test.ts::a malformed policy block refuses at load"
+      proof: "unit test: test/object-reaper-rung-wiring.test.ts"
   falsifier: |
     Close without implementation if the module already has a caller. Check it: `grep -rn
     "reapGitObjects\|object-reaper" src/ --include=*.ts` and read every hit. If `logDiskReclaimRung`
