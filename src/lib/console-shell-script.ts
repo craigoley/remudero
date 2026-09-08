@@ -351,6 +351,14 @@ export function needsMeSummaryText(rows: readonly { ts?: string }[]): string {
   return `${rows.length} open${ago ? ` · oldest ${ago}` : ""}`;
 }
 
+/** W1-T3183: the verify:human backlog's OWN count -- deliberately never folded into
+ *  {@link needsMeSummaryText} above, which now counts asks only. A queued-but-never-dispatched
+ *  row has no "open since" affordance to age (needsMeVerifyRowHtml pushes no `ts`), so this never
+ *  claims one — just the depth of the queue itself, which is W1-T507's whole point. */
+export function needsMeBacklogSummaryText(rows: readonly unknown[]): string {
+  return rows.length === 0 ? "none queued" : `${rows.length} queued, never dispatched`;
+}
+
 export function upNextSummaryText(head: readonly { id: string }[]): string {
   if (head.length === 0) return "nothing waiting to gather";
   const more = head.length > 1 ? ` (+${head.length - 1} more)` : "";
@@ -680,7 +688,7 @@ const SHELL_SCRIPT_HELPERS = [
   mailboxEscalationClass, mailboxThreadKey, mailboxVisibleThreads, mailboxUnreadCount,
   mailboxMarkRead, mailboxMarkResolved,
   rowChevronHtml, rowDetailSkeletonHtml, planSectionRowHtml,
-  nowSummaryText, needsMeSummaryText, upNextSummaryText, recentSummaryText, acceptedSummaryText,
+  nowSummaryText, needsMeSummaryText, needsMeBacklogSummaryText, upNextSummaryText, recentSummaryText, acceptedSummaryText,
   restSummaryText, selfMeasurementFigure, selfMeasurementRowHtml,
   liveSpendHtml, workerStateHtml, decisionSummaryHtml, draftedTasksHtml,
   recentPrLinkHtml, recentSpendHtml, runRowHtml, acceptanceRowHtml, depChainHtml, cardIssueLinkHtml,
