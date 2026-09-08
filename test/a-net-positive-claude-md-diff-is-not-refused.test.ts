@@ -356,11 +356,21 @@ test("W1-T2831: CI actually gives the arm a comparand — an unwired gate skips 
   const ci = parse(readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
     jobs: Record<string, { steps: Array<{ run?: string; env?: Record<string, string> }> }>;
   };
+  // SELECTED BY INVOCATION, NOT BY MENTION (W1-T3068). `.find(run.includes("claude-md-budget-
+  // ratchet"))` was unambiguous only while one step named the gate. W1-T3068 added a second
+  // mention — main's push lane dispatches it through a shell function, `run_main_ceiling_gate
+  // claude-md-budget-ratchet …` — and because that step sits in an earlier job, `.find` returned
+  // IT, a step that carries no BASE_SHA and never needed one. The guard then reported the PR gate
+  // as unwired when it was untouched: the same class of drift the comment above already refuses
+  // for text windows, one level up. So match the literal npm INVOCATION, and require exactly one
+  // of them — a second direct caller must be read by a person, not silently selected between.
   const steps = Object.values(ci.jobs).flatMap((j) => j.steps ?? []);
-  const step = steps.find((st) => (st.run ?? "").includes("claude-md-budget-ratchet"));
+  const invocations = steps.filter((st) => (st.run ?? "").includes("npm run --silent claude-md-budget-ratchet"));
+  assert.equal(invocations.length, 1, `exactly one ci.yml step may invoke the ratchet directly; found ${invocations.length}`);
+  const step = invocations[0];
   assert.ok(step, "the ratchet step still exists in ci.yml");
   assert.equal(
-    step!.env?.BASE_SHA,
+    step.env?.BASE_SHA,
     "${{ github.event.pull_request.base.sha }}",
     "the step must carry the PR's base sha, or the net-byte arm has no comparand and skips every run",
   );
