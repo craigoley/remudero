@@ -1,0 +1,74 @@
+- id: W1-T3159
+  title: "THE CONSOLE HAS NO TIME SERIES AT ALL — every daemon-health field is a SCALAR (`last poll …`, `disk free …`, `rate limit …`, `spend today $198.831`), `grep -c '<svg|sparkline|chart|polyline' src/lib/serve.ts` returns ZERO, so an operator can read the current value of everything and the trend of nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [src/lib/serve.ts, test/the-console-has-no-time-series-at-all.test.ts]
+  origin: "operator-session#console-visibility-2026-09-08"
+  plan_refs: ["W1-T3158", "W1-T2239"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08. `grep -cE "<svg|sparkline|chart|polyline" src/lib/serve.ts` returns **0**.
+    There is no charting of any kind in the console, and no external chart library is available to
+    it — so this is inline SVG or nothing.
+
+    EVERY HEALTH FIELD IS A SCALAR. From the operator's own console: `last poll …`, `next poll …`,
+    `disk free …`, `rate limit …`, `spend today $198.831`, `spend this week $389.029`, `running 2`,
+    `queued 94`. Each is a point reading. Nothing shows whether spend is accelerating, whether disk
+    is trending down, or whether the queue is draining or filling.
+
+    THE SERIES EXIST IN THE LEDGER ALREADY, and this session read several of them directly:
+      - sweep dispositions per pass (`sweep.summary` carries the per-disposition counts)
+      - `main.health.observed` (530 rows in three days)
+      - cost rows (`cost_usd`, `total_cost_usd`) — 541 cost-bearing rows over three days
+      - wake volume (`github.wake.accepted`, 6 580 rows) and settle behaviour
+    A trend is a `GROUP BY` over rows the fleet already writes, not new instrumentation.
+
+    WHY THIS IS WORTH A TASK RATHER THAN A PREFERENCE. The two operational defects found this
+    session were both TRENDS, invisible as scalars: a PR re-dispatched 143 times over three days at
+    a steady 2.5-minute cadence, and loose objects climbing 13 870 -> 19 049 in six hours. Each read
+    as an unremarkable current value at every single instant.
+  design: |
+    (i) INLINE SVG, NO DEPENDENCY. The console has no chart library and cannot fetch one; a
+    hand-rolled polyline over a bounded series is the whole mechanism.
+    (ii) A SMALL, NAMED SET OF SERIES, chosen because each has a decision attached: spend per day,
+    queue depth, sweep dispositions per pass, and wake volume. Not "graphs" in general — a panel
+    that renders whatever it finds is a panel nobody can review.
+    (iii) BOUNDED READ, STATED WINDOW. Every series declares its window and its bucket, and the read
+    is bounded — the console polls, and an unbounded ledger-union scan per poll is a cost it has
+    never paid. THE BUCKETING IS PART OF THE CLAIM: a daily bucket hides a 2.5-minute loop, which is
+    exactly the defect this is meant to surface, so the bucket must be small enough to show it.
+    (iv) A SERIES THAT CANNOT BE READ RENDERS AS ABSENT, never as zero. A flat line at zero and "no
+    data" are different facts and this repo's own P48 rule ("no naked zero") already says so.
+  acceptance:
+    - claim: "the console renders at least one bounded time series as inline SVG, with no external dependency"
+      proof: "unit test: test/the-console-has-no-time-series-at-all.test.ts"
+    - claim: "each series states its window and bucket, so a reader knows what a point covers"
+      proof: "unit test: test/the-console-has-no-time-series-at-all.test.ts"
+    - claim: "an unreadable or empty series renders as ABSENT, never as a flat zero line"
+      proof: "unit test: test/the-console-has-no-time-series-at-all.test.ts"
+    - claim: "the bucket is small enough that a repeating sub-hourly event is visible rather than averaged away"
+      proof: "unit test: test/the-console-has-no-time-series-at-all.test.ts"
+  falsifier: |
+    CLOSE IF the console already charts anything: `grep -cE "<svg|sparkline|chart|polyline"
+    src/lib/serve.ts`. MEASURED 2026-09-08: 0.
+    PROVE IT LOAD-BEARING: a fixture series containing a repeating sub-hourly spike must be visible
+    in the rendered output; the same series under a daily bucket must not be. If both render the
+    same, the bucket is decorative and design (iii) is unmet.
+    DO NOT satisfy this by adding a chart library. The console cannot fetch one, and a vendored
+    library is a dependency decision with its own argument, not a side effect of wanting a graph.
+    DO NOT render a series with no stated window. A trend line whose span is unknown is a shape, not
+    a measurement — and the operator's existing complaint is that the console is hard to READ, not
+    that it is short of pixels.
+  note: |
+    Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src.
+    SCOPE HONESTY: "beautiful" is not a testable property and this shard does not claim it. What is
+    testable is bounded, provenance-stating, absent-vs-zero-distinguishing series with a bucket fine
+    enough to show the defects that actually occurred. Visual polish beyond that is the operator's
+    call on the rendered result, not something a criterion here can carry.

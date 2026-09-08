@@ -1,0 +1,64 @@
+- id: W1-T3157
+  title: "THE MAILBOX IS AN `<h3>` NESTED INSIDE THE NEEDS-ME SECTION, NOT A PLACE — it renders under `data-owner-tab=\"decisions\"` beneath a 58-row needs-me list, so reaching six unread threads means scrolling past fifty-two `verify: human` rows that are not messages and cannot be replied to"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files: [src/lib/serve.ts, test/the-mailbox-is-its-own-section.test.ts]
+  origin: "operator-session#console-visibility-2026-09-08"
+  plan_refs: ["W1-T2497", "W1-T3156"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED in the shipped shell (src/lib/serve.ts, the `needs-me` section): the mailbox is
+
+      <h3 class="mailbox-heading">Mailbox<span id="mailbox-unread-count" …></span></h3>
+      <div id="mailbox" class="mailbox" …></div>
+
+    inside `<section id="needs-me" … data-owner-tab="decisions">`. W1-T2497 added it ADDITIVELY and
+    said so — "same escalations above, as a thread; ADDITIVE, needs-me-list untouched" — which was
+    the right call for introducing it and is now the constraint.
+
+    MEASURED FROM THE OPERATOR'S OWN CONSOLE, 2026-09-08: `Needs me 58 open`, of which FIFTY-TWO are
+    `awaiting human verification -- filed verify: human, never auto-dispatched`. Those are a
+    standing backlog, not messages: they have no thread, no reply box and no resolve. The six that
+    ARE messages sit below all of them.
+
+    THE TABS ALREADY EXIST. `data-owner-tab` routes sections to Decisions / Queue / Now / Plan /
+    Feed, so this is a placement change within a mechanism that is already there, not a new one.
+
+    THIS TASK IS PLACEMENT ONLY. It does not touch what the mailbox contains, how threads are keyed,
+    or the needs-me list's own contents — W1-T3156 changes the first, and the `verify: human`
+    backlog is its own question.
+  design: |
+    (i) The mailbox becomes its own tab-owned section with its own `data-owner-tab`, beside
+    Decisions rather than inside it.
+    (ii) THE UNREAD COUNT MOVES WITH IT and stays visible from the tab strip, or the section is
+    worse than the heading it replaced — a message nobody sees is the defect being fixed.
+    (iii) NEEDS-ME IS UNTOUCHED. Its rows, ordering and controls stay exactly as they are; this
+    moves a sibling out, it does not re-scope the list.
+    (iv) NO CONTENT CHANGE. Threads, keys, read/resolved localStorage state and reply behaviour are
+    carried across verbatim.
+  acceptance:
+    - claim: "the mailbox renders as its own tab-owned section rather than a heading inside needs-me"
+      proof: "unit test: test/the-mailbox-is-its-own-section.test.ts"
+    - claim: "the unread count is reachable without opening the section, so a message still announces itself"
+      proof: "unit test: test/the-mailbox-is-its-own-section.test.ts"
+    - claim: "the needs-me list's rows and controls are unchanged by the move"
+      proof: "unit test: test/the-mailbox-is-its-own-section.test.ts"
+    - claim: "thread keys and read/resolved state survive the move, so an operator's existing read marks are not reset"
+      proof: "unit test: test/the-mailbox-is-its-own-section.test.ts"
+  falsifier: |
+    CLOSE IF the mailbox is already its own section: read the `needs-me` section in serve.ts and
+    check whether `#mailbox` sits inside it. MEASURED 2026-09-08: it does, under
+    `data-owner-tab="decisions"`.
+    PROVE IT LOAD-BEARING: the test must assert the mailbox's OWNING SECTION, not merely that the
+    element exists — an assertion satisfied by today's markup discriminates nothing.
+    DO NOT satisfy this by hiding the `verify: human` rows. Fifty-two standing verifications are a
+    real backlog and hiding them answers a question nobody asked; if they should be elsewhere, that
+    is a separate task with its own argument.
+  note: |
+    Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src.
