@@ -615,7 +615,7 @@ class RouteResponseBuffer {
 }
 
 function writeBufferedResponse(res: import("node:http").ServerResponse, cached: BufferedRouteResponse, staleness: ConsoleResponseStaleness): void {
-  const headers = {
+  const headers: Record<string, string> = {
     ...cached.headers,
     "x-rmd-cache-state": staleness.stale ? "stale" : "fresh",
     "x-rmd-cache-age-ms": staleness.ageMs === null ? "unknown" : String(staleness.ageMs),
