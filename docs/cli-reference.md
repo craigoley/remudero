@@ -87,6 +87,7 @@ usage:
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
+  rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evidence "<text>" [--evidence ...] --rollback "<text>" [--supersedes <anchor>]   # An agent records a ruling, behind an LLM judge that routes the risky ones to the operator.
   rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]   # The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.
 
 An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits
@@ -820,6 +821,16 @@ rmd approve <P##> [<P##> ...]
 ```
 
 one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready
+
+### `rmd rule`
+
+An agent records a ruling, behind an LLM judge that routes the risky ones to the operator.
+
+```
+rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evidence "<text>" [--evidence ...] --rollback "<text>" [--supersedes <anchor>]
+```
+
+an agent records a ruling behind a judge (W1-T3212, operator ruling 2026-09-08): the judge assesses whether THIS ruling is safe for an agent to land — reversible, inside its competence, evidenced, narrow — never whether it is RIGHT, which is what the operator's bit is for when the answer is no. On record, the entry lands in plan/decisions.d/ through the same bridge decision records already use, attributed to its agent author with its evidence and a rollback line. On escalate it lands NOTHING and stages an ordinary inbox proposal the operator ratifies with `rmd approve` — the same gated, ledgered, one-bit path, never a second channel. FAILS CLOSED, the opposite polarity to the escalation judge: a throwing, timing-out or unparseable verdict escalates, because the costly direction here is installing a decision nobody reviewed. A ruling that declares it supersedes a standing record goes to the operator unconditionally, without the judge being asked. Every verdict writes one ruling.judged ledger row naming decision and reason, on both arms
 
 ### `rmd reframe`
 
