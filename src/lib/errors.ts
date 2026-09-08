@@ -21,13 +21,6 @@
  */
 
 /**
- * The discriminant an `RmdError` carries. Deliberately a closed union, not `string` — a new
- * kind is a reviewable one-line addition here, not a typo an author can introduce silently at
- * a throw site. Grows only as more error families adopt the envelope; see this file's header.
- */
-export type RmdErrorKind = "plan" | "usage";
-
-/**
  * The exit code the CLI process boundary (`main()` in `src/run-task.ts`) uses for anything that
  * is NOT an `RmdError` — a foreign `Error`, a thrown string, or any other thrown value. Matches
  * the code `main()`'s outer catch has always used for an unclassified failure.
@@ -57,6 +50,13 @@ export abstract class RmdError extends Error {
 export function isRmdError(err: unknown): err is RmdError {
   return err instanceof RmdError;
 }
+
+/**
+ * The discriminant an `RmdError` carries. Deliberately a closed union, not `string` — a new
+ * kind is a reviewable one-line addition here, not a typo an author can introduce silently at
+ * a throw site. Grows only as more error families adopt the envelope; see this file's header.
+ */
+export type RmdErrorKind = "plan" | "usage";
 
 /**
  * The process boundary's one lookup: an `RmdError` answers its own declared exit code; anything

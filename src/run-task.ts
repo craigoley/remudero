@@ -39155,6 +39155,8 @@ export async function main(
   process.exit(2);
 }
 
+// diff-cov: process-boundary - direct CLI guard; imported tests cover `main()` and
+// `exitCodeFor()`, while this wrapper only prints and exits the current process.
 // Only run when invoked directly (not when imported by tests).
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((err) => {
