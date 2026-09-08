@@ -1,0 +1,68 @@
+- id: W1-T3215
+  title: "THE MANDATED CALLER SWEEP IS ONE HOP, SO A SUITE THAT NAMES THE CHANGED SYMBOL'S CALLER IS INVISIBLE — `git grep -l <changed symbol>` returned 0 for the very suite that went red, while the in-file caller it does name returned 22"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/ci-parity.ts, src/run-task.ts, test/the-caller-sweep-stops-at-one-hop.test.ts]
+  origin: "operator-session#board-pass-2026-09-08"
+  plan_refs: ["W1-T2680", "W1-T2969", "W1-T2523", "W1-T3192"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 ON #4722. The diff changed exactly one function body in src/lib/serve.ts —
+    prewarmBoardGithub, whose first warm moved off the caller's stack. The sweep CLAUDE.md mandates
+    is `git grep -l <symbol>` over test/, then run every suite it names. Run on this diff it names
+    four suites. All four pass. CI went red on a FIFTH, test/serve-prewarm-clientgate.test.ts, whose
+    four cases assert the warm lands synchronously.
+
+    THE NUMBERS, both taken on the PR head: `git grep -c prewarmBoardGithub` in that suite reads
+    ZERO — the sweep cannot see it by construction — while `git grep -c gatePrewarmOnClients` in the
+    same file reads 22. gatePrewarmOnClients is the IN-FILE CALLER: it is the only thing that
+    invokes prewarmBoardGithub in src/, it is what the suite drives, and it is where the behaviour
+    change is observable. One more hop and the sweep would have named it.
+
+    THIS IS NOT W1-T2680's BLINDNESS. That one is a census suite naming NO symbol of any diff, and
+    `rmd census-membership` now answers it. Here the suite names a symbol perfectly well; the sweep
+    just never asked about that symbol, because the prescribed query stops at the definition the
+    diff edited and never walks to who calls it. Both halves must hold for the sweep to be complete,
+    and only the census half has a verb.
+
+    WHY THE WHOLE-FILE FALLBACK IS NOT THE ANSWER. Sweeping every exported symbol of the changed
+    file is complete and useless: MEASURED on this same diff, src/lib/serve.ts exports 41 functions
+    and the union of suites naming any of them is 76 — a sixth of the directory, which an agent
+    reads as "run everything" and therefore runs nothing. The closure must be reachability from the
+    CHANGED symbols, not membership in the changed file, or the answer is discarded for being one.
+
+    IT BELONGS BESIDE ITS OTHER HALF. `censusSuiteMembership` already lives in src/lib/ci-parity.ts
+    behind the `rmd census-membership` verb, and answers the complementary question. Putting the
+    symbol-closure half in the same module and behind the same verb shape means one place answers
+    "which suites does this diff join", rather than a second module reached only by its own tests.
+
+    ENUMERATE FROM THE TREE, NEVER FROM A LIST — the same constraint W1-T2680 and W1-T2521 already
+    impose. The closure is computed at run time by parsing src/ for which functions reference which,
+    so a caller added in the same commit is walked by the run that adds it.
+
+    THE FALSIFIER IS THE PAIR. A closure loose enough to reach serve-prewarm-clientgate from
+    prewarmBoardGithub will, if unbounded, reach most of the tree — so the test must pin BOTH ends
+    on the real repo: the suite that actually went red IS listed for a prewarmBoardGithub change,
+    and the count stays far below the 76 the whole-file sweep produces. A depth bound with no
+    measured ceiling is the "bound that fires on a healthy condition" defect this repo keeps
+    re-earning; whatever bound ships must be justified against the closure sizes actually observed.
+  acceptance:
+    - claim: "the verb walks src/ at run time and names the suites reachable from a changed symbol through its callers, not just the suites naming the symbol itself"
+      proof: "unit test: test/the-caller-sweep-stops-at-one-hop.test.ts"
+    - claim: "for a prewarmBoardGithub change the listed suites include serve-prewarm-clientgate, the one the one-hop sweep missed and CI caught"
+      proof: "unit test: test/the-caller-sweep-stops-at-one-hop.test.ts"
+    - claim: "the answer stays far smaller than the whole-file sweep's 76 suites, so it remains a list an agent will actually run"
+      proof: "unit test: test/the-caller-sweep-stops-at-one-hop.test.ts"
+    - claim: "a caller added to the tree is walked without editing any registry"
+      proof: "unit test: test/the-caller-sweep-stops-at-one-hop.test.ts"
+    - claim: "an empty changed-symbol set yields an empty list rather than every suite"
+      proof: "unit test: test/the-caller-sweep-stops-at-one-hop.test.ts"
+    - claim: "the closure is reachable from a real rmd verb, not merely exported for its own tests"
+      proof: "grep: callerReachableSuites( in src/run-task.ts"
