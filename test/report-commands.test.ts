@@ -32,6 +32,8 @@ import {
   learningsExportCommand,
   learningsImportCommand,
   traceCommand,
+  LAUNCHCTL_PID_RE,
+  LAUNCHCTL_LIST_LINE_RE,
 } from "../src/lib/report-commands.js";
 import type { RestPullRow } from "../src/lib/open-prs-rest.js";
 import type { Config } from "../src/lib/config.js";
@@ -204,6 +206,24 @@ test("doctorCommand: every reader injected over a fixed, empty state prints a fu
   assert.equal(typeof rc, "number");
   assert.equal(printed.length, 1);
   assert.match(printed[0], /rmd doctor|WORST|OK|WARN|FAIL/i);
+});
+
+// ── statusCommand's own launchd-query regexes — negative-reachability-ratchet.test.ts's census
+// counts every module-scope `NAME_RE` regex as fixture-less until a test drives BOTH its
+// rejecting and its accepting arm by identifier; these two moved here with statusCommand's
+// default `queryService` and are exported (report-commands.ts's own doc note) solely so this
+// file can do exactly that.
+
+test("LAUNCHCTL_PID_RE: matches launchctl print's quoted-or-bare pid line, rejects a line with none", () => {
+  assert.equal(LAUNCHCTL_PID_RE.test('\t"pid" = 61234;'), true);
+  assert.equal(LAUNCHCTL_PID_RE.test("\tpid = 61234;"), true);
+  assert.equal(LAUNCHCTL_PID_RE.test('\t"state" = "running";'), false);
+});
+
+test("LAUNCHCTL_LIST_LINE_RE: matches launchctl list's PID/Status/Label line, rejects an unrelated line", () => {
+  assert.equal(LAUNCHCTL_LIST_LINE_RE.test("1234\t0\tcom.remudero.supervisor"), true);
+  assert.equal(LAUNCHCTL_LIST_LINE_RE.test("-\t0\tcom.remudero.supervisor"), true);
+  assert.equal(LAUNCHCTL_LIST_LINE_RE.test("not a launchctl list line at all"), false);
 });
 
 // ── statusCommand — invoked through the lib module, per this task's own acceptance claim ───────
