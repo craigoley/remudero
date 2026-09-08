@@ -206,7 +206,6 @@ jobs:
                 }
                 echo "::endgroup::"
               }
-              run_main_ceiling_gate source-size-ratchet source-size-ratchet
               run_main_ceiling_gate learnings-budget-ratchet learnings-budget-ratchet
               run_main_ceiling_gate claude-md-budget-ratchet claude-md-budget-ratchet
               run_main_ceiling_gate comment-load-signal comment-load-signal -- --base HEAD^
@@ -1159,16 +1158,10 @@ jobs:
         run: npm run --silent task-id-existence:check -- --require-open-prs
 
   source-size:
-    # SOURCE-SIZE ratchet — a per-file LINE ceiling, the same shape as the comment-load and
-    # learnings-budget gates and for the same reason: something grew unnoticed. W1-T2488 built the
-    # ceiling and nothing ever ran it; on a clean main at 6e31c5d2 `npm run source-size-ratchet` read
-    # BLOCKED on seven files, up to +478 lines over. A recorded ceiling nothing enforces is dead
-    # configuration that drifts, which is exactly what it had done.
-    #
-    # This job runs the ENFORCING `--baseline` mode; the separate `source-size-signal` script reports
-    # growth of changed files and never fails. The gate refuses one thing: a baselined file whose
-    # line count grew past its ceiling. A decrease is always accepted, and a PR that shrinks a file
-    # re-captures the ceiling downward in the same diff.
+    # SOURCE-SIZE signal — a stable required context because inability to MEASURE is an integrity
+    # failure, but line growth itself is not a correctness verdict. W1-T2862 consumes the retained
+    # fast-preflight payload and files deduplicated priority-1 decomposition work for material
+    # hotspots; the feature PR never edits a shared baseline just to turn this check green.
     # FALSIFIER: test/source-size-baseline-is-enforced.test.ts.
     name: source-size
     runs-on: ubuntu-latest
@@ -1176,14 +1169,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
       - name: Install (clean, from lockfile)
         run: npm ci
-      - name: Source-size ratchet (no baselined file grows past its recorded ceiling)
-        run: npm run --silent source-size-ratchet
+      - name: Source-size signal (growth informs review and follow-up work; measurement failure still refuses)
+        run: npm run --silent source-size-signal
 
   comment-load-ratchet:
     # COMMENT-LOAD ratchet — a CEILING on comment volume, the same shape as the learnings-budget

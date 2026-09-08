@@ -73,7 +73,7 @@ test("W1-T2883: the baseline mode REFUSES growth by one line and ACCEPTS a file 
   }
 });
 
-test("W1-T2883: the enforcing mode runs as a PR check in ci.yml, under its own job, on the real script", () => {
+test("W1-T3140: the stable required PR check runs the source-size signal, never legacy baseline enforcement", () => {
   // PARSED, NOT GREPPED. A text scan of the job body reads its COMMENTS too — measured: the first
   // version of this test failed because the job's own comment explains why `source-size-signal` is
   // a different thing, and the scan counted that mention as the job running it. Parsing sees only
@@ -86,15 +86,13 @@ test("W1-T2883: the enforcing mode runs as a PR check in ci.yml, under its own j
 
   const runs = job.steps.map((step) => step.run ?? "").filter(Boolean);
   assert.ok(
-    runs.some((r) => /npm run --silent source-size-ratchet/.test(r)),
-    `the job must RUN the enforcing script; saw ${JSON.stringify(runs)}`,
+    runs.some((r) => /npm run --silent source-size-signal/.test(r)),
+    `the job must RUN the PR-relative signal; saw ${JSON.stringify(runs)}`,
   );
-  // It must NOT run the signal mode: that reports growth and never fails, so a job wired to it
-  // would be green on a file that had grown past its ceiling.
   assert.equal(
-    runs.some((r) => /source-size-signal/.test(r)),
+    runs.some((r) => /source-size-ratchet/.test(r)),
     false,
-    "the signal mode never fails; this job must run the ratchet",
+    "line growth is a maintainability signal with a durable follow-up, not a correctness failure",
   );
   // PR-only, and unconditional within that — the fail-closed shape the jobs around it use. A
   // path-filtered required check that can go silently absent is the #102 deadlock class.
