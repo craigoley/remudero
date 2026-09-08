@@ -1,0 +1,120 @@
+- id: W1-T3142
+  title: "A PR CANNOT RESTATE ITS OWN SHARD'S ACCEPTANCE CRITERIA — `bodyContradictsDiff` scans the WHOLE body including the Acceptance block, so a criterion describing what the fix must do for `a plan-only diff` is read as a claim that THIS diff is plan-only; the PR is refused for words its own task file wrote, and the only remedy is to delete the block or backtick a criterion into unreadability"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium  # Rule 19: one predicate in one file plus its falsifier — the region walk already
+                # exists and is being shared rather than re-derived.
+  band_meaning: span
+  budget_usd: 20.00
+  files: [src/lib/review.ts, test/a-criterion-restated-is-not-a-claim.test.ts]
+  origin: "operator-session#4577-could-not-quote-its-own-criterion-2026-09-08"
+  plan_refs: ["W1-T3061", "W1-T2533", "W1-T2534", "W1-T308"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON `origin/main` AT 41231c67, 2026-09-08, by driving the SHIPPED `bodyContradictsDiff`
+    over a diff of `[.github/workflows/ci.yml, test/x.test.ts]`:
+
+      body text                                                                    contradictions
+      "a plan-only diff still classifies as PLAN_ONLY when commits land on          1  ("plan-only")
+       the base"  — W1-T3060 acceptance criterion 2, VERBATIM from the merged shard
+      "This PR is plan-only."  — a deliberately false claim, the control            1  ("plan-only")
+      "`a plan-only diff still classifies as PLAN_ONLY ...`"  — backtick-quoted     0
+      "Fixes the diff base. Touches the workflow and one test."  — no claim         0
+
+    THE CRITERION AND THE LIE ARE INDISTINGUISHABLE. A merged task's own acceptance text, restated
+    in the body of the PR that implements it, produces exactly the refusal a false scope claim
+    produces. #4577 hit this: its Acceptance block had to be OMITTED to get the PR reviewed, on a
+    task whose criteria the gate then resolved from the shard anyway.
+
+    THE ACCEPTANCE BLOCK IS NOT THE AUTHOR'S PROSE. Where a body carries a `Remudero-Task:` trailer
+    the gate resolves criteria FROM THE SHARD — `rmd check-acceptance` says so in as many words
+    ("criteria source: W1-T3061's shard via the body trailer"). The block in the body is a
+    RESTATEMENT of text that lives in `plan/tasks.d/`, written by the filing, reviewed there, and
+    linted there. Scanning it as the body's own assertion refuses a PR for words its own task file
+    wrote.
+
+    WHY THE W1-T3061 GUARDS DO NOT COVER IT — three arms, and this shape reaches none of them.
+    `shorthandIsAboutChangeset`'s attributive arm reads the noun the shorthand modifies (`diff`,
+    a changeset word) and then asks whether a COPULAR FRAME names a foreign subject. In
+    "a plan-only diff still classifies …" there is no copular frame at all: the noun phrase opens
+    the sentence. `ATTRIBUTIVE_SUBJECT_RE` returns null, and the arm's documented fail-closed rule —
+    "an unreadable or absent frame leaves the refusal standing" — refuses. That rule is correct for
+    the arm and wrong for this text, because the text is not the author speaking.
+
+    IT HAS BITTEN BEFORE, IN THE SAME PLACE, AND WAS RECORDED RATHER THAN FIXED. The comment above
+    the shorthand loop already says: "TRAP: W1-T413's own criteria name
+    `test/trailer-credit-plan-only.test.ts`, and `\b` matches between the `-` and the `.`, so
+    quoting the required proof forced failure." That is this defect with a PROOF PATH instead of a
+    CLAIM — the acceptance block being read as prose — and the note treats it as a curiosity of
+    word boundaries rather than as the region being scanned at all.
+
+    THE WORKAROUNDS ARE BOTH BAD. Deleting the Acceptance block removes the human-readable statement
+    of what the PR must achieve from the artefact reviewers read. Backticking a criterion silences
+    the detector by making the claim an inline quote — which is true, and is the escape the refusal
+    names — but it disfigures the very sentence a reviewer is meant to read, and it must be done to
+    a criterion whose wording is fixed by a merged shard.
+  design: |
+    (i) THE PRINCIPLE IS ALREADY IN THIS FILE, AND THIS IS ITS THIRD APPLICATION, NOT A NEW
+    MECHANISM. "A QUOTATION IS NOT AN ASSERTION" — W1-T308 blanked blockquotes and fenced blocks in
+    `stripQuotedRegions`; W1-T2534 extended it to INLINE spans with `isInsideInlineQuote`; W1-T2549
+    made that the one predicate every arm shares. The Acceptance block is a restatement of the
+    shard's text, so it is quoted content by the same reasoning, and it is blanked by the same
+    function.
+
+    (ii) BLANK IT FOR CLAIM SCANNING ONLY, NEVER FOR PARSING. `parseAcceptanceBlock`,
+    `acceptanceBlockDiagnostics` and every author-time check keep reading the block exactly as they
+    do today. Only the `scan` string `recognizeChangesetClaims` matches against loses it, and only
+    because that string exists to hold the body's OWN assertions. Position- and newline-preserving,
+    like the two regions blanked beside it, so every match index still lines up.
+
+    (iii) ONE REGION WALK, SHARED — NOT A SECOND HAND-MAINTAINED COPY. `acceptanceBlockDiagnostics`
+    already walks exactly this region: header, then bullets, tolerating leading blanks and indented
+    continuations, stopping at the first line that is none of those. Extract that walk as an
+    exported region function and have BOTH callers use it. Two copies of this boundary would drift,
+    and a body whose block ends in one reading and not the other is the silent half of this defect.
+
+    (iv) THE REST OF THE BODY IS UNTOUCHED, WHICH IS WHAT KEEPS THE GATE HONEST. Prose above the
+    header, prose after the block ends, the trailer, the summary — all still scanned. A body that
+    says "This PR is plan-only." anywhere outside the block is refused exactly as it is today, and
+    the falsifier asserts that on the same fixture that proves the block is exempt.
+
+    (v) A BODY WITH NO ACCEPTANCE HEADER MUST BE BYTE-FOR-BYTE UNCHANGED. No header, no region, no
+    blanking — the walk returns nothing and `stripQuotedRegions` returns what it returns today.
+
+    (vi) NOT A WIDENING OF ANY GRAMMAR ARM. `CONDITIONAL_CLAUSE_RE`, `ATTRIBUTIVE_SUBJECT_RE`,
+    `SELF_REFERENTIAL_SUBJECT_RE` and the two W1-T2533 denial regexes are not touched. Teaching the
+    attributive arm that "a plan-only diff" is generic would change what counts as a claim
+    EVERYWHERE in a body, including in prose where an author really is describing their own change;
+    scoping the fix to the region that is not theirs to begin with changes nothing else.
+  acceptance:
+    - claim: a criterion restated inside the Acceptance block is not read as the body's own scope claim, so a PR can state what it must achieve in the words its shard already uses
+      proof: "unit test: test/a-criterion-restated-is-not-a-claim.test.ts"
+    - claim: the same sentence in ordinary body prose is still refused, so the exemption is the region and never the wording
+      proof: "unit test: test/a-criterion-restated-is-not-a-claim.test.ts"
+    - claim: the blanked region begins at the acceptance header and ends where the block's own parser ends it, both callers reading one shared walk rather than two copies
+      proof: "unit test: test/a-criterion-restated-is-not-a-claim.test.ts"
+    - claim: a body carrying no acceptance header scans exactly as it does today, character for character
+      proof: "unit test: test/a-criterion-restated-is-not-a-claim.test.ts"
+    - claim: criteria parsing is unaffected — the block is blanked for claim scanning only, and the same body still parses the same criteria and proofs
+      proof: "unit test: test/a-criterion-restated-is-not-a-claim.test.ts"
+    - claim: the shared region walk ships as a named exported seam rather than a second copy of the boundary rule inside the stripper
+      proof: "grep: acceptanceBlockRegion in src/lib/review.ts"
+  falsifier: |
+    Close without implementation if a criterion restated in a PR body is NOT in fact refused —
+    reproduce by running `bodyContradictsDiff` with W1-T3060's criterion 2 and a diff of
+    `.github/workflows/ci.yml`. If it returns an empty array, the premise is wrong.
+
+    A change that widens `ATTRIBUTIVE_SUBJECT_RE` or any other grammar arm so that "a plan-only
+    diff" stops reading as a claim does NOT satisfy this task. That silences the same words in
+    ordinary prose, where an author describing their own diff is exactly who the arm is for.
+
+    A change that blanks the acceptance block for `parseAcceptanceBlock` as well does not satisfy it
+    either: the criteria must still parse, and a body whose block became invisible to the parser
+    would land "no acceptance criteria to judge (fail closed)" on a PR whose checks are all green.
+
+    A change that keeps a second copy of the region boundary inside the stripper does not satisfy
+    the third criterion, however correct its behaviour on the day it lands.
