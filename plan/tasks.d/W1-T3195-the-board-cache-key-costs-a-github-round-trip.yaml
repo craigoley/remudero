@@ -11,6 +11,7 @@
   origin: "operator-session#console-read-model-2026-09-08"
   plan_refs: ["W1-T3192", "W1-T2919", "W1-T3196"]
   status: queued
+  priority: 1
   attempts: 0
   rationale: |
     OBSERVED 2026-09-08 at `ec3c69d9a`, and provable from the source alone.
