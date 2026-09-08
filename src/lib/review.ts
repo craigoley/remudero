@@ -9,7 +9,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
-// W1-T2895: the plan-scope predicate now lives in the leaf module src/lib/plan-scope.ts.
+// W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
 import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
