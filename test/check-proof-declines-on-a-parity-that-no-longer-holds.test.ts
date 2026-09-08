@@ -108,16 +108,62 @@ test("a unit-test proof passing identically at head and base is reported as disc
   }
 });
 
-// ── Acceptance 2: fails or is absent at base ⇒ discriminates, verdict unchanged ──────────────────
+// ── Acceptance 2: fails at base ⇒ discriminates, verdict unchanged ──────────────────────────────
+//
+// (W1-T3098) ABSENCE ALONE IS NO LONGER DISCRIMINATION. The base worktree receives every `test/**`
+// file the diff ADDED, so a PR-added proof is genuinely RE-RUN at the merge base instead of failing
+// on a file that checkout never had. The pair below is the whole point of that seam: the same shape
+// of added test grades `executed_stale` when it would have passed at base regardless, and
+// `discriminates` only when it actually needs this PR's own source change.
 
-test("a unit-test proof that passes at head and is absent at base reports discrimination, verdict unchanged", () => {
-  const passing = 'import { test } from "node:test";\ntest("exists only on the head", () => {});\n';
+test("a unit-test proof the PR ADDED, which passes at base once copied there, discriminates nothing", () => {
+  const passing = 'import { test } from "node:test";\ntest("passes wherever it runs", () => {});\n';
   const repo = twoCommitRepo({}, { "test/fresh.test.ts": passing });
   try {
     const { code, out } = runCheckProof(["--base", "HEAD~1", "unit test:", "test/fresh.test.ts"], repo);
+    assert.match(out, /^verdict:\s+pass\s*$/m, "the head run genuinely passed");
+    assert.match(
+      out,
+      /^base:\s+pass\s*$/m,
+      "copied into the merge-base worktree the very same test passes there too — it never needed this PR",
+    );
+    assert.match(
+      out,
+      /^discrimination:\s+executed_stale\b/m,
+      "a new test that would pass at base anyway proves nothing about the change (W1-T3098)",
+    );
+    assert.equal(code, CHECK_PROOF_EXIT.executedStale, "graded stale, not a plain local pass");
+    assert.doesNotMatch(out, /NOT COMPARABLE/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("a unit-test proof the PR ADDED that needs the PR's own source reports discrimination, verdict unchanged", () => {
+  // Only `test/**` is copied into the base worktree, so the module this test imports is genuinely
+  // missing there — the failure is the PR's absent SOURCE, which is exactly what should discriminate.
+  const repo = twoCommitRepo(
+    {},
+    {
+      "src/head-only.js": "export const answer = 42;\n",
+      // The import is DYNAMIC, inside the test body: a top-level import of a module the base lacks
+      // crashes the file before any subtest runs, which the classifier honestly grades
+      // `base_unknown` ("could not execute"), not `fail`. Awaiting it inside the subtest makes the
+      // rejection a real `not ok 1` — the shape a forward-referencing TDD test actually ships.
+      "test/needs-head.test.ts":
+        'import { test } from "node:test";\n' +
+        'import assert from "node:assert/strict";\n' +
+        'test("needs a module only the head has", async () => {\n' +
+        '  const { answer } = await import("../src/head-only.js");\n' +
+        '  assert.equal(answer, 42);\n' +
+        '});\n',
+    },
+  );
+  try {
+    const { code, out } = runCheckProof(["--base", "HEAD~1", "unit test:", "test/needs-head.test.ts"], repo);
     assert.equal(code, CHECK_PROOF_EXIT.pass, "the head verdict itself (pass) is unchanged by the base check");
     assert.match(out, /^verdict:\s+pass\s*$/m);
-    assert.match(out, /^base:\s+fail$/m, "`node --test` finds no such file in the base worktree");
+    assert.match(out, /^base:\s+fail$/m, "at the merge base the imported source does not exist");
     assert.match(out, /^discrimination:\s+discriminates\b/m, "head and base disagree — this proof tells done from not-done");
     assert.doesNotMatch(out, /executed_stale/, "a discriminating proof must never be reported stale");
     assert.doesNotMatch(out, /NOT COMPARABLE/);
