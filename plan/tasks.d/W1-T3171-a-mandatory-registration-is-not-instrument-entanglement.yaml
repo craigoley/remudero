@@ -62,10 +62,37 @@
     (v) FAIL CLOSED, AND SAY WHICH ARM DECIDED. Anything unparseable, any job name that does not match
     on both sides, any extra src/ path: no subtraction. The refusal message should name which of the
     three conditions failed, so an author is not left guessing between them.
+    AMENDED 2026-09-08 — THERE ARE TWO MANDATORY REGISTRIES, NOT ONE, AND NAMING ONLY THE FIRST
+    WOULD HAVE SHIPPED A CARVE-OUT THAT STILL BLOCKS THE PR IT WAS FILED FOR.
+
+    This task was written against `src/lib/ci-parity.ts`'s table. MEASURED on #4559's real diff,
+    through `detectInstrumentEntanglement` itself:
+
+      instrumentPaths  .github/workflows/ci-gate.yml, .github/workflows/ci.yml
+      srcPaths         src/lib/ci-parity.ts, src/lib/review.ts
+      entangled        true
+
+    `src/lib/review.ts` is in that list for `INSTRUMENT_SURFACE_EXCLUSIONS`, W1-T402's completeness
+    registry: every gate-rule-like path the tree's own workflows reference must be declared or
+    carry a recorded, reasoned exclusion. Adding a script therefore FORCES an entry, exactly as
+    adding a ci.yml job forces a ci-parity row. The diff's own shape says the change is nothing
+    else: 3 hunks, 13 added lines, ZERO removed, and every hunk's `@@` context names
+    `INSTRUMENT_SURFACE_EXCLUSIONS`.
+
+    THE ENTRIES ARE MANDATORY BY MEASUREMENT, NOT ASSERTION: deleting those three from the merged
+    tree takes `test/instrument-surface-completeness.test.ts` from 13/13 to 12/13, failing on
+    "every gate-rule-like path ... is either declared or has a recorded, reasoned exclusion".
+
+    So criterion 1 now names BOTH registries, and criterion 2 is TIGHTENED rather than relaxed to
+    admit the second: a registry file is subtracted only when its change in this diff is confined
+    to its registration map. A registry file carrying any other hunk is refused exactly as an
+    unrelated `src/` file is — strictly stronger than the original wording, which guarded only
+    ACROSS files and not WITHIN one.
+
   acceptance:
-    - claim: "a diff adding a ci.yml job plus its ci-gate registration and the matching registry entry is not entangled, and #4559's real shape is the fixture"
+    - claim: "a diff adding a ci.yml job plus its ci-gate registration and the matching entries in BOTH mandatory registries is not entangled, and #4559's real shape is the fixture"
       proof: "unit test: test/a-mandatory-registration-is-not-entanglement.test.ts"
-    - claim: "the same workflow diff carrying ANY other product src/ file is still refused, so the carve-out cannot ship unrelated code"
+    - claim: "a registry file carrying ANY change outside its registration map, or any OTHER product src/ file, is still refused — the carve-out cannot ship unrelated code even inside a registry file"
       proof: "unit test: test/a-mandatory-registration-is-not-entanglement.test.ts"
     - claim: "a workflow edit that is not a registration — a run: line, a trigger, a timeout — is untouched and still refuses beside src/"
       proof: "unit test: test/a-mandatory-registration-is-not-entanglement.test.ts"
