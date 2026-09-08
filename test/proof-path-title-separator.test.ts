@@ -7,6 +7,13 @@
 // to the keyword floor without saying so. MEASURED at origin/main 36c36000: W1-T3071's four proofs
 // all resolved `not_executable` while its plan-only filing still merged green.
 //
+// THE SURFACE UNDER TEST IS `TEST_PATH_TITLE_SEPARATOR_RE` (src/lib/review.ts). This file is its
+// falsifier: the cases below exercise BOTH arms — a body it matches (refused) and bodies it must
+// NOT match (the whole-file form, the bare-title form, and a non-path `::`). Note this does NOT
+// make it 'exercised' for test/negative-reachability-ratchet.test.ts, whose whole `_RE`
+// population reads fixture-less by that detector's definition; its per-file row is raised by one
+// instead, which is how that census records a new surface.
+//
 // The refusal lives in the SHARED parser so every consumer inherits it from one decision:
 // `rmd check-proof`, the reviewer, and the changed-task lint path. There is deliberately no second
 // interpretation in the linter.
