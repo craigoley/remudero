@@ -333,6 +333,11 @@ export interface DeriveDeps {
    *  contract: `undefined` falls back per-task, `null` skips the rung so W1-T119 defers rather than
    *  this rung inventing an absence. */
   openHeadBranches?: (taskId: string) => PrRef[] | null;
+  /** W1-T3144: observe the size of the complete open-board batch {@link projectPlan} already reads.
+   * `undefined` means the batch read failed; omission means the caller does not need the count.
+   * This is a callback rather than a second gateway accessor call so dispatch admission cannot add
+   * another GitHub request or drift onto a different snapshot. */
+  observeOpenPrCount?: (count: number | undefined) => void;
   /** LIVENESS BOUND (W1-T179): milliseconds of ledger silence a dispatched, unresolved run tolerates
    *  before it is no longer "running" absent an open PR. Injectable so a test can assert the boundary
    *  without a real wait. */
@@ -2801,6 +2806,10 @@ export function projectPlan(
   // every task, so the rung skips and W1-T119 does the deferring — never a false "no open PR".
   const allOpen = effectiveDeps.github.listOpenHeadBranches?.();
   if (allOpen !== undefined) {
+    // W1-T3144: one board read, two consumers. Dispatch's WIP governor needs every open PR, while
+    // the projection below intentionally indexes only plan tasks. Hand the already-fetched count
+    // outward before grouping; never reconstruct board depth from the smaller task-indexed Map.
+    effectiveDeps.observeOpenPrCount?.(allOpen === null ? undefined : allOpen.length);
     let openByTask: Map<string, PrRef[]> | null = null;
     if (allOpen !== null) {
       openByTask = new Map<string, PrRef[]>();
