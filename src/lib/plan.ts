@@ -677,7 +677,7 @@ export function assertRunnable(
   if (task.status === "blocked") {
     throw new PlanError(`task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`);
   }
-  if (task.verify === "human" && !releasedIds?.has(task.id)) {
+  if (task.verify === "human" && releasedIds?.has(task.id) !== true) {
     throw new PlanError(`task ${task.id} is verify:human — not auto-runnable by the proto-runner`);
   }
   const unmet = unmetDependencies(plan, task, isMerged);

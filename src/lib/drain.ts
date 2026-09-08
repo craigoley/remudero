@@ -418,7 +418,7 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     opts.onFiltered?.(t, "continued-this-pass");
     return false;
   }
-  if (t.verify !== "auto" && !opts.releasedIds?.has(t.id)) {
+  if (t.verify !== "auto" && opts.releasedIds?.has(t.id) !== true) {
     opts.onFiltered?.(t, "verify-not-auto");
     return false;
   }
