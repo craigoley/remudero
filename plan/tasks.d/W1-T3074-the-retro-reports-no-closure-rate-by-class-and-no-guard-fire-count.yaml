@@ -67,6 +67,6 @@
     mapping naming three guards, a ledger firing one) must list one guard instead of three.
   note: |
     FILED 2026-09-07 without a `refs/rmd-id/` reservation (credential-scoped session; see
-    W1-T3073's note for the open-PR read taken at filing time). risk:high is Rule 19 SPAN.
+    W1-T3088's note for the open-PR read taken at filing time). risk:high is Rule 19 SPAN.
     Deliberately NOT a filing governor and NOT a selection change: those are rulings
     (W1-T3075, W1-T3076). This task only makes the two populations visible.

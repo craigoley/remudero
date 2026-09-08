@@ -59,6 +59,6 @@
     PROVE IT LOAD-BEARING: remove the helper spread from one writer and the first criterion's
     fixture for that path must fail.
   note: |
-    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3073's note). risk:high on
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3088's note). risk:high on
     Rule 19 SPAN across run-task.ts, ledger.ts and the retro's index order. The `grep:` proof names
     a file and a token absent from it today (checked), so it discriminates at head against base.

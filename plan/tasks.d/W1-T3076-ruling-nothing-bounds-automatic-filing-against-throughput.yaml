@@ -79,6 +79,6 @@
   note: |
     `verify: human` on purpose; the three grep phrases are the parts a thin ruling would omit and
     are absent from DECISIONS.md at filing. FILED 2026-09-07 without a `refs/rmd-id/` reservation
-    from a credential-scoped session; see W1-T3073's note. NOT a re-filing of W1-T2657/W1-T2658:
+    from a credential-scoped session; see W1-T3088's note. NOT a re-filing of W1-T2657/W1-T2658:
     the 2026-09-04 ruling withdrew archive-from-location; option (a) here is the RETIREMENT-effect
     line that ruling left open, not an archive.

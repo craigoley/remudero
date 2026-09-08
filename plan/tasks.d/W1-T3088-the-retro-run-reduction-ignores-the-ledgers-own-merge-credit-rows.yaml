@@ -1,4 +1,4 @@
-- id: W1-T3073
+- id: W1-T3088
   title: "THE RETRO'S RUN REDUCTION IGNORES THE LEDGER'S OWN MERGE-CREDIT ROWS — the sweep's credit backfill appends a `verdict.merged` row for every gate-side merge it observes, but it keys that row on the SWEEP'S run id, and `gatherRuns` reads only the `verdict` step of the task's own run, so a run that merged gate-side still reduces to `blocked_ci` in every calibration table, `mergedSince`, `degradedSuccess` and the credit union's own denominator, and the retro pays a REST read to rediscover a fact its ledger already holds"
   repo: remudero
   depends_on: []
@@ -70,7 +70,7 @@
     to `blocked_ci` again while the second criterion's negative case stays unchanged.
   note: |
     FILED 2026-09-07 from a session whose push credential is scoped to one branch: the id carries NO
-    `refs/rmd-id/W1-T3073` reservation. Open PRs were read through the GitHub API at filing time and
+    `refs/rmd-id/W1-T3088` reservation. Open PRs were read through the GitHub API at filing time and
     held ids up to W1-T3071; the fleet minted W1-T3072 at 23:56:56Z. If `task-id-existence` refuses
     this id at CI, renumber this shard — never delete the contesting reservation (CLAUDE.md).
     risk:high is Rule 19 SPAN (a src file and its suite), not blast radius; `band_meaning: span`.

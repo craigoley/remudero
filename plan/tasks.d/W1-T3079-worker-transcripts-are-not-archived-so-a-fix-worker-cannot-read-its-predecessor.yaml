@@ -60,7 +60,7 @@
     PROVE IT LOAD-BEARING: with the pointer line removed from `renderFixPrompt`, the second
     criterion's positive fixture must fail while the archive write still passes.
   note: |
-    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3073's note). risk:high on
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3088's note). risk:high on
     Rule 19 SPAN (the archive write in run-task.ts, the pointer in the fix prompt, one suite).
     The efficacy measurement (do pointed fix rungs strike less) is deliberately NOT here.
     DUPLICATE-SURFACE ADVISORY, ANSWERED: `lint-plan` names W1-T77, W1-T78, W1-T100, W1-T150, W1-T168 and W1-T176 as live shards sharing

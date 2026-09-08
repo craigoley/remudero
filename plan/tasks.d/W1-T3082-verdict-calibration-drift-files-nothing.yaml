@@ -62,6 +62,6 @@
     PROVE IT LOAD-BEARING: remove the (class, window) dedup key and the first criterion's fixture
     run twice in one window must raise two proposals instead of one.
   note: |
-    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3073's note). risk:high on
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3088's note). risk:high on
     Rule 19 SPAN (two src files, a policy row, one suite). The `grep:` proof names a token absent
     from plan/policy.yaml today (checked), so it discriminates at head against base.

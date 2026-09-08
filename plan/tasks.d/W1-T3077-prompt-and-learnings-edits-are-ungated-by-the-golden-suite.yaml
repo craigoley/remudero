@@ -68,6 +68,6 @@
     unrelated-function probe must still pass either way, so the test discriminates the match.
   note: |
     FILED 2026-09-07 without a `refs/rmd-id/` reservation (credential-scoped session; see
-    W1-T3073's note). Rule 25 CHECKED BEFORE FILING: every declared file is an instrument path or
+    W1-T3088's note). Rule 25 CHECKED BEFORE FILING: every declared file is an instrument path or
     a test, so the build PR is the sanctioned instrument-only shape and must stay that way — a
     worker that finds it needs a `src/` change files a companion task instead.

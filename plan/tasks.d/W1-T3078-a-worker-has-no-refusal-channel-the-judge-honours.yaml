@@ -65,7 +65,7 @@
     PROVE IT LOAD-BEARING: with the sweep route removed, the second criterion's fixture must spend a
     strike again while the first still grades refused, so the two halves are separately falsified.
   note: |
-    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3073's note). risk:high on
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3088's note). risk:high on
     Rule 19 SPAN across three subsystems; if the implementing worker judges it two concerns, split
     the SWEEP route into a child task and keep the judge outcome and the prompt contract together —
     the judge outcome without the contract is dead code, and the contract without the judge is

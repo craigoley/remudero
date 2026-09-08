@@ -69,4 +69,4 @@
     `verify: human` on purpose: a grep confirms a decision was written, never that it is sound.
     The proofs are the three phrases a thin ruling would omit, each absent from DECISIONS.md at
     filing (checked with grep). FILED 2026-09-07 without a `refs/rmd-id/` reservation from a
-    credential-scoped session; see W1-T3073's note.
+    credential-scoped session; see W1-T3088's note.

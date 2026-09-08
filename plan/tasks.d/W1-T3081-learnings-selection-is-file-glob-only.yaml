@@ -66,7 +66,7 @@
     PROVE IT LOAD-BEARING: with `errorHits` removed from the sort key, the first criterion's
     fixture must invert.
   note: |
-    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3073's note). risk:high on
+    FILED 2026-09-07 without a `refs/rmd-id/` reservation (see W1-T3088's note). risk:high on
     Rule 19 SPAN (learnings.ts, the index generator, one suite). Adding the keys to existing
     entries is DELIBERATELY not this task's scope — the corpus edit is a separate, plan-data PR
     once the selector can read them; the budget ratchet bounds it.
