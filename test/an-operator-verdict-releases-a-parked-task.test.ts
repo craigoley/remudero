@@ -32,7 +32,7 @@ test("W1-T3206: no release rows means NO releases — the wall still stands", ()
 
 test("W1-T3206: an unparseable line releases nothing rather than throwing — the safe direction", () => {
   const ids = releasedTaskIds([
-    "{ this is not json",
+    "{ this ratify.approved row is not json",
     row({ step: RELEASE_LEDGER_STEP, task_id: "W1-T2983" }),
   ]);
   assert.deepEqual([...ids], ["W1-T2983"], "the good row still releases; the bad one is skipped");
