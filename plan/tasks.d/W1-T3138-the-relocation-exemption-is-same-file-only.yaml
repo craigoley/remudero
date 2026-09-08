@@ -1,0 +1,113 @@
+- id: W1-T3138
+  title: "THE RELOCATION EXEMPTION IS SAME-FILE ONLY — `computeRelocatedLines` looks the moved text up with `removed.get(file)`, so EXTRACTING a region into a new module inherits that whole region's coverage debt as ADDED lines, and `diff-coverage` BLOCKS a refactor that added no untested code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [scripts/diff-coverage.mjs, test/a-relocation-across-files-is-still-a-relocation.test.ts]
+  origin: "operator-session#board-clearing-2026-09-08"
+  plan_refs: ["W1-T221", "W1-T2325", "W1-T2276"]
+  status: queued
+  attempts: 0
+  rationale: |
+    `diff-coverage.mjs` ALREADY holds the right idea and scopes it too narrowly. Its module header
+    states the rule plainly: "An added line whose identical text was REMOVED elsewhere in the same
+    diff is a RELOCATION, not a regression, and is exempt -- see computeRelocatedLines (W1-T2325)."
+    But the implementation opens with `const removedLines = removed.get(file)` and `continue`s when
+    that misses, so the match is confined to ONE FILE. Text moved from file A to file B satisfies the
+    header's stated rule and is refused anyway.
+
+    THAT IS THE SHAPE OF EVERY EXTRACTION, WHICH IS THE MOST COMMON LARGE REFACTOR THIS REPO DOES.
+    CLAUDE.md already records the consequence under its own heading: "`diff-coverage` flags ADDED
+    lines, so restructuring an untested region inherits its debt at the gate -- measure MAIN's
+    coverage of that region before assuming the PR caused it. Rewriting a block converts a silent
+    pre-existing gap into a blocking failure." Same-file relocation was fixed; cross-file was not.
+
+    MEASURED 2026-09-08 ON #4522 (`run-W1-T2902-1788824574770`), which lifts the console shell's
+    client code out of a template literal inside `src/lib/serve.ts` into a real
+    `src/lib/console-shell-client.ts`. `coverage-ratchet` fails with `diff-coverage: BLOCKED -- this
+    diff adds source line(s) with zero covering tests`, naming 1047 uncovered added lines. Over that
+    PR's real diff: 3820 non-blank lines added to the new file, 3651 non-blank lines removed from
+    `serve.ts`, and 3346 of the added lines -- 87% -- have an IDENTICAL trimmed counterpart among the
+    removed ones. Nothing about that text is new; it is the same code, in a new home, and the gate
+    reads all of it as freshly added and untested.
+
+    THE EXISTING WORKAROUNDS DO NOT REACH IT, AND THAT IS NOT AN ACCIDENT. The
+    `// diff-cov: process-boundary` directive is deliberately narrow: `computeBoundaryRanges` honours
+    it only before a declaration of at most `MAX_BOUNDARY_EXEC_LINES` (15) containing a DIRECT
+    boundary call (`spawnSync`/`execFileSync(process.execPath …)`, `process.exit`, `spawnWorker`), and
+    anything else is INVALID and fails closed. Browser/DOM code matches none of those and should not:
+    widening that directive to fit would destroy the one property that makes it safe. The other lever,
+    adding a path to ci.yml's `--test-coverage-exclude`, both weakens the gate permanently and puts an
+    instrument beside product code, which Standing rule 25 then refuses.
+
+    THIS IS NOT A REQUEST TO TRUST THE AUTHOR. The predicate stays evidence-based and textual: an
+    added line is exempt only when the SAME text was removed in the SAME diff. A moved line that is
+    also EDITED does not match and stays blocking, which is the property that makes cross-file
+    relocation as safe as the same-file case already shipped.
+  design: |
+    (i) MATCH ACROSS THE WHOLE DIFF, NOT ONE FILE. Replace the `removed.get(file)` lookup with a
+    search over every file's removed lines. The added side stays per-file and per-run: a run of added
+    lines in the destination must map onto a contiguous run of removed lines in ONE source file, so a
+    "relocation" cannot be assembled by stitching fragments from several files.
+
+    (ii) KEEP EVERY EXISTING CONSTRAINT EXACTLY. The contiguity requirement on both sides, the
+    `minRun`/`MIN_RELOCATION_RUN` floor, the `consumed` set that stops one removed run being spent
+    twice, and the `.trim()` comparison all stay as they are. This task changes WHERE the match may be
+    found, and nothing about WHAT counts as a match.
+
+    (iii) SAME-FILE MUST STILL WIN FIRST. Search the destination file's own removed lines before any
+    other file's, so a within-file move keeps its current pairing and today's behaviour is a strict
+    subset of tomorrow's. A cross-file match is only ever consulted when the same-file search finds
+    none.
+
+    (iv) THE REPORT MUST NAME THE SOURCE. `main()` already prints every exempted line with its reason
+    (`diff-coverage: exempt (<kind>) <v> -- <reason>`). A cross-file exemption prints the file the text
+    came FROM, so a reviewer can check the claim rather than take it. An exemption nobody can audit is
+    the failure mode this gate exists to avoid.
+
+    (v) FAIL CLOSED, UNCHANGED. Any unreadable input, any run shorter than the floor, any text that
+    does not match exactly after trimming, leaves the line BLOCKING. The gate may only ever
+    under-exempt on doubt, which is the invariant the header already states.
+  acceptance:
+    - claim: "a run of added lines whose identical text was removed from a DIFFERENT file in the same diff is exempt, and the report names the file it came from"
+      proof: "unit test: test/a-relocation-across-files-is-still-a-relocation.test.ts"
+    - claim: "an added run that is EDITED rather than moved stays blocking, so the exemption turns on identical text and not on the author's intent"
+      proof: "unit test: test/a-relocation-across-files-is-still-a-relocation.test.ts"
+    - claim: "a run shorter than MIN_RELOCATION_RUN is refused across files exactly as it is within one, and a run cannot be assembled from fragments of two source files"
+      proof: "unit test: test/a-relocation-across-files-is-still-a-relocation.test.ts"
+    - claim: "one removed run cannot be spent twice, so duplicating a block into two destinations exempts only the first"
+      proof: "unit test: test/a-relocation-across-files-is-still-a-relocation.test.ts"
+    - claim: "a same-file relocation still pairs against its own file first and its existing verdicts are byte-identical, so today's behaviour is a strict subset"
+      proof: "unit test: test/a-relocation-across-files-is-still-a-relocation.test.ts"
+  falsifier: |
+    Close without implementation if `computeRelocatedLines` already matches across files. This was
+    MEASURED at origin/main 3e9e7ab0f by calling the exported function directly with an 8-line body,
+    not by reading it: moved WITHIN one file it exempts 8 lines; the byte-identical body moved to a
+    DIFFERENT file exempts 0. The positive control is the same-file call in the same probe, so the
+    zero is a real refusal and not a dead query. The cause is visible in the loop's first two
+    statements, `const removedLines = removed.get(file); if (!removedLines) continue;` — a destination
+    file with no removed lines OF ITS OWN is skipped before any comparison happens.
+
+    Close also if the blocked case is not real. MEASURED on #4522's actual diff: `diff-coverage:
+    BLOCKED` naming 1047 uncovered added lines, while 3346 of 3820 added non-blank lines in the new
+    module have an identical trimmed counterpart among the 3651 removed from `src/lib/serve.ts`.
+
+    DO NOT falsify this from the `process-boundary` directive. `computeBoundaryRanges` requires a
+    direct boundary call within `MAX_BOUNDARY_EXEC_LINES` (15) and fails closed otherwise; it cannot
+    express "this text already existed elsewhere", and widening it to try would remove the bound that
+    makes it safe.
+  note: |
+    ONE CONCERN ONLY: let the relocation predicate see the whole diff instead of one file. Not in
+    scope: changing what counts as a match (trimming, contiguity, the run floor), touching
+    `coverage-ratchet.mjs`'s aggregate floor, the `process-boundary` directive, ci.yml's
+    `--test-coverage-exclude` list, or unblocking #4522 by hand — that PR is the evidence this task
+    was derived from and is expected to clear on its own once this ships.
+
+    The dangerous half is (i). Searching every file widens what can pair, so criterion 3 exists
+    specifically to prove a run cannot be stitched from two sources, and criterion 4 that a single
+    removed run cannot be spent twice. Both must be verified by watching them FAIL against an
+    implementation without the `consumed`/single-source guards, not merely by passing.
