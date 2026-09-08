@@ -1086,6 +1086,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+import { fetchPrDiff } from "./lib/pr-diff.js";
 export { resolveRepoRoot };
 // `unknownArgError` MOVED to ./lib/cli-args.ts — its sibling `commandSyntax` stays here,
 // anchored to the `commandSpec`/`COMMANDS` registry it reads. Re-exported below for
@@ -5683,7 +5684,23 @@ async function runReview(args: {
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
   }
-  const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+  // W1-T3093: `gh pr diff` is REFUSED above 300 changed files (HTTP 406), and this line used to
+  // throw straight out of the review — no verdict, no refusal, no ledger row anyone could attribute.
+  // A local three-dot comparison has no cap and renders the same diff; anything that is NOT the size
+  // cap is refused BY NAME rather than answered from whatever this checkout happens to hold.
+  const diffOutcome = fetchPrDiff(prUrl, headSha, {
+    api: (u) => execFileSync("gh", ["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 }),
+    local: (sha) =>
+      execFileSync("git", ["-C", repoRoot, "diff", `origin/main...${sha}`], { encoding: "utf8", maxBuffer: 1 << 26 }),
+  });
+  if (diffOutcome.kind === "refused") {
+    log("review.diff_unreadable", { pr_url: prUrl, reason: diffOutcome.reason });
+    throw new Error(`rmd review: ${diffOutcome.reason}`);
+  }
+  if (diffOutcome.source === "local") {
+    log("review.diff_local_fallback", { pr_url: prUrl, head_sha: headSha });
+  }
+  const diff = diffOutcome.diff;
   const criteria = task.acceptance ?? [];
   const decisionDigest = reviewDecisionDigest({
     headSha, diff, report, body: inputBody, acceptance: criteria, declaredFiles: task.files,
