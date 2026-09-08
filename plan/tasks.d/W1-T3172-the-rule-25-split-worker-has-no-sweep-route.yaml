@@ -38,13 +38,13 @@
     condition an in-place patch cannot satisfy. W1-T2436 later supplied a different effect: open a
     separate prerequisite PR, wait for its own CI, park the original, and rebase only after the
     prerequisite merges. The missing work is the typed connection from the authoritative review
-    record, through the board disposition, into that existing arm. W1-T3029's rule-15 refusal must
-    remain blocked-ambiguous because no equivalent sanctioned worker exists for editing task
+    record, through the board disposition, into that existing arm. W1-T3029's rule-15 refusal must remain blocked-ambiguous
+    because no equivalent sanctioned worker exists for editing task
     criteria; the two structural failures must not be generalized together.
   design: |
     Recover one head-and-input-bound structural review record from the same `review.posted` ledger
-    scan that already builds the board. Match the current task key, exact `head_sha`, and exact
-    `review_input_digest`; last matching record wins, and a success or another class clears the
+    scan that already builds the board. Match the current task key, exact `head_sha`, and exact `review_input_digest`;
+    last matching record wins, and a success or another class clears the
     entanglement projection. Accept only `failure_class === instrument_entangled` with two
     non-empty arrays of bounded strings under the already-recorded
     `decision_verdict.instrumentEntanglementPaths`. Missing, malformed or stale evidence is no
