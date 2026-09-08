@@ -49,13 +49,13 @@ function playwrightInstallSteps(jobs: Record<string, CiJob>): Array<[string, str
   );
 }
 
-test("W1-T1027: both playwright-carrying jobs exist and each has exactly one install step", async () => {
+test("W1-T1027: every playwright-carrying job exists and has exactly one install step", async () => {
   const jobs = await loadCiJobs();
   const steps = playwrightInstallSteps(jobs);
   assert.deepEqual(
     steps.map(([jobId]) => jobId).sort(),
-    ["ci", "coverage-ratchet"],
-    "expected exactly `ci` and `coverage-ratchet` to carry a playwright install step",
+    ["ci", "coverage-ratchet", "test-slow"],
+    "expected `ci`, `coverage-ratchet`, and `test-slow` to carry a playwright install step",
   );
 });
 
@@ -91,10 +91,10 @@ test("W1-T1027: no install step carries a retry, a lock wait, or a per-attempt t
   }
 });
 
-test("W1-T1027: both jobs carry a byte-identical install step (fix both copies or neither)", async () => {
+test("W1-T1027: all jobs carry a byte-identical install step (fix every copy or none)", async () => {
   const jobs = await loadCiJobs();
   const runs = playwrightInstallSteps(jobs).map(([, run]) => run);
-  assert.equal(runs.length, 2, "expected exactly two install steps");
+  assert.equal(runs.length, 3, "expected exactly three install steps");
   assert.equal(
     runs[0],
     runs[1],
@@ -103,10 +103,10 @@ test("W1-T1027: both jobs carry a byte-identical install step (fix both copies o
   );
 });
 
-test("W1-T1027: no third job silently grows a playwright install step", async () => {
+test("W1-T1027: no fourth job silently grows a playwright install step", async () => {
   const jobs = await loadCiJobs();
   const jobIds = playwrightInstallSteps(jobs).map(([jobId]) => jobId);
-  assert.equal(new Set(jobIds).size, 2, "a third job carrying this step would need its own timeout banding too");
+  assert.equal(new Set(jobIds).size, 3, "a fourth job carrying this step would need its own timeout banding too");
 });
 
 // ── THE FALSIFIER: the browser still installs, and text still measures, WITHOUT the fonts ────

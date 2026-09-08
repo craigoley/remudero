@@ -23,7 +23,7 @@ import {
 import type { Task } from "./plan.js";
 import { findExportDefinition, isExportReachable } from "./reachability.js";
 import { REPLAY_RESULT_STEP } from "./replay.js";
-import { utcWeekWindowMs } from "./sweep.js";
+import { utcWeekWindowMs } from "./time-window.js";
 import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";

@@ -17,7 +17,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ensureBrowsers, pinnedPlaywrightCli, playwrightCacheRoot, requiredChromiumDirs } from "../src/lib/review.js";
+import { ensureBrowsers, pinnedPlaywrightCli, requiredChromiumDirs } from "../src/lib/review.js";
+import { playwrightCacheRoot } from "../src/lib/worker-home.js";
 
 /** A trimmed real `node_modules/playwright-core/browsers.json` — the shape and the
  * exact revisions from the 1.62.0 bump that caused the incident. */

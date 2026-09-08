@@ -1,26 +1,27 @@
 import { execFileSync } from "node:child_process";
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
-import { isInPlanScope } from "./plan-architect.js";
+// W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
+import { isInPlanScope } from "./plan-scope.js";
 import { loadPlanAtRef, visibleCriteria, type AcceptanceCriterion, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerLines } from "./status.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { playwrightCacheRoot } from "./worker-home.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
   GENERATED_LEDGER_CLASSES,
   isCompanionPath,
 } from "./companion-paths.js";
-import { ghJson } from "./worker.js";
 
 /** The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; W1-T1C) — the second half of the merge contract. Standing rule 4:
  * green checks are NOT evidence, so after `ci` goes green a fresh-context REVIEW worker (never the implementer's
@@ -128,6 +129,20 @@ export function lastReviewDecisionTerminal(
   return terminal;
 }
 
+/**
+ * The live ledger file's lines, as plain records — this module's own reader, routed through
+ * {@link readLedgerUnionRecordsSync} (`ledger-union.ts`, W1-T2898) rather than `status.ts`'s
+ * `readLedgerLines` (W1-T2895): `review.ts` importing a VALUE from `status.ts` closed three of
+ * the thirteen import cycles `npm run cycle-ratchet` tolerated. `maxRotations: 0` reads the live
+ * file alone, never rotations — identical scope to `readLedgerLines`; `dedupe: false` keeps every
+ * line exactly as ledgered, matching `readLedgerLines`' own no-dedup behaviour byte for byte. Only
+ * the array of records is used here — never `readLedgerLines`' `.torn`/`.present` metadata, which
+ * none of this module's three call sites read.
+ */
+function readLiveLedgerRecords(ledgerPath: string): Array<Record<string, unknown>> {
+  return readLedgerUnionRecordsSync(dirname(ledgerPath), { maxRotations: 0, dedupe: false }).rows;
+}
+
 export type ReviewDecisionClaim =
   | { kind: "owned"; release: () => void }
   | { kind: "in_flight" }
@@ -149,7 +164,7 @@ export async function claimReviewDecision(opts: {
     if (error instanceof ReviewStatusLockTimeoutError) return { kind: "in_flight" };
     throw error;
   }
-  const terminal = lastReviewDecisionTerminal(readLedgerLines(opts.ledgerPath), opts.taskId, opts.prUrl, opts.digest);
+  const terminal = lastReviewDecisionTerminal(readLiveLedgerRecords(opts.ledgerPath), opts.taskId, opts.prUrl, opts.digest);
   if (terminal) {
     handle.release();
     return { kind: "replay", terminal };
@@ -1170,21 +1185,6 @@ function installPinnedChromium(cwd: string): void {
     stdio: "pipe",
     timeout: 600_000,
   });
-}
-
-/** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real path, which is how CI
- *  images relocate the cache; the literal `"0"` means "inside node_modules" and is NOT a directory, so it falls
- *  through to the platform default exactly as Playwright's own resolution does. */
-export function playwrightCacheRoot(
-  env: NodeJS.ProcessEnv = process.env,
-  platform: string = process.platform,
-  home: string = homedir(),
-): string {
-  const override = env.PLAYWRIGHT_BROWSERS_PATH;
-  if (override !== undefined && override !== "" && override !== "0") return override;
-  if (platform === "darwin") return join(home, "Library", "Caches", "ms-playwright");
-  if (platform === "win32") return join(env.LOCALAPPDATA ?? join(home, "AppData", "Local"), "ms-playwright");
-  return join(home, ".cache", "ms-playwright");
 }
 
 /** The three genuinely different answers to "which test file(s) could this name-filtered proof's raw name live in?",
@@ -5003,6 +5003,9 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "plan/tasks.yaml": "plan/task DATA, not gate logic",
   "plan/plan-index.json": "a generated index artifact, and its :check mode is not wired into any CI workflow",
   "package-lock.json": "a dependency lockfile, not gate logic",
+  "scripts/test-tier-manifest.json":
+    "the per-test-file duration ledger (W1-T2904) — DATA scripts/test-tier-manifest.mjs's --check reads, " +
+    "not the rule logic itself, same shape as openapi/daemon.yaml above",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
   "scripts/rule15-precheck.mjs":
@@ -5015,6 +5018,11 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "registration, the circularity W1-T402 clause (v) records for its siblings.",
   "scripts/clock-shift.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/clock-sweep.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
+  "scripts/flake-retry-aggregate.mjs":
+    "VERIFIED NON-INSTRUMENT (W1-T2904) — reads scripts/test-with-retry.mjs's own FLAKE-RETRY lines and " +
+    "prints a per-test count. The only ci.yml job that runs it is flake-retry-aggregate, registered " +
+    "ADVISORY in ci-gate.yml and gating nothing, and the script exits 0 whatever it finds, so a diff " +
+    "touching it cannot change whether any check passes or fails — informational only, by construction.",
   "deploy/recycle-container.sh":
     "container-recycle ops runbook script with no CI-gate role — derived only because the task-id-existence " +
     "job's comment cites it as the defect's worked example, which is prose, not a reference",
@@ -5094,6 +5102,11 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/no-hand-rolled-fetch-check.mjs": "the no-hand-rolled-fetch gate script — widening deferred, see above",
   "scripts/test-with-retry.mjs":
     "wraps the ci/coverage-ratchet jobs' actual test pass/fail determination — widening deferred, see above",
+  "scripts/test-tier-manifest.mjs":
+    "KNOWN GAP, WIDENING DEFERRED (W1-T2904) — its --check/--run modes genuinely refuse (exit 1) an " +
+    "untiered test file and assigns the required fast/slow test surfaces. It is now required through " +
+    "ci-gate; promotion into the blocking instrument surface remains separate under W1-T402 clause (v), " +
+    "because widening the reviewer in the introducing PR would entangle it with its own parity registration.",
   "tsconfig.json": "the TS strict-mode config the Typecheck step compiles against — widening deferred, see above",
 };
 
@@ -5352,6 +5365,104 @@ function scriptStem(path: string): string {
 /** The one workflow {@link CI_PARITY_TABLE} mirrors — see test/preflight-ci-parity.test.ts, which asserts that table
  *  against THIS file in both directions. */
 const CI_WORKFLOW_PATH = ".github/workflows/ci.yml";
+const CI_GATE_WORKFLOW_PATH = ".github/workflows/ci-gate.yml";
+
+/**
+ * The registries this repo's own censuses make MANDATORY to edit in the same diff that adds a
+ * gate: `CI_PARITY_TABLE` (preflight --ci-parity must carry one entry per ci.yml job, both ways)
+ * and `INSTRUMENT_SURFACE_EXCLUSIONS` (W1-T402 refuses a gate-rule-like path that is neither
+ * declared nor excluded with a reason). A registration is not smuggling — it is the coupling two
+ * bidirectional gates impose — but only while the file carries NOTHING ELSE, which is what
+ * `declaration` is checked against.
+ */
+const MANDATORY_REGISTRIES: ReadonlyArray<{ path: string; declaration: string }> = [
+  { path: CENSUS_REGISTRATION_PATH, declaration: "CI_PARITY_TABLE" },
+  { path: "src/lib/review.ts", declaration: "INSTRUMENT_SURFACE_EXCLUSIONS" },
+];
+
+/** Each `@@` hunk's trailing context for `file`, in order; `undefined` where git emitted none.
+ *  {@link walkDiff} drops `@@` lines outright, so this is a separate pass over the same text. */
+function diffHunkContexts(diff: string, file: string): Array<string | undefined> {
+  const out: Array<string | undefined> = [];
+  let current = "";
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("diff --git")) {
+      current = raw.match(/\sb\/(\S+)\s*$/)?.[1] ?? "";
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      const plus = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      if (plus !== "/dev/null") current = plus;
+      continue;
+    }
+    if (!raw.startsWith("@@") || current !== file) continue;
+    const trailing = /^@@[^@]*@@(.*)$/.exec(raw)?.[1]?.trim();
+    out.push(trailing ? trailing : undefined);
+  }
+  return out;
+}
+
+/**
+ * True when `file` is one of {@link MANDATORY_REGISTRIES} and EVERY hunk it carries in this diff
+ * sits inside that registry's own declaration. Fails closed: a hunk for which git emitted no
+ * function context at all is not confined, and a file with no hunks is not confined either.
+ *
+ * This is the guard that stops the carve-out becoming an escape hatch. Naming a registry file
+ * without it would make `src/lib/review.ts` — the reviewer itself — freely editable beside any
+ * workflow change.
+ */
+function changeIsConfinedToRegistry(diff: string, file: string): boolean {
+  const registry = MANDATORY_REGISTRIES.find((r) => r.path === file);
+  if (registry === undefined) return false;
+  const contexts = diffHunkContexts(diff, file);
+  if (contexts.length === 0) return false;
+  return contexts.every((c) => c !== undefined && c.includes(registry.declaration));
+}
+
+/**
+ * The W1-T3171 subtraction: a CI job registration the repo's own censuses make unavoidable.
+ *
+ * Rule 25 refuses an instrument beside `src/` because a weakened instrument could hide a product
+ * regression shipped next to it. Here there IS no product change to hide — every `src/` path in
+ * the diff is a registration map, and adding a ci.yml job FORCES entries in both. Returns the
+ * paths to subtract from the VERDICT, never from the reported evidence.
+ *
+ * All three conditions must hold, and each closes a different hole:
+ *   (a) every instrument in the diff is one of the two CI workflows — so an unrelated instrument
+ *       cannot ride along on a registration;
+ *   (b) ci.yml adds at least one job and EVERY added job is registered in BOTH ci-gate.yml and
+ *       the parity table — an unmatched name is not this shape (and a workflow edit that adds no
+ *       job at all, a `run:`/trigger/timeout change, never reaches the carve-out);
+ *   (c) every product `src/` path is a registry file confined to its own declaration.
+ */
+function mandatoryRegistrationPaths(
+  diff: string,
+  instrumentPaths: readonly string[],
+  srcPaths: readonly string[],
+): { instruments: string[]; srcs: string[] } {
+  const none = { instruments: [], srcs: [] };
+  const workflows = [CI_WORKFLOW_PATH, CI_GATE_WORKFLOW_PATH];
+  if (instrumentPaths.length === 0 || !instrumentPaths.every((f) => workflows.includes(f))) return none;
+
+  const lines = walkDiff(diff);
+  const addedJobs = lines
+    .filter((l) => l.file === CI_WORKFLOW_PATH && l.kind === "add")
+    .map((l) => /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(l.text)?.[1])
+    .filter((name): name is string => name !== undefined);
+  if (addedJobs.length === 0) return none;
+
+  const gateAdds = lines.filter((l) => l.file === CI_GATE_WORKFLOW_PATH && l.kind === "add");
+  const parityAdds = lines.filter((l) => l.file === CENSUS_REGISTRATION_PATH && l.kind === "add");
+  const registeredBothSides = addedJobs.every(
+    (job) =>
+      gateAdds.some((l) => l.text.includes(`"${job}"`)) && parityAdds.some((l) => l.text.includes(`job: "${job}"`)),
+  );
+  if (!registeredBothSides) return none;
+
+  if (srcPaths.length === 0 || !srcPaths.every((f) => changeIsConfinedToRegistry(diff, f))) return none;
+  return { instruments: [...instrumentPaths], srcs: [...srcPaths] };
+}
+
 
 /** A ci.yml JOB introduced by this diff, keyed on the REGISTERED UNIT rather than the instrument FILE (W1-T2738).
  * `.github/workflows/ci.yml` has existed since the repo did, so {@link fileIsNewInDiff} is false for it however new
@@ -5409,6 +5520,43 @@ export type InstrumentChangeDirection = "tightening" | "loosening" | "introduced
 
 /** Every `"key": <number>` pair on one diff line, as [key, value]. A line carrying no such pair
  *  yields nothing, which is what makes an unparseable hunk fall through to `undetermined` below. */
+/**
+ * Keys whose value is PROVENANCE or PROSE — when, where, by what command and why a number was
+ * captured. None of them is an allowance, so refreshing one cannot loosen the ceiling the number
+ * sets, and an HONEST re-capture is obliged to move them: `cycle-baseline.json`'s own
+ * `_methodology` says its count is re-derived AT `capturedAtSha`.
+ *
+ * Deliberately narrow, and the exclusions are the point. Across `scripts/*-baseline.json` the
+ * other string-valued keys are `path`, `reason`, `id`, `testFile`, `target`, `literal` and
+ * `scopeConfig` — every one of them NAMES AN EXEMPTED ENTRY or repoints the scope being measured,
+ * so adding one IS a loosening. Those stay unaccountable, which is what stops a diff from
+ * lowering one ceiling while quietly adding an exemption beside it and still reading `tightening`.
+ */
+const INSTRUMENT_CAPTURE_KEYS: ReadonlySet<string> = new Set([
+  "capturedAt",
+  "capturedAtSha",
+  "capturedAgainst",
+  "captureCommand",
+  "bumpRationale",
+  "priorBumpRationale",
+]);
+
+/** True for a provenance/prose key: `_`-prefixed by this repo's baseline convention (`_comment`,
+ *  `_methodology`, `_history`), or one of the capture fields above. */
+function isInstrumentProvenanceKey(key: string): boolean {
+  return key.startsWith("_") || INSTRUMENT_CAPTURE_KEYS.has(key);
+}
+
+/** The keys of every `"key": "string"` row on one line. Companion to {@link numericRowsOn}, which
+ *  sees only numeric values and therefore cannot tell prose from an exemption entry. */
+function stringRows(text: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]+)"\s*:\s*"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) out.push(m[1]);
+  return out;
+}
+
 function numericRowsOn(text: string): Array<[string, number]> {
   const out: Array<[string, number]> = [];
   const re = /"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)/g;
@@ -5462,7 +5610,15 @@ export function classifyInstrumentChange(diff: string, diffFiles: string[], file
     }
     if (l.kind !== "add") continue;
     const rows = numericRowsOn(l.text);
-    if (rows.length === 0) return "undetermined"; // a hunk this parser cannot account for
+    if (rows.length === 0) {
+      // W1-T3182. A line carrying ONLY provenance/prose rows is skipped rather than treated as
+      // unaccountable: bailing here made this whole carve-out unreachable for the 8 of 19
+      // baselines that record a `capturedAt`, because a correct re-capture must refresh it.
+      // Anything else — including a line with no parseable row at all — still refuses.
+      const keys = stringRows(l.text);
+      if (keys.length > 0 && keys.every(isInstrumentProvenanceKey)) continue;
+      return "undetermined"; // a hunk this parser cannot account for
+    }
     for (const [key, value] of rows) {
       const before = removedByKey.get(key);
       if (before === undefined) {
@@ -5520,9 +5676,16 @@ export function detectInstrumentEntanglement(
           const d = classifyInstrumentChange(diff, diffFiles, f);
           return d === "tightening" || d === "introduced";
         });
-  const subtracted = new Set([...introducedGates, ...harmlessInstruments]);
+  // W1-T3171: subtract a CI job registration two bidirectional censuses make UNAVOIDABLE. Unlike
+  // the two carve-outs above it subtracts on BOTH sides at once, because the mixture it clears is
+  // symmetric: the workflows are the instrument, the registry entries are the `src/` half, and
+  // neither exists without the other. Same subtract-from-the-verdict-only discipline.
+  const registration = diff === undefined ? { instruments: [], srcs: [] } : mandatoryRegistrationPaths(diff, instrumentPaths, srcPaths);
+  const subtracted = new Set([...introducedGates, ...harmlessInstruments, ...registration.instruments]);
   const effectiveInstrumentPaths = subtracted.size === 0 ? instrumentPaths : instrumentPaths.filter((f) => !subtracted.has(f));
-  const effectiveSrcPaths = introducedGates.length === 0 ? srcPaths : srcPaths.filter((f) => f !== CENSUS_REGISTRATION_PATH);
+  const subtractedSrc = new Set(registration.srcs);
+  const effectiveSrcPaths = (introducedGates.length === 0 ? srcPaths : srcPaths.filter((f) => f !== CENSUS_REGISTRATION_PATH))
+    .filter((f) => !subtractedSrc.has(f));
   return {
     entangled: effectiveInstrumentPaths.length > 0 && effectiveSrcPaths.length > 0,
     instrumentPaths,
@@ -6628,7 +6791,7 @@ export async function postReviewStatusGuarded(
   try {
     // READ BEFORE WRITE, INSIDE THE LOCK — a read taken before acquiring the
     // lock would leave open exactly the TOCTOU gap the lock exists to close.
-    const lines = readLedgerLines(opts.ledgerPath);
+    const lines = readLiveLedgerRecords(opts.ledgerPath);
     const prior =
       opts.prUrl !== undefined && opts.reviewInputDigest !== undefined
         ? lastPostedReviewStatusForInput(lines, opts.taskId, opts.prUrl, opts.sha, opts.reviewInputDigest)
@@ -6754,7 +6917,7 @@ export interface PostReviewPendingResult {
  * The posted status carries the posting `run_id`, which is what sweep.ts's `OpenPrView.reviewPendingSince` producer
  * derives its staleness clock from. */
 export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
-  const lines = readLedgerLines(opts.ledgerPath);
+  const lines = readLiveLedgerRecords(opts.ledgerPath);
   const hasInputIdentity = opts.prUrl !== undefined && opts.reviewInputDigest !== undefined;
   const priorTerminal = hasInputIdentity
     ? lastPostedReviewStatusForInput(lines, opts.taskId, opts.prUrl!, opts.sha, opts.reviewInputDigest!)

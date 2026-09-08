@@ -300,7 +300,7 @@ test("acceptance 6: job-level conditions are only PR guards or stable-name aggre
   const doc = parseYaml(ciYml) as { jobs: Record<string, { if?: string }> };
   for (const [jobId, job] of Object.entries(doc.jobs)) {
     if (job.if === undefined) continue;
-    if (jobId === "ci-required" || jobId === "coverage-ratchet-required") {
+    if (jobId === "ci-required" || jobId === "coverage-ratchet-required" || jobId === "flake-retry-aggregate") {
       assert.equal(job.if, "${{ always() }}", `aggregator '${jobId}' must run even when a shard fails`);
     } else {
       assert.match(job.if, /^github\.event_name == 'pull_request'$/, `job '${jobId}' carries an unexpected job-level if: '${job.if}'`);

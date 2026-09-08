@@ -1028,6 +1028,21 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
     ],
   },
   {
+    job: "test-slow",
+    mirrored: false,
+    reason:
+      "W1-T2904 — runs scripts/test-tier-manifest.json's slow-tier subset, already a SUBSET of the complete " +
+      "test/**/*.test.ts surface the 'ci' entry above runs locally via npm run test:ci; CI requires the split " +
+      "job, while a local dry run gains nothing by re-running part of the complete local surface",
+  },
+  {
+    job: "flake-retry-aggregate",
+    mirrored: false,
+    reason:
+      "W1-T2904 — GitHub-only best-effort aggregation of per-shard FLAKE-RETRY artifacts; " +
+      "it changes no test verdict and has no useful local equivalent beyond the unit-tested parser",
+  },
+  {
     job: "commitlint",
     mirrored: false,
     reason:

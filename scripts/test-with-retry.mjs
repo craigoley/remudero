@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// scripts/test-with-retry.mjs — ONE bounded, evidence-preserving whole-command test retry
-// (W1-T255).
+// scripts/test-with-retry.mjs — ONE bounded, evidence-preserving failed-file retry (W1-T255,
+// W1-T2904).
 //
 // WHY: the merge gate runs the SAME ~90-file suite in TWO required check runs per PR (the `ci`
 // job's `npm test`, and the `coverage-ratchet` job's same test/**/*.test.ts glob under
@@ -10,7 +10,7 @@
 // job's own conclusion, so the flake's evidence disappears with it and the flake rate is
 // unmeasurable (the gap W1-T220 deliberately left unfiled).
 //
-// THIS WRAPPER spawns the WHOLE command it is given, inheriting stdio (the CI log sees exactly
+// THIS WRAPPER spawns the command it is given, inheriting stdio (the CI log sees exactly
 // what a direct invocation would show, live, in order) while also capturing that same output for
 // parsing. A ZERO exit does nothing further -- the command is spawned EXACTLY ONCE on green, so a
 // healthy PR pays no extra wall-time. A NON-ZERO exit:
@@ -19,11 +19,11 @@
 //      `FLAKE-RETRY: first attempt failed — <names>` -- and appends the same line to
 //      $GITHUB_STEP_SUMMARY when that env var is set (CI), so the flake leaves a record instead
 //      of erasing it,
-//   3. re-runs the IDENTICAL WHOLE command exactly once. The final exit code is the SECOND run's.
+//   3. uses Node's TAP `location:` evidence to re-run only failed test files. If the child is not
+//      a recognized Node test command, or emitted no trustworthy file location, it fails safe to
+//      the identical whole command. The final exit code is the SECOND run's.
 //
-// WHOLE-COMMAND, never per-test: the coverage job's lcov artifact must stay one coherent,
-// single-run document, so coverage-ratchet.mjs / diff-coverage.mjs keep consuming exactly what
-// they consume today (the SECOND run's lcov.info, written to the same path the first run wrote).
+// Coverage deliberately does not use this wrapper: its lcov artifact must stay one coherent run.
 //
 // A deterministic failure fails BOTH attempts -- red is unchanged, the retry cannot mask a real
 // break. TEST_RETRY=0 disables the retry entirely (the first attempt's exit code is final) -- a
@@ -42,7 +42,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { gitOrThrow } from "./lib/git.mjs";
 
 /**
@@ -65,10 +65,10 @@ import { gitOrThrow } from "./lib/git.mjs";
  * own falsifier names exactly that outcome: "Re-design rather than build if the check proves
  * unable to attribute a path to the process that made it under parallel execution."
  *
- * ONE PROCESS, ONE BEFORE, ONE AFTER. This wrapper spawns the suite exactly once (twice on the
- * retry path), so there is no concurrent writer to confuse it and no attribution to get wrong. It
+ * ONE WRAPPER, ONE BEFORE, ONE AFTER. This wrapper owns the suite and its optional failed-file
+ * retry, so there is no concurrent wrapper snapshot to confuse it and no attribution to get wrong. It
  * also SEES CHILD-PROCESS WRITES — instance 1 was a spawned ratchet, which no in-process `fs`
- * wrapper could ever observe. Cost is two `git status` calls per SUITE (~104ms measured) against
+ * wrapper could ever observe. Cost is two `git status` calls per WRAPPER (~104ms measured) against
  * ~2,148 for the per-process design (~112s).
  *
  * WHAT IS GIVEN UP, STATED: this names the PATH but not the test file that wrote it. Criterion 1
@@ -141,6 +141,59 @@ export function parseFailingTestNames(output) {
     }
   }
   return [...names];
+}
+
+/** Extracts test-file paths from TAP failure diagnostic blocks. Test titles are not identities:
+ * two files may contain the same title, while Node's `location:` field names the file that must
+ * be retried. Paths outside `cwd` are ignored rather than granting a retry access to another
+ * checkout. */
+export function parseFailingTestFiles(output, cwd = process.cwd()) {
+  const files = new Set();
+  let inFailure = false;
+  for (const rawLine of output.split(/\r?\n/)) {
+    if (/^not ok \d+ - /.test(rawLine)) inFailure = true;
+    if (inFailure) {
+      const match = rawLine.match(/location:\s*['"](.+?\.test\.(?:[cm]?[jt]s))(?::\d+:\d+)?['"]/);
+      if (match) {
+        let path = match[1];
+        if (path.startsWith("file://")) path = fileURLToPath(path);
+        const rel = (isAbsolute(path) ? relative(cwd, path) : path).split(sep).join("/");
+        if (rel !== ".." && !rel.startsWith("../")) files.add(rel);
+      }
+    }
+    if (inFailure && rawLine.trim() === "...") inFailure = false;
+  }
+  return [...files].sort();
+}
+
+function isNodeCommand(cmd) {
+  return basename(cmd) === "node" || basename(cmd).startsWith("node.");
+}
+
+function isTestFileSelector(arg) {
+  return /\.test\.(?:[cm]?[jt]s)$/.test(arg) || (/[*?[\]]/.test(arg) && /\.test\./.test(arg));
+}
+
+/** Builds pass two. Known Node test invocations are narrowed to the exact failed files; unknown
+ * commands retain the old whole-command retry as a fail-safe. A shard selector is removed because
+ * exact files have already been attributed to this shard and Node could otherwise hash them out. */
+export function retryInvocationForFailedFiles(cmd, args, failedFiles) {
+  if (failedFiles.length === 0 || !isNodeCommand(cmd)) return { cmd, args: [...args], scoped: false };
+
+  if (args[0]?.endsWith("scripts/test-tier-manifest.mjs")) {
+    return {
+      cmd,
+      args: ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...failedFiles],
+      scoped: true,
+    };
+  }
+
+  if (args.includes("--test")) {
+    const retained = args.filter((arg) => !arg.startsWith("--test-shard=") && !isTestFileSelector(arg));
+    return { cmd, args: [...retained, ...failedFiles], scoped: true };
+  }
+
+  return { cmd, args: [...args], scoped: false };
 }
 
 function runOnce(cmd, args) {
@@ -228,6 +281,7 @@ export async function main(argv) {
 
   const firstPassElapsedMs = Date.now() - startedAt;
   const firstNames = parseFailingTestNames(first.output);
+  const failedFiles = parseFailingTestFiles(first.output);
   recordFlakeEvidence("first attempt failed", firstNames);
 
   const budgetSeconds = parseBudgetSeconds(process.env.TEST_RETRY_BUDGET_SECONDS);
@@ -242,7 +296,11 @@ export async function main(argv) {
     return reportTrackedTreeDirt(treeBefore, first.code);
   }
 
-  const second = await runOnce(cmd, args);
+  const retry = retryInvocationForFailedFiles(cmd, args, failedFiles);
+  if (retry.scoped) {
+    console.log(`FLAKE-RETRY-FILES: retrying ${failedFiles.length} failed file(s) — ${failedFiles.join(", ")}`);
+  }
+  const second = await runOnce(retry.cmd, retry.args);
   // Evidence-preserving on non-recovery too: a retry that ALSO fails (a deterministic break, or a
   // double flake) must leave its own greppable record rather than only the first attempt's — so a
   // break the retry did NOT paper over is just as countable as one it did.

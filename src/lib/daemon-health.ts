@@ -44,7 +44,7 @@ import { statfsSync } from "node:fs";
 import { ghExec } from "./github-transport.js";
 import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";
-import { DEFAULT_POLL_INTERVAL_MS } from "./daemon.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import type { Route } from "./service.js";
 import { parseGhRateLimitHeaders } from "./worker.js";
 
@@ -170,12 +170,12 @@ export interface GhRateLimitBucket {
  * a negative reading off a malformed payload keeps reading as exhausted rather than as healthy.
  *
  * THE DAEMON TICK STILL CARRIES ITS OWN INLINE BRANCH, and that is a constraint rather than an
- * oversight: `daemon.ts` imports this module TYPE-ONLY on purpose, because this module imports a
- * VALUE from it (`DEFAULT_POLL_INTERVAL_MS`) — a value import back would be a genuine cycle, which
- * that file's own comment says in as many words. Rewiring it was rejected as scope for a drain
- * reporting change. What guards the drift instead is an EQUIVALENCE TEST that drives the real
- * `runDaemon` tick and the real drain reporter over one shared table of readings and asserts they
- * escalate the same buckets — so tuning either side alone goes red.
+ * oversight: `daemon.ts` imports this module TYPE-ONLY on purpose, because this module's default
+ * poll interval (`DEFAULT_POLL_INTERVAL_MS`, sourced from the leaf module `poll-interval.ts`, not
+ * `daemon.ts` — W1-T2895) would close a genuine cycle if imported straight back. Rewiring it was
+ * rejected as scope for a drain reporting change. What guards the drift instead is an EQUIVALENCE
+ * TEST that drives the real `runDaemon` tick and the real drain reporter over one shared table of
+ * readings and asserts they escalate the same buckets — so tuning either side alone goes red.
  */
 export function isBucketExhausted(reading: GhRateLimitBucket): boolean {
   return reading.remaining <= 0;

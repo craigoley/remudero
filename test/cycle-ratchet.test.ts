@@ -52,11 +52,15 @@ function run(args: string[]) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { cwd: REPO_ROOT, encoding: "utf8" });
 }
 
-test("the shipped tree passes its own ceiling, and the cruise is not vacuous over an empty set", () => {
+test("the shipped tree passes its own ceiling, now zero as of W1-T2895", () => {
   const printed = run(["--print"]);
   assert.equal(printed.status, 0, printed.stderr);
   const count = Number(/(\d+) distinct cycle\(s\)/.exec(printed.stdout)?.[1]);
-  assert.ok(count > 0, `sanity: the cruise must find SOME cycle or this gate proves nothing; saw ${count}`);
+  // Sanity that the cruise engine still WORKS (finds real cycles when they exist) lives in the
+  // synthetic-fixture tests below, which plant rings the ratchet must count. The real tree's own
+  // count is asserted directly against the baseline it holds: 0, since this task cut every ring
+  // `cycle-ratchet -- --print` reported (scripts/cycle-baseline.json's own `_history`).
+  assert.equal(count, 0, `the tree's own cycle count must match its zero ceiling; saw ${count}`);
   const gate = run([]);
   assert.equal(gate.status, 0, `the tree must pass its own ceiling:\n${gate.stdout}\n${gate.stderr}`);
   assert.match(gate.stdout, /cycle-ratchet: OK/);
@@ -77,7 +81,10 @@ test("THE FALSIFIER: one ring MORE than the ceiling exits non-zero and names the
 
 test("BELOW the ceiling passes and says so — cutting a cycle without ratcheting down is never a failure", () => {
   const root = tmpRoot();
-  const one = run(["--json", cruiseFixture(root, [["a.ts", "b.ts"]]), "--baseline", BASELINE]);
+  // A synthetic baseline, not BASELINE itself: the real ceiling is 0 as of W1-T2895 (every ring
+  // cut), so there is no room below it to plant a fixture against — this test's own concern is
+  // the ratchet's BELOW-ceiling reporting, which a raised synthetic ceiling still exercises.
+  const one = run(["--json", cruiseFixture(root, [["a.ts", "b.ts"]]), "--baseline", baselineFixture(root, '{"maxCycles":5}')]);
   assert.equal(one.status, 0);
   assert.match(one.stdout, /below; ratchet .* DOWN/, "a gain must be reported so it can be held");
 });
@@ -121,12 +128,13 @@ test("a malformed ceiling is REFUSED, never silently disarmed — W1-T1277's fou
   assert.equal(good.status, 0, "the falsifier: a WELL-FORMED ceiling is accepted");
 });
 
-test("no-circular stays `warn` — the ratchet holds NET GROWTH and must never make an existing ring blocking", () => {
+test("no-circular is `error` as of W1-T2895 — the tolerated count reached 0, so a new cycle fails only the PR that adds it", () => {
   const config = readFileSync(join(REPO_ROOT, ".dependency-cruiser.cjs"), "utf8");
   const at = config.indexOf('name: "no-circular"');
   assert.ok(at > 0, "sanity: the rule must still be named in the config");
-  assert.match(config.slice(at - 400, at + 200), /severity:\s*"warn"/,
-    "raising no-circular to `error` would fail every PR touching a module in an existing ring");
+  assert.match(config.slice(at - 700, at + 200), /severity:\s*"error"/,
+    "with zero existing rings, `error` no longer turns a REQUIRED check red over pre-existing " +
+      "structure — see the falsifier below for the case that must actually fail");
 });
 
 test("the ratchet is wired into CI's depcruise job and into package.json", () => {
