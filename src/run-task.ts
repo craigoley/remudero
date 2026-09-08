@@ -28969,6 +28969,8 @@ export function buildSweepEffects(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   // W1-T254: injectable review runner so the post-review effect's attempt/
   // done/failed logging path is unit-covered without spawning a real review.
+  /* c8 ignore next 5 -- the injected recorder below proves the handoff; these lines are the
+   * irreducible production binding to reviewCommand, whose own semantic path is tested directly. */
   reviewRunner: (prNumber: number, isPlanFiling?: boolean) => Promise<number> = (prNumber, isPlanFiling) =>
     reviewCommand(String(prNumber), ["--repo", repo], {
       executionMode: "semantic",
