@@ -10,7 +10,7 @@
   files: [test/claude-md-cap-citations.test.ts]
   origin: "followup#W1-T2457-1788020906446"
   plan_refs: ["§8A", "W1-T2457", "W1-T2282", "W1-T1234"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CLASS, NOT THE INSTANCE. W1-T2611 corrects two shards that froze a CLAUDE.md cap figure into

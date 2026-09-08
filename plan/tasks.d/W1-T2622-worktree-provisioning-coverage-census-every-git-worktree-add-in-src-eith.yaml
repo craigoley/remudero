@@ -61,7 +61,7 @@
   origin: architect
   plan_refs: ["§8A", "§5"]
   files: [src/lib/worktree-sites.ts, test/worktree-creation-census.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED 2026-09-01 alongside W1-T2621, from the same follow-up harvest of run

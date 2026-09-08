@@ -10,7 +10,7 @@
   files: [scripts/fleet-heartbeat.sh, test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts]
   origin: "operator-session#lets-get-rmd-more-automated-2026-08-31"
   plan_refs: ["W1-T496"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, REPEATEDLY, IN ONE HOUR OF DAEMON LOG — six times in a single 60-minute window, once

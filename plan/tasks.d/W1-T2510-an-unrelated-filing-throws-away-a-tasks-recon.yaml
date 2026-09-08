@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/an-unrelated-filing-keeps-a-tasks-recon.test.ts]
   origin: "operator-session#recon-cache-measurement-2026-08-30"
   plan_refs: ["W1-T2509"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CACHE WORKS; ITS KEY IS TOO COARSE. Measured over the ledger union on 2026-08-30:

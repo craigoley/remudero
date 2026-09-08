@@ -10,7 +10,7 @@
   files: [scripts/mount-headroom-sweep.mjs, test/mount-headroom-sweep.test.ts]
   origin: "operator-session#the-spend-census-2026-09-01"
   plan_refs: ["W1-T931", "W1-T2539", "W1-T2557"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS THE PREREQUISITE FOR EVERY MOUNT CHANGE, AND IT SPENDS NOTHING. The data already exists:

@@ -10,7 +10,7 @@
   files: [src/lib/serve.ts, src/lib/panel-graph.ts, test/the-console-reads-like-a-mailbox.test.ts]
   origin: "operator-brief#make-the-inbox-feel-like-emailing-a-colleague-2026-08-30"
   plan_refs: ["W1-T2494", "W1-T2496", "W1-T2489", "W1-T2475"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS THE SURFACE THE OTHER THREE EXIST FOR, AND IT IS DELIBERATELY LAST. W1-T2494 gives a

@@ -11,7 +11,7 @@
   files: [src/lib/routing-prior.ts, src/lib/mount-recommender.ts, test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts]
   origin: "operator-session#codex-router-design-2026-09-01"
   plan_refs: ["W1-T2575", "W1-T2574"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS THE TASK THAT MAKES THE ROUTER GET SMARTER AS THE FLEET TAKES ON MORE REPOS, AND THE

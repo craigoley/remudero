@@ -10,7 +10,7 @@
   files: [deploy/recycle-container.sh, test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts]
   origin: "operator-session#the-github-auth-outage-2026-09-01"
   plan_refs: ["W1-T978", "W1-T1010", "W1-T1046", "W1-T2555"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS. `files:` names two entries whose stems

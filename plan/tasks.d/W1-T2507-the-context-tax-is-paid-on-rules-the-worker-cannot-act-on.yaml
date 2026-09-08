@@ -10,7 +10,7 @@
   files: [CLAUDE.md, learnings/architecture.yaml, test/claude-md-rules-reach-their-scope.test.ts]
   origin: "operator-brief#pull-knowledge-out-of-claude-md-2026-08-30"
   plan_refs: ["W1-T33", "W1-T503", "W1-T2506"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE DESTINATION IS BUILT, MEASURED AND ALREADY CARRYING 51 ENTRIES. `learnings/` matches by file

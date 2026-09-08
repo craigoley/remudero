@@ -10,7 +10,7 @@
   files: [test/triage-proof-dialect.test.ts, test/a-hand-rolled-mutation-test-collides-with-the-real-harness.test.ts]
   origin: "operator-brief#nightly-red-root-cause-2026-09-01"
   plan_refs: ["W1-T2521"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── DIAGNOSED 2026-09-01, ROOT CAUSE ESTABLISHED, FILED NOWHERE UNTIL NOW ────────────────────

@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, test/run-branch-claim-is-unenforced.test.ts]
   origin: "operator-request#fleet-branch-naming-gap-2026-08-28"
   plan_refs: ["W1-T2427", "W1-T2426", "W1-T377", "W1-T378", "W1-T447", "W1-T1076"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept before a byte of this file was written, each against a control drawn

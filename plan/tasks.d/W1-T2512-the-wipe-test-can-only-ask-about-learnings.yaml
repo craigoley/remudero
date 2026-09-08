@@ -10,7 +10,7 @@
   files: [src/lib/wipe-test.ts, src/run-task.ts, test/the-wipe-test-can-only-ask-about-learnings.test.ts]
   origin: "operator-brief#reduce-the-overhead-and-tokens-per-task-2026-08-30"
   plan_refs: ["W1-T86", "W1-T299", "W1-T2241", "W1-T1253", "W1-T1252"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE HARNESS IS RIGHT AND ITS APERTURE IS ONE FACTOR WIDE. `src/lib/wipe-test.ts`'s own header

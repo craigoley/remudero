@@ -79,7 +79,7 @@
   origin: followup#W1-T2458-1788035402626
   plan_refs: ["§9", "W1-T494", "W1-T151"]
   files: [src/lib/worker.ts, test/canonical-checkout-drift.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED FROM followup:W1-T2458-1788035402626:2026-08-29T20:33:15.794Z:1 (run W1-T2458-1788035402626),

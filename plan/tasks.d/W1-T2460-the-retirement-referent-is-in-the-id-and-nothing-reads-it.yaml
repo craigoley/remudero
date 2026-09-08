@@ -10,7 +10,7 @@
   files: [src/lib/inbox.ts, test/legacy-board-review-proposals-can-retire.test.ts]
   origin: "operator-brief#seventeen-proposals-can-never-retire-2026-08-29"
   plan_refs: ["W1-T2451", "W1-T2455", "W1-T2458", "W1-T130"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept, anchored `W1-T2460([^0-9]|$)` with a `[0-9]` class and never `\d`.

@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, test/board-prewarm-does-not-block.test.ts]
   origin: "operator-brief#console-poll-cost-centre-2026-08-28"
   plan_refs: ["W1-T2323", "W1-T154", "W1-T2219", "W1-T119"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept before a byte of this file was written, controls from the ENUMERATED

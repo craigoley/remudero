@@ -143,7 +143,7 @@
     - claim: "the daemon quota hook still surfaces without pausing dispatch"
       proof: "unit test: test/rate-limit-reading-provenance.test.ts"
   files: [src/lib/daemon-health.ts, src/lib/retro.ts, src/run-task.ts, test/rate-limit-reading-provenance.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#rate-limit-endpoint-reports-no-budget-2026-08-26"
   plan_refs: ["W1-T132", "W1-T249", "W1-T372", "W1-T525", "W1-T1066"]

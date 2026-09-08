@@ -55,7 +55,7 @@
   origin: retro-followup
   plan_refs: ["W1-T2272", "W1-T2306", "W1-T2548", "W1-T2538"]
   files: [src/run-task.ts, test/a-printed-remedy-is-never-applied.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk:high, band_meaning: blast-radius — a rung that commits generated output automatically is

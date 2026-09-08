@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, test/probe-refusal-is-not-a-dispatch.test.ts]
   origin: "operator-brief#breaker-counts-probe-refusals-2026-08-27"
   plan_refs: ["W1-T2249", "W1-T2344", "W1-T2415", "W1-T206", "W1-T271", "W1-T316", "W1-T1281", "W1-T2201"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base 293d1d91, anchored `W1-T2423([^0-9]|$)` with a `[0-9]`

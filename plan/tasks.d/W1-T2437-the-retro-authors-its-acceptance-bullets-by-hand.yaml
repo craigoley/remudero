@@ -10,7 +10,7 @@
   files: [.remudero/skills/retro.yaml, test/retro-acceptance-block-shape.test.ts]
   origin: "operator-brief#retro-authors-its-own-bullets-2026-08-28"
   plan_refs: ["W1-T1060", "W1-T2272", "W1-T166", "W1-T2435"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept before a byte of this file was written, controls from the ENUMERATED

@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, src/run-task.ts, test/review-skips-spawn-on-plan-only.test.ts, test/review-deletion-blind.test.ts]
   origin: "operator-brief#skip-the-plan-only-reviewer-spawn-2026-08-30"
   plan_refs: ["W1-T2471", "W1-T205", "W1-T2221", "W1-T63"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE DIAGNOSIS IS W1-T2471's RECON (#3295) AND IS CITED, NOT RE-DERIVED — but every fact was

@@ -10,7 +10,7 @@
   files: [src/lib/account-usage.ts, src/lib/worker.ts, test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts]
   origin: "operator-brief#we-lost-an-hour-to-the-session-limit-2026-08-30"
   plan_refs: ["W1-T197", "W1-T215"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS WHY THE GATE THAT SHOULD HAVE PREVENTED THE OUTAGE NEVER FIRED. Headroom enforcement is

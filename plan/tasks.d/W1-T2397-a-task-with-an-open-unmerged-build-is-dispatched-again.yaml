@@ -10,7 +10,7 @@
   files: [src/lib/status.ts, src/lib/drain.ts, test/open-build-is-not-credit.test.ts]
   origin: "operator-brief#open-unmerged-build-is-not-credit-2026-08-27"
   plan_refs: ["W1-T2387", "W1-T2392", "W1-T256", "W1-T2370", "W1-T177", "W1-T1066"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept, each against a control drawn from THE OPEN SET enumerated first

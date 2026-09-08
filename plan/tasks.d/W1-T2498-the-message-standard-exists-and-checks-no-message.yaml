@@ -10,7 +10,7 @@
   files: [src/lib/operator-message.ts, src/lib/escalate.ts, test/every-inbox-message-meets-the-standard.test.ts]
   origin: "operator-brief#an-interpreter-on-the-way-into-the-inbox-2026-08-30"
   plan_refs: ["W1-T2279", "W1-T2494"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE HARD PART IS DONE AND NOTHING CONSUMES IT. W1-T2279 wrote a structural contract grounded in

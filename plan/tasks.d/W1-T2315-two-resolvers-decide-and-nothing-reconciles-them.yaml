@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/resolver-divergence-detector.test.ts]
   origin: oper#two-resolvers-decide-and-nothing-reconciles-them-2026-08-26
   plan_refs: ["W1-T952", "W1-T2251", "W1-T2297", "W1-T923"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     EVERY COUNT BELOW CARRIES THE TREE IT WAS TAKEN IN. Symbol facts re-confirmed in a worktree at

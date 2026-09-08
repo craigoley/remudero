@@ -10,7 +10,7 @@
   files: [src/lib/github-posture.ts, test/github-posture-merge-settings.test.ts]
   origin: "operator-brief#unasserted-repo-settings-2026-08-28"
   plan_refs: ["W1-T2387", "W1-T2435", "W1-T2442", "W1-T1040", "W1-T2447", "W1-T31"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base 15a3850b, anchored `W1-T2448([^0-9]|$)`, `[0-9]` never

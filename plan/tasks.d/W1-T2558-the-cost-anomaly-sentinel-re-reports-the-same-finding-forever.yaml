@@ -10,7 +10,7 @@
   files: [src/lib/cost-anomaly.ts, test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts]
   origin: "operator-session#the-spend-census-2026-09-01"
   plan_refs: ["W1-T931", "W1-T2557"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SENTINEL IS RIGHT AND ITS FINDINGS ARE REAL. W1-T931 built it for a reason its own doc

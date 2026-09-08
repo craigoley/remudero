@@ -10,7 +10,7 @@
   files: [src/run-task.ts, src/lib/status-board.ts, test/dispatch-claim-evidence-reachability.test.ts]
   origin: "operator-brief#dispatch-claim-outlives-its-task-2026-08-28"
   plan_refs: ["W1-T2270", "W1-T2397", "W1-T2387", "W1-T2427", "W1-T396", "W1-T1066", "W1-T319", "W1-T1035"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base 0cbfdc47, anchored `W1-T2446([^0-9]|$)` with a `[0-9]`

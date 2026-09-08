@@ -10,7 +10,7 @@
   files: [test/negative-reachability-ratchet.test.ts]
   origin: "operator-brief#instrument-negative-reachability-2026-08-26"
   plan_refs: ["W1-T2295", "W1-T2300", "W1-T438"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE EVIDENCE IS A COUNTED SYNTHESIS OVER 2026-08-25/26, AND ITS HEADLINE DIED SO THIS COULD

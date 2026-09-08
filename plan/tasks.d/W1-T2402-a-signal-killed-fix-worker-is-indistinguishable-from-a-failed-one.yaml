@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/fix-rung-signal-death.test.ts]
   origin: "operator-brief#fix-worker-signal-death-2026-08-27"
   plan_refs: ["W1-T1127", "W1-T2383", "W1-T2388", "W1-T1044"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces, anchored `W1-T2402([^0-9]|$)` with a `[0-9]` class and never `\d`,

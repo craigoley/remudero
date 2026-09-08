@@ -10,7 +10,7 @@
   files: [src/lib/sweep.ts, test/requeue-count-reads-the-surface.test.ts]
   origin: "operator-brief#counter-blind-to-an-action-it-did-not-write-2026-08-27"
   plan_refs: ["W1-T1223", "W1-T1127", "W1-T1110", "W1-T2423", "W1-T990", "W1-T2430", "W1-T2425", "W1-T186"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept at base 070f5b7b, anchored `W1-T2431([^0-9]|$)` with a `[0-9]`

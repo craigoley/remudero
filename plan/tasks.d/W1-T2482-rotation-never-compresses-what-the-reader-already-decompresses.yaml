@@ -10,7 +10,7 @@
   files: [src/lib/ledger.ts, test/rotation-compresses-what-the-reader-already-decompresses.test.ts]
   origin: "operator-incident#azure-io-saturation-2026-08-30"
   plan_refs: ["W1-T444", "W1-T256", "W1-T2266"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS THE FIRST FINDING IN THIS ARC WITH A LIVE OUTAGE ATTACHED, NOT A STALE NUMBER. On

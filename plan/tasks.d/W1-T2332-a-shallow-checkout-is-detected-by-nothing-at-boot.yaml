@@ -130,7 +130,7 @@
     - claim: "the measurement is taken by the caller that already resolves the boot head sha, not inside the module that must touch no filesystem"
       proof: "grep: readCheckoutDepth( in src/run-task.ts"
   files: [src/lib/daemon.ts, src/lib/doctor.ts, src/run-task.ts, test/daemon.test.ts, test/doctor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "feedback#fb-1786001088591-dbf763"
   plan_refs: ["W1-T991", "W1-T1047", "W1-T1236", "W1-T1209", "W1-T2333"]

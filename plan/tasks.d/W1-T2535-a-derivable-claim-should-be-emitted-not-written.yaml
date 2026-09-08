@@ -10,7 +10,7 @@
   files: [src/lib/plan-pr-emitter.ts, test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts]
   origin: "operator-session#how-do-we-get-it-all-green-2026-08-31"
   plan_refs: ["W1-T274", "W1-T2532", "W1-T2533", "W1-T2534"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE PATTERN, NOT AN INCIDENT. On 2026-08-31 three distinct defects reddened the board and all

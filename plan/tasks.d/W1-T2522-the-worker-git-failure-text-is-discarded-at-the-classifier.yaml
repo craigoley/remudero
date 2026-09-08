@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/the-worker-git-failure-text-is-discarded.test.ts]
   origin: "operator-session#credential-expired-cause-unknown-2026-08-30"
   plan_refs: ["W1-T2267", "W1-T2398", "W1-T2518"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     SUPERSEDES W1-T2518'S REMEDY, WHICH WAS WRONG AND WOULD HAVE SHIPPED GREEN. That shard priced

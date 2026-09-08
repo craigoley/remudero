@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/a-recovered-headroom-breach-closes-its-own-escalation.test.ts]
   origin: "inbox#stale-headroom-escalations-2026-09-02"
   plan_refs: ["W1-T2565", "W1-T2516", "W1-T249"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ── THE GAP, AND WHY THE EXISTING RECONCILER CANNOT COVER IT ────────────────────────────────

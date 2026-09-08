@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/trailer-stamp-failure-is-recorded.test.ts]
   origin: "operator-brief#trailer-stamp-swallows-failure-2026-08-28"
   plan_refs: ["W1-T1060", "W1-T2272", "W1-T2315", "W1-T166", "W1-T923"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces swept before a byte of this file was written, controls drawn from the

@@ -10,7 +10,7 @@
   files: [src/lib/classify.ts, src/run-task.ts, test/three-retries-in-three-seconds-against-a-lockout.test.ts]
   origin: "operator-brief#we-lost-an-hour-to-the-session-limit-2026-08-30"
   plan_refs: ["W1-T46", "W1-T113"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED OFF THE LEDGER, NOT INFERRED. Four `implement.done` rows for W1-T2471, all

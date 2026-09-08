@@ -10,7 +10,7 @@
   files: [src/lib/producer-identity.ts, src/lib/ledger.ts, test/every-message-names-one-declared-sender.test.ts]
   origin: "operator-brief#make-the-inbox-feel-like-emailing-a-colleague-2026-08-30"
   plan_refs: ["W1-T2494", "W1-T2497"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A MESSAGE WITHOUT A SENDER IS A NOTIFICATION, AND THIS IS THE CHEAPEST HALF OF MAKING THE INBOX

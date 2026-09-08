@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["P25", "§7B", "W1-T2304"]
   files: [src/lib/board-review.ts, test/board-review.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RATIFIED FROM the machine-minted proposal board-review:escalation:#3194, whose LITERAL text is

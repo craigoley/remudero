@@ -10,7 +10,7 @@
   files: [src/lib/followup-dedup-census.ts, test/followup-dedup-census.test.ts]
   origin: "followup#W1-T2458-1788035402626:2026-08-29T20:43:52.284Z:0"
   plan_refs: ["P25", "§7", "W1-T2458", "W1-T2455", "W1-T2563", "W1-T420"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ASK, VERBATIM, AND ITS PRECONDITION IS NOW MET. The routed follow-up this ratifies reads:

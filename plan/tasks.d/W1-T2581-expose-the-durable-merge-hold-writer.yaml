@@ -17,7 +17,7 @@
     - scripts/source-size-baseline.json
   origin: "operator-brief#automatic-pr-queue-manual-merge-override-2026-09-01"
   plan_refs: ["W1-T1000002", "W1-T1000003", "W1-T970"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The durable merge-hold consumers are already material at current main. Commit 7485cbc0

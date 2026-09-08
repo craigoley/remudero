@@ -10,7 +10,7 @@
   files: [src/lib/serve.ts, src/lib/panel-graph.ts, test/the-console-draws-the-graph-it-computes.test.ts]
   origin: "operator-brief#amazingly-beautiful-console-2026-08-30"
   plan_refs: ["W1-T43", "W1-T2475"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS IS THE PRODUCER-WITH-NO-CONSUMER SHAPE, ONE LAYER OUT. The expensive half is built: a

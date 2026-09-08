@@ -69,7 +69,7 @@
   origin: architect
   plan_refs: ["§12", "§3", "W1-T1288", "W1-T130"]
   files: [src/lib/git-push.ts, src/run-task.ts, test/git-push-head-confirmation.test.ts, test/review-provider-provenance.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     FILED 2026-08-30 from the same follow-up as W1-T2609

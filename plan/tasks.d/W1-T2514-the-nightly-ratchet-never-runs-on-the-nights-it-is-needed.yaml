@@ -10,7 +10,7 @@
   files: [.github/workflows/mutation-nightly.yml, scripts/mutation-ratchet.mjs, test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts]
   origin: "operator-session#clearing-issue-2686-2026-08-30"
   plan_refs: ["W1-T133", "W1-T130", "W1-T108"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE INTENT IS RIGHT AND THE PLACEMENT DEFEATS IT. The Stryker step's own comment states the

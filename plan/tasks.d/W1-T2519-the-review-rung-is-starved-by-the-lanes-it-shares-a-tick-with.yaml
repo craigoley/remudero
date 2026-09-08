@@ -10,7 +10,7 @@
   files: [src/lib/daemon.ts, test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts]
   origin: "operator-session#a-green-pr-waited-two-hours-for-a-review-2026-08-30"
   plan_refs: ["W1-T1065", "W1-T1044", "W1-T2504", "W1-T2513"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE REPO HAS ALREADY MEASURED THIS AND FILED IT UNDER A DIFFERENT QUESTION. W1-T1065's comment in

@@ -129,7 +129,7 @@
     - claim: "nothing in the widened path relaxes what counts as judgeable"
       proof: "unit test: test/acceptance-block-truncation-repair.test.ts"
   files: [src/lib/plan-pr-emitter.ts, test/acceptance-block-truncation-repair.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#retro-renders-past-its-own-readers-2026-08-26"
   plan_refs: ["W1-T2288"]

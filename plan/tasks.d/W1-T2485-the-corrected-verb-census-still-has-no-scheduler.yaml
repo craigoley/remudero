@@ -10,7 +10,7 @@
   files: [src/lib/measurement-cadence.ts, src/run-task.ts, test/the-verb-census-reaches-a-reader.test.ts]
   origin: "operator-brief#go-ahead-with-both-2026-08-30"
   plan_refs: ["W1-T2479", "W1-T2477", "W1-T1259", "W1-T2266"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ORDER IS THE POINT AND W1-T2479 IS THE PREREQUISITE, NOT A COURTESY. That task fixes a

@@ -72,7 +72,7 @@
   origin: architect
   plan_refs: ["§7B", "§5C"]
   files: [src/lib/board-review.ts, src/run-task.ts, test/board-review.test.ts, test/board-review-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FILED 2026-08-27 by the Architect who could not ground board-review:escalation:#3043 from its own
     text. The evidence for this task IS that proposal: its entire body was a count, and reconstructing what it

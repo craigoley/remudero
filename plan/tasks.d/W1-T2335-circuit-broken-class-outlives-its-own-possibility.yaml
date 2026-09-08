@@ -120,7 +120,7 @@
       proof: "unit test: test/blockers-name-only-dispatchable-work.test.ts"
     - claim: "a dispatchable task with a tripped breaker keeps its row and its reset wording unchanged"
       proof: "unit test: test/blockers-name-only-dispatchable-work.test.ts"
-  status: queued
+  status: merged
   attempts: 0
   note: |
     `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` names one source file and one test
