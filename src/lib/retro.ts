@@ -28,6 +28,7 @@ import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
 import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-workshop.js";
 import { openLedgerUnion } from "./ledger-union.js";
+import { closureByClass, guardFireCounts, renderClosureByClass, renderGuardFireCounts, type ClassClosure, type GuardFireCount } from "./retro-closure.js";
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
 export interface LedgerRecord {
@@ -1442,6 +1443,8 @@ export interface RetroGather {
    *  caller omitting `opts.planCoherence` gets `{ kind: "unexamined", reason }`, because omission
    *  reads as "nothing calls this" while a stated `unexamined` is a real, rendered answer. */
   planCoherence: PlanCoherenceReport;
+  closureByClass: ClassClosure[];
+  guardFireCounts: GuardFireCount[];
 }
 
 /** Build the whole deterministic gather from raw inputs. Pure over its injected `github` gateway:
@@ -1475,6 +1478,8 @@ export function buildGather(opts: {
    *  reason it could not be listed. buildGather stays FS-free. Omit and the rung still runs
    *  against an `{ ok: false, reason }` default, so the report says `unexamined`. */
   planCoherence?: { monolith: { path: string; text: string }; shards: PlanCoherenceShardListing };
+  openTaskClasses?: string[];
+  priorGuardZeroStreak?: Record<string, number>;
 }): RetroGather {
   const records = parseLedger(opts.ledgerNdjson);
   const followupRecords = opts.followupLedgerNdjson !== undefined ? parseLedger(opts.followupLedgerNdjson) : records;
@@ -1552,6 +1557,8 @@ export function buildGather(opts: {
         reason: "buildGather's opts.planCoherence was not supplied (no caller has wired plan/tasks.yaml + plan/tasks.d/ reads in yet)",
       },
     ),
+    closureByClass: closureByClass(scoped, shipped, opts.openTaskClasses ?? [], opts.sinceTs),
+    guardFireCounts: guardFireCounts(scoped, mapping, opts.sinceTs, { fallbackRows: GUARD_REASON_FALLBACK_ROWS, priorZeroStreak: opts.priorGuardZeroStreak }),
   };
 }
 
@@ -1645,6 +1652,10 @@ export function renderGather(g: RetroGather): string {
     renderArchitectLaneShare(g.architectLaneShare),
     "",
     renderReplayCalibration(g.replay),
+    "",
+    renderClosureByClass(g.closureByClass),
+    "",
+    renderGuardFireCounts(g.guardFireCounts),
     "",
     ...(g.weeklyBurnByModelClass
       ? [
@@ -3589,6 +3600,7 @@ export interface RetroMarker {
   /** W1-T89/P18: this cycle's `mast.byCategory`, carried forward so the NEXT retro shows a trend.
    *  Backward-compatible: a marker written before this field yields no trend, never a failure. */
   mast_category_counts?: Record<string, number>;
+  guard_zero_streak?: Record<string, number>;
 }
 
 /** Thrown by {@link loadMarker} when state/last-retro.json EXISTS but fails to parse. DISTINCT

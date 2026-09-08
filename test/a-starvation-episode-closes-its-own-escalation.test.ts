@@ -567,7 +567,16 @@ test("daemonCommand WIRES onStarvationCleared to escalateStarvationCleared — t
 
 test("CONTROL: the comment-stripped source is not vacuous — it still carries the code this file tests", () => {
   // If the stripper ate the file, the assertions above would pass or fail for the wrong reason.
-  assert.match(RUN_TASK_CODE, /export function escalateStarvationCleared\(/, "the function under test must survive comment-stripping");
+  assert.match(
+    RUN_TASK_CODE,
+    /import \{[\s\S]*escalateStarvationCleared,[\s\S]*\} from "\.\/lib\/escalation-catalogue\.js"/,
+    "the function under test must be locally bound from the moved catalogue",
+  );
+  assert.match(
+    RUN_TASK_CODE,
+    /export \{[\s\S]*escalateStarvationCleared,[\s\S]*\};/,
+    "run-task.ts must keep re-exporting the moved function",
+  );
   // ANTI-VACUITY, BOTH WAYS: the code line survives, and a comment line naming the same symbol
   // does not — otherwise a mention in prose could satisfy the wiring assertion above.
   assert.match(RUN_TASK_CODE, /onStarvationCleared: \(info\) =>/, "the wired call line itself must survive the filter");
