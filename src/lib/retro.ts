@@ -28,6 +28,7 @@ import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
 import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-workshop.js";
+import type { GhFailureReason } from "./status.js";
 import { closureByClass, guardFireCounts, renderClosureByClass, renderGuardFireCounts, type ClassClosure, type GuardFireCount } from "./retro-closure.js";
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
@@ -452,8 +453,23 @@ export interface ShippedGithub {
   headRefName(prUrl: string): string | undefined;
   /** DEGRADE LOUDLY (W1-T132): a known-throttled or erroring gateway returns a reason NAMING it,
    *  `undefined` when healthy. Checked once per {@link buildGather} call, before any credit is
-   *  rendered, so a zero-merge read never passes as a confirmed "nothing shipped". */
+   *  rendered, so a zero-merge read never passes as a confirmed "nothing shipped". THIS IS A
+   *  PRE-FLIGHT PROBE ONLY (one cheap `gh api rate_limit` read) — it cannot see a SECONDARY
+   *  (abuse/concurrency) limit, which leaves every PRIMARY bucket full while a real call still
+   *  403s. `readFailed`/`readFailureReason` below are the POST-FLIGHT complement (W1-T3132). */
   unavailable?(): string | undefined;
+  /** Sticky per this gateway's own call sequence — the same "one outage taints every read since"
+   *  discipline `GitHub.readFailed` (lib/status.ts) already keeps. True iff the fetch(es) backing
+   *  `findMergedByTrailer`/`headRefName` that ALREADY RAN this {@link buildGather} call actually
+   *  failed. Optional; a gateway that omits it never folds a fetch failure into availability —
+   *  exactly the pre-W1-T3132 behaviour. */
+  readFailed?(): boolean;
+  /** The CLASSIFIED reason the most recent failed read failed, consulted only once `readFailed()`
+   *  reports true. Only `"rate_limit"` folds into the merge-state join's availability verdict
+   *  (W1-T3132: a SECONDARY limit 403s every real call while `/rate_limit` still reports every
+   *  bucket full) — a 404 or a network drop keeps whatever `shippedSince` already does with it (a
+   *  silent "no GitHub evidence either" — unchanged by this task; see its own falsifier). */
+  readFailureReason?(): GhFailureReason | undefined;
   /** Every commit merged into this repo's default branch, full history. Backs
    *  {@link runlessMergesSince}, the trigger's only route to a merge {@link shippedSince} cannot
    *  reach. OPTIONAL, degrading to zero added merges and never a throw (W1-T2288). */
@@ -1491,7 +1507,18 @@ export function buildGather(opts: {
   const discrepancies = [...union.discrepancies, ...ledgerCreditDiscrepancies(runs, opts.sinceTs)];
   // Checked ONCE, after the union runs so a healthy union still gets full credit: a reason here
   // means the read layer is untrustworthy, whatever shippedSince managed to resolve (W1-T132).
-  const githubUnavailable = opts.github?.unavailable?.();
+  //
+  // W1-T3132: `unavailable()` alone is the CHEAP PRE-FLIGHT probe and cannot see a SECONDARY rate
+  // limit — `/rate_limit` stays full while the union's own fetches, immediately above, just 403'd.
+  // Fold in what those fetches actually observed: only a RATE-LIMIT-classified failure counts, so
+  // a 404 or a network drop keeps shippedSince's existing silent "no evidence either" handling,
+  // never becoming a false throttle (the task's own falsifier).
+  const githubFetchRateLimited = opts.github?.readFailed?.() === true && opts.github?.readFailureReason?.() === "rate_limit";
+  const githubUnavailable =
+    opts.github?.unavailable?.() ??
+    (githubFetchRateLimited
+      ? "GitHub secondary rate limit hit during the merge-state fetch (readFailed() after shippedSince; /rate_limit still reported every bucket full)"
+      : undefined);
   // Computed once, shared by the events list and its recurrence trend — never two reads.
   const mapping = opts.mastMapping ?? { rows: [] };
   const mergeState = censusMergeStateFrom(shipped, opts.github, githubUnavailable);

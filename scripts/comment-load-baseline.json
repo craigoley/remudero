@@ -246,7 +246,7 @@
   "src/lib/retro-closure.ts": 250,
   "src/lib/retro-preflight.ts": 83,
   "src/lib/retro-subprocess.ts": 8,
-  "src/lib/retro.ts": 1000,
+  "src/lib/retro.ts": 1019,
   "src/lib/review-capacity.ts": 250,
   "src/lib/review-provider-provenance.ts": 29,
   "src/lib/review.ts": 2250,
