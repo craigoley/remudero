@@ -16235,7 +16235,13 @@ function depReviewMigrationFeedbackId(submissionKey: string): string {
   return `fb-dep-review-${createHash("sha256").update(submissionKey).digest("hex").slice(0, 16)}`;
 }
 
-function defaultDepReviewPrMutations(owner: string, repo: string): DepReviewPrMutations {
+/**
+ * W1-T2896 CI-log round: exported (was module-private) so its `ghExec` call sites are directly
+ * unit-testable the same way {@link realArmDeps} is (test/arm-at-open.test.ts's PATH-stubbed-`gh`
+ * pattern) — `depReviewCommand`'s own test coverage always injects `deps.prMutations`, so this
+ * default factory's real body never ran under any existing suite.
+ */
+export function defaultDepReviewPrMutations(owner: string, repo: string): DepReviewPrMutations {
   const repoArg = `${owner}/${repo}`;
   return {
     comment(prUrl, body) {

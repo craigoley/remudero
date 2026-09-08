@@ -4,7 +4,15 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-import baseline from "../scripts/gh-transport-baseline.json" with { type: "json" };
+// W1-T2896 CI-log round: a static `with { type: "json" }` import synthesizes its OWN v8-covered
+// module record for the baseline file — the coverage-ratchet diff gate then sees
+// `scripts/gh-transport-baseline.json:1` as an added, never-hit line with no test that could ever
+// "call" a JSON literal. `readFileSync` + `JSON.parse` (every other baseline consumer's own idiom
+// — e.g. test/a-source-file-cannot-outgrow-its-baseline.test.ts's `source-size-baseline.json`
+// read) carries no such record.
+const baseline = JSON.parse(
+  readFileSync(new URL("../scripts/gh-transport-baseline.json", import.meta.url), "utf8"),
+) as { directGhSpawnsOutsideTransport: number };
 
 const TRANSPORT_PATH = "src/lib/github-transport.ts";
 
