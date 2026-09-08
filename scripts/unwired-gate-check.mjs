@@ -24,9 +24,10 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { basename, join } from "node:path";
+import { isMainModule } from "./lib/argv.mjs";
 import { parse as parseYaml } from "yaml";
+import { REPO_ROOT } from "./lib/repo-root.mjs";
 
 /** The gate-shape predicate for a basename. A hyphen before the suffix excludes the bare
  *  aggregate runner scripts/check.mjs. */
@@ -329,7 +330,7 @@ export function scanRepo(repoRoot, { allowance = ALLOWANCE, scripts, wiringText 
  *  path in-process. Returns the exit code rather than assigning it, so a fixture's outcome can
  *  never leak into the real test runner's process.exitCode. */
 export function main({
-  repoRoot = join(dirname(fileURLToPath(import.meta.url)), ".."),
+  repoRoot = REPO_ROOT,
   scan = scanRepo,
   scanNpm = scanNpmScripts,
   log = console.log,
@@ -371,6 +372,6 @@ export function main({
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   process.exitCode = main();
 }

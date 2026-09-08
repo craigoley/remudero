@@ -34,7 +34,7 @@
     "lint-plan": "tsx src/run-task.ts lint-plan",
     "depcruise": "depcruise src --config .dependency-cruiser.cjs",
     "cycle-ratchet": "node scripts/cycle-ratchet.mjs",
-    "jscpd": "jscpd src --config .jscpd.json",
+    "jscpd": "jscpd src scripts --config .jscpd.json",
     "claims": "node scripts/claims-check.mjs",
     "assertion-discrimination": "node scripts/assertion-discrimination-check.mjs",
     "learnings-index": "node scripts/generate-learnings-index.mjs",

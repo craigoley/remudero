@@ -13,10 +13,10 @@
 // a filing carries no trailer. Usage: node --import tsx scripts/credit-surface-gate.mjs --head-ref
 // <ref> [--worktree-path <path>] (ref falls back to $GITHUB_HEAD_REF; path defaults to cwd).
 
-import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { LINT_FILING_SUBJECT_RE, isDispatchedRunBranch } from "../src/run-task.ts";
+import { git } from "./lib/git.mjs";
 
 // Re-exported so a caller/test can name this shape without a second import of src/run-task.ts.
 export { LINT_FILING_SUBJECT_RE, isDispatchedRunBranch };
@@ -91,11 +91,9 @@ export function evaluateCreditSurfaceGate({ headCommitMessage, headRef }) {
  * @param {string} worktreePath
  */
 export function readHeadCommitMessage(worktreePath) {
-  try {
-    return execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%B"], { encoding: "utf8" });
-  } catch {
-    return undefined;
-  }
+  const result = git(["log", "-1", "--format=%B"], { cwd: worktreePath });
+  if (result.error || result.status !== 0) return undefined;
+  return result.stdout;
 }
 
 /**
@@ -151,6 +149,6 @@ export function main(argv) {
 }
 
 // Only runs when executed directly, never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

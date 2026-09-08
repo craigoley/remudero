@@ -26,8 +26,10 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } f
 import { spawnSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import { parseArgs } from 'node:util';
-import { dirname, join, posix, resolve as resolvePath } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, join, posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { isMainModule } from "./lib/argv.mjs";
+import { REPO_ROOT } from './lib/repo-root.mjs';
 
 // The paths that can move src/lib/classify.ts's mutation score live in DATA
 // (scripts/mutation-relevant-paths.json), not in this script -- adding one is a data-file edit
@@ -761,7 +763,7 @@ function main(argv) {
     const commandBudgetMs =
       typeof scopeConfig.commandBudgetMs === 'number' ? scopeConfig.commandBudgetMs : 20000;
 
-    const repoRoot = resolvePath(__dirname, '..');
+    const repoRoot = REPO_ROOT;
     const importers = deriveDirectImporters(matched, testFiles, (p) =>
       readFileSync(join(repoRoot, p), 'utf8'),
     );
@@ -1101,6 +1103,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/mutation-ratchet.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

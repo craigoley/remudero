@@ -19,8 +19,9 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { isMainModule } from "./lib/argv.mjs";
+import { REPO_ROOT } from "./lib/repo-root.mjs";
 
 /** The one sanctioned prefix constant, kept literal to avoid a production-code dependency. */
 export const RMD_TMP_PREFIX = "rmd-";
@@ -307,7 +308,7 @@ export function checkMkdtempCallsites(repoRoot, opts = {}) {
 export function main(opts = {}) {
   const out = opts.out ?? ((s) => process.stdout.write(s + "\n"));
   const err = opts.err ?? ((s) => process.stderr.write(s + "\n"));
-  const repoRoot = opts.repoRoot ?? join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = opts.repoRoot ?? REPO_ROOT;
   const scan = opts.scan ?? scanRepo;
   let summary;
   try { summary = scan(repoRoot); } catch (e) {
@@ -325,6 +326,6 @@ export function main(opts = {}) {
 }
 
 // Bare-script invocation guard — same shape as scripts/tracked-source-write-check.mjs.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   process.exit(main());
 }

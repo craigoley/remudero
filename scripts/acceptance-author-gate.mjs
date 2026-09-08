@@ -41,10 +41,11 @@
 // — design item (ii), W1-T1060) printed to stderr.
 
 import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { acceptanceAuthorTimeCheck } from "../src/lib/review.ts";
+import { REPO_ROOT } from "./lib/repo-root.mjs";
 
 /**
  * Bot authors exempt from this gate — see the module comment's "THE ONE EXEMPTION" section.
@@ -92,8 +93,7 @@ export function readEventPayload(eventPath) {
   return { readable: true, body: typeof pr.body === "string" ? pr.body : "", authorLogin };
 }
 
-/** Repo root, derived from this script's own location — never a cwd assumption. */
-export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+export { REPO_ROOT };
 
 /**
  * Every task id the plan DECLARES, across `plan/tasks.yaml` and every `plan/tasks.d/*.yaml` shard.
@@ -206,6 +206,6 @@ export function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/acceptance-author-gate.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

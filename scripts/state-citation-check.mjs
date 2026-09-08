@@ -23,10 +23,10 @@
 //   (dir default: . ; baseline default: scripts/state-citation-baseline.json)
 
 import { readFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { join, relative, resolve } from "node:path";
+import { git } from "./lib/git.mjs";
 
 // A citation is a literal `state/` path ending in `.md` — the predicate separating durable
 // documents from ~166 ordinary runtime state/ paths, mechanically, never by judgement.
@@ -53,7 +53,7 @@ const BINARY_EXTENSIONS = new Set([
  * tracks nothing, which main() below treats the same as "scanned zero files".
  */
 export function listTrackedFiles(dirs, cwd) {
-  const result = spawnSync("git", ["-C", cwd, "ls-files", "-z", "--", ...dirs], { encoding: "utf8" });
+  const result = git(["ls-files", "-z", "--", ...dirs], { cwd });
   if (result.error || result.status !== 0) {
     throw new Error(
       `state-citation: \`git ls-files\` failed in ${cwd} (dirs: ${dirs.join(", ")}): ` +
@@ -256,6 +256,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/state-citation-check.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

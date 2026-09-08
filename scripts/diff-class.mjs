@@ -21,13 +21,13 @@
 // Why: docs/forensics/diff-class.md#module-header (CI-spend measurement, scope-predicate rationale).
 
 import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { join, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { fileURLToPath } from "node:url";
 import { isInPlanScope, outOfPlanScopeFiles } from "../src/lib/plan-architect.ts";
+import { isMainModule } from "./lib/argv.mjs";
+import { REPO_ROOT } from "./lib/repo-root.mjs";
 
-/** Repo root, derived from this script's own location — never a cwd assumption. */
-export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+export { REPO_ROOT };
 
 /** The three recognized class tokens, exported so callers never hand-copy the literal set. */
 export const CLASSES = Object.freeze({
@@ -309,5 +309,4 @@ export function main(argv) {
   process.exitCode = 0; // ALWAYS 0 in classify mode — the class token on stdout carries the verdict
 }
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
-if (isMain) main(process.argv.slice(2));
+if (isMainModule(import.meta.url)) main(process.argv.slice(2));

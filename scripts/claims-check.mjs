@@ -37,7 +37,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -224,6 +224,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/claims-check.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

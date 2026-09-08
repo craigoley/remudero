@@ -25,7 +25,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/argv.mjs";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "../src/lib/proof-grammar.ts";
 import { ACCEPTANCE_HEADER_RE, ACCEPTANCE_BULLET_RE, PROOF_DIALECT } from "../src/lib/review.ts";
 import { SCENARIO_NARRATIVE_BOUNDS } from "../src/lib/task-linter.ts";
@@ -231,6 +231,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`tsx scripts/generate-proof-dialect.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

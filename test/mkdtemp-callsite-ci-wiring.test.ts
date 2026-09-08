@@ -83,10 +83,12 @@ test("W1-T2781: the existing unconditional unwired-gate workflow contract is oth
 test("W1-T2781: the exact workflow command preserves the checker's refusal in a tracked fixture", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-mkdtemp-ci-wiring-"));
   try {
-    mkdirSync(join(root, "scripts"), { recursive: true });
+    mkdirSync(join(root, "scripts", "lib"), { recursive: true });
     mkdirSync(join(root, "hooks"), { recursive: true });
     mkdirSync(join(root, "test"), { recursive: true });
     cpSync(join(REPO_ROOT, "scripts", "mkdtemp-callsite-check.mjs"), join(root, "scripts", "mkdtemp-callsite-check.mjs"));
+    cpSync(join(REPO_ROOT, "scripts", "lib", "repo-root.mjs"), join(root, "scripts", "lib", "repo-root.mjs"));
+    cpSync(join(REPO_ROOT, "scripts", "lib", "argv.mjs"), join(root, "scripts", "lib", "argv.mjs"));
     writeFileSync(join(root, "hooks", "mkdtemp-allowlist.txt"), "");
     writeFileSync(join(root, "package.json"), JSON.stringify({
       type: "module",

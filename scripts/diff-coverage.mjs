@@ -24,7 +24,8 @@
 import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
+import { isMainModule } from "./lib/argv.mjs";
+import { parseLcovRecords } from './lib/lcov.mjs';
 
 // W1-T2570: esbuild is CJS-only here; `createRequire` is how an .mjs module reaches it.
 const require = createRequire(import.meta.url);
@@ -42,42 +43,32 @@ export function parseLcovHitsByFile(lcovText) {
   const files = new Map();
   const fnLines = new Map();
   const fnHits = new Map();
-  let current = null;
-  let currentPath = null;
-  for (const line of lcovText.split('\n')) {
-    if (line.startsWith('SF:')) {
-      currentPath = line.slice(3).trim();
-      current = files.get(currentPath);
-      if (!current) {
-        current = new Map();
-        files.set(currentPath, current);
-      }
-    } else if (line.startsWith('FN:') && current) {
-      // FN:<line>,<name> — a declared function; FNDA is the truth for whether it ran, not DA.
-      // A LIST: one line can declare several (W1-T481). Why: docs/forensics/diff-coverage.md#fn-record-parsing.
-      const [ln, name] = line.slice(3).split(',');
+  for (const record of parseLcovRecords(lcovText)) {
+    const currentPath = record.sourceFile;
+    let current = files.get(currentPath);
+    if (!current) {
+      current = new Map();
+      files.set(currentPath, current);
+    }
+    // FN:<line>,<name> — a declared function; FNDA is the truth for whether it ran, not DA. A
+    // LIST: one line can declare several (W1-T481). Why: docs/forensics/diff-coverage.md#fn-record-parsing.
+    for (const { line: declLine, names } of record.fn) {
       if (!fnLines.has(currentPath)) fnLines.set(currentPath, new Map());
       const namesByLine = fnLines.get(currentPath);
-      const declLine = Number(ln);
       if (!namesByLine.has(declLine)) namesByLine.set(declLine, []);
-      namesByLine.get(declLine).push(name);
-    } else if (line.startsWith('FNDA:') && current) {
-      // ANY-NON-ZERO, never last-wins, so a later FNDA:0 for a duplicate pair can't erase a real
-      // call count. Why: docs/forensics/diff-coverage.md#fnda-record-parsing.
-      const [hits, name] = line.slice(5).split(',');
+      namesByLine.get(declLine).push(...names);
+    }
+    // ANY-NON-ZERO, never last-wins, so a later FNDA:0 for a duplicate pair can't erase a real
+    // call count. Why: docs/forensics/diff-coverage.md#fnda-record-parsing.
+    for (const { name, hits } of record.fnda) {
       if (!fnHits.has(currentPath)) fnHits.set(currentPath, new Map());
       const enteredByName = fnHits.get(currentPath);
-      enteredByName.set(name, (enteredByName.get(name) ?? false) || Number(hits) > 0);
-    } else if (line.startsWith('DA:') && current) {
-      // ANY-HIGHER-WINS, never last-wins (W1-T2276, same reasoning as FNDA: above): a duplicate
-      // DA: from another SF: block is only ever real evidence, so the larger count wins.
-      const [lineNoStr, hitsStr] = line.slice(3).split(',');
-      const ln = Number(lineNoStr);
-      const hits = Number(hitsStr);
+      enteredByName.set(name, (enteredByName.get(name) ?? false) || hits > 0);
+    }
+    // ANY-HIGHER-WINS, never last-wins (W1-T2276, same reasoning as FNDA: above): a duplicate
+    // DA: from another SF: block is only ever real evidence, so the larger count wins.
+    for (const { line: ln, hits } of record.da) {
       current.set(ln, Math.max(current.get(ln) ?? 0, hits));
-    } else if (line.startsWith('end_of_record')) {
-      current = null;
-      currentPath = null;
     }
   }
   reconcileDuplicateFunctionDeclarations(fnLines);
@@ -619,6 +610,6 @@ function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/diff-coverage.mjs ...`), never on import.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }
